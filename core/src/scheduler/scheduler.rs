@@ -2,8 +2,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::IrqMutex;
 use slopos_lib::preempt::PreemptGuard;
+use slopos_lib::IrqMutex;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -14,11 +14,11 @@ use crate::wl_currency;
 
 use super::per_cpu;
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
+    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_set_state, Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED,
+    TASK_STATE_READY, TASK_STATE_RUNNING,
 };
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
@@ -405,18 +405,26 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
 
     let is_user_mode = unsafe { (*new_task).flags & TASK_FLAG_USER_MODE != 0 };
 
-    // Determine whether to save old task context:
-    // - If switching TO user mode, don't save kernel context because context_switch_user
-    //   uses iretq and never returns. The user task returns via syscall/interrupt.
-    //   Saving would corrupt idle's RIP from task_entry_wrapper to our return address.
-    // - If switching TO kernel mode, save context so we can resume later.
+    // Determine whether to save old task context based on the OLD task's state:
+    //
+    // - If old task is user-mode with context_from_user=1: the syscall dispatcher
+    //   already saved user registers via save_user_context(). Do NOT overwrite with
+    //   kernel-mode values (which would corrupt CS/RIP for the next iretq resume).
+    //   Do NOT clear context_from_user here — it must survive until the task is
+    //   actually restored, so prepare_switch on re-pickup knows to use iretq.
+    //
+    // - If old task is kernel-mode (context_from_user=0): save so we can resume.
+    //   Note: context_switch_user never returns (iretq), so saving the old context
+    //   into the assembly is fine — the old task's RIP is our return address and
+    //   will be used when someone later context_switches back to it.
     let mut old_ctx_ptr: *mut TaskContext = ptr::null_mut();
     unsafe {
-        if !old_task.is_null() && !is_user_mode && (*old_task).context_from_user == 0 {
+        if !old_task.is_null() && (*old_task).context_from_user == 0 {
             old_ctx_ptr = &raw mut (*old_task).context;
-        } else if !old_task.is_null() {
-            (*old_task).context_from_user = 0;
         }
+        // If context_from_user == 1, leave it set — the next resume will
+        // use context_switch_user to iretq back to user mode with the
+        // already-saved user registers.
     }
 
     unsafe {
@@ -430,7 +438,15 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
                 paging_set_current_directory(page_dir);
             }
         } else {
-            paging_set_current_directory(paging_get_kernel_directory());
+            let kernel_dir = paging_get_kernel_directory();
+            paging_set_current_directory(kernel_dir);
+            // Kernel-mode tasks (especially idle) may have stale user CR3
+            // saved by context_switch_user when we switched away earlier.
+            // Restore kernel CR3 so context_switch's assembly restores it.
+            let kd_phys = (*kernel_dir).pml4_phys.as_u64();
+            if kd_phys != 0 {
+                (*new_task).context.cr3 = kd_phys;
+            }
         }
     }
     let rsp0 = if is_user_mode {
@@ -460,6 +476,7 @@ fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
 
     unsafe {
         if info.is_user_mode {
+            validate_user_context(&(*info.new_task).context, info.new_task);
             context_switch_user(info.old_ctx_ptr, &(*info.new_task).context);
         } else if !info.old_ctx_ptr.is_null() {
             context_switch(info.old_ctx_ptr, &(*info.new_task).context);
@@ -469,7 +486,64 @@ fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
     }
 }
 
+/// Validate that a user-mode task's context has sane values before iretq.
+/// Catches context corruption early with a clear panic message rather than
+/// a mysterious Invalid Opcode at a garbage address.
+#[inline]
+fn validate_user_context(ctx: &TaskContext, task: *const Task) {
+    let cs = ctx.cs;
+    let ss = ctx.ss;
+    let rip = ctx.rip;
+    let rsp = ctx.rsp;
+
+    // CS and SS must have user RPL (ring 3, bits 0:1 == 3)
+    let cs_ok = (cs & 3) == 3;
+    let ss_ok = (ss & 3) == 3;
+    // RIP must be in user VA range (below kernel half)
+    let rip_ok = rip < 0xffff800000000000;
+    // RSP must be in user VA range
+    let rsp_ok = rsp < 0xffff800000000000;
+
+    if cs_ok && ss_ok && rip_ok && rsp_ok {
+        return;
+    }
+
+    let task_id = if task.is_null() {
+        INVALID_TASK_ID
+    } else {
+        unsafe { (*task).task_id }
+    };
+    let cfu = if task.is_null() {
+        0
+    } else {
+        unsafe { (*task).context_from_user }
+    };
+
+    let cr3 = ctx.cr3;
+    panic!(
+        "validate_user_context: corrupt context for task {} (cfu={}): \
+         cs=0x{:x} ss=0x{:x} rip=0x{:x} rsp=0x{:x} cr3=0x{:x}",
+        task_id, cfu, cs, ss, rip, rsp, cr3
+    );
+}
+
 pub fn schedule() {
+    // CRITICAL SMP FIX: APs must never use the global scheduler. The global
+    // SchedulerInner has a single current_task / idle_task / return_context
+    // designed for CPU 0 only. APs entering this path would corrupt the BSP's
+    // scheduler state and eventually cause context switches to jump into .data
+    // (CPU_SCHEDULERS array) instead of .text code.
+    //
+    // When an AP task needs to reschedule (yield, exit, preemption), we
+    // context_switch back to the AP's idle task context. That returns
+    // execution to ap_execute_task / ap_scheduler_loop which handles
+    // re-queuing the current task and picking the next one.
+    let cpu_id = slopos_lib::get_current_cpu();
+    if cpu_id != 0 {
+        schedule_on_ap(cpu_id);
+        return;
+    }
+
     let preempt_guard = PreemptGuard::new();
 
     enum ScheduleResult {
@@ -489,7 +563,6 @@ pub fn schedule() {
         sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
         let current = sched.current_task;
-        let cpu_id = slopos_lib::get_current_cpu();
         let is_idle = per_cpu::with_cpu_scheduler(cpu_id, |local| local.idle_task() == current)
             .unwrap_or(false)
             || current == sched.idle_task;
@@ -552,13 +625,104 @@ pub fn schedule() {
     }
 }
 
-pub fn r#yield() {
-    with_scheduler(|sched| {
-        sched.total_yields += 1;
-        if !sched.current_task.is_null() {
-            task_record_yield(sched.current_task);
+/// AP-local scheduling: switch back to the AP's idle task context.
+///
+/// When a task running on an AP needs to reschedule (yield, exit, preemption,
+/// block), we re-queue it (if still runnable) into the per-CPU queue and
+/// context_switch to the AP's idle task. This returns execution to
+/// `ap_execute_task` which then flows back to `ap_scheduler_loop` to pick
+/// the next task.
+fn schedule_on_ap(cpu_id: usize) {
+    let _preempt_guard = PreemptGuard::new();
+
+    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
+        .unwrap_or(ptr::null_mut());
+
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+
+    if idle_task.is_null() {
+        // No idle task on this AP — nothing we can switch to
+        return;
+    }
+
+    // If current task is already the idle task or null, nothing to do
+    if current.is_null() || current == idle_task {
+        return;
+    }
+
+    // Re-queue the current task if it's still runnable
+    unsafe {
+        if task_is_running(current) {
+            if task_set_state((*current).task_id, TASK_STATE_READY) == 0 {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    sched.enqueue_local(current);
+                });
+            }
         }
+        // If task is blocked or terminated, don't re-queue — ap_execute_task
+        // handles that state when it regains control.
+    }
+
+    // Switch back to idle task — this returns to ap_execute_task's call site
+    let timestamp = kdiag_timestamp();
+    task_record_context_switch(current, idle_task, timestamp);
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(idle_task);
     });
+    task_set_current(idle_task);
+
+    unsafe {
+        // Restore kernel page directory for idle context
+        let kernel_dir = paging_get_kernel_directory();
+        paging_set_current_directory(kernel_dir);
+
+        // CRITICAL: Patch idle task's saved CR3 to the kernel page directory.
+        // When ap_execute_task() switched FROM idle TO the user task, the
+        // assembly saved the user task's CR3 into idle_task.context.cr3.
+        // If we don't fix it here, context_switch will reload that stale CR3,
+        // which may point to a terminated task's (freed) page tables.
+        let kdir_phys = (*kernel_dir).pml4_phys.as_u64();
+        let kdir_null = (*kernel_dir).pml4_phys.is_null();
+        if !kdir_null {
+            (*idle_task).context.cr3 = kdir_phys;
+        }
+
+        // For user-mode tasks: NEVER save kernel-mode context here.
+        // Their context is managed exclusively by save_user_context() in
+        // the syscall dispatcher. Overwriting with kernel values would cause
+        // context_switch_user to iretq with kernel CS/RIP (NX fault).
+        let is_user = (*current).flags & TASK_FLAG_USER_MODE != 0;
+        if is_user {
+            (*current).context_from_user = 0;
+        }
+
+        let current_ctx = if !is_user {
+            &raw mut (*current).context
+        } else {
+            ptr::null_mut()
+        };
+        let idle_ctx = &raw const (*idle_task).context;
+        context_switch(current_ctx, idle_ctx);
+    }
+    // Execution resumes here when this task is scheduled again on any CPU
+}
+
+pub fn r#yield() {
+    let cpu_id = slopos_lib::get_current_cpu();
+    if cpu_id == 0 {
+        with_scheduler(|sched| {
+            sched.total_yields += 1;
+            if !sched.current_task.is_null() {
+                task_record_yield(sched.current_task);
+            }
+        });
+    } else {
+        let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
+            .unwrap_or(ptr::null_mut());
+        task_record_yield(current);
+    }
     schedule();
 }
 
@@ -629,8 +793,13 @@ pub fn unblock_task(task: *mut Task) -> c_int {
 
 pub fn scheduler_task_exit_impl() -> ! {
     let current = scheduler_get_current_task();
+    let cpu_id = slopos_lib::get_current_cpu();
+
     if current.is_null() {
         klog_info!("scheduler_task_exit: No current task");
+        if cpu_id != 0 {
+            ap_task_exit_to_idle(cpu_id);
+        }
         schedule();
         loop {
             unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
@@ -644,7 +813,6 @@ pub fn scheduler_task_exit_impl() -> ! {
         klog_info!("scheduler_task_exit: Failed to terminate current task");
     }
 
-    let cpu_id = slopos_lib::get_current_cpu();
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_current_task(ptr::null_mut());
     });
@@ -654,9 +822,50 @@ pub fn scheduler_task_exit_impl() -> ! {
         });
     }
     task_set_current(ptr::null_mut());
+
+    if cpu_id != 0 {
+        ap_task_exit_to_idle(cpu_id);
+    }
+
     schedule();
 
     klog_info!("scheduler_task_exit: Schedule returned unexpectedly");
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
+}
+
+/// AP task exit: switch directly to the AP's idle task context.
+/// The task is already terminated, so we just need to return to the idle loop.
+fn ap_task_exit_to_idle(cpu_id: usize) -> ! {
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+
+    if idle_task.is_null() {
+        klog_info!("ap_task_exit_to_idle: CPU {} has no idle task", cpu_id);
+        loop {
+            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+        }
+    }
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(idle_task);
+    });
+    task_set_current(idle_task);
+
+    unsafe {
+        let kernel_dir = paging_get_kernel_directory();
+        paging_set_current_directory(kernel_dir);
+
+        // Patch idle context CR3 — see schedule_on_ap for rationale
+        if !(*kernel_dir).pml4_phys.is_null() {
+            (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
+        }
+
+        let idle_ctx = &raw const (*idle_task).context;
+        context_switch(ptr::null_mut(), idle_ctx);
+    }
+
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
@@ -808,7 +1017,14 @@ pub fn start_scheduler() -> c_int {
             task_set_current(sched.idle_task);
             reset_task_quantum(sched, sched.idle_task);
         });
-        idle_task_function(ptr::null_mut());
+        // Dispatch the idle task via context_switch so it runs on its own
+        // kmalloc'd kernel stack, NOT on the BSP .bss stack. This prevents
+        // stack sharing between the idle task and the BSP boot code, which
+        // caused NX violations when stale return addresses on the .bss stack
+        // were executed after a context switch round-trip.
+        unsafe {
+            context_switch(ptr::null_mut(), &(*idle_task).context);
+        }
     } else if current_null {
         return -1;
     }
@@ -894,9 +1110,15 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
-    // If preemption is disabled via PreemptGuard, just mark pending
     if PreemptGuard::is_active() {
         PreemptGuard::set_reschedule_pending();
+        return;
+    }
+
+    let cpu_id = slopos_lib::get_current_cpu();
+
+    if cpu_id != 0 {
+        scheduler_timer_tick_ap(cpu_id);
         return;
     }
 
@@ -932,6 +1154,49 @@ pub fn scheduler_timer_tick() {
             return;
         }
         sched.total_preemptions = sched.total_preemptions.saturating_add(1);
+        PreemptGuard::set_reschedule_pending();
+    });
+}
+
+fn scheduler_timer_tick_ap(cpu_id: usize) {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.increment_ticks();
+        if !sched.is_enabled() {
+            return;
+        }
+
+        let current = sched.current_task();
+        if current.is_null() {
+            return;
+        }
+        let idle = sched.idle_task();
+        if current == idle {
+            if sched.total_ready_count() > 0 {
+                PreemptGuard::set_reschedule_pending();
+            }
+            return;
+        }
+        if unsafe { (*current).flags } & TASK_FLAG_NO_PREEMPT != 0 {
+            return;
+        }
+        unsafe {
+            if (*current).time_slice_remaining > 0 {
+                (*current).time_slice_remaining -= 1;
+            }
+            if (*current).time_slice_remaining > 0 {
+                return;
+            }
+        }
+        if sched.total_ready_count() == 0 {
+            unsafe {
+                (*current).time_slice_remaining = (*current).time_slice;
+                if (*current).time_slice_remaining == 0 {
+                    (*current).time_slice_remaining = SCHED_DEFAULT_TIME_SLICE as u64;
+                }
+            }
+            return;
+        }
+        sched.increment_preemptions();
         PreemptGuard::set_reschedule_pending();
     });
 }
@@ -1012,6 +1277,22 @@ pub fn scheduler_run_ap(cpu_id: usize) -> ! {
         let return_ctx = per_cpu::get_ap_return_context(cpu_id);
         if !return_ctx.is_null() {
             crate::ffi_boundary::init_kernel_context(return_ctx);
+        }
+    }
+
+    // Switch from Limine's boot stack (HHDM-mapped physical memory) to the
+    // idle task's kernel stack (kmalloc'd, kernel virtual). The boot stack
+    // is transient and its HHDM address would be saved into the idle context
+    // by context_switch_user, causing crashes when restoring later.
+    unsafe {
+        let new_rsp = (*idle_task).kernel_stack_top;
+        if new_rsp != 0 {
+            core::arch::asm!(
+                "mov rsp, {0}",
+                "mov rbp, rsp",
+                in(reg) new_rsp,
+                options(nostack)
+            );
         }
     }
 
@@ -1111,6 +1392,7 @@ fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
         let idle_ctx = &raw mut (*idle_task).context;
 
         if is_user_mode {
+            validate_user_context(&(*next_task).context, next_task);
             context_switch_user(idle_ctx, &(*next_task).context);
         } else {
             context_switch(idle_ctx, &(*next_task).context);
@@ -1125,6 +1407,16 @@ fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
     });
 
     task_set_current(idle_task);
+
+    // Restore kernel CR3 in idle context — the assembly saved the user task's
+    // CR3 into idle_task.context when we switched away from idle earlier.
+    unsafe {
+        let kernel_dir = paging_get_kernel_directory();
+        paging_set_current_directory(kernel_dir);
+        if !(*kernel_dir).pml4_phys.is_null() {
+            (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
+        }
+    }
 
     unsafe {
         if !task_is_terminated(next_task) && task_is_running(next_task) {

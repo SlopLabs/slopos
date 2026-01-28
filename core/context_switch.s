@@ -39,7 +39,14 @@ context_switch:
     movq    %rsi, 0x20(%rdi)
     movq    %rdi, 0x28(%rdi)
     movq    %rbp, 0x30(%rdi)
-    movq    %rsp, 0x38(%rdi)
+
+    # Save RSP+8 (skip the return address pushed by `call`) so that the
+    # restore path's pushq+retq leaves RSP correctly aligned for the Rust
+    # wrapper's epilogue. Without this, the extra pushq shifts the stack by
+    # 8 bytes and the wrapper's pop rbp / ret read wrong slots.
+    leaq    8(%rsp), %rax
+    movq    %rax, 0x38(%rdi)
+
     movq    %r8,  0x40(%rdi)
     movq    %r9,  0x48(%rdi)
     movq    %r10, 0x50(%rdi)
@@ -148,7 +155,11 @@ context_switch_user:
     movq    %rsi, 0x20(%rdi)
     movq    %rdi, 0x28(%rdi)
     movq    %rbp, 0x30(%rdi)
-    movq    %rsp, 0x38(%rdi)
+
+    # Save RSP+8: see context_switch save comment for rationale.
+    leaq    8(%rsp), %rax
+    movq    %rax, 0x38(%rdi)
+
     movq    %r8,  0x40(%rdi)
     movq    %r9,  0x48(%rdi)
     movq    %r10, 0x50(%rdi)
@@ -279,8 +290,9 @@ simple_context_switch:
     leaq    FPU_STATE_OFFSET(%r8), %rax
     fxsave64 (%rax)
 
-    # Save callee-saved registers
-    movq    %rsp, 0x38(%r8)
+    # Save callee-saved registers (RSP+8: see context_switch save comment)
+    leaq    8(%rsp), %rax
+    movq    %rax, 0x38(%r8)
     movq    %rbp, 0x30(%r8)
     movq    %rbx, 0x08(%r8)
     movq    %rsi, 0x20(%r8)
@@ -352,7 +364,8 @@ init_kernel_context:
     movq    %rsi, 0x20(%rdi)        # Save rsi
     movq    %rdi, 0x28(%rdi)        # Save rdi
     movq    %rbp, 0x30(%rdi)        # Save rbp
-    movq    %rsp, 0x38(%rdi)        # Save rsp
+    leaq    8(%rsp), %rax           # Save rsp+8 (see context_switch save comment)
+    movq    %rax, 0x38(%rdi)
     movq    %r8,  0x40(%rdi)        # Save r8
     movq    %r9,  0x48(%rdi)        # Save r9
     movq    %r10, 0x50(%rdi)        # Save r10
