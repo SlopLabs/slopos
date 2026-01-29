@@ -199,6 +199,7 @@ pub fn init_bsp(apic_id: u32) {
     }
     BSP_APIC_ID.store(apic_id, Ordering::Release);
     init_percpu_for_cpu(0, apic_id);
+    mark_cpu_online(0);
 }
 
 #[inline]

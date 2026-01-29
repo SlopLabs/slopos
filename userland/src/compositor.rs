@@ -13,13 +13,13 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat, rgb};
+use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat};
 use crate::syscall::{
-    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, sys_drain_queue,
-    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
-    sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset, sys_mark_frames_done,
-    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_unmap, sys_sleep_ms,
-    sys_spawn_task, sys_tty_set_focus, sys_yield,
+    sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
+    sys_input_get_button_state, sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset,
+    sys_mark_frames_done, sys_raise_window, sys_set_window_position, sys_set_window_state,
+    sys_shm_unmap, sys_sleep_ms, sys_spawn_task, sys_tty_set_focus, sys_write, sys_yield,
+    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo,
 };
 use crate::ui_utils;
 
@@ -1155,21 +1155,28 @@ fn title_to_str(title: &[u8; 32]) -> &str {
 
 #[unsafe(link_section = ".user_text")]
 pub fn compositor_user_main(_arg: *mut c_void) {
+    sys_write(b"COMPOSITOR: starting\n");
     let mut wm = WindowManager::new();
     let mut fb_info = DisplayInfo::default();
 
     if sys_fb_info(&mut fb_info) < 0 {
+        sys_write(b"COMPOSITOR: fb_info failed\n");
         loop {
             sys_yield();
         }
     }
+    sys_write(b"COMPOSITOR: fb_info ok\n");
 
     let mut output = match CompositorOutput::new(&fb_info) {
         Some(out) => out,
-        None => loop {
-            sys_yield();
-        },
+        None => {
+            sys_write(b"COMPOSITOR: output alloc failed\n");
+            loop {
+                sys_yield();
+            }
+        }
     };
+    sys_write(b"COMPOSITOR: output allocated\n");
 
     wm.set_output_info(output.bytes_pp, output.pitch);
 
@@ -1180,6 +1187,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     };
 
     const TARGET_FRAME_MS: u64 = 16;
+    let mut frame_count: u32 = 0;
 
     loop {
         let frame_start_ms = sys_get_time_ms();
@@ -1196,7 +1204,15 @@ pub fn compositor_user_main(_arg: *mut c_void) {
                 wm.render(&mut buf);
             }
 
-            output.present();
+            let flip_result = output.present();
+            if frame_count < 3 {
+                if flip_result {
+                    sys_write(b"COMPOSITOR: fb_flip ok\n");
+                } else {
+                    sys_write(b"COMPOSITOR: fb_flip FAILED\n");
+                }
+            }
+            frame_count = frame_count.saturating_add(1);
 
             let present_time = sys_get_time_ms();
             sys_mark_frames_done(present_time);

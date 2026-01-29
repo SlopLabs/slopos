@@ -8,9 +8,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY, Task, TaskContext,
+    Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY,
 };
-use slopos_lib::{InitFlag, MAX_CPUS, klog_debug, klog_info};
+use slopos_lib::{klog_debug, klog_info, InitFlag, MAX_CPUS};
 use spin::Mutex;
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -484,6 +484,15 @@ fn find_least_loaded_cpu(affinity: u32) -> usize {
         }
 
         if !is_percpu_scheduler_initialized(cpu_id) {
+            continue;
+        }
+
+        if !slopos_lib::is_cpu_online(cpu_id) {
+            continue;
+        }
+
+        let sched_enabled = with_cpu_scheduler(cpu_id, |sched| sched.is_enabled()).unwrap_or(false);
+        if !sched_enabled {
             continue;
         }
 

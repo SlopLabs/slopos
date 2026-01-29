@@ -37,10 +37,10 @@ unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
-    DisplayInfo, ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
-    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open,
-    sys_fs_read, sys_fs_unlink, sys_fs_write, sys_halt, sys_read_char, sys_spawn_task,
-    sys_surface_commit, sys_surface_set_title, sys_sys_info, sys_write,
+    sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink,
+    sys_fs_write, sys_halt, sys_read_char, sys_spawn_task, sys_surface_commit,
+    sys_surface_set_title, sys_sys_info, sys_write, sys_yield, DisplayInfo, ShmBuffer, UserFsEntry,
+    UserFsList, UserSysInfo, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -1441,6 +1441,8 @@ pub fn shell_user_main(_arg: *mut c_void) {
         loop {
             let rc = sys_read_char();
             if rc < 0 {
+                // No character available - yield to let other tasks run
+                sys_yield();
                 continue;
             }
             let c = rc as u8;

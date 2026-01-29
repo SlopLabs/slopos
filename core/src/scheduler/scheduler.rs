@@ -3,11 +3,14 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use slopos_lib::preempt::PreemptGuard;
+use slopos_lib::InterruptFrame;
 use slopos_lib::IrqMutex;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog_info;
+
+use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
 
 use crate::platform;
 use crate::wl_currency;
@@ -1206,6 +1209,71 @@ pub fn scheduler_request_reschedule_from_interrupt() {
         try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
     if should_set == Some(true) && !PreemptGuard::is_active() {
         PreemptGuard::set_reschedule_pending();
+    }
+}
+
+/// Save user context from an interrupt frame when timer preempts user-mode code.
+///
+/// This must be called from the timer IRQ handler BEFORE scheduler_timer_tick()
+/// when the interrupted code was running in user mode (CS ring 3).
+///
+/// Without this, timer preemptions of user tasks would lose their context:
+/// - The syscall path saves user context via save_user_context() in dispatch.rs
+/// - Timer preemptions must also save user context from the interrupt frame
+/// - Otherwise, context_switch_user would save kernel-mode registers instead
+pub fn save_preempt_context(frame: *mut InterruptFrame) {
+    if frame.is_null() {
+        return;
+    }
+
+    let task = scheduler_get_current_task();
+    if task.is_null() {
+        return;
+    }
+
+    // Only save for user-mode tasks
+    let is_user_mode = unsafe { (*task).flags & TASK_FLAG_USER_MODE != 0 };
+    if !is_user_mode {
+        return;
+    }
+
+    // Verify the interrupt came from user mode (ring 3)
+    let cs = unsafe { (*frame).cs };
+
+    if (cs & 3) != 3 {
+        return;
+    }
+
+    // Save user registers from the interrupt frame to the task's context
+    unsafe {
+        let ctx: &mut TaskContext = &mut (*task).context;
+        ctx.rax = (*frame).rax;
+        ctx.rbx = (*frame).rbx;
+        ctx.rcx = (*frame).rcx;
+        ctx.rdx = (*frame).rdx;
+        ctx.rsi = (*frame).rsi;
+        ctx.rdi = (*frame).rdi;
+        ctx.rbp = (*frame).rbp;
+        ctx.r8 = (*frame).r8;
+        ctx.r9 = (*frame).r9;
+        ctx.r10 = (*frame).r10;
+        ctx.r11 = (*frame).r11;
+        ctx.r12 = (*frame).r12;
+        ctx.r13 = (*frame).r13;
+        ctx.r14 = (*frame).r14;
+        ctx.r15 = (*frame).r15;
+        ctx.rip = (*frame).rip;
+        ctx.rsp = (*frame).rsp;
+        ctx.rflags = (*frame).rflags;
+        ctx.cs = (*frame).cs;
+        ctx.ss = (*frame).ss;
+        ctx.ds = GDT_USER_DATA_SELECTOR as u64;
+        ctx.es = GDT_USER_DATA_SELECTOR as u64;
+        ctx.fs = 0;
+        ctx.gs = 0;
+
+        // Mark that we have fresh user context saved
+        (*task).context_from_user = 1;
     }
 }
 
