@@ -38,9 +38,7 @@ use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
     DisplayInfo, ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
-    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open,
-    sys_fs_read, sys_fs_unlink, sys_fs_write, sys_halt, sys_read_char, sys_spawn_task,
-    sys_surface_commit, sys_surface_set_title, sys_sys_info, sys_write, sys_yield,
+    UserFsList, UserSysInfo, core as sys_core, fs, process, tty, window,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -326,7 +324,7 @@ mod surface {
             let shm_buffer = match ShmBuffer::create(buffer_size) {
                 Ok(buf) => buf,
                 Err(_) => {
-                    let _ = sys_write(b"shell: failed to create shm buffer\n");
+                    let _ = tty::write(b"shell: failed to create shm buffer\n");
                     return false;
                 }
             };
@@ -335,7 +333,7 @@ mod surface {
                 .attach_surface(width as u32, height as u32)
                 .is_err()
             {
-                let _ = sys_write(b"shell: failed to attach surface\n");
+                let _ = tty::write(b"shell: failed to attach surface\n");
                 return false;
             }
 
@@ -793,7 +791,7 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
 #[unsafe(link_section = ".user_text")]
 fn shell_console_init() {
     let mut info = DisplayInfo::default();
-    if sys_fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
+    if window::fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
         return;
     }
 
@@ -835,7 +833,7 @@ fn shell_console_init() {
 fn shell_console_clear() {
     if DISPLAY.enabled.get() {
         console_clear(&DISPLAY);
-        let _ = sys_surface_commit();
+        let _ = window::surface_commit();
     }
 }
 
@@ -848,7 +846,7 @@ fn shell_console_write(buf: &[u8]) {
 
 #[unsafe(link_section = ".user_text")]
 fn shell_write(buf: &[u8]) {
-    let _ = sys_write(buf);
+    let _ = tty::write(buf);
     shell_console_write(buf);
     shell_console_commit();
 }
@@ -856,7 +854,7 @@ fn shell_write(buf: &[u8]) {
 #[unsafe(link_section = ".user_text")]
 fn shell_echo_char(c: u8) {
     let buf = [c];
-    let _ = sys_write(&buf);
+    let _ = tty::write(&buf);
     shell_console_write(&buf);
     shell_console_commit();
 }
@@ -874,7 +872,7 @@ fn shell_console_get_cursor() -> (i32, i32) {
 fn shell_console_page_up() {
     if DISPLAY.enabled.get() {
         console_page_up(&DISPLAY);
-        let _ = sys_surface_commit();
+        let _ = window::surface_commit();
     }
 }
 
@@ -882,14 +880,14 @@ fn shell_console_page_up() {
 fn shell_console_page_down() {
     if DISPLAY.enabled.get() {
         console_page_down(&DISPLAY);
-        let _ = sys_surface_commit();
+        let _ = window::surface_commit();
     }
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_commit() {
     if DISPLAY.enabled.get() {
-        let _ = sys_surface_commit();
+        let _ = window::surface_commit();
     }
 }
 
@@ -897,7 +895,7 @@ fn shell_console_commit() {
 fn shell_console_follow_bottom() {
     if DISPLAY.enabled.get() {
         console_ensure_follow(&DISPLAY);
-        let _ = sys_surface_commit();
+        let _ = window::surface_commit();
     }
 }
 
@@ -905,7 +903,7 @@ fn shell_console_follow_bottom() {
 fn shell_redraw_input(_line_row: i32, input: &[u8]) {
     if DISPLAY.enabled.get() {
         console_rewrite_input(&DISPLAY, PROMPT, input);
-        let _ = sys_surface_commit();
+        let _ = window::surface_commit();
     }
 }
 
@@ -1172,13 +1170,13 @@ fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
 #[unsafe(link_section = ".user_text")]
 fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(HALTED);
-    sys_halt();
+    process::halt();
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
-    if sys_sys_info(&mut info) != 0 {
+    if sys_core::sys_info(&mut info) != 0 {
         shell_write(b"info: failed\n");
         return 1;
     }
@@ -1208,7 +1206,7 @@ fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_sysinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
-    let rc = sys_spawn_task(b"sysinfo\0");
+    let rc = process::spawn(b"sysinfo\0");
     if rc <= 0 {
         shell_write(b"sysinfo: failed to spawn\n");
         return 1;
@@ -1248,7 +1246,7 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             count: 0,
         };
 
-        if unsafe { sys_fs_list(path as *const c_char, &mut list) } != 0 {
+        if fs::list_dir(path as *const c_char, &mut list).is_err() {
             shell_write(ERR_NO_SUCH);
             return 1;
         }
@@ -1292,18 +1290,23 @@ fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
         }
 
         let mut tmp = [0u8; SHELL_IO_MAX + 1];
-        let fd = unsafe { sys_fs_open(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) };
-        if fd < 0 {
-            shell_write(ERR_NO_SUCH);
-            return 1;
-        }
-        let r = unsafe { sys_fs_read(fd as i32, tmp.as_mut_ptr() as *mut c_void, SHELL_IO_MAX) };
-        let _ = sys_fs_close(fd as i32);
-        if r < 0 {
-            shell_write(ERR_NO_SUCH);
-            return 1;
-        }
-        let len = cmp::min(r as usize, tmp.len() - 1);
+        let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                shell_write(ERR_NO_SUCH);
+                return 1;
+            }
+        };
+        let r = match fs::read_slice(fd, &mut tmp[..SHELL_IO_MAX]) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = fs::close_fd(fd);
+                shell_write(ERR_NO_SUCH);
+                return 1;
+            }
+        };
+        let _ = fs::close_fd(fd);
+        let len = cmp::min(r, tmp.len() - 1);
         tmp[len] = 0;
         shell_write(&tmp[..len]);
         if r as usize == SHELL_IO_MAX {
@@ -1345,19 +1348,27 @@ fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
             len = SHELL_IO_MAX;
         }
 
-        let fd = unsafe {
-            sys_fs_open(
-                path_buf.as_ptr() as *const c_char,
-                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-            )
+        let fd = match fs::open_path(
+            path_buf.as_ptr() as *const c_char,
+            USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                shell_write(b"write failed\n");
+                return 1;
+            }
         };
-        if fd < 0 {
-            shell_write(b"write failed\n");
-            return 1;
-        }
-        let w = unsafe { sys_fs_write(fd as i32, text as *const c_void, len) };
-        let _ = sys_fs_close(fd as i32);
-        if w < 0 || w as usize != len {
+        let text_slice = unsafe { core::slice::from_raw_parts(text, len) };
+        let w = match fs::write_slice(fd, text_slice) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = fs::close_fd(fd);
+                shell_write(b"write failed\n");
+                return 1;
+            }
+        };
+        let _ = fs::close_fd(fd);
+        if w != len {
             shell_write(b"write failed\n");
             return 1;
         }
@@ -1381,7 +1392,7 @@ fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
             shell_write(PATH_TOO_LONG);
             return 1;
         }
-        if unsafe { sys_fs_mkdir(path_buf.as_ptr() as *const c_char) } != 0 {
+        if fs::mkdir_path(path_buf.as_ptr() as *const c_char).is_err() {
             shell_write(b"mkdir failed\n");
             return 1;
         }
@@ -1405,7 +1416,7 @@ fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
             shell_write(PATH_TOO_LONG);
             return 1;
         }
-        if unsafe { sys_fs_unlink(path_buf.as_ptr() as *const c_char) } != 0 {
+        if fs::unlink_path(path_buf.as_ptr() as *const c_char).is_err() {
             shell_write(b"rm failed\n");
             return 1;
         }
@@ -1423,7 +1434,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
     shell_console_clear();
 
     // Set window title
-    sys_surface_set_title("SlopOS Shell");
+    window::surface_set_title("SlopOS Shell");
 
     shell_write(WELCOME);
 
@@ -1439,10 +1450,10 @@ pub fn shell_user_main(_arg: *mut c_void) {
         let mut len = 0usize;
 
         loop {
-            let rc = sys_read_char();
+            let rc = tty::read_char();
             if rc < 0 {
                 // No character available - yield to let other tasks run
-                sys_yield();
+                sys_core::yield_now();
                 continue;
             }
             let c = rc as u8;

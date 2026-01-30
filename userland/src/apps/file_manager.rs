@@ -8,8 +8,8 @@ use core::str;
 
 use crate::gfx::{self, DrawBuffer, PixelFormat, rgb};
 use crate::syscall::{
-    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList, sys_fb_info,
-    sys_fs_list, sys_input_poll_batch, sys_surface_commit, sys_surface_set_title, sys_yield,
+    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList, core as sys_core,
+    fs, input, window,
 };
 use crate::theme::*;
 
@@ -65,7 +65,7 @@ impl FileManager {
 
     fn init_surface(&mut self) -> bool {
         let mut fb_info = DisplayInfo::default();
-        if sys_fb_info(&mut fb_info) != 0 {
+        if window::fb_info(&mut fb_info) != 0 {
             return false;
         }
 
@@ -118,9 +118,7 @@ impl FileManager {
             count: 0,
         };
 
-        unsafe {
-            sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
-        }
+        let _ = fs::list_dir(self.current_path.as_ptr() as *const i8, &mut list);
 
         self.entry_count = list.count;
         self.needs_redraw = true;
@@ -208,7 +206,7 @@ impl FileManager {
     /// Poll for input events and handle them
     fn poll_input(&mut self) {
         let mut events = [InputEvent::default(); 16];
-        let count = sys_input_poll_batch(&mut events) as usize;
+        let count = input::poll_batch(&mut events) as usize;
 
         for i in 0..count {
             let ev = &events[i];
@@ -315,16 +313,16 @@ pub fn file_manager_main(_arg: *mut c_void) {
     if !fm.init_surface() {
         // Surface init failed - just yield forever
         loop {
-            sys_yield();
+            sys_core::yield_now();
         }
     }
 
     // Set window title
-    sys_surface_set_title("Files");
+    window::surface_set_title("Files");
 
     // Initial draw
     fm.draw();
-    let _ = sys_surface_commit();
+    let _ = window::surface_commit();
 
     // Main event loop
     loop {
@@ -332,10 +330,10 @@ pub fn file_manager_main(_arg: *mut c_void) {
 
         if fm.needs_redraw {
             fm.draw();
-            let _ = sys_surface_commit();
+            let _ = window::surface_commit();
             fm.needs_redraw = false;
         }
 
-        sys_yield();
+        sys_core::yield_now();
     }
 }

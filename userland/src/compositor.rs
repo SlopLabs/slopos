@@ -15,11 +15,8 @@ use core::ffi::c_void;
 
 use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat, rgb};
 use crate::syscall::{
-    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, sys_drain_queue,
-    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
-    sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset, sys_mark_frames_done,
-    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_unmap, sys_sleep_ms,
-    sys_spawn_task, sys_tty_set_focus, sys_write, sys_yield,
+    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, core as sys_core, input, memory,
+    process, tty, window,
 };
 use crate::ui_utils;
 
@@ -149,7 +146,7 @@ impl ClientSurfaceCache {
                 // Window no longer exists - unmap the shared memory and clear the entry
                 if let Some(ref mapping) = entry.mapping {
                     unsafe {
-                        sys_shm_unmap(mapping.vaddr());
+                        memory::shm_unmap(mapping.vaddr());
                     }
                 }
                 *entry = ClientSurfaceEntry::empty();
@@ -235,7 +232,7 @@ impl CompositorOutput {
 
     /// Present the output buffer to the framebuffer
     fn present(&self) -> bool {
-        sys_fb_flip(self.buffer.token()) == 0
+        window::fb_flip(self.buffer.token()) == 0
     }
 }
 
@@ -370,7 +367,7 @@ impl WindowManager {
         let old_y = self.mouse_y;
 
         // Always query global pointer position (works even when focus is on another task)
-        let (new_x, new_y) = sys_input_get_pointer_pos();
+        let (new_x, new_y) = input::get_pointer_pos();
         if new_x != self.mouse_x || new_y != self.mouse_y {
             // Record trail for damage tracking
             if self.cursor_trail_count < MAX_CURSOR_TRAIL {
@@ -383,7 +380,7 @@ impl WindowManager {
 
         // Always query global button state (works even when focus is on another task)
         self.mouse_buttons_prev = self.mouse_buttons;
-        self.mouse_buttons = sys_input_get_button_state();
+        self.mouse_buttons = input::get_button_state();
     }
 
     /// Check if mouse was just clicked (press event)
@@ -401,7 +398,7 @@ impl WindowManager {
         self.prev_windows = self.windows;
         self.prev_window_count = self.window_count;
 
-        self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
+        self.window_count = window::enumerate_windows(&mut self.windows) as u32;
 
         // Clean up stale surface mappings
         self.surface_cache
@@ -585,23 +582,23 @@ impl WindowManager {
                     }
 
                     if self.hit_test_minimize_button(&window) {
-                        sys_set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
+                        window::set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
                         return;
                     }
 
                     self.start_drag(&window);
-                    sys_raise_window(window.task_id);
-                    sys_tty_set_focus(window.task_id);
+                    window::raise_window(window.task_id);
+                    tty::set_focus(window.task_id);
                     self.focused_task = window.task_id;
                     return;
                 }
 
                 // Check content area click - set pointer focus so client receives events
                 if self.hit_test_content_area(&window) {
-                    sys_raise_window(window.task_id);
-                    sys_tty_set_focus(window.task_id);
+                    window::raise_window(window.task_id);
+                    tty::set_focus(window.task_id);
                     // Set pointer focus with window offset for coordinate translation
-                    sys_input_set_pointer_focus_with_offset(window.task_id, window.x, window.y);
+                    input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
                     self.focused_task = window.task_id;
                     return;
                 }
@@ -657,7 +654,7 @@ impl WindowManager {
     fn update_drag(&mut self) {
         let new_x = self.mouse_x - self.drag_offset_x;
         let new_y = self.mouse_y - self.drag_offset_y;
-        sys_set_window_position(self.drag_task, new_x, new_y);
+        window::set_window_position(self.drag_task, new_x, new_y);
         self.needs_full_redraw = true;
     }
 
@@ -673,7 +670,7 @@ impl WindowManager {
     /// wm.close_window(42);
     /// ```
     fn close_window(&mut self, task_id: u32) {
-        sys_set_window_state(task_id, WINDOW_STATE_MINIMIZED);
+        window::set_window_state(task_id, WINDOW_STATE_MINIMIZED);
         self.needs_full_redraw = true;
     }
 
@@ -701,12 +698,12 @@ impl WindowManager {
         if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH {
             if let Some(task_id) = self.find_window_by_title(b"Files") {
                 // File manager already running - raise it
-                sys_raise_window(task_id);
-                sys_tty_set_focus(task_id);
+                window::raise_window(task_id);
+                tty::set_focus(task_id);
                 self.focused_task = task_id;
             } else {
                 // Spawn new file manager task
-                sys_spawn_task(b"file_manager\0");
+                process::spawn(b"file_manager\0");
             }
             self.needs_full_redraw = true;
             return;
@@ -715,11 +712,11 @@ impl WindowManager {
         let sysinfo_btn_x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         if self.mouse_x >= sysinfo_btn_x && self.mouse_x < sysinfo_btn_x + SYSINFO_BUTTON_WIDTH {
             if let Some(task_id) = self.find_window_by_title(b"Sysinfo") {
-                sys_raise_window(task_id);
-                sys_tty_set_focus(task_id);
+                window::raise_window(task_id);
+                tty::set_focus(task_id);
                 self.focused_task = task_id;
             } else {
-                sys_spawn_task(b"sysinfo\0");
+                process::spawn(b"sysinfo\0");
             }
             self.needs_full_redraw = true;
             return;
@@ -736,10 +733,10 @@ impl WindowManager {
                 } else {
                     WINDOW_STATE_MINIMIZED
                 };
-                sys_set_window_state(window.task_id, new_state);
+                window::set_window_state(window.task_id, new_state);
                 if new_state == WINDOW_STATE_NORMAL {
-                    sys_raise_window(window.task_id);
-                    sys_tty_set_focus(window.task_id);
+                    window::raise_window(window.task_id);
+                    tty::set_focus(window.task_id);
                     self.focused_task = window.task_id;
                 }
                 self.needs_full_redraw = true;
@@ -1155,28 +1152,28 @@ fn title_to_str(title: &[u8; 32]) -> &str {
 
 #[unsafe(link_section = ".user_text")]
 pub fn compositor_user_main(_arg: *mut c_void) {
-    sys_write(b"COMPOSITOR: starting\n");
+    tty::write(b"COMPOSITOR: starting\n");
     let mut wm = WindowManager::new();
     let mut fb_info = DisplayInfo::default();
 
-    if sys_fb_info(&mut fb_info) < 0 {
-        sys_write(b"COMPOSITOR: fb_info failed\n");
+    if window::fb_info(&mut fb_info) < 0 {
+        tty::write(b"COMPOSITOR: fb_info failed\n");
         loop {
-            sys_yield();
+            sys_core::yield_now();
         }
     }
-    sys_write(b"COMPOSITOR: fb_info ok\n");
+    tty::write(b"COMPOSITOR: fb_info ok\n");
 
     let mut output = match CompositorOutput::new(&fb_info) {
         Some(out) => out,
         None => {
-            sys_write(b"COMPOSITOR: output alloc failed\n");
+            tty::write(b"COMPOSITOR: output alloc failed\n");
             loop {
-                sys_yield();
+                sys_core::yield_now();
             }
         }
     };
-    sys_write(b"COMPOSITOR: output allocated\n");
+    tty::write(b"COMPOSITOR: output allocated\n");
 
     wm.set_output_info(output.bytes_pp, output.pitch);
 
@@ -1190,9 +1187,9 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     let mut frame_count: u32 = 0;
 
     loop {
-        let frame_start_ms = sys_get_time_ms();
+        let frame_start_ms = sys_core::get_time_ms();
 
-        sys_drain_queue();
+        input::drain_queue();
 
         wm.update_mouse();
         wm.refresh_windows();
@@ -1207,23 +1204,23 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             let flip_result = output.present();
             if frame_count < 3 {
                 if flip_result {
-                    sys_write(b"COMPOSITOR: fb_flip ok\n");
+                    tty::write(b"COMPOSITOR: fb_flip ok\n");
                 } else {
-                    sys_write(b"COMPOSITOR: fb_flip FAILED\n");
+                    tty::write(b"COMPOSITOR: fb_flip FAILED\n");
                 }
             }
             frame_count = frame_count.saturating_add(1);
 
-            let present_time = sys_get_time_ms();
-            sys_mark_frames_done(present_time);
+            let present_time = sys_core::get_time_ms();
+            window::mark_frames_done(present_time);
         }
 
-        let frame_end_ms = sys_get_time_ms();
+        let frame_end_ms = sys_core::get_time_ms();
         let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
         if frame_time < TARGET_FRAME_MS {
-            sys_sleep_ms((TARGET_FRAME_MS - frame_time) as u32);
+            sys_core::sleep_ms((TARGET_FRAME_MS - frame_time) as u32);
         }
 
-        sys_yield();
+        sys_core::yield_now();
     }
 }

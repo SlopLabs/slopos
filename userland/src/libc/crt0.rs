@@ -58,8 +58,8 @@ macro_rules! entry {
     ($main:ident) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn _start() -> ! {
-            $crate::libslop::crt0::set_main($main);
-            $crate::libslop::crt0::_start()
+            $crate::libc::crt0::set_main($main);
+            $crate::libc::crt0::crt0_start()
         }
     };
 }

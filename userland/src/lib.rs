@@ -10,12 +10,11 @@ pub mod loader;
 pub mod apps;
 pub mod compositor;
 pub mod gfx;
-pub mod libslop;
+pub mod libc;
 pub mod roulette;
 pub mod runtime;
 pub mod shell;
 pub mod syscall;
-pub mod syscall_raw;
 pub mod theme;
 pub mod ui_utils;
 

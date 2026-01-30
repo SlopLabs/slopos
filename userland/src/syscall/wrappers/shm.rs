@@ -1,0 +1,186 @@
+//! Shared memory RAII wrappers.
+
+use core::num::NonZeroU32;
+use core::ptr::NonNull;
+
+use crate::syscall::memory;
+use slopos_abi::{SHM_ACCESS_RO, SHM_ACCESS_RW, ShmError};
+
+pub struct ShmBuffer {
+    token: NonZeroU32,
+    ptr: NonNull<u8>,
+    size: usize,
+}
+
+impl ShmBuffer {
+    #[unsafe(link_section = ".user_text")]
+    pub fn create(size: usize) -> Result<Self, ShmError> {
+        if size == 0 {
+            return Err(ShmError::InvalidSize);
+        }
+
+        let token_raw = memory::shm_create(size as u64, 0);
+        let token = NonZeroU32::new(token_raw).ok_or(ShmError::AllocationFailed)?;
+
+        let ptr_raw = memory::shm_map(token_raw, SHM_ACCESS_RW);
+        if ptr_raw == 0 {
+            memory::shm_destroy(token_raw);
+            return Err(ShmError::MappingFailed);
+        }
+
+        let ptr = NonNull::new(ptr_raw as *mut u8).ok_or_else(|| {
+            memory::shm_destroy(token_raw);
+            ShmError::MappingFailed
+        })?;
+
+        Ok(Self { token, ptr, size })
+    }
+
+    #[inline]
+    pub fn token(&self) -> u32 {
+        self.token.get()
+    }
+
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
+    }
+
+    #[unsafe(link_section = ".user_text")]
+    pub fn attach_surface(&self, width: u32, height: u32) -> Result<(), ShmError> {
+        let result = crate::syscall::window::surface_attach(self.token.get(), width, height);
+        if result < 0 {
+            Err(ShmError::PermissionDenied)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for ShmBuffer {
+    #[unsafe(link_section = ".user_text")]
+    fn drop(&mut self) {
+        unsafe {
+            memory::shm_unmap(self.ptr.as_ptr() as u64);
+        }
+        memory::shm_destroy(self.token.get());
+    }
+}
+
+pub struct ShmBufferRef {
+    token: NonZeroU32,
+    ptr: NonNull<u8>,
+    size: usize,
+}
+
+impl ShmBufferRef {
+    #[unsafe(link_section = ".user_text")]
+    pub fn map_readonly(token: u32, size: usize) -> Result<Self, ShmError> {
+        let token_nz = NonZeroU32::new(token).ok_or(ShmError::InvalidToken)?;
+
+        if size == 0 {
+            return Err(ShmError::InvalidSize);
+        }
+
+        let ptr_raw = memory::shm_map(token, SHM_ACCESS_RO);
+        if ptr_raw == 0 {
+            return Err(ShmError::MappingFailed);
+        }
+
+        let ptr = NonNull::new(ptr_raw as *mut u8).ok_or(ShmError::MappingFailed)?;
+
+        Ok(Self {
+            token: token_nz,
+            ptr,
+            size,
+        })
+    }
+
+    #[inline]
+    pub fn token(&self) -> u32 {
+        self.token.get()
+    }
+
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
+    }
+
+    #[inline]
+    pub fn slice(&self, start: usize, len: usize) -> Option<&[u8]> {
+        if start.saturating_add(len) <= self.size {
+            Some(&self.as_slice()[start..start + len])
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for ShmBufferRef {
+    #[unsafe(link_section = ".user_text")]
+    fn drop(&mut self) {
+        unsafe {
+            memory::shm_unmap(self.ptr.as_ptr() as u64);
+        }
+    }
+}
+
+pub struct CachedShmMapping {
+    vaddr: u64,
+    size: usize,
+}
+
+impl CachedShmMapping {
+    #[unsafe(link_section = ".user_text")]
+    pub fn map_readonly(token: u32, size: usize) -> Option<Self> {
+        if token == 0 || size == 0 {
+            return None;
+        }
+
+        let vaddr = memory::shm_map(token, SHM_ACCESS_RO);
+        if vaddr == 0 {
+            return None;
+        }
+
+        Some(Self { vaddr, size })
+    }
+
+    #[inline]
+    pub fn vaddr(&self) -> u64 {
+        self.vaddr
+    }
+
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.vaddr as *const u8, self.size) }
+    }
+
+    #[inline]
+    pub fn slice(&self, start: usize, len: usize) -> Option<&[u8]> {
+        if start.saturating_add(len) <= self.size {
+            Some(&self.as_slice()[start..start + len])
+        } else {
+            None
+        }
+    }
+}

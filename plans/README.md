@@ -33,7 +33,7 @@ All 363 tests pass.
 The kernel foundation is complete. All critical systems are implemented:
 - VFS Layer with ext2, ramfs, devfs
 - exec() syscall with ELF loading from filesystem
-- libslop minimal C runtime (read/write/exit/malloc)
+- libc minimal C runtime (read/write/exit/malloc)
 - CRT0, argv/envp passing, brk syscall
 - Per-CPU page caches, VMA red-black tree
 - ASLR, RwLock primitives

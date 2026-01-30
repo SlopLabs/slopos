@@ -3,10 +3,7 @@ use core::ffi::c_void;
 use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
 
 use crate::gfx::{self, DrawBuffer, PixelFormat};
-use crate::syscall::{
-    DisplayInfo, ShmBuffer, UserSysInfo, sys_fb_info, sys_get_cpu_count, sys_get_current_cpu,
-    sys_surface_commit, sys_surface_set_title, sys_sys_info, sys_write, sys_yield,
-};
+use crate::syscall::{DisplayInfo, ShmBuffer, UserSysInfo, core as sys_core, tty, window};
 use crate::theme::{COLOR_BACKGROUND, COLOR_TEXT};
 
 const SYSINFO_WIDTH: i32 = 360;
@@ -38,7 +35,7 @@ impl SysinfoApp {
 
     fn init_surface(&mut self) -> bool {
         let mut fb_info = DisplayInfo::default();
-        if sys_fb_info(&mut fb_info) != 0 {
+        if window::fb_info(&mut fb_info) != 0 {
             return false;
         }
 
@@ -63,7 +60,7 @@ impl SysinfoApp {
             return false;
         }
 
-        sys_surface_set_title("Sysinfo");
+        window::surface_set_title("Sysinfo");
         self.shm_buffer = Some(shm);
         true
     }
@@ -103,10 +100,10 @@ impl SysinfoApp {
 
         gfx::fill_rect(&mut buf, 0, 0, width, height, COLOR_BACKGROUND);
 
-        let cpu_count = sys_get_cpu_count() as u64;
-        let current_cpu = sys_get_current_cpu() as u64;
+        let cpu_count = sys_core::get_cpu_count() as u64;
+        let current_cpu = sys_core::get_current_cpu() as u64;
         let mut info = UserSysInfo::default();
-        let sys_rc = sys_sys_info(&mut info);
+        let sys_rc = sys_core::sys_info(&mut info);
 
         let mut line = [0u8; 96];
         let mut y = SYSINFO_MARGIN_Y;
@@ -189,15 +186,15 @@ impl SysinfoApp {
 pub fn sysinfo_main(_arg: *mut c_void) {
     let mut app = SysinfoApp::new();
     if !app.init_surface() {
-        let _ = sys_write(b"sysinfo: framebuffer unavailable\n");
+        let _ = tty::write(b"sysinfo: framebuffer unavailable\n");
         return;
     }
 
     app.draw_info();
-    let _ = sys_surface_commit();
+    let _ = window::surface_commit();
 
     loop {
-        sys_yield();
+        sys_core::yield_now();
     }
 }
 
