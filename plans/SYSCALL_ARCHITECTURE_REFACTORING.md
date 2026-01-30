@@ -1,8 +1,29 @@
 # Syscall Architecture Refactoring Plan
 
-> **Status**: Planning  
+> **Status**: Planning (Refined)  
 > **Created**: 2026-01-29  
+> **Last Updated**: 2026-01-30  
 > **Priority**: High (DRY violation, API confusion)
+
+---
+
+### ⚠️ SlopOS Migration Philosophy
+
+**SlopOS does not allow:**
+- Dead code (unused code must be deleted immediately)
+- Deprecation warnings (`#[deprecated]` is forbidden)
+- Gradual migrations (no "both APIs available" periods)
+
+**SlopOS does allow:**
+- Breaking changes (we're not deployed anywhere)
+- Hard migrations (atomic cutover in a single commit)
+- Build failures during development (iterate until fixed)
+
+This plan uses **two-phase atomic migration**:
+1. **Phase 1**: Build new infrastructure alongside old (additive only)
+2. **Phase 2**: Single commit that switches everything and deletes old code
+
+---
 
 ## 1. Problem Statement
 
@@ -428,42 +449,151 @@ pub fn exit(status: c_int) -> ! {
 
 ## 4. Migration Strategy
 
-### 4.1 Phase 1: Foundation (Non-Breaking)
+> **SlopOS Philosophy**: No dead code. No deprecation. Break and fix immediately.
+> Breaking changes are trivial—SlopOS isn't deployed anywhere. Hard migrations only.
 
-1. Create `syscall/error.rs` with `SyscallError` and `demux()`
-2. Create `syscall/mod.rs` with new module structure
-3. Move `syscall_raw.rs` → `syscall/raw.rs`
-4. **Keep old `syscall.rs` working** via re-exports
+### 4.1 Phase 1: Build New Infrastructure (Additive Only)
 
-### 4.2 Phase 2: New API (Parallel)
+**Goal**: Create the complete new syscall layer alongside old code. Nothing removed yet, nothing broken.
 
-1. Implement `syscall/fs.rs` with new `read()`/`write()` using `demux()`
-2. Implement `syscall/tty.rs` with `tty_read()`/`tty_write()`
-3. Implement `syscall/wrappers/fd.rs` with `FdGuard`
-4. **Both old and new APIs available**
+**Why separate phase**: Allows testing new APIs in isolation before the cutover. New code can compile and be verified without affecting existing functionality.
 
-### 4.3 Phase 3: Migration (App by App)
+1. Create `userland/src/syscall/` directory structure:
+   ```
+   syscall/
+   ├── mod.rs          # Public exports only
+   ├── raw.rs          # Copy from syscall_raw.rs (not move yet)
+   ├── error.rs        # SyscallError, demux(), SyscallResult
+   ├── numbers.rs      # Re-exports from abi::syscall
+   ├── core.rs         # yield, exit, exit_with_code, sleep, time, random
+   ├── tty.rs          # tty_write, tty_read, tty_read_char (console I/O)
+   ├── fs.rs           # open, close, read, write, stat, list, mkdir, unlink
+   ├── memory.rs       # brk, sbrk, shm_* functions
+   ├── process.rs      # spawn, exec, fork, halt
+   ├── window.rs       # fb_*, surface_*, enumerate_windows, set_window_*
+   ├── input.rs        # input_poll, input_get_*, drain_queue
+   ├── roulette.rs     # Wheel of Fate syscalls
+   └── wrappers/
+       ├── mod.rs
+       ├── shm.rs      # ShmBuffer, ShmBufferRef (copy from syscall.rs)
+       └── fd.rs       # FdGuard (new RAII wrapper)
+   ```
 
-1. Migrate `shell.rs` to new API
-2. Migrate `compositor.rs` to new API
-3. Migrate `apps/*.rs` to new API
-4. **Deprecate old API** with `#[deprecated]`
+2. Implement all new modules with proper `demux()` error handling
+3. Create `userland/src/libc/` directory structure (parallel to libslop):
+   ```
+   libc/
+   ├── mod.rs
+   ├── syscall.rs      # C-ABI wrappers using new syscall/
+   ├── ffi.rs          # extern "C" exports
+   ├── malloc.rs       # Heap allocator
+   └── crt0.rs         # C runtime startup
+   ```
 
-### 4.4 Phase 4: Cleanup
+4. Verify new code compiles (can use `#[cfg(feature = "new_syscall")]` temporarily if needed)
 
-1. Remove deprecated old API
-2. Rename `libslop/` → `libc/`
-3. Update documentation
-4. Final cleanup
+**Exit Criteria**:
+- All new modules compile
+- New APIs have doc comments
+- No changes to existing functionality
+- Old `syscall.rs`, `syscall_raw.rs`, `libslop/` untouched
 
-### 4.5 Risk Mitigation
+### 4.2 Phase 2: Atomic Cutover
+
+**Goal**: Single commit that switches everything. All or nothing.
+
+**The Big Bang** (one commit, coordinated changes):
+
+1. **Update all consumers** (10 files total):
+   
+   **Apps** (6 files):
+   - `shell.rs` → new `syscall::{tty, fs, core, window, input, process}` APIs
+   - `compositor.rs` → new `syscall::{tty, window, input, core, memory}` APIs
+   - `roulette.rs` → new `syscall::{tty, core, roulette, window}` APIs
+   - `apps/file_manager.rs` → new `syscall::{window, fs, input, core}` APIs
+   - `apps/sysinfo.rs` → new `syscall::{window, core, tty}` APIs
+   
+   **C Runtime** (4 files):
+   - `libc/malloc.rs` → `syscall::memory::brk`
+   - `libc/ffi.rs` → `libc::syscall::*`
+   - `libc/crt0.rs` → `syscall::core::exit_with_code`
+   - `libc/mod.rs` → re-export from new `libc::syscall`
+
+2. **Delete old code**:
+   - Delete `userland/src/syscall.rs` (old monolithic module)
+   - Delete `userland/src/syscall_raw.rs` (replaced by `syscall/raw.rs`)
+   - Delete entire `userland/src/libslop/` directory
+
+3. **Update lib.rs**:
+   - Replace `mod syscall;` with `pub mod syscall;` (new module)
+   - Replace `mod libslop;` with `pub mod libc;`
+   - Remove `mod syscall_raw;`
+
+4. **Verify build passes**: `make build && make test`
+
+**Exit Criteria**:
+- `make build` succeeds
+- `make test` passes (kernel boots, harness runs)
+- No references to old `syscall.rs`, `syscall_raw.rs`, or `libslop/`
+- Zero dead code
+
+### 4.3 Verification & Polish
+
+**Goal**: Ensure nothing regressed after the atomic cutover.
+
+1. **Manual smoke test** (`make boot`):
+   - Shell launches and accepts commands
+   - `cat`, `echo`, `ls`, `mkdir`, `rm` work
+   - Compositor renders windows
+   - Roulette spins the Wheel of Fate
+   - File manager and sysinfo apps display correctly
+
+2. **Verify link sections**:
+   ```bash
+   objdump -h builddir/kernel.elf | grep user_text
+   ```
+   Ensure all userland syscall functions are in `.user_text`
+
+3. **Code review**: Ensure no subtle semantic changes
+   - TTY I/O uses correct syscall numbers (SYSCALL_WRITE vs SYSCALL_FS_WRITE)
+   - Error handling is consistent via `demux()`
+   - RAII wrappers don't leak resources
+
+### 4.4 Risk Mitigation
 
 | Risk | Mitigation |
 |------|------------|
-| Breaking existing apps | Parallel APIs during migration |
-| Subtle semantic changes | Comprehensive testing at each phase |
-| Link section issues | Verify `.user_text` placement with `objdump` |
-| Performance regression | Benchmark critical paths |
+| Phase 2 commit doesn't compile | Phase 1 ensures new code works; Phase 2 is purely mechanical replacement |
+| Missed a usage | Compiler will catch it—old modules deleted, imports will fail |
+| Semantic regression | Phase 3 smoke tests catch runtime issues |
+| Link section mistakes | objdump verification in Phase 3 |
+| Performance issues | Inline attributes preserved; no new abstraction overhead |
+
+**Recovery Plan**: If Phase 2 breaks badly, `git reset --hard HEAD~1` and iterate on Phase 1.
+
+### 4.5 Migration Mapping (Quick Reference)
+
+| Old Location | Old Function | New Location | New Function |
+|--------------|--------------|--------------|--------------|
+| `syscall.rs` | `sys_write(buf)` | `syscall::tty` | `write(buf)` |
+| `syscall.rs` | `sys_read(buf)` | `syscall::tty` | `read(buf)` |
+| `syscall.rs` | `sys_read_char()` | `syscall::tty` | `read_char()` |
+| `syscall.rs` | `sys_exit()` | `syscall::core` | `exit()` |
+| `syscall.rs` | `sys_fs_open(...)` | `syscall::fs` | `open(...)` |
+| `syscall.rs` | `sys_fs_close(fd)` | `syscall::fs` | `close(fd)` |
+| `syscall.rs` | `sys_fs_read(...)` | `syscall::fs` | `read(fd, buf)` |
+| `syscall.rs` | `sys_fs_write(...)` | `syscall::fs` | `write(fd, buf)` |
+| `syscall.rs` | `sys_fb_info()` | `syscall::window` | `fb_info()` |
+| `syscall.rs` | `sys_surface_*` | `syscall::window` | `surface_*` |
+| `syscall.rs` | `sys_input_*` | `syscall::input` | `poll_*`, `get_*` |
+| `syscall.rs` | `sys_spawn_task(...)` | `syscall::process` | `spawn(...)` |
+| `syscall.rs` | `sys_shm_*` | `syscall::memory` | `shm_*` |
+| `syscall.rs` | `ShmBuffer` | `syscall::wrappers::shm` | `ShmBuffer` |
+| `libslop/syscall.rs` | `sys_read(fd,...)` | `libc::syscall` | `read(fd,...)` |
+| `libslop/syscall.rs` | `sys_write(fd,...)` | `libc::syscall` | `write(fd,...)` |
+| `libslop/syscall.rs` | `sys_exit(status)` | `syscall::core` | `exit_with_code(status)` |
+| `libslop/syscall.rs` | `sys_brk(addr)` | `syscall::memory` | `brk(addr)` |
+| `libslop/syscall.rs` | `sys_sbrk(inc)` | `syscall::memory` | `sbrk(inc)` |
 
 ---
 
@@ -490,35 +620,66 @@ pub fn exit(status: c_int) -> ! {
 1. **Don't add a proc-macro system** - complexity not worth it for SlopOS scale
 2. **Don't encode metadata in syscall numbers** - current simple scheme is fine
 3. **Don't remove C-ABI support** - needed for POSIX compatibility
-4. **Don't break the build during migration** - parallel APIs
+4. **Don't use `#[deprecated]`** - SlopOS uses hard migrations, not gradual deprecation
+5. **Don't leave dead code** - if old code has zero usages, delete it immediately
+6. **Don't do gradual migration** - one atomic commit switches everything
 
 ---
 
 ## 6. Implementation Checklist
 
-### Phase 1: Foundation
-- [ ] Create `userland/src/syscall/error.rs`
-- [ ] Create `userland/src/syscall/mod.rs`
-- [ ] Move `syscall_raw.rs` → `syscall/raw.rs`
-- [ ] Verify build still works
+### Phase 1: Build New Infrastructure (Additive Only)
 
-### Phase 2: New API
-- [ ] Implement `syscall/fs.rs`
-- [ ] Implement `syscall/tty.rs`
-- [ ] Implement `syscall/core.rs`
-- [ ] Implement `syscall/wrappers/fd.rs`
-- [ ] Move `ShmBuffer` to `syscall/wrappers/shm.rs`
-- [ ] Add deprecation warnings to old API
+**New syscall/ module:**
+- [ ] Create `userland/src/syscall/mod.rs` (public exports)
+- [ ] Create `userland/src/syscall/raw.rs` (copy from syscall_raw.rs)
+- [ ] Create `userland/src/syscall/error.rs` (SyscallError, demux, SyscallResult)
+- [ ] Create `userland/src/syscall/numbers.rs` (re-export abi::syscall)
+- [ ] Create `userland/src/syscall/core.rs` (yield, exit, exit_with_code, sleep, time)
+- [ ] Create `userland/src/syscall/tty.rs` (write, read, read_char)
+- [ ] Create `userland/src/syscall/fs.rs` (open, close, read, write, stat, list, mkdir, unlink)
+- [ ] Create `userland/src/syscall/memory.rs` (brk, sbrk, shm_*)
+- [ ] Create `userland/src/syscall/process.rs` (spawn, exec, fork, halt)
+- [ ] Create `userland/src/syscall/window.rs` (fb_*, surface_*, enumerate_*, set_window_*)
+- [ ] Create `userland/src/syscall/input.rs` (poll_*, get_*, drain_queue)
+- [ ] Create `userland/src/syscall/roulette.rs` (Wheel of Fate syscalls)
+- [ ] Create `userland/src/syscall/wrappers/mod.rs`
+- [ ] Create `userland/src/syscall/wrappers/shm.rs` (ShmBuffer, ShmBufferRef, CachedShmMapping)
+- [ ] Create `userland/src/syscall/wrappers/fd.rs` (FdGuard)
 
-### Phase 3: Migration
-- [ ] Migrate `apps/sysinfo.rs`
-- [ ] Migrate `apps/file_manager.rs`
-- [ ] Migrate `shell.rs`
-- [ ] Migrate `compositor.rs`
-- [ ] Migrate `roulette.rs`
+**New libc/ module:**
+- [ ] Create `userland/src/libc/mod.rs`
+- [ ] Create `userland/src/libc/syscall.rs` (C-ABI wrappers)
+- [ ] Create `userland/src/libc/ffi.rs` (extern "C" exports)
+- [ ] Create `userland/src/libc/malloc.rs` (heap allocator)
+- [ ] Create `userland/src/libc/crt0.rs` (C runtime startup)
 
-### Phase 4: Cleanup
-- [ ] Remove old `syscall.rs`
-- [ ] Rename `libslop/` → `libc/`
-- [ ] Update all imports
-- [ ] Final documentation pass
+**Verification:**
+- [ ] All new modules compile (may use temporary cfg flag)
+- [ ] Doc comments on public APIs
+
+### Phase 2: Atomic Cutover (Single Commit)
+
+**Update consumers:**
+- [ ] Update `shell.rs` to use new APIs
+- [ ] Update `compositor.rs` to use new APIs
+- [ ] Update `roulette.rs` to use new APIs
+- [ ] Update `apps/file_manager.rs` to use new APIs
+- [ ] Update `apps/sysinfo.rs` to use new APIs
+- [ ] Update `lib.rs` module declarations
+
+**Delete old code:**
+- [ ] Delete `userland/src/syscall.rs`
+- [ ] Delete `userland/src/syscall_raw.rs`
+- [ ] Delete `userland/src/libslop/` directory
+
+**Final verification:**
+- [ ] `make build` succeeds
+- [ ] `make test` passes
+
+### Phase 3: Verification & Polish
+
+- [ ] Manual smoke test with `make boot`
+- [ ] Verify `.user_text` link sections with objdump
+- [ ] Ensure no semantic regressions
+- [ ] Update AGENTS.md if any new patterns established
