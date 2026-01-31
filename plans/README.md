@@ -8,6 +8,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 |----------|-------------|
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
+| [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
 
 ---
 
@@ -17,14 +18,26 @@ The Rust-native SMP safety infrastructure is now complete:
 
 | Component | Status |
 |-----------|--------|
-| `TaskStatus` enum | ✅ Implemented in `abi/src/task.rs` |
-| `BlockReason` enum | ✅ Implemented in `abi/src/task.rs` |
-| Type-safe state transitions | ✅ `mark_ready()`, `mark_running()`, `block()`, `terminate()` |
-| `TaskHandle` safe wrapper | ✅ Implemented in `core/src/scheduler/task_lock.rs` |
-| `IrqRwLock` primitives | ✅ Implemented in `lib/src/spinlock.rs` |
-| `SwitchContext` with `offset_of!` | ✅ Compile-time safe struct offsets |
+| `TaskStatus` enum | Implemented in `abi/src/task.rs` |
+| `BlockReason` enum | Implemented in `abi/src/task.rs` |
+| Type-safe state transitions | `mark_ready()`, `mark_running()`, `block()`, `terminate()` |
+| `TaskHandle` safe wrapper | Implemented in `core/src/scheduler/task_lock.rs` |
+| `IrqRwLock` primitives | Implemented in `lib/src/spinlock.rs` |
+| `SwitchContext` with `offset_of!` | Compile-time safe struct offsets |
 
-All 363 tests pass.
+---
+
+## Completed: Unified PCR Infrastructure
+
+The Unified Processor Control Region (PCR) following Redox OS patterns is complete:
+
+| Component | Status |
+|-----------|--------|
+| `ProcessorControlRegion` struct | Implemented in `lib/src/pcr.rs` |
+| Per-CPU GDT/TSS embedding | Embedded in PCR |
+| Fast GS-based CPU access | `gs:[24]` for instant CPU ID (~1-3 cycles) |
+| AP user-mode execution | Fixed - tasks run on any CPU |
+| SYSCALL/context switch assembly | Updated for PCR offsets |
 
 ---
 
