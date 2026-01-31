@@ -6,6 +6,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 
 | Document | Description |
 |----------|-------------|
+| [UNIFIED_PERCPU_SCHEDULER.md](./UNIFIED_PERCPU_SCHEDULER.md) | **Priority** - Symmetric per-CPU scheduler following Theseus/Redox patterns |
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
@@ -54,6 +55,29 @@ The kernel foundation is complete. All critical systems are implemented:
 - SYSCALL/SYSRET fast path
 - Priority-based scheduling
 - TLB shootdown, FPU state save
+
+---
+
+## In Progress: Unified Per-CPU Scheduler
+
+**See [UNIFIED_PERCPU_SCHEDULER.md](./UNIFIED_PERCPU_SCHEDULER.md) for complete design.**
+
+The current scheduler has an asymmetric architecture where BSP (CPU 0) operates differently from APs. This plan unifies all CPUs under a symmetric per-CPU model following Theseus OS and Redox OS patterns.
+
+| Phase | Description | Status | Risk |
+|-------|-------------|:------:|:----:|
+| Phase 0 | Add inbox drain to timer tick (immediate win) | Planned | Very Low |
+| Phase 1 | State consolidation (eliminate SchedulerInner duplication) | Planned | Low |
+| Phase 2 | Unified scheduler_loop() for all CPUs | Planned | Medium |
+| Phase 3 | BSP enters scheduler_loop() instead of halting | Planned | Medium-High |
+| Phase 4 | Lock-free cross-CPU scheduling | Planned | Low |
+| Phase 5 | Cleanup and code deletion | Planned | Low |
+
+**Key Benefits:**
+- Lock-free cross-CPU task wakeups (<10μs vs ~1ms with current mutex)
+- Symmetric code paths (no special-case BSP handling)
+- Foundation for pluggable scheduler policies
+- Matches production Rust OS architectures
 
 ---
 
