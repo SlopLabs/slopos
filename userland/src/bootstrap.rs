@@ -1,5 +1,6 @@
 use core::ffi::c_char;
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_core::syscall::register_spawn_task_callback;
@@ -119,7 +120,7 @@ fn block_task_on(task_id: u32, task_info: *mut Task, wait_on: u32) -> i32 {
         return -1;
     }
     unsafe {
-        (*task_info).waiting_on_task_id = wait_on;
+        (*task_info).waiting_on.store(wait_on, Ordering::Release);
     }
     if task_set_state(task_id, TASK_STATE_RUNNING) != 0 {
         return -1;

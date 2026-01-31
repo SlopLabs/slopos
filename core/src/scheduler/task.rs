@@ -1,6 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::mem;
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use slopos_lib::IrqMutex;
 
@@ -8,6 +9,94 @@ use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
+
+// =============================================================================
+// Zombie List for Deferred Task Reclamation
+// =============================================================================
+
+/// List of terminated tasks waiting to be freed when refcount hits zero.
+/// Protected by IrqMutex for interrupt safety.
+static ZOMBIE_LIST: slopos_lib::IrqMutex<ZombieList> = slopos_lib::IrqMutex::new(ZombieList::new());
+
+struct ZombieList {
+    tasks: [Option<*mut Task>; MAX_TASKS],
+    count: usize,
+}
+
+// SAFETY: ZombieList contains raw pointers to Task slots which are static.
+// All access is serialized through the IrqMutex.
+unsafe impl Send for ZombieList {}
+unsafe impl Sync for ZombieList {}
+
+impl ZombieList {
+    const fn new() -> Self {
+        Self {
+            tasks: [None; MAX_TASKS],
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, task: *mut Task) {
+        if self.count < MAX_TASKS {
+            self.tasks[self.count] = Some(task);
+            self.count += 1;
+        }
+    }
+}
+
+/// Add a terminated task to the zombie list for deferred cleanup.
+/// The task will be freed when its reference count reaches zero.
+fn defer_task_cleanup(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    ZOMBIE_LIST.lock().push(task);
+}
+
+/// Reap zombie tasks that are ready to be freed.
+/// Should be called periodically (e.g., from scheduler idle path).
+pub fn reap_zombies() {
+    let mut list = ZOMBIE_LIST.lock();
+
+    let mut write_idx = 0usize;
+    for read_idx in 0..list.count {
+        if let Some(task) = list.tasks[read_idx] {
+            // Check if task is ready to be freed (refcount == 0)
+            let ref_count = unsafe { (*task).ref_count() };
+            if ref_count == 0 {
+                // Safe to free now
+                unsafe {
+                    klog_debug!("reap_zombies: Freeing zombie task {}", (*task).task_id);
+
+                    // Free kernel stack
+                    if (*task).kernel_stack_base != 0 {
+                        kfree((*task).kernel_stack_base as *mut c_void);
+                        (*task).kernel_stack_base = 0;
+                    }
+
+                    // Free user stack (if kernel task without process)
+                    if (*task).process_id == INVALID_PROCESS_ID && (*task).stack_base != 0 {
+                        kfree((*task).stack_base as *mut c_void);
+                        (*task).stack_base = 0;
+                    }
+
+                    // Mark slot as invalid for reuse
+                    *task = Task::invalid();
+                }
+                // Don't keep this one in the list
+                list.tasks[read_idx] = None;
+            } else {
+                // Still has references - keep in list
+                if write_idx != read_idx {
+                    list.tasks[write_idx] = list.tasks[read_idx];
+                    list.tasks[read_idx] = None;
+                }
+                write_idx += 1;
+            }
+        }
+    }
+    list.count = write_idx;
+}
 
 use super::scheduler;
 
@@ -119,41 +208,43 @@ pub fn task_find_by_id(task_id: u32) -> *mut Task {
 }
 
 fn release_task_dependents(completed_task_id: u32) {
-    let dependents: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
+    // Collect task pointers first, then try to wake outside the lock
+    // This prevents holding the task manager lock during wake operations
+    let candidates: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
         let mut result = [None; MAX_TASKS];
         let mut idx = 0;
         for dependent in mgr.tasks.iter_mut() {
+            // Skip non-blocked tasks
             if !task_is_blocked(dependent) {
                 continue;
             }
-            if dependent.waiting_on_task_id != completed_task_id {
+            // Check if waiting on the completed task (atomic load)
+            if dependent.waiting_on.load(Ordering::Acquire) != completed_task_id {
                 continue;
             }
-            dependent.waiting_on_task_id = INVALID_TASK_ID;
+            // Candidate for wakeup - collect pointer
             result[idx] = Some(dependent as *mut Task);
             idx += 1;
         }
         result
     });
 
-    for dep_opt in dependents.iter() {
-        if let Some(dep) = dep_opt {
-            let dep_ptr = *dep;
-            let dep_id = unsafe { (*dep_ptr).task_id };
-            let dep_rip = unsafe { (*dep_ptr).context.rip };
-            let dep_state = unsafe { (*dep_ptr).state() };
-            klog_info!(
-                "release_task_dependents: task {} ptr=0x{:x} rip=0x{:x} state={}",
-                dep_id,
-                dep_ptr as usize,
-                dep_rip,
-                dep_state
-            );
-            if scheduler::unblock_task(dep_ptr) != 0 {
-                klog_info!("release_task_dependents: Failed to unblock task {}", dep_id);
-            } else {
-                klog_info!("release_task_dependents: Unblocked task {}", dep_id);
+    // Now attempt to wake each candidate using the single-winner protocol
+    // CAS ensures exactly one waker wins per task
+    for candidate_opt in candidates.iter() {
+        if let Some(task_ptr) = candidate_opt {
+            let task = *task_ptr;
+            let task_id = unsafe { (*task).task_id };
+
+            if scheduler::try_wake_from_task_wait(task, completed_task_id) {
+                klog_info!(
+                    "release_task_dependents: Woke task {} (was waiting on {})",
+                    task_id,
+                    completed_task_id
+                );
             }
+            // If try_wake returns false, another waker won or task changed state
+            // Either way, nothing more for us to do
         }
     }
 }
@@ -458,7 +549,9 @@ pub fn task_create(
     task_ref.creation_time = kdiag_timestamp();
     task_ref.yield_count = 0;
     task_ref.last_run_timestamp = 0;
-    task_ref.waiting_on_task_id = INVALID_TASK_ID;
+    task_ref
+        .waiting_on
+        .store(INVALID_TASK_ID, Ordering::Release);
     task_ref.user_started = 0;
     task_ref.context_from_user = 0;
     task_ref.exit_reason = TaskExitReason::None;
@@ -544,26 +637,48 @@ pub fn task_terminate(task_id: u32) -> c_int {
         (*task_ptr).fate_pending = 0;
     }
 
-    let was_paused = crate::per_cpu::pause_all_aps();
+    // Clear our own waiting_on (we're done waiting on anything)
+    unsafe {
+        (*task_ptr)
+            .waiting_on
+            .store(INVALID_TASK_ID, Ordering::Release);
+    }
+
+    // Memory barrier: ensure TERMINATED state is visible before we wake dependents
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    // NO MORE pause_all_aps()!
+    // The atomic CAS protocol in release_task_dependents handles races safely.
     release_task_dependents(resolved_id);
-    crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
 
     if !is_current {
         unsafe {
             if (*task_ptr).process_id != INVALID_PROCESS_ID {
+                // Clean up process-specific resources immediately
+                // (These don't depend on task memory being valid)
                 fileio_destroy_table_for_process((*task_ptr).process_id);
                 video_task_cleanup(resolved_id);
                 // Clean up shared memory buffers owned by this task
                 // Must happen before destroy_process_vm to properly unmap pages
                 shm_cleanup_task(resolved_id);
                 destroy_process_vm((*task_ptr).process_id);
+            }
+
+            // Defer memory cleanup until refcount is zero
+            // This allows other CPUs to safely finish using task pointers
+            // (e.g., in remote inbox or other queues)
+            if (*task_ptr).ref_count() > 0 {
+                defer_task_cleanup(task_ptr);
+            } else {
+                // No references - safe to free immediately
                 if (*task_ptr).kernel_stack_base != 0 {
                     kfree((*task_ptr).kernel_stack_base as *mut c_void);
                 }
-            } else if (*task_ptr).stack_base != 0 {
-                kfree((*task_ptr).stack_base as *mut c_void);
+                if (*task_ptr).process_id == INVALID_PROCESS_ID && (*task_ptr).stack_base != 0 {
+                    kfree((*task_ptr).stack_base as *mut c_void);
+                }
+                *task_ptr = Task::invalid();
             }
-            *task_ptr = Task::invalid();
         }
     }
 
@@ -953,7 +1068,7 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     child.creation_time = kdiag_timestamp();
     child.yield_count = 0;
     child.last_run_timestamp = 0;
-    child.waiting_on_task_id = INVALID_TASK_ID;
+    child.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
     child.exit_reason = TaskExitReason::None;
     child.fault_reason = TaskFaultReason::None;
     child.exit_code = 0;

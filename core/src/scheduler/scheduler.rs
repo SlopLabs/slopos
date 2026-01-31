@@ -759,12 +759,20 @@ pub fn task_wait_for(task_id: u32) -> c_int {
 
     let mut target: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut target) != 0 || target.is_null() {
-        unsafe { (*current).waiting_on_task_id = INVALID_TASK_ID };
+        unsafe {
+            (*current)
+                .waiting_on
+                .store(INVALID_TASK_ID, Ordering::Release)
+        };
         return 0;
     }
-    unsafe { (*current).waiting_on_task_id = task_id };
+    unsafe { (*current).waiting_on.store(task_id, Ordering::Release) };
     block_current_task();
-    unsafe { (*current).waiting_on_task_id = INVALID_TASK_ID };
+    unsafe {
+        (*current)
+            .waiting_on
+            .store(INVALID_TASK_ID, Ordering::Release)
+    };
     0
 }
 
@@ -792,6 +800,64 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
     schedule_task(task)
+}
+
+/// Attempt to wake a task that was waiting on `completed_id`.
+/// Returns true if THIS caller won the wake race and should handle the task.
+/// Returns false if another caller already woke it or task wasn't waiting on this ID.
+///
+/// This is the key primitive for lock-free task termination - uses CAS to ensure
+/// exactly one waker succeeds per waiting task.
+pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
+    if task.is_null() || completed_id == INVALID_TASK_ID {
+        return false;
+    }
+
+    // CAS: Atomically clear waiting_on only if it matches completed_id
+    // Only ONE caller can succeed this CAS - the "winner"
+    let result = unsafe {
+        (*task).waiting_on.compare_exchange(
+            completed_id,      // expected: waiting on the completed task
+            INVALID_TASK_ID,   // desired: no longer waiting
+            Ordering::AcqRel,  // success: acquire prior writes, release our write
+            Ordering::Acquire, // failure: just acquire to see current value
+        )
+    };
+
+    match result {
+        Ok(_) => {
+            // We won the race! Now transition state and enqueue
+            // CAS: BLOCKED -> READY (single-winner state transition)
+            if task_set_state(unsafe { (*task).task_id }, TASK_STATE_READY) != 0 {
+                // State changed unexpectedly - task may be terminated or already ready
+                // Check if it's a real failure
+                if task_is_terminated(task) || task_is_invalid(task) {
+                    klog_info!(
+                        "try_wake_from_task_wait: task {} state transition failed (terminated/invalid)",
+                        unsafe { (*task).task_id }
+                    );
+                    return false;
+                }
+                // Task is already ready/running - that's fine, we still "won" the CAS
+            }
+
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+            // Enqueue the task
+            if schedule_task(task) != 0 {
+                klog_info!(
+                    "try_wake_from_task_wait: failed to schedule task {}",
+                    unsafe { (*task).task_id }
+                );
+            }
+            true
+        }
+        Err(_current) => {
+            // Lost race OR task is waiting on different ID
+            // Either way, not our responsibility to wake
+            false
+        }
+    }
 }
 
 pub fn scheduler_task_exit_impl() -> ! {
@@ -1371,6 +1437,12 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
     use super::work_steal::try_work_steal;
 
     loop {
+        // FIRST: Drain remote inbox before checking for work
+        // This ensures cross-CPU wakes are processed promptly
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.drain_remote_inbox();
+        });
+
         if per_cpu::are_aps_paused() {
             unsafe {
                 core::arch::asm!("sti; hlt; cli", options(nomem, nostack));

@@ -168,6 +168,10 @@ pub struct PerCpuScheduler {
     initialized: AtomicBool,
     pub return_context: TaskContext,
     executing_task: AtomicBool,
+    /// Head of Treiber stack for remote wake requests (lock-free MPSC)
+    remote_inbox_head: AtomicPtr<Task>,
+    /// Count of tasks in inbox (informational only)
+    inbox_count: AtomicU32,
 }
 
 unsafe impl Send for PerCpuScheduler {}
@@ -190,6 +194,8 @@ impl PerCpuScheduler {
             initialized: AtomicBool::new(false),
             return_context: TaskContext::zero(),
             executing_task: AtomicBool::new(false),
+            remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
+            inbox_count: AtomicU32::new(0),
         }
     }
 
@@ -239,6 +245,9 @@ impl PerCpuScheduler {
         self.total_ticks.store(0, Ordering::Relaxed);
         self.idle_time.store(0, Ordering::Relaxed);
         self.initialized.store(true, Ordering::Release);
+        self.remote_inbox_head
+            .store(ptr::null_mut(), Ordering::Release);
+        self.inbox_count.store(0, Ordering::Relaxed);
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -344,6 +353,108 @@ impl PerCpuScheduler {
 
     pub fn increment_idle_time(&self) {
         self.idle_time.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Push a task to this CPU's remote wake inbox.
+    ///
+    /// This is a lock-free MPSC (multi-producer single-consumer) push.
+    /// Can be called from ANY CPU safely.
+    pub fn push_remote_wake(&self, task: *mut Task) {
+        if task.is_null() {
+            return;
+        }
+
+        // Lock-free push using CAS loop (Treiber stack pattern)
+        loop {
+            // Load current head
+            let old_head = self.remote_inbox_head.load(Ordering::Acquire);
+
+            // Point our next to current head
+            unsafe {
+                (*task).next_inbox.store(old_head, Ordering::Relaxed);
+            }
+
+            // Try to become new head
+            match self.remote_inbox_head.compare_exchange_weak(
+                old_head,
+                task,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // Success! Update count and return
+                    self.inbox_count.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Err(_) => {
+                    // Lost race - retry
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    /// Drain all tasks from remote inbox into local ready queues.
+    ///
+    /// This is the single-consumer part of MPSC.
+    /// MUST only be called by the owning CPU!
+    pub fn drain_remote_inbox(&mut self) {
+        // Atomically take entire inbox
+        let head = self
+            .remote_inbox_head
+            .swap(ptr::null_mut(), Ordering::AcqRel);
+
+        if head.is_null() {
+            return;
+        }
+
+        let mut count = 0u32;
+        let mut current = head;
+
+        // Reverse the stack to maintain FIFO order
+        let mut reversed: *mut Task = ptr::null_mut();
+        while !current.is_null() {
+            let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
+            unsafe {
+                (*current).next_inbox.store(reversed, Ordering::Relaxed);
+            }
+            reversed = current;
+            current = next;
+            count += 1;
+        }
+
+        // Enqueue all tasks into local ready queues
+        current = reversed;
+        while !current.is_null() {
+            let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
+
+            // Clear inbox linkage
+            unsafe {
+                (*current)
+                    .next_inbox
+                    .store(ptr::null_mut(), Ordering::Release);
+            }
+
+            // Enqueue into appropriate priority queue
+            let priority = unsafe { (*current).priority as usize };
+            let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+
+            // Local enqueue with lock
+            let _guard = self.queue_lock.lock();
+            self.ready_queues[idx].enqueue(current);
+            drop(_guard);
+
+            current = next;
+        }
+
+        // Update inbox count
+        self.inbox_count.fetch_sub(count, Ordering::Relaxed);
+    }
+
+    /// Check if inbox has pending tasks
+    #[inline]
+    pub fn has_pending_inbox(&self) -> bool {
+        !self.remote_inbox_head.load(Ordering::Acquire).is_null()
     }
 }
 

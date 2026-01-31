@@ -5,7 +5,7 @@
 
 use core::ffi::c_void;
 use core::ptr;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
 // =============================================================================
 // Task Configuration Constants
@@ -460,7 +460,7 @@ pub struct Task {
     pub creation_time: u64,
     pub yield_count: u32,
     pub last_run_timestamp: u64,
-    pub waiting_on_task_id: u32,
+    pub waiting_on: AtomicU32,
     pub user_started: u8,
     pub context_from_user: u8,
     pub exit_reason: TaskExitReason,
@@ -474,6 +474,10 @@ pub struct Task {
     pub migration_count: u32,
     pub switch_ctx: SwitchContext,
     pub next_ready: *mut Task,
+    /// Linkage for remote wake inbox (separate from ready queue linkage)
+    pub next_inbox: AtomicPtr<Task>,
+    /// Reference count for safe deferred reclamation
+    pub refcnt: AtomicU32,
 }
 
 impl Task {
@@ -503,7 +507,7 @@ impl Task {
             creation_time: 0,
             yield_count: 0,
             last_run_timestamp: 0,
-            waiting_on_task_id: INVALID_TASK_ID,
+            waiting_on: AtomicU32::new(INVALID_TASK_ID),
             user_started: 0,
             context_from_user: 0,
             exit_reason: TaskExitReason::None,
@@ -517,6 +521,8 @@ impl Task {
             migration_count: 0,
             switch_ctx: SwitchContext::zero(),
             next_ready: ptr::null_mut(),
+            next_inbox: AtomicPtr::new(ptr::null_mut()),
+            refcnt: AtomicU32::new(0),
         }
     }
 
@@ -644,7 +650,8 @@ impl Task {
         self.creation_time = other.creation_time;
         self.yield_count = other.yield_count;
         self.last_run_timestamp = other.last_run_timestamp;
-        self.waiting_on_task_id = other.waiting_on_task_id;
+        self.waiting_on
+            .store(other.waiting_on.load(Ordering::Acquire), Ordering::Release);
         self.user_started = other.user_started;
         self.context_from_user = other.context_from_user;
         self.exit_reason = other.exit_reason;
@@ -658,6 +665,27 @@ impl Task {
         self.migration_count = other.migration_count;
         self.switch_ctx = other.switch_ctx;
         self.next_ready = other.next_ready;
+        self.next_inbox
+            .store(other.next_inbox.load(Ordering::Acquire), Ordering::Release);
+        self.refcnt.store(0, Ordering::Release); // Don't clone refcount - start fresh
+    }
+
+    /// Increment reference count. Returns new count.
+    #[inline]
+    pub fn inc_ref(&self) -> u32 {
+        self.refcnt.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Decrement reference count. Returns true if this was the last reference.
+    #[inline]
+    pub fn dec_ref(&self) -> bool {
+        self.refcnt.fetch_sub(1, Ordering::AcqRel) == 1
+    }
+
+    /// Get current reference count.
+    #[inline]
+    pub fn ref_count(&self) -> u32 {
+        self.refcnt.load(Ordering::Acquire)
     }
 }
 
