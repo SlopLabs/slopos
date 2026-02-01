@@ -11,34 +11,6 @@ use crate::irq::{
     is_masked, mask_irq_line, register_handler, unmask_irq_line, unregister_handler,
 };
 
-#[allow(dead_code)]
-fn create_irq_frame(irq_line: u8) -> InterruptFrame {
-    InterruptFrame {
-        r15: 0,
-        r14: 0,
-        r13: 0,
-        r12: 0,
-        rbp: 0,
-        rbx: 0,
-        r11: 0,
-        r10: 0,
-        r9: 0,
-        r8: 0,
-        rax: 0,
-        rcx: 0,
-        rdx: 0,
-        rsi: 0,
-        rdi: 0,
-        vector: (IRQ_BASE_VECTOR as u64) + (irq_line as u64),
-        error_code: 0,
-        rip: 0xFFFF_FFFF_8000_1000,
-        cs: 0x08,
-        rflags: 0x202,
-        rsp: 0xFFFF_FFFF_8010_0000,
-        ss: 0x10,
-    }
-}
-
 pub fn test_irq_register_invalid_line() -> c_int {
     extern "C" fn dummy_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
 

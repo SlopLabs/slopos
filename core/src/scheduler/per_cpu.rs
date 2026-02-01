@@ -120,7 +120,6 @@ impl ReadyQueue {
         -1
     }
 
-    #[allow(dead_code)]
     fn steal_from_tail(&mut self) -> Option<*mut Task> {
         if self.count.load(Ordering::Relaxed) <= 1 {
             return None;
@@ -312,7 +311,6 @@ impl PerCpuScheduler {
         self.ready_queues.iter().map(|q| q.len()).sum()
     }
 
-    #[allow(dead_code)]
     pub fn steal_task(&mut self) -> Option<*mut Task> {
         let _guard = self.queue_lock.lock();
         for queue in self.ready_queues.iter_mut().rev() {

@@ -229,42 +229,6 @@ fn flush_tlb_local_full() {
     cpu::flush_tlb_all();
 }
 
-/// INVPCID descriptor structure for the INVPCID instruction.
-#[repr(C, align(16))]
-struct InvpcidDescriptor {
-    pcid: u64,
-    addr: u64,
-}
-
-/// INVPCID types.
-#[repr(u64)]
-#[allow(dead_code)]
-enum InvpcidType {
-    /// Invalidate mappings for a single linear address and PCID.
-    IndividualAddress = 0,
-    /// Invalidate all mappings for a single PCID (except global).
-    SingleContext = 1,
-    /// Invalidate all mappings (including global).
-    AllContextsIncludingGlobal = 2,
-    /// Invalidate all mappings (except global).
-    AllContextsExcludingGlobal = 3,
-}
-
-/// Execute INVPCID instruction (if available).
-#[inline]
-#[allow(dead_code)]
-fn invpcid(invtype: InvpcidType, pcid: u64, addr: u64) {
-    let desc = InvpcidDescriptor { pcid, addr };
-    unsafe {
-        core::arch::asm!(
-            "invpcid {}, [{}]",
-            in(reg) invtype as u64,
-            in(reg) &desc,
-            options(nostack, preserves_flags)
-        );
-    }
-}
-
 #[inline]
 fn flush_page_local(vaddr: VirtAddr) {
     cpu::invlpg(vaddr.as_u64());

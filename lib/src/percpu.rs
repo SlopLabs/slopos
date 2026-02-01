@@ -359,21 +359,6 @@ pub fn register_lapic_id_fn(f: fn() -> u32) {
     LAPIC_ID_FN.store(f as *mut (), Ordering::Release);
 }
 
-#[allow(dead_code)]
-fn read_lapic_id() -> u32 {
-    let fn_ptr = LAPIC_ID_FN.load(Ordering::Acquire);
-    if !fn_ptr.is_null() {
-        // SAFETY: Function pointer was set by register_lapic_id_fn with a valid fn() -> u32
-        let f: fn() -> u32 = unsafe { core::mem::transmute(fn_ptr) };
-        return f();
-    }
-
-    // Fallback: Read initial APIC ID from CPUID leaf 1
-    // This works even before the APIC driver is initialized
-    let (_, ebx, _, _) = crate::cpu::cpuid(1);
-    ((ebx >> 24) & 0xFF) as u32
-}
-
 /// Set the current task pointer for this CPU.
 #[inline]
 pub fn set_current_task(task: *mut ()) {

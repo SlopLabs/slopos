@@ -25,7 +25,7 @@
 
 use slopos_abi::arch::x86_64::cpuid::CPUID_FEAT_EDX_PAT;
 use slopos_abi::arch::x86_64::msr::Msr;
-use slopos_lib::{InitFlag, cpu, klog_debug, klog_info, klog_warn};
+use slopos_lib::{cpu, klog_debug, klog_info, klog_warn, InitFlag};
 
 // =============================================================================
 // Memory Type Constants
@@ -71,18 +71,6 @@ const PAT_VALUE: u64 = (MEM_TYPE_WB as u64)
     | ((MEM_TYPE_UC as u64) << 24)
     | ((MEM_TYPE_WB as u64) << 32)
     | ((MEM_TYPE_WC as u64) << 40)
-    | ((MEM_TYPE_UC_MINUS as u64) << 48)
-    | ((MEM_TYPE_UC as u64) << 56);
-
-/// Default PAT value (as set by CPU reset).
-/// Used for logging comparison.
-#[allow(dead_code)]
-const PAT_DEFAULT: u64 = (MEM_TYPE_WB as u64)
-    | ((MEM_TYPE_WT as u64) << 8)
-    | ((MEM_TYPE_UC_MINUS as u64) << 16)
-    | ((MEM_TYPE_UC as u64) << 24)
-    | ((MEM_TYPE_WB as u64) << 32)
-    | ((MEM_TYPE_WT as u64) << 40)
     | ((MEM_TYPE_UC_MINUS as u64) << 48)
     | ((MEM_TYPE_UC as u64) << 56);
 
@@ -184,51 +172,5 @@ pub fn pat_init() {
     } else {
         klog_info!("PAT: Initialized with WC support (PA1=WC, PA5=WC)");
         klog_debug!("PAT: New value: 0x{:016x}", new_pat);
-    }
-}
-
-/// Get a human-readable name for a memory type.
-#[allow(dead_code)]
-pub fn memory_type_name(mem_type: u8) -> &'static str {
-    match mem_type {
-        MEM_TYPE_UC => "UC",
-        MEM_TYPE_WC => "WC",
-        MEM_TYPE_WT => "WT",
-        MEM_TYPE_WP => "WP",
-        MEM_TYPE_WB => "WB",
-        MEM_TYPE_UC_MINUS => "UC-",
-        _ => "???",
-    }
-}
-
-/// Dump current PAT configuration for debugging.
-#[allow(dead_code)]
-pub fn dump_pat() {
-    if !pat_supported() {
-        klog_info!("PAT: Not supported by CPU");
-        return;
-    }
-
-    let pat = cpu::read_msr(Msr::PAT.address());
-    klog_info!(
-        "PAT: Current configuration (MSR 0x{:x}):",
-        Msr::PAT.address()
-    );
-    klog_info!("PAT: Raw value: 0x{:016x}", pat);
-
-    for i in 0..8u8 {
-        let mem_type = ((pat >> (i * 8)) & 0xFF) as u8;
-        let pat_bit = (i >> 2) & 1;
-        let pcd_bit = (i >> 1) & 1;
-        let pwt_bit = i & 1;
-        klog_info!(
-            "PAT:   PA{} (PAT={} PCD={} PWT={}) = {} (0x{:02x})",
-            i,
-            pat_bit,
-            pcd_bit,
-            pwt_bit,
-            memory_type_name(mem_type),
-            mem_type
-        );
     }
 }

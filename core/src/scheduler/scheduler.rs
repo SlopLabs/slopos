@@ -1608,7 +1608,6 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
     per_cpu::get_total_ready_tasks()
 }
 
-#[allow(dead_code)]
 pub fn send_reschedule_ipi(target_cpu: usize) {
     use slopos_abi::arch::x86_64::idt::RESCHEDULE_IPI_VECTOR;
 
