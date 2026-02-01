@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
