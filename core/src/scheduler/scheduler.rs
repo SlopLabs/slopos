@@ -318,19 +318,27 @@ pub fn schedule_task(task: *mut Task) -> c_int {
     let target_cpu = per_cpu::select_target_cpu(task);
     let current_cpu = slopos_lib::get_current_cpu();
 
-    let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
+    if target_cpu == current_cpu {
+        let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
 
-    if result != Some(0) {
-        with_scheduler(|sched| {
-            if sched.enqueue_task(task) != 0 {
-                return -1;
-            }
+        if result != Some(0) {
+            with_scheduler(|sched| {
+                if sched.enqueue_task(task) != 0 {
+                    return -1;
+                }
+                0
+            })
+        } else {
             0
-        })
+        }
     } else {
+        per_cpu::with_cpu_scheduler(target_cpu, |sched| {
+            sched.push_remote_wake(task);
+        });
+
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        if target_cpu != current_cpu && slopos_lib::is_cpu_online(target_cpu) {
+        if slopos_lib::is_cpu_online(target_cpu) {
             send_reschedule_ipi(target_cpu);
         }
         0
@@ -1185,6 +1193,10 @@ pub fn scheduler_timer_tick() {
     }
 
     let cpu_id = slopos_lib::get_current_cpu();
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.drain_remote_inbox();
+    });
 
     if cpu_id != 0 {
         scheduler_timer_tick_ap(cpu_id);

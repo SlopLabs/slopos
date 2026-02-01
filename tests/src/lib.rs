@@ -231,16 +231,18 @@ mod suites {
 
     use slopos_core::sched_tests::{
         test_create_conflicting_flags, test_create_max_tasks, test_create_null_entry,
-        test_create_null_name, test_create_over_max_tasks, test_double_terminate,
-        test_find_invalid_id, test_get_info_null_output, test_idle_priority_last,
-        test_interleaved_operations, test_many_same_priority_tasks, test_priority_ordering,
-        test_rapid_create_destroy_cycle, test_schedule_duplicate_task, test_schedule_null_task,
+        test_create_null_name, test_create_over_max_tasks, test_cross_cpu_schedule_lockfree,
+        test_double_terminate, test_find_invalid_id, test_get_info_null_output,
+        test_idle_priority_last, test_interleaved_operations, test_many_same_priority_tasks,
+        test_priority_ordering, test_rapid_create_destroy_cycle, test_remote_inbox_multiple_tasks,
+        test_remote_inbox_push_drain, test_schedule_duplicate_task, test_schedule_null_task,
         test_schedule_to_empty_queue, test_schedule_while_disabled, test_scheduler_starts_disabled,
         test_state_transition_invalid_blocked_to_running,
         test_state_transition_invalid_terminated_to_running,
         test_state_transition_ready_to_running, test_state_transition_running_to_blocked,
         test_terminate_invalid_id, test_terminate_nonexistent_id, test_timer_tick_decrements_slice,
-        test_timer_tick_no_current_task, test_unschedule_not_in_queue,
+        test_timer_tick_drains_inbox, test_timer_tick_no_current_task,
+        test_unschedule_not_in_queue,
     };
 
     use slopos_drivers::ioapic_tests::{
@@ -568,6 +570,10 @@ mod suites {
             test_schedule_while_disabled,
             test_many_same_priority_tasks,
             test_interleaved_operations,
+            test_remote_inbox_push_drain,
+            test_remote_inbox_multiple_tasks,
+            test_timer_tick_drains_inbox,
+            test_cross_cpu_schedule_lockfree,
         ]
     );
 
