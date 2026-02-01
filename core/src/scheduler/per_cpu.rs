@@ -516,29 +516,6 @@ pub fn with_cpu_scheduler<R>(
     }
 }
 
-/// # Safety
-/// Caller must ensure they are on the CPU they intend to access and that
-/// no concurrent mutable access occurs. Prefer `with_local_scheduler()` when possible.
-pub unsafe fn get_local_scheduler() -> &'static mut PerCpuScheduler {
-    let cpu_id = slopos_lib::get_current_cpu();
-    unsafe { &mut CPU_SCHEDULERS[cpu_id] }
-}
-
-/// # Safety
-/// Caller must ensure no concurrent mutable access to the same scheduler occurs.
-/// Prefer `with_cpu_scheduler()` when possible.
-pub unsafe fn get_cpu_scheduler(cpu_id: usize) -> Option<&'static mut PerCpuScheduler> {
-    if cpu_id >= MAX_CPUS {
-        return None;
-    }
-    let sched = unsafe { &mut CPU_SCHEDULERS[cpu_id] };
-    if sched.is_initialized() {
-        Some(sched)
-    } else {
-        None
-    }
-}
-
 pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
     if cpu_id >= MAX_CPUS || task.is_null() {
         return -1;
@@ -551,6 +528,20 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
     }
 
     with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)).unwrap_or(-1)
+}
+
+pub fn try_steal_task_from_cpu(cpu_id: usize) -> Option<*mut Task> {
+    with_cpu_scheduler(cpu_id, |sched| {
+        if sched.total_ready_count() <= 1 {
+            return None;
+        }
+        sched.steal_task()
+    })
+    .flatten()
+}
+
+pub fn get_cpu_ready_count(cpu_id: usize) -> u32 {
+    with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0)
 }
 
 pub fn get_total_ready_tasks() -> u32 {

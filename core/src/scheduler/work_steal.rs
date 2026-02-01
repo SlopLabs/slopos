@@ -3,7 +3,9 @@
 use slopos_abi::task::Task;
 use slopos_lib::{get_cpu_count, get_current_cpu, klog_debug};
 
-use super::per_cpu::{get_cpu_scheduler, with_cpu_scheduler, with_local_scheduler};
+use super::per_cpu::{
+    enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu, with_local_scheduler,
+};
 
 pub fn try_work_steal() -> bool {
     let cpu_id = get_current_cpu();
@@ -34,19 +36,11 @@ pub fn try_work_steal() -> bool {
 }
 
 fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
-    // SAFETY: Work stealing is single-threaded from the thief's perspective,
-    // and the victim's scheduler uses internal locking for queue operations.
-    let sched = unsafe { get_cpu_scheduler(victim)? };
-
-    if sched.total_ready_count() <= 1 {
-        return None;
-    }
-
-    let task = sched.steal_task()?;
+    let task = try_steal_task_from_cpu(victim)?;
 
     let affinity = unsafe { (*task).cpu_affinity };
     if affinity != 0 && (affinity & (1 << thief)) == 0 {
-        sched.enqueue_local(task);
+        enqueue_task_on_cpu(victim, task);
         return None;
     }
 
@@ -58,7 +52,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
 }
 
 pub fn get_cpu_load(cpu_id: usize) -> u32 {
-    with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0)
+    get_cpu_ready_count(cpu_id)
 }
 
 pub fn find_least_loaded_cpu(exclude: usize) -> Option<usize> {

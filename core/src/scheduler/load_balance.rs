@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_abi::task::Task;
 use slopos_lib::{get_cpu_count, klog_debug};
 
-use super::per_cpu::{get_cpu_scheduler, with_cpu_scheduler};
+use super::per_cpu::{enqueue_task_on_cpu, try_steal_task_from_cpu, with_cpu_scheduler};
 use super::work_steal::{calculate_load_imbalance, find_least_loaded_cpu, find_most_loaded_cpu};
 
 static BALANCE_INTERVAL_MS: AtomicU64 = AtomicU64::new(100);
@@ -59,29 +59,14 @@ pub fn periodic_load_balance(current_time_ms: u64) {
 }
 
 fn migrate_task_between_cpus(from_cpu: usize, to_cpu: usize) -> bool {
-    // SAFETY: Load balancing runs on a single CPU and schedulers use internal locking.
-    let task = {
-        let sched = match unsafe { get_cpu_scheduler(from_cpu) } {
-            Some(s) => s,
-            None => return false,
-        };
-
-        if sched.total_ready_count() <= 1 {
-            return false;
-        }
-
-        match sched.steal_task() {
-            Some(t) => t,
-            None => return false,
-        }
+    let task = match try_steal_task_from_cpu(from_cpu) {
+        Some(t) => t,
+        None => return false,
     };
 
     let affinity = unsafe { (*task).cpu_affinity };
     if affinity != 0 && (affinity & (1 << to_cpu)) == 0 {
-        // SAFETY: Same as above - re-enqueue to original CPU.
-        if let Some(sched) = unsafe { get_cpu_scheduler(from_cpu) } {
-            sched.enqueue_local(task);
-        }
+        enqueue_task_on_cpu(from_cpu, task);
         return false;
     }
 
