@@ -5,9 +5,9 @@ use core::{
 };
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use slopos_core::wl_currency;
 use slopos_drivers::serial;
 use slopos_lib::klog::{self, KlogLevel};
+use slopos_lib::wl_currency;
 use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
 use slopos_video::splash;
 

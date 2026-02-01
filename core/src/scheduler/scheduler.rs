@@ -13,7 +13,7 @@ use slopos_lib::klog_info;
 use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
 
 use crate::platform;
-use crate::wl_currency;
+use slopos_lib::wl_currency;
 
 use super::per_cpu;
 use super::task::{

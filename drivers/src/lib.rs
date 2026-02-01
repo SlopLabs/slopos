@@ -24,4 +24,3 @@ pub mod xe;
 
 pub use ps2::keyboard;
 pub use ps2::mouse;
-pub use slopos_core::wl_currency;

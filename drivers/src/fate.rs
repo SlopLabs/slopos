@@ -1,6 +1,6 @@
 use crate::random::Lfsr64;
 use slopos_abi::fate::FateResult;
-use slopos_core::wl_currency;
+use slopos_lib::wl_currency;
 use slopos_lib::{cpu, klog_info};
 
 static OUTCOME_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

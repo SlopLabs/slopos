@@ -14,7 +14,6 @@ pub mod scheduler;
 #[macro_use]
 pub mod syscall;
 pub mod syscall_services;
-pub use slopos_lib::wl_currency;
 
 pub use scheduler::context_tests;
 pub use scheduler::fate_api;

@@ -1,8 +1,8 @@
 use super::task::{Task, task_find_by_id};
 use crate::platform;
-use crate::wl_currency;
 use core::ffi::c_int;
 use slopos_abi::fate::FateResult;
+use slopos_lib::wl_currency;
 
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
