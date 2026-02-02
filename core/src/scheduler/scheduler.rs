@@ -508,6 +508,67 @@ fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
     }
 }
 
+/// Phase 3: Unified task execution for all CPUs.
+/// Handles page directory setup, TSS RSP0, context validation, and actual switch.
+fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
+    if to_task.is_null() {
+        return;
+    }
+
+    let timestamp = kdiag_timestamp();
+    task_record_context_switch(from_task, to_task, timestamp);
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(to_task);
+        sched.increment_switches();
+    });
+    task_set_current(to_task);
+
+    let _balance = wl_currency::check_balance();
+
+    unsafe {
+        let is_user_mode = (*to_task).flags & TASK_FLAG_USER_MODE != 0;
+
+        let kernel_rsp = if is_user_mode && (*to_task).kernel_stack_top != 0 {
+            (*to_task).kernel_stack_top
+        } else {
+            kernel_stack_top() as u64
+        };
+        platform::gdt_set_kernel_rsp0(kernel_rsp);
+
+        if (*to_task).process_id != INVALID_TASK_ID {
+            if is_user_mode {
+                process_vm_sync_kernel_mappings((*to_task).process_id);
+            }
+            let page_dir = process_vm_get_page_dir((*to_task).process_id);
+            if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
+                (*to_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
+                paging_set_current_directory(page_dir);
+            }
+        } else {
+            let kernel_dir = paging_get_kernel_directory();
+            paging_set_current_directory(kernel_dir);
+            let kd_phys = (*kernel_dir).pml4_phys.as_u64();
+            if kd_phys != 0 {
+                (*to_task).context.cr3 = kd_phys;
+            }
+        }
+
+        let old_ctx_ptr = if !from_task.is_null() && (*from_task).context_from_user == 0 {
+            &raw mut (*from_task).context
+        } else {
+            ptr::null_mut()
+        };
+
+        if is_user_mode {
+            validate_user_context(&(*to_task).context, to_task);
+            context_switch_user(old_ctx_ptr, &(*to_task).context);
+        } else {
+            context_switch(old_ctx_ptr, &(*to_task).context);
+        }
+    }
+}
+
 /// Validate that a user-mode task's context has sane values before iretq.
 /// Catches context corruption early with a clear panic message rather than
 /// a mysterious Invalid Opcode at a garbage address.
@@ -1422,8 +1483,6 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
     use super::work_steal::try_work_steal;
 
     loop {
-        // FIRST: Drain remote inbox before checking for work
-        // This ensures cross-CPU wakes are processed promptly
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.drain_remote_inbox();
         });
@@ -1458,7 +1517,38 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
                 });
                 continue;
             }
-            ap_execute_task(cpu_id, idle_task, next_task);
+
+            // Phase 3: Use unified execute_task instead of ap_execute_task
+            execute_task(cpu_id, idle_task, next_task);
+
+            // Post-switch: restore idle as current and re-queue task if runnable
+            let timestamp = kdiag_timestamp();
+            task_record_context_switch(next_task, idle_task, timestamp);
+
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.set_current_task(idle_task);
+            });
+            task_set_current(idle_task);
+
+            unsafe {
+                let kernel_dir = paging_get_kernel_directory();
+                paging_set_current_directory(kernel_dir);
+                if !(*kernel_dir).pml4_phys.is_null() {
+                    (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
+                }
+
+                if !task_is_terminated(next_task) && task_is_running(next_task) {
+                    if task_set_state((*next_task).task_id, TASK_STATE_READY) == 0 {
+                        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                            sched.enqueue_local(next_task);
+                        });
+                    }
+                }
+            }
+
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.set_executing_task(false);
+            });
             continue;
         }
 
@@ -1474,88 +1564,6 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
         }
     }
-}
-
-fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
-    if task_is_terminated(next_task) || !task_is_ready(next_task) {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.set_executing_task(false);
-        });
-        return;
-    }
-
-    let timestamp = kdiag_timestamp();
-    task_record_context_switch(idle_task, next_task, timestamp);
-
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(next_task);
-        sched.increment_switches();
-    });
-
-    task_set_current(next_task);
-
-    unsafe {
-        let is_user_mode = (*next_task).flags & TASK_FLAG_USER_MODE != 0;
-        let kernel_rsp = if is_user_mode && (*next_task).kernel_stack_top != 0 {
-            (*next_task).kernel_stack_top
-        } else {
-            kernel_stack_top() as u64
-        };
-
-        platform::gdt_set_kernel_rsp0(kernel_rsp);
-
-        if (*next_task).process_id != INVALID_TASK_ID {
-            let page_dir = process_vm_get_page_dir((*next_task).process_id);
-            if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
-                (*next_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
-                paging_set_current_directory(page_dir);
-            }
-        } else {
-            paging_set_current_directory(paging_get_kernel_directory());
-        }
-
-        let idle_ctx = &raw mut (*idle_task).context;
-
-        if is_user_mode {
-            validate_user_context(&(*next_task).context, next_task);
-            context_switch_user(idle_ctx, &(*next_task).context);
-        } else {
-            context_switch(idle_ctx, &(*next_task).context);
-        }
-    }
-
-    let timestamp = kdiag_timestamp();
-    task_record_context_switch(next_task, idle_task, timestamp);
-
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(idle_task);
-    });
-
-    task_set_current(idle_task);
-
-    // Restore kernel CR3 in idle context — the assembly saved the user task's
-    // CR3 into idle_task.context when we switched away from idle earlier.
-    unsafe {
-        let kernel_dir = paging_get_kernel_directory();
-        paging_set_current_directory(kernel_dir);
-        if !(*kernel_dir).pml4_phys.is_null() {
-            (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
-        }
-    }
-
-    unsafe {
-        if !task_is_terminated(next_task) && task_is_running(next_task) {
-            if task_set_state((*next_task).task_id, TASK_STATE_READY) == 0 {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    sched.enqueue_local(next_task);
-                });
-            }
-        }
-    }
-
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_executing_task(false);
-    });
 }
 
 pub fn get_percpu_scheduler_stats(
