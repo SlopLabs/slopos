@@ -51,7 +51,7 @@ fn __link_boot_deps() {
         core::ptr::read_volatile(
             &((sched::scheduler_request_reschedule_from_interrupt as *const ()) as usize),
         );
-        core::ptr::read_volatile(&((sched::start_scheduler as *const ()) as usize));
+        core::ptr::read_volatile(&((sched::enter_scheduler as *const ()) as usize));
         core::ptr::read_volatile(&((sched::scheduler_timer_tick as *const ()) as usize));
         core::ptr::read_volatile(&((fs::fileio_create_table_for_process as *const ()) as usize));
         core::ptr::read_volatile(&((fs::fileio_destroy_table_for_process as *const ()) as usize));

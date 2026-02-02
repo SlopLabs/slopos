@@ -154,14 +154,7 @@ pub fn run_scheduler_test() -> c_int {
 
     klog_info!("Tasks scheduled, starting scheduler...");
 
-    if scheduler::start_scheduler() != 0 {
-        klog_info!("Failed to start scheduler");
-        return -1;
-    }
-
-    klog_info!("Scheduler started successfully");
-
-    0
+    scheduler::enter_scheduler(0);
 }
 
 /* ========================================================================

@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
 
-use slopos_core::{init_scheduler_for_ap, scheduler_run_ap};
+use slopos_core::{enter_scheduler, init_scheduler_for_ap};
 use slopos_drivers::apic;
 use slopos_lib::wl_currency::{award_loss, award_win};
 use slopos_lib::{cpu, init_bsp, init_percpu_for_cpu, is_cpu_online, klog_info, pcr};
@@ -48,7 +48,7 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     );
 
     init_scheduler_for_ap(cpu_idx);
-    scheduler_run_ap(cpu_idx);
+    enter_scheduler(cpu_idx);
 }
 
 pub fn smp_init() {

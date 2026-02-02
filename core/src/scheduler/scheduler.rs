@@ -1104,17 +1104,16 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     0
 }
 
-/// Thin wrapper around enter_scheduler(0) for API compatibility.
-/// Returns -1 if already enabled, otherwise never returns.
-pub fn start_scheduler() -> c_int {
-    let already_enabled = with_scheduler(|sched| sched.enabled != 0);
-    if already_enabled {
-        return -1;
-    }
-    enter_scheduler(0);
-}
-
 pub fn enter_scheduler(cpu_id: usize) -> ! {
+    // Guard against double-enable on BSP
+    if cpu_id == 0 {
+        let already_enabled = with_scheduler(|sched| sched.enabled != 0);
+        if already_enabled {
+            loop {
+                unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+            }
+        }
+    }
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.enable();
     });
@@ -1560,10 +1559,6 @@ pub fn init_scheduler_for_ap(cpu_id: usize) {
             );
         }
     }
-}
-
-pub fn scheduler_run_ap(cpu_id: usize) -> ! {
-    enter_scheduler(cpu_id)
 }
 
 pub fn get_percpu_scheduler_stats(

@@ -429,7 +429,7 @@ pub fn report_kernel_status() {
     }
 }
 
-use slopos_core::start_scheduler;
+use slopos_core::enter_scheduler;
 
 fn boot_step_serial_init_fn() {
     serial::write_line("BOOT: serial step -> init");
@@ -567,16 +567,7 @@ pub fn kernel_main_impl() {
         klog_newline();
     }
 
-    let rc = start_scheduler();
-    if rc != 0 {
-        panic!("Scheduler startup failed");
-    }
-
-    klog_info!("WARNING: Scheduler exited unexpectedly");
-
-    loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
-    }
+    enter_scheduler(0);
 }
 pub fn kernel_main_no_multiboot() {
     crate::ffi_boundary::kernel_main();

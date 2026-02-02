@@ -61,7 +61,7 @@ All 364 tests pass after each phase.
 | `ap_execute_task()` | 3 | ~80 |
 | `ap_scheduler_loop()` | 4 | ~130 |
 
-`start_scheduler()` retained as thin wrapper around `enter_scheduler(0)` for API compatibility.
+`start_scheduler()` and `scheduler_run_ap()` wrappers have been removed. All call sites now use `enter_scheduler(cpu_id)` directly.
 
 ---
 
