@@ -157,6 +157,16 @@ impl SchedulerInner {
 static SCHEDULER: Once<IrqMutex<SchedulerInner>> = Once::new();
 static IDLE_WAKEUP_CB: Once<IrqMutex<Option<fn() -> c_int>>> = Once::new();
 
+use core::sync::atomic::AtomicU8;
+static SCHEDULER_ENABLED: AtomicU8 = AtomicU8::new(0);
+static PREEMPTION_ENABLED: AtomicU8 = AtomicU8::new(SCHEDULER_PREEMPTION_DEFAULT);
+
+#[inline]
+fn is_scheduling_active() -> bool {
+    SCHEDULER_ENABLED.load(Ordering::Acquire) != 0
+        && PREEMPTION_ENABLED.load(Ordering::Acquire) != 0
+}
+
 #[inline]
 fn with_scheduler<R>(f: impl FnOnce(&mut SchedulerInner) -> R) -> R {
     let mutex = SCHEDULER.get().expect("scheduler not initialized");
@@ -724,6 +734,7 @@ pub fn schedule() {
         if next_task.is_null() {
             if !sched.idle_task.is_null() && task_is_terminated(sched.idle_task) {
                 sched.enabled = 0;
+                SCHEDULER_ENABLED.store(0, Ordering::Release);
                 if !sched.current_task.is_null() {
                     let current_ctx = unsafe { &raw mut (*sched.current_task).context };
                     let return_ctx = &raw const sched.return_context;
@@ -1015,17 +1026,15 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
 }
 
 fn deferred_reschedule_callback() {
-    if !PreemptGuard::is_active() {
-        let should_schedule =
-            try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
-        if should_schedule == Some(true) {
-            schedule();
-        }
+    if !PreemptGuard::is_active() && is_scheduling_active() {
+        schedule();
     }
 }
 
 pub fn init_scheduler() -> c_int {
     SCHEDULER.call_once(|| IrqMutex::new(SchedulerInner::new()));
+    SCHEDULER_ENABLED.store(0, Ordering::Release);
+    PREEMPTION_ENABLED.store(SCHEDULER_PREEMPTION_DEFAULT, Ordering::Release);
     with_scheduler(|sched| {
         sched.init_queues();
         sched.current_task = ptr::null_mut();
@@ -1118,6 +1127,7 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         with_scheduler(|sched| {
             if sched.enabled == 0 {
                 sched.enabled = 1;
+                SCHEDULER_ENABLED.store(1, Ordering::Release);
             }
             unsafe { crate::ffi_boundary::init_kernel_context(&raw mut sched.return_context) };
         });
@@ -1269,12 +1279,14 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 }
 
 pub fn stop_scheduler() {
+    SCHEDULER_ENABLED.store(0, Ordering::Release);
     with_scheduler(|sched| {
         sched.enabled = 0;
     });
 }
 
 pub fn scheduler_shutdown() {
+    SCHEDULER_ENABLED.store(0, Ordering::Release);
     with_scheduler(|sched| {
         sched.enabled = 0;
         sched.init_queues();
@@ -1309,7 +1321,7 @@ pub fn get_scheduler_stats(
 }
 
 pub fn scheduler_is_enabled() -> c_int {
-    try_with_scheduler(|sched| sched.enabled as c_int).unwrap_or(0)
+    SCHEDULER_ENABLED.load(Ordering::Acquire) as c_int
 }
 
 pub fn scheduler_get_current_task() -> *mut Task {
@@ -1325,14 +1337,15 @@ pub fn scheduler_get_current_task() -> *mut Task {
 }
 
 pub fn scheduler_set_preemption_enabled(enabled: c_int) {
-    let preemption_enabled = with_scheduler(|sched| {
-        sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
-        if sched.preemption_enabled == 0 {
-            PreemptGuard::clear_reschedule_pending();
-        }
-        sched.preemption_enabled
+    let val = if enabled != 0 { 1u8 } else { 0u8 };
+    PREEMPTION_ENABLED.store(val, Ordering::Release);
+    with_scheduler(|sched| {
+        sched.preemption_enabled = val;
     });
-    if preemption_enabled != 0 {
+    if val == 0 {
+        PreemptGuard::clear_reschedule_pending();
+    }
+    if val != 0 {
         platform::timer_enable_irq();
     } else {
         platform::timer_disable_irq();
@@ -1340,7 +1353,7 @@ pub fn scheduler_set_preemption_enabled(enabled: c_int) {
 }
 
 pub fn scheduler_is_preemption_enabled() -> c_int {
-    try_with_scheduler(|sched| sched.preemption_enabled as c_int).unwrap_or(0)
+    PREEMPTION_ENABLED.load(Ordering::Acquire) as c_int
 }
 
 pub fn scheduler_timer_tick() {
@@ -1440,9 +1453,7 @@ fn scheduler_timer_tick_ap(cpu_id: usize) {
 }
 
 pub fn scheduler_request_reschedule_from_interrupt() {
-    let should_set =
-        try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
-    if should_set == Some(true) && !PreemptGuard::is_active() {
+    if is_scheduling_active() && !PreemptGuard::is_active() {
         PreemptGuard::set_reschedule_pending();
     }
 }
@@ -1521,10 +1532,7 @@ pub fn scheduler_handle_post_irq() {
         return;
     }
 
-    let should_schedule =
-        try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
-
-    if should_schedule == Some(true) {
+    if is_scheduling_active() {
         PreemptGuard::clear_reschedule_pending();
         schedule();
     }
