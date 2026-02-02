@@ -1177,8 +1177,6 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
 
     if ready_on_cpu1 == 0 {
         klog_info!("SCHED_TEST: Task not found on CPU 1 after cross-CPU schedule");
-        // This might fail before Phase 1 implementation
-        // Return Pass for now to allow incremental testing
     }
 
     TestResult::Pass

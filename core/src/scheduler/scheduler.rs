@@ -388,7 +388,6 @@ fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
         next = sched.dequeue_highest_priority();
     }
 
-    // Phase 1: BSP participates in work stealing
     // If both local and global queues are empty, try stealing from other CPUs
     if next.is_null() {
         if try_work_steal() {
@@ -518,7 +517,7 @@ fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
     }
 }
 
-/// Phase 3: Unified task execution for all CPUs.
+/// Unified task execution for all CPUs.
 /// Handles page directory setup, TSS RSP0, context validation, and actual switch.
 fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     if to_task.is_null() {
@@ -629,15 +628,14 @@ pub fn schedule() {
     let cpu_id = slopos_lib::get_current_cpu();
     let preempt_guard = PreemptGuard::new();
 
-    // Phase 2: Get current and idle from per-CPU scheduler (unified for all CPUs)
     let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
         .unwrap_or(ptr::null_mut());
 
     let idle_task =
         per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
 
-    // === AP PATH (Phase 2: inlined from schedule_on_ap) ===
-    // APs switch back to idle task; ap_scheduler_loop handles next task selection
+    // === AP PATH ===
+    // APs switch back to idle task; scheduler_loop handles next task selection
     if cpu_id != 0 {
         if idle_task.is_null() || current.is_null() || current == idle_task {
             drop(preempt_guard);
@@ -704,14 +702,12 @@ pub fn schedule() {
         }
         sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
-        // Phase 2: Use per-CPU current (already fetched above)
         let is_idle = current == idle_task || current == sched.idle_task;
 
         if !current.is_null() && !is_idle {
             if task_is_running(current) {
                 if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
                     klog_info!("schedule: failed to mark task ready");
-                // Phase 2: Re-queue to per-CPU scheduler instead of global
                 } else if per_cpu::with_cpu_scheduler(cpu_id, |local| local.enqueue_local(current))
                     .unwrap_or(-1)
                     != 0
@@ -984,7 +980,7 @@ fn ap_task_exit_to_idle(cpu_id: usize) -> ! {
         let kernel_dir = paging_get_kernel_directory();
         paging_set_current_directory(kernel_dir);
 
-        // Patch idle context CR3 — see schedule_on_ap for rationale
+        // Patch idle context CR3 so context_switch restores kernel address space
         if !(*kernel_dir).pml4_phys.is_null() {
             (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
         }
@@ -1108,8 +1104,8 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     0
 }
 
-/// Phase 4: start_scheduler is now a thin wrapper around enter_scheduler.
-/// Kept for API compatibility - returns -1 if already enabled, otherwise never returns.
+/// Thin wrapper around enter_scheduler(0) for API compatibility.
+/// Returns -1 if already enabled, otherwise never returns.
 pub fn start_scheduler() -> c_int {
     let already_enabled = with_scheduler(|sched| sched.enabled != 0);
     if already_enabled {
