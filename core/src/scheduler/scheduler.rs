@@ -2,9 +2,9 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
+use slopos_lib::preempt::PreemptGuard;
 use slopos_lib::InterruptFrame;
 use slopos_lib::IrqMutex;
-use slopos_lib::preempt::PreemptGuard;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -17,12 +17,13 @@ use slopos_lib::wl_currency;
 
 use super::per_cpu;
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
+    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_set_state, Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED,
+    TASK_STATE_READY, TASK_STATE_RUNNING,
 };
+use super::work_steal::try_work_steal;
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHED_POLICY_COOPERATIVE: u8 = 2;
@@ -375,6 +376,16 @@ fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
 
     if next.is_null() {
         next = sched.dequeue_highest_priority();
+    }
+
+    // Phase 1: BSP participates in work stealing
+    // If both local and global queues are empty, try stealing from other CPUs
+    if next.is_null() {
+        if try_work_steal() {
+            // Work steal succeeded - task was enqueued to our local queue
+            next = per_cpu::with_cpu_scheduler(cpu_id, |local| local.dequeue_highest_priority())
+                .unwrap_or(ptr::null_mut());
+        }
     }
 
     if next.is_null() && !sched.idle_task.is_null() && !task_is_terminated(sched.idle_task) {
