@@ -6,7 +6,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 
 | Document | Description |
 |----------|-------------|
-| [SCHEDULER_UNIFICATION.md](./SCHEDULER_UNIFICATION.md) | Scheduler unification - current state and remaining work |
+| [SCHEDULER_FULL_SYMMETRY.md](./SCHEDULER_FULL_SYMMETRY.md) | Optional scheduler cleanup - eliminate remaining BSP/AP asymmetries |
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
@@ -58,23 +58,22 @@ The kernel foundation is complete. All critical systems are implemented:
 
 ---
 
-## Partial: Scheduler Unification
+## Completed: Scheduler Unification
 
-**See [SCHEDULER_UNIFICATION.md](./SCHEDULER_UNIFICATION.md) for details.**
-
-Lock-free cross-CPU scheduling is now working. Partial fix applied 2026-02-01:
+The scheduler unification is complete. All CPUs now use unified code paths:
 
 | What | Status |
 |------|:------:|
 | Timer tick drains inbox for ALL CPUs | ✅ Done |
 | Lock-free cross-CPU via `push_remote_wake()` | ✅ Done |
-| BSP uses unified `scheduler_loop()` | ❌ Not done |
-| Eliminate `SchedulerInner` duplication | ❌ Not done |
-| Remove `cpu_id == 0` special cases | ❌ Not done |
+| BSP uses unified `scheduler_loop()` | ✅ Done |
+| Unified `enter_scheduler(cpu_id)` entry point | ✅ Done |
+| Lock-free atomics for hot-path checks | ✅ Done |
+| Legacy wrappers removed | ✅ Done |
 
-**Current State**: Functional. All 364 tests pass. BSP processes inbox at ~1ms (timer tick).
+**Current State**: Complete. All 364 tests pass.
 
-**Full Unification**: Optional. Would give continuous inbox drain, BSP work-stealing, cleaner code.
+**Optional Cleanup**: [SCHEDULER_FULL_SYMMETRY.md](./SCHEDULER_FULL_SYMMETRY.md) documents remaining asymmetries that could be eliminated (low priority).
 
 ---
 
