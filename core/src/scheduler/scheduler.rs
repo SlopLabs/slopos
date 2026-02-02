@@ -550,24 +550,68 @@ fn validate_user_context(ctx: &TaskContext, task: *const Task) {
 }
 
 pub fn schedule() {
-    // CRITICAL SMP FIX: APs must never use the global scheduler. The global
-    // SchedulerInner has a single current_task / idle_task / return_context
-    // designed for CPU 0 only. APs entering this path would corrupt the BSP's
-    // scheduler state and eventually cause context switches to jump into .data
-    // (CPU_SCHEDULERS array) instead of .text code.
-    //
-    // When an AP task needs to reschedule (yield, exit, preemption), we
-    // context_switch back to the AP's idle task context. That returns
-    // execution to ap_execute_task / ap_scheduler_loop which handles
-    // re-queuing the current task and picking the next one.
     let cpu_id = slopos_lib::get_current_cpu();
+    let preempt_guard = PreemptGuard::new();
+
+    // Phase 2: Get current and idle from per-CPU scheduler (unified for all CPUs)
+    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
+        .unwrap_or(ptr::null_mut());
+
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+
+    // === AP PATH (Phase 2: inlined from schedule_on_ap) ===
+    // APs switch back to idle task; ap_scheduler_loop handles next task selection
     if cpu_id != 0 {
-        schedule_on_ap(cpu_id);
+        if idle_task.is_null() || current.is_null() || current == idle_task {
+            drop(preempt_guard);
+            return;
+        }
+
+        unsafe {
+            if task_is_running(current) {
+                if task_set_state((*current).task_id, TASK_STATE_READY) == 0 {
+                    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                        sched.enqueue_local(current);
+                    });
+                }
+            }
+        }
+
+        let timestamp = kdiag_timestamp();
+        task_record_context_switch(current, idle_task, timestamp);
+
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.set_current_task(idle_task);
+        });
+        task_set_current(idle_task);
+
+        unsafe {
+            let kernel_dir = paging_get_kernel_directory();
+            paging_set_current_directory(kernel_dir);
+
+            let kdir_phys = (*kernel_dir).pml4_phys.as_u64();
+            if !(*kernel_dir).pml4_phys.is_null() {
+                (*idle_task).context.cr3 = kdir_phys;
+            }
+
+            let is_user = (*current).flags & TASK_FLAG_USER_MODE != 0;
+            if is_user {
+                (*current).context_from_user = 0;
+            }
+
+            let current_ctx = if !is_user {
+                &raw mut (*current).context
+            } else {
+                ptr::null_mut()
+            };
+            let idle_ctx = &raw const (*idle_task).context;
+            context_switch(current_ctx, idle_ctx);
+        }
         return;
     }
 
-    let preempt_guard = PreemptGuard::new();
-
+    // === BSP PATH ===
     enum ScheduleResult {
         Disabled,
         NoTask,
@@ -584,16 +628,18 @@ pub fn schedule() {
         }
         sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
-        let current = sched.current_task;
-        let is_idle = per_cpu::with_cpu_scheduler(cpu_id, |local| local.idle_task() == current)
-            .unwrap_or(false)
-            || current == sched.idle_task;
+        // Phase 2: Use per-CPU current (already fetched above)
+        let is_idle = current == idle_task || current == sched.idle_task;
 
         if !current.is_null() && !is_idle {
             if task_is_running(current) {
                 if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
                     klog_info!("schedule: failed to mark task ready");
-                } else if sched.enqueue_task(current) != 0 {
+                // Phase 2: Re-queue to per-CPU scheduler instead of global
+                } else if per_cpu::with_cpu_scheduler(cpu_id, |local| local.enqueue_local(current))
+                    .unwrap_or(-1)
+                    != 0
+                {
                     klog_info!("schedule: ready queue full when re-queuing task");
                     task_set_state(unsafe { (*current).task_id }, TASK_STATE_RUNNING);
                     reset_task_quantum(sched, current);
@@ -645,90 +691,6 @@ pub fn schedule() {
             do_context_switch(info, preempt_guard);
         }
     }
-}
-
-/// AP-local scheduling: switch back to the AP's idle task context.
-///
-/// When a task running on an AP needs to reschedule (yield, exit, preemption,
-/// block), we re-queue it (if still runnable) into the per-CPU queue and
-/// context_switch to the AP's idle task. This returns execution to
-/// `ap_execute_task` which then flows back to `ap_scheduler_loop` to pick
-/// the next task.
-fn schedule_on_ap(cpu_id: usize) {
-    let _preempt_guard = PreemptGuard::new();
-
-    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
-        .unwrap_or(ptr::null_mut());
-
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
-
-    if idle_task.is_null() {
-        // No idle task on this AP — nothing we can switch to
-        return;
-    }
-
-    // If current task is already the idle task or null, nothing to do
-    if current.is_null() || current == idle_task {
-        return;
-    }
-
-    // Re-queue the current task if it's still runnable
-    unsafe {
-        if task_is_running(current) {
-            if task_set_state((*current).task_id, TASK_STATE_READY) == 0 {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    sched.enqueue_local(current);
-                });
-            }
-        }
-        // If task is blocked or terminated, don't re-queue — ap_execute_task
-        // handles that state when it regains control.
-    }
-
-    // Switch back to idle task — this returns to ap_execute_task's call site
-    let timestamp = kdiag_timestamp();
-    task_record_context_switch(current, idle_task, timestamp);
-
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(idle_task);
-    });
-    task_set_current(idle_task);
-
-    unsafe {
-        // Restore kernel page directory for idle context
-        let kernel_dir = paging_get_kernel_directory();
-        paging_set_current_directory(kernel_dir);
-
-        // CRITICAL: Patch idle task's saved CR3 to the kernel page directory.
-        // When ap_execute_task() switched FROM idle TO the user task, the
-        // assembly saved the user task's CR3 into idle_task.context.cr3.
-        // If we don't fix it here, context_switch will reload that stale CR3,
-        // which may point to a terminated task's (freed) page tables.
-        let kdir_phys = (*kernel_dir).pml4_phys.as_u64();
-        let kdir_null = (*kernel_dir).pml4_phys.is_null();
-        if !kdir_null {
-            (*idle_task).context.cr3 = kdir_phys;
-        }
-
-        // For user-mode tasks: NEVER save kernel-mode context here.
-        // Their context is managed exclusively by save_user_context() in
-        // the syscall dispatcher. Overwriting with kernel values would cause
-        // context_switch_user to iretq with kernel CS/RIP (NX fault).
-        let is_user = (*current).flags & TASK_FLAG_USER_MODE != 0;
-        if is_user {
-            (*current).context_from_user = 0;
-        }
-
-        let current_ctx = if !is_user {
-            &raw mut (*current).context
-        } else {
-            ptr::null_mut()
-        };
-        let idle_ctx = &raw const (*idle_task).context;
-        context_switch(current_ctx, idle_ctx);
-    }
-    // Execution resumes here when this task is scheduled again on any CPU
 }
 
 pub fn r#yield() {
