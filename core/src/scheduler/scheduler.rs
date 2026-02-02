@@ -522,6 +522,11 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         sched.set_current_task(to_task);
         sched.increment_switches();
     });
+    if cpu_id == 0 {
+        with_scheduler(|sched| {
+            sched.current_task = to_task;
+        });
+    }
     task_set_current(to_task);
 
     let _balance = wl_currency::check_balance();
@@ -1094,54 +1099,172 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     0
 }
 
+/// Phase 4: start_scheduler is now a thin wrapper around enter_scheduler.
+/// Kept for API compatibility - returns -1 if already enabled, otherwise never returns.
 pub fn start_scheduler() -> c_int {
-    let (already_enabled, has_ready_tasks) = with_scheduler(|sched| {
-        if sched.enabled != 0 {
-            return (true, false);
-        }
-        sched.enabled = 1;
-        unsafe { crate::ffi_boundary::init_kernel_context(&raw mut sched.return_context) };
-        let has_ready = sched.total_ready_count() > 0;
-        (false, has_ready)
-    });
-
+    let already_enabled = with_scheduler(|sched| sched.enabled != 0);
     if already_enabled {
         return -1;
     }
+    enter_scheduler(0);
+}
 
-    scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
+pub fn enter_scheduler(cpu_id: usize) -> ! {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.enable();
+    });
 
-    if has_ready_tasks {
-        schedule();
-    }
-
-    let (current_null, idle_task) =
-        with_scheduler(|sched| (sched.current_task.is_null(), sched.idle_task));
-
-    if current_null && !idle_task.is_null() {
+    if cpu_id == 0 {
         with_scheduler(|sched| {
-            sched.current_task = sched.idle_task;
-            let cpu_id = slopos_lib::get_current_cpu();
-            per_cpu::with_cpu_scheduler(cpu_id, |local| {
-                local.set_current_task(sched.idle_task);
-            });
-            task_set_current(sched.idle_task);
-            reset_task_quantum(sched, sched.idle_task);
+            if sched.enabled == 0 {
+                sched.enabled = 1;
+            }
+            unsafe { crate::ffi_boundary::init_kernel_context(&raw mut sched.return_context) };
         });
-        // Dispatch the idle task via context_switch so it runs on its own
-        // kmalloc'd kernel stack, NOT on the BSP .bss stack. This prevents
-        // stack sharing between the idle task and the BSP boot code, which
-        // caused NX violations when stale return addresses on the .bss stack
-        // were executed after a context switch round-trip.
-        unsafe {
-            context_switch(ptr::null_mut(), &(*idle_task).context);
-        }
-    } else if current_null {
-        return -1;
+        scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
     }
 
+    slopos_lib::mark_cpu_online(cpu_id);
+    klog_info!("SCHED: CPU {} scheduler online", cpu_id);
+
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |s| s.idle_task()).unwrap_or(ptr::null_mut());
+
+    if idle_task.is_null() {
+        klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
+        loop {
+            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+        }
+    }
+
+    unsafe {
+        let return_ctx = per_cpu::get_ap_return_context(cpu_id);
+        if !return_ctx.is_null() {
+            crate::ffi_boundary::init_kernel_context(return_ctx);
+        }
+    }
+
+    // APs: switch from Limine boot stack (HHDM-transient) to idle's kernel stack.
+    // BSP: stays on .bss boot stack which is stable kernel virtual memory.
+    if cpu_id != 0 {
+        unsafe {
+            let new_rsp = (*idle_task).kernel_stack_top;
+            if new_rsp != 0 {
+                core::arch::asm!(
+                    "mov rsp, {0}",
+                    "mov rbp, rsp",
+                    in(reg) new_rsp,
+                    options(nostack)
+                );
+            }
+        }
+    } else {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.set_current_task(idle_task);
+        });
+        with_scheduler(|sched| {
+            sched.current_task = idle_task;
+        });
+        task_set_current(idle_task);
+    }
+
+    scheduler_loop(cpu_id, idle_task)
+}
+
+fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+        // 1. Drain remote inbox (continuous for all CPUs)
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.drain_remote_inbox();
+        });
+
+        // 2. Check for pause (test reinitialization)
+        if per_cpu::are_aps_paused() {
+            unsafe {
+                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+            }
+            continue;
+        }
+
+        // 3. Dequeue highest priority task
+        let next_task =
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
+                .unwrap_or(ptr::null_mut());
+
+        // 4. Execute task if available
+        if !next_task.is_null() {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.set_executing_task(true);
+            });
+
+            // Re-check pause after marking executing
+            if per_cpu::are_aps_paused() {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    sched.enqueue_local(next_task);
+                    sched.set_executing_task(false);
+                });
+                core::hint::spin_loop();
+                continue;
+            }
+
+            if task_is_terminated(next_task) || !task_is_ready(next_task) {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    sched.set_executing_task(false);
+                });
+                continue;
+            }
+
+            execute_task(cpu_id, idle_task, next_task);
+
+            // Post-switch: restore idle as current and re-queue task if runnable
+            let timestamp = kdiag_timestamp();
+            task_record_context_switch(next_task, idle_task, timestamp);
+
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.set_current_task(idle_task);
+            });
+            if cpu_id == 0 {
+                with_scheduler(|sched| {
+                    sched.current_task = idle_task;
+                });
+            }
+            task_set_current(idle_task);
+
+            unsafe {
+                let kernel_dir = paging_get_kernel_directory();
+                paging_set_current_directory(kernel_dir);
+                if !(*kernel_dir).pml4_phys.is_null() {
+                    (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
+                }
+
+                if !task_is_terminated(next_task) && task_is_running(next_task) {
+                    if task_set_state((*next_task).task_id, TASK_STATE_READY) == 0 {
+                        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                            sched.enqueue_local(next_task);
+                        });
+                    }
+                }
+            }
+
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.set_executing_task(false);
+            });
+            continue;
+        }
+
+        // 5. Try work stealing if no local tasks
+        if !per_cpu::are_aps_paused() && try_work_steal() {
+            continue;
+        }
+
+        // 6. Idle - increment stats and halt
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.increment_idle_time();
+        });
+
+        unsafe {
+            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+        }
     }
 }
 
@@ -1436,134 +1559,7 @@ pub fn init_scheduler_for_ap(cpu_id: usize) {
 }
 
 pub fn scheduler_run_ap(cpu_id: usize) -> ! {
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.enable();
-    });
-
-    slopos_lib::mark_cpu_online(cpu_id);
-    klog_info!("SCHED: CPU {} scheduler online", cpu_id);
-
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |s| s.idle_task()).unwrap_or(ptr::null_mut());
-
-    if idle_task.is_null() {
-        klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
-        loop {
-            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
-        }
-    }
-
-    unsafe {
-        let return_ctx = per_cpu::get_ap_return_context(cpu_id);
-        if !return_ctx.is_null() {
-            crate::ffi_boundary::init_kernel_context(return_ctx);
-        }
-    }
-
-    // Switch from Limine's boot stack (HHDM-mapped physical memory) to the
-    // idle task's kernel stack (kmalloc'd, kernel virtual). The boot stack
-    // is transient and its HHDM address would be saved into the idle context
-    // by context_switch_user, causing crashes when restoring later.
-    unsafe {
-        let new_rsp = (*idle_task).kernel_stack_top;
-        if new_rsp != 0 {
-            core::arch::asm!(
-                "mov rsp, {0}",
-                "mov rbp, rsp",
-                in(reg) new_rsp,
-                options(nostack)
-            );
-        }
-    }
-
-    ap_scheduler_loop(cpu_id, idle_task);
-}
-
-fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
-    use super::work_steal::try_work_steal;
-
-    loop {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.drain_remote_inbox();
-        });
-
-        if per_cpu::are_aps_paused() {
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-            }
-            continue;
-        }
-
-        let next_task =
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
-                .unwrap_or(ptr::null_mut());
-
-        if !next_task.is_null() {
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.set_executing_task(true);
-            });
-
-            if per_cpu::are_aps_paused() {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    sched.enqueue_local(next_task);
-                    sched.set_executing_task(false);
-                });
-                core::hint::spin_loop();
-                continue;
-            }
-            if task_is_terminated(next_task) || !task_is_ready(next_task) {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    sched.set_executing_task(false);
-                });
-                continue;
-            }
-
-            // Phase 3: Use unified execute_task instead of ap_execute_task
-            execute_task(cpu_id, idle_task, next_task);
-
-            // Post-switch: restore idle as current and re-queue task if runnable
-            let timestamp = kdiag_timestamp();
-            task_record_context_switch(next_task, idle_task, timestamp);
-
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.set_current_task(idle_task);
-            });
-            task_set_current(idle_task);
-
-            unsafe {
-                let kernel_dir = paging_get_kernel_directory();
-                paging_set_current_directory(kernel_dir);
-                if !(*kernel_dir).pml4_phys.is_null() {
-                    (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
-                }
-
-                if !task_is_terminated(next_task) && task_is_running(next_task) {
-                    if task_set_state((*next_task).task_id, TASK_STATE_READY) == 0 {
-                        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                            sched.enqueue_local(next_task);
-                        });
-                    }
-                }
-            }
-
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.set_executing_task(false);
-            });
-            continue;
-        }
-
-        if !per_cpu::are_aps_paused() && try_work_steal() {
-            continue;
-        }
-
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.increment_idle_time();
-        });
-
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
-    }
+    enter_scheduler(cpu_id)
 }
 
 pub fn get_percpu_scheduler_stats(
