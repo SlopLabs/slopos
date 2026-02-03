@@ -13,7 +13,7 @@ use core::panic::PanicInfo;
 use slopos_core as sched;
 use slopos_drivers::serial;
 use slopos_fs as fs;
-use slopos_lib::{cpu, klog_error};
+
 use slopos_mm::KernelAllocator;
 use slopos_userland as userland;
 mod ffi;
@@ -64,8 +64,11 @@ static FORCE_LINK_BOOT_DEPS: fn() = __link_boot_deps;
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     serial::init();
-    klog_error!("Allocation failure: {:?}", layout);
-    cpu::halt_loop();
+    panic!(
+        "OOM: allocation failed for size={} align={}",
+        layout.size(),
+        layout.align()
+    );
 }
 
 #[panic_handler]

@@ -19,9 +19,9 @@ use super::per_cpu;
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
-    task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    TaskContext, reap_zombies, task_get_info, task_is_blocked, task_is_invalid, task_is_ready,
+    task_is_running, task_is_terminated, task_record_context_switch, task_record_yield,
+    task_set_current, task_set_state,
 };
 use super::work_steal::try_work_steal;
 
@@ -1262,7 +1262,13 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             continue;
         }
 
-        // 6. Idle - increment stats and halt
+        // 6. Reap zombie tasks (deferred cleanup for terminated tasks)
+        // Only BSP handles zombie reaping to avoid contention
+        if cpu_id == 0 {
+            reap_zombies();
+        }
+
+        // 7. Idle - increment stats and halt
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.increment_idle_time();
         });
