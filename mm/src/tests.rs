@@ -1,6 +1,10 @@
+extern crate alloc;
+
 use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
+
+use alloc::vec::Vec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::klog_info;
@@ -9,8 +13,8 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
-    get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
+    alloc_page_frame, alloc_page_frames, free_page_frame, get_page_allocator_stats,
+    page_frame_get_ref, page_frame_inc_ref, ALLOC_FLAG_ZERO,
 };
 use crate::paging::{
     get_current_page_directory, paging_get_kernel_directory, paging_is_cow,
@@ -412,6 +416,17 @@ pub fn test_heap_stats() -> c_int {
     }
 
     kfree(ptr);
+    0
+}
+
+pub fn test_global_alloc_vec() -> c_int {
+    let mut vec = Vec::new();
+    for i in 0..128u64 {
+        vec.push(i);
+    }
+    if vec.len() != 128 {
+        return -1;
+    }
     0
 }
 
@@ -1125,7 +1140,7 @@ pub fn test_shm_surface_attach_too_small() -> c_int {
 /// Test 9: Map shared buffer more than MAX_MAPPINGS_PER_BUFFER times
 /// BUG FINDER: shm_map uses unwrap() on mapping slot search - will panic!
 pub fn test_shm_mapping_overflow() -> c_int {
-    use crate::shared_memory::{ShmAccess, shm_map};
+    use crate::shared_memory::{shm_map, ShmAccess};
 
     let owner = 1u32;
     let size = 4096u64;
@@ -1557,11 +1572,11 @@ pub use crate::tests_demand::{
 };
 
 pub use crate::tests_oom::{
-    test_alloc_free_cycles_no_leak, test_dma_allocation_exhaustion, test_heap_alloc_pressure,
-    test_heap_expansion_under_pressure, test_kzalloc_zeroed_under_pressure,
-    test_multiorder_alloc_failure, test_page_alloc_fragmentation_oom, test_page_alloc_until_oom,
-    test_process_heap_expansion_oom, test_process_vm_creation_pressure, test_refcount_during_oom,
-    test_zero_flag_under_pressure,
+    test_alloc_free_cycles_no_leak, test_dma_allocation_exhaustion, test_heap_alloc_one_gib,
+    test_heap_alloc_pressure, test_heap_expansion_under_pressure,
+    test_kzalloc_zeroed_under_pressure, test_multiorder_alloc_failure,
+    test_page_alloc_fragmentation_oom, test_page_alloc_until_oom, test_process_heap_expansion_oom,
+    test_process_vm_creation_pressure, test_refcount_during_oom, test_zero_flag_under_pressure,
 };
 
 pub use crate::tests_cow_edge::{

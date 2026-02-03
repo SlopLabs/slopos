@@ -11,10 +11,11 @@ use slopos_lib::klog_info;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
-use crate::mm_constants::{INVALID_PROCESS_ID, PAGE_SIZE_4KB, PageFlags};
+use crate::memory_init::get_memory_statistics;
+use crate::mm_constants::{PageFlags, INVALID_PROCESS_ID, PAGE_SIZE_4KB};
 use crate::page_alloc::{
-    ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames,
-    free_page_frame, get_page_allocator_stats,
+    alloc_page_frame, alloc_page_frames, free_page_frame, get_page_allocator_stats, ALLOC_FLAG_DMA,
+    ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO,
 };
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
 
@@ -220,6 +221,49 @@ pub fn test_heap_alloc_pressure() -> c_int {
 
     // Free in reverse order
     for i in (0..count).rev() {
+        kfree(ptrs[i]);
+    }
+
+    0
+}
+
+/// Test: Allocate 1 GiB worth of 1 MiB blocks if memory allows
+pub fn test_heap_alloc_one_gib() -> c_int {
+    const ONE_MIB: usize = 1024 * 1024;
+    const TARGET_BLOCKS: usize = 1024;
+    const TARGET_BYTES: u64 = ONE_MIB as u64 * TARGET_BLOCKS as u64;
+
+    let mut total = 0u64;
+    let mut available = 0u64;
+    let mut regions = 0u32;
+    get_memory_statistics(&mut total, &mut available, &mut regions);
+
+    if available < TARGET_BYTES {
+        klog_info!(
+            "OOM_TEST: Skipping 1GiB heap test (available {} MB)",
+            available / (1024 * 1024)
+        );
+        return 0;
+    }
+
+    let mut ptrs: [*mut core::ffi::c_void; TARGET_BLOCKS] = [ptr::null_mut(); TARGET_BLOCKS];
+
+    for i in 0..TARGET_BLOCKS {
+        let ptr = kmalloc(ONE_MIB);
+        if ptr.is_null() {
+            klog_info!("OOM_TEST: Failed to allocate 1MiB block {}", i);
+            for j in 0..i {
+                kfree(ptrs[j]);
+            }
+            return -1;
+        }
+        unsafe {
+            *(ptr as *mut u8) = (i & 0xFF) as u8;
+        }
+        ptrs[i] = ptr;
+    }
+
+    for i in 0..TARGET_BLOCKS {
         kfree(ptrs[i]);
     }
 

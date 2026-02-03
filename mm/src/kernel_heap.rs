@@ -1,20 +1,21 @@
 use core::ffi::{c_int, c_void};
+use core::mem;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::free_list::{
-    BlockHeader, FreeList, HEADER_SIZE, MAGIC_FREE, MIN_BLOCK_SIZE, round_up_pow2, size_class,
-    try_split_block,
-};
-use slopos_lib::{IrqMutex, klog_debug, klog_info};
+use slopos_lib::{align_down_u64, align_up_usize, klog_debug, klog_info, wl_currency, IrqMutex};
 
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
-use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
+use crate::mm_constants::{PageFlags, PAGE_SIZE_4KB};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page, virt_to_phys};
 
-const NUM_SIZE_CLASSES: usize = 16;
-const MAX_ALLOC_SIZE: u32 = 0x100000;
+const NUM_SIZE_CLASSES: usize = 8;
+const MAX_ALLOC_SIZE: usize = 0x100000;
+const SLAB_MAGIC: u32 = 0x534C_4142;
+const LARGE_MAGIC: u32 = 0x4C_4152_47;
+const LARGE_FREE_MAGIC: u32 = 0x4C_4652_45;
+const SIZE_CLASSES: [usize; NUM_SIZE_CLASSES] = [16, 32, 64, 128, 256, 512, 1024, 2048];
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -29,11 +30,46 @@ pub struct HeapStats {
     pub free_count: u32,
 }
 
+#[repr(C)]
+struct SlabHeader {
+    magic: u32,
+    object_size: u32,
+    total_count: u16,
+    free_count: u16,
+    next: *mut SlabHeader,
+    free_list: *mut u8,
+}
+
+#[repr(C)]
+struct LargeAllocHeader {
+    magic: u32,
+    pages: u32,
+    size: u32,
+    reserved: u32,
+    next: *mut LargeAllocHeader,
+}
+
+#[derive(Clone, Copy)]
+struct SlabCache {
+    object_size: usize,
+    slabs: *mut SlabHeader,
+}
+
+impl SlabCache {
+    const fn empty() -> Self {
+        Self {
+            object_size: 0,
+            slabs: ptr::null_mut(),
+        }
+    }
+}
+
 struct KernelHeap {
     start_addr: u64,
     end_addr: u64,
     current_break: u64,
-    free_lists: [FreeList; NUM_SIZE_CLASSES],
+    caches: [SlabCache; NUM_SIZE_CLASSES],
+    large_free_list: *mut LargeAllocHeader,
     stats: HeapStats,
     initialized: bool,
     diagnostics_enabled: bool,
@@ -47,7 +83,8 @@ impl KernelHeap {
             start_addr: 0,
             end_addr: 0,
             current_break: 0,
-            free_lists: [FreeList::new(); NUM_SIZE_CLASSES],
+            caches: [SlabCache::empty(); NUM_SIZE_CLASSES],
+            large_free_list: ptr::null_mut(),
             stats: HeapStats {
                 total_size: 0,
                 allocated_size: 0,
@@ -62,112 +99,70 @@ impl KernelHeap {
             diagnostics_enabled: true,
         }
     }
-
-    fn add_to_free_list(&mut self, block: *mut BlockHeader) {
-        unsafe {
-            if block.is_null() || !(*block).is_valid() {
-                klog_info!("add_to_free_list: Invalid block");
-                return;
-            }
-
-            let class = size_class((*block).size as usize, NUM_SIZE_CLASSES);
-            (*block).mark_free();
-            self.free_lists[class].push_front(block);
-
-            self.stats.free_blocks += 1;
-            self.stats.allocated_blocks = self.stats.allocated_blocks.saturating_sub(1);
-        }
-    }
-
-    fn remove_from_free_list(&mut self, block: *mut BlockHeader) {
-        unsafe {
-            if block.is_null() || !(*block).is_valid() {
-                klog_info!("remove_from_free_list: Invalid block");
-                return;
-            }
-
-            let class = size_class((*block).size as usize, NUM_SIZE_CLASSES);
-            self.free_lists[class].remove(block);
-            (*block).mark_allocated();
-
-            self.stats.allocated_blocks += 1;
-            self.stats.free_blocks = self.stats.free_blocks.saturating_sub(1);
-        }
-    }
-
-    fn find_free_block(&self, size: usize) -> *mut BlockHeader {
-        let start_class = size_class(size, NUM_SIZE_CLASSES);
-        for i in start_class..NUM_SIZE_CLASSES {
-            let block = self.free_lists[i].find_first_fit(size);
-            if !block.is_null() {
-                return block;
-            }
-        }
-        ptr::null_mut()
-    }
 }
 
 static KERNEL_HEAP: IrqMutex<KernelHeap> = IrqMutex::new(KernelHeap::new());
 
-fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
-    let mut pages_needed = (min_size + PAGE_SIZE_4KB as u32 - 1) / PAGE_SIZE_4KB as u32;
-    if pages_needed < 4 {
-        pages_needed = 4;
+fn slab_object_start() -> usize {
+    align_up_usize(mem::size_of::<SlabHeader>(), 16)
+}
+
+fn size_class_index(size: usize) -> Option<usize> {
+    for (idx, class) in SIZE_CLASSES.iter().enumerate() {
+        if size <= *class {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn map_heap_pages(heap: &mut KernelHeap, pages: u32) -> Option<u64> {
+    if pages == 0 {
+        return None;
     }
 
-    klog_debug!("Expanding heap by {} pages", pages_needed);
+    let total_bytes = pages as u64 * PAGE_SIZE_4KB;
+    if heap.current_break == 0 || heap.current_break + total_bytes > heap.end_addr {
+        return None;
+    }
 
-    let expansion_start = heap.current_break;
-    let total_bytes = (pages_needed as u64) * PAGE_SIZE_4KB;
+    let start = heap.current_break;
     let mut mapped_pages = 0u32;
 
-    if expansion_start >= heap.end_addr || expansion_start + total_bytes > heap.end_addr {
-        klog_info!("expand_heap: Heap growth denied - would exceed heap window");
-        return -1;
-    }
-
-    for i in 0..pages_needed {
+    for i in 0..pages {
         let phys_page = alloc_page_frame(0);
         if phys_page.is_null() {
-            klog_info!("expand_heap: Failed to allocate physical page");
-            rollback_expansion(expansion_start, mapped_pages);
-            return -1;
+            rollback_mapping(start, mapped_pages);
+            return None;
         }
-        let virt_page = expansion_start + (i as u64) * PAGE_SIZE_4KB;
+        let virt_page = start + (i as u64) * PAGE_SIZE_4KB;
         if map_page_4kb(
             VirtAddr::new(virt_page),
             phys_page,
             PageFlags::KERNEL_RW.bits(),
         ) != 0
         {
-            klog_info!("expand_heap: Failed to map heap page");
             free_page_frame(phys_page);
-            rollback_expansion(expansion_start, mapped_pages);
-            return -1;
+            rollback_mapping(start, mapped_pages);
+            return None;
         }
         mapped_pages += 1;
     }
 
-    let new_block_addr = expansion_start;
-    let new_block_size = (total_bytes as usize) - HEADER_SIZE;
-    let new_block = new_block_addr as *mut BlockHeader;
-
-    unsafe {
-        BlockHeader::init(new_block, new_block_size as u32, MAGIC_FREE);
-    }
-
     heap.current_break += total_bytes;
-    heap.stats.total_size += total_bytes;
-    heap.stats.free_size += new_block_size as u64;
-    heap.add_to_free_list(new_block);
-
+    heap.stats.total_size = heap.stats.total_size.saturating_add(total_bytes);
+    heap.stats.free_size = heap
+        .stats
+        .total_size
+        .saturating_sub(heap.stats.allocated_size);
     paging_bump_kernel_mapping_gen();
-    0
+
+    Some(start)
 }
 
-fn rollback_expansion(expansion_start: u64, mapped_pages: u32) {
-    for j in 0..mapped_pages {
-        let virt_page = expansion_start + (j as u64) * PAGE_SIZE_4KB;
+fn rollback_mapping(start: u64, mapped_pages: u32) {
+    for i in 0..mapped_pages {
+        let virt_page = start + (i as u64) * PAGE_SIZE_4KB;
         let mapped_phys = virt_to_phys(VirtAddr::new(virt_page));
         if !mapped_phys.is_null() {
             unmap_page(VirtAddr::new(virt_page));
@@ -176,59 +171,282 @@ fn rollback_expansion(expansion_start: u64, mapped_pages: u32) {
     }
 }
 
+fn slab_build_free_list(base: *mut u8, object_size: usize, total_count: usize) -> *mut u8 {
+    let mut head: *mut u8 = ptr::null_mut();
+    let mut current: *mut u8 = ptr::null_mut();
+
+    for i in 0..total_count {
+        let obj = unsafe { base.add(i * object_size) };
+        if head.is_null() {
+            head = obj;
+            current = obj;
+        } else {
+            unsafe { *(current as *mut *mut u8) = obj };
+            current = obj;
+        }
+    }
+
+    if !current.is_null() {
+        unsafe { *(current as *mut *mut u8) = ptr::null_mut() };
+    }
+
+    head
+}
+
+fn slab_create(heap: &mut KernelHeap, object_size: usize) -> *mut SlabHeader {
+    let start = slab_object_start();
+    if start >= PAGE_SIZE_4KB as usize {
+        return ptr::null_mut();
+    }
+
+    let available = PAGE_SIZE_4KB as usize - start;
+    let total_count = available / object_size;
+    if total_count == 0 {
+        return ptr::null_mut();
+    }
+
+    let slab_addr = match map_heap_pages(heap, 1) {
+        Some(addr) => addr,
+        None => return ptr::null_mut(),
+    };
+
+    let header = slab_addr as *mut SlabHeader;
+    let data_base = unsafe { (slab_addr as *mut u8).add(start) };
+    let free_list = slab_build_free_list(data_base, object_size, total_count);
+
+    unsafe {
+        (*header).magic = SLAB_MAGIC;
+        (*header).object_size = object_size as u32;
+        (*header).total_count = total_count as u16;
+        (*header).free_count = total_count as u16;
+        (*header).next = ptr::null_mut();
+        (*header).free_list = free_list;
+    }
+
+    heap.stats.total_blocks = heap.stats.total_blocks.saturating_add(total_count as u32);
+    heap.stats.free_blocks = heap.stats.free_blocks.saturating_add(total_count as u32);
+
+    header
+}
+
+fn slab_alloc_from_cache(heap: &mut KernelHeap, idx: usize) -> *mut c_void {
+    let cache_ptr = &mut heap.caches[idx] as *mut SlabCache;
+    unsafe {
+        let mut slab = (*cache_ptr).slabs;
+        while !slab.is_null() {
+            if (*slab).free_count > 0 {
+                let obj = (*slab).free_list;
+                if obj.is_null() {
+                    return ptr::null_mut();
+                }
+                (*slab).free_list = *(obj as *mut *mut u8);
+                (*slab).free_count = (*slab).free_count.saturating_sub(1);
+                heap.stats.allocated_size = heap
+                    .stats
+                    .allocated_size
+                    .saturating_add((*slab).object_size as u64);
+                heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_add(1);
+                heap.stats.free_blocks = heap.stats.free_blocks.saturating_sub(1);
+                heap.stats.allocation_count = heap.stats.allocation_count.saturating_add(1);
+                heap.stats.free_size = heap
+                    .stats
+                    .total_size
+                    .saturating_sub(heap.stats.allocated_size);
+                return obj as *mut c_void;
+            }
+            slab = (*slab).next;
+        }
+
+        let object_size = (*cache_ptr).object_size;
+        let new_slab = slab_create(heap, object_size);
+        if new_slab.is_null() {
+            return ptr::null_mut();
+        }
+        (*new_slab).next = (*cache_ptr).slabs;
+        (*cache_ptr).slabs = new_slab;
+    }
+
+    slab_alloc_from_cache(heap, idx)
+}
+
+fn alloc_large(heap: &mut KernelHeap, size: usize) -> *mut c_void {
+    let header_size = align_up_usize(mem::size_of::<LargeAllocHeader>(), 16);
+    let total = size.saturating_add(header_size);
+    let pages = align_up_usize(total, PAGE_SIZE_4KB as usize) / PAGE_SIZE_4KB as usize;
+
+    if pages == 0 {
+        return ptr::null_mut();
+    }
+
+    let mut prev: *mut LargeAllocHeader = ptr::null_mut();
+    let mut current = heap.large_free_list;
+    while !current.is_null() {
+        unsafe {
+            if (*current).pages as usize >= pages {
+                if prev.is_null() {
+                    heap.large_free_list = (*current).next;
+                } else {
+                    (*prev).next = (*current).next;
+                }
+                let base = current as u64;
+                (*current).magic = LARGE_MAGIC;
+                (*current).size = size as u32;
+                (*current).next = ptr::null_mut();
+                heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_add(1);
+                heap.stats.allocated_size = heap.stats.allocated_size.saturating_add(size as u64);
+                heap.stats.allocation_count = heap.stats.allocation_count.saturating_add(1);
+                heap.stats.free_size = heap
+                    .stats
+                    .total_size
+                    .saturating_sub(heap.stats.allocated_size);
+                return (base as *mut u8).add(header_size) as *mut c_void;
+            }
+            prev = current;
+            current = (*current).next;
+        }
+    }
+
+    let base = match map_heap_pages(heap, pages as u32) {
+        Some(addr) => addr,
+        None => return ptr::null_mut(),
+    };
+
+    let header = base as *mut LargeAllocHeader;
+    unsafe {
+        (*header).magic = LARGE_MAGIC;
+        (*header).pages = pages as u32;
+        (*header).size = size as u32;
+        (*header).reserved = 0;
+        (*header).next = ptr::null_mut();
+    }
+
+    heap.stats.total_blocks = heap.stats.total_blocks.saturating_add(1);
+    heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_add(1);
+    heap.stats.allocated_size = heap.stats.allocated_size.saturating_add(size as u64);
+    heap.stats.allocation_count = heap.stats.allocation_count.saturating_add(1);
+    heap.stats.free_size = heap
+        .stats
+        .total_size
+        .saturating_sub(heap.stats.allocated_size);
+
+    unsafe { (base as *mut u8).add(header_size) as *mut c_void }
+}
+
+fn free_large(heap: &mut KernelHeap, base: u64) -> c_int {
+    let header = base as *mut LargeAllocHeader;
+    unsafe {
+        if (*header).magic != LARGE_MAGIC {
+            return -1;
+        }
+        let size = (*header).size as u64;
+        (*header).magic = LARGE_FREE_MAGIC;
+        (*header).next = heap.large_free_list;
+        heap.large_free_list = header;
+
+        heap.stats.allocated_size = heap.stats.allocated_size.saturating_sub(size);
+        heap.stats.free_size = heap
+            .stats
+            .total_size
+            .saturating_sub(heap.stats.allocated_size);
+        heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_sub(1);
+        heap.stats.free_count = heap.stats.free_count.saturating_add(1);
+    }
+
+    0
+}
+
+fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
+    let base = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB) as *mut SlabHeader;
+    if base.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        if (*base).magic != SLAB_MAGIC {
+            return -1;
+        }
+
+        let object_size = (*base).object_size as usize;
+        let start = slab_object_start();
+        let object_base = (base as usize).saturating_add(start);
+        let object_end = (base as usize).saturating_add(PAGE_SIZE_4KB as usize);
+        let ptr_addr = ptr_in as usize;
+
+        if ptr_addr < object_base || ptr_addr >= object_end {
+            return -1;
+        }
+
+        let offset = ptr_addr - object_base;
+        if offset % object_size != 0 {
+            return -1;
+        }
+
+        let mut current = (*base).free_list;
+        while !current.is_null() {
+            if current as usize == ptr_addr {
+                return -1;
+            }
+            current = *(current as *mut *mut u8);
+        }
+
+        *(ptr_in as *mut *mut u8) = (*base).free_list;
+        (*base).free_list = ptr_in as *mut u8;
+        (*base).free_count = (*base).free_count.saturating_add(1);
+        heap.stats.allocated_size = heap
+            .stats
+            .allocated_size
+            .saturating_sub((*base).object_size as u64);
+        heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_sub(1);
+        heap.stats.free_blocks = heap.stats.free_blocks.saturating_add(1);
+        heap.stats.free_count = heap.stats.free_count.saturating_add(1);
+        heap.stats.free_size = heap
+            .stats
+            .total_size
+            .saturating_sub(heap.stats.allocated_size);
+    }
+
+    0
+}
+
 pub fn kmalloc(size: usize) -> *mut c_void {
     let mut heap = KERNEL_HEAP.lock();
 
     if !heap.initialized {
         klog_info!("kmalloc: Heap not initialized");
+        wl_currency::award_loss();
         return ptr::null_mut();
     }
 
-    if size == 0 || size as u32 > MAX_ALLOC_SIZE {
+    if size == 0 || size > MAX_ALLOC_SIZE {
+        wl_currency::award_loss();
         return ptr::null_mut();
     }
 
-    let rounded_size = round_up_pow2(size, MIN_BLOCK_SIZE);
-    let total_size = rounded_size + HEADER_SIZE;
+    let rounded_size = align_up_usize(size, 16);
+    let result = if let Some(idx) = size_class_index(rounded_size) {
+        slab_alloc_from_cache(&mut heap, idx)
+    } else {
+        alloc_large(&mut heap, rounded_size)
+    };
 
-    let mut block = heap.find_free_block(total_size);
-    if block.is_null() {
-        if expand_heap(&mut heap, total_size as u32) != 0 {
-            return ptr::null_mut();
-        }
-        block = heap.find_free_block(total_size);
+    if result.is_null() {
+        wl_currency::award_loss();
+    } else {
+        wl_currency::award_win();
     }
 
-    if block.is_null() {
-        klog_info!("kmalloc: No suitable block found after expansion");
-        return ptr::null_mut();
-    }
-
-    heap.remove_from_free_list(block);
-
-    unsafe {
-        let split_block = try_split_block(block, rounded_size, MIN_BLOCK_SIZE);
-        if !split_block.is_null() {
-            heap.add_to_free_list(split_block);
-        }
-
-        heap.stats.allocated_size += (*block).size as u64;
-        heap.stats.free_size = heap.stats.free_size.saturating_sub((*block).size as u64);
-        heap.stats.allocation_count += 1;
-
-        BlockHeader::data_ptr(block) as *mut c_void
-    }
+    result
 }
 
 pub fn kzalloc(size: usize) -> *mut c_void {
-    let ptr = kmalloc(size);
-    if ptr.is_null() {
+    let ptr_out = kmalloc(size);
+    if ptr_out.is_null() {
         return ptr::null_mut();
     }
     unsafe {
-        ptr::write_bytes(ptr, 0, size);
+        ptr::write_bytes(ptr_out, 0, size);
     }
-    ptr
+    ptr_out
 }
 
 pub fn kfree(ptr_in: *mut c_void) {
@@ -241,22 +459,26 @@ pub fn kfree(ptr_in: *mut c_void) {
         return;
     }
 
-    let block = unsafe { BlockHeader::from_data_ptr(ptr_in as *mut u8) };
-    unsafe {
-        if block.is_null() || !(*block).is_valid() || !(*block).is_allocated() {
-            klog_info!("kfree: Invalid block or double free detected");
-            return;
-        }
-
-        heap.stats.allocated_size = heap
-            .stats
-            .allocated_size
-            .saturating_sub((*block).size as u64);
-        heap.stats.free_size += (*block).size as u64;
-        heap.stats.free_count += 1;
-
-        heap.add_to_free_list(block);
+    let base = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB);
+    if base < heap.start_addr || base >= heap.current_break {
+        klog_info!("kfree: Invalid block or double free detected");
+        wl_currency::award_loss();
+        return;
     }
+    let slab_result = slab_free(&mut heap, ptr_in);
+    if slab_result == 0 {
+        wl_currency::award_win();
+        return;
+    }
+
+    let large_result = free_large(&mut heap, base);
+    if large_result == 0 {
+        wl_currency::award_win();
+        return;
+    }
+
+    klog_info!("kfree: Invalid block or double free detected");
+    wl_currency::award_loss();
 }
 
 pub fn init_kernel_heap() -> c_int {
@@ -265,19 +487,17 @@ pub fn init_kernel_heap() -> c_int {
     heap.end_addr = mm_get_kernel_heap_end();
     heap.current_break = heap.start_addr;
 
-    for i in 0..NUM_SIZE_CLASSES {
-        heap.free_lists[i] = FreeList::new();
+    for (idx, size) in SIZE_CLASSES.iter().enumerate() {
+        heap.caches[idx] = SlabCache {
+            object_size: *size,
+            slabs: ptr::null_mut(),
+        };
     }
 
     heap.stats = HeapStats::default();
-
-    if expand_heap(&mut heap, (PAGE_SIZE_4KB * 4) as u32) != 0 {
-        panic!("Failed to initialize kernel heap");
-    }
-
+    heap.large_free_list = ptr::null_mut();
     heap.initialized = true;
     klog_debug!("Kernel heap initialized at 0x{:x}", heap.start_addr);
-
     0
 }
 
@@ -309,69 +529,30 @@ pub fn print_heap_stats() {
         return;
     }
 
-    klog_info!("Free blocks by class:");
-
-    let mut total_free_blocks = 0u64;
-    let mut largest_free_block = 0u64;
-    let thresholds: [u32; 15] = [
-        16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
-    ];
-
-    for i in 0..NUM_SIZE_CLASSES {
-        let mut class_count = 0u32;
-        unsafe {
-            heap.free_lists[i].for_each(|block| {
-                class_count += 1;
-                total_free_blocks += 1;
-                let size = (*block).size as u64;
-                if size > largest_free_block {
-                    largest_free_block = size;
-                }
-            });
-        }
-
-        if class_count == 0 {
+    for cache in heap.caches.iter() {
+        if cache.object_size == 0 {
             continue;
         }
 
-        if i < 15 {
-            klog_info!("  <= {}: {} blocks", thresholds[i], class_count);
-        } else {
-            klog_info!("  > {}: {} blocks", thresholds[14], class_count);
-        }
-    }
-
-    klog_info!("Total free blocks: {}", total_free_blocks);
-    klog_info!("Largest free block: {} bytes", largest_free_block);
-
-    if total_free_blocks > 0 {
-        let average_free = if heap.stats.free_size > 0 {
-            heap.stats.free_size / total_free_blocks
-        } else {
-            0
-        };
-        klog_info!("Average free block: {} bytes", average_free);
-    }
-
-    if heap.stats.free_size > 0 {
-        let mut fragmented_bytes = heap.stats.free_size;
-        if largest_free_block < fragmented_bytes {
-            fragmented_bytes -= largest_free_block;
-        } else {
-            fragmented_bytes = 0;
+        let mut total = 0u32;
+        let mut free = 0u32;
+        let mut slab = cache.slabs;
+        unsafe {
+            while !slab.is_null() {
+                total += (*slab).total_count as u32;
+                free += (*slab).free_count as u32;
+                slab = (*slab).next;
+            }
         }
 
-        let fragmentation_percent = if heap.stats.free_size > 0 {
-            (fragmented_bytes * 100) / heap.stats.free_size
-        } else {
-            0
-        };
-
-        klog_info!(
-            "Fragmented bytes: {} ({}%)",
-            fragmented_bytes,
-            fragmentation_percent
-        );
+        if total > 0 {
+            klog_info!(
+                "Slab {}B: free {} / total {}",
+                cache.object_size,
+                free,
+                total
+            );
+        }
     }
 }
 

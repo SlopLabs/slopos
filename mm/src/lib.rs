@@ -31,9 +31,10 @@ pub mod vma_flags;
 pub mod vma_tree;
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::mem;
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use slopos_lib::align_up;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use slopos_lib::{align_up, align_up_usize};
 
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
@@ -76,4 +77,73 @@ unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
         // The bump allocator never frees; this is acceptable for early kernel bring-up.
     }
+}
+
+const ALLOC_MODE_BUMP: u8 = 0;
+const ALLOC_MODE_SLAB: u8 = 1;
+static GLOBAL_ALLOC_MODE: AtomicU8 = AtomicU8::new(ALLOC_MODE_BUMP);
+static GLOBAL_BUMP_ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+pub struct KernelAllocator;
+
+impl KernelAllocator {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+unsafe impl GlobalAlloc for KernelAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if GLOBAL_ALLOC_MODE.load(Ordering::Acquire) == ALLOC_MODE_SLAB {
+            let align = layout.align().max(16);
+            let size = layout.size();
+            if align <= 16 {
+                return crate::kernel_heap::kmalloc(size) as *mut u8;
+            }
+
+            let extra = align_up_usize(mem::size_of::<usize>(), 16);
+            let total = size.saturating_add(align).saturating_add(extra);
+            let raw = crate::kernel_heap::kmalloc(total) as *mut u8;
+            if raw.is_null() {
+                return ptr::null_mut();
+            }
+
+            let base = raw as usize;
+            let aligned = align_up_usize(base.saturating_add(extra), align);
+            let slot = (aligned - mem::size_of::<usize>()) as *mut usize;
+            unsafe {
+                *slot = base;
+            }
+            return aligned as *mut u8;
+        }
+
+        unsafe { GLOBAL_BUMP_ALLOCATOR.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if ptr.is_null() {
+            return;
+        }
+
+        if GLOBAL_ALLOC_MODE.load(Ordering::Acquire) == ALLOC_MODE_SLAB {
+            let align = layout.align().max(16);
+            if align <= 16 {
+                crate::kernel_heap::kfree(ptr as *mut _);
+                return;
+            }
+
+            let slot = (ptr as usize).saturating_sub(mem::size_of::<usize>()) as *mut usize;
+            let raw = unsafe { *slot } as *mut u8;
+            if !raw.is_null() {
+                crate::kernel_heap::kfree(raw as *mut _);
+            }
+            return;
+        }
+
+        unsafe { GLOBAL_BUMP_ALLOCATOR.dealloc(ptr, layout) }
+    }
+}
+
+pub fn global_allocator_use_kernel_heap() {
+    GLOBAL_ALLOC_MODE.store(ALLOC_MODE_SLAB, Ordering::Release);
 }

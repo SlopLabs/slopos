@@ -14,13 +14,13 @@ use slopos_core as sched;
 use slopos_drivers::serial;
 use slopos_fs as fs;
 use slopos_lib::{cpu, klog_error};
-use slopos_mm::BumpAllocator;
+use slopos_mm::KernelAllocator;
 use slopos_userland as userland;
 mod ffi;
 use slopos_video as video;
 
 #[global_allocator]
-static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator::new();
+static GLOBAL_ALLOCATOR: KernelAllocator = KernelAllocator::new();
 
 // Include the Limine assembly trampoline that sets up stack + serial and jumps into kernel_main.
 global_asm!(include_str!("../../boot/limine_entry.s"));

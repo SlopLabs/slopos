@@ -6,10 +6,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
 pub use slopos_lib::testing::suite_masks::SUITE_SCHEDULER;
 pub use slopos_lib::testing::{
-    HARNESS_MAX_SUITES, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
-    measure_elapsed_ms,
+    measure_elapsed_ms, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
+    HARNESS_MAX_SUITES,
 };
-use slopos_lib::{StateFlag, define_test_suite, klog_info, register_test_suites};
+use slopos_lib::{define_test_suite, klog_info, register_test_suites, StateFlag};
 
 pub type InterruptTestConfig = TestConfig;
 pub type InterruptTestVerbosity = Verbosity;
@@ -170,7 +170,11 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         summary.elapsed_ms,
     );
 
-    if summary.failed == 0 { 0 } else { -1 }
+    if summary.failed == 0 {
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn tests_request_shutdown(failed: i32) {
@@ -202,13 +206,14 @@ mod suites {
         test_demand_permission_allow_read, test_demand_permission_allow_write,
         test_demand_permission_deny_exec, test_demand_permission_deny_user_kernel,
         test_demand_permission_deny_write_ro, test_dma_allocation_exhaustion,
-        test_heap_alloc_pressure, test_heap_alloc_zero, test_heap_boundary_write,
-        test_heap_double_free_defensive, test_heap_expansion_under_pressure,
-        test_heap_fragmentation_behind_head, test_heap_free_list_search, test_heap_kfree_null,
-        test_heap_kzalloc_zeroed, test_heap_large_alloc, test_heap_large_block_integrity,
-        test_heap_medium_alloc, test_heap_no_overlap, test_heap_small_alloc, test_heap_stats,
-        test_heap_stress_cycles, test_irqmutex_basic, test_irqmutex_mutation,
-        test_irqmutex_try_lock, test_kzalloc_zeroed_under_pressure, test_multiorder_alloc_failure,
+        test_global_alloc_vec, test_heap_alloc_one_gib, test_heap_alloc_pressure,
+        test_heap_alloc_zero, test_heap_boundary_write, test_heap_double_free_defensive,
+        test_heap_expansion_under_pressure, test_heap_fragmentation_behind_head,
+        test_heap_free_list_search, test_heap_kfree_null, test_heap_kzalloc_zeroed,
+        test_heap_large_alloc, test_heap_large_block_integrity, test_heap_medium_alloc,
+        test_heap_no_overlap, test_heap_small_alloc, test_heap_stats, test_heap_stress_cycles,
+        test_irqmutex_basic, test_irqmutex_mutation, test_irqmutex_try_lock,
+        test_kzalloc_zeroed_under_pressure, test_multiorder_alloc_failure,
         test_multiple_process_vms, test_page_alloc_fragmentation,
         test_page_alloc_fragmentation_oom, test_page_alloc_free_cycle, test_page_alloc_free_null,
         test_page_alloc_multi_order, test_page_alloc_multipage_integrity,
@@ -411,7 +416,11 @@ mod suites {
             out_ref.timed_out = 0;
         }
 
-        if passed == total { 0 } else { -1 }
+        if passed == total {
+            0
+        } else {
+            -1
+        }
     }
 
     pub static EXT2_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
@@ -453,6 +462,7 @@ mod suites {
             test_heap_kfree_null,
             test_heap_alloc_zero,
             test_heap_stats,
+            test_global_alloc_vec,
         ]
     );
 
@@ -609,6 +619,7 @@ mod suites {
             test_page_alloc_fragmentation_oom,
             test_dma_allocation_exhaustion,
             test_heap_alloc_pressure,
+            test_heap_alloc_one_gib,
             test_process_vm_creation_pressure,
             test_heap_expansion_under_pressure,
             test_zero_flag_under_pressure,
@@ -907,7 +918,11 @@ mod suites {
             out_ref.failed = total.saturating_sub(passed);
             out_ref.elapsed_ms = elapsed;
         }
-        if passed == total { 0 } else { -1 }
+        if passed == total {
+            0
+        } else {
+            -1
+        }
     }
 
     pub static FPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {

@@ -20,6 +20,7 @@ RUST_TARGET_JSON ?= targets/x86_64-slos.json
 CARGO_TARGET_DIR ?= $(BUILD_DIR)/target
 QEMU_BIN ?= qemu-system-x86_64
 QEMU_SMP ?= 2
+QEMU_MEM ?= 512M
 
 ISO := $(BUILD_DIR)/slop.iso
 ISO_NO_TESTS := $(BUILD_DIR)/slop-notests.iso
@@ -309,7 +310,7 @@ boot: iso-notests
 		$(QEMU_BIN) \
 	  -machine q35,accel=tcg \
 	  -smp $(QEMU_SMP) \
-	  -m 512M \
+	  -m $(QEMU_MEM) \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
 	  -drive if=pflash,format=raw,file="$$OVMF_VARS_RUNTIME" \
 	  -device ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3 \
