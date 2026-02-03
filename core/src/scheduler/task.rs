@@ -68,15 +68,18 @@ pub fn reap_zombies() {
                 unsafe {
                     klog_debug!("reap_zombies: Freeing zombie task {}", (*task).task_id);
 
+                    let kstack = (*task).kernel_stack_base;
+                    let ustack = (*task).stack_base;
+
                     // Free kernel stack
-                    if (*task).kernel_stack_base != 0 {
-                        kfree((*task).kernel_stack_base as *mut c_void);
+                    if kstack != 0 {
+                        kfree(kstack as *mut c_void);
                         (*task).kernel_stack_base = 0;
                     }
 
-                    // Free user stack (if kernel task without process)
-                    if (*task).process_id == INVALID_PROCESS_ID && (*task).stack_base != 0 {
-                        kfree((*task).stack_base as *mut c_void);
+                    // Free user stack only if it differs from kernel stack
+                    if (*task).process_id == INVALID_PROCESS_ID && ustack != 0 && ustack != kstack {
+                        kfree(ustack as *mut c_void);
                         (*task).stack_base = 0;
                     }
 
@@ -674,7 +677,12 @@ pub fn task_terminate(task_id: u32) -> c_int {
                 if (*task_ptr).kernel_stack_base != 0 {
                     kfree((*task_ptr).kernel_stack_base as *mut c_void);
                 }
-                if (*task_ptr).process_id == INVALID_PROCESS_ID && (*task_ptr).stack_base != 0 {
+                // For kernel tasks, stack_base == kernel_stack_base (same allocation).
+                // Only free stack_base separately if it differs from kernel_stack_base.
+                if (*task_ptr).process_id == INVALID_PROCESS_ID
+                    && (*task_ptr).stack_base != 0
+                    && (*task_ptr).stack_base != (*task_ptr).kernel_stack_base
+                {
                     kfree((*task_ptr).stack_base as *mut c_void);
                 }
                 *task_ptr = Task::invalid();

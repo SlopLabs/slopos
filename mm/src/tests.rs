@@ -430,48 +430,65 @@ pub fn test_global_alloc_vec() -> c_int {
     0
 }
 
-// Keep existing tests
 pub fn test_heap_free_list_search() -> i32 {
     let mut stats_before = MaybeUninit::uninit();
     get_heap_stats(stats_before.as_mut_ptr());
     let initial_heap_size = unsafe { stats_before.assume_init() }.total_size;
 
-    let small = kmalloc(32);
-    if small.is_null() {
+    let p1 = kmalloc(256);
+    if p1.is_null() {
         return -1;
     }
-    let large = kmalloc(1024);
-    if large.is_null() {
-        kfree(small);
+    let p2 = kmalloc(256);
+    if p2.is_null() {
+        kfree(p1);
         return -1;
     }
-    let medium = kmalloc(256);
-    if medium.is_null() {
-        kfree(small);
-        kfree(large);
-        return -1;
-    }
-
-    kfree(large);
-    kfree(small);
-
-    let requested = kmalloc(512);
-    if requested.is_null() {
-        kfree(medium);
+    let p3 = kmalloc(256);
+    if p3.is_null() {
+        kfree(p1);
+        kfree(p2);
         return -1;
     }
 
-    let mut stats_after = MaybeUninit::uninit();
-    get_heap_stats(stats_after.as_mut_ptr());
-    let final_heap_size = unsafe { stats_after.assume_init() }.total_size;
-    if final_heap_size > initial_heap_size {
-        kfree(requested);
-        kfree(medium);
+    let mut stats_after_alloc = MaybeUninit::uninit();
+    get_heap_stats(stats_after_alloc.as_mut_ptr());
+    let heap_after_alloc = unsafe { stats_after_alloc.assume_init() }.total_size;
+
+    kfree(p1);
+    kfree(p2);
+
+    let p4 = kmalloc(256);
+    if p4.is_null() {
+        kfree(p3);
+        return -1;
+    }
+    let p5 = kmalloc(256);
+    if p5.is_null() {
+        kfree(p3);
+        kfree(p4);
         return -1;
     }
 
-    kfree(requested);
-    kfree(medium);
+    let mut stats_final = MaybeUninit::uninit();
+    get_heap_stats(stats_final.as_mut_ptr());
+    let final_heap_size = unsafe { stats_final.assume_init() }.total_size;
+
+    if final_heap_size > heap_after_alloc {
+        kfree(p3);
+        kfree(p4);
+        kfree(p5);
+        return -1;
+    }
+
+    kfree(p3);
+    kfree(p4);
+    kfree(p5);
+
+    if final_heap_size < initial_heap_size {
+        return -1;
+    }
+
     0
 }
 

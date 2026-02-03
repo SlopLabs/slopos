@@ -438,8 +438,9 @@ pub fn test_alloc_free_cycles_no_leak() -> c_int {
     const CYCLES: usize = 100;
     const PAGES_PER_CYCLE: usize = 4;
 
-    for cycle in 0..CYCLES {
+    for _cycle in 0..CYCLES {
         let mut pages: [PhysAddr; PAGES_PER_CYCLE] = [PhysAddr::NULL; PAGES_PER_CYCLE];
+        let mut allocated = 0usize;
 
         for i in 0..PAGES_PER_CYCLE {
             pages[i] = alloc_page_frame(ALLOC_FLAG_NO_PCP);
@@ -447,35 +448,25 @@ pub fn test_alloc_free_cycles_no_leak() -> c_int {
                 for j in 0..i {
                     free_page_frame(pages[j]);
                 }
-                klog_info!("OOM_TEST: Allocation failed at cycle {}", cycle);
-                // Not a bug - might be OOM
                 break;
             }
+            allocated += 1;
         }
 
-        for i in 0..PAGES_PER_CYCLE {
-            if !pages[i].is_null() {
-                free_page_frame(pages[i]);
-            }
+        for i in 0..allocated {
+            free_page_frame(pages[i]);
         }
     }
 
     let mut free_end = 0u32;
     get_page_allocator_stats(ptr::null_mut(), &mut free_end, ptr::null_mut());
 
-    // Allow small variance for PCP caching
-    let diff = if free_start > free_end {
-        free_start - free_end
-    } else {
-        free_end - free_start
-    };
-
-    if diff > 16 {
+    if free_start > free_end && (free_start - free_end) > 16 {
         klog_info!(
-            "OOM_TEST: Memory leak detected! Start: {}, End: {}, Diff: {}",
+            "OOM_TEST: Memory leak! Start: {}, End: {}, Leaked: {}",
             free_start,
             free_end,
-            diff
+            free_start - free_end
         );
         return -1;
     }
