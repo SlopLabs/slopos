@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use slopos_lib::{klog_debug, InitFlag};
+use slopos_lib::{InitFlag, klog_debug};
 
 use crate::mm_constants::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, KERNEL_HEAP_SIZE, KERNEL_HEAP_VBASE,
