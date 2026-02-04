@@ -4,6 +4,12 @@
 
 After a soft reboot (triggered by losing at roulette), the roulette animation drops from smooth ~60 FPS to ~1 FPS. This document captures the complete investigation and root cause analysis.
 
+## Status: RESOLVED
+
+**Root Cause:** The new slab allocator's `init_kernel_heap()` was missing initial page mapping that the old free-list allocator performed via `expand_heap()`.
+
+**Fix:** Added `map_heap_pages(&mut heap, 4)` to `init_kernel_heap()` in `mm/src/kernel_heap.rs`.
+
 ## Symptoms
 
 - **First boot**: Roulette animation runs smoothly
@@ -33,7 +39,7 @@ We discovered that `pat_init()` was **never called** during boot. The function e
 
 This fix ensures PAT[1]=WC (Write-Combining) is set on every boot. However, **the bug persisted**.
 
-### Root Cause: MTRR + Page Table Flags (CONFIRMED)
+### Third Hypothesis: MTRR + Page Table Flags (INVESTIGATED BUT NOT ROOT CAUSE)
 
 After the PAT fix, diagnostic logs showed:
 
@@ -45,6 +51,27 @@ RENDER_DIAG: WARNING - slow render detected! 37723 cycles/pixel suggests uncache
 ```
 
 **PAT[1]=1 (WC) is correctly set, but rendering is still 37,723 cycles/pixel!**
+
+We initially believed this was due to MTRR misconfiguration after warm reboot. However, further bisecting revealed a different cause.
+
+### Actual Root Cause: Missing Initial Heap Page Mapping (CONFIRMED & FIXED)
+
+Through systematic bisection of commit `b06a5971339` ("new memory allocator"), we discovered:
+
+1. The bug was introduced by the new slab allocator in `mm/src/kernel_heap.rs`
+2. The OLD `init_kernel_heap()` called `expand_heap()` which mapped 4 initial pages
+3. The NEW `init_kernel_heap()` skipped initial page mapping (lazy allocation)
+4. **Adding `map_heap_pages(&mut heap, 4)` to the new init fixed the bug**
+
+**Bisection results:**
+- Cosmetic import changes: SMOOTH ✓
+- New kernel_heap.rs (without initial mapping): SLOW ✗
+- New kernel_heap.rs + initial mapping: SMOOTH ✓
+
+**Why this matters:** Something about mapping heap pages during early boot (before video init) affects framebuffer behavior after soft reboot. The exact mechanism is still unclear but likely involves:
+- TLB state synchronization via `paging_bump_kernel_mapping_gen()`
+- Page table structure initialization timing
+- Interaction with Limine's HHDM page table setup
 
 ## Technical Analysis
 
@@ -97,66 +124,39 @@ Where:
 **Key insight from Oracle consultation:**
 > PAT alone cannot override an MTRR-default-UC region. UC wins in the effective-type resolution.
 
-## Why First Boot Works
+## Why First Boot Works / Why Warm Reboot Failed
 
-On **cold boot**:
-1. UEFI/firmware may set up MTRRs with WC for framebuffer region
-2. Limine preserves these MTRR settings
-3. Framebuffer gets WC from MTRR (even without PAT help)
+**Original hypothesis (MTRR-based) was incorrect.**
 
-On **warm reboot** (PS/2 0xFE reset):
-1. CPU is reset but MTRRs may revert to defaults
-2. Limine may not reinitialize MTRRs the same way
-3. Framebuffer region becomes UC by default
-4. Even with PAT[1]=WC, page tables use PAT index 0 (no PWT bit)
-5. Effective type: UC (extremely slow)
+The actual reason:
+- **First boot after commit `b06a5971339`**: Still slow on reboot because no initial heap pages mapped
+- **After fix**: Initial heap page mapping during `init_kernel_heap()` triggers page table/TLB operations that properly synchronize state
 
-## Solution Options
+The exact mechanism is not fully understood, but the symptom correlates directly with whether `map_heap_pages()` is called during heap initialization.
 
-### Option 1: Variable MTRR (Recommended)
+## Solution (IMPLEMENTED)
 
-Configure a variable MTRR for the framebuffer region as WC.
+### Fix: Restore Initial Heap Page Mapping
 
-**Pros:**
-- Authoritative fix - MTRRs override PAT defaults
-- Works regardless of page table flags
-- Localized change, doesn't affect rest of system
+Added to `mm/src/kernel_heap.rs` in `init_kernel_heap()`:
 
-**Cons:**
-- Requires new MTRR management code
-- Must be done on all CPUs (MTRRs are per-core)
-- MTRR constraints: base must be aligned to size, size must be power-of-two
+```rust
+if map_heap_pages(&mut heap, 4).is_none() {
+    panic!("Failed to initialize kernel heap");
+}
+```
 
-**Implementation:**
-1. Read `IA32_MTRR_CAP` to get number of variable MTRRs
-2. Find a free variable MTRR pair
-3. Program `IA32_MTRR_PHYSBASEn` and `IA32_MTRR_PHYSMASKn` for FB region
-4. Use Intel-required sequence: disable caching → wbinvd → disable MTRRs → write MSRs → re-enable → wbinvd → re-enable caching
-5. Ensure same setup on AP CPUs during SMP bring-up
+This restores the behavior of the old allocator's `expand_heap()` call, which mapped 4 pages during init.
 
-### Option 2: Page Table Flag Fix (May Not Be Sufficient)
+### Discarded Options (MTRR-based)
 
-Set PWT=1 on framebuffer page table entries to select PAT[1]=WC.
+The following options were considered but are **not needed** since the root cause was not MTRR-related:
 
-**Pros:**
-- Simpler implementation
-- Uses existing page mapping infrastructure
+1. ~~Variable MTRR configuration~~
+2. ~~Page table flag fix (PWT=1)~~
+3. ~~Combined MTRR + page table approach~~
 
-**Cons:**
-- **Won't work if MTRR defaults to UC** - UC overrides WC from PAT
-- Limine may use huge pages (2MB/1GB) for HHDM, making PTE surgery complex
-- Fragile - depends on bootloader behavior
-
-**Implementation:**
-1. Add `PageFlags::FRAMEBUFFER_WC` constant (PRESENT | WRITABLE | WRITE_THROUGH)
-2. After boot, remap framebuffer pages with new flags
-3. Invalidate TLB for affected pages
-
-### Option 3: Combined Approach (Most Robust)
-
-1. Set up MTRR for framebuffer as WC
-2. Create dedicated kernel virtual mapping with PWT=1
-3. Use this mapping instead of HHDM for framebuffer access
+These may still be useful for future framebuffer optimization but are not required for this bug.
 
 ## Files Involved
 
@@ -190,11 +190,9 @@ fn run_render_diagnostics(backend, width, height) {
 
 ## Next Steps
 
-1. **Implement MTRR support** in `mm/src/mtrr.rs`
-2. **Add MTRR init** for framebuffer during early boot (after PAT, before video)
-3. **Ensure SMP consistency** - same MTRR config on all CPUs
-4. **Test warm reboot** - verify performance is consistent across reboots
-5. **Remove diagnostic instrumentation** once fix is verified
+1. ~~**Implement MTRR support** in `mm/src/mtrr.rs`~~ (Not needed - bug was not MTRR-related)
+2. **Investigate why initial heap mapping affects framebuffer** (optional, for understanding)
+3. **Remove diagnostic instrumentation** once fix is verified
 
 ## References
 
@@ -207,4 +205,13 @@ fn run_render_diagnostics(backend, width, height) {
 - `3ffdc5ca6` - mm: initialize PAT with Write-Combining for framebuffer performance
   - Fixed: PAT was never initialized
   - Added: test_pat_wc_enabled to verify PAT[1]==WC
-  - Result: PAT now correct, but bug persists due to MTRR issue
+  - Result: PAT now correct, but bug persisted (was not the root cause)
+
+- `b06a5971339` - new memory allocator
+  - **Introduced the bug** by removing initial heap page mapping from init
+  - Old `expand_heap()` mapped 4 pages; new slab init mapped none
+
+- (pending) - mm: fix framebuffer perf regression by restoring initial heap mapping
+  - Added `map_heap_pages(&mut heap, 4)` to `init_kernel_heap()`
+  - Restores behavior of old allocator's `expand_heap()` call
+  - **Fixes the soft-reboot framebuffer performance bug**

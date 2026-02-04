@@ -496,6 +496,11 @@ pub fn init_kernel_heap() -> c_int {
 
     heap.stats = HeapStats::default();
     heap.large_free_list = ptr::null_mut();
+
+    if map_heap_pages(&mut heap, 4).is_none() {
+        panic!("Failed to initialize kernel heap");
+    }
+
     heap.initialized = true;
     klog_debug!("Kernel heap initialized at 0x{:x}", heap.start_addr);
     0
