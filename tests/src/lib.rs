@@ -208,8 +208,8 @@ mod suites {
         test_heap_free_list_search, test_heap_kfree_null, test_heap_kzalloc_zeroed,
         test_heap_large_alloc, test_heap_large_block_integrity, test_heap_medium_alloc,
         test_heap_no_overlap, test_heap_small_alloc, test_heap_stats, test_heap_stress_cycles,
-        test_irqmutex_basic, test_irqmutex_mutation, test_irqmutex_try_lock,
-        test_kzalloc_zeroed_under_pressure, test_multiorder_alloc_failure,
+        test_heap_warmup_pages_minimum, test_irqmutex_basic, test_irqmutex_mutation,
+        test_irqmutex_try_lock, test_kzalloc_zeroed_under_pressure, test_multiorder_alloc_failure,
         test_multiple_process_vms, test_page_alloc_fragmentation,
         test_page_alloc_fragmentation_oom, test_page_alloc_free_cycle, test_page_alloc_free_null,
         test_page_alloc_multi_order, test_page_alloc_multipage_integrity,
@@ -447,6 +447,7 @@ mod suites {
         heap_ext,
         SUITE_SCHEDULER,
         [
+            test_heap_warmup_pages_minimum,
             test_heap_small_alloc,
             test_heap_medium_alloc,
             test_heap_large_alloc,

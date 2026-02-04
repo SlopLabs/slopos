@@ -3,10 +3,10 @@ use core::mem;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{align_down_u64, align_up_usize, klog_debug, klog_info, wl_currency, IrqMutex};
+use slopos_lib::{IrqMutex, align_down_u64, align_up_usize, klog_debug, klog_info, wl_currency};
 
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
-use crate::mm_constants::{PageFlags, PAGE_SIZE_4KB};
+use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page, virt_to_phys};
 
@@ -481,6 +481,10 @@ pub fn kfree(ptr_in: *mut c_void) {
     wl_currency::award_loss();
 }
 
+/// Minimum pages required for soft reboot coherency fix.
+/// See documentation in `init_kernel_heap()` for details.
+pub const HEAP_WARMUP_PAGES: u32 = 4;
+
 pub fn init_kernel_heap() -> c_int {
     let mut heap = KERNEL_HEAP.lock();
     heap.start_addr = mm_get_kernel_heap_start();
@@ -497,7 +501,37 @@ pub fn init_kernel_heap() -> c_int {
     heap.stats = HeapStats::default();
     heap.large_free_list = ptr::null_mut();
 
-    if map_heap_pages(&mut heap, 4).is_none() {
+    // ============================================================================
+    // SOFT REBOOT COHERENCY FIX - DO NOT REMOVE
+    // ============================================================================
+    //
+    // After soft reboot (PS/2 0xFE reset), x86 paging structure caches may retain
+    // stale entries from the previous boot. Limine creates fresh page tables, but
+    // the CPU's internal paging structure caches aren't automatically coherent.
+    //
+    // This causes framebuffer performance to degrade from ~60 FPS to ~1 FPS because:
+    // 1. Stale paging structure cache entries point to old page table locations
+    // 2. PAT (Page Attribute Table) settings for Write-Combining aren't applied
+    // 3. Framebuffer writes fall back to uncached mode (~37,000 cycles/pixel)
+    //
+    // The fix requires BOTH:
+    // - ≥2 physical frame allocations: Forces buddy allocator metadata coherency
+    //   via read-after-write serialization on the bitmap/free list structures
+    // - ≥1 page mapping: Forces page table walks that populate paging structure
+    //   caches with fresh entries from Limine's new page tables
+    //
+    // `map_heap_pages(4)` satisfies both requirements (4 allocs + 4 maps).
+    // Experiments confirmed 2 pages minimum works, but 4 provides safety margin.
+    //
+    // References:
+    // - Intel Application Note 317080-002: "TLBs, Paging-Structure Caches, and
+    //   Their Invalidation"
+    // - https://blog.stuffedcow.net/2015/08/pagewalk-coherence/
+    //
+    // WARNING: Removing or reducing this below 2 pages WILL cause framebuffer
+    // performance regression after soft reboot. See test_heap_warmup_pages_minimum().
+    // ============================================================================
+    if map_heap_pages(&mut heap, HEAP_WARMUP_PAGES).is_none() {
         panic!("Failed to initialize kernel heap");
     }
 

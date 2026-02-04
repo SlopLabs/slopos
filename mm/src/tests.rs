@@ -492,6 +492,44 @@ pub fn test_heap_free_list_search() -> i32 {
     0
 }
 
+/// Regression test: Verify HEAP_WARMUP_PAGES is sufficient for soft reboot coherency.
+///
+/// After soft reboot, x86 paging structure caches may retain stale entries. The fix
+/// requires ≥2 physical frame allocations AND ≥1 page mapping during heap init.
+/// This test ensures HEAP_WARMUP_PAGES is never reduced below the minimum threshold.
+///
+/// If this test fails, framebuffer performance will degrade to ~1 FPS after soft reboot.
+/// See: Intel Application Note 317080-002 "TLBs, Paging-Structure Caches"
+pub fn test_heap_warmup_pages_minimum() -> c_int {
+    use crate::kernel_heap::HEAP_WARMUP_PAGES;
+
+    // Minimum required: ≥2 allocations + ≥1 mapping
+    // map_heap_pages(N) does N allocations and N mappings, so N >= 2 is required.
+    const MINIMUM_WARMUP_PAGES: u32 = 2;
+
+    if HEAP_WARMUP_PAGES < MINIMUM_WARMUP_PAGES {
+        klog_info!(
+            "HEAP_TEST: HEAP_WARMUP_PAGES ({}) is below minimum ({}). \
+             This WILL cause framebuffer performance regression after soft reboot!",
+            HEAP_WARMUP_PAGES,
+            MINIMUM_WARMUP_PAGES
+        );
+        return -1;
+    }
+
+    // Warn if reduced from the original safe value
+    const RECOMMENDED_WARMUP_PAGES: u32 = 4;
+    if HEAP_WARMUP_PAGES < RECOMMENDED_WARMUP_PAGES {
+        klog_info!(
+            "HEAP_TEST: Warning - HEAP_WARMUP_PAGES ({}) is below recommended ({})",
+            HEAP_WARMUP_PAGES,
+            RECOMMENDED_WARMUP_PAGES
+        );
+    }
+
+    0
+}
+
 pub fn test_heap_fragmentation_behind_head() -> i32 {
     let mut ptrs: [*mut core::ffi::c_void; 5] = [core::ptr::null_mut(); 5];
     let sizes = [128usize, 256, 128, 512, 256];
