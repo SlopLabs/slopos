@@ -191,8 +191,133 @@ fn run_render_diagnostics(backend, width, height) {
 ## Next Steps
 
 1. ~~**Implement MTRR support** in `mm/src/mtrr.rs`~~ (Not needed - bug was not MTRR-related)
-2. **Investigate why initial heap mapping affects framebuffer** (optional, for understanding)
+2. ~~**Investigate why initial heap mapping affects framebuffer**~~ (See investigation below)
 3. **Remove diagnostic instrumentation** once fix is verified
+
+## Deep Investigation: Why 4 Heap Pages?
+
+Systematic experimentation revealed the precise requirements for the fix:
+
+### Experiment Results
+
+| Experiment | Physical Allocs | Page Maps | Result |
+|------------|-----------------|-----------|--------|
+| Read page tables only | 0 | 0 | ❌ Slow |
+| Write (no-op) to existing page tables | 0 | 0 | ❌ Slow |
+| 2 allocs, immediately freed | 2 (freed) | 0 | ❌ Slow |
+| 1 page via map_heap_pages | 1 | 1 | ❌ Slow |
+| 2 pages via map_heap_pages | 2 | 2 | ✅ Smooth |
+| 3 pages via map_heap_pages | 3 | 3 | ✅ Smooth |
+| 4 pages via map_heap_pages | 4 | 4 | ✅ Smooth |
+| 1 extra alloc + 1 page map | 2 | 1 | ✅ Smooth |
+| 2 allocs, 0 maps | 2 | 0 | ❌ Slow |
+| 1 page map + 1 extra alloc | 2 | 1 | ✅ Smooth |
+
+### Conclusion
+
+**The fix requires BOTH:**
+- **≥2 physical frame allocations** via `alloc_page_frame()`
+- **≥1 page mapping** via `map_page_4kb()`
+
+Order does not matter. The current fix of `map_heap_pages(&mut heap, 4)` satisfies both requirements (4 allocs + 4 maps).
+
+### Technical Analysis: Why ≥2 Allocations + ≥1 Mapping?
+
+Based on x86 architecture knowledge and the experimental results, here is the most likely explanation:
+
+#### The Soft Reboot Problem
+
+When a soft reboot occurs (PS/2 keyboard controller reset via `0xFE` to port `0x64`):
+1. The CPU performs a warm reset - some internal state is preserved
+2. Physical memory contents persist (unlike cold boot where RAM is cleared)
+3. Limine reloads and creates fresh page tables
+4. The kernel re-initializes all subsystems
+
+The key issue: **stale CPU microarchitectural state from the previous boot interacts with fresh memory contents**.
+
+#### Why `pat_init()` Isn't Enough
+
+`pat_init()` performs the Intel-mandated PAT modification procedure:
+- `wbinvd()` - write-back and invalidate all caches
+- `flush_tlb_all()` - full TLB flush via CR3 reload
+- Write new PAT value
+- `wbinvd()` again
+- `flush_tlb_all()` again
+
+This should reset cache/TLB state, but it doesn't flush all microarchitectural state:
+- **Store buffers** may retain pending writes
+- **Line fill buffers** may have in-flight reads
+- **Memory ordering buffers** track outstanding operations
+- **Prefetch queues** may have stale physical addresses
+
+#### The "2 Allocations" Requirement
+
+The buddy allocator (`page_alloc.rs`) uses a bitmap and free lists stored in physical memory. When `alloc_page_frame()` is called:
+
+1. **First allocation**: Reads allocator metadata, finds a free page, marks it used
+   - This reads/writes to allocator's bitmap and free list structures
+   - Creates cache lines for these structures
+   - But may still have inconsistent microarchitectural state
+
+2. **Second allocation**: Reads the SAME allocator metadata again
+   - Forces a second pass through the allocator's data structures
+   - The read-after-write to the same memory locations forces the CPU to serialize
+   - This acts as an implicit **memory barrier** that flushes store buffers
+
+This explains why `2 allocs + 0 maps = SLOW` but `2 allocs + 1 map = SMOOTH`:
+- The allocations alone synchronize allocator state
+- But without a mapping, the page table structures (used by framebuffer access) aren't touched
+
+#### The "1 Mapping" Requirement
+
+`map_page_4kb()` performs a page table walk and writes to page table entries. For the heap region (`0xFFFF_FFFF_9000_0000`), this:
+
+1. Walks PML4 → PDPT → PD → PT (reading page table structures via HHDM)
+2. May allocate intermediate page tables (using `alloc_page_frame(ALLOC_FLAG_ZERO)`)
+3. Writes the final PT entry
+
+The page table walk **reads the same physical page table structures used by framebuffer access**. Since framebuffer is accessed via HHDM (`0xFFFF_8000_xxxx_xxxx`), and the kernel heap is also in kernel space, they share:
+- The same PML4 (kernel's KERNEL_PAGE_DIR)
+- Potentially overlapping PDPT structures
+
+By reading/writing page tables for the heap, we force the CPU to:
+1. Fetch current page table contents into cache
+2. Establish coherent cache lines for the page table hierarchy
+3. Flush any stale prefetched translations
+
+#### The Combined Effect
+
+```
+pat_init()
+    ↓ (flushes caches/TLB but not all microarch state)
+alloc_page_frame() × 2
+    ↓ (forces allocator metadata coherency via read-after-write)
+map_page_4kb() × 1+
+    ↓ (forces page table coherency via walk + write)
+Framebuffer access
+    ↓ (now sees coherent page tables → correct PAT → fast WC access)
+```
+
+#### Why 1 Allocation Fails
+
+With only 1 allocation + 1 mapping:
+- The single allocator access doesn't force full serialization
+- The mapping uses the frame from that allocation
+- But the allocator's internal state may still have stale cached data
+- Subsequent page table allocations (for PDPT/PD/PT structures) may behave incorrectly
+
+The second allocation forces a second trip through the allocator, which:
+- Touches the bitmap again (read-modify-write)
+- Serializes memory operations
+- Ensures subsequent page table structure allocations see coherent state
+
+#### Conclusion
+
+The fix works because it forces **two separate serialization points**:
+1. **Allocator serialization**: ≥2 allocations force read-after-write coherency on buddy allocator metadata
+2. **Page table serialization**: ≥1 mapping forces page table walk + write, establishing coherent cache state for the shared kernel page table hierarchy
+
+This is a subtle interaction between soft reboot's partial CPU reset, Limine's fresh page tables, and the kernel's memory subsystem initialization order. The "4 pages" in the original fix is conservative - "2 pages" (2 allocs + 2 maps) would work, but 4 provides margin.
 
 ## References
 
