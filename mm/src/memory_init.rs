@@ -620,6 +620,7 @@ pub fn init_memory_system(
         slopos_lib::panic_recovery::register_panic_cleanup(mm_panic_cleanup);
 
         init_paging();
+        crate::pat::pat_init();
 
         // Map ACPI reclaimable regions into HHDM so drivers can parse ACPI tables
         // This is required for Limine revision 3 which no longer maps these regions

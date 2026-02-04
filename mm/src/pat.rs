@@ -25,7 +25,7 @@
 
 use slopos_abi::arch::x86_64::cpuid::CPUID_FEAT_EDX_PAT;
 use slopos_abi::arch::x86_64::msr::Msr;
-use slopos_lib::{cpu, klog_debug, klog_info, klog_warn, InitFlag};
+use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
 // =============================================================================
 // Memory Type Constants
@@ -134,8 +134,7 @@ pub fn pat_init() {
     }
 
     if !pat_supported() {
-        klog_warn!("PAT: Not supported by CPU, framebuffer performance may suffer");
-        return;
+        panic!("PAT: Not supported by CPU - SlopOS requires PAT for framebuffer performance");
     }
 
     PAT_SUPPORTED.mark_set();
@@ -164,13 +163,10 @@ pub fn pat_init() {
 
     let new_pat = cpu::read_msr(Msr::PAT.address());
     if new_pat != PAT_VALUE {
-        klog_warn!(
-            "PAT: Write verification failed! Expected 0x{:016x}, got 0x{:016x}",
-            PAT_VALUE,
-            new_pat
+        panic!(
+            "PAT: Write verification failed! Expected {:#018x}, got {:#018x}",
+            PAT_VALUE, new_pat
         );
-    } else {
-        klog_info!("PAT: Initialized with WC support (PA1=WC, PA5=WC)");
-        klog_debug!("PAT: New value: 0x{:016x}", new_pat);
     }
+    klog_info!("PAT: Initialized with WC support (PA1=WC, PA5=WC)");
 }

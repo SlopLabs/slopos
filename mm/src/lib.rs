@@ -16,6 +16,7 @@ pub mod mmio;
 pub mod mmio_tests;
 pub mod page_alloc;
 pub mod paging;
+pub mod pat;
 pub mod process_vm;
 pub mod shared_memory;
 pub mod symbols;

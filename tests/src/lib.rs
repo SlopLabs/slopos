@@ -217,7 +217,7 @@ mod suites {
         test_page_alloc_stats, test_page_alloc_until_oom, test_page_alloc_write_verify,
         test_page_alloc_zero_full_page, test_page_alloc_zeroed, test_paging_cow_kernel,
         test_paging_get_kernel_dir, test_paging_user_accessible_kernel, test_paging_virt_to_phys,
-        test_process_heap_expansion_oom, test_process_vm_alloc_and_access,
+        test_pat_wc_enabled, test_process_heap_expansion_oom, test_process_vm_alloc_and_access,
         test_process_vm_brk_expansion, test_process_vm_counter_reset,
         test_process_vm_create_destroy_memory, test_process_vm_creation_pressure,
         test_process_vm_slot_reuse, test_refcount_during_oom, test_ring_buffer_basic,
@@ -466,6 +466,7 @@ mod suites {
             test_paging_get_kernel_dir,
             test_paging_user_accessible_kernel,
             test_paging_cow_kernel,
+            test_pat_wc_enabled,
         ]
     );
 
