@@ -255,6 +255,11 @@ mod suites {
         test_ioapic_register_constants, test_ioapic_unmask_invalid_gsi,
     };
 
+    use slopos_drivers::pit_tests::{
+        test_pit_frequency_valid, test_pit_poll_delay_no_early_exit, test_pit_poll_delay_stress,
+        test_pit_poll_delay_timing_consistency, test_pit_poll_delay_zero_ms,
+    };
+
     use crate::exception_tests::{
         test_critical_exception_classification, test_error_code_preservation,
         test_exception_names_all_vectors, test_exception_names_valid,
@@ -762,6 +767,17 @@ mod suites {
         ]
     );
     define_test_suite!(
+        pit,
+        SUITE_SCHEDULER,
+        [
+            test_pit_frequency_valid,
+            test_pit_poll_delay_zero_ms,
+            test_pit_poll_delay_no_early_exit,
+            test_pit_poll_delay_timing_consistency,
+            test_pit_poll_delay_stress,
+        ]
+    );
+    define_test_suite!(
         context,
         SUITE_SCHEDULER,
         [
@@ -946,6 +962,7 @@ mod suites {
             EXEC_SUITE_DESC,
             IRQ_SUITE_DESC,
             IOAPIC_SUITE_DESC,
+            PIT_SUITE_DESC,
             CONTEXT_SUITE_DESC,
             TLB_SUITE_DESC,
             MMIO_SUITE_DESC,

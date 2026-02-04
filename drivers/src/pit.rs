@@ -84,12 +84,16 @@ pub fn pit_disable_irq() {
 }
 
 fn pit_read_count() -> u16 {
-    unsafe {
+    // Must disable interrupts to prevent IRQ from corrupting the latch/read sequence
+    let flags = slopos_lib::cpu::save_flags_cli();
+    let count = unsafe {
         PIT_COMMAND.write(0x00);
         let low = PIT_CHANNEL0.read();
         let high = PIT_CHANNEL0.read();
         ((high as u16) << 8) | (low as u16)
-    }
+    };
+    slopos_lib::cpu::restore_flags(flags);
+    count
 }
 
 pub fn pit_poll_delay_ms(ms: u32) {

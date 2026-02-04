@@ -3,7 +3,6 @@
 //! Each CPU has its own scheduler instance with local run queues.
 //! This minimizes lock contention and improves cache locality.
 
-use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
@@ -164,6 +163,8 @@ pub struct PerCpuScheduler {
     pub total_preemptions: AtomicU64,
     pub total_ticks: AtomicU64,
     pub idle_time: AtomicU64,
+    pub total_yields: AtomicU64,
+    pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
     pub return_context: TaskContext,
     executing_task: AtomicBool,
@@ -190,6 +191,8 @@ impl PerCpuScheduler {
             total_preemptions: AtomicU64::new(0),
             total_ticks: AtomicU64::new(0),
             idle_time: AtomicU64::new(0),
+            total_yields: AtomicU64::new(0),
+            schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
             return_context: TaskContext::zero(),
             executing_task: AtomicBool::new(false),
@@ -243,6 +246,8 @@ impl PerCpuScheduler {
         self.total_preemptions.store(0, Ordering::Relaxed);
         self.total_ticks.store(0, Ordering::Relaxed);
         self.idle_time.store(0, Ordering::Relaxed);
+        self.total_yields.store(0, Ordering::Relaxed);
+        self.schedule_calls.store(0, Ordering::Relaxed);
         self.initialized.store(true, Ordering::Release);
         self.remote_inbox_head
             .store(ptr::null_mut(), Ordering::Release);
@@ -351,6 +356,14 @@ impl PerCpuScheduler {
 
     pub fn increment_idle_time(&self) {
         self.idle_time.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_yields(&self) {
+        self.total_yields.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_schedule_calls(&self) {
+        self.schedule_calls.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Push a task to this CPU's remote wake inbox.
@@ -555,6 +568,45 @@ pub fn get_total_ready_tasks() -> u32 {
     total
 }
 
+pub fn get_total_switches() -> u64 {
+    let mut total = 0u64;
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if let Some(count) =
+            with_cpu_scheduler(cpu_id, |sched| sched.total_switches.load(Ordering::Relaxed))
+        {
+            total = total.saturating_add(count);
+        }
+    }
+    total
+}
+
+pub fn get_total_yields() -> u64 {
+    let mut total = 0u64;
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if let Some(count) =
+            with_cpu_scheduler(cpu_id, |sched| sched.total_yields.load(Ordering::Relaxed))
+        {
+            total = total.saturating_add(count);
+        }
+    }
+    total
+}
+
+pub fn get_total_schedule_calls() -> u32 {
+    let mut total = 0u32;
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if let Some(count) =
+            with_cpu_scheduler(cpu_id, |sched| sched.schedule_calls.load(Ordering::Relaxed))
+        {
+            total = total.saturating_add(count);
+        }
+    }
+    total
+}
+
 pub fn select_target_cpu(task: *mut Task) -> usize {
     if task.is_null() {
         return slopos_lib::get_current_cpu();
@@ -607,27 +659,6 @@ fn find_least_loaded_cpu(affinity: u32) -> usize {
     best_cpu
 }
 
-// =============================================================================
-// Per-CPU Idle Task Creation for SMP
-// =============================================================================
-
-/// Idle loop function for AP idle tasks.
-/// This is the entry point for each AP's idle task.
-fn ap_idle_loop(_: *mut c_void) {
-    loop {
-        // Increment idle time counter
-        let cpu_id = slopos_lib::get_current_cpu();
-        with_cpu_scheduler(cpu_id, |sched| {
-            sched.increment_idle_time();
-        });
-        // Wait for interrupt (reschedule IPI or timer). The sti; hlt sequence
-        // atomically enables interrupts and halts until the next interrupt.
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
-    }
-}
-
 /// Create an idle task specifically for an Application Processor.
 /// Returns the task pointer on success, null on failure.
 ///
@@ -663,7 +694,7 @@ pub fn create_ap_idle_task(cpu_id: usize) -> *mut Task {
     let task_id = unsafe {
         task_create(
             name.as_ptr() as *const i8,
-            core::mem::transmute(ap_idle_loop as *const ()),
+            core::mem::transmute(super::scheduler::unified_idle_loop as *const ()),
             ptr::null_mut(),
             TASK_PRIORITY_IDLE,
             TASK_FLAG_KERNEL_MODE,
