@@ -43,6 +43,7 @@ pub struct PerCpuData {
     pub current_task: AtomicPtr<()>,
     pub kernel_stack_top: AtomicU64,
     pub preempt_count: AtomicU32,
+    pub reschedule_pending: AtomicU32,
     pub in_interrupt: AtomicBool,
     pub scheduler: AtomicPtr<()>,
     pub online: AtomicBool,
@@ -61,6 +62,7 @@ impl PerCpuData {
             current_task: AtomicPtr::new(ptr::null_mut()),
             kernel_stack_top: AtomicU64::new(0),
             preempt_count: AtomicU32::new(0),
+            reschedule_pending: AtomicU32::new(0),
             in_interrupt: AtomicBool::new(false),
             scheduler: AtomicPtr::new(ptr::null_mut()),
             online: AtomicBool::new(false),
@@ -137,6 +139,7 @@ pub fn init_percpu_for_cpu(cpu_id: usize, apic_id: u32) {
         data.current_task.store(ptr::null_mut(), Ordering::Release);
         data.kernel_stack_top.store(0, Ordering::Release);
         data.preempt_count.store(0, Ordering::Release);
+        data.reschedule_pending.store(0, Ordering::Release);
         data.in_interrupt.store(false, Ordering::Release);
         data.scheduler.store(ptr::null_mut(), Ordering::Release);
         data.online.store(false, Ordering::Release);

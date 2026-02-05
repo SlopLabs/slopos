@@ -5,12 +5,11 @@
 
 use core::marker::PhantomData;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::cpu;
 use crate::percpu::get_percpu_data;
 
-static RESCHEDULE_PENDING: AtomicU32 = AtomicU32::new(0);
 static RESCHEDULE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// RAII guard that disables preemption while held.
@@ -43,17 +42,21 @@ impl PreemptGuard {
 
     #[inline]
     pub fn set_reschedule_pending() {
-        RESCHEDULE_PENDING.store(1, Ordering::SeqCst);
+        get_percpu_data()
+            .reschedule_pending
+            .store(1, Ordering::Release);
     }
 
     #[inline]
     pub fn is_reschedule_pending() -> bool {
-        RESCHEDULE_PENDING.load(Ordering::SeqCst) != 0
+        get_percpu_data().reschedule_pending.load(Ordering::Acquire) != 0
     }
 
     #[inline]
     pub fn clear_reschedule_pending() {
-        RESCHEDULE_PENDING.store(0, Ordering::SeqCst);
+        get_percpu_data()
+            .reschedule_pending
+            .store(0, Ordering::Release);
     }
 }
 
@@ -70,7 +73,7 @@ impl Drop for PreemptGuard {
         let prev = percpu.preempt_count.fetch_sub(1, Ordering::Release);
         debug_assert!(prev > 0, "preempt_count underflow");
 
-        if prev == 1 && RESCHEDULE_PENDING.swap(0, Ordering::SeqCst) != 0 {
+        if prev == 1 && percpu.reschedule_pending.swap(0, Ordering::AcqRel) != 0 {
             let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
             if !fn_ptr.is_null() {
                 // SAFETY: fn_ptr was set via register_reschedule_callback with a valid fn()

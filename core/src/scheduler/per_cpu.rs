@@ -2,7 +2,19 @@
 //!
 //! Each CPU has its own scheduler instance with local run queues.
 //! This minimizes lock contention and improves cache locality.
+//!
+//! # Safety Model
+//!
+//! `PerCpuScheduler` uses interior mutability throughout so that all public
+//! APIs take `&self` (shared reference). This eliminates the UB that arose
+//! from handing out `&mut` to a `static` array element from multiple CPUs.
+//!
+//! - Atomic fields: direct load/store (lock-free).
+//! - `ready_queues`: wrapped in `UnsafeCell`, guarded by `queue_lock`.
+//! - `return_context`: wrapped in `UnsafeCell`, only written during
+//!   single-threaded init and read by the owning CPU.
 
+use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
@@ -153,7 +165,7 @@ const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 #[repr(C, align(64))]
 pub struct PerCpuScheduler {
     pub cpu_id: usize,
-    ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
+    ready_queues: UnsafeCell<[ReadyQueue; NUM_PRIORITY_LEVELS]>,
     queue_lock: Mutex<()>,
     current_task_atomic: AtomicPtr<Task>,
     idle_task_atomic: AtomicPtr<Task>,
@@ -166,11 +178,9 @@ pub struct PerCpuScheduler {
     pub total_yields: AtomicU64,
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
-    pub return_context: TaskContext,
+    pub return_context: UnsafeCell<TaskContext>,
     executing_task: AtomicBool,
-    /// Head of Treiber stack for remote wake requests (lock-free MPSC)
     remote_inbox_head: AtomicPtr<Task>,
-    /// Count of tasks in inbox (informational only)
     inbox_count: AtomicU32,
 }
 
@@ -181,7 +191,7 @@ impl PerCpuScheduler {
     pub const fn new() -> Self {
         Self {
             cpu_id: 0,
-            ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
+            ready_queues: UnsafeCell::new([EMPTY_QUEUE; NUM_PRIORITY_LEVELS]),
             queue_lock: Mutex::new(()),
             current_task_atomic: AtomicPtr::new(ptr::null_mut()),
             idle_task_atomic: AtomicPtr::new(ptr::null_mut()),
@@ -194,7 +204,7 @@ impl PerCpuScheduler {
             total_yields: AtomicU64::new(0),
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
-            return_context: TaskContext::zero(),
+            return_context: UnsafeCell::new(TaskContext::zero()),
             executing_task: AtomicBool::new(false),
             remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
             inbox_count: AtomicU32::new(0),
@@ -229,10 +239,19 @@ impl PerCpuScheduler {
         self.idle_task_atomic.store(task, Ordering::Release);
     }
 
-    pub fn init(&mut self, cpu_id: usize) {
-        self.cpu_id = cpu_id;
-        for queue in self.ready_queues.iter_mut() {
-            queue.init();
+    /// # Safety
+    /// Must be called exactly once per CPU during single-threaded init.
+    pub unsafe fn init(&self, cpu_id: usize) {
+        // SAFETY: called during single-threaded init before any concurrent access.
+        // cpu_id and time_slice are plain fields written only here; use raw pointer.
+        unsafe {
+            let ptr = self as *const Self as *mut Self;
+            (*ptr).cpu_id = cpu_id;
+            (*ptr).time_slice = 10;
+            let queues = &mut *self.ready_queues.get();
+            for queue in queues.iter_mut() {
+                queue.init();
+            }
         }
         self.current_task_atomic
             .store(ptr::null_mut(), Ordering::Release);
@@ -241,7 +260,6 @@ impl PerCpuScheduler {
                 .store(ptr::null_mut(), Ordering::Release);
         }
         self.enabled.store(false, Ordering::Relaxed);
-        self.time_slice = 10;
         self.total_switches.store(0, Ordering::Relaxed);
         self.total_preemptions.store(0, Ordering::Relaxed);
         self.total_ticks.store(0, Ordering::Relaxed);
@@ -258,7 +276,7 @@ impl PerCpuScheduler {
         self.initialized.load(Ordering::Acquire)
     }
 
-    pub fn enqueue_local(&mut self, task: *mut Task) -> i32 {
+    pub fn enqueue_local(&self, task: *mut Task) -> i32 {
         if task.is_null() {
             return -1;
         }
@@ -278,11 +296,12 @@ impl PerCpuScheduler {
         }
 
         let _guard = self.queue_lock.lock();
-        self.ready_queues[idx].enqueue(task)
+        // SAFETY: queue_lock held, exclusive access to ready_queues
+        let queues = unsafe { &mut *self.ready_queues.get() };
+        queues[idx].enqueue(task)
     }
 
-    pub fn dequeue_highest_priority(&mut self) -> *mut Task {
-        // Sanity check: ensure self pointer is in valid kernel space
+    pub fn dequeue_highest_priority(&self) -> *mut Task {
         let self_addr = self as *const _ as usize;
         if self_addr < 0xffffffff80000000 {
             klog_info!(
@@ -292,7 +311,9 @@ impl PerCpuScheduler {
             return ptr::null_mut();
         }
         let _guard = self.queue_lock.lock();
-        for queue in self.ready_queues.iter_mut() {
+        // SAFETY: queue_lock held, exclusive access to ready_queues
+        let queues = unsafe { &mut *self.ready_queues.get() };
+        for queue in queues.iter_mut() {
             let task = queue.dequeue();
             if !task.is_null() {
                 return task;
@@ -301,24 +322,30 @@ impl PerCpuScheduler {
         ptr::null_mut()
     }
 
-    pub fn remove_task(&mut self, task: *mut Task) -> i32 {
+    pub fn remove_task(&self, task: *mut Task) -> i32 {
         if task.is_null() {
             return -1;
         }
         let priority = unsafe { (*task).priority as usize };
         let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
         let _guard = self.queue_lock.lock();
-        self.ready_queues[idx].remove(task)
+        // SAFETY: queue_lock held, exclusive access to ready_queues
+        let queues = unsafe { &mut *self.ready_queues.get() };
+        queues[idx].remove(task)
     }
 
     pub fn total_ready_count(&self) -> u32 {
         let _guard = self.queue_lock.lock();
-        self.ready_queues.iter().map(|q| q.len()).sum()
+        // SAFETY: queue_lock held, read-only access to ready_queues
+        let queues = unsafe { &*self.ready_queues.get() };
+        queues.iter().map(|q| q.len()).sum()
     }
 
-    pub fn steal_task(&mut self) -> Option<*mut Task> {
+    pub fn steal_task(&self) -> Option<*mut Task> {
         let _guard = self.queue_lock.lock();
-        for queue in self.ready_queues.iter_mut().rev() {
+        // SAFETY: queue_lock held, exclusive access to ready_queues
+        let queues = unsafe { &mut *self.ready_queues.get() };
+        for queue in queues.iter_mut().rev() {
             if let Some(task) = queue.steal_from_tail() {
                 return Some(task);
             }
@@ -326,7 +353,7 @@ impl PerCpuScheduler {
         None
     }
 
-    pub fn set_idle_task(&mut self, task: *mut Task) {
+    pub fn set_idle_task(&self, task: *mut Task) {
         self.idle_task_atomic.store(task, Ordering::Release);
     }
 
@@ -406,11 +433,8 @@ impl PerCpuScheduler {
     }
 
     /// Drain all tasks from remote inbox into local ready queues.
-    ///
-    /// This is the single-consumer part of MPSC.
-    /// MUST only be called by the owning CPU!
-    pub fn drain_remote_inbox(&mut self) {
-        // Atomically take entire inbox
+    /// MUST only be called by the owning CPU.
+    pub fn drain_remote_inbox(&self) {
         let head = self
             .remote_inbox_head
             .swap(ptr::null_mut(), Ordering::AcqRel);
@@ -422,7 +446,6 @@ impl PerCpuScheduler {
         let mut count = 0u32;
         let mut current = head;
 
-        // Reverse the stack to maintain FIFO order
         let mut reversed: *mut Task = ptr::null_mut();
         while !current.is_null() {
             let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
@@ -434,31 +457,28 @@ impl PerCpuScheduler {
             count += 1;
         }
 
-        // Enqueue all tasks into local ready queues
         current = reversed;
         while !current.is_null() {
             let next = unsafe { (*current).next_inbox.load(Ordering::Acquire) };
 
-            // Clear inbox linkage
             unsafe {
                 (*current)
                     .next_inbox
                     .store(ptr::null_mut(), Ordering::Release);
             }
 
-            // Enqueue into appropriate priority queue
             let priority = unsafe { (*current).priority as usize };
             let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
 
-            // Local enqueue with lock
             let _guard = self.queue_lock.lock();
-            self.ready_queues[idx].enqueue(current);
+            // SAFETY: queue_lock held
+            let queues = unsafe { &mut *self.ready_queues.get() };
+            queues[idx].enqueue(current);
             drop(_guard);
 
             current = next;
         }
 
-        // Update inbox count
         self.inbox_count.fetch_sub(count, Ordering::Relaxed);
     }
 
@@ -505,28 +525,23 @@ pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {
     unsafe { CPU_SCHEDULERS[cpu_id].is_initialized() }
 }
 
-pub fn with_local_scheduler<R>(f: impl FnOnce(&mut PerCpuScheduler) -> R) -> R {
+pub fn with_local_scheduler<R>(f: impl FnOnce(&PerCpuScheduler) -> R) -> R {
     let cpu_id = slopos_lib::get_current_cpu();
-    unsafe {
-        let sched = &mut CPU_SCHEDULERS[cpu_id];
-        f(sched)
-    }
+    // SAFETY: cpu_id < MAX_CPUS guaranteed by get_current_cpu; shared ref only
+    let sched = unsafe { &CPU_SCHEDULERS[cpu_id] };
+    f(sched)
 }
 
-pub fn with_cpu_scheduler<R>(
-    cpu_id: usize,
-    f: impl FnOnce(&mut PerCpuScheduler) -> R,
-) -> Option<R> {
+pub fn with_cpu_scheduler<R>(cpu_id: usize, f: impl FnOnce(&PerCpuScheduler) -> R) -> Option<R> {
     if cpu_id >= MAX_CPUS {
         return None;
     }
-    unsafe {
-        let sched = &mut CPU_SCHEDULERS[cpu_id];
-        if !sched.is_initialized() {
-            return None;
-        }
-        Some(f(sched))
+    // SAFETY: bounds checked; shared ref only — interior mutability handles mutation
+    let sched = unsafe { &CPU_SCHEDULERS[cpu_id] };
+    if !sched.is_initialized() {
+        return None;
     }
+    Some(f(sched))
 }
 
 pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
@@ -731,12 +746,12 @@ pub fn create_ap_idle_task(cpu_id: usize) -> *mut Task {
 /// Get the return context for an AP to use when no tasks are available.
 /// This is stored in the per-CPU scheduler and initialized during AP startup.
 pub fn get_ap_return_context(cpu_id: usize) -> *mut TaskContext {
-    unsafe {
-        if cpu_id >= MAX_CPUS {
-            return ptr::null_mut();
-        }
-        &raw mut CPU_SCHEDULERS[cpu_id].return_context
+    if cpu_id >= MAX_CPUS {
+        return ptr::null_mut();
     }
+    // SAFETY: return_context is only written during single-threaded init
+    // and read by the owning CPU
+    unsafe { CPU_SCHEDULERS[cpu_id].return_context.get() }
 }
 
 /// Check if the given task is the idle task for any CPU
@@ -832,17 +847,17 @@ pub fn clear_cpu_queues(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-    unsafe {
-        let sched = &mut CPU_SCHEDULERS[cpu_id];
-        let _guard = sched.queue_lock.lock();
-        for queue in sched.ready_queues.iter_mut() {
-            queue.init();
-        }
-        // Clear current task but preserve idle task
-        sched
-            .current_task_atomic
-            .store(ptr::null_mut(), Ordering::Release);
+    // SAFETY: bounds checked; interior mutability via queue_lock + UnsafeCell
+    let sched = unsafe { &CPU_SCHEDULERS[cpu_id] };
+    let _guard = sched.queue_lock.lock();
+    // SAFETY: queue_lock held
+    let queues = unsafe { &mut *sched.ready_queues.get() };
+    for queue in queues.iter_mut() {
+        queue.init();
     }
+    sched
+        .current_task_atomic
+        .store(ptr::null_mut(), Ordering::Release);
 }
 
 /// Clear all per-CPU ready queues across all CPUs. Used during scheduler shutdown.
