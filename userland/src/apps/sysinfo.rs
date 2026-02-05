@@ -7,7 +7,7 @@ use crate::syscall::{DisplayInfo, ShmBuffer, UserSysInfo, core as sys_core, tty,
 use crate::theme::{COLOR_BACKGROUND, COLOR_TEXT};
 
 const SYSINFO_WIDTH: i32 = 360;
-const SYSINFO_HEIGHT: i32 = 220;
+const SYSINFO_HEIGHT: i32 = 258;
 const SYSINFO_MARGIN_X: i32 = 12;
 const SYSINFO_MARGIN_Y: i32 = 12;
 const SYSINFO_LINE_HEIGHT: i32 = 18;
