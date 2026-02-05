@@ -21,6 +21,14 @@ CARGO_TARGET_DIR ?= $(BUILD_DIR)/target
 QEMU_BIN ?= qemu-system-x86_64
 QEMU_SMP ?= 2
 QEMU_MEM ?= 512M
+# Hardware-accelerated virtualisation with TCG fallback:
+#   Linux  → KVM  (requires /dev/kvm; CI without it falls back to TCG)
+#   macOS  → HVF  (Intel Macs; Apple Silicon falls back to TCG)
+ifeq ($(UNAME_S),Darwin)
+QEMU_ACCEL ?= hvf:tcg
+else
+QEMU_ACCEL ?= kvm:tcg
+endif
 
 ISO := $(BUILD_DIR)/slop.iso
 ISO_NO_TESTS := $(BUILD_DIR)/slop-notests.iso
@@ -308,7 +316,7 @@ boot: iso-notests
 	fi; \
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
 		$(QEMU_BIN) \
-	  -machine q35,accel=tcg \
+	  -machine q35,accel=$(QEMU_ACCEL) \
 	  -smp $(QEMU_SMP) \
 	  -m $(QEMU_MEM) \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
@@ -372,7 +380,7 @@ boot-log: iso-notests
 	echo "Starting QEMU with $(BOOT_LOG_TIMEOUT)s timeout (logging to $(LOG_FILE))..."; \
 	set +e; \
 	timeout "$(BOOT_LOG_TIMEOUT)s" $(QEMU_BIN) \
-	  -machine q35,accel=tcg \
+	  -machine q35,accel=$(QEMU_ACCEL) \
 	  -smp $(QEMU_SMP) \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
@@ -415,7 +423,7 @@ test: iso-tests
 	echo "Starting QEMU for interrupt test harness..."; \
 	set +e; \
 	$(QEMU_BIN) \
-	  -machine q35,accel=tcg \
+	  -machine q35,accel=$(QEMU_ACCEL) \
 	  -smp $(QEMU_SMP) \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \

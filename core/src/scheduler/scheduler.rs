@@ -187,7 +187,11 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             ptr::null_mut()
         };
 
-        if is_user_mode {
+        // Use CS RPL bits to determine dispatch mode, not TASK_FLAG_USER_MODE.
+        // A user-mode task mid-syscall has CS=0x8 (kernel) in its saved context,
+        // so dispatching via context_switch (retq) is correct. Only dispatch via
+        // context_switch_user (iretq) when the saved CS is actually ring 3.
+        if (*to_task).context.cs & 3 == 3 {
             validate_user_context(&(*to_task).context, to_task);
             context_switch_user(old_ctx_ptr, &(*to_task).context);
         } else {
@@ -295,16 +299,14 @@ pub fn schedule() {
             (*idle_task).context.cr3 = kdir_phys;
         }
 
+        // Always save kernel context for ALL tasks, including user-mode
+        // tasks mid-syscall. Clear context_from_user so the next resume
+        // uses context_switch (retq) rather than context_switch_user (iretq).
         let current_ctx = if !current.is_null() {
-            let is_user = (*current).flags & TASK_FLAG_USER_MODE != 0;
-            if is_user {
+            if (*current).flags & TASK_FLAG_USER_MODE != 0 {
                 (*current).context_from_user = 0;
             }
-            if !is_user {
-                &raw mut (*current).context
-            } else {
-                ptr::null_mut()
-            }
+            &raw mut (*current).context
         } else {
             ptr::null_mut()
         };
