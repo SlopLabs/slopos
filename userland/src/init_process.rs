@@ -1,6 +1,5 @@
 use crate::syscall::{core as sys_core, process, tty};
 
-#[unsafe(link_section = ".user_text")]
 fn spawn_service(name: &[u8]) -> i32 {
     let tid = process::spawn(name);
     if tid <= 0 {
@@ -9,7 +8,6 @@ fn spawn_service(name: &[u8]) -> i32 {
     tid
 }
 
-#[unsafe(link_section = ".user_text")]
 pub fn init_user_main(_arg: *mut u8) {
     let roulette_tid = spawn_service(b"roulette");
     if roulette_tid > 0 {

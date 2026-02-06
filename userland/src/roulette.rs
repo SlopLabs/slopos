@@ -1,7 +1,6 @@
 use crate::syscall::{DisplayInfo, core as sys_core, roulette, tty, window};
 use core::ffi::c_void;
 
-#[unsafe(link_section = ".user_text")]
 fn text_fallback(fate: u32) {
     const HDR: &[u8] = b"ROULETTE: framebuffer unavailable, using text fallback\n";
     const LBL: &[u8] = b"Fate number: ";
@@ -32,12 +31,9 @@ fn text_fallback(fate: u32) {
     tty::write(b"\n");
 }
 
-#[unsafe(link_section = ".user_rodata")]
 static MSG_START: [u8; 16] = *b"ROULETTE: start\n";
-#[unsafe(link_section = ".user_rodata")]
 static MSG_FB_INFO_OK: [u8; 36] = *b"ROULETTE: fb_info ok, drawing wheel\n";
 
-#[unsafe(link_section = ".user_text")]
 pub fn roulette_user_main(_arg: *mut c_void) {
     let _ = tty::write(&MSG_START);
     let spin = roulette::spin();

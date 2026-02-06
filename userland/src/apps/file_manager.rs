@@ -305,7 +305,6 @@ impl FileManager {
 }
 
 /// Main entry point for standalone file manager binary
-#[unsafe(link_section = ".user_text")]
 pub fn file_manager_main(_arg: *mut c_void) {
     let mut fm = FileManager::new();
 

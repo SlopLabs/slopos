@@ -1150,7 +1150,6 @@ fn title_to_str(title: &[u8; 32]) -> &str {
     core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
 }
 
-#[unsafe(link_section = ".user_text")]
 pub fn compositor_user_main(_arg: *mut c_void) {
     tty::write(b"COMPOSITOR: starting\n");
     let mut wm = WindowManager::new();

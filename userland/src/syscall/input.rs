@@ -10,7 +10,6 @@ pub fn poll(event_out: &mut InputEvent) -> Option<InputEvent> {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn poll_batch(events: &mut [InputEvent]) -> u64 {
     unsafe {
         syscall2(
@@ -66,7 +65,6 @@ pub fn get_button_state() -> u8 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn drain_queue() {
     unsafe {
         syscall0(SYSCALL_DRAIN_QUEUE);

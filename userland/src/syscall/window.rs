@@ -5,19 +5,16 @@ use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4};
 use slopos_abi::{DisplayInfo, SurfaceRole, WindowInfo};
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn fb_info(out: &mut DisplayInfo) -> i64 {
     unsafe { syscall1(SYSCALL_FB_INFO, out as *mut _ as u64) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn fb_flip(token: u32) -> i64 {
     unsafe { syscall1(SYSCALL_FB_FLIP, token as u64) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_attach(token: u32, width: u32, height: u32) -> i64 {
     unsafe {
         syscall3(
@@ -30,25 +27,21 @@ pub fn surface_attach(token: u32, width: u32, height: u32) -> i64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_commit() -> i64 {
     unsafe { syscall0(SYSCALL_SURFACE_COMMIT) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_frame() -> i64 {
     unsafe { syscall0(SYSCALL_SURFACE_FRAME) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn poll_frame_done() -> u64 {
     unsafe { syscall0(SYSCALL_POLL_FRAME_DONE) }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn mark_frames_done(present_time_ms: u64) {
     unsafe {
         syscall1(SYSCALL_MARK_FRAMES_DONE, present_time_ms);
@@ -56,7 +49,6 @@ pub fn mark_frames_done(present_time_ms: u64) {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_damage(x: i32, y: i32, width: i32, height: i32) -> i64 {
     unsafe {
         syscall4(
@@ -70,31 +62,26 @@ pub fn surface_damage(x: i32, y: i32, width: i32, height: i32) -> i64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn buffer_age() -> u8 {
     unsafe { syscall0(SYSCALL_BUFFER_AGE) as u8 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_set_role(role: SurfaceRole) -> i64 {
     unsafe { syscall1(SYSCALL_SURFACE_SET_ROLE, role as u64) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_set_parent(parent_task_id: u32) -> i64 {
     unsafe { syscall1(SYSCALL_SURFACE_SET_PARENT, parent_task_id as u64) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_set_relative_position(rel_x: i32, rel_y: i32) -> i64 {
     unsafe { syscall2(SYSCALL_SURFACE_SET_REL_POS, rel_x as u64, rel_y as u64) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn surface_set_title(title: &str) -> i64 {
     let bytes = title.as_bytes();
     unsafe {
@@ -107,7 +94,6 @@ pub fn surface_set_title(title: &str) -> i64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn enumerate_windows(windows: &mut [WindowInfo]) -> u64 {
     unsafe {
         syscall2(
@@ -119,7 +105,6 @@ pub fn enumerate_windows(windows: &mut [WindowInfo]) -> u64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
     unsafe {
         syscall3(
@@ -132,13 +117,11 @@ pub fn set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn set_window_state(task_id: u32, state: u8) -> i64 {
     unsafe { syscall2(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64) as i64 }
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn raise_window(task_id: u32) -> i64 {
     unsafe { syscall1(SYSCALL_RAISE_WINDOW, task_id as u64) as i64 }
 }

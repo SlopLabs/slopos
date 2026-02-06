@@ -12,12 +12,11 @@
 //! - rax: return value
 //! - rcx, r11: clobbered by syscall instruction
 //!
-//! All functions are placed in `.user_text` for Ring 3 execution.
+//! All functions execute in Ring 3 as part of standalone userland ELF binaries.
 
 use core::arch::asm;
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall0(num: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -34,7 +33,6 @@ pub unsafe fn syscall0(num: u64) -> u64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -52,7 +50,6 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -71,7 +68,6 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -91,7 +87,6 @@ pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -112,7 +107,6 @@ pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> 
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     let ret: u64;
     unsafe {
@@ -134,7 +128,6 @@ pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
 }
 
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub unsafe fn syscall6(
     num: u64,
     arg0: u64,

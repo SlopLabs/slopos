@@ -1,5 +1,4 @@
 use core::ffi::c_void;
-#[unsafe(link_section = ".user_text")]
 pub fn u_memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     if dst.is_null() || src.is_null() || n == 0 {
         return dst;
@@ -15,7 +14,6 @@ pub fn u_memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     }
     dst
 }
-#[unsafe(link_section = ".user_text")]
 pub fn u_memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
     if dst.is_null() || n == 0 {
         return dst;
@@ -29,7 +27,6 @@ pub fn u_memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
     }
     dst
 }
-#[unsafe(link_section = ".user_text")]
 pub fn u_strlen(s: *const u8) -> usize {
     if s.is_null() {
         return 0;
@@ -44,7 +41,6 @@ pub fn u_strlen(s: *const u8) -> usize {
     }
     len
 }
-#[unsafe(link_section = ".user_text")]
 pub fn u_strnlen(s: *const u8, maxlen: usize) -> usize {
     if s.is_null() || maxlen == 0 {
         return 0;

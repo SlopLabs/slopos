@@ -46,29 +46,17 @@ const SHELL_MAX_TOKEN_LENGTH: usize = 64;
 const SHELL_PATH_BUF: usize = 128;
 const SHELL_IO_MAX: usize = 512;
 
-#[unsafe(link_section = ".user_rodata")]
 static PROMPT: &[u8] = b"$ ";
-#[unsafe(link_section = ".user_rodata")]
 static NL: &[u8] = b"\n";
-#[unsafe(link_section = ".user_rodata")]
 static WELCOME: &[u8] = b"SlopOS Shell v0.1 (userland)\n";
-#[unsafe(link_section = ".user_rodata")]
 static HELP_HEADER: &[u8] = b"Available commands:\n";
-#[unsafe(link_section = ".user_rodata")]
 static UNKNOWN_CMD: &[u8] = b"Unknown command. Type 'help'.\n";
-#[unsafe(link_section = ".user_rodata")]
 static PATH_TOO_LONG: &[u8] = b"path too long\n";
-#[unsafe(link_section = ".user_rodata")]
 static ERR_NO_SUCH: &[u8] = b"No such file or directory\n";
-#[unsafe(link_section = ".user_rodata")]
 static ERR_TOO_MANY_ARGS: &[u8] = b"too many arguments\n";
-#[unsafe(link_section = ".user_rodata")]
 static ERR_MISSING_OPERAND: &[u8] = b"missing operand\n";
-#[unsafe(link_section = ".user_rodata")]
 static ERR_MISSING_FILE: &[u8] = b"missing file operand\n";
-#[unsafe(link_section = ".user_rodata")]
 static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
-#[unsafe(link_section = ".user_rodata")]
 static HALTED: &[u8] = b"Shell requested shutdown...\n";
 
 const FONT_CHAR_WIDTH: i32 = 8;
@@ -151,7 +139,6 @@ impl DisplayState {
 // Safety: Userland is single-threaded with no preemption during shell code
 unsafe impl Sync for DisplayState {}
 
-#[unsafe(link_section = ".user_bss")]
 static DISPLAY: DisplayState = DisplayState::new();
 
 // =============================================================================
@@ -161,11 +148,9 @@ static DISPLAY: DisplayState = DisplayState::new();
 mod scrollback {
     use super::*;
 
-    #[unsafe(link_section = ".user_bss")]
     static DATA: SyncUnsafeCell<[u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]> =
         SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]);
 
-    #[unsafe(link_section = ".user_bss")]
     static LENS: SyncUnsafeCell<[u16; SHELL_SCROLLBACK_LINES]> =
         SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES]);
 
@@ -300,7 +285,6 @@ mod surface {
         }
     }
 
-    #[unsafe(link_section = ".user_bss")]
     static SURFACE: SyncUnsafeCell<ShellSurface> = SyncUnsafeCell::new(ShellSurface::empty());
 
     /// Access surface for drawing. Safety: single-threaded userland
@@ -354,18 +338,14 @@ mod surface {
 mod buffers {
     use super::*;
 
-    #[unsafe(link_section = ".user_bss")]
     static LINE_BUF: SyncUnsafeCell<[u8; 256]> = SyncUnsafeCell::new([0; 256]);
 
-    #[unsafe(link_section = ".user_bss")]
     static TOKEN_STORAGE: SyncUnsafeCell<[[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]> =
         SyncUnsafeCell::new([[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]);
 
-    #[unsafe(link_section = ".user_bss")]
     static PATH_BUF: SyncUnsafeCell<[u8; SHELL_PATH_BUF]> =
         SyncUnsafeCell::new([0; SHELL_PATH_BUF]);
 
-    #[unsafe(link_section = ".user_bss")]
     static LIST_ENTRIES: SyncUnsafeCell<[UserFsEntry; 32]> =
         SyncUnsafeCell::new([UserFsEntry::new(); 32]);
 
@@ -577,7 +557,6 @@ fn update_backspace_state(display: &DisplayState) {
 // Console operations (combined state + render)
 // =============================================================================
 
-#[unsafe(link_section = ".user_text")]
 fn console_write(display: &DisplayState, text: &[u8]) {
     if !display.enabled.get() {
         return;
@@ -788,7 +767,6 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
 // Public API functions
 // =============================================================================
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_init() {
     let mut info = DisplayInfo::default();
     if window::fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
@@ -829,7 +807,6 @@ fn shell_console_init() {
     DISPLAY.bg.set(SHELL_BG_COLOR);
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_clear() {
     if DISPLAY.enabled.get() {
         console_clear(&DISPLAY);
@@ -837,21 +814,18 @@ fn shell_console_clear() {
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_write(buf: &[u8]) {
     if DISPLAY.enabled.get() {
         console_write(&DISPLAY, buf);
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_write(buf: &[u8]) {
     let _ = tty::write(buf);
     shell_console_write(buf);
     shell_console_commit();
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_echo_char(c: u8) {
     let buf = [c];
     let _ = tty::write(&buf);
@@ -859,7 +833,6 @@ fn shell_echo_char(c: u8) {
     shell_console_commit();
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_get_cursor() -> (i32, i32) {
     if DISPLAY.enabled.get() {
         DISPLAY.cursor()
@@ -868,7 +841,6 @@ fn shell_console_get_cursor() -> (i32, i32) {
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_page_up() {
     if DISPLAY.enabled.get() {
         console_page_up(&DISPLAY);
@@ -876,7 +848,6 @@ fn shell_console_page_up() {
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_page_down() {
     if DISPLAY.enabled.get() {
         console_page_down(&DISPLAY);
@@ -884,14 +855,12 @@ fn shell_console_page_down() {
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_commit() {
     if DISPLAY.enabled.get() {
         let _ = window::surface_commit();
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_console_follow_bottom() {
     if DISPLAY.enabled.get() {
         console_ensure_follow(&DISPLAY);
@@ -899,7 +868,6 @@ fn shell_console_follow_bottom() {
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_redraw_input(_line_row: i32, input: &[u8]) {
     if DISPLAY.enabled.get() {
         console_rewrite_input(&DISPLAY, PROMPT, input);
@@ -919,7 +887,6 @@ struct BuiltinEntry {
     func: BuiltinFn,
 }
 
-#[unsafe(link_section = ".user_rodata")]
 static BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: b"help",
@@ -983,7 +950,6 @@ fn is_space(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
-#[unsafe(link_section = ".user_text")]
 fn u_streq_slice(a: *const u8, b: &[u8]) -> bool {
     if a.is_null() {
         return b.is_empty();
@@ -1002,7 +968,6 @@ fn u_streq_slice(a: *const u8, b: &[u8]) -> bool {
     true
 }
 
-#[unsafe(link_section = ".user_text")]
 fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
     if buffer.is_empty() {
         return -1;
@@ -1041,7 +1006,6 @@ fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
     0
 }
 
-#[unsafe(link_section = ".user_text")]
 fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     if line.is_empty() || tokens.is_empty() {
         return 0;
@@ -1079,7 +1043,6 @@ fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     count as i32
 }
 
-#[unsafe(link_section = ".user_text")]
 fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {
     for entry in BUILTINS {
         if u_streq_slice(name, entry.name) {
@@ -1089,7 +1052,6 @@ fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {
     None
 }
 
-#[unsafe(link_section = ".user_text")]
 fn print_kv(key: &[u8], value: u64) {
     if !key.is_empty() {
         shell_write(key);
@@ -1122,7 +1084,6 @@ fn print_kv(key: &[u8], value: u64) {
 // Built-in commands
 // =============================================================================
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_help(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(HELP_HEADER);
     for entry in BUILTINS {
@@ -1137,7 +1098,6 @@ fn cmd_help(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
     let mut first = true;
     for i in 1..argc {
@@ -1160,20 +1120,17 @@ fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(b"\x1B[2J\x1B[H");
     shell_console_clear();
     0
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(HALTED);
     process::halt();
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
@@ -1204,7 +1161,6 @@ fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_sysinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
     let rc = process::spawn(b"sysinfo\0");
     if rc <= 0 {
@@ -1214,7 +1170,6 @@ fn cmd_sysinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
         shell_write(ERR_TOO_MANY_ARGS);
@@ -1272,7 +1227,6 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     result
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         shell_write(ERR_MISSING_FILE);
@@ -1316,7 +1270,6 @@ fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         shell_write(ERR_MISSING_FILE);
@@ -1376,7 +1329,6 @@ fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         shell_write(ERR_MISSING_OPERAND);
@@ -1400,7 +1352,6 @@ fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     })
 }
 
-#[unsafe(link_section = ".user_text")]
 fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         shell_write(ERR_MISSING_OPERAND);
@@ -1428,7 +1379,6 @@ fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
 // Main entry point
 // =============================================================================
 
-#[unsafe(link_section = ".user_text")]
 pub fn shell_user_main(_arg: *mut c_void) {
     shell_console_init();
     shell_console_clear();

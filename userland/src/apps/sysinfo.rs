@@ -182,7 +182,6 @@ impl SysinfoApp {
     }
 }
 
-#[unsafe(link_section = ".user_text")]
 pub fn sysinfo_main(_arg: *mut c_void) {
     let mut app = SysinfoApp::new();
     if !app.init_surface() {

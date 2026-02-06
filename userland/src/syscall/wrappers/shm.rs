@@ -13,7 +13,6 @@ pub struct ShmBuffer {
 }
 
 impl ShmBuffer {
-    #[unsafe(link_section = ".user_text")]
     pub fn create(size: usize) -> Result<Self, ShmError> {
         if size == 0 {
             return Err(ShmError::InvalidSize);
@@ -56,7 +55,6 @@ impl ShmBuffer {
         unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
     }
 
-    #[unsafe(link_section = ".user_text")]
     pub fn attach_surface(&self, width: u32, height: u32) -> Result<(), ShmError> {
         let result = crate::syscall::window::surface_attach(self.token.get(), width, height);
         if result < 0 {
@@ -68,7 +66,6 @@ impl ShmBuffer {
 }
 
 impl Drop for ShmBuffer {
-    #[unsafe(link_section = ".user_text")]
     fn drop(&mut self) {
         unsafe {
             memory::shm_unmap(self.ptr.as_ptr() as u64);
@@ -84,7 +81,6 @@ pub struct ShmBufferRef {
 }
 
 impl ShmBufferRef {
-    #[unsafe(link_section = ".user_text")]
     pub fn map_readonly(token: u32, size: usize) -> Result<Self, ShmError> {
         let token_nz = NonZeroU32::new(token).ok_or(ShmError::InvalidToken)?;
 
@@ -132,7 +128,6 @@ impl ShmBufferRef {
 }
 
 impl Drop for ShmBufferRef {
-    #[unsafe(link_section = ".user_text")]
     fn drop(&mut self) {
         unsafe {
             memory::shm_unmap(self.ptr.as_ptr() as u64);
@@ -146,7 +141,6 @@ pub struct CachedShmMapping {
 }
 
 impl CachedShmMapping {
-    #[unsafe(link_section = ".user_text")]
     pub fn map_readonly(token: u32, size: usize) -> Option<Self> {
         if token == 0 || size == 0 {
             return None;

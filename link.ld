@@ -32,13 +32,6 @@ SECTIONS
     _text_end = .;
   } :text
 
-  /* User-executable text (mapped U/S=1 for ring3 tasks) */
-  .user_text ALIGN(4096) : {
-    _user_text_start = .;
-    *(.user_text .user_text.*)
-    _user_text_end = .;
-  } :text
-
   /* Kernel start symbol (alias for start of text) */
   _kernel_start = _text_start;
 
@@ -46,13 +39,6 @@ SECTIONS
     _rodata_start = .;
     *(.rodata .rodata.*)
     _rodata_end = .;
-  } :rodata
-
-  /* User read-only data */
-  .user_rodata ALIGN(4096) : {
-    _user_rodata_start = .;
-    *(.user_rodata .user_rodata.*)
-    _user_rodata_end = .;
   } :rodata
 
   .boot_init_early_hw ALIGN(8) : {
@@ -89,20 +75,6 @@ SECTIONS
     _data_start = .;
     *(.data .data.*)
     _data_end = .;
-  } :data
-
-  /* User writable globals */
-  .user_data ALIGN(4096) : {
-    _user_data_start = .;
-    *(.user_data .user_data.*)
-    _user_data_end = .;
-  } :data
-
-  /* User zero-initialized globals */
-  .user_bss (NOLOAD) : ALIGN(4096) {
-    _user_bss_start = .;
-    *(.user_bss .user_bss.*)
-    _user_bss_end = .;
   } :data
 
   .bss (NOLOAD) : ALIGN(4096) {

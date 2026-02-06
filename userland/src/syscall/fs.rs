@@ -32,7 +32,6 @@ use slopos_abi::{UserFsList, UserFsStat};
 /// * `EACCES` - Permission denied
 /// * `EINVAL` - Invalid flags
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<RawFd> {
     let result = unsafe { syscall2(SYSCALL_FS_OPEN, path as u64, flags as u64) };
     demux(result).map(|v| v as RawFd)
@@ -40,7 +39,6 @@ pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<RawFd> {
 
 /// Open a file using a CStr path.
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<RawFd> {
     open_path(path.as_ptr(), flags)
 }
@@ -50,7 +48,6 @@ pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<RawFd> {
 /// # Errors
 /// * `EBADF` - Invalid file descriptor
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn close_fd(fd: RawFd) -> SyscallResult<()> {
     let result = unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) };
     demux(result).map(|_| ())
@@ -65,7 +62,6 @@ pub fn close_fd(fd: RawFd) -> SyscallResult<()> {
 /// * `EBADF` - Invalid file descriptor
 /// * `EIO` - I/O error
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn read_slice(fd: RawFd, buf: &mut [u8]) -> SyscallResult<usize> {
     let result = unsafe {
         syscall3(
@@ -88,7 +84,6 @@ pub fn read_slice(fd: RawFd, buf: &mut [u8]) -> SyscallResult<usize> {
 /// * `EIO` - I/O error
 /// * `ENOSPC` - No space left on device
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn write_slice(fd: RawFd, buf: &[u8]) -> SyscallResult<usize> {
     let result = unsafe {
         syscall3(
@@ -110,7 +105,6 @@ pub fn write_slice(fd: RawFd, buf: &[u8]) -> SyscallResult<usize> {
 /// # Errors
 /// * `ENOENT` - File not found
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn stat_path(path: *const c_char, out_stat: &mut UserFsStat) -> SyscallResult<()> {
     let result = unsafe { syscall2(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64) };
     demux(result).map(|_| ())
@@ -126,7 +120,6 @@ pub fn stat_path(path: *const c_char, out_stat: &mut UserFsStat) -> SyscallResul
 /// * `ENOENT` - Parent directory not found
 /// * `ENOSPC` - No space left on device
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn mkdir_path(path: *const c_char) -> SyscallResult<()> {
     let result = unsafe { syscall1(SYSCALL_FS_MKDIR, path as u64) };
     demux(result).map(|_| ())
@@ -142,7 +135,6 @@ pub fn mkdir_path(path: *const c_char) -> SyscallResult<()> {
 /// * `EISDIR` - Is a non-empty directory
 /// * `EBUSY` - File is in use
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn unlink_path(path: *const c_char) -> SyscallResult<()> {
     let result = unsafe { syscall1(SYSCALL_FS_UNLINK, path as u64) };
     demux(result).map(|_| ())
@@ -158,7 +150,6 @@ pub fn unlink_path(path: *const c_char) -> SyscallResult<()> {
 /// * `ENOENT` - Directory not found
 /// * `ENOTDIR` - Path is not a directory
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()> {
     let result = unsafe { syscall2(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64) };
     demux(result).map(|_| ())
@@ -173,14 +164,12 @@ pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()>
 /// # Safety
 /// `path` must be a valid null-terminated string pointer.
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub(crate) unsafe fn open_raw(path: *const c_char, flags: u32) -> i64 {
     unsafe { syscall2(SYSCALL_FS_OPEN, path as u64, flags as u64) as i64 }
 }
 
 /// Raw close syscall for libc compatibility.
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub(crate) fn close_raw(fd: RawFd) -> i64 {
     unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) as i64 }
 }
@@ -190,7 +179,6 @@ pub(crate) fn close_raw(fd: RawFd) -> i64 {
 /// # Safety
 /// `buf` must be valid for writes of `len` bytes.
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub(crate) unsafe fn read_raw(fd: RawFd, buf: *mut c_void, len: usize) -> i64 {
     unsafe { syscall3(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
 }
@@ -200,7 +188,6 @@ pub(crate) unsafe fn read_raw(fd: RawFd, buf: *mut c_void, len: usize) -> i64 {
 /// # Safety
 /// `buf` must be valid for reads of `len` bytes.
 #[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub(crate) unsafe fn write_raw(fd: RawFd, buf: *const c_void, len: usize) -> i64 {
     unsafe { syscall3(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
 }
