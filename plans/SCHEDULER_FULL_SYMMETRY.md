@@ -3,7 +3,7 @@
 **Status**: ✅ COMPLETE  
 **Priority**: Low (cleanup, no functional impact)  
 **Prerequisite**: Scheduler Unification (COMPLETE)
-**Validation**: `make test` passes (`373/373`)
+**Validation**: `make test` passes (`378/378`)
 
 ---
 
@@ -19,7 +19,7 @@ All planned asymmetries were removed via instant replacement (no migration perio
 ### Per-Phase Process
 
 1. Implement the phase changes
-2. Run `make test` - all 373 tests must pass
+2. Run `make test` - all 378 tests must pass
 3. User tests boot manually and reports result
 4. If issues: fix and iterate until user confirms working
 5. Commit the phase
@@ -104,7 +104,7 @@ Each phase is atomic: implement unified code AND delete old code in the same com
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "sched\.current_task[[:space:]]*=\|sched\.idle_task[[:space:]]*=" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -130,7 +130,7 @@ grep -n "sched\.current_task[[:space:]]*=\|sched\.idle_task[[:space:]]*=" core/s
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "sched\.ready_queues\|SchedulerInner::enqueue_task\|SchedulerInner::dequeue_highest_priority\|SchedulerInner::remove_task" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -155,7 +155,7 @@ grep -n "sched\.ready_queues\|SchedulerInner::enqueue_task\|SchedulerInner::dequ
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "sched\.enabled\|sched\.preemption_enabled\|sched\.policy" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -184,7 +184,7 @@ grep -n "sched\.enabled\|sched\.preemption_enabled\|sched\.policy" core/src/sche
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "idle_task_function\|ap_idle_loop" core/src/scheduler/*.rs
 # Should find 0 results
 ```
@@ -209,7 +209,7 @@ grep -n "idle_task_function\|ap_idle_loop" core/src/scheduler/*.rs
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "AP PATH\|BSP PATH\|cpu_id != 0\|cpu_id == 0" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -229,7 +229,7 @@ grep -n "AP PATH\|BSP PATH\|cpu_id != 0\|cpu_id == 0" core/src/scheduler/schedul
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "ap_task_exit_to_idle" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -249,7 +249,7 @@ grep -n "ap_task_exit_to_idle" core/src/scheduler/scheduler.rs
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "scheduler_timer_tick_ap" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -271,7 +271,7 @@ grep -n "scheduler_timer_tick_ap" core/src/scheduler/scheduler.rs
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 ```
 
 ---
@@ -294,7 +294,7 @@ make test  # 373/373
 
 **Verification**:
 ```bash
-make test  # 373/373
+make test  # 378/378
 grep -n "SchedulerInner\|SCHEDULER\.\|with_scheduler" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -315,7 +315,7 @@ grep -n "SchedulerInner\|SCHEDULER\.\|with_scheduler" core/src/scheduler/schedul
 | 8 | BSP stack switch conditional | Medium |
 | 9 | `SchedulerInner` entirely | Low |
 
-All 373 tests must pass after each phase.
+All 378 tests must pass after each phase.
 
 ---
 
@@ -332,7 +332,7 @@ core/src/scheduler/per_cpu.rs     # Phases 4, 8
 
 ```bash
 # After each phase
-make test                    # All 373 tests must pass
+make test                    # All 378 tests must pass
 
 # Check for remaining special cases (should decrease each phase)
 grep -c "cpu_id == 0\|cpu_id != 0" core/src/scheduler/scheduler.rs

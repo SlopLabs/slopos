@@ -130,13 +130,12 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    let last_cpu = unsafe { (*task).last_cpu as usize };
-    per_cpu::with_cpu_scheduler(last_cpu, |sched| {
-        sched.remove_task(task);
-        if sched.current_task() == task {
-            sched.set_current_task(ptr::null_mut());
-        }
-    });
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.remove_task(task);
+        });
+    }
 
     0
 }
@@ -697,7 +696,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         });
 
         // 2. Check for pause (test reinitialization)
-        if per_cpu::are_aps_paused() {
+        if per_cpu::should_pause_scheduler_loop(cpu_id) {
             unsafe {
                 core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
             }
@@ -716,7 +715,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             });
 
             // Re-check pause after marking executing
-            if per_cpu::are_aps_paused() {
+            if per_cpu::should_pause_scheduler_loop(cpu_id) {
                 per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                     sched.enqueue_local(next_task);
                     sched.set_executing_task(false);

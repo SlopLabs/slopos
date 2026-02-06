@@ -564,6 +564,10 @@ pub fn task_create(
     task_ref.fate_value = 0;
     task_ref.fate_pending = 0;
     task_ref.next_ready = ptr::null_mut();
+    task_ref
+        .next_inbox
+        .store(ptr::null_mut(), Ordering::Release);
+    task_ref.refcnt.store(0, Ordering::Release);
 
     init_task_context(task_ref);
 
@@ -617,8 +621,6 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
 
-    scheduler::unschedule_task(task_ptr);
-
     let now = kdiag_timestamp();
     unsafe {
         if (*task_ptr).last_run_timestamp != 0 && now >= (*task_ptr).last_run_timestamp {
@@ -646,6 +648,8 @@ pub fn task_terminate(task_id: u32) -> c_int {
             .waiting_on
             .store(INVALID_TASK_ID, Ordering::Release);
     }
+
+    scheduler::unschedule_task(task_ptr);
 
     // Memory barrier: ensure TERMINATED state is visible before we wake dependents
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -1084,6 +1088,8 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     child.fate_value = 0;
     child.fate_pending = 0;
     child.next_ready = ptr::null_mut();
+    child.next_inbox.store(ptr::null_mut(), Ordering::Release);
+    child.refcnt.store(0, Ordering::Release);
 
     with_task_manager(|mgr| {
         mgr.num_tasks = mgr.num_tasks.saturating_add(1);

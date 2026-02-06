@@ -49,6 +49,19 @@ impl ReadyQueue {
         self.count.store(0, Ordering::Relaxed);
     }
 
+    fn clear_with_ref_release(&mut self) {
+        let mut cursor = self.head;
+        while !cursor.is_null() {
+            let next = unsafe { (*cursor).next_ready };
+            unsafe {
+                (*cursor).next_ready = ptr::null_mut();
+                (*cursor).dec_ref();
+            }
+            cursor = next;
+        }
+        self.init();
+    }
+
     fn is_empty(&self) -> bool {
         self.count.load(Ordering::Relaxed) == 0
     }
@@ -84,6 +97,9 @@ impl ReadyQueue {
             self.tail = task;
         }
         self.count.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            (*task).inc_ref();
+        }
         0
     }
 
@@ -100,6 +116,9 @@ impl ReadyQueue {
             (*task).next_ready = ptr::null_mut();
         }
         self.count.fetch_sub(1, Ordering::Relaxed);
+        unsafe {
+            (*task).dec_ref();
+        }
         task
     }
 
@@ -121,6 +140,9 @@ impl ReadyQueue {
                 }
                 unsafe { (*cursor).next_ready = ptr::null_mut() };
                 self.count.fetch_sub(1, Ordering::Relaxed);
+                unsafe {
+                    (*cursor).dec_ref();
+                }
                 return 0;
             }
             prev = cursor;
@@ -153,6 +175,9 @@ impl ReadyQueue {
         unsafe { (*prev).next_ready = ptr::null_mut() };
         self.tail = prev;
         self.count.fetch_sub(1, Ordering::Relaxed);
+        unsafe {
+            (*cursor).dec_ref();
+        }
 
         Some(cursor)
     }
@@ -248,7 +273,7 @@ impl PerCpuScheduler {
             (*ptr).time_slice = 10;
             let queues = &mut *self.ready_queues.get();
             for queue in queues.iter_mut() {
-                queue.init();
+                queue.clear_with_ref_release();
             }
         }
         self.current_task_atomic
@@ -265,9 +290,7 @@ impl PerCpuScheduler {
         self.total_yields.store(0, Ordering::Relaxed);
         self.schedule_calls.store(0, Ordering::Relaxed);
         self.initialized.store(true, Ordering::Release);
-        self.remote_inbox_head
-            .store(ptr::null_mut(), Ordering::Release);
-        self.inbox_count.store(0, Ordering::Relaxed);
+        self.clear_remote_inbox_with_ref_release();
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -400,6 +423,14 @@ impl PerCpuScheduler {
             return;
         }
 
+        // Acquire inbox ownership before publishing task into the lock-free list.
+        // This prevents a drain from observing the task and dropping the reference
+        // before the producer has incremented refcnt.
+        unsafe {
+            (*task).last_cpu = self.cpu_id as u8;
+            (*task).inc_ref();
+        }
+
         // Lock-free push using CAS loop (Treiber stack pattern)
         loop {
             // Load current head
@@ -465,19 +496,68 @@ impl PerCpuScheduler {
                     .store(ptr::null_mut(), Ordering::Release);
             }
 
-            let priority = unsafe { (*current).priority as usize };
-            let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+            let should_enqueue = unsafe { (*current).state() == TASK_STATE_READY };
+            if should_enqueue {
+                unsafe {
+                    (*current).last_cpu = self.cpu_id as u8;
+                }
+                let priority = unsafe { (*current).priority as usize };
+                let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
 
-            let _guard = self.queue_lock.lock();
-            // SAFETY: queue_lock held
-            let queues = unsafe { &mut *self.ready_queues.get() };
-            queues[idx].enqueue(current);
-            drop(_guard);
+                let _guard = self.queue_lock.lock();
+                // SAFETY: queue_lock held
+                let queues = unsafe { &mut *self.ready_queues.get() };
+                queues[idx].enqueue(current);
+                drop(_guard);
+            }
+
+            unsafe {
+                (*current).dec_ref();
+            }
 
             current = next;
         }
 
-        self.inbox_count.fetch_sub(count, Ordering::Relaxed);
+        self.saturating_sub_inbox_count(count);
+    }
+
+    fn clear_remote_inbox_with_ref_release(&self) {
+        let mut cursor = self
+            .remote_inbox_head
+            .swap(ptr::null_mut(), Ordering::AcqRel);
+        let mut drained = 0u32;
+        while !cursor.is_null() {
+            let next = unsafe { (*cursor).next_inbox.load(Ordering::Acquire) };
+            unsafe {
+                (*cursor)
+                    .next_inbox
+                    .store(ptr::null_mut(), Ordering::Release);
+                (*cursor).dec_ref();
+            }
+            cursor = next;
+            drained = drained.saturating_add(1);
+        }
+        self.saturating_sub_inbox_count(drained);
+    }
+
+    fn saturating_sub_inbox_count(&self, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+
+        let mut current = self.inbox_count.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(amount);
+            match self.inbox_count.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Check if inbox has pending tasks
@@ -817,6 +897,11 @@ pub fn are_aps_paused() -> bool {
     AP_PAUSED.load(Ordering::Acquire)
 }
 
+#[inline]
+pub fn should_pause_scheduler_loop(cpu_id: usize) -> bool {
+    cpu_id != 0 && are_aps_paused()
+}
+
 /// Clear all ready queues for a specific CPU. Used during test reinitialization.
 pub fn clear_cpu_queues(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
@@ -828,8 +913,10 @@ pub fn clear_cpu_queues(cpu_id: usize) {
     // SAFETY: queue_lock held
     let queues = unsafe { &mut *sched.ready_queues.get() };
     for queue in queues.iter_mut() {
-        queue.init();
+        queue.clear_with_ref_release();
     }
+    drop(_guard);
+    sched.clear_remote_inbox_with_ref_release();
     sched
         .current_task_atomic
         .store(ptr::null_mut(), Ordering::Release);

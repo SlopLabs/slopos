@@ -1319,6 +1319,71 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
     TestResult::Pass
 }
 
+/// Test: Draining remote inbox must not enqueue non-ready tasks.
+pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu_id = slopos_lib::get_current_cpu();
+
+    let task_id = task_create(
+        b"InboxBlocked\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.push_remote_wake(task_ptr);
+    });
+
+    if task_set_state(task_id, TASK_STATE_RUNNING) != 0
+        || task_set_state(task_id, TASK_STATE_BLOCKED) != 0
+    {
+        klog_info!("SCHED_TEST: Failed to transition task to BLOCKED before inbox drain");
+        return TestResult::Fail;
+    }
+
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.drain_remote_inbox();
+    });
+
+    let ready_count =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
+    if ready_count != 0 {
+        klog_info!(
+            "SCHED_TEST: Non-ready task was enqueued from inbox (ready_count={})",
+            ready_count
+        );
+        return TestResult::Fail;
+    }
+
+    let inbox_pending =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
+            .unwrap_or(true);
+    if inbox_pending {
+        klog_info!("SCHED_TEST: Inbox still has pending entries after drain");
+        return TestResult::Fail;
+    }
+
+    if unsafe { (*task_ptr).ref_count() } != 0 {
+        klog_info!(
+            "SCHED_TEST: Task refcount leaked after inbox drain (refcnt={})",
+            unsafe { (*task_ptr).ref_count() }
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 /// Test: Cross-CPU schedule_task uses lock-free path
 /// Verifies that schedule_task to another CPU uses push_remote_wake
 pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
@@ -1352,11 +1417,13 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
         return TestResult::Fail;
     }
+    let cpu_id = slopos_lib::get_current_cpu();
 
-    // Set affinity to CPU 1 to force cross-CPU scheduling
+    // Set affinity to CPU 1 to force cross-CPU scheduling.
+    // Keep last_cpu on the current CPU so the scheduler must migrate it.
     unsafe {
         (*task_ptr).cpu_affinity = 1 << 1; // Only CPU 1
-        (*task_ptr).last_cpu = 1;
+        (*task_ptr).last_cpu = cpu_id as u8;
     }
 
     // Schedule task - should use lock-free path to CPU 1
@@ -1377,6 +1444,14 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
 
     if ready_on_cpu1 == 0 {
         klog_info!("SCHED_TEST: Task not found on CPU 1 after cross-CPU schedule");
+        return TestResult::Fail;
+    }
+
+    if unsafe { (*task_ptr).last_cpu } != 1 {
+        klog_info!(
+            "SCHED_TEST: last_cpu not updated to target CPU (expected 1, got {})",
+            unsafe { (*task_ptr).last_cpu }
+        );
         return TestResult::Fail;
     }
 

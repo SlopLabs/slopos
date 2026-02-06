@@ -673,13 +673,43 @@ impl Task {
     /// Increment reference count. Returns new count.
     #[inline]
     pub fn inc_ref(&self) -> u32 {
-        self.refcnt.fetch_add(1, Ordering::AcqRel) + 1
+        let mut current = self.refcnt.load(Ordering::Acquire);
+        loop {
+            if current == u32::MAX {
+                return u32::MAX;
+            }
+            let next = current + 1;
+            match self.refcnt.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Decrement reference count. Returns true if this was the last reference.
     #[inline]
     pub fn dec_ref(&self) -> bool {
-        self.refcnt.fetch_sub(1, Ordering::AcqRel) == 1
+        let mut current = self.refcnt.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return false;
+            }
+            let next = current - 1;
+            match self.refcnt.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next == 0,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Get current reference count.

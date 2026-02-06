@@ -235,7 +235,8 @@ mod suites {
         test_create_null_name, test_create_over_max_tasks, test_cross_cpu_schedule_lockfree,
         test_double_terminate, test_find_invalid_id, test_get_info_null_output,
         test_idle_priority_last, test_interleaved_operations, test_many_same_priority_tasks,
-        test_priority_ordering, test_rapid_create_destroy_cycle, test_remote_inbox_multiple_tasks,
+        test_priority_ordering, test_rapid_create_destroy_cycle,
+        test_remote_inbox_drops_non_ready_tasks, test_remote_inbox_multiple_tasks,
         test_remote_inbox_push_drain, test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack,
         test_resolve_idle_stack_reports_missing_idle_task,
         test_resolve_idle_stack_reports_missing_kernel_stack, test_schedule_duplicate_task,
@@ -589,6 +590,7 @@ mod suites {
             test_remote_inbox_push_drain,
             test_remote_inbox_multiple_tasks,
             test_timer_tick_drains_inbox,
+            test_remote_inbox_drops_non_ready_tasks,
             test_cross_cpu_schedule_lockfree,
         ]
     );
