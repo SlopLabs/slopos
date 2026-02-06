@@ -21,7 +21,7 @@
 //! | `tty` | TTY/console I/O (not file descriptors!) |
 //! | `fs` | File descriptor operations |
 //! | `memory` | brk, sbrk, shared memory |
-//! | `process` | spawn, exec, fork, halt |
+//! | `process` | spawn by path, exec, fork, halt |
 //! | `window` | Framebuffer, surface, window management |
 //! | `input` | Input events, pointer, keyboard |
 //! | `roulette` | Wheel of Fate syscalls |

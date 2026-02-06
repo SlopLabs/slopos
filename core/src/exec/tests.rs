@@ -7,7 +7,7 @@ use slopos_mm::elf::{ELF_MAGIC, ElfValidator};
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm;
 
-use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH, resolve_program_spec};
+use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 
 const MINIMAL_ELF_SIZE: usize = 64;
 
@@ -353,30 +353,18 @@ pub fn test_exec_max_size_boundary() -> c_int {
     0
 }
 
-pub fn test_program_spec_resolves_init() -> c_int {
-    let Some(spec) = resolve_program_spec(b"init") else {
-        klog_info!("EXEC_TEST: BUG - failed to resolve init spec");
-        return -1;
-    };
-
-    if spec.path != INIT_PATH {
-        klog_info!("EXEC_TEST: BUG - init spec path mismatch");
+pub fn test_init_path_is_absolute() -> c_int {
+    if INIT_PATH.first().copied() != Some(b'/') {
+        klog_info!("EXEC_TEST: BUG - INIT_PATH must be absolute");
         return -1;
     }
-
     0
 }
 
-pub fn test_program_spec_resolves_nul_terminated_name() -> c_int {
-    let Some(spec) = resolve_program_spec(b"shell\0") else {
-        klog_info!("EXEC_TEST: BUG - failed to resolve nul-terminated shell name");
-        return -1;
-    };
-
-    if spec.path != b"/bin/shell" {
-        klog_info!("EXEC_TEST: BUG - shell spec path mismatch");
+pub fn test_init_path_within_exec_limit() -> c_int {
+    if INIT_PATH.is_empty() || INIT_PATH.len() > EXEC_MAX_PATH {
+        klog_info!("EXEC_TEST: BUG - INIT_PATH length invalid");
         return -1;
     }
-
     0
 }

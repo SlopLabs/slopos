@@ -1,11 +1,24 @@
 //! Process management syscalls: spawn, exec, fork, halt.
 
 use super::numbers::*;
-use super::raw::{syscall0, syscall1, syscall2};
+use super::raw::{syscall0, syscall1, syscall4};
 
 #[inline(always)]
-pub fn spawn(name: &[u8]) -> i32 {
-    unsafe { syscall2(SYSCALL_SPAWN_TASK, name.as_ptr() as u64, name.len() as u64) as i32 }
+pub fn spawn_path(path: &[u8]) -> i32 {
+    spawn_path_with_attrs(path, 5, 0)
+}
+
+#[inline(always)]
+pub fn spawn_path_with_attrs(path: &[u8], priority: u8, flags: u16) -> i32 {
+    unsafe {
+        syscall4(
+            SYSCALL_SPAWN_PATH,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            priority as u64,
+            flags as u64,
+        ) as i32
+    }
 }
 
 #[inline(always)]

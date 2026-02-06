@@ -116,7 +116,18 @@ pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 // Task management
 // =============================================================================
 
-pub const SYSCALL_SPAWN_TASK: u64 = 64;
+/// Spawn a new userspace task by absolute executable path.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to path bytes (NUL-terminated or explicit length)
+/// * rsi (arg1): path length in bytes
+/// * rdx (arg2): task priority (`u8`)
+/// * r10 (arg3): task flags (`u16`, kernel enforces user-mode bit)
+///
+/// # Returns
+/// * positive task ID on success
+/// * negative `ExecError` code on failure
+pub const SYSCALL_SPAWN_PATH: u64 = 64;
 pub const SYSCALL_WAITPID: u64 = 68;
 
 // =============================================================================

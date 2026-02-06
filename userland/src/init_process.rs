@@ -1,7 +1,11 @@
+use crate::program_registry;
 use crate::syscall::{core as sys_core, process, tty};
 
 fn spawn_service(name: &[u8]) -> i32 {
-    let tid = process::spawn(name);
+    let tid = match program_registry::resolve_program(name) {
+        Some(spec) => process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags),
+        None => -1,
+    };
     if tid <= 0 {
         let _ = tty::write(b"init: failed to spawn service\n");
     }

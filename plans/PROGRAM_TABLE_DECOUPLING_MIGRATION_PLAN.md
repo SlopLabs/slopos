@@ -1,6 +1,6 @@
 # SlopOS PROGRAM_TABLE Decoupling Migration Plan
 
-> **Status**: Planned  
+> **Status**: Completed  
 > **Date**: 2026-02-06  
 > **Scope**: Remove kernel-owned user program registry (`PROGRAM_TABLE`) and move launch policy fully into userspace init/service logic while preserving deterministic boot.
 
@@ -189,13 +189,13 @@ Update this table as work lands.
 
 | Phase | Status | PR/Commit | Evidence | Notes |
 |------|--------|-----------|----------|-------|
-| Phase 0 | Planned | - | - | Baseline capture pending. |
-| Phase 1 | Planned | - | - | Path-first spawn API not yet landed. |
-| Phase 2 | Planned | - | - | Userspace init resolver pending. |
-| Phase 3 | Planned | - | - | Caller migration pending. |
-| Phase 4 | Planned | - | - | Kernel PROGRAM_TABLE removal pending. |
-| Phase 5 | Planned | - | - | W/L hardening pending. |
-| Phase 6 | Planned | - | - | Cleanup/docs pending. |
+| Phase 0 | Done | working tree | call graph captured in `core/src/exec/mod.rs`, `core/src/syscall/handlers.rs`, `userland/src/init_process.rs`, `userland/src/shell.rs`, `userland/src/compositor.rs` | Baseline recorded and verified during migration. |
+| Phase 1 | Done | working tree | `abi/src/syscall.rs` adds `SYSCALL_SPAWN_PATH`; `core/src/syscall/handlers.rs` adds `syscall_spawn_path`; `userland/src/syscall/process.rs` adds `spawn_path_with_attrs()` | Path-first spawn syscall is now primary. |
+| Phase 2 | Done | working tree | `userland/src/program_registry.rs`; `userland/src/init_process.rs` resolves names in userspace and spawns by path+attrs | Name resolution moved out of kernel into userspace policy. |
+| Phase 3 | Done | working tree | `userland/src/shell.rs` and `userland/src/compositor.rs` migrated to userspace registry + `spawn_path_with_attrs()` | Active userland callers no longer depend on kernel name lookup. |
+| Phase 4 | Done | working tree | `core/src/exec/mod.rs` no longer contains `PROGRAM_TABLE`, `ProgramSpec`, or `resolve_program_spec`; `core/src/exec/tests.rs` updated | Kernel only launches `/sbin/init` at boot. |
+| Phase 5 | Done | working tree | `core/src/exec/mod.rs` integrates `wl_currency::award_win/award_loss`; `core/src/syscall/handlers.rs` integrates W/L in `syscall_exec` | Launch success/failure paths now explicitly account W/L. |
+| Phase 6 | Done | working tree | `tests/src/lib.rs` updated for removed legacy exec tests; this plan updated with landed evidence | Legacy name-based path removed from active code and docs synchronized. |
 
 Evidence examples:
 - command output summary (`make test`, `make boot-log`)
@@ -206,13 +206,13 @@ Evidence examples:
 
 ## 8. Definition of Done
 
-- [ ] Kernel has no static user-program name registry.
-- [ ] Userspace init owns name->path policy.
-- [ ] Path-based spawn API is primary and documented.
-- [ ] Legacy name-based compatibility path removed or explicitly frozen.
-- [ ] W/L accounting integrated for launch success/failure paths.
-- [ ] `make test` passes with no new critical regressions.
-- [ ] Boot-to-init and init-driven service launch remain deterministic.
+- [x] Kernel has no static user-program name registry.
+- [x] Userspace init owns name->path policy.
+- [x] Path-based spawn API is primary and documented.
+- [x] Legacy name-based compatibility path removed or explicitly frozen.
+- [x] W/L accounting integrated for launch success/failure paths.
+- [x] `make test` passes with no new critical regressions.
+- [x] Boot-to-init and init-driven service launch remain deterministic.
 
 ---
 

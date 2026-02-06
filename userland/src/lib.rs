@@ -6,6 +6,7 @@ pub mod compositor;
 pub mod gfx;
 pub mod init_process;
 pub mod libc;
+pub mod program_registry;
 pub mod roulette;
 pub mod runtime;
 pub mod shell;

@@ -29,6 +29,7 @@ use crate::{
 use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
 use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
+use slopos_lib::wl_currency;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 use slopos_mm::user_copy::copy_to_user;
@@ -462,20 +463,27 @@ define_syscall!(syscall_sys_info(ctx, args) {
     ctx.ok(0)
 });
 
-define_syscall!(syscall_spawn_task(ctx, args) {
-    let name_ptr = args.arg0 as *const u8;
-    let name_len = args.arg1 as usize;
+define_syscall!(syscall_spawn_path(ctx, args) {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    let priority = args.arg2 as u8;
+    let flags = args.arg3 as u16;
 
-    if name_ptr.is_null() || name_len == 0 || name_len > 64 {
+    if path_ptr.is_null() || path_len == 0 || path_len > exec::EXEC_MAX_PATH {
         return ctx.err();
     }
 
-    let mut name_buf = [0u8; 64];
-    let copied_len = try_or_err!(ctx, syscall_bounded_from_user(&mut name_buf, name_ptr as u64, name_len as u64, 64));
+    let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
+    let copied_len = try_or_err!(ctx, syscall_bounded_from_user(
+        &mut path_buf,
+        path_ptr as u64,
+        path_len as u64,
+        exec::EXEC_MAX_PATH,
+    ));
 
-    match exec::spawn_program_by_name(&name_buf[..copied_len]) {
+    match exec::spawn_program_with_attrs(&path_buf[..copied_len], priority, flags) {
         Ok(task_id) => ctx.ok(task_id as u64),
-        Err(_) => ctx.err(),
+        Err(err) => ctx.ok(err as i32 as u64),
     }
 });
 
@@ -541,6 +549,7 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         &mut stack_ptr,
     ) {
         Ok(()) => {
+            wl_currency::award_win();
             unsafe {
                 (*frame).rip = entry_point;
                 (*frame).rsp = stack_ptr;
@@ -557,6 +566,7 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
             SyscallDisposition::Ok
         }
         Err(e) => {
+            wl_currency::award_loss();
             unsafe {
                 (*frame).rax = e as i32 as u64;
             }
@@ -848,9 +858,9 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
         handler: Some(syscall_input_get_button_state),
         name: b"input_get_button_state\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_SPAWN_TASK as usize] = SyscallEntry {
-        handler: Some(syscall_spawn_task),
-        name: b"spawn_task\0".as_ptr() as *const c_char,
+    table[SYSCALL_SPAWN_PATH as usize] = SyscallEntry {
+        handler: Some(syscall_spawn_path),
+        name: b"spawn_path\0".as_ptr() as *const c_char,
     };
     table[SYSCALL_WAITPID as usize] = SyscallEntry {
         handler: Some(syscall_waitpid),

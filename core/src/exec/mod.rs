@@ -7,9 +7,9 @@ use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_USER_MODE};
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
 use slopos_fs::vfs::ops::vfs_open;
-use slopos_lib::klog_info;
+use slopos_lib::{klog_info, wl_currency};
 use slopos_mm::elf::ElfError;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
@@ -28,55 +28,9 @@ pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
 pub const EXEC_MAX_ARGS: usize = 32;
 pub const EXEC_MAX_ENVS: usize = 32;
 pub const EXEC_MAX_ELF_SIZE: usize = 16 * 1024 * 1024;
+pub const EXEC_SPAWN_DEFAULT_PRIORITY: u8 = 5;
 
 pub const INIT_PATH: &[u8] = b"/sbin/init";
-
-#[derive(Clone, Copy, Debug)]
-pub struct ProgramSpec {
-    pub task_name: &'static [u8],
-    pub path: &'static [u8],
-    pub priority: u8,
-    pub flags: u16,
-}
-
-const PROGRAM_TABLE: [ProgramSpec; 6] = [
-    ProgramSpec {
-        task_name: b"init\0",
-        path: b"/sbin/init",
-        priority: 5,
-        flags: TASK_FLAG_USER_MODE,
-    },
-    ProgramSpec {
-        task_name: b"shell\0",
-        path: b"/bin/shell",
-        priority: 5,
-        flags: TASK_FLAG_USER_MODE,
-    },
-    ProgramSpec {
-        task_name: b"compositor\0",
-        path: b"/bin/compositor",
-        priority: 4,
-        flags: TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR,
-    },
-    ProgramSpec {
-        task_name: b"roulette\0",
-        path: b"/bin/roulette",
-        priority: 5,
-        flags: TASK_FLAG_USER_MODE | TASK_FLAG_DISPLAY_EXCLUSIVE,
-    },
-    ProgramSpec {
-        task_name: b"file_manager\0",
-        path: b"/bin/file_manager",
-        priority: 5,
-        flags: TASK_FLAG_USER_MODE,
-    },
-    ProgramSpec {
-        task_name: b"sysinfo\0",
-        path: b"/bin/sysinfo",
-        priority: 5,
-        flags: TASK_FLAG_USER_MODE,
-    },
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -101,72 +55,102 @@ fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[..len]
 }
 
-pub fn resolve_program_spec(name: &[u8]) -> Option<&'static ProgramSpec> {
-    let requested = trim_nul_bytes(name);
-    PROGRAM_TABLE
-        .iter()
-        .find(|spec| trim_nul_bytes(spec.task_name) == requested)
-}
-
 pub fn launch_init() -> Result<u32, ExecError> {
-    spawn_program(&PROGRAM_TABLE[0])
+    spawn_program_with_attrs(INIT_PATH, EXEC_SPAWN_DEFAULT_PRIORITY, TASK_FLAG_USER_MODE)
 }
 
-pub fn spawn_program_by_name(name: &[u8]) -> Result<u32, ExecError> {
-    let spec = resolve_program_spec(name).ok_or(ExecError::NoEntry)?;
-    spawn_program(spec)
+fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError> {
+    let trimmed = trim_nul_bytes(path);
+    if trimmed.is_empty() {
+        return Err(ExecError::NameTooLong);
+    }
+
+    let basename_start = trimmed
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |idx| idx + 1);
+    let basename = &trimmed[basename_start..];
+
+    if basename.is_empty() || basename.len() >= TASK_NAME_MAX_LEN {
+        return Err(ExecError::NameTooLong);
+    }
+
+    let mut name = [0u8; TASK_NAME_MAX_LEN];
+    name[..basename.len()].copy_from_slice(basename);
+    Ok(name)
 }
 
-pub fn spawn_program(spec: &ProgramSpec) -> Result<u32, ExecError> {
-    let user_code_entry: TaskEntry =
-        unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
+pub fn spawn_program_with_attrs(
+    path: &[u8],
+    priority: u8,
+    mut flags: u16,
+) -> Result<u32, ExecError> {
+    let result = (|| {
+        let normalized_path = trim_nul_bytes(path);
+        if normalized_path.is_empty() || normalized_path.len() > EXEC_MAX_PATH {
+            return Err(ExecError::NameTooLong);
+        }
 
-    let task_id = task_create(
-        spec.task_name.as_ptr() as *const c_char,
-        user_code_entry,
-        ptr::null_mut(),
-        spec.priority,
-        spec.flags,
-    );
+        flags |= TASK_FLAG_USER_MODE;
+        let task_name = task_name_from_path(normalized_path)?;
+        let user_code_entry: TaskEntry =
+            unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
 
-    if task_id == INVALID_TASK_ID {
-        return Err(ExecError::NoMem);
+        let task_id = task_create(
+            task_name.as_ptr() as *const c_char,
+            user_code_entry,
+            ptr::null_mut(),
+            priority,
+            flags,
+        );
+
+        if task_id == INVALID_TASK_ID {
+            return Err(ExecError::NoMem);
+        }
+
+        let mut task_info: *mut Task = ptr::null_mut();
+        if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
+            task_terminate(task_id);
+            return Err(ExecError::Fault);
+        }
+
+        let process_id = unsafe { (*task_info).process_id };
+        let mut entry = 0u64;
+        let mut stack_ptr = 0u64;
+
+        if let Err(err) = do_exec(
+            process_id,
+            normalized_path,
+            None,
+            None,
+            &mut entry,
+            &mut stack_ptr,
+        ) {
+            task_terminate(task_id);
+            return Err(err);
+        }
+
+        unsafe {
+            (*task_info).entry_point = entry;
+            ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
+            ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
+        }
+
+        if schedule_task(task_info) != 0 {
+            task_terminate(task_id);
+            return Err(ExecError::NoMem);
+        }
+
+        Ok(task_id)
+    })();
+
+    if result.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
     }
 
-    let mut task_info: *mut Task = ptr::null_mut();
-    if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
-        task_terminate(task_id);
-        return Err(ExecError::Fault);
-    }
-
-    let process_id = unsafe { (*task_info).process_id };
-    let mut entry = 0u64;
-    let mut stack_ptr = 0u64;
-
-    if let Err(err) = do_exec(
-        process_id,
-        spec.path,
-        None,
-        None,
-        &mut entry,
-        &mut stack_ptr,
-    ) {
-        task_terminate(task_id);
-        return Err(err);
-    }
-
-    unsafe {
-        (*task_info).entry_point = entry;
-        ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
-        ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
-    }
-
-    if schedule_task(task_info) != 0 {
-        task_terminate(task_id);
-        return Err(ExecError::NoMem);
-    }
-
-    Ok(task_id)
+    result
 }
 
 pub fn do_exec(

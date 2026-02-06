@@ -14,6 +14,7 @@
 use core::ffi::c_void;
 
 use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat, rgb};
+use crate::program_registry;
 use crate::syscall::{
     CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, core as sys_core, input, memory,
     process, tty, window,
@@ -703,7 +704,9 @@ impl WindowManager {
                 self.focused_task = task_id;
             } else {
                 // Spawn new file manager task
-                process::spawn(b"file_manager\0");
+                if let Some(spec) = program_registry::resolve_program(b"file_manager") {
+                    process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+                }
             }
             self.needs_full_redraw = true;
             return;
@@ -716,7 +719,9 @@ impl WindowManager {
                 tty::set_focus(task_id);
                 self.focused_task = task_id;
             } else {
-                process::spawn(b"sysinfo\0");
+                if let Some(spec) = program_registry::resolve_program(b"sysinfo") {
+                    process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+                }
             }
             self.needs_full_redraw = true;
             return;
