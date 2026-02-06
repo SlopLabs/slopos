@@ -363,6 +363,16 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
 /// Test: Schedule task to empty queue
 pub fn test_schedule_to_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
+    let cpu_id = slopos_lib::get_current_cpu();
+
+    slopos_lib::mark_cpu_online(cpu_id);
+    if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
+        klog_info!(
+            "SCHED_TEST: Failed to enable scheduler precondition on CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
 
     let task_id = task_create(
         b"EmptyQueue\0".as_ptr() as *const c_char,
@@ -828,6 +838,67 @@ pub fn test_schedule_while_disabled() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression: boot userland pre-init enqueues tasks before enter_scheduler().
+/// This must work on the current CPU even when its scheduler is initialized
+/// but not yet enabled.
+pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu_id = slopos_lib::get_current_cpu();
+
+    if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.disable()).is_none() {
+        klog_info!(
+            "SCHED_TEST: Failed to disable scheduler precondition on CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
+
+    let task_id = task_create(
+        b"BootPreInit\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    if cpu_id >= u32::BITS as usize {
+        return TestResult::Pass;
+    }
+
+    unsafe {
+        (*task_ptr).cpu_affinity = 1u32 << cpu_id;
+        (*task_ptr).last_cpu = cpu_id as u8;
+    }
+
+    if schedule_task(task_ptr) != 0 {
+        klog_info!(
+            "SCHED_TEST: Failed to schedule task before scheduler enable on CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
+
+    let ready_count =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
+    if ready_count == 0 {
+        klog_info!(
+            "SCHED_TEST: Task was not enqueued before scheduler enable on CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 // =============================================================================
 // STRESS TESTS
 // =============================================================================
@@ -967,14 +1038,11 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
         sched.push_remote_wake(task_ptr);
     });
 
-    // Verify inbox has pending task
+    // Verify inbox has pending task.
+    // On SMP, a timer tick may concurrently drain the inbox before this read.
+    // We treat that as acceptable and validate via ready-queue delta below.
     let has_pending = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
         .unwrap_or(false);
-
-    if !has_pending {
-        klog_info!("SCHED_TEST: push_remote_wake did not add task to inbox");
-        return TestResult::Fail;
-    }
 
     // Drain inbox
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -986,7 +1054,7 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
             .unwrap_or(true);
 
-    if still_pending {
+    if still_pending && has_pending {
         klog_info!("SCHED_TEST: drain_remote_inbox did not empty inbox");
         return TestResult::Fail;
     }
@@ -1136,6 +1204,12 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Pass; // Skip on single-CPU systems
     }
 
+    slopos_lib::mark_cpu_online(1);
+    if super::per_cpu::with_cpu_scheduler(1, |sched| sched.enable()).is_none() {
+        klog_info!("SCHED_TEST: Failed to enable target CPU 1 scheduler");
+        return TestResult::Fail;
+    }
+
     let task_id = task_create(
         b"CrossCPU\0".as_ptr() as *const c_char,
         dummy_task_fn,
@@ -1177,6 +1251,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
 
     if ready_on_cpu1 == 0 {
         klog_info!("SCHED_TEST: Task not found on CPU 1 after cross-CPU schedule");
+        return TestResult::Fail;
     }
 
     TestResult::Pass

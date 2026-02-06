@@ -95,7 +95,9 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         reset_task_quantum(task);
     }
 
-    let target_cpu = per_cpu::select_target_cpu(task);
+    let Some(target_cpu) = per_cpu::select_target_cpu(task) else {
+        return -1;
+    };
     let current_cpu = slopos_lib::get_current_cpu();
 
     if target_cpu == current_cpu {
@@ -106,9 +108,13 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         }
         0
     } else {
-        per_cpu::with_cpu_scheduler(target_cpu, |sched| {
+        let push_result = per_cpu::with_cpu_scheduler(target_cpu, |sched| {
             sched.push_remote_wake(task);
+            0
         });
+        if push_result != Some(0) {
+            return -1;
+        }
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 

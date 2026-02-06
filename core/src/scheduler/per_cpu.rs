@@ -620,51 +620,97 @@ pub fn get_total_schedule_calls() -> u32 {
     total
 }
 
-pub fn select_target_cpu(task: *mut Task) -> usize {
+pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
+    let current_cpu = slopos_lib::get_current_cpu();
     if task.is_null() {
-        return slopos_lib::get_current_cpu();
+        return if is_schedulable_cpu(current_cpu, 0)
+            || is_local_enqueue_fallback_cpu(current_cpu, 0)
+        {
+            Some(current_cpu)
+        } else {
+            find_least_loaded_cpu(0)
+        };
     }
 
     let affinity = unsafe { (*task).cpu_affinity };
     let last_cpu = unsafe { (*task).last_cpu as usize };
-    let cpu_count = slopos_lib::get_cpu_count();
 
-    if affinity != 0 && (affinity & (1 << last_cpu)) != 0 && last_cpu < cpu_count {
-        if is_percpu_scheduler_initialized(last_cpu) {
-            return last_cpu;
-        }
+    if is_schedulable_cpu(last_cpu, affinity) {
+        return Some(last_cpu);
     }
 
-    find_least_loaded_cpu(affinity)
+    if let Some(best_cpu) = find_least_loaded_cpu(affinity) {
+        return Some(best_cpu);
+    }
+
+    // Boot-time fallback: allow queueing onto the current CPU before it is
+    // marked online/enabled, so pre-init tasks can be staged before enter_scheduler().
+    if is_local_enqueue_fallback_cpu(current_cpu, affinity) {
+        return Some(current_cpu);
+    }
+
+    None
 }
 
-fn find_least_loaded_cpu(affinity: u32) -> usize {
+#[inline]
+fn cpu_matches_affinity(cpu_id: usize, affinity: u32) -> bool {
+    if affinity == 0 {
+        return true;
+    }
+    if cpu_id >= u32::BITS as usize {
+        return false;
+    }
+    (affinity & (1u32 << cpu_id)) != 0
+}
+
+fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
     let cpu_count = slopos_lib::get_cpu_count();
-    let mut best_cpu = 0usize;
+    if cpu_id >= cpu_count {
+        return false;
+    }
+
+    if !cpu_matches_affinity(cpu_id, affinity) {
+        return false;
+    }
+
+    if !is_percpu_scheduler_initialized(cpu_id) {
+        return false;
+    }
+
+    if !slopos_lib::is_cpu_online(cpu_id) {
+        return false;
+    }
+
+    with_cpu_scheduler(cpu_id, |sched| sched.is_enabled()).unwrap_or(false)
+}
+
+fn is_local_enqueue_fallback_cpu(cpu_id: usize, affinity: u32) -> bool {
+    let cpu_count = slopos_lib::get_cpu_count();
+    if cpu_id >= cpu_count {
+        return false;
+    }
+
+    if !cpu_matches_affinity(cpu_id, affinity) {
+        return false;
+    }
+
+    is_percpu_scheduler_initialized(cpu_id)
+}
+
+fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
+    let cpu_count = slopos_lib::get_cpu_count();
+    let mut best_cpu: Option<usize> = None;
     let mut min_load = u32::MAX;
 
     for cpu_id in 0..cpu_count {
-        if affinity != 0 && (affinity & (1 << cpu_id)) == 0 {
-            continue;
-        }
-
-        if !is_percpu_scheduler_initialized(cpu_id) {
-            continue;
-        }
-
-        if !slopos_lib::is_cpu_online(cpu_id) {
-            continue;
-        }
-
-        let sched_enabled = with_cpu_scheduler(cpu_id, |sched| sched.is_enabled()).unwrap_or(false);
-        if !sched_enabled {
+        if !is_schedulable_cpu(cpu_id, affinity) {
             continue;
         }
 
         if let Some(load) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
             if load < min_load {
                 min_load = load;
-                best_cpu = cpu_id;
+                best_cpu = Some(cpu_id);
             }
         }
     }
