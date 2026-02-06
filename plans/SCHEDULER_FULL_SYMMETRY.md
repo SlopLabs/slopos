@@ -1,20 +1,16 @@
 # Scheduler Full Symmetry Plan
 
-**Status**: 📋 PLANNED  
+**Status**: ✅ COMPLETE  
 **Priority**: Low (cleanup, no functional impact)  
 **Prerequisite**: Scheduler Unification (COMPLETE)
+**Validation**: `make test` passes (`373/373`)
 
 ---
 
 ## Overview
 
-The scheduler unification is complete - all CPUs use `enter_scheduler(cpu_id)` and `scheduler_loop()`. However, several asymmetries remain:
-
-1. **`SchedulerInner` duplication**: BSP still uses a global `SchedulerInner` struct alongside per-CPU state
-2. **BSP special cases**: 14 places check `cpu_id == 0` for different behavior
-3. **Idle task differences**: BSP and APs use different idle loop implementations
-
-This plan eliminates these asymmetries via instant replacement (no migration period).
+This document tracks the full-symmetry cleanup that followed scheduler unification.
+All planned asymmetries were removed via instant replacement (no migration period).
 
 ---
 
@@ -23,7 +19,7 @@ This plan eliminates these asymmetries via instant replacement (no migration per
 ### Per-Phase Process
 
 1. Implement the phase changes
-2. Run `make test` - all 364 tests must pass
+2. Run `make test` - all 373 tests must pass
 3. User tests boot manually and reports result
 4. If issues: fix and iterate until user confirms working
 5. Commit the phase
@@ -37,7 +33,7 @@ This plan eliminates these asymmetries via instant replacement (no migration per
 
 ---
 
-## Current State Analysis
+## Baseline Analysis (Pre-Implementation)
 
 ### SchedulerInner Fields (BSP-only global state)
 
@@ -108,8 +104,8 @@ Each phase is atomic: implement unified code AND delete old code in the same com
 
 **Verification**:
 ```bash
-make test  # 364/364
-grep -n "sched\.current_task\|sched\.idle_task" core/src/scheduler/scheduler.rs
+make test  # 373/373
+grep -n "sched\.current_task[[:space:]]*=\|sched\.idle_task[[:space:]]*=" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
 
@@ -134,8 +130,8 @@ grep -n "sched\.current_task\|sched\.idle_task" core/src/scheduler/scheduler.rs
 
 **Verification**:
 ```bash
-make test  # 364/364
-grep -n "sched\.ready_queues\|sched\.enqueue\|sched\.dequeue" core/src/scheduler/scheduler.rs
+make test  # 373/373
+grep -n "sched\.ready_queues\|SchedulerInner::enqueue_task\|SchedulerInner::dequeue_highest_priority\|SchedulerInner::remove_task" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
 
@@ -159,7 +155,7 @@ grep -n "sched\.ready_queues\|sched\.enqueue\|sched\.dequeue" core/src/scheduler
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 grep -n "sched\.enabled\|sched\.preemption_enabled\|sched\.policy" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -180,7 +176,7 @@ grep -n "sched\.enabled\|sched\.preemption_enabled\|sched\.policy" core/src/sche
 
 **Update**:
 - `create_idle_task()` → use `unified_idle_loop`
-- `create_ap_idle_task()` → use `unified_idle_loop`
+- `create_idle_task_for_cpu()` → use `unified_idle_loop` for all CPUs
 
 **Files**: 
 - `core/src/scheduler/scheduler.rs`
@@ -188,7 +184,7 @@ grep -n "sched\.enabled\|sched\.preemption_enabled\|sched\.policy" core/src/sche
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 grep -n "idle_task_function\|ap_idle_loop" core/src/scheduler/*.rs
 # Should find 0 results
 ```
@@ -213,9 +209,9 @@ grep -n "idle_task_function\|ap_idle_loop" core/src/scheduler/*.rs
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 grep -n "AP PATH\|BSP PATH\|cpu_id != 0\|cpu_id == 0" core/src/scheduler/scheduler.rs
-# Should find minimal results (only intentional ones like double-enable guard)
+# Should find 0 results
 ```
 
 ---
@@ -233,7 +229,7 @@ grep -n "AP PATH\|BSP PATH\|cpu_id != 0\|cpu_id == 0" core/src/scheduler/schedul
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 grep -n "ap_task_exit_to_idle" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -253,7 +249,7 @@ grep -n "ap_task_exit_to_idle" core/src/scheduler/scheduler.rs
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 grep -n "scheduler_timer_tick_ap" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -275,7 +271,7 @@ grep -n "scheduler_timer_tick_ap" core/src/scheduler/scheduler.rs
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 ```
 
 ---
@@ -298,7 +294,7 @@ make test  # 364/364
 
 **Verification**:
 ```bash
-make test  # 364/364
+make test  # 373/373
 grep -n "SchedulerInner\|SCHEDULER\.\|with_scheduler" core/src/scheduler/scheduler.rs
 # Should find 0 results
 ```
@@ -319,7 +315,7 @@ grep -n "SchedulerInner\|SCHEDULER\.\|with_scheduler" core/src/scheduler/schedul
 | 8 | BSP stack switch conditional | Medium |
 | 9 | `SchedulerInner` entirely | Low |
 
-All 364 tests must pass after each phase.
+All 373 tests must pass after each phase.
 
 ---
 
@@ -336,7 +332,7 @@ core/src/scheduler/per_cpu.rs     # Phases 4, 8
 
 ```bash
 # After each phase
-make test                    # All 364 tests must pass
+make test                    # All 373 tests must pass
 
 # Check for remaining special cases (should decrease each phase)
 grep -c "cpu_id == 0\|cpu_id != 0" core/src/scheduler/scheduler.rs

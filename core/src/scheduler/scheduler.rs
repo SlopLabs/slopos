@@ -586,24 +586,43 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     0
 }
 
+#[inline(never)]
+unsafe fn enter_scheduler_on_idle_stack(cpu_id: usize, idle_task: *mut Task, stack_top: u64) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, rdx",
+            "mov rbp, rsp",
+            "call {target}",
+            "ud2",
+            target = sym scheduler_loop_entry,
+            in("rdi") cpu_id,
+            in("rsi") idle_task,
+            in("rdx") stack_top,
+            options(noreturn)
+        );
+    }
+}
+
+extern "C" fn scheduler_loop_entry(cpu_id: usize, idle_task: *mut Task) -> ! {
+    scheduler_loop(cpu_id, idle_task)
+}
+
 pub fn enter_scheduler(cpu_id: usize) -> ! {
-    // Guard against double-enable on BSP
-    if cpu_id == 0 {
-        let already_enabled = SCHEDULER_ENABLED.load(Ordering::Acquire) != 0;
-        if already_enabled {
-            loop {
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
-            }
+    let already_enabled =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.is_enabled()).unwrap_or(false);
+    if already_enabled {
+        loop {
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
         }
     }
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.enable();
     });
 
-    if cpu_id == 0 {
-        if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
-            SCHEDULER_ENABLED.store(1, Ordering::Release);
-        }
+    if SCHEDULER_ENABLED
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
         scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
     }
 
@@ -632,24 +651,18 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     });
     task_set_current(idle_task);
 
-    // APs: switch from Limine boot stack (HHDM-transient) to idle's kernel stack.
-    // BSP: stays on .bss boot stack which is stable kernel virtual memory.
-    // We cannot switch BSP's stack here because local variables would become invalid.
-    if cpu_id != 0 {
-        unsafe {
-            let new_rsp = (*idle_task).kernel_stack_top;
-            if new_rsp != 0 {
-                core::arch::asm!(
-                    "mov rsp, {0}",
-                    "mov rbp, rsp",
-                    in(reg) new_rsp,
-                    options(nostack)
-                );
-            }
+    let idle_stack_top = unsafe { (*idle_task).kernel_stack_top };
+    if idle_stack_top == 0 {
+        klog_info!(
+            "SCHED: CPU {} idle task has no kernel stack, halting",
+            cpu_id
+        );
+        loop {
+            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
         }
     }
 
-    scheduler_loop(cpu_id, idle_task)
+    unsafe { enter_scheduler_on_idle_stack(cpu_id, idle_task, idle_stack_top) }
 }
 
 fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
@@ -734,10 +747,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         }
 
         // 6. Reap zombie tasks (deferred cleanup for terminated tasks)
-        // Only BSP handles zombie reaping to avoid contention
-        if cpu_id == 0 {
-            reap_zombies();
-        }
+        reap_zombies();
 
         // 7. Idle - increment stats and halt
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -968,16 +978,11 @@ pub fn boot_step_idle_task() -> c_int {
 pub fn init_scheduler_for_ap(cpu_id: usize) {
     per_cpu::init_percpu_scheduler(cpu_id);
 
-    // Create idle task for this AP. At this point BSP has already initialized
-    // the task manager and heap, so it's safe to allocate.
-    if cpu_id != 0 {
-        let idle = per_cpu::create_ap_idle_task(cpu_id);
-        if idle.is_null() {
-            klog_info!(
-                "SCHED: Warning - failed to create idle task for CPU {}",
-                cpu_id
-            );
-        }
+    if create_idle_task_for_cpu(cpu_id) != 0 {
+        klog_info!(
+            "SCHED: Warning - failed to create idle task for CPU {}",
+            cpu_id
+        );
     }
 }
 

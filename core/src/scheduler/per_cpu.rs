@@ -18,9 +18,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY, Task, TaskContext,
-};
+use slopos_abi::task::{TASK_STATE_READY, Task, TaskContext};
 use slopos_lib::{InitFlag, MAX_CPUS, klog_debug, klog_info};
 use spin::Mutex;
 
@@ -672,75 +670,6 @@ fn find_least_loaded_cpu(affinity: u32) -> usize {
     }
 
     best_cpu
-}
-
-/// Create an idle task specifically for an Application Processor.
-/// Returns the task pointer on success, null on failure.
-///
-/// This creates a minimal kernel task that will serve as the "from" context
-/// when the AP picks up real work from its queue.
-pub fn create_ap_idle_task(cpu_id: usize) -> *mut Task {
-    use crate::task::{task_create, task_get_info};
-
-    if cpu_id == 0 {
-        klog_info!("SCHED: CPU 0 should use create_idle_task(), not create_ap_idle_task()");
-        return ptr::null_mut();
-    }
-
-    if cpu_id >= MAX_CPUS {
-        klog_info!("SCHED: Invalid CPU ID {} for AP idle task", cpu_id);
-        return ptr::null_mut();
-    }
-
-    // Create a unique name for this CPU's idle task
-    let mut name = [0u8; 16];
-    let prefix = b"ap_idle_";
-    name[..prefix.len()].copy_from_slice(prefix);
-    // Add CPU number (simple digit conversion for cpu_id < 10)
-    if cpu_id < 10 {
-        name[prefix.len()] = b'0' + cpu_id as u8;
-        name[prefix.len() + 1] = 0;
-    } else {
-        name[prefix.len()] = b'0' + (cpu_id / 10) as u8;
-        name[prefix.len() + 1] = b'0' + (cpu_id % 10) as u8;
-        name[prefix.len() + 2] = 0;
-    }
-
-    let task_id = unsafe {
-        task_create(
-            name.as_ptr() as *const i8,
-            core::mem::transmute(super::scheduler::unified_idle_loop as *const ()),
-            ptr::null_mut(),
-            TASK_PRIORITY_IDLE,
-            TASK_FLAG_KERNEL_MODE,
-        )
-    };
-
-    if task_id == INVALID_TASK_ID {
-        klog_info!("SCHED: Failed to create idle task for CPU {}", cpu_id);
-        return ptr::null_mut();
-    }
-
-    let mut idle_task: *mut Task = ptr::null_mut();
-    if task_get_info(task_id, &mut idle_task) != 0 || idle_task.is_null() {
-        klog_info!("SCHED: Failed to get idle task info for CPU {}", cpu_id);
-        return ptr::null_mut();
-    }
-
-    // Set CPU affinity to only run on this specific CPU
-    unsafe {
-        (*idle_task).cpu_affinity = 1 << cpu_id;
-        (*idle_task).last_cpu = cpu_id as u8;
-    }
-
-    // Register with per-CPU scheduler
-    with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_idle_task(idle_task);
-    });
-
-    klog_debug!("SCHED: Created idle task {} for CPU {}", task_id, cpu_id);
-
-    idle_task
 }
 
 /// Get the return context for an AP to use when no tasks are available.
