@@ -316,10 +316,6 @@ impl core::ops::Not for VmaFlags {
     }
 }
 
-/// Legacy constant for backward compatibility during migration
-/// TODO: Remove once all callers are migrated to VmaFlags::COW
-pub const VMA_FLAG_COW: u32 = VmaFlags::COW.bits();
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,4 @@
-use crate::blockdev::{BlockDevice, CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
+use crate::blockdev::{CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_lib::{InitFlag, IrqMutex};
@@ -314,37 +314,3 @@ fn ext2_file_type_to_vfs(file_type: u8) -> FileType {
         _ => FileType::Regular,
     }
 }
-
-pub struct Ext2VfsAdapter<D: BlockDevice + Send> {
-    device: IrqMutex<D>,
-}
-
-impl<D: BlockDevice + Send> Ext2VfsAdapter<D> {
-    pub fn new(device: D) -> VfsResult<Self> {
-        let adapter = Self {
-            device: IrqMutex::new(device),
-        };
-
-        {
-            let mut dev = adapter.device.lock();
-            Ext2Fs::init_internal(&mut *dev).map_err(ext2_error_to_vfs)?;
-        }
-
-        Ok(adapter)
-    }
-
-    fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
-        let mut dev = self.device.lock();
-        let mut fs = Ext2Fs::init_internal(&mut *dev).map_err(ext2_error_to_vfs)?;
-        f(&mut fs).map_err(ext2_error_to_vfs)
-    }
-}
-
-impl<D: BlockDevice + Send> Ext2VfsBackend for Ext2VfsAdapter<D> {
-    fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
-        self.with_fs(f)
-    }
-}
-
-unsafe impl<D: BlockDevice + Send> Send for Ext2VfsAdapter<D> {}
-unsafe impl<D: BlockDevice + Send> Sync for Ext2VfsAdapter<D> {}

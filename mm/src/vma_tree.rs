@@ -16,8 +16,6 @@ use core::ptr;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::vma_flags::VmaFlags;
 
-pub use crate::vma_flags::VMA_FLAG_COW;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Color {

@@ -212,20 +212,25 @@ pub fn test_elf_segment_offset_overflow() -> c_int {
 }
 
 pub fn test_elf_kernel_address_entry() -> c_int {
-    let mut elf = create_minimal_elf_header();
-    // e_entry in kernel space
-    elf[24..32].copy_from_slice(&0xFFFF_FFFF_8000_0000u64.to_le_bytes());
+    // Create an ELF with a kernel-space entry point AND a matching kernel-space
+    // PT_LOAD segment.  The validator must reject the segment because it falls
+    // in kernel address space.
+    let kernel_addr: u64 = 0xFFFF_FFFF_8000_0000;
+    let elf = create_elf_with_load_segment(
+        kernel_addr, // vaddr in kernel space
+        0x1000,      // memsz
+        0x100,       // filesz
+        120,         // offset (past headers)
+    );
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
-        Err(_) => return 0,
+        Err(_) => return 0, // Header rejection is also acceptable
     };
 
-    let header = validator.header();
-    if header.e_entry >= 0xFFFF_8000_0000_0000 {
-        // Validator should have caught this or translate_address should handle it
-        // This is a potential security issue if not handled
-        klog_info!("EXEC_TEST: WARNING - ELF with kernel entry point needs relocation");
+    if validator.validate_load_segments().is_ok() {
+        klog_info!("EXEC_TEST: BUG - ElfValidator accepted segment in kernel address space");
+        return -1;
     }
     0
 }
