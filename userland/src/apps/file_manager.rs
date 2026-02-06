@@ -224,6 +224,9 @@ impl FileManager {
                         self.needs_redraw = true;
                     }
                 }
+                InputEventType::CloseRequest => {
+                    sys_core::exit();
+                }
                 _ => {}
             }
         }

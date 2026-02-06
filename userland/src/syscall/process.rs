@@ -27,6 +27,11 @@ pub fn waitpid(task_id: u32) -> i32 {
 }
 
 #[inline(always)]
+pub fn terminate_task(task_id: u32) -> i32 {
+    unsafe { syscall1(SYSCALL_TERMINATE_TASK, task_id as u64) as i32 }
+}
+
+#[inline(always)]
 pub fn exec(path: &[u8]) -> i64 {
     unsafe { syscall1(SYSCALL_EXEC, path.as_ptr() as u64) as i64 }
 }

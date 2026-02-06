@@ -326,6 +326,22 @@ pub fn input_set_pointer_focus_with_offset(
     }
 }
 
+/// Enqueue a window-close request event for a task.
+/// Called by compositor syscall path when user clicks a close button.
+pub fn input_request_close(task_id: u32, timestamp_ms: u64) -> bool {
+    if task_id == 0 {
+        return false;
+    }
+
+    let mut mgr = INPUT_MANAGER.lock();
+    if let Some(idx) = mgr.find_or_create_queue(task_id) {
+        mgr.queues[idx].push(InputEvent::close_request(timestamp_ms));
+        true
+    } else {
+        false
+    }
+}
+
 /// Get current keyboard focus task ID
 pub fn input_get_keyboard_focus() -> u32 {
     INPUT_MANAGER.lock().keyboard_focus

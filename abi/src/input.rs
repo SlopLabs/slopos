@@ -29,6 +29,8 @@ pub enum InputEventType {
     PointerEnter = 5,
     /// Pointer left surface
     PointerLeave = 6,
+    /// Window manager requests this app to close gracefully
+    CloseRequest = 7,
 }
 
 impl InputEventType {
@@ -43,6 +45,7 @@ impl InputEventType {
             4 => Some(Self::PointerButtonRelease),
             5 => Some(Self::PointerEnter),
             6 => Some(Self::PointerLeave),
+            7 => Some(Self::CloseRequest),
             _ => None,
         }
     }
@@ -56,7 +59,14 @@ impl InputEventType {
     /// Returns true if this is a pointer event
     #[inline]
     pub fn is_pointer_event(self) -> bool {
-        !self.is_key_event()
+        matches!(
+            self,
+            Self::PointerMotion
+                | Self::PointerButtonPress
+                | Self::PointerButtonRelease
+                | Self::PointerEnter
+                | Self::PointerLeave
+        )
     }
 }
 
@@ -65,6 +75,7 @@ impl InputEventType {
 /// For key events: data0 contains scancode in low 16 bits, ASCII in high 16 bits
 /// For pointer motion: data0 is x coordinate, data1 is y coordinate
 /// For pointer button: data0 contains button code
+/// For close request: data0/data1 are zero
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InputEventData {
@@ -155,6 +166,16 @@ impl InputEvent {
                 data0: x as u32,
                 data1: y as u32,
             },
+        }
+    }
+
+    /// Create a close-request event
+    pub fn close_request(timestamp_ms: u64) -> Self {
+        Self {
+            event_type: InputEventType::CloseRequest,
+            _padding: [0; 3],
+            timestamp_ms,
+            data: InputEventData { data0: 0, data1: 0 },
         }
     }
 

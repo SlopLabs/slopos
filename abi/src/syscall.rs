@@ -79,6 +79,7 @@ pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
 pub const SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET: u64 = 65;
 pub const SYSCALL_INPUT_GET_POINTER_POS: u64 = 66;
 pub const SYSCALL_INPUT_GET_BUTTON_STATE: u64 = 67;
+pub const SYSCALL_INPUT_REQUEST_CLOSE: u64 = 84;
 
 // =============================================================================
 // Surface / Compositor
@@ -129,6 +130,7 @@ pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 /// * negative `ExecError` code on failure
 pub const SYSCALL_SPAWN_PATH: u64 = 64;
 pub const SYSCALL_WAITPID: u64 = 68;
+pub const SYSCALL_TERMINATE_TASK: u64 = 69;
 
 // =============================================================================
 // Process execution

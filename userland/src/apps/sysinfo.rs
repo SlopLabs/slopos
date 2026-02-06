@@ -3,7 +3,10 @@ use core::ffi::c_void;
 use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
 
 use crate::gfx::{self, DrawBuffer, PixelFormat};
-use crate::syscall::{DisplayInfo, ShmBuffer, UserSysInfo, core as sys_core, tty, window};
+use crate::syscall::{
+    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserSysInfo, core as sys_core, input, tty,
+    window,
+};
 use crate::theme::{COLOR_BACKGROUND, COLOR_TEXT};
 
 const SYSINFO_WIDTH: i32 = 360;
@@ -192,7 +195,15 @@ pub fn sysinfo_main(_arg: *mut c_void) {
     app.draw_info();
     let _ = window::surface_commit();
 
+    let mut events = [InputEvent::default(); 8];
     loop {
+        let count = input::poll_batch(&mut events) as usize;
+        for event in events.iter().take(count) {
+            if event.event_type == InputEventType::CloseRequest {
+                sys_core::exit();
+            }
+        }
+
         sys_core::yield_now();
     }
 }

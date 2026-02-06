@@ -280,6 +280,23 @@ define_syscall!(syscall_input_get_button_state(ctx, args) requires compositor {
     ctx.ok(buttons as u64)
 });
 
+define_syscall!(syscall_input_request_close(ctx, args) requires compositor {
+    let target_task_id = args.arg0_u32();
+    if target_task_id == 0 || target_task_id == INVALID_TASK_ID {
+        wl_currency::award_loss();
+        return ctx.err();
+    }
+
+    let timestamp_ms = platform::get_time_ms();
+    if input::input_request_close(target_task_id, timestamp_ms) != 0 {
+        wl_currency::award_loss();
+        return ctx.err();
+    }
+
+    wl_currency::award_win();
+    ctx.ok(0)
+});
+
 define_syscall!(syscall_tty_set_focus(ctx, args) requires compositor {
     let target = args.arg0_u32();
     ctx.from_bool_value(tty::tty_set_focus(target) == 0, tty::tty_get_focus() as u64)
@@ -514,6 +531,28 @@ define_syscall!(syscall_waitpid(ctx, args) {
     } else {
         ctx.ok(0)
     }
+});
+
+define_syscall!(syscall_terminate_task(ctx, args) requires compositor {
+    let target_id = args.arg0_u32();
+    if target_id == 0 || target_id == INVALID_TASK_ID {
+        wl_currency::award_loss();
+        return ctx.err();
+    }
+
+    let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
+    if target_id == caller_id {
+        wl_currency::award_loss();
+        return ctx.err();
+    }
+
+    if task_terminate(target_id) != 0 {
+        wl_currency::award_loss();
+        return ctx.err();
+    }
+
+    wl_currency::award_win();
+    ctx.ok(0)
 });
 
 pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -867,6 +906,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
         handler: Some(syscall_input_get_button_state),
         name: b"input_get_button_state\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_INPUT_REQUEST_CLOSE as usize] = SyscallEntry {
+        handler: Some(syscall_input_request_close),
+        name: b"input_request_close\0".as_ptr() as *const c_char,
+    };
     table[SYSCALL_SPAWN_PATH as usize] = SyscallEntry {
         handler: Some(syscall_spawn_path),
         name: b"spawn_path\0".as_ptr() as *const c_char,
@@ -874,6 +917,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_WAITPID as usize] = SyscallEntry {
         handler: Some(syscall_waitpid),
         name: b"waitpid\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_TERMINATE_TASK as usize] = SyscallEntry {
+        handler: Some(syscall_terminate_task),
+        name: b"terminate_task\0".as_ptr() as *const c_char,
     };
     table[SYSCALL_EXEC as usize] = SyscallEntry {
         handler: Some(syscall_exec),

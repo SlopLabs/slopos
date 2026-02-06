@@ -53,6 +53,10 @@ pub fn set_pointer_focus_with_offset(target_task_id: u32, offset_x: i32, offset_
     }
 }
 
+pub fn request_close(target_task_id: u32) -> i64 {
+    unsafe { syscall1(SYSCALL_INPUT_REQUEST_CLOSE, target_task_id as u64) as i64 }
+}
+
 pub fn get_pointer_pos() -> (i32, i32) {
     let result = unsafe { syscall0(SYSCALL_INPUT_GET_POINTER_POS) };
     let x = (result >> 32) as i32;

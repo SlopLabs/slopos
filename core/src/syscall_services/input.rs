@@ -8,6 +8,7 @@ slopos_lib::define_service! {
         set_keyboard_focus(task_id: u32);
         set_pointer_focus(task_id: u32, timestamp_ms: u64);
         set_pointer_focus_with_offset(task_id: u32, x: i32, y: i32, timestamp_ms: u64);
+        request_close(task_id: u32, timestamp_ms: u64) -> i32;
         get_pointer_focus() -> u32;
         get_pointer_position() -> (i32, i32);
         get_button_state() -> u32;
@@ -42,6 +43,11 @@ pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
 #[inline(always)]
 pub fn input_set_pointer_focus_with_offset(task_id: u32, x: i32, y: i32, timestamp_ms: u64) {
     set_pointer_focus_with_offset(task_id, x, y, timestamp_ms)
+}
+
+#[inline(always)]
+pub fn input_request_close(task_id: u32, timestamp_ms: u64) -> i32 {
+    request_close(task_id, timestamp_ms)
 }
 
 #[inline(always)]

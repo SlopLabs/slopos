@@ -162,6 +162,9 @@ const WINDOW_STATE_MINIMIZED: u8 = 1;
 // Cursor constants
 const CURSOR_SIZE: i32 = 9;
 
+// Grace period before force-closing unresponsive apps after close request
+const CLOSE_REQUEST_GRACE_MS: u64 = 1500;
+
 /// Tracks state for conditional taskbar redraws
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TaskbarState {
@@ -306,6 +309,10 @@ struct WindowManager {
     // Cursor positions visited this frame (for trail-free damage)
     cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     cursor_trail_count: usize,
+    // Pending graceful close requests (task + deadline)
+    pending_close_tasks: [u32; MAX_WINDOWS],
+    pending_close_deadlines: [u64; MAX_WINDOWS],
+    pending_close_count: usize,
 }
 
 impl WindowManager {
@@ -349,6 +356,9 @@ impl WindowManager {
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
+            pending_close_tasks: [0; MAX_WINDOWS],
+            pending_close_deadlines: [0; MAX_WINDOWS],
+            pending_close_count: 0,
         }
     }
 
@@ -478,6 +488,75 @@ impl WindowManager {
     /// Check if a window with given task_id exists in current frame
     fn window_exists(&self, task_id: u32) -> bool {
         (0..self.window_count as usize).any(|i| self.windows[i].task_id == task_id)
+    }
+
+    fn pending_close_index(&self, task_id: u32) -> Option<usize> {
+        (0..self.pending_close_count).find(|&i| self.pending_close_tasks[i] == task_id)
+    }
+
+    fn remove_pending_close_at(&mut self, idx: usize) {
+        if idx >= self.pending_close_count {
+            return;
+        }
+
+        let last = self.pending_close_count - 1;
+        self.pending_close_tasks[idx] = self.pending_close_tasks[last];
+        self.pending_close_deadlines[idx] = self.pending_close_deadlines[last];
+        self.pending_close_tasks[last] = 0;
+        self.pending_close_deadlines[last] = 0;
+        self.pending_close_count -= 1;
+    }
+
+    fn request_window_close(&mut self, task_id: u32) {
+        if let Some(idx) = self.pending_close_index(task_id) {
+            // Second click on an already-pending close: force-close immediately.
+            let _ = process::terminate_task(task_id);
+            self.remove_pending_close_at(idx);
+            self.needs_full_redraw = true;
+            return;
+        }
+
+        let now = sys_core::get_time_ms();
+        let requested = input::request_close(task_id) == 0;
+
+        if !requested || self.pending_close_count >= MAX_WINDOWS {
+            // Fallback when graceful close cannot be queued.
+            let _ = process::terminate_task(task_id);
+            self.needs_full_redraw = true;
+            return;
+        }
+
+        let idx = self.pending_close_count;
+        self.pending_close_tasks[idx] = task_id;
+        self.pending_close_deadlines[idx] = now.saturating_add(CLOSE_REQUEST_GRACE_MS);
+        self.pending_close_count += 1;
+        self.needs_full_redraw = true;
+    }
+
+    fn process_pending_close_requests(&mut self) {
+        if self.pending_close_count == 0 {
+            return;
+        }
+
+        let now = sys_core::get_time_ms();
+        let mut i = 0usize;
+        while i < self.pending_close_count {
+            let task_id = self.pending_close_tasks[i];
+
+            if !self.window_exists(task_id) {
+                self.remove_pending_close_at(i);
+                continue;
+            }
+
+            if now >= self.pending_close_deadlines[i] {
+                let _ = process::terminate_task(task_id);
+                self.remove_pending_close_at(i);
+                self.needs_full_redraw = true;
+                continue;
+            }
+
+            i += 1;
+        }
     }
 
     /// Find a window by its title and return its task_id
@@ -659,10 +738,10 @@ impl WindowManager {
         self.needs_full_redraw = true;
     }
 
-    /// Minimizes the window identified by `task_id` and marks the compositor for a full redraw.
+    /// Requests graceful close for the app task identified by `task_id`.
     ///
-    /// This sets the window state to `WINDOW_STATE_MINIMIZED` and ensures the next frame repaints the
-    /// output to reflect the change.
+    /// This sends a close-request input event first (Redox/Orbital-style). If the app does not
+    /// exit within a grace period, the compositor force-terminates it.
     ///
     /// # Examples
     ///
@@ -671,8 +750,7 @@ impl WindowManager {
     /// wm.close_window(42);
     /// ```
     fn close_window(&mut self, task_id: u32) {
-        window::set_window_state(task_id, WINDOW_STATE_MINIMIZED);
-        self.needs_full_redraw = true;
+        self.request_window_close(task_id);
     }
 
     /// Handle a mouse click on the taskbar, spawning the file manager or minimizing/restoring a window.
@@ -1197,6 +1275,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
         wm.update_mouse();
         wm.refresh_windows();
+        wm.process_pending_close_requests();
         wm.handle_mouse_events(fb_info.height as i32);
 
         if wm.needs_redraw() {

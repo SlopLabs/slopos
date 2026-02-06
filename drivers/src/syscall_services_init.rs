@@ -15,6 +15,7 @@ static INPUT_SERVICES: InputServices = InputServices {
     set_keyboard_focus: input_set_keyboard_focus,
     set_pointer_focus: input_set_pointer_focus,
     set_pointer_focus_with_offset: input_set_pointer_focus_with_offset,
+    request_close: input_request_close,
     get_pointer_focus: input_get_pointer_focus,
     get_pointer_position: input_get_pointer_position,
     get_button_state: input_get_button_state,
@@ -42,6 +43,14 @@ fn input_set_pointer_focus(task_id: u32, ts: u64) {
 
 fn input_set_pointer_focus_with_offset(task_id: u32, x: i32, y: i32, ts: u64) {
     input_event::input_set_pointer_focus_with_offset(task_id, x, y, ts)
+}
+
+fn input_request_close(task_id: u32, timestamp_ms: u64) -> i32 {
+    if input_event::input_request_close(task_id, timestamp_ms) {
+        0
+    } else {
+        -1
+    }
 }
 
 fn input_get_pointer_focus() -> u32 {
