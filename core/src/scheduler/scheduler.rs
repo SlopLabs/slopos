@@ -580,7 +580,7 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     }
 
     unsafe {
-        (*idle_task).cpu_affinity = 1 << cpu_id;
+        (*idle_task).cpu_affinity = per_cpu::affinity_mask_for_cpu(cpu_id);
         (*idle_task).last_cpu = cpu_id as u8;
     }
 

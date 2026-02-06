@@ -4,7 +4,8 @@ use slopos_abi::task::Task;
 use slopos_lib::{get_cpu_count, get_current_cpu, klog_debug};
 
 use super::per_cpu::{
-    enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu, with_local_scheduler,
+    affinity_allows_cpu, enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu,
+    with_local_scheduler,
 };
 
 pub fn try_work_steal() -> bool {
@@ -39,7 +40,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
     let task = try_steal_task_from_cpu(victim)?;
 
     let affinity = unsafe { (*task).cpu_affinity };
-    if affinity != 0 && (affinity & (1 << thief)) == 0 {
+    if !affinity_allows_cpu(affinity, thief) {
         enqueue_task_on_cpu(victim, task);
         return None;
     }

@@ -734,13 +734,26 @@ pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
 
 #[inline]
 fn cpu_matches_affinity(cpu_id: usize, affinity: u32) -> bool {
+    affinity_allows_cpu(affinity, cpu_id)
+}
+
+#[inline]
+pub(crate) fn affinity_mask_for_cpu(cpu_id: usize) -> u32 {
+    if cpu_id >= u32::BITS as usize {
+        0
+    } else {
+        1u32 << cpu_id
+    }
+}
+
+#[inline]
+pub(crate) fn affinity_allows_cpu(affinity: u32, cpu_id: usize) -> bool {
     if affinity == 0 {
         return true;
     }
-    if cpu_id >= u32::BITS as usize {
-        return false;
-    }
-    (affinity & (1u32 << cpu_id)) != 0
+
+    let mask = affinity_mask_for_cpu(cpu_id);
+    mask != 0 && (affinity & mask) != 0
 }
 
 fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {

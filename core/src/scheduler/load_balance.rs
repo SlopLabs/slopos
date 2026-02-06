@@ -5,7 +5,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_abi::task::Task;
 use slopos_lib::{get_cpu_count, klog_debug};
 
-use super::per_cpu::{enqueue_task_on_cpu, try_steal_task_from_cpu, with_cpu_scheduler};
+use super::per_cpu::{
+    affinity_allows_cpu, enqueue_task_on_cpu, try_steal_task_from_cpu, with_cpu_scheduler,
+};
 use super::work_steal::{calculate_load_imbalance, find_least_loaded_cpu, find_most_loaded_cpu};
 
 static BALANCE_INTERVAL_MS: AtomicU64 = AtomicU64::new(100);
@@ -65,7 +67,7 @@ fn migrate_task_between_cpus(from_cpu: usize, to_cpu: usize) -> bool {
     };
 
     let affinity = unsafe { (*task).cpu_affinity };
-    if affinity != 0 && (affinity & (1 << to_cpu)) == 0 {
+    if !affinity_allows_cpu(affinity, to_cpu) {
         enqueue_task_on_cpu(from_cpu, task);
         return false;
     }
@@ -95,13 +97,13 @@ pub fn trigger_migration(task: *mut Task) -> bool {
     let affinity = unsafe { (*task).cpu_affinity };
     let current_cpu = unsafe { (*task).last_cpu as usize };
 
-    if affinity == 0 || (affinity & (1 << current_cpu)) != 0 {
+    if affinity_allows_cpu(affinity, current_cpu) {
         return false;
     }
 
     let cpu_count = get_cpu_count();
     for cpu_id in 0..cpu_count {
-        if (affinity & (1 << cpu_id)) != 0 {
+        if affinity_allows_cpu(affinity, cpu_id) {
             unsafe {
                 (*task).migration_count += 1;
             }
