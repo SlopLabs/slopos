@@ -138,8 +138,8 @@ pub const SYSCALL_WAITPID: u64 = 68;
 ///
 /// # Arguments (via registers)
 /// * rdi (arg0): Pointer to null-terminated path string
-/// * rsi (arg1): Pointer to null-terminated argv array (or NULL)
-/// * rdx (arg2): Pointer to null-terminated envp array (or NULL)
+/// * rsi (arg1): Reserved for future argv support (must be zero)
+/// * rdx (arg2): Reserved for future envp support (must be zero)
 ///
 /// # Returns
 /// * Does not return on success (process image is replaced)

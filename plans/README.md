@@ -6,7 +6,6 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 
 | Document | Description |
 |----------|-------------|
-| [PROGRAM_TABLE_DECOUPLING_MIGRATION_PLAN.md](./PROGRAM_TABLE_DECOUPLING_MIGRATION_PLAN.md) | Migration plan to remove kernel `PROGRAM_TABLE` policy coupling and move spawn policy into userspace init |
 | [SCHEDULER_FULL_SYMMETRY.md](./SCHEDULER_FULL_SYMMETRY.md) | Optional scheduler cleanup - eliminate remaining BSP/AP asymmetries |
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |

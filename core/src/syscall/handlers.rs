@@ -470,16 +470,23 @@ define_syscall!(syscall_spawn_path(ctx, args) {
     let flags = args.arg3 as u16;
 
     if path_ptr.is_null() || path_len == 0 || path_len > exec::EXEC_MAX_PATH {
+        wl_currency::award_loss();
         return ctx.err();
     }
 
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
-    let copied_len = try_or_err!(ctx, syscall_bounded_from_user(
+    let copied_len = match syscall_bounded_from_user(
         &mut path_buf,
         path_ptr as u64,
         path_len as u64,
         exec::EXEC_MAX_PATH,
-    ));
+    ) {
+        Ok(len) => len,
+        Err(_) => {
+            wl_currency::award_loss();
+            return ctx.err();
+        }
+    };
 
     match exec::spawn_program_with_attrs(&path_buf[..copied_len], priority, flags) {
         Ok(task_id) => ctx.ok(task_id as u64),
@@ -523,11 +530,13 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     let path_ptr = args.arg0;
 
     if path_ptr == 0 {
+        wl_currency::award_loss();
         return ctx.err();
     }
 
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
     if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
+        wl_currency::award_loss();
         return ctx.err();
     }
 
