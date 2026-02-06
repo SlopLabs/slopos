@@ -165,12 +165,37 @@ const CURSOR_SIZE: i32 = 9;
 // Grace period before force-closing unresponsive apps after close request
 const CLOSE_REQUEST_GRACE_MS: u64 = 1500;
 
+struct StartMenuItem {
+    label: &'static str,
+    window_title: Option<&'static [u8]>,
+    program_name: &'static [u8],
+}
+
+const START_MENU_ITEMS: [StartMenuItem; 3] = [
+    StartMenuItem {
+        label: "Files",
+        window_title: Some(b"Files"),
+        program_name: b"file_manager",
+    },
+    StartMenuItem {
+        label: "Info",
+        window_title: Some(b"Sysinfo"),
+        program_name: b"sysinfo",
+    },
+    StartMenuItem {
+        label: "Shell",
+        window_title: Some(b"SlopOS Shell"),
+        program_name: b"shell",
+    },
+];
+
 /// Tracks state for conditional taskbar redraws
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TaskbarState {
     window_count: u32,
     focused_task: u32,
     window_states: u32,
+    start_menu_open: bool,
 }
 
 impl TaskbarState {
@@ -179,10 +204,16 @@ impl TaskbarState {
             window_count: 0,
             focused_task: 0,
             window_states: 0,
+            start_menu_open: false,
         }
     }
 
-    fn from_windows(windows: &[UserWindowInfo; MAX_WINDOWS], count: u32, focused: u32) -> Self {
+    fn from_windows(
+        windows: &[UserWindowInfo; MAX_WINDOWS],
+        count: u32,
+        focused: u32,
+        start_menu_open: bool,
+    ) -> Self {
         let mut states = 0u32;
         for i in 0..count.min(32) as usize {
             if windows[i].state == WINDOW_STATE_MINIMIZED {
@@ -193,6 +224,7 @@ impl TaskbarState {
             window_count: count,
             focused_task: focused,
             window_states: states,
+            start_menu_open,
         }
     }
 }
@@ -292,6 +324,7 @@ struct WindowManager {
     mouse_y: i32,
     mouse_buttons: u8,
     mouse_buttons_prev: u8,
+    start_menu_open: bool,
     first_frame: bool,
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
@@ -345,6 +378,7 @@ impl WindowManager {
             mouse_y: 0,
             mouse_buttons: 0,
             mouse_buttons_prev: 0,
+            start_menu_open: false,
             first_frame: true,
             prev_taskbar_state: TaskbarState::empty(),
             taskbar_needs_redraw: true,
@@ -416,8 +450,12 @@ impl WindowManager {
             .cleanup_stale(&self.windows, self.window_count);
 
         // Check if taskbar state changed
-        let new_state =
-            TaskbarState::from_windows(&self.windows, self.window_count, self.focused_task);
+        let new_state = TaskbarState::from_windows(
+            &self.windows,
+            self.window_count,
+            self.focused_task,
+            self.start_menu_open,
+        );
         if new_state != self.prev_taskbar_state {
             self.taskbar_needs_redraw = true;
             self.prev_taskbar_state = new_state;
@@ -642,9 +680,24 @@ impl WindowManager {
 
         // Handle new clicks
         if clicked {
+            if self.start_menu_open && self.hit_test_start_menu(fb_height) {
+                if let Some(item_idx) = self.hit_test_start_menu_item(fb_height) {
+                    self.activate_start_menu_item(item_idx);
+                }
+                return;
+            }
+
+            if self.start_menu_open
+                && !self.hit_test_start_button(fb_height)
+                && !self.hit_test_start_menu(fb_height)
+            {
+                self.start_menu_open = false;
+                self.needs_full_redraw = true;
+            }
+
             // Check taskbar clicks
             if self.mouse_y >= fb_height - TASKBAR_HEIGHT {
-                self.handle_taskbar_click();
+                self.handle_taskbar_click(fb_height);
                 return;
             }
 
@@ -753,59 +806,120 @@ impl WindowManager {
         self.request_window_close(task_id);
     }
 
-    /// Handle a mouse click on the taskbar, spawning the file manager or minimizing/restoring a window.
-    ///
-    /// If the click is inside the Files button, this spawns the file manager task if not already
-    /// running, or raises the existing file manager window. If the click hits a per-window taskbar
-    /// button, this toggles that window between minimized and normal state via `sys_set_window_state`;
-    /// when restoring, it raises the window, sets TTY focus, updates `focused_task`, and marks a
-    /// full redraw. Returns after handling the first matching button.
+    fn start_button_x(&self) -> i32 {
+        TASKBAR_BUTTON_PADDING
+    }
+
+    fn app_buttons_start_x(&self) -> i32 {
+        self.start_button_x() + START_BUTTON_WIDTH + START_APPS_GAP
+    }
+
+    fn start_button_y(&self, fb_height: i32) -> i32 {
+        fb_height - TASKBAR_HEIGHT + TASKBAR_BUTTON_PADDING
+    }
+
+    fn start_button_height(&self) -> i32 {
+        TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2)
+    }
+
+    fn start_menu_height(&self) -> i32 {
+        (START_MENU_ITEMS.len() as i32 * START_MENU_ITEM_HEIGHT) + (START_MENU_PADDING * 2)
+    }
+
+    fn start_menu_x(&self) -> i32 {
+        self.start_button_x()
+    }
+
+    fn start_menu_y(&self, fb_height: i32) -> i32 {
+        self.start_button_y(fb_height) - self.start_menu_height() - TASKBAR_BUTTON_PADDING
+    }
+
+    fn hit_test_start_button(&self, fb_height: i32) -> bool {
+        let btn_x = self.start_button_x();
+        let btn_y = self.start_button_y(fb_height);
+        let btn_h = self.start_button_height();
+        self.mouse_x >= btn_x
+            && self.mouse_x < btn_x + START_BUTTON_WIDTH
+            && self.mouse_y >= btn_y
+            && self.mouse_y < btn_y + btn_h
+    }
+
+    fn hit_test_start_menu(&self, fb_height: i32) -> bool {
+        let menu_x = self.start_menu_x();
+        let menu_y = self.start_menu_y(fb_height);
+        let menu_h = self.start_menu_height();
+        self.mouse_x >= menu_x
+            && self.mouse_x < menu_x + START_MENU_WIDTH
+            && self.mouse_y >= menu_y
+            && self.mouse_y < menu_y + menu_h
+    }
+
+    fn hit_test_start_menu_item(&self, fb_height: i32) -> Option<usize> {
+        if !self.start_menu_open || !self.hit_test_start_menu(fb_height) {
+            return None;
+        }
+
+        let menu_y = self.start_menu_y(fb_height) + START_MENU_PADDING;
+        let rel_y = self.mouse_y - menu_y;
+        if rel_y < 0 {
+            return None;
+        }
+        let idx = (rel_y / START_MENU_ITEM_HEIGHT) as usize;
+        if idx < START_MENU_ITEMS.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    fn launch_or_raise_program(&mut self, window_title: Option<&[u8]>, program_name: &[u8]) {
+        if let Some(title) = window_title {
+            if let Some(task_id) = self.find_window_by_title(title) {
+                window::raise_window(task_id);
+                tty::set_focus(task_id);
+                self.focused_task = task_id;
+                return;
+            }
+        }
+
+        if let Some(spec) = program_registry::resolve_program(program_name) {
+            process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+        }
+    }
+
+    fn activate_start_menu_item(&mut self, item_idx: usize) {
+        if let Some(item) = START_MENU_ITEMS.get(item_idx) {
+            self.launch_or_raise_program(item.window_title, item.program_name);
+            self.start_menu_open = false;
+            self.needs_full_redraw = true;
+        }
+    }
+
+    /// Handle a mouse click on the taskbar, toggling start menu and minimizing/restoring windows.
     ///
     /// # Examples
     ///
     /// ```
     /// // Assume `wm` is a prepared WindowManager with valid taskbar layout and mouse_x/mouse_y set.
     /// let mut wm = WindowManager::new();
-    /// // position mouse over the Files button and simulate click handling
+    /// // Position mouse over the Start button and simulate click handling.
     /// wm.mouse_x = 4; // within TASKBAR_BUTTON_PADDING
-    /// wm.handle_taskbar_click();
+    /// wm.handle_taskbar_click(480);
     /// assert!(wm.needs_full_redraw);
     /// ```
-    fn handle_taskbar_click(&mut self) {
-        let files_btn_x = TASKBAR_BUTTON_PADDING;
-        // Check Files button click - spawn file manager or raise existing window
-        if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH {
-            if let Some(task_id) = self.find_window_by_title(b"Files") {
-                // File manager already running - raise it
-                window::raise_window(task_id);
-                tty::set_focus(task_id);
-                self.focused_task = task_id;
-            } else {
-                // Spawn new file manager task
-                if let Some(spec) = program_registry::resolve_program(b"file_manager") {
-                    process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
-                }
-            }
+    fn handle_taskbar_click(&mut self, fb_height: i32) {
+        if self.hit_test_start_button(fb_height) {
+            self.start_menu_open = !self.start_menu_open;
             self.needs_full_redraw = true;
             return;
         }
 
-        let sysinfo_btn_x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
-        if self.mouse_x >= sysinfo_btn_x && self.mouse_x < sysinfo_btn_x + SYSINFO_BUTTON_WIDTH {
-            if let Some(task_id) = self.find_window_by_title(b"Sysinfo") {
-                window::raise_window(task_id);
-                tty::set_focus(task_id);
-                self.focused_task = task_id;
-            } else {
-                if let Some(spec) = program_registry::resolve_program(b"sysinfo") {
-                    process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
-                }
-            }
-            self.needs_full_redraw = true;
+        if let Some(item_idx) = self.hit_test_start_menu_item(fb_height) {
+            self.activate_start_menu_item(item_idx);
             return;
         }
 
-        let mut x = sysinfo_btn_x + SYSINFO_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let mut x = self.app_buttons_start_x();
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let button_width = TASKBAR_BUTTON_WIDTH;
@@ -827,6 +941,11 @@ impl WindowManager {
             }
 
             x += button_width + TASKBAR_BUTTON_PADDING;
+        }
+
+        if self.start_menu_open {
+            self.start_menu_open = false;
+            self.needs_full_redraw = true;
         }
     }
 
@@ -878,10 +997,7 @@ impl WindowManager {
         );
     }
 
-    /// Renders the taskbar into the provided draw buffer, including the Files button and one button per tracked window.
-    ///
-    /// The taskbar is drawn at the bottom of the buffer; the Files button reflects the File Manager's visible/hover state,
-    /// and each window gets a fixed-width button that indicates focus and shows a truncated title.
+    /// Renders the taskbar into the provided draw buffer, including Start and window buttons.
     ///
     /// # Examples
     ///
@@ -906,19 +1022,17 @@ impl WindowManager {
             COLOR_TASKBAR,
         );
 
-        // Draw Files button
-        let files_btn_x = TASKBAR_BUTTON_PADDING;
+        // Draw Start button
+        let start_btn_x = self.start_button_x();
         let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
         let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
-        let files_hover = self.mouse_x >= files_btn_x
-            && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH
+        let start_hover = self.mouse_x >= start_btn_x
+            && self.mouse_x < start_btn_x + START_BUTTON_WIDTH
             && self.mouse_y >= btn_y
             && self.mouse_y < btn_y + btn_height;
 
-        // Highlight if file manager window exists or button is hovered
-        let file_manager_running = self.find_window_by_title(b"Files").is_some();
-        let files_color = if file_manager_running || files_hover {
+        let start_color = if self.start_menu_open || start_hover {
             COLOR_BUTTON_HOVER
         } else {
             COLOR_BUTTON
@@ -926,54 +1040,34 @@ impl WindowManager {
 
         gfx::fill_rect(
             buf,
-            files_btn_x,
+            start_btn_x,
             btn_y,
-            FM_BUTTON_WIDTH,
+            START_BUTTON_WIDTH,
             btn_height,
-            files_color,
+            start_color,
         );
         gfx::font::draw_string(
             buf,
-            files_btn_x + 4,
+            start_btn_x + 4,
             btn_y + 4,
-            "Files",
+            "Start",
             COLOR_TEXT,
-            files_color,
+            start_color,
         );
 
-        // Draw Sysinfo button
-        let sysinfo_btn_x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
-        let sysinfo_hover = self.mouse_x >= sysinfo_btn_x
-            && self.mouse_x < sysinfo_btn_x + SYSINFO_BUTTON_WIDTH
-            && self.mouse_y >= btn_y
-            && self.mouse_y < btn_y + btn_height;
-
-        let sysinfo_running = self.find_window_by_title(b"Sysinfo").is_some();
-        let sysinfo_color = if sysinfo_running || sysinfo_hover {
-            COLOR_BUTTON_HOVER
-        } else {
-            COLOR_BUTTON
-        };
-
+        // Draw a subtle separator/gap between Start section and app buttons
+        let separator_x = self.app_buttons_start_x() - (START_APPS_GAP / 2);
         gfx::fill_rect(
             buf,
-            sysinfo_btn_x,
-            btn_y,
-            SYSINFO_BUTTON_WIDTH,
-            btn_height,
-            sysinfo_color,
-        );
-        gfx::font::draw_string(
-            buf,
-            sysinfo_btn_x + 4,
-            btn_y + 4,
-            "Info",
-            COLOR_TEXT,
-            sysinfo_color,
+            separator_x,
+            taskbar_y + 2,
+            1,
+            TASKBAR_HEIGHT - 4,
+            COLOR_BUTTON_HOVER,
         );
 
         // Draw app buttons
-        let mut x = sysinfo_btn_x + SYSINFO_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let mut x = self.app_buttons_start_x();
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let focused = window.task_id == self.focused_task;
@@ -999,6 +1093,53 @@ impl WindowManager {
             gfx::font::draw_string(buf, x + 4, btn_y + 4, truncated, COLOR_TEXT, btn_color);
 
             x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        }
+    }
+
+    fn draw_start_menu(&self, buf: &mut DrawBuffer) {
+        if !self.start_menu_open {
+            return;
+        }
+
+        let fb_height = buf.height() as i32;
+        let menu_x = self.start_menu_x();
+        let menu_y = self.start_menu_y(fb_height);
+        let menu_h = self.start_menu_height();
+
+        gfx::fill_rect(
+            buf,
+            menu_x,
+            menu_y,
+            START_MENU_WIDTH,
+            menu_h,
+            COLOR_START_MENU_BG,
+        );
+
+        for (idx, item) in START_MENU_ITEMS.iter().enumerate() {
+            let item_y = menu_y + START_MENU_PADDING + (idx as i32 * START_MENU_ITEM_HEIGHT);
+            let item_hover = self.hit_test_start_menu_item(fb_height) == Some(idx);
+            let item_color = if item_hover {
+                COLOR_BUTTON_HOVER
+            } else {
+                COLOR_START_MENU_BG
+            };
+
+            gfx::fill_rect(
+                buf,
+                menu_x + START_MENU_PADDING,
+                item_y,
+                START_MENU_WIDTH - (START_MENU_PADDING * 2),
+                START_MENU_ITEM_HEIGHT,
+                item_color,
+            );
+            gfx::font::draw_string(
+                buf,
+                menu_x + START_MENU_PADDING + 4,
+                item_y + 6,
+                item.label,
+                COLOR_TEXT,
+                item_color,
+            );
         }
     }
 
@@ -1181,6 +1322,9 @@ impl WindowManager {
 
         // Draw taskbar
         self.draw_taskbar(buf);
+
+        // Draw start menu over windows/taskbar chrome when open
+        self.draw_start_menu(buf);
 
         // Draw cursor (on top of everything)
         self.draw_cursor(buf);

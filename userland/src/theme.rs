@@ -9,6 +9,11 @@ pub const BUTTON_PADDING: i32 = 2;
 pub const TASKBAR_HEIGHT: i32 = 32;
 pub const TASKBAR_BUTTON_WIDTH: i32 = 120;
 pub const TASKBAR_BUTTON_PADDING: i32 = 4;
+pub const START_BUTTON_WIDTH: i32 = 56;
+pub const START_APPS_GAP: i32 = 14;
+pub const START_MENU_WIDTH: i32 = 180;
+pub const START_MENU_ITEM_HEIGHT: i32 = 24;
+pub const START_MENU_PADDING: i32 = 6;
 
 // Colors - Dark Roulette Theme
 pub const COLOR_TITLE_BAR: u32 = rgb(0x1E, 0x1E, 0x1E);
@@ -20,6 +25,7 @@ pub const COLOR_TEXT: u32 = rgb(0xE0, 0xE0, 0xE0);
 pub const COLOR_TASKBAR: u32 = rgb(0x25, 0x25, 0x26);
 pub const COLOR_CURSOR: u32 = rgb(0xFF, 0xFF, 0xFF);
 pub const COLOR_BACKGROUND: u32 = rgb(0x00, 0x11, 0x22);
+pub const COLOR_START_MENU_BG: u32 = rgb(0x1A, 0x1A, 0x1C);
 
 // File Manager Specific
 pub const FM_WIDTH: i32 = 400;
