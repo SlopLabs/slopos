@@ -119,12 +119,12 @@ pub fn spawn_program_by_name(name: &[u8]) -> Result<u32, ExecError> {
 }
 
 pub fn spawn_program(spec: &ProgramSpec) -> Result<u32, ExecError> {
-    let bootstrap_entry: TaskEntry =
+    let user_code_entry: TaskEntry =
         unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
 
     let task_id = task_create(
         spec.task_name.as_ptr() as *const c_char,
-        bootstrap_entry,
+        user_code_entry,
         ptr::null_mut(),
         spec.priority,
         spec.flags,

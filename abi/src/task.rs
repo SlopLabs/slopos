@@ -19,21 +19,11 @@ pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
 // =============================================================================
-// Task State Constants (deprecated - use TaskStatus enum instead)
-// =============================================================================
-
-pub const TASK_STATE_INVALID: u8 = 0;
-pub const TASK_STATE_READY: u8 = 1;
-pub const TASK_STATE_RUNNING: u8 = 2;
-pub const TASK_STATE_BLOCKED: u8 = 3;
-pub const TASK_STATE_TERMINATED: u8 = 4;
-
-// =============================================================================
 // TaskStatus - Type-safe task state enum
 // =============================================================================
 
 /// Type-safe task status with explicit state machine semantics.
-/// Uses `#[repr(u8)]` to maintain binary compatibility with legacy u8 state.
+/// Uses `#[repr(u8)]` to maintain binary compatibility with u8 representation.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskStatus {
@@ -51,7 +41,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    /// Convert from legacy u8 state constant.
+    /// Convert from raw u8 value.
     #[inline]
     pub const fn from_u8(value: u8) -> Self {
         match value {
@@ -64,7 +54,7 @@ impl TaskStatus {
         }
     }
 
-    /// Convert to legacy u8 state constant.
+    /// Convert to raw u8 value.
     #[inline]
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -118,7 +108,7 @@ pub enum BlockReason {
     KeyboardWait = 5,
     /// Waiting for IPC message
     IpcWait = 6,
-    /// Generic blocked state (legacy compatibility)
+    /// Generic blocked state
     Generic = 7,
 }
 
@@ -485,7 +475,7 @@ impl Task {
         Self {
             task_id: INVALID_TASK_ID,
             name: [0; TASK_NAME_MAX_LEN],
-            state_atomic: AtomicU8::new(TASK_STATE_INVALID),
+            state_atomic: AtomicU8::new(TaskStatus::Invalid.as_u8()),
             priority: TASK_PRIORITY_NORMAL,
             flags: 0,
             block_reason: BlockReason::None,

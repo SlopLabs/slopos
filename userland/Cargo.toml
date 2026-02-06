@@ -39,9 +39,6 @@ path = "src/bin/init.rs"
 
 [features]
 default = []
-standalone-bin = []
-# Enable this to bundle an external user payload ELF from builddir/roulette_payload.elf
-external_payload = []
 
 [dependencies]
 slopos-abi = { workspace = true }

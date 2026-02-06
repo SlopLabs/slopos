@@ -18,7 +18,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use slopos_abi::task::{TASK_STATE_READY, Task, TaskContext};
+use slopos_abi::task::{Task, TaskContext, TaskStatus};
 use slopos_lib::{InitFlag, MAX_CPUS, klog_debug, klog_info};
 use spin::Mutex;
 
@@ -496,7 +496,7 @@ impl PerCpuScheduler {
                     .store(ptr::null_mut(), Ordering::Release);
             }
 
-            let should_enqueue = unsafe { (*current).state() == TASK_STATE_READY };
+            let should_enqueue = unsafe { (*current).status() == TaskStatus::Ready };
             if should_enqueue {
                 unsafe {
                     (*current).last_cpu = self.cpu_id as u8;
@@ -628,7 +628,7 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
     }
 
     unsafe {
-        if (*task).state() != TASK_STATE_READY {
+        if (*task).status() != TaskStatus::Ready {
             return -1;
         }
     }

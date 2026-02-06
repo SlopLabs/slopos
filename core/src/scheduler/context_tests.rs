@@ -3,10 +3,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
-    TASK_STATE_RUNNING, TASK_STATE_TERMINATED, Task,
-};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskStatus};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -92,20 +89,20 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
         return TestResult::Fail;
     }
 
-    let initial_state = unsafe { (*task_ptr).state() };
-    if initial_state != TASK_STATE_READY {
+    let initial_state = unsafe { (*task_ptr).status() };
+    if initial_state != TaskStatus::Ready {
         klog_info!("CONTEXT_TEST: BUG - New task not in READY state");
         task_terminate(task_id);
         return TestResult::Fail;
     }
 
-    task_set_state(task_id, TASK_STATE_RUNNING);
-    let _running_state = unsafe { (*task_ptr).state() };
+    task_set_state(task_id, TaskStatus::Running);
+    let _running_state = unsafe { (*task_ptr).status() };
 
-    task_set_state(task_id, TASK_STATE_BLOCKED);
-    let _blocked_state = unsafe { (*task_ptr).state() };
+    task_set_state(task_id, TaskStatus::Blocked);
+    let _blocked_state = unsafe { (*task_ptr).status() };
 
-    task_set_state(task_id, TASK_STATE_READY);
+    task_set_state(task_id, TaskStatus::Ready);
 
     task_terminate(task_id);
     TestResult::Pass
@@ -121,12 +118,12 @@ pub fn test_task_invalid_state_transition() -> TestResult {
 
     task_terminate(task_id);
 
-    let _result = task_set_state(task_id, TASK_STATE_RUNNING);
+    let _result = task_set_state(task_id, TaskStatus::Running);
 
     let task_ptr = task_find_by_id(task_id);
     if !task_ptr.is_null() {
-        let state = unsafe { (*task_ptr).state() };
-        if state == TASK_STATE_RUNNING {
+        let state = unsafe { (*task_ptr).status() };
+        if state == TaskStatus::Running {
             klog_info!("CONTEXT_TEST: BUG - Revived terminated task to RUNNING");
             return TestResult::Fail;
         }
@@ -273,10 +270,10 @@ pub fn test_task_find_after_terminate() -> TestResult {
 
     let ptr_after = task_find_by_id(task_id);
     if !ptr_after.is_null() {
-        let state = unsafe { (*ptr_after).state() };
-        if state != TASK_STATE_TERMINATED {
+        let state = unsafe { (*ptr_after).status() };
+        if state != TaskStatus::Terminated {
             klog_info!(
-                "CONTEXT_TEST: BUG - Terminated task in wrong state: {}",
+                "CONTEXT_TEST: BUG - Terminated task in wrong state: {:?}",
                 state
             );
             return TestResult::Fail;

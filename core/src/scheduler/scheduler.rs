@@ -18,10 +18,9 @@ use slopos_lib::wl_currency;
 use super::per_cpu;
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, Task, TaskContext, reap_zombies,
-    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
-    task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, reap_zombies, task_get_info,
+    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
+    task_record_context_switch, task_record_yield, task_set_current, task_set_state,
 };
 use super::work_steal::try_work_steal;
 
@@ -278,7 +277,7 @@ pub fn schedule() {
     if !current.is_null() {
         unsafe {
             if task_is_running(current) {
-                if task_set_state((*current).task_id, TASK_STATE_READY) == 0 {
+                if task_set_state((*current).task_id, TaskStatus::Ready) == 0 {
                     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                         sched.enqueue_local(current);
                     });
@@ -345,7 +344,7 @@ pub fn block_current_task() {
     if task_is_blocked(current) {
         return;
     }
-    if task_set_state(unsafe { (*current).task_id }, TASK_STATE_BLOCKED) != 0 {
+    if task_set_state(unsafe { (*current).task_id }, TaskStatus::Blocked) != 0 {
         return;
     }
     unschedule_task(current);
@@ -391,7 +390,7 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return 0;
     }
 
-    if task_set_state(unsafe { (*task).task_id }, TASK_STATE_READY) != 0 {
+    if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
         // CAS failed - another CPU already changed the state, which is fine
         // under SMP. Only fail if task is in a bad state.
         if task_is_terminated(task) || task_is_invalid(task) {
@@ -432,7 +431,7 @@ pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
         Ok(_) => {
             // We won the race! Now transition state and enqueue
             // CAS: BLOCKED -> READY (single-winner state transition)
-            if task_set_state(unsafe { (*task).task_id }, TASK_STATE_READY) != 0 {
+            if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
                 // State changed unexpectedly - task may be terminated or already ready
                 // Check if it's a real failure
                 if task_is_terminated(task) || task_is_invalid(task) {
@@ -750,7 +749,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
                 }
 
                 if !task_is_terminated(next_task) && task_is_running(next_task) {
-                    if task_set_state((*next_task).task_id, TASK_STATE_READY) == 0 {
+                    if task_set_state((*next_task).task_id, TaskStatus::Ready) == 0 {
                         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                             sched.enqueue_local(next_task);
                         });

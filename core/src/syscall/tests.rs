@@ -13,10 +13,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
-    TASK_STATE_TERMINATED, Task,
-};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskStatus};
 use slopos_lib::{InterruptFrame, klog_info, testing::TestResult};
 
 use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
@@ -251,8 +248,8 @@ pub fn test_fork_terminated_parent() -> TestResult {
 
     let task_ptr_after = task_find_by_id(task_id);
     if !task_ptr_after.is_null() {
-        let state = unsafe { (*task_ptr_after).state() };
-        if state == TASK_STATE_TERMINATED {
+        let state = unsafe { (*task_ptr_after).status() };
+        if state == TaskStatus::Terminated {
             let child_id = task_fork(task_ptr_after);
             if child_id != INVALID_TASK_ID {
                 klog_info!("SYSCALL_TEST: BUG - task_fork succeeded for terminated task!");
@@ -282,7 +279,7 @@ pub fn test_fork_blocked_parent() -> TestResult {
         return TestResult::Fail;
     }
 
-    task_set_state(task_id, TASK_STATE_BLOCKED);
+    task_set_state(task_id, TaskStatus::Blocked);
 
     let child_id = task_fork(task_ptr);
 
@@ -628,8 +625,8 @@ pub fn test_terminate_already_terminated() -> TestResult {
 
     let task_ptr = task_find_by_id(task_id);
     if !task_ptr.is_null() {
-        let state = unsafe { (*task_ptr).state() };
-        if state == TASK_STATE_READY {
+        let state = unsafe { (*task_ptr).status() };
+        if state == TaskStatus::Ready {
             klog_info!("SYSCALL_TEST: BUG - Terminated task still in READY state!");
             return TestResult::Fail;
         }
@@ -664,12 +661,12 @@ pub fn test_operations_on_terminated_task() -> TestResult {
     let _info_result = task_get_info(task_id, &mut task_ptr);
 
     use crate::scheduler::task::task_set_state;
-    let state_result = task_set_state(task_id, TASK_STATE_READY);
+    let state_result = task_set_state(task_id, TaskStatus::Ready);
     if state_result == 0 {
         let task = task_find_by_id(task_id);
         if !task.is_null() {
-            let current_state = unsafe { (*task).state() };
-            if current_state == TASK_STATE_READY {
+            let current_state = unsafe { (*task).status() };
+            if current_state == TaskStatus::Ready {
                 klog_info!("SYSCALL_TEST: BUG - Revived terminated task!");
                 return TestResult::Fail;
             }

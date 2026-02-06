@@ -41,18 +41,3 @@ impl fmt::Display for PagingError {
 }
 
 pub type PagingResult<T = ()> = Result<T, PagingError>;
-
-impl PagingError {
-    #[deprecated(note = "use PagingResult instead")]
-    pub fn to_c_int(self) -> core::ffi::c_int {
-        -1
-    }
-}
-
-#[deprecated(note = "use PagingResult instead")]
-pub fn result_to_c_int(result: PagingResult) -> core::ffi::c_int {
-    match result {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}

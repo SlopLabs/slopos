@@ -6,7 +6,7 @@ use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
 use crate::ps2::keyboard;
 use crate::serial;
-use slopos_abi::task::{TASK_STATE_BLOCKED, TASK_STATE_READY, Task};
+use slopos_abi::task::{Task, TaskStatus};
 use slopos_core::sched::{
     block_current_task, scheduler_get_current_task, scheduler_is_enabled,
     scheduler_register_idle_wakeup_callback, unblock_task,
@@ -182,8 +182,8 @@ pub fn tty_notify_input_ready() {
     let task = tty_wait_queue_pop();
 
     if !task.is_null() {
-        let state = unsafe { (*task).state() };
-        if state == TASK_STATE_BLOCKED || state == TASK_STATE_READY {
+        let status = unsafe { (*task).status() };
+        if status == TaskStatus::Blocked || status == TaskStatus::Ready {
             unblock_task(task);
         }
     }

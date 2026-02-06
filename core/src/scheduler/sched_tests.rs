@@ -20,9 +20,8 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE,
-    TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STATE_BLOCKED, TASK_STATE_READY,
-    TASK_STATE_RUNNING, Task, init_task_manager, task_create, task_find_by_id, task_get_info,
-    task_set_state, task_shutdown_all, task_terminate,
+    TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create,
+    task_find_by_id, task_get_info, task_set_state, task_shutdown_all, task_terminate,
 };
 
 // =============================================================================
@@ -101,21 +100,21 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    let initial_state = unsafe { (*task).state() };
-    if initial_state != TASK_STATE_READY {
-        klog_info!("SCHED_TEST: Expected READY state, got {}", initial_state);
+    let initial_state = unsafe { (*task).status() };
+    if initial_state != TaskStatus::Ready {
+        klog_info!("SCHED_TEST: Expected READY state, got {:?}", initial_state);
         return TestResult::Fail;
     }
 
-    if task_set_state(task_id, TASK_STATE_RUNNING) != 0 {
+    if task_set_state(task_id, TaskStatus::Running) != 0 {
         klog_info!("SCHED_TEST: Failed to set RUNNING state");
         return TestResult::Fail;
     }
 
-    let new_state = unsafe { (*task).state() };
-    if new_state != TASK_STATE_RUNNING {
+    let new_state = unsafe { (*task).status() };
+    if new_state != TaskStatus::Running {
         klog_info!(
-            "SCHED_TEST: Expected RUNNING state after transition, got {}",
+            "SCHED_TEST: Expected RUNNING state after transition, got {:?}",
             new_state
         );
         return TestResult::Fail;
@@ -141,18 +140,18 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
     }
 
     // Set to RUNNING first
-    task_set_state(task_id, TASK_STATE_RUNNING);
+    task_set_state(task_id, TaskStatus::Running);
 
     // Then transition to BLOCKED
-    if task_set_state(task_id, TASK_STATE_BLOCKED) != 0 {
+    if task_set_state(task_id, TaskStatus::Blocked) != 0 {
         klog_info!("SCHED_TEST: Failed to set BLOCKED state");
         return TestResult::Fail;
     }
 
     let task = task_find_by_id(task_id);
-    let state = unsafe { (*task).state() };
-    if state != TASK_STATE_BLOCKED {
-        klog_info!("SCHED_TEST: Expected BLOCKED, got {}", state);
+    let state = unsafe { (*task).status() };
+    if state != TaskStatus::Blocked {
+        klog_info!("SCHED_TEST: Expected BLOCKED, got {:?}", state);
         return TestResult::Fail;
     }
 
@@ -181,10 +180,10 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
     let task = task_find_by_id(task_id);
 
     if !task.is_null() {
-        let _result = task_set_state(task_id, TASK_STATE_RUNNING);
-        let new_state = unsafe { (*task).state() };
+        let _result = task_set_state(task_id, TaskStatus::Running);
+        let new_state = unsafe { (*task).status() };
 
-        if new_state == TASK_STATE_RUNNING {
+        if new_state == TaskStatus::Running {
             klog_info!("SCHED_TEST: BUG - Invalid transition TERMINATED->RUNNING was allowed!");
             return TestResult::Fail;
         }
@@ -209,15 +208,15 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    task_set_state(task_id, TASK_STATE_RUNNING);
-    task_set_state(task_id, TASK_STATE_BLOCKED);
+    task_set_state(task_id, TaskStatus::Running);
+    task_set_state(task_id, TaskStatus::Blocked);
 
-    let _result = task_set_state(task_id, TASK_STATE_RUNNING);
+    let _result = task_set_state(task_id, TaskStatus::Running);
 
     let task = task_find_by_id(task_id);
-    let state = unsafe { (*task).state() };
+    let state = unsafe { (*task).status() };
 
-    if state == TASK_STATE_RUNNING {
+    if state == TaskStatus::Running {
         klog_info!("SCHED_TEST: BUG - Invalid transition BLOCKED->RUNNING was allowed!");
         return TestResult::Fail;
     }
@@ -1344,8 +1343,8 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
         sched.push_remote_wake(task_ptr);
     });
 
-    if task_set_state(task_id, TASK_STATE_RUNNING) != 0
-        || task_set_state(task_id, TASK_STATE_BLOCKED) != 0
+    if task_set_state(task_id, TaskStatus::Running) != 0
+        || task_set_state(task_id, TaskStatus::Blocked) != 0
     {
         klog_info!("SCHED_TEST: Failed to transition task to BLOCKED before inbox drain");
         return TestResult::Fail;

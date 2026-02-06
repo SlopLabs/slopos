@@ -226,7 +226,6 @@ build-userland:
 	  --bin shell \
 	  --bin file_manager \
 	  --bin sysinfo \
-	  --features standalone-bin \
 	  --no-default-features \
 	  --release; \
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette ]; then \
