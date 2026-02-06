@@ -23,10 +23,10 @@ use crate::syscall_services::{fate as fate_svc, input, tty, video};
 use crate::{
     clear_scheduler_current_task, fate_apply_outcome, fate_set_pending, fate_spin,
     fate_take_pending, get_scheduler_stats, get_task_stats, schedule,
-    scheduler_is_preemption_enabled, task_terminate, yield_,
+    scheduler_is_preemption_enabled, task_get_exit_record, task_terminate, task_wait_for, yield_,
 };
 
-use slopos_abi::task::{Task, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
 use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
 use slopos_mm::page_alloc::get_page_allocator_stats;
@@ -462,15 +462,6 @@ define_syscall!(syscall_sys_info(ctx, args) {
     ctx.ok(0)
 });
 
-pub type SpawnTaskFn = fn(&[u8]) -> i32;
-
-static SPAWN_TASK_CALLBACK: slopos_lib::IrqMutex<Option<SpawnTaskFn>> =
-    slopos_lib::IrqMutex::new(None);
-
-pub fn register_spawn_task_callback(callback: SpawnTaskFn) {
-    *SPAWN_TASK_CALLBACK.lock() = Some(callback);
-}
-
 define_syscall!(syscall_spawn_task(ctx, args) {
     let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
@@ -482,13 +473,32 @@ define_syscall!(syscall_spawn_task(ctx, args) {
     let mut name_buf = [0u8; 64];
     let copied_len = try_or_err!(ctx, syscall_bounded_from_user(&mut name_buf, name_ptr as u64, name_len as u64, 64));
 
-    let callback = *SPAWN_TASK_CALLBACK.lock();
-    let result = match callback {
-        Some(spawn_fn) => spawn_fn(&name_buf[..copied_len]),
-        None => -1,
-    };
+    match exec::spawn_program_by_name(&name_buf[..copied_len]) {
+        Ok(task_id) => ctx.ok(task_id as u64),
+        Err(_) => ctx.err(),
+    }
+});
 
-    ctx.from_bool_value(result > 0, result as u64)
+define_syscall!(syscall_waitpid(ctx, args) {
+    let target_id = args.arg0 as u32;
+    if target_id == 0 || target_id == INVALID_TASK_ID {
+        return ctx.err();
+    }
+
+    let mut record = TaskExitRecord::empty();
+    if task_get_exit_record(target_id, &mut record) == 0 {
+        return ctx.ok(record.exit_code as u64);
+    }
+
+    // Block caller until target terminates via release_task_dependents wake path
+    task_wait_for(target_id);
+
+    let mut record2 = TaskExitRecord::empty();
+    if task_get_exit_record(target_id, &mut record2) == 0 {
+        ctx.ok(record2.exit_code as u64)
+    } else {
+        ctx.ok(0)
+    }
 });
 
 pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -841,6 +851,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_SPAWN_TASK as usize] = SyscallEntry {
         handler: Some(syscall_spawn_task),
         name: b"spawn_task\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_WAITPID as usize] = SyscallEntry {
+        handler: Some(syscall_waitpid),
+        name: b"waitpid\0".as_ptr() as *const c_char,
     };
     table[SYSCALL_EXEC as usize] = SyscallEntry {
         handler: Some(syscall_exec),

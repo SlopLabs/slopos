@@ -176,7 +176,6 @@ use slopos_mm::process_vm::{
     process_vm_get_stack_top,
 };
 use slopos_mm::shared_memory::shm_cleanup_task;
-use slopos_mm::symbols;
 
 #[inline]
 fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> R {
@@ -253,15 +252,7 @@ fn release_task_dependents(completed_task_id: u32) {
 }
 
 fn user_entry_is_allowed(addr: u64) -> bool {
-    // Allow entry points in embedded user_text section (for legacy compatibility)
-    let (start_ptr, end_ptr) = symbols::user_text_bounds();
-    let start = start_ptr as u64;
-    let end = end_ptr as u64;
-    if start != 0 && end != 0 && start < end && addr >= start && addr < end {
-        return true;
-    }
-    // Allow entry points in PROCESS_CODE_START_VA range (for ELF binaries)
-    // ELF binaries are loaded at 0x400000, allow a reasonable range
+    // User tasks must start from filesystem-loaded ELF code in PROCESS_CODE_START_VA.
     const PROCESS_CODE_END: u64 = 0x0000_0000_0050_0000; // 1MB range
     addr >= PROCESS_CODE_START_VA && addr < PROCESS_CODE_END
 }
@@ -323,22 +314,6 @@ fn init_task_context(task: &mut Task) {
         task.context.ss = 0x1B;
         task.context.rdi = task.entry_arg as u64;
         task.context.rsi = 0;
-        // #region agent log
-        {
-            use slopos_lib::klog_info;
-            let rip = task.context.rip;
-            let rsp = task.context.rsp;
-            let rdi = task.context.rdi;
-            let entry_point = task.entry_point;
-            klog_info!(
-                "init_task_context: user task rip=0x{:x} rsp=0x{:x} rdi=0x{:x} entry_point=0x{:x}\n",
-                rip,
-                rsp,
-                rdi,
-                entry_point
-            );
-        }
-        // #endregion
     }
 
     task.context.cr3 = 0;
@@ -528,23 +503,7 @@ pub fn task_create(
     task_ref.kernel_stack_base = kernel_stack_base;
     task_ref.kernel_stack_top = kernel_stack_base + kernel_stack_size;
     task_ref.kernel_stack_size = kernel_stack_size;
-    if flags & TASK_FLAG_USER_MODE != 0 {
-        let entry_addr = entry_point as u64;
-        let (text_start, text_end) = slopos_mm::symbols::user_text_bounds();
-        let text_start = text_start as u64;
-        let text_end = text_end as u64;
-        if entry_addr >= text_start && entry_addr < text_end {
-            use slopos_lib::align_down;
-            use slopos_mm::mm_constants::PAGE_SIZE_4KB;
-            let text_start_aligned = align_down(text_start as usize, PAGE_SIZE_4KB as usize) as u64;
-            let offset = entry_addr - text_start_aligned;
-            task_ref.entry_point = PROCESS_CODE_START_VA + offset;
-        } else {
-            task_ref.entry_point = entry_addr;
-        }
-    } else {
-        task_ref.entry_point = entry_point as usize as u64;
-    }
+    task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
     task_ref.time_slice_remaining = task_ref.time_slice;

@@ -39,7 +39,17 @@ impl StaticExt2Vfs {
     }
 }
 
-impl FileSystem for StaticExt2Vfs {
+trait Ext2VfsBackend {
+    fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R>;
+}
+
+impl Ext2VfsBackend for StaticExt2Vfs {
+    fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
+        self.with_fs(f)
+    }
+}
+
+impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
     fn name(&self) -> &'static str {
         "ext2"
     }
@@ -49,7 +59,7 @@ impl FileSystem for StaticExt2Vfs {
     }
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
-        self.with_fs(|fs| {
+        self.with_ext2(|fs| {
             let parent_inode = fs.read_inode(parent as u32)?;
             if !parent_inode.is_directory() {
                 return Err(Ext2Error::NotDirectory);
@@ -70,7 +80,7 @@ impl FileSystem for StaticExt2Vfs {
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        self.with_fs(|fs| {
+        self.with_ext2(|fs| {
             let ext2_inode = fs.read_inode(inode as u32)?;
             Ok(FileStat {
                 inode,
@@ -90,15 +100,15 @@ impl FileSystem for StaticExt2Vfs {
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        self.with_fs(|fs| fs.read_file(inode as u32, offset as u32, buf))
+        self.with_ext2(|fs| fs.read_file(inode as u32, offset as u32, buf))
     }
 
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        self.with_fs(|fs| fs.write_file(inode as u32, offset as u32, buf))
+        self.with_ext2(|fs| fs.write_file(inode as u32, offset as u32, buf))
     }
 
     fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        self.with_fs(|fs| {
+        self.with_ext2(|fs| {
             let inode = match file_type {
                 FileType::Directory => fs.create_directory(parent as u32, name)?,
                 FileType::Regular => fs.create_file(parent as u32, name)?,
@@ -109,7 +119,7 @@ impl FileSystem for StaticExt2Vfs {
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
-        self.with_fs(|fs| {
+        self.with_ext2(|fs| {
             let _target_inode = {
                 let mut found: Option<u32> = None;
                 fs.for_each_dir_entry(parent as u32, |entry| {
@@ -194,7 +204,7 @@ impl FileSystem for StaticExt2Vfs {
         offset: usize,
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize> {
-        self.with_fs(|fs| {
+        self.with_ext2(|fs| {
             let ext2_inode = fs.read_inode(inode as u32)?;
             if !ext2_inode.is_directory() {
                 return Err(Ext2Error::NotDirectory);
@@ -330,193 +340,9 @@ impl<D: BlockDevice + Send> Ext2VfsAdapter<D> {
     }
 }
 
-impl<D: BlockDevice + Send + 'static> FileSystem for Ext2VfsAdapter<D> {
-    fn name(&self) -> &'static str {
-        "ext2"
-    }
-
-    fn root_inode(&self) -> InodeId {
-        EXT2_ROOT_INODE as InodeId
-    }
-
-    fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
-        self.with_fs(|fs| {
-            let parent_inode = fs.read_inode(parent as u32)?;
-            if !parent_inode.is_directory() {
-                return Err(Ext2Error::NotDirectory);
-            }
-
-            let mut found: Option<u32> = None;
-            fs.for_each_dir_entry(parent as u32, |entry| {
-                if entry.name == name {
-                    found = Some(entry.inode);
-                    false
-                } else {
-                    true
-                }
-            })?;
-
-            found.map(|i| i as InodeId).ok_or(Ext2Error::PathNotFound)
-        })
-    }
-
-    fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        self.with_fs(|fs| {
-            let ext2_inode = fs.read_inode(inode as u32)?;
-            Ok(FileStat {
-                inode,
-                file_type: inode_to_file_type(&ext2_inode),
-                size: ext2_inode.size as u64,
-                mode: ext2_inode.mode,
-                nlink: ext2_inode.links_count as u32,
-                uid: ext2_inode.uid as u32,
-                gid: ext2_inode.gid as u32,
-                atime: ext2_inode.atime as u64,
-                mtime: ext2_inode.mtime as u64,
-                ctime: ext2_inode.ctime as u64,
-                dev_major: 0,
-                dev_minor: 0,
-            })
-        })
-    }
-
-    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        self.with_fs(|fs| fs.read_file(inode as u32, offset as u32, buf))
-    }
-
-    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        self.with_fs(|fs| fs.write_file(inode as u32, offset as u32, buf))
-    }
-
-    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        self.with_fs(|fs| {
-            let inode = match file_type {
-                FileType::Directory => fs.create_directory(parent as u32, name)?,
-                FileType::Regular => fs.create_file(parent as u32, name)?,
-                _ => return Err(Ext2Error::InvalidInode),
-            };
-            Ok(inode as InodeId)
-        })
-    }
-
-    fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
-        self.with_fs(|fs| {
-            let _target_inode = {
-                let mut found: Option<u32> = None;
-                fs.for_each_dir_entry(parent as u32, |entry| {
-                    if entry.name == name {
-                        found = Some(entry.inode);
-                        false
-                    } else {
-                        true
-                    }
-                })?;
-                found.ok_or(Ext2Error::PathNotFound)?
-            };
-
-            let mut path_buf = [0u8; 256];
-            let mut pos = 0;
-
-            let mut build_path =
-                |fs: &mut Ext2Fs, start: u32, name: &[u8]| -> Result<usize, Ext2Error> {
-                    let mut components: [([u8; 64], usize); 16] = [([0u8; 64], 0); 16];
-                    let mut depth = 0;
-                    let mut current = start;
-
-                    while current != EXT2_ROOT_INODE && depth < 16 {
-                        let mut parent_found: Option<u32> = None;
-                        let mut name_found: Option<([u8; 64], usize)> = None;
-
-                        fs.for_each_dir_entry(current, |entry| {
-                            if entry.name == b".." {
-                                parent_found = Some(entry.inode);
-                            }
-                            true
-                        })?;
-
-                        let parent = parent_found.ok_or(Ext2Error::PathNotFound)?;
-
-                        fs.for_each_dir_entry(parent, |entry| {
-                            if entry.inode == current && entry.name != b"." && entry.name != b".." {
-                                let mut buf = [0u8; 64];
-                                let len = entry.name.len().min(64);
-                                buf[..len].copy_from_slice(&entry.name[..len]);
-                                name_found = Some((buf, len));
-                                false
-                            } else {
-                                true
-                            }
-                        })?;
-
-                        if let Some((buf, len)) = name_found {
-                            components[depth] = (buf, len);
-                            depth += 1;
-                        }
-
-                        current = parent;
-                    }
-
-                    path_buf[pos] = b'/';
-                    pos += 1;
-
-                    for i in (0..depth).rev() {
-                        let (buf, len) = components[i];
-                        path_buf[pos..pos + len].copy_from_slice(&buf[..len]);
-                        pos += len;
-                        path_buf[pos] = b'/';
-                        pos += 1;
-                    }
-
-                    let name_len = name.len().min(256 - pos);
-                    path_buf[pos..pos + name_len].copy_from_slice(&name[..name_len]);
-                    pos += name_len;
-
-                    Ok(pos)
-                };
-
-            let path_len = build_path(fs, parent as u32, name)?;
-            fs.remove_path(&path_buf[..path_len])
-        })
-    }
-
-    fn readdir(
-        &self,
-        inode: InodeId,
-        offset: usize,
-        callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
-    ) -> VfsResult<usize> {
-        self.with_fs(|fs| {
-            let ext2_inode = fs.read_inode(inode as u32)?;
-            if !ext2_inode.is_directory() {
-                return Err(Ext2Error::NotDirectory);
-            }
-
-            let mut count = 0usize;
-            let mut current = 0usize;
-
-            fs.for_each_dir_entry(inode as u32, |entry| {
-                if current < offset {
-                    current += 1;
-                    return true;
-                }
-
-                let ft = ext2_file_type_to_vfs(entry.file_type);
-                let cont = callback(entry.name, entry.inode as InodeId, ft);
-                count += 1;
-                current += 1;
-                cont
-            })?;
-
-            Ok(count)
-        })
-    }
-
-    fn truncate(&self, _inode: InodeId, _size: u64) -> VfsResult<()> {
-        Err(VfsError::NotSupported)
-    }
-
-    fn sync(&self) -> VfsResult<()> {
-        Ok(())
+impl<D: BlockDevice + Send> Ext2VfsBackend for Ext2VfsAdapter<D> {
+    fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
+        self.with_fs(f)
     }
 }
 

@@ -18,7 +18,6 @@ slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-mm = { workspace = true }
-slopos-userland = { workspace = true }
 slopos-video = { workspace = true }
 slopos-tests = { workspace = true, optional = true }
 

@@ -15,7 +15,6 @@ use slopos_drivers::serial;
 use slopos_fs as fs;
 
 use slopos_mm::KernelAllocator;
-use slopos_userland as userland;
 mod ffi;
 use slopos_video as video;
 
@@ -28,10 +27,6 @@ global_asm!(include_str!("../../boot/limine_entry.s"));
 // Ensure the boot crate is linked so kernel_main is available for the assembly entry.
 #[used]
 static BOOT_LINK_GUARD: ffi::BootEntry = ffi::BOOT_ENTRY;
-
-// Force-link userland so its boot init steps (roulette/shell) stay in the image.
-#[used]
-static USERLAND_LINK_GUARD: fn() = userland::init;
 
 // Pull in other subsystems that the boot crate expects to call by making a volatile reference to them.
 fn __link_boot_deps() {

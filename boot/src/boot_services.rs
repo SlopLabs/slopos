@@ -1,6 +1,7 @@
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
+use slopos_core::exec;
 use slopos_core::{boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init};
 use slopos_drivers::virtio_blk;
 use slopos_fs::{
@@ -49,6 +50,19 @@ fn boot_step_fs_init() -> i32 {
     0
 }
 
+fn boot_step_init_launch() -> i32 {
+    match exec::launch_init() {
+        Ok(task_id) => {
+            klog_info!("USERLAND: launched /sbin/init as task {}", task_id);
+            0
+        }
+        Err(err) => {
+            klog_info!("USERLAND: failed to launch /sbin/init ({:?})", err);
+            -1
+        }
+    }
+}
+
 crate::boot_init_step_with_flags!(
     BOOT_STEP_TASK_MANAGER,
     services,
@@ -79,6 +93,14 @@ crate::boot_init_step_with_flags!(
     b"fs init\0",
     boot_step_fs_init,
     boot_init_priority(55)
+);
+
+crate::boot_init_step_with_flags!(
+    BOOT_STEP_INIT_LAUNCH,
+    services,
+    b"launch /sbin/init\0",
+    boot_step_init_launch,
+    boot_init_priority(58)
 );
 
 fn boot_step_mark_kernel_ready_fn() {

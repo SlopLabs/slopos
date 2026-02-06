@@ -8,4 +8,3 @@ pub mod handlers;
 pub mod tests;
 
 pub use dispatch::syscall_handle;
-pub use handlers::register_spawn_task_callback;

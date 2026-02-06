@@ -3,14 +3,24 @@
 pub mod tests;
 
 use alloc::vec::Vec;
+use core::ffi::c_char;
+use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
+use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_USER_MODE};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_lib::klog_info;
-use slopos_mm::elf::{ElfError, ElfValidator};
+use slopos_mm::elf::ElfError;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
-use slopos_mm::process_vm::process_vm_get_page_dir;
+use slopos_mm::process_vm::{
+    process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
+    process_vm_translate_elf_address,
+};
+
+use crate::{
+    INVALID_TASK_ID, Task, TaskEntry, schedule_task, task_create, task_get_info, task_terminate,
+};
 
 extern crate alloc;
 
@@ -19,6 +29,55 @@ pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
 pub const EXEC_MAX_ARGS: usize = 32;
 pub const EXEC_MAX_ENVS: usize = 32;
 pub const EXEC_MAX_ELF_SIZE: usize = 16 * 1024 * 1024;
+
+pub const INIT_PATH: &[u8] = b"/sbin/init";
+
+#[derive(Clone, Copy, Debug)]
+pub struct ProgramSpec {
+    pub task_name: &'static [u8],
+    pub path: &'static [u8],
+    pub priority: u8,
+    pub flags: u16,
+}
+
+const PROGRAM_TABLE: [ProgramSpec; 6] = [
+    ProgramSpec {
+        task_name: b"init\0",
+        path: b"/sbin/init",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+    },
+    ProgramSpec {
+        task_name: b"shell\0",
+        path: b"/bin/shell",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+    },
+    ProgramSpec {
+        task_name: b"compositor\0",
+        path: b"/bin/compositor",
+        priority: 4,
+        flags: TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR,
+    },
+    ProgramSpec {
+        task_name: b"roulette\0",
+        path: b"/bin/roulette",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE | TASK_FLAG_DISPLAY_EXCLUSIVE,
+    },
+    ProgramSpec {
+        task_name: b"file_manager\0",
+        path: b"/bin/file_manager",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+    },
+    ProgramSpec {
+        task_name: b"sysinfo\0",
+        path: b"/bin/sysinfo",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -36,6 +95,79 @@ impl From<ElfError> for ExecError {
     fn from(_: ElfError) -> Self {
         ExecError::NoExec
     }
+}
+
+fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..len]
+}
+
+pub fn resolve_program_spec(name: &[u8]) -> Option<&'static ProgramSpec> {
+    let requested = trim_nul_bytes(name);
+    PROGRAM_TABLE
+        .iter()
+        .find(|spec| trim_nul_bytes(spec.task_name) == requested)
+}
+
+pub fn launch_init() -> Result<u32, ExecError> {
+    spawn_program(&PROGRAM_TABLE[0])
+}
+
+pub fn spawn_program_by_name(name: &[u8]) -> Result<u32, ExecError> {
+    let spec = resolve_program_spec(name).ok_or(ExecError::NoEntry)?;
+    spawn_program(spec)
+}
+
+pub fn spawn_program(spec: &ProgramSpec) -> Result<u32, ExecError> {
+    let bootstrap_entry: TaskEntry =
+        unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
+
+    let task_id = task_create(
+        spec.task_name.as_ptr() as *const c_char,
+        bootstrap_entry,
+        ptr::null_mut(),
+        spec.priority,
+        spec.flags,
+    );
+
+    if task_id == INVALID_TASK_ID {
+        return Err(ExecError::NoMem);
+    }
+
+    let mut task_info: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
+        task_terminate(task_id);
+        return Err(ExecError::Fault);
+    }
+
+    let process_id = unsafe { (*task_info).process_id };
+    let mut entry = 0u64;
+    let mut stack_ptr = 0u64;
+
+    if let Err(err) = do_exec(
+        process_id,
+        spec.path,
+        None,
+        None,
+        &mut entry,
+        &mut stack_ptr,
+    ) {
+        task_terminate(task_id);
+        return Err(err);
+    }
+
+    unsafe {
+        (*task_info).entry_point = entry;
+        ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
+        ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
+    }
+
+    if schedule_task(task_info) != 0 {
+        task_terminate(task_id);
+        return Err(ExecError::NoMem);
+    }
+
+    Ok(task_id)
 }
 
 pub fn do_exec(
@@ -57,7 +189,15 @@ pub fn do_exec(
         _ => ExecError::IoError,
     })?;
 
-    let file_size = handle.size().map_err(|_| ExecError::IoError)? as usize;
+    let file_stat = handle
+        .fs
+        .stat(handle.inode)
+        .map_err(|_| ExecError::IoError)?;
+    if (file_stat.mode & 0o111) == 0 {
+        return Err(ExecError::NoExec);
+    }
+
+    let file_size = file_stat.size as usize;
     if file_size == 0 || file_size > EXEC_MAX_ELF_SIZE {
         return Err(ExecError::NoExec);
     }
@@ -88,44 +228,7 @@ pub fn do_exec(
         elf_data.truncate(offset as usize);
     }
 
-    let validator = ElfValidator::new(&elf_data)
-        .map_err(|_| ExecError::NoExec)?
-        .with_load_base(PROCESS_CODE_START_VA);
-
-    let header = validator.header();
-    let (segments, segment_count) = validator
-        .validate_load_segments()
-        .map_err(|_| ExecError::NoExec)?;
-    let segments = &segments[..segment_count];
-
-    if segments.is_empty() {
-        return Err(ExecError::NoExec);
-    }
-
-    let page_dir = process_vm_get_page_dir(process_id);
-    if page_dir.is_null() {
-        return Err(ExecError::NoMem);
-    }
-
-    let min_vaddr = segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0);
-    let _needs_reloc = min_vaddr >= 0xFFFF_FFFF_8000_0000 || min_vaddr != PROCESS_CODE_START_VA;
-
-    clear_user_code_region(page_dir, PROCESS_CODE_START_VA);
-
-    for segment in segments.iter() {
-        let user_start =
-            translate_address(segment.original_vaddr, min_vaddr, PROCESS_CODE_START_VA);
-        let user_end = translate_address(
-            segment.original_vaddr + segment.mem_size,
-            min_vaddr,
-            PROCESS_CODE_START_VA,
-        );
-
-        map_segment(page_dir, &elf_data, segment, user_start, user_end)?;
-    }
-
-    let user_entry = translate_address(header.e_entry, min_vaddr, PROCESS_CODE_START_VA);
-    *entry_out = user_entry;
+    process_vm_load_elf_data(process_id, &elf_data, entry_out).map_err(ExecError::from)?;
 
     let stack_top = setup_user_stack(process_id, argv, envp)?;
     *stack_ptr_out = stack_top;
@@ -133,7 +236,7 @@ pub fn do_exec(
     klog_info!(
         "exec: loaded ELF for process {}, entry={:#x}, stack={:#x}",
         process_id,
-        user_entry,
+        *entry_out,
         stack_top
     );
 
@@ -141,123 +244,7 @@ pub fn do_exec(
 }
 
 pub fn translate_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
-    const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
-    if addr >= KERNEL_BASE {
-        let offset = addr.wrapping_sub(KERNEL_BASE);
-        code_base.wrapping_add(offset)
-    } else if min_vaddr >= KERNEL_BASE {
-        let offset = addr.wrapping_sub(min_vaddr);
-        code_base.wrapping_add(offset)
-    } else if min_vaddr < code_base {
-        addr.wrapping_add(code_base.wrapping_sub(min_vaddr))
-    } else {
-        addr
-    }
-}
-
-fn clear_user_code_region(page_dir: *mut slopos_mm::paging::ProcessPageDir, code_base: u64) {
-    let code_limit = code_base + 0x100000;
-    slopos_mm::process_vm::unmap_user_range_pub(
-        page_dir,
-        code_base.saturating_sub(0x100000),
-        code_limit + 0x100000,
-    );
-}
-
-fn map_segment(
-    page_dir: *mut slopos_mm::paging::ProcessPageDir,
-    elf_data: &[u8],
-    segment: &slopos_mm::elf::ValidatedSegment,
-    user_start: u64,
-    user_end: u64,
-) -> Result<(), ExecError> {
-    use slopos_lib::align_down;
-    use slopos_mm::elf::PF_W;
-    use slopos_mm::mm_constants::PageFlags;
-    use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
-    use slopos_mm::paging::{map_page_4kb_in_dir, virt_to_phys_in_dir};
-
-    let map_flags = if (segment.flags & PF_W) != 0 {
-        PageFlags::USER_RW.bits()
-    } else {
-        PageFlags::USER_RO.bits()
-    };
-
-    let page_start = align_down(user_start as usize, PAGE_SIZE_4KB as usize) as u64;
-    let page_end = slopos_lib::align_up(user_end as usize, PAGE_SIZE_4KB as usize) as u64;
-
-    let mut dst = page_start;
-    while dst < page_end {
-        let existing_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(dst));
-        let phys = if !existing_phys.is_null() {
-            existing_phys
-        } else {
-            let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-            if new_phys.is_null() {
-                return Err(ExecError::NoMem);
-            }
-            if map_page_4kb_in_dir(page_dir, VirtAddr::new(dst), new_phys, map_flags) != 0 {
-                free_page_frame(new_phys);
-                return Err(ExecError::NoMem);
-            }
-            new_phys
-        };
-
-        let dest_virt = phys.to_virt();
-        if dest_virt.is_null() {
-            return Err(ExecError::NoMem);
-        }
-
-        copy_segment_page_data(elf_data, segment, dst, user_start, dest_virt.as_mut_ptr());
-
-        dst += PAGE_SIZE_4KB;
-    }
-
-    Ok(())
-}
-
-fn copy_segment_page_data(
-    data: &[u8],
-    segment: &slopos_mm::elf::ValidatedSegment,
-    page_va: u64,
-    user_seg_start: u64,
-    dest_ptr: *mut u8,
-) {
-    let page_end_va = page_va.wrapping_add(PAGE_SIZE_4KB);
-    let seg_file_end = user_seg_start.wrapping_add(segment.file_size);
-    let seg_mem_end = user_seg_start.wrapping_add(segment.mem_size);
-
-    let copy_start = core::cmp::max(page_va, user_seg_start);
-    let copy_end = core::cmp::min(page_end_va, seg_file_end);
-
-    if copy_start < copy_end {
-        let page_off_in_seg = copy_start - user_seg_start;
-        let dest_off = (copy_start - page_va) as usize;
-        let copy_len = (copy_end - copy_start) as usize;
-        let src_off = segment.file_offset.wrapping_add(page_off_in_seg) as usize;
-
-        if src_off < data.len() && src_off.saturating_add(copy_len) <= data.len() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data.as_ptr().add(src_off),
-                    dest_ptr.add(dest_off),
-                    copy_len,
-                );
-            }
-        }
-    }
-
-    if seg_mem_end > seg_file_end {
-        let zero_start = core::cmp::max(page_va, seg_file_end);
-        let zero_end = core::cmp::min(page_end_va, seg_mem_end);
-        if zero_start < zero_end {
-            let zero_off = (zero_start - page_va) as usize;
-            let zero_len = (zero_end - zero_start) as usize;
-            unsafe {
-                core::ptr::write_bytes(dest_ptr.add(zero_off), 0, zero_len);
-            }
-        }
-    }
+    process_vm_translate_elf_address(addr, min_vaddr, code_base)
 }
 
 fn setup_user_stack(
@@ -265,8 +252,11 @@ fn setup_user_stack(
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
 ) -> Result<u64, ExecError> {
-    let layout = unsafe { &*slopos_mm::memory_layout::mm_get_process_layout() };
-    let stack_top = layout.stack_top;
+    let stack_top_raw = process_vm_get_stack_top(process_id);
+    if stack_top_raw == 0 {
+        return Err(ExecError::Fault);
+    }
+    let stack_top = stack_top_raw.wrapping_sub(8);
 
     let page_dir = process_vm_get_page_dir(process_id);
     if page_dir.is_null() {

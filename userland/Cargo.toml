@@ -33,6 +33,10 @@ path = "src/bin/file_manager.rs"
 name = "sysinfo"
 path = "src/bin/sysinfo.rs"
 
+[[bin]]
+name = "init"
+path = "src/bin/init.rs"
+
 [features]
 default = []
 standalone-bin = []

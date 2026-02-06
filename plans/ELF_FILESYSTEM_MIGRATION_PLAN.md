@@ -1,6 +1,6 @@
 # SlopOS ELF Filesystem Migration Plan
 
-> **Status**: Approved Planning Baseline  
+> **Status**: Implemented (Verification Complete)  
 > **Date**: 2026-02-06  
 > **Scope**: Clean breaking refactor to remove embedded user ELF loading and make filesystem binaries the only execution source.
 
@@ -174,13 +174,13 @@ Update this table as work lands.
 
 | Phase | Status | PR/Commit | Evidence | Notes |
 |------|--------|-----------|----------|-------|
-| Phase 0 | Planned | | | |
-| Phase 1 | Planned | | | |
-| Phase 2 | Planned | | | |
-| Phase 3 | Planned | | | |
-| Phase 4 | Planned | | | |
-| Phase 5 | Planned | | | |
-| Phase 6 | Planned | | | |
+| Phase 0 | Completed | local worktree | `make build`, `make test`, `make boot-log` reruns captured | Baseline regressions tracked during migration (IoError/Fault boot breakages fixed before completion). |
+| Phase 1 | Completed | local worktree | `core/src/exec/mod.rs`, `mm/src/process_vm.rs`, `core/src/syscall/handlers.rs` | `exec` now loads via canonical MM path (`process_vm_load_elf_data`, `process_vm_translate_elf_address`), duplicate loader logic removed. |
+| Phase 2 | Completed | local worktree | `Makefile`, `fs/assets/ext2.img` build path, `debugfs -R "stat /sbin/init" fs/assets/ext2.img` | Rootfs packaging is deterministic (`/sbin/init`, `/bin/*`) with execute mode; filesystem binaries are boot source. |
+| Phase 3 | Completed | local worktree | `boot/src/boot_services.rs`, `userland/src/init_process.rs`, `userland/src/bin/init.rs`, removal of `userland/src/bootstrap.rs` | Boot now launches `/sbin/init` only; init process owns app policy (`spawn compositor/roulette/shell`). |
+| Phase 4 | Completed | local worktree | `kernel/src/main.rs`, `kernel/Cargo.toml`, `mm/src/process_vm.rs`, `core/src/syscall/mod.rs` | Embedded user ELF compatibility/link-retention and spawn callback plumbing removed. |
+| Phase 5 | Completed | local worktree | `fs/src/ext2_vfs.rs` | Duplicated ext2 `FileSystem` impl paths consolidated behind shared `Ext2VfsBackend` blanket impl. |
+| Phase 6 | Completed | local worktree | `core/src/exec/tests.rs`, `tests/src/lib.rs`, `test_output.log` | Added program-spec coverage and validated filesystem exec path. `make test` passes (`TESTS SUMMARY: total=380 passed=380 failed=0`). Boot log shows successful init launch (`exec: loaded ELF for process 1`). |
 
 Evidence examples:
 - command output summary (`make test`, boot log excerpt)
@@ -191,15 +191,19 @@ Evidence examples:
 
 ## 8. Definition of Done
 
-All items must be true:
+- [x] Exactly one canonical ELF loader path remains.
+- [x] User binaries are loaded from filesystem paths only.
+- [x] `/sbin/init` is the only kernel-launched user process.
+- [x] Embedded user ELF loading codepaths are removed.
+- [x] ext2 VFS duplication is removed or consolidated behind a single implementation source.
+- [x] Test harness passes with no new critical regressions.
+- [x] Execution ledger is fully populated with evidence links/notes.
 
-1. Exactly one canonical ELF loader path remains.
-2. User binaries are loaded from filesystem paths only.
-3. `/sbin/init` is the only kernel-launched user process.
-4. Embedded user ELF loading codepaths are removed.
-5. ext2 VFS duplication is removed or consolidated behind a single implementation source.
-6. Test harness passes with no new critical regressions.
-7. Execution ledger is fully populated with evidence links/notes.
+Verification notes:
+- `make test` passes end-to-end (`TESTS SUMMARY: total=380 passed=380 failed=0`).
+- `make boot-log` no longer fails at `launch /sbin/init`; boot reaches userspace with filesystem exec evidence in `test_output.log`:
+  - `exec: loaded ELF for process 1, entry=0x400000, stack=...`
+  - additional user processes load from `/bin/*` paths.
 
 ---
 
@@ -209,4 +213,3 @@ All items must be true:
 2. Dynamic linker and shared object runtime.
 3. Package manager or installer subsystem.
 4. Non-ext2 rootfs formats.
-

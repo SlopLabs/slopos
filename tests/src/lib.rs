@@ -326,6 +326,7 @@ mod suites {
         test_elf_segment_overflow_vaddr, test_elf_truncated_header, test_elf_wrong_class,
         test_elf_wrong_endian, test_elf_wrong_machine, test_exec_max_size_boundary,
         test_path_empty, test_path_too_long, test_process_vm_null_page_dir,
+        test_program_spec_resolves_init, test_program_spec_resolves_nul_terminated_name,
         test_translate_address_kernel_to_user, test_translate_address_user_passthrough,
     };
 
@@ -726,6 +727,8 @@ mod suites {
             test_elf_huge_segment_count,
             test_elf_phentsize_mismatch,
             test_exec_max_size_boundary,
+            test_program_spec_resolves_init,
+            test_program_spec_resolves_nul_terminated_name,
         ]
     );
     define_test_suite!(

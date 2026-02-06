@@ -15,7 +15,7 @@ use crate::platform;
 use super::ffi_boundary::simple_context_switch;
 
 use slopos_mm::kernel_heap::kmalloc;
-use slopos_mm::mm_constants::PAGE_SIZE_4KB;
+use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
 
 use slopos_abi::arch::{GDT_USER_CODE_SELECTOR, GDT_USER_DATA_SELECTOR, SYSCALL_VECTOR};
 
@@ -161,19 +161,6 @@ pub fn run_scheduler_test() -> c_int {
  * PRIVILEGE SEPARATION TEST
  * ======================================================================== */
 
-#[unsafe(link_section = ".user_text")]
-fn user_stub_task(arg: *mut c_void) {
-    let _ = arg;
-    unsafe {
-        core::arch::asm!(
-            "mov rax, 0",
-            "int 0x80",
-            "mov rax, 1",
-            "int 0x80",
-            options(noreturn)
-        );
-    }
-}
 pub fn run_privilege_separation_invariant_test() -> c_int {
     klog_info!("PRIVSEP_TEST: Checking privilege separation invariants");
 
@@ -187,7 +174,7 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
 
     let user_task_id = task_create(
         b"UserStub\0".as_ptr() as *const c_char,
-        user_stub_task,
+        unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) },
         ptr::null_mut(),
         TASK_PRIORITY_NORMAL,
         TASK_FLAG_USER_MODE,

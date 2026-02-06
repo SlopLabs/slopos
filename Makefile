@@ -38,6 +38,7 @@ LOG_FILE ?= test_output.log
 FS_IMAGE_DIR := fs/assets
 FS_IMAGE := $(FS_IMAGE_DIR)/ext2.img
 FS_IMAGE_SIZE ?= 8M
+ROOTFS_USERLAND_BINS := init shell compositor roulette file_manager sysinfo
 
 BOOT_LOG_TIMEOUT ?= 15
 BOOT_CMDLINE ?= itests=off
@@ -220,6 +221,7 @@ build-userland:
 	  --target targets/x86_64-slos-userland.json \
 	  --package slopos-userland \
 	  --bin roulette \
+	  --bin init \
 	  --bin compositor \
 	  --bin shell \
 	  --bin file_manager \
@@ -229,6 +231,9 @@ build-userland:
 	  --release; \
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette" "$(BUILD_DIR)/roulette.elf"; \
+	fi; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/init ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/init" "$(BUILD_DIR)/init.elf"; \
 	fi; \
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/compositor ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/compositor" "$(BUILD_DIR)/compositor.elf"; \
@@ -242,9 +247,9 @@ build-userland:
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/sysinfo ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/sysinfo" "$(BUILD_DIR)/sysinfo.elf"; \
 	fi; \
-	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf $(BUILD_DIR)/sysinfo.elf"
+	echo "Userland binaries built: $(BUILD_DIR)/init.elf $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf $(BUILD_DIR)/sysinfo.elf"
 
-build: fs-image build-userland
+build: fs-image
 	@$(call build_kernel)
 
 iso: build
@@ -257,19 +262,35 @@ iso-tests: fs-image
 	@$(call build_kernel,slopos-drivers/qemu-exit kernel/builtin-tests)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
 
-fs-image: $(FS_IMAGE)
+fs-image: build-userland $(FS_IMAGE)
 
-$(FS_IMAGE):
+$(FS_IMAGE): build-userland
 	@mkdir -p $(FS_IMAGE_DIR)
 	@if ! command -v mkfs.ext2 >/dev/null 2>&1; then \
 		echo "mkfs.ext2 is required to create $(FS_IMAGE)" >&2; \
 		exit 1; \
 	fi
-	@if [ ! -f "$@" ]; then \
-		echo "Creating ext2 image at $@ ($(FS_IMAGE_SIZE))"; \
-		truncate -s $(FS_IMAGE_SIZE) "$@"; \
-		mkfs.ext2 -F "$@" >/dev/null; \
+	@if ! command -v debugfs >/dev/null 2>&1; then \
+		echo "debugfs is required to populate $(FS_IMAGE)" >&2; \
+		exit 1; \
 	fi
+	@echo "Rebuilding ext2 image at $@ ($(FS_IMAGE_SIZE))"
+	@rm -f "$@"
+	@truncate -s $(FS_IMAGE_SIZE) "$@"
+	@mkfs.ext2 -F "$@" >/dev/null
+	@debugfs -w -R "mkdir /bin" "$@" >/dev/null
+	@debugfs -w -R "mkdir /sbin" "$@" >/dev/null
+	@for bin in $(ROOTFS_USERLAND_BINS); do \
+		src="$(BUILD_DIR)/$$bin.elf"; \
+		if [ ! -f "$$src" ]; then \
+			echo "Missing userland binary: $$src" >&2; \
+			exit 1; \
+		fi; \
+		dst="/bin/$$bin"; \
+		if [ "$$bin" = "init" ]; then dst="/sbin/init"; fi; \
+		debugfs -w -R "write $$src $$dst" "$@" >/dev/null; \
+		debugfs -w -R "set_inode_field $$dst mode 0100755" "$@" >/dev/null; \
+	done
 
 boot: iso-notests
 	@set -e; \

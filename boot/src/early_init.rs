@@ -557,7 +557,7 @@ pub fn kernel_main_impl() {
     }
 
     boot_info(b"=== KERNEL BOOT SUCCESSFUL ===\0");
-    boot_info(b"Operational subsystems: serial, interrupts, memory, scheduler, shell\0");
+    boot_info(b"Operational subsystems: serial, interrupts, memory, scheduler, init\0");
     boot_info(b"Graphics: framebuffer required and active\0");
     boot_info(b"Kernel initialization complete - ALL SYSTEMS OPERATIONAL!\0");
     boot_info(b"The kernel has initialized. Handing over to scheduler...\0");

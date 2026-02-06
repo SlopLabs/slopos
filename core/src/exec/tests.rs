@@ -7,7 +7,7 @@ use slopos_mm::elf::{ELF_MAGIC, ElfValidator};
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm;
 
-use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH};
+use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH, resolve_program_spec};
 
 const MINIMAL_ELF_SIZE: usize = 64;
 
@@ -345,5 +345,33 @@ pub fn test_exec_max_size_boundary() -> c_int {
         klog_info!("EXEC_TEST: BUG - EXEC_MAX_ELF_SIZE is zero");
         return -1;
     }
+    0
+}
+
+pub fn test_program_spec_resolves_init() -> c_int {
+    let Some(spec) = resolve_program_spec(b"init") else {
+        klog_info!("EXEC_TEST: BUG - failed to resolve init spec");
+        return -1;
+    };
+
+    if spec.path != INIT_PATH {
+        klog_info!("EXEC_TEST: BUG - init spec path mismatch");
+        return -1;
+    }
+
+    0
+}
+
+pub fn test_program_spec_resolves_nul_terminated_name() -> c_int {
+    let Some(spec) = resolve_program_spec(b"shell\0") else {
+        klog_info!("EXEC_TEST: BUG - failed to resolve nul-terminated shell name");
+        return -1;
+    };
+
+    if spec.path != b"/bin/shell" {
+        klog_info!("EXEC_TEST: BUG - shell spec path mismatch");
+        return -1;
+    }
+
     0
 }

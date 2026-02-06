@@ -254,9 +254,14 @@ impl<'a> Ext2Fs<'a> {
         while remaining > 0 {
             let file_block = file_offset / self.block_size as usize;
             let block_offset = file_offset % self.block_size as usize;
-            let block_num = self.map_block(&inode, file_block as u32)?;
             let block_slice = &mut block_buf[..self.block_size as usize];
-            self.read_block(block_num, block_slice)?;
+            match self.map_block(&inode, file_block as u32) {
+                Ok(block_num) => self.read_block(block_num, block_slice)?,
+                Err(Ext2Error::InvalidBlock) => {
+                    block_slice.fill(0);
+                }
+                Err(err) => return Err(err),
+            }
             let to_copy = cmp::min(remaining, self.block_size as usize - block_offset);
             buffer[read_total..read_total + to_copy]
                 .copy_from_slice(&block_slice[block_offset..block_offset + to_copy]);

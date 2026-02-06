@@ -117,6 +117,7 @@ pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 // =============================================================================
 
 pub const SYSCALL_SPAWN_TASK: u64 = 64;
+pub const SYSCALL_WAITPID: u64 = 68;
 
 // =============================================================================
 // Process execution

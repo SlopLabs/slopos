@@ -328,18 +328,6 @@ fn teardown_process_mappings(process: *mut ProcessVm) {
     }
 }
 
-fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
-    if page_dir.is_null() {
-        return -1;
-    }
-
-    // User programs are now loaded as separate ELF binaries via process_vm_load_elf(),
-    // so we no longer need to map embedded sections from the kernel binary.
-    // This function is kept for compatibility but does nothing.
-    // The embedded .user_* sections in the kernel are no longer used for user programs.
-    0
-}
-
 // ELF structures for relocation parsing
 #[repr(C)]
 struct Elf64Shdr {
@@ -634,31 +622,10 @@ fn apply_elf_relocations(
     0
 }
 
-pub fn process_vm_load_elf(
-    process_id: u32,
-    payload: *const u8,
-    payload_len: usize,
-    entry_out: *mut u64,
-) -> c_int {
-    if payload.is_null() || process_id == INVALID_PROCESS_ID {
-        return -1;
-    }
-
-    let data = unsafe { core::slice::from_raw_parts(payload, payload_len) };
-
-    match process_vm_load_elf_validated(process_id, data, entry_out) {
-        Ok(()) => 0,
-        Err(e) => {
-            klog_info!("ELF load failed: {}", e);
-            -1
-        }
-    }
-}
-
-fn process_vm_load_elf_validated(
+pub fn process_vm_load_elf_data(
     process_id: u32,
     data: &[u8],
-    entry_out: *mut u64,
+    entry_out: &mut u64,
 ) -> Result<(), ElfError> {
     let code_base = crate::mm_constants::PROCESS_CODE_START_VA;
 
@@ -686,8 +653,9 @@ fn process_vm_load_elf_validated(
     let mut mapped_pages: u32 = 0;
 
     for segment in segments.iter() {
-        let user_start = translate_address(segment.original_vaddr, min_vaddr, code_base);
-        let user_end = translate_address(
+        let user_start =
+            process_vm_translate_elf_address(segment.original_vaddr, min_vaddr, code_base);
+        let user_end = process_vm_translate_elf_address(
             segment.original_vaddr + segment.mem_size,
             min_vaddr,
             code_base,
@@ -715,13 +683,11 @@ fn process_vm_load_elf_validated(
         );
     }
 
-    let user_entry = translate_address(header.e_entry, min_vaddr, code_base);
+    let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);
 
     unsafe {
         (*process).total_pages = (*process).total_pages.saturating_add(mapped_pages);
-        if !entry_out.is_null() {
-            *entry_out = user_entry;
-        }
+        *entry_out = user_entry;
     }
 
     Ok(())
@@ -736,7 +702,7 @@ fn calculate_load_offset(segments: &[ValidatedSegment], code_base: u64) -> (u64,
     (min_vaddr, needs_reloc)
 }
 
-fn translate_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
+pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
     if addr >= KERNEL_BASE {
         let offset = addr.wrapping_sub(KERNEL_BASE);
         code_base.wrapping_add(offset)
@@ -917,12 +883,6 @@ pub fn create_process_vm() -> u32 {
 
     unsafe {
         paging_copy_kernel_mappings((*page_dir_ptr).pml4);
-        // Map dedicated user sections (text/rodata/data/bss) into the user window.
-        if map_user_sections(page_dir_ptr) != 0 {
-            kfree(page_dir_ptr as *mut _);
-            free_page_frame(pml4_phys);
-            return INVALID_PROCESS_ID;
-        }
     }
 
     unsafe {
