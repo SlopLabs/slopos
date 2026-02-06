@@ -899,6 +899,132 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
     TestResult::Pass
 }
 
+/// Regression: BSP idle-stack handoff must use idle task kernel stack.
+pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    if scheduler::create_idle_task_for_cpu(0) != 0 {
+        klog_info!("SCHED_TEST: Failed to create BSP idle task");
+        return TestResult::Fail;
+    }
+
+    let (idle_task, stack_top) = match scheduler::resolve_idle_stack_for_cpu(0) {
+        Ok(values) => values,
+        Err(err) => {
+            klog_info!("SCHED_TEST: Failed to resolve BSP idle stack: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+
+    if idle_task.is_null() {
+        klog_info!("SCHED_TEST: Resolved idle task pointer is null");
+        return TestResult::Fail;
+    }
+
+    let expected_top = unsafe { (*idle_task).kernel_stack_top };
+    if expected_top == 0 || stack_top != expected_top {
+        klog_info!(
+            "SCHED_TEST: Idle stack mismatch (expected=0x{:x}, got=0x{:x})",
+            expected_top,
+            stack_top
+        );
+        return TestResult::Fail;
+    }
+
+    if (stack_top & 0xF) != 0 {
+        klog_info!(
+            "SCHED_TEST: Idle stack is not 16-byte aligned: 0x{:x}",
+            stack_top
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Regression: idle-stack resolution must fail cleanly when no idle task exists.
+pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let previous_idle = super::per_cpu::with_cpu_scheduler(0, |sched| {
+        let old = sched.idle_task();
+        sched.set_idle_task(ptr::null_mut());
+        old
+    })
+    .unwrap_or(ptr::null_mut());
+
+    let result = match scheduler::resolve_idle_stack_for_cpu(0) {
+        Err(scheduler::IdleStackResolveError::MissingIdleTask) => TestResult::Pass,
+        Err(other) => {
+            klog_info!(
+                "SCHED_TEST: Expected MissingIdleTask, got different error: {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+        Ok((_, stack_top)) => {
+            klog_info!(
+                "SCHED_TEST: Expected missing idle task, got stack 0x{:x}",
+                stack_top
+            );
+            TestResult::Fail
+        }
+    };
+
+    super::per_cpu::with_cpu_scheduler(0, |sched| {
+        sched.set_idle_task(previous_idle);
+    });
+
+    result
+}
+
+/// Regression: idle-stack resolution must fail cleanly for zero kernel stack top.
+pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    if scheduler::create_idle_task_for_cpu(0) != 0 {
+        klog_info!("SCHED_TEST: Failed to create BSP idle task");
+        return TestResult::Fail;
+    }
+
+    let idle_task = match super::per_cpu::with_cpu_scheduler(0, |sched| sched.idle_task()) {
+        Some(task) if !task.is_null() => task,
+        _ => {
+            klog_info!("SCHED_TEST: Failed to fetch BSP idle task from per-CPU scheduler");
+            return TestResult::Fail;
+        }
+    };
+
+    let original_top = unsafe { (*idle_task).kernel_stack_top };
+    unsafe {
+        (*idle_task).kernel_stack_top = 0;
+    }
+
+    let result = match scheduler::resolve_idle_stack_for_cpu(0) {
+        Err(scheduler::IdleStackResolveError::MissingKernelStack) => TestResult::Pass,
+        Err(other) => {
+            klog_info!(
+                "SCHED_TEST: Expected MissingKernelStack, got different error: {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+        Ok((_, stack_top)) => {
+            klog_info!(
+                "SCHED_TEST: Expected missing kernel stack, got stack 0x{:x}",
+                stack_top
+            );
+            TestResult::Fail
+        }
+    };
+
+    unsafe {
+        (*idle_task).kernel_stack_top = original_top;
+    }
+
+    result
+}
+
 // =============================================================================
 // STRESS TESTS
 // =============================================================================

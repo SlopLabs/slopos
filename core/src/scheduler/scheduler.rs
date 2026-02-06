@@ -592,6 +592,29 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     0
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IdleStackResolveError {
+    MissingIdleTask,
+    MissingKernelStack,
+}
+
+pub(crate) fn resolve_idle_stack_for_cpu(
+    cpu_id: usize,
+) -> Result<(*mut Task, u64), IdleStackResolveError> {
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+    if idle_task.is_null() {
+        return Err(IdleStackResolveError::MissingIdleTask);
+    }
+
+    let stack_top = unsafe { (*idle_task).kernel_stack_top };
+    if stack_top == 0 {
+        return Err(IdleStackResolveError::MissingKernelStack);
+    }
+
+    Ok((idle_task, stack_top))
+}
+
 #[inline(never)]
 unsafe fn enter_scheduler_on_idle_stack(cpu_id: usize, idle_task: *mut Task, stack_top: u64) -> ! {
     unsafe {
@@ -625,25 +648,31 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         sched.enable();
     });
 
-    if SCHEDULER_ENABLED
-        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
-    }
+    // Entering any scheduler loop marks global scheduling as active.
+    // Do not touch timer IRQ routing here; boot may not have configured IOAPIC yet.
+    SCHEDULER_ENABLED.store(1, Ordering::Release);
 
     slopos_lib::mark_cpu_online(cpu_id);
     klog_info!("SCHED: CPU {} scheduler online", cpu_id);
 
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |s| s.idle_task()).unwrap_or(ptr::null_mut());
-
-    if idle_task.is_null() {
-        klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
-        loop {
-            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+    let (idle_task, idle_stack_top) = match resolve_idle_stack_for_cpu(cpu_id) {
+        Ok(values) => values,
+        Err(IdleStackResolveError::MissingIdleTask) => {
+            klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
+            loop {
+                unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+            }
         }
-    }
+        Err(IdleStackResolveError::MissingKernelStack) => {
+            klog_info!(
+                "SCHED: CPU {} idle task has no kernel stack, halting",
+                cpu_id
+            );
+            loop {
+                unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+            }
+        }
+    };
 
     unsafe {
         let return_ctx = per_cpu::get_ap_return_context(cpu_id);
@@ -656,17 +685,6 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         sched.set_current_task(idle_task);
     });
     task_set_current(idle_task);
-
-    let idle_stack_top = unsafe { (*idle_task).kernel_stack_top };
-    if idle_stack_top == 0 {
-        klog_info!(
-            "SCHED: CPU {} idle task has no kernel stack, halting",
-            cpu_id
-        );
-        loop {
-            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
-        }
-    }
 
     unsafe { enter_scheduler_on_idle_stack(cpu_id, idle_task, idle_stack_top) }
 }
