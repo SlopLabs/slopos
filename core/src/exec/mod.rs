@@ -15,7 +15,6 @@ use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
 use slopos_mm::process_vm::{
     process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
-    process_vm_translate_elf_address,
 };
 
 use crate::{
@@ -241,10 +240,6 @@ pub fn do_exec(
     );
 
     Ok(())
-}
-
-pub fn translate_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
-    process_vm_translate_elf_address(addr, min_vaddr, code_base)
 }
 
 fn setup_user_stack(

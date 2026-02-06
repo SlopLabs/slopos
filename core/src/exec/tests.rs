@@ -256,13 +256,13 @@ pub fn test_path_empty() -> c_int {
 }
 
 pub fn test_translate_address_kernel_to_user() -> c_int {
-    use super::translate_address;
+    use slopos_mm::process_vm::process_vm_translate_elf_address;
 
     let kernel_addr = 0xFFFF_FFFF_8000_1000u64;
     let min_vaddr = 0xFFFF_FFFF_8000_0000u64;
     let code_base = PROCESS_CODE_START_VA;
 
-    let translated = translate_address(kernel_addr, min_vaddr, code_base);
+    let translated = process_vm_translate_elf_address(kernel_addr, min_vaddr, code_base);
 
     if translated >= 0xFFFF_8000_0000_0000 {
         klog_info!("EXEC_TEST: BUG - translate_address didn't move kernel addr to user space");
@@ -278,13 +278,13 @@ pub fn test_translate_address_kernel_to_user() -> c_int {
 }
 
 pub fn test_translate_address_user_passthrough() -> c_int {
-    use super::translate_address;
+    use slopos_mm::process_vm::process_vm_translate_elf_address;
 
     let user_addr = 0x0000_0040_0000_1000u64;
     let min_vaddr = 0x0000_0040_0000_0000u64;
     let code_base = PROCESS_CODE_START_VA;
 
-    let translated = translate_address(user_addr, min_vaddr, code_base);
+    let translated = process_vm_translate_elf_address(user_addr, min_vaddr, code_base);
 
     if translated >= 0xFFFF_8000_0000_0000 {
         klog_info!("EXEC_TEST: BUG - user address translated to kernel space");
