@@ -392,6 +392,7 @@ struct WindowManager {
     first_frame: bool,
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
+    prev_start_menu_hover: Option<usize>,
     // Force full redraw flag
     needs_full_redraw: bool,
     // Client surface cache for shared memory mappings
@@ -448,6 +449,7 @@ impl WindowManager {
             first_frame: true,
             prev_taskbar_state: TaskbarState::empty(),
             taskbar_needs_redraw: true,
+            prev_start_menu_hover: None,
             needs_full_redraw: true,
             surface_cache: ClientSurfaceCache::new(),
             output_bytes_pp: 4,
@@ -489,14 +491,22 @@ impl WindowManager {
         );
 
         if self.start_menu_open {
-            let menu_h = self.start_menu_height();
-            self.output_damage.add_rect(
-                self.start_menu_x(),
-                self.start_menu_y(fb_height),
-                self.start_menu_x() + START_MENU_WIDTH - 1,
-                self.start_menu_y(fb_height) + menu_h - 1,
-            );
+            self.add_start_menu_damage();
         }
+    }
+
+    fn add_start_menu_damage(&mut self) {
+        if self.output_width == 0 || self.output_height == 0 {
+            return;
+        }
+        let fb_height = self.output_height as i32;
+        let menu_h = self.start_menu_height();
+        self.output_damage.add_rect(
+            self.start_menu_x(),
+            self.start_menu_y(fb_height),
+            self.start_menu_x() + START_MENU_WIDTH - 1,
+            self.start_menu_y(fb_height) + menu_h - 1,
+        );
     }
 
     /// Update mouse state from kernel.
@@ -585,6 +595,12 @@ impl WindowManager {
                     // New position needs redraw (if visible)
                     self.add_bounds_damage(&curr_bounds);
                 }
+            } else if curr_bounds.visible {
+                // New window appearing for the first time — force a full redraw
+                // so every layer (background, overlapping windows, decorations,
+                // taskbar) composites correctly in a single
+                // consistent frame.
+                self.needs_full_redraw = true;
             }
 
             // Store current bounds for next frame (even for minimized windows)
@@ -620,6 +636,19 @@ impl WindowManager {
                 self.add_cursor_damage_at(x, y);
             }
             self.add_cursor_damage_at(self.mouse_x, self.mouse_y);
+        }
+
+        // Track start menu hover changes so the full menu area gets redrawn
+        // when the highlighted item changes (cursor damage alone is too small)
+        if self.start_menu_open && self.output_height > 0 {
+            let fb_h = self.output_height as i32;
+            let current_hover = self.hit_test_start_menu_item(fb_h);
+            if current_hover != self.prev_start_menu_hover {
+                self.add_start_menu_damage();
+                self.prev_start_menu_hover = current_hover;
+            }
+        } else {
+            self.prev_start_menu_hover = None;
         }
     }
 
