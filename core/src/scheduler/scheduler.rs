@@ -29,6 +29,7 @@ use slopos_abi::task::{BlockReason, MAX_TASKS};
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
+const USER_SPACE_TOP: u64 = 0xffff_8000_0000_0000;
 
 static IDLE_WAKEUP_CB: Once<IrqMutex<Option<fn() -> c_int>>> = Once::new();
 
@@ -185,9 +186,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
         return 0;
     }
 
-    if PREEMPTION_ENABLED.load(Ordering::Acquire) == 0
-        || SCHEDULER_ENABLED.load(Ordering::Acquire) == 0
-    {
+    if !is_scheduling_active() {
         platform::timer_poll_delay_ms(ms);
         return 0;
     }
@@ -263,12 +262,102 @@ fn reset_task_quantum(task: *mut Task) {
     }
 }
 
+#[inline]
+fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
+    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
+        .unwrap_or(ptr::null_mut());
+    let idle =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+    (current, idle)
+}
+
+#[inline]
+fn scheduler_ready_count(cpu_id: usize) -> u32 {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0)
+}
+
+#[inline]
+fn set_scheduler_current_task(cpu_id: usize, task: *mut Task) {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(task);
+    });
+    task_set_current(task);
+}
+
+fn requeue_running_task(cpu_id: usize, current: *mut Task) {
+    if current.is_null() {
+        return;
+    }
+
+    unsafe {
+        if task_is_running(current) && task_set_state((*current).task_id, TaskStatus::Ready) == 0 {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.enqueue_local(current);
+            });
+        }
+    }
+}
+
+fn switch_to_kernel_address_space(task: *mut Task) {
+    unsafe {
+        let kernel_dir = paging_get_kernel_directory();
+        paging_set_current_directory(kernel_dir);
+        if !(*kernel_dir).pml4_phys.is_null() && !task.is_null() {
+            (*task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
+        }
+    }
+}
+
+fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mut Task) {
+    let timestamp = kdiag_timestamp();
+    task_record_context_switch(current, idle_task, timestamp);
+
+    set_scheduler_current_task(cpu_id, idle_task);
+    switch_to_kernel_address_space(idle_task);
+
+    unsafe {
+        // Always save kernel context for ALL tasks, including user-mode
+        // tasks mid-syscall. Clear context_from_user so the next resume
+        // uses context_switch (retq) rather than context_switch_user (iretq).
+        let current_ctx = if !current.is_null() {
+            if (*current).flags & TASK_FLAG_USER_MODE != 0 {
+                (*current).context_from_user = 0;
+            }
+            &raw mut (*current).context
+        } else {
+            ptr::null_mut()
+        };
+
+        let idle_ctx = &raw const (*idle_task).context;
+        context_switch(current_ctx, idle_ctx);
+    }
+}
+
+#[inline]
+fn task_has_no_preempt_flag(task: *mut Task) -> bool {
+    !task.is_null() && (unsafe { (*task).flags } & TASK_FLAG_NO_PREEMPT != 0)
+}
+
+#[inline]
+fn consume_time_slice(current: *mut Task) -> bool {
+    unsafe {
+        if (*current).time_slice_remaining > 0 {
+            (*current).time_slice_remaining -= 1;
+        }
+        (*current).time_slice_remaining > 0
+    }
+}
+
+#[inline]
+fn mark_preempt_if_ready(cpu_id: usize) {
+    if scheduler_ready_count(cpu_id) > 0 {
+        PreemptGuard::set_reschedule_pending();
+    }
+}
+
 pub fn clear_scheduler_current_task() {
     let cpu_id = slopos_lib::get_current_cpu();
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(ptr::null_mut());
-    });
-    task_set_current(ptr::null_mut());
+    set_scheduler_current_task(cpu_id, ptr::null_mut());
 }
 
 pub fn schedule_task(task: *mut Task) -> c_int {
@@ -439,24 +528,18 @@ fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> bool {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(next_task, idle_task, timestamp);
 
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(idle_task);
-    });
-    task_set_current(idle_task);
+    set_scheduler_current_task(cpu_id, idle_task);
+
+    switch_to_kernel_address_space(idle_task);
 
     unsafe {
-        let kernel_dir = paging_get_kernel_directory();
-        paging_set_current_directory(kernel_dir);
-        if !(*kernel_dir).pml4_phys.is_null() {
-            (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
-        }
-
-        if !task_is_terminated(next_task) && task_is_running(next_task) {
-            if task_set_state((*next_task).task_id, TaskStatus::Ready) == 0 {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    let _ = sched.enqueue_local(next_task);
-                });
-            }
+        if !task_is_terminated(next_task)
+            && task_is_running(next_task)
+            && task_set_state((*next_task).task_id, TaskStatus::Ready) == 0
+        {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                let _ = sched.enqueue_local(next_task);
+            });
         }
     }
 
@@ -481,9 +564,9 @@ fn validate_user_context(ctx: &TaskContext, task: *const Task) {
     let cs_ok = (cs & 3) == 3;
     let ss_ok = (ss & 3) == 3;
     // RIP must be in user VA range (below kernel half)
-    let rip_ok = rip < 0xffff800000000000;
+    let rip_ok = rip < USER_SPACE_TOP;
     // RSP must be in user VA range
-    let rsp_ok = rsp < 0xffff800000000000;
+    let rsp_ok = rsp < USER_SPACE_TOP;
 
     if cs_ok && ss_ok && rip_ok && rsp_ok {
         return;
@@ -517,11 +600,7 @@ pub fn schedule() {
         return;
     }
 
-    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
-        .unwrap_or(ptr::null_mut());
-
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+    let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.increment_schedule_calls();
@@ -538,50 +617,8 @@ pub fn schedule() {
         return;
     }
 
-    if !current.is_null() {
-        unsafe {
-            if task_is_running(current) {
-                if task_set_state((*current).task_id, TaskStatus::Ready) == 0 {
-                    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                        sched.enqueue_local(current);
-                    });
-                }
-            }
-        }
-    }
-
-    let timestamp = kdiag_timestamp();
-    task_record_context_switch(current, idle_task, timestamp);
-
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_current_task(idle_task);
-    });
-    task_set_current(idle_task);
-
-    unsafe {
-        let kernel_dir = paging_get_kernel_directory();
-        paging_set_current_directory(kernel_dir);
-
-        let kdir_phys = (*kernel_dir).pml4_phys.as_u64();
-        if !(*kernel_dir).pml4_phys.is_null() {
-            (*idle_task).context.cr3 = kdir_phys;
-        }
-
-        // Always save kernel context for ALL tasks, including user-mode
-        // tasks mid-syscall. Clear context_from_user so the next resume
-        // uses context_switch (retq) rather than context_switch_user (iretq).
-        let current_ctx = if !current.is_null() {
-            if (*current).flags & TASK_FLAG_USER_MODE != 0 {
-                (*current).context_from_user = 0;
-            }
-            &raw mut (*current).context
-        } else {
-            ptr::null_mut()
-        };
-
-        let idle_ctx = &raw const (*idle_task).context;
-        context_switch(current_ctx, idle_ctx);
-    }
+    requeue_running_task(cpu_id, current);
+    switch_from_current_to_idle(cpu_id, current, idle_task);
     cpu::restore_flags(irq_flags);
 }
 
@@ -1049,10 +1086,7 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 
 pub fn scheduler_timer_tick() {
     let cpu_id = slopos_lib::get_current_cpu();
-    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
-        .unwrap_or(ptr::null_mut());
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+    let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 
     let preempt_active = PreemptGuard::is_active();
     let running_idle = !current.is_null() && current == idle_task;
@@ -1080,30 +1114,19 @@ pub fn scheduler_timer_tick() {
     }
 
     if current == idle_task {
-        let ready_count =
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
-        if ready_count > 0 {
-            PreemptGuard::set_reschedule_pending();
-        }
+        mark_preempt_if_ready(cpu_id);
         return;
     }
 
-    if unsafe { (*current).flags } & TASK_FLAG_NO_PREEMPT != 0 {
+    if task_has_no_preempt_flag(current) {
         return;
     }
 
-    unsafe {
-        if (*current).time_slice_remaining > 0 {
-            (*current).time_slice_remaining -= 1;
-        }
-        if (*current).time_slice_remaining > 0 {
-            return;
-        }
+    if consume_time_slice(current) {
+        return;
     }
 
-    let ready_count =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
-    if ready_count == 0 {
+    if scheduler_ready_count(cpu_id) == 0 {
         reset_task_quantum(current);
         return;
     }

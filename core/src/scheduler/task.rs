@@ -53,6 +53,29 @@ fn defer_task_cleanup(task: *mut Task) {
     ZOMBIE_LIST.lock().push(task);
 }
 
+fn free_task_memory_and_invalidate(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+
+    unsafe {
+        let kstack = (*task).kernel_stack_base;
+        let ustack = (*task).stack_base;
+
+        if kstack != 0 {
+            kfree(kstack as *mut c_void);
+            (*task).kernel_stack_base = 0;
+        }
+
+        if (*task).process_id == INVALID_PROCESS_ID && ustack != 0 && ustack != kstack {
+            kfree(ustack as *mut c_void);
+            (*task).stack_base = 0;
+        }
+
+        *task = Task::invalid();
+    }
+}
+
 /// Reap zombie tasks that are ready to be freed.
 /// Should be called periodically (e.g., from scheduler idle path).
 pub fn reap_zombies() {
@@ -67,25 +90,8 @@ pub fn reap_zombies() {
                 // Safe to free now
                 unsafe {
                     klog_debug!("reap_zombies: Freeing zombie task {}", (*task).task_id);
-
-                    let kstack = (*task).kernel_stack_base;
-                    let ustack = (*task).stack_base;
-
-                    // Free kernel stack
-                    if kstack != 0 {
-                        kfree(kstack as *mut c_void);
-                        (*task).kernel_stack_base = 0;
-                    }
-
-                    // Free user stack only if it differs from kernel stack
-                    if (*task).process_id == INVALID_PROCESS_ID && ustack != 0 && ustack != kstack {
-                        kfree(ustack as *mut c_void);
-                        (*task).stack_base = 0;
-                    }
-
-                    // Mark slot as invalid for reuse
-                    *task = Task::invalid();
                 }
+                free_task_memory_and_invalidate(task);
                 // Don't keep this one in the list
                 list.tasks[read_idx] = None;
             } else {
@@ -256,6 +262,119 @@ fn user_entry_is_allowed(addr: u64) -> bool {
     addr >= PROCESS_CODE_START_VA && addr < PROCESS_CODE_END
 }
 
+struct TaskCreateResources {
+    process_id: u32,
+    stack_base: u64,
+    kernel_stack_base: u64,
+    kernel_stack_size: u64,
+}
+
+fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
+    let stack = kmalloc(TASK_STACK_SIZE as usize);
+    if stack.is_null() {
+        klog_info!("task_create: Failed to allocate kernel stack");
+        return None;
+    }
+
+    let stack_base = stack as u64;
+    Some(TaskCreateResources {
+        process_id: INVALID_PROCESS_ID,
+        stack_base,
+        kernel_stack_base: stack_base,
+        kernel_stack_size: TASK_STACK_SIZE,
+    })
+}
+
+fn allocate_user_task_resources() -> Option<TaskCreateResources> {
+    let process_id = create_process_vm();
+    if process_id == INVALID_PROCESS_ID {
+        klog_info!("task_create: Failed to create process VM");
+        return None;
+    }
+
+    let stack_top = process_vm_get_stack_top(process_id);
+    if stack_top == 0 {
+        klog_info!("task_create: Failed to get process stack");
+        destroy_process_vm(process_id);
+        return None;
+    }
+
+    let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
+    if kstack.is_null() {
+        klog_info!("task_create: Failed to allocate kernel RSP0 stack");
+        destroy_process_vm(process_id);
+        return None;
+    }
+
+    if fileio_create_table_for_process(process_id) != 0 {
+        kfree(kstack);
+        destroy_process_vm(process_id);
+        return None;
+    }
+
+    Some(TaskCreateResources {
+        process_id,
+        stack_base: stack_top - TASK_STACK_SIZE,
+        kernel_stack_base: kstack as u64,
+        kernel_stack_size: TASK_KERNEL_STACK_SIZE,
+    })
+}
+
+fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
+    if flags & TASK_FLAG_KERNEL_MODE != 0 {
+        allocate_kernel_task_resources()
+    } else {
+        allocate_user_task_resources()
+    }
+}
+
+fn cleanup_task_create_resources(process_id: u32, kernel_stack_base: u64) {
+    if process_id != INVALID_PROCESS_ID {
+        fileio_destroy_table_for_process(process_id);
+        destroy_process_vm(process_id);
+        if kernel_stack_base != 0 {
+            kfree(kernel_stack_base as *mut c_void);
+        }
+        return;
+    }
+
+    if kernel_stack_base != 0 {
+        kfree(kernel_stack_base as *mut c_void);
+    }
+}
+
+fn reset_task_runtime_fields(task: &mut Task) {
+    task.time_slice_remaining = task.time_slice;
+    task.total_runtime = 0;
+    task.creation_time = kdiag_timestamp();
+    task.yield_count = 0;
+    task.last_run_timestamp = 0;
+    task.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
+    task.exit_reason = TaskExitReason::None;
+    task.fault_reason = TaskFaultReason::None;
+    task.exit_code = 0;
+    task.fate_token = 0;
+    task.fate_value = 0;
+    task.fate_pending = 0;
+    task.next_ready = ptr::null_mut();
+    task.next_inbox.store(ptr::null_mut(), Ordering::Release);
+    task.refcnt.store(0, Ordering::Release);
+}
+
+fn cleanup_fork_setup_resources(
+    child_process_id: u32,
+    child_kernel_stack: *mut c_void,
+    destroy_file_table: bool,
+) {
+    if destroy_file_table {
+        fileio_destroy_table_for_process(child_process_id);
+    }
+    if !child_kernel_stack.is_null() {
+        kfree(child_kernel_stack);
+    }
+    destroy_process_vm(child_process_id);
+}
+
 fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<usize> {
     if task.is_null() {
         return None;
@@ -263,6 +382,47 @@ fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<us
     let start = mgr.tasks.as_ptr() as usize;
     let idx = (task as usize - start) / mem::size_of::<Task>();
     if idx < MAX_TASKS { Some(idx) } else { None }
+}
+
+enum ReserveTaskSlotError {
+    MaxTasks,
+    NoFreeSlot,
+}
+
+fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotError> {
+    with_task_manager(|mgr| {
+        if mgr.num_tasks >= MAX_TASKS as u32 {
+            return Err(ReserveTaskSlotError::MaxTasks);
+        }
+
+        let mut slot: *mut Task = ptr::null_mut();
+        for task in mgr.tasks.iter_mut() {
+            if task.status() == TaskStatus::Invalid {
+                slot = task as *mut Task;
+                break;
+            }
+        }
+
+        if slot.is_null() {
+            return Err(ReserveTaskSlotError::NoFreeSlot);
+        }
+
+        if let Some(idx) = task_slot_index_inner(mgr, slot) {
+            mgr.exit_records[idx] = TaskExitRecord::empty();
+        }
+
+        let task_id = mgr.next_task_id;
+        mgr.next_task_id = task_id.wrapping_add(1);
+
+        Ok((slot, task_id))
+    })
+}
+
+fn record_task_created() {
+    with_task_manager(|mgr| {
+        mgr.num_tasks = mgr.num_tasks.saturating_add(1);
+        mgr.tasks_created = mgr.tasks_created.saturating_add(1);
+    });
 }
 
 fn record_task_exit(
@@ -393,86 +553,22 @@ pub fn task_create(
         return INVALID_TASK_ID;
     }
 
-    let (task, task_id) = with_task_manager(|mgr| {
-        if mgr.num_tasks >= MAX_TASKS as u32 {
+    let (task, task_id) = match reserve_task_slot() {
+        Ok(values) => values,
+        Err(ReserveTaskSlotError::MaxTasks) => {
             klog_info!("task_create: Maximum tasks reached");
-            return (ptr::null_mut(), INVALID_TASK_ID);
+            return INVALID_TASK_ID;
         }
-
-        let task = {
-            let mut found = ptr::null_mut();
-            for t in mgr.tasks.iter_mut() {
-                if t.status() == TaskStatus::Invalid {
-                    found = t as *mut Task;
-                    break;
-                }
-            }
-            found
-        };
-        if task.is_null() {
+        Err(ReserveTaskSlotError::NoFreeSlot) => {
             klog_info!("task_create: No free task slots");
-            return (ptr::null_mut(), INVALID_TASK_ID);
-        }
-
-        if let Some(idx) = task_slot_index_inner(mgr, task) {
-            mgr.exit_records[idx] = TaskExitRecord::empty();
-        }
-
-        let task_id = mgr.next_task_id;
-        mgr.next_task_id = task_id.wrapping_add(1);
-
-        (task, task_id)
-    });
-
-    if task.is_null() {
-        return INVALID_TASK_ID;
-    }
-
-    let mut process_id = INVALID_PROCESS_ID;
-    let stack_base;
-    let kernel_stack_base;
-    let kernel_stack_size;
-
-    if flags & TASK_FLAG_KERNEL_MODE != 0 {
-        let stack = kmalloc(TASK_STACK_SIZE as usize);
-        if stack.is_null() {
-            klog_info!("task_create: Failed to allocate kernel stack");
             return INVALID_TASK_ID;
         }
-        stack_base = stack as u64;
-        kernel_stack_base = stack_base;
-        kernel_stack_size = TASK_STACK_SIZE;
-    } else {
-        process_id = create_process_vm();
-        if process_id == INVALID_PROCESS_ID {
-            klog_info!("task_create: Failed to create process VM");
-            return INVALID_TASK_ID;
-        }
+    };
 
-        let stack_top = process_vm_get_stack_top(process_id);
-        if stack_top == 0 {
-            klog_info!("task_create: Failed to get process stack");
-            destroy_process_vm(process_id);
-            return INVALID_TASK_ID;
-        }
-        stack_base = stack_top - TASK_STACK_SIZE;
-
-        let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
-        if kstack.is_null() {
-            klog_info!("task_create: Failed to allocate kernel RSP0 stack");
-            destroy_process_vm(process_id);
-            return INVALID_TASK_ID;
-        }
-
-        kernel_stack_base = kstack as u64;
-        kernel_stack_size = TASK_KERNEL_STACK_SIZE;
-
-        if fileio_create_table_for_process(process_id) != 0 {
-            kfree(kstack);
-            destroy_process_vm(process_id);
-            return INVALID_TASK_ID;
-        }
-    }
+    let resources = match allocate_task_create_resources(flags) {
+        Some(resources) => resources,
+        None => return INVALID_TASK_ID,
+    };
 
     let task_ref = unsafe { &mut *task };
     task_ref.task_id = task_id;
@@ -480,68 +576,39 @@ pub fn task_create(
     task_ref.set_status(TaskStatus::Ready);
     task_ref.priority = priority;
     task_ref.flags = flags;
-    task_ref.process_id = process_id;
-    task_ref.stack_base = stack_base;
+    task_ref.process_id = resources.process_id;
+    task_ref.stack_base = resources.stack_base;
     task_ref.stack_size = TASK_STACK_SIZE;
-    task_ref.stack_pointer = stack_base + TASK_STACK_SIZE - 8;
+    task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
-        if process_id != INVALID_PROCESS_ID {
-            fileio_destroy_table_for_process(process_id);
-            destroy_process_vm(process_id);
-            if kernel_stack_base != 0 {
-                kfree(kernel_stack_base as *mut c_void);
-            }
-        } else if kernel_stack_base != 0 {
-            kfree(kernel_stack_base as *mut c_void);
-        }
+        cleanup_task_create_resources(resources.process_id, resources.kernel_stack_base);
         *task_ref = Task::invalid();
         return INVALID_TASK_ID;
     }
 
-    task_ref.kernel_stack_base = kernel_stack_base;
-    task_ref.kernel_stack_top = kernel_stack_base + kernel_stack_size;
-    task_ref.kernel_stack_size = kernel_stack_size;
+    task_ref.kernel_stack_base = resources.kernel_stack_base;
+    task_ref.kernel_stack_top = resources.kernel_stack_base + resources.kernel_stack_size;
+    task_ref.kernel_stack_size = resources.kernel_stack_size;
     task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
-    task_ref.time_slice_remaining = task_ref.time_slice;
-    task_ref.total_runtime = 0;
-    task_ref.creation_time = kdiag_timestamp();
-    task_ref.yield_count = 0;
-    task_ref.last_run_timestamp = 0;
-    task_ref
-        .waiting_on
-        .store(INVALID_TASK_ID, Ordering::Release);
+    reset_task_runtime_fields(task_ref);
     task_ref.user_started = 0;
     task_ref.context_from_user = 0;
-    task_ref.exit_reason = TaskExitReason::None;
-    task_ref.fault_reason = TaskFaultReason::None;
-    task_ref.exit_code = 0;
-    task_ref.fate_token = 0;
-    task_ref.fate_value = 0;
-    task_ref.fate_pending = 0;
-    task_ref.next_ready = ptr::null_mut();
-    task_ref
-        .next_inbox
-        .store(ptr::null_mut(), Ordering::Release);
-    task_ref.refcnt.store(0, Ordering::Release);
 
     init_task_context(task_ref);
 
     if flags & TASK_FLAG_KERNEL_MODE != 0 {
         task_ref.context.cr3 = cpu::read_cr3() & !0xFFF;
     } else {
-        let page_dir = process_vm_get_page_dir(process_id);
+        let page_dir = process_vm_get_page_dir(resources.process_id);
         if !page_dir.is_null() {
             task_ref.context.cr3 = unsafe { (*page_dir).pml4_phys.as_u64() };
         }
     }
 
-    with_task_manager(|mgr| {
-        mgr.num_tasks = mgr.num_tasks.saturating_add(1);
-        mgr.tasks_created = mgr.tasks_created.saturating_add(1);
-    });
+    record_task_created();
 
     klog_debug!(
         "Created task '{}' with ID {}",
@@ -552,18 +619,11 @@ pub fn task_create(
     task_id
 }
 pub fn task_terminate(task_id: u32) -> c_int {
-    let mut resolved_id = task_id;
-    let task_ptr: *mut Task;
+    let (task_ptr, resolved_id) = resolve_termination_target(task_id);
 
-    if task_id == u32::MAX {
-        task_ptr = scheduler::scheduler_get_current_task();
-        if task_ptr.is_null() {
-            klog_info!("task_terminate: No current task to terminate");
-            return -1;
-        }
-        resolved_id = unsafe { (*task_ptr).task_id };
-    } else {
-        task_ptr = task_find_by_id(task_id);
+    if task_id == u32::MAX && task_ptr.is_null() {
+        klog_info!("task_terminate: No current task to terminate");
+        return -1;
     }
 
     if task_ptr.is_null() || unsafe { (*task_ptr).status() } == TaskStatus::Invalid {
@@ -578,7 +638,36 @@ pub fn task_terminate(task_id: u32) -> c_int {
     );
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
+    mark_task_terminated(task_ptr, resolved_id);
 
+    if !is_current {
+        cleanup_terminated_task_resources(task_ptr, resolved_id);
+    }
+
+    with_task_manager(|mgr| {
+        if !is_current && mgr.num_tasks > 0 {
+            mgr.num_tasks -= 1;
+        }
+        mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
+    });
+
+    0
+}
+
+fn resolve_termination_target(task_id: u32) -> (*mut Task, u32) {
+    if task_id == u32::MAX {
+        let current = scheduler::scheduler_get_current_task();
+        if current.is_null() {
+            (ptr::null_mut(), INVALID_TASK_ID)
+        } else {
+            (current, unsafe { (*current).task_id })
+        }
+    } else {
+        (task_find_by_id(task_id), task_id)
+    }
+}
+
+fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     let now = kdiag_timestamp();
     unsafe {
         if (*task_ptr).last_run_timestamp != 0 && now >= (*task_ptr).last_run_timestamp {
@@ -599,10 +688,6 @@ pub fn task_terminate(task_id: u32) -> c_int {
         (*task_ptr).fate_token = 0;
         (*task_ptr).fate_value = 0;
         (*task_ptr).fate_pending = 0;
-    }
-
-    // Clear our own waiting_on (we're done waiting on anything)
-    unsafe {
         (*task_ptr)
             .waiting_on
             .store(INVALID_TASK_ID, Ordering::Release);
@@ -610,106 +695,85 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     scheduler::unschedule_task(task_ptr);
 
-    // Memory barrier: ensure TERMINATED state is visible before we wake dependents
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-    // NO MORE pause_all_aps()!
-    // The atomic CAS protocol in release_task_dependents handles races safely.
     release_task_dependents(resolved_id);
-
-    if !is_current {
-        unsafe {
-            if (*task_ptr).process_id != INVALID_PROCESS_ID {
-                // Clean up process-specific resources immediately
-                // (These don't depend on task memory being valid)
-                fileio_destroy_table_for_process((*task_ptr).process_id);
-                video_task_cleanup(resolved_id);
-                // Clean up shared memory buffers owned by this task
-                // Must happen before destroy_process_vm to properly unmap pages
-                shm_cleanup_task(resolved_id);
-                destroy_process_vm((*task_ptr).process_id);
-            }
-
-            // Defer memory cleanup until refcount is zero
-            // This allows other CPUs to safely finish using task pointers
-            // (e.g., in remote inbox or other queues)
-            if (*task_ptr).ref_count() > 0 {
-                defer_task_cleanup(task_ptr);
-            } else {
-                // No references - safe to free immediately
-                if (*task_ptr).kernel_stack_base != 0 {
-                    kfree((*task_ptr).kernel_stack_base as *mut c_void);
-                }
-                // For kernel tasks, stack_base == kernel_stack_base (same allocation).
-                // Only free stack_base separately if it differs from kernel_stack_base.
-                if (*task_ptr).process_id == INVALID_PROCESS_ID
-                    && (*task_ptr).stack_base != 0
-                    && (*task_ptr).stack_base != (*task_ptr).kernel_stack_base
-                {
-                    kfree((*task_ptr).stack_base as *mut c_void);
-                }
-                *task_ptr = Task::invalid();
-            }
-        }
-    }
-
-    with_task_manager(|mgr| {
-        if !is_current && mgr.num_tasks > 0 {
-            mgr.num_tasks -= 1;
-        }
-        mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
-    });
-
-    0
 }
 
-pub fn task_shutdown_all() -> c_int {
-    let was_paused = crate::per_cpu::pause_all_aps();
-
-    let mut result = 0;
-    let current = scheduler::scheduler_get_current_task();
-
-    let tasks_to_terminate: [Option<u32>; MAX_TASKS] = with_task_manager(|mgr| {
-        let mut ids = [None; MAX_TASKS];
-        for (i, task) in mgr.tasks.iter().enumerate() {
-            if task.status() == TaskStatus::Invalid {
-                continue;
-            }
-            let task_ptr = &mgr.tasks[i] as *const Task as *mut Task;
-            if task_ptr == current {
-                continue;
-            }
-            if crate::per_cpu::is_idle_task(task_ptr) {
-                continue;
-            }
-            if task.task_id == INVALID_TASK_ID {
-                continue;
-            }
-            ids[i] = Some(task.task_id);
+fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
+    unsafe {
+        if (*task_ptr).process_id != INVALID_PROCESS_ID {
+            fileio_destroy_table_for_process((*task_ptr).process_id);
+            video_task_cleanup(resolved_id);
+            shm_cleanup_task(resolved_id);
+            destroy_process_vm((*task_ptr).process_id);
         }
-        ids
-    });
 
-    for id_opt in tasks_to_terminate.iter() {
-        if let Some(task_id) = id_opt {
-            if task_terminate(*task_id) != 0 {
-                result = -1;
-            }
+        if (*task_ptr).ref_count() > 0 {
+            defer_task_cleanup(task_ptr);
+        } else {
+            free_task_memory_and_invalidate(task_ptr);
         }
     }
+}
 
-    crate::per_cpu::clear_all_cpu_queues();
+#[inline]
+fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut Task) -> bool {
+    if task.status() == TaskStatus::Invalid {
+        return false;
+    }
+    if task_ptr == current {
+        return false;
+    }
+    if crate::per_cpu::is_idle_task(task_ptr) {
+        return false;
+    }
+    task.task_id != INVALID_TASK_ID
+}
 
+fn collect_shutdown_task_ids(current: *mut Task) -> [Option<u32>; MAX_TASKS] {
+    with_task_manager(|mgr| {
+        let mut ids = [None; MAX_TASKS];
+        for (i, task) in mgr.tasks.iter().enumerate() {
+            let task_ptr = task as *const Task as *mut Task;
+            if should_collect_for_shutdown(task, task_ptr, current) {
+                ids[i] = Some(task.task_id);
+            }
+        }
+        ids
+    })
+}
+
+fn terminate_task_ids(task_ids: &[Option<u32>; MAX_TASKS]) -> c_int {
+    let mut result = 0;
+    for task_id in task_ids.iter().flatten() {
+        if task_terminate(*task_id) != 0 {
+            result = -1;
+        }
+    }
+    result
+}
+
+fn refresh_num_tasks_after_shutdown() {
     with_task_manager(|mgr| {
         let mut preserved = 0u32;
         for task in mgr.tasks.iter() {
-            let s = task.status();
-            if s != TaskStatus::Invalid && s != TaskStatus::Terminated {
+            let status = task.status();
+            if status != TaskStatus::Invalid && status != TaskStatus::Terminated {
                 preserved += 1;
             }
         }
         mgr.num_tasks = preserved;
     });
+}
+
+pub fn task_shutdown_all() -> c_int {
+    let was_paused = crate::per_cpu::pause_all_aps();
+    let current = scheduler::scheduler_get_current_task();
+    let tasks_to_terminate = collect_shutdown_task_ids(current);
+    let result = terminate_task_ids(&tasks_to_terminate);
+
+    crate::per_cpu::clear_all_cpu_queues();
+    refresh_num_tasks_after_shutdown();
 
     crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
     result
@@ -756,10 +820,25 @@ pub fn task_set_state(task_id: u32, new_status: TaskStatus) -> c_int {
         return -1;
     }
 
-    if task_ref.try_transition_to(new_status) {
-        0
-    } else {
-        -1
+    transition_to_c_int(task_ref.try_transition_to(new_status))
+}
+
+#[inline]
+fn transition_to_c_int(success: bool) -> c_int {
+    if success { 0 } else { -1 }
+}
+
+fn apply_state_transition(
+    task_ref: &mut Task,
+    new_status: TaskStatus,
+    reason: BlockReason,
+) -> c_int {
+    match new_status {
+        TaskStatus::Ready => transition_to_c_int(task_ref.mark_ready()),
+        TaskStatus::Running => transition_to_c_int(task_ref.mark_running()),
+        TaskStatus::Blocked => transition_to_c_int(task_ref.block(reason)),
+        TaskStatus::Terminated => transition_to_c_int(task_ref.terminate()),
+        TaskStatus::Invalid => -1,
     }
 }
 
@@ -778,37 +857,7 @@ pub fn task_set_state_with_reason(
         return -1;
     }
 
-    match new_status {
-        TaskStatus::Ready => {
-            if task_ref.mark_ready() {
-                0
-            } else {
-                -1
-            }
-        }
-        TaskStatus::Running => {
-            if task_ref.mark_running() {
-                0
-            } else {
-                -1
-            }
-        }
-        TaskStatus::Blocked => {
-            if task_ref.block(reason) {
-                0
-            } else {
-                -1
-            }
-        }
-        TaskStatus::Terminated => {
-            if task_ref.terminate() {
-                0
-            } else {
-                -1
-            }
-        }
-        TaskStatus::Invalid => -1,
-    }
+    apply_state_transition(task_ref, new_status, reason)
 }
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
     with_task_manager(|mgr| {
@@ -869,12 +918,12 @@ pub fn task_state_to_string(status: TaskStatus) -> *const c_char {
 }
 
 pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
-    if callback.is_none() {
-        return;
-    }
-    let cb = callback.unwrap();
+    let cb = match callback {
+        Some(cb) => cb,
+        None => return,
+    };
 
-    let task_ptrs: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
+    let task_ptrs = with_task_manager(|mgr| {
         let mut ptrs = [None; MAX_TASKS];
         for (i, task) in mgr.tasks.iter_mut().enumerate() {
             if task.status() != TaskStatus::Invalid && task.task_id != INVALID_TASK_ID {
@@ -884,10 +933,8 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
         ptrs
     });
 
-    for ptr_opt in task_ptrs.iter() {
-        if let Some(task) = ptr_opt {
-            cb(*task, context);
-        }
+    for task in task_ptrs.iter().flatten() {
+        cb(*task, context);
     }
 }
 pub fn task_get_current_id() -> u32 {
@@ -967,51 +1014,24 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     let child_kernel_stack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
     if child_kernel_stack.is_null() {
         klog_info!("task_fork: failed to allocate kernel stack");
-        destroy_process_vm(child_process_id);
+        cleanup_fork_setup_resources(child_process_id, ptr::null_mut(), false);
         return INVALID_TASK_ID;
     }
 
     if fileio_clone_table_for_process(parent.process_id, child_process_id) != 0 {
         klog_info!("task_fork: failed to clone file table");
-        kfree(child_kernel_stack);
-        destroy_process_vm(child_process_id);
+        cleanup_fork_setup_resources(child_process_id, child_kernel_stack, false);
         return INVALID_TASK_ID;
     }
 
-    let (child_task_ptr, child_task_id) = with_task_manager(|mgr| {
-        if mgr.num_tasks >= MAX_TASKS as u32 {
-            return (ptr::null_mut(), INVALID_TASK_ID);
+    let (child_task_ptr, child_task_id) = match reserve_task_slot() {
+        Ok(values) => values,
+        Err(_) => {
+            klog_info!("task_fork: no free task slots");
+            cleanup_fork_setup_resources(child_process_id, child_kernel_stack, true);
+            return INVALID_TASK_ID;
         }
-
-        let mut slot: *mut Task = ptr::null_mut();
-        for t in mgr.tasks.iter_mut() {
-            if t.status() == TaskStatus::Invalid {
-                slot = t as *mut Task;
-                break;
-            }
-        }
-
-        if slot.is_null() {
-            return (ptr::null_mut(), INVALID_TASK_ID);
-        }
-
-        let task_id = mgr.next_task_id;
-        mgr.next_task_id = task_id.wrapping_add(1);
-
-        if let Some(idx) = task_slot_index_inner(mgr, slot) {
-            mgr.exit_records[idx] = TaskExitRecord::empty();
-        }
-
-        (slot, task_id)
-    });
-
-    if child_task_ptr.is_null() {
-        klog_info!("task_fork: no free task slots");
-        fileio_destroy_table_for_process(child_process_id);
-        kfree(child_kernel_stack);
-        destroy_process_vm(child_process_id);
-        return INVALID_TASK_ID;
-    }
+    };
 
     let child = unsafe { &mut *child_task_ptr };
 
@@ -1032,26 +1052,9 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
         child.context.cr3 = unsafe { (*child_page_dir).pml4_phys.as_u64() };
     }
 
-    child.time_slice_remaining = child.time_slice;
-    child.total_runtime = 0;
-    child.creation_time = kdiag_timestamp();
-    child.yield_count = 0;
-    child.last_run_timestamp = 0;
-    child.waiting_on.store(INVALID_TASK_ID, Ordering::Release);
-    child.exit_reason = TaskExitReason::None;
-    child.fault_reason = TaskFaultReason::None;
-    child.exit_code = 0;
-    child.fate_token = 0;
-    child.fate_value = 0;
-    child.fate_pending = 0;
-    child.next_ready = ptr::null_mut();
-    child.next_inbox.store(ptr::null_mut(), Ordering::Release);
-    child.refcnt.store(0, Ordering::Release);
+    reset_task_runtime_fields(child);
 
-    with_task_manager(|mgr| {
-        mgr.num_tasks = mgr.num_tasks.saturating_add(1);
-        mgr.tasks_created = mgr.tasks_created.saturating_add(1);
-    });
+    record_task_created();
 
     klog_info!(
         "task_fork: created child task {} (process {}) from parent task {} (process {})",
