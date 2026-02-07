@@ -1,60 +1,28 @@
 //! Standalone File Manager Application
-//!
-//! This is a standalone userland application that runs in its own window,
-//! following the same architecture as the shell.
 
-use core::ffi::c_void;
 use core::str;
 
 use slopos_abi::draw::Color32;
 
-use crate::gfx::{self, DrawBuffer, PixelFormat};
-use crate::syscall::{
-    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList, core as sys_core,
-    fs, input, window,
-};
+use crate::appkit::{self, ControlFlow, Event, Window, WindowedApp};
+use crate::gfx::{self, DrawBuffer};
+use crate::syscall::{UserFsEntry, UserFsList, fs};
 use crate::theme::*;
 
-// Content area constants (excluding compositor-drawn title bar)
-const FM_CONTENT_WIDTH: i32 = FM_WIDTH;
-const FM_CONTENT_HEIGHT: i32 = FM_HEIGHT - FM_TITLE_HEIGHT;
+const FM_CONTENT_WIDTH: u32 = FM_WIDTH as u32;
+const FM_CONTENT_HEIGHT: u32 = (FM_HEIGHT - FM_TITLE_HEIGHT) as u32;
 const NAV_ROW_HEIGHT: i32 = 24;
 
-/// Standalone File Manager with its own surface buffer
 pub struct FileManager {
-    // Surface management
-    shm_buffer: Option<ShmBuffer>,
-    width: i32,
-    height: i32,
-    pitch: usize,
-    bytes_pp: u8,
-    pixel_format: PixelFormat,
-    needs_redraw: bool,
-
-    // Input tracking (pointer position from motion events)
-    pointer_x: i32,
-    pointer_y: i32,
-
-    // File system state
     current_path: [u8; 128],
     entries: [UserFsEntry; 32],
     entry_count: u32,
-    scroll_top: i32,
+    scroll_top: u32,
 }
 
 impl FileManager {
-    /// Creates a new FileManager for standalone operation
-    pub fn new() -> Self {
+    fn new() -> Self {
         let mut fm = Self {
-            shm_buffer: None,
-            width: FM_CONTENT_WIDTH,
-            height: FM_CONTENT_HEIGHT,
-            pitch: 0,
-            bytes_pp: 4,
-            pixel_format: PixelFormat::Argb8888,
-            needs_redraw: true,
-            pointer_x: 0,
-            pointer_y: 0,
             current_path: [0; 128],
             entries: [UserFsEntry::new(); 32],
             entry_count: 0,
@@ -65,75 +33,23 @@ impl FileManager {
         fm
     }
 
-    fn init_surface(&mut self) -> bool {
-        let mut fb_info = DisplayInfo::default();
-        if window::fb_info(&mut fb_info) != 0 {
-            return false;
-        }
-
-        self.bytes_pp = fb_info.bytes_per_pixel();
-        self.pitch = (self.width as usize) * (self.bytes_pp as usize);
-        self.pixel_format = if fb_info.format.is_bgr_order() {
-            PixelFormat::Argb8888
-        } else {
-            PixelFormat::Rgba8888
-        };
-
-        let buffer_size = self.pitch * (self.height as usize);
-        let shm = match ShmBuffer::create(buffer_size) {
-            Ok(buf) => buf,
-            Err(_) => return false,
-        };
-
-        if shm
-            .attach_surface(self.width as u32, self.height as u32)
-            .is_err()
-        {
-            return false;
-        }
-
-        self.shm_buffer = Some(shm);
-        true
-    }
-
-    /// Get a DrawBuffer for rendering
-    fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
-        let shm = self.shm_buffer.as_mut()?;
-        let mut buf = DrawBuffer::new(
-            shm.as_mut_slice(),
-            self.width as u32,
-            self.height as u32,
-            self.pitch,
-            self.bytes_pp,
-        )?;
-        buf.set_pixel_format(self.pixel_format);
-        Some(buf)
-    }
-
-    /// Reload directory listing
-    pub fn refresh(&mut self) {
+    fn refresh(&mut self) {
         self.entries = [UserFsEntry::new(); 32];
-
         let mut list = UserFsList {
             entries: self.entries.as_mut_ptr(),
             max_entries: 32,
             count: 0,
         };
-
         let _ = fs::list_dir(self.current_path.as_ptr() as *const i8, &mut list);
-
-        self.entry_count = list.count;
-        self.needs_redraw = true;
+        self.entry_count = list.count.min(self.entries.len() as u32);
     }
 
-    /// Navigate to parent or child directory
     fn navigate(&mut self, name: &[u8]) {
         if name == b".." {
             let mut len = 0;
             while len < 128 && self.current_path[len] != 0 {
                 len += 1;
             }
-
             if len > 1 {
                 let mut i = len - 1;
                 while i > 0 && self.current_path[i] != b'/' {
@@ -149,7 +65,6 @@ impl FileManager {
             while len < 128 && self.current_path[len] != 0 {
                 len += 1;
             }
-
             if len + 1 + name.len() + 1 <= 128 {
                 if len > 1 || (len == 1 && self.current_path[0] != b'/') {
                     self.current_path[len] = b'/';
@@ -158,7 +73,6 @@ impl FileManager {
                     self.current_path[0] = b'/';
                     len = 1;
                 }
-
                 for (i, &b) in name.iter().enumerate() {
                     self.current_path[len + i] = b;
                 }
@@ -169,11 +83,8 @@ impl FileManager {
         self.scroll_top = 0;
     }
 
-    /// Handle a click at window-local coordinates (0,0 = top-left of content area)
     fn handle_click(&mut self, x: i32, y: i32) -> bool {
-        // Navigation row (Up button)
         if y >= 0 && y < NAV_ROW_HEIGHT {
-            // Up button on the left side
             if x >= 4 && x < 4 + BUTTON_SIZE {
                 self.navigate(b"..");
                 return true;
@@ -181,16 +92,13 @@ impl FileManager {
             return false;
         }
 
-        // File list area (below navigation row)
         let list_y = y - NAV_ROW_HEIGHT;
-        if list_y >= 0 && x >= 0 && x < self.width {
-            let idx = list_y / FM_ITEM_HEIGHT;
+        if list_y >= 0 && x >= 0 {
+            let idx = (list_y / FM_ITEM_HEIGHT) as u32;
             let entry_idx = self.scroll_top + idx;
-
-            if entry_idx >= 0 && entry_idx < self.entry_count as i32 {
+            if entry_idx < self.entry_count {
                 let entry = self.entries[entry_idx as usize];
                 if entry.is_directory() {
-                    // Directory - navigate into it
                     let mut name_len = 0;
                     while name_len < 64 && entry.name[name_len] != 0 {
                         name_len += 1;
@@ -201,71 +109,47 @@ impl FileManager {
                 return true;
             }
         }
-
         false
     }
+}
 
-    /// Poll for input events and handle them
-    fn poll_input(&mut self) {
-        let mut events = [InputEvent::default(); 16];
-        let count = input::poll_batch(&mut events) as usize;
-
-        for i in 0..count {
-            let ev = &events[i];
-            match ev.event_type {
-                InputEventType::PointerMotion | InputEventType::PointerEnter => {
-                    // Track pointer position from motion/enter events
-                    // Coordinates are window-local (translated by kernel)
-                    self.pointer_x = ev.pointer_x();
-                    self.pointer_y = ev.pointer_y();
-                }
-                InputEventType::PointerButtonPress => {
-                    // Use tracked position for click handling
-                    // (button events don't include coordinates)
-                    if self.handle_click(self.pointer_x, self.pointer_y) {
-                        self.needs_redraw = true;
-                    }
-                }
-                InputEventType::CloseRequest => {
-                    sys_core::exit();
-                }
-                _ => {}
-            }
-        }
+impl WindowedApp for FileManager {
+    fn init(&mut self, win: &mut Window) {
+        win.set_title("Files");
+        win.request_redraw();
     }
 
-    /// Draw the file manager content (no title bar - compositor handles that)
-    fn draw(&mut self) {
-        // Copy values before borrowing self for draw_buffer
-        let width = self.width;
-        let height = self.height;
-        let current_path = self.current_path;
-        let entry_count = self.entry_count;
-        let scroll_top = self.scroll_top;
-        let entries = self.entries;
+    fn on_event(&mut self, win: &mut Window, event: Event) -> ControlFlow {
+        match event {
+            Event::CloseRequest => return ControlFlow::Exit,
+            Event::PointerPress { .. } => {
+                let (px, py) = win.pointer();
+                if self.handle_click(px, py) {
+                    win.request_redraw();
+                }
+            }
+            _ => {}
+        }
+        ControlFlow::Continue
+    }
 
-        let Some(mut buf) = self.draw_buffer() else {
-            return;
-        };
+    fn draw(&mut self, fb: &mut DrawBuffer<'_>) {
+        let width = fb.width() as i32;
+        let height = fb.height() as i32;
 
-        // Clear background
-        gfx::fill_rect(&mut buf, 0, 0, width, height, FM_COLOR_BG);
+        gfx::fill_rect(fb, 0, 0, width, height, FM_COLOR_BG);
 
-        // Navigation row background
-        gfx::fill_rect(&mut buf, 0, 0, width, NAV_ROW_HEIGHT, COLOR_TITLE_BAR);
+        gfx::fill_rect(fb, 0, 0, width, NAV_ROW_HEIGHT, COLOR_TITLE_BAR);
+        gfx::fill_rect(fb, 4, 4, BUTTON_SIZE, BUTTON_SIZE - 8, COLOR_BUTTON);
+        gfx::font::draw_string(fb, 8, 4, "^", COLOR_TEXT, COLOR_BUTTON);
 
-        // Up button
-        gfx::fill_rect(&mut buf, 4, 4, BUTTON_SIZE, BUTTON_SIZE - 8, COLOR_BUTTON);
-        gfx::font::draw_string(&mut buf, 8, 4, "^", COLOR_TEXT, COLOR_BUTTON);
-
-        // Current path display
         let mut len = 0;
-        while len < current_path.len() && current_path[len] != 0 {
+        while len < self.current_path.len() && self.current_path[len] != 0 {
             len += 1;
         }
-        let path_str = str::from_utf8(&current_path[..len]).unwrap_or("/");
+        let path_str = str::from_utf8(&self.current_path[..len]).unwrap_or("/");
         gfx::font::draw_string(
-            &mut buf,
+            fb,
             4 + BUTTON_SIZE + 8,
             4,
             path_str,
@@ -273,73 +157,38 @@ impl FileManager {
             COLOR_TITLE_BAR,
         );
 
-        // File list (below navigation row)
         let list_start_y = NAV_ROW_HEIGHT;
         let available_height = height - NAV_ROW_HEIGHT;
         let max_visible = available_height / FM_ITEM_HEIGHT;
 
-        for i in 0..entry_count as usize {
-            if i < scroll_top as usize {
+        for i in 0..self.entry_count as usize {
+            if i < self.scroll_top as usize {
                 continue;
             }
-            let row = (i as i32) - scroll_top;
+            let row = (i as i32) - self.scroll_top as i32;
             if row >= max_visible {
                 break;
             }
-
             let item_y = list_start_y + (row * FM_ITEM_HEIGHT);
-            let entry = &entries[i];
+            let entry = &self.entries[i];
 
-            // Extract name
             let mut name_len = 0;
             while name_len < 64 && entry.name[name_len] != 0 {
                 name_len += 1;
             }
             let name = str::from_utf8(&entry.name[..name_len]).unwrap_or("?");
 
-            // Color: blue for directories, white for files
             let color = if entry.is_directory() {
                 Color32::rgb(0x40, 0x80, 0xFF)
             } else {
                 COLOR_TEXT
             };
-
-            gfx::font::draw_string(&mut buf, 8, item_y + 2, name, color, FM_COLOR_BG);
+            gfx::font::draw_string(fb, 8, item_y + 2, name, color, FM_COLOR_BG);
         }
     }
 }
 
-/// Main entry point for standalone file manager binary
-pub fn file_manager_main(_arg: *mut c_void) {
-    let mut fm = FileManager::new();
-
-    // Initialize surface
-    if !fm.init_surface() {
-        // Surface init failed - just yield forever
-        loop {
-            sys_core::yield_now();
-        }
-    }
-
-    // Set window title
-    window::surface_set_title("Files");
-
-    // Initial draw
-    fm.draw();
-    let _ = window::surface_damage(0, 0, fm.width, fm.height);
-    let _ = window::surface_commit();
-
-    // Main event loop
-    loop {
-        fm.poll_input();
-
-        if fm.needs_redraw {
-            fm.draw();
-            let _ = window::surface_damage(0, 0, fm.width, fm.height);
-            let _ = window::surface_commit();
-            fm.needs_redraw = false;
-        }
-
-        sys_core::yield_now();
-    }
+pub fn file_manager_main(_arg: *mut core::ffi::c_void) -> ! {
+    let fm = FileManager::new();
+    appkit::run(fm, FM_CONTENT_WIDTH, FM_CONTENT_HEIGHT)
 }

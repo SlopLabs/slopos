@@ -40,7 +40,7 @@ use crate::gfx::{self, DrawBuffer};
 use crate::program_registry;
 use crate::runtime;
 use crate::syscall::{
-    DisplayInfo, ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
+    DisplayInfo, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
     UserFsList, UserSysInfo, core as sys_core, fs, process, tty, window,
 };
 
@@ -158,14 +158,13 @@ mod scrollback {
     static LENS: SyncUnsafeCell<[u16; SHELL_SCROLLBACK_LINES]> =
         SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES]);
 
-    /// Safety: Single-threaded userland, no preemption during shell code
     #[inline]
-    pub fn get_line(slot: usize) -> &'static [u8] {
+    pub fn with_line<R, F: FnOnce(&[u8]) -> R>(slot: usize, f: F) -> R {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         unsafe {
             let data = &*DATA.get();
             let start = slot * SHELL_SCROLLBACK_COLS;
-            &data[start..start + SHELL_SCROLLBACK_COLS]
+            f(&data[start..start + SHELL_SCROLLBACK_COLS])
         }
     }
 
@@ -252,86 +251,42 @@ mod scrollback {
 
 mod surface {
     use super::*;
-    use gfx::PixelFormat;
+    use crate::appkit::Surface;
 
-    struct ShellSurface {
-        shm_buffer: Option<ShmBuffer>,
-        width: i32,
-        height: i32,
-        pitch: usize,
-        bytes_pp: u8,
-        pixel_format: PixelFormat,
+    static SURFACE: SyncUnsafeCell<Option<Surface>> = SyncUnsafeCell::new(None);
+
+    fn with_surface<R, F: FnOnce(&mut Surface) -> R>(f: F) -> Option<R> {
+        let slot = unsafe { &mut *SURFACE.get() };
+        slot.as_mut().map(f)
     }
 
-    impl ShellSurface {
-        const fn empty() -> Self {
-            Self {
-                shm_buffer: None,
-                width: 0,
-                height: 0,
-                pitch: 0,
-                bytes_pp: 4,
-                pixel_format: PixelFormat::Argb8888,
-            }
-        }
-
-        fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
-            let buf = self.shm_buffer.as_mut()?;
-            let mut draw_buf = DrawBuffer::new(
-                buf.as_mut_slice(),
-                self.width as u32,
-                self.height as u32,
-                self.pitch,
-                self.bytes_pp,
-            )?;
-            draw_buf.set_pixel_format(self.pixel_format);
-            Some(draw_buf)
-        }
-    }
-
-    static SURFACE: SyncUnsafeCell<ShellSurface> = SyncUnsafeCell::new(ShellSurface::empty());
-
-    /// Access surface for drawing. Safety: single-threaded userland
-    fn with_surface<R, F: FnOnce(&mut ShellSurface) -> R>(f: F) -> R {
-        f(unsafe { &mut *SURFACE.get() })
-    }
-
-    pub fn init(width: i32, height: i32, display_info: &DisplayInfo) -> bool {
-        with_surface(|s| {
-            s.width = width;
-            s.height = height;
-            s.bytes_pp = display_info.bytes_per_pixel();
-            s.pitch = (width as usize) * (s.bytes_pp as usize);
-            s.pixel_format = if display_info.format.is_bgr_order() {
-                PixelFormat::Argb8888
-            } else {
-                PixelFormat::Rgba8888
-            };
-
-            let buffer_size = s.pitch * (height as usize);
-            let shm_buffer = match ShmBuffer::create(buffer_size) {
-                Ok(buf) => buf,
-                Err(_) => {
-                    let _ = tty::write(b"shell: failed to create shm buffer\n");
-                    return false;
+    pub fn init(width: i32, height: i32) -> bool {
+        match Surface::new(width as u32, height as u32) {
+            Ok(s) => {
+                unsafe {
+                    *SURFACE.get() = Some(s);
                 }
-            };
-
-            if shm_buffer
-                .attach_surface(width as u32, height as u32)
-                .is_err()
-            {
-                let _ = tty::write(b"shell: failed to attach surface\n");
-                return false;
+                true
             }
-
-            s.shm_buffer = Some(shm_buffer);
-            true
-        })
+            Err(_) => {
+                let _ = tty::write(b"shell: surface init failed\n");
+                false
+            }
+        }
     }
 
     pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
-        with_surface(|s| s.draw_buffer().map(|mut buf| f(&mut buf)))
+        with_surface(|surface| {
+            let mut buf = surface.frame()?;
+            Some(f(&mut buf))
+        })?
+    }
+
+    pub fn present_full() {
+        let slot = unsafe { &*SURFACE.get() };
+        if let Some(surface) = slot.as_ref() {
+            surface.present_full();
+        }
     }
 }
 
@@ -415,12 +370,13 @@ fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logica
         return;
     }
 
-    let line = scrollback::get_line(slot);
-    for (col, &ch) in line.iter().take(draw_len).enumerate() {
-        if ch != 0 {
-            draw_char_at(buf, col as i32, row, ch, fg, bg);
+    scrollback::with_line(slot, |line| {
+        for (col, &ch) in line.iter().take(draw_len).enumerate() {
+            if ch != 0 {
+                draw_char_at(buf, col as i32, row, ch, fg, bg);
+            }
         }
-    }
+    });
 }
 
 fn redraw_view(buf: &mut DrawBuffer, display: &DisplayState) {
@@ -772,13 +728,16 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
 // =============================================================================
 
 fn shell_console_init() {
-    let mut info = DisplayInfo::default();
-    if window::fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
+    let width = SHELL_WINDOW_WIDTH;
+    let height = SHELL_WINDOW_HEIGHT;
+
+    if !surface::init(width, height) {
+        DISPLAY.enabled.set(false);
         return;
     }
 
-    let width = SHELL_WINDOW_WIDTH;
-    let height = SHELL_WINDOW_HEIGHT;
+    let mut info = DisplayInfo::default();
+    let _ = window::fb_info(&mut info);
 
     DISPLAY.width.set(width);
     DISPLAY.height.set(height);
@@ -796,11 +755,6 @@ fn shell_console_init() {
         .set(rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
 
     if DISPLAY.cols.get() <= 0 || DISPLAY.rows.get() <= 0 {
-        DISPLAY.enabled.set(false);
-        return;
-    }
-
-    if !surface::init(width, height, &info) {
         DISPLAY.enabled.set(false);
         return;
     }
@@ -861,12 +815,7 @@ fn shell_console_page_down() {
 
 fn shell_console_commit() {
     if DISPLAY.enabled.get() {
-        let width = DISPLAY.width.get();
-        let height = DISPLAY.height.get();
-        if width > 0 && height > 0 {
-            let _ = window::surface_damage(0, 0, width, height);
-        }
-        let _ = window::surface_commit();
+        surface::present_full();
     }
 }
 

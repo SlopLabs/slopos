@@ -2,106 +2,29 @@ use core::ffi::c_void;
 
 use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
 
-use crate::gfx::{self, DrawBuffer, PixelFormat};
-use crate::syscall::{
-    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserSysInfo, core as sys_core, input, tty,
-    window,
-};
+use crate::appkit::{self, Window, WindowedApp};
+use crate::gfx::{self, DrawBuffer};
+use crate::syscall::{UserSysInfo, core as sys_core};
 use crate::theme::{COLOR_BACKGROUND, COLOR_TEXT};
 
-const SYSINFO_WIDTH: i32 = 360;
-const SYSINFO_HEIGHT: i32 = 258;
-const SYSINFO_MARGIN_X: i32 = 12;
-const SYSINFO_MARGIN_Y: i32 = 12;
-const SYSINFO_LINE_HEIGHT: i32 = 18;
+const SYSINFO_WIDTH: u32 = 360;
+const SYSINFO_HEIGHT: u32 = 258;
+const MARGIN_X: i32 = 12;
+const MARGIN_Y: i32 = 12;
+const LINE_HEIGHT: i32 = 18;
 
-pub struct SysinfoApp {
-    shm_buffer: Option<ShmBuffer>,
-    width: i32,
-    height: i32,
-    pitch: usize,
-    bytes_pp: u8,
-    pixel_format: PixelFormat,
-}
+pub struct SysinfoApp;
 
-impl SysinfoApp {
-    pub fn new() -> Self {
-        Self {
-            shm_buffer: None,
-            width: SYSINFO_WIDTH,
-            height: SYSINFO_HEIGHT,
-            pitch: 0,
-            bytes_pp: 4,
-            pixel_format: PixelFormat::Argb8888,
-        }
+impl WindowedApp for SysinfoApp {
+    fn init(&mut self, win: &mut Window) {
+        win.set_title("Sysinfo");
+        win.request_redraw();
     }
 
-    fn init_surface(&mut self) -> bool {
-        let mut fb_info = DisplayInfo::default();
-        if window::fb_info(&mut fb_info) != 0 {
-            return false;
-        }
-
-        self.bytes_pp = fb_info.bytes_per_pixel();
-        self.pitch = (self.width as usize) * (self.bytes_pp as usize);
-        self.pixel_format = if fb_info.format.is_bgr_order() {
-            PixelFormat::Argb8888
-        } else {
-            PixelFormat::Rgba8888
-        };
-
-        let buffer_size = self.pitch * (self.height as usize);
-        let shm = match ShmBuffer::create(buffer_size) {
-            Ok(buf) => buf,
-            Err(_) => return false,
-        };
-
-        if shm
-            .attach_surface(self.width as u32, self.height as u32)
-            .is_err()
-        {
-            return false;
-        }
-
-        window::surface_set_title("Sysinfo");
-        self.shm_buffer = Some(shm);
-        true
-    }
-
-    fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
-        let shm = self.shm_buffer.as_mut()?;
-        let mut buf = DrawBuffer::new(
-            shm.as_mut_slice(),
-            self.width as u32,
-            self.height as u32,
-            self.pitch,
-            self.bytes_pp,
-        )?;
-        buf.set_pixel_format(self.pixel_format);
-        Some(buf)
-    }
-
-    fn draw_text_line(buf: &mut DrawBuffer<'_>, x: i32, y: i32, text: &str) {
-        gfx::font::draw_string(buf, x, y, text, COLOR_TEXT, COLOR_BACKGROUND);
-    }
-
-    fn format_line<'a>(buf: &'a mut [u8; 96], label: &str, value: u64, suffix: &str) -> &'a str {
-        let mut idx = 0usize;
-        idx = copy_str(buf, idx, label);
-        idx = write_u64(buf, idx, value);
-        idx = copy_str(buf, idx, suffix);
-        unsafe { core::str::from_utf8_unchecked(&buf[..idx]) }
-    }
-
-    fn draw_info(&mut self) {
-        let width = self.width;
-        let height = self.height;
-        let mut buf = match self.draw_buffer() {
-            Some(buf) => buf,
-            None => return,
-        };
-
-        gfx::fill_rect(&mut buf, 0, 0, width, height, COLOR_BACKGROUND);
+    fn draw(&mut self, fb: &mut DrawBuffer<'_>) {
+        let width = fb.width() as i32;
+        let height = fb.height() as i32;
+        gfx::fill_rect(fb, 0, 0, width, height, COLOR_BACKGROUND);
 
         let cpu_count = sys_core::get_cpu_count() as u64;
         let current_cpu = sys_core::get_current_cpu() as u64;
@@ -109,104 +32,128 @@ impl SysinfoApp {
         let sys_rc = sys_core::sys_info(&mut info);
 
         let mut line = [0u8; 96];
-        let mut y = SYSINFO_MARGIN_Y;
+        let mut y = MARGIN_Y;
 
-        Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, "SLOPOS SYSINFO");
-        y += SYSINFO_LINE_HEIGHT;
+        draw_text(fb, MARGIN_X, y, "SLOPOS SYSINFO");
+        y += LINE_HEIGHT;
 
-        let line_str = Self::format_line(&mut line, "CPUs available: ", cpu_count, "");
-        Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-        y += SYSINFO_LINE_HEIGHT;
+        draw_text(
+            fb,
+            MARGIN_X,
+            y,
+            format_line(&mut line, "CPUs available: ", cpu_count, ""),
+        );
+        y += LINE_HEIGHT;
 
-        let line_str = Self::format_line(&mut line, "Current CPU: ", current_cpu, "");
-        Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-        y += SYSINFO_LINE_HEIGHT;
+        draw_text(
+            fb,
+            MARGIN_X,
+            y,
+            format_line(&mut line, "Current CPU: ", current_cpu, ""),
+        );
+        y += LINE_HEIGHT;
 
         if sys_rc == 0 {
             let total_mib = pages_to_mib(info.total_pages as u64);
             let free_mib = pages_to_mib(info.free_pages as u64);
             let alloc_mib = pages_to_mib(info.allocated_pages as u64);
 
-            let line_str = Self::format_line(&mut line, "Memory total: ", total_mib, " MiB");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str = Self::format_line(&mut line, "Memory free: ", free_mib, " MiB");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str = Self::format_line(&mut line, "Memory alloc: ", alloc_mib, " MiB");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str =
-                Self::format_line(&mut line, "Tasks total: ", info.total_tasks as u64, "");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str =
-                Self::format_line(&mut line, "Tasks active: ", info.active_tasks as u64, "");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str =
-                Self::format_line(&mut line, "Tasks ready: ", info.ready_tasks as u64, "");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str = Self::format_line(
-                &mut line,
-                "Task ctx switches: ",
-                info.task_context_switches,
-                "",
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Memory total: ", total_mib, " MiB"),
             );
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str = Self::format_line(
-                &mut line,
-                "Scheduler switches: ",
-                info.scheduler_context_switches,
-                "",
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Memory free: ", free_mib, " MiB"),
             );
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
-
-            let line_str =
-                Self::format_line(&mut line, "Scheduler yields: ", info.scheduler_yields, "");
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, line_str);
-            y += SYSINFO_LINE_HEIGHT;
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Memory alloc: ", alloc_mib, " MiB"),
+            );
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Tasks total: ", info.total_tasks as u64, ""),
+            );
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Tasks active: ", info.active_tasks as u64, ""),
+            );
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Tasks ready: ", info.ready_tasks as u64, ""),
+            );
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(
+                    &mut line,
+                    "Task ctx switches: ",
+                    info.task_context_switches,
+                    "",
+                ),
+            );
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(
+                    &mut line,
+                    "Scheduler switches: ",
+                    info.scheduler_context_switches,
+                    "",
+                ),
+            );
+            y += LINE_HEIGHT;
+            draw_text(
+                fb,
+                MARGIN_X,
+                y,
+                format_line(&mut line, "Scheduler yields: ", info.scheduler_yields, ""),
+            );
+            y += LINE_HEIGHT;
         } else {
-            Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, "System info: unavailable");
-            y += SYSINFO_LINE_HEIGHT;
+            draw_text(fb, MARGIN_X, y, "System info: unavailable");
+            y += LINE_HEIGHT;
         }
 
-        Self::draw_text_line(&mut buf, SYSINFO_MARGIN_X, y, "Drivers: kernel-managed");
+        draw_text(fb, MARGIN_X, y, "Drivers: kernel-managed");
     }
 }
 
-pub fn sysinfo_main(_arg: *mut c_void) {
-    let mut app = SysinfoApp::new();
-    if !app.init_surface() {
-        let _ = tty::write(b"sysinfo: framebuffer unavailable\n");
-        return;
-    }
+pub fn sysinfo_main(_arg: *mut c_void) -> ! {
+    appkit::run(SysinfoApp, SYSINFO_WIDTH, SYSINFO_HEIGHT)
+}
 
-    app.draw_info();
-    let _ = window::surface_damage(0, 0, app.width, app.height);
-    let _ = window::surface_commit();
+fn draw_text(fb: &mut DrawBuffer<'_>, x: i32, y: i32, text: &str) {
+    gfx::font::draw_string(fb, x, y, text, COLOR_TEXT, COLOR_BACKGROUND);
+}
 
-    let mut events = [InputEvent::default(); 8];
-    loop {
-        let count = input::poll_batch(&mut events) as usize;
-        for event in events.iter().take(count) {
-            if event.event_type == InputEventType::CloseRequest {
-                sys_core::exit();
-            }
-        }
-
-        sys_core::yield_now();
-    }
+fn format_line<'a>(buf: &'a mut [u8; 96], label: &str, value: u64, suffix: &str) -> &'a str {
+    let mut idx = 0usize;
+    idx = copy_str(buf, idx, label);
+    idx = write_u64(buf, idx, value);
+    idx = copy_str(buf, idx, suffix);
+    core::str::from_utf8(&buf[..idx]).unwrap_or("???")
 }
 
 fn pages_to_mib(pages: u64) -> u64 {
@@ -227,7 +174,6 @@ fn copy_str(buf: &mut [u8; 96], mut idx: usize, value: &str) -> usize {
 fn write_u64(buf: &mut [u8; 96], mut idx: usize, mut value: u64) -> usize {
     let mut tmp = [0u8; 32];
     let mut len = 0usize;
-
     if value == 0 {
         tmp[0] = b'0';
         len = 1;
@@ -239,7 +185,6 @@ fn write_u64(buf: &mut [u8; 96], mut idx: usize, mut value: u64) -> usize {
         }
         tmp[..len].reverse();
     }
-
     for &b in &tmp[..len] {
         if idx >= buf.len() {
             break;

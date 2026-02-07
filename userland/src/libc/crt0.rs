@@ -28,9 +28,25 @@ pub fn envp() -> *const *const c_char {
     unsafe { ENVP }
 }
 
-pub fn crt0_start() -> ! {
+/// Parse argc/argv/envp from the kernel-prepared user stack and store
+/// them in the CRT0 globals.
+///
+/// **WARNING**: This function reads RSP via inline assembly.  It must
+/// only be called from a context where RSP still points at the
+/// kernel-prepared stack layout (argc at [rsp], argv at [rsp+8], …).
+/// Calling it from a normal Rust function is *wrong* because the
+/// prologue has already adjusted RSP.  Use a `#[naked]` trampoline
+/// that captures the raw stack pointer and passes it here.
+///
+/// Currently **not** called from the `entry!` macro — no app uses
+/// `get_arg()`/`get_env()` yet.
+///
+/// # Safety
+/// - Must be called exactly once, before any use of `argc()`/`argv()`/
+///   `envp()`/`get_arg()`/`get_env()`.
+/// - RSP must still point at the original kernel-prepared user stack.
+pub unsafe fn init_from_stack() {
     unsafe {
-        use super::syscall::sys_exit;
         use core::arch::asm;
 
         let sp: u64;
@@ -38,30 +54,35 @@ pub fn crt0_start() -> ! {
 
         let stack_ptr = sp as *const u64;
 
-        ARGC = *stack_ptr as isize;
+        let raw_argc = *stack_ptr as isize;
+        if raw_argc < 0 || raw_argc > 1024 {
+            ARGC = 0;
+            ARGV = core::ptr::null();
+            ENVP = core::ptr::null();
+            return;
+        }
+
+        ARGC = raw_argc;
         ARGV = stack_ptr.add(1) as *const *const c_char;
 
-        let envp_offset = 1 + (ARGC as usize) + 1;
+        let envp_offset = 1 + (raw_argc as usize) + 1;
         ENVP = stack_ptr.add(envp_offset) as *const *const c_char;
-
-        if let Some(main) = MAIN_FN {
-            let ret = main(ARGC, ARGV, ENVP);
-            sys_exit(ret);
-        } else {
-            sys_exit(127);
-        }
     }
 }
 
-#[macro_export]
-macro_rules! entry {
-    ($main:ident) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn _start() -> ! {
-            $crate::libc::crt0::set_main($main);
-            $crate::libc::crt0::crt0_start()
-        }
-    };
+/// # Safety
+/// Same RSP requirements as [`init_from_stack`].
+pub unsafe fn crt0_start() -> ! {
+    use super::syscall::sys_exit;
+
+    init_from_stack();
+
+    if let Some(main) = MAIN_FN {
+        let ret = main(ARGC, ARGV, ENVP);
+        sys_exit(ret);
+    } else {
+        sys_exit(127);
+    }
 }
 
 pub fn get_arg(index: usize) -> Option<&'static [u8]> {

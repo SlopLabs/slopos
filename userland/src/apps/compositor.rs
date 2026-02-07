@@ -15,7 +15,7 @@ use core::ffi::c_void;
 
 use slopos_abi::draw::Color32;
 
-use crate::gfx::{self, DamageRect, DrawBuffer, PixelFormat};
+use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::program_registry;
 use crate::syscall::{
     CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, core as sys_core, input, memory,
@@ -69,8 +69,6 @@ impl ClientSurfaceCache {
         }
     }
 
-    /// Get the index of a cached mapping for the given task/token, or create one.
-    /// Returns the index into entries array, or None if mapping failed.
     fn get_or_create_index(
         &mut self,
         task_id: u32,
@@ -81,30 +79,21 @@ impl ClientSurfaceCache {
             return None;
         }
 
-        // Check if we already have this mapping
         for (i, entry) in self.entries.iter().enumerate() {
             if entry.matches(task_id, token) {
                 return Some(i);
             }
         }
 
-        // Need to create a new mapping
+        let slot = self.entries.iter().position(|e| e.is_empty())?;
+
         let mapping = CachedShmMapping::map_readonly(token, buffer_size)?;
-
-        // Find a slot to store the mapping
-        for (i, entry) in self.entries.iter_mut().enumerate() {
-            if entry.is_empty() {
-                *entry = ClientSurfaceEntry {
-                    task_id,
-                    token,
-                    mapping: Some(mapping),
-                };
-                return Some(i);
-            }
-        }
-
-        // No slot available
-        None
+        self.entries[slot] = ClientSurfaceEntry {
+            task_id,
+            token,
+            mapping: Some(mapping),
+        };
+        Some(slot)
     }
 
     /// Get a slice view of the cached buffer at the given index.
@@ -116,38 +105,23 @@ impl ClientSurfaceCache {
             .map(|m| m.as_slice())
     }
 
-    /// Unmaps and clears cached client surface mappings for entries whose windows no longer exist.
-    ///
-    /// Iterates the cache and for each entry with a nonzero task id checks whether that task id
-    /// is present in the provided window list (first `window_count` entries of `windows`).
-    /// If the task id is not found, the entry's shared-memory mapping (if any) is unmapped and
-    /// the entry is reset to an empty state.
-    ///
-    /// # Parameters
-    ///
-    /// - `windows`: slice containing the current set of windows (length `MAX_WINDOWS`).
-    /// - `window_count`: number of active windows to consider from `windows`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Call cleanup_stale to ensure mappings for removed windows are released.
-    /// let mut cache = ClientSurfaceCache::new();
-    /// // Create an all-zero windows array (no active windows).
-    /// let windows: [UserWindowInfo; MAX_WINDOWS] = unsafe { std::mem::zeroed() };
-    /// cache.cleanup_stale(&windows, 0);
-    /// ```
     fn cleanup_stale(&mut self, windows: &[UserWindowInfo; MAX_WINDOWS], window_count: u32) {
         for entry in &mut self.entries {
             if entry.task_id == 0 {
                 continue;
             }
 
-            let still_exists =
-                (0..window_count as usize).any(|i| windows[i].task_id == entry.task_id);
+            let mut stale = true;
+            for i in 0..window_count as usize {
+                if windows[i].task_id == entry.task_id {
+                    if windows[i].shm_token == entry.token {
+                        stale = false;
+                    }
+                    break;
+                }
+            }
 
-            if !still_exists {
-                // Window no longer exists - unmap the shared memory and clear the entry
+            if stale {
                 if let Some(ref mapping) = entry.mapping {
                     unsafe {
                         memory::shm_unmap(mapping.vaddr());
@@ -244,8 +218,8 @@ struct CompositorOutput {
 impl CompositorOutput {
     fn new(fb: &DisplayInfo) -> Option<Self> {
         let pitch = fb.pitch as usize;
-        let size = pitch * fb.height as usize;
         let bytes_pp = fb.bytes_per_pixel();
+        let size = pitch.checked_mul(fb.height as usize)?;
 
         if size == 0 || bytes_pp < 3 {
             return None;
@@ -562,8 +536,13 @@ impl WindowManager {
     fn refresh_windows(&mut self) {
         self.prev_windows = self.windows;
         self.prev_window_count = self.window_count;
+        // Snapshot previous bounds before overwriting — the lookup in
+        // find_prev_bounds() indexes into prev_windows which may have a
+        // different ordering than the current frame.
+        let saved_bounds = self.prev_window_bounds;
 
-        self.window_count = window::enumerate_windows(&mut self.windows) as u32;
+        let raw_count = window::enumerate_windows(&mut self.windows);
+        self.window_count = (raw_count as usize).min(MAX_WINDOWS) as u32;
 
         // Clean up stale surface mappings
         self.surface_cache
@@ -590,8 +569,7 @@ impl WindowManager {
             let window = self.windows[i];
             let curr_bounds = WindowBounds::from_window(&window);
 
-            // Find previous bounds for this window
-            let prev_bounds = self.find_prev_bounds(window.task_id);
+            let prev_bounds = self.find_prev_bounds_in(&saved_bounds, window.task_id);
 
             // Check for window movement or visibility change - add both old and new positions as damage
             if let Some(old) = prev_bounds {
@@ -629,12 +607,10 @@ impl WindowManager {
             }
         }
 
-        // Handle removed windows (expose damage)
         for i in 0..self.prev_window_count as usize {
             let prev = &self.prev_windows[i];
             if !self.window_exists(prev.task_id) {
-                let old_bounds = self.prev_window_bounds[i];
-                self.add_bounds_damage(&old_bounds);
+                self.add_bounds_damage(&saved_bounds[i]);
             }
         }
 
@@ -696,11 +672,14 @@ impl WindowManager {
         }
     }
 
-    /// Find previous bounds for a window by task_id
-    fn find_prev_bounds(&self, task_id: u32) -> Option<WindowBounds> {
+    fn find_prev_bounds_in(
+        &self,
+        bounds: &[WindowBounds; MAX_WINDOWS],
+        task_id: u32,
+    ) -> Option<WindowBounds> {
         for i in 0..self.prev_window_count as usize {
             if self.prev_windows[i].task_id == task_id {
-                return Some(self.prev_window_bounds[i]);
+                return Some(bounds[i]);
             }
         }
         None
@@ -1745,11 +1724,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
     wm.set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
 
-    let pixel_format = if fb_info.format.is_bgr_order() {
-        PixelFormat::Argb8888
-    } else {
-        PixelFormat::Rgba8888
-    };
+    let pixel_format = fb_info.format;
 
     const TARGET_FRAME_MS: u64 = 16;
     let mut frame_count: u32 = 0;
