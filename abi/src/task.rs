@@ -1,47 +1,49 @@
-//! Task-related types and constants shared between kernel subsystems.
+//! Task ABI types shared between kernel subsystems.
 //!
-//! This module contains the canonical definitions for task management,
-//! eliminating duplicate definitions across sched, drivers, boot, and mm crates.
+//! This module is the single source of truth for task-related types and
+//! constants. All subsystems (scheduler, syscall, boot, mm) import from
+//! here rather than defining their own copies.
+//!
+//! # Layout contracts
+//!
+//! Several types have `#[repr(C)]` or `#[repr(C, packed)]` layouts that
+//! are relied upon by assembly code in `core/context_switch.s` and
+//! `core/src/scheduler/switch_asm.rs`. Compile-time assertions verify
+//! that offsets match the assembly expectations.
 
 use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
-// =============================================================================
-// Task Configuration Constants
-// =============================================================================
+// --- Task Configuration ---
 
 pub const MAX_TASKS: usize = 32;
-pub const TASK_STACK_SIZE: u64 = 0x8000; // 32KB
-pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32KB
+pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
+pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
-// =============================================================================
-// TaskStatus - Type-safe task state enum
-// =============================================================================
+// --- TaskStatus ---
 
-/// Type-safe task status with explicit state machine semantics.
-/// Uses `#[repr(u8)]` to maintain binary compatibility with u8 representation.
+/// Type-safe task status with explicit state-machine semantics.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskStatus {
-    /// Task slot is not in use
+    /// Task slot is not in use.
     #[default]
     Invalid = 0,
-    /// Task is ready to run, waiting in a run queue
+    /// Task is ready to run, waiting in a run queue.
     Ready = 1,
-    /// Task is currently executing on a CPU
+    /// Task is currently executing on a CPU.
     Running = 2,
-    /// Task is blocked waiting for some event
+    /// Task is blocked waiting for some event.
     Blocked = 3,
-    /// Task has terminated and is awaiting cleanup
+    /// Task has terminated and is awaiting cleanup.
     Terminated = 4,
 }
 
 impl TaskStatus {
-    /// Convert from raw u8 value.
     #[inline]
     pub const fn from_u8(value: u8) -> Self {
         match value {
@@ -54,13 +56,11 @@ impl TaskStatus {
         }
     }
 
-    /// Convert to raw u8 value.
     #[inline]
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Check if this state can transition to the target state.
     #[inline]
     pub const fn can_transition_to(self, target: Self) -> bool {
         match self {
@@ -71,44 +71,23 @@ impl TaskStatus {
             Self::Terminated => matches!(target, Self::Invalid | Self::Terminated),
         }
     }
-
-    /// Returns true if task is in a runnable state (Ready or Running).
-    #[inline]
-    pub const fn is_runnable(self) -> bool {
-        matches!(self, Self::Ready | Self::Running)
-    }
-
-    /// Returns true if task can be scheduled.
-    #[inline]
-    pub const fn is_schedulable(self) -> bool {
-        matches!(self, Self::Ready)
-    }
 }
 
-// =============================================================================
-// BlockReason - Why a task is blocked
-// =============================================================================
+// --- BlockReason ---
 
 /// Reason why a task is in the Blocked state.
-/// Helps with debugging and enables targeted wakeups.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BlockReason {
     #[default]
     None = 0,
-    /// Waiting for another task to terminate (task ID stored separately)
+    /// Target task ID stored in `waiting_on`.
     WaitingOnTask = 1,
-    /// Sleeping for a specified duration
     Sleep = 2,
-    /// Waiting for I/O completion
     IoWait = 3,
-    /// Waiting for a mutex/lock
     MutexWait = 4,
-    /// Waiting for keyboard input
     KeyboardWait = 5,
-    /// Waiting for IPC message
     IpcWait = 6,
-    /// Generic blocked state
     Generic = 7,
 }
 
@@ -134,33 +113,27 @@ impl BlockReason {
     }
 }
 
-// =============================================================================
-// Task Priority Constants
-// =============================================================================
+// --- Task Priority ---
 
 pub const TASK_PRIORITY_HIGH: u8 = 0;
 pub const TASK_PRIORITY_NORMAL: u8 = 1;
 pub const TASK_PRIORITY_LOW: u8 = 2;
 pub const TASK_PRIORITY_IDLE: u8 = 3;
 
-// =============================================================================
-// Task Flag Constants
-// =============================================================================
+// --- Task Flags ---
 
 pub const TASK_FLAG_USER_MODE: u16 = 0x01;
-pub const TASK_FLAG_FPU_INITIALIZED: u16 = 0x40;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
 pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
 pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
+pub const TASK_FLAG_FPU_INITIALIZED: u16 = 0x40;
 
-// =============================================================================
-// TaskContext - CPU register state for context switching
-// =============================================================================
+// --- TaskContext ---
 
 /// CPU register state saved during context switches.
-/// Size: 200 bytes (0xC8) - 25 x 8-byte registers
+/// Size: 200 bytes (0xC8) — 25 × 8-byte registers.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct TaskContext {
@@ -192,6 +165,7 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
+    /// All-zero context. Required for `const` contexts where `Default` is unavailable.
     pub const fn zero() -> Self {
         Self {
             rax: 0,
@@ -223,8 +197,15 @@ impl TaskContext {
     }
 }
 
+// --- SwitchContext ---
+
 use core::mem::offset_of;
 
+/// Callee-saved register state for the software context switch.
+///
+/// Layout must match the assembly in `core/context_switch.s` and
+/// `core/src/scheduler/switch_asm.rs`. Compile-time assertions below
+/// verify every offset.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SwitchContext {
@@ -240,6 +221,7 @@ pub struct SwitchContext {
 }
 
 impl SwitchContext {
+    /// Zero-initialized context with interrupts enabled (rflags = 0x202).
     pub const fn zero() -> Self {
         Self {
             rbx: 0,
@@ -254,55 +236,23 @@ impl SwitchContext {
         }
     }
 
-    pub const fn builder() -> SwitchContextBuilder {
-        SwitchContextBuilder::new()
-    }
-}
-
-#[must_use]
-pub struct SwitchContextBuilder {
-    ctx: SwitchContext,
-    stack_configured: bool,
-}
-
-impl SwitchContextBuilder {
-    pub const fn new() -> Self {
+    /// Create a context for a new task.
+    ///
+    /// The entry point is stored in r12, the argument in r13 (picked up by
+    /// the trampoline in `switch_asm.rs`). `rsp` is set to `stack_top - 8`
+    /// to simulate call-frame alignment. `rip` points at the trampoline.
+    pub const fn new_for_task(entry_point: u64, arg: u64, stack_top: u64, trampoline: u64) -> Self {
         Self {
-            ctx: SwitchContext {
-                rbx: 0,
-                r12: 0,
-                r13: 0,
-                r14: 0,
-                r15: 0,
-                rbp: 0,
-                rsp: 0,
-                rflags: 0x202,
-                rip: 0,
-            },
-            stack_configured: false,
+            rbx: 0,
+            r12: entry_point,
+            r13: arg,
+            r14: 0,
+            r15: 0,
+            rbp: 0,
+            rsp: stack_top - 8,
+            rflags: 0x202,
+            rip: trampoline,
         }
-    }
-
-    pub const fn with_entry(mut self, entry_point: u64, arg: u64) -> Self {
-        self.ctx.r12 = entry_point;
-        self.ctx.r13 = arg;
-        self
-    }
-
-    pub const fn with_stack(mut self, stack_top: u64, trampoline: u64) -> Self {
-        self.ctx.rsp = stack_top - 8;
-        self.ctx.rip = trampoline;
-        self.stack_configured = true;
-        self
-    }
-
-    pub fn build(self) -> SwitchContext {
-        assert!(self.stack_configured, "SwitchContext stack not configured");
-        self.ctx
-    }
-
-    pub const fn build_unconfigured(self) -> SwitchContext {
-        self.ctx
     }
 }
 
@@ -330,14 +280,12 @@ const _: () = {
     assert!(offset_of!(SwitchContext, rip) == 64);
 };
 
-// =============================================================================
-// FpuState - FPU/SSE register state for context switching
-// =============================================================================
+// --- FpuState ---
 
 pub const FPU_STATE_SIZE: usize = 512;
 pub const MXCSR_DEFAULT: u32 = 0x1F80;
 
-// FXSAVE area offsets (Intel SDM Vol. 1, Table 10-2)
+// FXSAVE area offsets (Intel SDM Vol. 1, Table 10-2).
 const FXSAVE_FCW_OFFSET: usize = 0;
 const FXSAVE_MXCSR_OFFSET: usize = 24;
 
@@ -355,13 +303,11 @@ impl FpuState {
         }
     }
 
-    /// Initialize with default FCW (0x037F) and MXCSR (0x1F80) - all exceptions masked.
+    /// Default FCW (0x037F) and MXCSR (0x1F80) — all exceptions masked.
     pub const fn new() -> Self {
         let mut state = Self::zero();
-        // FCW: exceptions masked, 64-bit precision, round-to-nearest
         state.data[FXSAVE_FCW_OFFSET] = 0x7F;
         state.data[FXSAVE_FCW_OFFSET + 1] = 0x03;
-        // MXCSR: SSE exceptions masked, round-to-nearest
         state.data[FXSAVE_MXCSR_OFFSET] = 0x80;
         state.data[FXSAVE_MXCSR_OFFSET + 1] = 0x1F;
         state
@@ -384,9 +330,7 @@ impl Default for FpuState {
     }
 }
 
-// =============================================================================
-// Task Exit/Fault Reason Enums
-// =============================================================================
+// --- Task Exit/Fault Reason ---
 
 /// Reason for task termination.
 #[repr(u16)]
@@ -411,18 +355,11 @@ pub enum TaskFaultReason {
     UserDeviceNa = 4,
 }
 
-// =============================================================================
-// Task Struct Layout Constants (for assembly access)
-// =============================================================================
+// --- Task Struct ---
 
-// Offset from &Task.context to &Task.fpu_state
-// TaskContext is 200 bytes (packed), FpuState needs 16-byte alignment
-// So there's 8 bytes padding: 200 + 8 = 208 (0xD0)
-pub const TASK_FPU_OFFSET_FROM_CONTEXT: usize = 0xD0;
-
-// =============================================================================
-// Task Struct
-// =============================================================================
+// Verify assembly FPU_STATE_OFFSET (0xD0) matches the actual field distance.
+// Assembly in core/context_switch.s: `.equ FPU_STATE_OFFSET, 0xD0`
+const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == 0xD0);
 
 #[repr(C)]
 pub struct Task {
@@ -464,9 +401,9 @@ pub struct Task {
     pub migration_count: u32,
     pub switch_ctx: SwitchContext,
     pub next_ready: *mut Task,
-    /// Linkage for remote wake inbox (separate from ready queue linkage)
+    /// Linkage for remote wake inbox (separate from ready-queue linkage).
     pub next_inbox: AtomicPtr<Task>,
-    /// Reference count for safe deferred reclamation
+    /// Reference count for safe deferred reclamation.
     pub refcnt: AtomicU32,
 }
 
@@ -517,12 +454,12 @@ impl Task {
     }
 
     #[inline]
-    pub fn state(&self) -> u8 {
+    fn state(&self) -> u8 {
         self.state_atomic.load(Ordering::Acquire)
     }
 
     #[inline]
-    pub fn set_state(&self, state: u8) {
+    fn set_state(&self, state: u8) {
         self.state_atomic.store(state, Ordering::Release);
     }
 
@@ -540,34 +477,17 @@ impl Task {
     pub fn try_transition_to(&self, target: TaskStatus) -> bool {
         let current = self.state();
         let current_status = TaskStatus::from_u8(current);
-        if current_status.can_transition_to(target) {
-            match self.state_atomic.compare_exchange(
-                current,
-                target.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        } else {
-            false
+        if !current_status.can_transition_to(target) {
+            return false;
         }
+        self.state_atomic
+            .compare_exchange(current, target.as_u8(), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     #[inline]
     pub fn mark_ready(&self) -> bool {
         self.try_transition_to(TaskStatus::Ready)
-    }
-
-    #[inline]
-    pub fn mark_ready_and_clear_block(&mut self) -> bool {
-        if self.try_transition_to(TaskStatus::Ready) {
-            self.block_reason = BlockReason::None;
-            true
-        } else {
-            false
-        }
     }
 
     #[inline]
@@ -583,11 +503,6 @@ impl Task {
         } else {
             false
         }
-    }
-
-    #[inline]
-    pub fn block_atomic(&self) -> bool {
-        self.try_transition_to(TaskStatus::Blocked)
     }
 
     #[inline]
@@ -615,6 +530,14 @@ impl Task {
         self.status() == TaskStatus::Terminated
     }
 
+    /// Copy all task state from `other` into `self`.
+    ///
+    /// Atomic fields are snapshot-copied. The reference count is reset to
+    /// zero and linkage pointers are cleared — the new copy starts with no
+    /// references and belongs to no queue.
+    ///
+    /// Field-by-field copy is required because `abi` forbids unsafe code.
+    /// When adding new fields to `Task`, remember to update this method.
     pub fn clone_from(&mut self, other: &Task) {
         self.task_id = other.task_id;
         self.name = other.name;
@@ -654,66 +577,42 @@ impl Task {
         self.last_cpu = other.last_cpu;
         self.migration_count = other.migration_count;
         self.switch_ctx = other.switch_ctx;
-        self.next_ready = other.next_ready;
-        self.next_inbox
-            .store(other.next_inbox.load(Ordering::Acquire), Ordering::Release);
-        self.refcnt.store(0, Ordering::Release); // Don't clone refcount - start fresh
+        // New copy: clean linkage and zero references.
+        self.next_ready = ptr::null_mut();
+        self.next_inbox = AtomicPtr::new(ptr::null_mut());
+        self.refcnt = AtomicU32::new(0);
     }
 
-    /// Increment reference count. Returns new count.
+    /// Increment reference count. Returns new count, saturating at `u32::MAX`.
     #[inline]
     pub fn inc_ref(&self) -> u32 {
-        let mut current = self.refcnt.load(Ordering::Acquire);
-        loop {
-            if current == u32::MAX {
-                return u32::MAX;
-            }
-            let next = current + 1;
-            match self.refcnt.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return next,
-                Err(observed) => current = observed,
-            }
+        let prev = self.refcnt.load(Ordering::Acquire);
+        if prev == u32::MAX {
+            return u32::MAX;
         }
+        self.refcnt.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// Decrement reference count. Returns true if this was the last reference.
+    /// Decrement reference count. Returns `true` if this was the last reference.
+    ///
+    /// Returns `false` without modifying the counter if it is already zero.
     #[inline]
     pub fn dec_ref(&self) -> bool {
-        let mut current = self.refcnt.load(Ordering::Acquire);
-        loop {
-            if current == 0 {
-                return false;
-            }
-            let next = current - 1;
-            match self.refcnt.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return next == 0,
-                Err(observed) => current = observed,
-            }
+        let prev = self.refcnt.load(Ordering::Acquire);
+        if prev == 0 {
+            return false;
         }
+        self.refcnt.fetch_sub(1, Ordering::AcqRel) == 1
     }
 
-    /// Get current reference count.
     #[inline]
     pub fn ref_count(&self) -> u32 {
         self.refcnt.load(Ordering::Acquire)
     }
 }
 
-// =============================================================================
-// TaskExitRecord - for tracking task termination
-// =============================================================================
+// --- TaskExitRecord ---
 
-/// Record of task termination for post-mortem inspection.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TaskExitRecord {
@@ -735,12 +634,9 @@ impl TaskExitRecord {
     }
 }
 
-// =============================================================================
-// IdtEntry - Interrupt Descriptor Table entry
-// =============================================================================
+// --- IdtEntry ---
 
 /// x86-64 IDT (Interrupt Descriptor Table) entry.
-/// Used for setting up interrupt and exception handlers.
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct IdtEntry {
@@ -754,7 +650,6 @@ pub struct IdtEntry {
 }
 
 impl IdtEntry {
-    /// Create a zeroed IDT entry.
     pub const fn zero() -> Self {
         Self {
             offset_low: 0,

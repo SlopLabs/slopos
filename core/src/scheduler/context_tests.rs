@@ -446,10 +446,7 @@ pub fn test_switch_context_setup_initial() -> TestResult {
     let arg: u64 = 0xCAFEBABE;
     let trampoline: u64 = 0x12345678;
 
-    let ctx = SwitchContext::builder()
-        .with_entry(entry, arg)
-        .with_stack(stack_top, trampoline)
-        .build();
+    let ctx = SwitchContext::new_for_task(entry, arg, stack_top, trampoline);
 
     if ctx.rsp != stack_top - 8 {
         klog_info!("CONTEXT_TEST: builder rsp wrong: {:#x}", ctx.rsp);

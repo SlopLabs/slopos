@@ -82,12 +82,12 @@ pub extern "sysv64" fn switch_registers(prev: *mut SwitchContext, next: *const S
 /// Entry trampoline for new kernel tasks.
 ///
 /// When a new task is created, its stack is set up to "return" to this function.
-/// The task's entry point is in r12, argument in r13 (set by SwitchContextBuilder).
+/// The task's entry point is in r12, argument in r13 (set by SwitchContext::new_for_task).
 #[unsafe(naked)]
 pub extern "sysv64" fn task_entry_trampoline() {
     naked_asm!(
-        // r12 = entry point function pointer (set by SwitchContextBuilder)
-        // r13 = argument to pass (set by SwitchContextBuilder)
+        // r12 = entry point function pointer (set by SwitchContext::new_for_task)
+        // r13 = argument to pass (set by SwitchContext::new_for_task)
 
         // Move argument to first parameter register (rdi)
         "mov rdi, r13",
