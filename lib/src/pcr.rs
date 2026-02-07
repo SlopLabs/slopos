@@ -1,21 +1,5 @@
 //! Unified Processor Control Region (PCR) for SMP Support
 //!
-//! This module provides a single unified per-CPU data structure following Redox OS patterns.
-//! The PCR consolidates all per-CPU state including:
-//! - SYSCALL scratch space (user_rsp_tmp, kernel_rsp)
-//! - CPU identification (cpu_id, apic_id)
-//! - Scheduler state (current_task, scheduler, preempt_count)
-//! - GDT and TSS (embedded in PCR)
-//! - Per-CPU kernel stack
-//!
-//! # GS_BASE Discipline
-//!
-//! In kernel mode, `GS_BASE` always points to the current CPU's PCR.
-//! This is maintained by:
-//! - `swapgs` on syscall/interrupt entry from user mode
-//! - `swapgs` on syscall/interrupt exit to user mode
-//! - `context_switch_user` setting up MSRs correctly before `iretq`
-//!
 //! # Assembly Offsets (CRITICAL)
 //!
 //! Fields at offsets 0-24 are accessed by assembly code via `gs:[offset]`.
@@ -26,93 +10,11 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-/// Kernel stack size per CPU (64KB)
+use slopos_abi::arch::x86_64::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
+
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
 use super::percpu::MAX_CPUS as PCR_MAX_CPUS;
-
-/// GDT entry count: null, kernel code, kernel data, user data, user code = 5
-/// Plus TSS descriptor (2 entries for 64-bit TSS)
-pub const GDT_ENTRY_COUNT: usize = 7;
-
-/// 64-bit Task State Segment
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct Tss64 {
-    pub reserved0: u32,
-    pub rsp0: u64,
-    pub rsp1: u64,
-    pub rsp2: u64,
-    pub reserved1: u64,
-    pub ist: [u64; 7],
-    pub reserved2: u64,
-    pub reserved3: u16,
-    pub iomap_base: u16,
-}
-
-impl Tss64 {
-    pub const fn new() -> Self {
-        Self {
-            reserved0: 0,
-            rsp0: 0,
-            rsp1: 0,
-            rsp2: 0,
-            reserved1: 0,
-            ist: [0; 7],
-            reserved2: 0,
-            reserved3: 0,
-            iomap_base: 0,
-        }
-    }
-}
-
-/// TSS descriptor entry (16 bytes for 64-bit mode)
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct GdtTssEntry {
-    pub limit_low: u16,
-    pub base_low: u16,
-    pub base_mid: u8,
-    pub access: u8,
-    pub granularity: u8,
-    pub base_high: u8,
-    pub base_upper: u32,
-    pub reserved: u32,
-}
-
-impl GdtTssEntry {
-    pub const fn new() -> Self {
-        Self {
-            limit_low: 0,
-            base_low: 0,
-            base_mid: 0,
-            access: 0,
-            granularity: 0,
-            base_high: 0,
-            base_upper: 0,
-            reserved: 0,
-        }
-    }
-}
-
-/// GDT layout with embedded TSS descriptor
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct GdtLayout {
-    /// Standard GDT entries: null, kernel code, kernel data, user data, user code
-    pub entries: [u64; 5],
-    /// TSS descriptor (16 bytes)
-    pub tss_entry: GdtTssEntry,
-}
-
-impl GdtLayout {
-    pub const fn new() -> Self {
-        Self {
-            entries: [0; 5],
-            tss_entry: GdtTssEntry::new(),
-        }
-    }
-}
 
 /// Processor Control Region - unified per-CPU data structure
 ///
@@ -255,126 +157,22 @@ impl ProcessorControlRegion {
 unsafe impl Send for ProcessorControlRegion {}
 unsafe impl Sync for ProcessorControlRegion {}
 
-// ==================== GDT/TSS INITIALIZATION ====================
-
-const GDT_ACCESS_PRESENT: u8 = 1 << 7;
-const GDT_ACCESS_DPL_KERNEL: u8 = 0 << 5;
-const GDT_ACCESS_DPL_USER: u8 = 3 << 5;
-const GDT_ACCESS_SEGMENT: u8 = 1 << 4;
-const GDT_ACCESS_CODE_TYPE: u8 = 0b1010;
-const GDT_ACCESS_DATA_TYPE: u8 = 0b0010;
-const GDT_FLAG_GRANULARITY: u8 = 1 << 3;
-const GDT_FLAG_LONG_MODE: u8 = 1 << 1;
-const GDT_FLAGS_64BIT: u8 = GDT_FLAG_GRANULARITY | GDT_FLAG_LONG_MODE;
-
-const fn gdt_make_descriptor(
-    limit_low: u16,
-    base_low: u16,
-    base_mid: u8,
-    access: u8,
-    limit_high: u8,
-    flags: u8,
-    base_high: u8,
-) -> u64 {
-    (limit_low as u64)
-        | ((base_low as u64) << 16)
-        | ((base_mid as u64) << 32)
-        | ((access as u64) << 40)
-        | ((limit_high as u64) << 48)
-        | ((flags as u64) << 52)
-        | ((base_high as u64) << 56)
-}
-
-const GDT_NULL_DESCRIPTOR: u64 = 0;
-const GDT_CODE_DESCRIPTOR_64: u64 = gdt_make_descriptor(
-    0xFFFF,
-    0,
-    0,
-    GDT_ACCESS_PRESENT | GDT_ACCESS_DPL_KERNEL | GDT_ACCESS_SEGMENT | GDT_ACCESS_CODE_TYPE,
-    0xF,
-    GDT_FLAGS_64BIT,
-    0,
-);
-const GDT_DATA_DESCRIPTOR_64: u64 = gdt_make_descriptor(
-    0xFFFF,
-    0,
-    0,
-    GDT_ACCESS_PRESENT | GDT_ACCESS_DPL_KERNEL | GDT_ACCESS_SEGMENT | GDT_ACCESS_DATA_TYPE,
-    0xF,
-    GDT_FLAGS_64BIT,
-    0,
-);
-const GDT_USER_DATA_DESCRIPTOR_64: u64 = gdt_make_descriptor(
-    0xFFFF,
-    0,
-    0,
-    GDT_ACCESS_PRESENT | GDT_ACCESS_DPL_USER | GDT_ACCESS_SEGMENT | GDT_ACCESS_DATA_TYPE,
-    0xF,
-    GDT_FLAGS_64BIT,
-    0,
-);
-const GDT_USER_CODE_DESCRIPTOR_64: u64 = gdt_make_descriptor(
-    0xFFFF,
-    0,
-    0,
-    GDT_ACCESS_PRESENT | GDT_ACCESS_DPL_USER | GDT_ACCESS_SEGMENT | GDT_ACCESS_CODE_TYPE,
-    0xF,
-    GDT_FLAGS_64BIT,
-    0,
-);
-
-pub const GDT_KERNEL_CS: u16 = 0x08;
-pub const GDT_KERNEL_DS: u16 = 0x10;
-pub const GDT_USER_DS: u16 = 0x1B;
-pub const GDT_USER_CS: u16 = 0x23;
-pub const GDT_TSS_SELECTOR: u16 = 0x28;
-
-const IA32_GS_BASE: u32 = 0xC000_0101;
-const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
-
-#[repr(C, packed)]
-struct GdtDescriptor {
-    limit: u16,
-    base: u64,
-}
+use slopos_abi::arch::x86_64::msr::Msr;
 
 impl ProcessorControlRegion {
-    /// Initialize GDT and TSS entries in this PCR
-    ///
     /// # Safety
     /// Must be called before install()
     pub unsafe fn init_gdt(&mut self) {
-        self.gdt.entries[0] = GDT_NULL_DESCRIPTOR;
-        self.gdt.entries[1] = GDT_CODE_DESCRIPTOR_64;
-        self.gdt.entries[2] = GDT_DATA_DESCRIPTOR_64;
-        self.gdt.entries[3] = GDT_USER_DATA_DESCRIPTOR_64;
-        self.gdt.entries[4] = GDT_USER_CODE_DESCRIPTOR_64;
-
-        let tss_base = &self.tss as *const _ as u64;
-        let tss_limit = core::mem::size_of::<Tss64>() as u16 - 1;
-
-        self.gdt.tss_entry.limit_low = tss_limit & 0xFFFF;
-        self.gdt.tss_entry.base_low = (tss_base & 0xFFFF) as u16;
-        self.gdt.tss_entry.base_mid = ((tss_base >> 16) & 0xFF) as u8;
-        self.gdt.tss_entry.access = 0x89;
-        self.gdt.tss_entry.granularity = (((tss_limit as u32) >> 16) & 0x0F) as u8;
-        self.gdt.tss_entry.base_high = ((tss_base >> 24) & 0xFF) as u8;
-        self.gdt.tss_entry.base_upper = (tss_base >> 32) as u32;
-        self.gdt.tss_entry.reserved = 0;
-
+        self.gdt.load_standard_entries();
+        self.gdt.load_tss(&self.tss);
         self.tss.rsp0 = self.kernel_rsp;
         self.tss.iomap_base = core::mem::size_of::<Tss64>() as u16;
     }
 
-    /// Load this PCR's GDT and configure GS_BASE
-    ///
     /// # Safety
     /// init_gdt() must be called first
     pub unsafe fn install(&mut self) {
-        let gdtr = GdtDescriptor {
-            limit: (core::mem::size_of::<GdtLayout>() - 1) as u16,
-            base: &self.gdt as *const _ as u64,
-        };
+        let gdtr = GdtDescriptor::from_layout(&self.gdt);
 
         core::arch::asm!(
             "lgdt [{0}]",
@@ -394,13 +192,13 @@ impl ProcessorControlRegion {
             "movw %ax, %ss",
             "movw %ax, %fs",
             "movw %ax, %gs",
-            code = const GDT_KERNEL_CS as usize,
-            data = const GDT_KERNEL_DS as usize,
+            code = const SegmentSelector::KERNEL_CODE.bits() as usize,
+            data = const SegmentSelector::KERNEL_DATA.bits() as usize,
             out("rax") _,
             options(att_syntax, nostack)
         );
 
-        let tss_sel = GDT_TSS_SELECTOR;
+        let tss_sel = SegmentSelector::TSS.bits();
         core::arch::asm!(
             "ltr {0:x}",
             in(reg) tss_sel,
@@ -413,7 +211,7 @@ impl ProcessorControlRegion {
 
         core::arch::asm!(
             "wrmsr",
-            in("ecx") IA32_GS_BASE,
+            in("ecx") Msr::GS_BASE.address(),
             in("eax") low,
             in("edx") high,
             options(nostack, preserves_flags)
@@ -421,7 +219,7 @@ impl ProcessorControlRegion {
 
         core::arch::asm!(
             "wrmsr",
-            in("ecx") IA32_KERNEL_GS_BASE,
+            in("ecx") Msr::KERNEL_GS_BASE.address(),
             in("eax") low,
             in("edx") high,
             options(nostack, preserves_flags)

@@ -11,7 +11,7 @@ pub mod paging;
 pub mod pci;
 
 pub use apic::ApicBaseMsr;
-pub use gdt::SegmentSelector;
+pub use gdt::{GdtDescriptor, GdtLayout, GdtTssEntry, SegmentSelector, Tss64};
 pub use msr::Msr;
 pub use page_table::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
 pub use paging::PageFlags;
