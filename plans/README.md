@@ -8,6 +8,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 |----------|-------------|
 | [SCHEDULER_FULL_SYMMETRY.md](./SCHEDULER_FULL_SYMMETRY.md) | Optional scheduler cleanup - eliminate remaining BSP/AP asymmetries |
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
+| [COMPOSITOR_RENDERING_GOLD_STANDARD_PLAN.md](./COMPOSITOR_RENDERING_GOLD_STANDARD_PLAN.md) | Deep compositor analysis and lean roadmap for artifact-free high-performance rendering |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
 
