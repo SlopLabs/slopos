@@ -1,53 +1,31 @@
-use super::{DrawBuffer, DrawTarget};
-use slopos_gfx::primitives as draw_primitives;
+use slopos_abi::draw::{Canvas, Color32};
+use slopos_gfx::canvas_ops;
 
-pub fn fill_rect(buf: &mut DrawBuffer, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    draw_primitives::fill_rect(buf, x, y, w, h, color);
-    let x1 = x.max(0);
-    let y1 = y.max(0);
-    let x2 = (x + w - 1).min(buf.width() as i32 - 1);
-    let y2 = (y + h - 1).min(buf.height() as i32 - 1);
-    if x1 <= x2 && y1 <= y2 {
-        buf.add_damage(x1, y1, x2, y2);
-    }
+use super::DrawBuffer;
+
+pub fn fill_rect(buf: &mut DrawBuffer, x: i32, y: i32, w: i32, h: i32, color: Color32) {
+    let dmg = canvas_ops::fill_rect(buf, x, y, w, h, color);
+    buf.damage_mut().apply(dmg);
 }
 
-pub fn draw_line(buf: &mut DrawBuffer, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
-    draw_primitives::line(buf, x0, y0, x1, y1, color);
-    let min_x = x0.min(x1).max(0);
-    let min_y = y0.min(y1).max(0);
-    let max_x = x0.max(x1).min(buf.width() as i32 - 1);
-    let max_y = y0.max(y1).min(buf.height() as i32 - 1);
-    buf.add_damage(min_x, min_y, max_x, max_y);
+pub fn draw_line(buf: &mut DrawBuffer, x0: i32, y0: i32, x1: i32, y1: i32, color: Color32) {
+    let dmg = canvas_ops::line(buf, x0, y0, x1, y1, color);
+    buf.damage_mut().apply(dmg);
 }
 
-pub fn draw_circle(buf: &mut DrawBuffer, cx: i32, cy: i32, radius: i32, color: u32) {
-    draw_primitives::circle(buf, cx, cy, radius, color);
-    let min_x = (cx - radius).max(0);
-    let min_y = (cy - radius).max(0);
-    let max_x = (cx + radius).min(buf.width() as i32 - 1);
-    let max_y = (cy + radius).min(buf.height() as i32 - 1);
-    buf.add_damage(min_x, min_y, max_x, max_y);
+pub fn draw_circle(buf: &mut DrawBuffer, cx: i32, cy: i32, radius: i32, color: Color32) {
+    let dmg = canvas_ops::circle(buf, cx, cy, radius, color);
+    buf.damage_mut().apply(dmg);
 }
 
-pub fn draw_circle_filled(buf: &mut DrawBuffer, cx: i32, cy: i32, radius: i32, color: u32) {
-    draw_primitives::circle_filled(buf, cx, cy, radius, color);
-    let min_x = (cx - radius).max(0);
-    let min_y = (cy - radius).max(0);
-    let max_x = (cx + radius).min(buf.width() as i32 - 1);
-    let max_y = (cy + radius).min(buf.height() as i32 - 1);
-    buf.add_damage(min_x, min_y, max_x, max_y);
+pub fn draw_circle_filled(buf: &mut DrawBuffer, cx: i32, cy: i32, radius: i32, color: Color32) {
+    let dmg = canvas_ops::circle_filled(buf, cx, cy, radius, color);
+    buf.damage_mut().apply(dmg);
 }
 
-pub fn draw_rect(buf: &mut DrawBuffer, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    draw_primitives::rect(buf, x, y, w, h, color);
-    let x1 = x.max(0);
-    let y1 = y.max(0);
-    let x2 = (x + w - 1).min(buf.width() as i32 - 1);
-    let y2 = (y + h - 1).min(buf.height() as i32 - 1);
-    if x1 <= x2 && y1 <= y2 {
-        buf.add_damage(x1, y1, x2, y2);
-    }
+pub fn draw_rect(buf: &mut DrawBuffer, x: i32, y: i32, w: i32, h: i32, color: Color32) {
+    let dmg = canvas_ops::rect(buf, x, y, w, h, color);
+    buf.damage_mut().apply(dmg);
 }
 
 pub fn blit(
@@ -112,7 +90,7 @@ pub fn blit(
     buf.add_damage(dst_x0, dst_y0, dst_x1, dst_y1);
 }
 
-pub fn scroll_up(buf: &mut DrawBuffer, pixels: i32, fill_color: u32) {
+pub fn scroll_up(buf: &mut DrawBuffer, pixels: i32, fill_color: Color32) {
     if pixels <= 0 {
         return;
     }
@@ -121,8 +99,9 @@ pub fn scroll_up(buf: &mut DrawBuffer, pixels: i32, fill_color: u32) {
     let width = buf.width() as i32;
 
     if pixels >= height {
-        let raw = buf.pixel_format().convert_color(fill_color);
-        buf.clear(raw);
+        let px = buf.canvas_pixel_format().encode(fill_color);
+        buf.clear_canvas(px);
+        buf.add_damage(0, 0, width - 1, height - 1);
         return;
     }
 
@@ -130,7 +109,7 @@ pub fn scroll_up(buf: &mut DrawBuffer, pixels: i32, fill_color: u32) {
     fill_rect(buf, 0, height - pixels, width, pixels, fill_color);
 }
 
-pub fn scroll_down(buf: &mut DrawBuffer, pixels: i32, fill_color: u32) {
+pub fn scroll_down(buf: &mut DrawBuffer, pixels: i32, fill_color: Color32) {
     if pixels <= 0 {
         return;
     }
@@ -139,8 +118,9 @@ pub fn scroll_down(buf: &mut DrawBuffer, pixels: i32, fill_color: u32) {
     let width = buf.width() as i32;
 
     if pixels >= height {
-        let raw = buf.pixel_format().convert_color(fill_color);
-        buf.clear(raw);
+        let px = buf.canvas_pixel_format().encode(fill_color);
+        buf.clear_canvas(px);
+        buf.add_damage(0, 0, width - 1, height - 1);
         return;
     }
 

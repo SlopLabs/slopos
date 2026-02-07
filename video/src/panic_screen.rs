@@ -5,14 +5,15 @@
 //! since most subsystems may be in undefined states during panic.
 
 use core::ffi::c_char;
+use slopos_abi::draw::Color32;
 
 use crate::graphics::GraphicsContext;
 use crate::{font, framebuffer};
 
 // Colors (ARGB format)
-const PANIC_BG_COLOR: u32 = 0xFF8B0000; // Dark red
-const PANIC_FG_COLOR: u32 = 0xFFFFFFFF; // White
-const PANIC_HEADER_COLOR: u32 = 0xFFFF4444; // Bright red for header
+const PANIC_BG_COLOR: Color32 = Color32(0xFF8B0000); // Dark red
+const PANIC_FG_COLOR: Color32 = Color32(0xFFFFFFFF); // White
+const PANIC_HEADER_COLOR: Color32 = Color32(0xFFFF4444); // Bright red for header
 
 /// Format a u64 value as a hex string into the provided buffer.
 /// Returns a slice to the formatted string (null-terminated).
@@ -87,7 +88,7 @@ pub fn display_panic_screen(
     };
 
     // Clear screen to dark red
-    framebuffer::framebuffer_clear(PANIC_BG_COLOR);
+    framebuffer::framebuffer_clear(PANIC_BG_COLOR.to_u32());
 
     let width = ctx.width() as i32;
     let height = ctx.height() as i32;
@@ -223,7 +224,7 @@ pub fn display_panic_screen(
         note_x,
         note_y,
         serial_note.as_ptr() as *const c_char,
-        0xFF888888, // Gray
+        Color32(0xFF888888), // Gray
         PANIC_BG_COLOR,
     );
 

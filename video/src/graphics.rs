@@ -1,8 +1,6 @@
 use crate::framebuffer::{self, FbState};
-use slopos_abi::pixel::DrawPixelFormat;
+use slopos_abi::draw::{Canvas, EncodedPixel};
 use slopos_abi::video_traits::VideoError;
-use slopos_abi::{DrawTarget, PixelBuffer, pixel_ops};
-use slopos_gfx::primitives;
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
 
@@ -28,7 +26,7 @@ fn snapshot() -> GraphicsResult<FbState> {
     framebuffer::snapshot().ok_or(VideoError::NoFramebuffer)
 }
 
-impl PixelBuffer for GraphicsContext {
+impl Canvas for GraphicsContext {
     #[inline]
     fn width(&self) -> u32 {
         self.fb.width()
@@ -40,25 +38,25 @@ impl PixelBuffer for GraphicsContext {
     }
 
     #[inline]
-    fn pitch(&self) -> usize {
+    fn pitch_bytes(&self) -> usize {
         self.fb.pitch() as usize
     }
 
     #[inline]
-    fn bytes_pp(&self) -> u8 {
+    fn bytes_per_pixel(&self) -> u8 {
         self.fb.info.bytes_per_pixel()
     }
 
     #[inline]
-    fn pixel_format(&self) -> DrawPixelFormat {
-        DrawPixelFormat::from_pixel_format(self.fb.info.format)
+    fn pixel_format(&self) -> slopos_abi::pixel::PixelFormat {
+        self.fb.info.format
     }
 
     #[inline]
-    fn write_pixel_at_offset(&mut self, byte_offset: usize, color: u32) {
+    fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel) {
+        let color = pixel.to_u32();
         let pixel_ptr = unsafe { self.fb.base_ptr().add(byte_offset) };
         let bytes_pp = self.fb.info.bytes_per_pixel();
-
         unsafe {
             match bytes_pp {
                 4 => (pixel_ptr as *mut u32).write_volatile(color),
@@ -76,7 +74,7 @@ impl PixelBuffer for GraphicsContext {
     }
 
     #[inline]
-    fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, color: u32) {
+    fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, pixel: EncodedPixel) {
         if row < 0 || row >= self.fb.height() as i32 {
             return;
         }
@@ -87,6 +85,7 @@ impl PixelBuffer for GraphicsContext {
             return;
         }
 
+        let color = pixel.to_u32();
         let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
         let pitch = self.fb.pitch() as usize;
         let buffer = self.fb.base_ptr();
@@ -94,19 +93,16 @@ impl PixelBuffer for GraphicsContext {
         let pixel_count = (x1 - x0 + 1) as usize;
 
         if bytes_pp == 4 {
-            // Fast path: check if all bytes of color are the same (e.g., 0x00000000 or 0xFFFFFFFF)
             let b0 = (color & 0xFF) as u8;
             let b1 = ((color >> 8) & 0xFF) as u8;
             let b2 = ((color >> 16) & 0xFF) as u8;
             let b3 = ((color >> 24) & 0xFF) as u8;
 
             if b0 == b1 && b1 == b2 && b2 == b3 {
-                // All bytes identical - use fast bulk write (common for black/white)
                 unsafe {
                     core::ptr::write_bytes(pixel_ptr, b0, pixel_count * 4);
                 }
             } else {
-                // Use 64-bit writes for better throughput (2 pixels at a time)
                 let color64 = (color as u64) | ((color as u64) << 32);
                 unsafe {
                     let mut ptr = pixel_ptr;
@@ -132,7 +128,6 @@ impl PixelBuffer for GraphicsContext {
                 }
             }
         } else {
-            // Fallback for 2bpp/3bpp - per-pixel writes
             let mut ptr = pixel_ptr;
             for _ in x0..=x1 {
                 unsafe {
@@ -150,77 +145,4 @@ impl PixelBuffer for GraphicsContext {
             }
         }
     }
-}
-
-impl DrawTarget for GraphicsContext {
-    #[inline]
-    fn width(&self) -> u32 {
-        PixelBuffer::width(self)
-    }
-
-    #[inline]
-    fn height(&self) -> u32 {
-        PixelBuffer::height(self)
-    }
-
-    #[inline]
-    fn pitch(&self) -> usize {
-        PixelBuffer::pitch(self)
-    }
-
-    #[inline]
-    fn bytes_pp(&self) -> u8 {
-        PixelBuffer::bytes_pp(self)
-    }
-
-    #[inline]
-    fn pixel_format(&self) -> DrawPixelFormat {
-        PixelBuffer::pixel_format(self)
-    }
-
-    #[inline]
-    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
-        pixel_ops::draw_pixel_impl(self, x, y, color);
-    }
-
-    #[inline]
-    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        pixel_ops::fill_rect_impl(self, x, y, w, h, color);
-    }
-
-    #[inline]
-    fn clear(&mut self, color: u32) {
-        pixel_ops::clear_impl(self, color);
-    }
-}
-
-#[inline]
-pub fn draw_pixel(ctx: &mut GraphicsContext, x: i32, y: i32, color: u32) {
-    let raw = PixelBuffer::pixel_format(ctx).convert_color(color);
-    DrawTarget::draw_pixel(ctx, x, y, raw);
-}
-
-#[inline]
-pub fn fill_rect(ctx: &mut GraphicsContext, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    primitives::fill_rect(ctx, x, y, w, h, color);
-}
-
-#[inline]
-pub fn draw_rect(ctx: &mut GraphicsContext, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    primitives::rect(ctx, x, y, w, h, color);
-}
-
-#[inline]
-pub fn draw_line(ctx: &mut GraphicsContext, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
-    primitives::line(ctx, x0, y0, x1, y1, color);
-}
-
-#[inline]
-pub fn draw_circle(ctx: &mut GraphicsContext, cx: i32, cy: i32, radius: i32, color: u32) {
-    primitives::circle(ctx, cx, cy, radius, color);
-}
-
-#[inline]
-pub fn draw_circle_filled(ctx: &mut GraphicsContext, cx: i32, cy: i32, radius: i32, color: u32) {
-    primitives::circle_filled(ctx, cx, cy, radius, color);
 }

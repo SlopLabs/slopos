@@ -1,5 +1,7 @@
 //! Pixel format definitions (Wayland wl_shm compatible)
 
+use crate::draw::{Color32, EncodedPixel};
+
 /// Construct an ARGB color value: 0xAARRGGBB (alpha high byte, blue low byte).
 #[inline]
 pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
@@ -94,6 +96,30 @@ impl PixelFormat {
             Self::Rgb888 => (r << 16) | (g << 8) | b,
             Self::Bgr888 => (b << 16) | (g << 8) | r,
         }
+    }
+
+    /// Encode a `Color32` (0xAARRGGBB) into the native pixel format.
+    ///
+    /// This is the preferred conversion path for the new `Canvas` API.
+    /// Unlike `convert_color` (which takes 0xRRGGBBAA), this method
+    /// takes the standard 0xAARRGGBB layout that matches `Color32`,
+    /// `rgba()`, and `rgb()`.
+    #[inline]
+    pub fn encode(self, color: Color32) -> EncodedPixel {
+        let v = color.0;
+        let a = (v >> 24) & 0xFF;
+        let r = (v >> 16) & 0xFF;
+        let g = (v >> 8) & 0xFF;
+        let b = v & 0xFF;
+
+        EncodedPixel(match self {
+            Self::Argb8888 => (a << 24) | (r << 16) | (g << 8) | b,
+            Self::Xrgb8888 => (0xFF << 24) | (r << 16) | (g << 8) | b,
+            Self::Rgba8888 => (r << 24) | (g << 16) | (b << 8) | a,
+            Self::Bgra8888 => (b << 24) | (g << 16) | (r << 8) | a,
+            Self::Rgb888 => (r << 16) | (g << 8) | b,
+            Self::Bgr888 => (b << 16) | (g << 8) | r,
+        })
     }
 
     /// Get a bitmap of all supported formats

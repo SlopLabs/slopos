@@ -6,7 +6,9 @@
 use core::ffi::c_void;
 use core::str;
 
-use crate::gfx::{self, DrawBuffer, PixelFormat, rgb};
+use slopos_abi::draw::Color32;
+
+use crate::gfx::{self, DrawBuffer, PixelFormat};
 use crate::syscall::{
     DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList, core as sys_core,
     fs, input, window,
@@ -297,7 +299,7 @@ impl FileManager {
 
             // Color: blue for directories, white for files
             let color = if entry.is_directory() {
-                rgb(0x40, 0x80, 0xFF)
+                Color32::rgb(0x40, 0x80, 0xFF)
             } else {
                 COLOR_TEXT
             };

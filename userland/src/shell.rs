@@ -12,6 +12,8 @@ use core::cmp;
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
+use slopos_abi::draw::Color32;
+
 // =============================================================================
 // Sync wrappers for single-threaded userland
 // =============================================================================
@@ -63,8 +65,8 @@ static REBOOTING: &[u8] = b"Shell requested reboot...\n";
 
 const FONT_CHAR_WIDTH: i32 = 8;
 const FONT_CHAR_HEIGHT: i32 = 16;
-const SHELL_BG_COLOR: u32 = 0x1E1E_1EFF;
-const SHELL_FG_COLOR: u32 = 0xE6E6_E6FF;
+const SHELL_BG_COLOR: Color32 = Color32(0x1E1E_1EFF);
+const SHELL_FG_COLOR: Color32 = Color32(0xE6E6_E6FF);
 
 const SHELL_WINDOW_WIDTH: i32 = 640;
 const SHELL_WINDOW_HEIGHT: i32 = 480;
@@ -92,8 +94,8 @@ struct DisplayState {
     total_lines: Cell<i32>,
     view_top: Cell<i32>,
     follow: Cell<bool>,
-    fg: Cell<u32>,
-    bg: Cell<u32>,
+    fg: Cell<Color32>,
+    bg: Cell<Color32>,
 }
 
 impl DisplayState {
@@ -381,13 +383,13 @@ mod buffers {
 // Free drawing functions (no &mut self, explicit parameters)
 // =============================================================================
 
-fn draw_char_at(buf: &mut DrawBuffer, col: i32, row: i32, c: u8, fg: u32, bg: u32) {
+fn draw_char_at(buf: &mut DrawBuffer, col: i32, row: i32, c: u8, fg: Color32, bg: Color32) {
     let x = col * FONT_CHAR_WIDTH;
     let y = row * FONT_CHAR_HEIGHT;
     gfx::font::draw_char(buf, x, y, c, fg, bg);
 }
 
-fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: u32) {
+fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: Color32) {
     gfx::fill_rect(buf, 0, row * FONT_CHAR_HEIGHT, width, FONT_CHAR_HEIGHT, bg);
 }
 

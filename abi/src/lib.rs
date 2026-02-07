@@ -33,7 +33,7 @@ pub mod window;
 pub use addr::*;
 pub use damage::{DamageRect, MAX_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS};
 pub use display::{DisplayInfo, FramebufferData};
-pub use draw::{DamageTracking, DrawTarget, PixelBuffer, pixel_ops};
+pub use draw::{Canvas, Color32, EncodedPixel};
 pub use error::*;
 pub use fate::FateResult;
 pub use fs::*;

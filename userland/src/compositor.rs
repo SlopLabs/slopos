@@ -13,7 +13,9 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, DamageRect, DrawBuffer, DrawTarget, PixelFormat, rgb};
+use slopos_abi::draw::Color32;
+
+use crate::gfx::{self, DamageRect, DrawBuffer, PixelFormat};
 use crate::program_registry;
 use crate::syscall::{
     CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, core as sys_core, input, memory,
@@ -25,7 +27,7 @@ use slopos_gfx::damage::DamageTracker;
 use crate::theme::*;
 
 // Window placeholder colors (until clients migrate to shared memory)
-const COLOR_WINDOW_PLACEHOLDER: u32 = rgb(0x20, 0x20, 0x30);
+const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
 
 const MAX_WINDOWS: usize = 32;
 
@@ -1548,7 +1550,14 @@ impl WindowManager {
 
         let mode = if force_full {
             // Full redraw fallback path
-            buf.clear(COLOR_BACKGROUND);
+            gfx::fill_rect(
+                buf,
+                0,
+                0,
+                buf.width() as i32,
+                buf.height() as i32,
+                COLOR_BACKGROUND,
+            );
 
             let window_count = self.window_count as usize;
             for i in 0..window_count {

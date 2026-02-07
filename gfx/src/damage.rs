@@ -73,6 +73,13 @@ impl<const N: usize> DamageTracker<N> {
         self.add(DamageRect { x0, y0, x1, y1 });
     }
 
+    #[inline]
+    pub fn apply(&mut self, damage: Option<DamageRect>) {
+        if let Some(d) = damage {
+            self.add(d);
+        }
+    }
+
     fn merge_smallest_pair(&mut self) {
         if self.count < 2 {
             return;

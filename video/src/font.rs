@@ -1,6 +1,7 @@
 use core::ffi::{c_char, c_int};
 
-use slopos_gfx::font_render;
+use slopos_abi::draw::Color32;
+use slopos_gfx::canvas_font;
 
 use crate::framebuffer;
 use crate::graphics::GraphicsContext;
@@ -28,15 +29,13 @@ fn c_str_to_slice(ptr: *const c_char) -> &'static [u8] {
     }
 }
 
-pub use slopos_gfx::font_render::{draw_char, draw_str, draw_string, string_lines, string_width};
-
 pub fn font_draw_char_ctx(
     _ctx: &GraphicsContext,
     x: i32,
     y: i32,
     c: c_char,
-    fg_color: u32,
-    bg_color: u32,
+    fg_color: Color32,
+    bg_color: Color32,
 ) -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
@@ -47,7 +46,7 @@ pub fn font_draw_char_ctx(
         Err(_) => return FONT_ERROR_NO_FB,
     };
 
-    font_render::draw_char(&mut ctx, x, y, c as u8, fg_color, bg_color);
+    canvas_font::draw_char(&mut ctx, x, y, c as u8, fg_color, bg_color);
     FONT_SUCCESS
 }
 
@@ -56,8 +55,8 @@ pub fn font_draw_string_ctx(
     x: i32,
     y: i32,
     str_ptr: *const c_char,
-    fg_color: u32,
-    bg_color: u32,
+    fg_color: Color32,
+    bg_color: Color32,
 ) -> c_int {
     if str_ptr.is_null() {
         return FONT_ERROR_INVALID;
@@ -72,6 +71,6 @@ pub fn font_draw_string_ctx(
     };
 
     let text = c_str_to_slice(str_ptr);
-    font_render::draw_string(&mut ctx, x, y, text, fg_color, bg_color);
+    canvas_font::draw_string(&mut ctx, x, y, text, fg_color, bg_color);
     FONT_SUCCESS
 }

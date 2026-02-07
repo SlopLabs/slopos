@@ -4,15 +4,17 @@ use slopos_lib::IrqMutex;
 
 use crate::font;
 use crate::framebuffer;
-use crate::graphics::{self, GraphicsContext, GraphicsResult};
+use crate::graphics::{GraphicsContext, GraphicsResult};
+use slopos_abi::draw::Color32;
 use slopos_abi::video_traits::VideoError;
+use slopos_gfx::canvas_ops;
 
-const SPLASH_BG_COLOR: u32 = 0x0000_0000;
-const SPLASH_TEXT_COLOR: u32 = 0xE6E6_E6FF;
-const SPLASH_SUBTEXT_COLOR: u32 = 0x9A9A_9AFF;
-const SPLASH_ACCENT_COLOR: u32 = 0x00C2_7FFF;
-const SPLASH_PROGRESS_TRACK_COLOR: u32 = 0x1A1A_1AFF;
-const SPLASH_PROGRESS_FRAME_COLOR: u32 = 0x2E2E_2EFF;
+const SPLASH_BG_COLOR: Color32 = Color32(0x0000_0000);
+const SPLASH_TEXT_COLOR: Color32 = Color32(0xE6E6_E6FF);
+const SPLASH_SUBTEXT_COLOR: Color32 = Color32(0x9A9A_9AFF);
+const SPLASH_ACCENT_COLOR: Color32 = Color32(0x00C2_7FFF);
+const SPLASH_PROGRESS_TRACK_COLOR: Color32 = Color32(0x1A1A_1AFF);
+const SPLASH_PROGRESS_FRAME_COLOR: Color32 = Color32(0x2E2E_2EFF);
 
 const SPLASH_PROGRESS_MIN_WIDTH: i32 = 220;
 const SPLASH_PROGRESS_MAX_WIDTH: i32 = 360;
@@ -110,9 +112,9 @@ fn ensure_framebuffer_ready() -> GraphicsResult<()> {
 }
 
 fn splash_draw_logo(ctx: &mut GraphicsContext, center_x: i32, center_y: i32, ring_radius: i32) {
-    graphics::draw_circle_filled(ctx, center_x, center_y, ring_radius, SPLASH_ACCENT_COLOR);
-    graphics::draw_circle_filled(ctx, center_x, center_y, ring_radius - 4, SPLASH_BG_COLOR);
-    graphics::fill_rect(
+    canvas_ops::circle_filled(ctx, center_x, center_y, ring_radius, SPLASH_ACCENT_COLOR);
+    canvas_ops::circle_filled(ctx, center_x, center_y, ring_radius - 4, SPLASH_BG_COLOR);
+    canvas_ops::fill_rect(
         ctx,
         center_x - 40,
         center_y + ring_radius + 10,
@@ -130,8 +132,8 @@ fn splash_draw_progress_bar(
     height: i32,
     progress: i32,
 ) {
-    graphics::fill_rect(ctx, x, y, width, height, SPLASH_PROGRESS_TRACK_COLOR);
-    graphics::draw_rect(
+    canvas_ops::fill_rect(ctx, x, y, width, height, SPLASH_PROGRESS_TRACK_COLOR);
+    canvas_ops::rect(
         ctx,
         x - 1,
         y - 1,
@@ -142,7 +144,7 @@ fn splash_draw_progress_bar(
 
     if progress > 0 {
         let fill_width = (width * progress) / 100;
-        graphics::fill_rect(ctx, x, y, fill_width, height, SPLASH_ACCENT_COLOR);
+        canvas_ops::fill_rect(ctx, x, y, fill_width, height, SPLASH_ACCENT_COLOR);
     }
 }
 
@@ -151,7 +153,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     let mut ctx = GraphicsContext::new()?;
 
     let mut state = STATE.lock();
-    framebuffer::framebuffer_clear(SPLASH_BG_COLOR);
+    framebuffer::framebuffer_clear(SPLASH_BG_COLOR.to_u32());
 
     let width = ctx.width() as i32;
     let height = ctx.height() as i32;
@@ -170,7 +172,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.title_y,
         TEXT_TITLE.as_ptr() as *const c_char,
         SPLASH_TEXT_COLOR,
-        0,
+        Color32(0),
     ) != 0
     {
         return Err(VideoError::Invalid);
@@ -181,7 +183,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.subtitle_y,
         TEXT_SUBTITLE.as_ptr() as *const c_char,
         SPLASH_SUBTEXT_COLOR,
-        0,
+        Color32(0),
     ) != 0
     {
         return Err(VideoError::Invalid);
@@ -192,7 +194,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.message_y,
         TEXT_INIT.as_ptr() as *const c_char,
         SPLASH_SUBTEXT_COLOR,
-        0,
+        Color32(0),
     ) != 0
     {
         return Err(VideoError::Invalid);
@@ -220,7 +222,7 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
     let height = ctx.height() as i32;
     let layout = splash_layout(width, height);
 
-    graphics::fill_rect(
+    canvas_ops::fill_rect(
         &mut ctx,
         layout.message_x,
         layout.message_y,
@@ -236,7 +238,7 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
             layout.message_y,
             message,
             SPLASH_SUBTEXT_COLOR,
-            0,
+            Color32(0),
         ) != 0
     {
         return Err(VideoError::Invalid);
@@ -277,6 +279,6 @@ pub fn splash_finish() -> GraphicsResult<()> {
 
 pub fn splash_clear() -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
-    framebuffer::framebuffer_clear(SPLASH_BG_COLOR);
+    framebuffer::framebuffer_clear(SPLASH_BG_COLOR.to_u32());
     Ok(())
 }

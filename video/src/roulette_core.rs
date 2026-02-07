@@ -1,20 +1,22 @@
 use core::ffi::{c_char, c_void};
+use slopos_abi::draw::Color32;
 use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::pit::pit_poll_delay_ms;
 
 use crate::graphics::GraphicsContext;
-use crate::{font, framebuffer, graphics};
+use crate::{font, framebuffer};
+use slopos_gfx::canvas_ops;
 
-const ROULETTE_BLANK_COLOR: u32 = 0x2A31_3BFF;
-const ROULETTE_BLANK_HIGHLIGHT: u32 = 0x5660_70FF;
-const ROULETTE_COLORED_HIGHLIGHT: u32 = 0x4DE3_CAFF;
-const ROULETTE_POINTER_COLOR: u32 = 0xFFE0_87FF;
-const ROULETTE_INFO_BG_COLOR: u32 = 0x0E14_1CFF;
-const ROULETTE_CARD_BORDER: u32 = 0x6470_83FF;
-const ROULETTE_CARD_TEXT: u32 = 0xF6F9_FDFF;
-const ROULETTE_MUTED_TEXT: u32 = 0xAAB4_C5FF;
-const ROULETTE_WIN_BG: u32 = 0x0D37_31FF;
-const ROULETTE_LOSE_BG: u32 = 0x3A20_24FF;
+const ROULETTE_BLANK_COLOR: Color32 = Color32(0x2A31_3BFF);
+const ROULETTE_BLANK_HIGHLIGHT: Color32 = Color32(0x5660_70FF);
+const ROULETTE_COLORED_HIGHLIGHT: Color32 = Color32(0x4DE3_CAFF);
+const ROULETTE_POINTER_COLOR: Color32 = Color32(0xFFE0_87FF);
+const ROULETTE_INFO_BG_COLOR: Color32 = Color32(0x0E14_1CFF);
+const ROULETTE_CARD_BORDER: Color32 = Color32(0x6470_83FF);
+const ROULETTE_CARD_TEXT: Color32 = Color32(0xF6F9_FDFF);
+const ROULETTE_MUTED_TEXT: Color32 = Color32(0xAAB4_C5FF);
+const ROULETTE_WIN_BG: Color32 = Color32(0x0D37_31FF);
+const ROULETTE_LOSE_BG: Color32 = Color32(0x3A20_24FF);
 
 const ROULETTE_SEGMENT_COUNT: i32 = 12;
 const ROULETTE_TRIG_SCALE: i32 = 1024;
@@ -27,13 +29,13 @@ const ROULETTE_SPIN_DURATION_MS: i32 = 7200;
 const ROULETTE_SPIN_FRAME_DELAY_MS: i32 = 12;
 
 // Public colors pulled from the legacy header.
-pub const ROULETTE_BG_COLOR: u32 = 0x0000_0000;
-pub const ROULETTE_WHEEL_COLOR: u32 = 0xD4DB_E6FF;
-pub const ROULETTE_TEXT_COLOR: u32 = 0xF1F4_F9FF;
-pub const ROULETTE_WIN_COLOR: u32 = 0x2DD4_B3FF;
-pub const ROULETTE_LOSE_COLOR: u32 = 0xE35D_5BFF;
-pub const ROULETTE_EVEN_COLOR: u32 = 0x3B45_54FF;
-pub const ROULETTE_ODD_COLOR: u32 = 0x0C7A_68FF;
+pub const ROULETTE_BG_COLOR: Color32 = Color32(0x0000_0000);
+pub const ROULETTE_WHEEL_COLOR: Color32 = Color32(0xD4DB_E6FF);
+pub const ROULETTE_TEXT_COLOR: Color32 = Color32(0xF1F4_F9FF);
+pub const ROULETTE_WIN_COLOR: Color32 = Color32(0x2DD4_B3FF);
+pub const ROULETTE_LOSE_COLOR: Color32 = Color32(0xE35D_5BFF);
+pub const ROULETTE_EVEN_COLOR: Color32 = Color32(0x3B45_54FF);
+pub const ROULETTE_ODD_COLOR: Color32 = Color32(0x0C7A_68FF);
 pub const ROULETTE_RESULT_DELAY_MS: u32 = 1700;
 
 #[repr(C)]
@@ -178,10 +180,10 @@ fn backend_fill_rect(
     y: i32,
     w: i32,
     h: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     match b.fill_rect {
-        Some(f) => f(b.ctx, x, y, w, h, color),
+        Some(f) => f(b.ctx, x, y, w, h, color.to_u32()),
         None => Err(VideoError::NoFramebuffer),
     }
 }
@@ -192,10 +194,10 @@ fn backend_draw_line(
     y0: i32,
     x1: i32,
     y1: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     match b.draw_line {
-        Some(f) => f(b.ctx, x0, y0, x1, y1, color),
+        Some(f) => f(b.ctx, x0, y0, x1, y1, color.to_u32()),
         None => Err(VideoError::NoFramebuffer),
     }
 }
@@ -205,10 +207,10 @@ fn backend_draw_circle(
     cx: i32,
     cy: i32,
     radius: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     match b.draw_circle {
-        Some(f) => f(b.ctx, cx, cy, radius, color),
+        Some(f) => f(b.ctx, cx, cy, radius, color.to_u32()),
         None => Err(VideoError::NoFramebuffer),
     }
 }
@@ -218,10 +220,10 @@ fn backend_draw_circle_filled(
     cx: i32,
     cy: i32,
     radius: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     match b.draw_circle_filled {
-        Some(f) => f(b.ctx, cx, cy, radius, color),
+        Some(f) => f(b.ctx, cx, cy, radius, color.to_u32()),
         None => Err(VideoError::NoFramebuffer),
     }
 }
@@ -231,11 +233,11 @@ fn backend_draw_text(
     x: i32,
     y: i32,
     text: &[u8],
-    fg: u32,
-    bg: u32,
+    fg: Color32,
+    bg: Color32,
 ) -> VideoResult {
     match b.draw_text {
-        Some(f) => f(b.ctx, x, y, text.as_ptr(), fg, bg),
+        Some(f) => f(b.ctx, x, y, text.as_ptr(), fg.to_u32(), bg.to_u32()),
         None => Err(VideoError::NoFramebuffer),
     }
 }
@@ -266,7 +268,7 @@ fn draw_filled_triangle(
     mut y1: i32,
     mut x2: i32,
     mut y2: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     if y0 > y1 {
         core::mem::swap(&mut y0, &mut y1);
@@ -316,7 +318,7 @@ fn draw_segment_wedge(
     start_idx: usize,
     inner_radius: i32,
     radius: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     let inner = inner_radius;
     let start_deg = (start_idx as i32) * ROULETTE_SEGMENT_DEGREES;
@@ -403,7 +405,7 @@ fn draw_pointer_for_angle(
     tip_radius: i32,
     base_radius: i32,
     angle_deg: i32,
-    color: u32,
+    color: Color32,
 ) -> VideoResult {
     let dir_x = cos_deg(angle_deg);
     let dir_y = sin_deg(angle_deg);
@@ -437,7 +439,7 @@ fn draw_pointer_ticks(
     tip_radius: i32,
     base_radius: i32,
     angle_deg: i32,
-    color: u32,
+    color: Color32,
 ) {
     let _ = draw_pointer_for_angle(
         b,
@@ -522,7 +524,7 @@ fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, 
         number_y,
         &num_str[..text_len],
         ROULETTE_CARD_TEXT,
-        0,
+        Color32(0),
     );
 }
 
@@ -690,9 +692,9 @@ fn even_px(x: i32) -> i32 {
     x & !1
 }
 
-fn draw_text_centered(b: &RouletteBackend, cx: i32, y: i32, text: &[u8], fg: u32) {
+fn draw_text_centered(b: &RouletteBackend, cx: i32, y: i32, text: &[u8], fg: Color32) {
     let x = even_px(cx - text_width_px(text) / 2);
-    let _ = backend_draw_text(b, x, y, text, fg, 0);
+    let _ = backend_draw_text(b, x, y, text, fg, Color32(0));
 }
 
 fn draw_panel(
@@ -701,8 +703,8 @@ fn draw_panel(
     y: i32,
     w: i32,
     h: i32,
-    fill: u32,
-    border: u32,
+    fill: Color32,
+    border: Color32,
 ) -> VideoResult {
     backend_fill_rect(b, x, y, w, h, fill)?;
     backend_draw_line(b, x, y, x + w, y, border)?;
@@ -1077,7 +1079,7 @@ fn kernel_get_size(ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
 
 fn kernel_fill_rect(ctx: *mut c_void, x: i32, y: i32, w: i32, h: i32, color: u32) -> VideoResult {
     let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
-    graphics::fill_rect(ctx, x, y, w, h, color);
+    canvas_ops::fill_rect(ctx, x, y, w, h, Color32(color));
     Ok(())
 }
 
@@ -1090,13 +1092,13 @@ fn kernel_draw_line(
     color: u32,
 ) -> VideoResult {
     let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
-    graphics::draw_line(ctx, x0, y0, x1, y1, color);
+    canvas_ops::line(ctx, x0, y0, x1, y1, Color32(color));
     Ok(())
 }
 
 fn kernel_draw_circle(ctx: *mut c_void, cx: i32, cy: i32, radius: i32, color: u32) -> VideoResult {
     let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
-    graphics::draw_circle(ctx, cx, cy, radius, color);
+    canvas_ops::circle(ctx, cx, cy, radius, Color32(color));
     Ok(())
 }
 
@@ -1108,7 +1110,7 @@ fn kernel_draw_circle_filled(
     color: u32,
 ) -> VideoResult {
     let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
-    graphics::draw_circle_filled(ctx, cx, cy, radius, color);
+    canvas_ops::circle_filled(ctx, cx, cy, radius, Color32(color));
     Ok(())
 }
 
@@ -1124,7 +1126,7 @@ fn kernel_draw_text(
     if text.is_null() {
         return Err(VideoError::Invalid);
     }
-    let rc = font::font_draw_string_ctx(ctx, x, y, text as *const c_char, fg, bg);
+    let rc = font::font_draw_string_ctx(ctx, x, y, text as *const c_char, Color32(fg), Color32(bg));
     if rc == 0 {
         Ok(())
     } else {

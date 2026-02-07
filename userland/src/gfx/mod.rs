@@ -1,10 +1,11 @@
 pub mod font;
 pub mod primitives;
 
-pub use slopos_abi::DrawTarget;
+pub use slopos_abi::Canvas;
 pub use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
+use slopos_abi::draw::EncodedPixel;
 pub use slopos_abi::pixel::DrawPixelFormat;
-use slopos_abi::{PixelBuffer, pixel_ops};
+use slopos_abi::pixel::PixelFormat as CanvasPixelFormat;
 pub use slopos_gfx::damage::DamageTracker;
 
 pub type PixelFormat = DrawPixelFormat;
@@ -16,6 +17,7 @@ pub struct DrawBuffer<'a> {
     pitch: usize,
     bytes_pp: u8,
     pixel_format: DrawPixelFormat,
+    canvas_pixel_format: CanvasPixelFormat,
     damage: DamageTracker,
 }
 
@@ -42,12 +44,21 @@ impl<'a> DrawBuffer<'a> {
             pitch,
             bytes_pp,
             pixel_format: DrawPixelFormat::from_bpp(bytes_pp * 8),
+            canvas_pixel_format: if bytes_pp == 4 {
+                CanvasPixelFormat::Argb8888
+            } else {
+                CanvasPixelFormat::Rgb888
+            },
             damage: DamageTracker::new(),
         })
     }
 
     pub fn set_pixel_format(&mut self, format: DrawPixelFormat) {
         self.pixel_format = format;
+    }
+
+    pub fn set_canvas_pixel_format(&mut self, format: CanvasPixelFormat) {
+        self.canvas_pixel_format = format;
     }
 
     pub fn width(&self) -> u32 {
@@ -68,6 +79,10 @@ impl<'a> DrawBuffer<'a> {
 
     pub fn pixel_format(&self) -> DrawPixelFormat {
         self.pixel_format
+    }
+
+    pub fn canvas_pixel_format(&self) -> CanvasPixelFormat {
+        self.canvas_pixel_format
     }
 
     pub fn data(&self) -> &[u8] {
@@ -113,7 +128,7 @@ impl<'a> DrawBuffer<'a> {
 
         let converted = self.pixel_format.convert_color(color);
         let offset = self.pixel_offset(x as u32, y as u32);
-        self.write_pixel_at_offset(offset, converted);
+        <Self as Canvas>::write_encoded_at(self, offset, EncodedPixel(converted));
     }
 
     pub fn get_pixel(&self, x: i32, y: i32) -> u32 {
@@ -154,7 +169,7 @@ impl<'a> DrawBuffer<'a> {
     }
 }
 
-impl PixelBuffer for DrawBuffer<'_> {
+impl Canvas for DrawBuffer<'_> {
     #[inline]
     fn width(&self) -> u32 {
         self.width
@@ -166,22 +181,23 @@ impl PixelBuffer for DrawBuffer<'_> {
     }
 
     #[inline]
-    fn pitch(&self) -> usize {
+    fn pitch_bytes(&self) -> usize {
         self.pitch
     }
 
     #[inline]
-    fn bytes_pp(&self) -> u8 {
+    fn bytes_per_pixel(&self) -> u8 {
         self.bytes_pp
     }
 
     #[inline]
-    fn pixel_format(&self) -> DrawPixelFormat {
-        self.pixel_format
+    fn pixel_format(&self) -> CanvasPixelFormat {
+        self.canvas_pixel_format
     }
 
     #[inline]
-    fn write_pixel_at_offset(&mut self, byte_offset: usize, color: u32) {
+    fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel) {
+        let color = pixel.to_u32();
         let bytes = color.to_le_bytes();
         match self.bytes_pp {
             4 => {
@@ -201,7 +217,7 @@ impl PixelBuffer for DrawBuffer<'_> {
     }
 
     #[inline]
-    fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, color: u32) {
+    fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, pixel: EncodedPixel) {
         if row < 0 || row >= self.height as i32 {
             return;
         }
@@ -212,6 +228,7 @@ impl PixelBuffer for DrawBuffer<'_> {
             return;
         }
 
+        let color = pixel.to_u32();
         let bytes_pp = self.bytes_pp as usize;
         let pitch = self.pitch;
         let span_w = (x1 - x0 + 1) as usize;
@@ -248,7 +265,8 @@ impl PixelBuffer for DrawBuffer<'_> {
     }
 
     #[inline]
-    fn clear_buffer(&mut self, color: u32) {
+    fn clear_canvas(&mut self, pixel: EncodedPixel) {
+        let color = pixel.to_u32();
         let bytes_pp = self.bytes_pp as usize;
 
         if color == 0 {
@@ -273,64 +291,5 @@ impl PixelBuffer for DrawBuffer<'_> {
         }
     }
 }
-
-impl DrawTarget for DrawBuffer<'_> {
-    #[inline]
-    fn width(&self) -> u32 {
-        PixelBuffer::width(self)
-    }
-
-    #[inline]
-    fn height(&self) -> u32 {
-        PixelBuffer::height(self)
-    }
-
-    #[inline]
-    fn pitch(&self) -> usize {
-        PixelBuffer::pitch(self)
-    }
-
-    #[inline]
-    fn bytes_pp(&self) -> u8 {
-        PixelBuffer::bytes_pp(self)
-    }
-
-    #[inline]
-    fn pixel_format(&self) -> DrawPixelFormat {
-        PixelBuffer::pixel_format(self)
-    }
-
-    #[inline]
-    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
-        pixel_ops::draw_pixel_impl(self, x, y, color);
-    }
-
-    #[inline]
-    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        pixel_ops::fill_rect_impl(self, x, y, w, h, color);
-    }
-
-    #[inline]
-    fn clear(&mut self, color: u32) {
-        pixel_ops::clear_impl(self, color);
-        self.add_damage(0, 0, self.width as i32 - 1, self.height as i32 - 1);
-    }
-}
-
-impl slopos_abi::DamageTracking for DrawBuffer<'_> {
-    fn add_damage(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
-        self.damage.add_rect(x0, y0, x1, y1);
-    }
-
-    fn clear_damage(&mut self) {
-        self.damage.clear();
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.damage.is_dirty()
-    }
-}
-
-pub use slopos_abi::pixel::{rgb, rgba};
 
 pub use primitives::*;
