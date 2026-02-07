@@ -22,12 +22,11 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::string::cstr_to_str;
 
 use slopos_abi::DisplayInfo;
+use slopos_abi::arch::x86_64::apic::ApicBaseMsr;
+use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
+use slopos_abi::arch::x86_64::msr::Msr;
 use slopos_abi::boot::LimineMemmapResponse;
 use slopos_lib::{InitFlag, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
-
-const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
-const MSR_APIC_BASE: u32 = 0x1B;
-const APIC_BASE_ADDR_MASK: u64 = 0xFFFFF000;
 
 const LIMINE_MEMMAP_USABLE: u64 = 0;
 const LIMINE_MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
@@ -388,12 +387,12 @@ fn record_framebuffer_reservation() {
 }
 
 fn record_apic_reservation() {
-    let (_a, _b, _c, d) = cpu::cpuid(1);
+    let (_a, _b, _c, d) = cpu::cpuid(CPUID_LEAF_FEATURES);
     if (d & CPUID_FEAT_EDX_APIC) == 0 {
         return;
     }
-    let apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
-    let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
+    let apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
+    let apic_phys = apic_base_msr & ApicBaseMsr::ADDR_MASK;
     if apic_phys == 0 {
         return;
     }

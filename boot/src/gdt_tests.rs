@@ -11,7 +11,8 @@
 use core::arch::asm;
 use core::ffi::c_int;
 
-use slopos_lib::klog_info;
+use slopos_abi::arch::x86_64::msr::{EFER_SCE, Msr};
+use slopos_lib::{cpu, klog_info};
 
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};
@@ -268,34 +269,10 @@ pub fn test_gdt_set_ist_index_overflow() -> c_int {
 // SYSCALL MSR TESTS
 // =============================================================================
 
-/// Read an MSR
-#[inline]
-fn rdmsr(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    unsafe {
-        asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ((high as u64) << 32) | (low as u64)
-}
-
-const MSR_EFER: u32 = 0xC000_0080;
-const MSR_STAR: u32 = 0xC000_0081;
-const MSR_LSTAR: u32 = 0xC000_0082;
-const MSR_SFMASK: u32 = 0xC000_0084;
-
-const EFER_SCE: u64 = 1 << 0;
-
 /// Test: EFER.SCE bit is set (enables SYSCALL/SYSRET)
 /// BUG FINDER: If not set, SYSCALL instruction will #UD
 pub fn test_efer_sce_enabled() -> c_int {
-    let efer = rdmsr(MSR_EFER);
+    let efer = cpu::read_msr(Msr::EFER);
 
     if (efer & EFER_SCE) == 0 {
         klog_info!("GDT_TEST: BUG - EFER.SCE not set, SYSCALL will #UD");
@@ -308,7 +285,7 @@ pub fn test_efer_sce_enabled() -> c_int {
 /// Test: STAR MSR has valid selectors
 /// BUG FINDER: Wrong selectors = crash or privilege issues on syscall
 pub fn test_star_msr_valid() -> c_int {
-    let star = rdmsr(MSR_STAR);
+    let star = cpu::read_msr(Msr::STAR);
 
     // STAR layout:
     // [31:0]   - Reserved (should be 0, but some systems use it)
@@ -344,7 +321,7 @@ pub fn test_star_msr_valid() -> c_int {
 /// Test: LSTAR MSR points to kernel space
 /// BUG FINDER: LSTAR in user space = code execution vulnerability
 pub fn test_lstar_msr_valid() -> c_int {
-    let lstar = rdmsr(MSR_LSTAR);
+    let lstar = cpu::read_msr(Msr::LSTAR);
 
     if lstar == 0 {
         klog_info!("GDT_TEST: BUG - LSTAR is 0, SYSCALL will crash");
@@ -371,7 +348,7 @@ pub fn test_lstar_msr_valid() -> c_int {
 /// Test: SFMASK MSR clears appropriate flags
 /// BUG FINDER: If TF or IF not masked, syscall handler may execute weirdly
 pub fn test_sfmask_msr_valid() -> c_int {
-    let sfmask = rdmsr(MSR_SFMASK);
+    let sfmask = cpu::read_msr(Msr::SFMASK);
 
     // SFMASK should at minimum clear:
     // - IF (bit 9) - disable interrupts during syscall entry
@@ -608,16 +585,16 @@ pub fn test_gdt_double_init() -> c_int {
 
 /// Test: Calling syscall_msr_init twice doesn't corrupt state
 pub fn test_syscall_msr_double_init() -> c_int {
-    let efer_before = rdmsr(MSR_EFER);
-    let star_before = rdmsr(MSR_STAR);
-    let lstar_before = rdmsr(MSR_LSTAR);
+    let efer_before = cpu::read_msr(Msr::EFER);
+    let star_before = cpu::read_msr(Msr::STAR);
+    let lstar_before = cpu::read_msr(Msr::LSTAR);
 
     // Reinitialize SYSCALL MSRs
     syscall_msr_init();
 
-    let efer_after = rdmsr(MSR_EFER);
-    let star_after = rdmsr(MSR_STAR);
-    let lstar_after = rdmsr(MSR_LSTAR);
+    let efer_after = cpu::read_msr(Msr::EFER);
+    let star_after = cpu::read_msr(Msr::STAR);
+    let lstar_after = cpu::read_msr(Msr::LSTAR);
 
     // Critical bits should be preserved
     if (efer_before & EFER_SCE) != (efer_after & EFER_SCE) {
@@ -734,7 +711,7 @@ pub fn test_gdt_entry_order_matches_selectors() -> c_int {
 /// BUG FINDER: SYSRET uses STAR[63:48]+16 for CS and STAR[63:48]+8 for SS
 /// If wrong, user mode will have wrong selectors after SYSRET
 pub fn test_star_sysret_selector_calculation() -> c_int {
-    let star = rdmsr(MSR_STAR);
+    let star = cpu::read_msr(Msr::STAR);
     let sysret_base = ((star >> 48) & 0xFFFF) as u16;
 
     // SYSRET in 64-bit mode:
@@ -888,7 +865,7 @@ pub fn test_ist_stacks_have_guard_pages() -> c_int {
 /// Test: Verify LSTAR points to valid code (not data section)
 /// BUG FINDER: LSTAR pointing to data = crash on first syscall
 pub fn test_lstar_points_to_executable_code() -> c_int {
-    let lstar = rdmsr(MSR_LSTAR);
+    let lstar = cpu::read_msr(Msr::LSTAR);
 
     // Read first few bytes at LSTAR to check it looks like code
     // A function should NOT start with 0x00 bytes (NUL padding)

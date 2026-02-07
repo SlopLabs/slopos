@@ -19,9 +19,9 @@ use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use crate::InitFlag;
+use slopos_abi::arch::x86_64::msr::Msr;
 
-const IA32_GS_BASE: u32 = 0xC000_0101;
+use crate::InitFlag;
 
 /// Maximum number of CPUs supported.
 /// Must match MAX_CPUS in mm/src/tlb.rs and mm/src/page_alloc.rs.
@@ -156,17 +156,7 @@ pub fn init_percpu_for_cpu(cpu_id: usize, apic_id: u32) {
 
 #[inline(always)]
 fn write_gs_base(value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    unsafe {
-        asm!(
-            "wrmsr",
-            in("ecx") IA32_GS_BASE,
-            in("eax") low,
-            in("edx") high,
-            options(nostack, preserves_flags)
-        );
-    }
+    crate::cpu::write_msr(Msr::GS_BASE, value);
 }
 
 pub fn activate_gs_base_for_cpu(cpu_id: usize) {

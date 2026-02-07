@@ -1,12 +1,15 @@
+use slopos_abi::arch::x86_64::cpuid::{
+    CPUID_EXT_FEAT_EDX_LM, CPUID_FEAT_EDX_PAE, CPUID_FEAT_EDX_PGE, CPUID_LEAF_EXT_INFO,
+    CPUID_LEAF_FEATURES,
+};
+use slopos_abi::arch::x86_64::msr::{EFER_LMA, EFER_LME, Msr};
 use slopos_lib::cpu;
 use slopos_mm::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB};
-
-const MSR_EFER: u32 = 0xC000_0080;
 
 pub fn verify_cpu_state() {
     let cr0 = cpu::read_cr0();
     let cr4 = cpu::read_cr4();
-    let efer = cpu::read_msr(MSR_EFER);
+    let efer = cpu::read_msr(Msr::EFER);
 
     if (cr0 & cpu::CR0_PG) == 0 {
         panic!("Paging not enabled in CR0");
@@ -17,10 +20,10 @@ pub fn verify_cpu_state() {
     if (cr4 & cpu::CR4_PAE) == 0 {
         panic!("PAE not enabled in CR4");
     }
-    if (efer & (1 << 8)) == 0 {
+    if (efer & EFER_LME) == 0 {
         panic!("Long mode not enabled in EFER");
     }
-    if (efer & (1 << 10)) == 0 {
+    if (efer & EFER_LMA) == 0 {
         panic!("Long mode not active in EFER");
     }
 }
@@ -61,16 +64,16 @@ pub fn check_stack_health() {
 }
 
 pub fn verify_cpu_features() {
-    let (_, _, _, edx1) = cpu::cpuid(1);
-    if (edx1 & (1 << 6)) == 0 {
+    let (_, _, _, edx1) = cpu::cpuid(CPUID_LEAF_FEATURES);
+    if (edx1 & CPUID_FEAT_EDX_PAE) == 0 {
         panic!("CPU does not support PAE");
     }
-    if (edx1 & (1 << 13)) == 0 {
+    if (edx1 & CPUID_FEAT_EDX_PGE) == 0 {
         panic!("CPU does not support PGE");
     }
 
-    let (_, _, _, edx2) = cpu::cpuid(0x8000_0001);
-    if (edx2 & (1 << 29)) == 0 {
+    let (_, _, _, edx2) = cpu::cpuid(CPUID_LEAF_EXT_INFO);
+    if (edx2 & CPUID_EXT_FEAT_EDX_LM) == 0 {
         panic!("CPU does not support long mode");
     }
 }

@@ -5,16 +5,18 @@ use spin::Once;
 use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
-use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB_USIZE;
-use slopos_mm::mmio::MmioRegion;
-
-use slopos_abi::arch::x86_64::apic::*;
+use slopos_abi::arch::x86_64::apic::{ApicBaseMsr, *};
 pub use slopos_abi::arch::x86_64::apic::{
     LAPIC_ICR_DELIVERY_FIXED, LAPIC_ICR_DELIVERY_STATUS, LAPIC_ICR_DEST_BROADCAST,
     LAPIC_ICR_DEST_PHYSICAL, LAPIC_ICR_HIGH, LAPIC_ICR_LEVEL_ASSERT, LAPIC_ICR_LOW,
     LAPIC_ICR_TRIGGER_EDGE,
 };
+use slopos_abi::arch::x86_64::cpuid::{
+    CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES,
+};
+use slopos_abi::arch::x86_64::msr::Msr;
+use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB_USIZE;
+use slopos_mm::mmio::MmioRegion;
 
 const APIC_REGION_SIZE: usize = PAGE_SIZE_4KB_USIZE;
 
@@ -30,7 +32,7 @@ static APIC_REGS: Once<MmioRegion> = Once::new();
 pub fn detect() -> bool {
     klog_debug!("APIC: Detecting Local APIC availability...");
 
-    let (_, _, ecx, edx) = cpu::cpuid(1);
+    let (_, _, ecx, edx) = cpu::cpuid(CPUID_LEAF_FEATURES);
     if edx & CPUID_FEAT_EDX_APIC == 0 {
         klog_debug!("APIC: Local APIC is not available");
         APIC_AVAILABLE.reset();
@@ -42,8 +44,8 @@ pub fn detect() -> bool {
         X2APIC_AVAILABLE.mark_set();
     }
 
-    let apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
-    let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
+    let apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
+    let apic_phys = apic_base_msr & ApicBaseMsr::ADDR_MASK;
     APIC_BASE_PHYSICAL.store(apic_phys, Ordering::Relaxed);
 
     // Map APIC registers via MmioRegion
@@ -53,17 +55,17 @@ pub fn detect() -> bool {
             let virt = region.virt_base();
             APIC_REGS.call_once(|| region);
 
-            let bsp_flag = if apic_base_msr & APIC_BASE_BSP != 0 {
+            let bsp_flag = if apic_base_msr & ApicBaseMsr::BSP != 0 {
                 " BSP"
             } else {
                 ""
             };
-            let x2apic_flag = if apic_base_msr & APIC_BASE_X2APIC != 0 {
+            let x2apic_flag = if apic_base_msr & ApicBaseMsr::X2APIC_ENABLE != 0 {
                 " X2APIC"
             } else {
                 ""
             };
-            let enable_flag = if apic_base_msr & APIC_BASE_GLOBAL_ENABLE != 0 {
+            let enable_flag = if apic_base_msr & ApicBaseMsr::GLOBAL_ENABLE != 0 {
                 " ENABLED"
             } else {
                 ""
@@ -95,10 +97,10 @@ pub fn init() -> i32 {
     slopos_lib::register_lapic_id_fn(get_id);
     slopos_lib::register_send_ipi_to_cpu_fn(send_ipi_to_cpu);
 
-    let mut apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
-    if apic_base_msr & APIC_BASE_GLOBAL_ENABLE == 0 {
-        apic_base_msr |= APIC_BASE_GLOBAL_ENABLE;
-        cpu::write_msr(MSR_APIC_BASE, apic_base_msr);
+    let mut apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
+    if apic_base_msr & ApicBaseMsr::GLOBAL_ENABLE == 0 {
+        apic_base_msr |= ApicBaseMsr::GLOBAL_ENABLE;
+        cpu::write_msr(Msr::APIC_BASE, apic_base_msr);
         klog_debug!("APIC: Enabled APIC globally via MSR");
     }
 
@@ -138,8 +140,8 @@ pub fn is_bsp() -> bool {
     if !is_available() {
         return false;
     }
-    let apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
-    (apic_base_msr & APIC_BASE_BSP) != 0
+    let apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
+    (apic_base_msr & ApicBaseMsr::BSP) != 0
 }
 
 pub fn is_enabled() -> bool {
@@ -287,10 +289,10 @@ pub fn set_base_address(base: u64) {
     if !is_available() {
         return;
     }
-    let masked_base = base & APIC_BASE_ADDR_MASK;
-    let mut apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
-    apic_base_msr = (apic_base_msr & !APIC_BASE_ADDR_MASK) | masked_base;
-    cpu::write_msr(MSR_APIC_BASE, apic_base_msr);
+    let masked_base = base & ApicBaseMsr::ADDR_MASK;
+    let mut apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
+    apic_base_msr = (apic_base_msr & !ApicBaseMsr::ADDR_MASK) | masked_base;
+    cpu::write_msr(Msr::APIC_BASE, apic_base_msr);
 
     APIC_BASE_PHYSICAL.store(masked_base, Ordering::Relaxed);
     // Note: APIC_REGS is initialized once during detect() and cannot be updated.

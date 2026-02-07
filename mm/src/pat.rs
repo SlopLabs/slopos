@@ -23,7 +23,7 @@
 //! This layout is Linux-compatible and places WC at index 1 (PWT=1, PCD=0, PAT=0),
 //! which corresponds to the `WRITE_THROUGH` page flag when PAT bit is clear.
 
-use slopos_abi::arch::x86_64::cpuid::CPUID_FEAT_EDX_PAT;
+use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_EDX_PAT, CPUID_LEAF_FEATURES};
 use slopos_abi::arch::x86_64::msr::Msr;
 use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
@@ -95,7 +95,7 @@ pub fn is_supported() -> bool {
 ///
 /// Reads CPUID leaf 1 and checks EDX bit 16.
 pub fn pat_supported() -> bool {
-    let (_, _, _, edx) = cpu::cpuid(1);
+    let (_, _, _, edx) = cpu::cpuid(CPUID_LEAF_FEATURES);
     (edx & CPUID_FEAT_EDX_PAT) != 0
 }
 
@@ -141,7 +141,7 @@ pub fn pat_init() {
 
     klog_debug!("PAT: Initializing Page Attribute Table with WC support");
 
-    let old_pat = cpu::read_msr(Msr::PAT.address());
+    let old_pat = cpu::read_msr(Msr::PAT);
     klog_debug!("PAT: Current value: 0x{:016x}", old_pat);
 
     let flags = cpu::save_flags_cli();
@@ -153,7 +153,7 @@ pub fn pat_init() {
     cpu::write_cr0((cr0 | cpu::CR0_CD) & !cpu::CR0_NW);
 
     cpu::wbinvd();
-    cpu::write_msr(Msr::PAT.address(), PAT_VALUE);
+    cpu::write_msr(Msr::PAT, PAT_VALUE);
     cpu::wbinvd();
 
     cpu::write_cr0(cr0 & !cpu::CR0_CD & !cpu::CR0_NW);
@@ -161,7 +161,7 @@ pub fn pat_init() {
 
     cpu::restore_flags(flags);
 
-    let new_pat = cpu::read_msr(Msr::PAT.address());
+    let new_pat = cpu::read_msr(Msr::PAT);
     if new_pat != PAT_VALUE {
         panic!(
             "PAT: Write verification failed! Expected {:#018x}, got {:#018x}",

@@ -5,8 +5,8 @@ use core::arch::asm;
 use slopos_abi::arch::x86_64::gdt::{
     GDT_STANDARD_ENTRIES, GdtDescriptor, GdtLayout, SegmentSelector, Tss64,
 };
-use slopos_abi::arch::x86_64::msr::Msr;
-use slopos_lib::{MAX_CPUS, get_current_cpu, klog_debug};
+use slopos_abi::arch::x86_64::msr::{EFER_SCE, Msr};
+use slopos_lib::{MAX_CPUS, cpu, get_current_cpu, klog_debug};
 
 #[repr(C)]
 struct PerCpuSyscallData {
@@ -133,44 +133,12 @@ unsafe extern "C" {
     fn syscall_entry();
 }
 
-#[inline(always)]
-fn wrmsr(msr: Msr, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    unsafe {
-        asm!(
-            "wrmsr",
-            in("ecx") msr.address(),
-            in("eax") low,
-            in("edx") high,
-            options(nostack, preserves_flags)
-        );
-    }
-}
-
-fn rdmsr(msr: Msr) -> u64 {
-    let low: u32;
-    let high: u32;
-    unsafe {
-        asm!(
-            "rdmsr",
-            in("ecx") msr.address(),
-            out("eax") low,
-            out("edx") high,
-            options(nostack, preserves_flags)
-        );
-    }
-    ((high as u64) << 32) | (low as u64)
-}
-
-const EFER_SCE: u64 = 1 << 0;
-
 pub fn syscall_msr_init() {
     klog_debug!("SYSCALL: Initializing MSRs for fast syscall path");
 
-    let efer = rdmsr(Msr::EFER);
+    let efer = cpu::read_msr(Msr::EFER);
     if (efer & EFER_SCE) == 0 {
-        wrmsr(Msr::EFER, efer | EFER_SCE);
+        cpu::write_msr(Msr::EFER, efer | EFER_SCE);
         klog_debug!("SYSCALL: Enabled SCE bit in EFER");
     }
 
@@ -181,9 +149,9 @@ pub fn syscall_msr_init() {
 
     let sfmask_value: u64 = 0x0000_0000_0004_7700;
 
-    wrmsr(Msr::STAR, star_value);
-    wrmsr(Msr::LSTAR, lstar_value);
-    wrmsr(Msr::SFMASK, sfmask_value);
+    cpu::write_msr(Msr::STAR, star_value);
+    cpu::write_msr(Msr::LSTAR, lstar_value);
+    cpu::write_msr(Msr::SFMASK, sfmask_value);
 
     klog_debug!(
         "SYSCALL: STAR=0x{:016x} LSTAR=0x{:016x} SFMASK=0x{:016x}",
@@ -214,7 +182,7 @@ fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
         if cpu_id == 0 {
             SYSCALL_CPU_DATA_PTR = cpu_data_ptr;
         }
-        wrmsr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
+        cpu::write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
         klog_debug!(
             "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
             cpu_id,

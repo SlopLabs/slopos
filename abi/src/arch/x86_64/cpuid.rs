@@ -13,6 +13,9 @@ pub const CPUID_LEAF_FEATURES: u32 = 0x01;
 /// Extended topology enumeration.
 pub const CPUID_LEAF_TOPOLOGY: u32 = 0x0B;
 
+/// Structured extended feature flags (subleaf 0).
+pub const CPUID_LEAF_STRUCTURED_EXT: u32 = 0x07;
+
 /// Processor extended state enumeration.
 pub const CPUID_LEAF_XSAVE: u32 = 0x0D;
 
@@ -105,6 +108,9 @@ pub const CPUID_FEAT_ECX_MONITOR: u32 = 1 << 3;
 /// Supplemental SSE3 (SSSE3).
 pub const CPUID_FEAT_ECX_SSSE3: u32 = 1 << 9;
 
+/// Process Context Identifiers (PCID).
+pub const CPUID_FEAT_ECX_PCID: u32 = 1 << 17;
+
 /// SSE4.1 extensions.
 pub const CPUID_FEAT_ECX_SSE41: u32 = 1 << 19;
 
@@ -131,6 +137,13 @@ pub const CPUID_FEAT_ECX_AVX: u32 = 1 << 28;
 
 /// Hypervisor present (running in VM).
 pub const CPUID_FEAT_ECX_HYPERVISOR: u32 = 1 << 31;
+
+// =============================================================================
+// CPUID Leaf 7 (Subleaf 0) - EBX Structured Extended Feature Flags
+// =============================================================================
+
+/// INVPCID instruction support.
+pub const CPUID_SEXT_EBX_INVPCID: u32 = 1 << 10;
 
 // =============================================================================
 // CPUID Extended Leaf 0x80000001 - EDX Flags

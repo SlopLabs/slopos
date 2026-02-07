@@ -91,3 +91,19 @@ impl Msr {
         Self(address)
     }
 }
+
+// =============================================================================
+// EFER (Extended Feature Enable Register) Bit Definitions
+// =============================================================================
+
+/// System Call Extensions — enables SYSCALL/SYSRET instructions.
+pub const EFER_SCE: u64 = 1 << 0;
+
+/// Long Mode Enable — activates IA-32e paging when set with CR0.PG.
+pub const EFER_LME: u64 = 1 << 8;
+
+/// Long Mode Active — read-only; set by hardware when long mode is active.
+pub const EFER_LMA: u64 = 1 << 10;
+
+/// No-Execute Enable — enables the NX (execute-disable) page protection bit.
+pub const EFER_NXE: u64 = 1 << 11;

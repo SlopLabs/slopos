@@ -58,11 +58,9 @@ pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 // CPU Feature Detection
 // =============================================================================
 
-/// CPUID leaf 7, subleaf 0, EBX bit 10: INVPCID instruction support.
-const CPUID_FEAT_EBX_INVPCID: u32 = 1 << 10;
-
-/// CPUID leaf 1, ECX bit 17: PCID (Process Context Identifiers) support.
-const CPUID_FEAT_ECX_PCID: u32 = 1 << 17;
+use slopos_abi::arch::x86_64::cpuid::{
+    CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
+};
 
 /// Cached CPU feature flags for TLB operations.
 struct TlbFeatures {
@@ -85,13 +83,13 @@ fn detect_features() {
         return;
     }
 
-    let (_, _, ecx, _) = cpu::cpuid(1);
+    let (_, _, ecx, _) = cpu::cpuid(CPUID_LEAF_FEATURES);
     let pcid_supported = (ecx & CPUID_FEAT_ECX_PCID) != 0;
 
     let (max_leaf, _, _, _) = cpu::cpuid(0);
-    let invpcid_supported = if max_leaf >= 7 {
-        let (_, ebx, _, _) = cpu::cpuid(7);
-        (ebx & CPUID_FEAT_EBX_INVPCID) != 0
+    let invpcid_supported = if max_leaf >= CPUID_LEAF_STRUCTURED_EXT {
+        let (_, ebx, _, _) = cpu::cpuid(CPUID_LEAF_STRUCTURED_EXT);
+        (ebx & CPUID_SEXT_EBX_INVPCID) != 0
     } else {
         false
     };

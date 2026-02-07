@@ -1,4 +1,6 @@
+use slopos_abi::arch::x86_64::cpuid::CPUID_LEAF_FEATURES;
+
 pub fn read_bsp_apic_id() -> u32 {
-    let (_, ebx, _, _) = slopos_lib::cpu::cpuid(1);
+    let (_, ebx, _, _) = slopos_lib::cpu::cpuid(CPUID_LEAF_FEATURES);
     ((ebx >> 24) & 0xFF) as u32
 }

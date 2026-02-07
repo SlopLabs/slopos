@@ -7,7 +7,8 @@ use core::ptr;
 use alloc::vec::Vec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_lib::klog_info;
+use slopos_abi::arch::x86_64::msr::Msr;
+use slopos_lib::{cpu, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
@@ -2056,22 +2057,9 @@ pub fn test_vma_flags_retrieval() -> c_int {
 // ============================================================================
 
 pub fn test_pat_wc_enabled() -> c_int {
-    const IA32_PAT: u32 = 0x277;
     const MEM_TYPE_WC: u8 = 0x01;
 
-    let pat_msr: u64;
-    unsafe {
-        let low: u32;
-        let high: u32;
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_PAT,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-        pat_msr = ((high as u64) << 32) | (low as u64);
-    }
+    let pat_msr = cpu::read_msr(Msr::PAT);
 
     let pat1 = ((pat_msr >> 8) & 0xFF) as u8;
 

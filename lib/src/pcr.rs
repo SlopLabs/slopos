@@ -11,6 +11,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::arch::x86_64::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
+use slopos_abi::arch::x86_64::msr::Msr;
 
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
@@ -157,8 +158,6 @@ impl ProcessorControlRegion {
 unsafe impl Send for ProcessorControlRegion {}
 unsafe impl Sync for ProcessorControlRegion {}
 
-use slopos_abi::arch::x86_64::msr::Msr;
-
 impl ProcessorControlRegion {
     /// # Safety
     /// Must be called before install()
@@ -206,24 +205,8 @@ impl ProcessorControlRegion {
         );
 
         let self_addr = self as *mut _ as u64;
-        let low = self_addr as u32;
-        let high = (self_addr >> 32) as u32;
-
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") Msr::GS_BASE.address(),
-            in("eax") low,
-            in("edx") high,
-            options(nostack, preserves_flags)
-        );
-
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") Msr::KERNEL_GS_BASE.address(),
-            in("eax") low,
-            in("edx") high,
-            options(nostack, preserves_flags)
-        );
+        crate::cpu::write_msr(Msr::GS_BASE, self_addr);
+        crate::cpu::write_msr(Msr::KERNEL_GS_BASE, self_addr);
 
         mark_gs_base_set();
     }

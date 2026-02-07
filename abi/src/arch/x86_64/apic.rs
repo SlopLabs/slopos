@@ -76,29 +76,6 @@ impl ApicBaseMsr {
 }
 
 // =============================================================================
-// APIC Base Register Flags (for backward compatibility)
-// =============================================================================
-
-/// Bootstrap Processor flag in APIC Base MSR.
-pub const APIC_BASE_BSP: u64 = ApicBaseMsr::BSP;
-
-/// x2APIC mode enable flag.
-pub const APIC_BASE_X2APIC: u64 = ApicBaseMsr::X2APIC_ENABLE;
-
-/// Global APIC enable flag.
-pub const APIC_BASE_GLOBAL_ENABLE: u64 = ApicBaseMsr::GLOBAL_ENABLE;
-
-/// Mask to extract physical base address (bits 12-51).
-pub const APIC_BASE_ADDR_MASK: u64 = ApicBaseMsr::ADDR_MASK;
-
-// =============================================================================
-// MSR Address
-// =============================================================================
-
-/// APIC Base MSR address as raw u32 (for backward compatibility).
-pub const MSR_APIC_BASE: u32 = 0x1B;
-
-// =============================================================================
 // Local APIC Register Offsets
 // =============================================================================
 

@@ -217,7 +217,7 @@ pub mod cpu {
     }
 
     #[inline(always)]
-    pub fn read_msr(msr: u32) -> u64 {
+    pub fn read_msr(msr: slopos_abi::arch::Msr) -> u64 {
         let low: u32;
         let high: u32;
         unsafe {
@@ -225,7 +225,7 @@ pub mod cpu {
                 "rdmsr",
                 out("eax") low,
                 out("edx") high,
-                in("ecx") msr,
+                in("ecx") msr.address(),
                 options(nomem, nostack, preserves_flags)
             );
         }
@@ -233,7 +233,7 @@ pub mod cpu {
     }
 
     #[inline(always)]
-    pub fn write_msr(msr: u32, value: u64) {
+    pub fn write_msr(msr: slopos_abi::arch::Msr, value: u64) {
         let low = value as u32;
         let high = (value >> 32) as u32;
         unsafe {
@@ -241,7 +241,7 @@ pub mod cpu {
                 "wrmsr",
                 in("eax") low,
                 in("edx") high,
-                in("ecx") msr,
+                in("ecx") msr.address(),
                 options(nomem, nostack, preserves_flags)
             );
         }
@@ -394,7 +394,7 @@ pub mod ffi {
         }
     }
     pub extern "C" fn cpu_read_msr_ffi(msr: u32) -> u64 {
-        crate::cpu::read_msr(msr)
+        crate::cpu::read_msr(slopos_abi::arch::Msr::new(msr))
     }
 }
 
