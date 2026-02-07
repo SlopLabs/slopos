@@ -1,11 +1,10 @@
 use slopos_lib::IrqMutex;
 
-use crate::font;
 use crate::framebuffer;
 use crate::graphics::{GraphicsContext, GraphicsResult};
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::VideoError;
-use slopos_gfx::canvas_ops;
+use slopos_gfx::{canvas_font, canvas_ops};
 
 const SPLASH_BG_COLOR: Color32 = Color32(0x0000_0000);
 const SPLASH_TEXT_COLOR: Color32 = Color32(0xE6E6_E6FF);
@@ -165,7 +164,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.ring_radius,
     );
 
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         layout.title_x,
         layout.title_y,
@@ -173,7 +172,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         SPLASH_TEXT_COLOR,
         Color32(0),
     );
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         layout.subtitle_x,
         layout.subtitle_y,
@@ -181,7 +180,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         SPLASH_SUBTEXT_COLOR,
         Color32(0),
     );
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         layout.message_x,
         layout.message_y,
@@ -222,7 +221,7 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
     );
 
     if !message.is_empty() {
-        font::draw_string(
+        canvas_font::draw_string(
             &mut ctx,
             layout.message_x,
             layout.message_y,

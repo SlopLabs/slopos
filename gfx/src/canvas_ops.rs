@@ -1,6 +1,14 @@
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
+#[inline]
+fn emit<T: Canvas>(target: &mut T, damage: Option<DamageRect>) -> Option<DamageRect> {
+    if let Some(d) = damage {
+        target.report_damage(d);
+    }
+    damage
+}
+
 pub fn line<T: Canvas>(
     target: &mut T,
     x0: i32,
@@ -52,7 +60,7 @@ pub fn line<T: Canvas>(
     max_x = max_x.min(w - 1);
     max_y = max_y.min(h - 1);
 
-    if min_x <= max_x && min_y <= max_y {
+    let damage = if min_x <= max_x && min_y <= max_y {
         Some(DamageRect {
             x0: min_x,
             y0: min_y,
@@ -61,7 +69,8 @@ pub fn line<T: Canvas>(
         })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }
 
 pub fn rect<T: Canvas>(
@@ -88,11 +97,12 @@ pub fn rect<T: Canvas>(
     let x1 = (x + w - 1).min(buf_w - 1);
     let y1 = (y + h - 1).min(buf_h - 1);
 
-    if x0 <= x1 && y0 <= y1 {
+    let damage = if x0 <= x1 && y0 <= y1 {
         Some(DamageRect { x0, y0, x1, y1 })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }
 
 pub fn fill_rect<T: Canvas>(
@@ -116,11 +126,12 @@ pub fn fill_rect<T: Canvas>(
     let x1 = (x + w - 1).min(buf_w - 1);
     let y1 = (y + h - 1).min(buf_h - 1);
 
-    if x0 <= x1 && y0 <= y1 {
+    let damage = if x0 <= x1 && y0 <= y1 {
         Some(DamageRect { x0, y0, x1, y1 })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }
 
 pub fn circle<T: Canvas>(
@@ -165,11 +176,12 @@ pub fn circle<T: Canvas>(
     let x1 = (cx + radius).min(buf_w - 1);
     let y1 = (cy + radius).min(buf_h - 1);
 
-    if x0 <= x1 && y0 <= y1 {
+    let damage = if x0 <= x1 && y0 <= y1 {
         Some(DamageRect { x0, y0, x1, y1 })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }
 
 pub fn circle_filled<T: Canvas>(
@@ -212,11 +224,12 @@ pub fn circle_filled<T: Canvas>(
     let x1 = (cx + radius).min(buf_w - 1);
     let y1 = (cy + radius).min(buf_h - 1);
 
-    if x0 <= x1 && y0 <= y1 {
+    let damage = if x0 <= x1 && y0 <= y1 {
         Some(DamageRect { x0, y0, x1, y1 })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }
 
 pub fn triangle_filled<T: Canvas>(
@@ -278,7 +291,7 @@ pub fn triangle_filled<T: Canvas>(
     let max_x = x0.max(x1).max(x2).min(buf_w - 1);
     let max_y = y2.min(buf_h - 1);
 
-    if min_x <= max_x && min_y <= max_y {
+    let damage = if min_x <= max_x && min_y <= max_y {
         Some(DamageRect {
             x0: min_x,
             y0: min_y,
@@ -287,5 +300,6 @@ pub fn triangle_filled<T: Canvas>(
         })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }

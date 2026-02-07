@@ -178,6 +178,16 @@ pub trait Canvas {
         }
     }
 
+    /// Report that a rectangular region was modified.
+    ///
+    /// Drawing functions in the `gfx` crate call this automatically after
+    /// rendering. The default is a no-op — appropriate for direct framebuffer
+    /// surfaces where damage tracking is unnecessary. Buffer-backed surfaces
+    /// (e.g. shared-memory draw buffers) override this to feed their damage
+    /// tracker, eliminating the need for per-call wrapper boilerplate.
+    #[inline]
+    fn report_damage(&mut self, _rect: crate::damage::DamageRect) {}
+
     /// Fill a rectangle with a solid encoded pixel value.
     #[inline]
     fn fill_rect_encoded(&mut self, x: i32, y: i32, w: i32, h: i32, pixel: EncodedPixel) {

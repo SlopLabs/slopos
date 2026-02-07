@@ -2,6 +2,14 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_or_space};
 
+#[inline]
+fn emit<T: Canvas>(target: &mut T, damage: Option<DamageRect>) -> Option<DamageRect> {
+    if let Some(d) = damage {
+        target.report_damage(d);
+    }
+    damage
+}
+
 pub fn draw_char<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -36,11 +44,12 @@ pub fn draw_char<T: Canvas>(
     let x1 = (x + FONT_CHAR_WIDTH - 1).min(buf_w - 1);
     let y1 = (y + FONT_CHAR_HEIGHT - 1).min(buf_h - 1);
 
-    if x0 <= x1 && y0 <= y1 {
+    let damage = if x0 <= x1 && y0 <= y1 {
         Some(DamageRect { x0, y0, x1, y1 })
     } else {
         None
-    }
+    };
+    emit(target, damage)
 }
 
 pub fn draw_string<T: Canvas>(
@@ -90,7 +99,7 @@ pub fn draw_string<T: Canvas>(
         }
     }
 
-    damage
+    emit(target, damage)
 }
 
 #[inline]

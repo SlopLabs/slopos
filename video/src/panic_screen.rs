@@ -5,9 +5,11 @@
 //! since most subsystems may be in undefined states during panic.
 
 use slopos_abi::draw::{Canvas, Color32};
+use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
+use slopos_gfx::canvas_font;
 
+use crate::framebuffer;
 use crate::graphics::GraphicsContext;
-use crate::{font, framebuffer};
 
 // Colors (ARGB format)
 const PANIC_BG_COLOR: Color32 = Color32(0xFF8B0000); // Dark red
@@ -31,13 +33,13 @@ fn format_hex(value: u64, buf: &mut [u8; 19]) -> &[u8] {
 /// Draw a single line of text with a label and hex value.
 fn draw_register_line(ctx: &mut GraphicsContext, x: i32, y: i32, label: &[u8], value: u64) {
     // Draw label
-    font::draw_string(ctx, x, y, label, PANIC_FG_COLOR, PANIC_BG_COLOR);
+    canvas_font::draw_string(ctx, x, y, label, PANIC_FG_COLOR, PANIC_BG_COLOR);
 
     // Draw hex value
     let mut hex_buf = [0u8; 19];
     let _ = format_hex(value, &mut hex_buf);
-    let label_width = (label.len() as i32 - 1) * font::FONT_CHAR_WIDTH; // -1 for null terminator
-    font::draw_string(
+    let label_width = (label.len() as i32 - 1) * FONT_CHAR_WIDTH; // -1 for null terminator
+    canvas_font::draw_string(
         ctx,
         x + label_width,
         y,
@@ -86,8 +88,8 @@ pub fn display_panic_screen(
     let width = ctx.width() as i32;
     let height = ctx.height() as i32;
 
-    let char_height = font::FONT_CHAR_HEIGHT;
-    let char_width = font::FONT_CHAR_WIDTH;
+    let char_height = FONT_CHAR_HEIGHT;
+    let char_width = FONT_CHAR_WIDTH;
 
     let mut y = 60; // Start from top with margin
 
@@ -96,7 +98,7 @@ pub fn display_panic_screen(
     let header_len = 21;
     let header_width = header_len * char_width;
     let header_x = (width - header_width) / 2;
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         header_x,
         y,
@@ -111,7 +113,7 @@ pub fn display_panic_screen(
     let subtitle_len = 36;
     let subtitle_width = subtitle_len * char_width;
     let subtitle_x = (width - subtitle_width) / 2;
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         subtitle_x,
         y,
@@ -127,7 +129,7 @@ pub fn display_panic_screen(
     // Draw panic message if provided
     if let Some(msg) = message {
         let msg_label = b"Reason: \0";
-        font::draw_string(&mut ctx, 40, y, msg_label, PANIC_FG_COLOR, PANIC_BG_COLOR);
+        canvas_font::draw_string(&mut ctx, 40, y, msg_label, PANIC_FG_COLOR, PANIC_BG_COLOR);
 
         // Draw message character by character
         let mut x = 40 + 8 * char_width;
@@ -144,7 +146,7 @@ pub fn display_panic_screen(
                     break; // Don't overflow into prompt area
                 }
             }
-            font::draw_char(&mut ctx, x, y, byte, PANIC_FG_COLOR, PANIC_BG_COLOR);
+            canvas_font::draw_char(&mut ctx, x, y, byte, PANIC_FG_COLOR, PANIC_BG_COLOR);
             x += char_width;
         }
         y += char_height * 2;
@@ -153,7 +155,7 @@ pub fn display_panic_screen(
     // Draw register info section
     y += char_height;
     let reg_header = b"CPU State:\0";
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         40,
         y,
@@ -190,7 +192,7 @@ pub fn display_panic_screen(
     let prompt_width = prompt_len * char_width;
     let prompt_x = (width - prompt_width) / 2;
     let prompt_y = height - 60;
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         prompt_x,
         prompt_y,
@@ -205,7 +207,7 @@ pub fn display_panic_screen(
     let note_width = note_len * char_width;
     let note_x = (width - note_width) / 2;
     let note_y = height - 40;
-    font::draw_string(
+    canvas_font::draw_string(
         &mut ctx,
         note_x,
         note_y,

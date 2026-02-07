@@ -15,14 +15,13 @@ use core::ffi::c_void;
 
 use slopos_abi::draw::Color32;
 
-use crate::gfx::{self, DamageRect, DrawBuffer};
+use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer};
 use crate::program_registry;
 use crate::syscall::{
     CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, core as sys_core, input, memory,
     process, tty, window,
 };
 use crate::ui_utils;
-use slopos_gfx::damage::DamageTracker;
 
 use crate::theme::*;
 

@@ -15,7 +15,6 @@ use slopos_drivers::xe;
 use slopos_lib::{klog_info, klog_warn};
 
 pub mod compositor_context;
-pub mod font;
 pub mod framebuffer;
 pub mod graphics;
 pub mod panic_screen;

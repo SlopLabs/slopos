@@ -404,18 +404,8 @@ fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
         return false;
     }
 
-    // Blit content up by one line
-    gfx::blit(
-        buf,
-        0,
-        FONT_CHAR_HEIGHT,
-        0,
-        0,
-        width,
-        height - FONT_CHAR_HEIGHT,
-    );
+    buf.blit(0, FONT_CHAR_HEIGHT, 0, 0, width, height - FONT_CHAR_HEIGHT);
 
-    // Clear the bottom line
     gfx::fill_rect(
         buf,
         0,
@@ -628,7 +618,7 @@ fn console_page_up(display: &DisplayState) {
             let shift = delta * FONT_CHAR_HEIGHT;
             let width = display.width.get();
             let height = display.height.get();
-            gfx::blit(buf, 0, 0, 0, shift, width, height - shift);
+            buf.blit(0, 0, 0, shift, width, height - shift);
 
             let view_top = display.view_top.get();
             for row in 0..delta {
@@ -665,7 +655,7 @@ fn console_page_down(display: &DisplayState) {
             let shift = delta * FONT_CHAR_HEIGHT;
             let width = display.width.get();
             let height = display.height.get();
-            gfx::blit(buf, 0, shift, 0, 0, width, height - shift);
+            buf.blit(0, shift, 0, 0, width, height - shift);
 
             let start = rows - delta;
             let view_top = display.view_top.get();
