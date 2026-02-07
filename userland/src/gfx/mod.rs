@@ -3,12 +3,9 @@ pub mod primitives;
 
 pub use slopos_abi::Canvas;
 pub use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
-use slopos_abi::draw::EncodedPixel;
-pub use slopos_abi::pixel::DrawPixelFormat;
-use slopos_abi::pixel::PixelFormat as CanvasPixelFormat;
+use slopos_abi::draw::{Color32, EncodedPixel};
+pub use slopos_abi::pixel::PixelFormat;
 pub use slopos_gfx::damage::DamageTracker;
-
-pub type PixelFormat = DrawPixelFormat;
 
 pub struct DrawBuffer<'a> {
     data: &'a mut [u8],
@@ -16,8 +13,7 @@ pub struct DrawBuffer<'a> {
     height: u32,
     pitch: usize,
     bytes_pp: u8,
-    pixel_format: DrawPixelFormat,
-    canvas_pixel_format: CanvasPixelFormat,
+    pixel_format: PixelFormat,
     damage: DamageTracker,
 }
 
@@ -43,22 +39,17 @@ impl<'a> DrawBuffer<'a> {
             height,
             pitch,
             bytes_pp,
-            pixel_format: DrawPixelFormat::from_bpp(bytes_pp * 8),
-            canvas_pixel_format: if bytes_pp == 4 {
-                CanvasPixelFormat::Argb8888
+            pixel_format: if bytes_pp == 4 {
+                PixelFormat::Argb8888
             } else {
-                CanvasPixelFormat::Rgb888
+                PixelFormat::Rgb888
             },
             damage: DamageTracker::new(),
         })
     }
 
-    pub fn set_pixel_format(&mut self, format: DrawPixelFormat) {
+    pub fn set_pixel_format(&mut self, format: PixelFormat) {
         self.pixel_format = format;
-    }
-
-    pub fn set_canvas_pixel_format(&mut self, format: CanvasPixelFormat) {
-        self.canvas_pixel_format = format;
     }
 
     pub fn width(&self) -> u32 {
@@ -77,12 +68,8 @@ impl<'a> DrawBuffer<'a> {
         self.bytes_pp
     }
 
-    pub fn pixel_format(&self) -> DrawPixelFormat {
+    pub fn pixel_format(&self) -> PixelFormat {
         self.pixel_format
-    }
-
-    pub fn canvas_pixel_format(&self) -> CanvasPixelFormat {
-        self.canvas_pixel_format
     }
 
     pub fn data(&self) -> &[u8] {
@@ -126,9 +113,9 @@ impl<'a> DrawBuffer<'a> {
             return;
         }
 
-        let converted = self.pixel_format.convert_color(color);
+        let encoded = self.pixel_format.encode(Color32(color));
         let offset = self.pixel_offset(x as u32, y as u32);
-        <Self as Canvas>::write_encoded_at(self, offset, EncodedPixel(converted));
+        <Self as Canvas>::write_encoded_at(self, offset, encoded);
     }
 
     pub fn get_pixel(&self, x: i32, y: i32) -> u32 {
@@ -165,7 +152,40 @@ impl<'a> DrawBuffer<'a> {
             _ => 0,
         };
 
-        self.pixel_format.convert_color(raw)
+        // Decode from native format back to 0xAARRGGBB
+        match self.pixel_format {
+            PixelFormat::Argb8888 | PixelFormat::Xrgb8888 => {
+                // Already in 0xAARRGGBB format
+                raw
+            }
+            PixelFormat::Rgba8888 => {
+                // Native: 0xRRGGBBAA -> 0xAARRGGBB
+                let r = (raw >> 24) & 0xFF;
+                let g = (raw >> 16) & 0xFF;
+                let b = (raw >> 8) & 0xFF;
+                let a = raw & 0xFF;
+                (a << 24) | (r << 16) | (g << 8) | b
+            }
+            PixelFormat::Bgra8888 => {
+                // Native: 0xBBGGRRAA -> 0xAARRGGBB
+                let b = (raw >> 24) & 0xFF;
+                let g = (raw >> 16) & 0xFF;
+                let r = (raw >> 8) & 0xFF;
+                let a = raw & 0xFF;
+                (a << 24) | (r << 16) | (g << 8) | b
+            }
+            PixelFormat::Rgb888 => {
+                // Native: 0x00RRGGBB -> 0xFFRRGGBB
+                (0xFF << 24) | raw
+            }
+            PixelFormat::Bgr888 => {
+                // Native: 0x00BBGGRR -> 0xFFRRGGBB
+                let b = (raw >> 16) & 0xFF;
+                let g = (raw >> 8) & 0xFF;
+                let r = raw & 0xFF;
+                (0xFF << 24) | (r << 16) | (g << 8) | b
+            }
+        }
     }
 }
 
@@ -191,8 +211,8 @@ impl Canvas for DrawBuffer<'_> {
     }
 
     #[inline]
-    fn pixel_format(&self) -> CanvasPixelFormat {
-        self.canvas_pixel_format
+    fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
     }
 
     #[inline]

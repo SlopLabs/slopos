@@ -32,7 +32,7 @@ impl SysinfoApp {
             height: SYSINFO_HEIGHT,
             pitch: 0,
             bytes_pp: 4,
-            pixel_format: PixelFormat::Bgra,
+            pixel_format: PixelFormat::Argb8888,
         }
     }
 
@@ -45,9 +45,9 @@ impl SysinfoApp {
         self.bytes_pp = fb_info.bytes_per_pixel();
         self.pitch = (self.width as usize) * (self.bytes_pp as usize);
         self.pixel_format = if fb_info.format.is_bgr_order() {
-            PixelFormat::Bgra
+            PixelFormat::Argb8888
         } else {
-            PixelFormat::Rgba
+            PixelFormat::Rgba8888
         };
 
         let buffer_size = self.pitch * (self.height as usize);

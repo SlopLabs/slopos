@@ -1690,9 +1690,9 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     wm.set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
 
     let pixel_format = if fb_info.format.is_bgr_order() {
-        PixelFormat::Bgra
+        PixelFormat::Argb8888
     } else {
-        PixelFormat::Rgba
+        PixelFormat::Rgba8888
     };
 
     const TARGET_FRAME_MS: u64 = 16;

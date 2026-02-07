@@ -11,7 +11,7 @@ use spin::Once;
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog_info;
 
-use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
+use slopos_abi::arch::SegmentSelector;
 
 use crate::platform;
 use slopos_lib::wl_currency;
@@ -1198,8 +1198,8 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
         ctx.rflags = (*frame).rflags;
         ctx.cs = (*frame).cs;
         ctx.ss = (*frame).ss;
-        ctx.ds = GDT_USER_DATA_SELECTOR as u64;
-        ctx.es = GDT_USER_DATA_SELECTOR as u64;
+        ctx.ds = SegmentSelector::USER_DATA.bits() as u64;
+        ctx.es = SegmentSelector::USER_DATA.bits() as u64;
         ctx.fs = 0;
         ctx.gs = 0;
 

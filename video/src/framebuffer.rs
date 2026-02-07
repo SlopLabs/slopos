@@ -2,7 +2,6 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_lib::{IrqMutex, klog_debug, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -44,8 +43,8 @@ impl FbState {
     }
 
     #[inline]
-    pub(crate) fn draw_pixel_format(&self) -> DrawPixelFormat {
-        DrawPixelFormat::from_pixel_format(self.info.format)
+    pub(crate) fn draw_pixel_format(&self) -> PixelFormat {
+        self.info.format
     }
 
     #[inline]

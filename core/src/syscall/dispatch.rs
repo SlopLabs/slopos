@@ -3,7 +3,7 @@ use slopos_lib::klog_info;
 use crate::scheduler_get_current_task;
 use crate::syscall::handlers::syscall_lookup;
 
-use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
+use slopos_abi::arch::SegmentSelector;
 use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext};
 use slopos_lib::InterruptFrame;
 
@@ -34,8 +34,8 @@ fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
         ctx.rflags = (*frame).rflags;
         ctx.cs = (*frame).cs;
         ctx.ss = (*frame).ss;
-        ctx.ds = GDT_USER_DATA_SELECTOR as u64;
-        ctx.es = GDT_USER_DATA_SELECTOR as u64;
+        ctx.ds = SegmentSelector::USER_DATA.bits() as u64;
+        ctx.es = SegmentSelector::USER_DATA.bits() as u64;
         ctx.fs = 0;
         ctx.gs = 0;
 

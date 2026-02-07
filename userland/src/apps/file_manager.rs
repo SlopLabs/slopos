@@ -51,7 +51,7 @@ impl FileManager {
             height: FM_CONTENT_HEIGHT,
             pitch: 0,
             bytes_pp: 4,
-            pixel_format: PixelFormat::Bgra,
+            pixel_format: PixelFormat::Argb8888,
             needs_redraw: true,
             pointer_x: 0,
             pointer_y: 0,
@@ -74,9 +74,9 @@ impl FileManager {
         self.bytes_pp = fb_info.bytes_per_pixel();
         self.pitch = (self.width as usize) * (self.bytes_pp as usize);
         self.pixel_format = if fb_info.format.is_bgr_order() {
-            PixelFormat::Bgra
+            PixelFormat::Argb8888
         } else {
-            PixelFormat::Rgba
+            PixelFormat::Rgba8888
         };
 
         let buffer_size = self.pitch * (self.height as usize);

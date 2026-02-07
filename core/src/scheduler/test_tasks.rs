@@ -17,7 +17,7 @@ use super::ffi_boundary::simple_context_switch;
 use slopos_mm::kernel_heap::kmalloc;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
 
-use slopos_abi::arch::{GDT_USER_CODE_SELECTOR, GDT_USER_DATA_SELECTOR, SYSCALL_VECTOR};
+use slopos_abi::arch::{SYSCALL_VECTOR, SegmentSelector};
 
 /* ========================================================================
  * TEST TASK IMPLEMENTATIONS
@@ -203,7 +203,9 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
         }
         let cs = (*task_info).context.cs;
         let ss = (*task_info).context.ss;
-        if cs != GDT_USER_CODE_SELECTOR as u64 || ss != GDT_USER_DATA_SELECTOR as u64 {
+        if cs != SegmentSelector::USER_CODE.bits() as u64
+            || ss != SegmentSelector::USER_DATA.bits() as u64
+        {
             klog_info!(
                 "PRIVSEP_TEST: user task selectors incorrect (cs=0x{:x} ss=0x{:x})",
                 cs,

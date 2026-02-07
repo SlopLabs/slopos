@@ -271,7 +271,7 @@ mod surface {
                 height: 0,
                 pitch: 0,
                 bytes_pp: 4,
-                pixel_format: PixelFormat::Bgra,
+                pixel_format: PixelFormat::Argb8888,
             }
         }
 
@@ -303,9 +303,9 @@ mod surface {
             s.bytes_pp = display_info.bytes_per_pixel();
             s.pitch = (width as usize) * (s.bytes_pp as usize);
             s.pixel_format = if display_info.format.is_bgr_order() {
-                PixelFormat::Bgra
+                PixelFormat::Argb8888
             } else {
-                PixelFormat::Rgba
+                PixelFormat::Rgba8888
             };
 
             let buffer_size = s.pitch * (height as usize);

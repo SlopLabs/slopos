@@ -30,7 +30,6 @@ fn c_str_to_slice(ptr: *const c_char) -> &'static [u8] {
 }
 
 pub fn font_draw_char_ctx(
-    _ctx: &GraphicsContext,
     x: i32,
     y: i32,
     c: c_char,
@@ -51,7 +50,6 @@ pub fn font_draw_char_ctx(
 }
 
 pub fn font_draw_string_ctx(
-    _ctx: &GraphicsContext,
     x: i32,
     y: i32,
     str_ptr: *const c_char,

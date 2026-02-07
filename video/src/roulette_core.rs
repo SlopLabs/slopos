@@ -1122,11 +1122,11 @@ fn kernel_draw_text(
     fg: u32,
     bg: u32,
 ) -> VideoResult {
-    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }.ok_or(VideoError::Invalid)?;
+    let _ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }.ok_or(VideoError::Invalid)?;
     if text.is_null() {
         return Err(VideoError::Invalid);
     }
-    let rc = font::font_draw_string_ctx(ctx, x, y, text as *const c_char, Color32(fg), Color32(bg));
+    let rc = font::font_draw_string_ctx(x, y, text as *const c_char, Color32(fg), Color32(bg));
     if rc == 0 {
         Ok(())
     } else {

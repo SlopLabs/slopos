@@ -99,7 +99,7 @@ pub fn scroll_up(buf: &mut DrawBuffer, pixels: i32, fill_color: Color32) {
     let width = buf.width() as i32;
 
     if pixels >= height {
-        let px = buf.canvas_pixel_format().encode(fill_color);
+        let px = buf.pixel_format().encode(fill_color);
         buf.clear_canvas(px);
         buf.add_damage(0, 0, width - 1, height - 1);
         return;
@@ -118,7 +118,7 @@ pub fn scroll_down(buf: &mut DrawBuffer, pixels: i32, fill_color: Color32) {
     let width = buf.width() as i32;
 
     if pixels >= height {
-        let px = buf.canvas_pixel_format().encode(fill_color);
+        let px = buf.pixel_format().encode(fill_color);
         buf.clear_canvas(px);
         buf.add_damage(0, 0, width - 1, height - 1);
         return;

@@ -167,7 +167,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     );
 
     if font::font_draw_string_ctx(
-        &ctx,
         layout.title_x,
         layout.title_y,
         TEXT_TITLE.as_ptr() as *const c_char,
@@ -178,7 +177,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         return Err(VideoError::Invalid);
     }
     if font::font_draw_string_ctx(
-        &ctx,
         layout.subtitle_x,
         layout.subtitle_y,
         TEXT_SUBTITLE.as_ptr() as *const c_char,
@@ -189,7 +187,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         return Err(VideoError::Invalid);
     }
     if font::font_draw_string_ctx(
-        &ctx,
         layout.message_x,
         layout.message_y,
         TEXT_INIT.as_ptr() as *const c_char,
@@ -233,7 +230,6 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
 
     if !message.is_null()
         && font::font_draw_string_ctx(
-            &ctx,
             layout.message_x,
             layout.message_y,
             message,

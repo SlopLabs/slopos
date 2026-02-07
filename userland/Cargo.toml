@@ -42,10 +42,5 @@ default = []
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-core = { workspace = true }
 slopos-gfx = { workspace = true }
-slopos-drivers = { workspace = true }
-slopos-video = { workspace = true }
-slopos-boot = { workspace = true }
 slopos-lib = { workspace = true }
-slopos-mm = { workspace = true }
