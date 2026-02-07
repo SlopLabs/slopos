@@ -2,7 +2,9 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
 use slopos_core::exec;
-use slopos_core::{boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init};
+use slopos_core::sched::{
+    boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
+};
 use slopos_drivers::virtio_blk;
 use slopos_fs::{
     ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,

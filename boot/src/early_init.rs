@@ -417,7 +417,7 @@ pub fn report_kernel_status() {
     }
 }
 
-use slopos_core::enter_scheduler;
+use slopos_core::sched::enter_scheduler;
 
 fn boot_step_serial_init_fn() {
     serial::write_line("BOOT: serial step -> init");

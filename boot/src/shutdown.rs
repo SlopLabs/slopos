@@ -11,7 +11,8 @@ static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
 static SERIAL_DRAINED: StateFlag = StateFlag::new();
 
-use slopos_core::{scheduler_shutdown, task_shutdown_all};
+use slopos_core::sched::scheduler_shutdown;
+use slopos_core::task::task_shutdown_all;
 use slopos_drivers::apic;
 use slopos_drivers::pit::pit_poll_delay_ms;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};

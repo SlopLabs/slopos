@@ -434,7 +434,7 @@ mod suites {
     define_test_suite!(
         privsep,
         SUITE_SCHEDULER,
-        slopos_core::run_privilege_separation_invariant_test,
+        slopos_core::test_tasks::run_privilege_separation_invariant_test,
         single
     );
 

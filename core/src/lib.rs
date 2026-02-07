@@ -26,13 +26,3 @@ pub use scheduler::scheduler as sched;
 pub use scheduler::task;
 pub use scheduler::test_tasks;
 pub use scheduler::work_steal;
-
-pub use scheduler::fate_api::*;
-pub use scheduler::kthread::*;
-pub use scheduler::load_balance::*;
-pub use scheduler::per_cpu::*;
-pub use scheduler::sched_tests::*;
-pub use scheduler::scheduler::*;
-pub use scheduler::task::*;
-pub use scheduler::test_tasks::*;
-pub use scheduler::work_steal::*;

@@ -3,7 +3,7 @@ use slopos_lib::{IrqMutex, RingBuffer, klog_debug};
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;
 use crate::tty::tty_notify_input_ready;
-use slopos_core::scheduler_request_reschedule_from_interrupt;
+use slopos_core::sched::scheduler_request_reschedule_from_interrupt;
 
 const BUFFER_SIZE: usize = 256;
 type Buffer = RingBuffer<u8, BUFFER_SIZE>;

@@ -10,7 +10,12 @@ use slopos_abi::syscall::*;
 
 use crate::exec;
 
+use crate::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 use crate::platform;
+use crate::sched::{
+    clear_scheduler_current_task, get_scheduler_stats, schedule, scheduler_is_preemption_enabled,
+    sleep_current_task_ms, task_wait_for, yield_,
+};
 use crate::syscall::common::{
     SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
     syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
@@ -21,12 +26,7 @@ use crate::syscall::fs::{
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
 use crate::syscall_services::{fate as fate_svc, input, tty, video};
-use crate::{
-    clear_scheduler_current_task, fate_apply_outcome, fate_set_pending, fate_spin,
-    fate_take_pending, get_scheduler_stats, get_task_stats, schedule,
-    scheduler_is_preemption_enabled, sleep_current_task_ms, task_get_exit_record, task_terminate,
-    task_wait_for, yield_,
-};
+use crate::task::{get_task_stats, task_get_exit_record, task_terminate};
 
 use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
 use slopos_lib::InterruptFrame;

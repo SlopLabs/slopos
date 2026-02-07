@@ -17,9 +17,9 @@ use slopos_mm::process_vm::{
     process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
 };
 
-use crate::{
-    INVALID_TASK_ID, Task, TaskEntry, schedule_task, task_create, task_get_info, task_terminate,
-};
+use crate::sched::schedule_task;
+use crate::task::{TaskEntry, task_create, task_get_info, task_terminate};
+use slopos_abi::task::{INVALID_TASK_ID, Task};
 
 extern crate alloc;
 

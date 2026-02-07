@@ -1,6 +1,6 @@
 use slopos_lib::klog_info;
 
-use crate::scheduler_get_current_task;
+use crate::sched::scheduler_get_current_task;
 use crate::syscall::handlers::syscall_lookup;
 
 use slopos_abi::arch::SegmentSelector;

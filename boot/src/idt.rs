@@ -84,10 +84,10 @@ use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
 
-use slopos_core::{
+use slopos_core::sched::{
     schedule, scheduler_get_current_task, scheduler_request_reschedule_from_interrupt,
-    task_terminate,
 };
+use slopos_core::task::task_terminate;
 
 // Task and related types are now imported from abi
 use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskFaultReason};
