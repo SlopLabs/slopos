@@ -312,6 +312,13 @@ impl WindowBounds {
     }
 }
 
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
+struct DecorationHover {
+    task_id: u32,
+    close_hover: bool,
+    minimize_hover: bool,
+}
+
 /// Maximum cursor positions to track per frame (for damage)
 const MAX_CURSOR_TRAIL: usize = 16;
 const FRAME_METRICS_WINDOW: usize = 128;
@@ -396,6 +403,7 @@ struct WindowManager {
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
     prev_start_menu_hover: Option<usize>,
+    prev_decoration_hover: DecorationHover,
     // Force full redraw flag
     needs_full_redraw: bool,
     // Client surface cache for shared memory mappings
@@ -453,6 +461,7 @@ impl WindowManager {
             prev_taskbar_state: TaskbarState::empty(),
             taskbar_needs_redraw: true,
             prev_start_menu_hover: None,
+            prev_decoration_hover: DecorationHover::default(),
             needs_full_redraw: true,
             surface_cache: ClientSurfaceCache::new(),
             output_bytes_pp: 4,
@@ -653,6 +662,38 @@ impl WindowManager {
         } else {
             self.prev_start_menu_hover = None;
         }
+
+        // Track decoration hover changes on inactive windows so the title bar
+        // redraws when buttons gain/lose hover highlight.
+        let mut current_deco_hover = DecorationHover::default();
+        for i in (0..self.window_count as usize).rev() {
+            let window = self.windows[i];
+            if window.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+            if self.hit_test_title_bar(&window) {
+                current_deco_hover = DecorationHover {
+                    task_id: window.task_id,
+                    close_hover: self.hit_test_close_button(&window),
+                    minimize_hover: self.hit_test_minimize_button(&window),
+                };
+                break;
+            }
+        }
+        if current_deco_hover != self.prev_decoration_hover {
+            if self.prev_decoration_hover.task_id != 0 {
+                if let Some(old_win) = self.find_window_by_task(self.prev_decoration_hover.task_id)
+                {
+                    self.add_title_bar_damage(&old_win);
+                }
+            }
+            if current_deco_hover.task_id != 0 {
+                if let Some(new_win) = self.find_window_by_task(current_deco_hover.task_id) {
+                    self.add_title_bar_damage(&new_win);
+                }
+            }
+            self.prev_decoration_hover = current_deco_hover;
+        }
     }
 
     /// Find previous bounds for a window by task_id
@@ -668,6 +709,21 @@ impl WindowManager {
     /// Check if a window with given task_id exists in current frame
     fn window_exists(&self, task_id: u32) -> bool {
         (0..self.window_count as usize).any(|i| self.windows[i].task_id == task_id)
+    }
+
+    fn find_window_by_task(&self, task_id: u32) -> Option<UserWindowInfo> {
+        (0..self.window_count as usize)
+            .find(|&i| self.windows[i].task_id == task_id)
+            .map(|i| self.windows[i])
+    }
+
+    fn add_title_bar_damage(&mut self, window: &UserWindowInfo) {
+        self.output_damage.add_rect(
+            window.x,
+            window.y - TITLE_BAR_HEIGHT,
+            window.x + window.width as i32 - 1,
+            window.y - 1,
+        );
     }
 
     fn pending_close_index(&self, task_id: u32) -> Option<usize> {
