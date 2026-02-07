@@ -4,6 +4,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_lib::InterruptFrame;
 use slopos_lib::IrqMutex;
+use slopos_lib::cpu;
 use slopos_lib::preempt::PreemptGuard;
 use spin::Once;
 
@@ -18,11 +19,13 @@ use slopos_lib::wl_currency;
 use super::per_cpu;
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, reap_zombies, task_get_info,
-    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
-    task_record_context_switch, task_record_yield, task_set_current, task_set_state,
+    TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, reap_zombies, task_find_by_id,
+    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
+    task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
+    task_set_state, task_set_state_with_reason,
 };
 use super::work_steal::try_work_steal;
+use slopos_abi::task::{BlockReason, MAX_TASKS};
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
@@ -32,6 +35,192 @@ static IDLE_WAKEUP_CB: Once<IrqMutex<Option<fn() -> c_int>>> = Once::new();
 use core::sync::atomic::AtomicU8;
 static SCHEDULER_ENABLED: AtomicU8 = AtomicU8::new(0);
 static PREEMPTION_ENABLED: AtomicU8 = AtomicU8::new(SCHEDULER_PREEMPTION_DEFAULT);
+
+#[derive(Copy, Clone)]
+struct SleepEntry {
+    task_id: u32,
+    wake_tick: u64,
+    active: bool,
+}
+
+impl SleepEntry {
+    const fn empty() -> Self {
+        Self {
+            task_id: INVALID_TASK_ID,
+            wake_tick: 0,
+            active: false,
+        }
+    }
+}
+
+struct SleepQueue {
+    entries: [SleepEntry; MAX_TASKS],
+}
+
+impl SleepQueue {
+    const fn new() -> Self {
+        Self {
+            entries: [SleepEntry::empty(); MAX_TASKS],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries = [SleepEntry::empty(); MAX_TASKS];
+    }
+
+    fn upsert(&mut self, task_id: u32, wake_tick: u64) -> bool {
+        let mut free_idx = None;
+        for (idx, entry) in self.entries.iter_mut().enumerate() {
+            if entry.active && entry.task_id == task_id {
+                entry.wake_tick = wake_tick;
+                return true;
+            }
+            if !entry.active && free_idx.is_none() {
+                free_idx = Some(idx);
+            }
+        }
+
+        if let Some(idx) = free_idx {
+            self.entries[idx] = SleepEntry {
+                task_id,
+                wake_tick,
+                active: true,
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove(&mut self, task_id: u32) {
+        for entry in self.entries.iter_mut() {
+            if entry.active && entry.task_id == task_id {
+                *entry = SleepEntry::empty();
+                break;
+            }
+        }
+    }
+
+    fn collect_due(&mut self, now_tick: u64, out: &mut [u32; MAX_TASKS]) -> usize {
+        let mut count = 0usize;
+        for entry in self.entries.iter_mut() {
+            if !entry.active {
+                continue;
+            }
+            if tick_reached(now_tick, entry.wake_tick) {
+                if count < out.len() {
+                    out[count] = entry.task_id;
+                    count += 1;
+                }
+                *entry = SleepEntry::empty();
+            }
+        }
+        count
+    }
+}
+
+static SLEEP_QUEUE: IrqMutex<SleepQueue> = IrqMutex::new(SleepQueue::new());
+
+#[inline]
+fn tick_reached(now_tick: u64, deadline_tick: u64) -> bool {
+    // Wraparound-safe compare: true when now >= deadline in unsigned tick space.
+    now_tick.wrapping_sub(deadline_tick) < (1u64 << 63)
+}
+
+fn ms_to_sleep_ticks(ms: u32) -> u64 {
+    let freq = platform::timer_frequency() as u64;
+    if freq == 0 {
+        return 1;
+    }
+
+    let ticks = (ms as u64).saturating_mul(freq).saturating_add(999) / 1000;
+    ticks.max(1)
+}
+
+fn wake_sleeping_task(task_id: u32) {
+    if task_id == INVALID_TASK_ID {
+        return;
+    }
+
+    let task = task_find_by_id(task_id);
+    if task.is_null() || task_is_invalid(task) || task_is_terminated(task) {
+        return;
+    }
+
+    let is_sleep_blocked =
+        task_is_blocked(task) && unsafe { (*task).block_reason == BlockReason::Sleep };
+    if !is_sleep_blocked {
+        return;
+    }
+
+    if task_set_state_with_reason(task_id, TaskStatus::Ready, BlockReason::None) != 0 {
+        return;
+    }
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    let _ = schedule_task(task);
+}
+
+fn wake_due_sleepers(now_tick: u64) {
+    let mut due = [INVALID_TASK_ID; MAX_TASKS];
+    let due_count = {
+        let mut queue = SLEEP_QUEUE.lock();
+        queue.collect_due(now_tick, &mut due)
+    };
+
+    for task_id in due.iter().take(due_count) {
+        wake_sleeping_task(*task_id);
+    }
+}
+
+pub fn cancel_sleep(task_id: u32) {
+    if task_id == INVALID_TASK_ID {
+        return;
+    }
+    SLEEP_QUEUE.lock().remove(task_id);
+}
+
+pub fn sleep_current_task_ms(ms: u32) -> c_int {
+    if ms == 0 {
+        return 0;
+    }
+
+    if PREEMPTION_ENABLED.load(Ordering::Acquire) == 0
+        || SCHEDULER_ENABLED.load(Ordering::Acquire) == 0
+    {
+        platform::timer_poll_delay_ms(ms);
+        return 0;
+    }
+
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return -1;
+    }
+    if per_cpu::is_idle_task(current) {
+        platform::timer_poll_delay_ms(ms);
+        return 0;
+    }
+
+    let task_id = unsafe { (*current).task_id };
+    if task_id == INVALID_TASK_ID {
+        return -1;
+    }
+
+    let now_tick = platform::timer_ticks();
+    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
+    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+        return -1;
+    }
+
+    if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+        cancel_sleep(task_id);
+        return -1;
+    }
+
+    unschedule_task(current);
+    schedule();
+    0
+}
 
 #[inline]
 fn is_scheduling_active() -> bool {
@@ -146,6 +335,19 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         return;
     }
 
+    unsafe {
+        let rip = (*to_task).context.rip;
+        if rip < 0x1000 {
+            klog_info!(
+                "SCHED: refusing to dispatch task {} with invalid rip=0x{:x}",
+                (*to_task).task_id,
+                rip
+            );
+            let _ = crate::task::task_terminate((*to_task).task_id);
+            return;
+        }
+    }
+
     let timestamp = kdiag_timestamp();
     task_record_context_switch(from_task, to_task, timestamp);
 
@@ -204,6 +406,67 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     }
 }
 
+fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> bool {
+    let next_task = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
+        .unwrap_or(ptr::null_mut());
+
+    if next_task.is_null() {
+        return false;
+    }
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_executing_task(true);
+    });
+
+    if per_cpu::should_pause_scheduler_loop(cpu_id) {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            let _ = sched.enqueue_local(next_task);
+            sched.set_executing_task(false);
+        });
+        core::hint::spin_loop();
+        return false;
+    }
+
+    if task_is_terminated(next_task) || !task_is_ready(next_task) {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.set_executing_task(false);
+        });
+        return false;
+    }
+
+    execute_task(cpu_id, idle_task, next_task);
+
+    let timestamp = kdiag_timestamp();
+    task_record_context_switch(next_task, idle_task, timestamp);
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(idle_task);
+    });
+    task_set_current(idle_task);
+
+    unsafe {
+        let kernel_dir = paging_get_kernel_directory();
+        paging_set_current_directory(kernel_dir);
+        if !(*kernel_dir).pml4_phys.is_null() {
+            (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
+        }
+
+        if !task_is_terminated(next_task) && task_is_running(next_task) {
+            if task_set_state((*next_task).task_id, TaskStatus::Ready) == 0 {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    let _ = sched.enqueue_local(next_task);
+                });
+            }
+        }
+    }
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_executing_task(false);
+    });
+
+    true
+}
+
 /// Validate that a user-mode task's context has sane values before iretq.
 /// Catches context corruption early with a clear panic message rather than
 /// a mysterious Invalid Opcode at a garbage address.
@@ -247,10 +510,10 @@ fn validate_user_context(ctx: &TaskContext, task: *const Task) {
 
 pub fn schedule() {
     let cpu_id = slopos_lib::get_current_cpu();
-    let preempt_guard = PreemptGuard::new();
+    let irq_flags = cpu::save_flags_cli();
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
-        drop(preempt_guard);
+        cpu::restore_flags(irq_flags);
         return;
     }
 
@@ -265,12 +528,13 @@ pub fn schedule() {
     });
 
     if idle_task.is_null() {
-        drop(preempt_guard);
+        cpu::restore_flags(irq_flags);
         return;
     }
 
     if current == idle_task {
-        drop(preempt_guard);
+        let _ = run_ready_task_from_idle(cpu_id, idle_task);
+        cpu::restore_flags(irq_flags);
         return;
     }
 
@@ -318,7 +582,7 @@ pub fn schedule() {
         let idle_ctx = &raw const (*idle_task).context;
         context_switch(current_ctx, idle_ctx);
     }
-    drop(preempt_guard);
+    cpu::restore_flags(irq_flags);
 }
 
 pub fn r#yield() {
@@ -541,6 +805,7 @@ pub fn init_scheduler() -> c_int {
     user_copy::register_current_task_provider(current_task_process_id);
 
     per_cpu::init_all_percpu_schedulers();
+    SLEEP_QUEUE.lock().clear();
 
     slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
 
@@ -702,64 +967,8 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             continue;
         }
 
-        // 3. Dequeue highest priority task
-        let next_task =
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
-                .unwrap_or(ptr::null_mut());
-
-        // 4. Execute task if available
-        if !next_task.is_null() {
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.set_executing_task(true);
-            });
-
-            // Re-check pause after marking executing
-            if per_cpu::should_pause_scheduler_loop(cpu_id) {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    sched.enqueue_local(next_task);
-                    sched.set_executing_task(false);
-                });
-                core::hint::spin_loop();
-                continue;
-            }
-
-            if task_is_terminated(next_task) || !task_is_ready(next_task) {
-                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                    sched.set_executing_task(false);
-                });
-                continue;
-            }
-
-            execute_task(cpu_id, idle_task, next_task);
-
-            // Post-switch: restore idle as current and re-queue task if runnable
-            let timestamp = kdiag_timestamp();
-            task_record_context_switch(next_task, idle_task, timestamp);
-
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.set_current_task(idle_task);
-            });
-            task_set_current(idle_task);
-
-            unsafe {
-                let kernel_dir = paging_get_kernel_directory();
-                paging_set_current_directory(kernel_dir);
-                if !(*kernel_dir).pml4_phys.is_null() {
-                    (*idle_task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
-                }
-
-                if !task_is_terminated(next_task) && task_is_running(next_task) {
-                    if task_set_state((*next_task).task_id, TaskStatus::Ready) == 0 {
-                        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                            sched.enqueue_local(next_task);
-                        });
-                    }
-                }
-            }
-
-            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-                sched.set_executing_task(false);
-            });
+        // 3/4. Dequeue and execute one ready task if available.
+        if run_ready_task_from_idle(cpu_id, idle_task) {
             continue;
         }
 
@@ -788,6 +997,7 @@ pub fn stop_scheduler() {
 
 pub fn scheduler_shutdown() {
     SCHEDULER_ENABLED.store(0, Ordering::Release);
+    SLEEP_QUEUE.lock().clear();
     per_cpu::clear_all_cpu_queues();
 }
 
@@ -838,17 +1048,26 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
-    if PreemptGuard::is_active() {
+    let cpu_id = slopos_lib::get_current_cpu();
+    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
+        .unwrap_or(ptr::null_mut());
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
+
+    let preempt_active = PreemptGuard::is_active();
+    let running_idle = !current.is_null() && current == idle_task;
+
+    if preempt_active && !running_idle {
         PreemptGuard::set_reschedule_pending();
         return;
     }
-
-    let cpu_id = slopos_lib::get_current_cpu();
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.drain_remote_inbox();
         sched.increment_ticks();
     });
+
+    wake_due_sleepers(platform::timer_ticks());
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0
         || PREEMPTION_ENABLED.load(Ordering::Acquire) == 0
@@ -856,14 +1075,10 @@ pub fn scheduler_timer_tick() {
         return;
     }
 
-    let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
-        .unwrap_or(ptr::null_mut());
     if current.is_null() {
         return;
     }
 
-    let idle_task =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task()).unwrap_or(ptr::null_mut());
     if current == idle_task {
         let ready_count =
             per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);

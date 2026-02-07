@@ -47,6 +47,42 @@ impl FbState {
     pub(crate) fn draw_pixel_format(&self) -> DrawPixelFormat {
         DrawPixelFormat::from_pixel_format(self.info.format)
     }
+
+    #[inline]
+    pub(crate) fn buffer_size(&self) -> usize {
+        self.info.buffer_size() as usize
+    }
+
+    #[inline]
+    fn checked_offset(&self, x: u32, y: u32) -> Option<usize> {
+        if x >= self.width() || y >= self.height() {
+            return None;
+        }
+        let bytes_pp = self.info.bytes_per_pixel() as usize;
+        let pitch = self.pitch() as usize;
+        let offset = (y as usize)
+            .checked_mul(pitch)?
+            .checked_add((x as usize).checked_mul(bytes_pp)?)?;
+        if offset < self.buffer_size() {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn checked_ptr(&self, offset: usize, len: usize) -> Option<*mut u8> {
+        let end = offset.checked_add(len)?;
+        if end > self.buffer_size() {
+            return None;
+        }
+        let base = self.base_ptr();
+        if base.is_null() {
+            return None;
+        }
+        // SAFETY: offset and len were bounds-checked against framebuffer size above.
+        Some(unsafe { base.add(offset) })
+    }
 }
 
 struct FramebufferState {
@@ -225,14 +261,14 @@ pub fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
         None => return,
     };
 
-    if x >= fb.width() || y >= fb.height() {
-        return;
-    }
-
     let bytes_pp = fb.info.bytes_per_pixel() as usize;
     let converted = fb.draw_pixel_format().convert_color(color);
-    let offset = y as usize * fb.pitch() as usize + x as usize * bytes_pp;
-    let pixel_ptr = unsafe { fb.base_ptr().add(offset) };
+    let Some(offset) = fb.checked_offset(x, y) else {
+        return;
+    };
+    let Some(pixel_ptr) = fb.checked_ptr(offset, bytes_pp) else {
+        return;
+    };
 
     unsafe {
         match bytes_pp {
@@ -254,13 +290,13 @@ pub fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
         None => return 0,
     };
 
-    if x >= fb.width() || y >= fb.height() {
-        return 0;
-    }
-
     let bytes_pp = fb.info.bytes_per_pixel() as usize;
-    let offset = y as usize * fb.pitch() as usize + x as usize * bytes_pp;
-    let pixel_ptr = unsafe { fb.base_ptr().add(offset) };
+    let Some(offset) = fb.checked_offset(x, y) else {
+        return 0;
+    };
+    let Some(pixel_ptr) = fb.checked_ptr(offset, bytes_pp) else {
+        return 0;
+    };
 
     let mut color = 0u32;
     unsafe {
@@ -378,7 +414,71 @@ pub fn framebuffer_flush() -> c_int {
     if let Some(cb) = *guard { cb() } else { 0 }
 }
 
+fn copy_rect_from_shm(
+    fb: &FbState,
+    shm_virt: *const u8,
+    shm_size: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+) -> bool {
+    let fb_width = fb.width() as i32;
+    let fb_height = fb.height() as i32;
+    let bytes_pp = fb.info.bytes_per_pixel() as usize;
+    let fb_pitch = fb.pitch() as usize;
+
+    let cx0 = x0.max(0);
+    let cy0 = y0.max(0);
+    let cx1 = x1.min(fb_width - 1);
+    let cy1 = y1.min(fb_height - 1);
+    if cx0 > cx1 || cy0 > cy1 {
+        return true;
+    }
+
+    let row_bytes = (cx1 - cx0 + 1) as usize * bytes_pp;
+    for row in cy0..=cy1 {
+        let row_usize = row as usize;
+        let src_off = row_usize
+            .checked_mul(fb_pitch)
+            .and_then(|v| v.checked_add(cx0 as usize * bytes_pp));
+        let dst_off = src_off;
+        let Some(src_off) = src_off else {
+            return false;
+        };
+        let Some(dst_off) = dst_off else {
+            return false;
+        };
+
+        let Some(src_end) = src_off.checked_add(row_bytes) else {
+            return false;
+        };
+        if src_end > shm_size {
+            return false;
+        }
+
+        let Some(dst_ptr) = fb.checked_ptr(dst_off, row_bytes) else {
+            return false;
+        };
+        // SAFETY: src range is checked against shm_size, dst range checked by checked_ptr.
+        unsafe {
+            ptr::copy_nonoverlapping(shm_virt.add(src_off), dst_ptr, row_bytes);
+        }
+    }
+
+    true
+}
+
 pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
+    fb_flip_from_shm_damage(shm_phys, size, core::ptr::null(), 0)
+}
+
+pub fn fb_flip_from_shm_damage(
+    shm_phys: PhysAddr,
+    size: usize,
+    damage: *const slopos_abi::damage::DamageRect,
+    damage_count: u32,
+) -> c_int {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return -1,
@@ -395,9 +495,31 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
         None => return -1,
     };
 
-    unsafe {
-        ptr::copy_nonoverlapping(shm_virt as *const u8, fb.base_ptr(), copy_size);
+    let shm_ptr = shm_virt as *const u8;
+
+    if damage.is_null() || damage_count == 0 {
+        let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
+            return -1;
+        };
+        // SAFETY: source and destination have been validated and are non-overlapping.
+        unsafe {
+            ptr::copy_nonoverlapping(shm_ptr, dst_ptr, copy_size);
+        }
+        return framebuffer_flush();
     }
 
+    let max_regions = slopos_abi::damage::MAX_DAMAGE_REGIONS as u32;
+    let region_count = damage_count.min(max_regions) as usize;
+    // SAFETY: kernel syscall path validates this pointer and length before calling us.
+    let regions = unsafe { core::slice::from_raw_parts(damage, region_count) };
+
+    for rect in regions {
+        if !rect.is_valid() {
+            continue;
+        }
+        if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
+            return -1;
+        }
+    }
     framebuffer_flush()
 }

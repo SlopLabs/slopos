@@ -4,6 +4,7 @@ use core::ptr;
 use slopos_abi::DisplayInfo;
 use slopos_abi::InputEvent;
 use slopos_abi::WindowInfo;
+use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::*;
 
@@ -23,7 +24,8 @@ use crate::syscall_services::{fate as fate_svc, input, tty, video};
 use crate::{
     clear_scheduler_current_task, fate_apply_outcome, fate_set_pending, fate_spin,
     fate_take_pending, get_scheduler_stats, get_task_stats, schedule,
-    scheduler_is_preemption_enabled, task_get_exit_record, task_terminate, task_wait_for, yield_,
+    scheduler_is_preemption_enabled, sleep_current_task_ms, task_get_exit_record, task_terminate,
+    task_wait_for, yield_,
 };
 
 use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
@@ -32,7 +34,8 @@ use slopos_lib::klog_debug;
 use slopos_lib::wl_currency;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
-use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_copy::{copy_bytes_from_user, copy_to_user};
+use slopos_mm::user_ptr::UserBytes;
 use slopos_mm::user_ptr::UserPtr;
 
 pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -77,12 +80,17 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
     if ms > 60000 {
         ms = 60000;
     }
-    if scheduler_is_preemption_enabled() != 0 {
-        crate::platform::timer_sleep_ms(ms as u32);
+    let rc = if scheduler_is_preemption_enabled() != 0 {
+        sleep_current_task_ms(ms as u32)
     } else {
         crate::platform::timer_poll_delay_ms(ms as u32);
+        0
+    };
+    if rc == 0 {
+        ctx.ok(0)
+    } else {
+        ctx.err()
     }
-    ctx.ok(0)
 });
 
 pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -337,13 +345,45 @@ define_syscall!(syscall_raise_window(ctx, args) requires compositor {
 
 define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
     let token = args.arg0_u32();
+    let damage_ptr = args.arg1;
+    let damage_count = args.arg2_usize();
     let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
     let size = slopos_mm::shared_memory::shm_get_size(token);
     if phys_addr.is_null() || size == 0 {
         return ctx.err();
     }
+
+    let mut damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
+    let mut damage_region_count = 0u32;
+    if damage_ptr != 0 && damage_count > 0 {
+        let clamped = damage_count.min(MAX_DAMAGE_REGIONS);
+        let byte_len = core::mem::size_of::<DamageRect>() * clamped;
+        let user_bytes = match UserBytes::try_new(damage_ptr, byte_len) {
+            Ok(ptr) => ptr,
+            Err(_) => return ctx.err(),
+        };
+        let dst = &mut damage_regions[..clamped];
+        let dst_bytes = unsafe {
+            core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, byte_len)
+        };
+        if copy_bytes_from_user(user_bytes, dst_bytes).is_err() {
+            return ctx.err();
+        }
+        damage_region_count = clamped as u32;
+    }
+
     some_or_err!(ctx, video::get_display_info());
-    check_result!(ctx, video::fb_flip_from_shm(phys_addr, size));
+    let damage_ptr = if damage_region_count > 0 {
+        damage_regions.as_ptr()
+    } else {
+        core::ptr::null()
+    };
+    check_result!(ctx, video::fb_flip_from_shm(
+        phys_addr,
+        size,
+        damage_ptr,
+        damage_region_count,
+    ));
     ctx.ok(0)
 });
 

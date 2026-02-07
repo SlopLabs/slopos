@@ -812,7 +812,7 @@ fn shell_console_init() {
 fn shell_console_clear() {
     if DISPLAY.enabled.get() {
         console_clear(&DISPLAY);
-        let _ = window::surface_commit();
+        shell_console_commit();
     }
 }
 
@@ -846,19 +846,24 @@ fn shell_console_get_cursor() -> (i32, i32) {
 fn shell_console_page_up() {
     if DISPLAY.enabled.get() {
         console_page_up(&DISPLAY);
-        let _ = window::surface_commit();
+        shell_console_commit();
     }
 }
 
 fn shell_console_page_down() {
     if DISPLAY.enabled.get() {
         console_page_down(&DISPLAY);
-        let _ = window::surface_commit();
+        shell_console_commit();
     }
 }
 
 fn shell_console_commit() {
     if DISPLAY.enabled.get() {
+        let width = DISPLAY.width.get();
+        let height = DISPLAY.height.get();
+        if width > 0 && height > 0 {
+            let _ = window::surface_damage(0, 0, width, height);
+        }
         let _ = window::surface_commit();
     }
 }
@@ -866,14 +871,14 @@ fn shell_console_commit() {
 fn shell_console_follow_bottom() {
     if DISPLAY.enabled.get() {
         console_ensure_follow(&DISPLAY);
-        let _ = window::surface_commit();
+        shell_console_commit();
     }
 }
 
 fn shell_redraw_input(_line_row: i32, input: &[u8]) {
     if DISPLAY.enabled.get() {
         console_rewrite_input(&DISPLAY, PROMPT, input);
-        let _ = window::surface_commit();
+        shell_console_commit();
     }
 }
 

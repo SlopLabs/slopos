@@ -595,6 +595,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
             (*task_ptr).exit_code,
         );
         (*task_ptr).set_status(TaskStatus::Terminated);
+        scheduler::cancel_sleep(resolved_id);
         (*task_ptr).fate_token = 0;
         (*task_ptr).fate_value = 0;
         (*task_ptr).fate_pending = 0;

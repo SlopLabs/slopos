@@ -193,6 +193,7 @@ pub fn sysinfo_main(_arg: *mut c_void) {
     }
 
     app.draw_info();
+    let _ = window::surface_damage(0, 0, app.width, app.height);
     let _ = window::surface_commit();
 
     let mut events = [InputEvent::default(); 8];

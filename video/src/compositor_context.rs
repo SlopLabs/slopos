@@ -545,12 +545,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.title = surface.title;
         }
 
-        // Note: We no longer clear damage here. The next commit will replace it.
-        // This ensures damage isn't lost if the compositor fails to render.
-        //
-        // Trade-off: Static windows (no new commits) will report stale damage forever.
-        // This is acceptable since the compositor currently does full redraws anyway.
-        // When partial updates are implemented, add an explicit acknowledge mechanism.
+        // Damage is acknowledged and cleared in `surface_mark_frames_done()` after
+        // successful present. Do not clear here to avoid losing damage if present fails.
 
         count += 1;
     }
@@ -577,6 +573,9 @@ pub fn surface_mark_frames_done(present_time_ms: u64) {
     let mut ctx = CONTEXT.lock();
 
     for surface in ctx.surfaces.values_mut() {
+        // Compositor only calls this after a successful present. At this point,
+        // the previously committed damage has been consumed and can be cleared.
+        surface.committed_damage.clear();
         if surface.frame_callback_pending {
             surface.last_present_time_ms = present_time_ms;
             surface.frame_callback_pending = false;

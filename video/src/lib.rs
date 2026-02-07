@@ -1,5 +1,5 @@
 #![no_std]
-#![allow(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
@@ -7,6 +7,7 @@ use core::ffi::c_int;
 use slopos_abi::CompositorError;
 use slopos_abi::FramebufferData;
 use slopos_abi::addr::PhysAddr;
+use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
@@ -27,8 +28,13 @@ pub enum VideoBackend {
     Xe,
 }
 
-fn video_fb_flip(shm_phys: PhysAddr, size: usize) -> c_int {
-    framebuffer::fb_flip_from_shm(shm_phys, size)
+fn video_fb_flip(
+    shm_phys: PhysAddr,
+    size: usize,
+    damage: *const DamageRect,
+    damage_count: u32,
+) -> c_int {
+    framebuffer::fb_flip_from_shm_damage(shm_phys, size, damage, damage_count)
 }
 
 fn video_roulette_draw(fate: u32) -> VideoResult {

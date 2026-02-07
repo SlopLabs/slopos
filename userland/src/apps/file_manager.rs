@@ -324,6 +324,7 @@ pub fn file_manager_main(_arg: *mut c_void) {
 
     // Initial draw
     fm.draw();
+    let _ = window::surface_damage(0, 0, fm.width, fm.height);
     let _ = window::surface_commit();
 
     // Main event loop
@@ -332,6 +333,7 @@ pub fn file_manager_main(_arg: *mut c_void) {
 
         if fm.needs_redraw {
             fm.draw();
+            let _ = window::surface_damage(0, 0, fm.width, fm.height);
             let _ = window::surface_commit();
             fm.needs_redraw = false;
         }

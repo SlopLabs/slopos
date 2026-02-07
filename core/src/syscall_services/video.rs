@@ -4,6 +4,7 @@ use slopos_abi::CompositorError;
 use slopos_abi::DisplayInfo;
 use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
+use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
 
 pub type CompositorResult = Result<(), CompositorError>;
@@ -26,15 +27,20 @@ slopos_lib::define_service! {
         surface_set_role(task_id: u32, role: u8) -> CompositorResult;
         surface_set_parent(task_id: u32, parent_task_id: u32) -> CompositorResult;
         surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> CompositorResult;
-        @no_wrapper fb_flip(phys_addr: PhysAddr, size: usize) -> c_int;
+        @no_wrapper fb_flip(phys_addr: PhysAddr, size: usize, damage: *const DamageRect, damage_count: u32) -> c_int;
         @no_wrapper roulette_draw(fate: u32) -> VideoResult;
         @no_wrapper surface_set_title(task_id: u32, ptr: *const u8, len: usize) -> CompositorResult;
     }
 }
 
 #[inline(always)]
-pub fn fb_flip_from_shm(phys_addr: PhysAddr, size: usize) -> c_int {
-    (video_services().fb_flip)(phys_addr, size)
+pub fn fb_flip_from_shm(
+    phys_addr: PhysAddr,
+    size: usize,
+    damage: *const DamageRect,
+    damage_count: u32,
+) -> c_int {
+    (video_services().fb_flip)(phys_addr, size, damage, damage_count)
 }
 
 #[inline(always)]

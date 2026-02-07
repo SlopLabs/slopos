@@ -266,9 +266,11 @@ impl CompositorOutput {
         DrawBuffer::new(slice, self.width, self.height, self.pitch, self.bytes_pp)
     }
 
-    /// Present the output buffer to the framebuffer
-    fn present(&self) -> bool {
-        window::fb_flip(self.buffer.token()) == 0
+    /// Present the output buffer to the framebuffer.
+    ///
+    /// When `damage` is empty this falls back to full-buffer present.
+    fn present(&self, damage: &[DamageRect]) -> bool {
+        window::fb_flip_damage(self.buffer.token(), damage) == 0
     }
 }
 
@@ -309,6 +311,68 @@ impl WindowBounds {
 
 /// Maximum cursor positions to track per frame (for damage)
 const MAX_CURSOR_TRAIL: usize = 16;
+const FRAME_METRICS_WINDOW: usize = 128;
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum RenderMode {
+    Full,
+    Partial,
+}
+
+struct FrameMetrics {
+    full_redraw_frames: u64,
+    partial_redraw_frames: u64,
+    total_bytes_copied: u64,
+    late_frames: u64,
+    dropped_presents: u64,
+    frame_times: [u64; FRAME_METRICS_WINDOW],
+    frame_times_count: usize,
+    frame_times_cursor: usize,
+}
+
+impl FrameMetrics {
+    fn new() -> Self {
+        Self {
+            full_redraw_frames: 0,
+            partial_redraw_frames: 0,
+            total_bytes_copied: 0,
+            late_frames: 0,
+            dropped_presents: 0,
+            frame_times: [0; FRAME_METRICS_WINDOW],
+            frame_times_count: 0,
+            frame_times_cursor: 0,
+        }
+    }
+
+    fn record(
+        &mut self,
+        mode: RenderMode,
+        bytes_copied: usize,
+        frame_time_ms: u64,
+        target_frame_ms: u64,
+        present_ok: bool,
+    ) {
+        match mode {
+            RenderMode::Full => self.full_redraw_frames = self.full_redraw_frames.saturating_add(1),
+            RenderMode::Partial => {
+                self.partial_redraw_frames = self.partial_redraw_frames.saturating_add(1)
+            }
+        }
+        self.total_bytes_copied = self.total_bytes_copied.saturating_add(bytes_copied as u64);
+        if frame_time_ms > target_frame_ms {
+            self.late_frames = self.late_frames.saturating_add(1);
+        }
+        if !present_ok {
+            self.dropped_presents = self.dropped_presents.saturating_add(1);
+        }
+
+        self.frame_times[self.frame_times_cursor] = frame_time_ms;
+        self.frame_times_cursor = (self.frame_times_cursor + 1) % FRAME_METRICS_WINDOW;
+        if self.frame_times_count < FRAME_METRICS_WINDOW {
+            self.frame_times_count += 1;
+        }
+    }
+}
 
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
@@ -333,6 +397,8 @@ struct WindowManager {
     // Client surface cache for shared memory mappings
     surface_cache: ClientSurfaceCache,
     // Output buffer info for compositing
+    output_width: u32,
+    output_height: u32,
     output_bytes_pp: u8,
     output_pitch: usize,
     // Output damage accumulator for partial redraw
@@ -393,12 +459,44 @@ impl WindowManager {
             pending_close_tasks: [0; MAX_WINDOWS],
             pending_close_deadlines: [0; MAX_WINDOWS],
             pending_close_count: 0,
+            output_width: 0,
+            output_height: 0,
         }
     }
 
-    fn set_output_info(&mut self, bytes_pp: u8, pitch: usize) {
+    fn set_output_info(&mut self, width: u32, height: u32, bytes_pp: u8, pitch: usize) {
+        self.output_width = width;
+        self.output_height = height;
         self.output_bytes_pp = bytes_pp;
         self.output_pitch = pitch;
+    }
+
+    fn add_cursor_damage_at(&mut self, x: i32, y: i32) {
+        self.output_damage.add_rect(x - 4, y - 4, x + 4, y + 4);
+    }
+
+    fn add_taskbar_damage(&mut self) {
+        if self.output_width == 0 || self.output_height == 0 {
+            return;
+        }
+
+        let fb_height = self.output_height as i32;
+        self.output_damage.add_rect(
+            0,
+            fb_height - TASKBAR_HEIGHT,
+            self.output_width as i32 - 1,
+            fb_height - 1,
+        );
+
+        if self.start_menu_open {
+            let menu_h = self.start_menu_height();
+            self.output_damage.add_rect(
+                self.start_menu_x(),
+                self.start_menu_y(fb_height),
+                self.start_menu_x() + START_MENU_WIDTH - 1,
+                self.start_menu_y(fb_height) + menu_h - 1,
+            );
+        }
     }
 
     /// Update mouse state from kernel.
@@ -510,6 +608,18 @@ impl WindowManager {
                 let old_bounds = self.prev_window_bounds[i];
                 self.add_bounds_damage(&old_bounds);
             }
+        }
+
+        if self.taskbar_needs_redraw {
+            self.add_taskbar_damage();
+        }
+
+        if self.cursor_trail_count > 0 {
+            for i in 0..self.cursor_trail_count {
+                let (x, y) = self.cursor_trail[i];
+                self.add_cursor_damage_at(x, y);
+            }
+            self.add_cursor_damage_at(self.mouse_x, self.mouse_y);
         }
     }
 
@@ -1158,6 +1268,21 @@ impl WindowManager {
 
     /// Draw window content from client's shared memory surface (100% safe)
     fn draw_window_content(&mut self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
+        let full_clip = DamageRect {
+            x0: window.x,
+            y0: window.y,
+            x1: window.x + window.width as i32 - 1,
+            y1: window.y + window.height as i32 - 1,
+        };
+        self.draw_window_content_clipped(buf, window, &full_clip);
+    }
+
+    fn draw_window_content_clipped(
+        &mut self,
+        buf: &mut DrawBuffer,
+        window: &UserWindowInfo,
+        clip: &DamageRect,
+    ) {
         // Calculate buffer size for this surface
         let bytes_pp = self.output_bytes_pp as usize;
         let src_pitch = (window.width as usize) * bytes_pp;
@@ -1190,11 +1315,21 @@ impl WindowManager {
         let buf_width = buf.width() as i32;
         let buf_height = buf.height() as i32;
 
+        let window_rect = DamageRect {
+            x0: window.x,
+            y0: window.y,
+            x1: window.x + window.width as i32 - 1,
+            y1: window.y + window.height as i32 - 1,
+        };
+        let Some(draw_rect) = intersect_rect(clip, &window_rect) else {
+            return;
+        };
+
         // Clip to buffer bounds
-        let x0 = window.x.max(0);
-        let y0 = window.y.max(0);
-        let x1 = (window.x + window.width as i32).min(buf_width);
-        let y1 = (window.y + window.height as i32).min(buf_height);
+        let x0 = draw_rect.x0.max(0);
+        let y0 = draw_rect.y0.max(0);
+        let x1 = (draw_rect.x1 + 1).min(buf_width);
+        let y1 = (draw_rect.y1 + 1).min(buf_height);
 
         if x0 >= x1 || y0 >= y1 {
             return;
@@ -1223,6 +1358,83 @@ impl WindowManager {
             if src_end <= src_data.len() && dst_end <= dst_data.len() {
                 dst_data[dst_off..dst_end].copy_from_slice(&src_data[src_off..src_end]);
             }
+        }
+    }
+
+    fn draw_partial_region(&mut self, buf: &mut DrawBuffer, damage: &DamageRect) {
+        if !damage.is_valid() {
+            return;
+        }
+
+        gfx::fill_rect(
+            buf,
+            damage.x0,
+            damage.y0,
+            damage.x1 - damage.x0 + 1,
+            damage.y1 - damage.y0 + 1,
+            COLOR_BACKGROUND,
+        );
+
+        let window_count = self.window_count as usize;
+        for i in 0..window_count {
+            let window = self.windows[i];
+            if window.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+
+            let content_rect = DamageRect {
+                x0: window.x,
+                y0: window.y,
+                x1: window.x + window.width as i32 - 1,
+                y1: window.y + window.height as i32 - 1,
+            };
+            if intersect_rect(damage, &content_rect).is_some() {
+                self.draw_window_content_clipped(buf, &window, damage);
+            }
+
+            let title_rect = DamageRect {
+                x0: window.x,
+                y0: window.y - TITLE_BAR_HEIGHT,
+                x1: window.x + window.width as i32 - 1,
+                y1: window.y - 1,
+            };
+            if intersect_rect(damage, &title_rect).is_some() {
+                self.draw_title_bar(buf, &window);
+            }
+        }
+
+        let taskbar_y = buf.height() as i32 - TASKBAR_HEIGHT;
+        let taskbar_rect = DamageRect {
+            x0: 0,
+            y0: taskbar_y,
+            x1: buf.width() as i32 - 1,
+            y1: buf.height() as i32 - 1,
+        };
+        if intersect_rect(damage, &taskbar_rect).is_some() {
+            self.draw_taskbar(buf);
+        }
+
+        if self.start_menu_open {
+            let menu_h = self.start_menu_height();
+            let menu_rect = DamageRect {
+                x0: self.start_menu_x(),
+                y0: self.start_menu_y(buf.height() as i32),
+                x1: self.start_menu_x() + START_MENU_WIDTH - 1,
+                y1: self.start_menu_y(buf.height() as i32) + menu_h - 1,
+            };
+            if intersect_rect(damage, &menu_rect).is_some() {
+                self.draw_start_menu(buf);
+            }
+        }
+
+        let cursor_rect = DamageRect {
+            x0: self.mouse_x - 4,
+            y0: self.mouse_y - 4,
+            x1: self.mouse_x + 4,
+            y1: self.mouse_y + 4,
+        };
+        if intersect_rect(damage, &cursor_rect).is_some() {
+            self.draw_cursor(buf);
         }
     }
 
@@ -1283,10 +1495,9 @@ impl WindowManager {
 
     /// Perform a full compositor render pass into the given draw buffer.
     ///
-    /// Clears the output, draws all visible windows (content then title bar) in back-to-front
-    /// order, renders the taskbar, draws the cursor on top, and resets internal redraw flags.
-    /// This implementation always performs a full redraw when invoked; partial-redraw
-    /// optimizations are deferred.
+    /// Renders either a full frame or only damaged regions depending on tracked output damage.
+    /// Full redraw is used as a correctness fallback for first frame, explicit full redraw,
+    /// and full/unknown damage states.
     ///
     /// # Parameters
     ///
@@ -1301,38 +1512,54 @@ impl WindowManager {
     /// // Render the current scene into the output buffer.
     /// wm.render(&mut draw_buf);
     /// ```
-    fn render(&mut self, buf: &mut DrawBuffer) {
-        // Always clear the entire buffer
-        buf.clear(COLOR_BACKGROUND);
+    fn render(&mut self, buf: &mut DrawBuffer) -> RenderMode {
+        let force_full =
+            self.first_frame || self.needs_full_redraw || self.output_damage.is_full_damage();
 
-        // Draw all visible windows (bottom to top for proper z-ordering)
-        let window_count = self.window_count as usize;
-        for i in 0..window_count {
-            let window = self.windows[i];
-            if window.state == WINDOW_STATE_MINIMIZED {
-                continue;
+        let mode = if force_full {
+            // Full redraw fallback path
+            buf.clear(COLOR_BACKGROUND);
+
+            let window_count = self.window_count as usize;
+            for i in 0..window_count {
+                let window = self.windows[i];
+                if window.state == WINDOW_STATE_MINIMIZED {
+                    continue;
+                }
+                self.draw_window_content(buf, &window);
+                self.draw_title_bar(buf, &window);
             }
 
-            // Draw window content from client's shared memory surface
-            self.draw_window_content(buf, &window);
+            self.draw_taskbar(buf);
+            self.draw_start_menu(buf);
+            self.draw_cursor(buf);
+            RenderMode::Full
+        } else {
+            let mut damage_regions = [DamageRect::invalid(); 8];
+            let mut damage_count = 0usize;
+            for rect in self.output_damage.regions() {
+                if damage_count >= damage_regions.len() {
+                    break;
+                }
+                damage_regions[damage_count] = *rect;
+                damage_count += 1;
+            }
 
-            // Draw title bar
-            self.draw_title_bar(buf, &window);
-        }
-
-        // Draw taskbar
-        self.draw_taskbar(buf);
-
-        // Draw start menu over windows/taskbar chrome when open
-        self.draw_start_menu(buf);
-
-        // Draw cursor (on top of everything)
-        self.draw_cursor(buf);
+            if damage_count == 0 {
+                RenderMode::Partial
+            } else {
+                for rect in &damage_regions[..damage_count] {
+                    self.draw_partial_region(buf, rect);
+                }
+                RenderMode::Partial
+            }
+        };
 
         // Reset redraw flags
         self.needs_full_redraw = false;
         self.first_frame = false;
         self.taskbar_needs_redraw = false;
+        mode
     }
 
     /// Check if any redraw is needed
@@ -1340,24 +1567,7 @@ impl WindowManager {
         self.first_frame
             || self.needs_full_redraw
             || self.taskbar_needs_redraw
-            || self.mouse_moved()
             || self.output_damage.is_dirty()
-            || self.any_window_dirty()
-    }
-
-    fn mouse_moved(&self) -> bool {
-        // Mouse moved if we recorded any trail positions this frame
-        self.cursor_trail_count > 0
-    }
-
-    /// Check if any window has pending damage (fallback for damage tracking)
-    fn any_window_dirty(&self) -> bool {
-        for i in 0..self.window_count as usize {
-            if self.windows[i].is_dirty() {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -1375,6 +1585,43 @@ fn title_to_str(title: &[u8; 32]) -> &str {
 
     // Direct UTF-8 validation - no unsafe needed!
     core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
+}
+
+fn intersect_rect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
+    let x0 = a.x0.max(b.x0);
+    let y0 = a.y0.max(b.y0);
+    let x1 = a.x1.min(b.x1);
+    let y1 = a.y1.min(b.y1);
+    if x0 <= x1 && y0 <= y1 {
+        Some(DamageRect { x0, y0, x1, y1 })
+    } else {
+        None
+    }
+}
+
+fn estimate_present_bytes(
+    width: u32,
+    height: u32,
+    bytes_pp: u8,
+    pitch: usize,
+    mode: RenderMode,
+    damage: &[DamageRect],
+) -> usize {
+    if mode == RenderMode::Full || damage.is_empty() {
+        return pitch.saturating_mul(height as usize);
+    }
+
+    let mut total = 0usize;
+    for rect in damage {
+        let clipped = rect.clip(width as i32, height as i32);
+        if !clipped.is_valid() {
+            continue;
+        }
+        let w = (clipped.x1 - clipped.x0 + 1) as usize;
+        let h = (clipped.y1 - clipped.y0 + 1) as usize;
+        total = total.saturating_add(w.saturating_mul(h).saturating_mul(bytes_pp as usize));
+    }
+    total
 }
 
 pub fn compositor_user_main(_arg: *mut c_void) {
@@ -1401,7 +1648,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     };
     tty::write(b"COMPOSITOR: output allocated\n");
 
-    wm.set_output_info(output.bytes_pp, output.pitch);
+    wm.set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
 
     let pixel_format = if fb_info.format.is_bgr_order() {
         PixelFormat::Bgra
@@ -1411,6 +1658,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
     const TARGET_FRAME_MS: u64 = 16;
     let mut frame_count: u32 = 0;
+    let mut metrics = FrameMetrics::new();
 
     loop {
         let frame_start_ms = sys_core::get_time_ms();
@@ -1423,12 +1671,31 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         wm.handle_mouse_events(fb_info.height as i32);
 
         if wm.needs_redraw() {
+            let mut mode = RenderMode::Full;
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
-                wm.render(&mut buf);
+                mode = wm.render(&mut buf);
             }
 
-            let flip_result = output.present();
+            let mut present_damage = [DamageRect::invalid(); 8];
+            let mut present_damage_count = 0usize;
+            if mode == RenderMode::Partial {
+                for rect in wm.output_damage.regions() {
+                    if present_damage_count >= present_damage.len() {
+                        break;
+                    }
+                    present_damage[present_damage_count] = *rect;
+                    present_damage_count += 1;
+                }
+            }
+
+            let damage_slice = if mode == RenderMode::Partial {
+                &present_damage[..present_damage_count]
+            } else {
+                &[]
+            };
+
+            let flip_result = output.present(damage_slice);
             if frame_count < 3 {
                 if flip_result {
                     tty::write(b"COMPOSITOR: fb_flip ok\n");
@@ -1437,9 +1704,22 @@ pub fn compositor_user_main(_arg: *mut c_void) {
                 }
             }
             frame_count = frame_count.saturating_add(1);
+            if flip_result {
+                let present_time = sys_core::get_time_ms();
+                window::mark_frames_done(present_time);
+            }
 
-            let present_time = sys_core::get_time_ms();
-            window::mark_frames_done(present_time);
+            let frame_end_ms = sys_core::get_time_ms();
+            let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
+            let copied = estimate_present_bytes(
+                output.width,
+                output.height,
+                output.bytes_pp,
+                output.pitch,
+                mode,
+                damage_slice,
+            );
+            metrics.record(mode, copied, frame_time, TARGET_FRAME_MS, flip_result);
         }
 
         let frame_end_ms = sys_core::get_time_ms();
@@ -1447,7 +1727,5 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         if frame_time < TARGET_FRAME_MS {
             sys_core::sleep_ms((TARGET_FRAME_MS - frame_time) as u32);
         }
-
-        sys_core::yield_now();
     }
 }
