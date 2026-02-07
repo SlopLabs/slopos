@@ -1,5 +1,5 @@
 use super::{DrawBuffer, DrawTarget};
-use slopos_abi::draw_primitives;
+use slopos_gfx::primitives as draw_primitives;
 
 pub fn fill_rect(buf: &mut DrawBuffer, x: i32, y: i32, w: i32, h: i32, color: u32) {
     draw_primitives::fill_rect(buf, x, y, w, h, color);

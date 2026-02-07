@@ -41,7 +41,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
+use slopos_lib::{
+    InitFlag, IrqMutex, MAX_CPUS, align_down_u64, align_up_u64, klog_debug, klog_info,
+};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{
@@ -68,7 +70,6 @@ const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 const MAX_ORDER: u32 = 24;
 const INVALID_REGION_ID: u16 = 0xFFFF;
 
-const MAX_CPUS: usize = 256;
 const PCP_HIGH_WATERMARK: u32 = 64;
 const PCP_LOW_WATERMARK: u32 = 8;
 const PCP_BATCH_SIZE: u32 = 16;

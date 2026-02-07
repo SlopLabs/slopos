@@ -1,5 +1,5 @@
 use super::DrawBuffer;
-use slopos_abi::font_render;
+use slopos_gfx::font_render;
 
 pub use slopos_abi::font::{
     FONT_CHAR_COUNT, FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, FONT_DATA, FONT_FIRST_CHAR, FONT_LAST_CHAR,

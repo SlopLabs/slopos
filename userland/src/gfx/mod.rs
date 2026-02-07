@@ -2,9 +2,10 @@ pub mod font;
 pub mod primitives;
 
 pub use slopos_abi::DrawTarget;
-pub use slopos_abi::damage::{DamageRect, DamageTracker, MAX_DAMAGE_REGIONS};
+pub use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 pub use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::{PixelBuffer, pixel_ops};
+pub use slopos_gfx::damage::DamageTracker;
 
 pub type PixelFormat = DrawPixelFormat;
 

@@ -29,8 +29,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 /// Kernel stack size per CPU (64KB)
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
-/// Maximum number of CPUs supported
-pub const PCR_MAX_CPUS: usize = 256;
+use super::percpu::MAX_CPUS as PCR_MAX_CPUS;
 
 /// GDT entry count: null, kernel code, kernel data, user data, user code = 5
 /// Plus TSS descriptor (2 entries for 64-bit TSS)

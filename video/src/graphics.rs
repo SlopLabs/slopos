@@ -1,8 +1,8 @@
 use crate::framebuffer::{self, FbState};
-use slopos_abi::draw_primitives;
 use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::video_traits::VideoError;
 use slopos_abi::{DrawTarget, PixelBuffer, pixel_ops};
+use slopos_gfx::primitives;
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
 
@@ -202,25 +202,25 @@ pub fn draw_pixel(ctx: &mut GraphicsContext, x: i32, y: i32, color: u32) {
 
 #[inline]
 pub fn fill_rect(ctx: &mut GraphicsContext, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    draw_primitives::fill_rect(ctx, x, y, w, h, color);
+    primitives::fill_rect(ctx, x, y, w, h, color);
 }
 
 #[inline]
 pub fn draw_rect(ctx: &mut GraphicsContext, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    draw_primitives::rect(ctx, x, y, w, h, color);
+    primitives::rect(ctx, x, y, w, h, color);
 }
 
 #[inline]
 pub fn draw_line(ctx: &mut GraphicsContext, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
-    draw_primitives::line(ctx, x0, y0, x1, y1, color);
+    primitives::line(ctx, x0, y0, x1, y1, color);
 }
 
 #[inline]
 pub fn draw_circle(ctx: &mut GraphicsContext, cx: i32, cy: i32, radius: i32, color: u32) {
-    draw_primitives::circle(ctx, cx, cy, radius, color);
+    primitives::circle(ctx, cx, cy, radius, color);
 }
 
 #[inline]
 pub fn draw_circle_filled(ctx: &mut GraphicsContext, cx: i32, cy: i32, radius: i32, color: u32) {
-    draw_primitives::circle_filled(ctx, cx, cy, radius, color);
+    primitives::circle_filled(ctx, cx, cy, radius, color);
 }

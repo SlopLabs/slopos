@@ -1,8 +1,9 @@
 use crate::vfs::traits::{FileSystem, VfsError, VfsResult};
 use slopos_lib::IrqRwLock;
 
+use crate::MAX_PATH_LEN;
+
 const MAX_MOUNTS: usize = 16;
-const MAX_PATH_LEN: usize = 256;
 
 pub struct MountPoint {
     path: [u8; MAX_PATH_LEN],

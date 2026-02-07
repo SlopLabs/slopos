@@ -17,11 +17,9 @@ pub mod boot;
 pub mod damage;
 pub mod display;
 pub mod draw;
-pub mod draw_primitives;
 pub mod error;
 pub mod fate;
 pub mod font;
-pub mod font_render;
 pub mod fs;
 pub mod input;
 pub mod pixel;
@@ -33,10 +31,7 @@ pub mod video_traits;
 pub mod window;
 
 pub use addr::*;
-pub use damage::{
-    DamageRect, DamageTracker, InternalDamageTracker, MAX_DAMAGE_REGIONS,
-    MAX_INTERNAL_DAMAGE_REGIONS,
-};
+pub use damage::{DamageRect, MAX_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS};
 pub use display::{DisplayInfo, FramebufferData};
 pub use draw::{DamageTracking, DrawTarget, PixelBuffer, pixel_ops};
 pub use error::*;

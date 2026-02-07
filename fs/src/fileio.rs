@@ -17,8 +17,9 @@ const FILE_OPEN_APPEND: u32 = 1 << 3;
 
 use slopos_mm::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES};
 
+use crate::MAX_PATH_LEN;
+
 const FILEIO_MAX_OPEN_FILES: usize = 32;
-const MAX_PATH: usize = 256;
 
 #[derive(Clone, Copy)]
 struct FileDescriptor {
@@ -204,7 +205,10 @@ unsafe fn path_bytes<'a>(path: *const c_char) -> Option<&'a [u8]> {
     }
     unsafe {
         let len = cstr_len(path);
-        Some(slice::from_raw_parts(path as *const u8, len.min(MAX_PATH)))
+        Some(slice::from_raw_parts(
+            path as *const u8,
+            len.min(MAX_PATH_LEN),
+        ))
     }
 }
 

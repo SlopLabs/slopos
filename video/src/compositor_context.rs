@@ -16,11 +16,12 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 
-use slopos_abi::damage::{DamageRect, InternalDamageTracker};
+use slopos_abi::damage::DamageRect;
 use slopos_abi::{
     CompositorError, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole, WINDOW_STATE_NORMAL,
     WindowDamageRect, WindowInfo,
 };
+use slopos_gfx::damage::InternalDamageTracker;
 use slopos_lib::IrqMutex;
 
 type DamageTracker = InternalDamageTracker;

@@ -5,6 +5,7 @@ members = [
   "core",
   "drivers",
   "fs",
+  "gfx",
   "kernel",
   "lib",
   "mm",
@@ -37,6 +38,7 @@ slopos-boot = { path = "boot" }
 slopos-core = { path = "core" }
 slopos-drivers = { path = "drivers" }
 slopos-fs = { path = "fs" }
+slopos-gfx = { path = "gfx" }
 slopos-lib = { path = "lib" }
 slopos-mm = { path = "mm" }
 slopos-tests = { path = "tests" }

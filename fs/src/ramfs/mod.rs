@@ -3,7 +3,7 @@ use slopos_lib::IrqMutex;
 
 const MAX_INODES: usize = 64;
 const RAMFS_MAX_FILE_SIZE: usize = 4096;
-const MAX_NAME_LEN: usize = 32;
+use crate::MAX_NAME_LEN;
 const MAX_DIR_ENTRIES: usize = 32;
 
 const ROOT_INODE: InodeId = 1;

@@ -1,5 +1,8 @@
 #![no_std]
 
+pub const MAX_PATH_LEN: usize = 256;
+pub const MAX_NAME_LEN: usize = 32;
+
 pub mod blockdev;
 pub mod devfs;
 pub mod ext2;

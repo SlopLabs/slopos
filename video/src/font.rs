@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_int};
 
-use slopos_abi::font_render;
+use slopos_gfx::font_render;
 
 use crate::framebuffer;
 use crate::graphics::GraphicsContext;
@@ -28,25 +28,7 @@ fn c_str_to_slice(ptr: *const c_char) -> &'static [u8] {
     }
 }
 
-pub fn draw_char(ctx: &mut GraphicsContext, x: i32, y: i32, ch: u8, fg: u32, bg: u32) {
-    font_render::draw_char(ctx, x, y, ch, fg, bg);
-}
-
-pub fn draw_string(ctx: &mut GraphicsContext, x: i32, y: i32, text: &[u8], fg: u32, bg: u32) {
-    font_render::draw_string(ctx, x, y, text, fg, bg);
-}
-
-pub fn draw_str(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, fg: u32, bg: u32) {
-    font_render::draw_str(ctx, x, y, text, fg, bg);
-}
-
-pub fn string_width(text: &[u8]) -> i32 {
-    font_render::string_width(text)
-}
-
-pub fn string_lines(text: &[u8]) -> i32 {
-    font_render::string_lines(text)
-}
+pub use slopos_gfx::font_render::{draw_char, draw_str, draw_string, string_lines, string_width};
 
 pub fn font_draw_char_ctx(
     _ctx: &GraphicsContext,

@@ -1,10 +1,5 @@
-//! Font rendering for DrawTarget surfaces
-//!
-//! Uses the bitmap font data from font.rs and renders generically
-//! to any DrawTarget implementation.
-
-use crate::draw::DrawTarget;
-use crate::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_or_space};
+use slopos_abi::draw::DrawTarget;
+use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_or_space};
 
 pub fn draw_char<T: DrawTarget>(target: &mut T, x: i32, y: i32, ch: u8, fg: u32, bg: u32) {
     let fmt = target.pixel_format();

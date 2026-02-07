@@ -23,7 +23,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{cpu, klog_debug, klog_info};
+use slopos_lib::{MAX_CPUS, cpu, klog_debug, klog_info};
 
 use crate::mm_constants::PAGE_SIZE_4KB;
 
@@ -48,10 +48,6 @@ pub fn register_ipi_sender(sender: SendIpiFn) {
 /// Maximum number of pages to invalidate individually before switching to full flush.
 /// Beyond this threshold, a full TLB flush (CR3 reload) is cheaper.
 const INVLPG_THRESHOLD: usize = 32;
-
-/// Maximum number of CPUs supported for TLB shootdown.
-/// This should match the kernel's MAX_CPUS constant.
-pub const MAX_CPUS: usize = 256;
 
 /// IPI vector used for TLB shootdown requests.
 /// Must be in the range 0x20-0xFE and not conflict with other vectors.

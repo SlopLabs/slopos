@@ -7,7 +7,7 @@ const ZERO_INODE: InodeId = 3;
 const RANDOM_INODE: InodeId = 4;
 const CONSOLE_INODE: InodeId = 5;
 
-const MAX_NAME_LEN: usize = 32;
+use crate::MAX_NAME_LEN;
 
 struct DeviceEntry {
     name: [u8; MAX_NAME_LEN],

@@ -1,18 +1,10 @@
-//! Geometric drawing primitives
-//!
-//! All algorithms are implemented generically over `DrawTarget`.
-//! This replaces duplicate code in video/src/graphics.rs and
-//! userland/src/gfx/primitives.rs.
+use slopos_abi::draw::DrawTarget;
 
-use crate::draw::DrawTarget;
-
-/// Draw a line using Bresenham's algorithm
 pub fn line<T: DrawTarget>(target: &mut T, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
     let raw = target.pixel_format().convert_color(color);
     let w = target.width() as i32;
     let h = target.height() as i32;
 
-    // Early reject if entirely outside bounds
     if (x0 < 0 && x1 < 0) || (y0 < 0 && y1 < 0) || (x0 >= w && x1 >= w) || (y0 >= h && y1 >= h) {
         return;
     }
@@ -42,7 +34,6 @@ pub fn line<T: DrawTarget>(target: &mut T, x0: i32, y0: i32, x1: i32, y1: i32, c
     }
 }
 
-/// Draw a rectangle outline
 pub fn rect<T: DrawTarget>(target: &mut T, x: i32, y: i32, w: i32, h: i32, color: u32) {
     if w <= 0 || h <= 0 {
         return;
@@ -54,13 +45,11 @@ pub fn rect<T: DrawTarget>(target: &mut T, x: i32, y: i32, w: i32, h: i32, color
     target.draw_vline(x + w - 1, y, y + h - 1, raw);
 }
 
-/// Fill a rectangle with a solid color
 pub fn fill_rect<T: DrawTarget>(target: &mut T, x: i32, y: i32, w: i32, h: i32, color: u32) {
     let raw = target.pixel_format().convert_color(color);
     target.fill_rect(x, y, w, h, raw);
 }
 
-/// Draw a circle outline using the midpoint algorithm
 pub fn circle<T: DrawTarget>(target: &mut T, cx: i32, cy: i32, radius: i32, color: u32) {
     if radius <= 0 {
         return;
@@ -91,7 +80,6 @@ pub fn circle<T: DrawTarget>(target: &mut T, cx: i32, cy: i32, radius: i32, colo
     }
 }
 
-/// Draw a filled circle
 pub fn circle_filled<T: DrawTarget>(target: &mut T, cx: i32, cy: i32, radius: i32, color: u32) {
     if radius <= 0 {
         return;
@@ -120,7 +108,6 @@ pub fn circle_filled<T: DrawTarget>(target: &mut T, cx: i32, cy: i32, radius: i3
     }
 }
 
-/// Draw a filled triangle using scanline algorithm
 pub fn triangle_filled<T: DrawTarget>(
     target: &mut T,
     mut x0: i32,
@@ -133,7 +120,6 @@ pub fn triangle_filled<T: DrawTarget>(
 ) {
     let raw = target.pixel_format().convert_color(color);
 
-    // Sort vertices by y coordinate
     if y0 > y1 {
         core::mem::swap(&mut y0, &mut y1);
         core::mem::swap(&mut x0, &mut x1);
