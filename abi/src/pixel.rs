@@ -78,32 +78,7 @@ impl PixelFormat {
         matches!(self, Self::Argb8888 | Self::Xrgb8888 | Self::Bgra8888)
     }
 
-    /// Convert a color value from RGBA format to this pixel format
-    ///
-    /// Input color is 0xRRGGBBAA format (red in high byte)
-    #[inline]
-    pub fn convert_color(self, rgba: u32) -> u32 {
-        let r = (rgba >> 24) & 0xFF;
-        let g = (rgba >> 16) & 0xFF;
-        let b = (rgba >> 8) & 0xFF;
-        let a = rgba & 0xFF;
-
-        match self {
-            Self::Argb8888 => (a << 24) | (r << 16) | (g << 8) | b,
-            Self::Xrgb8888 => (0xFF << 24) | (r << 16) | (g << 8) | b,
-            Self::Rgba8888 => (r << 24) | (g << 16) | (b << 8) | a,
-            Self::Bgra8888 => (b << 24) | (g << 16) | (r << 8) | a,
-            Self::Rgb888 => (r << 16) | (g << 8) | b,
-            Self::Bgr888 => (b << 16) | (g << 8) | r,
-        }
-    }
-
     /// Encode a `Color32` (0xAARRGGBB) into the native pixel format.
-    ///
-    /// This is the preferred conversion path for the new `Canvas` API.
-    /// Unlike `convert_color` (which takes 0xRRGGBBAA), this method
-    /// takes the standard 0xAARRGGBB layout that matches `Color32`,
-    /// `rgba()`, and `rgb()`.
     #[inline]
     pub fn encode(self, color: Color32) -> EncodedPixel {
         let v = color.0;

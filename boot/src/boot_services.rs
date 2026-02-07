@@ -7,7 +7,7 @@ use slopos_drivers::virtio_blk;
 use slopos_fs::{
     ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,
 };
-use slopos_video::framebuffer::{framebuffer_is_initialized, get_display_info};
+use slopos_video::framebuffer::get_display_info;
 
 fn boot_step_task_manager_init_wrapper() -> i32 {
     boot_step_task_manager_init()
@@ -109,7 +109,7 @@ fn boot_step_mark_kernel_ready_fn() {
 }
 
 fn boot_step_framebuffer_demo_fn() {
-    if get_display_info().is_none() || framebuffer_is_initialized() == 0 {
+    if get_display_info().is_none() {
         klog_info!("Graphics demo: framebuffer not initialized, skipping");
         return;
     }

@@ -131,34 +131,15 @@ pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
 }
 
 fn paint_banner() {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return,
+    use slopos_abi::draw::Color32;
+    use slopos_gfx::canvas_ops;
+
+    let mut ctx = match graphics::GraphicsContext::new() {
+        Ok(ctx) => ctx,
+        Err(_) => return,
     };
-
-    if fb.bpp() < 24 {
-        klog_warn!(
-            "Framebuffer bpp {} unsupported for banner paint; skipping.",
-            fb.bpp()
-        );
-        return;
-    }
-
-    let stride = fb.pitch() as usize;
-    let height = fb.height().min(32) as usize;
-    let width = fb.width() as usize;
-    let base = fb.base_ptr();
-
-    for y in 0..height {
-        for x in 0..width {
-            let offset = y * stride + x * (fb.bpp() as usize / 8);
-            unsafe {
-                let ptr = base.add(offset);
-                ptr.write_volatile(0xAA);
-                ptr.add(1).write_volatile(0x33);
-                ptr.add(2).write_volatile(0xAA);
-                ptr.add(3).write_volatile(0x00);
-            }
-        }
-    }
+    let banner_color = Color32(0x00AA_33AA);
+    let w = ctx.width() as i32;
+    let banner_h = (ctx.height() as i32).min(32);
+    canvas_ops::fill_rect(&mut ctx, 0, 0, w, banner_h, banner_color);
 }

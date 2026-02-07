@@ -15,7 +15,6 @@ use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::pit::pit_poll_delay_ms;
 use slopos_gfx::{canvas_font, canvas_ops};
 
-use crate::framebuffer;
 use crate::graphics::GraphicsContext;
 
 // ---------------------------------------------------------------------------
@@ -565,7 +564,7 @@ fn render_wheel_frame<T: Canvas>(
 // Transition spinner (post-result screen)
 // ---------------------------------------------------------------------------
 
-fn draw_transition_spinner<T: Canvas>(ctx: &mut T, screen_w: i32, screen_h: i32, is_win: bool) {
+fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i32, is_win: bool) {
     let panel_w = (screen_w - 120)
         .max(260)
         .min(520)
@@ -632,7 +631,7 @@ fn draw_transition_spinner<T: Canvas>(ctx: &mut T, screen_w: i32, screen_h: i32,
         );
         draw_text_centered(ctx, center_x, panel_y + 132, detail, TEXT_COLOR);
 
-        framebuffer::framebuffer_flush();
+        ctx.flush();
         pit_poll_delay_ms(90);
     }
 }
@@ -641,8 +640,8 @@ fn draw_transition_spinner<T: Canvas>(ctx: &mut T, screen_w: i32, screen_h: i32,
 // Flush-and-sleep helper
 // ---------------------------------------------------------------------------
 
-fn flush_and_sleep(ms: u32) {
-    framebuffer::framebuffer_flush();
+fn flush_and_sleep(ctx: &GraphicsContext, ms: u32) {
+    ctx.flush();
     pit_poll_delay_ms(ms);
 }
 
@@ -670,7 +669,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
         start_segment = (start_segment + 3) % SEGMENT_COUNT;
     }
 
-    flush_and_sleep(300);
+    flush_and_sleep(ctx, 300);
 
     let start_angle = segment_center_angle(start_segment);
     let target_angle = segment_center_angle(target_segment);
@@ -725,7 +724,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
                 draw_wheel: false,
             },
         );
-        flush_and_sleep(SPIN_FRAME_DELAY_MS as u32);
+        flush_and_sleep(ctx, SPIN_FRAME_DELAY_MS as u32);
     }
 
     // Phase 3: Land on target segment
@@ -747,7 +746,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
             draw_wheel: true,
         },
     );
-    flush_and_sleep(900);
+    flush_and_sleep(ctx, 900);
 
     // Phase 4: Flash the landing segment
     for flash in 0..5 {
@@ -768,7 +767,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
                 draw_wheel: false,
             },
         );
-        flush_and_sleep(250);
+        flush_and_sleep(ctx, 250);
         if flash < 4 {
             render_wheel_frame(
                 ctx,
@@ -787,7 +786,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
                     draw_wheel: false,
                 },
             );
-            flush_and_sleep(150);
+            flush_and_sleep(ctx, 150);
         }
     }
 
@@ -809,7 +808,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
             draw_wheel: true,
         },
     );
-    flush_and_sleep(600);
+    flush_and_sleep(ctx, 600);
 
     // Phase 6: Result banner
     let fate_box_y = center_y + layout.radius + 22;
@@ -819,7 +818,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
 
     let banner_y = info_y + 12;
     draw_result_banner(ctx, center_x, banner_y, fate_number);
-    flush_and_sleep(RESULT_DELAY_MS);
+    flush_and_sleep(ctx, RESULT_DELAY_MS);
 
     // Phase 7: Transition spinner
     draw_transition_spinner(ctx, width, height, (fate_number & 1) == 1);

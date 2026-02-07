@@ -30,9 +30,8 @@ pub enum BootInitPhase {
     Optional = 4,
 }
 
-#[repr(C)]
 pub struct BootInitStep {
-    name: *const c_char,
+    name: &'static [u8],
     func: Option<fn() -> i32>,
     func_unit: Option<fn()>,
     flags: u32,
@@ -43,7 +42,7 @@ unsafe impl Sync for BootInitStep {}
 impl BootInitStep {
     pub const fn new(label: &'static [u8], func: fn() -> i32, flags: u32) -> Self {
         Self {
-            name: label.as_ptr() as *const c_char,
+            name: label,
             func: Some(func),
             func_unit: None,
             flags,
@@ -52,7 +51,7 @@ impl BootInitStep {
 
     pub const fn new_unit(label: &'static [u8], func: fn(), flags: u32) -> Self {
         Self {
-            name: label.as_ptr() as *const c_char,
+            name: label,
             func: None,
             func_unit: Some(func),
             flags,
@@ -281,15 +280,7 @@ fn boot_init_report_progress(step: &BootInitStep) {
 
 fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     serial::write_line("BOOT: running init step");
-    boot_init_report_step(
-        KlogLevel::Debug,
-        b"step\0",
-        Some(
-            unsafe { CStr::from_ptr(step.name).to_bytes_with_nul() }
-                .get(0..)
-                .unwrap_or(b"(unnamed)\0"),
-        ),
-    );
+    boot_init_report_step(KlogLevel::Debug, b"step\0", Some(step.name));
 
     let rc = if let Some(func) = step.func {
         func()
@@ -302,10 +293,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
 
     if rc != 0 {
         let optional = (step.flags & BOOT_INIT_FLAG_OPTIONAL) != 0;
-        boot_init_report_failure(
-            phase_name,
-            Some(unsafe { CStr::from_ptr(step.name).to_bytes_with_nul() }),
-        );
+        boot_init_report_failure(phase_name, Some(step.name));
         if optional {
             boot_info(b"Optional boot step failed, continuing...\0");
             boot_init_report_progress(step);

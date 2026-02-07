@@ -1,11 +1,9 @@
-use core::ffi::c_char;
-
 use slopos_lib::IrqMutex;
 
 use crate::font;
 use crate::framebuffer;
 use crate::graphics::{GraphicsContext, GraphicsResult};
-use slopos_abi::draw::Color32;
+use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::VideoError;
 use slopos_gfx::canvas_ops;
 
@@ -100,7 +98,7 @@ fn splash_layout(width: i32, height: i32) -> SplashLayout {
 }
 
 fn framebuffer_ready() -> bool {
-    framebuffer::framebuffer_is_initialized() != 0
+    framebuffer::snapshot().is_some()
 }
 
 fn ensure_framebuffer_ready() -> GraphicsResult<()> {
@@ -153,7 +151,8 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     let mut ctx = GraphicsContext::new()?;
 
     let mut state = STATE.lock();
-    framebuffer::framebuffer_clear(SPLASH_BG_COLOR.to_u32());
+    let bg_px = ctx.pixel_format().encode(SPLASH_BG_COLOR);
+    ctx.clear_canvas(bg_px);
 
     let width = ctx.width() as i32;
     let height = ctx.height() as i32;
@@ -166,36 +165,30 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.ring_radius,
     );
 
-    if font::font_draw_string_ctx(
+    font::draw_string(
+        &mut ctx,
         layout.title_x,
         layout.title_y,
-        TEXT_TITLE.as_ptr() as *const c_char,
+        TEXT_TITLE,
         SPLASH_TEXT_COLOR,
         Color32(0),
-    ) != 0
-    {
-        return Err(VideoError::Invalid);
-    }
-    if font::font_draw_string_ctx(
+    );
+    font::draw_string(
+        &mut ctx,
         layout.subtitle_x,
         layout.subtitle_y,
-        TEXT_SUBTITLE.as_ptr() as *const c_char,
+        TEXT_SUBTITLE,
         SPLASH_SUBTEXT_COLOR,
         Color32(0),
-    ) != 0
-    {
-        return Err(VideoError::Invalid);
-    }
-    if font::font_draw_string_ctx(
+    );
+    font::draw_string(
+        &mut ctx,
         layout.message_x,
         layout.message_y,
-        TEXT_INIT.as_ptr() as *const c_char,
+        TEXT_INIT,
         SPLASH_SUBTEXT_COLOR,
         Color32(0),
-    ) != 0
-    {
-        return Err(VideoError::Invalid);
-    }
+    );
 
     splash_draw_progress_bar(
         &mut ctx,
@@ -211,7 +204,7 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     Ok(())
 }
 
-pub fn splash_update_progress(progress: i32, message: *const c_char) -> GraphicsResult<()> {
+pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
 
     let mut ctx = GraphicsContext::new()?;
@@ -228,16 +221,15 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
         SPLASH_BG_COLOR,
     );
 
-    if !message.is_null()
-        && font::font_draw_string_ctx(
+    if !message.is_empty() {
+        font::draw_string(
+            &mut ctx,
             layout.message_x,
             layout.message_y,
             message,
             SPLASH_SUBTEXT_COLOR,
             Color32(0),
-        ) != 0
-    {
-        return Err(VideoError::Invalid);
+        );
     }
 
     splash_draw_progress_bar(
@@ -251,7 +243,7 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
     Ok(())
 }
 
-pub fn splash_report_progress(progress: i32, message: *const c_char) -> GraphicsResult<()> {
+pub fn splash_report_progress(progress: i32, message: &[u8]) -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
 
     let mut state = STATE.lock();
@@ -267,7 +259,7 @@ pub fn splash_report_progress(progress: i32, message: *const c_char) -> Graphics
 pub fn splash_finish() -> GraphicsResult<()> {
     let mut state = STATE.lock();
     if state.active {
-        splash_report_progress(100, b"Boot complete\0".as_ptr() as *const c_char)?;
+        splash_report_progress(100, b"Boot complete\0")?;
         state.active = false;
     }
     Ok(())
@@ -275,6 +267,8 @@ pub fn splash_finish() -> GraphicsResult<()> {
 
 pub fn splash_clear() -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
-    framebuffer::framebuffer_clear(SPLASH_BG_COLOR.to_u32());
+    let mut ctx = GraphicsContext::new()?;
+    let bg_px = ctx.pixel_format().encode(SPLASH_BG_COLOR);
+    ctx.clear_canvas(bg_px);
     Ok(())
 }

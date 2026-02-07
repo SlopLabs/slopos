@@ -4,8 +4,7 @@
 //! an unrecoverable error. Designed to work with minimal dependencies
 //! since most subsystems may be in undefined states during panic.
 
-use core::ffi::c_char;
-use slopos_abi::draw::Color32;
+use slopos_abi::draw::{Canvas, Color32};
 
 use crate::graphics::GraphicsContext;
 use crate::{font, framebuffer};
@@ -30,24 +29,19 @@ fn format_hex(value: u64, buf: &mut [u8; 19]) -> &[u8] {
 }
 
 /// Draw a single line of text with a label and hex value.
-fn draw_register_line(_ctx: &GraphicsContext, x: i32, y: i32, label: &[u8], value: u64) {
+fn draw_register_line(ctx: &mut GraphicsContext, x: i32, y: i32, label: &[u8], value: u64) {
     // Draw label
-    font::font_draw_string_ctx(
-        x,
-        y,
-        label.as_ptr() as *const c_char,
-        PANIC_FG_COLOR,
-        PANIC_BG_COLOR,
-    );
+    font::draw_string(ctx, x, y, label, PANIC_FG_COLOR, PANIC_BG_COLOR);
 
     // Draw hex value
     let mut hex_buf = [0u8; 19];
     let _ = format_hex(value, &mut hex_buf);
     let label_width = (label.len() as i32 - 1) * font::FONT_CHAR_WIDTH; // -1 for null terminator
-    font::font_draw_string_ctx(
+    font::draw_string(
+        ctx,
         x + label_width,
         y,
-        hex_buf.as_ptr() as *const c_char,
+        &hex_buf,
         PANIC_FG_COLOR,
         PANIC_BG_COLOR,
     );
@@ -76,17 +70,18 @@ pub fn display_panic_screen(
     cr3: u64,
     cr4: u64,
 ) -> bool {
-    if framebuffer::framebuffer_is_initialized() == 0 {
+    if framebuffer::snapshot().is_none() {
         return false;
     }
 
-    let ctx = match GraphicsContext::new() {
+    let mut ctx = match GraphicsContext::new() {
         Ok(ctx) => ctx,
         Err(_) => return false,
     };
 
     // Clear screen to dark red
-    framebuffer::framebuffer_clear(PANIC_BG_COLOR.to_u32());
+    let bg_px = ctx.pixel_format().encode(PANIC_BG_COLOR);
+    ctx.clear_canvas(bg_px);
 
     let width = ctx.width() as i32;
     let height = ctx.height() as i32;
@@ -101,10 +96,11 @@ pub fn display_panic_screen(
     let header_len = 21;
     let header_width = header_len * char_width;
     let header_x = (width - header_width) / 2;
-    font::font_draw_string_ctx(
+    font::draw_string(
+        &mut ctx,
         header_x,
         y,
-        header.as_ptr() as *const c_char,
+        header,
         PANIC_HEADER_COLOR,
         PANIC_BG_COLOR,
     );
@@ -115,10 +111,11 @@ pub fn display_panic_screen(
     let subtitle_len = 36;
     let subtitle_width = subtitle_len * char_width;
     let subtitle_x = (width - subtitle_width) / 2;
-    font::font_draw_string_ctx(
+    font::draw_string(
+        &mut ctx,
         subtitle_x,
         y,
-        subtitle.as_ptr() as *const c_char,
+        subtitle,
         PANIC_FG_COLOR,
         PANIC_BG_COLOR,
     );
@@ -130,13 +127,7 @@ pub fn display_panic_screen(
     // Draw panic message if provided
     if let Some(msg) = message {
         let msg_label = b"Reason: \0";
-        font::font_draw_string_ctx(
-            40,
-            y,
-            msg_label.as_ptr() as *const c_char,
-            PANIC_FG_COLOR,
-            PANIC_BG_COLOR,
-        );
+        font::draw_string(&mut ctx, 40, y, msg_label, PANIC_FG_COLOR, PANIC_BG_COLOR);
 
         // Draw message character by character
         let mut x = 40 + 8 * char_width;
@@ -153,7 +144,7 @@ pub fn display_panic_screen(
                     break; // Don't overflow into prompt area
                 }
             }
-            font::font_draw_char_ctx(x, y, byte as c_char, PANIC_FG_COLOR, PANIC_BG_COLOR);
+            font::draw_char(&mut ctx, x, y, byte, PANIC_FG_COLOR, PANIC_BG_COLOR);
             x += char_width;
         }
         y += char_height * 2;
@@ -162,10 +153,11 @@ pub fn display_panic_screen(
     // Draw register info section
     y += char_height;
     let reg_header = b"CPU State:\0";
-    font::font_draw_string_ctx(
+    font::draw_string(
+        &mut ctx,
         40,
         y,
-        reg_header.as_ptr() as *const c_char,
+        reg_header,
         PANIC_HEADER_COLOR,
         PANIC_BG_COLOR,
     );
@@ -173,24 +165,24 @@ pub fn display_panic_screen(
 
     // Draw RIP if available
     if let Some(rip_val) = rip {
-        draw_register_line(&ctx, 60, y, b"RIP: \0", rip_val);
+        draw_register_line(&mut ctx, 60, y, b"RIP: \0", rip_val);
         y += char_height + 4;
     }
 
     // Draw RSP if available
     if let Some(rsp_val) = rsp {
-        draw_register_line(&ctx, 60, y, b"RSP: \0", rsp_val);
+        draw_register_line(&mut ctx, 60, y, b"RSP: \0", rsp_val);
         y += char_height + 4;
     }
 
     // Draw control registers
-    draw_register_line(&ctx, 60, y, b"CR0: \0", cr0);
+    draw_register_line(&mut ctx, 60, y, b"CR0: \0", cr0);
     y += char_height + 4;
 
-    draw_register_line(&ctx, 60, y, b"CR3: \0", cr3);
+    draw_register_line(&mut ctx, 60, y, b"CR3: \0", cr3);
     y += char_height + 4;
 
-    draw_register_line(&ctx, 60, y, b"CR4: \0", cr4);
+    draw_register_line(&mut ctx, 60, y, b"CR4: \0", cr4);
 
     // Draw prompt at bottom
     let prompt = b"Press ENTER to shutdown\0";
@@ -198,10 +190,11 @@ pub fn display_panic_screen(
     let prompt_width = prompt_len * char_width;
     let prompt_x = (width - prompt_width) / 2;
     let prompt_y = height - 60;
-    font::font_draw_string_ctx(
+    font::draw_string(
+        &mut ctx,
         prompt_x,
         prompt_y,
-        prompt.as_ptr() as *const c_char,
+        prompt,
         PANIC_FG_COLOR,
         PANIC_BG_COLOR,
     );
@@ -212,15 +205,16 @@ pub fn display_panic_screen(
     let note_width = note_len * char_width;
     let note_x = (width - note_width) / 2;
     let note_y = height - 40;
-    font::font_draw_string_ctx(
+    font::draw_string(
+        &mut ctx,
         note_x,
         note_y,
-        serial_note.as_ptr() as *const c_char,
+        serial_note,
         Color32(0xFF888888), // Gray
         PANIC_BG_COLOR,
     );
 
-    framebuffer::framebuffer_flush();
+    ctx.flush();
 
     true
 }

@@ -1,3 +1,5 @@
+use core::ffi::c_int;
+
 use crate::framebuffer::{self, FbState};
 use slopos_abi::draw::{Canvas, EncodedPixel};
 use slopos_abi::video_traits::VideoError;
@@ -19,6 +21,14 @@ impl GraphicsContext {
 
     pub fn height(&self) -> u32 {
         self.fb.height()
+    }
+
+    /// Flush the framebuffer to the display backend.
+    ///
+    /// Invokes the registered flush callback (e.g. the Xe driver's scanout
+    /// trigger). Returns 0 on success or if no callback is registered.
+    pub fn flush(&self) -> c_int {
+        framebuffer::framebuffer_flush()
     }
 }
 
