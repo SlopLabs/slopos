@@ -65,6 +65,13 @@ pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDis
     SyscallDisposition::Ok
 }
 
+pub fn syscall_reboot(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+    wl_currency::award_win();
+    platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
+    #[allow(unreachable_code)]
+    SyscallDisposition::Ok
+}
+
 define_syscall!(syscall_sleep_ms(ctx, args) {
     let mut ms = args.arg0;
     if ms > 60000 {
@@ -769,6 +776,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_HALT as usize] = SyscallEntry {
         handler: Some(syscall_halt),
         name: b"halt\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_REBOOT as usize] = SyscallEntry {
+        handler: Some(syscall_reboot),
+        name: b"reboot\0".as_ptr() as *const c_char,
     };
     table[SYSCALL_ENUMERATE_WINDOWS as usize] = SyscallEntry {
         handler: Some(syscall_enumerate_windows),

@@ -1,4 +1,4 @@
-//! Process management syscalls: spawn, exec, fork, halt.
+//! Process management syscalls: spawn, exec, fork, halt, reboot.
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall4};
@@ -45,6 +45,16 @@ pub fn fork() -> i32 {
 pub fn halt() -> ! {
     unsafe {
         syscall0(SYSCALL_HALT);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline(always)]
+pub fn reboot() -> ! {
+    unsafe {
+        syscall0(SYSCALL_REBOOT);
     }
     loop {
         core::hint::spin_loop();

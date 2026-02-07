@@ -59,6 +59,7 @@ static ERR_MISSING_OPERAND: &[u8] = b"missing operand\n";
 static ERR_MISSING_FILE: &[u8] = b"missing file operand\n";
 static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
 static HALTED: &[u8] = b"Shell requested shutdown...\n";
+static REBOOTING: &[u8] = b"Shell requested reboot...\n";
 
 const FONT_CHAR_WIDTH: i32 = 8;
 const FONT_CHAR_HEIGHT: i32 = 16;
@@ -910,6 +911,11 @@ static BUILTINS: &[BuiltinEntry] = &[
         desc: b"Power off the system",
     },
     BuiltinEntry {
+        name: b"reboot",
+        func: cmd_reboot,
+        desc: b"Reboot the system",
+    },
+    BuiltinEntry {
         name: b"info",
         func: cmd_info,
         desc: b"Show kernel memory and scheduler stats",
@@ -1130,6 +1136,11 @@ fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
 fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(HALTED);
     process::halt();
+}
+
+fn cmd_reboot(_argc: i32, _argv: &[*const u8]) -> i32 {
+    shell_write(REBOOTING);
+    process::reboot();
 }
 
 fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
