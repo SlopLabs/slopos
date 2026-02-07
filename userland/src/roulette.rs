@@ -50,8 +50,8 @@ pub fn roulette_user_main(_arg: *mut c_void) {
         let _ = roulette::draw(fate);
     }
 
-    sys_core::sleep_ms(3000);
+    sys_core::sleep_ms(180);
     roulette::result(spin);
-    sys_core::sleep_ms(500);
+    sys_core::sleep_ms(120);
     sys_core::exit();
 }

@@ -5,11 +5,16 @@ use slopos_drivers::pit::pit_poll_delay_ms;
 use crate::graphics::GraphicsContext;
 use crate::{font, framebuffer, graphics};
 
-const ROULETTE_BLANK_COLOR: u32 = 0x1E1E_1EFF;
-const ROULETTE_BLANK_HIGHLIGHT: u32 = 0x3333_33FF;
-const ROULETTE_COLORED_HIGHLIGHT: u32 = 0x3DD6_C6FF;
-const ROULETTE_POINTER_COLOR: u32 = 0xE6E6_E6FF;
-const ROULETTE_INFO_BG_COLOR: u32 = 0x1A1A_1AFF;
+const ROULETTE_BLANK_COLOR: u32 = 0x2A31_3BFF;
+const ROULETTE_BLANK_HIGHLIGHT: u32 = 0x5660_70FF;
+const ROULETTE_COLORED_HIGHLIGHT: u32 = 0x4DE3_CAFF;
+const ROULETTE_POINTER_COLOR: u32 = 0xFFE0_87FF;
+const ROULETTE_INFO_BG_COLOR: u32 = 0x0E14_1CFF;
+const ROULETTE_CARD_BORDER: u32 = 0x6470_83FF;
+const ROULETTE_CARD_TEXT: u32 = 0xF6F9_FDFF;
+const ROULETTE_MUTED_TEXT: u32 = 0xAAB4_C5FF;
+const ROULETTE_WIN_BG: u32 = 0x0D37_31FF;
+const ROULETTE_LOSE_BG: u32 = 0x3A20_24FF;
 
 const ROULETTE_SEGMENT_COUNT: i32 = 12;
 const ROULETTE_TRIG_SCALE: i32 = 1024;
@@ -23,13 +28,13 @@ const ROULETTE_SPIN_FRAME_DELAY_MS: i32 = 12;
 
 // Public colors pulled from the legacy header.
 pub const ROULETTE_BG_COLOR: u32 = 0x0000_0000;
-pub const ROULETTE_WHEEL_COLOR: u32 = 0xC7C7_C7FF;
-pub const ROULETTE_TEXT_COLOR: u32 = 0xE6E6_E6FF;
+pub const ROULETTE_WHEEL_COLOR: u32 = 0xD4DB_E6FF;
+pub const ROULETTE_TEXT_COLOR: u32 = 0xF1F4_F9FF;
 pub const ROULETTE_WIN_COLOR: u32 = 0x2DD4_B3FF;
 pub const ROULETTE_LOSE_COLOR: u32 = 0xE35D_5BFF;
-pub const ROULETTE_EVEN_COLOR: u32 = 0x2A2A_2AFF;
-pub const ROULETTE_ODD_COLOR: u32 = 0x144E_44FF;
-pub const ROULETTE_RESULT_DELAY_MS: u32 = 5000;
+pub const ROULETTE_EVEN_COLOR: u32 = 0x3B45_54FF;
+pub const ROULETTE_ODD_COLOR: u32 = 0x0C7A_68FF;
+pub const ROULETTE_RESULT_DELAY_MS: u32 = 1700;
 
 #[repr(C)]
 pub struct RouletteBackend {
@@ -63,17 +68,23 @@ const SEGMENTS: [RouletteSegment; ROULETTE_SEGMENT_COUNT as usize] = [
     RouletteSegment { is_colored: false },
 ];
 
-const TEXT_UNKNOWN: &[u8] = b"? ? ?\0";
-const TEXT_WIN: &[u8] = b"W I N !\0";
-const TEXT_WIN_SUB: &[u8] = b"Fortune smiles upon the slop!\0";
-const TEXT_LOSE: &[u8] = b"L O S E\0";
-const TEXT_LOSE_SUB: &[u8] = b"L bozzo lol - try again!\0";
-const TEXT_WHEEL_TITLE: &[u8] = b"=== THE WHEEL OF FATE ===\0";
-const TEXT_WHEEL_SUB: &[u8] = b"Pointers choose your destiny...\0";
-const TEXT_CURRENCY_WIN: &[u8] = b"+10 W's (currency units)\0";
-const TEXT_CURRENCY_LOSE: &[u8] = b"-10 W's (currency units)\0";
-const TEXT_RESET: &[u8] = b"Rebooting... The Wheel spins again!\0";
-const TEXT_CONTINUE: &[u8] = b"Continuing to OS...\0";
+const TEXT_UNKNOWN: &[u8] = b"Hidden\0";
+const TEXT_WIN: &[u8] = b"Win\0";
+const TEXT_WIN_SUB: &[u8] = b"Boot path unlocked\0";
+const TEXT_LOSE: &[u8] = b"Lose\0";
+const TEXT_LOSE_SUB: &[u8] = b"Retry after reboot\0";
+const TEXT_CARD_LABEL: &[u8] = b"Number\0";
+const TEXT_PARITY_ODD: &[u8] = b"Odd\0";
+const TEXT_PARITY_EVEN: &[u8] = b"Even\0";
+const TEXT_CURRENCY_WIN: &[u8] = b"+10 W\0";
+const TEXT_CURRENCY_LOSE: &[u8] = b"-10 W\0";
+const TEXT_BOOTING_TITLE: &[u8] = b"Starting SlopOS\0";
+const TEXT_BOOTING_SUB: &[u8] = b"Loading shell and compositor\0";
+const TEXT_BOOTING_DETAIL: &[u8] = b"Please wait\0";
+const TEXT_REBOOT_TITLE: &[u8] = b"Rebooting\0";
+const TEXT_REBOOT_SUB: &[u8] = b"Preparing next spin\0";
+const TEXT_REBOOT_DETAIL: &[u8] = b"Please wait\0";
+const SPINNER_FRAMES: [&[u8]; 4] = [b"|\0", b"/\0", b"-\0", b"\\\0"];
 
 // Precomputed trig tables (scaled by 1024) carried over from the original C.
 const COS_TABLE: [i16; (ROULETTE_SEGMENT_COUNT + 1) as usize] = [
@@ -457,20 +468,24 @@ fn draw_pointer_ticks(
 }
 
 fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, revealed: bool) {
+    let card_x = cx - 136;
+    let card_w = 272;
+    let card_h = 88;
+    let number_y = y_pos + 46;
+
+    let _ = draw_panel(
+        b,
+        card_x,
+        y_pos,
+        card_w,
+        card_h,
+        ROULETTE_INFO_BG_COLOR,
+        ROULETTE_CARD_BORDER,
+    );
+    draw_text_centered(b, cx, y_pos + 14, TEXT_CARD_LABEL, ROULETTE_MUTED_TEXT);
+
     if !revealed {
-        unsafe {
-            let _ = backend_fill_rect(b, cx - 100, y_pos, 200, 60, ROULETTE_INFO_BG_COLOR);
-            let _ = backend_draw_line(b, cx - 100, y_pos, cx + 100, y_pos, ROULETTE_WHEEL_COLOR);
-            let _ = backend_draw_line(
-                b,
-                cx - 100,
-                y_pos + 60,
-                cx + 100,
-                y_pos + 60,
-                ROULETTE_WHEEL_COLOR,
-            );
-            let _ = backend_draw_text(b, cx - 40, y_pos + 20, TEXT_UNKNOWN, ROULETTE_TEXT_COLOR, 0);
-        }
+        draw_text_centered(b, cx, number_y, TEXT_UNKNOWN, ROULETTE_CARD_TEXT);
         return;
     }
 
@@ -480,16 +495,7 @@ fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, 
         ROULETTE_EVEN_COLOR
     };
     unsafe {
-        let _ = backend_fill_rect(b, cx - 100, y_pos, 200, 60, box_color);
-        let _ = backend_draw_line(b, cx - 100, y_pos, cx + 100, y_pos, ROULETTE_WHEEL_COLOR);
-        let _ = backend_draw_line(
-            b,
-            cx - 100,
-            y_pos + 60,
-            cx + 100,
-            y_pos + 60,
-            ROULETTE_WHEEL_COLOR,
-        );
+        let _ = backend_fill_rect(b, card_x + 8, y_pos + 34, card_w - 16, 44, box_color);
     }
 
     let mut num_str = [0u8; 21];
@@ -512,7 +518,7 @@ fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, 
             t -= 1;
         }
     }
-    let text_x = cx - (len as i32 * 8) / 2;
+    let text_x = cx - (len as i32 * font::FONT_CHAR_WIDTH) / 2;
     let mut text_len = len;
     if len < num_str.len() {
         num_str[len] = 0;
@@ -522,42 +528,66 @@ fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, 
         let _ = backend_draw_text(
             b,
             text_x,
-            y_pos + 20,
+            number_y,
             &num_str[..text_len],
-            ROULETTE_TEXT_COLOR,
+            ROULETTE_CARD_TEXT,
             0,
         );
     }
 }
 
 fn draw_result_banner(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32) {
-    let (result_text, sub_text, banner_color) = if fate_number & 1 == 1 {
-        (TEXT_WIN, TEXT_WIN_SUB, ROULETTE_WIN_COLOR)
+    let (result_text, sub_text, parity_text, currency_text, banner_color) = if fate_number & 1 == 1
+    {
+        (
+            TEXT_WIN,
+            TEXT_WIN_SUB,
+            TEXT_PARITY_ODD,
+            TEXT_CURRENCY_WIN,
+            ROULETTE_WIN_BG,
+        )
     } else {
-        (TEXT_LOSE, TEXT_LOSE_SUB, ROULETTE_LOSE_COLOR)
+        (
+            TEXT_LOSE,
+            TEXT_LOSE_SUB,
+            TEXT_PARITY_EVEN,
+            TEXT_CURRENCY_LOSE,
+            ROULETTE_LOSE_BG,
+        )
     };
 
-    unsafe {
-        let _ = backend_fill_rect(b, cx - 200, y_pos, 400, 80, banner_color);
-        let _ = backend_draw_line(
-            b,
-            cx - 202,
-            y_pos - 2,
-            cx + 202,
-            y_pos - 2,
-            ROULETTE_WHEEL_COLOR,
-        );
-        let _ = backend_draw_line(
-            b,
-            cx - 202,
-            y_pos + 82,
-            cx + 202,
-            y_pos + 82,
-            ROULETTE_WHEEL_COLOR,
-        );
-        let _ = backend_draw_text(b, cx - 60, y_pos + 15, result_text, ROULETTE_TEXT_COLOR, 0);
-        let _ = backend_draw_text(b, cx - 140, y_pos + 50, sub_text, ROULETTE_TEXT_COLOR, 0);
-    }
+    let _ = draw_panel(
+        b,
+        cx - 220,
+        y_pos,
+        440,
+        108,
+        banner_color,
+        ROULETTE_CARD_BORDER,
+    );
+    draw_text_centered(b, cx, y_pos + 16, result_text, ROULETTE_CARD_TEXT);
+    draw_text_centered(b, cx, y_pos + 41, sub_text, ROULETTE_MUTED_TEXT);
+
+    let _ = draw_panel(
+        b,
+        cx - 190,
+        y_pos + 64,
+        160,
+        32,
+        ROULETTE_INFO_BG_COLOR,
+        ROULETTE_CARD_BORDER,
+    );
+    let _ = draw_panel(
+        b,
+        cx + 30,
+        y_pos + 64,
+        160,
+        32,
+        ROULETTE_INFO_BG_COLOR,
+        ROULETTE_CARD_BORDER,
+    );
+    draw_text_centered(b, cx - 110, y_pos + 74, parity_text, ROULETTE_TEXT_COLOR);
+    draw_text_centered(b, cx + 110, y_pos + 74, currency_text, ROULETTE_TEXT_COLOR);
 }
 
 fn render_wheel_frame(
@@ -668,6 +698,149 @@ fn text_width_px(text: &[u8]) -> i32 {
     len as i32 * font::FONT_CHAR_WIDTH
 }
 
+fn even_px(x: i32) -> i32 {
+    x & !1
+}
+
+fn draw_text_centered(b: &RouletteBackend, cx: i32, y: i32, text: &[u8], fg: u32) {
+    let x = even_px(cx - text_width_px(text) / 2);
+    unsafe {
+        let _ = backend_draw_text(b, x, y, text, fg, 0);
+    }
+}
+
+fn draw_panel(
+    b: &RouletteBackend,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    fill: u32,
+    border: u32,
+) -> VideoResult {
+    unsafe {
+        backend_fill_rect(b, x, y, w, h, fill)?;
+        backend_draw_line(b, x, y, x + w, y, border)?;
+        backend_draw_line(b, x, y + h, x + w, y + h, border)?;
+        backend_draw_line(b, x, y, x, y + h, border)?;
+        backend_draw_line(b, x + w, y, x + w, y + h, border)?;
+    }
+    Ok(())
+}
+
+fn draw_transition_spinner(
+    b: &RouletteBackend,
+    screen_width: i32,
+    screen_height: i32,
+    is_win: bool,
+) -> VideoResult {
+    let mut panel_w = (screen_width - 120).max(260);
+    if panel_w > 520 {
+        panel_w = 520;
+    }
+    if panel_w > screen_width - 20 {
+        panel_w = (screen_width - 20).max(220);
+    }
+    let panel_h = 152;
+    let panel_x = (screen_width - panel_w) / 2;
+    let panel_y = (screen_height - panel_h) / 2;
+
+    let panel_bg = if is_win {
+        ROULETTE_WIN_BG
+    } else {
+        ROULETTE_LOSE_BG
+    };
+    let title = if is_win {
+        TEXT_BOOTING_TITLE
+    } else {
+        TEXT_REBOOT_TITLE
+    };
+    let subtitle = if is_win {
+        TEXT_BOOTING_SUB
+    } else {
+        TEXT_REBOOT_SUB
+    };
+    let detail = if is_win {
+        TEXT_BOOTING_DETAIL
+    } else {
+        TEXT_REBOOT_DETAIL
+    };
+
+    for tick in 0..16 {
+        draw_panel(
+            b,
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_h,
+            panel_bg,
+            ROULETTE_CARD_BORDER,
+        )?;
+
+        draw_text_centered(
+            b,
+            panel_x + panel_w / 2,
+            panel_y + 26,
+            title,
+            ROULETTE_CARD_TEXT,
+        );
+        draw_text_centered(
+            b,
+            panel_x + panel_w / 2,
+            panel_y + 56,
+            subtitle,
+            ROULETTE_MUTED_TEXT,
+        );
+
+        unsafe {
+            let spinner_box_x = panel_x + (panel_w - 120) / 2;
+            let _ = backend_fill_rect(
+                b,
+                spinner_box_x,
+                panel_y + 86,
+                120,
+                36,
+                ROULETTE_INFO_BG_COLOR,
+            );
+            let _ = backend_draw_line(
+                b,
+                spinner_box_x,
+                panel_y + 86,
+                spinner_box_x + 120,
+                panel_y + 86,
+                ROULETTE_CARD_BORDER,
+            );
+            let _ = backend_draw_line(
+                b,
+                spinner_box_x,
+                panel_y + 122,
+                spinner_box_x + 120,
+                panel_y + 122,
+                ROULETTE_CARD_BORDER,
+            );
+            draw_text_centered(
+                b,
+                panel_x + panel_w / 2,
+                panel_y + 96,
+                SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as i32) as usize],
+                ROULETTE_POINTER_COLOR,
+            );
+        }
+        draw_text_centered(
+            b,
+            panel_x + panel_w / 2,
+            panel_y + 132,
+            detail,
+            ROULETTE_TEXT_COLOR,
+        );
+        unsafe {
+            backend_sleep_ms(b, 90);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     if backend.is_null() {
         return -1;
@@ -685,20 +858,6 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
 
     if unsafe { backend_fill_rect(backend, 0, 0, width, height, ROULETTE_BG_COLOR) }.is_err() {
         return -3;
-    }
-
-    let title_x = width / 2 - text_width_px(TEXT_WHEEL_TITLE) / 2;
-    let sub_x = width / 2 - text_width_px(TEXT_WHEEL_SUB) / 2;
-    unsafe {
-        let _ = backend_draw_text(
-            backend,
-            title_x,
-            50,
-            TEXT_WHEEL_TITLE,
-            ROULETTE_WHEEL_COLOR,
-            0,
-        );
-        let _ = backend_draw_text(backend, sub_x, 80, TEXT_WHEEL_SUB, ROULETTE_TEXT_COLOR, 0);
     }
 
     let mut radius = ROULETTE_WHEEL_RADIUS;
@@ -896,8 +1055,8 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         backend_sleep_ms(backend, 600);
     }
 
-    let fate_box_y = center_y + layout.radius + 30;
-    let fate_box_h = 60;
+    let fate_box_y = center_y + layout.radius + 22;
+    let fate_box_h = 88;
     let mut info_y = fate_box_y + fate_box_h + 10;
     if info_y < 0 {
         info_y = 0;
@@ -915,53 +1074,14 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             ROULETTE_BG_COLOR,
         );
     }
-    let banner_y = info_y + 10;
+    let banner_y = info_y + 12;
     draw_result_banner(backend, center_x, banner_y, fate_number);
-
-    let currency_text = if fate_number & 1 != 0 {
-        TEXT_CURRENCY_WIN
-    } else {
-        TEXT_CURRENCY_LOSE
-    };
-    unsafe {
-        let _ = backend_draw_text(
-            backend,
-            center_x - 110,
-            banner_y + 90,
-            currency_text,
-            ROULETTE_TEXT_COLOR,
-            0,
-        );
-    }
-
-    if fate_number & 1 == 0 {
-        unsafe {
-            let _ = backend_draw_text(
-                backend,
-                center_x - 130,
-                banner_y + 130,
-                TEXT_RESET,
-                ROULETTE_TEXT_COLOR,
-                0,
-            );
-        }
-    } else {
-        let continue_x = center_x - text_width_px(TEXT_CONTINUE) / 2;
-        unsafe {
-            let _ = backend_draw_text(
-                backend,
-                continue_x,
-                banner_y + 130,
-                TEXT_CONTINUE,
-                ROULETTE_TEXT_COLOR,
-                0,
-            );
-        }
-    }
 
     unsafe {
         backend_sleep_ms(backend, ROULETTE_RESULT_DELAY_MS);
     }
+
+    let _ = draw_transition_spinner(backend, width, height, (fate_number & 1) == 1);
 
     0
 }

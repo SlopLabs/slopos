@@ -108,11 +108,20 @@ impl PixelBuffer for GraphicsContext {
             } else {
                 // Use 64-bit writes for better throughput (2 pixels at a time)
                 let color64 = (color as u64) | ((color as u64) << 32);
-                let pairs = pixel_count / 2;
-                let remainder = pixel_count % 2;
-
                 unsafe {
-                    let mut ptr64 = pixel_ptr as *mut u64;
+                    let mut ptr = pixel_ptr;
+                    let mut remaining = pixel_count;
+
+                    if remaining > 0 && ((ptr as usize) & (core::mem::align_of::<u64>() - 1)) != 0 {
+                        (ptr as *mut u32).write_volatile(color);
+                        ptr = ptr.add(4);
+                        remaining -= 1;
+                    }
+
+                    let pairs = remaining / 2;
+                    let remainder = remaining % 2;
+                    let mut ptr64 = ptr as *mut u64;
+
                     for _ in 0..pairs {
                         ptr64.write_volatile(color64);
                         ptr64 = ptr64.add(1);
