@@ -14,9 +14,9 @@ use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
 use crate::smp::smp_init;
 use slopos_drivers::{
-    apic::{apic_detect, apic_init, send_ipi_all_excluding_self},
+    apic,
     interrupts::config_from_cmdline,
-    ioapic::init,
+    ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
@@ -117,18 +117,18 @@ fn boot_step_timer_setup_fn() {
 
 fn boot_step_apic_setup_fn() {
     klog_debug!("Detecting Local APIC...");
-    if apic_detect() == 0 {
+    if !apic::detect() {
         panic!("SlopOS requires a Local APIC - legacy PIC is gone");
     }
 
     klog_debug!("Initializing Local APIC...");
-    if apic_init() != 0 {
+    if apic::init() != 0 {
         panic!("Local APIC initialization failed");
     }
 
     pic_quiesce_disable();
 
-    tlb::register_ipi_sender(send_ipi_all_excluding_self);
+    tlb::register_ipi_sender(apic::send_ipi_all_excluding_self);
     tlb::init();
 
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
@@ -141,7 +141,7 @@ fn boot_step_smp_setup_fn() {
 
 fn boot_step_ioapic_setup_fn() {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
-    if init() != 0 {
+    if ioapic::init() != 0 {
         panic!("IOAPIC discovery failed - SlopOS cannot operate without it");
     }
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");

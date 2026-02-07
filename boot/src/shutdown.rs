@@ -12,8 +12,7 @@ static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
 static SERIAL_DRAINED: StateFlag = StateFlag::new();
 
 use slopos_core::{scheduler_shutdown, task_shutdown_all};
-use slopos_drivers::apic::apic_is_available;
-use slopos_drivers::apic::{apic_disable, apic_send_eoi, apic_send_ipi_halt_all, apic_timer_stop};
+use slopos_drivers::apic;
 use slopos_drivers::pit::pit_poll_delay_ms;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
@@ -51,16 +50,16 @@ pub fn kernel_quiesce_interrupts() {
 
     klog_info!("Kernel shutdown: quiescing interrupt controllers");
 
-    if apic_is_available() != 0 {
+    if apic::is_available() {
         // Send shutdown IPIs to all processors before disabling APIC
-        apic_send_ipi_halt_all();
+        apic::send_ipi_halt_all();
         // Small delay to allow IPIs to be delivered
         for _ in 0..100 {
             cpu::pause();
         }
-        apic_send_eoi();
-        apic_timer_stop();
-        apic_disable();
+        apic::send_eoi();
+        apic::timer_stop();
+        apic::disable();
     }
 }
 pub fn kernel_drain_serial_output() {
@@ -105,8 +104,8 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
 
 fn halt() -> ! {
     // Contact APIC for proper shutdown coordination
-    if apic_is_available() != 0 {
-        apic_send_ipi_halt_all();
+    if apic::is_available() {
+        apic::send_ipi_halt_all();
         // Small delay to allow IPIs to be delivered
         for _ in 0..100 {
             cpu::pause();

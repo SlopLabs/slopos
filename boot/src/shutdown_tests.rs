@@ -20,7 +20,7 @@ use slopos_core::scheduler::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, init_task_manager, task_create,
     task_find_by_id, task_shutdown_all,
 };
-use slopos_drivers::apic::{apic_is_available, apic_is_enabled};
+use slopos_drivers::apic;
 use slopos_lib::ports::{
     ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND, QEMU_DEBUG_EXIT,
 };
@@ -393,7 +393,7 @@ pub fn test_kernel_page_directory_available() -> TestResult {
 /// Test: APIC availability can be queried
 pub fn test_apic_availability_queryable() -> TestResult {
     // This should not crash regardless of APIC state
-    let available = apic_is_available();
+    let available = apic::is_available();
 
     klog_info!("SHUTDOWN_TEST: APIC available = {}", available);
 
@@ -404,15 +404,14 @@ pub fn test_apic_availability_queryable() -> TestResult {
 
 /// Test: APIC enabled state can be queried
 pub fn test_apic_enabled_queryable() -> TestResult {
-    let available = apic_is_available();
-    if available == 0 {
+    if !apic::is_available() {
         // APIC not available, skip this test
         klog_info!("SHUTDOWN_TEST: APIC not available, skipping enabled check");
         return TestResult::Pass;
     }
 
     // This should not crash
-    let enabled = apic_is_enabled();
+    let enabled = apic::is_enabled();
 
     klog_info!("SHUTDOWN_TEST: APIC enabled = {}", enabled);
     TestResult::Pass
@@ -896,7 +895,7 @@ pub fn test_shutdown_e2e_full_flow() -> TestResult {
         INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_LOW,
         TASK_PRIORITY_NORMAL, init_task_manager, task_create, task_shutdown_all,
     };
-    use slopos_drivers::apic::apic_is_available;
+    use slopos_drivers::apic;
     use slopos_lib::cpu;
     use slopos_mm::page_alloc::pcp_drain_all;
     use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
@@ -1033,7 +1032,7 @@ pub fn test_shutdown_e2e_full_flow() -> TestResult {
 
     // PHASE 7: Check APIC state (would quiesce interrupts in real shutdown)
     tracker.record_phase(7);
-    tracker.apic_was_available = apic_is_available() != 0;
+    tracker.apic_was_available = apic::is_available();
     klog_info!(
         "E2E_SHUTDOWN: APIC available: {}",
         tracker.apic_was_available
@@ -1209,7 +1208,7 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
 pub fn test_shutdown_e2e_interrupt_state_preservation() -> TestResult {
     use slopos_core::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
     use slopos_core::scheduler::task::{init_task_manager, task_shutdown_all};
-    use slopos_drivers::apic::{apic_is_available, apic_is_enabled};
+    use slopos_drivers::apic;
     use slopos_lib::cpu;
 
     klog_info!("E2E_SHUTDOWN_IRQ: Testing interrupt state during shutdown");
@@ -1223,9 +1222,9 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> TestResult {
 
     let initial_flags = cpu::read_rflags();
     let initial_irq_enabled = (initial_flags & (1 << 9)) != 0;
-    let initial_apic_available = apic_is_available() != 0;
+    let initial_apic_available = apic::is_available();
     let initial_apic_enabled = if initial_apic_available {
-        apic_is_enabled() != 0
+        apic::is_enabled()
     } else {
         false
     };
@@ -1264,7 +1263,7 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> TestResult {
         return TestResult::Fail;
     }
 
-    let final_apic_available = apic_is_available() != 0;
+    let final_apic_available = apic::is_available();
     if initial_apic_available != final_apic_available {
         klog_info!("E2E_SHUTDOWN_IRQ: ERROR - APIC availability changed");
         return TestResult::Fail;
