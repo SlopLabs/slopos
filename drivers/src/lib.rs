@@ -2,7 +2,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod apic;
-pub mod fate;
 pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;

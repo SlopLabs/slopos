@@ -25,7 +25,7 @@ use crate::syscall::fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
-use crate::syscall_services::{fate as fate_svc, input, tty, video};
+use crate::syscall_services::{input, tty, video};
 use crate::task::{get_task_stats, task_get_exit_record, task_terminate};
 
 use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
@@ -228,11 +228,11 @@ define_syscall!(syscall_input_poll(ctx, args, task_id) requires task_id {
         return ctx.ok((-1i64) as u64);
     }
 
-    if ctx.is_compositor() && input::input_get_pointer_focus() == 0 {
-        input::input_set_pointer_focus(task_id, 0);
+    if ctx.is_compositor() && input::get_pointer_focus() == 0 {
+        input::set_pointer_focus(task_id, 0);
     }
 
-    match input::input_poll(task_id) {
+    match input::poll(task_id) {
         Some(event) => {
             unsafe { *event_ptr = event; }
             ctx.ok(1)
@@ -249,15 +249,15 @@ define_syscall!(syscall_input_poll_batch(ctx, args, task_id) requires task_id {
         return ctx.ok(0);
     }
 
-    if ctx.is_compositor() && input::input_get_pointer_focus() == 0 {
-        input::input_set_pointer_focus(task_id, 0);
+    if ctx.is_compositor() && input::get_pointer_focus() == 0 {
+        input::set_pointer_focus(task_id, 0);
     }
 
-    ctx.ok(input::input_drain_batch(task_id, buffer_ptr, max_count) as u64)
+    ctx.ok(input::drain_batch(task_id, buffer_ptr, max_count) as u64)
 });
 
 define_syscall!(syscall_input_has_events(ctx, args, task_id) requires task_id {
-    let count = input::input_event_count(task_id);
+    let count = input::event_count(task_id);
     ctx.ok(count as u64)
 });
 
@@ -268,8 +268,8 @@ define_syscall!(syscall_input_set_focus(ctx, args, task_id) requires task_id {
     let timestamp_ms = platform::get_time_ms();
 
     match focus_type {
-        0 => input::input_set_keyboard_focus(target_task_id),
-        1 => input::input_set_pointer_focus(target_task_id, timestamp_ms),
+        0 => input::set_keyboard_focus(target_task_id),
+        1 => input::set_pointer_focus(target_task_id, timestamp_ms),
         _ => return ctx.ok((-1i64) as u64),
     }
     ctx.ok(0)
@@ -280,18 +280,18 @@ define_syscall!(syscall_input_set_focus_with_offset(ctx, args) requires composit
     let offset_x = args.arg1 as i32;
     let offset_y = args.arg2 as i32;
     let timestamp_ms = platform::get_time_ms();
-    input::input_set_pointer_focus_with_offset(target_task_id, offset_x, offset_y, timestamp_ms);
+    input::set_pointer_focus_with_offset(target_task_id, offset_x, offset_y, timestamp_ms);
     ctx.ok(0)
 });
 
 define_syscall!(syscall_input_get_pointer_pos(ctx, args) requires compositor {
-    let (x, y) = input::input_get_pointer_position();
+    let (x, y) = input::get_pointer_position();
     let result = ((x as u32 as u64) << 32) | (y as u32 as u64);
     ctx.ok(result)
 });
 
 define_syscall!(syscall_input_get_button_state(ctx, args) requires compositor {
-    let buttons = input::input_get_button_state();
+    let buttons = input::get_button_state();
     ctx.ok(buttons as u64)
 });
 
@@ -303,7 +303,7 @@ define_syscall!(syscall_input_request_close(ctx, args) requires compositor {
     }
 
     let timestamp_ms = platform::get_time_ms();
-    if input::input_request_close(target_task_id, timestamp_ms) != 0 {
+    if input::request_close(target_task_id, timestamp_ms) != 0 {
         wl_currency::award_loss();
         return ctx.err();
     }
@@ -314,7 +314,7 @@ define_syscall!(syscall_input_request_close(ctx, args) requires compositor {
 
 define_syscall!(syscall_tty_set_focus(ctx, args) requires compositor {
     let target = args.arg0_u32();
-    ctx.from_bool_value(tty::tty_set_focus(target) == 0, tty::tty_get_focus() as u64)
+    ctx.from_bool_value(tty::set_focus(target) == 0, tty::get_focus() as u64)
 });
 
 define_syscall!(syscall_enumerate_windows(ctx, args) requires compositor {
@@ -441,7 +441,6 @@ define_syscall!(syscall_roulette_result(ctx, args, task_id) requires task_id {
 
     if is_win {
         fate_apply_outcome(&stored as *const FateResult, 0, true);
-        fate_svc::fate_notify_outcome(&stored as *const FateResult);
         ctx.ok(0)
     } else {
         fate_apply_outcome(&stored as *const FateResult, 0, false);
@@ -464,7 +463,7 @@ define_syscall!(syscall_user_read(ctx, args) {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let max_len = args.arg1_usize().min(USER_IO_MAX_BYTES);
 
-    let mut read_len = tty::tty_read_line(tmp.as_mut_ptr(), max_len);
+    let mut read_len = tty::read_line(tmp.as_mut_ptr(), max_len);
     if max_len > 0 {
         read_len = read_len.min(max_len.saturating_sub(1));
         tmp[read_len] = 0;
@@ -478,7 +477,7 @@ define_syscall!(syscall_user_read(ctx, args) {
 define_syscall!(syscall_user_read_char(ctx, args) {
     let _ = args;
     let mut c = 0u8;
-    check_result!(ctx, tty::tty_read_char_blocking(&mut c as *mut u8));
+    check_result!(ctx, tty::read_char_blocking(&mut c as *mut u8));
     ctx.ok(c as u64)
 });
 
