@@ -566,11 +566,71 @@ pub fn test_ext2_wl_currency_on_success() -> c_int {
     if result.is_ok() && balance > 0 { 0 } else { -1 }
 }
 
-/// Initialize VFS before running ext2 tests. Returns true if init succeeded.
-pub fn ext2_tests_init() -> bool {
+fn ext2_tests_init() -> bool {
     if let Err(_) = vfs_init_builtin_filesystems() {
         klog_info!("VFS_TEST: failed to initialize VFS");
         return false;
     }
     true
 }
+
+const EXT2_SUITE_NAME: &[u8] = b"ext2\0";
+
+fn run_ext2_suite(_config: *const (), out: *mut slopos_lib::testing::TestSuiteResult) -> i32 {
+    let start = slopos_lib::tsc::rdtsc();
+
+    if !ext2_tests_init() {
+        if let Some(out_ref) = unsafe { out.as_mut() } {
+            out_ref.name = EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char;
+            out_ref.total = 0;
+            out_ref.passed = 0;
+            out_ref.failed = 0;
+            out_ref.elapsed_ms = 0;
+        }
+        return 0;
+    }
+
+    let mut passed = 0u32;
+    let mut total = 0u32;
+
+    slopos_lib::run_test!(passed, total, test_vfs_initialized);
+    slopos_lib::run_test!(passed, total, test_vfs_root_stat);
+    slopos_lib::run_test!(passed, total, test_vfs_file_roundtrip);
+    slopos_lib::run_test!(passed, total, test_vfs_list);
+    slopos_lib::run_test!(passed, total, test_vfs_unlink);
+    slopos_lib::run_test!(passed, total, test_ext2_invalid_superblock_magic);
+    slopos_lib::run_test!(passed, total, test_ext2_unsupported_block_size);
+    slopos_lib::run_test!(passed, total, test_ext2_directory_format_error);
+    slopos_lib::run_test!(passed, total, test_ext2_invalid_inode);
+    slopos_lib::run_test!(passed, total, test_ext2_read_file_not_regular);
+    slopos_lib::run_test!(passed, total, test_ext2_device_read_error);
+    slopos_lib::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
+    slopos_lib::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
+    slopos_lib::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
+    slopos_lib::run_test!(passed, total, test_ext2_path_resolution_not_found);
+    slopos_lib::run_test!(passed, total, test_ext2_remove_path_not_file);
+    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_error);
+    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_success);
+
+    let elapsed = slopos_lib::testing::measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+
+    if let Some(out_ref) = unsafe { out.as_mut() } {
+        out_ref.name = EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char;
+        out_ref.total = total;
+        out_ref.passed = passed;
+        out_ref.failed = total.saturating_sub(passed);
+        out_ref.exceptions_caught = 0;
+        out_ref.unexpected_exceptions = 0;
+        out_ref.elapsed_ms = elapsed;
+        out_ref.timed_out = 0;
+    }
+
+    if passed == total { 0 } else { -1 }
+}
+
+#[used]
+#[unsafe(link_section = ".test_registry")]
+static EXT2_SUITE_DESC: slopos_lib::testing::TestSuiteDesc = slopos_lib::testing::TestSuiteDesc {
+    name: EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char,
+    run: Some(run_ext2_suite),
+};

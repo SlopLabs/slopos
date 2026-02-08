@@ -2075,3 +2075,129 @@ pub fn test_pat_wc_enabled() -> c_int {
 
     0
 }
+
+// ============================================================================
+// SUITE REGISTRATION — tests are auto-collected via linker section
+// ============================================================================
+
+use slopos_lib::define_test_suite;
+
+define_test_suite!(
+    vm,
+    [test_process_vm_slot_reuse, test_process_vm_counter_reset,]
+);
+
+define_test_suite!(
+    heap,
+    [
+        test_heap_free_list_search,
+        test_heap_fragmentation_behind_head,
+    ]
+);
+
+define_test_suite!(
+    page_alloc,
+    [
+        test_page_alloc_single,
+        test_page_alloc_multi_order,
+        test_page_alloc_free_cycle,
+        test_page_alloc_zeroed,
+        test_page_alloc_refcount,
+        test_page_alloc_stats,
+        test_page_alloc_free_null,
+        test_page_alloc_fragmentation,
+    ]
+);
+
+define_test_suite!(
+    heap_ext,
+    [
+        test_heap_warmup_pages_minimum,
+        test_heap_small_alloc,
+        test_heap_medium_alloc,
+        test_heap_large_alloc,
+        test_heap_kzalloc_zeroed,
+        test_heap_kfree_null,
+        test_heap_alloc_zero,
+        test_heap_stats,
+        test_global_alloc_vec,
+    ]
+);
+
+define_test_suite!(
+    paging,
+    [
+        test_paging_virt_to_phys,
+        test_paging_get_kernel_dir,
+        test_paging_user_accessible_kernel,
+        test_paging_cow_kernel,
+        test_pat_wc_enabled,
+    ]
+);
+
+define_test_suite!(
+    ring_buf,
+    [
+        test_ring_buffer_basic,
+        test_ring_buffer_fifo,
+        test_ring_buffer_empty_pop,
+        test_ring_buffer_full,
+        test_ring_buffer_overwrite,
+        test_ring_buffer_wrap,
+        test_ring_buffer_reset,
+        test_ring_buffer_capacity,
+    ]
+);
+
+define_test_suite!(
+    irqmutex,
+    [
+        test_irqmutex_basic,
+        test_irqmutex_mutation,
+        test_irqmutex_try_lock,
+    ]
+);
+
+define_test_suite!(
+    shm,
+    [
+        test_shm_create_destroy,
+        test_shm_create_zero_size,
+        test_shm_create_excessive_size,
+        test_shm_destroy_non_owner,
+        test_shm_refcount,
+        test_shm_invalid_token,
+        test_shm_surface_attach,
+        test_shm_surface_attach_too_small,
+        test_shm_surface_attach_overflow,
+        test_shm_mapping_overflow,
+    ]
+);
+
+define_test_suite!(
+    rigorous,
+    [
+        test_page_alloc_write_verify,
+        test_page_alloc_zero_full_page,
+        test_page_alloc_no_stale_data,
+        test_heap_boundary_write,
+        test_heap_no_overlap,
+        test_heap_double_free_defensive,
+        test_heap_large_block_integrity,
+        test_heap_stress_cycles,
+        test_page_alloc_multipage_integrity,
+    ]
+);
+
+define_test_suite!(
+    process_vm,
+    [
+        test_process_vm_create_destroy_memory,
+        test_process_vm_alloc_and_access,
+        test_process_vm_brk_expansion,
+        test_cow_page_isolation,
+        test_cow_fault_handling,
+        test_multiple_process_vms,
+        test_vma_flags_retrieval,
+    ]
+);

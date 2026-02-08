@@ -225,3 +225,25 @@ pub fn test_ioapic_gsi_range() -> c_int {
     }
     0
 }
+
+slopos_lib::define_test_suite!(
+    ioapic,
+    [
+        test_ioapic_ready_state,
+        test_apic_enabled_state,
+        test_apic_id_valid,
+        test_ioapic_legacy_irq_info_invalid,
+        test_ioapic_legacy_irq_info_valid,
+        test_ioapic_mask_invalid_gsi,
+        test_ioapic_unmask_invalid_gsi,
+        test_ioapic_config_invalid_gsi,
+        test_ioapic_config_boundary_vector,
+        test_ioapic_flag_constants,
+        test_ioapic_register_constants,
+        test_apic_eoi_safe,
+        test_ioapic_double_init,
+        test_ioapic_all_legacy_irqs,
+        test_apic_spurious_vector,
+        test_ioapic_gsi_range,
+    ]
+);

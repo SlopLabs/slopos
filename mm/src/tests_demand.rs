@@ -629,3 +629,26 @@ pub fn test_demand_invalid_process_id() -> c_int {
     destroy_process_vm(pid);
     ret
 }
+
+slopos_lib::define_test_suite!(
+    demand_paging,
+    [
+        test_demand_fault_present_page,
+        test_demand_fault_no_vma,
+        test_demand_fault_non_lazy_vma,
+        test_demand_fault_valid_lazy_vma,
+        test_demand_permission_deny_write_ro,
+        test_demand_permission_deny_user_kernel,
+        test_demand_permission_deny_exec,
+        test_demand_permission_allow_read,
+        test_demand_permission_allow_write,
+        test_demand_handle_null_page_dir,
+        test_demand_handle_no_vma,
+        test_demand_handle_success,
+        test_demand_handle_permission_denied,
+        test_demand_handle_page_boundary,
+        test_demand_multiple_faults,
+        test_demand_double_fault,
+        test_demand_invalid_process_id,
+    ]
+);

@@ -523,3 +523,5 @@ pub fn print_scheduler_stats() {
         klog_info!("  (no active tasks)");
     }
 }
+
+slopos_lib::define_test_suite!(privsep, run_privilege_separation_invariant_test, single);

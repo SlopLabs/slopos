@@ -816,6 +816,31 @@ pub fn test_task_id_wraparound() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// PUBLIC TEST ENTRY POINTS
-// =============================================================================
+slopos_lib::define_test_suite!(
+    syscall_valid,
+    [
+        test_syscall_lookup_invalid_number,
+        test_syscall_lookup_empty_slot,
+        test_syscall_lookup_valid,
+        test_fork_null_parent,
+        test_fork_kernel_task,
+        test_fork_at_task_limit,
+        test_fork_terminated_parent,
+        test_fork_blocked_parent,
+        test_fork_cleanup_on_failure,
+        test_user_ptr_null,
+        test_user_ptr_kernel_address,
+        test_user_ptr_misaligned,
+        test_user_ptr_overflow_boundary,
+        test_brk_extreme_values,
+        test_shm_create_boundaries,
+        test_irq_register_invalid_line,
+        test_irq_double_registration,
+        test_irq_unregister_nonexistent,
+        test_irq_stats_invalid,
+        test_terminate_already_terminated,
+        test_operations_on_terminated_task,
+        test_fork_memory_pressure,
+        test_task_id_wraparound,
+    ]
+);

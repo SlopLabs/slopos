@@ -1456,3 +1456,45 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
 
     TestResult::Pass
 }
+
+slopos_lib::define_test_suite!(
+    sched_core,
+    [
+        test_state_transition_ready_to_running,
+        test_state_transition_running_to_blocked,
+        test_state_transition_invalid_terminated_to_running,
+        test_state_transition_invalid_blocked_to_running,
+        test_create_max_tasks,
+        test_create_over_max_tasks,
+        test_rapid_create_destroy_cycle,
+        test_schedule_to_empty_queue,
+        test_schedule_duplicate_task,
+        test_schedule_null_task,
+        test_unschedule_not_in_queue,
+        test_priority_ordering,
+        test_idle_priority_last,
+        test_timer_tick_no_current_task,
+        test_timer_tick_decrements_slice,
+        test_terminate_invalid_id,
+        test_terminate_nonexistent_id,
+        test_double_terminate,
+        test_find_invalid_id,
+        test_get_info_null_output,
+        test_create_null_entry,
+        test_create_conflicting_flags,
+        test_create_null_name,
+        test_scheduler_starts_disabled,
+        test_schedule_while_disabled,
+        test_schedule_task_before_scheduler_enable_on_current_cpu,
+        test_resolve_idle_stack_reports_missing_idle_task,
+        test_resolve_idle_stack_reports_missing_kernel_stack,
+        test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack,
+        test_many_same_priority_tasks,
+        test_interleaved_operations,
+        test_remote_inbox_push_drain,
+        test_remote_inbox_multiple_tasks,
+        test_timer_tick_drains_inbox,
+        test_remote_inbox_drops_non_ready_tasks,
+        test_cross_cpu_schedule_lockfree,
+    ]
+);

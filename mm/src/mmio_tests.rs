@@ -132,3 +132,17 @@ pub fn test_mmio_map_near_phys_limit() -> c_int {
 
     0
 }
+
+slopos_lib::define_test_suite!(
+    mmio,
+    [
+        test_mmio_empty_region_state,
+        test_mmio_is_valid_offset_overflow,
+        test_mmio_sub_region_overflow,
+        test_mmio_empty_region_invalid_reads,
+        test_mmio_map_zero_size,
+        test_mmio_map_null_addr,
+        test_mmio_map_large_size,
+        test_mmio_map_near_phys_limit,
+    ]
+);

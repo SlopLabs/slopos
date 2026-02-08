@@ -146,3 +146,14 @@ pub fn test_pit_poll_delay_stress() -> c_int {
 
     0
 }
+
+slopos_lib::define_test_suite!(
+    pit,
+    [
+        test_pit_frequency_valid,
+        test_pit_poll_delay_zero_ms,
+        test_pit_poll_delay_no_early_exit,
+        test_pit_poll_delay_timing_consistency,
+        test_pit_poll_delay_stress,
+    ]
+);

@@ -1272,3 +1272,44 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> TestResult {
     klog_info!("E2E_SHUTDOWN_IRQ: Interrupt state preserved correctly");
     TestResult::Pass
 }
+
+slopos_lib::define_test_suite!(
+    shutdown,
+    [
+        test_stateflag_starts_inactive,
+        test_stateflag_enter_first_call,
+        test_stateflag_enter_idempotent,
+        test_stateflag_reset_and_reenter,
+        test_stateflag_take_consumption,
+        test_stateflag_independence,
+        test_stateflag_relaxed_access,
+        test_stateflag_concurrent_pattern,
+        test_scheduler_shutdown_disables,
+        test_scheduler_shutdown_idempotent,
+        test_scheduler_shutdown_clears_state,
+        test_double_scheduler_shutdown,
+        test_scheduler_reinit_after_shutdown,
+        test_task_shutdown_all_terminates,
+        test_task_shutdown_all_empty,
+        test_task_shutdown_all_idempotent,
+        test_task_shutdown_skips_current,
+        test_kernel_page_directory_available,
+        test_apic_availability_queryable,
+        test_apic_enabled_queryable,
+        test_qemu_debug_exit_port,
+        test_acpi_pm1a_ports_defined,
+        test_ps2_command_port_defined,
+        test_com1_port_defined,
+        test_com1_lsr_offset,
+        test_serial_flush_terminates,
+        test_shutdown_sequence_ordering,
+        test_shutdown_from_clean_state,
+        test_shutdown_partial_init,
+        test_rapid_shutdown_cycles,
+        test_shutdown_many_tasks,
+        test_shutdown_mixed_priorities,
+        test_shutdown_e2e_full_flow,
+        test_shutdown_e2e_stress_with_allocation,
+        test_shutdown_e2e_interrupt_state_preservation,
+    ]
+);

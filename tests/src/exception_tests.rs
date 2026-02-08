@@ -259,3 +259,20 @@ pub fn test_known_exception_names() -> c_int {
 
     0
 }
+
+slopos_lib::define_test_suite!(
+    exception,
+    [
+        test_exception_names_valid,
+        test_critical_exception_classification,
+        test_page_fault_error_codes,
+        test_frame_mode_detection,
+        test_frame_invalid_cs,
+        test_frame_noncanonical_addresses,
+        test_exception_names_all_vectors,
+        test_vector_boundaries,
+        test_error_code_preservation,
+        test_frame_integrity_patterns,
+        test_known_exception_names,
+    ]
+);

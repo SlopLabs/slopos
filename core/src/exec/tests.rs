@@ -368,3 +368,30 @@ pub fn test_init_path_within_exec_limit() -> c_int {
     }
     0
 }
+
+slopos_lib::define_test_suite!(
+    exec,
+    [
+        test_elf_invalid_magic,
+        test_elf_wrong_class,
+        test_elf_wrong_endian,
+        test_elf_wrong_machine,
+        test_elf_truncated_header,
+        test_elf_empty_file,
+        test_elf_no_load_segments,
+        test_elf_segment_overflow_vaddr,
+        test_elf_segment_filesz_greater_than_memsz,
+        test_elf_segment_offset_overflow,
+        test_elf_kernel_address_entry,
+        test_path_too_long,
+        test_path_empty,
+        test_translate_address_kernel_to_user,
+        test_translate_address_user_passthrough,
+        test_process_vm_null_page_dir,
+        test_elf_huge_segment_count,
+        test_elf_phentsize_mismatch,
+        test_exec_max_size_boundary,
+        test_init_path_is_absolute,
+        test_init_path_within_exec_limit,
+    ]
+);
