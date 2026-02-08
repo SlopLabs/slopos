@@ -2,7 +2,6 @@ pub mod context_tests;
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod kthread;
-pub mod load_balance;
 pub mod per_cpu;
 pub mod safe_switch;
 pub mod sched_tests;

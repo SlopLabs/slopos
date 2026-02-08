@@ -66,6 +66,17 @@ pub const USER_SPACE_START_VA: u64 = 0x0000_0000_0000_0000;
 /// User space end virtual address (up to canonical hole).
 pub const USER_SPACE_END_VA: u64 = 0x0000_8000_0000_0000;
 
+/// Start of kernel (high-canonical) virtual address space.
+///
+/// On x86-64, addresses between `USER_SPACE_END_VA` and this value fall in
+/// the non-canonical hole and fault on access.  Anything at or above this
+/// address is in the high-canonical half reserved for the kernel.
+///
+/// Use this to reject user-supplied addresses that would land in kernel space
+/// (e.g. ELF segment validation).  For the kernel's own load address, use
+/// `KERNEL_VIRTUAL_BASE` instead.
+pub const KERNEL_SPACE_START_VA: u64 = 0xFFFF_8000_0000_0000;
+
 /// Process code segment start virtual address.
 pub const PROCESS_CODE_START_VA: u64 = 0x0000_0000_0040_0000;
 

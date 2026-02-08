@@ -19,7 +19,6 @@ pub use scheduler::context_tests;
 pub use scheduler::fate_api;
 pub use scheduler::ffi_boundary;
 pub use scheduler::kthread;
-pub use scheduler::load_balance;
 pub use scheduler::per_cpu;
 pub use scheduler::sched_tests;
 pub use scheduler::scheduler as sched;

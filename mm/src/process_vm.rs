@@ -9,7 +9,9 @@ use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegme
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
-use crate::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags};
+use crate::mm_constants::{
+    INVALID_PROCESS_ID, KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags,
+};
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
 };
@@ -689,20 +691,18 @@ pub fn process_vm_load_elf_data(
     Ok(())
 }
 
-const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
-
 fn calculate_load_offset(segments: &[ValidatedSegment], code_base: u64) -> (u64, bool) {
     let min_vaddr = segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0);
 
-    let needs_reloc = min_vaddr >= KERNEL_BASE || min_vaddr != code_base;
+    let needs_reloc = min_vaddr >= KERNEL_VIRTUAL_BASE || min_vaddr != code_base;
     (min_vaddr, needs_reloc)
 }
 
 pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
-    if addr >= KERNEL_BASE {
-        let offset = addr.wrapping_sub(KERNEL_BASE);
+    if addr >= KERNEL_VIRTUAL_BASE {
+        let offset = addr.wrapping_sub(KERNEL_VIRTUAL_BASE);
         code_base.wrapping_add(offset)
-    } else if min_vaddr >= KERNEL_BASE {
+    } else if min_vaddr >= KERNEL_VIRTUAL_BASE {
         let offset = addr.wrapping_sub(min_vaddr);
         code_base.wrapping_add(offset)
     } else if min_vaddr < code_base {

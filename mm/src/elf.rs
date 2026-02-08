@@ -17,7 +17,9 @@
 
 use core::fmt;
 
-use crate::mm_constants::{PAGE_SIZE_4KB, USER_SPACE_END_VA, USER_SPACE_START_VA};
+use crate::mm_constants::{
+    KERNEL_SPACE_START_VA, PAGE_SIZE_4KB, USER_SPACE_END_VA, USER_SPACE_START_VA,
+};
 
 // =============================================================================
 // ELF Constants
@@ -690,8 +692,7 @@ impl<'a> ElfValidator<'a> {
 
         // 6. Validate address space: must be in user space
         // Check for kernel address space (high canonical addresses)
-        const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
-        if vaddr >= KERNEL_BASE || mem_end > KERNEL_BASE {
+        if vaddr >= KERNEL_SPACE_START_VA || mem_end > KERNEL_SPACE_START_VA {
             return Err(ElfError::KernelAddressViolation);
         }
 
