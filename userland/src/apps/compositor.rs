@@ -21,8 +21,6 @@ use crate::syscall::{
     CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, core as sys_core, input, memory,
     process, tty, window,
 };
-use crate::ui_utils;
-
 use crate::theme::*;
 
 // Window placeholder colors (until clients migrate to shared memory)
@@ -376,6 +374,7 @@ struct WindowManager {
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
     prev_start_menu_hover: Option<usize>,
+    prev_start_button_hover: bool,
     prev_decoration_hover: DecorationHover,
     // Force full redraw flag
     needs_full_redraw: bool,
@@ -434,6 +433,7 @@ impl WindowManager {
             prev_taskbar_state: TaskbarState::empty(),
             taskbar_needs_redraw: true,
             prev_start_menu_hover: None,
+            prev_start_button_hover: false,
             prev_decoration_hover: DecorationHover::default(),
             needs_full_redraw: true,
             surface_cache: ClientSurfaceCache::new(),
@@ -478,6 +478,22 @@ impl WindowManager {
         if self.start_menu_open {
             self.add_start_menu_damage();
         }
+    }
+
+    fn add_start_button_damage(&mut self) {
+        if self.output_width == 0 || self.output_height == 0 {
+            return;
+        }
+        let fb_height = self.output_height as i32;
+        let btn_x = self.start_button_x();
+        let btn_y = self.start_button_y(fb_height);
+        let btn_h = self.start_button_height();
+        self.output_damage.add_rect(
+            btn_x,
+            btn_y,
+            btn_x + START_BUTTON_WIDTH - 1,
+            btn_y + btn_h - 1,
+        );
     }
 
     fn add_start_menu_damage(&mut self) {
@@ -636,6 +652,15 @@ impl WindowManager {
             }
         } else {
             self.prev_start_menu_hover = None;
+        }
+
+        if self.output_height > 0 {
+            let fb_h = self.output_height as i32;
+            let hover = self.hit_test_start_button(fb_h);
+            if hover != self.prev_start_button_hover {
+                self.add_start_button_damage();
+                self.prev_start_button_hover = hover;
+            }
         }
 
         // Track decoration hover changes on inactive windows so the title bar
@@ -1127,50 +1152,7 @@ impl WindowManager {
 
     /// Draw window title bar to the output buffer
     fn draw_title_bar(&self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
-        let focused = window.task_id == self.focused_task;
-        let color = if focused {
-            COLOR_TITLE_BAR_FOCUSED
-        } else {
-            COLOR_TITLE_BAR
-        };
-
-        let title_y = window.y - TITLE_BAR_HEIGHT;
-
-        // Title bar background
-        gfx::fill_rect(
-            buf,
-            window.x,
-            title_y,
-            window.width as i32,
-            TITLE_BAR_HEIGHT,
-            color,
-        );
-
-        // Window title text
-        let title = title_to_str(&window.title);
-        gfx::font::draw_string(buf, window.x + 8, title_y + 4, title, COLOR_TEXT, color);
-
-        // Close button (X)
-        ui_utils::draw_button(
-            buf,
-            window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING,
-            title_y + BUTTON_PADDING,
-            BUTTON_SIZE,
-            "X",
-            self.hit_test_close_button(window),
-            true,
-        );
-
-        // Minimize button (_)
-        ui_utils::draw_button(
-            buf,
-            window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2),
-            title_y + BUTTON_PADDING,
-            BUTTON_SIZE,
-            "_",
-            self.hit_test_minimize_button(window),
-            false,
-        );
+        self.draw_title_bar_clipped(buf, window, &full_screen_clip(buf));
     }
 
     /// Renders the taskbar into the provided draw buffer, including Start and window buttons.
@@ -1186,150 +1168,15 @@ impl WindowManager {
     /// wm.draw_taskbar(&mut buf);
     /// ```
     fn draw_taskbar(&self, buf: &mut DrawBuffer) {
-        let taskbar_y = buf.height() as i32 - TASKBAR_HEIGHT;
-
-        // Taskbar background
-        gfx::fill_rect(
-            buf,
-            0,
-            taskbar_y,
-            buf.width() as i32,
-            TASKBAR_HEIGHT,
-            COLOR_TASKBAR,
-        );
-
-        // Draw Start button
-        let start_btn_x = self.start_button_x();
-        let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
-        let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
-
-        let start_hover = self.mouse_x >= start_btn_x
-            && self.mouse_x < start_btn_x + START_BUTTON_WIDTH
-            && self.mouse_y >= btn_y
-            && self.mouse_y < btn_y + btn_height;
-
-        let start_color = if self.start_menu_open || start_hover {
-            COLOR_BUTTON_HOVER
-        } else {
-            COLOR_BUTTON
-        };
-
-        gfx::fill_rect(
-            buf,
-            start_btn_x,
-            btn_y,
-            START_BUTTON_WIDTH,
-            btn_height,
-            start_color,
-        );
-        gfx::font::draw_string(
-            buf,
-            start_btn_x + 4,
-            btn_y + 4,
-            "Start",
-            COLOR_TEXT,
-            start_color,
-        );
-
-        // Draw a subtle separator/gap between Start section and app buttons
-        let separator_x = self.app_buttons_start_x() - (START_APPS_GAP / 2);
-        gfx::fill_rect(
-            buf,
-            separator_x,
-            taskbar_y + 2,
-            1,
-            TASKBAR_HEIGHT - 4,
-            COLOR_BUTTON_HOVER,
-        );
-
-        // Draw app buttons
-        let mut x = self.app_buttons_start_x();
-        for i in 0..self.window_count as usize {
-            let window = &self.windows[i];
-            let focused = window.task_id == self.focused_task;
-            let btn_color = if focused {
-                COLOR_BUTTON_HOVER
-            } else {
-                COLOR_BUTTON
-            };
-
-            let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
-            let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
-
-            gfx::fill_rect(buf, x, btn_y, TASKBAR_BUTTON_WIDTH, btn_height, btn_color);
-
-            // Button text (truncated to fit)
-            let title = title_to_str(&window.title);
-            let max_chars = (TASKBAR_BUTTON_WIDTH / 8 - 1) as usize;
-            let truncated: &str = if title.len() > max_chars {
-                &title[..max_chars]
-            } else {
-                title
-            };
-            gfx::font::draw_string(buf, x + 4, btn_y + 4, truncated, COLOR_TEXT, btn_color);
-
-            x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
-        }
+        self.draw_taskbar_clipped(buf, &full_screen_clip(buf));
     }
 
     fn draw_start_menu(&self, buf: &mut DrawBuffer) {
-        if !self.start_menu_open {
-            return;
-        }
-
-        let fb_height = buf.height() as i32;
-        let menu_x = self.start_menu_x();
-        let menu_y = self.start_menu_y(fb_height);
-        let menu_h = self.start_menu_height();
-
-        gfx::fill_rect(
-            buf,
-            menu_x,
-            menu_y,
-            START_MENU_WIDTH,
-            menu_h,
-            COLOR_START_MENU_BG,
-        );
-
-        for (idx, item) in START_MENU_ITEMS.iter().enumerate() {
-            let item_y = menu_y + START_MENU_PADDING + (idx as i32 * START_MENU_ITEM_HEIGHT);
-            let item_hover = self.hit_test_start_menu_item(fb_height) == Some(idx);
-            let item_color = if item_hover {
-                COLOR_BUTTON_HOVER
-            } else {
-                COLOR_START_MENU_BG
-            };
-
-            gfx::fill_rect(
-                buf,
-                menu_x + START_MENU_PADDING,
-                item_y,
-                START_MENU_WIDTH - (START_MENU_PADDING * 2),
-                START_MENU_ITEM_HEIGHT,
-                item_color,
-            );
-            gfx::font::draw_string(
-                buf,
-                menu_x + START_MENU_PADDING + 4,
-                item_y + 6,
-                item.label,
-                COLOR_TEXT,
-                item_color,
-            );
-        }
+        self.draw_start_menu_clipped(buf, &full_screen_clip(buf));
     }
 
-    /// Draw mouse cursor to the output buffer
     fn draw_cursor(&self, buf: &mut DrawBuffer) {
-        // Simple crosshair cursor
-        let mx = self.mouse_x;
-        let my = self.mouse_y;
-
-        // Horizontal line
-        gfx::fill_rect(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR);
-
-        // Vertical line
-        gfx::fill_rect(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR);
+        self.draw_cursor_clipped(buf, &full_screen_clip(buf));
     }
 
     /// Draw window content from client's shared memory surface (100% safe)
@@ -1363,7 +1210,7 @@ impl WindowManager {
             Some(idx) => idx,
             None => {
                 // No shared memory surface - draw placeholder
-                self.draw_window_placeholder(buf, window);
+                self.draw_window_placeholder(buf, window, clip);
                 return;
             }
         };
@@ -1372,7 +1219,7 @@ impl WindowManager {
         let src_data = match self.surface_cache.get_slice(cache_index) {
             Some(slice) => slice,
             None => {
-                self.draw_window_placeholder(buf, window);
+                self.draw_window_placeholder(buf, window, clip);
                 return;
             }
         };
@@ -1427,6 +1274,227 @@ impl WindowManager {
         }
     }
 
+    /// Draw a title bar clipped to the given damage region.
+    fn draw_title_bar_clipped(
+        &self,
+        buf: &mut DrawBuffer,
+        window: &UserWindowInfo,
+        clip: &DamageRect,
+    ) {
+        let focused = window.task_id == self.focused_task;
+        let color = if focused {
+            COLOR_TITLE_BAR_FOCUSED
+        } else {
+            COLOR_TITLE_BAR
+        };
+        let title_y = window.y - TITLE_BAR_HEIGHT;
+
+        fill_rect_clipped(
+            buf,
+            window.x,
+            title_y,
+            window.width as i32,
+            TITLE_BAR_HEIGHT,
+            color,
+            clip,
+        );
+
+        let title = title_to_str(&window.title);
+        draw_string_clipped(
+            buf,
+            window.x + 8,
+            title_y + 4,
+            title,
+            COLOR_TEXT,
+            color,
+            clip,
+        );
+
+        draw_button_clipped(
+            buf,
+            window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING,
+            title_y + BUTTON_PADDING,
+            BUTTON_SIZE,
+            "X",
+            self.hit_test_close_button(window),
+            true,
+            clip,
+        );
+
+        draw_button_clipped(
+            buf,
+            window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2),
+            title_y + BUTTON_PADDING,
+            BUTTON_SIZE,
+            "_",
+            self.hit_test_minimize_button(window),
+            false,
+            clip,
+        );
+    }
+
+    /// Draw the taskbar clipped to the given damage region.
+    fn draw_taskbar_clipped(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
+        let taskbar_y = buf.height() as i32 - TASKBAR_HEIGHT;
+
+        fill_rect_clipped(
+            buf,
+            0,
+            taskbar_y,
+            buf.width() as i32,
+            TASKBAR_HEIGHT,
+            COLOR_TASKBAR,
+            clip,
+        );
+
+        let start_btn_x = self.start_button_x();
+        let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
+        let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
+
+        let start_hover = self.mouse_x >= start_btn_x
+            && self.mouse_x < start_btn_x + START_BUTTON_WIDTH
+            && self.mouse_y >= btn_y
+            && self.mouse_y < btn_y + btn_height;
+
+        let start_color = if self.start_menu_open || start_hover {
+            COLOR_BUTTON_HOVER
+        } else {
+            COLOR_BUTTON
+        };
+
+        fill_rect_clipped(
+            buf,
+            start_btn_x,
+            btn_y,
+            START_BUTTON_WIDTH,
+            btn_height,
+            start_color,
+            clip,
+        );
+        draw_string_clipped(
+            buf,
+            start_btn_x + 4,
+            btn_y + 4,
+            "Start",
+            COLOR_TEXT,
+            start_color,
+            clip,
+        );
+
+        let separator_x = self.app_buttons_start_x() - (START_APPS_GAP / 2);
+        fill_rect_clipped(
+            buf,
+            separator_x,
+            taskbar_y + 2,
+            1,
+            TASKBAR_HEIGHT - 4,
+            COLOR_BUTTON_HOVER,
+            clip,
+        );
+
+        let mut x = self.app_buttons_start_x();
+        for i in 0..self.window_count as usize {
+            let window = &self.windows[i];
+            let focused = window.task_id == self.focused_task;
+            let btn_color = if focused {
+                COLOR_BUTTON_HOVER
+            } else {
+                COLOR_BUTTON
+            };
+
+            let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
+            let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
+
+            fill_rect_clipped(
+                buf,
+                x,
+                btn_y,
+                TASKBAR_BUTTON_WIDTH,
+                btn_height,
+                btn_color,
+                clip,
+            );
+
+            let title = title_to_str(&window.title);
+            let max_chars = (TASKBAR_BUTTON_WIDTH / 8 - 1) as usize;
+            let truncated: &str = if title.len() > max_chars {
+                &title[..max_chars]
+            } else {
+                title
+            };
+            draw_string_clipped(
+                buf,
+                x + 4,
+                btn_y + 4,
+                truncated,
+                COLOR_TEXT,
+                btn_color,
+                clip,
+            );
+
+            x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        }
+    }
+
+    /// Draw the start menu clipped to the given damage region.
+    fn draw_start_menu_clipped(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
+        if !self.start_menu_open {
+            return;
+        }
+
+        let fb_height = buf.height() as i32;
+        let menu_x = self.start_menu_x();
+        let menu_y = self.start_menu_y(fb_height);
+        let menu_h = self.start_menu_height();
+
+        fill_rect_clipped(
+            buf,
+            menu_x,
+            menu_y,
+            START_MENU_WIDTH,
+            menu_h,
+            COLOR_START_MENU_BG,
+            clip,
+        );
+
+        for (idx, item) in START_MENU_ITEMS.iter().enumerate() {
+            let item_y = menu_y + START_MENU_PADDING + (idx as i32 * START_MENU_ITEM_HEIGHT);
+            let item_hover = self.hit_test_start_menu_item(fb_height) == Some(idx);
+            let item_color = if item_hover {
+                COLOR_BUTTON_HOVER
+            } else {
+                COLOR_START_MENU_BG
+            };
+
+            fill_rect_clipped(
+                buf,
+                menu_x + START_MENU_PADDING,
+                item_y,
+                START_MENU_WIDTH - (START_MENU_PADDING * 2),
+                START_MENU_ITEM_HEIGHT,
+                item_color,
+                clip,
+            );
+            draw_string_clipped(
+                buf,
+                menu_x + START_MENU_PADDING + 4,
+                item_y + 6,
+                item.label,
+                COLOR_TEXT,
+                item_color,
+                clip,
+            );
+        }
+    }
+
+    /// Draw the mouse cursor clipped to the given damage region.
+    fn draw_cursor_clipped(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
+        let mx = self.mouse_x;
+        let my = self.mouse_y;
+        fill_rect_clipped(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR, clip);
+        fill_rect_clipped(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR, clip);
+    }
+
     fn draw_partial_region(&mut self, buf: &mut DrawBuffer, damage: &DamageRect) {
         if !damage.is_valid() {
             return;
@@ -1465,7 +1533,7 @@ impl WindowManager {
                 y1: window.y - 1,
             };
             if intersect_rect(damage, &title_rect).is_some() {
-                self.draw_title_bar(buf, &window);
+                self.draw_title_bar_clipped(buf, &window, damage);
             }
         }
 
@@ -1477,7 +1545,7 @@ impl WindowManager {
             y1: buf.height() as i32 - 1,
         };
         if intersect_rect(damage, &taskbar_rect).is_some() {
-            self.draw_taskbar(buf);
+            self.draw_taskbar_clipped(buf, damage);
         }
 
         if self.start_menu_open {
@@ -1489,7 +1557,7 @@ impl WindowManager {
                 y1: self.start_menu_y(buf.height() as i32) + menu_h - 1,
             };
             if intersect_rect(damage, &menu_rect).is_some() {
-                self.draw_start_menu(buf);
+                self.draw_start_menu_clipped(buf, damage);
             }
         }
 
@@ -1500,62 +1568,40 @@ impl WindowManager {
             y1: self.mouse_y + 4,
         };
         if intersect_rect(damage, &cursor_rect).is_some() {
-            self.draw_cursor(buf);
+            self.draw_cursor_clipped(buf, damage);
         }
     }
 
-    /// Render a simple placeholder for a window's content area when the client's surface is not available.
-    ///
-    /// This draws a filled rectangle using COLOR_WINDOW_PLACEHOLDER, an outline using COLOR_TITLE_BAR,
-    /// and a short informational text centered vertically inside the window bounds.
-    ///
-    /// # Parameters
-    ///
-    /// - `buf`: the draw target where the placeholder will be rendered.
-    /// - `window`: the window geometry and position; `x`, `y`, `width`, and `height` determine the placeholder area.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Construct minimal buffer and window info (types shown here are from the compositor crate).
-    /// let mut buf = DrawBuffer::default();
-    /// let window = UserWindowInfo { x: 20, y: 16, width: 200, height: 120, ..Default::default() };
-    /// let wm = WindowManager::new();
-    /// // Render a placeholder for the window into the buffer.
-    /// wm.draw_window_placeholder(&mut buf, &window);
-    /// ```
-    fn draw_window_placeholder(&self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
-        // Draw a colored rectangle as placeholder for window content
-        gfx::fill_rect(
-            buf,
-            window.x,
-            window.y,
-            window.width as i32,
-            window.height as i32,
-            COLOR_WINDOW_PLACEHOLDER,
-        );
+    fn draw_window_placeholder(
+        &self,
+        buf: &mut DrawBuffer,
+        window: &UserWindowInfo,
+        clip: &DamageRect,
+    ) {
+        let wx = window.x;
+        let wy = window.y;
+        let ww = window.width as i32;
+        let wh = window.height as i32;
 
-        // Draw a border to show window bounds
-        gfx::draw_rect(
-            buf,
-            window.x,
-            window.y,
-            window.width as i32,
-            window.height as i32,
-            COLOR_TITLE_BAR,
-        );
+        fill_rect_clipped(buf, wx, wy, ww, wh, COLOR_WINDOW_PLACEHOLDER, clip);
 
-        // Draw placeholder text
+        // Border: top, bottom, left, right edges
+        fill_rect_clipped(buf, wx, wy, ww, 1, COLOR_TITLE_BAR, clip);
+        fill_rect_clipped(buf, wx, wy + wh - 1, ww, 1, COLOR_TITLE_BAR, clip);
+        fill_rect_clipped(buf, wx, wy, 1, wh, COLOR_TITLE_BAR, clip);
+        fill_rect_clipped(buf, wx + ww - 1, wy, 1, wh, COLOR_TITLE_BAR, clip);
+
         let text = "Window content pending migration";
-        let text_x = window.x + 10;
-        let text_y = window.y + window.height as i32 / 2 - 8;
-        gfx::font::draw_string(
+        let text_x = wx + 10;
+        let text_y = wy + wh / 2 - 8;
+        draw_string_clipped(
             buf,
             text_x,
             text_y,
             text,
             COLOR_TEXT,
             COLOR_WINDOW_PLACEHOLDER,
+            clip,
         );
     }
 
@@ -1660,6 +1706,15 @@ fn title_to_str(title: &[u8; 32]) -> &str {
     core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
 }
 
+fn full_screen_clip(buf: &DrawBuffer) -> DamageRect {
+    DamageRect {
+        x0: 0,
+        y0: 0,
+        x1: buf.width() as i32 - 1,
+        y1: buf.height() as i32 - 1,
+    }
+}
+
 fn intersect_rect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
     let x0 = a.x0.max(b.x0);
     let y0 = a.y0.max(b.y0);
@@ -1670,6 +1725,132 @@ fn intersect_rect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
     } else {
         None
     }
+}
+
+fn fill_rect_clipped(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: Color32,
+    clip: &DamageRect,
+) {
+    let rx0 = x.max(clip.x0);
+    let ry0 = y.max(clip.y0);
+    let rx1 = (x + w - 1).min(clip.x1);
+    let ry1 = (y + h - 1).min(clip.y1);
+    if rx0 <= rx1 && ry0 <= ry1 {
+        gfx::fill_rect(buf, rx0, ry0, rx1 - rx0 + 1, ry1 - ry0 + 1, color);
+    }
+}
+
+fn draw_char_clipped(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    ch: u8,
+    fg: Color32,
+    bg: Color32,
+    clip: &DamageRect,
+) {
+    use slopos_abi::draw::Canvas;
+    let char_w = gfx::font::FONT_CHAR_WIDTH;
+    let char_h = gfx::font::FONT_CHAR_HEIGHT;
+
+    if x > clip.x1 || y > clip.y1 || x + char_w - 1 < clip.x0 || y + char_h - 1 < clip.y0 {
+        return;
+    }
+
+    let glyph = match gfx::font::get_glyph(ch) {
+        Some(g) => g,
+        None => match gfx::font::get_glyph(b' ') {
+            Some(g) => g,
+            None => return,
+        },
+    };
+
+    let fmt = buf.pixel_format();
+    let fg_px = fmt.encode(fg);
+    let bg_px = fmt.encode(bg);
+    let has_bg = bg.0 != 0;
+
+    for (row_idx, &row_bits) in glyph.iter().enumerate() {
+        let py = y + row_idx as i32;
+        if py < clip.y0 || py > clip.y1 {
+            continue;
+        }
+        for col in 0..char_w {
+            let px = x + col;
+            if px < clip.x0 || px > clip.x1 {
+                continue;
+            }
+            let is_fg = (row_bits & (0x80 >> col)) != 0;
+            if is_fg {
+                buf.put_pixel(px, py, fg_px);
+            } else if has_bg {
+                buf.put_pixel(px, py, bg_px);
+            }
+        }
+    }
+}
+
+fn draw_string_clipped(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    text: &str,
+    fg: Color32,
+    bg: Color32,
+    clip: &DamageRect,
+) {
+    let char_h = gfx::font::FONT_CHAR_HEIGHT;
+    let char_w = gfx::font::FONT_CHAR_WIDTH;
+    if y + char_h - 1 < clip.y0 || y > clip.y1 {
+        return;
+    }
+    let mut cx = x;
+    for &ch in text.as_bytes() {
+        if ch == 0 {
+            break;
+        }
+        if cx > clip.x1 {
+            break;
+        }
+        if cx + char_w - 1 >= clip.x0 {
+            draw_char_clipped(buf, cx, y, ch, fg, bg, clip);
+        }
+        cx += char_w;
+    }
+}
+
+fn draw_button_clipped(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    size: i32,
+    label: &str,
+    hover: bool,
+    is_close: bool,
+    clip: &DamageRect,
+) {
+    let color = if hover && is_close {
+        COLOR_BUTTON_CLOSE_HOVER
+    } else if hover {
+        COLOR_BUTTON_HOVER
+    } else {
+        COLOR_BUTTON
+    };
+    fill_rect_clipped(buf, x, y, size, size, color, clip);
+    draw_string_clipped(
+        buf,
+        x + size / 4,
+        y + size / 4,
+        label,
+        COLOR_TEXT,
+        color,
+        clip,
+    );
 }
 
 fn estimate_present_bytes(
