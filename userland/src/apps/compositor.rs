@@ -283,11 +283,136 @@ impl WindowBounds {
     }
 }
 
-#[derive(Copy, Clone, Default, PartialEq, Eq)]
-struct DecorationHover {
-    task_id: u32,
-    close_hover: bool,
-    minimize_hover: bool,
+// ── Hover Registry ──────────────────────────────────────────────────────────
+// Unified hover tracking for all interactive elements. Each frame the
+// compositor registers regions with their hit-test result; the registry
+// auto-diffs against the previous frame and reports damage rects.
+
+const MAX_HOVER_REGIONS: usize = 64;
+
+// Hover ID namespace constants
+const HOVER_START_BTN: u32 = 0x0001_0000;
+const HOVER_MENU_ITEM_BASE: u32 = 0x0002_0000; // + item index
+const HOVER_CLOSE_BASE: u32 = 0x0003_0000; // + task_id
+const HOVER_MINIMIZE_BASE: u32 = 0x0004_0000; // + task_id
+const HOVER_APP_BTN_BASE: u32 = 0x0005_0000; // + task_id
+
+#[derive(Copy, Clone)]
+struct HoverRegion {
+    id: u32,
+    rect: DamageRect,
+    hovered: bool,
+}
+
+impl HoverRegion {
+    const fn empty() -> Self {
+        Self {
+            id: 0,
+            rect: DamageRect::invalid(),
+            hovered: false,
+        }
+    }
+}
+
+struct HoverRegistry {
+    current: [HoverRegion; MAX_HOVER_REGIONS],
+    current_count: usize,
+    previous: [HoverRegion; MAX_HOVER_REGIONS],
+    previous_count: usize,
+}
+
+impl HoverRegistry {
+    fn new() -> Self {
+        Self {
+            current: [HoverRegion::empty(); MAX_HOVER_REGIONS],
+            current_count: 0,
+            previous: [HoverRegion::empty(); MAX_HOVER_REGIONS],
+            previous_count: 0,
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        self.previous = self.current;
+        self.previous_count = self.current_count;
+        self.current_count = 0;
+    }
+
+    fn register(&mut self, id: u32, rect: DamageRect, hovered: bool) {
+        if self.current_count >= MAX_HOVER_REGIONS {
+            return;
+        }
+        self.current[self.current_count] = HoverRegion { id, rect, hovered };
+        self.current_count += 1;
+    }
+
+    fn find_previous(&self, id: u32) -> Option<&HoverRegion> {
+        for i in 0..self.previous_count {
+            if self.previous[i].id == id {
+                return Some(&self.previous[i]);
+            }
+        }
+        None
+    }
+
+    fn find_current(&self, id: u32) -> Option<&HoverRegion> {
+        for i in 0..self.current_count {
+            if self.current[i].id == id {
+                return Some(&self.current[i]);
+            }
+        }
+        None
+    }
+
+    /// Diffs current vs previous frame. Returns damage rects for regions whose
+    /// hover state changed, appeared while hovered, or disappeared while hovered.
+    fn changed_regions(&self, out: &mut [DamageRect]) -> usize {
+        let mut count = 0usize;
+
+        for i in 0..self.current_count {
+            let cur = &self.current[i];
+            match self.find_previous(cur.id) {
+                Some(prev) => {
+                    if cur.hovered != prev.hovered {
+                        if count < out.len() && prev.rect.is_valid() {
+                            out[count] = prev.rect;
+                            count += 1;
+                        }
+                        if count < out.len() && cur.rect.is_valid() {
+                            out[count] = cur.rect;
+                            count += 1;
+                        }
+                    }
+                }
+                None => {
+                    if cur.hovered && count < out.len() && cur.rect.is_valid() {
+                        out[count] = cur.rect;
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        for i in 0..self.previous_count {
+            let prev = &self.previous[i];
+            if prev.hovered && self.find_current(prev.id).is_none() {
+                if count < out.len() && prev.rect.is_valid() {
+                    out[count] = prev.rect;
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
+    fn is_hovered(&self, id: u32) -> bool {
+        for i in 0..self.current_count {
+            if self.current[i].id == id {
+                return self.current[i].hovered;
+            }
+        }
+        false
+    }
 }
 
 /// Maximum cursor positions to track per frame (for damage)
@@ -373,10 +498,7 @@ struct WindowManager {
     first_frame: bool,
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
-    prev_start_menu_hover: Option<usize>,
-    prev_start_button_hover: bool,
-    prev_decoration_hover: DecorationHover,
-    // Force full redraw flag
+    hover_registry: HoverRegistry,
     needs_full_redraw: bool,
     // Client surface cache for shared memory mappings
     surface_cache: ClientSurfaceCache,
@@ -432,9 +554,7 @@ impl WindowManager {
             first_frame: true,
             prev_taskbar_state: TaskbarState::empty(),
             taskbar_needs_redraw: true,
-            prev_start_menu_hover: None,
-            prev_start_button_hover: false,
-            prev_decoration_hover: DecorationHover::default(),
+            hover_registry: HoverRegistry::new(),
             needs_full_redraw: true,
             surface_cache: ClientSurfaceCache::new(),
             output_bytes_pp: 4,
@@ -478,22 +598,6 @@ impl WindowManager {
         if self.start_menu_open {
             self.add_start_menu_damage();
         }
-    }
-
-    fn add_start_button_damage(&mut self) {
-        if self.output_width == 0 || self.output_height == 0 {
-            return;
-        }
-        let fb_height = self.output_height as i32;
-        let btn_x = self.start_button_x();
-        let btn_y = self.start_button_y(fb_height);
-        let btn_h = self.start_button_height();
-        self.output_damage.add_rect(
-            btn_x,
-            btn_y,
-            btn_x + START_BUTTON_WIDTH - 1,
-            btn_y + btn_h - 1,
-        );
     }
 
     fn add_start_menu_damage(&mut self) {
@@ -641,58 +745,124 @@ impl WindowManager {
             self.add_cursor_damage_at(self.mouse_x, self.mouse_y);
         }
 
-        // Track start menu hover changes so the full menu area gets redrawn
-        // when the highlighted item changes (cursor damage alone is too small)
-        if self.start_menu_open && self.output_height > 0 {
-            let fb_h = self.output_height as i32;
-            let current_hover = self.hit_test_start_menu_item(fb_h);
-            if current_hover != self.prev_start_menu_hover {
-                self.add_start_menu_damage();
-                self.prev_start_menu_hover = current_hover;
-            }
-        } else {
-            self.prev_start_menu_hover = None;
-        }
+        // ── Hover registry: begin frame and register all interactive regions ──
+        self.hover_registry.begin_frame();
 
         if self.output_height > 0 {
             let fb_h = self.output_height as i32;
-            let hover = self.hit_test_start_button(fb_h);
-            if hover != self.prev_start_button_hover {
-                self.add_start_button_damage();
-                self.prev_start_button_hover = hover;
+
+            let btn_x = self.start_button_x();
+            let btn_y = self.start_button_y(fb_h);
+            let btn_h = self.start_button_height();
+            self.hover_registry.register(
+                HOVER_START_BTN,
+                DamageRect {
+                    x0: btn_x,
+                    y0: btn_y,
+                    x1: btn_x + START_BUTTON_WIDTH - 1,
+                    y1: btn_y + btn_h - 1,
+                },
+                self.hit_test_start_button(fb_h),
+            );
+
+            if self.start_menu_open {
+                let menu_y = self.start_menu_y(fb_h) + START_MENU_PADDING;
+                let menu_x = self.start_menu_x();
+                let hovered_item = self.hit_test_start_menu_item(fb_h);
+                for idx in 0..START_MENU_ITEMS.len() {
+                    let item_y = menu_y + (idx as i32 * START_MENU_ITEM_HEIGHT);
+                    let hovered = hovered_item == Some(idx);
+                    self.hover_registry.register(
+                        HOVER_MENU_ITEM_BASE | idx as u32,
+                        DamageRect {
+                            x0: menu_x + START_MENU_PADDING,
+                            y0: item_y,
+                            x1: menu_x + START_MENU_WIDTH - START_MENU_PADDING - 1,
+                            y1: item_y + START_MENU_ITEM_HEIGHT - 1,
+                        },
+                        hovered,
+                    );
+                }
+            }
+
+            let mut app_x = self.app_buttons_start_x();
+            let taskbar_y = fb_h - TASKBAR_HEIGHT;
+            let app_btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
+            let app_btn_h = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
+            for i in 0..self.window_count as usize {
+                let window = self.windows[i];
+                let hovered = self.mouse_x >= app_x
+                    && self.mouse_x < app_x + TASKBAR_BUTTON_WIDTH
+                    && self.mouse_y >= app_btn_y
+                    && self.mouse_y < app_btn_y + app_btn_h;
+                self.hover_registry.register(
+                    HOVER_APP_BTN_BASE | window.task_id,
+                    DamageRect {
+                        x0: app_x,
+                        y0: app_btn_y,
+                        x1: app_x + TASKBAR_BUTTON_WIDTH - 1,
+                        y1: app_btn_y + app_btn_h - 1,
+                    },
+                    hovered,
+                );
+                app_x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
             }
         }
 
-        // Track decoration hover changes on inactive windows so the title bar
-        // redraws when buttons gain/lose hover highlight.
-        let mut current_deco_hover = DecorationHover::default();
+        // Decoration buttons (close/minimize) — only the topmost window under
+        // the cursor gets hover; once found, all deeper windows register as
+        // unhovered so the diff still fires damage when the cursor moves away.
+        let mut deco_hit_consumed = false;
         for i in (0..self.window_count as usize).rev() {
             let window = self.windows[i];
             if window.state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
-            if self.hit_test_title_bar(&window) {
-                current_deco_hover = DecorationHover {
-                    task_id: window.task_id,
-                    close_hover: self.hit_test_close_button(&window),
-                    minimize_hover: self.hit_test_minimize_button(&window),
-                };
-                break;
+
+            let close_x = window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING;
+            let close_y = window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
+            let min_x = window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
+            let min_y = window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
+
+            let on_title_bar = !deco_hit_consumed && self.hit_test_title_bar(&window);
+            let close_hover = on_title_bar && self.hit_test_close_button(&window);
+            let min_hover = on_title_bar && self.hit_test_minimize_button(&window);
+
+            if on_title_bar {
+                deco_hit_consumed = true;
             }
+
+            self.hover_registry.register(
+                HOVER_CLOSE_BASE | window.task_id,
+                DamageRect {
+                    x0: close_x,
+                    y0: close_y,
+                    x1: close_x + BUTTON_SIZE - 1,
+                    y1: close_y + BUTTON_SIZE - 1,
+                },
+                close_hover,
+            );
+            self.hover_registry.register(
+                HOVER_MINIMIZE_BASE | window.task_id,
+                DamageRect {
+                    x0: min_x,
+                    y0: min_y,
+                    x1: min_x + BUTTON_SIZE - 1,
+                    y1: min_y + BUTTON_SIZE - 1,
+                },
+                min_hover,
+            );
         }
-        if current_deco_hover != self.prev_decoration_hover {
-            if self.prev_decoration_hover.task_id != 0 {
-                if let Some(old_win) = self.find_window_by_task(self.prev_decoration_hover.task_id)
-                {
-                    self.add_title_bar_damage(&old_win);
-                }
-            }
-            if current_deco_hover.task_id != 0 {
-                if let Some(new_win) = self.find_window_by_task(current_deco_hover.task_id) {
-                    self.add_title_bar_damage(&new_win);
-                }
-            }
-            self.prev_decoration_hover = current_deco_hover;
+
+        let mut hover_damage = [DamageRect::invalid(); 32];
+        let hover_damage_count = self.hover_registry.changed_regions(&mut hover_damage);
+        for i in 0..hover_damage_count {
+            self.output_damage.add_rect(
+                hover_damage[i].x0,
+                hover_damage[i].y0,
+                hover_damage[i].x1,
+                hover_damage[i].y1,
+            );
         }
     }
 
@@ -712,21 +882,6 @@ impl WindowManager {
     /// Check if a window with given task_id exists in current frame
     fn window_exists(&self, task_id: u32) -> bool {
         (0..self.window_count as usize).any(|i| self.windows[i].task_id == task_id)
-    }
-
-    fn find_window_by_task(&self, task_id: u32) -> Option<UserWindowInfo> {
-        (0..self.window_count as usize)
-            .find(|&i| self.windows[i].task_id == task_id)
-            .map(|i| self.windows[i])
-    }
-
-    fn add_title_bar_damage(&mut self, window: &UserWindowInfo) {
-        self.output_damage.add_rect(
-            window.x,
-            window.y - TITLE_BAR_HEIGHT,
-            window.x + window.width as i32 - 1,
-            window.y - 1,
-        );
     }
 
     fn pending_close_index(&self, task_id: u32) -> Option<usize> {
@@ -1316,7 +1471,8 @@ impl WindowManager {
             title_y + BUTTON_PADDING,
             BUTTON_SIZE,
             "X",
-            self.hit_test_close_button(window),
+            self.hover_registry
+                .is_hovered(HOVER_CLOSE_BASE | window.task_id),
             true,
             clip,
         );
@@ -1327,7 +1483,8 @@ impl WindowManager {
             title_y + BUTTON_PADDING,
             BUTTON_SIZE,
             "_",
-            self.hit_test_minimize_button(window),
+            self.hover_registry
+                .is_hovered(HOVER_MINIMIZE_BASE | window.task_id),
             false,
             clip,
         );
@@ -1351,10 +1508,7 @@ impl WindowManager {
         let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
         let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
-        let start_hover = self.mouse_x >= start_btn_x
-            && self.mouse_x < start_btn_x + START_BUTTON_WIDTH
-            && self.mouse_y >= btn_y
-            && self.mouse_y < btn_y + btn_height;
+        let start_hover = self.hover_registry.is_hovered(HOVER_START_BTN);
 
         let start_color = if self.start_menu_open || start_hover {
             COLOR_BUTTON_HOVER
@@ -1396,7 +1550,10 @@ impl WindowManager {
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let focused = window.task_id == self.focused_task;
-            let btn_color = if focused {
+            let hovered = self
+                .hover_registry
+                .is_hovered(HOVER_APP_BTN_BASE | window.task_id);
+            let btn_color = if focused || hovered {
                 COLOR_BUTTON_HOVER
             } else {
                 COLOR_BUTTON
@@ -1459,7 +1616,9 @@ impl WindowManager {
 
         for (idx, item) in START_MENU_ITEMS.iter().enumerate() {
             let item_y = menu_y + START_MENU_PADDING + (idx as i32 * START_MENU_ITEM_HEIGHT);
-            let item_hover = self.hit_test_start_menu_item(fb_height) == Some(idx);
+            let item_hover = self
+                .hover_registry
+                .is_hovered(HOVER_MENU_ITEM_BASE | idx as u32);
             let item_color = if item_hover {
                 COLOR_BUTTON_HOVER
             } else {
