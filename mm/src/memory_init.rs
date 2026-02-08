@@ -19,7 +19,6 @@ use crate::paging::{init_paging, map_page_4kb};
 use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_lib::string::cstr_to_str;
 
 use slopos_abi::DisplayInfo;
 use slopos_abi::arch::x86_64::apic::ApicBaseMsr;
@@ -490,13 +489,12 @@ fn log_reserved_regions() {
                 continue;
             }
             let region_ref = &*region;
-            let label_ptr = if region_ref.label[0] != 0 {
-                region_ref.label.as_ptr()
+            let label_str = if region_ref.label[0] != 0 {
+                slopos_lib::string::bytes_as_str(&region_ref.label)
             } else {
-                mm_reservation_type_name(region_ref.type_) as *const u8
+                mm_reservation_type_name(region_ref.type_)
             };
             let region_end = region_ref.phys_base + region_ref.length;
-            let label_str = cstr_to_str(label_ptr as *const c_char);
             klog_info!(
                 "  {}: 0x{:x} - 0x{:x} ({} KB)",
                 label_str,

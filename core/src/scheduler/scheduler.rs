@@ -14,7 +14,6 @@ use slopos_lib::klog_info;
 use slopos_abi::arch::SegmentSelector;
 
 use crate::platform;
-use slopos_lib::wl_currency;
 
 use super::per_cpu;
 use super::task::{
@@ -445,8 +444,6 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         sched.increment_switches();
     });
     task_set_current(to_task);
-
-    let _balance = wl_currency::check_balance();
 
     unsafe {
         let is_user_mode = (*to_task).flags & TASK_FLAG_USER_MODE != 0;

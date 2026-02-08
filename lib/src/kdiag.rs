@@ -1,6 +1,5 @@
-use crate::string::cstr_to_str;
 use core::arch::asm;
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cpu;
@@ -132,27 +131,27 @@ pub struct InterruptFrame {
     pub ss: u64,
 }
 
-fn exception_name(vector: u8) -> &'static [u8] {
+fn exception_name(vector: u8) -> &'static str {
     match vector {
-        0 => b"Divide Error\0",
-        1 => b"Debug\0",
-        2 => b"NMI\0",
-        3 => b"Breakpoint\0",
-        4 => b"Overflow\0",
-        5 => b"Bound Range\0",
-        6 => b"Invalid Opcode\0",
-        7 => b"Device Not Available\0",
-        8 => b"Double Fault\0",
-        10 => b"Invalid TSS\0",
-        11 => b"Segment Not Present\0",
-        12 => b"Stack Fault\0",
-        13 => b"General Protection\0",
-        14 => b"Page Fault\0",
-        16 => b"FPU Error\0",
-        17 => b"Alignment Check\0",
-        18 => b"Machine Check\0",
-        19 => b"SIMD FP Exception\0",
-        _ => b"Unknown\0",
+        0 => "Divide Error",
+        1 => "Debug",
+        2 => "NMI",
+        3 => "Breakpoint",
+        4 => "Overflow",
+        5 => "Bound Range",
+        6 => "Invalid Opcode",
+        7 => "Device Not Available",
+        8 => "Double Fault",
+        10 => "Invalid TSS",
+        11 => "Segment Not Present",
+        12 => "Stack Fault",
+        13 => "General Protection",
+        14 => "Page Fault",
+        16 => "FPU Error",
+        17 => "Alignment Check",
+        18 => "Machine Check",
+        19 => "SIMD FP Exception",
+        _ => "Unknown",
     }
 }
 
@@ -243,7 +242,7 @@ pub fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
     }
     unsafe {
         let f = &*frame;
-        let exc_name = cstr_to_str(exception_name(f.vector as u8).as_ptr() as *const c_char);
+        let exc_name = exception_name(f.vector as u8);
         crate::klog_info!("=== INTERRUPT FRAME DUMP ===");
         crate::klog_info!(
             "Vector: {} ({}) Error Code: 0x{:x}",

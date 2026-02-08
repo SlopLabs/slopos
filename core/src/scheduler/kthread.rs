@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use slopos_lib::klog_info;
-use slopos_lib::string::cstr_to_str;
+use slopos_lib::string;
 
 use super::scheduler;
 use super::scheduler::task_wait_for;
@@ -34,7 +34,7 @@ pub fn kthread_spawn_ex(
 
     if id == INVALID_TASK_ID {
         klog_info!("kthread_spawn_ex: failed to create thread '{}'", unsafe {
-            cstr_to_str(name)
+            string::cstr_to_str(name)
         });
     }
 

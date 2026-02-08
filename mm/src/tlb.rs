@@ -506,27 +506,3 @@ impl Drop for TlbFlushBatch {
         }
     }
 }
-
-// =============================================================================
-// FFI Exports
-// =============================================================================
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tlb_flush_page(vaddr: u64) {
-    flush_page(VirtAddr::new(vaddr));
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tlb_flush_range(start: u64, end: u64) {
-    flush_range(VirtAddr::new(start), VirtAddr::new(end));
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tlb_flush_all() {
-    flush_all();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tlb_handle_ipi(cpu_idx: u32) {
-    handle_shootdown_ipi(cpu_idx as usize);
-}

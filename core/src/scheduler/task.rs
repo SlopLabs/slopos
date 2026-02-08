@@ -7,7 +7,7 @@ use slopos_lib::IrqMutex;
 
 use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
-use slopos_lib::string::cstr_to_str;
+use slopos_lib::string::bytes_as_str;
 use slopos_lib::{klog_debug, klog_info};
 
 // =============================================================================
@@ -517,7 +517,7 @@ pub fn init_task_manager() -> c_int {
                 klog_debug!(
                     "init_task_manager: preserving idle task {} ('{}')",
                     task.task_id,
-                    unsafe { cstr_to_str(task.name.as_ptr() as *const c_char) }
+                    bytes_as_str(&task.name)
                 );
                 continue;
             }
@@ -612,7 +612,7 @@ pub fn task_create(
 
     klog_debug!(
         "Created task '{}' with ID {}",
-        unsafe { cstr_to_str(task_ref.name.as_ptr() as *const c_char) },
+        bytes_as_str(&task_ref.name),
         task_id
     );
 
@@ -633,7 +633,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     klog_info!(
         "Terminating task '{}' (ID {})",
-        unsafe { cstr_to_str((*task_ptr).name.as_ptr() as *const c_char) },
+        bytes_as_str(&unsafe { &*task_ptr }.name),
         resolved_id
     );
 
@@ -907,13 +907,13 @@ pub fn task_get_total_yields() -> u64 {
     try_with_task_manager(|mgr| mgr.total_yields).unwrap_or(0)
 }
 
-pub fn task_state_to_string(status: TaskStatus) -> *const c_char {
+pub fn task_state_to_string(status: TaskStatus) -> &'static str {
     match status {
-        TaskStatus::Invalid => b"invalid\0".as_ptr() as *const c_char,
-        TaskStatus::Ready => b"ready\0".as_ptr() as *const c_char,
-        TaskStatus::Running => b"running\0".as_ptr() as *const c_char,
-        TaskStatus::Blocked => b"blocked\0".as_ptr() as *const c_char,
-        TaskStatus::Terminated => b"terminated\0".as_ptr() as *const c_char,
+        TaskStatus::Invalid => "invalid",
+        TaskStatus::Ready => "ready",
+        TaskStatus::Running => "running",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Terminated => "terminated",
     }
 }
 
@@ -959,7 +959,7 @@ pub fn task_set_current(task: *mut Task) {
                 "task_set_current: unexpected state {} for task {} ('{}')",
                 current_status.as_u8() as u32,
                 (*task).task_id,
-                cstr_to_str((*task).name.as_ptr() as *const c_char)
+                bytes_as_str(&(*task).name)
             );
         }
         (*task).set_status(TaskStatus::Running);

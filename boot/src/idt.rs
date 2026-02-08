@@ -361,7 +361,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let critical = is_critical_exception_internal(vector);
     unsafe {
         if critical || !matches!(CURRENT_EXCEPTION_MODE, ExceptionMode::Test) {
-            let name = cstr_to_str(get_exception_name(vector));
+            let name = get_exception_name(vector);
             klog_info!("EXCEPTION: Vector {} ({})", vector, name);
         }
     }
@@ -375,36 +375,32 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     handler(frame);
 }
-pub fn get_exception_name(vector: u8) -> *const c_char {
-    get_exception_name_cstr(vector).as_ptr() as *const c_char
-}
-
-fn get_exception_name_cstr(vector: u8) -> &'static [u8] {
+pub fn get_exception_name(vector: u8) -> &'static str {
     match vector {
-        0 => b"Divide Error\0",
-        1 => b"Debug\0",
-        2 => b"Non-Maskable Interrupt\0",
-        3 => b"Breakpoint\0",
-        4 => b"Overflow\0",
-        5 => b"Bound Range Exceeded\0",
-        6 => b"Invalid Opcode\0",
-        7 => b"Device Not Available\0",
-        8 => b"Double Fault\0",
-        9 => b"Coprocessor Segment Overrun\0",
-        10 => b"Invalid TSS\0",
-        11 => b"Segment Not Present\0",
-        12 => b"Stack Segment Fault\0",
-        13 => b"General Protection Fault\0",
-        14 => b"Page Fault\0",
-        15 => b"Reserved\0",
-        16 => b"x87 FPU Error\0",
-        17 => b"Alignment Check\0",
-        18 => b"Machine Check\0",
-        19 => b"SIMD Floating-Point Exception\0",
-        20 => b"Virtualization Exception\0",
-        21 => b"Control Protection Exception\0",
-        22..=31 => b"Reserved\0",
-        _ => b"Unknown\0",
+        0 => "Divide Error",
+        1 => "Debug",
+        2 => "Non-Maskable Interrupt",
+        3 => "Breakpoint",
+        4 => "Overflow",
+        5 => "Bound Range Exceeded",
+        6 => "Invalid Opcode",
+        7 => "Device Not Available",
+        8 => "Double Fault",
+        9 => "Coprocessor Segment Overrun",
+        10 => "Invalid TSS",
+        11 => "Segment Not Present",
+        12 => "Stack Segment Fault",
+        13 => "General Protection Fault",
+        14 => "Page Fault",
+        15 => "Reserved",
+        16 => "x87 FPU Error",
+        17 => "Alignment Check",
+        18 => "Machine Check",
+        19 => "SIMD Floating-Point Exception",
+        20 => "Virtualization Exception",
+        21 => "Control Protection Exception",
+        22..=31 => "Reserved",
+        _ => "Unknown",
     }
 }
 

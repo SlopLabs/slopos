@@ -1,6 +1,7 @@
 use core::ffi::c_void;
 
 use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
+use slopos_lib::numfmt;
 
 use crate::appkit::{self, Window, WindowedApp};
 use crate::gfx::{self, DrawBuffer};
@@ -150,9 +151,14 @@ fn draw_text(fb: &mut DrawBuffer<'_>, x: i32, y: i32, text: &str) {
 
 fn format_line<'a>(buf: &'a mut [u8; 96], label: &str, value: u64, suffix: &str) -> &'a str {
     let mut idx = 0usize;
-    idx = copy_str(buf, idx, label);
-    idx = write_u64(buf, idx, value);
-    idx = copy_str(buf, idx, suffix);
+    idx = copy_bytes(buf, idx, label.as_bytes());
+
+    let mut num = [0u8; 21];
+    let formatted = numfmt::fmt_u64(value, &mut num);
+    let digits = formatted.strip_suffix(&[0]).unwrap_or(formatted);
+    idx = copy_bytes(buf, idx, digits);
+
+    idx = copy_bytes(buf, idx, suffix.as_bytes());
     core::str::from_utf8(&buf[..idx]).unwrap_or("???")
 }
 
@@ -160,32 +166,8 @@ fn pages_to_mib(pages: u64) -> u64 {
     pages.saturating_mul(PAGE_SIZE_4KB) / (1024 * 1024)
 }
 
-fn copy_str(buf: &mut [u8; 96], mut idx: usize, value: &str) -> usize {
-    for &b in value.as_bytes() {
-        if idx >= buf.len() {
-            break;
-        }
-        buf[idx] = b;
-        idx += 1;
-    }
-    idx
-}
-
-fn write_u64(buf: &mut [u8; 96], mut idx: usize, mut value: u64) -> usize {
-    let mut tmp = [0u8; 32];
-    let mut len = 0usize;
-    if value == 0 {
-        tmp[0] = b'0';
-        len = 1;
-    } else {
-        while value != 0 && len < tmp.len() {
-            tmp[len] = b'0' + (value % 10) as u8;
-            value /= 10;
-            len += 1;
-        }
-        tmp[..len].reverse();
-    }
-    for &b in &tmp[..len] {
+fn copy_bytes(buf: &mut [u8; 96], mut idx: usize, src: &[u8]) -> usize {
+    for &b in src {
         if idx >= buf.len() {
             break;
         }

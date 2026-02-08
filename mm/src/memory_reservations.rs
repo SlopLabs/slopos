@@ -423,14 +423,14 @@ pub fn mm_reservations_find_option(phys_addr: u64) -> Option<&'static MmRegion> 
         Some(unsafe { &*ptr })
     }
 }
-pub fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char {
+pub fn mm_reservation_type_name(type_: MmReservationType) -> &'static str {
     match type_ {
-        MmReservationType::AllocatorMetadata => b"allocator metadata\0".as_ptr() as *const c_char,
-        MmReservationType::Framebuffer => b"framebuffer\0".as_ptr() as *const c_char,
-        MmReservationType::AcpiReclaimable => b"acpi reclaim\0".as_ptr() as *const c_char,
-        MmReservationType::AcpiNvs => b"acpi nvs\0".as_ptr() as *const c_char,
-        MmReservationType::Apic => b"apic\0".as_ptr() as *const c_char,
-        MmReservationType::FirmwareOther => b"firmware\0".as_ptr() as *const c_char,
+        MmReservationType::AllocatorMetadata => "allocator metadata",
+        MmReservationType::Framebuffer => "framebuffer",
+        MmReservationType::AcpiReclaimable => "acpi reclaim",
+        MmReservationType::AcpiNvs => "acpi nvs",
+        MmReservationType::Apic => "apic",
+        MmReservationType::FirmwareOther => "firmware",
     }
 }
 pub fn mm_reservations_total_bytes(required_flags: u32) -> u64 {

@@ -2,7 +2,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use slopos_lib::klog_info;
-use slopos_lib::string::cstr_to_str;
+use slopos_lib::string;
 
 use super::scheduler;
 use super::task::{
@@ -287,7 +287,7 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
         ctx_ref.task_name
     };
 
-    let name_str = unsafe { cstr_to_str(name) };
+    let name_str = unsafe { string::cstr_to_str(name) };
     klog_info!("{}: Starting (initial RSP=0x{:x})", name_str, stack_base);
 
     let mut iteration: u32 = 0;
@@ -471,8 +471,8 @@ fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     let ctx = unsafe { &mut *(context as *mut TaskStatPrintCtx) };
     ctx.index = ctx.index.wrapping_add(1);
 
-    let name_str = unsafe { cstr_to_str((*task).name.as_ptr() as *const c_char) };
-    let state_str = unsafe { cstr_to_str(task_state_to_string((*task).status())) };
+    let name_str = string::bytes_as_str(&unsafe { &*task }.name);
+    let state_str = task_state_to_string(unsafe { (*task).status() });
     unsafe {
         klog_info!(
             "  #{} '{}' (ID {}) [{}] runtime={} ticks yields={}",
