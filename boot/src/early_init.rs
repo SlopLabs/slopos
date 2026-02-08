@@ -529,9 +529,8 @@ pub fn kernel_main_impl() {
     gdt::syscall_msr_init();
     serial::write_line("BOOT: early GDT/IDT/SYSCALL initialized");
 
-    // Register boot services and platform early to break circular dependencies
+    // Register platform and syscall service tables before the init phases run.
     crate::boot_impl::register_boot_services();
-    slopos_drivers::platform_init::init_platform_services();
     slopos_drivers::syscall_services_init::init_syscall_services();
 
     serial::write_line("BOOT: entering boot init");

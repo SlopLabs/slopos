@@ -1,7 +1,8 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::{early_init, gdt, idt, limine_protocol, shutdown};
-use slopos_drivers::platform_init;
+use slopos_core::platform::{PlatformServices, register_platform_services};
+use slopos_drivers::{apic, ioapic, pit, random, serial};
 
 fn kernel_shutdown_fn(reason: *const c_char) -> ! {
     shutdown::kernel_shutdown(reason)
@@ -27,11 +28,32 @@ fn idt_get_gate_fn(vector: u8, entry: *mut c_void) -> c_int {
     idt::idt_get_gate_opaque(vector, entry)
 }
 
+static PLATFORM_SERVICES: PlatformServices = PlatformServices {
+    timer_ticks: || slopos_core::irq::get_timer_ticks(),
+    timer_frequency: || pit::pit_get_frequency(),
+    timer_poll_delay_ms: |ms| pit::pit_poll_delay_ms(ms),
+    timer_sleep_ms: |ms| pit::pit_sleep_ms(ms),
+    timer_enable_irq: || pit::pit_enable_irq(),
+    timer_disable_irq: || pit::pit_disable_irq(),
+    console_putc: |c| serial::serial_putc_com1(c),
+    console_puts: |s| {
+        for &c in s {
+            serial::serial_putc_com1(c);
+        }
+    },
+    rng_next: || random::random_next(),
+    gdt_set_kernel_rsp0: gdt::gdt_set_kernel_rsp0,
+    kernel_shutdown: kernel_shutdown_fn,
+    kernel_reboot: kernel_reboot_fn,
+    is_rsdp_available: is_rsdp_available_fn,
+    get_rsdp_address: get_rsdp_address_fn,
+    is_kernel_initialized: is_kernel_initialized_fn,
+    idt_get_gate: idt_get_gate_fn,
+    irq_send_eoi: || apic::send_eoi(),
+    irq_mask_gsi: |gsi| ioapic::mask_gsi(gsi),
+    irq_unmask_gsi: |gsi| ioapic::unmask_gsi(gsi),
+};
+
 pub fn register_boot_services() {
-    platform_init::register_gdt_rsp0_callback(gdt::gdt_set_kernel_rsp0);
-    platform_init::register_kernel_shutdown_callback(kernel_shutdown_fn);
-    platform_init::register_kernel_reboot_callback(kernel_reboot_fn);
-    platform_init::register_rsdp_callbacks(is_rsdp_available_fn, get_rsdp_address_fn);
-    platform_init::register_kernel_initialized_callback(is_kernel_initialized_fn);
-    platform_init::register_idt_get_gate_callback(idt_get_gate_fn);
+    register_platform_services(&PLATFORM_SERVICES);
 }

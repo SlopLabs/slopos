@@ -130,7 +130,7 @@ fn with_irq_tables<R>(
 /// Send EOI to acknowledge interrupt.
 #[inline]
 fn acknowledge_irq() {
-    (platform::platform().irq_send_eoi)();
+    platform::irq_send_eoi();
 }
 
 /// Mask an IRQ line.
@@ -150,7 +150,7 @@ pub fn mask_irq_line(irq: u8) {
         }
     });
     if mask_hw {
-        (platform::platform().irq_mask_gsi)(gsi);
+        platform::irq_mask_gsi(gsi);
     } else {
         klog_info!("IRQ: Mask request ignored for line (no IOAPIC route)");
     }
@@ -173,7 +173,7 @@ pub fn unmask_irq_line(irq: u8) {
         }
     });
     if unmask_hw {
-        (platform::platform().irq_unmask_gsi)(gsi);
+        platform::irq_unmask_gsi(gsi);
     } else if was_masked {
         klog_info!("IRQ: Cannot unmask line (no IOAPIC route configured)");
     }

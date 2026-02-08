@@ -1,60 +1,71 @@
 use core::ffi::{c_char, c_int, c_void};
 
-use slopos_lib::ServiceCell;
+slopos_lib::define_service! {
+    /// Platform hardware abstraction layer.
+    ///
+    /// Registered once during early boot by the `boot` crate, which has visibility
+    /// into both driver implementations and boot-specific callbacks.
+    platform => PlatformServices {
+        // -- Timer ----------------------------------------------------------
+        timer_ticks() -> u64;
+        timer_frequency() -> u32;
+        timer_poll_delay_ms(ms: u32);
+        timer_sleep_ms(ms: u32);
+        timer_enable_irq();
+        timer_disable_irq();
 
-#[repr(C)]
-pub struct PlatformServices {
-    pub timer_get_ticks: fn() -> u64,
-    pub timer_get_frequency: fn() -> u32,
-    pub timer_poll_delay_ms: fn(u32),
-    pub timer_sleep_ms: fn(u32),
-    pub timer_enable_irq: fn(),
-    pub timer_disable_irq: fn(),
+        // -- Console --------------------------------------------------------
+        console_putc(c: u8);
+        @no_wrapper console_puts(s: &[u8]);
 
-    pub console_putc: fn(u8),
-    pub console_puts: fn(&[u8]),
+        // -- RNG ------------------------------------------------------------
+        rng_next() -> u64;
 
-    pub rng_next: fn() -> u64,
+        // -- GDT ------------------------------------------------------------
+        gdt_set_kernel_rsp0(rsp0: u64);
 
-    pub gdt_set_kernel_rsp0: fn(u64),
+        // -- Lifecycle ------------------------------------------------------
+        @no_wrapper kernel_shutdown(reason: *const c_char) -> !;
+        @no_wrapper kernel_reboot(reason: *const c_char) -> !;
 
-    pub kernel_shutdown: fn(*const c_char) -> !,
-    pub kernel_reboot: fn(*const c_char) -> !,
-    pub is_rsdp_available: fn() -> bool,
-    pub get_rsdp_address: fn() -> *const c_void,
-    pub is_kernel_initialized: fn() -> bool,
-    pub idt_get_gate: fn(u8, *mut c_void) -> c_int,
+        // -- ACPI -----------------------------------------------------------
+        is_rsdp_available() -> bool;
+        get_rsdp_address() -> *const c_void;
 
-    pub irq_send_eoi: fn(),
-    pub irq_mask_gsi: fn(u32) -> i32,
-    pub irq_unmask_gsi: fn(u32) -> i32,
+        // -- Kernel state ---------------------------------------------------
+        is_kernel_initialized() -> bool;
+        idt_get_gate(vector: u8, entry: *mut c_void) -> c_int;
+
+        // -- IRQ dispatch ---------------------------------------------------
+        irq_send_eoi();
+        irq_mask_gsi(gsi: u32) -> i32;
+        irq_unmask_gsi(gsi: u32) -> i32;
+    }
 }
 
-static PLATFORM: ServiceCell<PlatformServices> = ServiceCell::new("platform");
+// -- Manual wrappers for @no_wrapper methods --------------------------------
 
-pub fn register_platform(services: &'static PlatformServices) {
-    PLATFORM.register(services);
-}
-
+/// Write a byte slice to the platform console.
 #[inline(always)]
-pub fn platform() -> &'static PlatformServices {
-    PLATFORM.get()
+pub fn console_puts(s: &[u8]) {
+    (platform_services().console_puts)(s)
 }
 
-pub fn is_platform_initialized() -> bool {
-    PLATFORM.is_initialized()
-}
-
+/// Halt the kernel. Does not return.
 #[inline(always)]
-pub fn timer_ticks() -> u64 {
-    (platform().timer_get_ticks)()
+pub fn kernel_shutdown(reason: *const c_char) -> ! {
+    (platform_services().kernel_shutdown)(reason)
 }
 
+/// Reboot the machine. Does not return.
 #[inline(always)]
-pub fn timer_frequency() -> u32 {
-    (platform().timer_get_frequency)()
+pub fn kernel_reboot(reason: *const c_char) -> ! {
+    (platform_services().kernel_reboot)(reason)
 }
 
+// -- Computed helpers (not in the service table) -----------------------------
+
+/// Wall-clock milliseconds derived from timer ticks and frequency.
 #[inline(always)]
 pub fn get_time_ms() -> u64 {
     let ticks = timer_ticks();
@@ -63,74 +74,4 @@ pub fn get_time_ms() -> u64 {
         return 0;
     }
     (ticks * 1000) / freq as u64
-}
-
-#[inline(always)]
-pub fn timer_poll_delay_ms(ms: u32) {
-    (platform().timer_poll_delay_ms)(ms)
-}
-
-#[inline(always)]
-pub fn timer_sleep_ms(ms: u32) {
-    (platform().timer_sleep_ms)(ms)
-}
-
-#[inline(always)]
-pub fn timer_enable_irq() {
-    (platform().timer_enable_irq)()
-}
-
-#[inline(always)]
-pub fn timer_disable_irq() {
-    (platform().timer_disable_irq)()
-}
-
-#[inline(always)]
-pub fn console_putc(c: u8) {
-    (platform().console_putc)(c)
-}
-
-#[inline(always)]
-pub fn console_puts(s: &[u8]) {
-    (platform().console_puts)(s)
-}
-
-#[inline(always)]
-pub fn rng_next() -> u64 {
-    (platform().rng_next)()
-}
-
-#[inline(always)]
-pub fn gdt_set_kernel_rsp0(rsp0: u64) {
-    (platform().gdt_set_kernel_rsp0)(rsp0)
-}
-
-#[inline(always)]
-pub fn kernel_shutdown(reason: *const c_char) -> ! {
-    (platform().kernel_shutdown)(reason)
-}
-
-#[inline(always)]
-pub fn kernel_reboot(reason: *const c_char) -> ! {
-    (platform().kernel_reboot)(reason)
-}
-
-#[inline(always)]
-pub fn is_rsdp_available() -> bool {
-    (platform().is_rsdp_available)()
-}
-
-#[inline(always)]
-pub fn get_rsdp_address() -> *const c_void {
-    (platform().get_rsdp_address)()
-}
-
-#[inline(always)]
-pub fn is_kernel_initialized() -> bool {
-    (platform().is_kernel_initialized)()
-}
-
-#[inline(always)]
-pub fn idt_get_gate(vector: u8, entry: *mut c_void) -> c_int {
-    (platform().idt_get_gate)(vector, entry)
 }

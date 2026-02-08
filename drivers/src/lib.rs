@@ -11,7 +11,6 @@ pub mod pci;
 pub mod pic;
 pub mod pit;
 pub mod pit_tests;
-pub mod platform_init;
 pub mod ps2;
 pub mod random;
 pub mod serial;
