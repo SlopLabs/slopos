@@ -291,7 +291,7 @@ pub fn idt_load() {
 
 fn handle_tlb_shootdown_ipi() {
     let apic_id = slopos_drivers::apic::get_id();
-    if let Some(cpu_idx) = tlb::cpu_index_from_apic_id(apic_id) {
+    if let Some(cpu_idx) = slopos_lib::cpu_index_from_apic_id(apic_id) {
         tlb::handle_shootdown_ipi(cpu_idx);
     } else {
         klog_debug!(

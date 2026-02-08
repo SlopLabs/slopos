@@ -49,10 +49,7 @@ pub fn register_ipi_sender(sender: SendIpiFn) {
 /// Beyond this threshold, a full TLB flush (CR3 reload) is cheaper.
 const INVLPG_THRESHOLD: usize = 32;
 
-/// IPI vector used for TLB shootdown requests.
-/// Must be in the range 0x20-0xFE and not conflict with other vectors.
-/// We use 0xFD (253) which is in the high range, reserved for system IPIs.
-pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
+pub use slopos_abi::arch::x86_64::idt::TLB_SHOOTDOWN_VECTOR;
 
 // =============================================================================
 // CPU Feature Detection
@@ -190,9 +187,6 @@ struct TlbShootdownState {
     cpu_state: [PerCpuTlbState; MAX_CPUS],
     /// Number of active CPUs (set during SMP bringup).
     active_cpu_count: AtomicU32,
-    /// Current CPU's APIC ID (for self-identification).
-    /// This is set per-CPU during initialization.
-    bsp_apic_id: AtomicU32,
     /// Global sequence number for ordering.
     sequence: AtomicU64,
 }
@@ -203,20 +197,12 @@ impl TlbShootdownState {
         Self {
             cpu_state: [INIT_STATE; MAX_CPUS],
             active_cpu_count: AtomicU32::new(1),
-            bsp_apic_id: AtomicU32::new(0),
             sequence: AtomicU64::new(0),
         }
     }
 }
 
 static TLB_STATE: TlbShootdownState = TlbShootdownState::new();
-
-const INVALID_CPU_IDX: u32 = u32::MAX;
-
-static APIC_ID_TO_CPU_IDX: [AtomicU32; MAX_CPUS] = {
-    const INIT: AtomicU32 = AtomicU32::new(INVALID_CPU_IDX);
-    [INIT; MAX_CPUS]
-};
 
 #[inline(always)]
 fn flush_tlb_local_full() {
@@ -267,44 +253,13 @@ pub fn get_active_cpu_count() -> u32 {
     TLB_STATE.active_cpu_count.load(Ordering::Relaxed)
 }
 
-/// Register a new CPU as active (called during AP startup).
-/// Returns the CPU index assigned to this CPU.
-pub fn register_cpu(apic_id: u32) -> usize {
-    let count = TLB_STATE.active_cpu_count.fetch_add(1, Ordering::AcqRel);
-    let cpu_idx = count as usize;
-
-    if cpu_idx < MAX_CPUS {
-        if apic_id < MAX_CPUS as u32 {
-            APIC_ID_TO_CPU_IDX[apic_id as usize].store(cpu_idx as u32, Ordering::Release);
-        }
-        klog_debug!(
-            "TLB: Registered CPU {} with APIC ID 0x{:x}",
-            cpu_idx,
-            apic_id
-        );
-    }
-
-    cpu_idx
-}
-
-/// Set the BSP's APIC ID (called during boot).
-pub fn set_bsp_apic_id(apic_id: u32) {
-    TLB_STATE.bsp_apic_id.store(apic_id, Ordering::Release);
-    if apic_id < MAX_CPUS as u32 {
-        APIC_ID_TO_CPU_IDX[apic_id as usize].store(0, Ordering::Release);
-    }
-}
-
-pub fn cpu_index_from_apic_id(apic_id: u32) -> Option<usize> {
-    if apic_id >= MAX_CPUS as u32 {
-        return None;
-    }
-    let idx = APIC_ID_TO_CPU_IDX[apic_id as usize].load(Ordering::Acquire);
-    if idx == INVALID_CPU_IDX {
-        None
-    } else {
-        Some(idx as usize)
-    }
+/// Notify the TLB subsystem that a new CPU is online.
+///
+/// Called during AP startup after the CPU's topology has been registered
+/// via `slopos_lib::init_percpu_for_cpu`. This only updates the TLB
+/// shootdown active-CPU count; topology lives in `slopos_lib::percpu`.
+pub fn notify_cpu_online() {
+    TLB_STATE.active_cpu_count.fetch_add(1, Ordering::AcqRel);
 }
 
 fn send_shootdown_ipi() {

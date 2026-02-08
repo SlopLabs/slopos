@@ -3,7 +3,7 @@
 //! These tests target dangerous edge cases in TLB management:
 //! - flush_page/flush_range/flush_all with invalid addresses
 //! - TlbFlushBatch overflow behavior
-//! - SMP state consistency (active_cpu_count, register_cpu edge cases)
+//! - SMP state consistency (active_cpu_count, notify_cpu_online edge cases)
 //! - handle_shootdown_ipi with invalid cpu_idx
 //! - Race conditions in broadcast_flush_request
 
@@ -15,7 +15,6 @@ use slopos_lib::{MAX_CPUS, klog_info};
 use crate::tlb::{
     FlushType, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, flush_all, flush_asid, flush_page, flush_range,
     get_active_cpu_count, handle_shootdown_ipi, has_invpcid, has_pcid, is_smp_active,
-    set_bsp_apic_id,
 };
 
 // =============================================================================
@@ -206,9 +205,12 @@ pub fn test_get_active_cpu_count() -> c_int {
     0
 }
 
-pub fn test_set_bsp_apic_id() -> c_int {
-    set_bsp_apic_id(0);
-    set_bsp_apic_id(0xFF);
+pub fn test_bsp_apic_id_from_percpu() -> c_int {
+    let bsp_id = slopos_lib::get_bsp_apic_id();
+    if bsp_id == u32::MAX {
+        klog_info!("TLB_TEST: BUG - BSP APIC ID not set in percpu");
+        return -1;
+    }
     0
 }
 

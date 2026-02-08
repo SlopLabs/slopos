@@ -27,7 +27,7 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     let cpu_idx = NEXT_CPU_ID.fetch_add(1, Ordering::AcqRel);
 
     init_percpu_for_cpu(cpu_idx, apic_id);
-    tlb::register_cpu(apic_id);
+    tlb::notify_cpu_online();
 
     unsafe {
         let ap_pcr = pcr::init_ap_pcr(cpu_idx, apic_id);
@@ -64,7 +64,6 @@ pub fn smp_init() {
     let bsp_lapic = resp.bsp_lapic_id();
 
     init_bsp(bsp_lapic);
-    tlb::set_bsp_apic_id(bsp_lapic);
 
     let flags = resp.flags();
     let x2apic = if flags.contains(MpResponseFlags::X2APIC) {
