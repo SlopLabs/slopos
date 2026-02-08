@@ -3,16 +3,14 @@ use core::ffi::c_int;
 pub mod config;
 pub mod harness;
 mod runner;
-pub mod suite_masks;
 
 mod assertions;
-pub use config::{Suite, TestConfig, Verbosity, config_from_cmdline};
+pub use config::{TestConfig, Verbosity, config_from_cmdline};
 pub use harness::{
-    HARNESS_MAX_SUITES, HarnessConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult,
-    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms,
+    HARNESS_MAX_SUITES, TestRunSummary, TestSuiteDesc, TestSuiteResult, cycles_to_ms,
+    estimate_cycles_per_ms, measure_elapsed_ms,
 };
 pub use runner::run_single_test;
-pub use suite_masks::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestResult {
@@ -99,12 +97,12 @@ macro_rules! run_test {
 
 #[macro_export]
 macro_rules! define_test_suite {
-    ($suite_name:ident, $mask:expr, [$($test_fn:path),* $(,)?]) => {
+    ($suite_name:ident, [$($test_fn:path),* $(,)?]) => {
         $crate::paste::paste! {
             const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
 
             fn [<run_ $suite_name _suite>](
-                _config: *const $crate::testing::HarnessConfig,
+                _config: *const (),
                 out: *mut $crate::testing::TestSuiteResult,
             ) -> i32 {
                 let start = $crate::tsc::rdtsc();
@@ -131,20 +129,21 @@ macro_rules! define_test_suite {
                 if passed == total { 0 } else { -1 }
             }
 
+            #[used]
+            #[unsafe(link_section = ".test_registry")]
             pub static [<$suite_name:upper _SUITE_DESC>]: $crate::testing::TestSuiteDesc = $crate::testing::TestSuiteDesc {
                 name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
-                mask_bit: $mask,
                 run: Some([<run_ $suite_name _suite>]),
             };
         }
     };
 
-    ($suite_name:ident, $mask:expr, $runner_fn:path, single) => {
+    ($suite_name:ident, $runner_fn:path, single) => {
         $crate::paste::paste! {
             const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
 
             fn [<run_ $suite_name _suite>](
-                _config: *const $crate::testing::HarnessConfig,
+                _config: *const (),
                 out: *mut $crate::testing::TestSuiteResult,
             ) -> i32 {
                 let start = $crate::tsc::rdtsc();
@@ -166,20 +165,12 @@ macro_rules! define_test_suite {
                 if result == 0 { 0 } else { -1 }
             }
 
+            #[used]
+            #[unsafe(link_section = ".test_registry")]
             pub static [<$suite_name:upper _SUITE_DESC>]: $crate::testing::TestSuiteDesc = $crate::testing::TestSuiteDesc {
                 name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
-                mask_bit: $mask,
                 run: Some([<run_ $suite_name _suite>]),
             };
         }
-    };
-}
-
-#[macro_export]
-macro_rules! register_test_suites {
-    ($register_fn:path, $($suite_desc:expr),* $(,)?) => {
-        $(
-            let _ = $register_fn(&$suite_desc);
-        )*
     };
 }

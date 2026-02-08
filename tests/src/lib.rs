@@ -4,61 +4,30 @@ use core::ffi::c_char;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
-pub use slopos_lib::testing::suite_masks::SUITE_SCHEDULER;
 pub use slopos_lib::testing::{
     HARNESS_MAX_SUITES, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
     measure_elapsed_ms,
 };
-use slopos_lib::{StateFlag, define_test_suite, klog_info, register_test_suites};
-
-pub type InterruptTestConfig = TestConfig;
-pub type InterruptTestVerbosity = Verbosity;
+use slopos_lib::{StateFlag, define_test_suite, klog_info};
 
 pub mod exception_tests;
 
 pub const TESTS_MAX_SUITES: usize = HARNESS_MAX_SUITES;
 
-static mut REGISTRY: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] = [None; TESTS_MAX_SUITES];
-static mut REGISTRY_COUNT: usize = 0;
 static PANIC_SEEN: StateFlag = StateFlag::new();
 static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
 
-fn registry_mut() -> *mut [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] {
-    &raw mut REGISTRY
-}
-
-fn registry_count_mut() -> *mut usize {
-    &raw mut REGISTRY_COUNT
-}
-
-pub fn tests_reset_registry() {
-    unsafe {
-        (*registry_mut()).iter_mut().for_each(|slot| *slot = None);
-        *registry_count_mut() = 0;
-    }
+pub fn tests_reset_panic_state() {
     PANIC_SEEN.set_inactive();
     PANIC_REPORTED.store(false, Ordering::Relaxed);
 }
 
-pub fn tests_register_suite(desc: &'static TestSuiteDesc) -> i32 {
-    if desc.run.is_none() {
-        return -1;
-    }
-    unsafe {
-        if *registry_count_mut() >= TESTS_MAX_SUITES {
-            return -1;
-        }
-        (*registry_mut())[*registry_count_mut()] = Some(desc);
-        *registry_count_mut() += 1;
-    }
-    0
-}
-
-pub fn tests_register_system_suites() {
-    suites::register_all();
-}
-
-pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSummary) -> i32 {
+pub fn tests_run_all(
+    config: *const TestConfig,
+    summary: *mut TestRunSummary,
+    registry_start: *const TestSuiteDesc,
+    registry_end: *const TestSuiteDesc,
+) -> i32 {
     if config.is_null() {
         return -1;
     }
@@ -81,18 +50,10 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
 
     klog_info!("TESTS: Starting test suites\n");
 
-    let mut desc_list: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] =
-        [None; TESTS_MAX_SUITES];
-    let mut desc_count = unsafe { *registry_count_mut() };
-    if desc_count > TESTS_MAX_SUITES {
-        desc_count = TESTS_MAX_SUITES;
-    }
-    for i in 0..desc_count {
-        desc_list[i] = unsafe { (*registry_mut())[i] };
-    }
-
     let start_cycles = slopos_lib::tsc::rdtsc();
-    for (idx, entry) in desc_list.iter().enumerate().take(desc_count) {
+    let mut idx = 0usize;
+    let mut cursor = registry_start;
+    while cursor < registry_end {
         if PANIC_SEEN.is_active() {
             summary.unexpected_exceptions = summary.unexpected_exceptions.saturating_add(1);
             summary.failed = summary.failed.saturating_add(1);
@@ -102,11 +63,7 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
             break;
         }
 
-        let Some(desc) = entry else { continue };
-
-        if (cfg.suite_mask & desc.mask_bit) == 0 {
-            continue;
-        }
+        let desc = unsafe { &*cursor };
 
         let suite_start = slopos_lib::tsc::rdtsc();
         let mut res = TestSuiteResult::default();
@@ -155,6 +112,9 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
             res.elapsed_ms,
         );
         summary.add_suite_result(&res);
+
+        idx += 1;
+        cursor = unsafe { cursor.add(1) };
     }
     let end_cycles = slopos_lib::tsc::rdtsc();
     let overall_ms = measure_elapsed_ms(start_cycles, end_cycles);
@@ -186,7 +146,6 @@ pub fn tests_mark_panic() {
 
 mod suites {
     use super::*;
-    use slopos_lib::testing::HarnessConfig;
 
     use slopos_mm::tests::{
         test_alloc_free_cycles_no_leak, test_cow_clone_modify_both, test_cow_fault_handling,
@@ -357,13 +316,11 @@ mod suites {
 
     define_test_suite!(
         vm,
-        SUITE_SCHEDULER,
         [test_process_vm_slot_reuse, test_process_vm_counter_reset,]
     );
 
     define_test_suite!(
         heap,
-        SUITE_SCHEDULER,
         [
             test_heap_free_list_search,
             test_heap_fragmentation_behind_head,
@@ -373,7 +330,7 @@ mod suites {
     // ext2 suite requires custom runner for VFS initialization
     const EXT2_NAME: &[u8] = b"ext2\0";
 
-    fn run_ext2_suite(_config: *const HarnessConfig, out: *mut TestSuiteResult) -> i32 {
+    fn run_ext2_suite(_config: *const (), out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
 
         if !ext2_tests_init() {
@@ -425,22 +382,21 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
+    #[used]
+    #[unsafe(link_section = ".test_registry")]
     pub static EXT2_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
         name: EXT2_NAME.as_ptr() as *const core::ffi::c_char,
-        mask_bit: SUITE_SCHEDULER,
         run: Some(run_ext2_suite),
     };
 
     define_test_suite!(
         privsep,
-        SUITE_SCHEDULER,
         slopos_core::test_tasks::run_privilege_separation_invariant_test,
         single
     );
 
     define_test_suite!(
         page_alloc,
-        SUITE_SCHEDULER,
         [
             test_page_alloc_single,
             test_page_alloc_multi_order,
@@ -455,7 +411,6 @@ mod suites {
 
     define_test_suite!(
         heap_ext,
-        SUITE_SCHEDULER,
         [
             test_heap_warmup_pages_minimum,
             test_heap_small_alloc,
@@ -471,7 +426,6 @@ mod suites {
 
     define_test_suite!(
         paging,
-        SUITE_SCHEDULER,
         [
             test_paging_virt_to_phys,
             test_paging_get_kernel_dir,
@@ -483,7 +437,6 @@ mod suites {
 
     define_test_suite!(
         ring_buf,
-        SUITE_SCHEDULER,
         [
             test_ring_buffer_basic,
             test_ring_buffer_fifo,
@@ -498,7 +451,6 @@ mod suites {
 
     define_test_suite!(
         irqmutex,
-        SUITE_SCHEDULER,
         [
             test_irqmutex_basic,
             test_irqmutex_mutation,
@@ -508,7 +460,6 @@ mod suites {
 
     define_test_suite!(
         shm,
-        SUITE_SCHEDULER,
         [
             test_shm_create_destroy,
             test_shm_create_zero_size,
@@ -525,7 +476,6 @@ mod suites {
 
     define_test_suite!(
         rigorous,
-        SUITE_SCHEDULER,
         [
             test_page_alloc_write_verify,
             test_page_alloc_zero_full_page,
@@ -541,7 +491,6 @@ mod suites {
 
     define_test_suite!(
         process_vm,
-        SUITE_SCHEDULER,
         [
             test_process_vm_create_destroy_memory,
             test_process_vm_alloc_and_access,
@@ -555,7 +504,6 @@ mod suites {
 
     define_test_suite!(
         sched_core,
-        SUITE_SCHEDULER,
         [
             test_state_transition_ready_to_running,
             test_state_transition_running_to_blocked,
@@ -598,7 +546,6 @@ mod suites {
 
     define_test_suite!(
         demand_paging,
-        SUITE_SCHEDULER,
         [
             test_demand_fault_present_page,
             test_demand_fault_no_vma,
@@ -622,7 +569,6 @@ mod suites {
 
     define_test_suite!(
         oom,
-        SUITE_SCHEDULER,
         [
             test_page_alloc_until_oom,
             test_page_alloc_fragmentation_oom,
@@ -642,7 +588,6 @@ mod suites {
 
     define_test_suite!(
         cow_edge,
-        SUITE_SCHEDULER,
         [
             test_cow_read_not_cow_fault,
             test_cow_not_present_not_cow,
@@ -660,7 +605,6 @@ mod suites {
 
     define_test_suite!(
         syscall_valid,
-        SUITE_SCHEDULER,
         [
             test_syscall_lookup_invalid_number,
             test_syscall_lookup_empty_slot,
@@ -689,7 +633,6 @@ mod suites {
     );
     define_test_suite!(
         exception,
-        SUITE_SCHEDULER,
         [
             test_exception_names_valid,
             test_critical_exception_classification,
@@ -706,7 +649,6 @@ mod suites {
     );
     define_test_suite!(
         exec,
-        SUITE_SCHEDULER,
         [
             test_elf_invalid_magic,
             test_elf_wrong_class,
@@ -733,7 +675,6 @@ mod suites {
     );
     define_test_suite!(
         irq,
-        SUITE_SCHEDULER,
         [
             test_irq_register_invalid_line,
             test_irq_register_null_handler,
@@ -758,7 +699,6 @@ mod suites {
     );
     define_test_suite!(
         ioapic,
-        SUITE_SCHEDULER,
         [
             test_ioapic_ready_state,
             test_apic_enabled_state,
@@ -780,7 +720,6 @@ mod suites {
     );
     define_test_suite!(
         pit,
-        SUITE_SCHEDULER,
         [
             test_pit_frequency_valid,
             test_pit_poll_delay_zero_ms,
@@ -791,7 +730,6 @@ mod suites {
     );
     define_test_suite!(
         context,
-        SUITE_SCHEDULER,
         [
             test_task_context_initial_state,
             test_task_state_transitions_exhaustive,
@@ -817,7 +755,6 @@ mod suites {
     );
     define_test_suite!(
         tlb,
-        SUITE_SCHEDULER,
         [
             test_flush_page_null_address,
             test_flush_page_kernel_address,
@@ -858,7 +795,6 @@ mod suites {
     );
     define_test_suite!(
         mmio,
-        SUITE_SCHEDULER,
         [
             test_mmio_empty_region_state,
             test_mmio_is_valid_offset_overflow,
@@ -874,7 +810,7 @@ mod suites {
     // FPU/SSE suite requires custom implementation due to inline assembly
     const FPU_NAME: &[u8] = b"fpu_sse\0";
 
-    fn run_fpu_suite(_config: *const HarnessConfig, out: *mut TestSuiteResult) -> i32 {
+    fn run_fpu_suite(_config: *const (), out: *mut TestSuiteResult) -> i32 {
         use core::arch::x86_64::{__m128i, _mm_set_epi64x, _mm_storeu_si128};
 
         let start = slopos_lib::tsc::rdtsc();
@@ -943,41 +879,10 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
+    #[used]
+    #[unsafe(link_section = ".test_registry")]
     pub static FPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
         name: FPU_NAME.as_ptr() as *const c_char,
-        mask_bit: SUITE_SCHEDULER,
         run: Some(run_fpu_suite),
     };
-
-    pub fn register_all() {
-        register_test_suites!(
-            super::tests_register_suite,
-            VM_SUITE_DESC,
-            HEAP_SUITE_DESC,
-            EXT2_SUITE_DESC,
-            PRIVSEP_SUITE_DESC,
-            FPU_SUITE_DESC,
-            PAGE_ALLOC_SUITE_DESC,
-            HEAP_EXT_SUITE_DESC,
-            PAGING_SUITE_DESC,
-            RING_BUF_SUITE_DESC,
-            IRQMUTEX_SUITE_DESC,
-            SHM_SUITE_DESC,
-            RIGOROUS_SUITE_DESC,
-            PROCESS_VM_SUITE_DESC,
-            SCHED_CORE_SUITE_DESC,
-            DEMAND_PAGING_SUITE_DESC,
-            OOM_SUITE_DESC,
-            COW_EDGE_SUITE_DESC,
-            SYSCALL_VALID_SUITE_DESC,
-            EXCEPTION_SUITE_DESC,
-            EXEC_SUITE_DESC,
-            IRQ_SUITE_DESC,
-            IOAPIC_SUITE_DESC,
-            PIT_SUITE_DESC,
-            CONTEXT_SUITE_DESC,
-            TLB_SUITE_DESC,
-            MMIO_SUITE_DESC,
-        );
-    }
 }

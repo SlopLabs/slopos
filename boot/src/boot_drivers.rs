@@ -3,8 +3,7 @@ use core::ffi::{CStr, c_char};
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    TestRunSummary, TestSuiteResult, tests_register_suite, tests_register_system_suites,
-    tests_request_shutdown, tests_reset_registry, tests_run_all,
+    TestRunSummary, tests_request_shutdown, tests_reset_panic_state, tests_run_all,
 };
 use slopos_video as video;
 
@@ -14,9 +13,7 @@ use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
 use crate::smp::smp_init;
 use slopos_drivers::{
-    apic,
-    interrupts::config_from_cmdline,
-    ioapic,
+    apic, ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
@@ -190,8 +187,8 @@ fn boot_step_pci_init_fn() {
     }
 }
 
-use slopos_drivers::interrupts::SUITE_SCHEDULER;
-use slopos_lib::{define_test_suite, register_test_suites};
+use slopos_lib::define_test_suite;
+use slopos_lib::testing::config_from_cmdline;
 
 use crate::gdt_tests::{
     test_current_cs_is_kernel, test_current_ss_is_kernel, test_data_segment_selectors,
@@ -225,7 +222,6 @@ use crate::shutdown_tests::{
 
 define_test_suite!(
     gdt,
-    SUITE_SCHEDULER,
     [
         test_gdt_loaded_valid_limit,
         test_current_cs_is_kernel,
@@ -258,7 +254,6 @@ define_test_suite!(
 
 define_test_suite!(
     shutdown,
-    SUITE_SCHEDULER,
     [
         test_stateflag_starts_inactive,
         test_stateflag_enter_first_call,
@@ -298,10 +293,6 @@ define_test_suite!(
     ]
 );
 
-fn register_boot_test_suites() {
-    register_test_suites!(tests_register_suite, GDT_SUITE_DESC, SHUTDOWN_SUITE_DESC,);
-}
-
 fn boot_step_interrupt_tests_fn() -> i32 {
     // Parse command line to get test config
     let cmdline = boot_get_cmdline();
@@ -310,13 +301,7 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     } else {
         unsafe { CStr::from_ptr(cmdline) }.to_str().ok()
     };
-    let mut test_config = config_from_cmdline(cmdline_str);
-
-    if test_config.enabled && test_config.suite_mask == 0 {
-        klog_info!("INTERRUPT_TEST: No suites selected, skipping execution");
-        test_config.enabled = false;
-        test_config.shutdown = false;
-    }
+    let test_config = config_from_cmdline(cmdline_str);
 
     if !test_config.enabled {
         klog_debug!("INTERRUPT_TEST: Harness disabled");
@@ -326,37 +311,20 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     klog_info!("INTERRUPT_TEST: Running orchestrated harness");
 
     if klog::is_enabled_level(KlogLevel::Debug) {
-        klog_info!("INTERRUPT_TEST: Suites -> {}", test_config.suite());
         klog_info!("INTERRUPT_TEST: Verbosity -> {}", test_config.verbosity);
         klog_info!("INTERRUPT_TEST: Timeout (ms) -> {}", test_config.timeout_ms);
     }
 
-    tests_reset_registry();
-    tests_register_system_suites();
-    register_boot_test_suites();
+    tests_reset_panic_state();
 
-    let mut summary = TestRunSummary {
-        suites: [TestSuiteResult {
-            name: core::ptr::null(),
-            total: 0,
-            passed: 0,
-            failed: 0,
-            exceptions_caught: 0,
-            unexpected_exceptions: 0,
-            elapsed_ms: 0,
-            timed_out: 0,
-        }; slopos_tests::TESTS_MAX_SUITES],
-        suite_count: 0,
-        total_tests: 0,
-        passed: 0,
-        failed: 0,
-        exceptions_caught: 0,
-        unexpected_exceptions: 0,
-        elapsed_ms: 0,
-        timed_out: 0,
-    };
+    use crate::ffi_boundary::{__start_test_registry, __stop_test_registry};
+    let registry_start: *const slopos_lib::testing::TestSuiteDesc =
+        unsafe { &__start_test_registry };
+    let registry_end: *const slopos_lib::testing::TestSuiteDesc = unsafe { &__stop_test_registry };
 
-    let rc = tests_run_all(&test_config, &mut summary);
+    let mut summary = TestRunSummary::default();
+
+    let rc = tests_run_all(&test_config, &mut summary, registry_start, registry_end);
 
     if test_config.shutdown {
         klog_debug!("TESTS: Auto shutdown enabled after harness");

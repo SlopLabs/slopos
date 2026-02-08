@@ -1,78 +1,8 @@
-use super::suite_masks::{SUITE_ALL, SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER};
-
 const DEFAULT_ENABLED: bool = false;
-const DEFAULT_SUITE: Suite = Suite::All;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
 const DEFAULT_TIMEOUT_MS: u32 = 0;
 const DEFAULT_SHUTDOWN: bool = false;
 const DEFAULT_STACKTRACE_DEMO: bool = false;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Suite {
-    All,
-    Basic,
-    Memory,
-    Control,
-    Scheduler,
-}
-
-impl Suite {
-    pub fn from_str(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("basic") {
-            Suite::Basic
-        } else if value.eq_ignore_ascii_case("memory") {
-            Suite::Memory
-        } else if value.eq_ignore_ascii_case("control") {
-            Suite::Control
-        } else if value.eq_ignore_ascii_case("scheduler") {
-            Suite::Scheduler
-        } else {
-            Suite::All
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Suite::All => "all",
-            Suite::Basic => "basic",
-            Suite::Memory => "memory",
-            Suite::Control => "control",
-            Suite::Scheduler => "scheduler",
-        }
-    }
-
-    pub fn to_mask(&self) -> u32 {
-        match self {
-            Suite::All => SUITE_ALL,
-            Suite::Basic => SUITE_BASIC,
-            Suite::Memory => SUITE_MEMORY,
-            Suite::Control => SUITE_CONTROL,
-            Suite::Scheduler => SUITE_SCHEDULER,
-        }
-    }
-
-    pub fn from_mask(mask: u32) -> Self {
-        if mask == SUITE_ALL || mask == 0 {
-            Suite::All
-        } else if mask == SUITE_BASIC {
-            Suite::Basic
-        } else if mask == SUITE_MEMORY {
-            Suite::Memory
-        } else if mask == SUITE_CONTROL {
-            Suite::Control
-        } else if mask == SUITE_SCHEDULER {
-            Suite::Scheduler
-        } else {
-            Suite::All
-        }
-    }
-}
-
-impl core::fmt::Display for Suite {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verbosity {
@@ -110,24 +40,16 @@ impl core::fmt::Display for Verbosity {
 #[derive(Clone, Copy, Debug)]
 pub struct TestConfig {
     pub enabled: bool,
-    pub suite_mask: u32,
     pub verbosity: Verbosity,
     pub timeout_ms: u32,
     pub shutdown: bool,
     pub stacktrace_demo: bool,
 }
 
-impl TestConfig {
-    pub fn suite(&self) -> Suite {
-        Suite::from_mask(self.suite_mask)
-    }
-}
-
 impl Default for TestConfig {
     fn default() -> Self {
         Self {
             enabled: DEFAULT_ENABLED,
-            suite_mask: DEFAULT_SUITE.to_mask(),
             verbosity: DEFAULT_VERBOSITY,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             shutdown: DEFAULT_SHUTDOWN,
@@ -167,12 +89,11 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
                         cfg.shutdown = false;
                     }
                 } else {
-                    let suite = Suite::from_str(value);
+                    // Any non-boolean value (e.g. "basic", "memory") just enables tests.
                     cfg.enabled = true;
-                    cfg.suite_mask = suite.to_mask();
                 }
-            } else if let Some(value) = token.strip_prefix("itests.suite=") {
-                cfg.suite_mask = Suite::from_str(value).to_mask();
+            } else if token.starts_with("itests.suite=") {
+                // Accepted for backward compatibility; all suites always run.
                 cfg.enabled = true;
             } else if let Some(value) = token.strip_prefix("itests.verbosity=") {
                 cfg.verbosity = Verbosity::from_str(value);

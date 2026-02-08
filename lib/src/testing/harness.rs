@@ -1,27 +1,5 @@
-//! Test harness infrastructure for kernel integration tests.
-//!
-//! This module provides the low-level types and registration mechanism for the
-//! kernel test harness. It is designed to work with the `define_test_suite!` macro
-//! to eliminate boilerplate when defining test suites.
-//!
-//! # Architecture
-//!
-//! The test harness consists of:
-//! - `TestSuiteResult`: Per-suite execution results (passed/failed/elapsed time)
-//! - `TestSuiteDesc`: Static descriptor for a test suite (name, mask, runner)
-//! - `TestRunSummary`: Aggregated results across all suites
-//! - Registry: Global array of registered suite descriptors
-//!
-//! # Usage
-//!
-//! Use the `define_test_suite!` macro instead of manually implementing runners:
-//!
-//! ```ignore
-//! define_test_suite!(page_alloc, SUITE_MEMORY, [
-//!     test_page_alloc_single,
-//!     test_page_alloc_multi,
-//! ]);
-//! ```
+// Test harness types: TestSuiteResult, TestSuiteDesc, TestRunSummary.
+// Suites are auto-registered via #[link_section = ".test_registry"] in define_test_suite!.
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
@@ -31,9 +9,6 @@ pub const HARNESS_MAX_SUITES: usize = 30;
 
 /// Default cycles per millisecond estimate (3 GHz).
 const DEFAULT_CYCLES_PER_MS: u64 = 3_000_000;
-
-// Re-export suite mask constants from a central location
-pub use crate::testing::suite_masks::*;
 
 /// Result of executing a single test suite.
 #[repr(C)]
@@ -93,23 +68,12 @@ impl TestSuiteResult {
     }
 }
 
-/// Type alias for suite runner functions.
-///
-/// Uses raw pointer to opaque config to avoid circular dependency with drivers crate.
-/// The actual config type is `InterruptTestConfig` from `slopos_drivers::interrupts`.
 pub type SuiteRunnerFn = fn(*const (), *mut TestSuiteResult) -> i32;
 
-/// Alias for backward compatibility - HarnessConfig is defined in drivers::interrupts
-pub type HarnessConfig = ();
-
-/// Static descriptor for a test suite.
-///
-/// This is created by `define_test_suite!` and registered with the harness.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TestSuiteDesc {
     pub name: *const c_char,
-    pub mask_bit: u32,
     pub run: Option<SuiteRunnerFn>,
 }
 

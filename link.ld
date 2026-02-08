@@ -71,6 +71,12 @@ SECTIONS
     __stop_boot_init_optional = .;
   } :rodata
 
+  .test_registry ALIGN(8) : {
+    __start_test_registry = .;
+    KEEP(*(.test_registry))
+    __stop_test_registry = .;
+  } :rodata
+
   .data ALIGN(4096) : {
     _data_start = .;
     *(.data .data.*)
