@@ -21,110 +21,11 @@ pub fn get_timestamp_ms() -> u64 {
     (ticks * 1000) / freq as u64
 }
 
-// Re-export ABI types and constants for consumers
+// Re-export ABI types and constants for consumers.
+// All construction and accessor methods live on `InputEvent` in `slopos_abi::input`.
 pub use slopos_abi::{
     InputEvent, InputEventData, InputEventType, MAX_EVENTS_PER_TASK, MAX_INPUT_TASKS,
 };
-
-/// Extension trait for InputEvent construction methods
-pub trait InputEventExt {
-    /// Create a key event
-    fn key(event_type: InputEventType, scancode: u8, ascii: u8, timestamp_ms: u64) -> Self;
-    /// Create a pointer motion event
-    fn pointer_motion(x: i32, y: i32, timestamp_ms: u64) -> Self;
-    /// Create a pointer button event
-    fn pointer_button(pressed: bool, button: u8, timestamp_ms: u64) -> Self;
-    /// Create a pointer enter/leave event
-    fn pointer_enter_leave(enter: bool, x: i32, y: i32, timestamp_ms: u64) -> Self;
-    /// Extract scancode from key event
-    fn key_scancode(&self) -> u8;
-    /// Extract ASCII from key event
-    fn key_ascii(&self) -> u8;
-    /// Extract X coordinate from pointer event
-    fn pointer_x(&self) -> i32;
-    /// Extract Y coordinate from pointer event
-    fn pointer_y(&self) -> i32;
-    /// Extract button from pointer button event
-    fn pointer_button_code(&self) -> u8;
-}
-
-impl InputEventExt for InputEvent {
-    fn key(event_type: InputEventType, scancode: u8, ascii: u8, timestamp_ms: u64) -> Self {
-        Self {
-            event_type,
-            _padding: [0; 3],
-            timestamp_ms,
-            data: InputEventData {
-                data0: (scancode as u32) | ((ascii as u32) << 16),
-                data1: 0,
-            },
-        }
-    }
-
-    fn pointer_motion(x: i32, y: i32, timestamp_ms: u64) -> Self {
-        Self {
-            event_type: InputEventType::PointerMotion,
-            _padding: [0; 3],
-            timestamp_ms,
-            data: InputEventData {
-                data0: x as u32,
-                data1: y as u32,
-            },
-        }
-    }
-
-    fn pointer_button(pressed: bool, button: u8, timestamp_ms: u64) -> Self {
-        Self {
-            event_type: if pressed {
-                InputEventType::PointerButtonPress
-            } else {
-                InputEventType::PointerButtonRelease
-            },
-            _padding: [0; 3],
-            timestamp_ms,
-            data: InputEventData {
-                data0: button as u32,
-                data1: 0,
-            },
-        }
-    }
-
-    fn pointer_enter_leave(enter: bool, x: i32, y: i32, timestamp_ms: u64) -> Self {
-        Self {
-            event_type: if enter {
-                InputEventType::PointerEnter
-            } else {
-                InputEventType::PointerLeave
-            },
-            _padding: [0; 3],
-            timestamp_ms,
-            data: InputEventData {
-                data0: x as u32,
-                data1: y as u32,
-            },
-        }
-    }
-
-    fn key_scancode(&self) -> u8 {
-        (self.data.data0 & 0xFF) as u8
-    }
-
-    fn key_ascii(&self) -> u8 {
-        ((self.data.data0 >> 16) & 0xFF) as u8
-    }
-
-    fn pointer_x(&self) -> i32 {
-        self.data.data0 as i32
-    }
-
-    fn pointer_y(&self) -> i32 {
-        self.data.data1 as i32
-    }
-
-    fn pointer_button_code(&self) -> u8 {
-        (self.data.data0 & 0xFF) as u8
-    }
-}
 
 // =============================================================================
 // Per-Task Event Queue

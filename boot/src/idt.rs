@@ -24,8 +24,7 @@ pub use slopos_abi::arch::x86_64::idt::{
     RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
-// IdtEntry is now imported from abi
-pub use slopos_abi::task::IdtEntry;
+pub use slopos_abi::arch::x86_64::idt::IdtEntry;
 
 #[repr(C, packed)]
 struct IdtPtr {

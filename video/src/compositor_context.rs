@@ -16,10 +16,9 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 
-use slopos_abi::damage::DamageRect;
 use slopos_abi::{
-    CompositorError, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole, WINDOW_STATE_NORMAL,
-    WindowDamageRect, WindowInfo,
+    CompositorError, DamageRect, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole,
+    WINDOW_STATE_NORMAL, WindowInfo,
 };
 use slopos_gfx::damage::InternalDamageTracker;
 use slopos_lib::IrqMutex;
@@ -519,17 +518,7 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             (surface.window_x, surface.window_y)
         };
 
-        // Export damage from committed state
-        let (damage_rects, dmg_count) = surface.export_damage();
-        let mut regions = [WindowDamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS];
-        for i in 0..MAX_WINDOW_DAMAGE_REGIONS {
-            regions[i] = WindowDamageRect {
-                x0: damage_rects[i].x0,
-                y0: damage_rects[i].y0,
-                x1: damage_rects[i].x1,
-                y1: damage_rects[i].y1,
-            };
-        }
+        let (regions, dmg_count) = surface.export_damage();
 
         unsafe {
             let info = &mut *out_buffer.add(count as usize);

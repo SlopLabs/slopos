@@ -633,32 +633,3 @@ impl TaskExitRecord {
         }
     }
 }
-
-// --- IdtEntry ---
-
-/// x86-64 IDT (Interrupt Descriptor Table) entry.
-#[repr(C, packed)]
-#[derive(Copy, Clone)]
-pub struct IdtEntry {
-    pub offset_low: u16,
-    pub selector: u16,
-    pub ist: u8,
-    pub type_attr: u8,
-    pub offset_mid: u16,
-    pub offset_high: u32,
-    pub zero: u32,
-}
-
-impl IdtEntry {
-    pub const fn zero() -> Self {
-        Self {
-            offset_low: 0,
-            selector: 0,
-            ist: 0,
-            type_attr: 0,
-            offset_mid: 0,
-            offset_high: 0,
-            zero: 0,
-        }
-    }
-}
