@@ -234,7 +234,7 @@ mod suites {
     use slopos_mm::tlb_tests::{
         test_batch_at_threshold, test_batch_double_finish, test_batch_drop_flushes,
         test_batch_empty_finish, test_batch_multiple_pages, test_batch_overflow,
-        test_batch_scattered_addresses, test_batch_single_page, test_bsp_apic_id_from_percpu,
+        test_batch_scattered_addresses, test_batch_single_page, test_bsp_apic_id_from_pcr,
         test_flush_all_basic, test_flush_asid_kernel_cr3, test_flush_asid_zero,
         test_flush_page_high_kernel_address, test_flush_page_kernel_address,
         test_flush_page_null_address, test_flush_page_user_max_address, test_flush_range_empty,
@@ -778,7 +778,7 @@ mod suites {
             test_batch_double_finish,
             test_is_smp_active_initial,
             test_get_active_cpu_count,
-            test_bsp_apic_id_from_percpu,
+            test_bsp_apic_id_from_pcr,
             test_handle_shootdown_ipi_cpu_zero,
             test_handle_shootdown_ipi_cpu_max_minus_one,
             test_handle_shootdown_ipi_cpu_overflow,

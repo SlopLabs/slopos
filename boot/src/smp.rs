@@ -5,7 +5,7 @@ use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
 use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_drivers::apic;
 use slopos_lib::wl_currency::{award_loss, award_win};
-use slopos_lib::{cpu, init_bsp, init_percpu_for_cpu, is_cpu_online, klog_info, pcr};
+use slopos_lib::{cpu, is_cpu_online, klog_info, pcr};
 use slopos_mm::tlb;
 
 use crate::gdt::syscall_msr_init;
@@ -26,7 +26,6 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     let apic_id = apic::get_id();
     let cpu_idx = NEXT_CPU_ID.fetch_add(1, Ordering::AcqRel);
 
-    init_percpu_for_cpu(cpu_idx, apic_id);
     tlb::notify_cpu_online();
 
     unsafe {
@@ -63,7 +62,7 @@ pub fn smp_init() {
     let cpus = resp.cpus();
     let bsp_lapic = resp.bsp_lapic_id();
 
-    init_bsp(bsp_lapic);
+    // BSP PCR already initialized in early_init; nothing more needed here.
 
     let flags = resp.flags();
     let x2apic = if flags.contains(MpResponseFlags::X2APIC) {

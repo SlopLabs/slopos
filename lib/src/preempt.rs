@@ -8,7 +8,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::cpu;
-use crate::percpu::get_percpu_data;
+use crate::pcr;
 
 static RESCHEDULE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
@@ -23,8 +23,10 @@ pub struct PreemptGuard {
 impl PreemptGuard {
     #[inline]
     pub fn new() -> Self {
-        let percpu = get_percpu_data();
-        percpu.preempt_count.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: Only accessing atomic fields on the current CPU's PCR.
+        unsafe { pcr::current_pcr() }
+            .preempt_count
+            .fetch_add(1, Ordering::Relaxed);
         Self {
             _marker: PhantomData,
         }
@@ -32,29 +34,37 @@ impl PreemptGuard {
 
     #[inline]
     pub fn is_active() -> bool {
-        get_percpu_data().preempt_count.load(Ordering::Relaxed) > 0
+        unsafe { pcr::current_pcr() }
+            .preempt_count
+            .load(Ordering::Relaxed)
+            > 0
     }
 
     #[inline]
     pub fn count() -> u32 {
-        get_percpu_data().preempt_count.load(Ordering::Relaxed)
+        unsafe { pcr::current_pcr() }
+            .preempt_count
+            .load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn set_reschedule_pending() {
-        get_percpu_data()
+        unsafe { pcr::current_pcr() }
             .reschedule_pending
             .store(1, Ordering::Release);
     }
 
     #[inline]
     pub fn is_reschedule_pending() -> bool {
-        get_percpu_data().reschedule_pending.load(Ordering::Acquire) != 0
+        unsafe { pcr::current_pcr() }
+            .reschedule_pending
+            .load(Ordering::Acquire)
+            != 0
     }
 
     #[inline]
     pub fn clear_reschedule_pending() {
-        get_percpu_data()
+        unsafe { pcr::current_pcr() }
             .reschedule_pending
             .store(0, Ordering::Release);
     }
@@ -69,11 +79,12 @@ impl Default for PreemptGuard {
 impl Drop for PreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        let percpu = get_percpu_data();
-        let prev = percpu.preempt_count.fetch_sub(1, Ordering::Release);
+        // SAFETY: Only accessing atomic fields on the current CPU's PCR.
+        let pcr = unsafe { pcr::current_pcr() };
+        let prev = pcr.preempt_count.fetch_sub(1, Ordering::Release);
         debug_assert!(prev > 0, "preempt_count underflow");
 
-        if prev == 1 && percpu.reschedule_pending.swap(0, Ordering::AcqRel) != 0 {
+        if prev == 1 && pcr.reschedule_pending.swap(0, Ordering::AcqRel) != 0 {
             let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
             if !fn_ptr.is_null() {
                 // SAFETY: fn_ptr was set via register_reschedule_callback with a valid fn()

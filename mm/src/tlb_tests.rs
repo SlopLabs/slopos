@@ -205,10 +205,10 @@ pub fn test_get_active_cpu_count() -> c_int {
     0
 }
 
-pub fn test_bsp_apic_id_from_percpu() -> c_int {
+pub fn test_bsp_apic_id_from_pcr() -> c_int {
     let bsp_id = slopos_lib::get_bsp_apic_id();
     if bsp_id == u32::MAX {
-        klog_info!("TLB_TEST: BUG - BSP APIC ID not set in percpu");
+        klog_info!("TLB_TEST: BUG - BSP APIC ID not set in PCR");
         return -1;
     }
     0

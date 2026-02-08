@@ -32,7 +32,7 @@ use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::Deref;
 
-use crate::percpu::{MAX_CPUS, get_current_cpu};
+use crate::pcr::{MAX_CPUS, get_current_cpu};
 use crate::preempt::PreemptGuard;
 
 #[repr(C, align(64))]
@@ -153,7 +153,7 @@ macro_rules! cpu_local {
         $vis static $NAME: $crate::cpu_local::CpuLocal<$ty> = {
             const INIT: $crate::cpu_local::CacheAligned<$ty> =
                 $crate::cpu_local::CacheAligned($init);
-            $crate::cpu_local::CpuLocal::new_with([INIT; $crate::percpu::MAX_CPUS])
+            $crate::cpu_local::CpuLocal::new_with([INIT; $crate::pcr::MAX_CPUS])
         };
     };
 }

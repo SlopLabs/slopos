@@ -1,7 +1,7 @@
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
-use crate::percpu::get_current_cpu;
+use crate::pcr::get_current_cpu;
 
 #[repr(C, align(16))]
 pub struct JumpBuf {

@@ -256,8 +256,8 @@ pub fn get_active_cpu_count() -> u32 {
 /// Notify the TLB subsystem that a new CPU is online.
 ///
 /// Called during AP startup after the CPU's topology has been registered
-/// via `slopos_lib::init_percpu_for_cpu`. This only updates the TLB
-/// shootdown active-CPU count; topology lives in `slopos_lib::percpu`.
+/// via `slopos_lib::pcr::init_ap_pcr`. This only updates the TLB
+/// shootdown active-CPU count; topology lives in `slopos_lib::pcr`.
 pub fn notify_cpu_online() {
     TLB_STATE.active_cpu_count.fetch_add(1, Ordering::AcqRel);
 }
