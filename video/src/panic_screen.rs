@@ -7,43 +7,26 @@
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
 use slopos_gfx::canvas_font;
+use slopos_lib::numfmt;
 
 use crate::framebuffer;
 use crate::graphics::GraphicsContext;
 
-// Colors (ARGB format)
-const PANIC_BG_COLOR: Color32 = Color32(0xFF8B0000); // Dark red
-const PANIC_FG_COLOR: Color32 = Color32(0xFFFFFFFF); // White
-const PANIC_HEADER_COLOR: Color32 = Color32(0xFFFF4444); // Bright red for header
+const PANIC_BG_COLOR: Color32 = Color32(0xFF8B0000);
+const PANIC_FG_COLOR: Color32 = Color32(0xFFFFFFFF);
+const PANIC_HEADER_COLOR: Color32 = Color32(0xFFFF4444);
 
-/// Format a u64 value as a hex string into the provided buffer.
-/// Returns a slice to the formatted string (null-terminated).
-fn format_hex(value: u64, buf: &mut [u8; 19]) -> &[u8] {
-    const HEX_CHARS: &[u8] = b"0123456789ABCDEF";
-    buf[0] = b'0';
-    buf[1] = b'x';
-    for i in 0..16 {
-        let nibble = ((value >> (60 - i * 4)) & 0xF) as usize;
-        buf[2 + i] = HEX_CHARS[nibble];
-    }
-    buf[18] = 0; // Null terminator
-    &buf[..19]
-}
-
-/// Draw a single line of text with a label and hex value.
 fn draw_register_line(ctx: &mut GraphicsContext, x: i32, y: i32, label: &[u8], value: u64) {
-    // Draw label
     canvas_font::draw_string(ctx, x, y, label, PANIC_FG_COLOR, PANIC_BG_COLOR);
 
-    // Draw hex value
-    let mut hex_buf = [0u8; 19];
-    let _ = format_hex(value, &mut hex_buf);
-    let label_width = (label.len() as i32 - 1) * FONT_CHAR_WIDTH; // -1 for null terminator
+    let mut hex_buf = numfmt::NumBuf::<19>::new();
+    let hex_text = hex_buf.format_hex_u64(value);
+    let label_width = (label.len() as i32 - 1) * FONT_CHAR_WIDTH;
     canvas_font::draw_string(
         ctx,
         x + label_width,
         y,
-        &hex_buf,
+        hex_text,
         PANIC_FG_COLOR,
         PANIC_BG_COLOR,
     );

@@ -14,6 +14,7 @@ use slopos_abi::font::FONT_CHAR_WIDTH;
 use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::pit::pit_poll_delay_ms;
 use slopos_gfx::{canvas_font, canvas_ops};
+use slopos_lib::numfmt;
 
 use crate::graphics::GraphicsContext;
 
@@ -184,29 +185,6 @@ fn choose_landing_segment(fate_number: u32, need_colored: bool) -> i32 {
         }
     }
     start
-}
-
-// ---------------------------------------------------------------------------
-// Number formatting (no_std, stack-only)
-// ---------------------------------------------------------------------------
-
-fn format_u32(value: u32, buf: &mut [u8; 12]) -> &[u8] {
-    if value == 0 {
-        buf[0] = b'0';
-        buf[1] = 0;
-        return &buf[..2];
-    }
-
-    let mut n = value;
-    let mut pos = buf.len() - 1;
-    buf[pos] = 0;
-    while n != 0 && pos > 0 {
-        pos -= 1;
-        buf[pos] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    &buf[pos..]
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +419,8 @@ fn draw_fate_number<T: Canvas>(ctx: &mut T, cx: i32, y_pos: i32, fate_number: u3
     };
     canvas_ops::fill_rect(ctx, card_x + 8, y_pos + 34, card_w - 16, 44, box_color);
 
-    let mut num_buf = [0u8; 12];
-    let num_text = format_u32(fate_number, &mut num_buf);
+    let mut num_buf = numfmt::NumBuf::<12>::new();
+    let num_text = num_buf.format_u32(fate_number);
     let printable_len = num_text.iter().take_while(|&&b| b != 0).count() as i32;
     let text_x = cx - (printable_len * FONT_CHAR_WIDTH) / 2;
     canvas_font::draw_string(ctx, text_x, number_y, num_text, CARD_TEXT, Color32(0));

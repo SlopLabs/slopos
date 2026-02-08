@@ -1,153 +1,205 @@
-use core::ffi::{c_char, c_int};
-
-use crate::memory;
+//! Stack-only number formatting for `no_std` contexts.
+//!
+//! Every function writes into a caller-provided `&mut [u8]` buffer and returns
+//! a `&[u8]` sub-slice of the formatted result (null-terminated for direct use
+//! with the bitmap font renderer). No heap, no allocator, no raw pointers.
+//!
+//! # Typed wrappers
+//!
+//! The [`NumBuf`] helper encapsulates a correctly-sized stack buffer so callers
+//! don't need to compute buffer lengths themselves:
+//!
+//! ```ignore
+//! let mut buf = NumBuf::<21>::new();
+//! let text = buf.format_u64(12345);      // b"12345\0"
+//! let hex  = buf.format_hex_u64(0xBEEF); // b"0x000000000000BEEF\0"
+//! ```
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
-unsafe fn ensure_null(buffer: *mut c_char, buffer_len: usize) {
-    unsafe {
-        if !buffer.is_null() && buffer_len > 0 {
-            *buffer = 0;
+// ---------------------------------------------------------------------------
+// Core formatting functions
+// ---------------------------------------------------------------------------
+
+/// Format a `u64` as a decimal string into `buf`.
+///
+/// Returns the sub-slice containing the formatted digits followed by a NUL
+/// terminator. Returns `b"\0"` if the buffer is too small (needs at least 2
+/// bytes for the `"0\0"` case).
+pub fn fmt_u64(value: u64, buf: &mut [u8]) -> &[u8] {
+    if buf.len() < 2 {
+        if !buf.is_empty() {
+            buf[0] = 0;
         }
+        return &buf[..buf.len().min(1)];
     }
+
+    if value == 0 {
+        buf[0] = b'0';
+        buf[1] = 0;
+        return &buf[..2];
+    }
+
+    // Write digits in reverse, then shift to the front.
+    let last = buf.len() - 1;
+    buf[last] = 0; // NUL sentinel
+
+    let mut pos = last;
+    let mut n = value;
+    while n != 0 && pos > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    // If the number didn't fit, return "0\0" as a safe fallback.
+    if n != 0 {
+        buf[0] = b'0';
+        buf[1] = 0;
+        return &buf[..2];
+    }
+
+    // Shift the formatted digits to the start of the buffer.
+    let len = last - pos; // digit count (not including NUL)
+    buf.copy_within(pos..=last, 0);
+    &buf[..len + 1]
 }
 
-pub unsafe fn u64_to_decimal_internal(value: u64, buffer: *mut c_char, buffer_len: usize) -> usize {
-    if buffer.is_null() || buffer_len == 0 {
-        return 0;
+/// Format an `i64` as a decimal string into `buf`.
+///
+/// Negative values are prefixed with `'-'`. Returns the formatted sub-slice
+/// (NUL-terminated).
+pub fn fmt_i64(value: i64, buf: &mut [u8]) -> &[u8] {
+    if value >= 0 {
+        return fmt_u64(value as u64, buf);
     }
 
-    unsafe {
-        let mut write_pos = buffer_len - 1;
-        *buffer.add(write_pos) = 0;
-
-        if value == 0 {
-            if write_pos == 0 {
-                *buffer = 0;
-                return 0;
-            }
-            write_pos -= 1;
-            *buffer.add(write_pos) = b'0' as c_char;
-        } else {
-            let mut v = value;
-            while v > 0 {
-                if write_pos == 0 {
-                    *buffer = 0;
-                    return 0;
-                }
-                write_pos -= 1;
-                *buffer.add(write_pos) = (b'0' + (v % 10) as u8) as c_char;
-                v /= 10;
-            }
+    if buf.len() < 3 {
+        // Need at least "-0\0"
+        if !buf.is_empty() {
+            buf[0] = 0;
         }
-
-        let len = (buffer_len - 1) - write_pos;
-        memory::memmove_internal(
-            buffer as *mut u8,
-            buffer.add(write_pos) as *const u8,
-            len + 1,
-        );
-        len
+        return &buf[..buf.len().min(1)];
     }
+
+    buf[0] = b'-';
+    let magnitude = if value == i64::MIN {
+        (i64::MAX as u64) + 1
+    } else {
+        (-value) as u64
+    };
+
+    let tail = fmt_u64(magnitude, &mut buf[1..]);
+    let total = 1 + tail.len();
+    &buf[..total]
 }
 
-pub unsafe fn i64_to_decimal_internal(value: i64, buffer: *mut c_char, buffer_len: usize) -> usize {
-    if buffer.is_null() || buffer_len == 0 {
-        return 0;
-    }
-
-    unsafe {
-        if value >= 0 {
-            return u64_to_decimal_internal(value as u64, buffer, buffer_len);
-        }
-
-        if buffer_len < 2 {
-            *buffer = 0;
-            return 0;
-        }
-
-        *buffer = b'-' as c_char;
-        let magnitude = if value == i64::MIN {
-            (i64::MAX as u64) + 1
-        } else {
-            (-value) as u64
-        };
-
-        let len = u64_to_decimal_internal(magnitude, buffer.add(1), buffer_len - 1);
-        if len == 0 {
-            *buffer = 0;
-            return 0;
-        }
-        len + 1
-    }
+/// Format a `u32` as a decimal string into `buf`.
+///
+/// Convenience wrapper around [`fmt_u64`]. Returns the formatted sub-slice
+/// (NUL-terminated).
+#[inline]
+pub fn fmt_u32(value: u32, buf: &mut [u8]) -> &[u8] {
+    fmt_u64(value as u64, buf)
 }
 
-pub unsafe fn u64_to_hex_internal(
-    value: u64,
-    buffer: *mut c_char,
-    buffer_len: usize,
-    with_prefix: bool,
-) -> usize {
-    if buffer.is_null() || buffer_len == 0 {
-        return 0;
-    }
+/// Format a `u64` as a hexadecimal string with `0x` prefix into `buf`.
+///
+/// Always produces a full 16-nibble representation (leading zeros included),
+/// e.g. `"0x00000000DEADBEEF\0"`. The buffer must hold at least 19 bytes
+/// (`"0x"` + 16 nibbles + NUL).
+pub fn fmt_hex_u64(value: u64, buf: &mut [u8]) -> &[u8] {
+    const NEEDED: usize = 2 + 16 + 1; // "0x" + 16 hex digits + NUL
 
-    unsafe {
-        let needed = 16 + if with_prefix { 2 } else { 0 } + 1;
-        if buffer_len < needed {
-            *buffer = 0;
-            return 0;
+    if buf.len() < NEEDED {
+        if !buf.is_empty() {
+            buf[0] = 0;
         }
+        return &buf[..buf.len().min(1)];
+    }
 
-        let mut pos = 0usize;
-        if with_prefix {
-            *buffer.add(pos) = b'0' as c_char;
-            pos += 1;
-            *buffer.add(pos) = b'x' as c_char;
-            pos += 1;
+    buf[0] = b'0';
+    buf[1] = b'x';
+
+    let mut i = 0;
+    while i < 16 {
+        let nibble = ((value >> (60 - i * 4)) & 0xF) as usize;
+        buf[2 + i] = HEX_DIGITS[nibble];
+        i += 1;
+    }
+
+    buf[NEEDED - 1] = 0;
+    &buf[..NEEDED]
+}
+
+/// Format a `u8` as a two-character hex string (no prefix) into `buf`.
+///
+/// Produces e.g. `"FF\0"`. Buffer needs at least 3 bytes.
+pub fn fmt_hex_u8(value: u8, buf: &mut [u8]) -> &[u8] {
+    if buf.len() < 3 {
+        if !buf.is_empty() {
+            buf[0] = 0;
         }
-
-        let mut i = 16;
-        while i > 0 {
-            i -= 1;
-            let digit = ((value >> (i * 4)) & 0xF) as usize;
-            *buffer.add(pos) = HEX_DIGITS[digit] as c_char;
-            pos += 1;
-        }
-
-        *buffer.add(pos) = 0;
-        pos
-    }
-}
-
-pub unsafe fn u8_to_hex_internal(value: u8, buffer: *mut c_char, buffer_len: usize) -> usize {
-    if buffer.is_null() || buffer_len < 3 {
-        unsafe { ensure_null(buffer, buffer_len) };
-        return 0;
+        return &buf[..buf.len().min(1)];
     }
 
-    unsafe {
-        *buffer.add(0) = HEX_DIGITS[((value >> 4) & 0xF) as usize] as c_char;
-        *buffer.add(1) = HEX_DIGITS[(value & 0xF) as usize] as c_char;
-        *buffer.add(2) = 0;
-        2
-    }
+    buf[0] = HEX_DIGITS[((value >> 4) & 0xF) as usize];
+    buf[1] = HEX_DIGITS[(value & 0xF) as usize];
+    buf[2] = 0;
+    &buf[..3]
 }
 
-pub fn numfmt_u64_to_decimal(value: u64, buffer: *mut c_char, buffer_len: usize) -> usize {
-    unsafe { u64_to_decimal_internal(value, buffer, buffer_len) }
+// ---------------------------------------------------------------------------
+// NumBuf --- typed stack buffer helper
+// ---------------------------------------------------------------------------
+
+/// Stack-allocated formatting buffer.
+///
+/// `N` should be sized for the largest formatted output expected:
+/// - Decimal `u64::MAX` needs 21 bytes (20 digits + NUL)
+/// - Decimal `i64::MIN` needs 21 bytes ('-' + 19 digits + NUL)
+/// - Hex `u64` needs 19 bytes ("0x" + 16 nibbles + NUL)
+/// - Decimal `u32::MAX` needs 11 bytes (10 digits + NUL)
+///
+/// Common sizes: `NumBuf::<21>` (any integer), `NumBuf::<12>` (u32),
+/// `NumBuf::<19>` (hex u64).
+pub struct NumBuf<const N: usize> {
+    buf: [u8; N],
 }
-pub fn numfmt_i64_to_decimal(value: i64, buffer: *mut c_char, buffer_len: usize) -> usize {
-    unsafe { i64_to_decimal_internal(value, buffer, buffer_len) }
-}
-pub fn numfmt_u64_to_hex(
-    value: u64,
-    buffer: *mut c_char,
-    buffer_len: usize,
-    with_prefix: c_int,
-) -> usize {
-    unsafe { u64_to_hex_internal(value, buffer, buffer_len, with_prefix != 0) }
-}
-pub fn numfmt_u8_to_hex(value: u8, buffer: *mut c_char, buffer_len: usize) -> usize {
-    unsafe { u8_to_hex_internal(value, buffer, buffer_len) }
+
+impl<const N: usize> NumBuf<N> {
+    #[inline]
+    pub const fn new() -> Self {
+        Self { buf: [0u8; N] }
+    }
+
+    /// Format a `u64` as decimal.
+    #[inline]
+    pub fn format_u64(&mut self, value: u64) -> &[u8] {
+        fmt_u64(value, &mut self.buf)
+    }
+
+    /// Format a `u32` as decimal.
+    #[inline]
+    pub fn format_u32(&mut self, value: u32) -> &[u8] {
+        fmt_u32(value, &mut self.buf)
+    }
+
+    /// Format an `i64` as decimal.
+    #[inline]
+    pub fn format_i64(&mut self, value: i64) -> &[u8] {
+        fmt_i64(value, &mut self.buf)
+    }
+
+    /// Format a `u64` as hexadecimal with `0x` prefix.
+    #[inline]
+    pub fn format_hex_u64(&mut self, value: u64) -> &[u8] {
+        fmt_hex_u64(value, &mut self.buf)
+    }
+
+    /// Format a `u8` as two hex digits (no prefix).
+    #[inline]
+    pub fn format_hex_u8(&mut self, value: u8) -> &[u8] {
+        fmt_hex_u8(value, &mut self.buf)
+    }
 }
