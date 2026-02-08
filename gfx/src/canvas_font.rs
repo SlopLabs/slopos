@@ -52,6 +52,49 @@ pub fn draw_char<T: Canvas>(
     emit(target, damage)
 }
 
+pub fn draw_char_clipped<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    ch: u8,
+    fg: Color32,
+    bg: Color32,
+    clip: &DamageRect,
+) {
+    if x > clip.x1
+        || y > clip.y1
+        || x + FONT_CHAR_WIDTH - 1 < clip.x0
+        || y + FONT_CHAR_HEIGHT - 1 < clip.y0
+    {
+        return;
+    }
+
+    let fmt = target.pixel_format();
+    let fg_px = fmt.encode(fg);
+    let bg_px = fmt.encode(bg);
+    let glyph = get_glyph_or_space(ch);
+    let has_bg = bg.0 != 0;
+
+    for (row_idx, &row_bits) in glyph.iter().enumerate() {
+        let py = y + row_idx as i32;
+        if py < clip.y0 || py > clip.y1 {
+            continue;
+        }
+        for col in 0..FONT_CHAR_WIDTH {
+            let px = x + col;
+            if px < clip.x0 || px > clip.x1 {
+                continue;
+            }
+            let is_fg = (row_bits & (0x80 >> col)) != 0;
+            if is_fg {
+                target.put_pixel(px, py, fg_px);
+            } else if has_bg {
+                target.put_pixel(px, py, bg_px);
+            }
+        }
+    }
+}
+
 pub fn draw_string<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -112,6 +155,33 @@ pub fn draw_str<T: Canvas>(
     bg: Color32,
 ) -> Option<DamageRect> {
     draw_string(target, x, y, text.as_bytes(), fg, bg)
+}
+
+pub fn draw_str_clipped<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    text: &str,
+    fg: Color32,
+    bg: Color32,
+    clip: &DamageRect,
+) {
+    if y + FONT_CHAR_HEIGHT - 1 < clip.y0 || y > clip.y1 {
+        return;
+    }
+    let mut cx = x;
+    for &ch in text.as_bytes() {
+        if ch == 0 {
+            break;
+        }
+        if cx > clip.x1 {
+            break;
+        }
+        if cx + FONT_CHAR_WIDTH - 1 >= clip.x0 {
+            draw_char_clipped(target, cx, y, ch, fg, bg, clip);
+        }
+        cx += FONT_CHAR_WIDTH;
+    }
 }
 
 pub fn string_width(text: &[u8]) -> i32 {

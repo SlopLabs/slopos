@@ -134,6 +134,24 @@ pub fn fill_rect<T: Canvas>(
     emit(target, damage)
 }
 
+pub fn fill_rect_clipped<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: Color32,
+    clip: &DamageRect,
+) {
+    let rx0 = x.max(clip.x0);
+    let ry0 = y.max(clip.y0);
+    let rx1 = (x + w - 1).min(clip.x1);
+    let ry1 = (y + h - 1).min(clip.y1);
+    if rx0 <= rx1 && ry0 <= ry1 {
+        fill_rect(target, rx0, ry0, rx1 - rx0 + 1, ry1 - ry0 + 1, color);
+    }
+}
+
 pub fn circle<T: Canvas>(
     target: &mut T,
     cx: i32,

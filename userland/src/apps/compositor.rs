@@ -1444,7 +1444,7 @@ impl WindowManager {
         };
         let title_y = window.y - TITLE_BAR_HEIGHT;
 
-        fill_rect_clipped(
+        gfx::fill_rect_clipped(
             buf,
             window.x,
             title_y,
@@ -1455,7 +1455,7 @@ impl WindowManager {
         );
 
         let title = title_to_str(&window.title);
-        draw_string_clipped(
+        gfx::draw_str_clipped(
             buf,
             window.x + 8,
             title_y + 4,
@@ -1494,7 +1494,7 @@ impl WindowManager {
     fn draw_taskbar_clipped(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
         let taskbar_y = buf.height() as i32 - TASKBAR_HEIGHT;
 
-        fill_rect_clipped(
+        gfx::fill_rect_clipped(
             buf,
             0,
             taskbar_y,
@@ -1516,7 +1516,7 @@ impl WindowManager {
             COLOR_BUTTON
         };
 
-        fill_rect_clipped(
+        gfx::fill_rect_clipped(
             buf,
             start_btn_x,
             btn_y,
@@ -1525,7 +1525,7 @@ impl WindowManager {
             start_color,
             clip,
         );
-        draw_string_clipped(
+        gfx::draw_str_clipped(
             buf,
             start_btn_x + 4,
             btn_y + 4,
@@ -1536,7 +1536,7 @@ impl WindowManager {
         );
 
         let separator_x = self.app_buttons_start_x() - (START_APPS_GAP / 2);
-        fill_rect_clipped(
+        gfx::fill_rect_clipped(
             buf,
             separator_x,
             taskbar_y + 2,
@@ -1562,7 +1562,7 @@ impl WindowManager {
             let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
             let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
-            fill_rect_clipped(
+            gfx::fill_rect_clipped(
                 buf,
                 x,
                 btn_y,
@@ -1579,7 +1579,7 @@ impl WindowManager {
             } else {
                 title
             };
-            draw_string_clipped(
+            gfx::draw_str_clipped(
                 buf,
                 x + 4,
                 btn_y + 4,
@@ -1604,7 +1604,7 @@ impl WindowManager {
         let menu_y = self.start_menu_y(fb_height);
         let menu_h = self.start_menu_height();
 
-        fill_rect_clipped(
+        gfx::fill_rect_clipped(
             buf,
             menu_x,
             menu_y,
@@ -1625,7 +1625,7 @@ impl WindowManager {
                 COLOR_START_MENU_BG
             };
 
-            fill_rect_clipped(
+            gfx::fill_rect_clipped(
                 buf,
                 menu_x + START_MENU_PADDING,
                 item_y,
@@ -1634,7 +1634,7 @@ impl WindowManager {
                 item_color,
                 clip,
             );
-            draw_string_clipped(
+            gfx::draw_str_clipped(
                 buf,
                 menu_x + START_MENU_PADDING + 4,
                 item_y + 6,
@@ -1650,8 +1650,8 @@ impl WindowManager {
     fn draw_cursor_clipped(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
         let mx = self.mouse_x;
         let my = self.mouse_y;
-        fill_rect_clipped(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR, clip);
-        fill_rect_clipped(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR, clip);
+        gfx::fill_rect_clipped(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR, clip);
+        gfx::fill_rect_clipped(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR, clip);
     }
 
     fn draw_partial_region(&mut self, buf: &mut DrawBuffer, damage: &DamageRect) {
@@ -1742,18 +1742,18 @@ impl WindowManager {
         let ww = window.width as i32;
         let wh = window.height as i32;
 
-        fill_rect_clipped(buf, wx, wy, ww, wh, COLOR_WINDOW_PLACEHOLDER, clip);
+        gfx::fill_rect_clipped(buf, wx, wy, ww, wh, COLOR_WINDOW_PLACEHOLDER, clip);
 
         // Border: top, bottom, left, right edges
-        fill_rect_clipped(buf, wx, wy, ww, 1, COLOR_TITLE_BAR, clip);
-        fill_rect_clipped(buf, wx, wy + wh - 1, ww, 1, COLOR_TITLE_BAR, clip);
-        fill_rect_clipped(buf, wx, wy, 1, wh, COLOR_TITLE_BAR, clip);
-        fill_rect_clipped(buf, wx + ww - 1, wy, 1, wh, COLOR_TITLE_BAR, clip);
+        gfx::fill_rect_clipped(buf, wx, wy, ww, 1, COLOR_TITLE_BAR, clip);
+        gfx::fill_rect_clipped(buf, wx, wy + wh - 1, ww, 1, COLOR_TITLE_BAR, clip);
+        gfx::fill_rect_clipped(buf, wx, wy, 1, wh, COLOR_TITLE_BAR, clip);
+        gfx::fill_rect_clipped(buf, wx + ww - 1, wy, 1, wh, COLOR_TITLE_BAR, clip);
 
         let text = "Window content pending migration";
         let text_x = wx + 10;
         let text_y = wy + wh / 2 - 8;
-        draw_string_clipped(
+        gfx::draw_str_clipped(
             buf,
             text_x,
             text_y,
@@ -1886,103 +1886,6 @@ fn intersect_rect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
     }
 }
 
-fn fill_rect_clipped(
-    buf: &mut DrawBuffer,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    color: Color32,
-    clip: &DamageRect,
-) {
-    let rx0 = x.max(clip.x0);
-    let ry0 = y.max(clip.y0);
-    let rx1 = (x + w - 1).min(clip.x1);
-    let ry1 = (y + h - 1).min(clip.y1);
-    if rx0 <= rx1 && ry0 <= ry1 {
-        gfx::fill_rect(buf, rx0, ry0, rx1 - rx0 + 1, ry1 - ry0 + 1, color);
-    }
-}
-
-fn draw_char_clipped(
-    buf: &mut DrawBuffer,
-    x: i32,
-    y: i32,
-    ch: u8,
-    fg: Color32,
-    bg: Color32,
-    clip: &DamageRect,
-) {
-    use slopos_abi::draw::Canvas;
-    let char_w = gfx::font::FONT_CHAR_WIDTH;
-    let char_h = gfx::font::FONT_CHAR_HEIGHT;
-
-    if x > clip.x1 || y > clip.y1 || x + char_w - 1 < clip.x0 || y + char_h - 1 < clip.y0 {
-        return;
-    }
-
-    let glyph = match gfx::font::get_glyph(ch) {
-        Some(g) => g,
-        None => match gfx::font::get_glyph(b' ') {
-            Some(g) => g,
-            None => return,
-        },
-    };
-
-    let fmt = buf.pixel_format();
-    let fg_px = fmt.encode(fg);
-    let bg_px = fmt.encode(bg);
-    let has_bg = bg.0 != 0;
-
-    for (row_idx, &row_bits) in glyph.iter().enumerate() {
-        let py = y + row_idx as i32;
-        if py < clip.y0 || py > clip.y1 {
-            continue;
-        }
-        for col in 0..char_w {
-            let px = x + col;
-            if px < clip.x0 || px > clip.x1 {
-                continue;
-            }
-            let is_fg = (row_bits & (0x80 >> col)) != 0;
-            if is_fg {
-                buf.put_pixel(px, py, fg_px);
-            } else if has_bg {
-                buf.put_pixel(px, py, bg_px);
-            }
-        }
-    }
-}
-
-fn draw_string_clipped(
-    buf: &mut DrawBuffer,
-    x: i32,
-    y: i32,
-    text: &str,
-    fg: Color32,
-    bg: Color32,
-    clip: &DamageRect,
-) {
-    let char_h = gfx::font::FONT_CHAR_HEIGHT;
-    let char_w = gfx::font::FONT_CHAR_WIDTH;
-    if y + char_h - 1 < clip.y0 || y > clip.y1 {
-        return;
-    }
-    let mut cx = x;
-    for &ch in text.as_bytes() {
-        if ch == 0 {
-            break;
-        }
-        if cx > clip.x1 {
-            break;
-        }
-        if cx + char_w - 1 >= clip.x0 {
-            draw_char_clipped(buf, cx, y, ch, fg, bg, clip);
-        }
-        cx += char_w;
-    }
-}
-
 fn draw_button_clipped(
     buf: &mut DrawBuffer,
     x: i32,
@@ -2000,8 +1903,8 @@ fn draw_button_clipped(
     } else {
         COLOR_BUTTON
     };
-    fill_rect_clipped(buf, x, y, size, size, color, clip);
-    draw_string_clipped(
+    gfx::fill_rect_clipped(buf, x, y, size, size, color, clip);
+    gfx::draw_str_clipped(
         buf,
         x + size / 4,
         y + size / 4,

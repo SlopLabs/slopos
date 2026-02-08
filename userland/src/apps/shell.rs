@@ -36,6 +36,7 @@ impl<T> SyncUnsafeCell<T> {
 // Safety: Userland is single-threaded with no preemption during shell code
 unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 
+use crate::gfx::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
 use crate::gfx::{self, DrawBuffer};
 use crate::program_registry;
 use crate::runtime;
@@ -63,8 +64,6 @@ static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
 static HALTED: &[u8] = b"Shell requested shutdown...\n";
 static REBOOTING: &[u8] = b"Shell requested reboot...\n";
 
-const FONT_CHAR_WIDTH: i32 = 8;
-const FONT_CHAR_HEIGHT: i32 = 16;
 const SHELL_BG_COLOR: Color32 = Color32(0x1E1E_1EFF);
 const SHELL_FG_COLOR: Color32 = Color32(0xE6E6_E6FF);
 
