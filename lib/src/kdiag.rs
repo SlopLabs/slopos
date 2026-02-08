@@ -1,10 +1,108 @@
 use crate::string::cstr_to_str;
+use core::arch::asm;
 use core::ffi::{c_char, c_int};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cpu;
 use crate::stacktrace::{self, StacktraceEntry};
 use crate::tsc;
+
+// ---------------------------------------------------------------------------
+// Register snapshot — only used by kdiag_dump_cpu_state() below.
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct RegSnapshot {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+}
+
+#[inline(never)]
+fn snapshot_regs() -> RegSnapshot {
+    let (rax, rbx, rcx, rdx): (u64, u64, u64, u64);
+    let (rsi, rdi, rbp, rsp): (u64, u64, u64, u64);
+    let (r8, r9, r10, r11): (u64, u64, u64, u64);
+    let (r12, r13, r14, r15): (u64, u64, u64, u64);
+    unsafe {
+        asm!(
+            "mov {0}, rax",
+            "mov {1}, rbx",
+            "mov {2}, rcx",
+            "mov {3}, rdx",
+            out(reg) rax,
+            out(reg) rbx,
+            out(reg) rcx,
+            out(reg) rdx,
+            options(nomem, nostack, preserves_flags)
+        );
+        asm!(
+            "mov {0}, rsi",
+            "mov {1}, rdi",
+            "mov {2}, rbp",
+            "mov {3}, rsp",
+            out(reg) rsi,
+            out(reg) rdi,
+            out(reg) rbp,
+            out(reg) rsp,
+            options(nomem, nostack, preserves_flags)
+        );
+        asm!(
+            "mov {0}, r8",
+            "mov {1}, r9",
+            "mov {2}, r10",
+            "mov {3}, r11",
+            out(reg) r8,
+            out(reg) r9,
+            out(reg) r10,
+            out(reg) r11,
+            options(nomem, nostack, preserves_flags)
+        );
+        asm!(
+            "mov {0}, r12",
+            "mov {1}, r13",
+            "mov {2}, r14",
+            "mov {3}, r15",
+            out(reg) r12,
+            out(reg) r13,
+            out(reg) r14,
+            out(reg) r15,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    RegSnapshot {
+        rax,
+        rbx,
+        rcx,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        rsp,
+        r8,
+        r9,
+        r10,
+        r11,
+        r12,
+        r13,
+        r14,
+        r15,
+    }
+}
 
 pub const KDIAG_STACK_TRACE_DEPTH: usize = 16;
 
@@ -71,7 +169,7 @@ pub fn kdiag_timestamp() -> u64 {
     MONOTONIC_TIME.load(Ordering::Relaxed)
 }
 pub fn kdiag_dump_cpu_state() {
-    let regs = cpu::snapshot_regs();
+    let regs = snapshot_regs();
     let rflags = cpu::read_rflags();
     let cr0 = cpu::read_cr0();
     let cr2 = cpu::read_cr2();
