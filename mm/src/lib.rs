@@ -20,6 +20,7 @@ pub mod pat;
 pub mod process_vm;
 pub mod shared_memory;
 pub mod symbols;
+pub mod test_fixtures;
 pub mod tests;
 pub mod tests_cow_edge;
 pub mod tests_demand;

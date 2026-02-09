@@ -1,13 +1,8 @@
-//! OOM (Out-of-Memory) and Memory Exhaustion Tests
-//!
-//! Tests system behavior under memory pressure. These tests are designed
-//! to find bugs in error handling paths that are rarely exercised.
-
-use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::klog_info;
+use slopos_lib::testing::TestResult;
+use slopos_lib::{assert_test, fail, klog_info, pass};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
@@ -19,23 +14,20 @@ use crate::page_alloc::{
 };
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
 
-/// Test: Allocate until OOM, verify graceful failure
-pub fn test_page_alloc_until_oom() -> c_int {
+pub fn test_page_alloc_until_oom() -> TestResult {
     let mut total = 0u32;
     let mut free_before = 0u32;
     get_page_allocator_stats(&mut total, &mut free_before, ptr::null_mut());
 
     if free_before < 64 {
         klog_info!("OOM_TEST: Not enough free pages to test ({})", free_before);
-        return 0;
+        return pass!();
     }
 
     let mut allocated: [PhysAddr; 1024] = [PhysAddr::NULL; 1024];
     let mut count = 0usize;
 
-    // Allocate pages until failure, but limit to avoid test timeout
     let max_alloc = (free_before as usize).min(512);
-
     for i in 0..max_alloc {
         let phys = alloc_page_frame(ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
@@ -50,42 +42,28 @@ pub fn test_page_alloc_until_oom() -> c_int {
         }
     }
 
-    if count == 0 {
-        klog_info!("OOM_TEST: Failed to allocate any pages!");
-        return -1;
-    }
+    assert_test!(count > 0, "failed to allocate any pages");
 
-    // Verify we can still free pages
     for i in 0..count {
         free_page_frame(allocated[i]);
     }
 
-    // Verify stats recovered
     let mut free_after = 0u32;
     get_page_allocator_stats(ptr::null_mut(), &mut free_after, ptr::null_mut());
 
-    if free_after < free_before - 10 {
-        klog_info!(
-            "OOM_TEST: Memory leak after OOM test! Before: {}, After: {}",
-            free_before,
-            free_after
-        );
-        return -1;
-    }
+    assert_test!(free_after >= free_before - 10, "memory leak after OOM test");
 
-    0
+    pass!()
 }
 
-/// Test: Large block allocation when only fragmented memory available
-pub fn test_page_alloc_fragmentation_oom() -> c_int {
+pub fn test_page_alloc_fragmentation_oom() -> TestResult {
     let mut free_before = 0u32;
     get_page_allocator_stats(ptr::null_mut(), &mut free_before, ptr::null_mut());
 
     if free_before < 32 {
-        return 0;
+        return pass!();
     }
 
-    // Allocate individual pages to fragment memory
     let mut pages: [PhysAddr; 16] = [PhysAddr::NULL; 16];
     for i in 0..16 {
         pages[i] = alloc_page_frame(ALLOC_FLAG_NO_PCP);
@@ -93,21 +71,17 @@ pub fn test_page_alloc_fragmentation_oom() -> c_int {
             for j in 0..i {
                 free_page_frame(pages[j]);
             }
-            return 0;
+            return pass!();
         }
     }
 
-    // Free alternate pages (creates holes)
     for i in (0..16).step_by(2) {
         free_page_frame(pages[i]);
         pages[i] = PhysAddr::NULL;
     }
 
-    // Try to allocate a large contiguous block (16 pages)
-    // This might succeed or fail depending on memory layout
     let large = alloc_page_frames(16, ALLOC_FLAG_NO_PCP);
 
-    // Clean up
     if !large.is_null() {
         free_page_frame(large);
     }
@@ -117,31 +91,24 @@ pub fn test_page_alloc_fragmentation_oom() -> c_int {
         }
     }
 
-    0
+    pass!()
 }
 
-/// Test: DMA allocation constraints under pressure
-pub fn test_dma_allocation_exhaustion() -> c_int {
+pub fn test_dma_allocation_exhaustion() -> TestResult {
     let mut dma_pages: [PhysAddr; 64] = [PhysAddr::NULL; 64];
     let mut count = 0usize;
 
-    // DMA memory is limited to low addresses
     for _ in 0..64 {
         let phys = alloc_page_frame(ALLOC_FLAG_DMA | ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
             break;
         }
-        // Verify DMA constraint
         if phys.as_u64() >= 0x0100_0000 {
-            klog_info!(
-                "OOM_TEST: BUG - DMA allocation returned high address: {:#x}",
-                phys.as_u64()
-            );
             free_page_frame(phys);
             for j in 0..count {
                 free_page_frame(dma_pages[j]);
             }
-            return -1;
+            return fail!("DMA allocation returned high address: {:#x}", phys.as_u64());
         }
         if count < dma_pages.len() {
             dma_pages[count] = phys;
@@ -151,84 +118,70 @@ pub fn test_dma_allocation_exhaustion() -> c_int {
         }
     }
 
-    // Cleanup
     for i in 0..count {
         free_page_frame(dma_pages[i]);
     }
 
-    0
+    pass!()
 }
 
-/// Test: Heap allocation under memory pressure
-pub fn test_heap_alloc_pressure() -> c_int {
+pub fn test_heap_alloc_pressure() -> TestResult {
     let mut stats_before = core::mem::MaybeUninit::uninit();
     get_heap_stats(stats_before.as_mut_ptr());
     let _before = unsafe { stats_before.assume_init() };
 
-    // Allocate many small objects
     let mut ptrs: [*mut core::ffi::c_void; 128] = [ptr::null_mut(); 128];
     let mut count = 0usize;
 
     for _ in 0..128 {
-        let ptr = kmalloc(256);
-        if ptr.is_null() {
+        let p = kmalloc(256);
+        if p.is_null() {
             break;
         }
         if count < ptrs.len() {
-            ptrs[count] = ptr;
+            ptrs[count] = p;
             count += 1;
         } else {
-            kfree(ptr);
+            kfree(p);
         }
     }
 
-    if count == 0 {
-        klog_info!("OOM_TEST: Heap couldn't allocate any blocks");
-        return -1;
-    }
+    assert_test!(count > 0, "heap couldn't allocate any blocks");
 
-    // Write pattern to verify no corruption
     for i in 0..count {
         let byte_ptr = ptrs[i] as *mut u8;
         for j in 0..256 {
-            unsafe {
-                *byte_ptr.add(j) = (i & 0xFF) as u8;
-            }
+            unsafe { *byte_ptr.add(j) = (i & 0xFF) as u8 };
         }
     }
 
-    // Verify patterns
     for i in 0..count {
         let byte_ptr = ptrs[i] as *mut u8;
         for j in 0..256 {
             let val = unsafe { *byte_ptr.add(j) };
             if val != (i & 0xFF) as u8 {
-                klog_info!(
-                    "OOM_TEST: Heap corruption at block {}, offset {}: expected {:#x}, got {:#x}",
+                for k in 0..count {
+                    kfree(ptrs[k]);
+                }
+                return fail!(
+                    "heap corruption at block {}, offset {}: expected {:#x}, got {:#x}",
                     i,
                     j,
                     (i & 0xFF) as u8,
                     val
                 );
-                // Cleanup before failing
-                for k in 0..count {
-                    kfree(ptrs[k]);
-                }
-                return -1;
             }
         }
     }
 
-    // Free in reverse order
     for i in (0..count).rev() {
         kfree(ptrs[i]);
     }
 
-    0
+    pass!()
 }
 
-/// Test: Allocate 1 GiB worth of 1 MiB blocks if memory allows
-pub fn test_heap_alloc_one_gib() -> c_int {
+pub fn test_heap_alloc_one_gib() -> TestResult {
     const ONE_MIB: usize = 1024 * 1024;
     const TARGET_BLOCKS: usize = 1024;
     const TARGET_BYTES: u64 = ONE_MIB as u64 * TARGET_BLOCKS as u64;
@@ -243,41 +196,36 @@ pub fn test_heap_alloc_one_gib() -> c_int {
             "OOM_TEST: Skipping 1GiB heap test (available {} MB)",
             available / (1024 * 1024)
         );
-        return 0;
+        return pass!();
     }
 
     let mut ptrs: [*mut core::ffi::c_void; TARGET_BLOCKS] = [ptr::null_mut(); TARGET_BLOCKS];
 
     for i in 0..TARGET_BLOCKS {
-        let ptr = kmalloc(ONE_MIB);
-        if ptr.is_null() {
-            klog_info!("OOM_TEST: Failed to allocate 1MiB block {}", i);
+        let p = kmalloc(ONE_MIB);
+        if p.is_null() {
             for j in 0..i {
                 kfree(ptrs[j]);
             }
-            return -1;
+            return fail!("failed to allocate 1MiB block {}", i);
         }
-        unsafe {
-            *(ptr as *mut u8) = (i & 0xFF) as u8;
-        }
-        ptrs[i] = ptr;
+        unsafe { *(p as *mut u8) = (i & 0xFF) as u8 };
+        ptrs[i] = p;
     }
 
     for i in 0..TARGET_BLOCKS {
         kfree(ptrs[i]);
     }
 
-    0
+    pass!()
 }
 
-/// Test: Process VM creation under memory pressure
-pub fn test_process_vm_creation_pressure() -> c_int {
+pub fn test_process_vm_creation_pressure() -> TestResult {
     init_process_vm();
 
     let mut pids: [u32; 8] = [INVALID_PROCESS_ID; 8];
     let mut created = 0usize;
 
-    // Create multiple processes
     for i in 0..8 {
         let pid = create_process_vm();
         if pid == INVALID_PROCESS_ID {
@@ -288,30 +236,23 @@ pub fn test_process_vm_creation_pressure() -> c_int {
         created += 1;
     }
 
-    if created == 0 {
-        klog_info!("OOM_TEST: Couldn't create any processes");
-        return -1;
-    }
+    assert_test!(created > 0, "couldn't create any processes");
 
-    // Destroy all
     for i in 0..created {
         destroy_process_vm(pids[i]);
     }
 
-    // Verify we can create again
     let pid = create_process_vm();
-    if pid == INVALID_PROCESS_ID {
-        klog_info!("OOM_TEST: BUG - Can't create process after cleanup!");
-        return -1;
-    }
+    assert_test!(
+        pid != INVALID_PROCESS_ID,
+        "can't create process after cleanup"
+    );
     destroy_process_vm(pid);
 
-    0
+    pass!()
 }
 
-/// Test: Heap expansion when page allocator is stressed
-pub fn test_heap_expansion_under_pressure() -> c_int {
-    // First, stress the page allocator
+pub fn test_heap_expansion_under_pressure() -> TestResult {
     let mut pages: [PhysAddr; 64] = [PhysAddr::NULL; 64];
     let mut page_count = 0usize;
 
@@ -328,27 +269,22 @@ pub fn test_heap_expansion_under_pressure() -> c_int {
         }
     }
 
-    // Now try heap allocations
-    let ptr = kmalloc(4096);
-    let heap_ok = !ptr.is_null();
-    if heap_ok {
-        kfree(ptr);
+    let p = kmalloc(4096);
+    if !p.is_null() {
+        kfree(p);
     }
 
-    // Release page pressure
     for i in 0..page_count {
         free_page_frame(pages[i]);
     }
 
-    0
+    pass!()
 }
 
-/// Test: Zero-flag allocation correctness under pressure
-pub fn test_zero_flag_under_pressure() -> c_int {
+pub fn test_zero_flag_under_pressure() -> TestResult {
     let mut pages: [PhysAddr; 32] = [PhysAddr::NULL; 32];
     let mut count = 0usize;
 
-    // Allocate pages with ZERO flag
     for _ in 0..32 {
         let phys = alloc_page_frame(ALLOC_FLAG_ZERO | ALLOC_FLAG_NO_PCP);
         if phys.is_null() {
@@ -363,26 +299,24 @@ pub fn test_zero_flag_under_pressure() -> c_int {
     }
 
     if count == 0 {
-        return 0;
+        return pass!();
     }
 
-    // Verify all pages are zeroed
     for i in 0..count {
         if let Some(virt) = pages[i].to_virt_checked() {
             let ptr = virt.as_ptr::<u8>();
             for j in 0..PAGE_SIZE_4KB as usize {
                 let val = unsafe { *ptr.add(j) };
                 if val != 0 {
-                    klog_info!(
-                        "OOM_TEST: BUG - ZERO flag page {} has non-zero at offset {}: {:#x}",
+                    for k in 0..count {
+                        free_page_frame(pages[k]);
+                    }
+                    return fail!(
+                        "ZERO flag page {} has non-zero at offset {}: {:#x}",
                         i,
                         j,
                         val
                     );
-                    for k in 0..count {
-                        free_page_frame(pages[k]);
-                    }
-                    return -1;
                 }
             }
         }
@@ -392,46 +326,39 @@ pub fn test_zero_flag_under_pressure() -> c_int {
         free_page_frame(pages[i]);
     }
 
-    0
+    pass!()
 }
 
-/// Test: kzalloc returns zeroed memory even under pressure
-pub fn test_kzalloc_zeroed_under_pressure() -> c_int {
-    // First pollute some memory
+pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
     let pollute = kmalloc(512);
     if !pollute.is_null() {
-        unsafe {
-            ptr::write_bytes(pollute as *mut u8, 0xDE, 512);
-        }
+        unsafe { ptr::write_bytes(pollute as *mut u8, 0xDE, 512) };
         kfree(pollute);
     }
 
-    // Now allocate with kzalloc
-    let ptr = kzalloc(512);
-    if ptr.is_null() {
-        return 0;
+    let p = kzalloc(512);
+    if p.is_null() {
+        return pass!();
     }
 
-    let byte_ptr = ptr as *const u8;
+    let byte_ptr = p as *const u8;
     for i in 0..512 {
         let val = unsafe { *byte_ptr.add(i) };
         if val != 0 {
-            klog_info!(
-                "OOM_TEST: BUG - kzalloc returned non-zeroed memory at offset {}: {:#x}",
+            kfree(p);
+            return fail!(
+                "kzalloc returned non-zeroed memory at offset {}: {:#x}",
                 i,
                 val
             );
-            kfree(ptr);
-            return -1;
         }
     }
 
-    kfree(ptr);
-    0
+    kfree(p);
+    pass!()
 }
 
-/// Test: Allocate/free cycles don't leak under pressure
-pub fn test_alloc_free_cycles_no_leak() -> c_int {
+pub fn test_alloc_free_cycles_no_leak() -> TestResult {
     let mut free_start = 0u32;
     get_page_allocator_stats(ptr::null_mut(), &mut free_start, ptr::null_mut());
 
@@ -461,22 +388,15 @@ pub fn test_alloc_free_cycles_no_leak() -> c_int {
     let mut free_end = 0u32;
     get_page_allocator_stats(ptr::null_mut(), &mut free_end, ptr::null_mut());
 
-    if free_start > free_end && (free_start - free_end) > 16 {
-        klog_info!(
-            "OOM_TEST: Memory leak! Start: {}, End: {}, Leaked: {}",
-            free_start,
-            free_end,
-            free_start - free_end
-        );
-        return -1;
-    }
+    assert_test!(
+        !(free_start > free_end && (free_start - free_end) > 16),
+        "memory leak detected"
+    );
 
-    0
+    pass!()
 }
 
-/// Test: Multi-order allocation failure handling
-pub fn test_multiorder_alloc_failure() -> c_int {
-    // Try increasingly large allocations
+pub fn test_multiorder_alloc_failure() -> TestResult {
     for order in 0..10u32 {
         let count = 1u32 << order;
         let phys = alloc_page_frames(count, ALLOC_FLAG_NO_PCP);
@@ -492,22 +412,18 @@ pub fn test_multiorder_alloc_failure() -> c_int {
         }
     }
 
-    0
+    pass!()
 }
 
-/// Test: Process heap expansion until failure
-pub fn test_process_heap_expansion_oom() -> c_int {
+pub fn test_process_heap_expansion_oom() -> TestResult {
     init_process_vm();
 
     let pid = create_process_vm();
-    if pid == INVALID_PROCESS_ID {
-        return -1;
-    }
+    assert_test!(pid != INVALID_PROCESS_ID, "create process VM");
 
     let mut alloc_count = 0u32;
     let mut total_size = 0u64;
 
-    // Keep allocating heap until failure
     loop {
         let addr = process_vm_alloc(pid, PAGE_SIZE_4KB * 4, PageFlags::WRITABLE.bits() as u32);
         if addr == 0 {
@@ -515,8 +431,6 @@ pub fn test_process_heap_expansion_oom() -> c_int {
         }
         alloc_count += 1;
         total_size += PAGE_SIZE_4KB * 4;
-
-        // Safety limit
         if alloc_count >= 256 {
             break;
         }
@@ -529,39 +443,34 @@ pub fn test_process_heap_expansion_oom() -> c_int {
     );
 
     destroy_process_vm(pid);
-    0
+    pass!()
 }
 
-/// Test: Reference count correctness during OOM
-pub fn test_refcount_during_oom() -> c_int {
+pub fn test_refcount_during_oom() -> TestResult {
     use crate::page_alloc::{page_frame_get_ref, page_frame_inc_ref};
 
     let phys = alloc_page_frame(ALLOC_FLAG_NO_PCP);
     if phys.is_null() {
-        return 0;
+        return pass!();
     }
 
-    // Increment ref count multiple times
     for _ in 0..5 {
         page_frame_inc_ref(phys);
     }
 
     let ref_count = page_frame_get_ref(phys);
     if ref_count != 6 {
-        klog_info!("OOM_TEST: BUG - Ref count should be 6, got {}", ref_count);
-        // Try to free anyway
         for _ in 0..6 {
             free_page_frame(phys);
         }
-        return -1;
+        return fail!("ref count should be 6, got {}", ref_count);
     }
 
-    // Free all references
     for _ in 0..6 {
         free_page_frame(phys);
     }
 
-    0
+    pass!()
 }
 
 slopos_lib::define_test_suite!(
