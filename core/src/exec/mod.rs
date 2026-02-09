@@ -18,8 +18,9 @@ use slopos_mm::process_vm::{
 };
 
 use crate::sched::schedule_task;
+use crate::scheduler::task_struct::Task;
 use crate::task::{TaskEntry, task_create, task_get_info, task_terminate};
-use slopos_abi::task::{INVALID_TASK_ID, Task};
+use slopos_abi::task::INVALID_TASK_ID;
 
 extern crate alloc;
 

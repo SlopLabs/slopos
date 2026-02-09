@@ -109,13 +109,14 @@ pub fn reap_zombies() {
 
 use super::scheduler;
 
+pub use super::task_struct::{FpuState, Task, TaskContext};
 pub use slopos_abi::arch::x86_64::idt::IdtEntry;
 pub use slopos_abi::task::{
-    BlockReason, FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
+    BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
-    TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, Task,
-    TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason, TaskStatus,
+    TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, TaskExitReason,
+    TaskExitRecord, TaskFaultReason, TaskStatus,
 };
 
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
@@ -1035,7 +1036,9 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
 
     let child = unsafe { &mut *child_task_ptr };
 
-    child.clone_from(parent);
+    // SAFETY: child and parent are distinct task slots from the static TASK_TABLE,
+    // and we hold exclusive access to child (just reserved).
+    unsafe { child.clone_from_raw(parent) };
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;

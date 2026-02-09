@@ -2,7 +2,7 @@
 macro_rules! define_syscall {
     ($name:ident($ctx:ident, $args:ident) $body:block) => {
         pub fn $name(
-            task: *mut slopos_abi::task::Task,
+            task: *mut $crate::scheduler::task_struct::Task,
             frame: *mut slopos_lib::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             let _ = task;
@@ -18,7 +18,7 @@ macro_rules! define_syscall {
 
     ($name:ident($ctx:ident, $args:ident, $task_id:ident) requires task_id $body:block) => {
         pub fn $name(
-            task: *mut slopos_abi::task::Task,
+            task: *mut $crate::scheduler::task_struct::Task,
             frame: *mut slopos_lib::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]
@@ -38,7 +38,7 @@ macro_rules! define_syscall {
 
     ($name:ident($ctx:ident, $args:ident, $process_id:ident) requires process_id $body:block) => {
         pub fn $name(
-            task: *mut slopos_abi::task::Task,
+            task: *mut $crate::scheduler::task_struct::Task,
             frame: *mut slopos_lib::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]
@@ -58,7 +58,7 @@ macro_rules! define_syscall {
 
     ($name:ident($ctx:ident, $args:ident, $task_id:ident, $process_id:ident) requires task_and_process $body:block) => {
         pub fn $name(
-            task: *mut slopos_abi::task::Task,
+            task: *mut $crate::scheduler::task_struct::Task,
             frame: *mut slopos_lib::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]
@@ -83,7 +83,7 @@ macro_rules! define_syscall {
 
     ($name:ident($ctx:ident, $args:ident) requires compositor $body:block) => {
         pub fn $name(
-            task: *mut slopos_abi::task::Task,
+            task: *mut $crate::scheduler::task_struct::Task,
             frame: *mut slopos_lib::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]
@@ -101,7 +101,7 @@ macro_rules! define_syscall {
 
     ($name:ident($ctx:ident, $args:ident) requires display_exclusive $body:block) => {
         pub fn $name(
-            task: *mut slopos_abi::task::Task,
+            task: *mut $crate::scheduler::task_struct::Task,
             frame: *mut slopos_lib::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]

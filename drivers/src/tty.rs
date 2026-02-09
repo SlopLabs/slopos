@@ -6,11 +6,12 @@ use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
 use crate::ps2::keyboard;
 use crate::serial;
-use slopos_abi::task::{Task, TaskStatus};
+use slopos_abi::task::TaskStatus;
 use slopos_core::sched::{
     block_current_task, scheduler_get_current_task, scheduler_is_enabled,
     scheduler_register_idle_wakeup_callback, unblock_task,
 };
+use slopos_core::scheduler::task_struct::Task;
 
 const TTY_MAX_WAITERS: usize = 32;
 

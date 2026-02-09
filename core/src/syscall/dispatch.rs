@@ -3,8 +3,9 @@ use slopos_lib::klog_info;
 use crate::sched::scheduler_get_current_task;
 use crate::syscall::handlers::syscall_lookup;
 
+use crate::scheduler::task_struct::{Task, TaskContext};
 use slopos_abi::arch::SegmentSelector;
-use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext};
+use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE};
 use slopos_lib::InterruptFrame;
 
 fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {

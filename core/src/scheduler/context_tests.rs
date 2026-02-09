@@ -3,7 +3,8 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskStatus};
+use super::task_struct::Task;
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -367,8 +368,8 @@ pub fn test_task_flags_preserved() -> TestResult {
 }
 
 pub fn test_switch_context_struct_size() -> TestResult {
+    use super::task_struct::SwitchContext;
     use core::mem::size_of;
-    use slopos_abi::task::SwitchContext;
 
     let size = size_of::<SwitchContext>();
     if size != 72 {
@@ -382,7 +383,7 @@ pub fn test_switch_context_struct_size() -> TestResult {
 }
 
 pub fn test_switch_context_offsets() -> TestResult {
-    use slopos_abi::task::{
+    use super::task_struct::{
         SWITCH_CTX_OFF_R12, SWITCH_CTX_OFF_R13, SWITCH_CTX_OFF_R14, SWITCH_CTX_OFF_R15,
         SWITCH_CTX_OFF_RBP, SWITCH_CTX_OFF_RBX, SWITCH_CTX_OFF_RFLAGS, SWITCH_CTX_OFF_RIP,
         SWITCH_CTX_OFF_RSP,
@@ -419,7 +420,7 @@ pub fn test_switch_context_offsets() -> TestResult {
 }
 
 pub fn test_switch_context_zero_init() -> TestResult {
-    use slopos_abi::task::SwitchContext;
+    use super::task_struct::SwitchContext;
 
     let ctx = SwitchContext::zero();
     if ctx.rbx != 0 || ctx.r12 != 0 || ctx.r13 != 0 || ctx.r14 != 0 || ctx.r15 != 0 {
@@ -439,7 +440,7 @@ pub fn test_switch_context_zero_init() -> TestResult {
 }
 
 pub fn test_switch_context_setup_initial() -> TestResult {
-    use slopos_abi::task::SwitchContext;
+    use super::task_struct::SwitchContext;
 
     let stack_top: u64 = 0x1000;
     let entry: u64 = 0xDEADBEEF;

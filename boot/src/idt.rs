@@ -88,8 +88,8 @@ use slopos_core::sched::{
 };
 use slopos_core::task::task_terminate;
 
-// Task and related types are now imported from abi
-use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
+use slopos_core::scheduler::task_struct::Task;
 
 unsafe extern "C" {
     fn isr0();

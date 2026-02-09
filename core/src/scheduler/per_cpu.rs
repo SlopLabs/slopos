@@ -18,7 +18,8 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use slopos_abi::task::{Task, TaskContext, TaskStatus};
+use super::task_struct::{Task, TaskContext};
+use slopos_abi::task::TaskStatus;
 use slopos_lib::{InitFlag, MAX_CPUS, klog_debug, klog_info};
 use spin::Mutex;
 

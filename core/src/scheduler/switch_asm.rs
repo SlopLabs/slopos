@@ -7,7 +7,7 @@
 use core::arch::naked_asm;
 use core::mem::offset_of;
 
-use slopos_abi::task::SwitchContext;
+use super::task_struct::SwitchContext;
 
 /// Low-level register switch between two contexts.
 ///

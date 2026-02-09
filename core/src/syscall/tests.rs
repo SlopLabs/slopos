@@ -13,7 +13,8 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskStatus};
+use crate::scheduler::task_struct::Task;
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
 use slopos_lib::{InterruptFrame, klog_info, testing::TestResult};
 
 use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown};

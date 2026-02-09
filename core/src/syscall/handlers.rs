@@ -28,7 +28,8 @@ use crate::syscall::fs::{
 use crate::syscall_services::{input, tty, video};
 use crate::task::{get_task_stats, task_get_exit_record, task_terminate};
 
-use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskExitRecord, TaskFaultReason};
+use crate::scheduler::task_struct::Task;
+use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskExitRecord, TaskFaultReason};
 use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
 use slopos_lib::wl_currency;

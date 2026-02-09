@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_int};
 
-use slopos_abi::task::Task;
+use crate::scheduler::task_struct::Task;
 use slopos_lib::InterruptFrame;
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};

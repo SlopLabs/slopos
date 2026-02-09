@@ -1,7 +1,6 @@
+use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
-use slopos_abi::task::{
-    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, Task,
-};
+use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
 use slopos_lib::InterruptFrame;
 
 #[derive(Clone, Copy)]
