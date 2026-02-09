@@ -8,7 +8,7 @@
 //! Events are routed to the focused task for each input type.
 
 use slopos_core::irq;
-use slopos_lib::IrqMutex;
+use slopos_lib::{IrqMutex, RingBuffer};
 
 use crate::pit::pit_get_frequency;
 
@@ -31,20 +31,10 @@ pub use slopos_abi::{
 // Per-Task Event Queue
 // =============================================================================
 
-/// Event queue for a single task
 struct TaskEventQueue {
-    /// Task ID this queue belongs to
     task_id: u32,
-    /// Whether this slot is active
     active: bool,
-    /// Circular buffer of events
-    events: [InputEvent; MAX_EVENTS_PER_TASK],
-    /// Head index (next write position)
-    head: usize,
-    /// Tail index (next read position)
-    tail: usize,
-    /// Number of events in queue
-    count: usize,
+    events: RingBuffer<InputEvent, MAX_EVENTS_PER_TASK>,
 }
 
 impl TaskEventQueue {
@@ -52,50 +42,13 @@ impl TaskEventQueue {
         Self {
             task_id: 0,
             active: false,
-            events: [InputEvent {
+            events: RingBuffer::new_with(InputEvent {
                 event_type: InputEventType::KeyPress,
                 _padding: [0; 3],
                 timestamp_ms: 0,
                 data: InputEventData { data0: 0, data1: 0 },
-            }; MAX_EVENTS_PER_TASK],
-            head: 0,
-            tail: 0,
-            count: 0,
+            }),
         }
-    }
-
-    fn push(&mut self, event: InputEvent) {
-        if self.count >= MAX_EVENTS_PER_TASK {
-            // Drop oldest event
-            self.tail = (self.tail + 1) % MAX_EVENTS_PER_TASK;
-            self.count -= 1;
-        }
-        self.events[self.head] = event;
-        self.head = (self.head + 1) % MAX_EVENTS_PER_TASK;
-        self.count += 1;
-    }
-
-    fn pop(&mut self) -> Option<InputEvent> {
-        if self.count == 0 {
-            return None;
-        }
-        let event = self.events[self.tail];
-        self.tail = (self.tail + 1) % MAX_EVENTS_PER_TASK;
-        self.count -= 1;
-        Some(event)
-    }
-
-    fn peek(&self) -> Option<&InputEvent> {
-        if self.count == 0 {
-            return None;
-        }
-        Some(&self.events[self.tail])
-    }
-
-    fn clear(&mut self) {
-        self.head = 0;
-        self.tail = 0;
-        self.count = 0;
     }
 }
 
@@ -145,17 +98,15 @@ impl InputManager {
     }
 
     fn find_or_create_queue(&mut self, task_id: u32) -> Option<usize> {
-        // First, try to find existing queue
         if let Some(idx) = self.find_queue(task_id) {
             return Some(idx);
         }
 
-        // Find a free slot
         for (i, queue) in self.queues.iter_mut().enumerate() {
             if !queue.active {
                 queue.task_id = task_id;
                 queue.active = true;
-                queue.clear();
+                queue.events.reset();
                 return Some(i);
             }
         }
@@ -206,7 +157,9 @@ pub fn input_set_pointer_focus_with_offset(
     // Send leave event to old focus (with old offset)
     if old_focus != 0 {
         if let Some(idx) = mgr.find_queue(old_focus) {
-            mgr.queues[idx].push(InputEvent::pointer_enter_leave(false, x, y, timestamp_ms));
+            mgr.queues[idx]
+                .events
+                .push_overwrite(InputEvent::pointer_enter_leave(false, x, y, timestamp_ms));
         }
     }
 
@@ -217,12 +170,14 @@ pub fn input_set_pointer_focus_with_offset(
         if let Some(idx) = mgr.find_or_create_queue(task_id) {
             let local_x = x - offset_x;
             let local_y = y - offset_y;
-            mgr.queues[idx].push(InputEvent::pointer_enter_leave(
-                true,
-                local_x,
-                local_y,
-                timestamp_ms,
-            ));
+            mgr.queues[idx]
+                .events
+                .push_overwrite(InputEvent::pointer_enter_leave(
+                    true,
+                    local_x,
+                    local_y,
+                    timestamp_ms,
+                ));
         }
     }
 }
@@ -236,7 +191,9 @@ pub fn input_request_close(task_id: u32, timestamp_ms: u64) -> bool {
 
     let mut mgr = INPUT_MANAGER.lock();
     if let Some(idx) = mgr.find_or_create_queue(task_id) {
-        mgr.queues[idx].push(InputEvent::close_request(timestamp_ms));
+        mgr.queues[idx]
+            .events
+            .push_overwrite(InputEvent::close_request(timestamp_ms));
         true
     } else {
         false
@@ -288,7 +245,12 @@ pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_m
         } else {
             InputEventType::KeyRelease
         };
-        mgr.queues[idx].push(InputEvent::key(event_type, scancode, ascii, timestamp_ms));
+        mgr.queues[idx].events.push_overwrite(InputEvent::key(
+            event_type,
+            scancode,
+            ascii,
+            timestamp_ms,
+        ));
     }
 }
 
@@ -308,7 +270,9 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     let local_y = y - mgr.window_offset_y;
 
     if let Some(idx) = mgr.find_or_create_queue(focus) {
-        mgr.queues[idx].push(InputEvent::pointer_motion(local_x, local_y, timestamp_ms));
+        mgr.queues[idx]
+            .events
+            .push_overwrite(InputEvent::pointer_motion(local_x, local_y, timestamp_ms));
     }
 }
 
@@ -328,7 +292,9 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
     }
 
     if let Some(idx) = mgr.find_or_create_queue(focus) {
-        mgr.queues[idx].push(InputEvent::pointer_button(pressed, button, timestamp_ms));
+        mgr.queues[idx]
+            .events
+            .push_overwrite(InputEvent::pointer_button(pressed, button, timestamp_ms));
     }
 }
 
@@ -341,7 +307,7 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
 pub fn input_poll(task_id: u32) -> Option<InputEvent> {
     let mut mgr = INPUT_MANAGER.lock();
     if let Some(idx) = mgr.find_queue(task_id) {
-        mgr.queues[idx].pop()
+        mgr.queues[idx].events.try_pop()
     } else {
         None
     }
@@ -374,7 +340,7 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
 
     let mut count = 0;
     while count < max_count {
-        if let Some(event) = mgr.queues[idx].pop() {
+        if let Some(event) = mgr.queues[idx].events.try_pop() {
             unsafe {
                 out_buffer.add(count).write(event);
             }
@@ -390,7 +356,7 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
 pub fn input_peek(task_id: u32) -> Option<InputEvent> {
     let mgr = INPUT_MANAGER.lock();
     if let Some(idx) = mgr.find_queue(task_id) {
-        mgr.queues[idx].peek().copied()
+        mgr.queues[idx].events.peek().copied()
     } else {
         None
     }
@@ -400,7 +366,7 @@ pub fn input_peek(task_id: u32) -> Option<InputEvent> {
 pub fn input_has_events(task_id: u32) -> bool {
     let mgr = INPUT_MANAGER.lock();
     if let Some(idx) = mgr.find_queue(task_id) {
-        mgr.queues[idx].count > 0
+        !mgr.queues[idx].events.is_empty()
     } else {
         false
     }
@@ -410,7 +376,7 @@ pub fn input_has_events(task_id: u32) -> bool {
 pub fn input_event_count(task_id: u32) -> u32 {
     let mgr = INPUT_MANAGER.lock();
     if let Some(idx) = mgr.find_queue(task_id) {
-        mgr.queues[idx].count as u32
+        mgr.queues[idx].events.len()
     } else {
         0
     }
@@ -432,10 +398,9 @@ pub fn input_cleanup_task(task_id: u32) {
         mgr.pointer_focus = 0;
     }
 
-    // Deactivate the queue
     if let Some(idx) = mgr.find_queue(task_id) {
         mgr.queues[idx].active = false;
         mgr.queues[idx].task_id = 0;
-        mgr.queues[idx].clear();
+        mgr.queues[idx].events.reset();
     }
 }

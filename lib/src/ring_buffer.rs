@@ -97,6 +97,15 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         Some(value)
     }
 
+    /// Peek at the oldest element without removing it.
+    #[inline(always)]
+    pub fn peek(&self) -> Option<&T> {
+        if self.is_empty() {
+            return None;
+        }
+        Some(&self.data[self.tail as usize])
+    }
+
     /// Expose internal slice for debugging/testing.
     pub fn as_slice(&self) -> &[T] {
         &self.data
