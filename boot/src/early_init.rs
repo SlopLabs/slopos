@@ -30,10 +30,21 @@ pub enum BootInitPhase {
     Optional = 4,
 }
 
+impl BootInitPhase {
+    pub const fn name(self) -> &'static [u8] {
+        match self {
+            Self::EarlyHw => b"early_hw\0",
+            Self::Memory => b"memory\0",
+            Self::Drivers => b"drivers\0",
+            Self::Services => b"services\0",
+            Self::Optional => b"optional\0",
+        }
+    }
+}
+
 pub struct BootInitStep {
     name: &'static [u8],
-    func: Option<fn() -> i32>,
-    func_unit: Option<fn()>,
+    func: fn() -> i32,
     flags: u32,
 }
 
@@ -43,17 +54,7 @@ impl BootInitStep {
     pub const fn new(label: &'static [u8], func: fn() -> i32, flags: u32) -> Self {
         Self {
             name: label,
-            func: Some(func),
-            func_unit: None,
-            flags,
-        }
-    }
-
-    pub const fn new_unit(label: &'static [u8], func: fn(), flags: u32) -> Self {
-        Self {
-            name: label,
-            func: None,
-            func_unit: Some(func),
+            func,
             flags,
         }
     }
@@ -64,68 +65,62 @@ impl BootInitStep {
 }
 
 #[macro_export]
-macro_rules! boot_init_step {
-    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
-        #[used]
-        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-        static $static_name: $crate::early_init::BootInitStep =
-            $crate::early_init::BootInitStep::new($label, $func, 0);
-    };
-}
-
-#[macro_export]
-macro_rules! boot_init_step_unit {
-    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
-        #[used]
-        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-        static $static_name: $crate::early_init::BootInitStep =
-            $crate::early_init::BootInitStep::new_unit($label, $func, 0);
-    };
-}
-
-#[macro_export]
-macro_rules! boot_init_step_with_flags {
-    ($static_name:ident, $phase:ident, $label:expr, $func:ident, $flags:expr) => {
+macro_rules! boot_init {
+    // Fallible fn() -> i32, explicit flags
+    ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, flags = $flags:expr) => {
         #[used]
         #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
         static $static_name: $crate::early_init::BootInitStep =
             $crate::early_init::BootInitStep::new($label, $func, $flags);
     };
-}
 
-#[macro_export]
-macro_rules! boot_init_step_with_flags_unit {
-    ($static_name:ident, $phase:ident, $label:expr, $func:ident, $flags:expr) => {
-        #[used]
-        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
-        static $static_name: $crate::early_init::BootInitStep =
-            $crate::early_init::BootInitStep::new_unit($label, $func, $flags);
-    };
-}
-
-#[macro_export]
-macro_rules! boot_init_optional_step {
-    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
-        $crate::boot_init_step_with_flags!(
+    // Fallible fn() -> i32, optional shorthand
+    ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, optional) => {
+        $crate::boot_init!(
             $static_name,
             $phase,
             $label,
             $func,
-            $crate::early_init::BOOT_INIT_FLAG_OPTIONAL
+            fallible,
+            flags = $crate::early_init::BOOT_INIT_FLAG_OPTIONAL
         );
     };
-}
 
-#[macro_export]
-macro_rules! boot_init_optional_step_unit {
-    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
-        $crate::boot_init_step_with_flags_unit!(
+    // Fallible fn() -> i32, no flags
+    ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible) => {
+        $crate::boot_init!($static_name, $phase, $label, $func, fallible, flags = 0);
+    };
+
+    // Infallible fn(), explicit flags
+    ($static_name:ident, $phase:ident, $label:expr, $func:path, flags = $flags:expr) => {
+        const _: () = {
+            fn wrapper() -> i32 {
+                $func();
+                0
+            }
+            #[used]
+            #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
+            static STEP: $crate::early_init::BootInitStep =
+                $crate::early_init::BootInitStep::new($label, wrapper, $flags);
+        };
+        #[allow(dead_code)]
+        const $static_name: () = ();
+    };
+
+    // Infallible fn(), optional shorthand
+    ($static_name:ident, $phase:ident, $label:expr, $func:path, optional) => {
+        $crate::boot_init!(
             $static_name,
             $phase,
             $label,
             $func,
-            $crate::early_init::BOOT_INIT_FLAG_OPTIONAL
+            flags = $crate::early_init::BOOT_INIT_FLAG_OPTIONAL
         );
+    };
+
+    // Infallible fn(), no flags (most common)
+    ($static_name:ident, $phase:ident, $label:expr, $func:path) => {
+        $crate::boot_init!($static_name, $phase, $label, $func, flags = 0);
     };
 }
 
@@ -282,14 +277,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     serial::write_line("BOOT: running init step");
     boot_init_report_step(KlogLevel::Debug, b"step\0", Some(step.name));
 
-    let rc = if let Some(func) = step.func {
-        func()
-    } else if let Some(func_unit) = step.func_unit {
-        func_unit();
-        0 // Unit return is always success
-    } else {
-        return 0;
-    };
+    let rc = (step.func)();
 
     if rc != 0 {
         let optional = (step.flags & BOOT_INIT_FLAG_OPTIONAL) != 0;
@@ -311,24 +299,12 @@ pub fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
         return 0;
     }
 
-    let phase_name: &[u8] = match phase {
-        BootInitPhase::EarlyHw => b"early_hw\0".as_slice(),
-        BootInitPhase::Memory => b"memory\0".as_slice(),
-        BootInitPhase::Drivers => b"drivers\0".as_slice(),
-        BootInitPhase::Services => b"services\0".as_slice(),
-        BootInitPhase::Optional => b"optional\0".as_slice(),
-    };
+    let phase_name = phase.name();
 
     boot_init_report_phase(KlogLevel::Debug, b"phase start -> \0", Some(phase_name));
 
-    let phase_label = match phase {
-        BootInitPhase::EarlyHw => "BOOT: phase early_hw",
-        BootInitPhase::Memory => "BOOT: phase memory",
-        BootInitPhase::Drivers => "BOOT: phase drivers",
-        BootInitPhase::Services => "BOOT: phase services",
-        BootInitPhase::Optional => "BOOT: phase optional",
-    };
-    serial::write_line(phase_label);
+    serial::write_str("BOOT: phase ");
+    serial::write_line(bytes_to_str(phase_name));
 
     let mut ordered: [*const BootInitStep; BOOT_INIT_MAX_STEPS] =
         [ptr::null(); BOOT_INIT_MAX_STEPS];
@@ -485,25 +461,26 @@ fn boot_step_boot_config_fn() {
     }
 }
 
-crate::boot_init_step_unit!(
+boot_init!(
     BOOT_STEP_SERIAL_INIT,
     early_hw,
     b"serial\0",
     boot_step_serial_init_fn
 );
-crate::boot_init_step_unit!(
+boot_init!(
     BOOT_STEP_BOOT_BANNER,
     early_hw,
     b"boot banner\0",
     boot_step_boot_banner_fn
 );
-boot_init_step!(
+boot_init!(
     BOOT_STEP_LIMINE,
     early_hw,
     b"limine\0",
-    boot_step_limine_protocol_fn
+    boot_step_limine_protocol_fn,
+    fallible
 );
-crate::boot_init_step_unit!(
+boot_init!(
     BOOT_STEP_BOOT_CONFIG,
     early_hw,
     b"boot config\0",

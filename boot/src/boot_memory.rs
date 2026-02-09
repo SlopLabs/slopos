@@ -1,7 +1,6 @@
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::boot_init_step;
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
 
 use slopos_mm::memory_init::init_memory_system;
@@ -51,13 +50,14 @@ fn boot_step_memory_verify() {
     }
 }
 
-boot_init_step!(
+crate::boot_init!(
     BOOT_STEP_MEMORY_INIT,
     memory,
     b"memory init\0",
-    boot_step_memory_init
+    boot_step_memory_init,
+    fallible
 );
-crate::boot_init_step_unit!(
+crate::boot_init!(
     BOOT_STEP_MEMORY_VERIFY,
     memory,
     b"address verification\0",

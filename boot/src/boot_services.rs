@@ -65,44 +65,45 @@ fn boot_step_init_launch() -> i32 {
     }
 }
 
-crate::boot_init_step_with_flags!(
+crate::boot_init!(
     BOOT_STEP_TASK_MANAGER,
     services,
     b"task manager\0",
     boot_step_task_manager_init_wrapper,
-    boot_init_priority(20)
+    fallible,
+    flags = boot_init_priority(20)
 );
-
-crate::boot_init_step_with_flags!(
+crate::boot_init!(
     BOOT_STEP_SCHEDULER,
     services,
     b"scheduler\0",
     boot_step_scheduler_init_wrapper,
-    boot_init_priority(30)
+    fallible,
+    flags = boot_init_priority(30)
 );
-
-crate::boot_init_step_with_flags!(
+crate::boot_init!(
     BOOT_STEP_IDLE_TASK,
     services,
     b"idle task\0",
     boot_step_idle_task_wrapper,
-    boot_init_priority(50)
+    fallible,
+    flags = boot_init_priority(50)
 );
-
-crate::boot_init_step_with_flags!(
+crate::boot_init!(
     BOOT_STEP_FS_INIT,
     services,
     b"fs init\0",
     boot_step_fs_init,
-    boot_init_priority(55)
+    fallible,
+    flags = boot_init_priority(55)
 );
-
-crate::boot_init_step_with_flags!(
+crate::boot_init!(
     BOOT_STEP_INIT_LAUNCH,
     services,
     b"launch /sbin/init\0",
     boot_step_init_launch,
-    boot_init_priority(58)
+    fallible,
+    flags = boot_init_priority(58)
 );
 
 fn boot_step_mark_kernel_ready_fn() {
@@ -119,17 +120,17 @@ fn boot_step_framebuffer_demo_fn() {
     klog_debug!("Graphics demo: framebuffer validation complete");
 }
 
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_MARK_READY,
     services,
     b"mark ready\0",
     boot_step_mark_kernel_ready_fn,
-    boot_init_priority(60)
+    flags = boot_init_priority(60)
 );
-
-crate::boot_init_optional_step_unit!(
+crate::boot_init!(
     BOOT_STEP_FRAMEBUFFER_DEMO,
     optional,
     b"wheel of fate\0",
-    boot_step_framebuffer_demo_fn
+    boot_step_framebuffer_demo_fn,
+    optional
 );

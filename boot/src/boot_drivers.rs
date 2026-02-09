@@ -236,73 +236,74 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     rc
 }
 
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_DEBUG_SUBSYSTEM,
     drivers,
     b"debug\0",
     boot_step_debug_subsystem_fn,
-    boot_init_priority(10)
+    flags = boot_init_priority(10)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_GDT_SETUP,
     drivers,
     b"gdt/tss\0",
     boot_step_gdt_setup_fn,
-    boot_init_priority(20)
+    flags = boot_init_priority(20)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_IDT_SETUP,
     drivers,
     b"idt\0",
     boot_step_idt_setup_fn,
-    boot_init_priority(30)
+    flags = boot_init_priority(30)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_APIC_SETUP,
     drivers,
     b"apic\0",
     boot_step_apic_setup_fn,
-    boot_init_priority(40)
+    flags = boot_init_priority(40)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_SMP_SETUP,
     drivers,
     b"smp\0",
     boot_step_smp_setup_fn,
-    boot_init_priority(45)
+    flags = boot_init_priority(45)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_IOAPIC_SETUP,
     drivers,
     b"ioapic\0",
     boot_step_ioapic_setup_fn,
-    boot_init_priority(50)
+    flags = boot_init_priority(50)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_IRQ_SETUP,
     drivers,
     b"irq dispatcher\0",
     boot_step_irq_setup_fn,
-    boot_init_priority(60)
+    flags = boot_init_priority(60)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_TIMER_SETUP,
     drivers,
     b"timer\0",
     boot_step_timer_setup_fn,
-    boot_init_priority(70)
+    flags = boot_init_priority(70)
 );
-crate::boot_init_step_with_flags_unit!(
+crate::boot_init!(
     BOOT_STEP_PCI_INIT,
     drivers,
     b"pci\0",
     boot_step_pci_init_fn,
-    boot_init_priority(80)
+    flags = boot_init_priority(80)
 );
-crate::boot_init_step_with_flags!(
+crate::boot_init!(
     BOOT_STEP_INTERRUPT_TESTS,
     drivers,
     b"interrupt tests\0",
     boot_step_interrupt_tests_fn,
-    boot_init_priority(90)
+    fallible,
+    flags = boot_init_priority(90)
 );
