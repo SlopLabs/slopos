@@ -19,18 +19,18 @@ use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
-define_syscall!(syscall_fs_open(ctx, args, pid) requires process_id {
+define_syscall!(syscall_fs_open(ctx, args) requires(let pid: process_id) {
     let mut path = [0i8; USER_PATH_MAX];
     check_result!(ctx, syscall_copy_user_str_to_cstr(&mut path, args.arg0));
     let fd = file_open_for_process(pid, path.as_ptr(), args.arg1_u32());
     ctx.from_rc_value(fd as i64)
 });
 
-define_syscall!(syscall_fs_close(ctx, args, pid) requires process_id {
+define_syscall!(syscall_fs_close(ctx, args) requires(let pid: process_id) {
     ctx.from_zero_success(file_close_fd(pid, args.arg0 as c_int))
 });
 
-define_syscall!(syscall_fs_read(ctx, args, pid) requires process_id {
+define_syscall!(syscall_fs_read(ctx, args) requires(let pid: process_id) {
     require_nonzero!(ctx, args.arg1);
 
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
@@ -45,7 +45,7 @@ define_syscall!(syscall_fs_read(ctx, args, pid) requires process_id {
     ctx.ok(bytes as u64)
 });
 
-define_syscall!(syscall_fs_write(ctx, args, pid) requires process_id {
+define_syscall!(syscall_fs_write(ctx, args) requires(let pid: process_id) {
     require_nonzero!(ctx, args.arg1);
 
     let mut tmp = [0u8; USER_IO_MAX_BYTES];

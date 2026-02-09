@@ -1,12 +1,12 @@
 use core::ffi::c_char;
 use core::ptr;
 
-use slopos_abi::DisplayInfo;
-use slopos_abi::InputEvent;
-use slopos_abi::WindowInfo;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::*;
+use slopos_abi::DisplayInfo;
+use slopos_abi::InputEvent;
+use slopos_abi::WindowInfo;
 
 use crate::exec;
 
@@ -17,8 +17,8 @@ use crate::sched::{
     sleep_current_task_ms, task_wait_for, yield_,
 };
 use crate::syscall::common::{
-    SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
-    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
+    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
+    syscall_return_err, SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES,
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
@@ -29,10 +29,10 @@ use crate::syscall_services::{input, tty, video};
 use crate::task::{get_task_stats, task_get_exit_record, task_terminate};
 
 use crate::scheduler::task_struct::Task;
-use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskExitRecord, TaskFaultReason};
-use slopos_lib::InterruptFrame;
+use slopos_abi::task::{TaskExitReason, TaskExitRecord, TaskFaultReason, INVALID_TASK_ID};
 use slopos_lib::klog_debug;
 use slopos_lib::wl_currency;
+use slopos_lib::InterruptFrame;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_to_user};
@@ -116,20 +116,20 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     SyscallDisposition::NoReturn
 }
 
-define_syscall!(syscall_surface_commit(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_commit(ctx, args) requires(let task_id) {
     ctx.from_result(video::surface_commit(task_id))
 });
 
-define_syscall!(syscall_surface_frame(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_frame(ctx, args) requires(let task_id) {
     ctx.from_result(video::surface_request_frame_callback(task_id))
 });
 
-define_syscall!(syscall_poll_frame_done(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_poll_frame_done(ctx, args) requires(let task_id) {
     let timestamp = video::surface_poll_frame_done(task_id);
     ctx.ok(timestamp)
 });
 
-define_syscall!(syscall_buffer_age(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_buffer_age(ctx, args) requires(let task_id) {
     let age = video::surface_get_buffer_age(task_id);
     ctx.ok(age as u64)
 });
@@ -140,7 +140,7 @@ define_syscall!(syscall_shm_poll_released(ctx, args) {
     ctx.ok(result as u64)
 });
 
-define_syscall!(syscall_surface_damage(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_damage(ctx, args) requires(let task_id) {
     let x = args.arg0_i32();
     let y = args.arg1_i32();
     let width = args.arg2_i32();
@@ -148,34 +148,34 @@ define_syscall!(syscall_surface_damage(ctx, args, task_id) requires task_id {
     ctx.from_result(video::surface_add_damage(task_id, x, y, width, height))
 });
 
-define_syscall!(syscall_shm_create(ctx, args, process_id) requires process_id {
+define_syscall!(syscall_shm_create(ctx, args) requires(let process_id) {
     let size = args.arg0;
     let flags = args.arg1_u32();
     ctx.from_token(slopos_mm::shared_memory::shm_create(process_id, size, flags))
 });
 
-define_syscall!(syscall_shm_map(ctx, args, process_id) requires process_id {
+define_syscall!(syscall_shm_map(ctx, args) requires(let process_id) {
     let token = args.arg0_u32();
     let access_val = args.arg1_u32();
     let access = some_or_err!(ctx, slopos_mm::shared_memory::ShmAccess::from_u32(access_val));
     ctx.from_nonzero(slopos_mm::shared_memory::shm_map(process_id, token, access))
 });
 
-define_syscall!(syscall_shm_unmap(ctx, args, process_id) requires process_id {
+define_syscall!(syscall_shm_unmap(ctx, args) requires(let process_id) {
     let vaddr = args.arg0;
     let result = slopos_mm::shared_memory::shm_unmap(process_id, vaddr);
     check_result!(ctx, result);
     ctx.ok(0)
 });
 
-define_syscall!(syscall_shm_destroy(ctx, args, process_id) requires process_id {
+define_syscall!(syscall_shm_destroy(ctx, args) requires(let process_id) {
     let token = args.arg0_u32();
     let result = slopos_mm::shared_memory::shm_destroy(process_id, token);
     check_result!(ctx, result);
     ctx.ok(0)
 });
 
-define_syscall!(syscall_surface_attach(ctx, args, task_id, process_id) requires task_and_process {
+define_syscall!(syscall_surface_attach(ctx, args) requires(let task_id, let process_id) {
     let token = args.arg0_u32();
     let width = args.arg1_u32();
     let height = args.arg2_u32();
@@ -187,30 +187,30 @@ define_syscall!(syscall_surface_attach(ctx, args, task_id, process_id) requires 
     ctx.ok(0)
 });
 
-define_syscall!(syscall_shm_create_with_format(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_shm_create_with_format(ctx, args) requires(let task_id) {
     let size = args.arg0;
     let format_val = args.arg1_u32();
     let format = some_or_err!(ctx, slopos_mm::shared_memory::PixelFormat::from_u32(format_val));
     ctx.from_token(slopos_mm::shared_memory::shm_create_with_format(task_id, size, format))
 });
 
-define_syscall!(syscall_surface_set_role(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_set_role(ctx, args) requires(let task_id) {
     let role = args.arg0 as u8;
     ctx.from_result(video::surface_set_role(task_id, role))
 });
 
-define_syscall!(syscall_surface_set_parent(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_set_parent(ctx, args) requires(let task_id) {
     let parent_task_id = args.arg0_u32();
     ctx.from_result(video::surface_set_parent(task_id, parent_task_id))
 });
 
-define_syscall!(syscall_surface_set_rel_pos(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_set_rel_pos(ctx, args) requires(let task_id) {
     let rel_x = args.arg0_i32();
     let rel_y = args.arg1_i32();
     ctx.from_result(video::surface_set_relative_position(task_id, rel_x, rel_y))
 });
 
-define_syscall!(syscall_surface_set_title(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_surface_set_title(ctx, args) requires(let task_id) {
     let title_ptr = args.arg0_const_ptr::<u8>();
     let title_len = args.arg1_usize();
 
@@ -223,7 +223,7 @@ define_syscall!(syscall_surface_set_title(ctx, args, task_id) requires task_id {
     ctx.from_result(video::surface_set_title(task_id, title_slice))
 });
 
-define_syscall!(syscall_input_poll(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_input_poll(ctx, args) requires(let task_id) {
     let event_ptr = args.arg0_ptr::<InputEvent>();
     if event_ptr.is_null() {
         return ctx.ok((-1i64) as u64);
@@ -242,7 +242,7 @@ define_syscall!(syscall_input_poll(ctx, args, task_id) requires task_id {
     }
 });
 
-define_syscall!(syscall_input_poll_batch(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_input_poll_batch(ctx, args) requires(let task_id) {
     let buffer_ptr = args.arg0_ptr::<InputEvent>();
     let max_count = args.arg1_usize();
 
@@ -257,12 +257,12 @@ define_syscall!(syscall_input_poll_batch(ctx, args, task_id) requires task_id {
     ctx.ok(input::drain_batch(task_id, buffer_ptr, max_count) as u64)
 });
 
-define_syscall!(syscall_input_has_events(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_input_has_events(ctx, args) requires(let task_id) {
     let count = input::event_count(task_id);
     ctx.ok(count as u64)
 });
 
-define_syscall!(syscall_input_set_focus(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_input_set_focus(ctx, args) requires(let task_id) {
     let _ = task_id;
     let target_task_id = args.arg0_u32();
     let focus_type = args.arg1_u32();
@@ -276,7 +276,7 @@ define_syscall!(syscall_input_set_focus(ctx, args, task_id) requires task_id {
     ctx.ok(0)
 });
 
-define_syscall!(syscall_input_set_focus_with_offset(ctx, args) requires compositor {
+define_syscall!(syscall_input_set_focus_with_offset(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     let offset_x = args.arg1 as i32;
     let offset_y = args.arg2 as i32;
@@ -285,18 +285,18 @@ define_syscall!(syscall_input_set_focus_with_offset(ctx, args) requires composit
     ctx.ok(0)
 });
 
-define_syscall!(syscall_input_get_pointer_pos(ctx, args) requires compositor {
+define_syscall!(syscall_input_get_pointer_pos(ctx, args) requires(compositor) {
     let (x, y) = input::get_pointer_position();
     let result = ((x as u32 as u64) << 32) | (y as u32 as u64);
     ctx.ok(result)
 });
 
-define_syscall!(syscall_input_get_button_state(ctx, args) requires compositor {
+define_syscall!(syscall_input_get_button_state(ctx, args) requires(compositor) {
     let buttons = input::get_button_state();
     ctx.ok(buttons as u64)
 });
 
-define_syscall!(syscall_input_request_close(ctx, args) requires compositor {
+define_syscall!(syscall_input_request_close(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     if target_task_id == 0 || target_task_id == INVALID_TASK_ID {
         wl_currency::award_loss();
@@ -313,12 +313,12 @@ define_syscall!(syscall_input_request_close(ctx, args) requires compositor {
     ctx.ok(0)
 });
 
-define_syscall!(syscall_tty_set_focus(ctx, args) requires compositor {
+define_syscall!(syscall_tty_set_focus(ctx, args) requires(compositor) {
     let target = args.arg0_u32();
     ctx.from_bool_value(tty::set_focus(target) == 0, tty::get_focus() as u64)
 });
 
-define_syscall!(syscall_enumerate_windows(ctx, args) requires compositor {
+define_syscall!(syscall_enumerate_windows(ctx, args) requires(compositor) {
     let out_buffer = args.arg0_ptr::<WindowInfo>();
     let max_count = args.arg1_u32();
     require_nonnull!(ctx, out_buffer);
@@ -326,25 +326,25 @@ define_syscall!(syscall_enumerate_windows(ctx, args) requires compositor {
     ctx.ok(video::surface_enumerate_windows(out_buffer, max_count) as u64)
 });
 
-define_syscall!(syscall_set_window_position(ctx, args) requires compositor {
+define_syscall!(syscall_set_window_position(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     let x = args.arg1_i32();
     let y = args.arg2_i32();
     ctx.from_result(video::surface_set_window_position(target_task_id, x, y))
 });
 
-define_syscall!(syscall_set_window_state(ctx, args) requires compositor {
+define_syscall!(syscall_set_window_state(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     let state = args.arg1 as u8;
     ctx.from_result(video::surface_set_window_state(target_task_id, state))
 });
 
-define_syscall!(syscall_raise_window(ctx, args) requires compositor {
+define_syscall!(syscall_raise_window(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     ctx.from_result(video::surface_raise_window(target_task_id))
 });
 
-define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
+define_syscall!(syscall_fb_flip(ctx, args) requires(compositor) {
     let token = args.arg0_u32();
     let damage_ptr = args.arg1;
     let damage_count = args.arg2_usize();
@@ -388,30 +388,30 @@ define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
     ctx.ok(0)
 });
 
-define_syscall!(syscall_drain_queue(ctx, args) requires compositor {
+define_syscall!(syscall_drain_queue(ctx, args) requires(compositor) {
     video::drain_queue();
     ctx.ok(0)
 });
 
-define_syscall!(syscall_shm_acquire(ctx, args) requires compositor {
+define_syscall!(syscall_shm_acquire(ctx, args) requires(compositor) {
     let token = args.arg0_u32();
     let result = slopos_mm::shared_memory::shm_acquire(token);
     ctx.ok(result as u64)
 });
 
-define_syscall!(syscall_shm_release(ctx, args) requires compositor {
+define_syscall!(syscall_shm_release(ctx, args) requires(compositor) {
     let token = args.arg0_u32();
     let result = slopos_mm::shared_memory::shm_release(token);
     ctx.ok(result as u64)
 });
 
-define_syscall!(syscall_mark_frames_done(ctx, args) requires compositor {
+define_syscall!(syscall_mark_frames_done(ctx, args) requires(compositor) {
     let present_time_ms = args.arg0;
     video::surface_mark_frames_done(present_time_ms);
     ctx.ok(0)
 });
 
-define_syscall!(syscall_roulette_draw(ctx, args) requires display_exclusive {
+define_syscall!(syscall_roulette_draw(ctx, args) requires(display_exclusive) {
     let fate = args.arg0_u32();
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
@@ -421,7 +421,7 @@ define_syscall!(syscall_roulette_draw(ctx, args) requires display_exclusive {
     disp
 });
 
-define_syscall!(syscall_roulette_spin(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_roulette_spin(ctx, args) requires(let task_id) {
     let _ = args;
     let res = fate_spin();
     check_result!(ctx, fate_set_pending(res, task_id));
@@ -429,7 +429,7 @@ define_syscall!(syscall_roulette_spin(ctx, args, task_id) requires task_id {
     ctx.ok(packed)
 });
 
-define_syscall!(syscall_roulette_result(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_roulette_result(ctx, args) requires(let task_id) {
     let mut stored = FateResult { token: 0, value: 0 };
     check_result!(ctx, fate_take_pending(task_id, &mut stored));
 
@@ -580,7 +580,7 @@ define_syscall!(syscall_waitpid(ctx, args) {
     }
 });
 
-define_syscall!(syscall_terminate_task(ctx, args) requires compositor {
+define_syscall!(syscall_terminate_task(ctx, args) requires(compositor) {
     let target_id = args.arg0_u32();
     if target_id == 0 || target_id == INVALID_TASK_ID {
         wl_currency::award_loss();
@@ -670,7 +670,7 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
 }
 
-define_syscall!(syscall_brk(ctx, args, process_id) requires process_id {
+define_syscall!(syscall_brk(ctx, args) requires(let process_id) {
     let new_brk = args.arg0;
     let result = slopos_mm::process_vm::process_vm_brk(process_id, new_brk);
     ctx.ok(result)
@@ -686,7 +686,7 @@ define_syscall!(syscall_get_current_cpu(ctx, args) {
     ctx.ok(slopos_lib::get_current_cpu() as u64)
 });
 
-define_syscall!(syscall_set_cpu_affinity(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_set_cpu_affinity(ctx, args) requires(let task_id) {
     let target_or_zero = args.arg0_u32();
     let new_affinity = args.arg1_u32();
     let resolved_task_id = if target_or_zero == 0 { task_id } else { target_or_zero };
@@ -700,7 +700,7 @@ define_syscall!(syscall_set_cpu_affinity(ctx, args, task_id) requires task_id {
     ctx.ok(0)
 });
 
-define_syscall!(syscall_get_cpu_affinity(ctx, args, task_id) requires task_id {
+define_syscall!(syscall_get_cpu_affinity(ctx, args) requires(let task_id) {
     let target_or_zero = args.arg0_u32();
     let resolved_task_id = if target_or_zero == 0 { task_id } else { target_or_zero };
 
@@ -724,284 +724,118 @@ pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     )
 }
 
-static SYSCALL_TABLE: [SyscallEntry; 128] = {
-    let mut table: [SyscallEntry; 128] = [SyscallEntry {
-        handler: None,
-        name: core::ptr::null(),
-    }; 128];
-    table[SYSCALL_YIELD as usize] = SyscallEntry {
-        handler: Some(syscall_yield),
-        name: b"yield\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_EXIT as usize] = SyscallEntry {
-        handler: Some(syscall_exit),
-        name: b"exit\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_WRITE as usize] = SyscallEntry {
-        handler: Some(syscall_user_write),
-        name: b"write\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_READ as usize] = SyscallEntry {
-        handler: Some(syscall_user_read),
-        name: b"read\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_READ_CHAR as usize] = SyscallEntry {
-        handler: Some(syscall_user_read_char),
-        name: b"read_char\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_TTY_SET_FOCUS as usize] = SyscallEntry {
-        handler: Some(syscall_tty_set_focus),
-        name: b"tty_set_focus\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_ROULETTE as usize] = SyscallEntry {
-        handler: Some(syscall_roulette_spin),
-        name: b"roulette\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SLEEP_MS as usize] = SyscallEntry {
-        handler: Some(syscall_sleep_ms),
-        name: b"sleep_ms\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FB_INFO as usize] = SyscallEntry {
-        handler: Some(syscall_fb_info),
-        name: b"fb_info\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_RANDOM_NEXT as usize] = SyscallEntry {
-        handler: Some(syscall_random_next),
-        name: b"random_next\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_ROULETTE_DRAW as usize] = SyscallEntry {
-        handler: Some(syscall_roulette_draw),
-        name: b"roulette_draw\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_ROULETTE_RESULT as usize] = SyscallEntry {
-        handler: Some(syscall_roulette_result),
-        name: b"roulette_result\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_OPEN as usize] = SyscallEntry {
-        handler: Some(syscall_fs_open),
-        name: b"fs_open\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_CLOSE as usize] = SyscallEntry {
-        handler: Some(syscall_fs_close),
-        name: b"fs_close\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_READ as usize] = SyscallEntry {
-        handler: Some(syscall_fs_read),
-        name: b"fs_read\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_WRITE as usize] = SyscallEntry {
-        handler: Some(syscall_fs_write),
-        name: b"fs_write\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_STAT as usize] = SyscallEntry {
-        handler: Some(syscall_fs_stat),
-        name: b"fs_stat\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_MKDIR as usize] = SyscallEntry {
-        handler: Some(syscall_fs_mkdir),
-        name: b"fs_mkdir\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_UNLINK as usize] = SyscallEntry {
-        handler: Some(syscall_fs_unlink),
-        name: b"fs_unlink\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FS_LIST as usize] = SyscallEntry {
-        handler: Some(syscall_fs_list),
-        name: b"fs_list\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SYS_INFO as usize] = SyscallEntry {
-        handler: Some(syscall_sys_info),
-        name: b"sys_info\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_HALT as usize] = SyscallEntry {
-        handler: Some(syscall_halt),
-        name: b"halt\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_REBOOT as usize] = SyscallEntry {
-        handler: Some(syscall_reboot),
-        name: b"reboot\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_ENUMERATE_WINDOWS as usize] = SyscallEntry {
-        handler: Some(syscall_enumerate_windows),
-        name: b"enumerate_windows\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SET_WINDOW_POSITION as usize] = SyscallEntry {
-        handler: Some(syscall_set_window_position),
-        name: b"set_window_position\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SET_WINDOW_STATE as usize] = SyscallEntry {
-        handler: Some(syscall_set_window_state),
-        name: b"set_window_state\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_RAISE_WINDOW as usize] = SyscallEntry {
-        handler: Some(syscall_raise_window),
-        name: b"raise_window\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_COMMIT as usize] = SyscallEntry {
-        handler: Some(syscall_surface_commit),
-        name: b"surface_commit\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GET_TIME_MS as usize] = SyscallEntry {
-        handler: Some(syscall_get_time_ms),
-        name: b"get_time_ms\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_CREATE as usize] = SyscallEntry {
-        handler: Some(syscall_shm_create),
-        name: b"shm_create\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_MAP as usize] = SyscallEntry {
-        handler: Some(syscall_shm_map),
-        name: b"shm_map\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_UNMAP as usize] = SyscallEntry {
-        handler: Some(syscall_shm_unmap),
-        name: b"shm_unmap\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_DESTROY as usize] = SyscallEntry {
-        handler: Some(syscall_shm_destroy),
-        name: b"shm_destroy\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_ATTACH as usize] = SyscallEntry {
-        handler: Some(syscall_surface_attach),
-        name: b"surface_attach\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FB_FLIP as usize] = SyscallEntry {
-        handler: Some(syscall_fb_flip),
-        name: b"fb_flip\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_DRAIN_QUEUE as usize] = SyscallEntry {
-        handler: Some(syscall_drain_queue),
-        name: b"drain_queue\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_ACQUIRE as usize] = SyscallEntry {
-        handler: Some(syscall_shm_acquire),
-        name: b"shm_acquire\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_RELEASE as usize] = SyscallEntry {
-        handler: Some(syscall_shm_release),
-        name: b"shm_release\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_POLL_RELEASED as usize] = SyscallEntry {
-        handler: Some(syscall_shm_poll_released),
-        name: b"shm_poll_released\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_FRAME as usize] = SyscallEntry {
-        handler: Some(syscall_surface_frame),
-        name: b"surface_frame\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_POLL_FRAME_DONE as usize] = SyscallEntry {
-        handler: Some(syscall_poll_frame_done),
-        name: b"poll_frame_done\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_MARK_FRAMES_DONE as usize] = SyscallEntry {
-        handler: Some(syscall_mark_frames_done),
-        name: b"mark_frames_done\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_GET_FORMATS as usize] = SyscallEntry {
-        handler: Some(syscall_shm_get_formats),
-        name: b"shm_get_formats\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SHM_CREATE_WITH_FORMAT as usize] = SyscallEntry {
-        handler: Some(syscall_shm_create_with_format),
-        name: b"shm_create_with_format\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_DAMAGE as usize] = SyscallEntry {
-        handler: Some(syscall_surface_damage),
-        name: b"surface_damage\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_BUFFER_AGE as usize] = SyscallEntry {
-        handler: Some(syscall_buffer_age),
-        name: b"buffer_age\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_SET_ROLE as usize] = SyscallEntry {
-        handler: Some(syscall_surface_set_role),
-        name: b"surface_set_role\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_SET_PARENT as usize] = SyscallEntry {
-        handler: Some(syscall_surface_set_parent),
-        name: b"surface_set_parent\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_SET_REL_POS as usize] = SyscallEntry {
-        handler: Some(syscall_surface_set_rel_pos),
-        name: b"surface_set_rel_pos\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SURFACE_SET_TITLE as usize] = SyscallEntry {
-        handler: Some(syscall_surface_set_title),
-        name: b"surface_set_title\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_POLL as usize] = SyscallEntry {
-        handler: Some(syscall_input_poll),
-        name: b"input_poll\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_POLL_BATCH as usize] = SyscallEntry {
-        handler: Some(syscall_input_poll_batch),
-        name: b"input_poll_batch\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_HAS_EVENTS as usize] = SyscallEntry {
-        handler: Some(syscall_input_has_events),
-        name: b"input_has_events\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_SET_FOCUS as usize] = SyscallEntry {
-        handler: Some(syscall_input_set_focus),
-        name: b"input_set_focus\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET as usize] = SyscallEntry {
-        handler: Some(syscall_input_set_focus_with_offset),
-        name: b"input_set_focus_with_offset\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_GET_POINTER_POS as usize] = SyscallEntry {
-        handler: Some(syscall_input_get_pointer_pos),
-        name: b"input_get_pointer_pos\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_GET_BUTTON_STATE as usize] = SyscallEntry {
-        handler: Some(syscall_input_get_button_state),
-        name: b"input_get_button_state\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_INPUT_REQUEST_CLOSE as usize] = SyscallEntry {
-        handler: Some(syscall_input_request_close),
-        name: b"input_request_close\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SPAWN_PATH as usize] = SyscallEntry {
-        handler: Some(syscall_spawn_path),
-        name: b"spawn_path\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_WAITPID as usize] = SyscallEntry {
-        handler: Some(syscall_waitpid),
-        name: b"waitpid\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_TERMINATE_TASK as usize] = SyscallEntry {
-        handler: Some(syscall_terminate_task),
-        name: b"terminate_task\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_EXEC as usize] = SyscallEntry {
-        handler: Some(syscall_exec),
-        name: b"exec\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_BRK as usize] = SyscallEntry {
-        handler: Some(syscall_brk),
-        name: b"brk\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FORK as usize] = SyscallEntry {
-        handler: Some(syscall_fork),
-        name: b"fork\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GET_CPU_COUNT as usize] = SyscallEntry {
-        handler: Some(syscall_get_cpu_count),
-        name: b"get_cpu_count\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GET_CURRENT_CPU as usize] = SyscallEntry {
-        handler: Some(syscall_get_current_cpu),
-        name: b"get_current_cpu\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_SET_CPU_AFFINITY as usize] = SyscallEntry {
-        handler: Some(syscall_set_cpu_affinity),
-        name: b"set_cpu_affinity\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GET_CPU_AFFINITY as usize] = SyscallEntry {
-        handler: Some(syscall_get_cpu_affinity),
-        name: b"get_cpu_affinity\0".as_ptr() as *const c_char,
-    };
-    table
+/// Build the static syscall dispatch table from a compact registration list.
+///
+/// Each entry maps a syscall number constant to its handler function and a
+/// debug name string. Unregistered slots remain `{ handler: None, name: null }`.
+macro_rules! syscall_table {
+    (size: $size:expr; $( [$num:expr] => $handler:expr, $name:literal; )*) => {{
+        let mut table: [SyscallEntry; $size] = [SyscallEntry {
+            handler: None,
+            name: core::ptr::null(),
+        }; $size];
+        $(
+            table[$num as usize] = SyscallEntry {
+                handler: Some($handler),
+                name: concat!($name, "\0").as_ptr() as *const c_char,
+            };
+        )*
+        table
+    }};
+}
+
+static SYSCALL_TABLE: [SyscallEntry; 128] = syscall_table! {
+    size: 128;
+
+    // Core
+    [SYSCALL_YIELD]          => syscall_yield,          "yield";
+    [SYSCALL_EXIT]           => syscall_exit,           "exit";
+    [SYSCALL_WRITE]          => syscall_user_write,     "write";
+    [SYSCALL_READ]           => syscall_user_read,      "read";
+    [SYSCALL_READ_CHAR]      => syscall_user_read_char, "read_char";
+    [SYSCALL_SLEEP_MS]       => syscall_sleep_ms,       "sleep_ms";
+    [SYSCALL_FB_INFO]        => syscall_fb_info,        "fb_info";
+    [SYSCALL_GET_TIME_MS]    => syscall_get_time_ms,    "get_time_ms";
+    [SYSCALL_SYS_INFO]       => syscall_sys_info,       "sys_info";
+    [SYSCALL_HALT]           => syscall_halt,            "halt";
+    [SYSCALL_REBOOT]         => syscall_reboot,          "reboot";
+
+    // Random / Roulette
+    [SYSCALL_RANDOM_NEXT]     => syscall_random_next,     "random_next";
+    [SYSCALL_ROULETTE]        => syscall_roulette_spin,   "roulette";
+    [SYSCALL_ROULETTE_RESULT] => syscall_roulette_result, "roulette_result";
+    [SYSCALL_ROULETTE_DRAW]   => syscall_roulette_draw,   "roulette_draw";
+
+    // Filesystem
+    [SYSCALL_FS_OPEN]   => syscall_fs_open,   "fs_open";
+    [SYSCALL_FS_CLOSE]  => syscall_fs_close,  "fs_close";
+    [SYSCALL_FS_READ]   => syscall_fs_read,   "fs_read";
+    [SYSCALL_FS_WRITE]  => syscall_fs_write,  "fs_write";
+    [SYSCALL_FS_STAT]   => syscall_fs_stat,   "fs_stat";
+    [SYSCALL_FS_MKDIR]  => syscall_fs_mkdir,  "fs_mkdir";
+    [SYSCALL_FS_UNLINK] => syscall_fs_unlink, "fs_unlink";
+    [SYSCALL_FS_LIST]   => syscall_fs_list,   "fs_list";
+
+    // TTY
+    [SYSCALL_TTY_SET_FOCUS] => syscall_tty_set_focus, "tty_set_focus";
+
+    // Window management
+    [SYSCALL_ENUMERATE_WINDOWS]   => syscall_enumerate_windows,   "enumerate_windows";
+    [SYSCALL_SET_WINDOW_POSITION] => syscall_set_window_position, "set_window_position";
+    [SYSCALL_SET_WINDOW_STATE]    => syscall_set_window_state,    "set_window_state";
+    [SYSCALL_RAISE_WINDOW]        => syscall_raise_window,        "raise_window";
+
+    // Surface / Compositor
+    [SYSCALL_SURFACE_COMMIT]      => syscall_surface_commit,      "surface_commit";
+    [SYSCALL_SURFACE_ATTACH]      => syscall_surface_attach,      "surface_attach";
+    [SYSCALL_SURFACE_FRAME]       => syscall_surface_frame,       "surface_frame";
+    [SYSCALL_POLL_FRAME_DONE]     => syscall_poll_frame_done,     "poll_frame_done";
+    [SYSCALL_MARK_FRAMES_DONE]    => syscall_mark_frames_done,    "mark_frames_done";
+    [SYSCALL_SURFACE_DAMAGE]      => syscall_surface_damage,      "surface_damage";
+    [SYSCALL_BUFFER_AGE]          => syscall_buffer_age,          "buffer_age";
+    [SYSCALL_SURFACE_SET_ROLE]    => syscall_surface_set_role,    "surface_set_role";
+    [SYSCALL_SURFACE_SET_PARENT]  => syscall_surface_set_parent,  "surface_set_parent";
+    [SYSCALL_SURFACE_SET_REL_POS] => syscall_surface_set_rel_pos, "surface_set_rel_pos";
+    [SYSCALL_SURFACE_SET_TITLE]   => syscall_surface_set_title,   "surface_set_title";
+    [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
+    [SYSCALL_DRAIN_QUEUE]         => syscall_drain_queue,         "drain_queue";
+
+    // Shared memory
+    [SYSCALL_SHM_CREATE]             => syscall_shm_create,             "shm_create";
+    [SYSCALL_SHM_MAP]                => syscall_shm_map,                "shm_map";
+    [SYSCALL_SHM_UNMAP]              => syscall_shm_unmap,              "shm_unmap";
+    [SYSCALL_SHM_DESTROY]            => syscall_shm_destroy,            "shm_destroy";
+    [SYSCALL_SHM_ACQUIRE]            => syscall_shm_acquire,            "shm_acquire";
+    [SYSCALL_SHM_RELEASE]            => syscall_shm_release,            "shm_release";
+    [SYSCALL_SHM_POLL_RELEASED]      => syscall_shm_poll_released,      "shm_poll_released";
+    [SYSCALL_SHM_GET_FORMATS]        => syscall_shm_get_formats,        "shm_get_formats";
+    [SYSCALL_SHM_CREATE_WITH_FORMAT] => syscall_shm_create_with_format, "shm_create_with_format";
+
+    // Input
+    [SYSCALL_INPUT_POLL]                 => syscall_input_poll,                 "input_poll";
+    [SYSCALL_INPUT_POLL_BATCH]           => syscall_input_poll_batch,           "input_poll_batch";
+    [SYSCALL_INPUT_HAS_EVENTS]           => syscall_input_has_events,           "input_has_events";
+    [SYSCALL_INPUT_SET_FOCUS]            => syscall_input_set_focus,            "input_set_focus";
+    [SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET] => syscall_input_set_focus_with_offset, "input_set_focus_with_offset";
+    [SYSCALL_INPUT_GET_POINTER_POS]      => syscall_input_get_pointer_pos,      "input_get_pointer_pos";
+    [SYSCALL_INPUT_GET_BUTTON_STATE]     => syscall_input_get_button_state,     "input_get_button_state";
+    [SYSCALL_INPUT_REQUEST_CLOSE]        => syscall_input_request_close,        "input_request_close";
+
+    // Task management
+    [SYSCALL_SPAWN_PATH]     => syscall_spawn_path,     "spawn_path";
+    [SYSCALL_WAITPID]        => syscall_waitpid,        "waitpid";
+    [SYSCALL_TERMINATE_TASK] => syscall_terminate_task,  "terminate_task";
+    [SYSCALL_EXEC]           => syscall_exec,            "exec";
+    [SYSCALL_FORK]           => syscall_fork,            "fork";
+
+    // Memory
+    [SYSCALL_BRK] => syscall_brk, "brk";
+
+    // SMP / CPU affinity
+    [SYSCALL_GET_CPU_COUNT]    => syscall_get_cpu_count,    "get_cpu_count";
+    [SYSCALL_GET_CURRENT_CPU]  => syscall_get_current_cpu,  "get_current_cpu";
+    [SYSCALL_SET_CPU_AFFINITY] => syscall_set_cpu_affinity, "set_cpu_affinity";
+    [SYSCALL_GET_CPU_AFFINITY] => syscall_get_cpu_affinity, "get_cpu_affinity";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

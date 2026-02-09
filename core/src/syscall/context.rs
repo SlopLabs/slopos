@@ -1,5 +1,5 @@
 use crate::scheduler::task_struct::Task;
-use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
+use crate::syscall::common::{syscall_return_err, syscall_return_ok, SyscallDisposition};
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
 use slopos_lib::InterruptFrame;
 
@@ -161,12 +161,20 @@ impl SyscallContext {
 
     #[inline]
     pub fn check_result(&self, result: i32) -> Result<(), SyscallDisposition> {
-        if result != 0 { Err(self.err()) } else { Ok(()) }
+        if result != 0 {
+            Err(self.err())
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
     pub fn check_negative(&self, result: i32) -> Result<(), SyscallDisposition> {
-        if result < 0 { Err(self.err()) } else { Ok(()) }
+        if result < 0 {
+            Err(self.err())
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
@@ -192,7 +200,11 @@ impl SyscallContext {
     /// Replaces: `if rc < 0 { ctx.err() } else { ctx.ok(0) }`
     #[inline]
     pub fn from_rc(&self, rc: i32) -> SyscallDisposition {
-        if rc < 0 { self.err() } else { self.ok(0) }
+        if rc < 0 {
+            self.err()
+        } else {
+            self.ok(0)
+        }
     }
 
     /// Convert a signed return code to a disposition, returning the value on success.
@@ -261,14 +273,22 @@ impl SyscallContext {
     /// Returns `err()` if false, otherwise `ok(0)`.
     #[inline]
     pub fn from_bool(&self, success: bool) -> SyscallDisposition {
-        if success { self.ok(0) } else { self.err() }
+        if success {
+            self.ok(0)
+        } else {
+            self.err()
+        }
     }
 
     /// Convert a bool to a disposition with a custom success value.
     /// Returns `err()` if false, otherwise `ok(value)`.
     #[inline]
     pub fn from_bool_value(&self, success: bool, value: u64) -> SyscallDisposition {
-        if success { self.ok(value) } else { self.err() }
+        if success {
+            self.ok(value)
+        } else {
+            self.err()
+        }
     }
 
     /// Convert an i32 result where != 0 means failure (common for C-style APIs).
@@ -277,64 +297,33 @@ impl SyscallContext {
     /// Replaces: `if rc != 0 { ctx.err() } else { ctx.ok(0) }`
     #[inline]
     pub fn from_zero_success(&self, rc: i32) -> SyscallDisposition {
-        if rc != 0 { self.err() } else { self.ok(0) }
+        if rc != 0 {
+            self.err()
+        } else {
+            self.ok(0)
+        }
     }
 }
 
+macro_rules! syscall_arg_accessors {
+    ($($field:ident),+) => {
+        $(
+            paste::paste! {
+                #[inline]
+                pub fn [<$field _u32>](&self) -> u32 { self.$field as u32 }
+                #[inline]
+                pub fn [<$field _i32>](&self) -> i32 { self.$field as i32 }
+                #[inline]
+                pub fn [<$field _usize>](&self) -> usize { self.$field as usize }
+                #[inline]
+                pub fn [<$field _ptr>]<T>(&self) -> *mut T { self.$field as *mut T }
+                #[inline]
+                pub fn [<$field _const_ptr>]<T>(&self) -> *const T { self.$field as *const T }
+            }
+        )+
+    };
+}
+
 impl SyscallArgs {
-    #[inline]
-    pub fn arg0_u32(&self) -> u32 {
-        self.arg0 as u32
-    }
-    #[inline]
-    pub fn arg0_i32(&self) -> i32 {
-        self.arg0 as i32
-    }
-    #[inline]
-    pub fn arg0_ptr<T>(&self) -> *mut T {
-        self.arg0 as *mut T
-    }
-    #[inline]
-    pub fn arg0_const_ptr<T>(&self) -> *const T {
-        self.arg0 as *const T
-    }
-
-    #[inline]
-    pub fn arg1_u32(&self) -> u32 {
-        self.arg1 as u32
-    }
-    #[inline]
-    pub fn arg1_i32(&self) -> i32 {
-        self.arg1 as i32
-    }
-    #[inline]
-    pub fn arg1_usize(&self) -> usize {
-        self.arg1 as usize
-    }
-    #[inline]
-    pub fn arg1_ptr<T>(&self) -> *mut T {
-        self.arg1 as *mut T
-    }
-
-    #[inline]
-    pub fn arg2_u32(&self) -> u32 {
-        self.arg2 as u32
-    }
-    #[inline]
-    pub fn arg2_i32(&self) -> i32 {
-        self.arg2 as i32
-    }
-    #[inline]
-    pub fn arg2_usize(&self) -> usize {
-        self.arg2 as usize
-    }
-
-    #[inline]
-    pub fn arg3_u32(&self) -> u32 {
-        self.arg3 as u32
-    }
-    #[inline]
-    pub fn arg3_i32(&self) -> i32 {
-        self.arg3 as i32
-    }
+    syscall_arg_accessors!(arg0, arg1, arg2, arg3, arg4, arg5);
 }
