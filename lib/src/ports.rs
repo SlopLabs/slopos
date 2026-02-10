@@ -60,3 +60,48 @@ pub const PIT_COMMAND_ACCESS_LOHI: u8 = 0x30;
 pub const PIT_COMMAND_MODE_SQUARE: u8 = 0x06;
 pub const PIT_COMMAND_BINARY: u8 = 0x00;
 pub const PIT_IRQ_LINE: u8 = 0;
+
+// ---------------------------------------------------------------------------
+// Low-level serial I/O primitives
+// ---------------------------------------------------------------------------
+//
+// These are the **single source of truth** for putting bytes on a UART.
+// Every path that writes to a serial port — early-boot klog, the runtime
+// klog backend, and the `SerialPort` driver — must funnel through here.
+//
+// The functions are intentionally lock-free: callers are responsible for
+// serialisation (cli/sti, spinlock, IrqMutex, … whatever suits the context).
+
+/// Write one byte to a UART, polling the Line Status Register until the
+/// transmit holding register is empty.
+///
+/// # Safety
+///
+/// Port I/O.  Caller must ensure `base` refers to a valid, initialised
+/// 8250/16550-compatible UART and that concurrent access is serialised.
+#[inline(always)]
+pub unsafe fn serial_putc(base: Port<u8>, byte: u8) {
+    let lsr = base.offset(UART_REG_LSR);
+    let thr = base.offset(UART_REG_THR);
+    unsafe {
+        while (lsr.read() & UART_LSR_TX_EMPTY) == 0 {
+            core::hint::spin_loop();
+        }
+        thr.write(byte);
+    }
+}
+
+/// Write a byte slice to a UART, converting lone `\n` into `\r\n`.
+///
+/// # Safety
+///
+/// Same requirements as [`serial_putc`].
+#[inline]
+pub unsafe fn serial_write_bytes(base: Port<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        if b == b'\n' {
+            unsafe { serial_putc(base, b'\r') };
+        }
+        unsafe { serial_putc(base, b) };
+    }
+}

@@ -79,31 +79,20 @@ pub type KlogBackend = fn(fmt::Arguments<'_>);
 /// Stored as a raw pointer; `null` means "use early-boot fallback".
 static BACKEND: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Early-boot fallback: write directly to COM1 via raw port I/O.
-///
-/// This path is used only before the serial driver is initialised.
-/// It runs during single-threaded boot so no locking is needed.
 fn early_backend(args: fmt::Arguments<'_>) {
+    use crate::ports::serial_write_bytes;
+
     struct EarlyWriter;
 
     impl fmt::Write for EarlyWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            for &b in s.as_bytes() {
-                if b == b'\n' {
-                    unsafe { COM1.write(b'\r') }
-                }
-                unsafe { COM1.write(b) }
-            }
+            unsafe { serial_write_bytes(COM1, s.as_bytes()) };
             Ok(())
         }
     }
 
     let _ = fmt::write(&mut EarlyWriter, args);
-    // Trailing newline (contract: backend appends one).
-    unsafe {
-        COM1.write(b'\r');
-        COM1.write(b'\n');
-    }
+    unsafe { serial_write_bytes(COM1, b"\n") };
 }
 
 /// Dispatch a log line through the active backend.

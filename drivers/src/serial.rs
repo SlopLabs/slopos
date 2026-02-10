@@ -8,11 +8,10 @@ use slopos_lib::ports::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
     UART_FCR_CLEAR_TX as FCR_CLEAR_TX, UART_FCR_ENABLE_FIFO as FCR_ENABLE_FIFO,
     UART_IIR_FIFO_ENABLED as IIR_FIFO_ENABLED, UART_IIR_FIFO_MASK as IIR_FIFO_MASK,
-    UART_LCR_DLAB as LCR_DLAB, UART_LSR_DATA_READY as LSR_DATA_READY,
-    UART_LSR_TX_EMPTY as LSR_TX_EMPTY, UART_MCR_AUX2 as MCR_AUX2, UART_MCR_DTR as MCR_DTR,
-    UART_MCR_RTS as MCR_RTS, UART_REG_IER as REG_IER, UART_REG_IIR as REG_IIR,
-    UART_REG_LCR as REG_LCR, UART_REG_LSR as REG_LSR, UART_REG_MCR as REG_MCR,
-    UART_REG_RBR as REG_RBR, UART_REG_SCR as REG_SCR,
+    UART_LCR_DLAB as LCR_DLAB, UART_LSR_DATA_READY as LSR_DATA_READY, UART_MCR_AUX2 as MCR_AUX2,
+    UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS, UART_REG_IER as REG_IER,
+    UART_REG_IIR as REG_IIR, UART_REG_LCR as REG_LCR, UART_REG_LSR as REG_LSR,
+    UART_REG_MCR as REG_MCR, UART_REG_RBR as REG_RBR, UART_REG_SCR as REG_SCR,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,29 +64,10 @@ fn serial_klog_backend(args: fmt::Arguments<'_>) {
         core::hint::spin_loop();
     }
 
-    // SAFETY: KLOG_LOCK serialises all klog writes; write directly via COM1
-    // raw port I/O to avoid the IrqMutex → PreemptGuard → PCR dependency.
     struct KlogWriter;
     impl fmt::Write for KlogWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            let lsr = COM1.offset(REG_LSR);
-            let data = COM1.offset(REG_RBR);
-            for &b in s.as_bytes() {
-                if b == b'\n' {
-                    unsafe {
-                        while (lsr.read() & LSR_TX_EMPTY) == 0 {
-                            core::hint::spin_loop();
-                        }
-                        data.write(b'\r');
-                    }
-                }
-                unsafe {
-                    while (lsr.read() & LSR_TX_EMPTY) == 0 {
-                        core::hint::spin_loop();
-                    }
-                    data.write(b);
-                }
-            }
+            unsafe { slopos_lib::ports::serial_write_bytes(COM1, s.as_bytes()) };
             Ok(())
         }
     }
@@ -250,12 +230,7 @@ impl SerialPort {
     }
 
     fn write_byte(&mut self, byte: u8) {
-        unsafe {
-            while (self.reg(REG_LSR).read() & LSR_TX_EMPTY) == 0 {
-                core::hint::spin_loop();
-            }
-            self.reg(REG_RBR).write(byte);
-        }
+        unsafe { slopos_lib::ports::serial_putc(self.base, byte) };
     }
 
     pub fn capabilities(&self) -> UartCapabilities {
@@ -265,15 +240,7 @@ impl SerialPort {
 
 impl Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for b in s.bytes() {
-            match b {
-                b'\n' => {
-                    self.write_byte(b'\r');
-                    self.write_byte(b'\n');
-                }
-                _ => self.write_byte(b),
-            }
-        }
+        unsafe { slopos_lib::ports::serial_write_bytes(self.base, s.as_bytes()) };
         Ok(())
     }
 }
