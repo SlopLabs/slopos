@@ -1185,19 +1185,19 @@ fn clear_bit(bitmap: &mut [u8], bit: usize) {
     }
 }
 
-fn read_le_u16(data: &[u8]) -> u16 {
+pub(crate) fn read_le_u16(data: &[u8]) -> u16 {
     u16::from_le_bytes([data[0], data[1]])
 }
 
-fn read_le_u32(data: &[u8]) -> u32 {
+pub(crate) fn read_le_u32(data: &[u8]) -> u32 {
     u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
 
-fn write_le_u16(data: &mut [u8], value: u16) {
+pub(crate) fn write_le_u16(data: &mut [u8], value: u16) {
     data[0..2].copy_from_slice(&value.to_le_bytes());
 }
 
-fn write_le_u32(data: &mut [u8], value: u32) {
+pub(crate) fn write_le_u32(data: &mut [u8], value: u32) {
     data[0..4].copy_from_slice(&value.to_le_bytes());
 }
 
