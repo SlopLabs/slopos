@@ -2,7 +2,7 @@ use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
 use slopos_lib::InterruptFrame;
-use slopos_lib::wl_currency;
+use slopos_lib::wl_currency::{self, WL_DELTA};
 
 #[derive(Clone, Copy)]
 pub struct SyscallArgs {
@@ -112,13 +112,13 @@ impl SyscallContext {
 
     #[inline]
     pub fn ok(&self, value: u64) -> SyscallDisposition {
-        wl_currency::award_win();
+        wl_currency::adjust_balance(WL_DELTA);
         syscall_return_ok(self.frame_ptr, value)
     }
 
     #[inline]
     pub fn err(&self) -> SyscallDisposition {
-        wl_currency::award_loss();
+        wl_currency::adjust_balance(-WL_DELTA);
         syscall_return_err(self.frame_ptr, u64::MAX)
     }
 

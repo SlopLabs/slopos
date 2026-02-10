@@ -2,7 +2,7 @@ use super::task::{Task, task_find_by_id};
 use crate::platform;
 use core::ffi::c_int;
 use slopos_abi::fate::FateResult;
-use slopos_lib::wl_currency;
+use slopos_lib::wl_currency::{self, WL_DELTA};
 
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
@@ -54,8 +54,8 @@ pub fn fate_apply_outcome(res: *const FateResult, _resolution: u32, award: bool)
         return;
     }
     if award {
-        wl_currency::award_win();
+        wl_currency::adjust_balance(WL_DELTA);
     } else {
-        wl_currency::award_loss();
+        wl_currency::adjust_balance(-WL_DELTA);
     }
 }
