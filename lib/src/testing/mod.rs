@@ -32,28 +32,11 @@ impl TestResult {
     }
 
     #[inline]
-    pub fn from_c_int(val: c_int) -> Self {
-        if val == 0 { Self::Pass } else { Self::Fail }
-    }
-
-    #[inline]
     pub fn to_c_int(self) -> c_int {
         match self {
             Self::Pass | Self::Skipped => 0,
             Self::Fail | Self::Panic => -1,
         }
-    }
-}
-
-impl From<i32> for TestResult {
-    fn from(val: i32) -> Self {
-        Self::from_c_int(val as c_int)
-    }
-}
-
-impl From<TestResult> for c_int {
-    fn from(val: TestResult) -> Self {
-        val.to_c_int()
     }
 }
 
@@ -83,16 +66,16 @@ macro_rules! fail {
 macro_rules! run_test {
     ($passed:expr, $total:expr, $test_fn:expr) => {{
         $total += 1;
-        let result = $crate::testing::run_single_test(stringify!($test_fn), || $test_fn().into());
+        let result = $crate::testing::run_single_test(stringify!($test_fn), || $test_fn());
         if result.is_pass() {
             $passed += 1;
         }
         result
     }};
 
-    ($test_fn:expr) => {{ $crate::testing::run_single_test(stringify!($test_fn), || $test_fn().into()) }};
+    ($test_fn:expr) => {{ $crate::testing::run_single_test(stringify!($test_fn), || $test_fn()) }};
 
-    ($name:expr, $test_fn:expr) => {{ $crate::testing::run_single_test($name, || $test_fn().into()) }};
+    ($name:expr, $test_fn:expr) => {{ $crate::testing::run_single_test($name, || $test_fn()) }};
 }
 
 #[macro_export]
@@ -147,7 +130,7 @@ macro_rules! define_test_suite {
                 out: *mut $crate::testing::TestSuiteResult,
             ) -> i32 {
                 let start = $crate::tsc::rdtsc();
-                let result = $crate::catch_panic!({ $runner_fn() });
+                let result = $crate::catch_panic!({ $runner_fn().to_c_int() });
                 let passed = if result == 0 { 1u32 } else { 0u32 };
                 let elapsed = $crate::testing::measure_elapsed_ms(start, $crate::tsc::rdtsc());
 

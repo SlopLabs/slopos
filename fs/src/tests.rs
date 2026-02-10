@@ -1,8 +1,8 @@
-use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::fs::UserFsEntry;
 use slopos_lib::klog_info;
+use slopos_lib::testing::TestResult;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::{Ext2Error, Ext2Fs};
@@ -11,60 +11,60 @@ use crate::vfs::{
     vfs_unlink,
 };
 
-pub fn test_vfs_initialized() -> c_int {
+pub fn test_vfs_initialized() -> TestResult {
     klog_info!("VFS_TEST: check initialized");
     if !vfs_is_initialized() {
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_vfs_root_stat() -> c_int {
+pub fn test_vfs_root_stat() -> TestResult {
     klog_info!("VFS_TEST: root stat");
     let (kind, _size) = match vfs_stat(b"/") {
         Ok(stat) => stat,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
     if kind != 1 {
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_vfs_file_roundtrip() -> c_int {
+pub fn test_vfs_file_roundtrip() -> TestResult {
     klog_info!("VFS_TEST: file roundtrip");
     if vfs_mkdir(b"/vfs_test").is_err() {
-        return -1;
+        return TestResult::Fail;
     }
 
     let handle = match vfs_open(b"/vfs_test/hello.txt", true) {
         Ok(h) => h,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let content = b"hello vfs";
     if handle.write(0, content).is_err() {
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut buf = [0u8; 32];
     let read_len = match handle.read(0, &mut buf) {
         Ok(len) => len,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     if read_len != content.len() || &buf[..content.len()] != content {
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_vfs_list() -> c_int {
+pub fn test_vfs_list() -> TestResult {
     klog_info!("VFS_TEST: list directory");
     let mut entries = [UserFsEntry::new(); 8];
     let count = match vfs_list(b"/vfs_test", &mut entries) {
         Ok(count) => count,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let mut found = false;
@@ -76,29 +76,29 @@ pub fn test_vfs_list() -> c_int {
     }
 
     if !found {
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_vfs_unlink() -> c_int {
+pub fn test_vfs_unlink() -> TestResult {
     klog_info!("VFS_TEST: unlink file");
     if vfs_unlink(b"/vfs_test/hello.txt").is_err() {
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut entries = [UserFsEntry::new(); 8];
     let count = match vfs_list(b"/vfs_test", &mut entries) {
         Ok(count) => count,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     for entry in entries.iter().take(count) {
         if entry.name_str() == "hello.txt" {
-            return -1;
+            return TestResult::Fail;
         }
     }
-    0
+    TestResult::Pass
 }
 
 struct FailingBlockDevice {
@@ -314,9 +314,9 @@ fn build_minimal_ext2_image(blocks: u32, inodes: u32) -> Option<MemoryBlockDevic
     })
 }
 
-pub fn test_ext2_invalid_superblock_magic() -> c_int {
+pub fn test_ext2_invalid_superblock_magic() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let sb_offset = 1024usize;
     unsafe {
@@ -327,14 +327,14 @@ pub fn test_ext2_invalid_superblock_magic() -> c_int {
 
     let result = Ext2Fs::init_internal(&mut device);
     match result {
-        Err(Ext2Error::InvalidSuperblock) => 0,
-        _ => -1,
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_unsupported_block_size() -> c_int {
+pub fn test_ext2_unsupported_block_size() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let sb_offset = 1024usize;
     unsafe {
@@ -344,14 +344,14 @@ pub fn test_ext2_unsupported_block_size() -> c_int {
 
     let result = Ext2Fs::init_internal(&mut device);
     match result {
-        Err(Ext2Error::UnsupportedBlockSize) => 0,
-        _ => -1,
+        Err(Ext2Error::UnsupportedBlockSize) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_directory_format_error() -> c_int {
+pub fn test_ext2_directory_format_error() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let dir_offset = 6 * 1024usize;
     unsafe {
@@ -362,76 +362,76 @@ pub fn test_ext2_directory_format_error() -> c_int {
 
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let result = fs.for_each_dir_entry(2, |_| true);
     match result {
-        Err(Ext2Error::DirectoryFormat) => 0,
-        _ => -1,
+        Err(Ext2Error::DirectoryFormat) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_invalid_inode() -> c_int {
+pub fn test_ext2_invalid_inode() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let result = fs.read_inode(9999);
     match result {
-        Err(Ext2Error::InvalidInode) => 0,
-        _ => -1,
+        Err(Ext2Error::InvalidInode) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_read_file_not_regular() -> c_int {
+pub fn test_ext2_read_file_not_regular() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let mut buf = [0u8; 32];
     let result = fs.read_file(2, 0, &mut buf);
     match result {
-        Err(Ext2Error::NotFile) => 0,
-        _ => -1,
+        Err(Ext2Error::NotFile) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_device_read_error() -> c_int {
+pub fn test_ext2_device_read_error() -> TestResult {
     let mut device = FailingBlockDevice::new(4096).with_read_fail();
     let result = Ext2Fs::init_internal(&mut device);
     match result {
-        Err(Ext2Error::DeviceError) => 0,
-        _ => -1,
+        Err(Ext2Error::DeviceError) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_device_write_error_on_metadata() -> c_int {
+pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut failing = WriteFailingDevice::new(device);
     let mut fs = match Ext2Fs::init_internal(&mut failing) {
         Ok(fs) => fs,
-        Err(_) => return 0,
+        Err(_) => return TestResult::Pass,
     };
 
     let result = fs.create_directory(2, b"faildir");
     match result {
-        Err(Ext2Error::DeviceError) => 0,
-        _ => -1,
+        Err(Ext2Error::DeviceError) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_read_block_out_of_bounds() -> c_int {
+pub fn test_ext2_read_block_out_of_bounds() -> TestResult {
     let spec = Ext2ImageSpec {
         blocks: 64,
         inodes: 32,
@@ -440,26 +440,26 @@ pub fn test_ext2_read_block_out_of_bounds() -> c_int {
         file_block: 80,
     };
     let Some(mut device) = build_ext2_image(spec) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let inode = match fs.resolve_path(b"/boot.bin") {
         Ok(inode) => inode,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let result = fs.read_file(inode, 0, &mut [0u8; 1]);
     match result {
-        Err(Ext2Error::InvalidBlock) | Err(Ext2Error::DeviceError) => 0,
-        _ => -1,
+        Err(Ext2Error::InvalidBlock) | Err(Ext2Error::DeviceError) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_read_file_data_roundtrip() -> c_int {
+pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
     let spec = Ext2ImageSpec {
         blocks: 64,
         inodes: 32,
@@ -468,59 +468,59 @@ pub fn test_ext2_read_file_data_roundtrip() -> c_int {
         file_block: 7,
     };
     let Some(mut device) = build_ext2_image(spec) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let inode = match fs.resolve_path(b"/boot.bin") {
         Ok(inode) => inode,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let mut buf = [0u8; 16];
     let read_len = match fs.read_file(inode, 0, &mut buf) {
         Ok(len) => len,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     if read_len != b"slopos-test".len() || &buf[..read_len] != b"slopos-test" {
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_ext2_path_resolution_not_found() -> c_int {
+pub fn test_ext2_path_resolution_not_found() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let result = fs.resolve_path(b"/nope/file.txt");
     match result {
-        Err(Ext2Error::PathNotFound) => 0,
-        _ => -1,
+        Err(Ext2Error::PathNotFound) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 
-pub fn test_ext2_remove_path_not_file() -> c_int {
+pub fn test_ext2_remove_path_not_file() -> TestResult {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
+        return TestResult::Pass;
     };
     let mut fs = match Ext2Fs::init_internal(&mut device) {
         Ok(fs) => fs,
-        Err(_) => return -1,
+        Err(_) => return TestResult::Fail,
     };
 
     let result = fs.remove_path(b"/");
     match result {
-        Err(Ext2Error::PathNotFound) => 0,
-        _ => -1,
+        Err(Ext2Error::PathNotFound) => TestResult::Pass,
+        _ => TestResult::Fail,
     }
 }
 

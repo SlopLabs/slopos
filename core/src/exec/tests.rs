@@ -1,8 +1,7 @@
 //! exec() ELF loader tests - targeting untested code paths likely to have bugs.
 
-use core::ffi::c_int;
-
 use slopos_lib::klog_info;
+use slopos_lib::testing::TestResult;
 use slopos_mm::elf::{ELF_MAGIC, ElfValidator};
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm;
@@ -61,97 +60,97 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf
 }
 
-pub fn test_elf_invalid_magic() -> c_int {
+pub fn test_elf_invalid_magic() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[0] = 0x00; // Corrupt magic
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted invalid magic");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_wrong_class() -> c_int {
+pub fn test_elf_wrong_class() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[4] = 1; // 32-bit instead of 64-bit
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted 32-bit ELF");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_wrong_endian() -> c_int {
+pub fn test_elf_wrong_endian() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[5] = 2; // Big endian
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted big-endian ELF");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_wrong_machine() -> c_int {
+pub fn test_elf_wrong_machine() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[18..20].copy_from_slice(&0x03u16.to_le_bytes()); // i386 instead of x86_64
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted i386 ELF on x86_64");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_truncated_header() -> c_int {
+pub fn test_elf_truncated_header() -> TestResult {
     let elf = [0x7F, b'E', b'L', b'F', 2, 1, 1, 0]; // Only 8 bytes
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted truncated ELF");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_empty_file() -> c_int {
+pub fn test_elf_empty_file() -> TestResult {
     let elf: [u8; 0] = [];
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted empty file");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_no_load_segments() -> c_int {
+pub fn test_elf_no_load_segments() -> TestResult {
     let elf = create_minimal_elf_header();
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v,
-        Err(_) => return 0, // Expected to fail without segments
+        Err(_) => return TestResult::Pass, // Expected to fail without segments
     };
 
     let (_, count) = match validator.validate_load_segments() {
         Ok(segs) => segs,
-        Err(_) => return 0,
+        Err(_) => return TestResult::Pass,
     };
 
     if count > 0 {
         klog_info!("EXEC_TEST: BUG - Found segments in ELF with phnum=0");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_segment_overflow_vaddr() -> c_int {
+pub fn test_elf_segment_overflow_vaddr() -> TestResult {
     let elf = create_elf_with_load_segment(
         u64::MAX - 0x1000, // vaddr near overflow
         0x2000,            // memsz that would overflow
@@ -161,17 +160,17 @@ pub fn test_elf_segment_overflow_vaddr() -> c_int {
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
-        Err(_) => return 0,
+        Err(_) => return TestResult::Pass,
     };
 
     if validator.validate_load_segments().is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted segment with vaddr overflow");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_segment_filesz_greater_than_memsz() -> c_int {
+pub fn test_elf_segment_filesz_greater_than_memsz() -> TestResult {
     let elf = create_elf_with_load_segment(
         PROCESS_CODE_START_VA,
         0x1000, // memsz
@@ -181,17 +180,17 @@ pub fn test_elf_segment_filesz_greater_than_memsz() -> c_int {
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
-        Err(_) => return 0,
+        Err(_) => return TestResult::Pass,
     };
 
     if validator.validate_load_segments().is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted filesz > memsz");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_segment_offset_overflow() -> c_int {
+pub fn test_elf_segment_offset_overflow() -> TestResult {
     let elf = create_elf_with_load_segment(
         PROCESS_CODE_START_VA,
         0x1000,
@@ -201,17 +200,17 @@ pub fn test_elf_segment_offset_overflow() -> c_int {
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
-        Err(_) => return 0,
+        Err(_) => return TestResult::Pass,
     };
 
     if validator.validate_load_segments().is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted segment offset overflow");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_kernel_address_entry() -> c_int {
+pub fn test_elf_kernel_address_entry() -> TestResult {
     // Create an ELF with a kernel-space entry point AND a matching kernel-space
     // PT_LOAD segment.  The validator must reject the segment because it falls
     // in kernel address space.
@@ -225,37 +224,37 @@ pub fn test_elf_kernel_address_entry() -> c_int {
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
-        Err(_) => return 0, // Header rejection is also acceptable
+        Err(_) => return TestResult::Pass, // Header rejection is also acceptable
     };
 
     if validator.validate_load_segments().is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted segment in kernel address space");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_path_too_long() -> c_int {
+pub fn test_path_too_long() -> TestResult {
     let long_path = [b'a'; EXEC_MAX_PATH + 1];
 
     if long_path.len() <= EXEC_MAX_PATH {
         klog_info!("EXEC_TEST: Test setup error");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_path_empty() -> c_int {
+pub fn test_path_empty() -> TestResult {
     let empty_path: [u8; 0] = [];
 
     if !empty_path.is_empty() {
         klog_info!("EXEC_TEST: Test setup error");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_translate_address_kernel_to_user() -> c_int {
+pub fn test_translate_address_kernel_to_user() -> TestResult {
     use slopos_mm::process_vm::process_vm_translate_elf_address;
 
     let kernel_addr = 0xFFFF_FFFF_8000_1000u64;
@@ -266,18 +265,18 @@ pub fn test_translate_address_kernel_to_user() -> c_int {
 
     if translated >= 0xFFFF_8000_0000_0000 {
         klog_info!("EXEC_TEST: BUG - translate_address didn't move kernel addr to user space");
-        return -1;
+        return TestResult::Fail;
     }
 
     if translated < code_base {
         klog_info!("EXEC_TEST: BUG - translated address below code base");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_translate_address_user_passthrough() -> c_int {
+pub fn test_translate_address_user_passthrough() -> TestResult {
     use slopos_mm::process_vm::process_vm_translate_elf_address;
 
     let user_addr = 0x0000_0040_0000_1000u64;
@@ -288,24 +287,24 @@ pub fn test_translate_address_user_passthrough() -> c_int {
 
     if translated >= 0xFFFF_8000_0000_0000 {
         klog_info!("EXEC_TEST: BUG - user address translated to kernel space");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_process_vm_null_page_dir() -> c_int {
+pub fn test_process_vm_null_page_dir() -> TestResult {
     let pid = 9999; // Invalid process ID
     let page_dir = process_vm::process_vm_get_page_dir(pid);
 
     if !page_dir.is_null() {
         klog_info!("EXEC_TEST: BUG - Got non-null page dir for invalid process");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_huge_segment_count() -> c_int {
+pub fn test_elf_huge_segment_count() -> TestResult {
     let mut elf = create_minimal_elf_header();
     // e_phnum = 0xFFFF (maximum)
     elf[56..58].copy_from_slice(&0xFFFFu16.to_le_bytes());
@@ -315,13 +314,13 @@ pub fn test_elf_huge_segment_count() -> c_int {
         let validator = result.unwrap();
         if validator.validate_load_segments().is_ok() {
             klog_info!("EXEC_TEST: BUG - Accepted ELF with impossible segment count");
-            return -1;
+            return TestResult::Fail;
         }
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_elf_phentsize_mismatch() -> c_int {
+pub fn test_elf_phentsize_mismatch() -> TestResult {
     let mut elf = create_minimal_elf_header();
     // e_phentsize = 1 (way too small for a program header)
     elf[54..56].copy_from_slice(&1u16.to_le_bytes());
@@ -331,42 +330,42 @@ pub fn test_elf_phentsize_mismatch() -> c_int {
     if let Ok(validator) = result {
         if validator.validate_load_segments().is_ok() {
             klog_info!("EXEC_TEST: BUG - Accepted ELF with invalid phentsize");
-            return -1;
+            return TestResult::Fail;
         }
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_exec_max_size_boundary() -> c_int {
+pub fn test_exec_max_size_boundary() -> TestResult {
     let max_size = EXEC_MAX_ELF_SIZE;
     let over_max = EXEC_MAX_ELF_SIZE + 1;
 
     if max_size >= over_max {
         klog_info!("EXEC_TEST: Test constant error");
-        return -1;
+        return TestResult::Fail;
     }
 
     if max_size == 0 {
         klog_info!("EXEC_TEST: BUG - EXEC_MAX_ELF_SIZE is zero");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_init_path_is_absolute() -> c_int {
+pub fn test_init_path_is_absolute() -> TestResult {
     if INIT_PATH.first().copied() != Some(b'/') {
         klog_info!("EXEC_TEST: BUG - INIT_PATH must be absolute");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_init_path_within_exec_limit() -> c_int {
+pub fn test_init_path_within_exec_limit() -> TestResult {
     if INIT_PATH.is_empty() || INIT_PATH.len() > EXEC_MAX_PATH {
         klog_info!("EXEC_TEST: BUG - INIT_PATH length invalid");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
 slopos_lib::define_test_suite!(

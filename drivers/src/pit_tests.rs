@@ -1,5 +1,4 @@
-use core::ffi::c_int;
-
+use slopos_lib::testing::TestResult;
 use slopos_lib::{klog_info, testing::measure_elapsed_ms, tsc::rdtsc};
 
 use crate::pit::{pit_get_frequency, pit_poll_delay_ms};
@@ -8,7 +7,7 @@ const DELAY_TEST_ITERATIONS: usize = 50;
 const DELAY_MS: u32 = 10;
 const MIN_EXPECTED_MS: u32 = 3;
 
-pub fn test_pit_poll_delay_no_early_exit() -> c_int {
+pub fn test_pit_poll_delay_no_early_exit() -> TestResult {
     let mut early_exits = 0u32;
     let mut min_elapsed: u32 = u32::MAX;
 
@@ -35,13 +34,13 @@ pub fn test_pit_poll_delay_no_early_exit() -> c_int {
             min_elapsed,
             MIN_EXPECTED_MS
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_pit_poll_delay_timing_consistency() -> c_int {
+pub fn test_pit_poll_delay_timing_consistency() -> TestResult {
     let mut total_elapsed: u64 = 0;
     let mut max_deviation: i64 = 0;
 
@@ -69,13 +68,13 @@ pub fn test_pit_poll_delay_timing_consistency() -> c_int {
             max_deviation,
             DELAY_MS
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_pit_poll_delay_zero_ms() -> c_int {
+pub fn test_pit_poll_delay_zero_ms() -> TestResult {
     let start = rdtsc();
     pit_poll_delay_ms(0);
     let end = rdtsc();
@@ -86,18 +85,18 @@ pub fn test_pit_poll_delay_zero_ms() -> c_int {
             "PIT_TEST: BUG - zero delay took {}ms (should be instant)",
             elapsed
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_pit_frequency_valid() -> c_int {
+pub fn test_pit_frequency_valid() -> TestResult {
     let freq = pit_get_frequency();
 
     if freq == 0 {
         klog_info!("PIT_TEST: BUG - PIT frequency is zero (not initialized?)");
-        return -1;
+        return TestResult::Fail;
     }
 
     if freq > 10000 {
@@ -107,10 +106,10 @@ pub fn test_pit_frequency_valid() -> c_int {
         );
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_pit_poll_delay_stress() -> c_int {
+pub fn test_pit_poll_delay_stress() -> TestResult {
     let iterations = 100;
     let delay_ms = 10u32;
     let min_expected = 2u32;
@@ -141,10 +140,10 @@ pub fn test_pit_poll_delay_stress() -> c_int {
             failures,
             iterations
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 slopos_lib::define_test_suite!(

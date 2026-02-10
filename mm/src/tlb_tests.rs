@@ -7,9 +7,8 @@
 //! - handle_shootdown_ipi with invalid cpu_idx
 //! - Race conditions in broadcast_flush_request
 
-use core::ffi::c_int;
-
 use slopos_abi::addr::VirtAddr;
+use slopos_lib::testing::TestResult;
 use slopos_lib::{MAX_CPUS, klog_info};
 
 use crate::tlb::{
@@ -21,176 +20,176 @@ use crate::tlb::{
 // BASIC FLUSH OPERATION TESTS
 // =============================================================================
 
-pub fn test_flush_page_null_address() -> c_int {
+pub fn test_flush_page_null_address() -> TestResult {
     flush_page(VirtAddr::NULL);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_page_kernel_address() -> c_int {
+pub fn test_flush_page_kernel_address() -> TestResult {
     let kernel_addr = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     flush_page(kernel_addr);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_page_user_max_address() -> c_int {
+pub fn test_flush_page_user_max_address() -> TestResult {
     let user_max = VirtAddr::new(0x0000_7FFF_FFFF_F000);
     flush_page(user_max);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_page_high_kernel_address() -> c_int {
+pub fn test_flush_page_high_kernel_address() -> TestResult {
     // High canonical kernel address (valid but unusual)
     let high_kernel = VirtAddr::new(0xFFFF_FFFF_FFFF_0000);
     flush_page(high_kernel);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_range_empty() -> c_int {
+pub fn test_flush_range_empty() -> TestResult {
     let addr = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     // Start == end means empty range
     flush_range(addr, addr);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_range_inverted() -> c_int {
+pub fn test_flush_range_inverted() -> TestResult {
     // End < start - should be handled gracefully (probably no-op)
     let start = VirtAddr::new(0xFFFF_FFFF_8001_0000);
     let end = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     flush_range(start, end);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_range_single_page() -> c_int {
+pub fn test_flush_range_single_page() -> TestResult {
     let start = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     let end = VirtAddr::new(0xFFFF_FFFF_8000_1000); // 4KB
     flush_range(start, end);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_range_large() -> c_int {
+pub fn test_flush_range_large() -> TestResult {
     // Large range should trigger full TLB flush internally (>32 pages)
     let start = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     let end = VirtAddr::new(0xFFFF_FFFF_8010_0000); // 1MB = 256 pages
     flush_range(start, end);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_range_threshold_boundary() -> c_int {
+pub fn test_flush_range_threshold_boundary() -> TestResult {
     // Exactly at INVLPG_THRESHOLD (32 pages)
     let start = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     let end = VirtAddr::new(0xFFFF_FFFF_8002_0000); // 32 * 4KB = 128KB
     flush_range(start, end);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_all_basic() -> c_int {
+pub fn test_flush_all_basic() -> TestResult {
     flush_all();
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_asid_kernel_cr3() -> c_int {
+pub fn test_flush_asid_kernel_cr3() -> TestResult {
     // Flush with a fake CR3 value representing kernel address space
     let fake_asid = 0xFFFF_FFFF_0000_0000u64;
     flush_asid(fake_asid);
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_asid_zero() -> c_int {
+pub fn test_flush_asid_zero() -> TestResult {
     flush_asid(0);
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // TLB FLUSH BATCH TESTS
 // =============================================================================
 
-pub fn test_batch_empty_finish() -> c_int {
+pub fn test_batch_empty_finish() -> TestResult {
     let mut batch = TlbFlushBatch::new();
     batch.finish();
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_single_page() -> c_int {
+pub fn test_batch_single_page() -> TestResult {
     let mut batch = TlbFlushBatch::new();
     batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000));
     batch.finish();
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_multiple_pages() -> c_int {
+pub fn test_batch_multiple_pages() -> TestResult {
     let mut batch = TlbFlushBatch::new();
     for i in 0..10u64 {
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
     }
     batch.finish();
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_at_threshold() -> c_int {
+pub fn test_batch_at_threshold() -> TestResult {
     // Add exactly INVLPG_THRESHOLD pages (32)
     let mut batch = TlbFlushBatch::new();
     for i in 0..32u64 {
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
     }
     batch.finish();
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_overflow() -> c_int {
+pub fn test_batch_overflow() -> TestResult {
     // Add more than INVLPG_THRESHOLD pages - should trigger full flush
     let mut batch = TlbFlushBatch::new();
     for i in 0..64u64 {
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
     }
     batch.finish();
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_scattered_addresses() -> c_int {
+pub fn test_batch_scattered_addresses() -> TestResult {
     // Non-contiguous addresses should still work
     let mut batch = TlbFlushBatch::new();
     batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000));
     batch.add(VirtAddr::new(0xFFFF_FFFF_A000_0000));
     batch.add(VirtAddr::new(0xFFFF_8000_0000_0000));
     batch.finish();
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_drop_flushes() -> c_int {
+pub fn test_batch_drop_flushes() -> TestResult {
     // Batch should flush on drop if not finished
     {
         let mut batch = TlbFlushBatch::new();
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000));
         // Intentionally not calling finish - drop should handle it
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_batch_double_finish() -> c_int {
+pub fn test_batch_double_finish() -> TestResult {
     let mut batch = TlbFlushBatch::new();
     batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000));
     batch.finish();
     batch.finish();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // SMP STATE TESTS
 // =============================================================================
 
-pub fn test_is_smp_active_initial() -> c_int {
+pub fn test_is_smp_active_initial() -> TestResult {
     // Initially only BSP is active, so SMP should be inactive
     // But since tests run after kernel init, this may vary
     let _is_smp = is_smp_active();
-    0
+    TestResult::Pass
 }
 
-pub fn test_get_active_cpu_count() -> c_int {
+pub fn test_get_active_cpu_count() -> TestResult {
     let count = get_active_cpu_count();
 
     if count == 0 {
         klog_info!("TLB_TEST: BUG - active_cpu_count is 0, should be at least 1");
-        return -1;
+        return TestResult::Fail;
     }
 
     if count > MAX_CPUS as u32 {
@@ -199,84 +198,84 @@ pub fn test_get_active_cpu_count() -> c_int {
             count,
             MAX_CPUS
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_bsp_apic_id_from_pcr() -> c_int {
+pub fn test_bsp_apic_id_from_pcr() -> TestResult {
     let bsp_id = slopos_lib::get_bsp_apic_id();
     if bsp_id == u32::MAX {
         klog_info!("TLB_TEST: BUG - BSP APIC ID not set in PCR");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // HANDLE_SHOOTDOWN_IPI TESTS
 // =============================================================================
 
-pub fn test_handle_shootdown_ipi_cpu_zero() -> c_int {
+pub fn test_handle_shootdown_ipi_cpu_zero() -> TestResult {
     handle_shootdown_ipi(0);
-    0
+    TestResult::Pass
 }
 
-pub fn test_handle_shootdown_ipi_cpu_max_minus_one() -> c_int {
+pub fn test_handle_shootdown_ipi_cpu_max_minus_one() -> TestResult {
     handle_shootdown_ipi(MAX_CPUS - 1);
-    0
+    TestResult::Pass
 }
 
-pub fn test_handle_shootdown_ipi_cpu_overflow() -> c_int {
+pub fn test_handle_shootdown_ipi_cpu_overflow() -> TestResult {
     // CPU index >= MAX_CPUS should be handled gracefully
     handle_shootdown_ipi(MAX_CPUS);
     handle_shootdown_ipi(MAX_CPUS + 100);
     handle_shootdown_ipi(usize::MAX);
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // CPU FEATURE DETECTION TESTS
 // =============================================================================
 
-pub fn test_has_invpcid_consistent() -> c_int {
+pub fn test_has_invpcid_consistent() -> TestResult {
     // Call twice - should return same result (cached)
     let first = has_invpcid();
     let second = has_invpcid();
 
     if first != second {
         klog_info!("TLB_TEST: BUG - has_invpcid returned different values");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_has_pcid_consistent() -> c_int {
+pub fn test_has_pcid_consistent() -> TestResult {
     let first = has_pcid();
     let second = has_pcid();
 
     if first != second {
         klog_info!("TLB_TEST: BUG - has_pcid returned different values");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // CONSTANTS VALIDATION TESTS
 // =============================================================================
 
-pub fn test_tlb_shootdown_vector_valid() -> c_int {
+pub fn test_tlb_shootdown_vector_valid() -> TestResult {
     // Vector should be in valid IPI range (0x20-0xFE)
     if TLB_SHOOTDOWN_VECTOR < 0x20 {
         klog_info!(
             "TLB_TEST: BUG - TLB_SHOOTDOWN_VECTOR 0x{:x} conflicts with exceptions",
             TLB_SHOOTDOWN_VECTOR
         );
-        return -1;
+        return TestResult::Fail;
     }
 
     if TLB_SHOOTDOWN_VECTOR > 0xFE {
@@ -284,16 +283,16 @@ pub fn test_tlb_shootdown_vector_valid() -> c_int {
             "TLB_TEST: BUG - TLB_SHOOTDOWN_VECTOR 0x{:x} is invalid (> 0xFE)",
             TLB_SHOOTDOWN_VECTOR
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_max_cpus_reasonable() -> c_int {
+pub fn test_max_cpus_reasonable() -> TestResult {
     if MAX_CPUS < 1 {
         klog_info!("TLB_TEST: BUG - MAX_CPUS is 0");
-        return -1;
+        return TestResult::Fail;
     }
 
     if MAX_CPUS > 1024 {
@@ -303,73 +302,73 @@ pub fn test_max_cpus_reasonable() -> c_int {
         );
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // FLUSH TYPE CONVERSION TESTS
 // =============================================================================
 
-pub fn test_flush_type_from_valid() -> c_int {
+pub fn test_flush_type_from_valid() -> TestResult {
     if FlushType::from(0) != FlushType::None {
         klog_info!("TLB_TEST: FlushType::from(0) != None");
-        return -1;
+        return TestResult::Fail;
     }
     if FlushType::from(1) != FlushType::SinglePage {
         klog_info!("TLB_TEST: FlushType::from(1) != SinglePage");
-        return -1;
+        return TestResult::Fail;
     }
     if FlushType::from(2) != FlushType::Range {
         klog_info!("TLB_TEST: FlushType::from(2) != Range");
-        return -1;
+        return TestResult::Fail;
     }
     if FlushType::from(3) != FlushType::Full {
         klog_info!("TLB_TEST: FlushType::from(3) != Full");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_flush_type_from_invalid() -> c_int {
+pub fn test_flush_type_from_invalid() -> TestResult {
     // Invalid values should map to None
     if FlushType::from(4) != FlushType::None {
         klog_info!("TLB_TEST: FlushType::from(4) != None");
-        return -1;
+        return TestResult::Fail;
     }
     if FlushType::from(255) != FlushType::None {
         klog_info!("TLB_TEST: FlushType::from(255) != None");
-        return -1;
+        return TestResult::Fail;
     }
     if FlushType::from(u32::MAX) != FlushType::None {
         klog_info!("TLB_TEST: FlushType::from(u32::MAX) != None");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
 // STRESS TESTS
 // =============================================================================
 
-pub fn test_rapid_flush_pages() -> c_int {
+pub fn test_rapid_flush_pages() -> TestResult {
     // Rapidly flush many pages - potential race condition finder
     for i in 0..100u64 {
         flush_page(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_rapid_flush_all() -> c_int {
+pub fn test_rapid_flush_all() -> TestResult {
     // Multiple full flushes in quick succession
     for _ in 0..10 {
         flush_all();
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_interleaved_flush_operations() -> c_int {
+pub fn test_interleaved_flush_operations() -> TestResult {
     // Mix different flush operations
     flush_page(VirtAddr::new(0xFFFF_FFFF_8000_0000));
     flush_all();
@@ -379,7 +378,7 @@ pub fn test_interleaved_flush_operations() -> c_int {
     );
     flush_page(VirtAddr::new(0xFFFF_FFFF_8003_0000));
     flush_asid(0);
-    0
+    TestResult::Pass
 }
 
 slopos_lib::define_test_suite!(

@@ -1,9 +1,10 @@
 //! IRQ dispatch tests - targeting untested edge cases and error paths.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 use core::ptr;
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
+use slopos_lib::testing::TestResult;
 use slopos_lib::{InterruptFrame, klog_info};
 
 use crate::irq::{
@@ -11,13 +12,13 @@ use crate::irq::{
     is_masked, mask_irq_line, register_handler, unmask_irq_line, unregister_handler,
 };
 
-pub fn test_irq_register_invalid_line() -> c_int {
+pub fn test_irq_register_invalid_line() -> TestResult {
     extern "C" fn dummy_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
 
     let result = register_handler(255, Some(dummy_handler), ptr::null_mut(), ptr::null());
     if result == 0 {
         klog_info!("IRQ_TEST: BUG - Accepted registration for invalid IRQ line 255");
-        return -1;
+        return TestResult::Fail;
     }
 
     let result2 = register_handler(
@@ -28,13 +29,13 @@ pub fn test_irq_register_invalid_line() -> c_int {
     );
     if result2 == 0 {
         klog_info!("IRQ_TEST: BUG - Accepted registration for IRQ line at boundary");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_register_null_handler() -> c_int {
+pub fn test_irq_register_null_handler() -> TestResult {
     let result = register_handler(5, None, ptr::null_mut(), ptr::null());
 
     if result != 0 {
@@ -42,10 +43,10 @@ pub fn test_irq_register_null_handler() -> c_int {
     }
 
     unregister_handler(5);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_double_register() -> c_int {
+pub fn test_irq_double_register() -> TestResult {
     extern "C" fn handler1(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
     extern "C" fn handler2(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
 
@@ -57,7 +58,7 @@ pub fn test_irq_double_register() -> c_int {
     );
     if r1 != 0 {
         klog_info!("IRQ_TEST: First registration failed");
-        return -1;
+        return TestResult::Fail;
     }
 
     let _r2 = register_handler(
@@ -68,16 +69,16 @@ pub fn test_irq_double_register() -> c_int {
     );
 
     unregister_handler(6);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_unregister_never_registered() -> c_int {
+pub fn test_irq_unregister_never_registered() -> TestResult {
     unregister_handler(7);
     unregister_handler(7);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_stats_invalid_line() -> c_int {
+pub fn test_irq_stats_invalid_line() -> TestResult {
     let mut stats = IrqStats {
         count: 0xDEAD,
         last_timestamp: 0xBEEF,
@@ -86,86 +87,86 @@ pub fn test_irq_stats_invalid_line() -> c_int {
     let result = get_stats(255, &mut stats);
     if result == 0 {
         klog_info!("IRQ_TEST: BUG - get_stats succeeded for invalid IRQ line");
-        return -1;
+        return TestResult::Fail;
     }
 
     let result2 = get_stats(IRQ_LINES as u8, &mut stats);
     if result2 == 0 {
         klog_info!("IRQ_TEST: BUG - get_stats succeeded for boundary IRQ line");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_stats_null_output() -> c_int {
+pub fn test_irq_stats_null_output() -> TestResult {
     let result = get_stats(0, ptr::null_mut());
     if result == 0 {
         klog_info!("IRQ_TEST: BUG - get_stats succeeded with null output");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_mask_unmask_invalid() -> c_int {
+pub fn test_irq_mask_unmask_invalid() -> TestResult {
     mask_irq_line(255);
     unmask_irq_line(255);
     mask_irq_line(IRQ_LINES as u8 + 10);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_is_masked_boundary() -> c_int {
+pub fn test_irq_is_masked_boundary() -> TestResult {
     let masked = is_masked(255);
     if !masked {
         klog_info!("IRQ_TEST: BUG - Invalid IRQ line should report as masked");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_route_invalid() -> c_int {
+pub fn test_irq_route_invalid() -> TestResult {
     let route = get_irq_route(255);
     if route.is_some() {
         klog_info!("IRQ_TEST: BUG - Got route for invalid IRQ line");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_enable_disable_invalid() -> c_int {
+pub fn test_irq_enable_disable_invalid() -> TestResult {
     enable_line(255);
     disable_line(255);
     enable_line(IRQ_LINES as u8 + 5);
     disable_line(IRQ_LINES as u8 + 5);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_initialized_flag() -> c_int {
+pub fn test_irq_initialized_flag() -> TestResult {
     let initialized = is_initialized();
     if !initialized {
         klog_info!("IRQ_TEST: WARNING - IRQ system not initialized when tests run");
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_rapid_register_unregister() -> c_int {
+pub fn test_irq_rapid_register_unregister() -> TestResult {
     extern "C" fn rapid_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
 
     for _ in 0..100 {
         let _ = register_handler(8, Some(rapid_handler), ptr::null_mut(), ptr::null());
         unregister_handler(8);
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_all_lines_mask_state() -> c_int {
+pub fn test_irq_all_lines_mask_state() -> TestResult {
     for irq in 0..IRQ_LINES as u8 {
         let _ = is_masked(irq);
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_stats_valid_line() -> c_int {
+pub fn test_irq_stats_valid_line() -> TestResult {
     let mut stats = IrqStats {
         count: 0,
         last_timestamp: 0,
@@ -174,12 +175,12 @@ pub fn test_irq_stats_valid_line() -> c_int {
     let result = get_stats(0, &mut stats);
     if result != 0 {
         klog_info!("IRQ_TEST: BUG - get_stats failed for valid IRQ line 0");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_context_pointer_preserved() -> c_int {
+pub fn test_irq_context_pointer_preserved() -> TestResult {
     static mut CONTEXT_VALUE: u64 = 0;
     static mut HANDLER_CALLED: bool = false;
 
@@ -198,14 +199,14 @@ pub fn test_irq_context_pointer_preserved() -> c_int {
     let result = register_handler(9, Some(context_handler), ctx_ptr, ptr::null());
     if result != 0 {
         klog_info!("IRQ_TEST: Failed to register context test handler");
-        return -1;
+        return TestResult::Fail;
     }
 
     unregister_handler(9);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_handler_with_long_name() -> c_int {
+pub fn test_irq_handler_with_long_name() -> TestResult {
     extern "C" fn long_name_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
 
     let long_name =
@@ -219,22 +220,22 @@ pub fn test_irq_handler_with_long_name() -> c_int {
     );
 
     unregister_handler(10);
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_timer_ticks_accessible() -> c_int {
+pub fn test_irq_timer_ticks_accessible() -> TestResult {
     let ticks = irq::get_timer_ticks();
     let _ = ticks;
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_keyboard_events_accessible() -> c_int {
+pub fn test_irq_keyboard_events_accessible() -> TestResult {
     let events = irq::get_keyboard_event_counter();
     let _ = events;
-    0
+    TestResult::Pass
 }
 
-pub fn test_irq_vector_calculation() -> c_int {
+pub fn test_irq_vector_calculation() -> TestResult {
     for irq in 0..IRQ_LINES as u8 {
         let expected_vector = (IRQ_BASE_VECTOR as u32) + (irq as u32);
         if expected_vector > 255 {
@@ -243,10 +244,10 @@ pub fn test_irq_vector_calculation() -> c_int {
                 irq,
                 expected_vector
             );
-            return -1;
+            return TestResult::Fail;
         }
     }
-    0
+    TestResult::Pass
 }
 
 slopos_lib::define_test_suite!(

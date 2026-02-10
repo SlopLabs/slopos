@@ -1,5 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
+
 use core::ptr;
+use slopos_lib::testing::TestResult;
 
 use slopos_lib::klog_info;
 use slopos_lib::string;
@@ -161,7 +163,7 @@ pub fn run_scheduler_test() -> c_int {
  * PRIVILEGE SEPARATION TEST
  * ======================================================================== */
 
-pub fn run_privilege_separation_invariant_test() -> c_int {
+pub fn run_privilege_separation_invariant_test() -> TestResult {
     klog_info!("PRIVSEP_TEST: Checking privilege separation invariants");
 
     if crate::task::init_task_manager() != 0
@@ -169,7 +171,7 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
         || scheduler::create_idle_task() != 0
     {
         klog_info!("PRIVSEP_TEST: init failed");
-        return -1;
+        return TestResult::Fail;
     }
 
     let user_task_id = task_create(
@@ -181,13 +183,13 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
     );
     if user_task_id == INVALID_TASK_ID {
         klog_info!("PRIVSEP_TEST: user task creation failed");
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut task_info: *mut Task = ptr::null_mut();
     if task_get_info(user_task_id, &mut task_info) != 0 || task_info.is_null() {
         klog_info!("PRIVSEP_TEST: task lookup failed");
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut failed = 0;
@@ -242,11 +244,11 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
 
     if failed != 0 {
         klog_info!("PRIVSEP_TEST: FAILED");
-        return -1;
+        return TestResult::Fail;
     }
 
     klog_info!("PRIVSEP_TEST: PASSED");
-    0
+    TestResult::Pass
 }
 
 /* ========================================================================
