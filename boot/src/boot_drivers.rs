@@ -53,14 +53,6 @@ fn boot_video_backend() -> video::VideoBackend {
     }
 }
 
-fn boot_step_debug_subsystem_fn() {
-    klog_debug!("Debug/logging subsystem initialized.");
-}
-
-fn boot_step_gdt_setup_fn() {
-    klog_debug!("GDT/TSS already initialized via PCR in early boot.");
-}
-
 fn boot_step_idt_setup_fn() {
     klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
@@ -236,20 +228,6 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     rc
 }
 
-crate::boot_init!(
-    BOOT_STEP_DEBUG_SUBSYSTEM,
-    drivers,
-    b"debug\0",
-    boot_step_debug_subsystem_fn,
-    flags = boot_init_priority(10)
-);
-crate::boot_init!(
-    BOOT_STEP_GDT_SETUP,
-    drivers,
-    b"gdt/tss\0",
-    boot_step_gdt_setup_fn,
-    flags = boot_init_priority(20)
-);
 crate::boot_init!(
     BOOT_STEP_IDT_SETUP,
     drivers,

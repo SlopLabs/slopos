@@ -92,27 +92,23 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     if task_shutdown_all() != 0 {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
-    // scheduler_set_current_task removed - no longer needed
 
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();
 
-    klog_info!("Kernel shutdown complete. Coordinating APIC shutdown and halting processors.");
+    klog_info!("Kernel shutdown complete.");
 
-    poweroff_hardware();
     halt();
 }
 
+/// Terminal halt: attempt ACPI power-off, then spin forever.
+///
+/// All quiescing (IPI broadcast, APIC teardown, serial drain) must be
+/// performed *before* calling this function — it exists solely to cut
+/// the power and park the BSP.  Callers are `kernel_shutdown` and
+/// `kernel_reboot`, both of which route through `kernel_quiesce_interrupts`
+/// first.
 fn halt() -> ! {
-    // Contact APIC for proper shutdown coordination
-    if apic::is_available() {
-        apic::send_ipi_halt_all();
-        // Small delay to allow IPIs to be delivered
-        for _ in 0..100 {
-            cpu::pause();
-        }
-    }
-
     poweroff_hardware();
 
     loop {

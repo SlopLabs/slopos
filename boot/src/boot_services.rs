@@ -1,4 +1,4 @@
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::klog_info;
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
 use slopos_core::exec;
@@ -9,7 +9,6 @@ use slopos_drivers::virtio_blk;
 use slopos_fs::{
     ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,
 };
-use slopos_video::framebuffer::get_display_info;
 
 fn boot_step_task_manager_init_wrapper() -> i32 {
     boot_step_task_manager_init()
@@ -111,26 +110,10 @@ fn boot_step_mark_kernel_ready_fn() {
     klog_info!("Kernel core services initialized.");
 }
 
-fn boot_step_framebuffer_demo_fn() {
-    if get_display_info().is_none() {
-        klog_info!("Graphics demo: framebuffer not initialized, skipping");
-        return;
-    }
-
-    klog_debug!("Graphics demo: framebuffer validation complete");
-}
-
 crate::boot_init!(
     BOOT_STEP_MARK_READY,
     services,
     b"mark ready\0",
     boot_step_mark_kernel_ready_fn,
     flags = boot_init_priority(60)
-);
-crate::boot_init!(
-    BOOT_STEP_FRAMEBUFFER_DEMO,
-    optional,
-    b"wheel of fate\0",
-    boot_step_framebuffer_demo_fn,
-    optional
 );
