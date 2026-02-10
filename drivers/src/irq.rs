@@ -1,6 +1,6 @@
 use core::ffi::c_void;
 
-use crate::ioapic_defs::{
+use crate::ioapic::regs::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };

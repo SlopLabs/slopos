@@ -1,12 +1,14 @@
+pub(crate) mod regs;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Once;
 
 use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
-use crate::apic_defs::*;
+use regs::*;
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::cpu::apic_defs::ApicBaseMsr;
+use slopos_lib::cpu::apic_msr::ApicBaseMsr;
 use slopos_lib::cpu::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_lib::cpu::msr::Msr;
 use slopos_mm::mmio::MmioRegion;
@@ -42,7 +44,6 @@ pub fn detect() -> bool {
     let apic_phys = apic_base_msr & ApicBaseMsr::ADDR_MASK;
     APIC_BASE_PHYSICAL.store(apic_phys, Ordering::Relaxed);
 
-    // Map APIC registers via MmioRegion
     let phys_addr = PhysAddr::new(apic_phys);
     match MmioRegion::map(phys_addr, APIC_REGION_SIZE) {
         Some(region) => {

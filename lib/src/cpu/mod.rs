@@ -1,4 +1,4 @@
-pub mod apic_defs;
+pub mod apic_msr;
 pub mod control_regs;
 pub mod core;
 pub mod cpuid;
@@ -9,7 +9,7 @@ pub mod stack;
 pub mod tlb;
 
 pub use self::core::*;
-pub use apic_defs::*;
+pub use apic_msr::*;
 pub use control_regs::*;
 pub use cpuid::*;
 pub use interrupts::*;

@@ -2,12 +2,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod apic;
-pub mod apic_defs;
 pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;
-pub mod ioapic_defs;
-pub mod ioapic_tests;
 pub mod irq;
 pub mod pci;
 pub mod pci_defs;

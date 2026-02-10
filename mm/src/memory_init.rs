@@ -23,7 +23,7 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use slopos_abi::DisplayInfo;
 use slopos_lib::boot_info::LimineMemmapResponse;
-use slopos_lib::cpu::apic_defs::ApicBaseMsr;
+use slopos_lib::cpu::apic_msr::ApicBaseMsr;
 use slopos_lib::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
 use slopos_lib::cpu::msr::Msr;
 use slopos_lib::{InitFlag, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};

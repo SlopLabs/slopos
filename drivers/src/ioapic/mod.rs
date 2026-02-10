@@ -1,9 +1,12 @@
+pub(crate) mod regs;
+pub mod tests;
+
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
 
-use crate::ioapic_defs::*;
+use regs::*;
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMode};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
