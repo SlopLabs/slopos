@@ -589,14 +589,27 @@ pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     panic_with_frame("General protection fault", frame);
 }
+/// Attempt to resolve a page fault via CoW or demand paging.
+///
+/// This is the **single authority** for recoverable user-space page fault
+/// resolution.  It is called from `common_exception_handler_impl` before the
+/// exception handler dispatch; a `true` return means the fault was resolved
+/// in-place and execution can resume.
+///
+/// Returns `false` for any non-recoverable case (kernel faults, IST guard
+/// hits, missing task/page-dir, or failed resolution) — the caller must then
+/// fall through to the diagnostic / terminate / panic path in
+/// `exception_page_fault`.
 fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
     let fault_addr = cpu::read_cr2();
     let frame_ref = unsafe { &*frame };
 
+    // IST guard page hit → not recoverable here (diagnosed later).
     if ist_stacks::ist_guard_fault(fault_addr, core::ptr::null_mut()) != 0 {
         return false;
     }
 
+    // Kernel-mode faults are never transparently resolved.
     if !in_user(frame_ref) {
         return false;
     }
@@ -612,12 +625,14 @@ fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
         return false;
     }
 
+    // Copy-on-Write resolution.
     if cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr) {
         if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
             return true;
         }
     }
 
+    // Demand paging resolution.
     if demand::is_demand_fault(frame_ref.error_code, pid, fault_addr) {
         if demand::handle_demand_fault(page_dir, pid, fault_addr, frame_ref.error_code).is_ok() {
             return true;
@@ -627,8 +642,14 @@ fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
     false
 }
 
+/// Unrecoverable page fault handler.
+///
+/// By the time this runs, `try_handle_page_fault` has already attempted (and
+/// failed) CoW and demand-paging resolution.  This function only performs
+/// diagnostics and terminates the faulting context (user task or kernel panic).
 pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     let fault_addr = cpu::read_cr2();
+    let frame_ref = unsafe { &*frame };
 
     let mut stack_name: *const c_char = core::ptr::null();
     if ist_stacks::ist_guard_fault(fault_addr, &mut stack_name) != 0 {
@@ -642,31 +663,7 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
         return;
     }
 
-    let frame_ref = unsafe { &*frame };
     let from_user = in_user(frame_ref);
-
-    if from_user {
-        let task_ptr = scheduler_get_current_task() as *mut Task;
-        if !task_ptr.is_null() {
-            let pid = unsafe { (*task_ptr).process_id };
-            let page_dir = process_vm::process_vm_get_page_dir(pid);
-            if !page_dir.is_null() {
-                if cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr) {
-                    if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
-                        return;
-                    }
-                }
-
-                if demand::is_demand_fault(frame_ref.error_code, pid, fault_addr) {
-                    if demand::handle_demand_fault(page_dir, pid, fault_addr, frame_ref.error_code)
-                        .is_ok()
-                    {
-                        return;
-                    }
-                }
-            }
-        }
-    }
 
     klog_info!("FATAL: Page fault");
     klog_info!("Fault address: 0x{:x}", fault_addr);
@@ -694,66 +691,10 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     );
 
     if from_user {
-        let mut pid = INVALID_TASK_ID;
-        let mut cr3 = 0u64;
-        let mut fault_phys = PhysAddr::NULL;
-        let mut rsp_phys = PhysAddr::NULL;
-        let mut rip_phys = PhysAddr::NULL;
-        let mut ctx_rip = 0u64;
-        let mut ctx_rsp = 0u64;
-        let task_ptr = scheduler_get_current_task() as *mut Task;
-        if !task_ptr.is_null() {
-            pid = unsafe { (*task_ptr).process_id };
-            unsafe {
-                // TaskContext is packed, use addr_of! to get raw pointers
-                ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rip));
-                ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rsp));
-            }
-            let dir = process_vm::process_vm_get_page_dir(pid);
-            if !dir.is_null() {
-                cr3 = unsafe { (*dir).pml4_phys.as_u64() };
-                fault_phys = paging::virt_to_phys_process(VirtAddr::new(fault_addr), dir);
-                rsp_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rsp), dir);
-                rip_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rip), dir);
-            }
-        }
-        if !rsp_phys.is_null() {
-            if let Some(base_addr) = rsp_phys.to_virt_checked() {
-                let base = base_addr.as_u64() as *const u64;
-                unsafe {
-                    let s0 = core::ptr::read_unaligned(base);
-                    let s1 = core::ptr::read_unaligned(base.add(1));
-                    let s2 = core::ptr::read_unaligned(base.add(2));
-                    klog_info!(
-                        "User PF stack top: [0]=0x{:x} [1]=0x{:x} [2]=0x{:x}",
-                        s0,
-                        s1,
-                        s2
-                    );
-                }
-            } else {
-                klog_info!(
-                    "User PF stack top unavailable (phys 0x{:x} unmapped)",
-                    rsp_phys.as_u64()
-                );
-            }
-        }
-        klog_info!(
-            "User PF debug: pid={} cr3=0x{:x} fault_phys=0x{:x} rip_phys=0x{:x} rsp_phys=0x{:x}",
-            pid,
-            cr3,
-            fault_phys.as_u64(),
-            rip_phys.as_u64(),
-            rsp_phys.as_u64()
-        );
-        klog_info!(
-            "User PF context snapshot: rip=0x{:x} rsp=0x{:x}",
-            ctx_rip,
-            ctx_rsp
-        );
+        log_user_page_fault_diagnostics(frame_ref, fault_addr);
         terminate_user_task(
             TaskFaultReason::UserPage,
-            unsafe { &*frame },
+            frame_ref,
             cstr_from_bytes(b"user page fault\0"),
         );
         return;
@@ -761,6 +702,68 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
 
     kdiag_dump_interrupt_frame(frame);
     panic_with_frame("Page fault", frame);
+}
+
+fn log_user_page_fault_diagnostics(frame_ref: &slopos_lib::InterruptFrame, fault_addr: u64) {
+    let mut pid = INVALID_TASK_ID;
+    let mut cr3 = 0u64;
+    let mut fault_phys = PhysAddr::NULL;
+    let mut rsp_phys = PhysAddr::NULL;
+    let mut rip_phys = PhysAddr::NULL;
+    let mut ctx_rip = 0u64;
+    let mut ctx_rsp = 0u64;
+
+    let task_ptr = scheduler_get_current_task() as *mut Task;
+    if !task_ptr.is_null() {
+        pid = unsafe { (*task_ptr).process_id };
+        unsafe {
+            ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rip));
+            ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rsp));
+        }
+        let dir = process_vm::process_vm_get_page_dir(pid);
+        if !dir.is_null() {
+            cr3 = unsafe { (*dir).pml4_phys.as_u64() };
+            fault_phys = paging::virt_to_phys_process(VirtAddr::new(fault_addr), dir);
+            rsp_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rsp), dir);
+            rip_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rip), dir);
+        }
+    }
+
+    if !rsp_phys.is_null() {
+        if let Some(base_addr) = rsp_phys.to_virt_checked() {
+            let base = base_addr.as_u64() as *const u64;
+            unsafe {
+                let s0 = core::ptr::read_unaligned(base);
+                let s1 = core::ptr::read_unaligned(base.add(1));
+                let s2 = core::ptr::read_unaligned(base.add(2));
+                klog_info!(
+                    "User PF stack top: [0]=0x{:x} [1]=0x{:x} [2]=0x{:x}",
+                    s0,
+                    s1,
+                    s2
+                );
+            }
+        } else {
+            klog_info!(
+                "User PF stack top unavailable (phys 0x{:x} unmapped)",
+                rsp_phys.as_u64()
+            );
+        }
+    }
+
+    klog_info!(
+        "User PF debug: pid={} cr3=0x{:x} fault_phys=0x{:x} rip_phys=0x{:x} rsp_phys=0x{:x}",
+        pid,
+        cr3,
+        fault_phys.as_u64(),
+        rip_phys.as_u64(),
+        rsp_phys.as_u64()
+    );
+    klog_info!(
+        "User PF context snapshot: rip=0x{:x} rsp=0x{:x}",
+        ctx_rip,
+        ctx_rsp
+    );
 }
 pub fn exception_fpu_error(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: x87 FPU error");
