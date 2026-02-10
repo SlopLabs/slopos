@@ -19,10 +19,13 @@ use super::scheduler::{
     scheduler_shutdown, scheduler_timer_tick, unschedule_task,
 };
 use super::task::{
-    INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE,
-    TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create,
-    task_find_by_id, task_get_info, task_set_state, task_shutdown_all, task_terminate,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
+    TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create, task_find_by_id,
+    task_get_info, task_set_state, task_shutdown_all, task_terminate,
 };
+use slopos_abi::arch::{SYSCALL_VECTOR, SegmentSelector};
+use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 
 // =============================================================================
 // RAII Fixture for Scheduler Tests
@@ -1457,6 +1460,80 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     TestResult::Pass
 }
 
+// =============================================================================
+// PRIVILEGE SEPARATION TESTS
+// Verify that user-mode tasks get correct segment selectors, process VM,
+// kernel RSP0 stack, and that the syscall gate has DPL=3.
+// =============================================================================
+
+/// Test: User-mode tasks are created with correct privilege separation invariants.
+pub fn test_privilege_separation_invariants() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let user_task_id = task_create(
+        b"UserStub\0".as_ptr() as *const c_char,
+        unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) },
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_USER_MODE,
+    );
+    if user_task_id == INVALID_TASK_ID {
+        klog_info!("SCHED_TEST: user task creation failed");
+        return TestResult::Fail;
+    }
+
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(user_task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        klog_info!("SCHED_TEST: user task lookup failed");
+        return TestResult::Fail;
+    }
+
+    unsafe {
+        if (*task_ptr).process_id == INVALID_PROCESS_ID {
+            klog_info!("SCHED_TEST: user task missing process VM");
+            return TestResult::Fail;
+        }
+        if (*task_ptr).kernel_stack_top == 0 {
+            klog_info!("SCHED_TEST: user task missing kernel RSP0 stack");
+            return TestResult::Fail;
+        }
+        let cs = (*task_ptr).context.cs;
+        let ss = (*task_ptr).context.ss;
+        if cs != SegmentSelector::USER_CODE.bits() as u64
+            || ss != SegmentSelector::USER_DATA.bits() as u64
+        {
+            klog_info!(
+                "SCHED_TEST: user selectors wrong (cs=0x{:x} ss=0x{:x})",
+                cs,
+                ss
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    let mut gate = IdtEntry {
+        offset_low: 0,
+        selector: 0,
+        ist: 0,
+        type_attr: 0,
+        offset_mid: 0,
+        offset_high: 0,
+        zero: 0,
+    };
+    let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
+    if crate::platform::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
+        klog_info!("SCHED_TEST: cannot read syscall gate");
+        return TestResult::Fail;
+    }
+    let dpl = (gate.type_attr >> 5) & 0x3;
+    if dpl != 3 {
+        klog_info!("SCHED_TEST: syscall gate DPL={} expected 3", dpl as u32);
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     sched_core,
     [
@@ -1496,5 +1573,6 @@ slopos_lib::define_test_suite!(
         test_timer_tick_drains_inbox,
         test_remote_inbox_drops_non_ready_tasks,
         test_cross_cpu_schedule_lockfree,
+        test_privilege_separation_invariants,
     ]
 );
