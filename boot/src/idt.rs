@@ -358,7 +358,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let critical = is_critical_exception_internal(vector);
     unsafe {
         if critical || !matches!(CURRENT_EXCEPTION_MODE, ExceptionMode::Test) {
-            let name = get_exception_name(vector);
+            let name = slopos_lib::arch::exception::get_exception_name(vector);
             klog_info!("EXCEPTION: Vector {} ({})", vector, name);
         }
     }
@@ -372,58 +372,34 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     handler(frame);
 }
-pub fn get_exception_name(vector: u8) -> &'static str {
-    match vector {
-        0 => "Divide Error",
-        1 => "Debug",
-        2 => "Non-Maskable Interrupt",
-        3 => "Breakpoint",
-        4 => "Overflow",
-        5 => "Bound Range Exceeded",
-        6 => "Invalid Opcode",
-        7 => "Device Not Available",
-        8 => "Double Fault",
-        9 => "Coprocessor Segment Overrun",
-        10 => "Invalid TSS",
-        11 => "Segment Not Present",
-        12 => "Stack Segment Fault",
-        13 => "General Protection Fault",
-        14 => "Page Fault",
-        15 => "Reserved",
-        16 => "x87 FPU Error",
-        17 => "Alignment Check",
-        18 => "Machine Check",
-        19 => "SIMD Floating-Point Exception",
-        20 => "Virtualization Exception",
-        21 => "Control Protection Exception",
-        22..=31 => "Reserved",
-        _ => "Unknown",
-    }
-}
-
 fn initialize_handler_tables() {
     unsafe {
         PANIC_HANDLERS = [exception_default_panic; 32];
         OVERRIDE_HANDLERS = [None; 32];
 
-        PANIC_HANDLERS[EXCEPTION_DIVIDE_ERROR as usize] = exception_divide_error;
-        PANIC_HANDLERS[EXCEPTION_DEBUG as usize] = exception_debug;
-        PANIC_HANDLERS[EXCEPTION_NMI as usize] = exception_nmi;
-        PANIC_HANDLERS[EXCEPTION_BREAKPOINT as usize] = exception_breakpoint;
-        PANIC_HANDLERS[EXCEPTION_OVERFLOW as usize] = exception_overflow;
-        PANIC_HANDLERS[EXCEPTION_BOUND_RANGE as usize] = exception_bound_range;
+        // Fatal: log name, dump frame, panic.
+        PANIC_HANDLERS[EXCEPTION_DIVIDE_ERROR as usize] = exception_fatal;
+        PANIC_HANDLERS[EXCEPTION_NMI as usize] = exception_fatal;
+        PANIC_HANDLERS[EXCEPTION_DOUBLE_FAULT as usize] = exception_fatal;
+        PANIC_HANDLERS[EXCEPTION_INVALID_TSS as usize] = exception_fatal;
+        PANIC_HANDLERS[EXCEPTION_SEGMENT_NOT_PRES as usize] = exception_fatal;
+        PANIC_HANDLERS[EXCEPTION_STACK_FAULT as usize] = exception_fatal;
+        PANIC_HANDLERS[EXCEPTION_MACHINE_CHECK as usize] = exception_fatal;
+
+        // Non-fatal: log name, dump frame, resume.
+        PANIC_HANDLERS[EXCEPTION_DEBUG as usize] = exception_nonfatal;
+        PANIC_HANDLERS[EXCEPTION_BREAKPOINT as usize] = exception_nonfatal;
+        PANIC_HANDLERS[EXCEPTION_OVERFLOW as usize] = exception_nonfatal;
+        PANIC_HANDLERS[EXCEPTION_BOUND_RANGE as usize] = exception_nonfatal;
+        PANIC_HANDLERS[EXCEPTION_FPU_ERROR as usize] = exception_nonfatal;
+        PANIC_HANDLERS[EXCEPTION_ALIGNMENT_CHECK as usize] = exception_nonfatal;
+        PANIC_HANDLERS[EXCEPTION_SIMD_FP_EXCEPTION as usize] = exception_nonfatal;
+
+        // Specialized: user-mode check before fatal/nonfatal fallback.
         PANIC_HANDLERS[EXCEPTION_INVALID_OPCODE as usize] = exception_invalid_opcode;
         PANIC_HANDLERS[EXCEPTION_DEVICE_NOT_AVAIL as usize] = exception_device_not_available;
-        PANIC_HANDLERS[EXCEPTION_DOUBLE_FAULT as usize] = exception_double_fault;
-        PANIC_HANDLERS[EXCEPTION_INVALID_TSS as usize] = exception_invalid_tss;
-        PANIC_HANDLERS[EXCEPTION_SEGMENT_NOT_PRES as usize] = exception_segment_not_present;
-        PANIC_HANDLERS[EXCEPTION_STACK_FAULT as usize] = exception_stack_fault;
         PANIC_HANDLERS[EXCEPTION_GENERAL_PROTECTION as usize] = exception_general_protection;
         PANIC_HANDLERS[EXCEPTION_PAGE_FAULT as usize] = exception_page_fault;
-        PANIC_HANDLERS[EXCEPTION_FPU_ERROR as usize] = exception_fpu_error;
-        PANIC_HANDLERS[EXCEPTION_ALIGNMENT_CHECK as usize] = exception_alignment_check;
-        PANIC_HANDLERS[EXCEPTION_MACHINE_CHECK as usize] = exception_machine_check;
-        PANIC_HANDLERS[EXCEPTION_SIMD_FP_EXCEPTION as usize] = exception_simd_fp_exception;
     }
 }
 
@@ -505,33 +481,26 @@ fn exception_default_panic(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     panic_with_frame("Unhandled exception", frame);
 }
-pub fn exception_divide_error(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Divide by zero error");
+
+fn exception_fatal(frame: *mut slopos_lib::InterruptFrame) {
+    let name = frame_exception_name(frame);
+    klog_info!("FATAL: {}", name);
     kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Divide by zero error", frame);
+    panic_with_frame(name, frame);
 }
-pub fn exception_debug(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("DEBUG: Debug exception occurred");
-    kdiag_dump_interrupt_frame(frame);
-}
-pub fn exception_nmi(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Non-maskable interrupt");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Non-maskable interrupt", frame);
-}
-pub fn exception_breakpoint(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("DEBUG: Breakpoint exception");
+
+fn exception_nonfatal(frame: *mut slopos_lib::InterruptFrame) {
+    let name = frame_exception_name(frame);
+    klog_info!("ERROR: {}", name);
     kdiag_dump_interrupt_frame(frame);
 }
-pub fn exception_overflow(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("ERROR: Overflow exception");
-    kdiag_dump_interrupt_frame(frame);
+
+fn frame_exception_name(frame: *mut slopos_lib::InterruptFrame) -> &'static str {
+    let vector = (unsafe { &*frame }.vector & 0xFF) as u8;
+    slopos_lib::arch::exception::get_exception_name(vector)
 }
-pub fn exception_bound_range(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("ERROR: Bound range exceeded");
-    kdiag_dump_interrupt_frame(frame);
-}
-pub fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
+
+fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
             TaskFaultReason::UserUd,
@@ -540,11 +509,10 @@ pub fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
         );
         return;
     }
-    klog_info!("FATAL: Invalid opcode");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Invalid opcode", frame);
+    exception_fatal(frame);
 }
-pub fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
+
+fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
             TaskFaultReason::UserDeviceNa,
@@ -553,30 +521,10 @@ pub fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
         );
         return;
     }
-    klog_info!("ERROR: Device not available");
-    kdiag_dump_interrupt_frame(frame);
+    exception_nonfatal(frame);
 }
-pub fn exception_double_fault(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Double fault");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Double fault", frame);
-}
-pub fn exception_invalid_tss(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Invalid TSS");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Invalid TSS", frame);
-}
-pub fn exception_segment_not_present(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Segment not present");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Segment not present", frame);
-}
-pub fn exception_stack_fault(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Stack segment fault");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Stack segment fault", frame);
-}
-pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
+
+fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
             TaskFaultReason::UserGp,
@@ -585,9 +533,7 @@ pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
         );
         return;
     }
-    klog_info!("FATAL: General protection fault");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("General protection fault", frame);
+    exception_fatal(frame);
 }
 /// Attempt to resolve a page fault via CoW or demand paging.
 ///
@@ -647,7 +593,7 @@ fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
 /// By the time this runs, `try_handle_page_fault` has already attempted (and
 /// failed) CoW and demand-paging resolution.  This function only performs
 /// diagnostics and terminates the faulting context (user task or kernel panic).
-pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
+fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     let fault_addr = cpu::read_cr2();
     let frame_ref = unsafe { &*frame };
 
@@ -764,23 +710,6 @@ fn log_user_page_fault_diagnostics(frame_ref: &slopos_lib::InterruptFrame, fault
         ctx_rip,
         ctx_rsp
     );
-}
-pub fn exception_fpu_error(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("ERROR: x87 FPU error");
-    kdiag_dump_interrupt_frame(frame);
-}
-pub fn exception_alignment_check(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("ERROR: Alignment check");
-    kdiag_dump_interrupt_frame(frame);
-}
-pub fn exception_machine_check(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Machine check");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Machine check", frame);
-}
-pub fn exception_simd_fp_exception(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("ERROR: SIMD floating-point exception");
-    kdiag_dump_interrupt_frame(frame);
 }
 
 fn panic_with_frame(message: &str, frame: *mut slopos_lib::InterruptFrame) {
