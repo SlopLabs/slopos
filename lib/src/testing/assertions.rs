@@ -70,6 +70,12 @@ macro_rules! assert_test {
             return $crate::testing::TestResult::Fail;
         }
     }};
+    ($cond:expr, $fmt:expr, $($arg:tt)*) => {{
+        if !$cond {
+            $crate::klog_info!(concat!("ASSERT: ", $fmt), $($arg)*);
+            return $crate::testing::TestResult::Fail;
+        }
+    }};
 }
 
 #[macro_export]

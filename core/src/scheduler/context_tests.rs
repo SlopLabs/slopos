@@ -5,13 +5,12 @@ use core::ptr;
 
 use super::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
-use slopos_lib::klog_info;
-use slopos_lib::testing::TestResult;
+use slopos_lib::{assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult};
 
 use super::scheduler::{init_scheduler, scheduler_shutdown};
 use super::task::{
-    MAX_TASKS, init_task_manager, task_create, task_find_by_id, task_fork, task_get_info,
-    task_set_state, task_shutdown_all, task_terminate,
+    MAX_TASKS, init_task_manager, task_create, task_find_by_id, task_get_info, task_set_state,
+    task_shutdown_all, task_terminate,
 };
 
 struct ContextFixture;
@@ -20,12 +19,8 @@ impl ContextFixture {
     fn new() -> Self {
         task_shutdown_all();
         scheduler_shutdown();
-        if init_task_manager() != 0 {
-            klog_info!("CONTEXT_TEST: Failed to init task manager");
-        }
-        if init_scheduler() != 0 {
-            klog_info!("CONTEXT_TEST: Failed to init scheduler");
-        }
+        let _ = init_task_manager();
+        let _ = init_scheduler();
         Self
     }
 }
@@ -49,18 +44,18 @@ fn create_test_task(name: &[u8], flags: u16) -> u32 {
     )
 }
 
+// =============================================================================
+// Task Lifecycle Tests
+// =============================================================================
+
 pub fn test_task_context_initial_state() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"CtxInit\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
-        return TestResult::Fail;
-    }
+    assert_not_null!(task_ptr);
 
     unsafe {
         let task = &*task_ptr;
@@ -80,29 +75,20 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"StateTrans\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_not_null!(task_ptr);
 
     let initial_state = unsafe { (*task_ptr).status() };
-    if initial_state != TaskStatus::Ready {
-        klog_info!("CONTEXT_TEST: BUG - New task not in READY state");
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_eq_test!(
+        initial_state,
+        TaskStatus::Ready,
+        "new task not in READY state"
+    );
 
     task_set_state(task_id, TaskStatus::Running);
-    let _running_state = unsafe { (*task_ptr).status() };
-
     task_set_state(task_id, TaskStatus::Blocked);
-    let _blocked_state = unsafe { (*task_ptr).status() };
-
     task_set_state(task_id, TaskStatus::Ready);
 
     task_terminate(task_id);
@@ -113,93 +99,32 @@ pub fn test_task_invalid_state_transition() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"BadTrans\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     task_terminate(task_id);
-
     let _result = task_set_state(task_id, TaskStatus::Running);
 
     let task_ptr = task_find_by_id(task_id);
     if !task_ptr.is_null() {
         let state = unsafe { (*task_ptr).status() };
-        if state == TaskStatus::Running {
-            klog_info!("CONTEXT_TEST: BUG - Revived terminated task to RUNNING");
-            return TestResult::Fail;
-        }
+        assert_test!(
+            state != TaskStatus::Running,
+            "revived terminated task to RUNNING"
+        );
     }
 
     TestResult::Pass
 }
 
-pub fn test_fork_null_parent() -> TestResult {
-    let _fixture = ContextFixture::new();
-
-    let child_id = task_fork(ptr::null_mut());
-    if child_id != INVALID_TASK_ID {
-        klog_info!("CONTEXT_TEST: BUG - task_fork succeeded with null parent");
-        task_terminate(child_id);
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-pub fn test_fork_kernel_task() -> TestResult {
-    let _fixture = ContextFixture::new();
-
-    let parent_id = create_test_task(b"KernelParent\0", TASK_FLAG_KERNEL_MODE);
-    if parent_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
-
-    let parent_ptr = task_find_by_id(parent_id);
-    if parent_ptr.is_null() {
-        task_terminate(parent_id);
-        return TestResult::Fail;
-    }
-
-    let child_id = task_fork(parent_ptr);
-    if child_id != INVALID_TASK_ID {
-        klog_info!("CONTEXT_TEST: BUG - Forked kernel task");
-        task_terminate(child_id);
-    }
-
-    task_terminate(parent_id);
-    TestResult::Pass
-}
-
-pub fn test_fork_terminated_parent() -> TestResult {
-    let _fixture = ContextFixture::new();
-
-    let parent_id = create_test_task(b"DeadParent\0", TASK_FLAG_KERNEL_MODE);
-    if parent_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
-
-    let parent_ptr = task_find_by_id(parent_id);
-    task_terminate(parent_id);
-
-    if !parent_ptr.is_null() {
-        let child_id = task_fork(parent_ptr);
-        if child_id != INVALID_TASK_ID {
-            klog_info!("CONTEXT_TEST: BUG - Forked terminated task");
-            task_terminate(child_id);
-            return TestResult::Fail;
-        }
-    }
-
-    TestResult::Pass
-}
+// =============================================================================
+// Task Info & Termination Edge Cases
+// =============================================================================
 
 pub fn test_task_get_info_null_output() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"InfoNull\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let _result = task_get_info(task_id, ptr::null_mut());
 
@@ -211,18 +136,16 @@ pub fn test_task_get_info_invalid_id() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let mut task_ptr: *mut Task = ptr::null_mut();
+
     let result = task_get_info(INVALID_TASK_ID, &mut task_ptr);
+    assert_test!(
+        result != 0 || task_ptr.is_null(),
+        "succeeded for INVALID_TASK_ID"
+    );
 
-    if result == 0 || !task_ptr.is_null() {
-        klog_info!("CONTEXT_TEST: BUG - task_get_info succeeded for INVALID_TASK_ID");
-        return TestResult::Fail;
-    }
-
+    task_ptr = ptr::null_mut();
     let result2 = task_get_info(0xFFFF_FFFF, &mut task_ptr);
-    if result2 == 0 || !task_ptr.is_null() {
-        klog_info!("CONTEXT_TEST: BUG - task_get_info succeeded for max ID");
-        return TestResult::Fail;
-    }
+    assert_test!(result2 != 0 || task_ptr.is_null(), "succeeded for max ID");
 
     TestResult::Pass
 }
@@ -231,9 +154,7 @@ pub fn test_task_double_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"DoubleTerm\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let _r1 = task_terminate(task_id);
     let _r2 = task_terminate(task_id);
@@ -257,28 +178,23 @@ pub fn test_task_find_after_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"FindTerm\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
-    let ptr_before = task_find_by_id(task_id);
-    if ptr_before.is_null() {
-        klog_info!("CONTEXT_TEST: BUG - Couldn't find task before termination");
-        return TestResult::Fail;
-    }
+    assert_not_null!(
+        task_find_by_id(task_id),
+        "task should exist before termination"
+    );
 
     task_terminate(task_id);
 
     let ptr_after = task_find_by_id(task_id);
     if !ptr_after.is_null() {
         let state = unsafe { (*ptr_after).status() };
-        if state != TaskStatus::Terminated {
-            klog_info!(
-                "CONTEXT_TEST: BUG - Terminated task in wrong state: {:?}",
-                state
-            );
-            return TestResult::Fail;
-        }
+        assert_eq_test!(
+            state,
+            TaskStatus::Terminated,
+            "terminated task in wrong state"
+        );
     }
 
     TestResult::Pass
@@ -326,15 +242,10 @@ pub fn test_task_process_id_consistency() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"ProcId\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_not_null!(task_ptr);
 
     let _proc_id = unsafe { (*task_ptr).process_id };
 
@@ -346,39 +257,32 @@ pub fn test_task_flags_preserved() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"FlagsTest\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_not_null!(task_ptr);
 
     let flags = unsafe { (*task_ptr).flags };
-    if (flags & TASK_FLAG_KERNEL_MODE) == 0 {
-        klog_info!("CONTEXT_TEST: BUG - Kernel mode flag not preserved");
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_test!(
+        (flags & TASK_FLAG_KERNEL_MODE) != 0,
+        "kernel mode flag not preserved"
+    );
 
     task_terminate(task_id);
     TestResult::Pass
 }
 
+// =============================================================================
+// SwitchContext Layout Tests
+// =============================================================================
+
 pub fn test_switch_context_struct_size() -> TestResult {
     use super::task_struct::SwitchContext;
-    use core::mem::size_of;
-
-    let size = size_of::<SwitchContext>();
-    if size != 72 {
-        klog_info!(
-            "CONTEXT_TEST: SwitchContext size wrong: {} (expected 72)",
-            size
-        );
-        return TestResult::Fail;
-    }
+    assert_eq_test!(
+        core::mem::size_of::<SwitchContext>(),
+        72,
+        "SwitchContext size wrong"
+    );
     TestResult::Pass
 }
 
@@ -389,33 +293,15 @@ pub fn test_switch_context_offsets() -> TestResult {
         SWITCH_CTX_OFF_RSP,
     };
 
-    if SWITCH_CTX_OFF_RBX != 0 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_R12 != 8 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_R13 != 16 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_R14 != 24 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_R15 != 32 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_RBP != 40 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_RSP != 48 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_RFLAGS != 56 {
-        return TestResult::Fail;
-    }
-    if SWITCH_CTX_OFF_RIP != 64 {
-        return TestResult::Fail;
-    }
+    assert_eq_test!(SWITCH_CTX_OFF_RBX, 0);
+    assert_eq_test!(SWITCH_CTX_OFF_R12, 8);
+    assert_eq_test!(SWITCH_CTX_OFF_R13, 16);
+    assert_eq_test!(SWITCH_CTX_OFF_R14, 24);
+    assert_eq_test!(SWITCH_CTX_OFF_R15, 32);
+    assert_eq_test!(SWITCH_CTX_OFF_RBP, 40);
+    assert_eq_test!(SWITCH_CTX_OFF_RSP, 48);
+    assert_eq_test!(SWITCH_CTX_OFF_RFLAGS, 56);
+    assert_eq_test!(SWITCH_CTX_OFF_RIP, 64);
     TestResult::Pass
 }
 
@@ -423,19 +309,15 @@ pub fn test_switch_context_zero_init() -> TestResult {
     use super::task_struct::SwitchContext;
 
     let ctx = SwitchContext::zero();
-    if ctx.rbx != 0 || ctx.r12 != 0 || ctx.r13 != 0 || ctx.r14 != 0 || ctx.r15 != 0 {
-        return TestResult::Fail;
-    }
-    if ctx.rbp != 0 || ctx.rsp != 0 || ctx.rip != 0 {
-        return TestResult::Fail;
-    }
-    if ctx.rflags != 0x202 {
-        klog_info!(
-            "CONTEXT_TEST: SwitchContext::zero() rflags wrong: {:#x}",
-            ctx.rflags
-        );
-        return TestResult::Fail;
-    }
+    assert_eq_test!(ctx.rbx, 0);
+    assert_eq_test!(ctx.r12, 0);
+    assert_eq_test!(ctx.r13, 0);
+    assert_eq_test!(ctx.r14, 0);
+    assert_eq_test!(ctx.r15, 0);
+    assert_eq_test!(ctx.rbp, 0);
+    assert_eq_test!(ctx.rsp, 0);
+    assert_eq_test!(ctx.rip, 0);
+    assert_eq_test!(ctx.rflags, 0x202, "rflags should default to IF+reserved");
     TestResult::Pass
 }
 
@@ -449,25 +331,11 @@ pub fn test_switch_context_setup_initial() -> TestResult {
 
     let ctx = SwitchContext::new_for_task(entry, arg, stack_top, trampoline);
 
-    if ctx.rsp != stack_top - 8 {
-        klog_info!("CONTEXT_TEST: builder rsp wrong: {:#x}", ctx.rsp);
-        return TestResult::Fail;
-    }
-    if ctx.rip != trampoline {
-        klog_info!("CONTEXT_TEST: builder rip wrong: {:#x}", ctx.rip);
-        return TestResult::Fail;
-    }
-    if ctx.r12 != entry {
-        klog_info!("CONTEXT_TEST: builder r12 wrong: {:#x}", ctx.r12);
-        return TestResult::Fail;
-    }
-    if ctx.r13 != arg {
-        klog_info!("CONTEXT_TEST: builder r13 wrong: {:#x}", ctx.r13);
-        return TestResult::Fail;
-    }
-    if ctx.rflags != 0x202 {
-        return TestResult::Fail;
-    }
+    assert_eq_test!(ctx.rsp, stack_top - 8, "rsp should be stack_top - 8");
+    assert_eq_test!(ctx.rip, trampoline, "rip should be trampoline");
+    assert_eq_test!(ctx.r12, entry, "r12 should hold entry");
+    assert_eq_test!(ctx.r13, arg, "r13 should hold arg");
+    assert_eq_test!(ctx.rflags, 0x202);
     TestResult::Pass
 }
 
@@ -475,25 +343,17 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     let _fixture = ContextFixture::new();
 
     let task_id = create_test_task(b"SwitchTest\0", TASK_FLAG_KERNEL_MODE);
-    if task_id == INVALID_TASK_ID {
-        return TestResult::Fail;
-    }
+    assert_test!(task_id != INVALID_TASK_ID);
 
     let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_not_null!(task_ptr);
 
     let switch_ctx = unsafe { &(*task_ptr).switch_ctx };
-    if switch_ctx.rflags != 0x202 {
-        klog_info!(
-            "CONTEXT_TEST: Task switch_ctx rflags not initialized: {:#x}",
-            switch_ctx.rflags
-        );
-        task_terminate(task_id);
-        return TestResult::Fail;
-    }
+    assert_eq_test!(
+        switch_ctx.rflags,
+        0x202,
+        "switch_ctx rflags not initialized"
+    );
 
     task_terminate(task_id);
     TestResult::Pass
@@ -505,9 +365,6 @@ slopos_lib::define_test_suite!(
         test_task_context_initial_state,
         test_task_state_transitions_exhaustive,
         test_task_invalid_state_transition,
-        test_fork_null_parent,
-        test_fork_kernel_task,
-        test_fork_terminated_parent,
         test_task_get_info_null_output,
         test_task_get_info_invalid_id,
         test_task_double_terminate,

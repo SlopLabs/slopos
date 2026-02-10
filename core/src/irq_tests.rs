@@ -5,7 +5,7 @@ use core::ptr;
 
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::testing::TestResult;
-use slopos_lib::{InterruptFrame, klog_info};
+use slopos_lib::{InterruptFrame, assert_test, klog_info};
 
 use crate::irq::{
     self, IRQ_LINES, IrqStats, disable_line, enable_line, get_irq_route, get_stats, is_initialized,
@@ -16,10 +16,10 @@ pub fn test_irq_register_invalid_line() -> TestResult {
     extern "C" fn dummy_handler(_: u8, _: *mut InterruptFrame, _: *mut c_void) {}
 
     let result = register_handler(255, Some(dummy_handler), ptr::null_mut(), ptr::null());
-    if result == 0 {
-        klog_info!("IRQ_TEST: BUG - Accepted registration for invalid IRQ line 255");
-        return TestResult::Fail;
-    }
+    assert_test!(
+        result != 0,
+        "Accepted registration for invalid IRQ line 255"
+    );
 
     let result2 = register_handler(
         IRQ_LINES as u8,
@@ -27,10 +27,10 @@ pub fn test_irq_register_invalid_line() -> TestResult {
         ptr::null_mut(),
         ptr::null(),
     );
-    if result2 == 0 {
-        klog_info!("IRQ_TEST: BUG - Accepted registration for IRQ line at boundary");
-        return TestResult::Fail;
-    }
+    assert_test!(
+        result2 != 0,
+        "Accepted registration for IRQ line at boundary"
+    );
 
     TestResult::Pass
 }
@@ -56,10 +56,7 @@ pub fn test_irq_double_register() -> TestResult {
         ptr::null_mut(),
         b"handler1\0".as_ptr() as *const c_char,
     );
-    if r1 != 0 {
-        klog_info!("IRQ_TEST: First registration failed");
-        return TestResult::Fail;
-    }
+    assert_test!(r1 == 0, "First registration failed");
 
     let _r2 = register_handler(
         6,
@@ -85,26 +82,17 @@ pub fn test_irq_stats_invalid_line() -> TestResult {
     };
 
     let result = get_stats(255, &mut stats);
-    if result == 0 {
-        klog_info!("IRQ_TEST: BUG - get_stats succeeded for invalid IRQ line");
-        return TestResult::Fail;
-    }
+    assert_test!(result != 0, "get_stats succeeded for invalid IRQ line 255");
 
     let result2 = get_stats(IRQ_LINES as u8, &mut stats);
-    if result2 == 0 {
-        klog_info!("IRQ_TEST: BUG - get_stats succeeded for boundary IRQ line");
-        return TestResult::Fail;
-    }
+    assert_test!(result2 != 0, "get_stats succeeded for boundary IRQ line");
 
     TestResult::Pass
 }
 
 pub fn test_irq_stats_null_output() -> TestResult {
     let result = get_stats(0, ptr::null_mut());
-    if result == 0 {
-        klog_info!("IRQ_TEST: BUG - get_stats succeeded with null output");
-        return TestResult::Fail;
-    }
+    assert_test!(result != 0, "get_stats succeeded with null output");
     TestResult::Pass
 }
 
@@ -117,19 +105,13 @@ pub fn test_irq_mask_unmask_invalid() -> TestResult {
 
 pub fn test_irq_is_masked_boundary() -> TestResult {
     let masked = is_masked(255);
-    if !masked {
-        klog_info!("IRQ_TEST: BUG - Invalid IRQ line should report as masked");
-        return TestResult::Fail;
-    }
+    assert_test!(masked, "Invalid IRQ line should report as masked");
     TestResult::Pass
 }
 
 pub fn test_irq_route_invalid() -> TestResult {
     let route = get_irq_route(255);
-    if route.is_some() {
-        klog_info!("IRQ_TEST: BUG - Got route for invalid IRQ line");
-        return TestResult::Fail;
-    }
+    assert_test!(route.is_none(), "Got route for invalid IRQ line");
     TestResult::Pass
 }
 
@@ -173,10 +155,7 @@ pub fn test_irq_stats_valid_line() -> TestResult {
     };
 
     let result = get_stats(0, &mut stats);
-    if result != 0 {
-        klog_info!("IRQ_TEST: BUG - get_stats failed for valid IRQ line 0");
-        return TestResult::Fail;
-    }
+    assert_test!(result == 0, "get_stats failed for valid IRQ line 0");
     TestResult::Pass
 }
 
@@ -197,10 +176,7 @@ pub fn test_irq_context_pointer_preserved() -> TestResult {
     let ctx_ptr = &test_value as *const u64 as *mut c_void;
 
     let result = register_handler(9, Some(context_handler), ctx_ptr, ptr::null());
-    if result != 0 {
-        klog_info!("IRQ_TEST: Failed to register context test handler");
-        return TestResult::Fail;
-    }
+    assert_test!(result == 0, "Failed to register context test handler");
 
     unregister_handler(9);
     TestResult::Pass
@@ -238,14 +214,12 @@ pub fn test_irq_keyboard_events_accessible() -> TestResult {
 pub fn test_irq_vector_calculation() -> TestResult {
     for irq in 0..IRQ_LINES as u8 {
         let expected_vector = (IRQ_BASE_VECTOR as u32) + (irq as u32);
-        if expected_vector > 255 {
-            klog_info!(
-                "IRQ_TEST: BUG - IRQ {} would produce invalid vector {}",
-                irq,
-                expected_vector
-            );
-            return TestResult::Fail;
-        }
+        assert_test!(
+            expected_vector <= 255,
+            "IRQ {} would produce invalid vector {}",
+            irq,
+            expected_vector
+        );
     }
     TestResult::Pass
 }
