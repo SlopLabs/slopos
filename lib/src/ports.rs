@@ -14,11 +14,6 @@ pub const PS2_DATA: Port<u8> = Port::new(0x60);
 pub const PS2_STATUS: Port<u8> = Port::new(0x64);
 pub const PS2_COMMAND: Port<u8> = Port::new(0x64);
 
-pub const PIC1_COMMAND: Port<u8> = Port::new(0x20);
-pub const PIC1_DATA: Port<u8> = Port::new(0x21);
-pub const PIC2_COMMAND: Port<u8> = Port::new(0xA0);
-pub const PIC2_DATA: Port<u8> = Port::new(0xA1);
-
 pub const PCI_CONFIG_ADDRESS: Port<u32> = Port::new(0xCF8);
 pub const PCI_CONFIG_DATA: Port<u32> = Port::new(0xCFC);
 
@@ -65,5 +60,3 @@ pub const PIT_COMMAND_ACCESS_LOHI: u8 = 0x30;
 pub const PIT_COMMAND_MODE_SQUARE: u8 = 0x06;
 pub const PIT_COMMAND_BINARY: u8 = 0x00;
 pub const PIT_IRQ_LINE: u8 = 0;
-
-pub const PIC_EOI: u8 = 0x20;

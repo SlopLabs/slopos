@@ -1220,15 +1220,15 @@ pub fn scheduler_handle_post_irq() {
     }
 }
 
-pub fn boot_step_task_manager_init() -> c_int {
+pub fn boot_step_task_manager_init() -> i32 {
     crate::task::init_task_manager()
 }
 
-pub fn boot_step_scheduler_init() -> c_int {
+pub fn boot_step_scheduler_init() -> i32 {
     init_scheduler()
 }
 
-pub fn boot_step_idle_task() -> c_int {
+pub fn boot_step_idle_task() -> i32 {
     create_idle_task()
 }
 

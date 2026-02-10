@@ -10,18 +10,6 @@ use slopos_fs::{
     ext2_vfs_init_with_callbacks, ext2_vfs_is_initialized, vfs_init_builtin_filesystems,
 };
 
-fn boot_step_task_manager_init_wrapper() -> i32 {
-    boot_step_task_manager_init()
-}
-
-fn boot_step_scheduler_init_wrapper() -> i32 {
-    boot_step_scheduler_init()
-}
-
-fn boot_step_idle_task_wrapper() -> i32 {
-    boot_step_idle_task()
-}
-
 fn boot_step_fs_init() -> i32 {
     if virtio_blk::virtio_blk_is_ready() {
         if ext2_vfs_init_with_callbacks(
@@ -68,7 +56,7 @@ crate::boot_init!(
     BOOT_STEP_TASK_MANAGER,
     services,
     b"task manager\0",
-    boot_step_task_manager_init_wrapper,
+    boot_step_task_manager_init,
     fallible,
     flags = boot_init_priority(20)
 );
@@ -76,7 +64,7 @@ crate::boot_init!(
     BOOT_STEP_SCHEDULER,
     services,
     b"scheduler\0",
-    boot_step_scheduler_init_wrapper,
+    boot_step_scheduler_init,
     fallible,
     flags = boot_init_priority(30)
 );
@@ -84,7 +72,7 @@ crate::boot_init!(
     BOOT_STEP_IDLE_TASK,
     services,
     b"idle task\0",
-    boot_step_idle_task_wrapper,
+    boot_step_idle_task,
     fallible,
     flags = boot_init_priority(50)
 );

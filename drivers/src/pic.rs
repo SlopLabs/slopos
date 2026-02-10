@@ -1,4 +1,10 @@
-use slopos_lib::ports::{PIC_EOI, PIC1_COMMAND, PIC1_DATA, PIC2_COMMAND, PIC2_DATA};
+use slopos_lib::io::Port;
+
+const PIC1_COMMAND: Port<u8> = Port::new(0x20);
+const PIC1_DATA: Port<u8> = Port::new(0x21);
+const PIC2_COMMAND: Port<u8> = Port::new(0xA0);
+const PIC2_DATA: Port<u8> = Port::new(0xA1);
+const PIC_EOI: u8 = 0x20;
 
 pub fn pic_quiesce_disable() {
     unsafe {
