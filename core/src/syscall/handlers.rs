@@ -1,12 +1,12 @@
 use core::ffi::c_char;
 use core::ptr;
 
-use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
-use slopos_abi::fate::FateResult;
-use slopos_abi::syscall::*;
 use slopos_abi::DisplayInfo;
 use slopos_abi::InputEvent;
 use slopos_abi::WindowInfo;
+use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
+use slopos_abi::fate::FateResult;
+use slopos_abi::syscall::*;
 
 use crate::exec;
 
@@ -17,8 +17,8 @@ use crate::sched::{
     sleep_current_task_ms, task_wait_for, yield_,
 };
 use crate::syscall::common::{
-    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
-    syscall_return_err, SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES,
+    SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
+    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
@@ -29,10 +29,10 @@ use crate::syscall_services::{input, tty, video};
 use crate::task::{get_task_stats, task_get_exit_record, task_terminate};
 
 use crate::scheduler::task_struct::Task;
-use slopos_abi::task::{TaskExitReason, TaskExitRecord, TaskFaultReason, INVALID_TASK_ID};
+use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskExitRecord, TaskFaultReason};
+use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
 use slopos_lib::wl_currency;
-use slopos_lib::InterruptFrame;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_to_user};
