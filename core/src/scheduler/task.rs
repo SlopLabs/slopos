@@ -110,7 +110,6 @@ pub fn reap_zombies() {
 use super::scheduler;
 
 pub use super::task_struct::{FpuState, Task, TaskContext};
-pub use slopos_abi::arch::x86_64::idt::IdtEntry;
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
@@ -118,6 +117,7 @@ pub use slopos_abi::task::{
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, TaskExitReason,
     TaskExitRecord, TaskFaultReason, TaskStatus,
 };
+pub use slopos_lib::arch::idt::IdtEntry;
 
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 

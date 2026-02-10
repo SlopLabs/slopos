@@ -22,7 +22,7 @@
 //! // map_page(phys, virt);  // Compile error!
 //! ```
 
-use crate::arch::x86_64::paging::PAGE_SIZE_4KB;
+const PAGE_SIZE_4KB: u64 = 0x1000;
 
 /// A physical memory address.
 ///

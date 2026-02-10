@@ -7,7 +7,7 @@ use core::ptr;
 use alloc::vec::Vec;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::arch::x86_64::msr::Msr;
+use slopos_lib::cpu::msr::Msr;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_not_null, assert_test, cpu, fail, klog_info, pass};
 

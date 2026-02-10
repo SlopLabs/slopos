@@ -1,5 +1,5 @@
+use super::page_table_defs::PageTableLevel;
 use core::fmt;
-use slopos_abi::arch::x86_64::PageTableLevel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PagingError {

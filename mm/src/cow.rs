@@ -1,7 +1,7 @@
 use core::ptr;
 
+use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::arch::x86_64::paging::PageFlags;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::mm_constants::PAGE_SIZE_4KB;

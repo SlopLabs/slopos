@@ -1,6 +1,6 @@
 use core::ffi::c_void;
 
-use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
+use slopos_abi::PAGE_SIZE;
 use slopos_lib::numfmt;
 
 use crate::appkit::{self, Window, WindowedApp};
@@ -163,7 +163,7 @@ fn format_line<'a>(buf: &'a mut [u8; 96], label: &str, value: u64, suffix: &str)
 }
 
 fn pages_to_mib(pages: u64) -> u64 {
-    pages.saturating_mul(PAGE_SIZE_4KB) / (1024 * 1024)
+    pages.saturating_mul(PAGE_SIZE) / (1024 * 1024)
 }
 
 fn copy_bytes(buf: &mut [u8; 96], mut idx: usize, src: &[u8]) -> usize {

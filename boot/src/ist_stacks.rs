@@ -55,7 +55,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::VirtAddr;
-use slopos_abi::arch::x86_64::idt::{
+use slopos_lib::arch::idt::{
     EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
 };

@@ -11,14 +11,12 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_abi::arch::IRQ_BASE_VECTOR;
-use slopos_abi::arch::x86_64::memory::{
-    EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE,
-};
 use slopos_lib::InitFlag;
 use slopos_lib::IrqMutex;
+use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
+use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE};
 
 use crate::platform;
 use crate::scheduler::scheduler::scheduler_handle_post_irq;

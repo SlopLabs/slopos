@@ -1,4 +1,4 @@
-use slopos_abi::arch::x86_64::exception::{exception_is_critical, get_exception_name};
+use slopos_lib::arch::exception::{exception_is_critical, get_exception_name};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{InterruptFrame, klog_info};
 

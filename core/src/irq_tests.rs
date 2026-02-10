@@ -3,7 +3,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_abi::arch::IRQ_BASE_VECTOR;
+use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{InterruptFrame, klog_info};
 

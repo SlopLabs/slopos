@@ -12,8 +12,6 @@
 #![forbid(unsafe_code)]
 
 pub mod addr;
-pub mod arch;
-pub mod boot;
 pub mod damage;
 pub mod display;
 pub mod draw;
@@ -29,6 +27,9 @@ pub mod syscall;
 pub mod task;
 pub mod video_traits;
 pub mod window;
+
+/// Standard 4KB page size for userland memory calculations.
+pub const PAGE_SIZE: u64 = 0x1000;
 
 pub use addr::*;
 pub use damage::{DamageRect, MAX_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS};

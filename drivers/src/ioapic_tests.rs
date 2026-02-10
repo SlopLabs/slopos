@@ -1,6 +1,6 @@
 //! IOAPIC/APIC tests - targeting untested initialization and routing edge cases.
 
-use slopos_abi::arch::x86_64::ioapic::*;
+use crate::ioapic_defs::*;
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 

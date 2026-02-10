@@ -18,8 +18,8 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use slopos_abi::arch::x86_64::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
-use slopos_abi::arch::x86_64::msr::Msr;
+use crate::arch::gdt::{GdtDescriptor, GdtLayout, SegmentSelector, Tss64};
+use crate::cpu::msr::Msr;
 
 use crate::InitFlag;
 

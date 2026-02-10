@@ -1,9 +1,9 @@
-use slopos_abi::arch::x86_64::cpuid::{
+use slopos_lib::cpu;
+use slopos_lib::cpu::cpuid::{
     CPUID_EXT_FEAT_EDX_LM, CPUID_FEAT_EDX_PAE, CPUID_FEAT_EDX_PGE, CPUID_LEAF_EXT_INFO,
     CPUID_LEAF_FEATURES,
 };
-use slopos_abi::arch::x86_64::msr::{EFER_LMA, EFER_LME, Msr};
-use slopos_lib::cpu;
+use slopos_lib::cpu::msr::{EFER_LMA, EFER_LME, Msr};
 use slopos_mm::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB};
 
 pub fn verify_cpu_state() {

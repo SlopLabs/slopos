@@ -1,6 +1,6 @@
+use super::page_table_defs::{PageTable, PageTableEntry, PageTableLevel};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::arch::x86_64::page_table::{PageTable, PageTableEntry, PageTableLevel};
-use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
 
 use super::error::{PagingError, PagingResult};
 use crate::hhdm::PhysAddrHhdm;

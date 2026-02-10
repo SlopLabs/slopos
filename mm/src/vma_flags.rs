@@ -24,7 +24,7 @@
 //! }
 //! ```
 
-use slopos_abi::arch::x86_64::paging::PageFlags;
+use crate::paging_defs::PageFlags;
 
 /// Backing type for a VMA - describes where page content comes from
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

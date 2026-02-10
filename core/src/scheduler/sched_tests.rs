@@ -24,7 +24,8 @@ use super::task::{
     TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create, task_find_by_id,
     task_get_info, task_set_state, task_shutdown_all, task_terminate,
 };
-use slopos_abi::arch::{SYSCALL_VECTOR, SegmentSelector};
+use slopos_lib::arch::gdt::SegmentSelector;
+use slopos_lib::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 
 // =============================================================================

@@ -8,7 +8,7 @@ use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InitFlag, IrqMutex, klog_info};
 use slopos_mm::mmio::MmioRegion;
 
-pub use slopos_abi::arch::x86_64::pci::{PciBarInfo, PciDeviceInfo, *};
+pub use crate::pci_defs::*;
 
 const PCI_VENDOR_ID: u8 = PCI_VENDOR_ID_OFFSET;
 const PCI_DEVICE_ID: u8 = PCI_DEVICE_ID_OFFSET;

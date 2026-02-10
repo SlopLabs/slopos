@@ -6,8 +6,8 @@
 
 use core::marker::PhantomData;
 
+use crate::memory_layout_defs::{USER_SPACE_END_VA, USER_SPACE_START_VA};
 use slopos_abi::addr::VirtAddr;
-use slopos_abi::arch::x86_64::memory::{USER_SPACE_END_VA, USER_SPACE_START_VA};
 
 /// Error type for user pointer validation.
 ///

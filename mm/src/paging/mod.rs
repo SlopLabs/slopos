@@ -1,11 +1,11 @@
 pub mod error;
+pub mod page_table_defs;
 mod tables;
 pub mod walker;
 
 pub use error::{PagingError, PagingResult};
+pub use page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
 pub use walker::{HhdmMapping, PageTableFrameMapping, PageTableWalker, WalkAction, WalkResult};
-
-pub use slopos_abi::arch::x86_64::page_table::PageTable;
 
 pub use tables::{
     EARLY_PD, EARLY_PDPT, EARLY_PML4, ProcessPageDir, get_current_page_directory,

@@ -1,9 +1,7 @@
 //! VirtIO PCI capability parsing and device initialization
 
+use crate::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::arch::x86_64::pci::{
-    PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET,
-};
 use slopos_mm::mmio::MmioRegion;
 
 use crate::pci::{

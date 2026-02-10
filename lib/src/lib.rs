@@ -2,6 +2,8 @@
 #![feature(c_variadic)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub mod arch;
+pub mod boot_info;
 pub mod cpu;
 
 pub mod io;

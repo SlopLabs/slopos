@@ -891,7 +891,7 @@ pub fn resume_all_aps() {
                 if let Some(apic_id) = slopos_lib::apic_id_from_cpu_index(cpu_id) {
                     slopos_lib::send_ipi_to_cpu(
                         apic_id,
-                        slopos_abi::arch::x86_64::idt::RESCHEDULE_IPI_VECTOR,
+                        slopos_lib::arch::idt::RESCHEDULE_IPI_VECTOR,
                     );
                 }
             }

@@ -1,8 +1,8 @@
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::arch::x86_64::paging::PageFlags;
 use slopos_lib::align_up_u64;
 
 use crate::mm_constants::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE, PAGE_SIZE_4KB};

@@ -3,8 +3,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
 
+use crate::ioapic_defs::*;
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::arch::x86_64::ioapic::*;
 use slopos_acpi::madt::{Madt, MadtEntry};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_core::platform;

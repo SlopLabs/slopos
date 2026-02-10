@@ -4,19 +4,13 @@ use spin::Once;
 
 use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
+use crate::apic_defs::*;
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::arch::x86_64::apic::{ApicBaseMsr, *};
-use slopos_abi::arch::x86_64::apic::{
-    LAPIC_ICR_DELIVERY_FIXED, LAPIC_ICR_DELIVERY_STATUS, LAPIC_ICR_DEST_BROADCAST,
-    LAPIC_ICR_DEST_PHYSICAL, LAPIC_ICR_HIGH, LAPIC_ICR_LEVEL_ASSERT, LAPIC_ICR_LOW,
-    LAPIC_ICR_TRIGGER_EDGE,
-};
-use slopos_abi::arch::x86_64::cpuid::{
-    CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES,
-};
-use slopos_abi::arch::x86_64::msr::Msr;
-use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB_USIZE;
+use slopos_lib::cpu::apic_defs::ApicBaseMsr;
+use slopos_lib::cpu::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
+use slopos_lib::cpu::msr::Msr;
 use slopos_mm::mmio::MmioRegion;
+use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 
 const APIC_REGION_SIZE: usize = PAGE_SIZE_4KB_USIZE;
 

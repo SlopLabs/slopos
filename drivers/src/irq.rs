@@ -1,7 +1,6 @@
 use core::ffi::c_void;
 
-use slopos_abi::arch::IRQ_BASE_VECTOR;
-use slopos_abi::arch::x86_64::ioapic::{
+use crate::ioapic_defs::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
@@ -9,6 +8,7 @@ use slopos_core::irq::{
     self, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, LEGACY_IRQ_TIMER,
 };
 use slopos_core::sched::{save_preempt_context, scheduler_timer_tick};
+use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
 
 use crate::{apic, ioapic, ps2};

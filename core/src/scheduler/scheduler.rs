@@ -11,7 +11,7 @@ use spin::Once;
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog_info;
 
-use slopos_abi::arch::SegmentSelector;
+use slopos_lib::arch::gdt::SegmentSelector;
 
 use crate::platform;
 
@@ -1267,7 +1267,7 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
 }
 
 pub fn send_reschedule_ipi(target_cpu: usize) {
-    use slopos_abi::arch::x86_64::idt::RESCHEDULE_IPI_VECTOR;
+    use slopos_lib::arch::idt::RESCHEDULE_IPI_VECTOR;
 
     let current_cpu = slopos_lib::get_current_cpu();
     if target_cpu == current_cpu {

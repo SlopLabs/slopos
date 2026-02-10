@@ -10,7 +10,7 @@
 
 use core::arch::asm;
 
-use slopos_abi::arch::x86_64::msr::{EFER_SCE, Msr};
+use slopos_lib::cpu::msr::{EFER_SCE, Msr};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{cpu, klog_info};
 

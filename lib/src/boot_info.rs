@@ -1,4 +1,4 @@
-use crate::DisplayInfo;
+use slopos_abi::DisplayInfo;
 
 #[derive(Clone, Copy)]
 #[repr(C)]

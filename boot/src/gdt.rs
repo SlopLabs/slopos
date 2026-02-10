@@ -2,10 +2,10 @@
 
 use core::arch::asm;
 
-use slopos_abi::arch::x86_64::gdt::{
+use slopos_lib::arch::gdt::{
     GDT_STANDARD_ENTRIES, GdtDescriptor, GdtLayout, SegmentSelector, Tss64,
 };
-use slopos_abi::arch::x86_64::msr::{EFER_SCE, Msr};
+use slopos_lib::cpu::msr::{EFER_SCE, Msr};
 use slopos_lib::{MAX_CPUS, cpu, get_current_cpu, klog_debug};
 
 #[repr(C)]

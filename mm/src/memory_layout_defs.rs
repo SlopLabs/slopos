@@ -3,7 +3,7 @@
 //! This module defines the virtual and physical address space layout used
 //! by SlopOS, including kernel space, user space, and special regions.
 
-use super::paging::PAGE_SIZE_4KB;
+use crate::paging_defs::PAGE_SIZE_4KB;
 
 // =============================================================================
 // Boot-Time Memory

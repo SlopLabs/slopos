@@ -49,13 +49,13 @@ pub fn register_ipi_sender(sender: SendIpiFn) {
 /// Beyond this threshold, a full TLB flush (CR3 reload) is cheaper.
 const INVLPG_THRESHOLD: usize = 32;
 
-pub use slopos_abi::arch::x86_64::idt::TLB_SHOOTDOWN_VECTOR;
+pub use slopos_lib::arch::idt::TLB_SHOOTDOWN_VECTOR;
 
 // =============================================================================
 // CPU Feature Detection
 // =============================================================================
 
-use slopos_abi::arch::x86_64::cpuid::{
+use slopos_lib::cpu::cpuid::{
     CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
 };
 

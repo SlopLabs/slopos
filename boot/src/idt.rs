@@ -13,18 +13,15 @@ use crate::panic::set_panic_cpu_state;
 
 global_asm!(include_str!("../idt_handlers.s"));
 
-// Import IDT constants from abi
-pub use slopos_abi::arch::x86_64::idt::{
+pub use slopos_lib::arch::idt::{
     EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
     EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
     EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    IdtEntry, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
-
-pub use slopos_abi::arch::x86_64::idt::IdtEntry;
 
 #[repr(C, packed)]
 struct IdtPtr {
@@ -277,7 +274,7 @@ pub fn exception_set_mode(mode: ExceptionMode) {
     }
 }
 pub fn exception_is_critical(vector: u8) -> i32 {
-    slopos_abi::arch::x86_64::exception::exception_is_critical(vector) as i32
+    slopos_lib::arch::exception::exception_is_critical(vector) as i32
 }
 pub fn idt_load() {
     unsafe {
@@ -431,7 +428,7 @@ fn initialize_handler_tables() {
 }
 
 fn is_critical_exception_internal(vector: u8) -> bool {
-    slopos_abi::arch::x86_64::exception::exception_is_critical(vector)
+    slopos_lib::arch::exception::exception_is_critical(vector)
 }
 
 fn in_user(frame: &slopos_lib::InterruptFrame) -> bool {

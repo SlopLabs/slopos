@@ -1,10 +1,8 @@
 //! SlopOS Memory and Paging Constants.
 //!
-//! This module re-exports memory and paging constants from `slopos_abi::arch::x86_64`.
-//! All code should use the type-safe `PageFlags` bitflags for page table operations.
+//! Re-exports memory layout and paging constants from their canonical modules.
 
-// Re-export memory layout constants from abi
-pub use slopos_abi::arch::x86_64::memory::{
+pub use crate::memory_layout_defs::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
     EARLY_PML4_PHYS_ADDR, EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES,
     EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE,
@@ -18,11 +16,7 @@ pub use slopos_abi::arch::x86_64::memory::{
 // INVALID_PROCESS_ID is canonical in task module
 pub use slopos_abi::task::INVALID_PROCESS_ID;
 
-// Re-export paging constants from abi
-pub use slopos_abi::arch::x86_64::paging::{
+pub use crate::paging_defs::{
     EFI_CONVENTIONAL_MEMORY, EFI_PAGE_SIZE, ENTRIES_PER_PAGE_TABLE, PAGE_ALIGN, PAGE_SIZE_1GB,
-    PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_4KB_USIZE, STACK_ALIGN,
+    PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_4KB_USIZE, PageFlags, STACK_ALIGN,
 };
-
-// Re-export PageFlags for type-safe flag manipulation
-pub use slopos_abi::arch::x86_64::paging::PageFlags;

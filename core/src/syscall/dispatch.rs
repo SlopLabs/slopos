@@ -4,9 +4,9 @@ use crate::sched::scheduler_get_current_task;
 use crate::syscall::handlers::syscall_lookup;
 
 use crate::scheduler::task_struct::{Task, TaskContext};
-use slopos_abi::arch::SegmentSelector;
 use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE};
 use slopos_lib::InterruptFrame;
+use slopos_lib::arch::gdt::SegmentSelector;
 
 fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
     if frame.is_null() || task.is_null() {

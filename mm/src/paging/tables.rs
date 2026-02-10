@@ -2,11 +2,9 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
+use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::arch::x86_64::page_table::{
-    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel,
-};
-use slopos_abi::arch::x86_64::paging::PageFlags;
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use super::walker::{PageTableWalker, WalkAction};

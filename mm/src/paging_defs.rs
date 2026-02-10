@@ -14,7 +14,7 @@ bitflags! {
     /// # Example
     ///
     /// ```ignore
-    /// use slopos_abi::arch::x86_64::PageFlags;
+    /// use slopos_mm::paging_defs::PageFlags;
     ///
     /// let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
     /// let pte = phys_addr | flags.bits();

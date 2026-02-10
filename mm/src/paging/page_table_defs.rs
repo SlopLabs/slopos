@@ -1,16 +1,13 @@
-//! Page table structures for x86_64 4-level paging.
+use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use super::paging::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
-use crate::addr::{PhysAddr, VirtAddr};
-
-/// Page table hierarchy level (4 = PML4, 1 = PT).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum PageTableLevel {
-    Four = 4,  // PML4 - 512GB per entry
-    Three = 3, // PDPT - 1GB per entry, supports huge pages
-    Two = 2,   // PD - 2MB per entry, supports huge pages
-    One = 1,   // PT - 4KB per entry
+    Four = 4,
+    Three = 3,
+    Two = 2,
+    One = 1,
 }
 
 impl PageTableLevel {
@@ -34,7 +31,6 @@ impl PageTableLevel {
         }
     }
 
-    /// Page size for leaf entries at this level (None for PML4).
     #[inline]
     pub const fn page_size(self) -> Option<u64> {
         match self {
@@ -50,14 +46,12 @@ impl PageTableLevel {
         matches!(self, Self::Three | Self::Two)
     }
 
-    /// Extract 9-bit index from virtual address for this level.
     #[inline]
     pub const fn index_of(self, vaddr: VirtAddr) -> usize {
         let shift = 12 + ((self as u8 - 1) * 9);
         ((vaddr.as_u64() >> shift) & 0x1FF) as usize
     }
 
-    /// Address space covered by one entry at this level.
     #[inline]
     pub const fn entry_size(self) -> u64 {
         1u64 << (12 + ((self as u8 - 1) * 9))
@@ -95,7 +89,6 @@ impl core::fmt::Display for PageTableLevel {
     }
 }
 
-/// A 64-bit page table entry.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PageTableEntry(u64);
@@ -196,7 +189,6 @@ impl core::fmt::Debug for PageTableEntry {
     }
 }
 
-/// Number of entries in a page table.
 pub const PAGE_TABLE_ENTRIES: usize = 512;
 
 /// A 512-entry page table, aligned to 4KB.
