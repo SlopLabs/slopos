@@ -54,18 +54,9 @@ pub const VIRTQ_DESC_F_WRITE: u16 = 2;
 /// Buffer contains a list of buffer descriptors
 pub const VIRTQ_DESC_F_INDIRECT: u16 = 4;
 
-// =============================================================================
-// PCI Configuration Constants
-// =============================================================================
-
-/// PCI Status register offset
-pub const PCI_STATUS_OFFSET: u8 = 0x06;
-/// PCI Status: Capabilities list present
-pub const PCI_STATUS_CAP_LIST: u16 = 0x10;
-/// PCI Capabilities pointer offset
-pub const PCI_CAP_PTR_OFFSET: u8 = 0x34;
-/// PCI Capability ID: Vendor-specific (used by VirtIO)
-pub const PCI_CAP_ID_VNDR: u8 = 0x09;
+pub use crate::pci_defs::{
+    PCI_CAP_ID_VNDR, PCI_CAP_PTR_OFFSET, PCI_STATUS_CAP_LIST, PCI_STATUS_OFFSET,
+};
 
 // =============================================================================
 // VirtIO Common Configuration Layout (MMIO offsets)

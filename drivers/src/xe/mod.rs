@@ -8,6 +8,7 @@ use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame}
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 
 use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
+use crate::pci_defs::PCI_CLASS_DISPLAY;
 
 mod display;
 mod forcewake;
@@ -16,7 +17,6 @@ mod mmio;
 mod regs;
 
 const PCI_VENDOR_INTEL: u16 = 0x8086;
-const PCI_CLASS_DISPLAY: u8 = 0x03;
 
 #[derive(Copy, Clone)]
 #[allow(dead_code)]

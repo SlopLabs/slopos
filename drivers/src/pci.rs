@@ -10,17 +10,7 @@ use slopos_mm::mmio::MmioRegion;
 
 pub use crate::pci_defs::*;
 
-const PCI_VENDOR_ID: u8 = PCI_VENDOR_ID_OFFSET;
-const PCI_DEVICE_ID: u8 = PCI_DEVICE_ID_OFFSET;
-const PCI_CLASS: u8 = PCI_CLASS_CODE_OFFSET;
-const PCI_SUBCLASS: u8 = PCI_SUBCLASS_OFFSET;
-const PCI_PROG_IF: u8 = PCI_PROG_IF_OFFSET;
-const PCI_REVISION: u8 = PCI_REVISION_ID_OFFSET;
-const PCI_HEADER_TYPE: u8 = PCI_HEADER_TYPE_OFFSET;
-const PCI_INTERRUPT_LINE: u8 = PCI_INTERRUPT_LINE_OFFSET;
-const PCI_INTERRUPT_PIN: u8 = PCI_INTERRUPT_PIN_OFFSET;
-const PCI_BAR0: u8 = PCI_BAR0_OFFSET;
-const PCI_SECONDARY_BUS: u8 = 0x19;
+const PCI_SECONDARY_BUS_OFFSET: u8 = 0x19;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -148,11 +138,11 @@ pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u
 }
 
 fn pci_read_vendor_id(bus: u8, device: u8, function: u8) -> u16 {
-    pci_config_read16(bus, device, function, PCI_VENDOR_ID)
+    pci_config_read16(bus, device, function, PCI_VENDOR_ID_OFFSET)
 }
 
 fn pci_read_header_type(bus: u8, device: u8, function: u8) -> u8 {
-    pci_config_read8(bus, device, function, PCI_HEADER_TYPE)
+    pci_config_read8(bus, device, function, PCI_HEADER_TYPE_OFFSET)
 }
 
 fn pci_is_multifunction(bus: u8, device: u8) -> bool {
@@ -160,11 +150,11 @@ fn pci_is_multifunction(bus: u8, device: u8) -> bool {
 }
 
 fn pci_get_secondary_bus(bus: u8, device: u8, function: u8) -> u8 {
-    pci_config_read8(bus, device, function, PCI_SECONDARY_BUS)
+    pci_config_read8(bus, device, function, PCI_SECONDARY_BUS_OFFSET)
 }
 
 fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
-    let bar_offset = PCI_BAR0 + bar_idx * 4;
+    let bar_offset = PCI_BAR0_OFFSET + bar_idx * 4;
     let original = pci_config_read32(bus, device, function, bar_offset);
     let is_io = (original & 1) != 0;
 
@@ -213,14 +203,14 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
         return;
     }
 
-    let device_id = pci_config_read16(bus, device, function, PCI_DEVICE_ID);
-    let class = pci_config_read8(bus, device, function, PCI_CLASS);
-    let subclass = pci_config_read8(bus, device, function, PCI_SUBCLASS);
-    let prog_if = pci_config_read8(bus, device, function, PCI_PROG_IF);
-    let revision = pci_config_read8(bus, device, function, PCI_REVISION);
+    let device_id = pci_config_read16(bus, device, function, PCI_DEVICE_ID_OFFSET);
+    let class = pci_config_read8(bus, device, function, PCI_CLASS_CODE_OFFSET);
+    let subclass = pci_config_read8(bus, device, function, PCI_SUBCLASS_OFFSET);
+    let prog_if = pci_config_read8(bus, device, function, PCI_PROG_IF_OFFSET);
+    let revision = pci_config_read8(bus, device, function, PCI_REVISION_ID_OFFSET);
     let header_type = pci_read_header_type(bus, device, function) & 0x7F;
-    let interrupt_line = pci_config_read8(bus, device, function, PCI_INTERRUPT_LINE);
-    let interrupt_pin = pci_config_read8(bus, device, function, PCI_INTERRUPT_PIN);
+    let interrupt_line = pci_config_read8(bus, device, function, PCI_INTERRUPT_LINE_OFFSET);
+    let interrupt_pin = pci_config_read8(bus, device, function, PCI_INTERRUPT_PIN_OFFSET);
 
     let mut bars = [PciBarInfo::zeroed(); PCI_MAX_BARS];
     let mut bar_count = 0u8;

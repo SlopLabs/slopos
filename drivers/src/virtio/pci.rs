@@ -17,7 +17,7 @@ use super::{
     get_device_status, reset_device, set_device_status,
 };
 
-pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
+pub use crate::pci_defs::PCI_VENDOR_ID_VIRTIO;
 
 pub fn enable_bus_master(info: &PciDeviceInfo) {
     let cmd = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);

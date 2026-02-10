@@ -10,7 +10,8 @@ use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
     self, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     pci::{
-        VIRTIO_VENDOR_ID, enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok,
+        PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
+        set_driver_ok,
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
@@ -79,7 +80,7 @@ fn virtio_blk_match(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         return false;
     }
     let info = unsafe { &*info };
-    if info.vendor_id != VIRTIO_VENDOR_ID {
+    if info.vendor_id != PCI_VENDOR_ID_VIRTIO {
         return false;
     }
     info.device_id == VIRTIO_BLK_DEVICE_ID_LEGACY || info.device_id == VIRTIO_BLK_DEVICE_ID_MODERN

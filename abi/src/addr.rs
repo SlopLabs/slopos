@@ -22,7 +22,7 @@
 //! // map_page(phys, virt);  // Compile error!
 //! ```
 
-const PAGE_SIZE_4KB: u64 = 0x1000;
+use crate::PAGE_SIZE;
 
 /// A physical memory address.
 ///
@@ -133,12 +133,12 @@ impl PhysAddr {
 
     #[inline]
     pub const fn page_base(self) -> Self {
-        self.align_down(PAGE_SIZE_4KB)
+        self.align_down(PAGE_SIZE)
     }
 
     #[inline]
     pub const fn page_offset(self) -> u64 {
-        self.0 & (PAGE_SIZE_4KB - 1)
+        self.0 & (PAGE_SIZE - 1)
     }
 }
 
@@ -234,12 +234,12 @@ impl VirtAddr {
 
     #[inline]
     pub const fn page_base(self) -> Self {
-        self.align_down(PAGE_SIZE_4KB)
+        self.align_down(PAGE_SIZE)
     }
 
     #[inline]
     pub const fn page_offset(self) -> u64 {
-        self.0 & (PAGE_SIZE_4KB - 1)
+        self.0 & (PAGE_SIZE - 1)
     }
 
     /// Check if this address is in kernel space (higher half).

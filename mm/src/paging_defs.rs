@@ -101,21 +101,6 @@ pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 /// 1GB page size (huge page via PDPTE).
 pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 
-/// Page alignment (same as PAGE_SIZE_4KB).
-pub const PAGE_ALIGN: u64 = PAGE_SIZE_4KB;
-
-/// Stack alignment requirement.
-pub const STACK_ALIGN: u64 = 16;
-
-/// Number of entries per page table (512 for 4KB pages).
-pub const ENTRIES_PER_PAGE_TABLE: usize = 512;
-
-/// EFI page size (same as 4KB).
-pub const EFI_PAGE_SIZE: u64 = PAGE_SIZE_4KB;
-
-/// EFI conventional memory type.
-pub const EFI_CONVENTIONAL_MEMORY: u64 = 7;
-
 #[cfg(test)]
 mod tests {
     use super::*;

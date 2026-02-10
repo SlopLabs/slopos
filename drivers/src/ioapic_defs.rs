@@ -42,30 +42,12 @@ pub const IOAPIC_REDIR_WRITABLE_MASK: u32 =
 /// Fixed delivery mode.
 pub const IOAPIC_FLAG_DELIVERY_FIXED: u32 = 0u32 << 8;
 
-/// Lowest priority delivery mode.
-pub const IOAPIC_FLAG_DELIVERY_LOWEST_PRI: u32 = 1u32 << 8;
-
-/// System Management Interrupt.
-pub const IOAPIC_FLAG_DELIVERY_SMI: u32 = 2u32 << 8;
-
-/// Non-Maskable Interrupt.
-pub const IOAPIC_FLAG_DELIVERY_NMI: u32 = 4u32 << 8;
-
-/// INIT delivery.
-pub const IOAPIC_FLAG_DELIVERY_INIT: u32 = 5u32 << 8;
-
-/// External INT delivery.
-pub const IOAPIC_FLAG_DELIVERY_EXTINT: u32 = 7u32 << 8;
-
 // =============================================================================
 // Redirection Entry Flags - Destination Mode (bit 11)
 // =============================================================================
 
 /// Physical destination mode.
 pub const IOAPIC_FLAG_DEST_PHYSICAL: u32 = 0u32 << 11;
-
-/// Logical destination mode.
-pub const IOAPIC_FLAG_DEST_LOGICAL: u32 = 1u32 << 11;
 
 // =============================================================================
 // Redirection Entry Flags - Polarity (bit 13)
@@ -93,6 +75,3 @@ pub const IOAPIC_FLAG_TRIGGER_LEVEL: u32 = 1u32 << 15;
 
 /// Interrupt masked.
 pub const IOAPIC_FLAG_MASK: u32 = 1u32 << 16;
-
-/// Interrupt unmasked.
-pub const IOAPIC_FLAG_UNMASKED: u32 = 0u32;

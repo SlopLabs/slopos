@@ -32,12 +32,6 @@ pub const EARLY_PD_PHYS_ADDR: u64 = 0x32000;
 /// The kernel is mapped in the highest 2GB of 64-bit address space.
 pub const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
-/// PML4 index for kernel space (entry 511).
-pub const KERNEL_PML4_INDEX: usize = 511;
-
-/// PDPT index for kernel space (entry 510).
-pub const KERNEL_PDPT_INDEX: usize = 510;
-
 /// Higher Half Direct Map base address.
 /// Physical memory is identity-mapped starting at this virtual address.
 pub const HHDM_VIRT_BASE: u64 = 0xFFFF_8000_0000_0000;
@@ -114,15 +108,9 @@ pub const EXCEPTION_STACK_PAGES: u64 = 8;
 /// Exception stack usable size (32 KB).
 pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * PAGE_SIZE_4KB;
 
-/// Total exception stack size including guard page (36 KB).
-pub const EXCEPTION_STACK_TOTAL_SIZE: u64 = EXCEPTION_STACK_GUARD_SIZE + EXCEPTION_STACK_SIZE;
-
 // =============================================================================
 // Process Limits
 // =============================================================================
-
-/// Maximum number of memory regions.
-pub const MAX_MEMORY_REGIONS: usize = 64;
 
 /// Maximum number of processes.
 pub const MAX_PROCESSES: usize = 256;
