@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::fs::UserFsEntry;
-use slopos_lib::{klog_info, wl_currency};
+use slopos_lib::klog_info;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::{Ext2Error, Ext2Fs};
@@ -424,17 +424,9 @@ pub fn test_ext2_device_write_error_on_metadata() -> c_int {
         Err(_) => return 0,
     };
 
-    wl_currency::reset();
     let result = fs.create_directory(2, b"faildir");
-    let balance = wl_currency::check_balance();
     match result {
-        Err(Ext2Error::DeviceError) => {
-            if balance < 0 {
-                0
-            } else {
-                -1
-            }
-        }
+        Err(Ext2Error::DeviceError) => 0,
         _ => -1,
     }
 }
@@ -532,40 +524,6 @@ pub fn test_ext2_remove_path_not_file() -> c_int {
     }
 }
 
-pub fn test_ext2_wl_currency_on_error() -> c_int {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
-    };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
-        Ok(fs) => fs,
-        Err(_) => return -1,
-    };
-
-    wl_currency::reset();
-    let result = fs.read_inode(0);
-    let balance = wl_currency::check_balance();
-    if result.is_err() && balance < 0 {
-        0
-    } else {
-        -1
-    }
-}
-
-pub fn test_ext2_wl_currency_on_success() -> c_int {
-    let Some(mut device) = build_minimal_ext2_image(64, 32) else {
-        return 0;
-    };
-    let mut fs = match Ext2Fs::init_internal(&mut device) {
-        Ok(fs) => fs,
-        Err(_) => return -1,
-    };
-
-    wl_currency::reset();
-    let result = fs.read_inode(2);
-    let balance = wl_currency::check_balance();
-    if result.is_ok() && balance > 0 { 0 } else { -1 }
-}
-
 fn ext2_tests_init() -> bool {
     if let Err(_) = vfs_init_builtin_filesystems() {
         klog_info!("VFS_TEST: failed to initialize VFS");
@@ -609,8 +567,6 @@ fn run_ext2_suite(_config: *const (), out: *mut slopos_lib::testing::TestSuiteRe
     slopos_lib::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
     slopos_lib::run_test!(passed, total, test_ext2_path_resolution_not_found);
     slopos_lib::run_test!(passed, total, test_ext2_remove_path_not_file);
-    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_error);
-    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_success);
 
     let elapsed = slopos_lib::testing::measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
 

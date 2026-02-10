@@ -2,7 +2,6 @@ use core::cmp;
 use core::mem;
 
 use crate::blockdev::BlockDevice;
-use slopos_lib::wl_currency;
 
 const EXT2_MIN_BLOCK_SIZE: u32 = 1024;
 const EXT2_MAX_BLOCK_SIZE: u32 = 4096;
@@ -92,12 +91,7 @@ pub struct Ext2Fs<'a> {
 
 impl<'a> Ext2Fs<'a> {
     pub fn init(device: &'a mut dyn BlockDevice) -> Result<Self, Ext2Error> {
-        let result = Self::init_internal(device);
-        match result {
-            Ok(_) => wl_currency::award_win(),
-            Err(_) => wl_currency::award_loss(),
-        }
-        result
+        Self::init_internal(device)
     }
 
     pub fn superblock(&self) -> Ext2Superblock {
@@ -109,9 +103,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     pub fn read_inode(&mut self, inode: u32) -> Result<Ext2Inode, Ext2Error> {
-        let result = self.read_inode_internal(inode);
-        Self::record_result(&result);
-        result
+        self.read_inode_internal(inode)
     }
 
     pub fn read_file(
@@ -120,9 +112,7 @@ impl<'a> Ext2Fs<'a> {
         offset: u32,
         buffer: &mut [u8],
     ) -> Result<usize, Ext2Error> {
-        let result = self.read_file_internal(inode, offset, buffer);
-        Self::record_result(&result);
-        result
+        self.read_file_internal(inode, offset, buffer)
     }
 
     pub fn write_file(
@@ -131,50 +121,30 @@ impl<'a> Ext2Fs<'a> {
         offset: u32,
         buffer: &[u8],
     ) -> Result<usize, Ext2Error> {
-        let result = self.write_file_internal(inode, offset, buffer);
-        Self::record_result(&result);
-        result
+        self.write_file_internal(inode, offset, buffer)
     }
 
     pub fn for_each_dir_entry<F>(&mut self, inode: u32, mut f: F) -> Result<(), Ext2Error>
     where
         F: FnMut(Ext2DirEntry<'_>) -> bool,
     {
-        let result = self.for_each_dir_entry_internal(inode, &mut f);
-        Self::record_result(&result);
-        result
+        self.for_each_dir_entry_internal(inode, &mut f)
     }
 
     pub fn resolve_path(&mut self, path: &[u8]) -> Result<u32, Ext2Error> {
-        let result = self.resolve_path_internal(path);
-        Self::record_result(&result);
-        result
+        self.resolve_path_internal(path)
     }
 
     pub fn create_file(&mut self, parent_inode: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        let result = self.create_inode_entry(parent_inode, name, false);
-        Self::record_result(&result);
-        result
+        self.create_inode_entry(parent_inode, name, false)
     }
 
     pub fn create_directory(&mut self, parent_inode: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        let result = self.create_inode_entry(parent_inode, name, true);
-        Self::record_result(&result);
-        result
+        self.create_inode_entry(parent_inode, name, true)
     }
 
     pub fn remove_path(&mut self, path: &[u8]) -> Result<(), Ext2Error> {
-        let result = self.remove_path_internal(path);
-        Self::record_result(&result);
-        result
-    }
-
-    fn record_result<T>(result: &Result<T, Ext2Error>) {
-        // W/L ledger: success earns a win, recoverable errors take a loss.
-        match result {
-            Ok(_) => wl_currency::award_win(),
-            Err(_) => wl_currency::award_loss(),
-        }
+        self.remove_path_internal(path)
     }
 
     pub(crate) fn init_internal(device: &'a mut dyn BlockDevice) -> Result<Self, Ext2Error> {

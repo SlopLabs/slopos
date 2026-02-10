@@ -9,7 +9,7 @@ use core::ptr;
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
 use slopos_fs::vfs::ops::vfs_open;
-use slopos_lib::{klog_info, wl_currency};
+use slopos_lib::klog_info;
 use slopos_mm::elf::ElfError;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
@@ -144,12 +144,6 @@ pub fn spawn_program_with_attrs(
 
         Ok(task_id)
     })();
-
-    if result.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-    }
 
     result
 }

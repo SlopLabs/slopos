@@ -4,7 +4,6 @@ use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
 
 use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_drivers::apic;
-use slopos_lib::wl_currency::{award_loss, award_win};
 use slopos_lib::{cpu, is_cpu_online, klog_info, pcr};
 use slopos_mm::tlb;
 
@@ -53,11 +52,8 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
 pub fn smp_init() {
     let Some(resp) = limine_protocol::mp_response() else {
         klog_info!("MP: Limine MP response unavailable; skipping AP startup");
-        award_loss();
         return;
     };
-
-    award_win();
 
     let cpus = resp.cpus();
     let bsp_lapic = resp.bsp_lapic_id();
@@ -118,11 +114,9 @@ pub fn smp_init() {
         }
 
         if cpu.extra.load(Ordering::Acquire) == AP_STARTED_MAGIC {
-            award_win();
             klog_info!("MP: CPU 0x{:x} reported online", cpu.lapic_id);
             started_count += 1;
         } else {
-            award_loss();
             klog_info!("MP: CPU 0x{:x} did not respond", cpu.lapic_id);
         }
     }

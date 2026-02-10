@@ -32,7 +32,7 @@ use crate::scheduler::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskExitRecord, TaskFaultReason};
 use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
-use slopos_lib::wl_currency;
+
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_to_user};
@@ -70,7 +70,6 @@ pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDis
 }
 
 pub fn syscall_reboot(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
-    wl_currency::award_win();
     platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallDisposition::Ok
@@ -299,17 +298,14 @@ define_syscall!(syscall_input_get_button_state(ctx, args) requires(compositor) {
 define_syscall!(syscall_input_request_close(ctx, args) requires(compositor) {
     let target_task_id = args.arg0_u32();
     if target_task_id == 0 || target_task_id == INVALID_TASK_ID {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
     let timestamp_ms = platform::get_time_ms();
     if input::request_close(target_task_id, timestamp_ms) != 0 {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
-    wl_currency::award_win();
     ctx.ok(0)
 });
 
@@ -534,7 +530,6 @@ define_syscall!(syscall_spawn_path(ctx, args) {
     let flags = args.arg3 as u16;
 
     if path_ptr.is_null() || path_len == 0 || path_len > exec::EXEC_MAX_PATH {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
@@ -547,7 +542,6 @@ define_syscall!(syscall_spawn_path(ctx, args) {
     ) {
         Ok(len) => len,
         Err(_) => {
-            wl_currency::award_loss();
             return ctx.err();
         }
     };
@@ -583,22 +577,18 @@ define_syscall!(syscall_waitpid(ctx, args) {
 define_syscall!(syscall_terminate_task(ctx, args) requires(compositor) {
     let target_id = args.arg0_u32();
     if target_id == 0 || target_id == INVALID_TASK_ID {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
     let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
     if target_id == caller_id {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
     if task_terminate(target_id) != 0 {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
-    wl_currency::award_win();
     ctx.ok(0)
 });
 
@@ -616,13 +606,11 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     let path_ptr = args.arg0;
 
     if path_ptr == 0 {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
     if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
-        wl_currency::award_loss();
         return ctx.err();
     }
 
@@ -644,7 +632,6 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         &mut stack_ptr,
     ) {
         Ok(()) => {
-            wl_currency::award_win();
             unsafe {
                 (*frame).rip = entry_point;
                 (*frame).rsp = stack_ptr;
@@ -661,7 +648,6 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
             SyscallDisposition::Ok
         }
         Err(e) => {
-            wl_currency::award_loss();
             unsafe {
                 (*frame).rax = e as i32 as u64;
             }

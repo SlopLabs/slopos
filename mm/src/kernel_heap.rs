@@ -3,7 +3,7 @@ use core::mem;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{IrqMutex, align_down_u64, align_up_usize, klog_debug, klog_info, wl_currency};
+use slopos_lib::{IrqMutex, align_down_u64, align_up_usize, klog_debug, klog_info};
 
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
 use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
@@ -413,12 +413,10 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 
     if !heap.initialized {
         klog_info!("kmalloc: Heap not initialized");
-        wl_currency::award_loss();
         return ptr::null_mut();
     }
 
     if size == 0 || size > MAX_ALLOC_SIZE {
-        wl_currency::award_loss();
         return ptr::null_mut();
     }
 
@@ -428,12 +426,6 @@ pub fn kmalloc(size: usize) -> *mut c_void {
     } else {
         alloc_large(&mut heap, rounded_size)
     };
-
-    if result.is_null() {
-        wl_currency::award_loss();
-    } else {
-        wl_currency::award_win();
-    }
 
     result
 }
@@ -462,23 +454,19 @@ pub fn kfree(ptr_in: *mut c_void) {
     let base = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB);
     if base < heap.start_addr || base >= heap.current_break {
         klog_info!("kfree: Invalid block or double free detected");
-        wl_currency::award_loss();
         return;
     }
     let slab_result = slab_free(&mut heap, ptr_in);
     if slab_result == 0 {
-        wl_currency::award_win();
         return;
     }
 
     let large_result = free_large(&mut heap, base);
     if large_result == 0 {
-        wl_currency::award_win();
         return;
     }
 
     klog_info!("kfree: Invalid block or double free detected");
-    wl_currency::award_loss();
 }
 
 /// Minimum pages required for soft reboot coherency fix.
