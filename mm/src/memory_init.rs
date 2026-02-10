@@ -549,7 +549,7 @@ fn display_memory_summary() {
         );
         klog_info!("Memory Regions:        {}", INIT_STATS.memory_regions_count);
         klog_info!("HHDM Offset:           0x{:x}", INIT_STATS.hhdm_offset);
-        klog_info!("=====================================================\n");
+        klog_info!("=====================================================");
     }
 }
 pub fn init_memory_system(
@@ -637,7 +637,7 @@ pub fn init_memory_system(
         display_memory_summary();
 
         klog_info!("MM: Complete memory system initialization successful!");
-        klog_debug!("MM: Ready for scheduler and video subsystem initialization\n");
+        klog_debug!("MM: Ready for scheduler and video subsystem initialization");
     }
     0
 }

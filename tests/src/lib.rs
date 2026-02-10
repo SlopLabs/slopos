@@ -44,11 +44,11 @@ pub fn tests_run_all(
 
     let cfg = unsafe { &*config };
     if !cfg.enabled {
-        klog_info!("TESTS: Harness disabled\n");
+        klog_info!("TESTS: Harness disabled");
         return 0;
     }
 
-    klog_info!("TESTS: Starting test suites\n");
+    klog_info!("TESTS: Starting test suites");
 
     let start_cycles = slopos_lib::tsc::rdtsc();
     let mut idx = 0usize;
@@ -58,7 +58,7 @@ pub fn tests_run_all(
             summary.unexpected_exceptions = summary.unexpected_exceptions.saturating_add(1);
             summary.failed = summary.failed.saturating_add(1);
             if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
-                klog_info!("TESTS: panic flagged, stopping suite execution\n");
+                klog_info!("TESTS: panic flagged, stopping suite execution");
             }
             break;
         }
@@ -78,7 +78,7 @@ pub fn tests_run_all(
             if suite_result != 0 {
                 res.unexpected_exceptions = res.unexpected_exceptions.saturating_add(1);
                 res.failed = res.failed.saturating_add(1);
-                klog_info!("TESTS: suite panic caught, continuing\n");
+                klog_info!("TESTS: suite panic caught, continuing");
             }
         }
 
@@ -93,7 +93,7 @@ pub fn tests_run_all(
                 res.timed_out = 1;
                 res.failed = res.failed.saturating_add(1);
                 if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
-                    klog_info!("TESTS: suite timeout exceeded\n");
+                    klog_info!("TESTS: suite timeout exceeded");
                 }
             }
         }
@@ -104,7 +104,7 @@ pub fn tests_run_all(
         }
 
         klog_info!(
-            "SUITE{} total={} pass={} fail={} elapsed={}ms\n",
+            "SUITE{} total={} pass={} fail={} elapsed={}ms",
             idx as u32,
             res.total,
             res.passed,
@@ -123,7 +123,7 @@ pub fn tests_run_all(
     }
 
     klog_info!(
-        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}\n",
+        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}",
         summary.total_tests,
         summary.passed,
         summary.failed,
@@ -140,6 +140,6 @@ pub fn tests_request_shutdown(failed: i32) {
 pub fn tests_mark_panic() {
     PANIC_SEEN.set_active();
     if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
-        klog_info!("TESTS: panic observed\n");
+        klog_info!("TESTS: panic observed");
     }
 }

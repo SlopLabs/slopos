@@ -13,7 +13,6 @@ use crate::pci_defs::PCI_CLASS_DISPLAY;
 mod display;
 mod forcewake;
 mod ggtt;
-mod mmio;
 mod regs;
 
 const PCI_VENDOR_INTEL: u16 = 0x8086;
@@ -128,7 +127,7 @@ pub fn xe_probe() -> bool {
         return false;
     }
 
-    let gmd_id = mmio::read32(&mmio_region, regs::GMD_ID);
+    let gmd_id = mmio_region.read_u32(regs::GMD_ID);
     if gmd_id == u32::MAX {
         klog_warn!("XE: GMD_ID read failed (0xFFFFFFFF)");
         return false;

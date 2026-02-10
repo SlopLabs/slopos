@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_drivers::serial;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::wl_currency;
-use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
+use slopos_lib::{klog_debug, klog_info, klog_set_level};
 use slopos_video::splash;
 
 use crate::limine_protocol;
@@ -400,8 +400,7 @@ fn boot_step_serial_init_fn() {
     serial::init();
     serial::write_line("BOOT: serial step -> after serial::init");
 
-    slopos_lib::klog_attach_serial();
-    serial::write_line("BOOT: serial step -> after klog_attach_serial");
+    serial::write_line("BOOT: serial step -> klog backend registered by serial::init");
 
     slopos_drivers::serial::write_line("SERIAL: init ok");
     boot_debug(b"Serial console ready on COM1\0");
@@ -517,7 +516,7 @@ pub fn kernel_main_impl() {
     serial::write_line("BOOT: boot init complete");
 
     if klog::is_enabled_level(KlogLevel::Info) {
-        klog_newline();
+        klog_info!("");
     }
 
     boot_info(b"=== KERNEL BOOT SUCCESSFUL ===\0");
@@ -528,7 +527,7 @@ pub fn kernel_main_impl() {
     boot_info(b"Starting scheduler...\0");
 
     if klog::is_enabled_level(KlogLevel::Info) {
-        klog_newline();
+        klog_info!("");
     }
 
     enter_scheduler(0);

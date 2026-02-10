@@ -1,6 +1,8 @@
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_lib::IrqMutex;
 use slopos_lib::RingBuffer;
+use slopos_lib::cpu;
 use slopos_lib::io::Port;
 use slopos_lib::ports::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
@@ -42,6 +44,59 @@ static INPUT_BUFFER: IrqMutex<SerialBuffer> = IrqMutex::new(SerialBuffer::new_wi
 pub fn init() {
     let mut port = SERIAL.lock();
     unsafe { port.init() }
+    drop(port);
+
+    slopos_lib::klog::klog_register_backend(serial_klog_backend);
+}
+
+/// PCR-independent spinlock for klog serial output.
+///
+/// `IrqMutex` depends on the PCR (Per-CPU Record) via `PreemptGuard`, which
+/// is unavailable during AP boot.  This lock uses only `cli`/`sti` + an
+/// `AtomicBool`, making it safe from any CPU context.
+static KLOG_LOCK: AtomicBool = AtomicBool::new(false);
+
+fn serial_klog_backend(args: fmt::Arguments<'_>) {
+    let saved_flags = cpu::save_flags_cli();
+    while KLOG_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
+    // SAFETY: KLOG_LOCK serialises all klog writes; write directly via COM1
+    // raw port I/O to avoid the IrqMutex → PreemptGuard → PCR dependency.
+    struct KlogWriter;
+    impl fmt::Write for KlogWriter {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            let lsr = COM1.offset(REG_LSR);
+            let data = COM1.offset(REG_RBR);
+            for &b in s.as_bytes() {
+                if b == b'\n' {
+                    unsafe {
+                        while (lsr.read() & LSR_TX_EMPTY) == 0 {
+                            core::hint::spin_loop();
+                        }
+                        data.write(b'\r');
+                    }
+                }
+                unsafe {
+                    while (lsr.read() & LSR_TX_EMPTY) == 0 {
+                        core::hint::spin_loop();
+                    }
+                    data.write(b);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let _ = fmt::write(&mut KlogWriter, args);
+    let _ = KlogWriter.write_str("\n");
+
+    KLOG_LOCK.store(false, Ordering::Release);
+    cpu::restore_flags(saved_flags);
 }
 
 pub fn init_port(base: u16) -> Result<UartCapabilities, ()> {

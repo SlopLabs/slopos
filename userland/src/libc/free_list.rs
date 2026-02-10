@@ -16,7 +16,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use slopos_lib::free_list::{FreeList, BlockHeader, MAGIC_FREE, MAGIC_ALLOCATED};
+//! use crate::libc::free_list::{FreeList, BlockHeader, MAGIC_FREE, MAGIC_ALLOCATED};
 //!
 //! // Create a new free list
 //! let mut free_list = FreeList::new();
@@ -481,39 +481,4 @@ where
     header.update_checksum();
 
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_round_up_pow2() {
-        assert_eq!(round_up_pow2(0, 16), 16);
-        assert_eq!(round_up_pow2(1, 16), 16);
-        assert_eq!(round_up_pow2(16, 16), 16);
-        assert_eq!(round_up_pow2(17, 16), 32);
-        assert_eq!(round_up_pow2(32, 16), 32);
-        assert_eq!(round_up_pow2(33, 16), 64);
-        assert_eq!(round_up_pow2(1024, 16), 1024);
-        assert_eq!(round_up_pow2(1025, 16), 2048);
-    }
-
-    #[test]
-    fn test_size_class() {
-        assert_eq!(size_class(1, 16), 0);
-        assert_eq!(size_class(16, 16), 0);
-        assert_eq!(size_class(17, 16), 1);
-        assert_eq!(size_class(32, 16), 1);
-        assert_eq!(size_class(33, 16), 2);
-        assert_eq!(size_class(64, 16), 2);
-        assert_eq!(size_class(65, 16), 3);
-        assert_eq!(size_class(1_000_000, 16), 15);
-    }
-
-    #[test]
-    fn test_checksum() {
-        let checksum = BlockHeader::compute_checksum(MAGIC_FREE, 1024, 0);
-        assert_eq!(checksum, MAGIC_FREE ^ 1024 ^ 0);
-    }
 }

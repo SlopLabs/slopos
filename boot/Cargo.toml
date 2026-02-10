@@ -17,6 +17,7 @@ doctest = false
 [features]
 default = []
 builtin-tests = ["slopos-tests/builtin-tests"]
+xe-gpu = ["slopos-drivers/xe-gpu", "slopos-video/xe-gpu"]
 
 [dependencies]
 limine = { workspace = true }

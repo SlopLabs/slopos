@@ -53,7 +53,7 @@ pub fn pit_set_frequency(frequency_hz: u32) {
     pit_io_wait();
 
     let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
-    klog_debug!("PIT: frequency set to {} Hz\n", freq);
+    klog_debug!("PIT: frequency set to {} Hz", freq);
 }
 
 pub fn pit_init(frequency_hz: u32) {
@@ -62,7 +62,7 @@ pub fn pit_init(frequency_hz: u32) {
     } else {
         frequency_hz
     };
-    klog_info!("PIT: Initializing timer at {} Hz\n", freq);
+    klog_info!("PIT: Initializing timer at {} Hz", freq);
     pit_set_frequency(freq);
 }
 

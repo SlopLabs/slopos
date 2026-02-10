@@ -1,9 +1,40 @@
+//! Kernel logging subsystem.
+//!
+//! All kernel log output funnels through a single **backend** function pointer.
+//! During early boot (before the serial driver is ready) the backend writes
+//! directly to COM1 via raw port I/O.  Once the serial driver initialises it
+//! registers itself as the backend, and all subsequent output goes through the
+//! driver's `IrqMutex`-protected path — giving us proper locking, FIFO
+//! awareness, and `\n → \r\n` conversion for free.
+//!
+//! # Backend contract
+//!
+//! The backend receives the pre-formatted arguments for a **single log line**
+//! and is responsible for:
+//!
+//! 1. Writing the formatted text **atomically** (no interleaving from other
+//!    CPUs).
+//! 2. Appending a trailing newline after the text.
+//!
+//! The early-boot fallback satisfies (1) trivially (single-threaded boot) and
+//! handles (2) by emitting `\r\n` after the text.
+//!
+//! # Registration
+//!
+//! ```ignore
+//! // In your serial driver init:
+//! slopos_lib::klog::klog_register_backend(my_backend_fn);
+//! ```
+
 use core::ffi::c_int;
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
-use crate::init_flag::InitFlag;
 use crate::ports::COM1;
+
+// ---------------------------------------------------------------------------
+// Log levels
+// ---------------------------------------------------------------------------
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,70 +59,116 @@ impl KlogLevel {
 }
 
 static CURRENT_LEVEL: AtomicU8 = AtomicU8::new(KlogLevel::Info as u8);
-static SERIAL_READY: InitFlag = InitFlag::new();
 
 #[inline(always)]
 fn is_enabled(level: KlogLevel) -> bool {
     level as u8 <= CURRENT_LEVEL.load(Ordering::Relaxed)
 }
 
-#[inline(always)]
-fn putc(byte: u8) {
-    let _ready = SERIAL_READY.is_set_relaxed();
-    unsafe { COM1.write(byte) }
-}
+// ---------------------------------------------------------------------------
+// Backend dispatch
+// ---------------------------------------------------------------------------
 
-fn write_bytes(bytes: &[u8]) {
-    for &b in bytes {
-        putc(b);
+/// Signature of a klog backend.
+///
+/// The backend must write the formatted text **and** a trailing newline,
+/// all under a single lock acquisition (if applicable) so that log lines
+/// from different CPUs do not interleave.
+pub type KlogBackend = fn(fmt::Arguments<'_>);
+
+/// Stored as a raw pointer; `null` means "use early-boot fallback".
+static BACKEND: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Early-boot fallback: write directly to COM1 via raw port I/O.
+///
+/// This path is used only before the serial driver is initialised.
+/// It runs during single-threaded boot so no locking is needed.
+fn early_backend(args: fmt::Arguments<'_>) {
+    struct EarlyWriter;
+
+    impl fmt::Write for EarlyWriter {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            for &b in s.as_bytes() {
+                if b == b'\n' {
+                    unsafe { COM1.write(b'\r') }
+                }
+                unsafe { COM1.write(b) }
+            }
+            Ok(())
+        }
+    }
+
+    let _ = fmt::write(&mut EarlyWriter, args);
+    // Trailing newline (contract: backend appends one).
+    unsafe {
+        COM1.write(b'\r');
+        COM1.write(b'\n');
     }
 }
 
-pub(crate) fn log_line(level: KlogLevel, text: &str) {
-    if !is_enabled(level) {
-        return;
+/// Dispatch a log line through the active backend.
+///
+/// If no backend has been registered yet the early-boot fallback is used.
+#[inline]
+fn dispatch(args: fmt::Arguments<'_>) {
+    let ptr = BACKEND.load(Ordering::Acquire);
+    if ptr.is_null() {
+        early_backend(args);
+    } else {
+        // SAFETY: `klog_register_backend` only stores valid `KlogBackend` fn
+        // pointers, which are the same size as `*mut ()` on all supported
+        // targets (x86_64).
+        let backend: KlogBackend = unsafe { core::mem::transmute(ptr) };
+        backend(args);
     }
-    write_bytes(text.as_bytes());
-    putc(b'\n');
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Register a backend that replaces the early-boot COM1 fallback.
+///
+/// Typically called once by the serial driver during its initialisation.
+pub fn klog_register_backend(backend: KlogBackend) {
+    BACKEND.store(backend as *mut (), Ordering::Release);
+}
+
+/// Initialise klog (sets default level).  Called very early in boot.
+pub fn klog_init() {
+    CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
+}
+
+pub fn klog_set_level(level: KlogLevel) {
+    CURRENT_LEVEL.store(level as u8, Ordering::Relaxed);
+}
+
+pub fn klog_get_level() -> KlogLevel {
+    KlogLevel::from_raw(CURRENT_LEVEL.load(Ordering::Relaxed))
+}
+
+pub fn klog_is_enabled(level: KlogLevel) -> c_int {
+    if is_enabled(level) { 1 } else { 0 }
 }
 
 pub fn is_enabled_level(level: KlogLevel) -> bool {
     is_enabled(level)
 }
 
+/// Emit a formatted log line at the given level.
+///
+/// The backend appends a trailing newline — callers should **not** include
+/// one in their format string.
 pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
     if !is_enabled(level) {
         return;
     }
-    struct KlogWriter;
-    impl fmt::Write for KlogWriter {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            write_bytes(s.as_bytes());
-            Ok(())
-        }
-    }
-    let _ = fmt::write(&mut KlogWriter, args);
-    putc(b'\n');
+    dispatch(args);
 }
-pub fn klog_init() {
-    CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
-    SERIAL_READY.reset();
-}
-pub fn klog_attach_serial() {
-    SERIAL_READY.mark_set();
-}
-pub fn klog_set_level(level: KlogLevel) {
-    CURRENT_LEVEL.store(level as u8, Ordering::Relaxed);
-}
-pub fn klog_get_level() -> KlogLevel {
-    KlogLevel::from_raw(CURRENT_LEVEL.load(Ordering::Relaxed))
-}
-pub fn klog_is_enabled(level: KlogLevel) -> c_int {
-    if is_enabled(level) { 1 } else { 0 }
-}
-pub fn klog_newline() {
-    putc(b'\n');
-}
+
+// ---------------------------------------------------------------------------
+// Macros
+// ---------------------------------------------------------------------------
 
 #[macro_export]
 macro_rules! klog {

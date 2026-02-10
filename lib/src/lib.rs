@@ -30,7 +30,6 @@ pub mod tsc {
 
 pub mod alignment;
 pub mod cpu_local;
-pub mod free_list;
 pub mod init_flag;
 pub mod kdiag;
 pub mod klog;
@@ -56,8 +55,7 @@ pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use kdiag::{InterruptFrame, KDIAG_STACK_TRACE_DEPTH, kdiag_timestamp};
 pub use klog::{
-    KlogLevel, klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline,
-    klog_set_level,
+    KlogLevel, klog_get_level, klog_init, klog_is_enabled, klog_register_backend, klog_set_level,
 };
 pub use ports::COM1;
 pub use preempt::{IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count};

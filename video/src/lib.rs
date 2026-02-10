@@ -11,6 +11,7 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
+#[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
 use slopos_lib::{klog_info, klog_warn};
 
@@ -24,6 +25,7 @@ pub mod splash;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VideoBackend {
     Framebuffer,
+    #[cfg(feature = "xe-gpu")]
     Xe,
 }
 
@@ -91,10 +93,11 @@ fn task_cleanup_callback(task_id: u32) {
 // Initialization
 // =============================================================================
 
-pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
+pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
     register_video_cleanup_hook(task_cleanup_callback);
 
-    if backend == VideoBackend::Xe {
+    #[cfg(feature = "xe-gpu")]
+    if _backend == VideoBackend::Xe {
         framebuffer::register_flush_callback(xe::xe_flush);
     }
 

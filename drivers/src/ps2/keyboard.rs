@@ -153,7 +153,7 @@ pub fn init() {
 }
 
 pub fn handle_scancode(scancode: u8) {
-    klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
+    klog_debug!("[KBD] Scancode: 0x{:02x}", scancode);
 
     let mut state = STATE.lock();
 
@@ -208,7 +208,7 @@ pub fn handle_scancode(scancode: u8) {
         return;
     }
 
-    klog_debug!("[KBD] ASCII: 0x{:02x}\n", ascii);
+    klog_debug!("[KBD] ASCII: 0x{:02x}", ascii);
 
     if ascii != 0 {
         state.char_buffer.push_overwrite(ascii);

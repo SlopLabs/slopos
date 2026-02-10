@@ -1,4 +1,6 @@
-use core::ffi::{CStr, c_char};
+use core::ffi::CStr;
+#[cfg(feature = "xe-gpu")]
+use core::ffi::c_char;
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
@@ -12,13 +14,14 @@ use crate::idt::{idt_init, idt_load};
 use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
 use crate::smp::smp_init;
+#[cfg(feature = "xe-gpu")]
+use slopos_drivers::xe;
 use slopos_drivers::{
     apic, ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
     virtio_blk::virtio_blk_register_driver,
-    xe,
 };
 use slopos_mm::tlb;
 
@@ -28,6 +31,7 @@ fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
+#[cfg(feature = "xe-gpu")]
 fn cmdline_contains(cmdline: *const c_char, needle: &str) -> bool {
     if cmdline.is_null() {
         return false;
@@ -45,12 +49,14 @@ fn cmdline_contains(cmdline: *const c_char, needle: &str) -> bool {
 }
 
 fn boot_video_backend() -> video::VideoBackend {
-    let cmdline = boot_get_cmdline();
-    if cmdline_contains(cmdline, "video=xe") {
-        video::VideoBackend::Xe
-    } else {
-        video::VideoBackend::Framebuffer
+    #[cfg(feature = "xe-gpu")]
+    {
+        let cmdline = boot_get_cmdline();
+        if cmdline_contains(cmdline, "video=xe") {
+            return video::VideoBackend::Xe;
+        }
     }
+    video::VideoBackend::Framebuffer
 }
 
 fn boot_step_idt_setup_fn() {
@@ -93,6 +99,7 @@ fn boot_step_timer_setup_fn() {
         );
     }
     let backend = boot_video_backend();
+    #[cfg(feature = "xe-gpu")]
     if backend == video::VideoBackend::Xe {
         klog_info!("BOOT: deferring video init until PCI for GPU backend");
         return;
@@ -141,6 +148,7 @@ fn boot_step_pci_init_fn() {
     virtio_blk_register_driver();
     pci_init();
     pci_probe_drivers();
+    #[cfg(feature = "xe-gpu")]
     if boot_video_backend() == video::VideoBackend::Xe {
         xe::xe_probe();
     }
@@ -167,15 +175,18 @@ fn boot_step_pci_init_fn() {
         klog_debug!("PCI: No GPU-class device discovered during enumeration");
     }
 
-    let backend = boot_video_backend();
-    if backend == video::VideoBackend::Xe {
-        let boot_fb = limine_protocol::boot_info().framebuffer;
-        let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
-            address: bf.address,
-            info: bf.info,
-        });
-        let xe_fb = xe::xe_framebuffer_init(fb);
-        video::init(xe_fb, backend);
+    #[cfg(feature = "xe-gpu")]
+    {
+        let backend = boot_video_backend();
+        if backend == video::VideoBackend::Xe {
+            let boot_fb = limine_protocol::boot_info().framebuffer;
+            let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
+                address: bf.address,
+                info: bf.info,
+            });
+            let xe_fb = xe::xe_framebuffer_init(fb);
+            video::init(xe_fb, backend);
+        }
     }
 }
 

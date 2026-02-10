@@ -4,10 +4,10 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use slopos_lib::align_up_usize;
-use slopos_lib::free_list::{
+use super::free_list::{
     BlockHeader, FreeList, HEADER_SIZE, MAGIC_FREE, MIN_BLOCK_SIZE, try_split_block,
 };
+use slopos_lib::align_up_usize;
 
 use super::syscall::sys_brk;
 

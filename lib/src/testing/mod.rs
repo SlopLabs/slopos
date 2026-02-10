@@ -53,11 +53,11 @@ macro_rules! fail {
         $crate::testing::TestResult::Fail
     };
     ($msg:expr) => {{
-        $crate::klog_info!("TEST FAIL: {}\n", $msg);
+        $crate::klog_info!("TEST FAIL: {}", $msg);
         $crate::testing::TestResult::Fail
     }};
     ($fmt:expr, $($arg:tt)*) => {{
-        $crate::klog_info!(concat!("TEST FAIL: ", $fmt, "\n"), $($arg)*);
+        $crate::klog_info!(concat!("TEST FAIL: ", $fmt), $($arg)*);
         $crate::testing::TestResult::Fail
     }};
 }

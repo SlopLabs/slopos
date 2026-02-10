@@ -15,6 +15,7 @@ test = false
 doctest = false
 [features]
 qemu-exit = []
+xe-gpu = []
 
 [dependencies]
 slopos-abi = { workspace = true }

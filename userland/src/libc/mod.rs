@@ -2,6 +2,7 @@
 
 pub mod crt0;
 pub mod ffi;
+pub mod free_list;
 pub mod malloc;
 pub mod syscall;
 

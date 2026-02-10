@@ -18,6 +18,7 @@ pub mod syscall_services_init;
 pub mod tty;
 pub mod virtio;
 pub mod virtio_blk;
+#[cfg(feature = "xe-gpu")]
 pub mod xe;
 
 pub use ps2::keyboard;
