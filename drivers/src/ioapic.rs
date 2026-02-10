@@ -5,7 +5,7 @@ use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
 
 use crate::ioapic_defs::*;
 use slopos_abi::addr::PhysAddr;
-use slopos_acpi::madt::{Madt, MadtEntry};
+use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMode};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_core::platform;
 use slopos_mm::hhdm;
@@ -58,19 +58,17 @@ impl IoapicController {
 
 #[derive(Clone, Copy)]
 struct IoapicIso {
-    bus_source: u8,
     irq_source: u8,
     gsi: u32,
-    flags: u16,
+    redir_flags: u32,
 }
 
 impl IoapicIso {
     const fn new() -> Self {
         Self {
-            bus_source: 0,
             irq_source: 0,
             gsi: 0,
-            flags: 0,
+            redir_flags: 0,
         }
     }
 }
@@ -159,33 +157,28 @@ fn ioapic_log_controller(ctrl: &IoapicController) {
 
 fn ioapic_log_iso(iso: &IoapicIso) {
     klog_debug!(
-        "IOAPIC: ISO bus {}, IRQ {} -> GSI {}, flags 0x{:x}",
-        iso.bus_source,
+        "IOAPIC: ISO IRQ {} -> GSI {}, redir_flags 0x{:x}",
         iso.irq_source,
         iso.gsi,
-        iso.flags
+        iso.redir_flags
     );
 }
 
-fn ioapic_flags_from_acpi(_bus_source: u8, flags: u16) -> u32 {
-    let polarity = flags & ACPI_MADT_POLARITY_MASK;
-    let mut result = match polarity {
-        0 | 1 => IOAPIC_FLAG_POLARITY_HIGH,
-        3 => IOAPIC_FLAG_POLARITY_LOW,
-        _ => IOAPIC_FLAG_POLARITY_HIGH,
+fn redir_flags_from_override(ov: &InterruptOverride) -> u32 {
+    let polarity = match ov.polarity() {
+        Polarity::ActiveLow => IOAPIC_FLAG_POLARITY_LOW,
+        Polarity::ActiveHigh | Polarity::BusDefault => IOAPIC_FLAG_POLARITY_HIGH,
     };
 
-    let trigger = (flags & ACPI_MADT_TRIGGER_MASK) >> ACPI_MADT_TRIGGER_SHIFT;
-    result |= match trigger {
-        0 | 1 => IOAPIC_FLAG_TRIGGER_EDGE,
-        3 => IOAPIC_FLAG_TRIGGER_LEVEL,
-        _ => IOAPIC_FLAG_TRIGGER_EDGE,
+    let trigger = match ov.trigger_mode() {
+        TriggerMode::Level => IOAPIC_FLAG_TRIGGER_LEVEL,
+        TriggerMode::Edge | TriggerMode::BusDefault => IOAPIC_FLAG_TRIGGER_EDGE,
     };
 
-    result
+    polarity | trigger
 }
 
-fn ioapic_find_iso(irq: u8) -> Option<&'static IoapicIso> {
+fn find_iso(irq: u8) -> Option<&'static IoapicIso> {
     unsafe {
         let count = ISO_COUNT.load(Ordering::Relaxed);
         let base_ptr = ISO_TABLE.ptr();
@@ -254,10 +247,9 @@ fn populate_from_madt(madt: &Madt) {
                 }
                 let iso = &mut *ISO_TABLE.ptr().add(idx);
                 ISO_COUNT.store(idx + 1, Ordering::Relaxed);
-                iso.bus_source = ov.bus_source;
                 iso.irq_source = ov.irq_source;
                 iso.gsi = ov.gsi;
-                iso.flags = ov.flags;
+                iso.redir_flags = redir_flags_from_override(&ov);
                 ioapic_log_iso(iso);
             },
             MadtEntry::Unknown { .. } => {}
@@ -375,9 +367,9 @@ pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -
     let mut gsi = legacy_irq as u32;
     let mut flags = IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE;
 
-    if let Some(iso) = ioapic_find_iso(legacy_irq) {
+    if let Some(iso) = find_iso(legacy_irq) {
         gsi = iso.gsi;
-        flags = ioapic_flags_from_acpi(iso.bus_source, iso.flags);
+        flags = iso.redir_flags;
         ioapic_log_iso(iso);
     }
 

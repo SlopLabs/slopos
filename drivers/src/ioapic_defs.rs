@@ -1,7 +1,10 @@
 //! I/O APIC hardware definitions.
 //!
-//! This module provides constants and types for I/O APIC configuration,
-//! including redirection entry flags and ACPI MADT parsing helpers.
+//! This module provides constants and types for I/O APIC hardware configuration:
+//! register offsets, redirection entry flags, and capacity limits.
+//!
+//! ACPI MADT parsing (polarity/trigger decoding, entry type IDs) lives in
+//! `slopos_acpi::madt` — not here.
 
 // =============================================================================
 // Size and Capacity Limits
@@ -31,29 +34,6 @@ pub const IOAPIC_REG_REDIR_BASE: u8 = 0x10;
 /// Includes: delivery mode (8-10), dest mode (11), polarity (13), trigger (15), mask (16).
 pub const IOAPIC_REDIR_WRITABLE_MASK: u32 =
     (7 << 8) | (1 << 11) | (1 << 13) | (1 << 15) | (1 << 16);
-
-// =============================================================================
-// ACPI MADT Entry Types
-// =============================================================================
-
-/// MADT entry type for IOAPIC controllers.
-pub const MADT_ENTRY_IOAPIC: u8 = 1;
-
-/// MADT entry type for interrupt source overrides.
-pub const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
-
-// =============================================================================
-// ACPI MADT Polarity/Trigger Parsing
-// =============================================================================
-
-/// Extracts polarity bits [1:0] from MADT flags.
-pub const ACPI_MADT_POLARITY_MASK: u16 = 0x3;
-
-/// Extracts trigger bits [3:2] from MADT flags.
-pub const ACPI_MADT_TRIGGER_MASK: u16 = 0xC;
-
-/// Shift amount for trigger bits.
-pub const ACPI_MADT_TRIGGER_SHIFT: u16 = 2;
 
 // =============================================================================
 // Redirection Entry Flags - Delivery Mode (bits [10:8])

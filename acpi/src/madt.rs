@@ -47,12 +47,74 @@ pub struct IoapicInfo {
     pub gsi_base: u32,
 }
 
+// =============================================================================
+// MADT Interrupt Source Override flag parsing
+// =============================================================================
+
+/// Polarity of an interrupt source override (MADT flags bits [1:0]).
+///
+/// Per ACPI spec, §5.2.12.5:
+/// - 0b00 = conforms to bus specifications
+/// - 0b01 = active high
+/// - 0b10 = reserved
+/// - 0b11 = active low
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Polarity {
+    /// Conforms to the specifications of the bus.
+    BusDefault,
+    /// Active high.
+    ActiveHigh,
+    /// Active low.
+    ActiveLow,
+}
+
+/// Trigger mode of an interrupt source override (MADT flags bits [3:2]).
+///
+/// Per ACPI spec, §5.2.12.5:
+/// - 0b00 = conforms to bus specifications
+/// - 0b01 = edge-triggered
+/// - 0b10 = reserved
+/// - 0b11 = level-triggered
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerMode {
+    /// Conforms to the specifications of the bus.
+    BusDefault,
+    /// Edge-triggered.
+    Edge,
+    /// Level-triggered.
+    Level,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct InterruptOverride {
     pub bus_source: u8,
     pub irq_source: u8,
     pub gsi: u32,
     pub flags: u16,
+}
+
+impl InterruptOverride {
+    /// Parse the polarity field from the MADT flags word.
+    #[inline]
+    pub fn polarity(&self) -> Polarity {
+        match self.flags & 0x3 {
+            0 => Polarity::BusDefault,
+            1 => Polarity::ActiveHigh,
+            3 => Polarity::ActiveLow,
+            _ => Polarity::BusDefault, // reserved → treat as bus default
+        }
+    }
+
+    /// Parse the trigger mode field from the MADT flags word.
+    #[inline]
+    pub fn trigger_mode(&self) -> TriggerMode {
+        match (self.flags >> 2) & 0x3 {
+            0 => TriggerMode::BusDefault,
+            1 => TriggerMode::Edge,
+            3 => TriggerMode::Level,
+            _ => TriggerMode::BusDefault, // reserved → treat as bus default
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
