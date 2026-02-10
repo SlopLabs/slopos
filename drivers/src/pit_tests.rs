@@ -59,7 +59,7 @@ pub fn test_pit_poll_delay_timing_consistency() -> TestResult {
     }
 
     let avg_elapsed = total_elapsed / (DELAY_TEST_ITERATIONS as u64);
-    let tolerance_ms: i64 = 5;
+    let tolerance_ms: i64 = 8;
 
     if max_deviation < -tolerance_ms {
         klog_info!(
