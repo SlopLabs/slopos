@@ -1,0 +1,34 @@
+//! ACPI table parsing infrastructure for SlopOS.
+//!
+//! This crate provides a reusable, zero-allocation ACPI table parser. Any
+//! subsystem that needs ACPI data (IOAPIC, HPET, NUMA, PCIe MCFG, etc.)
+//! consumes this crate rather than re-implementing table walking.
+//!
+//! # Architecture
+//!
+//! - [`tables`]: RSDP validation, XSDT/RSDT traversal, table lookup by signature.
+//! - [`madt`]: MADT (Multiple APIC Description Table) entry iteration.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use slopos_acpi::tables::AcpiTables;
+//! use slopos_acpi::madt::{MadtEntries, MadtEntry};
+//!
+//! let tables = AcpiTables::from_rsdp(rsdp_ptr)?;
+//! let madt = tables.find_madt()?;
+//!
+//! for entry in madt.entries() {
+//!     match entry {
+//!         MadtEntry::Ioapic(info) => { /* configure IOAPIC */ }
+//!         MadtEntry::InterruptOverride(iso) => { /* record override */ }
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
+#![no_std]
+#![allow(unsafe_op_in_unsafe_fn)]
+
+pub mod madt;
+pub mod tables;

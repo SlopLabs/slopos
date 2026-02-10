@@ -1,76 +1,17 @@
 use core::cell::UnsafeCell;
-use core::mem;
-use core::ptr::read_unaligned;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
+use slopos_acpi::madt::{Madt, MadtEntry};
+use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_core::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 
-/// IOAPIC register region size (one 4KB page covers both IOREGSEL and IOWIN).
 const IOAPIC_REGION_SIZE: usize = 0x20;
-
-#[repr(C, packed)]
-struct AcpiRsdp {
-    signature: [u8; 8],
-    checksum: u8,
-    oem_id: [u8; 6],
-    revision: u8,
-    rsdt_address: u32,
-    length: u32,
-    xsdt_address: u64,
-    extended_checksum: u8,
-    reserved: [u8; 3],
-}
-
-#[repr(C, packed)]
-struct AcpiSdtHeader {
-    signature: [u8; 4],
-    length: u32,
-    revision: u8,
-    checksum: u8,
-    oem_id: [u8; 6],
-    oem_table_id: [u8; 8],
-    oem_revision: u32,
-    creator_id: u32,
-    creator_revision: u32,
-}
-
-#[repr(C, packed)]
-struct AcpiMadt {
-    header: AcpiSdtHeader,
-    lapic_address: u32,
-    flags: u32,
-    entries: [u8; 0],
-}
-
-#[repr(C, packed)]
-struct AcpiMadtEntryHeader {
-    entry_type: u8,
-    length: u8,
-}
-
-#[repr(C, packed)]
-struct AcpiMadtIoapicEntry {
-    header: AcpiMadtEntryHeader,
-    ioapic_id: u8,
-    reserved: u8,
-    ioapic_address: u32,
-    gsi_base: u32,
-}
-
-#[repr(C, packed)]
-struct AcpiMadtIsoEntry {
-    header: AcpiMadtEntryHeader,
-    bus_source: u8,
-    irq_source: u8,
-    gsi: u32,
-    flags: u16,
-}
 
 #[derive(Clone, Copy)]
 struct IoapicController {
@@ -79,7 +20,6 @@ struct IoapicController {
     gsi_count: u32,
     version: u32,
     phys_addr: u64,
-    /// MMIO region for this controller (mapped via HHDM).
     mmio: Option<MmioRegion>,
 }
 
@@ -95,7 +35,6 @@ impl IoapicController {
         }
     }
 
-    /// Read from IOAPIC register via MMIO.
     #[inline]
     fn read_reg(&self, reg: u8) -> u32 {
         let region = match self.mmio {
@@ -106,7 +45,6 @@ impl IoapicController {
         region.read_u32(0x10)
     }
 
-    /// Write to IOAPIC register via MMIO.
     #[inline]
     fn write_reg(&self, reg: u8, value: u32) {
         let region = match self.mmio {
@@ -174,134 +112,12 @@ static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IOAPIC_READY: InitFlag = InitFlag::new();
 static IOAPIC_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 
-/// Map IOAPIC MMIO region, returning the virtual base address.
-/// Returns 0 if mapping fails (HHDM unavailable or invalid address).
 #[inline]
 fn map_ioapic_mmio(phys: u64) -> Option<MmioRegion> {
     if phys == 0 {
         return None;
     }
     MmioRegion::map(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
-}
-
-fn acpi_checksum(table: *const u8, length: usize) -> u8 {
-    let mut sum: u8 = 0;
-    for i in 0..length {
-        unsafe {
-            sum = sum.wrapping_add(*table.add(i));
-        }
-    }
-    sum
-}
-
-fn acpi_validate_rsdp(rsdp: *const AcpiRsdp) -> bool {
-    if rsdp.is_null() {
-        return false;
-    }
-    let rsdp_ref = unsafe { &*rsdp };
-    if acpi_checksum(rsdp as *const u8, 20) != 0 {
-        return false;
-    }
-    if rsdp_ref.revision >= 2 && rsdp_ref.length as usize >= mem::size_of::<AcpiRsdp>() {
-        if acpi_checksum(rsdp as *const u8, rsdp_ref.length as usize) != 0 {
-            return false;
-        }
-    }
-    true
-}
-
-fn acpi_validate_table(header: *const AcpiSdtHeader) -> bool {
-    if header.is_null() {
-        return false;
-    }
-    let hdr = unsafe { &*header };
-    if hdr.length < mem::size_of::<AcpiSdtHeader>() as u32 {
-        return false;
-    }
-    acpi_checksum(header as *const u8, hdr.length as usize) == 0
-}
-
-fn acpi_map_table(phys_addr: u64) -> *const AcpiSdtHeader {
-    if phys_addr == 0 {
-        return core::ptr::null();
-    }
-    use slopos_mm::hhdm::PhysAddrHhdm;
-    PhysAddr::new(phys_addr)
-        .try_to_virt()
-        .map(|v| v.as_ptr())
-        .unwrap_or(core::ptr::null())
-}
-
-fn acpi_scan_table(
-    sdt: *const AcpiSdtHeader,
-    entry_size: usize,
-    signature: &[u8; 4],
-) -> *const AcpiSdtHeader {
-    if sdt.is_null() {
-        return core::ptr::null();
-    }
-
-    let hdr = unsafe { &*sdt };
-    if hdr.length < mem::size_of::<AcpiSdtHeader>() as u32 {
-        return core::ptr::null();
-    }
-
-    let payload_bytes = hdr.length as usize - mem::size_of::<AcpiSdtHeader>();
-    let entry_count = payload_bytes / entry_size;
-    let entries = (sdt as *const u8).wrapping_add(mem::size_of::<AcpiSdtHeader>());
-
-    for i in 0..entry_count {
-        let entry_ptr = unsafe { entries.add(i * entry_size) };
-        let phys = if entry_size == 8 {
-            unsafe { read_unaligned(entry_ptr as *const u64) }
-        } else {
-            unsafe { read_unaligned(entry_ptr as *const u32) as u64 }
-        };
-
-        let candidate = acpi_map_table(phys);
-        if candidate.is_null() {
-            continue;
-        }
-        let candidate_ref = unsafe { &*candidate };
-        if candidate_ref.signature != *signature {
-            continue;
-        }
-        if !acpi_validate_table(candidate) {
-            klog_info!("ACPI: Found table with invalid checksum, skipping");
-            continue;
-        }
-        return candidate;
-    }
-    core::ptr::null()
-}
-
-fn acpi_find_table(rsdp: *const AcpiRsdp, signature: &[u8; 4]) -> *const AcpiSdtHeader {
-    if rsdp.is_null() {
-        return core::ptr::null();
-    }
-    let rsdp_ref = unsafe { &*rsdp };
-
-    if rsdp_ref.revision >= 2 && rsdp_ref.xsdt_address != 0 {
-        let xsdt = acpi_map_table(rsdp_ref.xsdt_address);
-        if !xsdt.is_null() && acpi_validate_table(xsdt) {
-            let hit = acpi_scan_table(xsdt, mem::size_of::<u64>(), signature);
-            if !hit.is_null() {
-                return hit;
-            }
-        }
-    }
-
-    if rsdp_ref.rsdt_address != 0 {
-        let rsdt = acpi_map_table(rsdp_ref.rsdt_address as u64);
-        if !rsdt.is_null() && acpi_validate_table(rsdt) {
-            let hit = acpi_scan_table(rsdt, mem::size_of::<u32>(), signature);
-            if !hit.is_null() {
-                return hit;
-            }
-        }
-    }
-
-    core::ptr::null()
 }
 
 fn ioapic_find_controller(gsi: u32) -> Option<*mut IoapicController> {
@@ -408,70 +224,43 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
     0
 }
 
-fn ioapic_parse_madt(madt: *const AcpiMadt) {
-    if madt.is_null() {
-        return;
-    }
-
+fn populate_from_madt(madt: &Madt) {
     IOAPIC_COUNT.store(0, Ordering::Relaxed);
     ISO_COUNT.store(0, Ordering::Relaxed);
 
-    let cursor = madt as *const u8;
-    let end = unsafe { cursor.add((*madt).header.length as usize) };
-    let mut ptr = unsafe { (*madt).entries.as_ptr() };
-
-    while unsafe { ptr.add(mem::size_of::<AcpiMadtEntryHeader>()) } <= end {
-        let hdr = unsafe { &*(ptr as *const AcpiMadtEntryHeader) };
-        if hdr.length == 0 || unsafe { ptr.add(hdr.length as usize) } > end {
-            break;
-        }
-
-        match hdr.entry_type {
-            MADT_ENTRY_IOAPIC => {
-                if hdr.length as usize >= mem::size_of::<AcpiMadtIoapicEntry>() {
-                    unsafe {
-                        let ioapic_index = IOAPIC_COUNT.load(Ordering::Relaxed);
-                        if ioapic_index >= IOAPIC_MAX_CONTROLLERS {
-                            klog_info!("IOAPIC: Too many controllers, ignoring extra entries");
-                        } else {
-                            let entry = &*(ptr as *const AcpiMadtIoapicEntry);
-                            let ctrl = &mut *IOAPIC_TABLE.ptr().add(ioapic_index);
-                            IOAPIC_COUNT.store(ioapic_index + 1, Ordering::Relaxed);
-                            ctrl.id = entry.ioapic_id;
-                            ctrl.gsi_base = entry.gsi_base;
-                            ctrl.phys_addr = entry.ioapic_address as u64;
-                            ctrl.mmio = map_ioapic_mmio(ctrl.phys_addr);
-                            ctrl.version = ctrl.read_reg(IOAPIC_REG_VER);
-                            ctrl.gsi_count = ((ctrl.version >> 16) & 0xFF) + 1;
-                            ioapic_log_controller(ctrl);
-                        }
-                    }
+    for entry in madt.entries() {
+        match entry {
+            MadtEntry::Ioapic(info) => unsafe {
+                let idx = IOAPIC_COUNT.load(Ordering::Relaxed);
+                if idx >= IOAPIC_MAX_CONTROLLERS {
+                    klog_info!("IOAPIC: Too many controllers, ignoring extra entries");
+                    continue;
                 }
-            }
-            MADT_ENTRY_INTERRUPT_OVERRIDE => {
-                if hdr.length as usize >= mem::size_of::<AcpiMadtIsoEntry>() {
-                    unsafe {
-                        let iso_index = ISO_COUNT.load(Ordering::Relaxed);
-                        if iso_index >= IOAPIC_MAX_ISO_ENTRIES {
-                            klog_info!("IOAPIC: Too many source overrides, ignoring extras");
-                        } else {
-                            let entry = &*(ptr as *const AcpiMadtIsoEntry);
-                            let iso = &mut *ISO_TABLE.ptr().add(iso_index);
-                            ISO_COUNT.store(iso_index + 1, Ordering::Relaxed);
-                            iso.bus_source = entry.bus_source;
-                            iso.irq_source = entry.irq_source;
-                            iso.gsi = entry.gsi;
-                            iso.flags = entry.flags;
-                            ioapic_log_iso(iso);
-                        }
-                    }
+                let ctrl = &mut *IOAPIC_TABLE.ptr().add(idx);
+                IOAPIC_COUNT.store(idx + 1, Ordering::Relaxed);
+                ctrl.id = info.id;
+                ctrl.gsi_base = info.gsi_base;
+                ctrl.phys_addr = info.address as u64;
+                ctrl.mmio = map_ioapic_mmio(ctrl.phys_addr);
+                ctrl.version = ctrl.read_reg(IOAPIC_REG_VER);
+                ctrl.gsi_count = ((ctrl.version >> 16) & 0xFF) + 1;
+                ioapic_log_controller(ctrl);
+            },
+            MadtEntry::InterruptOverride(ov) => unsafe {
+                let idx = ISO_COUNT.load(Ordering::Relaxed);
+                if idx >= IOAPIC_MAX_ISO_ENTRIES {
+                    klog_info!("IOAPIC: Too many source overrides, ignoring extras");
+                    continue;
                 }
-            }
-            _ => {}
-        }
-
-        unsafe {
-            ptr = ptr.add(hdr.length as usize);
+                let iso = &mut *ISO_TABLE.ptr().add(idx);
+                ISO_COUNT.store(idx + 1, Ordering::Relaxed);
+                iso.bus_source = ov.bus_source;
+                iso.irq_source = ov.irq_source;
+                iso.gsi = ov.gsi;
+                iso.flags = ov.flags;
+                ioapic_log_iso(iso);
+            },
+            MadtEntry::Unknown { .. } => {}
         }
     }
 }
@@ -502,23 +291,18 @@ pub fn init() -> i32 {
         return init_fail();
     }
 
-    let rsdp = platform::get_rsdp_address() as *const AcpiRsdp;
-    if !acpi_validate_rsdp(rsdp) {
-        klog_info!("IOAPIC: ACPI RSDP checksum failed");
+    let rsdp = platform::get_rsdp_address() as *const Rsdp;
+    let Some(tables) = AcpiTables::from_rsdp(rsdp) else {
+        klog_info!("IOAPIC: ACPI tables validation failed");
         return init_fail();
-    }
+    };
 
-    let madt_header = acpi_find_table(rsdp, b"APIC");
-    if madt_header.is_null() {
+    let Some(madt) = Madt::from_tables(&tables) else {
         klog_info!("IOAPIC: MADT not found in ACPI tables");
         return init_fail();
-    }
-    if !acpi_validate_table(madt_header) {
-        klog_info!("IOAPIC: MADT checksum invalid");
-        return init_fail();
-    }
+    };
 
-    ioapic_parse_madt(madt_header as *const AcpiMadt);
+    populate_from_madt(&madt);
 
     let count = IOAPIC_COUNT.load(Ordering::Relaxed);
     if count == 0 {

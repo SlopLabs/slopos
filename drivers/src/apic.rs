@@ -6,7 +6,7 @@ use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::apic::{ApicBaseMsr, *};
-pub use slopos_abi::arch::x86_64::apic::{
+use slopos_abi::arch::x86_64::apic::{
     LAPIC_ICR_DELIVERY_FIXED, LAPIC_ICR_DELIVERY_STATUS, LAPIC_ICR_DEST_BROADCAST,
     LAPIC_ICR_DEST_PHYSICAL, LAPIC_ICR_HIGH, LAPIC_ICR_LEVEL_ASSERT, LAPIC_ICR_LOW,
     LAPIC_ICR_TRIGGER_EDGE,
@@ -240,44 +240,38 @@ pub fn timer_set_divisor(divisor: u32) {
     write_register(LAPIC_TIMER_DCR, divisor);
 }
 
-pub fn send_ipi_halt_all() {
+const IPI_POLL_LIMIT: u32 = 10_000;
+const ICR_DEST_ALL_EXCLUDING_SELF: u32 = 0x3 << 18;
+
+fn wait_icr_idle() {
+    let mut remaining = IPI_POLL_LIMIT;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && remaining > 0 {
+        cpu::pause();
+        remaining -= 1;
+    }
+}
+
+fn send_ipi_raw(icr_high: u32, icr_low: u32) {
     if !is_available() || !is_enabled() {
         return;
     }
+    wait_icr_idle();
+    write_register(LAPIC_ICR_HIGH, icr_high);
+    write_register(LAPIC_ICR_LOW, icr_low);
+    wait_icr_idle();
+}
 
-    // Vector 0xFE is commonly used for shutdown IPI
-    const SHUTDOWN_VECTOR: u32 = 0xFE;
-
-    // Wait for any pending IPI to complete (delivery status bit must be clear)
-    let mut timeout = 1000;
-    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
-        cpu::pause();
-        timeout -= 1;
-    }
-
-    // Write destination to ICR_HIGH (broadcast to all except self in physical mode)
-    write_register(LAPIC_ICR_HIGH, LAPIC_ICR_DEST_BROADCAST);
-
-    // Write IPI command to ICR_LOW:
-    // - Vector: 0xFE (shutdown)
-    // - Delivery mode: Fixed (0)
-    // - Destination mode: Physical (0)
-    // - Level: Asserted (1)
-    // - Trigger: Edge (0)
-    let icr_low = SHUTDOWN_VECTOR
+fn fixed_ipi_flags(vector: u32) -> u32 {
+    vector
         | LAPIC_ICR_DELIVERY_FIXED
         | LAPIC_ICR_DEST_PHYSICAL
         | LAPIC_ICR_LEVEL_ASSERT
-        | LAPIC_ICR_TRIGGER_EDGE;
-    write_register(LAPIC_ICR_LOW, icr_low);
+        | LAPIC_ICR_TRIGGER_EDGE
+}
 
-    // Wait for IPI to be sent (delivery status bit must clear)
-    timeout = 1000;
-    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
-        cpu::pause();
-        timeout -= 1;
-    }
-
+pub fn send_ipi_halt_all() {
+    const SHUTDOWN_VECTOR: u32 = 0xFE;
+    send_ipi_raw(LAPIC_ICR_DEST_BROADCAST, fixed_ipi_flags(SHUTDOWN_VECTOR));
     klog_debug!("APIC: Sent shutdown IPI to all processors");
 }
 
@@ -366,60 +360,12 @@ pub fn dump_state() {
 }
 
 pub fn send_ipi_all_excluding_self(vector: u8) {
-    if !is_available() || !is_enabled() {
-        return;
-    }
-
-    let mut timeout = 10000;
-    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
-        cpu::pause();
-        timeout -= 1;
-    }
-
-    const ICR_DEST_ALL_EXCLUDING_SELF: u32 = 0x3 << 18;
-
-    write_register(LAPIC_ICR_HIGH, 0);
-
-    let icr_low = (vector as u32)
-        | LAPIC_ICR_DELIVERY_FIXED
-        | LAPIC_ICR_DEST_PHYSICAL
-        | LAPIC_ICR_LEVEL_ASSERT
-        | LAPIC_ICR_TRIGGER_EDGE
-        | ICR_DEST_ALL_EXCLUDING_SELF;
-
-    write_register(LAPIC_ICR_LOW, icr_low);
-
-    timeout = 10000;
-    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
-        cpu::pause();
-        timeout -= 1;
-    }
+    send_ipi_raw(
+        0,
+        fixed_ipi_flags(vector as u32) | ICR_DEST_ALL_EXCLUDING_SELF,
+    );
 }
 
 pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
-    if !is_available() || !is_enabled() {
-        return;
-    }
-
-    let mut timeout = 10000;
-    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
-        cpu::pause();
-        timeout -= 1;
-    }
-
-    write_register(LAPIC_ICR_HIGH, target_apic_id << 24);
-
-    let icr_low = (vector as u32)
-        | LAPIC_ICR_DELIVERY_FIXED
-        | LAPIC_ICR_DEST_PHYSICAL
-        | LAPIC_ICR_LEVEL_ASSERT
-        | LAPIC_ICR_TRIGGER_EDGE;
-
-    write_register(LAPIC_ICR_LOW, icr_low);
-
-    timeout = 10000;
-    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
-        cpu::pause();
-        timeout -= 1;
-    }
+    send_ipi_raw(target_apic_id << 24, fixed_ipi_flags(vector as u32));
 }
