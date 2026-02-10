@@ -7,12 +7,13 @@ use slopos_lib::{assert_test, fail, klog_info, pass};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::memory_init::get_memory_statistics;
-use crate::mm_constants::{INVALID_PROCESS_ID, PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{
     ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames,
     free_page_frame, get_page_allocator_stats,
 };
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
+use slopos_abi::task::INVALID_PROCESS_ID;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
     let mut total = 0u32;

@@ -3,13 +3,14 @@ use slopos_lib::{assert_test, fail, klog_info, pass};
 
 use crate::cow::{CowError, handle_cow_fault, is_cow_fault};
 use crate::hhdm::PhysAddrHhdm;
-use crate::mm_constants::{INVALID_PROCESS_ID, PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_get_ref, page_frame_inc_ref,
 };
 use crate::paging::{paging_is_cow, paging_mark_cow, virt_to_phys_in_dir};
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::process_vm_clone_cow;
 use crate::test_fixtures::{ProcessVmGuard, map_test_page};
+use slopos_abi::task::INVALID_PROCESS_ID;
 
 pub fn test_cow_read_not_cow_fault() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {

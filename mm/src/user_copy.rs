@@ -48,13 +48,13 @@ fn current_process_id() -> u32 {
     if let Some(cb) = *guard {
         cb()
     } else {
-        crate::mm_constants::INVALID_PROCESS_ID
+        slopos_abi::task::INVALID_PROCESS_ID
     }
 }
 
 fn current_process_dir() -> *mut crate::paging::ProcessPageDir {
     let pid = current_process_id();
-    if pid == crate::mm_constants::INVALID_PROCESS_ID {
+    if pid == slopos_abi::task::INVALID_PROCESS_ID {
         return ptr::null_mut();
     }
     process_vm_get_page_dir(pid)
@@ -82,13 +82,13 @@ fn validate_user_pages(
 
     let start = user_addr.as_u64();
     let end = start + len as u64;
-    let mut page = start & !(crate::mm_constants::PAGE_SIZE_4KB - 1);
+    let mut page = start & !(crate::paging_defs::PAGE_SIZE_4KB - 1);
 
     while page < end {
         if paging_is_user_accessible(dir, VirtAddr(page)) == 0 {
             return Err(UserPtrError::NotMapped);
         }
-        page = page.wrapping_add(crate::mm_constants::PAGE_SIZE_4KB);
+        page = page.wrapping_add(crate::paging_defs::PAGE_SIZE_4KB);
     }
 
     Ok(())

@@ -3,7 +3,8 @@ use core::ptr;
 
 use slopos_lib::{align_down_u64, align_up_u64, klog_info};
 
-use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB};
+use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
+use crate::paging_defs::PAGE_SIZE_4KB;
 
 const MM_REGION_STATIC_CAP: usize = 4096;
 

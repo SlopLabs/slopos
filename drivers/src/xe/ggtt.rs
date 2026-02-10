@@ -1,7 +1,7 @@
 use slopos_abi::PhysAddr;
 use slopos_lib::align_up_u64;
-use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::mmio::MmioRegion;
+use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 
 use super::regs;
 

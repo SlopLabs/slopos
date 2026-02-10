@@ -26,7 +26,7 @@ use super::task::{
 };
 use slopos_lib::arch::gdt::SegmentSelector;
 use slopos_lib::arch::idt::SYSCALL_VECTOR;
-use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
+use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 
 // =============================================================================
 // RAII Fixture for Scheduler Tests

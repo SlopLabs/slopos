@@ -50,7 +50,7 @@ use crate::memory_reservations::{
     MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MmRegion, MmRegionKind, mm_region_count, mm_region_get,
     mm_reservations_count, mm_reservations_get,
 };
-use crate::mm_constants::PAGE_SIZE_4KB;
+use crate::paging_defs::PAGE_SIZE_4KB;
 
 pub const ALLOC_FLAG_ZERO: u32 = 0x01;
 pub const ALLOC_FLAG_DMA: u32 = 0x02;

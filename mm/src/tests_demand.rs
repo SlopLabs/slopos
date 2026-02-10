@@ -3,8 +3,8 @@ use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_not_null, assert_test, fail, klog_info, pass};
 
 use crate::demand::{DemandError, can_satisfy_fault, handle_demand_fault, is_demand_fault};
-use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::paging::virt_to_phys_in_dir;
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{process_vm_alloc, process_vm_get_vma_flags};
 use crate::test_fixtures::{ProcessVmGuard, map_test_page};
 use crate::vma_flags::VmaFlags;

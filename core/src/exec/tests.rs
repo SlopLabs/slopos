@@ -3,7 +3,7 @@
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 use slopos_mm::elf::{ELF_MAGIC, ElfValidator};
-use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
+use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm;
 
 use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};

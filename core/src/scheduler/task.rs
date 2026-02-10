@@ -119,7 +119,7 @@ pub use slopos_abi::task::{
 };
 pub use slopos_lib::arch::idt::IdtEntry;
 
-use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
+use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 
 use spin::Once;
 

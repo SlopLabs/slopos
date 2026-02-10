@@ -9,10 +9,11 @@ use slopos_lib::{cpu, klog_debug, klog_info};
 
 use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
-use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
+use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
+use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::tlb;
 
 static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
@@ -134,7 +135,7 @@ fn phys_to_table(phys: PhysAddr) -> *mut PageTable {
 
 fn is_user_address(vaddr: VirtAddr) -> bool {
     let raw = vaddr.as_u64();
-    raw < KERNEL_VIRTUAL_BASE && raw >= crate::mm_constants::USER_SPACE_START_VA
+    raw < KERNEL_VIRTUAL_BASE && raw >= crate::memory_layout_defs::USER_SPACE_START_VA
 }
 
 #[inline(always)]

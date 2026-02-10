@@ -52,7 +52,7 @@ fn video_surface_set_title(
     let ptr_addr = title_ptr as u64;
     let len = title_len.min(31);
     let end_addr = ptr_addr.saturating_add(len as u64);
-    use slopos_mm::mm_constants::USER_SPACE_END_VA;
+    use slopos_mm::memory_layout_defs::USER_SPACE_END_VA;
     if ptr_addr >= USER_SPACE_END_VA || end_addr > USER_SPACE_END_VA {
         return Err(CompositorError::InvalidArgument);
     }

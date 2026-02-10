@@ -9,9 +9,7 @@ use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegme
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
-use crate::mm_constants::{
-    INVALID_PROCESS_ID, KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags,
-};
+use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
 };
@@ -20,8 +18,10 @@ use crate::paging::{
     paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
     paging_sync_kernel_mappings, unmap_page_in_dir, virt_to_phys_in_dir,
 };
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};
+use slopos_abi::task::INVALID_PROCESS_ID;
 
 #[derive(Clone, Copy)]
 struct ProcessVm {
@@ -625,7 +625,7 @@ pub fn process_vm_load_elf_data(
     data: &[u8],
     entry_out: &mut u64,
 ) -> Result<(), ElfError> {
-    let code_base = crate::mm_constants::PROCESS_CODE_START_VA;
+    let code_base = crate::memory_layout_defs::PROCESS_CODE_START_VA;
 
     let validator = ElfValidator::new(data)?.with_load_base(code_base);
     let header = validator.header();

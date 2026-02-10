@@ -4,7 +4,7 @@ use slopos_lib::{klog_debug, klog_info};
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
 
 use slopos_mm::memory_init::init_memory_system;
-use slopos_mm::mm_constants::KERNEL_VIRTUAL_BASE;
+use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 
 fn boot_step_memory_init() -> i32 {
     let memmap = boot_get_memmap();

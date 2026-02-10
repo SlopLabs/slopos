@@ -17,9 +17,8 @@
 
 use core::fmt;
 
-use crate::mm_constants::{
-    KERNEL_SPACE_START_VA, PAGE_SIZE_4KB, USER_SPACE_END_VA, USER_SPACE_START_VA,
-};
+use crate::memory_layout_defs::{KERNEL_SPACE_START_VA, USER_SPACE_END_VA, USER_SPACE_START_VA};
+use crate::paging_defs::PAGE_SIZE_4KB;
 
 // =============================================================================
 // ELF Constants

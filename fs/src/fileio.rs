@@ -15,7 +15,8 @@ const FILE_OPEN_READ: u32 = 1 << 0;
 const FILE_OPEN_WRITE: u32 = 1 << 1;
 const FILE_OPEN_APPEND: u32 = 1 << 3;
 
-use slopos_mm::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES};
+use slopos_abi::task::INVALID_PROCESS_ID;
+use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
 use crate::MAX_PATH_LEN;
 

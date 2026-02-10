@@ -5,8 +5,9 @@ use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::align_up_u64;
 
-use crate::mm_constants::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE, PAGE_SIZE_4KB};
+use crate::memory_layout_defs::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE};
 use crate::paging::map_page_4kb;
+use crate::paging_defs::PAGE_SIZE_4KB;
 
 static MMIO_NEXT_VIRT: AtomicU64 = AtomicU64::new(MMIO_VIRT_BASE);
 

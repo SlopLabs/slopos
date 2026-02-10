@@ -11,9 +11,9 @@ use slopos_lib::IrqRwLock;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 pub use slopos_abi::pixel::PixelFormat;
 
-use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 use crate::paging::{map_page_4kb_in_dir, unmap_page_in_dir};
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::process_vm_get_page_dir;
 use slopos_lib::{align_up, klog_debug, klog_info};
 

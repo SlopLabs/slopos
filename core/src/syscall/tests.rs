@@ -306,7 +306,7 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
     );
 
     let parent_pid = slopos_mm::process_vm::create_process_vm();
-    if parent_pid == slopos_mm::mm_constants::INVALID_PROCESS_ID {
+    if parent_pid == slopos_abi::task::INVALID_PROCESS_ID {
         return TestResult::Fail;
     }
 
@@ -314,13 +314,13 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
         let _ = slopos_mm::process_vm::process_vm_alloc(
             parent_pid,
             4096 * 4,
-            slopos_mm::mm_constants::PageFlags::WRITABLE.bits() as u32,
+            slopos_mm::paging_defs::PageFlags::WRITABLE.bits() as u32,
         );
     }
 
     for _ in 0..3 {
         let child_pid = slopos_mm::process_vm::process_vm_clone_cow(parent_pid);
-        if child_pid != slopos_mm::mm_constants::INVALID_PROCESS_ID {
+        if child_pid != slopos_abi::task::INVALID_PROCESS_ID {
             slopos_mm::process_vm::destroy_process_vm(child_pid);
         }
     }
@@ -426,7 +426,7 @@ pub fn test_brk_extreme_values() -> TestResult {
     slopos_mm::process_vm::init_process_vm();
     let pid = slopos_mm::process_vm::create_process_vm();
 
-    if pid == slopos_mm::mm_constants::INVALID_PROCESS_ID {
+    if pid == slopos_abi::task::INVALID_PROCESS_ID {
         return TestResult::Fail;
     }
 
@@ -690,7 +690,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
 
     // Create parent process
     let parent_pid = slopos_mm::process_vm::create_process_vm();
-    if parent_pid == slopos_mm::mm_constants::INVALID_PROCESS_ID {
+    if parent_pid == slopos_abi::task::INVALID_PROCESS_ID {
         return TestResult::Fail;
     }
 
@@ -699,7 +699,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
         let addr = slopos_mm::process_vm::process_vm_alloc(
             parent_pid,
             4096 * 4, // 16KB per allocation
-            slopos_mm::mm_constants::PageFlags::WRITABLE.bits() as u32,
+            slopos_mm::paging_defs::PageFlags::WRITABLE.bits() as u32,
         );
         if addr == 0 {
             break; // Out of memory, that's fine
@@ -734,7 +734,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
     );
 
     // Cleanup
-    if child_pid != slopos_mm::mm_constants::INVALID_PROCESS_ID {
+    if child_pid != slopos_abi::task::INVALID_PROCESS_ID {
         slopos_mm::process_vm::destroy_process_vm(child_pid);
     }
     slopos_mm::process_vm::destroy_process_vm(parent_pid);

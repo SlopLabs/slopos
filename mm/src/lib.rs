@@ -12,7 +12,6 @@ pub mod memory_init;
 pub mod memory_layout;
 pub mod memory_layout_defs;
 mod memory_reservations;
-pub mod mm_constants;
 pub mod mmio;
 pub mod mmio_tests;
 pub mod page_alloc;

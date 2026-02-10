@@ -4,7 +4,8 @@ use slopos_lib::cpu::cpuid::{
     CPUID_LEAF_FEATURES,
 };
 use slopos_lib::cpu::msr::{EFER_LMA, EFER_LME, Msr};
-use slopos_mm::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB};
+use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
+use slopos_mm::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_4KB};
 
 pub fn verify_cpu_state() {
     let cr0 = cpu::read_cr0();

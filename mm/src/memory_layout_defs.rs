@@ -128,4 +128,4 @@ pub const MAX_MEMORY_REGIONS: usize = 64;
 pub const MAX_PROCESSES: usize = 256;
 
 // Note: INVALID_PROCESS_ID is defined in abi/src/task.rs as the canonical location.
-// Use `slopos_abi::task::INVALID_PROCESS_ID` or import via mm_constants.
+// Use `slopos_abi::task::INVALID_PROCESS_ID` directly.

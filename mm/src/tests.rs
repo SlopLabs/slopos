@@ -13,7 +13,6 @@ use slopos_lib::{assert_not_null, assert_test, cpu, fail, klog_info, pass};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
-use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
     get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
@@ -22,6 +21,7 @@ use crate::paging::{
     get_current_page_directory, paging_get_kernel_directory, paging_is_cow,
     paging_is_user_accessible, virt_to_phys,
 };
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::get_process_vm_stats;
 
 // ============================================================================
@@ -475,10 +475,10 @@ pub fn test_heap_fragmentation_behind_head() -> TestResult {
 // PROCESS VM TESTS (existing)
 // ============================================================================
 
-use crate::mm_constants::INVALID_PROCESS_ID;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_page_dir,
 };
+use slopos_abi::task::INVALID_PROCESS_ID;
 
 pub fn test_process_vm_slot_reuse() -> TestResult {
     init_process_vm();
@@ -1332,8 +1332,8 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
 // ============================================================================
 
 use crate::cow::{handle_cow_fault, is_cow_fault};
-use crate::mm_constants::PageFlags;
 use crate::paging::{map_page_4kb_in_dir, paging_mark_cow, virt_to_phys_in_dir};
+use crate::paging_defs::PageFlags;
 use crate::test_fixtures::ProcessVmGuard;
 
 pub fn test_process_vm_create_destroy_memory() -> TestResult {

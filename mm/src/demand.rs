@@ -6,9 +6,9 @@
 
 use slopos_abi::addr::VirtAddr;
 
-use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use crate::paging::{ProcessPageDir, map_page_4kb_in_dir, virt_to_phys_in_dir};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
 use crate::vma_flags::VmaFlags;

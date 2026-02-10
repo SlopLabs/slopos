@@ -3,9 +3,9 @@
 use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
 use slopos_lib::{InitFlag, IrqMutex, align_up_u64, klog_info, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
+use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 
 use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
 

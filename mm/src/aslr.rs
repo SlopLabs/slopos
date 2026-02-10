@@ -4,7 +4,7 @@
 //! Uses TSC-seeded LFSR64 RNG.
 
 use crate::memory_layout::ProcessMemoryLayout;
-use crate::mm_constants::PAGE_SIZE_4KB;
+use crate::paging_defs::PAGE_SIZE_4KB;
 use slopos_lib::tsc;
 
 #[derive(Clone, Copy)]

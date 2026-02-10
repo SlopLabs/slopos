@@ -1,12 +1,12 @@
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use crate::mm_constants::INVALID_PROCESS_ID;
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use crate::paging::{ProcessPageDir, map_page_4kb_in_dir};
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_clone_cow,
     process_vm_get_page_dir,
 };
+use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// RAII guard: owns a process VM + page directory, calls `destroy_process_vm` on drop.
 pub struct ProcessVmGuard {

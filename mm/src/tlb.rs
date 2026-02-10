@@ -25,7 +25,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use slopos_abi::addr::VirtAddr;
 use slopos_lib::{MAX_CPUS, cpu, klog_debug, klog_info};
 
-use crate::mm_constants::PAGE_SIZE_4KB;
+use crate::paging_defs::PAGE_SIZE_4KB;
 
 /// Function pointer type for sending TLB shootdown IPI.
 /// Called with the IPI vector number.

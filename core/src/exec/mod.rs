@@ -12,7 +12,8 @@ use slopos_fs::vfs::ops::vfs_open;
 use slopos_lib::klog_info;
 use slopos_mm::elf::ElfError;
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PROCESS_CODE_START_VA};
+use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
     process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
 };

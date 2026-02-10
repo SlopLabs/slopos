@@ -1,5 +1,9 @@
 use crate::kernel_heap::init_kernel_heap;
 use crate::memory_layout::{get_kernel_memory_layout, init_kernel_memory_layout};
+use crate::memory_layout_defs::{
+    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
+    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE,
+};
 use crate::memory_reservations::{
     MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
     MM_RESERVATION_FLAG_MMIO, MmRegion, MmRegionKind, MmReservationType, mm_region_add_usable,
@@ -8,14 +12,11 @@ use crate::memory_reservations::{
     mm_reservations_capacity, mm_reservations_count, mm_reservations_get,
     mm_reservations_overflow_count, mm_reservations_total_bytes,
 };
-use crate::mm_constants::{
-    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
-    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB, PageFlags,
-};
 use crate::page_alloc::{
     finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
 };
 use crate::paging::{init_paging, map_page_4kb};
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
