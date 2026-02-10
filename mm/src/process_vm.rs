@@ -8,7 +8,7 @@ use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
-use crate::memory_layout::mm_get_process_layout;
+use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
@@ -825,8 +825,7 @@ fn copy_segment_page_data(
     }
 }
 pub fn create_process_vm() -> u32 {
-    let base_layout = unsafe { &*mm_get_process_layout() };
-    let layout = aslr::randomize_process_layout(base_layout);
+    let layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
     let mut manager = VM_MANAGER.lock();
     if manager.num_processes >= MAX_PROCESSES as u32 {
         klog_info!("create_process_vm: Maximum processes reached");
@@ -1027,15 +1026,13 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
         return 0;
     }
     let process = unsafe { &mut *process_ptr };
-    let layout = unsafe { &*mm_get_process_layout() };
-
     let size_aligned = (size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
     if size_aligned == 0 {
         return 0;
     }
     let start_addr = process.heap_end;
     let end_addr = start_addr + size_aligned;
-    if end_addr > layout.heap_max {
+    if end_addr > DEFAULT_PROCESS_LAYOUT.heap_max {
         klog_info!("process_vm_alloc: Heap overflow");
         return 0;
     }
@@ -1195,8 +1192,6 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         return 0;
     }
     let process = unsafe { &mut *process_ptr };
-    let layout = unsafe { &*mm_get_process_layout() };
-
     if new_brk == 0 {
         return process.heap_end;
     }
@@ -1210,7 +1205,7 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         return process.heap_end;
     }
 
-    if aligned_brk > layout.heap_max {
+    if aligned_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
         return process.heap_end;
     }
 

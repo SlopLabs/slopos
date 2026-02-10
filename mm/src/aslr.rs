@@ -3,7 +3,7 @@
 //! Randomizes stack (1MB range) and heap (16MB range) to mitigate exploitation.
 //! Uses TSC-seeded LFSR64 RNG.
 
-use crate::memory_layout::ProcessMemoryLayout;
+use crate::memory_layout_defs::ProcessMemoryLayout;
 use crate::paging_defs::PAGE_SIZE_4KB;
 use slopos_lib::tsc;
 

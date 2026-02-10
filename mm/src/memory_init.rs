@@ -1,5 +1,5 @@
 use crate::kernel_heap::init_kernel_heap;
-use crate::memory_layout::{get_kernel_memory_layout, init_kernel_memory_layout};
+use crate::memory_layout::{init_kernel_bounds, kernel_image_bounds};
 use crate::memory_layout_defs::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
     EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE,
@@ -210,24 +210,19 @@ fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
 }
 
 fn record_kernel_core_reservations() {
-    let layout_ptr = get_kernel_memory_layout();
-    if layout_ptr.is_null() {
-        klog_info!("MM: kernel layout unavailable; cannot reserve kernel image");
+    let (kstart, kend) = kernel_image_bounds();
+    if kstart == 0 && kend == 0 {
+        klog_info!("MM: kernel bounds unavailable; cannot reserve kernel image");
         return;
     }
-    let layout = unsafe { &*layout_ptr };
 
-    let kernel_phys = virt_to_phys_kernel(layout.kernel_start_phys);
-    let kernel_end_phys = virt_to_phys_kernel(layout.kernel_end_phys);
-    let kernel_size = if kernel_end_phys > kernel_phys {
-        kernel_end_phys - kernel_phys
-    } else {
-        0
-    };
+    let kstart_phys = virt_to_phys_kernel(kstart);
+    let kend_phys = virt_to_phys_kernel(kend);
+    let kernel_size = kend_phys.saturating_sub(kstart_phys);
 
     if kernel_size > 0 {
         add_reservation_or_panic(
-            kernel_phys,
+            kstart_phys,
             kernel_size,
             MmReservationType::FirmwareOther,
             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
@@ -584,7 +579,7 @@ pub fn init_memory_system(
             panic!("MM: Missing Limine memory map");
         }
 
-        init_kernel_memory_layout();
+        init_kernel_bounds();
         if !crate::hhdm::is_available() {
             panic!("MM: HHDM unavailable; cannot translate physical addresses");
         }

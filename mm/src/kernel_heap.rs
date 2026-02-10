@@ -5,7 +5,7 @@ use core::ptr;
 use slopos_abi::addr::VirtAddr;
 use slopos_lib::{IrqMutex, align_down_u64, align_up_usize, klog_debug, klog_info};
 
-use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
+use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page, virt_to_phys};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
@@ -475,8 +475,8 @@ pub const HEAP_WARMUP_PAGES: u32 = 4;
 
 pub fn init_kernel_heap() -> c_int {
     let mut heap = KERNEL_HEAP.lock();
-    heap.start_addr = mm_get_kernel_heap_start();
-    heap.end_addr = mm_get_kernel_heap_end();
+    heap.start_addr = KERNEL_HEAP_VBASE;
+    heap.end_addr = KERNEL_HEAP_VEND;
     heap.current_break = heap.start_addr;
 
     for (idx, size) in SIZE_CLASSES.iter().enumerate() {

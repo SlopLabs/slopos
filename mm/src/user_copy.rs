@@ -5,7 +5,7 @@ use slopos_abi::addr::VirtAddr;
 use slopos_lib::pcr;
 use slopos_lib::{InitFlag, IrqMutex};
 
-use crate::memory_layout::mm_get_kernel_heap_start;
+use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
 use crate::paging::paging_is_user_accessible;
 use crate::process_vm::process_vm_get_page_dir;
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
@@ -73,7 +73,7 @@ fn validate_user_pages(
     }
 
     if !KERNEL_GUARD_CHECKED.is_set() {
-        let kernel_probe = mm_get_kernel_heap_start();
+        let kernel_probe = KERNEL_HEAP_VBASE;
         if paging_is_user_accessible(dir, VirtAddr::new(kernel_probe)) != 0 {
             return Err(UserPtrError::NotMapped);
         }

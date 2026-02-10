@@ -50,6 +50,9 @@ pub const KERNEL_HEAP_VBASE: u64 = 0xFFFF_FFFF_9000_0000;
 /// Kernel heap size (256 MB).
 pub const KERNEL_HEAP_SIZE: u64 = 256 * 1024 * 1024;
 
+/// Kernel heap end virtual address (derived from base + size).
+pub const KERNEL_HEAP_VEND: u64 = KERNEL_HEAP_VBASE + KERNEL_HEAP_SIZE;
+
 // =============================================================================
 // User Virtual Address Space
 // =============================================================================
@@ -107,6 +110,39 @@ pub const EXCEPTION_STACK_PAGES: u64 = 8;
 
 /// Exception stack usable size (32 KB).
 pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * PAGE_SIZE_4KB;
+
+// =============================================================================
+// Default Process Memory Layout
+// =============================================================================
+
+/// Default (non-randomized) process memory layout.
+///
+/// Used as the base layout for ASLR randomization and heap limit checks.
+/// All fields are compile-time constants; ASLR produces a modified copy at
+/// process creation time.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessMemoryLayout {
+    pub code_start: u64,
+    pub data_start: u64,
+    pub heap_start: u64,
+    pub heap_max: u64,
+    pub stack_top: u64,
+    pub stack_size: u64,
+    pub user_space_start: u64,
+    pub user_space_end: u64,
+}
+
+pub const DEFAULT_PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
+    code_start: PROCESS_CODE_START_VA,
+    data_start: PROCESS_DATA_START_VA,
+    heap_start: PROCESS_HEAP_START_VA,
+    heap_max: PROCESS_HEAP_MAX_VA,
+    stack_top: PROCESS_STACK_TOP_VA,
+    stack_size: PROCESS_STACK_SIZE_BYTES,
+    user_space_start: USER_SPACE_START_VA,
+    user_space_end: USER_SPACE_END_VA,
+};
 
 // =============================================================================
 // Process Limits

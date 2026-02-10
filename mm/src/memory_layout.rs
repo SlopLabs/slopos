@@ -1,120 +1,43 @@
-use core::ffi::c_void;
-use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_lib::{InitFlag, klog_debug};
 
-use crate::memory_layout_defs::{
-    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, KERNEL_HEAP_SIZE, KERNEL_HEAP_VBASE,
-    KERNEL_VIRTUAL_BASE, PROCESS_CODE_START_VA, PROCESS_DATA_START_VA, PROCESS_HEAP_MAX_VA,
-    PROCESS_HEAP_START_VA, PROCESS_STACK_SIZE_BYTES, PROCESS_STACK_TOP_VA, USER_SPACE_END_VA,
-    USER_SPACE_START_VA,
-};
-use crate::paging_defs::PAGE_SIZE_1GB;
 use crate::symbols;
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct KernelMemoryLayout {
-    pub kernel_start_phys: u64,
-    pub kernel_end_phys: u64,
-    pub kernel_start_virt: u64,
-    pub kernel_end_virt: u64,
-    pub kernel_heap_start: u64,
-    pub kernel_heap_end: u64,
-    pub kernel_stack_start: u64,
-    pub kernel_stack_end: u64,
-    pub identity_map_end: u64,
-    pub user_space_start: u64,
-    pub user_space_end: u64,
-}
+static KERNEL_IMAGE_START: AtomicU64 = AtomicU64::new(0);
+static KERNEL_IMAGE_END: AtomicU64 = AtomicU64::new(0);
+static BOUNDS_INIT: InitFlag = InitFlag::new();
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct ProcessMemoryLayout {
-    pub code_start: u64,
-    pub data_start: u64,
-    pub heap_start: u64,
-    pub heap_max: u64,
-    pub stack_top: u64,
-    pub stack_size: u64,
-    pub user_space_start: u64,
-    pub user_space_end: u64,
-}
-
-static mut KERNEL_LAYOUT: KernelMemoryLayout = KernelMemoryLayout {
-    kernel_start_phys: 0,
-    kernel_end_phys: 0,
-    kernel_start_virt: 0,
-    kernel_end_virt: 0,
-    kernel_heap_start: 0,
-    kernel_heap_end: 0,
-    kernel_stack_start: 0,
-    kernel_stack_end: 0,
-    identity_map_end: 0,
-    user_space_start: 0,
-    user_space_end: 0,
-};
-
-static LAYOUT_INIT: InitFlag = InitFlag::new();
-
-static PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
-    code_start: PROCESS_CODE_START_VA,
-    data_start: PROCESS_DATA_START_VA,
-    heap_start: PROCESS_HEAP_START_VA,
-    heap_max: PROCESS_HEAP_MAX_VA,
-    stack_top: PROCESS_STACK_TOP_VA,
-    stack_size: PROCESS_STACK_SIZE_BYTES,
-    user_space_start: USER_SPACE_START_VA,
-    user_space_end: USER_SPACE_END_VA,
-};
-
-fn ptr_as_u64(p: *const c_void) -> u64 {
-    p as usize as u64
-}
-pub fn init_kernel_memory_layout() {
-    if !LAYOUT_INIT.init_once() {
+/// Resolve linker-provided `_kernel_start` / `_kernel_end` symbols and cache
+/// their raw addresses.  Idempotent — only the first call has an effect.
+///
+/// The stored values are linker symbol addresses and may be virtual (e.g.
+/// higher-half) depending on the link script.  Callers that need true physical
+/// addresses must translate via `virt_to_phys_kernel()` or equivalent.
+pub fn init_kernel_bounds() {
+    if !BOUNDS_INIT.init_once() {
         return;
     }
 
-    // SAFETY: Single-threaded initialization during boot, protected by InitFlag
-    unsafe {
-        let (start, end) = symbols::kernel_bounds();
-        let start_phys = ptr_as_u64(start.cast());
-        let end_phys = ptr_as_u64(end.cast());
+    let (start, end) = symbols::kernel_bounds();
+    KERNEL_IMAGE_START.store(start as usize as u64, Ordering::Release);
+    KERNEL_IMAGE_END.store(end as usize as u64, Ordering::Release);
 
-        KERNEL_LAYOUT.kernel_start_phys = start_phys;
-        KERNEL_LAYOUT.kernel_end_phys = end_phys;
+    klog_debug!(
+        "kernel image bounds: {:#x}..{:#x}",
+        start as u64,
+        end as u64
+    );
+}
 
-        KERNEL_LAYOUT.kernel_start_virt = KERNEL_VIRTUAL_BASE;
-        KERNEL_LAYOUT.kernel_end_virt = KERNEL_VIRTUAL_BASE + (end_phys - start_phys);
-
-        KERNEL_LAYOUT.kernel_heap_start = KERNEL_HEAP_VBASE;
-        KERNEL_LAYOUT.kernel_heap_end = KERNEL_HEAP_VBASE + KERNEL_HEAP_SIZE;
-
-        KERNEL_LAYOUT.kernel_stack_start = BOOT_STACK_PHYS_ADDR;
-        KERNEL_LAYOUT.kernel_stack_end = BOOT_STACK_PHYS_ADDR + BOOT_STACK_SIZE;
-
-        KERNEL_LAYOUT.identity_map_end = PAGE_SIZE_1GB;
-        KERNEL_LAYOUT.user_space_start = USER_SPACE_START_VA;
-        KERNEL_LAYOUT.user_space_end = USER_SPACE_END_VA;
+/// Returns `(start, end)` of the kernel image, or `(0, 0)` if
+/// [`init_kernel_bounds`] has not been called yet.
+pub fn kernel_image_bounds() -> (u64, u64) {
+    if !BOUNDS_INIT.is_set() {
+        return (0, 0);
     }
-
-    klog_debug!("SlopOS: Kernel memory layout initialized");
-}
-pub fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
-    if LAYOUT_INIT.is_set() {
-        // SAFETY: Layout is immutable after initialization, protected by InitFlag
-        unsafe { &KERNEL_LAYOUT as *const KernelMemoryLayout }
-    } else {
-        ptr::null()
-    }
-}
-pub fn mm_get_kernel_heap_start() -> u64 {
-    unsafe { KERNEL_LAYOUT.kernel_heap_start }
-}
-pub fn mm_get_kernel_heap_end() -> u64 {
-    unsafe { KERNEL_LAYOUT.kernel_heap_end }
-}
-pub fn mm_get_process_layout() -> *const ProcessMemoryLayout {
-    &PROCESS_LAYOUT as *const ProcessMemoryLayout
+    (
+        KERNEL_IMAGE_START.load(Ordering::Acquire),
+        KERNEL_IMAGE_END.load(Ordering::Acquire),
+    )
 }
