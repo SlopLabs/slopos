@@ -12,6 +12,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
 | [COMPOSITOR_HOVER_REGISTRY.md](./COMPOSITOR_HOVER_REGISTRY.md) | Replace ad-hoc hover tracking with a single reactive HoverRegion registry |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
+| [CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md](./CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md) | Detailed execution playbook with dependencies, tests, rollback strategy, phase gates, and task checklists |
 | [ABI_SCOPE_CLEANUP.md](./ABI_SCOPE_CLEANUP.md) | Extract `gfx` crate from `abi` — move rendering algorithms out of the types crate |
 
 ---
