@@ -1,3 +1,4 @@
+use crate::hhdm::PhysAddrHhdm;
 use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
@@ -174,6 +175,17 @@ impl PageTableEntry {
     #[inline]
     pub const fn points_to_table(&self) -> bool {
         self.is_present() && !self.is_huge()
+    }
+
+    /// If this entry points to a subtable (present, non-huge), return the
+    /// virtual pointer to that table via the HHDM. Returns null if the entry
+    /// is not present, is a huge-page mapping, or the address is null.
+    #[inline]
+    pub fn table_ptr(&self) -> *mut PageTable {
+        if !self.points_to_table() {
+            return core::ptr::null_mut();
+        }
+        self.address().to_virt().as_mut_ptr()
     }
 }
 

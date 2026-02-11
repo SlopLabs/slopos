@@ -30,6 +30,38 @@ pub struct HeapStats {
     pub free_count: u32,
 }
 
+impl HeapStats {
+    fn record_slab_alloc(&mut self, size: u64) {
+        self.allocated_size = self.allocated_size.saturating_add(size);
+        self.allocated_blocks = self.allocated_blocks.saturating_add(1);
+        self.free_blocks = self.free_blocks.saturating_sub(1);
+        self.allocation_count = self.allocation_count.saturating_add(1);
+        self.free_size = self.total_size.saturating_sub(self.allocated_size);
+    }
+
+    fn record_large_alloc(&mut self, size: u64) {
+        self.allocated_blocks = self.allocated_blocks.saturating_add(1);
+        self.allocated_size = self.allocated_size.saturating_add(size);
+        self.allocation_count = self.allocation_count.saturating_add(1);
+        self.free_size = self.total_size.saturating_sub(self.allocated_size);
+    }
+
+    fn record_slab_free(&mut self, size: u64) {
+        self.allocated_size = self.allocated_size.saturating_sub(size);
+        self.allocated_blocks = self.allocated_blocks.saturating_sub(1);
+        self.free_blocks = self.free_blocks.saturating_add(1);
+        self.free_count = self.free_count.saturating_add(1);
+        self.free_size = self.total_size.saturating_sub(self.allocated_size);
+    }
+
+    fn record_large_free(&mut self, size: u64) {
+        self.allocated_size = self.allocated_size.saturating_sub(size);
+        self.allocated_blocks = self.allocated_blocks.saturating_sub(1);
+        self.free_count = self.free_count.saturating_add(1);
+        self.free_size = self.total_size.saturating_sub(self.allocated_size);
+    }
+}
+
 #[repr(C)]
 struct SlabHeader {
     magic: u32,
@@ -241,17 +273,7 @@ fn slab_alloc_from_cache(heap: &mut KernelHeap, idx: usize) -> *mut c_void {
                 }
                 (*slab).free_list = *(obj as *mut *mut u8);
                 (*slab).free_count = (*slab).free_count.saturating_sub(1);
-                heap.stats.allocated_size = heap
-                    .stats
-                    .allocated_size
-                    .saturating_add((*slab).object_size as u64);
-                heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_add(1);
-                heap.stats.free_blocks = heap.stats.free_blocks.saturating_sub(1);
-                heap.stats.allocation_count = heap.stats.allocation_count.saturating_add(1);
-                heap.stats.free_size = heap
-                    .stats
-                    .total_size
-                    .saturating_sub(heap.stats.allocated_size);
+                heap.stats.record_slab_alloc((*slab).object_size as u64);
                 return obj as *mut c_void;
             }
             slab = (*slab).next;
@@ -292,13 +314,7 @@ fn alloc_large(heap: &mut KernelHeap, size: usize) -> *mut c_void {
                 (*current).magic = LARGE_MAGIC;
                 (*current).size = size as u32;
                 (*current).next = ptr::null_mut();
-                heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_add(1);
-                heap.stats.allocated_size = heap.stats.allocated_size.saturating_add(size as u64);
-                heap.stats.allocation_count = heap.stats.allocation_count.saturating_add(1);
-                heap.stats.free_size = heap
-                    .stats
-                    .total_size
-                    .saturating_sub(heap.stats.allocated_size);
+                heap.stats.record_large_alloc(size as u64);
                 return (base as *mut u8).add(header_size) as *mut c_void;
             }
             prev = current;
@@ -321,13 +337,7 @@ fn alloc_large(heap: &mut KernelHeap, size: usize) -> *mut c_void {
     }
 
     heap.stats.total_blocks = heap.stats.total_blocks.saturating_add(1);
-    heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_add(1);
-    heap.stats.allocated_size = heap.stats.allocated_size.saturating_add(size as u64);
-    heap.stats.allocation_count = heap.stats.allocation_count.saturating_add(1);
-    heap.stats.free_size = heap
-        .stats
-        .total_size
-        .saturating_sub(heap.stats.allocated_size);
+    heap.stats.record_large_alloc(size as u64);
 
     unsafe { (base as *mut u8).add(header_size) as *mut c_void }
 }
@@ -342,14 +352,7 @@ fn free_large(heap: &mut KernelHeap, base: u64) -> c_int {
         (*header).magic = LARGE_FREE_MAGIC;
         (*header).next = heap.large_free_list;
         heap.large_free_list = header;
-
-        heap.stats.allocated_size = heap.stats.allocated_size.saturating_sub(size);
-        heap.stats.free_size = heap
-            .stats
-            .total_size
-            .saturating_sub(heap.stats.allocated_size);
-        heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_sub(1);
-        heap.stats.free_count = heap.stats.free_count.saturating_add(1);
+        heap.stats.record_large_free(size);
     }
 
     0
@@ -392,17 +395,7 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
         *(ptr_in as *mut *mut u8) = (*base).free_list;
         (*base).free_list = ptr_in as *mut u8;
         (*base).free_count = (*base).free_count.saturating_add(1);
-        heap.stats.allocated_size = heap
-            .stats
-            .allocated_size
-            .saturating_sub((*base).object_size as u64);
-        heap.stats.allocated_blocks = heap.stats.allocated_blocks.saturating_sub(1);
-        heap.stats.free_blocks = heap.stats.free_blocks.saturating_add(1);
-        heap.stats.free_count = heap.stats.free_count.saturating_add(1);
-        heap.stats.free_size = heap
-            .stats
-            .total_size
-            .saturating_sub(heap.stats.allocated_size);
+        heap.stats.record_slab_free((*base).object_size as u64);
     }
 
     0

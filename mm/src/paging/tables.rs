@@ -517,66 +517,44 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
     unsafe { &mut KERNEL_PAGE_DIR }
 }
 
-unsafe fn free_pt_level(pt: *mut PageTable, pt_phys: PhysAddr) {
-    if pt.is_null() {
+/// Recursively free a page table hierarchy from the given level down.
+///
+/// - At the leaf level (PT/Level 1): frees each mapped physical frame.
+/// - At intermediate levels (PD/Level 2, PDPT/Level 3): recurses into
+///   non-huge subtables and frees huge-page frames directly.
+/// - Always frees the table's own frame at the end.
+unsafe fn free_table_level(table: *mut PageTable, table_phys: PhysAddr, level: PageTableLevel) {
+    if table.is_null() {
         return;
     }
-    for entry in (*pt).iter() {
-        if entry.is_present() {
-            let phys = entry.address();
+
+    for entry in (*table).iter() {
+        if !entry.is_present() {
+            continue;
+        }
+
+        let phys = entry.address();
+        if level == PageTableLevel::One {
             if page_frame_can_free(phys) != 0 {
                 free_page_frame(phys);
             }
-        }
-    }
-    if page_frame_can_free(pt_phys) != 0 {
-        free_page_frame(pt_phys);
-    }
-}
-
-unsafe fn free_pd_level(pd: *mut PageTable, pd_phys: PhysAddr) {
-    if pd.is_null() {
-        return;
-    }
-    for entry in (*pd).iter() {
-        if !entry.is_present() {
             continue;
         }
-        let phys = entry.address();
+
         if entry.is_huge() {
             if page_frame_is_tracked(phys) != 0 {
                 free_page_frame(phys);
             }
-        } else {
-            let pt = phys_to_table(phys);
-            free_pt_level(pt, phys);
-        }
-    }
-    if page_frame_can_free(pd_phys) != 0 {
-        free_page_frame(pd_phys);
-    }
-}
-
-unsafe fn free_pdpt_level(pdpt: *mut PageTable, pdpt_phys: PhysAddr) {
-    if pdpt.is_null() {
-        return;
-    }
-    for entry in (*pdpt).iter() {
-        if !entry.is_present() {
             continue;
         }
-        let phys = entry.address();
-        if entry.is_huge() {
-            if page_frame_is_tracked(phys) != 0 {
-                free_page_frame(phys);
-            }
-        } else {
-            let pd = phys_to_table(phys);
-            free_pd_level(pd, phys);
-        }
+
+        let next_table = entry.table_ptr();
+        let next_level = level.next_lower().unwrap();
+        free_table_level(next_table, phys, next_level);
     }
-    if page_frame_can_free(pdpt_phys) != 0 {
-        free_page_frame(pdpt_phys);
+
+    if page_frame_can_free(table_phys) != 0 {
+        free_page_frame(table_phys);
     }
 }
 
@@ -598,7 +576,7 @@ fn free_page_table_tree(page_dir: *mut ProcessPageDir) {
             }
             let pdpt_phys = entry.address();
             let pdpt = phys_to_table(pdpt_phys);
-            free_pdpt_level(pdpt, pdpt_phys);
+            free_table_level(pdpt, pdpt_phys, PageTableLevel::Three);
             entry.clear();
         }
     }
@@ -699,7 +677,7 @@ pub fn paging_mark_range_user(
                 pml4_entry.add_flags(PageFlags::USER);
             }
 
-            let pdpt = phys_to_table(pml4_entry.address());
+            let pdpt = pml4_entry.table_ptr();
             if pdpt.is_null() {
                 return -1;
             }
@@ -719,7 +697,7 @@ pub fn paging_mark_range_user(
                 continue;
             }
 
-            let pd = phys_to_table(pdpt_entry.address());
+            let pd = pdpt_entry.table_ptr();
             if pd.is_null() {
                 return -1;
             }
@@ -739,7 +717,7 @@ pub fn paging_mark_range_user(
                 continue;
             }
 
-            let pt = phys_to_table(pd_entry.address());
+            let pt = pd_entry.table_ptr();
             if pt.is_null() {
                 return -1;
             }
@@ -795,7 +773,7 @@ pub fn paging_update_range_protection(
                 continue;
             }
 
-            let pdpt = phys_to_table(pml4_entry.address());
+            let pdpt = pml4_entry.table_ptr();
             if pdpt.is_null() {
                 addr += PAGE_SIZE_4KB;
                 continue;
@@ -806,7 +784,7 @@ pub fn paging_update_range_protection(
                 continue;
             }
 
-            let pd = phys_to_table(pdpt_entry.address());
+            let pd = pdpt_entry.table_ptr();
             if pd.is_null() {
                 addr += PAGE_SIZE_4KB;
                 continue;
@@ -817,7 +795,7 @@ pub fn paging_update_range_protection(
                 continue;
             }
 
-            let pt = phys_to_table(pd_entry.address());
+            let pt = pd_entry.table_ptr();
             if pt.is_null() {
                 addr += PAGE_SIZE_4KB;
                 continue;
@@ -881,7 +859,7 @@ pub fn paging_mark_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int 
             return -1;
         }
 
-        let pdpt = phys_to_table(pml4_entry.address());
+        let pdpt = pml4_entry.table_ptr();
         let pdpt_entry = (&*pdpt).entry(pdpt_idx);
         if !pdpt_entry.is_present() {
             return -1;
@@ -890,7 +868,7 @@ pub fn paging_mark_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int 
             return -1;
         }
 
-        let pd = phys_to_table(pdpt_entry.address());
+        let pd = pdpt_entry.table_ptr();
         let pd_entry = (&*pd).entry(pd_idx);
         if !pd_entry.is_present() {
             return -1;
@@ -899,7 +877,7 @@ pub fn paging_mark_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int 
             return -1;
         }
 
-        let pt = phys_to_table(pd_entry.address());
+        let pt = pd_entry.table_ptr();
         let pt_entry = (&mut *pt).entry_mut(pt_idx);
         if !pt_entry.is_present() {
             return -1;
@@ -932,7 +910,7 @@ pub fn paging_is_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> bool {
             return false;
         }
 
-        let pdpt = phys_to_table(pml4_entry.address());
+        let pdpt = pml4_entry.table_ptr();
         let pdpt_entry = (&*pdpt).entry(pdpt_idx);
         if !pdpt_entry.is_present() {
             return false;
@@ -941,7 +919,7 @@ pub fn paging_is_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> bool {
             return false;
         }
 
-        let pd = phys_to_table(pdpt_entry.address());
+        let pd = pdpt_entry.table_ptr();
         let pd_entry = (&*pd).entry(pd_idx);
         if !pd_entry.is_present() {
             return false;
@@ -950,7 +928,7 @@ pub fn paging_is_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> bool {
             return false;
         }
 
-        let pt = phys_to_table(pd_entry.address());
+        let pt = pd_entry.table_ptr();
         let pt_entry = (&*pt).entry(pt_idx);
         if !pt_entry.is_present() {
             return false;
@@ -979,7 +957,7 @@ pub fn paging_get_pte_flags(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> O
             return None;
         }
 
-        let pdpt = phys_to_table(pml4_entry.address());
+        let pdpt = pml4_entry.table_ptr();
         let pdpt_entry = (&*pdpt).entry(pdpt_idx);
         if !pdpt_entry.is_present() {
             return None;
@@ -988,7 +966,7 @@ pub fn paging_get_pte_flags(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> O
             return Some(pdpt_entry.flags());
         }
 
-        let pd = phys_to_table(pdpt_entry.address());
+        let pd = pdpt_entry.table_ptr();
         let pd_entry = (&*pd).entry(pd_idx);
         if !pd_entry.is_present() {
             return None;
@@ -997,7 +975,7 @@ pub fn paging_get_pte_flags(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> O
             return Some(pd_entry.flags());
         }
 
-        let pt = phys_to_table(pd_entry.address());
+        let pt = pd_entry.table_ptr();
         let pt_entry = (&*pt).entry(pt_idx);
         if !pt_entry.is_present() {
             return None;
