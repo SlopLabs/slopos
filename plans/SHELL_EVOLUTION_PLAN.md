@@ -1,8 +1,8 @@
 # SlopOS Shell Evolution Plan
 
-> **Status**: Planning Phase
+> **Status**: Phase 0 Complete
 > **Target**: Transform the shell from a command dispatcher into a real POSIX-inspired shell
-> **Current**: `userland/src/apps/shell.rs` — 1441-line monolith, 12 commands, no history, no line editing, no pipes
+> **Current**: `userland/src/apps/shell/` — modular directory (10 files), 12 commands, no history, no line editing, no pipes
 
 ---
 
@@ -77,8 +77,18 @@ Phase 0–1 are pure userland. Phase 2 uses existing syscalls. Phase 6 requires 
 ### File Structure (Current)
 
 ```
-userland/src/apps/shell.rs          ← 1441-line monolith
-userland/src/bin/shell.rs           ← 4-line entry point
+userland/src/apps/shell/
+├── mod.rs              ← ShellState, REPL loop, shared constants
+├── display.rs          ← DisplayState, scrollback, console_*/draw_* functions
+├── input.rs            ← read_command_line(), key handling, PageUp/PageDown
+├── parser.rs           ← shell_parse_line, is_space, normalize_path, u_streq_slice
+├── surface.rs          ← Surface wrapper (init, draw, present_full)
+├── buffers.rs          ← LINE_BUF, TOKEN_STORAGE, PATH_BUF, LIST_ENTRIES
+└── builtins/
+    ├── mod.rs          ← BuiltinEntry, BUILTINS table, find_builtin, print_kv
+    ├── fs.rs           ← cmd_ls, cmd_cat, cmd_write, cmd_mkdir, cmd_rm
+    └── system.rs       ← cmd_help, cmd_echo, cmd_clear, cmd_info, cmd_sysinfo, cmd_shutdown, cmd_reboot
+userland/src/bin/shell.rs           ← 4-line entry point (unchanged)
 ```
 
 ---
@@ -108,20 +118,20 @@ userland/src/apps/shell/
 
 ### Tasks
 
-- [ ] **0.1** Create `userland/src/apps/shell/` directory
-- [ ] **0.2** Create `mod.rs` — extract `shell_user_main()` REPL loop + new `ShellState` struct holding all state
-- [ ] **0.3** Create `display.rs` — move `DisplayState`, `DISPLAY` static, all `console_*` functions, all `draw_*` functions, scrollback module
-- [ ] **0.4** Create `input.rs` — move keyboard handling logic (the inner input loop from `shell_user_main`), line buffer management, `KEY_PAGE_UP`/`KEY_PAGE_DOWN` handling
-- [ ] **0.5** Create `parser.rs` — move `shell_parse_line()`, `is_space()`, `normalize_path()`, `u_streq_slice()`, token constants (`SHELL_MAX_TOKENS`, etc.)
-- [ ] **0.6** Create `builtins/mod.rs` — move `BuiltinEntry` struct, `BUILTINS` table, `find_builtin()`, `BuiltinFn` type alias, `print_kv()` helper
-- [ ] **0.7** Create `builtins/fs.rs` — move `cmd_ls`, `cmd_cat`, `cmd_write`, `cmd_mkdir`, `cmd_rm`
-- [ ] **0.8** Create `builtins/system.rs` — move `cmd_help`, `cmd_echo`, `cmd_clear`, `cmd_info`, `cmd_sysinfo`, `cmd_shutdown`, `cmd_reboot`
-- [ ] **0.9** Create `surface.rs` — move the `surface` module (Surface wrapper, `init`, `draw`, `present_full`)
-- [ ] **0.10** Create `buffers.rs` — move the `buffers` module (LINE_BUF, TOKEN_STORAGE, PATH_BUF, LIST_ENTRIES)
-- [ ] **0.11** Update `userland/src/apps/mod.rs` to reference `shell` as a module directory instead of a single file
-- [ ] **0.12** Verify: `make build` compiles cleanly
-- [ ] **0.13** Verify: `make test` passes
-- [ ] **0.14** Verify: `make boot VIDEO=1` — shell boots and all 12 commands still work
+- [x] **0.1** Create `userland/src/apps/shell/` directory
+- [x] **0.2** Create `mod.rs` — extract `shell_user_main()` REPL loop + new `ShellState` struct holding all state
+- [x] **0.3** Create `display.rs` — move `DisplayState`, `DISPLAY` static, all `console_*` functions, all `draw_*` functions, scrollback module
+- [x] **0.4** Create `input.rs` — move keyboard handling logic (the inner input loop from `shell_user_main`), line buffer management, `KEY_PAGE_UP`/`KEY_PAGE_DOWN` handling
+- [x] **0.5** Create `parser.rs` — move `shell_parse_line()`, `is_space()`, `normalize_path()`, `u_streq_slice()`, token constants (`SHELL_MAX_TOKENS`, etc.)
+- [x] **0.6** Create `builtins/mod.rs` — move `BuiltinEntry` struct, `BUILTINS` table, `find_builtin()`, `BuiltinFn` type alias, `print_kv()` helper
+- [x] **0.7** Create `builtins/fs.rs` — move `cmd_ls`, `cmd_cat`, `cmd_write`, `cmd_mkdir`, `cmd_rm`
+- [x] **0.8** Create `builtins/system.rs` — move `cmd_help`, `cmd_echo`, `cmd_clear`, `cmd_info`, `cmd_sysinfo`, `cmd_shutdown`, `cmd_reboot`
+- [x] **0.9** Create `surface.rs` — move the `surface` module (Surface wrapper, `init`, `draw`, `present_full`)
+- [x] **0.10** Create `buffers.rs` — move the `buffers` module (LINE_BUF, TOKEN_STORAGE, PATH_BUF, LIST_ENTRIES)
+- [x] **0.11** Update `userland/src/apps/mod.rs` to reference `shell` as a module directory instead of a single file
+- [x] **0.12** Verify: `make build` compiles cleanly
+- [x] **0.13** Verify: `make test` passes (384/384)
+- [x] **0.14** Verify: `make boot VIDEO=1` — shell boots and all 12 commands still work
 
 ### Design Notes
 
@@ -824,12 +834,12 @@ Keyboard → input.rs (line editing, history)
 
 | Phase | Status | Tasks | Done | Blocked |
 |-------|--------|-------|------|---------|
-| **Phase 0**: Module Split | Not Started | 14 | 0 | — |
-| **Phase 1**: Core Shell | Not Started | 28 | 0 | Phase 0 |
-| **Phase 2**: Process Control | Not Started | 30 | 0 | Phase 0 |
-| **Phase 3**: Environment | Not Started | 17 | 0 | Phase 0 |
-| **Phase 4**: New Builtins | Not Started | 23 | 0 | Phase 0 |
-| **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 0, 1 |
+| **Phase 0**: Module Split | **Complete** | 14 | 14 | — |
+| **Phase 1**: Core Shell | Not Started | 28 | 0 | — |
+| **Phase 2**: Process Control | Not Started | 30 | 0 | — |
+| **Phase 3**: Environment | Not Started | 17 | 0 | — |
+| **Phase 4**: New Builtins | Not Started | 23 | 0 | — |
+| **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
-| **Total** | | **163** | **0** | |
+| **Total** | | **163** | **14** | |
