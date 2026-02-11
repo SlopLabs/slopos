@@ -110,6 +110,7 @@ pub fn reap_zombies() {
 use super::scheduler;
 
 pub use super::task_struct::{FpuState, Task, TaskContext};
+use slopos_abi::signal::{SIGCHLD, sig_bit};
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
@@ -182,6 +183,8 @@ use slopos_mm::process_vm::{
     process_vm_get_stack_top,
 };
 use slopos_mm::shared_memory::shm_cleanup_task;
+use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_ptr::UserPtr;
 
 #[inline]
 fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> R {
@@ -444,6 +447,57 @@ fn record_task_exit(
     });
 }
 
+fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool {
+    with_task_manager(|mgr| {
+        for task in mgr.tasks.iter() {
+            if task.task_id == excluding_task_id {
+                continue;
+            }
+            let status = task.status();
+            if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
+                continue;
+            }
+            if task.process_id == process_id {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn notify_parent_of_child_exit(task_ptr: *mut Task) {
+    if task_ptr.is_null() {
+        return;
+    }
+
+    let (task_id, tgid, parent_task_id) = unsafe {
+        (
+            (*task_ptr).task_id,
+            (*task_ptr).tgid,
+            (*task_ptr).parent_task_id,
+        )
+    };
+
+    if parent_task_id == INVALID_TASK_ID || parent_task_id == task_id {
+        return;
+    }
+
+    if tgid != task_id {
+        return;
+    }
+
+    let parent = task_find_by_id(parent_task_id);
+    if parent.is_null() {
+        return;
+    }
+
+    unsafe {
+        (*parent)
+            .signal_pending
+            .fetch_or(sig_bit(SIGCHLD), Ordering::AcqRel);
+    }
+}
+
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
     task.fpu_state = FpuState::new();
@@ -531,6 +585,8 @@ pub fn init_task_manager() -> c_int {
         mgr.next_task_id = max_task_id + 1;
         mgr.initialized = true;
     });
+    // Invariants restored -- clear any poisoned state from panic recovery.
+    TASK_MANAGER.clear_poison();
     0
 }
 pub fn task_create(
@@ -578,6 +634,10 @@ pub fn task_create(
     task_ref.priority = priority;
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
+    // New process: task is its own thread-group leader.
+    task_ref.tgid = task_id;
+    task_ref.clear_child_tid = 0;
+    task_ref.parent_task_id = INVALID_TASK_ID;
     task_ref.stack_base = resources.stack_base;
     task_ref.stack_size = TASK_STACK_SIZE;
     task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
@@ -692,6 +752,19 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
         (*task_ptr)
             .waiting_on
             .store(INVALID_TASK_ID, Ordering::Release);
+
+        super::futex::futex_remove_task(task_ptr);
+
+        let clear_tid = (*task_ptr).clear_child_tid;
+        if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
+            if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {
+                let _ = copy_to_user(clear_ptr, &0u32);
+            }
+            let _ = super::futex::futex_wake_one(clear_tid);
+            (*task_ptr).clear_child_tid = 0;
+        }
+
+        notify_parent_of_child_exit(task_ptr);
     }
 
     scheduler::unschedule_task(task_ptr);
@@ -703,10 +776,14 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
     unsafe {
         if (*task_ptr).process_id != INVALID_PROCESS_ID {
-            fileio_destroy_table_for_process((*task_ptr).process_id);
+            let process_id = (*task_ptr).process_id;
+            let task_id = (*task_ptr).task_id;
             video_task_cleanup(resolved_id);
             shm_cleanup_task(resolved_id);
-            destroy_process_vm((*task_ptr).process_id);
+            if !process_has_other_live_tasks(process_id, task_id) {
+                fileio_destroy_table_for_process(process_id);
+                destroy_process_vm(process_id);
+            }
         }
 
         if (*task_ptr).ref_count() > 0 {
@@ -1042,6 +1119,10 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
+    child.parent_task_id = parent.task_id;
+    // Fork creates a new process: child is its own thread-group leader.
+    child.tgid = child_task_id;
+    child.clear_child_tid = 0;
     child.set_status(TaskStatus::Ready);
 
     child.kernel_stack_base = child_kernel_stack as u64;
@@ -1070,8 +1151,232 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     child_task_id
 }
 
+/// Create a new task via clone(2) semantics.
+///
+/// `flags`: Combination of CLONE_VM, CLONE_FILES, CLONE_THREAD, etc.
+/// `child_stack`: If non-zero, the child's initial RSP. If zero, inherit parent RSP (fork-like).
+/// `parent_tidptr`: User address to write the child's TID (if CLONE_PARENT_SETTID).
+/// `child_tidptr`: User address for CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID.
+/// `tls`: New FS_BASE for child (if CLONE_SETTLS).
+///
+/// Returns `Ok(child_task_id)` on success or `Err(errno_u64)` on failure.
+pub fn task_clone(
+    parent_task: *mut Task,
+    flags: u64,
+    child_stack: u64,
+    parent_tidptr: u64,
+    child_tidptr: u64,
+    tls: u64,
+) -> Result<u32, u64> {
+    use slopos_abi::syscall::*;
+
+    if parent_task.is_null() {
+        return Err(ERRNO_EINVAL);
+    }
+
+    let parent = unsafe { &*parent_task };
+
+    // Reject kernel-mode tasks and tasks without a process VM.
+    if parent.flags & TASK_FLAG_KERNEL_MODE != 0 || parent.process_id == INVALID_PROCESS_ID {
+        return Err(ERRNO_EINVAL);
+    }
+
+    // Reject unsupported flag combinations.
+    if flags & !CLONE_SUPPORTED_MASK != 0 {
+        klog_info!("task_clone: unsupported flags 0x{:x}", flags);
+        return Err(ERRNO_EINVAL);
+    }
+
+    // CLONE_THREAD requires CLONE_VM and CLONE_SIGHAND (Linux semantics).
+    if flags & CLONE_THREAD != 0 {
+        if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 {
+            klog_info!("task_clone: CLONE_THREAD requires CLONE_VM | CLONE_SIGHAND");
+            return Err(ERRNO_EINVAL);
+        }
+    }
+
+    // CLONE_SIGHAND requires CLONE_VM (Linux semantics).
+    if flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
+        klog_info!("task_clone: CLONE_SIGHAND requires CLONE_VM");
+        return Err(ERRNO_EINVAL);
+    }
+
+    if flags & CLONE_FILES != 0 && flags & CLONE_VM == 0 {
+        klog_info!("task_clone: CLONE_FILES without CLONE_VM is unsupported");
+        return Err(ERRNO_EINVAL);
+    }
+
+    let share_vm = flags & CLONE_VM != 0;
+    let share_files = flags & CLONE_FILES != 0;
+    let is_thread = flags & CLONE_THREAD != 0;
+
+    // Determine the child's process ID.
+    // CLONE_VM: child shares parent's address space (same process_id).
+    // No CLONE_VM: child gets a COW copy (new process_id), like fork.
+    let child_process_id = if share_vm {
+        parent.process_id
+    } else {
+        let pid = process_vm_clone_cow(parent.process_id);
+        if pid == INVALID_PROCESS_ID {
+            klog_info!("task_clone: process_vm_clone_cow failed");
+            return Err(ERRNO_ENOMEM);
+        }
+        pid
+    };
+
+    // Allocate a kernel stack for the child.
+    let child_kernel_stack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
+    if child_kernel_stack.is_null() {
+        if !share_vm {
+            cleanup_fork_setup_resources(child_process_id, ptr::null_mut(), false);
+        }
+        return Err(ERRNO_ENOMEM);
+    }
+
+    // Clone file table if not sharing and we made a new process.
+    if !share_vm && !share_files {
+        if fileio_clone_table_for_process(parent.process_id, child_process_id) != 0 {
+            if !share_vm {
+                cleanup_fork_setup_resources(child_process_id, child_kernel_stack, false);
+            } else {
+                kfree(child_kernel_stack);
+            }
+            return Err(ERRNO_ENOMEM);
+        }
+    }
+
+    // Reserve a task slot for the child.
+    let (child_task_ptr, child_task_id) = match reserve_task_slot() {
+        Ok(values) => values,
+        Err(_) => {
+            if !share_vm {
+                cleanup_fork_setup_resources(child_process_id, child_kernel_stack, !share_files);
+            } else {
+                kfree(child_kernel_stack);
+            }
+            return Err(ERRNO_EAGAIN);
+        }
+    };
+
+    let child = unsafe { &mut *child_task_ptr };
+
+    // SAFETY: child and parent are distinct task slots from the static TASK_TABLE,
+    // and we hold exclusive access to child (just reserved).
+    unsafe { child.clone_from_raw(parent) };
+
+    child.task_id = child_task_id;
+    child.process_id = child_process_id;
+    child.parent_task_id = parent.task_id;
+
+    // Thread-group identity.
+    if is_thread {
+        // Thread joins the parent's thread group.
+        child.tgid = if parent.tgid != INVALID_TASK_ID {
+            parent.tgid
+        } else {
+            parent.task_id
+        };
+    } else {
+        // New process: child is its own thread-group leader.
+        child.tgid = child_task_id;
+    }
+
+    child.set_status(TaskStatus::Ready);
+
+    // Set up kernel stack.
+    child.kernel_stack_base = child_kernel_stack as u64;
+    child.kernel_stack_top = child_kernel_stack as u64 + TASK_KERNEL_STACK_SIZE;
+    child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
+
+    // Child returns 0 from clone.
+    child.context.rax = 0;
+
+    // If a child stack was provided, use it.
+    if child_stack != 0 {
+        child.context.rsp = child_stack;
+    }
+
+    // CLONE_CHILD_CLEARTID: remember the address for exit-time futex wake.
+    if flags & CLONE_CHILD_CLEARTID != 0 && child_tidptr != 0 {
+        child.clear_child_tid = child_tidptr;
+    } else {
+        child.clear_child_tid = 0;
+    }
+
+    if flags & CLONE_SETTLS != 0 {
+        child.fs_base = tls;
+    }
+
+    // Set CR3 for the child's address space.
+    if !share_vm {
+        let child_page_dir = process_vm_get_page_dir(child_process_id);
+        if !child_page_dir.is_null() {
+            child.context.cr3 = unsafe { (*child_page_dir).pml4_phys.as_u64() };
+        }
+    }
+    // If sharing VM, CR3 is already inherited from clone_from_raw.
+
+    reset_task_runtime_fields(child);
+    record_task_created();
+
+    // CLONE_PARENT_SETTID: write child TID into parent's memory.
+    if flags & CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {
+        let parent_tid_user = match UserPtr::<u32>::try_new(parent_tidptr) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = task_terminate(child_task_id);
+                return Err(ERRNO_EFAULT);
+            }
+        };
+        if copy_to_user(parent_tid_user, &child_task_id).is_err() {
+            let _ = task_terminate(child_task_id);
+            return Err(ERRNO_EFAULT);
+        }
+    }
+
+    // CLONE_CHILD_SETTID: write child TID into child's memory at child_tidptr.
+    // For CLONE_VM threads, the address space is shared so we can write directly.
+    if flags & CLONE_CHILD_SETTID != 0 && child_tidptr != 0 {
+        if share_vm {
+            let child_tid_user = match UserPtr::<u32>::try_new(child_tidptr) {
+                Ok(p) => p,
+                Err(_) => {
+                    let _ = task_terminate(child_task_id);
+                    return Err(ERRNO_EFAULT);
+                }
+            };
+            if copy_to_user(child_tid_user, &child_task_id).is_err() {
+                let _ = task_terminate(child_task_id);
+                return Err(ERRNO_EFAULT);
+            }
+        }
+        // For non-CLONE_VM (fork-like), we'd need to write into the child's
+        // COW address space. This is complex; defer for now.
+    }
+
+    klog_info!(
+        "task_clone: created child task {} (process {}, tgid {}) flags=0x{:x} from parent {} (process {})",
+        child_task_id,
+        child_process_id,
+        child.tgid,
+        flags,
+        parent.task_id,
+        parent.process_id
+    );
+
+    Ok(child_task_id)
+}
+
 pub unsafe fn task_manager_force_unlock() {
     unsafe { TASK_MANAGER.force_unlock() };
+}
+
+/// Force-unlock the task manager AND mark it as poisoned.
+/// Called from panic recovery to signal that the task table may be
+/// in an inconsistent state. The next `init_task_manager()` call
+/// clears the poison after reinitializing invariants.
+pub unsafe fn task_manager_poison_unlock() {
+    unsafe { TASK_MANAGER.poison_unlock() };
 }
 
 use super::ffi_boundary::task_entry_wrapper;

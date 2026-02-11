@@ -216,16 +216,7 @@ pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
 }
 
 pub fn virt_to_phys_process(vaddr: VirtAddr, page_dir: *mut ProcessPageDir) -> PhysAddr {
-    if page_dir.is_null() {
-        return PhysAddr::NULL;
-    }
-    unsafe {
-        let saved = CURRENT_PAGE_DIR;
-        CURRENT_PAGE_DIR = page_dir;
-        let phys = virt_to_phys(vaddr);
-        CURRENT_PAGE_DIR = saved;
-        phys
-    }
+    virt_to_phys_for_dir(page_dir, vaddr)
 }
 
 fn map_page_in_directory(
@@ -776,6 +767,88 @@ pub fn paging_mark_range_user(
                 pt_entry.remove_flags(PageFlags::WRITABLE);
             } else {
                 pt_entry.add_flags(PageFlags::WRITABLE);
+            }
+            addr += PAGE_SIZE_4KB;
+        }
+    }
+    0
+}
+
+/// Update page table protection flags for an existing mapped range.
+///
+/// Sets or clears WRITABLE and NO_EXECUTE on each present 4KB PTE in
+/// `[start, end)`. Skips pages that are not yet mapped (lazy/demand).
+/// Returns 0 on success, -1 if page_dir is invalid.
+pub fn paging_update_range_protection(
+    page_dir: *mut ProcessPageDir,
+    start: VirtAddr,
+    end: VirtAddr,
+    new_flags: PageFlags,
+) -> c_int {
+    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } || start.as_u64() >= end.as_u64()
+    {
+        return -1;
+    }
+
+    let writable = new_flags.contains(PageFlags::WRITABLE);
+    let no_execute = new_flags.contains(PageFlags::NO_EXECUTE);
+
+    let mut addr = start.as_u64() & !(PAGE_SIZE_4KB - 1);
+    unsafe {
+        while addr < end.as_u64() {
+            let vaddr = VirtAddr::new(addr);
+
+            let pml4_idx = PageTableLevel::Four.index_of(vaddr);
+            let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
+            let pd_idx = PageTableLevel::Two.index_of(vaddr);
+            let pt_idx = PageTableLevel::One.index_of(vaddr);
+
+            let pml4_entry = (&mut *(*page_dir).pml4).entry_mut(pml4_idx);
+            if !pml4_entry.is_present() {
+                addr += PAGE_SIZE_4KB;
+                continue;
+            }
+
+            let pdpt = phys_to_table(pml4_entry.address());
+            if pdpt.is_null() {
+                addr += PAGE_SIZE_4KB;
+                continue;
+            }
+            let pdpt_entry = (&mut *pdpt).entry_mut(pdpt_idx);
+            if !pdpt_entry.is_present() {
+                addr += PAGE_SIZE_4KB;
+                continue;
+            }
+
+            let pd = phys_to_table(pdpt_entry.address());
+            if pd.is_null() {
+                addr += PAGE_SIZE_4KB;
+                continue;
+            }
+            let pd_entry = (&mut *pd).entry_mut(pd_idx);
+            if !pd_entry.is_present() {
+                addr += PAGE_SIZE_4KB;
+                continue;
+            }
+
+            let pt = phys_to_table(pd_entry.address());
+            if pt.is_null() {
+                addr += PAGE_SIZE_4KB;
+                continue;
+            }
+            let pt_entry = (&mut *pt).entry_mut(pt_idx);
+            if pt_entry.is_present() {
+                if writable {
+                    pt_entry.add_flags(PageFlags::WRITABLE);
+                } else {
+                    pt_entry.remove_flags(PageFlags::WRITABLE);
+                }
+                if no_execute {
+                    pt_entry.add_flags(PageFlags::NO_EXECUTE);
+                } else {
+                    pt_entry.remove_flags(PageFlags::NO_EXECUTE);
+                }
+                tlb::flush_page(vaddr);
             }
             addr += PAGE_SIZE_4KB;
         }

@@ -7,10 +7,11 @@ use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
+use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_lib::klog_info;
-use slopos_mm::elf::ElfError;
+use slopos_mm::elf::{ElfError, ElfExecInfo};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
@@ -207,10 +208,14 @@ pub fn do_exec(
         elf_data.truncate(offset as usize);
     }
 
-    process_vm_load_elf_data(process_id, &elf_data, entry_out).map_err(ExecError::from)?;
+    let exec_info =
+        process_vm_load_elf_data(process_id, &elf_data, entry_out).map_err(ExecError::from)?;
 
-    let stack_top = setup_user_stack(process_id, argv, envp)?;
+    let stack_top = setup_user_stack(process_id, argv, envp, &exec_info)?;
     *stack_ptr_out = stack_top;
+
+    // POSIX: close all FDs with FD_CLOEXEC set after point of no return.
+    slopos_fs::fileio_close_on_exec(process_id);
 
     klog_info!(
         "exec: loaded ELF for process {}, entry={:#x}, stack={:#x}",
@@ -226,6 +231,7 @@ fn setup_user_stack(
     process_id: u32,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
+    exec_info: &ElfExecInfo,
 ) -> Result<u64, ExecError> {
     let stack_top_raw = process_vm_get_stack_top(process_id);
     if stack_top_raw == 0 {
@@ -280,10 +286,21 @@ fn setup_user_stack(
 
     sp &= !0xF;
 
-    let aux_size = 2 * 8;
-    sp = sp.wrapping_sub(aux_size);
-    write_u64_to_user_stack(page_dir, sp, 0)?;
-    write_u64_to_user_stack(page_dir, sp + 8, 0)?;
+    let auxv = [
+        (AT_PHDR, exec_info.phdr_addr),
+        (AT_PHENT, exec_info.phent_size as u64),
+        (AT_PHNUM, exec_info.phnum as u64),
+        (AT_PAGESZ, PAGE_SIZE_4KB),
+        (AT_ENTRY, exec_info.entry),
+        (AT_NULL, 0),
+    ];
+    let aux_size = auxv.len() * (2 * core::mem::size_of::<u64>());
+    sp = sp.wrapping_sub(aux_size as u64);
+    for (idx, (a_type, a_val)) in auxv.iter().enumerate() {
+        let slot = sp + (idx as u64) * 16;
+        write_u64_to_user_stack(page_dir, slot, *a_type)?;
+        write_u64_to_user_stack(page_dir, slot + 8, *a_val)?;
+    }
 
     sp = sp.wrapping_sub(8);
     write_u64_to_user_stack(page_dir, sp, 0)?;

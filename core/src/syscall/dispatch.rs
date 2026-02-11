@@ -45,6 +45,28 @@ fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
     }
 }
 
+/// RAII guard that clears NO_PREEMPT on the task when dropped.
+/// Ensures the flag cannot leak even if the syscall handler panics.
+struct NoPreemptGuard {
+    task: *mut Task,
+}
+
+impl NoPreemptGuard {
+    /// Set NO_PREEMPT on the task and return a guard that clears it on drop.
+    fn new(task: *mut Task) -> Self {
+        unsafe { (*task).flags |= TASK_FLAG_NO_PREEMPT };
+        Self { task }
+    }
+}
+
+impl Drop for NoPreemptGuard {
+    fn drop(&mut self) {
+        if !self.task.is_null() {
+            unsafe { (*self.task).flags &= !TASK_FLAG_NO_PREEMPT };
+        }
+    }
+}
+
 pub fn syscall_handle(frame: *mut InterruptFrame) {
     if frame.is_null() {
         return;
@@ -61,34 +83,23 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
     }
 
     save_user_context(frame, task);
-    unsafe {
-        (*task).flags |= TASK_FLAG_NO_PREEMPT;
-    }
 
+    // RAII guards ensure cleanup on all exit paths including panics.
+    let _no_preempt = NoPreemptGuard::new(task);
     let pid = unsafe { (*task).process_id };
-    let original_provider = slopos_mm::user_copy::set_syscall_process_id(pid);
+    let _provider_guard = slopos_mm::user_copy::set_syscall_process_id(pid);
 
     let sysno = unsafe { (*frame).rax };
     let entry = syscall_lookup(sysno);
     if entry.is_null() {
-        klog_info!("SYSCALL: Unknown syscall {}", sysno);
-        unsafe {
-            (*frame).rax = u64::MAX;
-        }
-        unsafe {
-            (*task).flags &= !TASK_FLAG_NO_PREEMPT;
-        }
-        slopos_mm::user_copy::restore_task_provider(original_provider);
+        klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
+        unsafe { (*frame).rax = slopos_abi::syscall::ENOSYS_RETURN };
         return;
     }
 
     let handler = unsafe { (*entry).handler };
     if let Some(func) = handler {
         func(task, frame);
+        crate::syscall::signal::deliver_pending_signal(task, frame);
     }
-
-    unsafe {
-        (*task).flags &= !TASK_FLAG_NO_PREEMPT;
-    }
-    slopos_mm::user_copy::restore_task_provider(original_provider);
 }

@@ -180,6 +180,271 @@ pub const SYSCALL_SET_CPU_AFFINITY: u64 = 82;
 pub const SYSCALL_GET_CPU_AFFINITY: u64 = 83;
 
 // =============================================================================
+// Process identity
+// =============================================================================
+
+pub const SYSCALL_GETPID: u64 = 86;
+pub const SYSCALL_GETPPID: u64 = 87;
+pub const SYSCALL_GETUID: u64 = 88;
+pub const SYSCALL_GETGID: u64 = 89;
+pub const SYSCALL_GETEUID: u64 = 90;
+pub const SYSCALL_GETEGID: u64 = 91;
+
+// =============================================================================
+// Memory management (POSIX)
+// =============================================================================
+
+/// Map anonymous memory into the process address space.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): requested address (hint, or 0 for kernel-chosen)
+/// * rsi (arg1): length in bytes (must be > 0, rounded up to page size)
+/// * rdx (arg2): protection flags (PROT_READ | PROT_WRITE | PROT_EXEC)
+/// * r10 (arg3): mapping flags (MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED)
+/// * r8  (arg4): file descriptor (must be -1 for MAP_ANONYMOUS)
+/// * r9  (arg5): offset (must be 0 for MAP_ANONYMOUS)
+///
+/// # Returns
+/// * Virtual address of the mapping on success
+/// * Negative errno on failure (-EINVAL, -ENOMEM)
+pub const SYSCALL_MMAP: u64 = 92;
+
+/// Unmap a previously mapped memory region.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): start address (must be page-aligned)
+/// * rsi (arg1): length in bytes (rounded up to page size)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (-EINVAL)
+pub const SYSCALL_MUNMAP: u64 = 93;
+
+/// Change protection on a memory region.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): start address (must be page-aligned)
+/// * rsi (arg1): length in bytes (rounded up to page size)
+/// * rdx (arg2): new protection flags (PROT_READ | PROT_WRITE | PROT_EXEC)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (-EINVAL, -ENOMEM)
+pub const SYSCALL_MPROTECT: u64 = 94;
+
+// =============================================================================
+// File descriptor operations
+// =============================================================================
+
+pub const SYSCALL_DUP: u64 = 95;
+pub const SYSCALL_DUP2: u64 = 96;
+pub const SYSCALL_DUP3: u64 = 97;
+pub const SYSCALL_FCNTL: u64 = 98;
+pub const SYSCALL_LSEEK: u64 = 99;
+pub const SYSCALL_FSTAT: u64 = 100;
+
+// =============================================================================
+// mmap constants
+// =============================================================================
+
+/// Protection flags for mmap/mprotect
+pub const PROT_NONE: u64 = 0;
+pub const PROT_READ: u64 = 1;
+pub const PROT_WRITE: u64 = 2;
+pub const PROT_EXEC: u64 = 4;
+
+/// Mapping flags for mmap
+pub const MAP_PRIVATE: u64 = 0x02;
+pub const MAP_ANONYMOUS: u64 = 0x20;
+pub const MAP_FIXED: u64 = 0x10;
+
+// =============================================================================
+// fcntl constants
+// =============================================================================
+
+pub const F_DUPFD: u64 = 0;
+pub const F_GETFD: u64 = 1;
+pub const F_SETFD: u64 = 2;
+pub const F_GETFL: u64 = 3;
+pub const F_SETFL: u64 = 4;
+pub const FD_CLOEXEC: u64 = 1;
+
+// =============================================================================
+// lseek whence constants
+// =============================================================================
+
+pub const SEEK_SET: u64 = 0;
+pub const SEEK_CUR: u64 = 1;
+pub const SEEK_END: u64 = 2;
+
+// =============================================================================
+// Thread / clone
+// =============================================================================
+
+/// Create a new thread or process via clone.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): clone flags (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD etc.)
+/// * rsi (arg1): child stack pointer (0 = share parent stack, i.e. fork-like)
+/// * rdx (arg2): parent_tid pointer (written if CLONE_PARENT_SETTID)
+/// * r10 (arg3): child_tid pointer  (written/cleared per CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID)
+/// * r8  (arg4): tls value           (new FS_BASE if CLONE_SETTLS)
+///
+/// # Returns
+/// * child task ID to parent on success
+/// * 0 to child on success
+/// * Negative errno on failure (-EINVAL, -ENOMEM, -EAGAIN)
+pub const SYSCALL_CLONE: u64 = 101;
+
+// =============================================================================
+// clone flags — Linux-compatible values
+// =============================================================================
+
+/// Child and parent share the same virtual address space.
+pub const CLONE_VM: u64 = 0x0000_0100;
+/// Child and parent share the same filesystem information (cwd, root).
+pub const CLONE_FS: u64 = 0x0000_0200;
+/// Child and parent share the same file descriptor table.
+pub const CLONE_FILES: u64 = 0x0000_0400;
+/// Child and parent share the same signal handler table.
+pub const CLONE_SIGHAND: u64 = 0x0000_0800;
+/// Write the child's TID into the parent's memory at `parent_tid`.
+pub const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+/// Write the child's TID into the child's memory at `child_tid`.
+pub const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+/// Clear the child's TID at `child_tid` on exit (for futex-based join).
+pub const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+/// Set the TLS (FS_BASE) for the new thread.
+pub const CLONE_SETTLS: u64 = 0x0008_0000;
+/// New thread shares the parent's thread group (POSIX thread semantics).
+pub const CLONE_THREAD: u64 = 0x0001_0000;
+
+/// Mask of all clone flags that SlopOS currently recognises.
+pub const CLONE_SUPPORTED_MASK: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_SETTLS
+    | CLONE_THREAD;
+
+// =============================================================================
+// Signals
+// =============================================================================
+
+/// Install or query a signal handler for a given signal.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): signal number (1-31)
+/// * rsi (arg1): pointer to new `UserSigaction` (or 0 to query only)
+/// * rdx (arg2): pointer to old `UserSigaction` output (or 0 to skip)
+/// * r10 (arg3): size of signal set (must be 8)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (-EINVAL, -EFAULT)
+pub const SYSCALL_RT_SIGACTION: u64 = 102;
+
+/// Examine and change blocked signal mask.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): how (SIG_BLOCK=0, SIG_UNBLOCK=1, SIG_SETMASK=2)
+/// * rsi (arg1): pointer to new signal set (or 0 to query only)
+/// * rdx (arg2): pointer to old signal set output (or 0 to skip)
+/// * r10 (arg3): size of signal set (must be 8)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (-EINVAL, -EFAULT)
+pub const SYSCALL_RT_SIGPROCMASK: u64 = 103;
+
+/// Send a signal to a process or task.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): target task ID (or 0 for self)
+/// * rsi (arg1): signal number (1-31, or 0 to check task existence)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (-EINVAL, -ESRCH, -EPERM)
+pub const SYSCALL_KILL: u64 = 104;
+
+/// Restore execution state after a signal handler completes.
+///
+/// # Arguments
+/// * The signal frame is on the user stack (set up by the kernel during
+///   signal delivery). No explicit register arguments needed.
+///
+/// # Returns
+/// * Does not return to caller -- restores saved execution context.
+pub const SYSCALL_RT_SIGRETURN: u64 = 105;
+
+// =============================================================================
+// Futex
+// =============================================================================
+
+/// Futex system call -- fast userspace locking primitive.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to the futex word (u32, must be 4-byte aligned)
+/// * rsi (arg1): futex operation (FUTEX_WAIT, FUTEX_WAKE)
+/// * rdx (arg2): value (expected value for WAIT, max waiters for WAKE)
+/// * r10 (arg3): timeout in milliseconds (0 = no timeout; only for FUTEX_WAIT)
+///
+/// # Returns
+/// * FUTEX_WAIT: 0 on success, -EAGAIN if value mismatch, -ETIMEDOUT on timeout
+/// * FUTEX_WAKE: number of waiters woken
+/// * -ENOSYS for unsupported operations
+/// * -EINVAL for bad arguments
+pub const SYSCALL_FUTEX: u64 = 106;
+
+/// Futex operations
+pub const FUTEX_WAIT: u64 = 0;
+pub const FUTEX_WAKE: u64 = 1;
+
+// =============================================================================
+// TLS / arch_prctl
+// =============================================================================
+
+/// Set or get architecture-specific thread state (TLS base).
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): sub-command (ARCH_SET_FS, ARCH_GET_FS)
+/// * rsi (arg1): for SET_FS: new FS_BASE value; for GET_FS: pointer to u64 output
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure (-EINVAL, -EFAULT)
+pub const SYSCALL_ARCH_PRCTL: u64 = 107;
+
+/// arch_prctl sub-commands (Linux-compatible values)
+pub const ARCH_SET_FS: u64 = 0x1002;
+pub const ARCH_GET_FS: u64 = 0x1003;
+
+// =============================================================================
+// Errno constants (Linux-compatible negative values)
+// =============================================================================
+
+pub const ERRNO_EINVAL: u64 = (-22i64) as u64;
+pub const ERRNO_ENOMEM: u64 = (-12i64) as u64;
+pub const ERRNO_EAGAIN: u64 = (-11i64) as u64;
+pub const ERRNO_ESRCH: u64 = (-3i64) as u64;
+pub const ERRNO_EFAULT: u64 = (-14i64) as u64;
+pub const ERRNO_ETIMEDOUT: u64 = (-110i64) as u64;
+
+// =============================================================================
+// Syscall ABI stability
+// =============================================================================
+
+/// Total size of the dispatch table. All syscall numbers must be below this.
+pub const SYSCALL_TABLE_SIZE: usize = 128;
+
+/// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
+pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
+
+// =============================================================================
 // Syscall data structures
 // =============================================================================
 

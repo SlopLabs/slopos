@@ -448,6 +448,12 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     unsafe {
         let is_user_mode = (*to_task).flags & TASK_FLAG_USER_MODE != 0;
 
+        if is_user_mode {
+            slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, (*to_task).fs_base);
+        } else {
+            slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, 0);
+        }
+
         let kernel_rsp = if is_user_mode && (*to_task).kernel_stack_top != 0 {
             (*to_task).kernel_stack_top
         } else {
@@ -849,9 +855,13 @@ pub fn init_scheduler() -> c_int {
 }
 
 fn sched_panic_cleanup() {
+    // SAFETY: Called from the panic recovery path after longjmp. The lock
+    // may have been held when the panic occurred and the guard was lost.
+    // We poison-unlock to mark the data as potentially inconsistent; the
+    // scheduler reinit path checks is_poisoned() before accepting operations.
     unsafe {
         scheduler_force_unlock();
-        crate::task::task_manager_force_unlock();
+        crate::task::task_manager_poison_unlock();
     }
 }
 

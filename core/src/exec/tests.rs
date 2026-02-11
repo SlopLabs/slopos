@@ -1,14 +1,40 @@
 //! exec() ELF loader tests - targeting untested code paths likely to have bugs.
 
+use slopos_abi::addr::VirtAddr;
+use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
+use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
-use slopos_mm::elf::{ELF_MAGIC, ElfValidator};
+use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
+use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_mm::paging::virt_to_phys_in_dir;
+use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm;
 
 use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 
 const MINIMAL_ELF_SIZE: usize = 64;
+
+fn read_user_u64(process_id: u32, addr: u64) -> Option<u64> {
+    let page_dir = process_vm::process_vm_get_page_dir(process_id);
+    if page_dir.is_null() {
+        return None;
+    }
+    let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(addr));
+    let virt = phys.to_virt_checked()?;
+    Some(unsafe { core::ptr::read_unaligned(virt.as_ptr::<u64>()) })
+}
+
+fn find_argc_slot(process_id: u32, sp: u64, expected_argc: u64) -> Option<u64> {
+    for i in 0..16u64 {
+        let slot = sp + i * 8;
+        if read_user_u64(process_id, slot) == Some(expected_argc) {
+            return Some(slot);
+        }
+    }
+    None
+}
 
 fn create_minimal_elf_header() -> [u8; MINIMAL_ELF_SIZE] {
     let mut elf = [0u8; MINIMAL_ELF_SIZE];
@@ -368,6 +394,147 @@ pub fn test_init_path_within_exec_limit() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_setup_user_stack_contract_layout() -> TestResult {
+    process_vm::init_process_vm();
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+
+    let args: [&[u8]; 1] = [b"/sbin/init"];
+    let envs: [&[u8]; 1] = [b"TERM=slop"];
+    let exec_info = ElfExecInfo {
+        entry: 0x401000,
+        phdr_addr: 0x402000,
+        phent_size: 56,
+        phnum: 3,
+    };
+
+    let result = super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info);
+    let sp = match result {
+        Ok(v) => v,
+        Err(_) => {
+            klog_info!("EXEC_TEST: setup_user_stack returned error in contract layout test");
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+
+    let base = match find_argc_slot(pid, sp, 1) {
+        Some(v) => v,
+        None => {
+            klog_info!(
+                "EXEC_TEST: argc marker not found near stack pointer (sp={})",
+                sp
+            );
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+
+    let argv0 = read_user_u64(pid, base + 8).unwrap_or(0);
+    let argv_null = read_user_u64(pid, base + 16).unwrap_or(u64::MAX);
+    let env0 = read_user_u64(pid, base + 24).unwrap_or(0);
+    let env_null = read_user_u64(pid, base + 32).unwrap_or(u64::MAX);
+
+    if argv0 == 0 || env0 == 0 || argv_null != 0 || env_null != 0 {
+        klog_info!(
+            "EXEC_TEST: stack vector layout mismatch argv0={:#x} argv_null={} env0={:#x} env_null={}",
+            argv0,
+            argv_null,
+            env0,
+            env_null
+        );
+        process_vm::destroy_process_vm(pid);
+        return TestResult::Fail;
+    }
+
+    process_vm::destroy_process_vm(pid);
+    TestResult::Pass
+}
+
+pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
+    process_vm::init_process_vm();
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+
+    let args: [&[u8]; 2] = [b"/sbin/init", b"--smoke"];
+    let envs: [&[u8]; 2] = [b"TERM=slop", b"PATH=/sbin"];
+    let exec_info = ElfExecInfo {
+        entry: 0x7000_1000,
+        phdr_addr: 0x7000_2000,
+        phent_size: 56,
+        phnum: 5,
+    };
+
+    let sp = match super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info) {
+        Ok(v) => v,
+        Err(_) => {
+            klog_info!("EXEC_TEST: setup_user_stack returned error in auxv test");
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+
+    let base = match find_argc_slot(pid, sp, args.len() as u64) {
+        Some(v) => v,
+        None => {
+            klog_info!(
+                "EXEC_TEST: auxv test could not locate argc marker near sp={}",
+                sp
+            );
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+
+    let aux_start = base + 8 * (1 + args.len() as u64 + 1 + envs.len() as u64 + 1);
+    let mut cursor = aux_start;
+    let mut saw_phdr = false;
+    let mut saw_phent = false;
+    let mut saw_phnum = false;
+    let mut saw_pagesz = false;
+    let mut saw_entry = false;
+    let mut saw_null = false;
+
+    for _ in 0..16 {
+        let key = read_user_u64(pid, cursor).unwrap_or(u64::MAX);
+        let val = read_user_u64(pid, cursor + 8).unwrap_or(u64::MAX);
+        if key == AT_PHDR && val == exec_info.phdr_addr {
+            saw_phdr = true;
+        } else if key == AT_PHENT && val == exec_info.phent_size as u64 {
+            saw_phent = true;
+        } else if key == AT_PHNUM && val == exec_info.phnum as u64 {
+            saw_phnum = true;
+        } else if key == AT_PAGESZ && val == PAGE_SIZE_4KB {
+            saw_pagesz = true;
+        } else if key == AT_ENTRY && val == exec_info.entry {
+            saw_entry = true;
+        } else if key == AT_NULL && val == 0 {
+            saw_null = true;
+            break;
+        }
+        cursor = cursor.wrapping_add(16);
+    }
+
+    process_vm::destroy_process_vm(pid);
+    if !(saw_phdr && saw_phent && saw_phnum && saw_pagesz && saw_entry && saw_null) {
+        klog_info!(
+            "EXEC_TEST: auxv missing entries phdr={} phent={} phnum={} pagesz={} entry={} null={}",
+            saw_phdr,
+            saw_phent,
+            saw_phnum,
+            saw_pagesz,
+            saw_entry,
+            saw_null
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     exec,
     [
@@ -392,5 +559,7 @@ slopos_lib::define_test_suite!(
         test_exec_max_size_boundary,
         test_init_path_is_absolute,
         test_init_path_within_exec_limit,
+        test_setup_user_stack_contract_layout,
+        test_setup_user_stack_auxv_required_entries,
     ]
 );

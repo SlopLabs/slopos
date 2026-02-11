@@ -4,7 +4,10 @@ use core::slice;
 
 use slopos_lib::{InitFlag, IrqMutex};
 
-use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry};
+use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
+use slopos_abi::syscall::{
+    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, SEEK_CUR, SEEK_END, SEEK_SET,
+};
 
 use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
@@ -29,6 +32,9 @@ struct FileDescriptor {
     position: usize,
     flags: u32,
     valid: bool,
+    cloexec: bool,
+    /// When true, reads/writes route to the platform console/TTY instead of a filesystem.
+    console: bool,
 }
 
 impl FileDescriptor {
@@ -39,6 +45,8 @@ impl FileDescriptor {
             position: 0,
             flags: 0,
             valid: false,
+            cloexec: false,
+            console: false,
         }
     }
 }
@@ -113,6 +121,8 @@ fn reset_descriptor(desc: &mut FileDescriptor) {
     desc.position = 0;
     desc.flags = 0;
     desc.valid = false;
+    desc.cloexec = false;
+    desc.console = false;
 }
 
 fn reset_table(table: &mut FileTableSlot) {
@@ -158,8 +168,12 @@ fn get_descriptor<'a>(table: &'a mut FileTableSlot, fd: c_int) -> Option<&'a mut
 }
 
 fn find_free_slot(table: &FileTableSlot) -> Option<usize> {
-    for (idx, desc) in table.descriptors.iter().enumerate() {
-        if !desc.valid {
+    find_free_slot_from(table, 0)
+}
+
+fn find_free_slot_from(table: &FileTableSlot, min_fd: usize) -> Option<usize> {
+    for idx in min_fd..FILEIO_MAX_OPEN_FILES {
+        if !table.descriptors[idx].valid {
             return Some(idx);
         }
     }
@@ -213,6 +227,44 @@ unsafe fn path_bytes<'a>(path: *const c_char) -> Option<&'a [u8]> {
     }
 }
 
+/// Bootstrap FD 0 (stdin), 1 (stdout), 2 (stderr) as console descriptors.
+///
+/// Console descriptors are valid file descriptors that route reads/writes
+/// through the platform console/TTY instead of a filesystem.  This ensures
+/// every new user process satisfies the POSIX FD bootstrap contract.
+fn bootstrap_console_fds(table: &mut FileTableSlot) {
+    // FD 0 = stdin (read-only console)
+    table.descriptors[0] = FileDescriptor {
+        inode: 0,
+        fs: None,
+        position: 0,
+        flags: FILE_OPEN_READ,
+        valid: true,
+        cloexec: false,
+        console: true,
+    };
+    // FD 1 = stdout (write-only console)
+    table.descriptors[1] = FileDescriptor {
+        inode: 0,
+        fs: None,
+        position: 0,
+        flags: FILE_OPEN_WRITE,
+        valid: true,
+        cloexec: false,
+        console: true,
+    };
+    // FD 2 = stderr (write-only console)
+    table.descriptors[2] = FileDescriptor {
+        inode: 0,
+        fs: None,
+        position: 0,
+        flags: FILE_OPEN_WRITE,
+        valid: true,
+        cloexec: false,
+        console: true,
+    };
+}
+
 pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
     if process_id == INVALID_PROCESS_ID {
         return 0;
@@ -227,6 +279,7 @@ pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
         reset_table(slot);
         slot.process_id = process_id;
         slot.in_use = true;
+        bootstrap_console_fds(slot);
         0
     })
 }
@@ -379,6 +432,13 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
             return -1;
         }
 
+        // Console descriptors: stdin returns 0 (no data available).
+        // Interactive console input is handled by SYSCALL_READ / SYSCALL_READ_CHAR.
+        if desc.console {
+            drop(guard);
+            return 0;
+        }
+
         let fs = match desc.fs {
             Some(fs) => fs,
             None => {
@@ -421,6 +481,17 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
             return -1;
         }
 
+        // Console descriptors: route stdout/stderr writes to serial port.
+        if desc.console {
+            drop(guard);
+            let bytes = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
+            // SAFETY: COM1 is always valid on x86_64 QEMU targets.
+            unsafe {
+                slopos_lib::ports::serial_write_bytes(slopos_lib::ports::COM1, bytes);
+            }
+            return count as ssize_t;
+        }
+
         let fs = match desc.fs {
             Some(fs) => fs,
             None => {
@@ -461,7 +532,11 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     })
 }
 
-pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c_int {
+/// POSIX lseek: reposition file offset.
+///
+/// Returns the new offset on success, or -1 on error (ESPIPE for console FDs).
+/// The offset parameter is signed to support negative seeks with SEEK_CUR/SEEK_END.
+pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
@@ -476,6 +551,12 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c
             return -1;
         };
 
+        // Console descriptors are not seekable (POSIX ESPIPE).
+        if desc.console {
+            drop(guard);
+            return -1;
+        }
+
         let fs = match desc.fs {
             Some(fs) => fs,
             None => {
@@ -485,50 +566,31 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c
         };
 
         let size = match fs.stat(desc.inode) {
-            Ok(stat) => stat.size as usize,
+            Ok(stat) => stat.size as i64,
             Err(_) => {
                 drop(guard);
                 return -1;
             }
         };
 
-        let delta = offset as usize;
-        let new_pos = match whence {
-            0 => {
-                if delta > size {
-                    drop(guard);
-                    return -1;
-                }
-                delta
-            }
-            1 => {
-                if let Some(p) = desc.position.checked_add(delta) {
-                    if p <= size {
-                        p
-                    } else {
-                        drop(guard);
-                        return -1;
-                    }
-                } else {
-                    drop(guard);
-                    return -1;
-                }
-            }
-            2 => {
-                if delta > size {
-                    drop(guard);
-                    return -1;
-                }
-                size - delta
-            }
+        let new_pos = match whence as u64 {
+            SEEK_SET => offset,
+            SEEK_CUR => (desc.position as i64).saturating_add(offset),
+            SEEK_END => size.saturating_add(offset),
             _ => {
                 drop(guard);
                 return -1;
             }
         };
-        desc.position = new_pos;
+
+        if new_pos < 0 {
+            drop(guard);
+            return -1;
+        }
+
+        desc.position = new_pos as usize;
         drop(guard);
-        0
+        new_pos
     })
 }
 
@@ -639,4 +701,308 @@ pub fn file_list_path(
         }
         Err(_) => -1,
     }
+}
+
+// =============================================================================
+// POSIX FD operations: dup, dup2, dup3, fcntl, fstat
+// =============================================================================
+
+/// Duplicate a file descriptor to the lowest available fd.
+/// Returns the new fd on success, -1 on error.
+pub fn file_dup_fd(process_id: u32, old_fd: c_int) -> c_int {
+    file_dup_fd_min(process_id, old_fd, 0)
+}
+
+/// Duplicate a file descriptor to the lowest available fd >= min_fd.
+/// Used by both dup() (min_fd=0) and fcntl F_DUPFD.
+fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return -1;
+        };
+        if !table.in_use {
+            return -1;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+        let src = unsafe { get_descriptor(&mut *table_ptr, old_fd) };
+        let Some(src) = src else {
+            drop(guard);
+            return -1;
+        };
+        let copy = *src;
+
+        let table = unsafe { &mut *table_ptr };
+        let Some(new_idx) = find_free_slot_from(table, min_fd) else {
+            drop(guard);
+            return -1;
+        };
+
+        table.descriptors[new_idx] = copy;
+        // dup() clears FD_CLOEXEC on the new descriptor
+        table.descriptors[new_idx].cloexec = false;
+        drop(guard);
+        new_idx as c_int
+    })
+}
+
+/// Duplicate old_fd to exactly new_fd. If new_fd is already open it is closed first.
+/// If old_fd == new_fd, return new_fd without closing.
+/// Returns new_fd on success, -1 on error.
+pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
+    if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
+        return -1;
+    }
+    if old_fd == new_fd {
+        // Verify old_fd is valid, return new_fd if so
+        return with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1;
+            };
+            if !table.in_use {
+                return -1;
+            }
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let valid = unsafe { get_descriptor(&mut *table_ptr, old_fd) }.is_some();
+            drop(guard);
+            if valid { new_fd } else { -1 }
+        });
+    }
+
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return -1;
+        };
+        if !table.in_use {
+            return -1;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+        let src = unsafe { get_descriptor(&mut *table_ptr, old_fd) };
+        let Some(src) = src else {
+            drop(guard);
+            return -1;
+        };
+        let copy = *src;
+
+        let table = unsafe { &mut *table_ptr };
+        // Silently close new_fd if it was open
+        if table.descriptors[new_fd as usize].valid {
+            reset_descriptor(&mut table.descriptors[new_fd as usize]);
+        }
+        table.descriptors[new_fd as usize] = copy;
+        // dup2 clears FD_CLOEXEC on the new descriptor
+        table.descriptors[new_fd as usize].cloexec = false;
+        drop(guard);
+        new_fd
+    })
+}
+
+/// Duplicate old_fd to exactly new_fd with flags.
+/// Unlike dup2, dup3 fails if old_fd == new_fd.
+/// The only supported flag is O_CLOEXEC (mapped to bit 0 of flags).
+/// Returns new_fd on success, -1 on error.
+pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -> c_int {
+    if old_fd == new_fd {
+        return -1;
+    }
+    if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
+        return -1;
+    }
+
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return -1;
+        };
+        if !table.in_use {
+            return -1;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+        let src = unsafe { get_descriptor(&mut *table_ptr, old_fd) };
+        let Some(src) = src else {
+            drop(guard);
+            return -1;
+        };
+        let copy = *src;
+
+        let table = unsafe { &mut *table_ptr };
+        if table.descriptors[new_fd as usize].valid {
+            reset_descriptor(&mut table.descriptors[new_fd as usize]);
+        }
+        table.descriptors[new_fd as usize] = copy;
+        // dup3 sets cloexec based on flags
+        table.descriptors[new_fd as usize].cloexec = (flags & FD_CLOEXEC as u32) != 0;
+        drop(guard);
+        new_fd
+    })
+}
+
+/// Minimal fcntl implementation.
+///
+/// Supported commands:
+/// - F_DUPFD: duplicate fd to lowest available >= arg
+/// - F_GETFD: get FD_CLOEXEC flag
+/// - F_SETFD: set FD_CLOEXEC flag
+/// - F_GETFL: get file status flags (open mode)
+/// - F_SETFL: set file status flags (currently only APPEND)
+///
+/// Returns command-specific value on success, -1 on error.
+pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
+    match cmd {
+        F_DUPFD => file_dup_fd_min(process_id, fd, arg as usize) as i64,
+        F_GETFD => with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1i64;
+            };
+            if !table.in_use {
+                return -1;
+            }
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                drop(guard);
+                return -1;
+            };
+            let val = if desc.cloexec { FD_CLOEXEC as i64 } else { 0 };
+            drop(guard);
+            val
+        }),
+        F_SETFD => with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1i64;
+            };
+            if !table.in_use {
+                return -1;
+            }
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                drop(guard);
+                return -1;
+            };
+            desc.cloexec = (arg & FD_CLOEXEC) != 0;
+            drop(guard);
+            0
+        }),
+        F_GETFL => with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1i64;
+            };
+            if !table.in_use {
+                return -1;
+            }
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                drop(guard);
+                return -1;
+            };
+            let val = desc.flags as i64;
+            drop(guard);
+            val
+        }),
+        F_SETFL => {
+            with_tables(|kernel, processes| {
+                let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                    return -1i64;
+                };
+                if !table.in_use {
+                    return -1;
+                }
+                let table_ptr: *mut FileTableSlot = table;
+                let guard = unsafe { (&(*table_ptr).lock).lock() };
+                let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                    drop(guard);
+                    return -1;
+                };
+                // Only allow modifying APPEND; preserve read/write mode bits
+                let mode_bits = desc.flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
+                desc.flags = mode_bits | (arg as u32 & FILE_OPEN_APPEND);
+                drop(guard);
+                0
+            })
+        }
+        _ => -1,
+    }
+}
+
+/// Close all file descriptors with FD_CLOEXEC set for a process.
+///
+/// Called during exec() to satisfy the POSIX close-on-exec contract.
+/// Console FDs (0/1/2) are never marked cloexec by default, so they
+/// survive exec transitions automatically.
+pub fn fileio_close_on_exec(process_id: u32) {
+    if process_id == INVALID_PROCESS_ID {
+        return;
+    }
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return;
+        };
+        if !table.in_use {
+            return;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let table = unsafe { &mut *table_ptr };
+        for desc in table.descriptors.iter_mut() {
+            if desc.valid && desc.cloexec {
+                reset_descriptor(desc);
+            }
+        }
+        drop(guard);
+    });
+}
+
+/// Stat an open file descriptor.
+/// Returns 0 on success and fills out_stat, -1 on error.
+pub fn file_fstat_fd(process_id: u32, fd: c_int, out_stat: &mut UserFsStat) -> c_int {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return -1;
+        };
+        if !table.in_use {
+            return -1;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+            drop(guard);
+            return -1;
+        };
+
+        // Console descriptors report as character devices with size 0.
+        if desc.console {
+            out_stat.type_ = slopos_abi::fs::FS_TYPE_CHARDEV;
+            out_stat.size = 0;
+            drop(guard);
+            return 0;
+        }
+
+        let fs = match desc.fs {
+            Some(fs) => fs,
+            None => {
+                drop(guard);
+                return -1;
+            }
+        };
+
+        match fs.stat(desc.inode) {
+            Ok(stat) => {
+                out_stat.type_ = stat.file_type as u8;
+                out_stat.size = stat.size as u32;
+                drop(guard);
+                0
+            }
+            Err(_) => {
+                drop(guard);
+                -1
+            }
+        }
+    })
 }

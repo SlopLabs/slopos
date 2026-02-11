@@ -37,12 +37,12 @@ pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> SyscallDispo
     SyscallDisposition::Ok
 }
 
-pub fn syscall_return_err(frame: *mut InterruptFrame, _err_value: u64) -> SyscallDisposition {
+pub fn syscall_return_err(frame: *mut InterruptFrame, err_value: u64) -> SyscallDisposition {
     if frame.is_null() {
         return SyscallDisposition::Ok;
     }
     unsafe {
-        (*frame).rax = u64::MAX;
+        (*frame).rax = err_value;
     }
     SyscallDisposition::Ok
 }

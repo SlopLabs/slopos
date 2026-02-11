@@ -92,6 +92,12 @@ pub const PROCESS_STACK_TOP_VA: u64 = 0x0000_7FFF_FF00_0000;
 /// Process stack size in bytes (1 MB).
 pub const PROCESS_STACK_SIZE_BYTES: u64 = 0x0000_0000_0010_0000;
 
+/// mmap region start virtual address (above heap max).
+pub const PROCESS_MMAP_START_VA: u64 = 0x0000_0000_4000_0000;
+
+/// mmap region end virtual address (below stack).
+pub const PROCESS_MMAP_END_VA: u64 = 0x0000_7FFF_FE00_0000;
+
 // =============================================================================
 // Exception Stack Region
 // =============================================================================

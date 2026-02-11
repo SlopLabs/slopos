@@ -1,10 +1,8 @@
-#![allow(static_mut_refs)]
-
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::ptr;
 
-use slopos_lib::{InitFlag, klog_debug, klog_info};
+use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
@@ -37,7 +35,7 @@ struct VirtioBlkReqHeader {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct VirtioBlkDevice {
+struct VirtioBlkDevice {
     queue: Virtqueue,
     capacity_sectors: u64,
     ready: bool,
@@ -53,11 +51,24 @@ impl VirtioBlkDevice {
     }
 }
 
-static DEVICE_CLAIMED: InitFlag = InitFlag::new();
+/// Combined device + MMIO caps under a single lock, ensuring ownership/claim
+/// state and the request path share one coherent synchronization model.
+struct VirtioBlkState {
+    device: VirtioBlkDevice,
+    caps: VirtioMmioCaps,
+}
 
-// SAFETY: Access is synchronized via DEVICE_CLAIMED flag and single-request semantics.
-static mut VIRTIO_BLK_DEVICE: VirtioBlkDevice = VirtioBlkDevice::new();
-static mut MMIO_CAPS: VirtioMmioCaps = VirtioMmioCaps::empty();
+impl VirtioBlkState {
+    const fn new() -> Self {
+        Self {
+            device: VirtioBlkDevice::new(),
+            caps: VirtioMmioCaps::empty(),
+        }
+    }
+}
+
+static DEVICE_CLAIMED: InitFlag = InitFlag::new();
+static VIRTIO_BLK_STATE: IrqMutex<VirtioBlkState> = IrqMutex::new(VirtioBlkState::new());
 
 struct RequestBuffers {
     req_page: OwnedPageFrame,
@@ -96,14 +107,13 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
 }
 
 fn do_request(
-    dev: &mut VirtioBlkDevice,
-    caps: &VirtioMmioCaps,
+    state: &mut VirtioBlkState,
     sector: u64,
     buffer: *mut u8,
     len: usize,
     write: bool,
 ) -> bool {
-    if !dev.queue.is_ready() {
+    if !state.device.queue.is_ready() {
         return false;
     }
 
@@ -139,7 +149,7 @@ fn do_request(
         *status_ptr = 0xFF;
     }
 
-    dev.queue.write_desc(
+    state.device.queue.write_desc(
         0,
         VirtqDesc {
             addr: req_phys,
@@ -149,7 +159,7 @@ fn do_request(
         },
     );
 
-    dev.queue.write_desc(
+    state.device.queue.write_desc(
         1,
         VirtqDesc {
             addr: bounce_phys,
@@ -163,7 +173,7 @@ fn do_request(
         },
     );
 
-    dev.queue.write_desc(
+    state.device.queue.write_desc(
         2,
         VirtqDesc {
             addr: status_phys,
@@ -173,10 +183,15 @@ fn do_request(
         },
     );
 
-    dev.queue.submit(0);
-    queue::notify_queue(&caps.notify_cfg, caps.notify_off_multiplier, &dev.queue, 0);
+    state.device.queue.submit(0);
+    queue::notify_queue(
+        &state.caps.notify_cfg,
+        state.caps.notify_off_multiplier,
+        &state.device.queue,
+        0,
+    );
 
-    if !dev.queue.poll_used(REQUEST_TIMEOUT_SPINS) {
+    if !state.device.queue.poll_used(REQUEST_TIMEOUT_SPINS) {
         klog_info!("virtio-blk: request timeout");
         return false;
     }
@@ -253,9 +268,10 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         ready: true,
     };
 
-    unsafe {
-        VIRTIO_BLK_DEVICE = dev;
-        MMIO_CAPS = caps;
+    {
+        let mut state = VIRTIO_BLK_STATE.lock();
+        state.device = dev;
+        state.caps = caps;
     }
 
     klog_info!(
@@ -281,18 +297,21 @@ pub fn virtio_blk_register_driver() {
 }
 
 pub fn virtio_blk_is_ready() -> bool {
-    unsafe { VIRTIO_BLK_DEVICE.ready }
+    VIRTIO_BLK_STATE.lock().device.ready
 }
 
 pub fn virtio_blk_capacity() -> u64 {
-    unsafe { VIRTIO_BLK_DEVICE.capacity_sectors * SECTOR_SIZE }
+    let state = VIRTIO_BLK_STATE.lock();
+    state.device.capacity_sectors * SECTOR_SIZE
 }
 
 pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
     if buffer.is_empty() {
         return true;
     }
-    if !virtio_blk_is_ready() {
+
+    let mut state = VIRTIO_BLK_STATE.lock();
+    if !state.device.ready {
         return false;
     }
 
@@ -305,16 +324,7 @@ pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
     let mut buf_pos = 0usize;
     for i in 0..sectors_needed {
         let sector = start_sector + i as u64;
-        let ok = unsafe {
-            do_request(
-                &mut VIRTIO_BLK_DEVICE,
-                &MMIO_CAPS,
-                sector,
-                sector_buf.as_mut_ptr(),
-                512,
-                false,
-            )
-        };
+        let ok = do_request(&mut state, sector, sector_buf.as_mut_ptr(), 512, false);
         if !ok {
             return false;
         }
@@ -338,7 +348,9 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
     if buffer.is_empty() {
         return true;
     }
-    if !virtio_blk_is_ready() {
+
+    let mut state = VIRTIO_BLK_STATE.lock();
+    if !state.device.ready {
         return false;
     }
 
@@ -357,16 +369,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
         let copy_len = dst_end - dst_start;
 
         if dst_start != 0 || dst_end != 512 {
-            let ok = unsafe {
-                do_request(
-                    &mut VIRTIO_BLK_DEVICE,
-                    &MMIO_CAPS,
-                    sector,
-                    sector_buf.as_mut_ptr(),
-                    512,
-                    false,
-                )
-            };
+            let ok = do_request(&mut state, sector, sector_buf.as_mut_ptr(), 512, false);
             if !ok {
                 return false;
             }
@@ -374,16 +377,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
 
         sector_buf[dst_start..dst_end].copy_from_slice(&buffer[buf_pos..buf_pos + copy_len]);
 
-        let ok = unsafe {
-            do_request(
-                &mut VIRTIO_BLK_DEVICE,
-                &MMIO_CAPS,
-                sector,
-                sector_buf.as_mut_ptr(),
-                512,
-                true,
-            )
-        };
+        let ok = do_request(&mut state, sector, sector_buf.as_mut_ptr(), 512, true);
         if !ok {
             return false;
         }

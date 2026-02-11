@@ -25,9 +25,23 @@ pub fn register_current_task_provider(provider: fn() -> u32) {
     *CURRENT_TASK_PROVIDER.lock() = Some(provider);
 }
 
+/// RAII guard that restores the previous task provider on drop.
+/// Ensures the provider cannot leak across syscall boundaries, even if
+/// the handler panics or takes an early-return path.
+pub struct SyscallProviderGuard {
+    original: Option<fn() -> u32>,
+}
+
+impl Drop for SyscallProviderGuard {
+    fn drop(&mut self) {
+        let mut guard = CURRENT_TASK_PROVIDER.lock();
+        *guard = self.original;
+    }
+}
+
 /// Sets the syscall PID in per-CPU storage (SMP-safe).
-/// Returns the previous task provider so it can be restored after the syscall.
-pub fn set_syscall_process_id(pid: u32) -> Option<fn() -> u32> {
+/// Returns an RAII guard that restores the previous provider on drop.
+pub fn set_syscall_process_id(pid: u32) -> SyscallProviderGuard {
     // SAFETY: Accessing atomic field on current CPU's PCR.
     unsafe { pcr::current_pcr() }
         .syscall_pid
@@ -35,9 +49,11 @@ pub fn set_syscall_process_id(pid: u32) -> Option<fn() -> u32> {
     let mut guard = CURRENT_TASK_PROVIDER.lock();
     let original = *guard;
     *guard = Some(syscall_process_id_provider);
-    original
+    SyscallProviderGuard { original }
 }
 
+/// Restore the task provider explicitly. Prefer using the RAII guard from
+/// `set_syscall_process_id` instead; this exists for backward compatibility.
 pub fn restore_task_provider(provider: Option<fn() -> u32>) {
     let mut guard = CURRENT_TASK_PROVIDER.lock();
     *guard = provider;
@@ -81,14 +97,29 @@ fn validate_user_pages(
     }
 
     let start = user_addr.as_u64();
-    let end = start + len as u64;
-    let mut page = start & !(crate::paging_defs::PAGE_SIZE_4KB - 1);
+
+    // Overflow-checked end computation: reject ranges that wrap around u64.
+    let end = start
+        .checked_add(len as u64)
+        .ok_or(UserPtrError::Overflow)?;
+
+    // Reject ranges that extend into or past the kernel/user boundary.
+    if end > crate::memory_layout_defs::USER_SPACE_END_VA {
+        return Err(UserPtrError::OutOfUserRange);
+    }
+
+    let page_size = crate::paging_defs::PAGE_SIZE_4KB;
+    let mut page = start & !(page_size - 1);
 
     while page < end {
         if paging_is_user_accessible(dir, VirtAddr(page)) == 0 {
             return Err(UserPtrError::NotMapped);
         }
-        page = page.wrapping_add(crate::paging_defs::PAGE_SIZE_4KB);
+        // Saturating add prevents infinite loop on page near u64::MAX.
+        page = match page.checked_add(page_size) {
+            Some(next) => next,
+            None => break,
+        };
     }
 
     Ok(())

@@ -658,9 +658,12 @@ pub fn get_memory_statistics(
 }
 
 fn mm_panic_cleanup() {
+    // SAFETY: Called from panic recovery path. Poison-unlock marks each
+    // allocator as potentially inconsistent so that subsequent callers
+    // can detect and handle the poisoned state appropriately.
     unsafe {
-        crate::page_alloc::page_allocator_force_unlock();
-        crate::kernel_heap::kernel_heap_force_unlock();
-        crate::process_vm::process_vm_force_unlock();
+        crate::page_alloc::page_allocator_poison_unlock();
+        crate::kernel_heap::kernel_heap_poison_unlock();
+        crate::process_vm::process_vm_poison_unlock();
     }
 }

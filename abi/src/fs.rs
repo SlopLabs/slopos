@@ -9,6 +9,7 @@ pub const USER_FS_MAX_ENTRIES: u32 = 64;
 /// Filesystem entry type constants
 pub const FS_TYPE_FILE: u8 = 0;
 pub const FS_TYPE_DIRECTORY: u8 = 1;
+pub const FS_TYPE_CHARDEV: u8 = 2;
 pub const FS_TYPE_UNKNOWN: u8 = 0xFF;
 
 /// File open flags

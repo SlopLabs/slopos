@@ -896,7 +896,9 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
             return -1;
         }
 
-        let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+        let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+            return -1;
+        };
         let is_alloc = PageAllocator::frame_state_is_allocated(frame.state);
         let ord = frame.order as u32;
 
@@ -1004,7 +1006,9 @@ pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
     if !alloc.is_valid_frame(frame_num) {
         return 0;
     }
-    let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+        return 0;
+    };
     PageAllocator::frame_state_is_allocated(frame.state) as c_int
 }
 
@@ -1014,7 +1018,9 @@ pub fn page_frame_inc_ref(phys_addr: PhysAddr) -> c_int {
     if !alloc.is_valid_frame(frame_num) {
         return -1;
     }
-    let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+        return -1;
+    };
     if !PageAllocator::frame_state_is_allocated(frame.state) {
         return -1;
     }
@@ -1028,7 +1034,9 @@ pub fn page_frame_get_ref(phys_addr: PhysAddr) -> u32 {
     if !alloc.is_valid_frame(frame_num) {
         return 0;
     }
-    let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+        return 0;
+    };
     frame.ref_count
 }
 
@@ -1066,6 +1074,23 @@ fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
 
 pub unsafe fn page_allocator_force_unlock() {
     PAGE_ALLOCATOR.force_unlock();
+}
+
+/// Force-unlock the page allocator AND mark it as poisoned.
+/// Called from panic recovery to signal that allocator state may be
+/// inconsistent. Check `page_allocator_is_poisoned()` before trusting state.
+pub unsafe fn page_allocator_poison_unlock() {
+    PAGE_ALLOCATOR.poison_unlock();
+}
+
+/// Returns true if the page allocator was force-unlocked during panic recovery.
+pub fn page_allocator_is_poisoned() -> bool {
+    PAGE_ALLOCATOR.is_poisoned()
+}
+
+/// Clear the page allocator's poisoned state after reinitialization.
+pub fn page_allocator_clear_poison() {
+    PAGE_ALLOCATOR.clear_poison();
 }
 
 // =============================================================================

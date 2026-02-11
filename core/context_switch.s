@@ -7,7 +7,7 @@
 .section .text
 .global context_switch
 
-# FPU state offset from TaskContext pointer (TaskContext is 200 bytes, +8 padding for 16-byte alignment)
+# FPU state offset from TaskContext pointer (TaskContext is 200 bytes + 8 padding for 16-byte alignment)
 .equ FPU_STATE_OFFSET, 0xD0
 
 #
@@ -20,7 +20,7 @@
 #   0x80: rip, 0x88: rflags
 #   0x90-0xB8: segment registers
 #   0xC0: cr3
-# FPU state at offset 0xD0 from context pointer (512 bytes, 16-byte aligned)
+# FPU state at offset 0xC8 from context pointer (512 bytes, 16-byte aligned)
 #
 
 context_switch:

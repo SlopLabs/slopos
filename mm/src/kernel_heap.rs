@@ -586,3 +586,20 @@ pub fn print_heap_stats() {
 pub unsafe fn kernel_heap_force_unlock() {
     KERNEL_HEAP.force_unlock();
 }
+
+/// Force-unlock the kernel heap AND mark it as poisoned.
+/// Called from panic recovery to signal that heap metadata may be
+/// inconsistent. Check `kernel_heap_is_poisoned()` before trusting state.
+pub unsafe fn kernel_heap_poison_unlock() {
+    KERNEL_HEAP.poison_unlock();
+}
+
+/// Returns true if the kernel heap was force-unlocked during panic recovery.
+pub fn kernel_heap_is_poisoned() -> bool {
+    KERNEL_HEAP.is_poisoned()
+}
+
+/// Clear the kernel heap's poisoned state after reinitialization.
+pub fn kernel_heap_clear_poison() {
+    KERNEL_HEAP.clear_poison();
+}

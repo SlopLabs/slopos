@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod addr;
+pub mod auxv;
 pub mod damage;
 pub mod display;
 pub mod draw;
@@ -22,6 +23,7 @@ pub mod fs;
 pub mod input;
 pub mod pixel;
 pub mod shm;
+pub mod signal;
 pub mod surface;
 pub mod syscall;
 pub mod task;

@@ -22,8 +22,12 @@ use crate::syscall::common::{
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
-    syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
-    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
+    syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
+    syscall_fs_mkdir, syscall_fs_open, syscall_fs_read, syscall_fs_stat, syscall_fs_unlink,
+    syscall_fs_write, syscall_fstat, syscall_lseek,
+};
+use crate::syscall::signal::{
+    syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
 use crate::syscall_services::{input, tty, video};
 use crate::task::{get_task_stats, task_get_exit_record, task_terminate};
@@ -35,7 +39,7 @@ use slopos_lib::klog_debug;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
-use slopos_mm::user_copy::{copy_bytes_from_user, copy_to_user};
+use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserBytes;
 use slopos_mm::user_ptr::UserPtr;
 
@@ -662,6 +666,34 @@ define_syscall!(syscall_brk(ctx, args) requires(let process_id) {
     ctx.ok(result)
 });
 
+define_syscall!(syscall_mmap(ctx, args) requires(let process_id) {
+    let addr = args.arg0;
+    let length = args.arg1;
+    let prot = args.arg2;
+    let flags = args.arg3;
+    let fd = args.arg4 as i64;
+    let offset = args.arg5;
+    let result = slopos_mm::process_vm::process_vm_mmap(
+        process_id, addr, length, prot, flags, fd, offset,
+    );
+    ctx.from_nonzero(result)
+});
+
+define_syscall!(syscall_munmap(ctx, args) requires(let process_id) {
+    let addr = args.arg0;
+    let length = args.arg1;
+    let rc = slopos_mm::process_vm::process_vm_munmap(process_id, addr, length);
+    ctx.from_rc(rc)
+});
+
+define_syscall!(syscall_mprotect(ctx, args) requires(let process_id) {
+    let addr = args.arg0;
+    let length = args.arg1;
+    let prot = args.arg2;
+    let rc = slopos_mm::process_vm::process_vm_mprotect(process_id, addr, length, prot);
+    ctx.from_rc(rc)
+});
+
 define_syscall!(syscall_get_cpu_count(ctx, args) {
     let _ = args;
     ctx.ok(slopos_lib::get_cpu_count() as u64)
@@ -698,6 +730,85 @@ define_syscall!(syscall_get_cpu_affinity(ctx, args) requires(let task_id) {
     ctx.ok(unsafe { (*task_ptr).cpu_affinity } as u64)
 });
 
+// =============================================================================
+// Process identity
+// =============================================================================
+
+define_syscall!(syscall_getpid(ctx, args) requires(let task_id) {
+    let _ = args;
+    ctx.ok(task_id as u64)
+});
+
+define_syscall!(syscall_getppid(ctx, args) {
+    let _ = args;
+    let task = some_or_err!(ctx, ctx.task_mut());
+    ctx.ok(task.parent_task_id as u64)
+});
+
+// SlopOS runs all tasks as root (uid 0). Single-user policy; no privilege
+// separation. Returns 0 unconditionally.
+define_syscall!(syscall_getuid(ctx, args) {
+    let _ = args;
+    ctx.ok(0)
+});
+
+// SlopOS runs all tasks in group 0. Single-user policy.
+define_syscall!(syscall_getgid(ctx, args) {
+    let _ = args;
+    ctx.ok(0)
+});
+
+// Effective UID == real UID == 0 (no setuid support).
+define_syscall!(syscall_geteuid(ctx, args) {
+    let _ = args;
+    ctx.ok(0)
+});
+
+// Effective GID == real GID == 0 (no setgid support).
+define_syscall!(syscall_getegid(ctx, args) {
+    let _ = args;
+    ctx.ok(0)
+});
+
+// =============================================================================
+// TLS / arch_prctl
+// =============================================================================
+
+pub fn syscall_arch_prctl(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
+    let cmd = args.arg0;
+    let addr = args.arg1;
+
+    match cmd {
+        ARCH_SET_FS => {
+            // Validate: reject kernel-space addresses.
+            if addr >= slopos_mm::memory_layout_defs::USER_SPACE_END_VA && addr != 0 {
+                return ctx.ok(ERRNO_EINVAL);
+            }
+            let t = some_or_err!(ctx, ctx.task_mut());
+            t.fs_base = addr;
+            // Write the MSR immediately so it takes effect when returning to user mode.
+            slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, addr);
+            ctx.ok(0)
+        }
+        ARCH_GET_FS => {
+            if addr == 0 {
+                return ctx.ok(ERRNO_EINVAL);
+            }
+            let t = some_or_err!(ctx, ctx.task_mut());
+            let fs_base_val = t.fs_base;
+            let user_ptr = try_or_err!(ctx, UserPtr::<u64>::try_new(addr));
+            try_or_err!(ctx, copy_to_user(user_ptr, &fs_base_val));
+            ctx.ok(0)
+        }
+        _ => ctx.ok(ERRNO_EINVAL),
+    }
+}
+
 pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
@@ -708,6 +819,63 @@ pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         child_id != slopos_abi::task::INVALID_TASK_ID,
         child_id as u64,
     )
+}
+
+pub fn syscall_clone(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, slopos_abi::syscall::ERRNO_EINVAL);
+    };
+
+    let args = ctx.args();
+    let flags = args.arg0;
+    let child_stack = args.arg1;
+    let parent_tidptr = args.arg2;
+    let child_tidptr = args.arg3;
+    let tls = args.arg4;
+
+    match crate::scheduler::task::task_clone(
+        task,
+        flags,
+        child_stack,
+        parent_tidptr,
+        child_tidptr,
+        tls,
+    ) {
+        Ok(child_id) => ctx.ok(child_id as u64),
+        Err(errno) => syscall_return_err(frame, errno),
+    }
+}
+
+pub fn syscall_futex(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, ERRNO_EINVAL);
+    };
+
+    let args = ctx.args();
+    let uaddr = args.arg0;
+    let op = args.arg1;
+    let val = args.arg2_u32();
+    let timeout = args.arg3;
+
+    if (uaddr & 0x3) != 0 {
+        return ctx.ok(ERRNO_EINVAL);
+    }
+
+    let user_word = match UserPtr::<u32>::try_new(uaddr) {
+        Ok(p) => p,
+        Err(_) => return ctx.ok(ERRNO_EFAULT),
+    };
+    if copy_from_user(user_word).is_err() {
+        return ctx.ok(ERRNO_EFAULT);
+    }
+
+    let rc = match op {
+        FUTEX_WAIT => crate::scheduler::futex::futex_wait(uaddr, val, timeout),
+        FUTEX_WAKE => crate::scheduler::futex::futex_wake(uaddr, val),
+        _ => ENOSYS_RETURN as i64,
+    };
+
+    ctx.ok(rc as u64)
 }
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -730,8 +898,8 @@ macro_rules! syscall_table {
     }};
 }
 
-static SYSCALL_TABLE: [SyscallEntry; 128] = syscall_table! {
-    size: 128;
+static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
+    size: SYSCALL_TABLE_SIZE;
 
     // Core
     [SYSCALL_YIELD]          => syscall_yield,          "yield";
@@ -813,15 +981,42 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = syscall_table! {
     [SYSCALL_TERMINATE_TASK] => syscall_terminate_task,  "terminate_task";
     [SYSCALL_EXEC]           => syscall_exec,            "exec";
     [SYSCALL_FORK]           => syscall_fork,            "fork";
+    [SYSCALL_CLONE]          => syscall_clone,           "clone";
+    [SYSCALL_FUTEX]          => syscall_futex,           "futex";
+    [SYSCALL_ARCH_PRCTL]     => syscall_arch_prctl,      "arch_prctl";
 
     // Memory
-    [SYSCALL_BRK] => syscall_brk, "brk";
+    [SYSCALL_BRK]      => syscall_brk,      "brk";
+    [SYSCALL_MMAP]     => syscall_mmap,     "mmap";
+    [SYSCALL_MUNMAP]   => syscall_munmap,   "munmap";
+    [SYSCALL_MPROTECT] => syscall_mprotect, "mprotect";
 
     // SMP / CPU affinity
     [SYSCALL_GET_CPU_COUNT]    => syscall_get_cpu_count,    "get_cpu_count";
     [SYSCALL_GET_CURRENT_CPU]  => syscall_get_current_cpu,  "get_current_cpu";
     [SYSCALL_SET_CPU_AFFINITY] => syscall_set_cpu_affinity, "set_cpu_affinity";
     [SYSCALL_GET_CPU_AFFINITY] => syscall_get_cpu_affinity, "get_cpu_affinity";
+
+    // Process identity
+    [SYSCALL_GETPID]  => syscall_getpid,  "getpid";
+    [SYSCALL_GETPPID] => syscall_getppid, "getppid";
+    [SYSCALL_GETUID]  => syscall_getuid,  "getuid";
+    [SYSCALL_GETGID]  => syscall_getgid,  "getgid";
+    [SYSCALL_GETEUID] => syscall_geteuid, "geteuid";
+    [SYSCALL_GETEGID] => syscall_getegid, "getegid";
+
+    [SYSCALL_RT_SIGACTION]   => syscall_rt_sigaction,   "rt_sigaction";
+    [SYSCALL_RT_SIGPROCMASK] => syscall_rt_sigprocmask, "rt_sigprocmask";
+    [SYSCALL_KILL]           => syscall_kill,           "kill";
+    [SYSCALL_RT_SIGRETURN]   => syscall_rt_sigreturn,   "rt_sigreturn";
+
+    // File descriptor operations
+    [SYSCALL_DUP]   => syscall_dup,   "dup";
+    [SYSCALL_DUP2]  => syscall_dup2,  "dup2";
+    [SYSCALL_DUP3]  => syscall_dup3,  "dup3";
+    [SYSCALL_FCNTL] => syscall_fcntl, "fcntl";
+    [SYSCALL_LSEEK] => syscall_lseek, "lseek";
+    [SYSCALL_FSTAT] => syscall_fstat, "fstat";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

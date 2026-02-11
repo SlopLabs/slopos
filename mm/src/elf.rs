@@ -146,6 +146,8 @@ pub enum ElfError {
     NoLoadSegments,
     /// Null pointer passed
     NullPointer,
+    /// Dynamic linking (PT_INTERP) not supported
+    DynamicNotSupported,
 }
 
 impl fmt::Display for ElfError {
@@ -174,6 +176,7 @@ impl fmt::Display for ElfError {
             Self::TooManyLoadSegments => write!(f, "too many PT_LOAD segments"),
             Self::NoLoadSegments => write!(f, "no PT_LOAD segments found"),
             Self::NullPointer => write!(f, "null pointer"),
+            Self::DynamicNotSupported => write!(f, "dynamic linking (PT_INTERP) not supported"),
         }
     }
 }
@@ -729,4 +732,33 @@ impl<'a> ElfValidator<'a> {
         let end = start + segment.file_size as usize;
         &self.data[start..end]
     }
+
+    /// Check if the ELF requires a dynamic interpreter (PT_INTERP).
+    pub fn has_interpreter(&self) -> ElfResult<bool> {
+        for i in 0..self.header.e_phnum as usize {
+            let phdr = self.get_program_header(i)?;
+            if phdr.p_type == PT_INTERP {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+// =============================================================================
+// ELF Exec Info (metadata for auxiliary vector)
+// =============================================================================
+
+/// Metadata collected during ELF loading, used to populate the auxiliary vector
+/// on the user stack.
+#[derive(Debug, Clone, Copy)]
+pub struct ElfExecInfo {
+    /// User-space entry point address.
+    pub entry: u64,
+    /// User-space address where program headers are mapped (or 0 if not mapped).
+    pub phdr_addr: u64,
+    /// Size of each program header entry.
+    pub phent_size: u16,
+    /// Number of program headers.
+    pub phnum: u16,
 }

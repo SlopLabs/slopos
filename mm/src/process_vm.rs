@@ -624,11 +624,16 @@ pub fn process_vm_load_elf_data(
     process_id: u32,
     data: &[u8],
     entry_out: &mut u64,
-) -> Result<(), ElfError> {
+) -> Result<crate::elf::ElfExecInfo, ElfError> {
     let code_base = crate::memory_layout_defs::PROCESS_CODE_START_VA;
 
     let validator = ElfValidator::new(data)?.with_load_base(code_base);
     let header = validator.header();
+
+    // Reject dynamically-linked binaries (PT_INTERP present).
+    if validator.has_interpreter()? {
+        return Err(ElfError::DynamicNotSupported);
+    }
 
     let (segments, segment_count) = validator.validate_load_segments()?;
     let segments = &segments[..segment_count];
@@ -683,12 +688,38 @@ pub fn process_vm_load_elf_data(
 
     let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);
 
+    // Compute the user-space address of the program headers. The ELF spec says
+    // the phdr table lives at file offset e_phoff, which usually falls inside
+    // the first PT_LOAD segment. Walk mapped segments to find the one that
+    // contains it.
+    let phdr_user_addr = {
+        let phoff = header.e_phoff;
+        let phdr_end = phoff + (header.e_phnum as u64) * (header.e_phentsize as u64);
+        let mut addr = 0u64;
+        for seg in segments.iter() {
+            let seg_file_end = seg.file_offset + seg.file_size;
+            if phoff >= seg.file_offset && phdr_end <= seg_file_end {
+                let offset_in_seg = phoff - seg.file_offset;
+                let seg_user =
+                    process_vm_translate_elf_address(seg.original_vaddr, min_vaddr, code_base);
+                addr = seg_user + offset_in_seg;
+                break;
+            }
+        }
+        addr
+    };
+
     unsafe {
         (*process).total_pages = (*process).total_pages.saturating_add(mapped_pages);
         *entry_out = user_entry;
     }
 
-    Ok(())
+    Ok(crate::elf::ElfExecInfo {
+        entry: user_entry,
+        phdr_addr: phdr_user_addr,
+        phent_size: header.e_phentsize,
+        phnum: header.e_phnum,
+    })
 }
 
 fn calculate_load_offset(segments: &[ValidatedSegment], code_base: u64) -> (u64, bool) {
@@ -1242,6 +1273,354 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     process.heap_end
 }
 
+// =============================================================================
+// mmap / munmap / mprotect
+// =============================================================================
+
+/// Convert POSIX mmap prot flags to VmaFlags.
+fn prot_to_vma_flags(prot: u64) -> VmaFlags {
+    use slopos_abi::syscall::{PROT_EXEC, PROT_READ, PROT_WRITE};
+
+    let mut flags = VmaFlags::USER | VmaFlags::ANON | VmaFlags::LAZY;
+    if prot & PROT_READ != 0 {
+        flags |= VmaFlags::READ;
+    }
+    if prot & PROT_WRITE != 0 {
+        flags |= VmaFlags::WRITE;
+    }
+    if prot & PROT_EXEC != 0 {
+        flags |= VmaFlags::EXEC;
+    }
+    flags
+}
+
+/// Find a free gap in the process address space within the mmap region.
+///
+/// Walks the VMA tree starting at `PROCESS_MMAP_START_VA` looking for a gap
+/// of at least `size` bytes. Returns the start address of the gap, or 0 on
+/// failure.
+fn find_mmap_gap(process: *const ProcessVm, size: u64) -> u64 {
+    use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
+
+    if process.is_null() || size == 0 {
+        return 0;
+    }
+
+    unsafe {
+        let tree = &(*process).vma_tree;
+        let mut candidate = PROCESS_MMAP_START_VA;
+
+        let mut cursor = tree.find_first_at_or_after(PROCESS_MMAP_START_VA);
+
+        while !cursor.is_null() {
+            let vma_start = (*cursor).start;
+            let vma_end = (*cursor).end;
+
+            // If there's enough space before this VMA, use it
+            if candidate + size <= vma_start {
+                return candidate;
+            }
+
+            // Skip past this VMA
+            if vma_end > candidate {
+                candidate = vma_end;
+            }
+
+            cursor = tree.next(cursor);
+        }
+
+        // Check space after the last VMA
+        if candidate + size <= PROCESS_MMAP_END_VA {
+            return candidate;
+        }
+    }
+
+    0
+}
+
+/// Map anonymous memory into the process address space (mmap).
+///
+/// `addr_hint`: requested address (0 = kernel chooses).
+/// `length`: mapping size in bytes (rounded up to page boundary).
+/// `prot`: PROT_READ | PROT_WRITE | PROT_EXEC.
+/// `flags_val`: MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED.
+/// `fd`: must be -1 for MAP_ANONYMOUS (file-backed not yet supported).
+/// `offset`: must be 0 for MAP_ANONYMOUS.
+///
+/// Returns the virtual address of the mapping on success, or 0 on failure.
+pub fn process_vm_mmap(
+    process_id: u32,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags_val: u64,
+    fd: i64,
+    offset: u64,
+) -> u64 {
+    use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
+    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE};
+
+    // Only anonymous private mappings for now
+    if flags_val & MAP_ANONYMOUS == 0 {
+        klog_info!("process_vm_mmap: Only MAP_ANONYMOUS supported");
+        return 0;
+    }
+    if flags_val & MAP_PRIVATE == 0 {
+        klog_info!("process_vm_mmap: Only MAP_PRIVATE supported");
+        return 0;
+    }
+    if fd != -1 || offset != 0 {
+        klog_info!("process_vm_mmap: fd must be -1 and offset 0 for anonymous");
+        return 0;
+    }
+    if length == 0 {
+        return 0;
+    }
+
+    let size = match length.checked_add(PAGE_SIZE_4KB - 1) {
+        Some(v) => v & !(PAGE_SIZE_4KB - 1),
+        None => return 0,
+    };
+
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return 0;
+    }
+
+    let is_fixed = flags_val & MAP_FIXED != 0;
+
+    let start_addr = if is_fixed {
+        // MAP_FIXED: use exact address, must be page-aligned
+        if (addr_hint & (PAGE_SIZE_4KB - 1)) != 0 {
+            klog_info!("process_vm_mmap: MAP_FIXED address not page-aligned");
+            return 0;
+        }
+        if addr_hint < PROCESS_MMAP_START_VA
+            || addr_hint
+                .checked_add(size)
+                .map_or(true, |end| end > PROCESS_MMAP_END_VA)
+        {
+            klog_info!("process_vm_mmap: MAP_FIXED address out of mmap region");
+            return 0;
+        }
+        // Unmap any existing pages in the range first
+        let end_addr = addr_hint + size;
+        unsafe {
+            let tree = &mut (*process_ptr).vma_tree;
+            let mut cursor = tree.find_first_at_or_after(addr_hint);
+            while !cursor.is_null() && (*cursor).start < end_addr {
+                let next = tree.next(cursor);
+                let overlap_start = (*cursor).start.max(addr_hint);
+                let overlap_end = (*cursor).end.min(end_addr);
+                if overlap_start < overlap_end {
+                    let freed = unmap_and_free_range(process_ptr, overlap_start, overlap_end);
+                    if (*process_ptr).total_pages >= freed {
+                        (*process_ptr).total_pages -= freed;
+                    } else {
+                        (*process_ptr).total_pages = 0;
+                    }
+                    // Remove or trim the overlapping VMA
+                    if (*cursor).start >= addr_hint && (*cursor).end <= end_addr {
+                        tree.remove((*cursor).start, (*cursor).end);
+                    } else if (*cursor).start < addr_hint && (*cursor).end > end_addr {
+                        // Split: trim left, create right
+                        let right_start = end_addr;
+                        let right_end = (*cursor).end;
+                        let flags = (*cursor).flags;
+                        tree.set_end(cursor, addr_hint);
+                        tree.insert(right_start, right_end, flags);
+                    } else if (*cursor).start < addr_hint {
+                        tree.set_end(cursor, addr_hint);
+                    } else {
+                        tree.set_start(cursor, end_addr);
+                    }
+                }
+                cursor = next;
+            }
+        }
+        addr_hint
+    } else {
+        // Kernel chooses address
+        let chosen = find_mmap_gap(process_ptr, size);
+        if chosen == 0 {
+            klog_info!("process_vm_mmap: No free region found for {} bytes", size);
+            return 0;
+        }
+        chosen
+    };
+
+    let end_addr = start_addr + size;
+    let vma_flags = prot_to_vma_flags(prot);
+
+    if add_vma_to_process(process_ptr, start_addr, end_addr, vma_flags) != 0 {
+        klog_info!("process_vm_mmap: Failed to insert VMA");
+        return 0;
+    }
+
+    // For the baseline: mappings are lazy (demand-paged), so no physical
+    // pages are allocated here. The page fault handler will allocate them
+    // when accessed.
+
+    start_addr
+}
+
+/// Unmap a previously mmap'd memory region.
+///
+/// `addr`: start address (must be page-aligned).
+/// `length`: length in bytes (rounded up to page size).
+///
+/// Returns 0 on success, -1 on failure.
+pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
+    if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
+        return -1;
+    }
+
+    let size = match length.checked_add(PAGE_SIZE_4KB - 1) {
+        Some(v) => v & !(PAGE_SIZE_4KB - 1),
+        None => return -1,
+    };
+
+    let end = match addr.checked_add(size) {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return -1;
+    }
+
+    // Validate the range falls within user space
+    if addr >= crate::memory_layout_defs::USER_SPACE_END_VA
+        || end > crate::memory_layout_defs::USER_SPACE_END_VA
+    {
+        return -1;
+    }
+
+    unsafe {
+        let tree = &mut (*process_ptr).vma_tree;
+        let mut cursor = tree.find_first_at_or_after(addr);
+        let mut found_any = false;
+
+        while !cursor.is_null() && (*cursor).start < end {
+            let next = tree.next(cursor);
+            let vma_start = (*cursor).start;
+            let vma_end = (*cursor).end;
+
+            let overlap_start = vma_start.max(addr);
+            let overlap_end = vma_end.min(end);
+
+            if overlap_start < overlap_end {
+                found_any = true;
+                let freed = unmap_and_free_range(process_ptr, overlap_start, overlap_end);
+                if (*process_ptr).total_pages >= freed {
+                    (*process_ptr).total_pages -= freed;
+                } else {
+                    (*process_ptr).total_pages = 0;
+                }
+
+                if vma_start >= addr && vma_end <= end {
+                    // Entire VMA is within range: remove
+                    tree.remove(vma_start, vma_end);
+                } else if vma_start < addr && vma_end > end {
+                    // Range punches a hole: split VMA
+                    let right_start = end;
+                    let right_end = vma_end;
+                    let flags = (*cursor).flags;
+                    tree.set_end(cursor, addr);
+                    tree.insert(right_start, right_end, flags);
+                } else if vma_start < addr {
+                    // Trim end
+                    tree.set_end(cursor, addr);
+                } else {
+                    // Trim start
+                    tree.set_start(cursor, end);
+                }
+            }
+
+            cursor = next;
+        }
+
+        if !found_any {
+            // POSIX says munmap on unmapped region is a no-op, return success
+            return 0;
+        }
+    }
+
+    0
+}
+
+/// Change protection on a memory region.
+///
+/// `addr`: start address (must be page-aligned).
+/// `length`: length in bytes (rounded up to page size).
+/// `prot`: new protection flags (PROT_READ | PROT_WRITE | PROT_EXEC).
+///
+/// Returns 0 on success, -1 on failure.
+pub fn process_vm_mprotect(process_id: u32, addr: u64, length: u64, prot: u64) -> i32 {
+    use crate::paging::paging_update_range_protection;
+
+    if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
+        return -1;
+    }
+
+    let size = match length.checked_add(PAGE_SIZE_4KB - 1) {
+        Some(v) => v & !(PAGE_SIZE_4KB - 1),
+        None => return -1,
+    };
+
+    let end = match addr.checked_add(size) {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return -1;
+    }
+
+    // Validate the range falls within user space
+    if addr >= crate::memory_layout_defs::USER_SPACE_END_VA
+        || end > crate::memory_layout_defs::USER_SPACE_END_VA
+    {
+        return -1;
+    }
+
+    // Build new VMA flags from prot
+    let new_prot = prot_to_vma_flags(prot).protection_only();
+    let new_page_flags = (new_prot | VmaFlags::USER).to_page_flags();
+
+    unsafe {
+        let page_dir = (*process_ptr).page_dir;
+        if page_dir.is_null() {
+            return -1;
+        }
+
+        // Verify the entire range is covered by VMAs
+        let vma = find_vma_covering(process_ptr, addr, end);
+        if vma.is_null() {
+            // Range not fully covered -- check if there's partial coverage
+            // For baseline: require full coverage by a single VMA
+            klog_info!("process_vm_mprotect: Range not covered by VMA");
+            return -1;
+        }
+
+        // Update VMA protection flags (preserve state flags)
+        let state = (*vma).flags.state_only();
+        (*vma).flags = new_prot | VmaFlags::USER | state;
+
+        // Update page table entries for already-mapped pages
+        paging_update_range_protection(
+            page_dir,
+            VirtAddr::new(addr),
+            VirtAddr::new(end),
+            new_page_flags,
+        );
+    }
+
+    0
+}
+
 /// Clone address space with COW for fork(). Returns child PID or INVALID_PROCESS_ID.
 pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     let parent_ptr = find_process_vm(parent_id);
@@ -1434,4 +1813,21 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
 pub unsafe fn process_vm_force_unlock() {
     VM_MANAGER.force_unlock();
+}
+
+/// Force-unlock the VM manager AND mark it as poisoned.
+/// Called from panic recovery to signal that VM state may be
+/// inconsistent. Check `process_vm_is_poisoned()` before trusting state.
+pub unsafe fn process_vm_poison_unlock() {
+    VM_MANAGER.poison_unlock();
+}
+
+/// Returns true if the VM manager was force-unlocked during panic recovery.
+pub fn process_vm_is_poisoned() -> bool {
+    VM_MANAGER.is_poisoned()
+}
+
+/// Clear the VM manager's poisoned state after reinitialization.
+pub fn process_vm_clear_poison() {
+    VM_MANAGER.clear_poison();
 }

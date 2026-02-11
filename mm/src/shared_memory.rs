@@ -395,7 +395,20 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
 
     // Second pass: record the mapping
     let buffer = &mut registry.buffers[slot];
-    let mapping_slot = buffer.mappings.iter().position(|m| !m.active).unwrap();
+    let mapping_slot = match buffer.mappings.iter().position(|m| !m.active) {
+        Some(s) => s,
+        None => {
+            // All mapping slots filled between first and second pass;
+            // roll back the page mappings we just installed.
+            for j in 0..pages {
+                let rollback_vaddr = vaddr.offset((j as u64) * PAGE_SIZE_4KB);
+                unmap_page_in_dir(page_dir, rollback_vaddr);
+            }
+            registry.free_vaddr(vaddr, buffer_size);
+            klog_info!("shm_map: mapping slots exhausted for token {}", token);
+            return 0;
+        }
+    };
     buffer.mappings[mapping_slot] = ShmMapping {
         task_id: process_id,
         virt_addr: vaddr,

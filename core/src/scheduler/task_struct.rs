@@ -7,7 +7,9 @@
 use core::ffi::c_void;
 use core::mem::offset_of;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+
+use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -211,6 +213,35 @@ impl Default for FpuState {
 }
 
 // =============================================================================
+// SignalAction — kernel-internal per-signal disposition
+// =============================================================================
+
+/// Kernel-internal signal action. Mirrors the relevant fields of UserSigaction
+/// but stored per-task for fast dispatch.
+#[derive(Copy, Clone)]
+pub struct SignalAction {
+    /// Handler address: SIG_DFL (0), SIG_IGN (1), or a user function pointer.
+    pub handler: u64,
+    /// Signal mask to OR into blocked set while handler runs.
+    pub mask: SigSet,
+    /// SA_* flags (SA_RESTORER, SA_NODEFER, SA_RESETHAND, etc.)
+    pub flags: u64,
+    /// Restorer function pointer (set via SA_RESTORER).
+    pub restorer: u64,
+}
+
+impl SignalAction {
+    pub const fn default() -> Self {
+        Self {
+            handler: SIG_DFL,
+            mask: SIG_EMPTY,
+            flags: 0,
+            restorer: 0,
+        }
+    }
+}
+
+// =============================================================================
 // Task — the kernel task control block
 // =============================================================================
 
@@ -238,6 +269,17 @@ pub struct Task {
     pub entry_arg: *mut c_void,
     pub context: TaskContext,
     pub fpu_state: FpuState,
+    // --- Fields below are NOT accessed by assembly and can be freely reordered ---
+    pub parent_task_id: u32,
+    /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
+    /// switching to user mode, and read back on context save.
+    pub fs_base: u64,
+    /// Thread-group ID. For the group leader, tgid == task_id.
+    /// For threads created with CLONE_THREAD, tgid == leader's task_id.
+    pub tgid: u32,
+    /// User-space address to clear (and futex-wake) on thread exit.
+    /// Set by clone(CLONE_CHILD_CLEARTID). 0 means not set.
+    pub clear_child_tid: u64,
     pub time_slice: u64,
     pub time_slice_remaining: u64,
     pub total_runtime: u64,
@@ -256,6 +298,13 @@ pub struct Task {
     pub cpu_affinity: u32,
     pub last_cpu: u8,
     pub migration_count: u32,
+    // --- Signal state ---
+    /// Bitmask of pending signals (written atomically by kill()).
+    pub signal_pending: AtomicU64,
+    /// Bitmask of blocked signals (modified by rt_sigprocmask).
+    pub signal_blocked: SigSet,
+    /// Per-signal action table.
+    pub signal_actions: [SignalAction; NSIG],
     pub switch_ctx: SwitchContext,
     pub next_ready: *mut Task,
     pub next_inbox: AtomicPtr<Task>,
@@ -283,6 +332,10 @@ impl Task {
             entry_arg: ptr::null_mut(),
             context: TaskContext::zero(),
             fpu_state: FpuState::new(),
+            parent_task_id: INVALID_TASK_ID,
+            fs_base: 0,
+            tgid: INVALID_TASK_ID,
+            clear_child_tid: 0,
             time_slice: 0,
             time_slice_remaining: 0,
             total_runtime: 0,
@@ -301,6 +354,9 @@ impl Task {
             cpu_affinity: 0,
             last_cpu: 0,
             migration_count: 0,
+            signal_pending: AtomicU64::new(0),
+            signal_blocked: SIG_EMPTY,
+            signal_actions: [SignalAction::default(); NSIG],
             switch_ctx: SwitchContext::zero(),
             next_ready: ptr::null_mut(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
@@ -405,6 +461,8 @@ impl Task {
         self.next_ready = ptr::null_mut();
         self.next_inbox = AtomicPtr::new(ptr::null_mut());
         self.refcnt = AtomicU32::new(0);
+        // Child inherits signal actions and blocked mask but starts with no pending signals.
+        self.signal_pending = AtomicU64::new(0);
     }
 
     #[inline]

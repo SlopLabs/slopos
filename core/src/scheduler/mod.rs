@@ -1,6 +1,7 @@
 pub mod context_tests;
 pub mod fate_api;
 pub mod ffi_boundary;
+pub mod futex;
 pub mod kthread;
 pub mod per_cpu;
 pub mod safe_switch;

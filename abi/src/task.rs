@@ -79,6 +79,7 @@ pub enum BlockReason {
     KeyboardWait = 5,
     IpcWait = 6,
     Generic = 7,
+    FutexWait = 8,
 }
 
 impl BlockReason {
@@ -93,6 +94,7 @@ impl BlockReason {
             5 => Self::KeyboardWait,
             6 => Self::IpcWait,
             7 => Self::Generic,
+            8 => Self::FutexWait,
             _ => Self::None,
         }
     }

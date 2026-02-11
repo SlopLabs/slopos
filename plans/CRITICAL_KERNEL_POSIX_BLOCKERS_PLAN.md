@@ -18,10 +18,41 @@ This roadmap is ordered by risk:
 
 If followed in order, this plan reduces the probability of catastrophic regressions while moving SlopOS toward practical POSIX/Linux userspace compatibility.
 
+## Current Status Snapshot (2026-02-11)
+
+Latest verified run:
+
+- `make test` -> `TESTS SUMMARY: total=370 passed=370 failed=0`
+
+Phase-level status:
+
+| Phase | Status | Notes |
+|------|--------|-------|
+| Phase 0 | done | Baseline/guardrail pass completed earlier; reproducible test baseline captured in workflow |
+| Phase 1 | done | Shared memory panic path, allocator unwrap hardening, and user-copy overflow fixes are in-tree |
+| Phase 2 | done | Page-dir global swap removal, panic-recovery lock discipline, driver sync, and syscall provider lifecycle hardening completed |
+| Phase 3 | done | ABI matrix/ENOSYS behavior, identity syscalls, and FD bootstrap contract implemented |
+| Phase 4 | done | `mmap`/`munmap`/`mprotect` + core FD ops (`dup*`, `fcntl`, `lseek`, `fstat`) implemented |
+| Phase 5 | done | Clone/thread-group, futex baseline, and signal baseline (including `SIGCHLD`/wait interaction) are implemented and test-covered |
+| Phase 6 | done | Exec auxv contract + TLS setup/preservation and validation tests are implemented |
+| Phase 7 | not started | Interactive POSIX usability work not started in this pass |
+| Phase 8 | in progress | Global gate currently green (`make test` pass), but dedicated stress/compat hardening tasks remain open |
+
+Work package snapshot for active tail (5.x/6.x):
+
+| Work package | Status | State details |
+|--------------|--------|---------------|
+| 5.1 `clone` + thread groups | done | Clone thread-group semantics + lifecycle interaction validated with join-like and mixed fork/clone tests |
+| 5.2 futex baseline | done | Wait/wake baseline wired with mismatch/lost-wakeup and contention-path regression coverage |
+| 5.3 signals baseline | done | `rt_sigaction`, `rt_sigprocmask`, `kill`, `rt_sigreturn`, handler delivery/return, and `SIGCHLD`+wait coupling are implemented |
+| 6.1 exec/auxv contract | done | Stack contract and required auxv entry validation harnesses are in-tree |
+| 6.2 TLS setup | done | `arch_prctl` + FS base preservation and clone TLS isolation tests are in-tree |
+
 ---
 
 ## Table of Contents
 
+0. [Current Status Snapshot (2026-02-11)](#current-status-snapshot-2026-02-11)
 1. [Scope, Assumptions, and Non-Goals](#1-scope-assumptions-and-non-goals)
 2. [Severity and Priority Model](#2-severity-and-priority-model)
 3. [Dependency Graph](#3-dependency-graph)
@@ -104,6 +135,8 @@ High-level dependency chain:
 
 Objective: Ensure every subsequent change is measured and reversible.
 
+Status: [x] Completed.
+
 ### 4.1 Baseline snapshot
 
 - [ ] Capture current `make test` result and keep artifact log in `test_output.log`.
@@ -130,6 +163,8 @@ Rollback:
 ## 5. Phase 1 - Kernel Safety Hotfixes
 
 Objective: Remove immediate panic and corruption vectors.
+
+Status: [x] Completed.
 
 ### Work Package 1.1 - Shared memory mapping panic removal (P0)
 
@@ -212,6 +247,8 @@ Rollback strategy:
 ## 6. Phase 2 - Concurrency and Recovery Correctness
 
 Objective: Remove SMP race patterns and make panic recovery explicit and bounded.
+
+Status: [x] Completed.
 
 ### Work Package 2.1 - Remove mutable global page-dir switching (P0)
 
@@ -324,6 +361,8 @@ Rollback strategy:
 
 Objective: Make syscall surface predictable and explicitly versioned enough for libc iteration.
 
+Status: [x] Completed.
+
 ### Work Package 3.1 - ABI matrix and ENOSYS contract (P1)
 
 Primary files:
@@ -410,6 +449,8 @@ Rollback strategy:
 
 Objective: Deliver foundational semantics libc and UNIX-style userspace rely on.
 
+Status: [x] Completed.
+
 ### Work Package 4.1 - `mmap`/`munmap`/`mprotect` baseline (P1)
 
 Primary files:
@@ -474,6 +515,8 @@ Rollback strategy:
 
 Objective: Add minimum kernel primitives for libc threading and process control.
 
+Status: [x] Completed.
+
 ### Work Package 5.1 - `clone` and thread-group scaffolding (P1)
 
 Primary files:
@@ -484,18 +527,18 @@ Primary files:
 
 Tasks:
 
-- [ ] Introduce minimal `clone` variant sufficient for early libc/pthread pathways.
-- [ ] Define thread-group identifiers and parent/child semantics.
-- [ ] Integrate lifecycle with existing task termination and wait mechanics.
+- [x] Introduce minimal `clone` variant sufficient for early libc/pthread pathways.
+- [x] Define thread-group identifiers and parent/child semantics.
+- [x] Integrate lifecycle with existing task termination and wait mechanics.
 
 Tests:
 
-- [ ] Basic thread create/exit/join-like behavior tests.
-- [ ] Mixed fork + clone interaction tests.
+- [x] Basic thread create/exit/join-like behavior tests.
+- [x] Mixed fork + clone interaction tests.
 
 Done criteria:
 
-- [ ] Thread creation semantics are explicit and repeatable.
+- [x] Thread creation semantics are explicit and repeatable.
 
 Rollback strategy:
 
@@ -509,18 +552,18 @@ Primary files:
 
 Tasks:
 
-- [ ] Implement `FUTEX_WAIT` and `FUTEX_WAKE` core behavior.
-- [ ] Handle wake races and value mismatch semantics correctly.
-- [ ] Ensure timeout and interruption behavior is documented.
+- [x] Implement `FUTEX_WAIT` and `FUTEX_WAKE` core behavior.
+- [x] Handle wake races and value mismatch semantics correctly.
+- [x] Ensure timeout and interruption behavior is documented.
 
 Tests:
 
-- [ ] Contended lock simulation on multiple CPUs.
-- [ ] Lost-wakeup regression tests.
+- [x] Contended lock simulation on multiple CPUs.
+- [x] Lost-wakeup regression tests.
 
 Done criteria:
 
-- [ ] Futex baseline supports basic userspace mutex/condvar operation.
+- [x] Futex baseline supports basic userspace mutex/condvar operation.
 
 Rollback strategy:
 
@@ -536,19 +579,19 @@ Primary files:
 
 Tasks:
 
-- [ ] Implement `rt_sigaction`, `rt_sigprocmask`, `kill`.
-- [ ] Implement `rt_sigreturn` return-path correctness.
-- [ ] Define and implement child-exit signaling interaction with wait.
+- [x] Implement `rt_sigaction`, `rt_sigprocmask`, `kill`.
+- [x] Implement `rt_sigreturn` return-path correctness.
+- [x] Define and implement child-exit signaling interaction with wait.
 
 Tests:
 
-- [ ] Handler install/deliver/return tests.
-- [ ] Masking/unmasking behavior tests.
-- [ ] SIGCHLD + wait interaction tests.
+- [x] Handler install/deliver/return tests.
+- [x] Masking/unmasking behavior tests.
+- [x] SIGCHLD + wait interaction tests.
 
 Done criteria:
 
-- [ ] Signal core is functional for fundamental process control use cases.
+- [x] Signal core is functional for fundamental process control use cases.
 
 Rollback strategy:
 
@@ -560,6 +603,8 @@ Rollback strategy:
 
 Objective: Make exec/runtime handoff compatible with dynamic userspace expectations.
 
+Status: [x] Completed.
+
 ### Work Package 6.1 - Exec interpreter and auxv contract (P1/P2 bridge)
 
 Primary files:
@@ -569,18 +614,18 @@ Primary files:
 
 Tasks:
 
-- [ ] Define support policy for interpreter-style execution contract.
-- [ ] Populate minimal auxiliary vector expected by libc runtime.
-- [ ] Validate stack layout contract (`argc`, `argv`, `envp`, `auxv`) end-to-end.
+- [x] Define support policy for interpreter-style execution contract.
+- [x] Populate minimal auxiliary vector expected by libc runtime.
+- [x] Validate stack layout contract (`argc`, `argv`, `envp`, `auxv`) end-to-end.
 
 Tests:
 
-- [ ] Stack layout validation harness.
-- [ ] Runtime smoke test verifying auxv entries needed by startup code.
+- [x] Stack layout validation harness.
+- [x] Runtime smoke test verifying auxv entries needed by startup code.
 
 Done criteria:
 
-- [ ] Exec handoff is deterministic and documented.
+- [x] Exec handoff is deterministic and documented.
 
 Rollback strategy:
 
@@ -595,18 +640,18 @@ Primary files:
 
 Tasks:
 
-- [ ] Implement x86_64 TLS base setup syscall behavior.
-- [ ] Ensure scheduler/context switch preserves TLS register/base state.
-- [ ] Validate per-thread isolation for TLS data.
+- [x] Implement x86_64 TLS base setup syscall behavior.
+- [x] Ensure scheduler/context switch preserves TLS register/base state.
+- [x] Validate per-thread isolation for TLS data.
 
 Tests:
 
-- [ ] Multi-thread TLS isolation tests.
-- [ ] Context switch TLS preservation tests.
+- [x] Multi-thread TLS isolation tests.
+- [x] Context switch TLS preservation tests.
 
 Done criteria:
 
-- [ ] TLS setup and preservation reliable in threaded workloads.
+- [x] TLS setup and preservation reliable in threaded workloads.
 
 Rollback strategy:
 
@@ -617,6 +662,8 @@ Rollback strategy:
 ## 11. Phase 7 - Interactive POSIX Usability
 
 Objective: Enable shell-like interactive behavior and process orchestration basics.
+
+Status: [ ] Not started.
 
 ### Work Package 7.1 - I/O multiplexing baseline (P2)
 
@@ -661,6 +708,8 @@ Done criteria (Phase 7):
 ## 12. Phase 8 - Hardening and Verification Gates
 
 Objective: Prove the system is robust, not just feature-present.
+
+Status: [-] Ongoing (baseline gate green, dedicated hardening checklist still open).
 
 ### 12.1 Unsafe invariant registry (P3)
 
@@ -749,12 +798,13 @@ Milestone is done when:
 
 ## Immediate Next Sprint Recommendation
 
-Sprint 1 should include only:
+Sprint focus should move to Phase 7 + targeted hardening:
 
-1. Phase 1.1 (shared memory unwrap panic fix)
-2. Phase 1.3 (user-copy overflow guard)
-3. Phase 2.1 (remove global mutable page-dir switching)
+1. Phase 7.1: implement `poll`/`select` baseline with explicit readiness subset.
+2. Phase 7.2: implement `pipe`/`pipe2` with `dup2`/`fork`/`exec`/close semantics coverage.
+3. Phase 7.3: add minimal terminal `ioctl` + process-group/session baseline (`setpgid`/`getpgid`/`setsid`).
+4. Phase 8 hardening: add dedicated stress suites for scheduler wake races, VM map/protect races, and storage contention.
 
 Reason:
 
-- These three items yield the highest immediate risk reduction per engineering effort and unblock safer work in later phases.
+- Phases 0-6 are now closed; the main compatibility gap is interactive POSIX process control and readiness semantics, with stress hardening needed before milestone promotion.

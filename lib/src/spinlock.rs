@@ -8,8 +8,14 @@ use crate::preempt::PreemptGuard;
 
 /// Mutex that disables interrupts AND preemption while held.
 /// Essential for kernel code accessed from both normal and interrupt contexts.
+///
+/// Supports poisoning semantics for panic recovery: after a panic-time
+/// force-unlock via `poison_unlock()`, the mutex is marked poisoned.
+/// Callers can check `is_poisoned()` to determine if the protected data
+/// may be in an inconsistent state and needs reinitialization.
 pub struct IrqMutex<T> {
     lock: AtomicBool,
+    poisoned: AtomicBool,
     data: UnsafeCell<T>,
 }
 
@@ -29,6 +35,7 @@ impl<T> IrqMutex<T> {
     pub const fn new(data: T) -> Self {
         Self {
             lock: AtomicBool::new(false),
+            poisoned: AtomicBool::new(false),
             data: UnsafeCell::new(data),
         }
     }
@@ -41,10 +48,42 @@ impl<T> IrqMutex<T> {
     /// 1. No code is currently executing with this lock held
     /// 2. The data protected by the lock is in a consistent state (or will be reinitialized)
     ///
-    /// This is a last-resort mechanism for panic recovery scenarios.
+    /// Prefer `poison_unlock()` which also marks the mutex as poisoned to signal
+    /// that the protected data may be in an inconsistent state.
     #[inline]
     pub unsafe fn force_unlock(&self) {
         self.lock.store(false, Ordering::Release);
+    }
+
+    /// Force unlock the mutex AND mark it as poisoned.
+    ///
+    /// # Safety
+    /// Same safety requirements as `force_unlock()`. This should be used in
+    /// panic recovery paths instead of bare `force_unlock()` to signal that the
+    /// protected data may be in an inconsistent state after the interrupted
+    /// critical section.
+    ///
+    /// Callers that acquire the lock after poisoning should check `is_poisoned()`
+    /// and reinitialize the protected data before trusting its invariants.
+    #[inline]
+    pub unsafe fn poison_unlock(&self) {
+        self.poisoned.store(true, Ordering::Release);
+        self.lock.store(false, Ordering::Release);
+    }
+
+    /// Returns true if this mutex was force-unlocked during panic recovery.
+    /// When poisoned, the protected data may be in an inconsistent state
+    /// and should be reinitialized before normal use.
+    #[inline]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Clear the poisoned state after the protected data has been reinitialized.
+    /// Only call this after verifying or restoring the data's invariants.
+    #[inline]
+    pub fn clear_poison(&self) {
+        self.poisoned.store(false, Ordering::Release);
     }
 
     /// Check if the lock is currently held.

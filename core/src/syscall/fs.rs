@@ -11,7 +11,8 @@ use crate::syscall::common::{
 };
 
 use slopos_fs::fileio::{
-    file_close_fd, file_list_path, file_mkdir_path, file_open_for_process, file_read_fd,
+    file_close_fd, file_dup_fd, file_dup2_fd, file_dup3_fd, file_fcntl_fd, file_fstat_fd,
+    file_list_path, file_mkdir_path, file_open_for_process, file_read_fd, file_seek_fd,
     file_stat_path, file_unlink_path, file_write_fd,
 };
 
@@ -136,4 +137,52 @@ define_syscall!(syscall_fs_list(ctx, args) {
 
     kfree(tmp_ptr as *mut c_void);
     ctx.from_result(rc_hdr)
+});
+
+// =============================================================================
+// FD operations: dup, dup2, dup3, fcntl, lseek, fstat
+// =============================================================================
+
+define_syscall!(syscall_dup(ctx, args) requires(let pid: process_id) {
+    let fd = file_dup_fd(pid, args.arg0 as c_int);
+    ctx.from_rc_value(fd as i64)
+});
+
+define_syscall!(syscall_dup2(ctx, args) requires(let pid: process_id) {
+    let fd = file_dup2_fd(pid, args.arg0 as c_int, args.arg1 as c_int);
+    ctx.from_rc_value(fd as i64)
+});
+
+define_syscall!(syscall_dup3(ctx, args) requires(let pid: process_id) {
+    let fd = file_dup3_fd(pid, args.arg0 as c_int, args.arg1 as c_int, args.arg2_u32());
+    ctx.from_rc_value(fd as i64)
+});
+
+define_syscall!(syscall_fcntl(ctx, args) requires(let pid: process_id) {
+    let rc = file_fcntl_fd(pid, args.arg0 as c_int, args.arg1, args.arg2);
+    if rc < 0 {
+        ctx.err()
+    } else {
+        ctx.ok(rc as u64)
+    }
+});
+
+define_syscall!(syscall_lseek(ctx, args) requires(let pid: process_id) {
+    let new_offset = file_seek_fd(pid, args.arg0 as c_int, args.arg1 as i64, args.arg2_u32());
+    if new_offset < 0 {
+        ctx.err()
+    } else {
+        ctx.ok(new_offset as u64)
+    }
+});
+
+define_syscall!(syscall_fstat(ctx, args) requires(let pid: process_id) {
+    require_nonzero!(ctx, args.arg1);
+
+    let mut stat = UserFsStat { type_: 0, size: 0 };
+    check_result!(ctx, file_fstat_fd(pid, args.arg0 as c_int, &mut stat));
+
+    let stat_ptr = try_or_err!(ctx, UserPtr::<UserFsStat>::try_new(args.arg1));
+    try_or_err!(ctx, copy_to_user(stat_ptr, &stat));
+    ctx.ok(0)
 });
