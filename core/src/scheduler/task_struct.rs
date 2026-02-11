@@ -277,6 +277,8 @@ pub struct Task {
     /// Thread-group ID. For the group leader, tgid == task_id.
     /// For threads created with CLONE_THREAD, tgid == leader's task_id.
     pub tgid: u32,
+    pub pgid: u32,
+    pub sid: u32,
     /// User-space address to clear (and futex-wake) on thread exit.
     /// Set by clone(CLONE_CHILD_CLEARTID). 0 means not set.
     pub clear_child_tid: u64,
@@ -335,6 +337,8 @@ impl Task {
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
             tgid: INVALID_TASK_ID,
+            pgid: INVALID_TASK_ID,
+            sid: INVALID_TASK_ID,
             clear_child_tid: 0,
             time_slice: 0,
             time_slice_remaining: 0,

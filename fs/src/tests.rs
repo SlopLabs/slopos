@@ -101,6 +101,55 @@ pub fn test_vfs_unlink() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_vfs_storage_contention_stress_baseline() -> TestResult {
+    if vfs_mkdir(b"/vfs_stress").is_err() {
+        return TestResult::Fail;
+    }
+
+    let mut payload = [0u8; 256];
+    for (idx, b) in payload.iter_mut().enumerate() {
+        *b = (idx & 0xFF) as u8;
+    }
+
+    for iter in 0..64u32 {
+        let mut path = [0u8; 32];
+        let name = [
+            b'f',
+            b'i',
+            b'l',
+            b'e',
+            b'_',
+            (b'0' + ((iter % 10) as u8)),
+            b'.',
+            b'b',
+            b'i',
+            b'n',
+        ];
+        path[..12].copy_from_slice(b"/vfs_stress/");
+        path[12..22].copy_from_slice(&name);
+
+        let handle = match vfs_open(&path[..22], true) {
+            Ok(h) => h,
+            Err(_) => return TestResult::Fail,
+        };
+
+        if handle.write(0, &payload).is_err() {
+            return TestResult::Fail;
+        }
+
+        let mut out = [0u8; 256];
+        let read_len = match handle.read(0, &mut out) {
+            Ok(n) => n,
+            Err(_) => return TestResult::Fail,
+        };
+        if read_len != payload.len() || out != payload {
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
 struct FailingBlockDevice {
     fail_reads: bool,
     fail_writes: bool,
@@ -542,6 +591,7 @@ fn run_ext2_suite(_config: *const (), out: *mut slopos_lib::testing::TestSuiteRe
     slopos_lib::run_test!(passed, total, test_vfs_file_roundtrip);
     slopos_lib::run_test!(passed, total, test_vfs_list);
     slopos_lib::run_test!(passed, total, test_vfs_unlink);
+    slopos_lib::run_test!(passed, total, test_vfs_storage_contention_stress_baseline);
     slopos_lib::run_test!(passed, total, test_ext2_invalid_superblock_magic);
     slopos_lib::run_test!(passed, total, test_ext2_unsupported_block_size);
     slopos_lib::run_test!(passed, total, test_ext2_directory_format_error);

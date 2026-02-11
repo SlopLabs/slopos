@@ -636,6 +636,8 @@ pub fn task_create(
     task_ref.process_id = resources.process_id;
     // New process: task is its own thread-group leader.
     task_ref.tgid = task_id;
+    task_ref.pgid = task_id;
+    task_ref.sid = task_id;
     task_ref.clear_child_tid = 0;
     task_ref.parent_task_id = INVALID_TASK_ID;
     task_ref.stack_base = resources.stack_base;
@@ -1122,6 +1124,8 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     child.parent_task_id = parent.task_id;
     // Fork creates a new process: child is its own thread-group leader.
     child.tgid = child_task_id;
+    child.pgid = parent.pgid;
+    child.sid = parent.sid;
     child.clear_child_tid = 0;
     child.set_status(TaskStatus::Ready);
 
@@ -1280,6 +1284,8 @@ pub fn task_clone(
         // New process: child is its own thread-group leader.
         child.tgid = child_task_id;
     }
+    child.pgid = parent.pgid;
+    child.sid = parent.sid;
 
     child.set_status(TaskStatus::Ready);
 

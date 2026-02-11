@@ -1535,6 +1535,53 @@ pub fn test_privilege_separation_invariants() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let mut task_ids = [INVALID_TASK_ID; 8];
+    for slot in &mut task_ids {
+        let id = task_create(
+            b"WakeStress\0".as_ptr() as *const c_char,
+            dummy_task_fn,
+            ptr::null_mut(),
+            TASK_PRIORITY_NORMAL,
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            return TestResult::Fail;
+        }
+        *slot = id;
+    }
+
+    for _ in 0..128 {
+        for id in task_ids {
+            let task_ptr = task_find_by_id(id);
+            if task_ptr.is_null() {
+                return TestResult::Fail;
+            }
+            let _ = schedule_task(task_ptr);
+        }
+        scheduler_timer_tick();
+        schedule();
+        for id in task_ids {
+            let task_ptr = task_find_by_id(id);
+            if !task_ptr.is_null() {
+                let _ = unschedule_task(task_ptr);
+            }
+            if task_find_by_id(id).is_null() {
+                return TestResult::Fail;
+            }
+            let _ = task_set_state(id, TaskStatus::Ready);
+        }
+    }
+
+    for id in task_ids {
+        task_terminate(id);
+    }
+
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     sched_core,
     [
@@ -1575,5 +1622,6 @@ slopos_lib::define_test_suite!(
         test_remote_inbox_drops_non_ready_tasks,
         test_cross_cpu_schedule_lockfree,
         test_privilege_separation_invariants,
+        test_scheduler_wakeup_race_stress_baseline,
     ]
 );

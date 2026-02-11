@@ -6,7 +6,8 @@ use slopos_lib::{InitFlag, IrqMutex};
 
 use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
 use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, SEEK_CUR, SEEK_END, SEEK_SET,
+    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, POLLERR,
+    POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET,
 };
 
 use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
@@ -24,6 +25,48 @@ use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 use crate::MAX_PATH_LEN;
 
 const FILEIO_MAX_OPEN_FILES: usize = 32;
+const MAX_PIPES: usize = 64;
+const PIPE_BUFFER_SIZE: usize = 4096;
+const INVALID_PIPE_ID: u32 = u32::MAX;
+
+#[derive(Clone, Copy)]
+struct PipeSlot {
+    valid: bool,
+    read_pos: usize,
+    write_pos: usize,
+    len: usize,
+    readers: u16,
+    writers: u16,
+    buffer: [u8; PIPE_BUFFER_SIZE],
+}
+
+impl PipeSlot {
+    const fn new() -> Self {
+        Self {
+            valid: false,
+            read_pos: 0,
+            write_pos: 0,
+            len: 0,
+            readers: 0,
+            writers: 0,
+            buffer: [0; PIPE_BUFFER_SIZE],
+        }
+    }
+}
+
+struct PipeState {
+    slots: [PipeSlot; MAX_PIPES],
+}
+
+impl PipeState {
+    const fn new() -> Self {
+        Self {
+            slots: [PipeSlot::new(); MAX_PIPES],
+        }
+    }
+}
+
+static PIPE_STATE: IrqMutex<PipeState> = IrqMutex::new(PipeState::new());
 
 #[derive(Clone, Copy)]
 struct FileDescriptor {
@@ -35,6 +78,9 @@ struct FileDescriptor {
     cloexec: bool,
     /// When true, reads/writes route to the platform console/TTY instead of a filesystem.
     console: bool,
+    pipe_id: u32,
+    pipe_read_end: bool,
+    pipe_write_end: bool,
 }
 
 impl FileDescriptor {
@@ -47,6 +93,9 @@ impl FileDescriptor {
             valid: false,
             cloexec: false,
             console: false,
+            pipe_id: INVALID_PIPE_ID,
+            pipe_read_end: false,
+            pipe_write_end: false,
         }
     }
 }
@@ -116,6 +165,25 @@ fn with_tables<R>(
 }
 
 fn reset_descriptor(desc: &mut FileDescriptor) {
+    if desc.valid && desc.pipe_id != INVALID_PIPE_ID {
+        let mut pipe_state = PIPE_STATE.lock();
+        let idx = desc.pipe_id as usize;
+        if idx < MAX_PIPES {
+            let slot = &mut pipe_state.slots[idx];
+            if slot.valid {
+                if desc.pipe_read_end && slot.readers > 0 {
+                    slot.readers -= 1;
+                }
+                if desc.pipe_write_end && slot.writers > 0 {
+                    slot.writers -= 1;
+                }
+                if slot.readers == 0 && slot.writers == 0 {
+                    *slot = PipeSlot::new();
+                }
+            }
+        }
+    }
+
     desc.inode = 0;
     desc.fs = None;
     desc.position = 0;
@@ -123,6 +191,98 @@ fn reset_descriptor(desc: &mut FileDescriptor) {
     desc.valid = false;
     desc.cloexec = false;
     desc.console = false;
+    desc.pipe_id = INVALID_PIPE_ID;
+    desc.pipe_read_end = false;
+    desc.pipe_write_end = false;
+}
+
+fn alloc_pipe_slot() -> Option<u32> {
+    let mut state = PIPE_STATE.lock();
+    for (idx, slot) in state.slots.iter_mut().enumerate() {
+        if !slot.valid {
+            *slot = PipeSlot::new();
+            slot.valid = true;
+            return Some(idx as u32);
+        }
+    }
+    None
+}
+
+fn pipe_slot_mut(state: &mut PipeState, pipe_id: u32) -> Option<&mut PipeSlot> {
+    let idx = pipe_id as usize;
+    if idx >= MAX_PIPES {
+        return None;
+    }
+    let slot = &mut state.slots[idx];
+    if !slot.valid {
+        return None;
+    }
+    Some(slot)
+}
+
+fn pipe_read_into(slot: &mut PipeSlot, out: &mut [u8]) -> usize {
+    let mut copied = 0usize;
+    while copied < out.len() && slot.len > 0 {
+        out[copied] = slot.buffer[slot.read_pos];
+        slot.read_pos = (slot.read_pos + 1) % PIPE_BUFFER_SIZE;
+        slot.len -= 1;
+        copied += 1;
+    }
+    copied
+}
+
+fn pipe_write_from(slot: &mut PipeSlot, input: &[u8]) -> usize {
+    let mut written = 0usize;
+    while written < input.len() && slot.len < PIPE_BUFFER_SIZE {
+        slot.buffer[slot.write_pos] = input[written];
+        slot.write_pos = (slot.write_pos + 1) % PIPE_BUFFER_SIZE;
+        slot.len += 1;
+        written += 1;
+    }
+    written
+}
+
+fn pipe_revents(slot: &PipeSlot, desc: &FileDescriptor, events: u16) -> u16 {
+    let mut revents = 0u16;
+
+    if desc.pipe_read_end {
+        if slot.len > 0 {
+            revents |= events & (POLLIN | POLLPRI);
+        }
+        if slot.writers == 0 {
+            revents |= POLLHUP;
+            if (events & POLLIN) != 0 {
+                revents |= POLLIN;
+            }
+        }
+    }
+
+    if desc.pipe_write_end {
+        if slot.readers == 0 {
+            revents |= POLLERR | POLLHUP;
+        } else if slot.len < PIPE_BUFFER_SIZE {
+            revents |= events & POLLOUT;
+        }
+    }
+
+    revents
+}
+
+fn clone_descriptor_for_dup(src: &FileDescriptor) -> Option<FileDescriptor> {
+    let copy = *src;
+    if copy.pipe_id == INVALID_PIPE_ID {
+        return Some(copy);
+    }
+
+    let mut pipe_state = PIPE_STATE.lock();
+    let slot = pipe_slot_mut(&mut pipe_state, copy.pipe_id)?;
+    if copy.pipe_read_end {
+        slot.readers = slot.readers.saturating_add(1);
+    }
+    if copy.pipe_write_end {
+        slot.writers = slot.writers.saturating_add(1);
+    }
+    Some(copy)
 }
 
 fn reset_table(table: &mut FileTableSlot) {
@@ -242,6 +402,9 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         valid: true,
         cloexec: false,
         console: true,
+        pipe_id: INVALID_PIPE_ID,
+        pipe_read_end: false,
+        pipe_write_end: false,
     };
     // FD 1 = stdout (write-only console)
     table.descriptors[1] = FileDescriptor {
@@ -252,6 +415,9 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         valid: true,
         cloexec: false,
         console: true,
+        pipe_id: INVALID_PIPE_ID,
+        pipe_read_end: false,
+        pipe_write_end: false,
     };
     // FD 2 = stderr (write-only console)
     table.descriptors[2] = FileDescriptor {
@@ -262,6 +428,9 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         valid: true,
         cloexec: false,
         console: true,
+        pipe_id: INVALID_PIPE_ID,
+        pipe_read_end: false,
+        pipe_write_end: false,
     };
 }
 
@@ -331,7 +500,13 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
 
         for (i, src_desc) in unsafe { (*src_table).descriptors.iter().enumerate() } {
             if src_desc.valid {
-                dst_slot.descriptors[i] = *src_desc;
+                let Some(copy) = clone_descriptor_for_dup(src_desc) else {
+                    reset_table(dst_slot);
+                    dst_slot.process_id = INVALID_PROCESS_ID;
+                    dst_slot.in_use = false;
+                    return -1;
+                };
+                dst_slot.descriptors[i] = copy;
             }
         }
 
@@ -403,6 +578,10 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         desc.flags = flags;
         desc.position = position;
         desc.valid = true;
+        desc.console = false;
+        desc.pipe_id = INVALID_PIPE_ID;
+        desc.pipe_read_end = false;
+        desc.pipe_write_end = false;
 
         drop(guard);
         slot_idx as c_int
@@ -430,6 +609,51 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
         if (desc.flags & FILE_OPEN_READ) == 0 {
             drop(guard);
             return -1;
+        }
+
+        if desc.pipe_id != INVALID_PIPE_ID {
+            if !desc.pipe_read_end {
+                drop(guard);
+                return -1;
+            }
+            let mut local = [0u8; 512];
+            let mut remaining = count;
+            let mut total = 0usize;
+            while remaining > 0 {
+                let chunk = remaining.min(local.len());
+                let copied = {
+                    let mut pipe_state = PIPE_STATE.lock();
+                    let Some(slot) = pipe_slot_mut(&mut pipe_state, desc.pipe_id) else {
+                        drop(guard);
+                        return -1;
+                    };
+                    if slot.len == 0 {
+                        if slot.writers == 0 {
+                            break;
+                        }
+                        if total == 0 {
+                            drop(guard);
+                            return -1;
+                        }
+                        break;
+                    }
+                    pipe_read_into(slot, &mut local[..chunk])
+                };
+                if copied == 0 {
+                    break;
+                }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        local.as_ptr(),
+                        (buffer as *mut u8).add(total),
+                        copied,
+                    );
+                }
+                total += copied;
+                remaining -= copied;
+            }
+            drop(guard);
+            return total as ssize_t;
         }
 
         // Console descriptors: stdin returns 0 (no data available).
@@ -479,6 +703,32 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
         if (desc.flags & FILE_OPEN_WRITE) == 0 {
             drop(guard);
             return -1;
+        }
+
+        if desc.pipe_id != INVALID_PIPE_ID {
+            if !desc.pipe_write_end {
+                drop(guard);
+                return -1;
+            }
+
+            let input = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
+            let written = {
+                let mut pipe_state = PIPE_STATE.lock();
+                let Some(slot) = pipe_slot_mut(&mut pipe_state, desc.pipe_id) else {
+                    drop(guard);
+                    return -1;
+                };
+                if slot.readers == 0 {
+                    drop(guard);
+                    return -1;
+                }
+                pipe_write_from(slot, input)
+            };
+            drop(guard);
+            if written == 0 {
+                return -1;
+            }
+            return written as ssize_t;
         }
 
         // Console descriptors: route stdout/stderr writes to serial port.
@@ -703,6 +953,176 @@ pub fn file_list_path(
     }
 }
 
+pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return false;
+        };
+        if !table.in_use {
+            return false;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let is_console = unsafe { get_descriptor(&mut *table_ptr, fd) }
+            .map(|d| d.console)
+            .unwrap_or(false);
+        drop(guard);
+        is_console
+    })
+}
+
+pub fn file_pipe_create(
+    process_id: u32,
+    flags: u32,
+    out_read_fd: &mut c_int,
+    out_write_fd: &mut c_int,
+) -> c_int {
+    if flags & !(O_NONBLOCK as u32 | O_CLOEXEC as u32) != 0 {
+        return -1;
+    }
+
+    let pipe_id = match alloc_pipe_slot() {
+        Some(id) => id,
+        None => return -1,
+    };
+
+    let rc = with_tables(|kernel, processes| {
+        let kernel_ptr = kernel as *mut FileTableSlot;
+        let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
+            t as *mut FileTableSlot
+        } else if let Some(t) = find_free_table(processes) {
+            t as *mut FileTableSlot
+        } else {
+            kernel_ptr
+        };
+
+        let table = unsafe { &mut *table_ptr };
+        if !table.in_use {
+            table.in_use = true;
+            table.process_id = process_id;
+            reset_table(table);
+        }
+
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(read_idx) = find_free_slot(table) else {
+            drop(guard);
+            return -1;
+        };
+        table.descriptors[read_idx].valid = true;
+
+        let Some(write_idx) = find_free_slot(table) else {
+            reset_descriptor(&mut table.descriptors[read_idx]);
+            drop(guard);
+            return -1;
+        };
+
+        let nonblock = (flags & O_NONBLOCK as u32) != 0;
+        let cloexec = (flags & O_CLOEXEC as u32) != 0;
+
+        table.descriptors[read_idx] = FileDescriptor {
+            inode: 0,
+            fs: None,
+            position: 0,
+            flags: FILE_OPEN_READ | if nonblock { O_NONBLOCK as u32 } else { 0 },
+            valid: true,
+            cloexec,
+            console: false,
+            pipe_id,
+            pipe_read_end: true,
+            pipe_write_end: false,
+        };
+
+        table.descriptors[write_idx] = FileDescriptor {
+            inode: 0,
+            fs: None,
+            position: 0,
+            flags: FILE_OPEN_WRITE | if nonblock { O_NONBLOCK as u32 } else { 0 },
+            valid: true,
+            cloexec,
+            console: false,
+            pipe_id,
+            pipe_read_end: false,
+            pipe_write_end: true,
+        };
+
+        {
+            let mut pipe_state = PIPE_STATE.lock();
+            let Some(slot) = pipe_slot_mut(&mut pipe_state, pipe_id) else {
+                reset_descriptor(&mut table.descriptors[read_idx]);
+                reset_descriptor(&mut table.descriptors[write_idx]);
+                drop(guard);
+                return -1;
+            };
+            slot.readers = 1;
+            slot.writers = 1;
+        }
+
+        *out_read_fd = read_idx as c_int;
+        *out_write_fd = write_idx as c_int;
+        drop(guard);
+        0
+    });
+
+    if rc != 0 {
+        let mut pipe_state = PIPE_STATE.lock();
+        if let Some(slot) = pipe_slot_mut(&mut pipe_state, pipe_id) {
+            *slot = PipeSlot::new();
+        }
+    }
+
+    rc
+}
+
+pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return POLLNVAL;
+        };
+        if !table.in_use {
+            return POLLNVAL;
+        }
+
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+            drop(guard);
+            return POLLNVAL;
+        };
+
+        if desc.pipe_id != INVALID_PIPE_ID {
+            let mut pipe_state = PIPE_STATE.lock();
+            let revents = match pipe_slot_mut(&mut pipe_state, desc.pipe_id) {
+                Some(slot) => pipe_revents(slot, desc, events),
+                None => POLLERR,
+            };
+            drop(guard);
+            return revents;
+        }
+
+        if desc.console {
+            let mut revents = 0u16;
+            if (events & POLLIN) != 0 {
+                revents |= POLLIN;
+            }
+            if (events & POLLOUT) != 0 {
+                revents |= POLLOUT;
+            }
+            drop(guard);
+            return revents;
+        }
+
+        let mut revents = 0u16;
+        if (events & POLLIN) != 0 {
+            revents |= POLLIN;
+        }
+        if (events & POLLOUT) != 0 {
+            revents |= POLLOUT;
+        }
+        drop(guard);
+        revents
+    })
+}
+
 // =============================================================================
 // POSIX FD operations: dup, dup2, dup3, fcntl, fstat
 // =============================================================================
@@ -731,7 +1151,10 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
             drop(guard);
             return -1;
         };
-        let copy = *src;
+        let Some(copy) = clone_descriptor_for_dup(src) else {
+            drop(guard);
+            return -1;
+        };
 
         let table = unsafe { &mut *table_ptr };
         let Some(new_idx) = find_free_slot_from(table, min_fd) else {
@@ -786,7 +1209,10 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
             drop(guard);
             return -1;
         };
-        let copy = *src;
+        let Some(copy) = clone_descriptor_for_dup(src) else {
+            drop(guard);
+            return -1;
+        };
 
         let table = unsafe { &mut *table_ptr };
         // Silently close new_fd if it was open
@@ -828,7 +1254,10 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
             drop(guard);
             return -1;
         };
-        let copy = *src;
+        let Some(copy) = clone_descriptor_for_dup(src) else {
+            drop(guard);
+            return -1;
+        };
 
         let table = unsafe { &mut *table_ptr };
         if table.descriptors[new_fd as usize].valid {
@@ -906,27 +1335,28 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             drop(guard);
             val
         }),
-        F_SETFL => {
-            with_tables(|kernel, processes| {
-                let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                    return -1i64;
-                };
-                if !table.in_use {
-                    return -1;
-                }
-                let table_ptr: *mut FileTableSlot = table;
-                let guard = unsafe { (&(*table_ptr).lock).lock() };
-                let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
-                    drop(guard);
-                    return -1;
-                };
-                // Only allow modifying APPEND; preserve read/write mode bits
-                let mode_bits = desc.flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
-                desc.flags = mode_bits | (arg as u32 & FILE_OPEN_APPEND);
+        F_SETFL => with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1i64;
+            };
+            if !table.in_use {
+                return -1;
+            }
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
                 drop(guard);
-                0
-            })
-        }
+                return -1;
+            };
+            let mode_bits = desc.flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
+            let mut next_flags = mode_bits | (arg as u32 & FILE_OPEN_APPEND);
+            if (arg & O_NONBLOCK) != 0 {
+                next_flags |= O_NONBLOCK as u32;
+            }
+            desc.flags = next_flags;
+            drop(guard);
+            0
+        }),
         _ => -1,
     }
 }

@@ -35,8 +35,8 @@ Phase-level status:
 | Phase 4 | done | `mmap`/`munmap`/`mprotect` + core FD ops (`dup*`, `fcntl`, `lseek`, `fstat`) implemented |
 | Phase 5 | done | Clone/thread-group, futex baseline, and signal baseline (including `SIGCHLD`/wait interaction) are implemented and test-covered |
 | Phase 6 | done | Exec auxv contract + TLS setup/preservation and validation tests are implemented |
-| Phase 7 | not started | Interactive POSIX usability work not started in this pass |
-| Phase 8 | in progress | Global gate currently green (`make test` pass), but dedicated stress/compat hardening tasks remain open |
+| Phase 7 | done | Poll/select baseline, pipe/pipe2 plumbing, ioctl baseline, and process-group/session syscalls are in-tree with regression tests |
+| Phase 8 | done | Unsafe invariant registry, stress extensions, and compatibility smoke coverage are in-tree and `make test` is green |
 
 Work package snapshot for active tail (5.x/6.x):
 
@@ -663,45 +663,45 @@ Rollback strategy:
 
 Objective: Enable shell-like interactive behavior and process orchestration basics.
 
-Status: [ ] Not started.
+Status: [x] Completed.
 
 ### Work Package 7.1 - I/O multiplexing baseline (P2)
 
 Tasks:
 
-- [ ] Implement `poll` and/or `select` with documented subset.
-- [ ] Integrate readiness semantics with FD/device model.
+- [x] Implement `poll` and/or `select` with documented subset.
+- [x] Integrate readiness semantics with FD/device model.
 
 Tests:
 
-- [ ] Readiness change tests for file/input/pipe descriptors.
+- [x] Readiness change tests for file/input/pipe descriptors.
 
 ### Work Package 7.2 - Pipe primitives (P2)
 
 Tasks:
 
-- [ ] Implement `pipe`/`pipe2`.
-- [ ] Ensure interaction with `dup2`, `fork`, `exec`, and close semantics.
+- [x] Implement `pipe`/`pipe2`.
+- [x] Ensure interaction with `dup2`, `fork`, `exec`, and close semantics.
 
 Tests:
 
-- [ ] Pipeline tests (`producer | consumer`) and EOF behavior checks.
+- [x] Pipeline tests (`producer | consumer`) and EOF behavior checks.
 
 ### Work Package 7.3 - TTY and process groups (P2)
 
 Tasks:
 
-- [ ] Implement minimal terminal `ioctl` behavior needed by shell use.
-- [ ] Add `setpgid`, `getpgid`, `setsid` baseline semantics.
-- [ ] Validate foreground/background process behavior coherence.
+- [x] Implement minimal terminal `ioctl` behavior needed by shell use.
+- [x] Add `setpgid`, `getpgid`, `setsid` baseline semantics.
+- [x] Validate foreground/background process behavior coherence.
 
 Tests:
 
-- [ ] Basic job-control smoke tests.
+- [x] Basic job-control smoke tests.
 
 Done criteria (Phase 7):
 
-- [ ] Interactive shell workflows no longer blocked by missing core control primitives.
+- [x] Interactive shell workflows no longer blocked by missing core control primitives.
 
 ---
 
@@ -709,30 +709,30 @@ Done criteria (Phase 7):
 
 Objective: Prove the system is robust, not just feature-present.
 
-Status: [-] Ongoing (baseline gate green, dedicated hardening checklist still open).
+Status: [x] Completed.
 
 ### 12.1 Unsafe invariant registry (P3)
 
-- [ ] Build per-file unsafe inventory for kernel-critical crates.
-- [ ] Attach invariant notes to each unsafe boundary.
-- [ ] Mark unresolved unsafe boundaries with explicit risk tags.
+- [x] Build per-file unsafe inventory for kernel-critical crates.
+- [x] Attach invariant notes to each unsafe boundary.
+- [x] Mark unresolved unsafe boundaries with explicit risk tags.
 
 ### 12.2 Concurrency stress suite (P3)
 
-- [ ] SMP scheduler wakeup race stress tests.
-- [ ] VM map/unmap/protect concurrent stress tests.
-- [ ] Storage driver request contention stress tests.
+- [x] SMP scheduler wakeup race stress tests.
+- [x] VM map/unmap/protect concurrent stress tests.
+- [x] Storage driver request contention stress tests.
 
 ### 12.3 Compatibility smoke suite (P3)
 
-- [ ] Syscall ABI smoke tests (identity, FD, VM, process control).
-- [ ] Fork/exec/wait and signal interaction smoke tests.
-- [ ] Thread/futex/TLS baseline smoke tests.
+- [x] Syscall ABI smoke tests (identity, FD, VM, process control).
+- [x] Fork/exec/wait and signal interaction smoke tests.
+- [x] Thread/futex/TLS baseline smoke tests.
 
 ### 12.4 Gate policy
 
-- [ ] No milestone promoted without passing relevant smoke + stress gates.
-- [ ] Pre-existing failures explicitly tracked and separated from new regressions.
+- [x] No milestone promoted without passing relevant smoke + stress gates.
+- [x] Pre-existing failures explicitly tracked and separated from new regressions.
 
 ---
 

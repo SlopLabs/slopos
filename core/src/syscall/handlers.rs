@@ -24,7 +24,8 @@ use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
     syscall_fs_mkdir, syscall_fs_open, syscall_fs_read, syscall_fs_stat, syscall_fs_unlink,
-    syscall_fs_write, syscall_fstat, syscall_lseek,
+    syscall_fs_write, syscall_fstat, syscall_ioctl, syscall_lseek, syscall_pipe, syscall_pipe2,
+    syscall_poll, syscall_select,
 };
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
@@ -745,6 +746,67 @@ define_syscall!(syscall_getppid(ctx, args) {
     ctx.ok(task.parent_task_id as u64)
 });
 
+define_syscall!(syscall_getpgid(ctx, args) requires(let task_id) {
+    let target = args.arg0_u32();
+    let resolved = if target == 0 { task_id } else { target };
+    let task_ptr = crate::scheduler::task::task_find_by_id(resolved);
+    if task_ptr.is_null() {
+        return ctx.err();
+    }
+    ctx.ok(unsafe { (*task_ptr).pgid } as u64)
+});
+
+define_syscall!(syscall_setpgid(ctx, args) requires(let task_id) {
+    let pid = args.arg0_u32();
+    let pgid_arg = args.arg1_u32();
+    let resolved_pid = if pid == 0 { task_id } else { pid };
+    let resolved_pgid = if pgid_arg == 0 { resolved_pid } else { pgid_arg };
+
+    let caller_ptr = crate::scheduler::task::task_find_by_id(task_id);
+    let target_ptr = crate::scheduler::task::task_find_by_id(resolved_pid);
+    if caller_ptr.is_null() || target_ptr.is_null() || resolved_pgid == 0 {
+        return ctx.err();
+    }
+
+    let caller = unsafe { &*caller_ptr };
+    let target = unsafe { &mut *target_ptr };
+    if resolved_pid != task_id && target.parent_task_id != task_id {
+        return ctx.err();
+    }
+    if target.sid != caller.sid {
+        return ctx.err();
+    }
+
+    if resolved_pgid != resolved_pid {
+        let leader_ptr = crate::scheduler::task::task_find_by_id(resolved_pgid);
+        if leader_ptr.is_null() {
+            return ctx.err();
+        }
+        let leader = unsafe { &*leader_ptr };
+        if leader.sid != caller.sid {
+            return ctx.err();
+        }
+    }
+
+    target.pgid = resolved_pgid;
+    ctx.ok(0)
+});
+
+define_syscall!(syscall_setsid(ctx, args) requires(let task_id) {
+    let _ = args;
+    let task_ptr = crate::scheduler::task::task_find_by_id(task_id);
+    if task_ptr.is_null() {
+        return ctx.err();
+    }
+    let task = unsafe { &mut *task_ptr };
+    if task.pgid == task.task_id {
+        return ctx.err();
+    }
+    task.sid = task.task_id;
+    task.pgid = task.task_id;
+    ctx.ok(task.sid as u64)
+});
+
 // SlopOS runs all tasks as root (uid 0). Single-user policy; no privilege
 // separation. Returns 0 unconditionally.
 define_syscall!(syscall_getuid(ctx, args) {
@@ -1017,6 +1079,14 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FCNTL] => syscall_fcntl, "fcntl";
     [SYSCALL_LSEEK] => syscall_lseek, "lseek";
     [SYSCALL_FSTAT] => syscall_fstat, "fstat";
+    [SYSCALL_POLL]  => syscall_poll,  "poll";
+    [SYSCALL_SELECT] => syscall_select, "select";
+    [SYSCALL_PIPE] => syscall_pipe, "pipe";
+    [SYSCALL_PIPE2] => syscall_pipe2, "pipe2";
+    [SYSCALL_IOCTL] => syscall_ioctl, "ioctl";
+    [SYSCALL_SETPGID] => syscall_setpgid, "setpgid";
+    [SYSCALL_GETPGID] => syscall_getpgid, "getpgid";
+    [SYSCALL_SETSID] => syscall_setsid, "setsid";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

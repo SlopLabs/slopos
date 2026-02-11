@@ -242,6 +242,14 @@ pub const SYSCALL_DUP3: u64 = 97;
 pub const SYSCALL_FCNTL: u64 = 98;
 pub const SYSCALL_LSEEK: u64 = 99;
 pub const SYSCALL_FSTAT: u64 = 100;
+pub const SYSCALL_POLL: u64 = 108;
+pub const SYSCALL_SELECT: u64 = 109;
+pub const SYSCALL_PIPE: u64 = 110;
+pub const SYSCALL_PIPE2: u64 = 111;
+pub const SYSCALL_IOCTL: u64 = 112;
+pub const SYSCALL_SETPGID: u64 = 113;
+pub const SYSCALL_GETPGID: u64 = 114;
+pub const SYSCALL_SETSID: u64 = 115;
 
 // =============================================================================
 // mmap constants
@@ -269,6 +277,9 @@ pub const F_GETFL: u64 = 3;
 pub const F_SETFL: u64 = 4;
 pub const FD_CLOEXEC: u64 = 1;
 
+pub const O_NONBLOCK: u64 = 0x800;
+pub const O_CLOEXEC: u64 = 0x80_000;
+
 // =============================================================================
 // lseek whence constants
 // =============================================================================
@@ -276,6 +287,78 @@ pub const FD_CLOEXEC: u64 = 1;
 pub const SEEK_SET: u64 = 0;
 pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
+
+pub const POLLIN: u16 = 0x0001;
+pub const POLLPRI: u16 = 0x0002;
+pub const POLLOUT: u16 = 0x0004;
+pub const POLLERR: u16 = 0x0008;
+pub const POLLHUP: u16 = 0x0010;
+pub const POLLNVAL: u16 = 0x0020;
+
+pub const FDSET_WORD_BITS: usize = 64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserPollFd {
+    pub fd: i32,
+    pub events: u16,
+    pub revents: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserTimeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+pub const TCGETS: u64 = 0x5401;
+pub const TCSETS: u64 = 0x5402;
+pub const TCSETSW: u64 = 0x5403;
+pub const TCSETSF: u64 = 0x5404;
+pub const TIOCGPGRP: u64 = 0x540F;
+pub const TIOCSPGRP: u64 = 0x5410;
+pub const TIOCGWINSZ: u64 = 0x5413;
+pub const TIOCSWINSZ: u64 = 0x5414;
+
+pub const NCCS: usize = 19;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UserTermios {
+    pub c_iflag: u32,
+    pub c_oflag: u32,
+    pub c_cflag: u32,
+    pub c_lflag: u32,
+    pub c_line: u8,
+    pub c_cc: [u8; NCCS],
+    pub c_ispeed: u32,
+    pub c_ospeed: u32,
+}
+
+impl Default for UserTermios {
+    fn default() -> Self {
+        Self {
+            c_iflag: 0,
+            c_oflag: 0,
+            c_cflag: 0,
+            c_lflag: 0,
+            c_line: 0,
+            c_cc: [0; NCCS],
+            c_ispeed: 0,
+            c_ospeed: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct UserWinsize {
+    pub ws_row: u16,
+    pub ws_col: u16,
+    pub ws_xpixel: u16,
+    pub ws_ypixel: u16,
+}
 
 // =============================================================================
 // Thread / clone

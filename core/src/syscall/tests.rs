@@ -8,7 +8,9 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use crate::scheduler::task_struct::Task;
-use crate::syscall::handlers::{syscall_arch_prctl, syscall_futex};
+use crate::syscall::handlers::{
+    syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
+};
 use crate::syscall::signal::{
     deliver_pending_signal, syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask,
     syscall_rt_sigreturn,
@@ -19,8 +21,10 @@ use slopos_abi::signal::{
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
-    FUTEX_WAIT, FUTEX_WAKE, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_KILL,
-    SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN,
+    FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE,
+    SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_PIPE, SYSCALL_PIPE2,
+    SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN,
+    SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
@@ -38,6 +42,9 @@ use crate::scheduler::task::{
     task_shutdown_all, task_terminate,
 };
 use crate::syscall::handlers::syscall_lookup;
+use slopos_fs::fileio::{
+    file_close_fd, file_pipe_create, file_poll_fd, file_read_fd, file_write_fd,
+};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 
 // =============================================================================
@@ -213,6 +220,161 @@ pub fn test_phase56_syscall_lookup_valid() -> TestResult {
         );
     }
 
+    TestResult::Pass
+}
+
+pub fn test_phase7_syscall_lookup_valid() -> TestResult {
+    let required = [
+        SYSCALL_POLL,
+        SYSCALL_SELECT,
+        SYSCALL_PIPE,
+        SYSCALL_PIPE2,
+        SYSCALL_IOCTL,
+        SYSCALL_SETPGID,
+        SYSCALL_GETPGID,
+        SYSCALL_SETSID,
+    ];
+
+    for sysno in required {
+        let entry = syscall_lookup(sysno);
+        assert_not_null!(entry, "required phase7 syscall missing from table");
+        assert_test!(
+            unsafe { (*entry).handler.is_some() },
+            "required phase7 syscall has no handler"
+        );
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_pipe_poll_eof_baseline() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = unsafe { (*task_ptr).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe creation failed"
+    );
+
+    let payload = b"wheel";
+    let written = file_write_fd(
+        pid,
+        write_fd,
+        payload.as_ptr() as *const c_char,
+        payload.len(),
+    );
+    assert_eq_test!(written as usize, payload.len(), "pipe write failed");
+
+    let revents = file_poll_fd(pid, read_fd, POLLIN);
+    assert_test!((revents & POLLIN) != 0, "pipe read fd should be readable");
+
+    let mut out = [0u8; 8];
+    let read = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, payload.len());
+    assert_eq_test!(read as usize, payload.len(), "pipe read length mismatch");
+    assert_test!(&out[..payload.len()] == payload, "pipe payload mismatch");
+
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write fd failed");
+    let eof_read = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    assert_eq_test!(eof_read, 0, "pipe EOF read should return 0");
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read fd failed");
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_process_group_session_syscalls_baseline() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID);
+    let parent_ptr = task_find_by_id(parent_id);
+    assert_not_null!(parent_ptr);
+
+    let child_id = task_fork(parent_ptr);
+    assert_test!(child_id != INVALID_TASK_ID);
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr);
+
+    let mut frame = zero_frame();
+    let _ = syscall_getpgid(parent_ptr, &mut frame);
+    assert_eq_test!(
+        frame.rax as u32,
+        unsafe { (*parent_ptr).pgid },
+        "getpgid self mismatch"
+    );
+
+    let mut setpgid_frame = zero_frame();
+    setpgid_frame.rdi = child_id as u64;
+    setpgid_frame.rsi = parent_id as u64;
+    let _ = syscall_setpgid(parent_ptr, &mut setpgid_frame);
+    assert_eq_test!(setpgid_frame.rax, 0, "setpgid should succeed for child");
+    assert_eq_test!(
+        unsafe { (*child_ptr).pgid },
+        parent_id,
+        "child pgid mismatch after setpgid"
+    );
+
+    let mut setsid_frame = zero_frame();
+    let _ = syscall_setsid(child_ptr, &mut setsid_frame);
+    assert_eq_test!(
+        setsid_frame.rax as u32,
+        child_id,
+        "setsid should return child sid"
+    );
+    assert_eq_test!(
+        unsafe { (*child_ptr).sid },
+        child_id,
+        "child sid mismatch after setsid"
+    );
+    assert_eq_test!(
+        unsafe { (*child_ptr).pgid },
+        child_id,
+        "child pgid mismatch after setsid"
+    );
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
+    TestResult::Pass
+}
+
+pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr);
+    let pid = unsafe { (*task_ptr).process_id };
+
+    for _ in 0..128 {
+        let addr = slopos_mm::process_vm::process_vm_mmap(
+            pid,
+            0,
+            4096,
+            slopos_abi::syscall::PROT_READ | slopos_abi::syscall::PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if addr == 0 {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+        if slopos_mm::process_vm::process_vm_munmap(pid, addr, 4096) != 0 {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    }
+
+    task_terminate(task_id);
     TestResult::Pass
 }
 
@@ -1200,6 +1362,7 @@ slopos_lib::define_test_suite!(
         test_syscall_lookup_empty_slot,
         test_syscall_lookup_valid,
         test_phase56_syscall_lookup_valid,
+        test_phase7_syscall_lookup_valid,
         test_fork_null_parent,
         test_fork_kernel_task,
         test_fork_at_task_limit,
@@ -1224,6 +1387,23 @@ slopos_lib::define_test_suite!(
         test_signal_install_deliver_and_sigreturn,
         test_sigprocmask_block_then_unblock_delivery,
         test_sigchld_and_wait_interaction,
+        test_arch_prctl_set_get_fs_roundtrip,
+        test_pipe_poll_eof_baseline,
+        test_process_group_session_syscalls_baseline,
+        test_vm_mmap_munmap_stress_baseline,
+    ]
+);
+
+slopos_lib::define_test_suite!(
+    syscall_compat_smoke,
+    [
+        test_phase56_syscall_lookup_valid,
+        test_phase7_syscall_lookup_valid,
+        test_pipe_poll_eof_baseline,
+        test_process_group_session_syscalls_baseline,
+        test_sigchld_and_wait_interaction,
+        test_clone_thread_tls_isolation,
+        test_futex_wait_mismatch_and_wake_no_waiters,
         test_arch_prctl_set_get_fs_roundtrip,
     ]
 );
