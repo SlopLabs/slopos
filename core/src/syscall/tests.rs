@@ -97,30 +97,20 @@ fn zero_frame() -> InterruptFrame {
     unsafe { core::mem::zeroed() }
 }
 
-struct PageDirRestoreGuard {
-    prev_dir: *mut slopos_mm::paging::ProcessPageDir,
-}
-
-impl Drop for PageDirRestoreGuard {
-    fn drop(&mut self) {
-        if !self.prev_dir.is_null() {
-            let _ = slopos_mm::paging::switch_page_directory(self.prev_dir);
-        }
-    }
-}
-
 fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
     let page_dir = slopos_mm::process_vm::process_vm_get_page_dir(pid);
     if page_dir.is_null() {
         return None;
     }
-    let prev_dir = slopos_mm::paging::get_current_page_directory();
     if slopos_mm::paging::switch_page_directory(page_dir) != 0 {
         return None;
     }
-    let _restore_guard = PageDirRestoreGuard { prev_dir };
     let _guard = set_syscall_process_id(pid);
     let out = f();
+    let kernel_dir = slopos_mm::paging::paging_get_kernel_directory();
+    if !kernel_dir.is_null() {
+        let _ = slopos_mm::paging::switch_page_directory(kernel_dir);
+    }
     Some(out)
 }
 

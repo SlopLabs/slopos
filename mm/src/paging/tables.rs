@@ -41,8 +41,6 @@ static mut KERNEL_PAGE_DIR: ProcessPageDir = ProcessPageDir {
     kernel_mapping_gen: 0,
 };
 
-static mut CURRENT_PAGE_DIR: *mut ProcessPageDir = unsafe { &mut KERNEL_PAGE_DIR };
-
 fn table_empty(table: &PageTable) -> bool {
     table.iter().all(|e| !e.is_present())
 }
@@ -212,7 +210,7 @@ pub fn virt_to_phys_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
 }
 
 pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
-    unsafe { virt_to_phys_for_dir(CURRENT_PAGE_DIR, vaddr) }
+    unsafe { virt_to_phys_for_dir(&mut KERNEL_PAGE_DIR, vaddr) }
 }
 
 pub fn virt_to_phys_process(vaddr: VirtAddr, page_dir: *mut ProcessPageDir) -> PhysAddr {
@@ -369,11 +367,11 @@ pub fn map_page_4kb_in_dir(
 }
 
 pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
-    unsafe { map_page_in_directory(CURRENT_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_4KB) }
+    unsafe { map_page_in_directory(&mut KERNEL_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_4KB) }
 }
 
 pub fn map_page_2mb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
-    unsafe { map_page_in_directory(CURRENT_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_2MB) }
+    unsafe { map_page_in_directory(&mut KERNEL_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_2MB) }
 }
 
 pub fn paging_map_shared_kernel_page(
@@ -502,7 +500,7 @@ pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_in
 }
 
 pub fn unmap_page(vaddr: VirtAddr) -> c_int {
-    unsafe { unmap_page_in_directory(CURRENT_PAGE_DIR, vaddr) }
+    unsafe { unmap_page_in_directory(&mut KERNEL_PAGE_DIR, vaddr) }
 }
 
 pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
@@ -511,21 +509,8 @@ pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
     }
     unsafe {
         set_cr3((*page_dir).pml4_phys);
-        CURRENT_PAGE_DIR = page_dir;
     }
     0
-}
-
-pub fn get_current_page_directory() -> *mut ProcessPageDir {
-    unsafe { CURRENT_PAGE_DIR }
-}
-
-pub fn paging_set_current_directory(page_dir: *mut ProcessPageDir) {
-    if !page_dir.is_null() {
-        unsafe {
-            CURRENT_PAGE_DIR = page_dir;
-        }
-    }
 }
 
 pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
@@ -672,10 +657,11 @@ pub fn is_mapped(vaddr: VirtAddr) -> c_int {
 
 pub fn get_page_size(vaddr: VirtAddr) -> u64 {
     unsafe {
-        if CURRENT_PAGE_DIR.is_null() || (*CURRENT_PAGE_DIR).pml4.is_null() {
+        let page_dir = &mut KERNEL_PAGE_DIR as *mut ProcessPageDir;
+        if (*page_dir).pml4.is_null() {
             return 0;
         }
-        let pml4 = (*CURRENT_PAGE_DIR).pml4;
+        let pml4 = (*page_dir).pml4;
         let walker = PageTableWalker::new();
         match walker.walk(&*pml4, vaddr) {
             Ok(result) => result.page_size,

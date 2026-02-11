@@ -39,7 +39,8 @@ use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
-use slopos_mm::paging;
+use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
+use slopos_mm::process_vm::process_vm_get_page_dir;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserBytes;
 use slopos_mm::user_ptr::UserPtr;
@@ -414,11 +415,25 @@ define_syscall!(syscall_mark_frames_done(ctx, args) requires(compositor) {
 
 define_syscall!(syscall_roulette_draw(ctx, args) requires(display_exclusive) {
     let fate = args.arg0_u32();
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
+    let caller_dir = match ctx.process_id() {
+        Some(pid) => {
+            let dir = process_vm_get_page_dir(pid);
+            if dir.is_null() {
+                core::ptr::null_mut()
+            } else {
+                dir
+            }
+        }
+        None => core::ptr::null_mut(),
+    };
+    let kernel_dir = paging_get_kernel_directory();
+    if !kernel_dir.is_null() {
+        let _ = switch_page_directory(kernel_dir);
+    }
     let disp = ctx.from_result(video::roulette_draw(fate));
-    let _ = paging::switch_page_directory(original_dir);
+    if !caller_dir.is_null() {
+        let _ = switch_page_directory(caller_dir);
+    }
     disp
 });
 

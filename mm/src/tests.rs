@@ -18,8 +18,7 @@ use crate::page_alloc::{
     get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
 };
 use crate::paging::{
-    get_current_page_directory, paging_get_kernel_directory, paging_is_cow,
-    paging_is_user_accessible, virt_to_phys,
+    paging_get_kernel_directory, paging_is_cow, paging_is_user_accessible, virt_to_phys,
 };
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::get_process_vm_stats;
@@ -617,9 +616,6 @@ pub fn test_paging_virt_to_phys() -> TestResult {
 pub fn test_paging_get_kernel_dir() -> TestResult {
     let kernel_dir = paging_get_kernel_directory();
     assert_not_null!(kernel_dir, "kernel directory");
-
-    let current_dir = get_current_page_directory();
-    assert_not_null!(current_dir, "current directory");
     pass!()
 }
 

@@ -226,7 +226,7 @@ fn is_scheduling_active() -> bool {
         && PREEMPTION_ENABLED.load(Ordering::Acquire) != 0
 }
 
-use slopos_mm::paging::{paging_get_kernel_directory, paging_set_current_directory};
+use slopos_mm::paging::paging_get_kernel_directory;
 use slopos_mm::process_vm::{process_vm_get_page_dir, process_vm_sync_kernel_mappings};
 use slopos_mm::user_copy;
 
@@ -300,7 +300,6 @@ fn requeue_running_task(cpu_id: usize, current: *mut Task) {
 fn switch_to_kernel_address_space(task: *mut Task) {
     unsafe {
         let kernel_dir = paging_get_kernel_directory();
-        paging_set_current_directory(kernel_dir);
         if !(*kernel_dir).pml4_phys.is_null() && !task.is_null() {
             (*task).context.cr3 = (*kernel_dir).pml4_phys.as_u64();
         }
@@ -468,11 +467,9 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             let page_dir = process_vm_get_page_dir((*to_task).process_id);
             if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
                 (*to_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
-                paging_set_current_directory(page_dir);
             }
         } else {
             let kernel_dir = paging_get_kernel_directory();
-            paging_set_current_directory(kernel_dir);
             let kd_phys = (*kernel_dir).pml4_phys.as_u64();
             if kd_phys != 0 {
                 (*to_task).context.cr3 = kd_phys;
