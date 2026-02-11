@@ -261,8 +261,14 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(block_num, block_slice)?;
             let mut cursor = block_offset;
             while cursor + 8 <= self.block_size as usize && remaining > 0 {
-                let entry_inode = read_le_u32(&block_slice[cursor..]);
-                let rec_len = read_le_u16(&block_slice[cursor + 4..]) as usize;
+                let entry_inode = u32::from_le_bytes([
+                    block_slice[cursor],
+                    block_slice[cursor + 1],
+                    block_slice[cursor + 2],
+                    block_slice[cursor + 3],
+                ]);
+                let rec_len =
+                    u16::from_le_bytes([block_slice[cursor + 4], block_slice[cursor + 5]]) as usize;
                 let name_len = block_slice[cursor + 6] as usize;
                 let file_type = block_slice[cursor + 7];
                 if rec_len < 8 || cursor + rec_len > self.block_size as usize {
@@ -434,8 +440,14 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(block_num, block_slice)?;
             let mut cursor = 0usize;
             while cursor + 8 <= self.block_size as usize {
-                let entry_inode = read_le_u32(&block_slice[cursor..]);
-                let rec_len = read_le_u16(&block_slice[cursor + 4..]) as usize;
+                let entry_inode = u32::from_le_bytes([
+                    block_slice[cursor],
+                    block_slice[cursor + 1],
+                    block_slice[cursor + 2],
+                    block_slice[cursor + 3],
+                ]);
+                let rec_len =
+                    u16::from_le_bytes([block_slice[cursor + 4], block_slice[cursor + 5]]) as usize;
                 let name_len = block_slice[cursor + 6] as usize;
                 if rec_len < 8 || cursor + rec_len > self.block_size as usize {
                     return Err(Ext2Error::DirectoryFormat);
@@ -444,7 +456,7 @@ impl<'a> Ext2Fs<'a> {
                     let name_start = cursor + 8;
                     let name_end = name_start + name_len;
                     if name_end <= cursor + rec_len && &block_slice[name_start..name_end] == name {
-                        write_le_u32(&mut block_slice[cursor..cursor + 4], 0);
+                        block_slice[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes());
                         self.write_block(block_num, block_slice)?;
                         return Ok(());
                     }
@@ -469,7 +481,12 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(inode.block[12], block_slice)?;
             for idx in 0..(self.block_size as usize / 4) {
                 let offset = idx * 4;
-                let block = read_le_u32(&block_slice[offset..]);
+                let block = u32::from_le_bytes([
+                    block_slice[offset],
+                    block_slice[offset + 1],
+                    block_slice[offset + 2],
+                    block_slice[offset + 3],
+                ]);
                 if block != 0 {
                     self.free_block(block)?;
                 }
@@ -619,7 +636,12 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(ind_block, block_slice)?;
             let idx = file_block - 12;
             let offset = (idx as usize) * 4;
-            let block = read_le_u32(&block_slice[offset..]);
+            let block = u32::from_le_bytes([
+                block_slice[offset],
+                block_slice[offset + 1],
+                block_slice[offset + 2],
+                block_slice[offset + 3],
+            ]);
             if block == 0 {
                 return Err(Ext2Error::InvalidBlock);
             }
@@ -656,10 +678,15 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(ind_block, block_slice)?;
             let idx = file_block - 12;
             let offset = (idx as usize) * 4;
-            let mut entry = read_le_u32(&block_slice[offset..]);
+            let mut entry = u32::from_le_bytes([
+                block_slice[offset],
+                block_slice[offset + 1],
+                block_slice[offset + 2],
+                block_slice[offset + 3],
+            ]);
             if entry == 0 {
                 entry = self.allocate_block()?;
-                write_le_u32(&mut block_slice[offset..offset + 4], entry);
+                block_slice[offset..offset + 4].copy_from_slice(&entry.to_le_bytes());
                 self.write_block(ind_block, block_slice)?;
                 return Ok((entry, true));
             }
@@ -745,7 +772,8 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(block_num, block_slice)?;
             let mut cursor = 0usize;
             while cursor + 8 <= self.block_size as usize {
-                let rec_len = read_le_u16(&block_slice[cursor + 4..]) as usize;
+                let rec_len =
+                    u16::from_le_bytes([block_slice[cursor + 4], block_slice[cursor + 5]]) as usize;
                 if rec_len < 8 || cursor + rec_len > self.block_size as usize {
                     return Err(Ext2Error::DirectoryFormat);
                 }
@@ -753,7 +781,8 @@ impl<'a> Ext2Fs<'a> {
                     let name_len = block_slice[cursor + 6] as usize;
                     let used = dir_entry_size(name_len);
                     if rec_len >= used + entry_size {
-                        write_le_u16(&mut block_slice[cursor + 4..cursor + 6], used as u16);
+                        block_slice[cursor + 4..cursor + 6]
+                            .copy_from_slice(&(used as u16).to_le_bytes());
                         let new_off = cursor + used;
                         write_dir_entry(
                             &mut block_slice[new_off..],
@@ -1015,29 +1044,29 @@ fn parse_superblock(data: &[u8]) -> Result<Ext2Superblock, Ext2Error> {
         return Err(Ext2Error::InvalidSuperblock);
     }
     Ok(Ext2Superblock {
-        inodes_count: read_le_u32(&data[0..]),
-        blocks_count: read_le_u32(&data[4..]),
-        free_blocks_count: read_le_u32(&data[12..]),
-        free_inodes_count: read_le_u32(&data[16..]),
-        first_data_block: read_le_u32(&data[20..]),
-        log_block_size: read_le_u32(&data[24..]),
-        blocks_per_group: read_le_u32(&data[32..]),
-        inodes_per_group: read_le_u32(&data[40..]),
-        magic: read_le_u16(&data[56..]),
-        rev_level: read_le_u32(&data[76..]),
-        first_ino: read_le_u32(&data[84..]),
-        inode_size: read_le_u16(&data[88..]),
+        inodes_count: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+        blocks_count: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+        free_blocks_count: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+        free_inodes_count: u32::from_le_bytes([data[16], data[17], data[18], data[19]]),
+        first_data_block: u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+        log_block_size: u32::from_le_bytes([data[24], data[25], data[26], data[27]]),
+        blocks_per_group: u32::from_le_bytes([data[32], data[33], data[34], data[35]]),
+        inodes_per_group: u32::from_le_bytes([data[40], data[41], data[42], data[43]]),
+        magic: u16::from_le_bytes([data[56], data[57]]),
+        rev_level: u32::from_le_bytes([data[76], data[77], data[78], data[79]]),
+        first_ino: u32::from_le_bytes([data[84], data[85], data[86], data[87]]),
+        inode_size: u16::from_le_bytes([data[88], data[89]]),
     })
 }
 
 fn parse_group_desc(data: &[u8]) -> Ext2GroupDesc {
     Ext2GroupDesc {
-        block_bitmap: read_le_u32(&data[0..]),
-        inode_bitmap: read_le_u32(&data[4..]),
-        inode_table: read_le_u32(&data[8..]),
-        free_blocks_count: read_le_u16(&data[12..]),
-        free_inodes_count: read_le_u16(&data[14..]),
-        used_dirs_count: read_le_u16(&data[16..]),
+        block_bitmap: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+        inode_bitmap: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+        inode_table: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+        free_blocks_count: u16::from_le_bytes([data[12], data[13]]),
+        free_inodes_count: u16::from_le_bytes([data[14], data[15]]),
+        used_dirs_count: u16::from_le_bytes([data[16], data[17]]),
     }
 }
 
@@ -1045,57 +1074,62 @@ fn parse_inode(data: &[u8]) -> Ext2Inode {
     let mut block = [0u32; 15];
     let mut offset = 40usize;
     for idx in 0..15 {
-        block[idx] = read_le_u32(&data[offset..]);
+        block[idx] = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
         offset += 4;
     }
     Ext2Inode {
-        mode: read_le_u16(&data[0..]),
-        uid: read_le_u16(&data[2..]),
-        size: read_le_u32(&data[4..]),
-        atime: read_le_u32(&data[8..]),
-        ctime: read_le_u32(&data[12..]),
-        mtime: read_le_u32(&data[16..]),
-        dtime: read_le_u32(&data[20..]),
-        gid: read_le_u16(&data[24..]),
-        links_count: read_le_u16(&data[26..]),
-        blocks: read_le_u32(&data[28..]),
-        flags: read_le_u32(&data[32..]),
+        mode: u16::from_le_bytes([data[0], data[1]]),
+        uid: u16::from_le_bytes([data[2], data[3]]),
+        size: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+        atime: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+        ctime: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+        mtime: u32::from_le_bytes([data[16], data[17], data[18], data[19]]),
+        dtime: u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+        gid: u16::from_le_bytes([data[24], data[25]]),
+        links_count: u16::from_le_bytes([data[26], data[27]]),
+        blocks: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
+        flags: u32::from_le_bytes([data[32], data[33], data[34], data[35]]),
         block,
     }
 }
 
 fn encode_superblock(data: &mut [u8], sb: Ext2Superblock) {
-    write_le_u32(&mut data[12..16], sb.free_blocks_count);
-    write_le_u32(&mut data[16..20], sb.free_inodes_count);
+    data[12..16].copy_from_slice(&sb.free_blocks_count.to_le_bytes());
+    data[16..20].copy_from_slice(&sb.free_inodes_count.to_le_bytes());
 }
 
 fn encode_group_desc(data: &mut [u8], desc: Ext2GroupDesc) {
-    write_le_u32(&mut data[0..4], desc.block_bitmap);
-    write_le_u32(&mut data[4..8], desc.inode_bitmap);
-    write_le_u32(&mut data[8..12], desc.inode_table);
-    write_le_u16(&mut data[12..14], desc.free_blocks_count);
-    write_le_u16(&mut data[14..16], desc.free_inodes_count);
-    write_le_u16(&mut data[16..18], desc.used_dirs_count);
+    data[0..4].copy_from_slice(&desc.block_bitmap.to_le_bytes());
+    data[4..8].copy_from_slice(&desc.inode_bitmap.to_le_bytes());
+    data[8..12].copy_from_slice(&desc.inode_table.to_le_bytes());
+    data[12..14].copy_from_slice(&desc.free_blocks_count.to_le_bytes());
+    data[14..16].copy_from_slice(&desc.free_inodes_count.to_le_bytes());
+    data[16..18].copy_from_slice(&desc.used_dirs_count.to_le_bytes());
 }
 
 fn encode_inode(data: &mut [u8], inode: Ext2Inode) {
     for byte in data.iter_mut() {
         *byte = 0;
     }
-    write_le_u16(&mut data[0..2], inode.mode);
-    write_le_u16(&mut data[2..4], inode.uid);
-    write_le_u32(&mut data[4..8], inode.size);
-    write_le_u32(&mut data[8..12], inode.atime);
-    write_le_u32(&mut data[12..16], inode.ctime);
-    write_le_u32(&mut data[16..20], inode.mtime);
-    write_le_u32(&mut data[20..24], inode.dtime);
-    write_le_u16(&mut data[24..26], inode.gid);
-    write_le_u16(&mut data[26..28], inode.links_count);
-    write_le_u32(&mut data[28..32], inode.blocks);
-    write_le_u32(&mut data[32..36], inode.flags);
+    data[0..2].copy_from_slice(&inode.mode.to_le_bytes());
+    data[2..4].copy_from_slice(&inode.uid.to_le_bytes());
+    data[4..8].copy_from_slice(&inode.size.to_le_bytes());
+    data[8..12].copy_from_slice(&inode.atime.to_le_bytes());
+    data[12..16].copy_from_slice(&inode.ctime.to_le_bytes());
+    data[16..20].copy_from_slice(&inode.mtime.to_le_bytes());
+    data[20..24].copy_from_slice(&inode.dtime.to_le_bytes());
+    data[24..26].copy_from_slice(&inode.gid.to_le_bytes());
+    data[26..28].copy_from_slice(&inode.links_count.to_le_bytes());
+    data[28..32].copy_from_slice(&inode.blocks.to_le_bytes());
+    data[32..36].copy_from_slice(&inode.flags.to_le_bytes());
     let mut offset = 40usize;
     for idx in 0..15 {
-        write_le_u32(&mut data[offset..offset + 4], inode.block[idx]);
+        data[offset..offset + 4].copy_from_slice(&inode.block[idx].to_le_bytes());
         offset += 4;
     }
 }
@@ -1106,8 +1140,8 @@ fn dir_entry_size(name_len: usize) -> usize {
 }
 
 fn write_dir_entry(data: &mut [u8], inode: u32, name: &[u8], is_dir: bool, rec_len: usize) {
-    write_le_u32(&mut data[0..4], inode);
-    write_le_u16(&mut data[4..6], rec_len as u16);
+    data[0..4].copy_from_slice(&inode.to_le_bytes());
+    data[4..6].copy_from_slice(&(rec_len as u16).to_le_bytes());
     data[6] = name.len() as u8;
     data[7] = if is_dir { 2 } else { 1 };
     for byte in data[8..rec_len].iter_mut() {
@@ -1183,22 +1217,6 @@ fn clear_bit(bitmap: &mut [u8], bit: usize) {
     if let Some(byte) = bitmap.get_mut(byte_idx) {
         *byte &= !(1 << bit_idx);
     }
-}
-
-pub(crate) fn read_le_u16(data: &[u8]) -> u16 {
-    u16::from_le_bytes([data[0], data[1]])
-}
-
-pub(crate) fn read_le_u32(data: &[u8]) -> u32 {
-    u32::from_le_bytes([data[0], data[1], data[2], data[3]])
-}
-
-pub(crate) fn write_le_u16(data: &mut [u8], value: u16) {
-    data[0..2].copy_from_slice(&value.to_le_bytes());
-}
-
-pub(crate) fn write_le_u32(data: &mut [u8], value: u32) {
-    data[0..4].copy_from_slice(&value.to_le_bytes());
 }
 
 const MODE_FILE: u16 = 0x8000;

@@ -101,8 +101,8 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     if !caps.has_device_cfg() {
         return 0;
     }
-    let lo = caps.device_cfg.read_u32(0) as u64;
-    let hi = caps.device_cfg.read_u32(4) as u64;
+    let lo = caps.device_cfg.read::<u32>(0) as u64;
+    let hi = caps.device_cfg.read::<u32>(4) as u64;
     lo | (hi << 32)
 }
 

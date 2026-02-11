@@ -143,46 +143,6 @@ impl MmioRegion {
     }
 
     #[inline]
-    pub fn read_u8(&self, offset: usize) -> u8 {
-        self.read(offset)
-    }
-
-    #[inline]
-    pub fn read_u16(&self, offset: usize) -> u16 {
-        self.read(offset)
-    }
-
-    #[inline]
-    pub fn read_u32(&self, offset: usize) -> u32 {
-        self.read(offset)
-    }
-
-    #[inline]
-    pub fn read_u64(&self, offset: usize) -> u64 {
-        self.read(offset)
-    }
-
-    #[inline]
-    pub fn write_u8(&self, offset: usize, value: u8) {
-        self.write(offset, value)
-    }
-
-    #[inline]
-    pub fn write_u16(&self, offset: usize, value: u16) {
-        self.write(offset, value)
-    }
-
-    #[inline]
-    pub fn write_u32(&self, offset: usize, value: u32) {
-        self.write(offset, value)
-    }
-
-    #[inline]
-    pub fn write_u64(&self, offset: usize, value: u64) {
-        self.write(offset, value)
-    }
-
-    #[inline]
     pub fn virt_base(&self) -> u64 {
         self.virt_base
     }

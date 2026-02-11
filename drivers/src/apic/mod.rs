@@ -298,7 +298,7 @@ pub fn read_register(reg: u32) -> u32 {
     }
     APIC_REGS
         .get()
-        .map(|r| r.read_u32(reg as usize))
+        .map(|r| r.read::<u32>(reg as usize))
         .unwrap_or(0)
 }
 
@@ -307,7 +307,7 @@ pub fn write_register(reg: u32, value: u32) {
         return;
     }
     if let Some(r) = APIC_REGS.get() {
-        r.write_u32(reg as usize, value);
+        r.write::<u32>(reg as usize, value);
     }
 }
 

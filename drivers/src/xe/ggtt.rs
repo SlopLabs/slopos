@@ -74,11 +74,11 @@ pub fn xe_ggtt_map(ggtt: &XeGgtt, start_entry: u32, phys: PhysAddr, pages: u32) 
         let addr = phys.offset(page as u64 * PAGE_SIZE_4KB).as_u64();
         let pte = (addr & regs::GGTT_PTE_ADDR_MASK) | regs::GGTT_PTE_PRESENT;
         let offset = (start_entry + page) as usize * regs::GGTT_PTE_BYTES;
-        ggtt.table.write_u64(offset, pte);
+        ggtt.table.write::<u64>(offset, pte);
     }
 
     let last_offset = (end - 1) as usize * regs::GGTT_PTE_BYTES;
-    let _ = ggtt.table.read_u64(last_offset);
+    let _ = ggtt.table.read::<u64>(last_offset);
     true
 }
 

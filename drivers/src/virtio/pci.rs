@@ -119,18 +119,18 @@ pub fn negotiate_features(
     status |= VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     set_device_status(cfg, status);
 
-    cfg.write_u32(COMMON_CFG_DEVICE_FEATURE_SELECT, 0);
-    let features_lo = cfg.read_u32(COMMON_CFG_DEVICE_FEATURE) as u64;
-    cfg.write_u32(COMMON_CFG_DEVICE_FEATURE_SELECT, 1);
-    let features_hi = cfg.read_u32(COMMON_CFG_DEVICE_FEATURE) as u64;
+    cfg.write::<u32>(COMMON_CFG_DEVICE_FEATURE_SELECT, 0);
+    let features_lo = cfg.read::<u32>(COMMON_CFG_DEVICE_FEATURE) as u64;
+    cfg.write::<u32>(COMMON_CFG_DEVICE_FEATURE_SELECT, 1);
+    let features_hi = cfg.read::<u32>(COMMON_CFG_DEVICE_FEATURE) as u64;
     let device_features = features_lo | (features_hi << 32);
 
     let driver_features = device_features & (required_features | optional_features);
 
-    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE_SELECT, 0);
-    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE, driver_features as u32);
-    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE_SELECT, 1);
-    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE, (driver_features >> 32) as u32);
+    cfg.write::<u32>(COMMON_CFG_DRIVER_FEATURE_SELECT, 0);
+    cfg.write::<u32>(COMMON_CFG_DRIVER_FEATURE, driver_features as u32);
+    cfg.write::<u32>(COMMON_CFG_DRIVER_FEATURE_SELECT, 1);
+    cfg.write::<u32>(COMMON_CFG_DRIVER_FEATURE, (driver_features >> 32) as u32);
 
     status |= VIRTIO_STATUS_FEATURES_OK;
     set_device_status(cfg, status);

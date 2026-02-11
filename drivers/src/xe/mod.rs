@@ -127,7 +127,7 @@ pub fn xe_probe() -> bool {
         return false;
     }
 
-    let gmd_id = mmio_region.read_u32(regs::GMD_ID);
+    let gmd_id = mmio_region.read::<u32>(regs::GMD_ID);
     if gmd_id == u32::MAX {
         klog_warn!("XE: GMD_ID read failed (0xFFFFFFFF)");
         return false;

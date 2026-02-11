@@ -45,8 +45,8 @@ impl IoapicController {
             Some(region) => region,
             None => return 0,
         };
-        region.write_u32(0x00, reg as u32);
-        region.read_u32(0x10)
+        region.write::<u32>(0x00, reg as u32);
+        region.read::<u32>(0x10)
     }
 
     #[inline]
@@ -55,8 +55,8 @@ impl IoapicController {
             Some(region) => region,
             None => return,
         };
-        region.write_u32(0x00, reg as u32);
-        region.write_u32(0x10, value);
+        region.write::<u32>(0x00, reg as u32);
+        region.write::<u32>(0x10, value);
     }
 }
 

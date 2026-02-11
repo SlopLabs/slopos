@@ -5,7 +5,7 @@ use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
-use crate::ext2::{Ext2Error, Ext2Fs, write_le_u16, write_le_u32};
+use crate::ext2::{Ext2Error, Ext2Fs};
 use crate::vfs::{
     vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_stat,
     vfs_unlink,
@@ -240,28 +240,28 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
     let sb_offset = 1024usize;
     let sb = unsafe { core::slice::from_raw_parts_mut(device.as_mut_ptr().add(sb_offset), 1024) };
 
-    write_le_u32(&mut sb[0..], spec.inodes);
-    write_le_u32(&mut sb[4..], spec.blocks);
-    write_le_u32(&mut sb[12..], 8);
-    write_le_u32(&mut sb[16..], 8);
-    write_le_u32(&mut sb[20..], 1);
-    write_le_u32(&mut sb[24..], 0);
-    write_le_u32(&mut sb[32..], blocks_per_group);
-    write_le_u32(&mut sb[40..], inodes_per_group);
-    write_le_u16(&mut sb[56..], 0xEF53);
-    write_le_u32(&mut sb[76..], 1);
-    write_le_u32(&mut sb[84..], 11);
-    write_le_u16(&mut sb[88..], inode_size);
+    sb[0..4].copy_from_slice(&spec.inodes.to_le_bytes());
+    sb[4..8].copy_from_slice(&spec.blocks.to_le_bytes());
+    sb[12..16].copy_from_slice(&8u32.to_le_bytes());
+    sb[16..20].copy_from_slice(&8u32.to_le_bytes());
+    sb[20..24].copy_from_slice(&1u32.to_le_bytes());
+    sb[24..28].copy_from_slice(&0u32.to_le_bytes());
+    sb[32..36].copy_from_slice(&blocks_per_group.to_le_bytes());
+    sb[40..44].copy_from_slice(&inodes_per_group.to_le_bytes());
+    sb[56..58].copy_from_slice(&0xEF53u16.to_le_bytes());
+    sb[76..80].copy_from_slice(&1u32.to_le_bytes());
+    sb[84..88].copy_from_slice(&11u32.to_le_bytes());
+    sb[88..90].copy_from_slice(&inode_size.to_le_bytes());
 
     let desc_offset = 2 * block_size as usize;
     let desc = unsafe { core::slice::from_raw_parts_mut(device.as_mut_ptr().add(desc_offset), 32) };
 
-    write_le_u32(&mut desc[0..], 3);
-    write_le_u32(&mut desc[4..], 4);
-    write_le_u32(&mut desc[8..], 5);
-    write_le_u16(&mut desc[12..], 8);
-    write_le_u16(&mut desc[14..], 8);
-    write_le_u16(&mut desc[16..], 1);
+    desc[0..4].copy_from_slice(&3u32.to_le_bytes());
+    desc[4..8].copy_from_slice(&4u32.to_le_bytes());
+    desc[8..12].copy_from_slice(&5u32.to_le_bytes());
+    desc[12..14].copy_from_slice(&8u16.to_le_bytes());
+    desc[14..16].copy_from_slice(&8u16.to_le_bytes());
+    desc[16..18].copy_from_slice(&1u16.to_le_bytes());
 
     let inode_table_offset = 5 * block_size as usize;
     let inode_table = unsafe {
@@ -269,18 +269,25 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
     };
 
     let root_inode_offset = 128;
-    write_le_u16(&mut inode_table[root_inode_offset..], 0x4000);
-    write_le_u32(&mut inode_table[root_inode_offset + 4..], block_size);
-    write_le_u32(&mut inode_table[root_inode_offset + 28..], 2);
-    write_le_u32(&mut inode_table[root_inode_offset + 40..], 6);
+    inode_table[root_inode_offset..root_inode_offset + 2].copy_from_slice(&0x4000u16.to_le_bytes());
+    inode_table[root_inode_offset + 4..root_inode_offset + 8]
+        .copy_from_slice(&block_size.to_le_bytes());
+    inode_table[root_inode_offset + 28..root_inode_offset + 32]
+        .copy_from_slice(&2u32.to_le_bytes());
+    inode_table[root_inode_offset + 40..root_inode_offset + 44]
+        .copy_from_slice(&6u32.to_le_bytes());
 
     let file_inode_number = 3u32;
     if let (Some(name), Some(data)) = (spec.file_name, spec.file_data) {
         let file_inode_offset = root_inode_offset + inode_size as usize;
-        write_le_u16(&mut inode_table[file_inode_offset..], 0x8000);
-        write_le_u32(&mut inode_table[file_inode_offset + 4..], data.len() as u32);
-        write_le_u32(&mut inode_table[file_inode_offset + 28..], 1);
-        write_le_u32(&mut inode_table[file_inode_offset + 40..], spec.file_block);
+        inode_table[file_inode_offset..file_inode_offset + 2]
+            .copy_from_slice(&0x8000u16.to_le_bytes());
+        inode_table[file_inode_offset + 4..file_inode_offset + 8]
+            .copy_from_slice(&(data.len() as u32).to_le_bytes());
+        inode_table[file_inode_offset + 28..file_inode_offset + 32]
+            .copy_from_slice(&1u32.to_le_bytes());
+        inode_table[file_inode_offset + 40..file_inode_offset + 44]
+            .copy_from_slice(&spec.file_block.to_le_bytes());
 
         if spec.file_block < spec.blocks {
             let data_offset = spec.file_block as usize * block_size as usize;
@@ -296,8 +303,8 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
 
         let mut write_dir_entry =
             |offset: usize, inode: u32, rec_len: u16, name: &[u8], file_type: u8| {
-                write_le_u32(&mut dir_block[offset..], inode);
-                write_le_u16(&mut dir_block[offset + 4..], rec_len);
+                dir_block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+                dir_block[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
                 dir_block[offset + 6] = name.len() as u8;
                 dir_block[offset + 7] = file_type;
                 let name_end = offset + 8 + name.len();
@@ -320,8 +327,8 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
 
         let mut write_dir_entry =
             |offset: usize, inode: u32, rec_len: u16, name: &[u8], file_type: u8| {
-                write_le_u32(&mut dir_block[offset..], inode);
-                write_le_u16(&mut dir_block[offset + 4..], rec_len);
+                dir_block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+                dir_block[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
                 dir_block[offset + 6] = name.len() as u8;
                 dir_block[offset + 7] = file_type;
                 let name_end = offset + 8 + name.len();
@@ -374,7 +381,7 @@ pub fn test_ext2_unsupported_block_size() -> TestResult {
     let sb_offset = 1024usize;
     unsafe {
         let sb = core::slice::from_raw_parts_mut(device.as_mut_ptr().add(sb_offset), 1024);
-        write_le_u32(&mut sb[24..], 8);
+        sb[24..28].copy_from_slice(&8u32.to_le_bytes());
     }
 
     let result = Ext2Fs::init_internal(&mut device);

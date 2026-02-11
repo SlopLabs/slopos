@@ -159,15 +159,15 @@ pub fn setup_queue(common_cfg: &MmioRegion, queue_index: u16, max_size: u16) -> 
         return None;
     }
 
-    common_cfg.write_u16(COMMON_CFG_QUEUE_SELECT, queue_index);
+    common_cfg.write::<u16>(COMMON_CFG_QUEUE_SELECT, queue_index);
 
-    let device_max_size = common_cfg.read_u16(COMMON_CFG_QUEUE_SIZE);
+    let device_max_size = common_cfg.read::<u16>(COMMON_CFG_QUEUE_SIZE);
     if device_max_size == 0 {
         return None;
     }
 
     let size = device_max_size.min(max_size);
-    common_cfg.write_u16(COMMON_CFG_QUEUE_SIZE, size);
+    common_cfg.write::<u16>(COMMON_CFG_QUEUE_SIZE, size);
 
     let desc_page = alloc_page_frame(ALLOC_FLAG_ZERO);
     let avail_page = alloc_page_frame(ALLOC_FLAG_ZERO);
@@ -190,12 +190,12 @@ pub fn setup_queue(common_cfg: &MmioRegion, queue_index: u16, max_size: u16) -> 
     let avail_virt = avail_page.to_virt().as_mut_ptr::<u8>();
     let used_virt = used_page.to_virt().as_mut_ptr::<u8>();
 
-    common_cfg.write_u64(COMMON_CFG_QUEUE_DESC, desc_page.as_u64());
-    common_cfg.write_u64(COMMON_CFG_QUEUE_AVAIL, avail_page.as_u64());
-    common_cfg.write_u64(COMMON_CFG_QUEUE_USED, used_page.as_u64());
-    common_cfg.write_u16(COMMON_CFG_QUEUE_ENABLE, 1);
+    common_cfg.write::<u64>(COMMON_CFG_QUEUE_DESC, desc_page.as_u64());
+    common_cfg.write::<u64>(COMMON_CFG_QUEUE_AVAIL, avail_page.as_u64());
+    common_cfg.write::<u64>(COMMON_CFG_QUEUE_USED, used_page.as_u64());
+    common_cfg.write::<u16>(COMMON_CFG_QUEUE_ENABLE, 1);
 
-    let notify_off = common_cfg.read_u16(COMMON_CFG_QUEUE_NOTIFY_OFF);
+    let notify_off = common_cfg.read::<u16>(COMMON_CFG_QUEUE_NOTIFY_OFF);
 
     Some(Virtqueue {
         size,
@@ -218,5 +218,5 @@ pub fn notify_queue(
     queue_index: u16,
 ) {
     let offset = (queue.notify_off as u32) * notify_off_multiplier;
-    notify_cfg.write_u16(offset as usize, queue_index);
+    notify_cfg.write::<u16>(offset as usize, queue_index);
 }

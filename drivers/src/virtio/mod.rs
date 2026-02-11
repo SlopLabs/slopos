@@ -147,13 +147,13 @@ impl VirtioMmioCaps {
 /// Set the device status register
 #[inline]
 pub fn set_device_status(cfg: &MmioRegion, status: u8) {
-    cfg.write_u8(COMMON_CFG_DEVICE_STATUS, status);
+    cfg.write::<u8>(COMMON_CFG_DEVICE_STATUS, status);
 }
 
 /// Get the device status register
 #[inline]
 pub fn get_device_status(cfg: &MmioRegion) -> u8 {
-    cfg.read_u8(COMMON_CFG_DEVICE_STATUS)
+    cfg.read::<u8>(COMMON_CFG_DEVICE_STATUS)
 }
 
 /// Reset the device (set status to 0)

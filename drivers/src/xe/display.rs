@@ -24,22 +24,22 @@ pub fn xe_display_program_primary(
     let size = ((height - 1) << 16) | (width - 1);
     let addr = ggtt_addr as u32;
 
-    mmio.write_u32(regs::PLANE_POS_A, 0);
-    mmio.write_u32(regs::PLANE_SIZE_A, size);
-    mmio.write_u32(regs::PLANE_STRIDE_A, stride);
-    mmio.write_u32(regs::PLANE_OFFSET_A, 0);
-    mmio.write_u32(regs::PLANE_SURF_A, addr);
+    mmio.write::<u32>(regs::PLANE_POS_A, 0);
+    mmio.write::<u32>(regs::PLANE_SIZE_A, size);
+    mmio.write::<u32>(regs::PLANE_STRIDE_A, stride);
+    mmio.write::<u32>(regs::PLANE_OFFSET_A, 0);
+    mmio.write::<u32>(regs::PLANE_SURF_A, addr);
 
     let ctl = regs::PLANE_CTL_ENABLE | regs::PLANE_CTL_FORMAT_XRGB_8888;
-    mmio.write_u32(regs::PLANE_CTL_A, ctl);
+    mmio.write::<u32>(regs::PLANE_CTL_A, ctl);
 
-    let _ = mmio.read_u32(regs::PLANE_SURF_A);
+    let _ = mmio.read::<u32>(regs::PLANE_SURF_A);
     true
 }
 
 pub fn xe_display_flush(mmio: &MmioRegion, ggtt_addr: u64) -> bool {
     let addr = ggtt_addr as u32;
-    mmio.write_u32(regs::PLANE_SURF_A, addr);
-    let _ = mmio.read_u32(regs::PLANE_SURF_A);
+    mmio.write::<u32>(regs::PLANE_SURF_A, addr);
+    let _ = mmio.read::<u32>(regs::PLANE_SURF_A);
     true
 }

@@ -173,19 +173,31 @@ pub fn is_busy() -> bool {
     read_status() & STATUS_INPUT_FULL != 0
 }
 
+/// Poll the status register until `condition` returns `true`, or timeout.
+#[inline(always)]
+fn wait_for_status(condition: fn() -> bool) -> bool {
+    for _ in 0..WAIT_ITERATIONS {
+        if condition() {
+            return true;
+        }
+        cpu::pause();
+    }
+    false
+}
+
+/// Check if the controller is ready to accept input (input buffer empty).
+#[inline(always)]
+fn is_ready() -> bool {
+    !is_busy()
+}
+
 /// Wait until the controller is ready to accept input (input buffer empty).
 ///
 /// This must be called before writing commands or data to the controller.
 /// Returns `true` if ready, `false` if timeout occurred.
 #[inline(always)]
 pub fn wait_ready() -> bool {
-    for _ in 0..WAIT_ITERATIONS {
-        if !is_busy() {
-            return true;
-        }
-        cpu::pause();
-    }
-    false
+    wait_for_status(is_ready)
 }
 
 /// Wait until data is available to read (output buffer full).
@@ -194,13 +206,7 @@ pub fn wait_ready() -> bool {
 /// Returns `true` if data available, `false` if timeout occurred.
 #[inline(always)]
 pub fn wait_data() -> bool {
-    for _ in 0..WAIT_ITERATIONS {
-        if has_data() {
-            return true;
-        }
-        cpu::pause();
-    }
-    false
+    wait_for_status(has_data)
 }
 
 /// Write a command to the PS/2 controller (port 0x64).
