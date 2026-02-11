@@ -1,5 +1,6 @@
 //! exec() syscall implementation for loading and executing ELF binaries from filesystem.
 
+#[cfg(feature = "itests")]
 pub mod tests;
 
 use alloc::vec::Vec;

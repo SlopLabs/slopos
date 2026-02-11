@@ -8,6 +8,7 @@ global_asm!(include_str!("../context_switch.s"), options(att_syntax));
 
 pub mod exec;
 pub mod irq;
+#[cfg(feature = "itests")]
 pub mod irq_tests;
 pub mod platform;
 pub mod scheduler;
@@ -15,11 +16,13 @@ pub mod scheduler;
 pub mod syscall;
 pub mod syscall_services;
 
+#[cfg(feature = "itests")]
 pub use scheduler::context_tests;
 pub use scheduler::fate_api;
 pub use scheduler::ffi_boundary;
 pub use scheduler::kthread;
 pub use scheduler::per_cpu;
+#[cfg(feature = "itests")]
 pub use scheduler::sched_tests;
 pub use scheduler::scheduler as sched;
 pub use scheduler::task;

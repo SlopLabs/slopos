@@ -6,22 +6,13 @@
 
 use slopos_abi::addr::VirtAddr;
 
+use crate::error::MmError;
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use crate::paging::{ProcessPageDir, map_page_4kb_in_dir, virt_to_phys_in_dir};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
 use crate::vma_flags::VmaFlags;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DemandError {
-    NoVma,
-    NotDemandPaged,
-    AllocationFailed,
-    MappingFailed,
-    PermissionDenied,
-    NullPageDir,
-}
 
 pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> bool {
     let is_present = (error_code & 0x01) != 0;
@@ -63,22 +54,22 @@ pub fn handle_demand_fault(
     process_id: u32,
     fault_addr: u64,
     error_code: u64,
-) -> Result<(), DemandError> {
+) -> Result<(), MmError> {
     if page_dir.is_null() {
-        return Err(DemandError::NullPageDir);
+        return Err(MmError::NullPageDir);
     }
 
     let aligned_addr = fault_addr & !(PAGE_SIZE_4KB - 1);
 
     let vma_flags =
-        process_vm::process_vm_get_vma_flags(process_id, aligned_addr).ok_or(DemandError::NoVma)?;
+        process_vm::process_vm_get_vma_flags(process_id, aligned_addr).ok_or(MmError::NoVma)?;
 
     if !vma_flags.is_demand_paged() || !vma_flags.is_anonymous() {
-        return Err(DemandError::NotDemandPaged);
+        return Err(MmError::NotDemandPaged);
     }
 
     if !can_satisfy_fault(error_code, vma_flags) {
-        return Err(DemandError::PermissionDenied);
+        return Err(MmError::PermissionDenied);
     }
 
     let existing_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(aligned_addr));
@@ -88,13 +79,13 @@ pub fn handle_demand_fault(
 
     let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     if phys.is_null() {
-        return Err(DemandError::AllocationFailed);
+        return Err(MmError::NoMemory);
     }
 
     let pte_flags = vma_flags.to_page_flags().bits();
     if map_page_4kb_in_dir(page_dir, VirtAddr::new(aligned_addr), phys, pte_flags) != 0 {
         free_page_frame(phys);
-        return Err(DemandError::MappingFailed);
+        return Err(MmError::MappingFailed);
     }
 
     tlb::flush_page(VirtAddr::new(aligned_addr));

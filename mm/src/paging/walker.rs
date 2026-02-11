@@ -2,7 +2,7 @@ use super::page_table_defs::{PageTable, PageTableEntry, PageTableLevel};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use super::error::{PagingError, PagingResult};
+use crate::error::{MmError, MmResult};
 use crate::hhdm::PhysAddrHhdm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,22 +79,22 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
         &self,
         entry: &PageTableEntry,
         level: PageTableLevel,
-    ) -> PagingResult<&'a PageTable> {
+    ) -> MmResult<&'a PageTable> {
         if !entry.is_present() {
-            return Err(PagingError::NotMapped {
+            return Err(MmError::NotMapped {
                 address: entry.address().as_u64(),
                 level,
             });
         }
         if entry.is_huge() && level.supports_huge_pages() {
-            return Err(PagingError::MappedToHugePage { level });
+            return Err(MmError::MappedToHugePage { level });
         }
 
         let phys = entry.address();
         let ptr = self
             .mapping
             .phys_to_table_ptr(phys)
-            .ok_or(PagingError::InvalidPageTable)?;
+            .ok_or(MmError::InvalidPageTable)?;
 
         Ok(unsafe { &*ptr })
     }
@@ -104,27 +104,27 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
         &self,
         entry: &PageTableEntry,
         level: PageTableLevel,
-    ) -> PagingResult<&'a mut PageTable> {
+    ) -> MmResult<&'a mut PageTable> {
         if !entry.is_present() {
-            return Err(PagingError::NotMapped {
+            return Err(MmError::NotMapped {
                 address: entry.address().as_u64(),
                 level,
             });
         }
         if entry.is_huge() && level.supports_huge_pages() {
-            return Err(PagingError::MappedToHugePage { level });
+            return Err(MmError::MappedToHugePage { level });
         }
 
         let phys = entry.address();
         let ptr = self
             .mapping
             .phys_to_table_ptr(phys)
-            .ok_or(PagingError::InvalidPageTable)?;
+            .ok_or(MmError::InvalidPageTable)?;
 
         Ok(unsafe { &mut *ptr })
     }
 
-    pub fn walk(&self, pml4: &PageTable, vaddr: VirtAddr) -> PagingResult<WalkResult> {
+    pub fn walk(&self, pml4: &PageTable, vaddr: VirtAddr) -> MmResult<WalkResult> {
         let mut current_table = pml4;
         let mut level = PageTableLevel::Four;
 
@@ -133,7 +133,7 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
             let entry = current_table[index];
 
             if !entry.is_present() {
-                return Err(PagingError::NotMapped {
+                return Err(MmError::NotMapped {
                     address: vaddr.as_u64(),
                     level,
                 });
@@ -173,7 +173,7 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
         pml4: &PageTable,
         vaddr: VirtAddr,
         mut callback: F,
-    ) -> PagingResult<WalkResult>
+    ) -> MmResult<WalkResult>
     where
         F: FnMut(PageTableLevel, &PageTableEntry) -> WalkAction,
     {
@@ -196,14 +196,14 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
                     });
                 }
                 WalkAction::Skip => {
-                    return Err(PagingError::NotMapped {
+                    return Err(MmError::NotMapped {
                         address: vaddr.as_u64(),
                         level,
                     });
                 }
                 WalkAction::Descend => {
                     if !entry.is_present() {
-                        return Err(PagingError::NotMapped {
+                        return Err(MmError::NotMapped {
                             address: vaddr.as_u64(),
                             level,
                         });

@@ -2,7 +2,8 @@ use slopos_abi::addr::VirtAddr;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_not_null, assert_test, fail, klog_info, pass};
 
-use crate::demand::{DemandError, can_satisfy_fault, handle_demand_fault, is_demand_fault};
+use crate::demand::{can_satisfy_fault, handle_demand_fault, is_demand_fault};
+use crate::error::MmError;
 use crate::paging::virt_to_phys_in_dir;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{process_vm_alloc, process_vm_get_vma_flags};
@@ -150,7 +151,7 @@ pub fn test_demand_permission_allow_write() -> TestResult {
 
 pub fn test_demand_handle_null_page_dir() -> TestResult {
     match handle_demand_fault(core::ptr::null_mut(), 1, 0x1000, 0x04) {
-        Err(DemandError::NullPageDir) => pass!(),
+        Err(MmError::NullPageDir) => pass!(),
         Ok(_) => fail!("handle_demand_fault succeeded with null page_dir"),
         Err(e) => fail!("wrong error for null page_dir: {:?}", e),
     }
@@ -165,7 +166,7 @@ pub fn test_demand_handle_no_vma() -> TestResult {
     let error_code: u64 = 0x04;
 
     match handle_demand_fault(vm.page_dir, vm.pid, unmapped_addr, error_code) {
-        Err(DemandError::NoVma) => pass!(),
+        Err(MmError::NoVma) => pass!(),
         Ok(_) => fail!("handle_demand_fault succeeded for unmapped address"),
         Err(e) => fail!("wrong error for unmapped address: {:?}", e),
     }
@@ -207,7 +208,7 @@ pub fn test_demand_handle_permission_denied() -> TestResult {
 
     let error_code: u64 = 0x06;
     match handle_demand_fault(vm.page_dir, vm.pid, addr, error_code) {
-        Err(DemandError::PermissionDenied) => pass!(),
+        Err(MmError::PermissionDenied) => pass!(),
         Ok(_) => fail!("handle_demand_fault allowed write to RO VMA"),
         Err(_) => pass!(),
     }
@@ -299,7 +300,7 @@ pub fn test_demand_invalid_process_id() -> TestResult {
     let error_code: u64 = 0x04;
 
     match handle_demand_fault(vm.page_dir, wrong_pid, 0x1000, error_code) {
-        Err(DemandError::NoVma) => pass!(),
+        Err(MmError::NoVma) => pass!(),
         Ok(_) => fail!("demand fault succeeded with wrong PID"),
         Err(_) => pass!(),
     }

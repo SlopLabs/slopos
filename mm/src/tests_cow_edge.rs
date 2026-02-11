@@ -1,7 +1,8 @@
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_test, fail, klog_info, pass};
 
-use crate::cow::{CowError, handle_cow_fault, is_cow_fault};
+use crate::cow::{handle_cow_fault, is_cow_fault};
+use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_get_ref, page_frame_inc_ref,
@@ -50,7 +51,7 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
 
 pub fn test_cow_handle_null_pagedir() -> TestResult {
     match handle_cow_fault(core::ptr::null_mut(), 0x1000) {
-        Err(CowError::NullPageDir) => pass!(),
+        Err(MmError::NullPageDir) => pass!(),
         Ok(_) => fail!("handle_cow_fault succeeded with null page_dir"),
         Err(e) => fail!("wrong error for null page_dir: {:?}", e),
     }
@@ -66,7 +67,7 @@ pub fn test_cow_handle_not_cow_page() -> TestResult {
     };
 
     match handle_cow_fault(vm.page_dir, 0x3000) {
-        Err(CowError::NotCowPage) => pass!(),
+        Err(MmError::NotCowPage) => pass!(),
         Ok(_) => fail!("handle_cow_fault succeeded on non-COW page"),
         Err(e) => fail!("wrong error for non-COW page: {:?}", e),
     }
@@ -362,7 +363,7 @@ pub fn test_cow_handle_invalid_address() -> TestResult {
 
     let unmapped: u64 = 0xDEAD_0000;
     match handle_cow_fault(vm.page_dir, unmapped) {
-        Err(CowError::NotCowPage) | Err(CowError::InvalidAddress) => pass!(),
+        Err(MmError::NotCowPage) | Err(MmError::InvalidAddress) => pass!(),
         Ok(_) => fail!("COW succeeded on unmapped address"),
         Err(e) => {
             klog_info!(

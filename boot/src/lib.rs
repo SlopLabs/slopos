@@ -10,11 +10,13 @@ pub mod early_init;
 pub mod ffi_boundary;
 pub mod gdt;
 pub use gdt::{gdt_set_kernel_rsp0, syscall_msr_init, syscall_update_kernel_rsp};
+#[cfg(feature = "itests")]
 pub mod gdt_tests;
 pub mod idt;
 pub mod ist_stacks;
 pub mod limine_protocol;
 pub mod panic;
+#[cfg(feature = "itests")]
 pub mod shutdown_tests;
 pub mod smp;
 pub mod safe_stack {

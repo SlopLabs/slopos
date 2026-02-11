@@ -1,3 +1,4 @@
+#[cfg(feature = "itests")]
 pub mod context_tests;
 pub mod fate_api;
 pub mod ffi_boundary;
@@ -5,6 +6,7 @@ pub mod futex;
 pub mod kthread;
 pub mod per_cpu;
 pub mod safe_switch;
+#[cfg(feature = "itests")]
 pub mod sched_tests;
 pub mod scheduler;
 pub mod switch_asm;

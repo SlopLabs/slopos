@@ -14,6 +14,10 @@ crate-type = ["rlib"]
 test = false
 doctest = false
 
+[features]
+default = []
+itests = ["slopos-mm/itests"]
+
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }

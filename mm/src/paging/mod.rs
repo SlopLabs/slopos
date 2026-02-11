@@ -1,9 +1,8 @@
-pub mod error;
 pub mod page_table_defs;
 mod tables;
 pub mod walker;
 
-pub use error::{PagingError, PagingResult};
+pub use crate::error::{MmError, MmResult};
 pub use page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
 pub use walker::{HhdmMapping, PageTableFrameMapping, PageTableWalker, WalkAction, WalkResult};
 

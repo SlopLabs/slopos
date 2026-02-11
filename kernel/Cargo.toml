@@ -10,6 +10,7 @@ workspace = true
 [features]
 default = []
 builtin-tests = ["slopos-boot/builtin-tests", "slopos-tests"]
+itests = ["slopos-boot/itests"]
 xe-gpu = ["slopos-boot/xe-gpu"]
 
 [dependencies]

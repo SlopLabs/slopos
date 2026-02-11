@@ -6,6 +6,7 @@ pub mod aslr;
 pub mod cow;
 pub mod demand;
 pub mod elf;
+pub mod error;
 pub mod hhdm;
 pub mod kernel_heap;
 pub mod memory_init;
@@ -13,6 +14,7 @@ pub mod memory_layout;
 pub mod memory_layout_defs;
 mod memory_reservations;
 pub mod mmio;
+#[cfg(feature = "itests")]
 pub mod mmio_tests;
 pub mod page_alloc;
 pub mod paging;
@@ -21,12 +23,18 @@ pub mod pat;
 pub mod process_vm;
 pub mod shared_memory;
 pub mod symbols;
+#[cfg(feature = "itests")]
 pub mod test_fixtures;
+#[cfg(feature = "itests")]
 pub mod tests;
+#[cfg(feature = "itests")]
 pub mod tests_cow_edge;
+#[cfg(feature = "itests")]
 pub mod tests_demand;
+#[cfg(feature = "itests")]
 pub mod tests_oom;
 pub mod tlb;
+#[cfg(feature = "itests")]
 pub mod tlb_tests;
 pub mod user_copy;
 pub mod user_ptr;

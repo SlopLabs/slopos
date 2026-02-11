@@ -1,5 +1,6 @@
 use core::ptr;
 
+use crate::error::MmError;
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
@@ -9,30 +10,21 @@ use crate::paging::{ProcessPageDir, map_page_4kb_in_dir, paging_is_cow, virt_to_
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::tlb;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CowError {
-    NotCowPage,
-    AllocationFailed,
-    MappingFailed,
-    InvalidAddress,
-    NullPageDir,
-}
-
-pub fn handle_cow_fault(page_dir: *mut ProcessPageDir, fault_addr: u64) -> Result<(), CowError> {
+pub fn handle_cow_fault(page_dir: *mut ProcessPageDir, fault_addr: u64) -> Result<(), MmError> {
     if page_dir.is_null() {
-        return Err(CowError::NullPageDir);
+        return Err(MmError::NullPageDir);
     }
 
     let vaddr = VirtAddr::new(fault_addr);
     let aligned_vaddr = VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1));
 
     if !paging_is_cow(page_dir, vaddr) {
-        return Err(CowError::NotCowPage);
+        return Err(MmError::NotCowPage);
     }
 
     let old_phys = virt_to_phys_in_dir(page_dir, aligned_vaddr);
     if old_phys.is_null() {
-        return Err(CowError::InvalidAddress);
+        return Err(MmError::InvalidAddress);
     }
 
     let ref_count = page_frame_get_ref(old_phys);
@@ -47,13 +39,13 @@ pub fn handle_cow_fault(page_dir: *mut ProcessPageDir, fault_addr: u64) -> Resul
 fn resolve_single_ref(
     page_dir: *mut ProcessPageDir,
     aligned_vaddr: VirtAddr,
-) -> Result<(), CowError> {
+) -> Result<(), MmError> {
     let old_phys = virt_to_phys_in_dir(page_dir, aligned_vaddr);
 
     let new_flags = PageFlags::USER_RW;
 
     if map_page_4kb_in_dir(page_dir, aligned_vaddr, old_phys, new_flags.bits()) != 0 {
-        return Err(CowError::MappingFailed);
+        return Err(MmError::MappingFailed);
     }
 
     tlb::flush_page(aligned_vaddr);
@@ -64,10 +56,10 @@ fn resolve_multi_ref(
     page_dir: *mut ProcessPageDir,
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
-) -> Result<(), CowError> {
+) -> Result<(), MmError> {
     let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     if new_phys.is_null() {
-        return Err(CowError::AllocationFailed);
+        return Err(MmError::NoMemory);
     }
 
     let old_virt = old_phys.to_virt();
@@ -75,7 +67,7 @@ fn resolve_multi_ref(
 
     if old_virt.is_null() || new_virt.is_null() {
         free_page_frame(new_phys);
-        return Err(CowError::InvalidAddress);
+        return Err(MmError::InvalidAddress);
     }
 
     unsafe {
@@ -90,7 +82,7 @@ fn resolve_multi_ref(
 
     if map_page_4kb_in_dir(page_dir, aligned_vaddr, new_phys, new_flags.bits()) != 0 {
         free_page_frame(new_phys);
-        return Err(CowError::MappingFailed);
+        return Err(MmError::MappingFailed);
     }
 
     tlb::flush_page(aligned_vaddr);
