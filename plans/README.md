@@ -14,6 +14,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
 | [CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md](./CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md) | Detailed execution playbook with dependencies, tests, rollback strategy, phase gates, and task checklists |
 | [ABI_SCOPE_CLEANUP.md](./ABI_SCOPE_CLEANUP.md) | Extract `gfx` crate from `abi` — move rendering algorithms out of the types crate |
+| [SHELL_EVOLUTION_PLAN.md](./SHELL_EVOLUTION_PLAN.md) | 7-phase plan to evolve the shell from command dispatcher to real POSIX-inspired shell (163 tasks) |
 
 ---
 
