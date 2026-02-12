@@ -62,6 +62,13 @@ static STATE: IrqMutex<KeyboardState> = IrqMutex::new(KeyboardState::new());
 
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;
+const KEY_UP: u8 = 0x82;
+const KEY_DOWN: u8 = 0x83;
+const KEY_LEFT: u8 = 0x84;
+const KEY_RIGHT: u8 = 0x85;
+const KEY_HOME: u8 = 0x86;
+const KEY_END: u8 = 0x87;
+const KEY_DELETE: u8 = 0x88;
 
 const SCANCODE_LETTERS: [u8; 0x80] = [
     0x00, 0x00, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x2D, 0x3D, 0x00, 0x09,
@@ -129,7 +136,21 @@ fn translate_scancode(scancode: u8, modifiers: &ModifierState) -> u8 {
         0x39 => b' ',
         0x0F => b'\t',
         0x01 => 0x1B,
-        _ => translate_letter(make_code, modifiers),
+        _ => {
+            let ch = translate_letter(make_code, modifiers);
+            // Ctrl+letter → control code (0x01–0x1A)
+            if modifiers.ctrl_left && ch != 0 {
+                let lower = if (b'A'..=b'Z').contains(&ch) {
+                    ch + 0x20
+                } else {
+                    ch
+                };
+                if (b'a'..=b'z').contains(&lower) {
+                    return lower - b'a' + 1;
+                }
+            }
+            ch
+        }
     }
 }
 
@@ -191,6 +212,13 @@ pub fn handle_scancode(scancode: u8) {
             return;
         }
         let extended_key = match make_code {
+            0x48 => KEY_UP,
+            0x50 => KEY_DOWN,
+            0x4B => KEY_LEFT,
+            0x4D => KEY_RIGHT,
+            0x47 => KEY_HOME,
+            0x4F => KEY_END,
+            0x53 => KEY_DELETE,
             0x49 => KEY_PAGE_UP,
             0x51 => KEY_PAGE_DOWN,
             _ => 0,
