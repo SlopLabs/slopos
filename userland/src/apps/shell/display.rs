@@ -533,7 +533,7 @@ fn console_ensure_follow(display: &DisplayState) {
     });
 }
 
-fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
+fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8], cursor_pos: usize) {
     if !display.enabled.get() {
         return;
     }
@@ -542,11 +542,9 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
     let slot = display.line_slot(cursor_line);
     let cols = display.cols.get() as usize;
 
-    // Build combined line
     let total_len = prompt.len() + input.len();
     let write_len = total_len.min(cols);
 
-    // Write to scrollback
     let mut combined = [0u8; SHELL_SCROLLBACK_COLS];
     let mut idx = 0;
     for &b in prompt.iter().chain(input.iter()).take(write_len) {
@@ -556,13 +554,22 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
     scrollback::write_line(slot, &combined[..idx]);
     display.cursor_col.set(idx as i32);
 
-    // Render if following
     if display.follow.get() {
         let view_top = display.view_top.get();
         let row = cursor_line - view_top;
         if row >= 0 && row < display.rows.get() {
             surface::draw(|buf| {
                 draw_row_from_scrollback(buf, display, cursor_line, row);
+
+                let cursor_col = (prompt.len() + cursor_pos) as i32;
+                if cursor_col < display.cols.get() {
+                    let ch = if cursor_pos < input.len() {
+                        input[cursor_pos]
+                    } else {
+                        b' '
+                    };
+                    draw_char_at(buf, cursor_col, row, ch, display.bg.get(), display.fg.get());
+                }
             });
         }
     }
@@ -671,9 +678,9 @@ pub fn shell_console_follow_bottom() {
     }
 }
 
-pub fn shell_redraw_input(_line_row: i32, input: &[u8]) {
+pub fn shell_redraw_input(_line_row: i32, prompt: &[u8], input: &[u8], cursor_pos: usize) {
     if DISPLAY.enabled.get() {
-        console_rewrite_input(&DISPLAY, super::PROMPT, input);
+        console_rewrite_input(&DISPLAY, prompt, input, cursor_pos);
         shell_console_commit();
     }
 }
