@@ -75,6 +75,16 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         func: fs::cmd_rm,
         desc: b"Remove a file",
     },
+    BuiltinEntry {
+        name: b"cd",
+        func: fs::cmd_cd,
+        desc: b"Change working directory",
+    },
+    BuiltinEntry {
+        name: b"pwd",
+        func: fs::cmd_pwd,
+        desc: b"Print working directory",
+    },
 ];
 
 pub fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {

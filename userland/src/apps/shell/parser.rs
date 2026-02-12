@@ -34,6 +34,11 @@ pub fn u_streq_slice(a: *const u8, b: &[u8]) -> bool {
 }
 
 pub fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
+    let cwd = super::cwd_bytes();
+    normalize_path_with_cwd(input, buffer, &cwd)
+}
+
+pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) -> i32 {
     if buffer.is_empty() {
         return -1;
     }
@@ -57,17 +62,25 @@ pub fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
         }
     }
 
-    let maxlen = buffer.len().saturating_sub(2);
-    let len = runtime::u_strnlen(input, maxlen);
-    if len > maxlen {
+    let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(cwd.len());
+    let input_len = runtime::u_strnlen(input, buffer.len());
+
+    let needs_sep = cwd_len > 0 && cwd[cwd_len - 1] != b'/';
+    let sep_len = if needs_sep { 1 } else { 0 };
+    let total = cwd_len + sep_len + input_len;
+
+    if total >= buffer.len() {
         return -1;
     }
-    buffer[0] = b'/';
-    unsafe {
-        ptr::copy_nonoverlapping(input, buffer.as_mut_ptr().add(1), len);
+
+    buffer[..cwd_len].copy_from_slice(&cwd[..cwd_len]);
+    if needs_sep {
+        buffer[cwd_len] = b'/';
     }
-    let term_idx = cmp::min(len + 1, buffer.len() - 1);
-    buffer[term_idx] = 0;
+    unsafe {
+        ptr::copy_nonoverlapping(input, buffer.as_mut_ptr().add(cwd_len + sep_len), input_len);
+    }
+    buffer[total] = 0;
     0
 }
 
