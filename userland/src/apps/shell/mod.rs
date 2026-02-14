@@ -40,7 +40,6 @@ pub(crate) static ERR_MISSING_FILE: &[u8] = b"missing file operand\n";
 pub(crate) static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
 pub(crate) static HALTED: &[u8] = b"Shell requested shutdown...\n";
 pub(crate) static REBOOTING: &[u8] = b"Shell requested reboot...\n";
-pub(crate) static HELP_HEADER: &[u8] = b"Available commands:\n";
 
 pub(crate) const SHELL_IO_MAX: usize = 512;
 

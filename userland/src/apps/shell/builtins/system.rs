@@ -2,21 +2,68 @@ use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
 use super::super::display::{shell_console_clear, shell_write};
-use super::super::{HALTED, HELP_HEADER, NL, REBOOTING};
-use super::{BUILTINS, print_kv};
+use super::super::parser::u_streq_slice;
+use super::super::{HALTED, NL, REBOOTING};
+use super::{BUILTINS, BuiltinCategory, print_kv};
 
-pub fn cmd_help(_argc: i32, _argv: &[*const u8]) -> i32 {
-    shell_write(HELP_HEADER);
-    for entry in BUILTINS {
-        shell_write(b"  ");
-        shell_write(entry.name);
-        shell_write(b" - ");
-        if !entry.desc.is_empty() {
+const NAME_COL_WIDTH: usize = 12;
+const PADDING: &[u8] = b"            ";
+
+fn write_padded(name: &[u8]) {
+    shell_write(name);
+    let pad = NAME_COL_WIDTH.saturating_sub(name.len());
+    if pad > 0 {
+        shell_write(&PADDING[..pad]);
+    }
+}
+
+pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
+    if argc >= 2 && !argv[1].is_null() {
+        return cmd_help_single(argv[1]);
+    }
+
+    shell_write(b"SlopOS Shell v0.2\n");
+    shell_write(b"Type 'help <command>' for detailed usage.\n\n");
+
+    for &cat in BuiltinCategory::ALL {
+        shell_write(cat.label());
+        shell_write(b":\n");
+        for entry in BUILTINS {
+            if entry.category != cat {
+                continue;
+            }
+            shell_write(b"  ");
+            write_padded(entry.name);
             shell_write(entry.desc);
+            shell_write(NL);
         }
         shell_write(NL);
     }
     0
+}
+
+fn cmd_help_single(name: *const u8) -> i32 {
+    for entry in BUILTINS {
+        if !u_streq_slice(name, entry.name) {
+            continue;
+        }
+        shell_write(entry.name);
+        shell_write(b" - ");
+        shell_write(entry.desc);
+        shell_write(b"\n\nUsage: ");
+        shell_write(entry.usage);
+        shell_write(b"\n\n");
+        if !entry.detail.is_empty() {
+            shell_write(entry.detail);
+            shell_write(NL);
+        }
+        return 0;
+    }
+    shell_write(b"help: unknown command '");
+    let len = runtime::u_strlen(name);
+    shell_write(unsafe { core::slice::from_raw_parts(name, len) });
+    shell_write(b"'\n");
+    1
 }
 
 pub fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
