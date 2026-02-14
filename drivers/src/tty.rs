@@ -9,9 +9,8 @@ use crate::ps2::keyboard;
 use crate::serial;
 use slopos_abi::signal::SIGINT;
 use slopos_lib::kernel_services::driver_runtime::{
-    DriverTaskHandle, driver_block_current_task, driver_current_task, driver_current_task_id,
-    driver_register_idle_wakeup_callback, driver_scheduler_is_enabled, driver_signal_process_group,
-    driver_unblock_task,
+    DriverTaskHandle, block_current_task, current_task, current_task_id,
+    register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, unblock_task,
 };
 
 const TTY_MAX_WAITERS: usize = 32;
@@ -49,7 +48,7 @@ fn tty_signal_foreground_pgrp(signum: u8) {
         return;
     }
 
-    let _ = driver_signal_process_group(pgid, signum);
+    let _ = signal_process_group(pgid, signum);
 }
 
 use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
@@ -85,7 +84,7 @@ fn tty_register_idle_callback() {
     if REGISTERED.swap(true, Ordering::AcqRel) {
         return;
     }
-    driver_register_idle_wakeup_callback(Some(tty_input_available_cb));
+    register_idle_wakeup_callback(Some(tty_input_available_cb));
 }
 
 fn tty_wait_queue_pop() -> DriverTaskHandle {
@@ -153,7 +152,7 @@ fn tty_focus_queue_pop() -> DriverTaskHandle {
 }
 
 fn tty_current_task_id() -> Option<u32> {
-    let task_id = driver_current_task_id();
+    let task_id = current_task_id();
     if task_id == 0 {
         return None;
     }
@@ -175,10 +174,10 @@ fn tty_wait_for_focus(task_id: u32) {
     if tty_task_has_focus(task_id) {
         return;
     }
-    if driver_scheduler_is_enabled() != 0 {
-        let current = driver_current_task();
+    if scheduler_is_enabled() != 0 {
+        let current = current_task();
         if tty_focus_queue_push(current) {
-            driver_block_current_task();
+            block_current_task();
             return;
         }
     }
@@ -187,20 +186,20 @@ fn tty_wait_for_focus(task_id: u32) {
     }
 }
 pub fn tty_notify_input_ready() {
-    if driver_scheduler_is_enabled() == 0 {
+    if scheduler_is_enabled() == 0 {
         return;
     }
 
     let task = tty_wait_queue_pop();
 
     if !task.is_null() {
-        let _ = driver_unblock_task(task);
+        let _ = unblock_task(task);
     }
 }
 
 pub fn tty_set_focus(task_id: u32) -> c_int {
     TTY_FOCUSED_TASK_ID.store(task_id, Ordering::Relaxed);
-    if driver_scheduler_is_enabled() == 0 {
+    if scheduler_is_enabled() == 0 {
         return 0;
     }
 
@@ -209,7 +208,7 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         if candidate.is_null() {
             break;
         }
-        let _ = driver_unblock_task(candidate);
+        let _ = unblock_task(candidate);
     }
     0
 }
@@ -270,10 +269,10 @@ fn tty_block_until_input_ready() {
     if tty_input_available() != 0 {
         return;
     }
-    if driver_scheduler_is_enabled() != 0 {
-        let current = driver_current_task();
+    if scheduler_is_enabled() != 0 {
+        let current = current_task();
         if tty_wait_queue_push(current) {
-            driver_block_current_task();
+            block_current_task();
             return;
         }
     }

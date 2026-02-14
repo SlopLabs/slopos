@@ -76,6 +76,26 @@ impl EncodedPixel {
     }
 }
 
+#[inline]
+fn clip_row_span_bounds(
+    width: u32,
+    height: u32,
+    row: i32,
+    x0: i32,
+    x1: i32,
+) -> Option<(usize, usize, usize)> {
+    if row < 0 || row >= height as i32 {
+        return None;
+    }
+    let w = width as i32;
+    let x0 = x0.max(0);
+    let x1 = x1.min(w - 1);
+    if x0 > x1 {
+        return None;
+    }
+    Some((row as usize, x0 as usize, x1 as usize))
+}
+
 /// Unified drawing surface trait.
 ///
 /// `Canvas` merges the responsibilities of the legacy `PixelBuffer` and
@@ -111,6 +131,11 @@ pub trait Canvas {
     /// Callers must ensure `byte_offset` is within buffer bounds.
     fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel);
 
+    #[inline]
+    fn clip_row_span(&self, row: i32, x0: i32, x1: i32) -> Option<(usize, usize, usize)> {
+        clip_row_span_bounds(self.width(), self.height(), row, x0, x1)
+    }
+
     /// Fill a horizontal span with a pre-encoded pixel.
     ///
     /// Fills pixels from column `x0` to `x1` (inclusive) on `row`.
@@ -120,20 +145,14 @@ pub trait Canvas {
     /// Implementors should override this for bulk-write optimisations.
     #[inline]
     fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, pixel: EncodedPixel) {
-        if row < 0 || row >= self.height() as i32 {
+        let Some((row, x0, x1)) = self.clip_row_span(row, x0, x1) else {
             return;
-        }
-        let w = self.width() as i32;
-        let x0 = x0.max(0);
-        let x1 = x1.min(w - 1);
-        if x0 > x1 {
-            return;
-        }
+        };
         let bpp = self.bytes_per_pixel() as usize;
         let pitch = self.pitch_bytes();
-        let row_start = (row as usize) * pitch;
+        let row_start = row * pitch;
         for x in x0..=x1 {
-            self.write_encoded_at(row_start + (x as usize) * bpp, pixel);
+            self.write_encoded_at(row_start + x * bpp, pixel);
         }
     }
 

@@ -7,23 +7,22 @@ use crate::ioapic::regs::{
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::kernel_services::driver_runtime::{
     DRIVER_IRQ_LINES, DRIVER_LEGACY_IRQ_COM1, DRIVER_LEGACY_IRQ_KEYBOARD, DRIVER_LEGACY_IRQ_MOUSE,
-    DRIVER_LEGACY_IRQ_TIMER, driver_irq_get_timer_ticks, driver_irq_increment_keyboard_events,
-    driver_irq_increment_timer_ticks, driver_irq_init, driver_irq_is_masked,
-    driver_irq_register_handler, driver_irq_set_route, driver_save_preempt_context,
-    driver_scheduler_timer_tick,
+    DRIVER_LEGACY_IRQ_TIMER, irq_get_timer_ticks, irq_increment_keyboard_events,
+    irq_increment_timer_ticks, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
+    save_preempt_context, scheduler_timer_tick,
 };
 use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
 
 use crate::{apic, ioapic, ps2};
 
 extern "C" fn timer_irq_handler(_irq: u8, frame: *mut InterruptFrame, _ctx: *mut c_void) {
-    driver_irq_increment_timer_ticks();
-    let tick = driver_irq_get_timer_ticks();
+    irq_increment_timer_ticks();
+    let tick = irq_get_timer_ticks();
     if tick <= 3 {
         klog_debug!("IRQ: Timer tick #{}", tick);
     }
-    driver_save_preempt_context(frame);
-    driver_scheduler_timer_tick();
+    save_preempt_context(frame);
+    scheduler_timer_tick();
 }
 
 extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
@@ -31,7 +30,7 @@ extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: 
         return;
     }
     let scancode = ps2::read_data_nowait();
-    driver_irq_increment_keyboard_events();
+    irq_increment_keyboard_events();
     ps2::keyboard::handle_scancode(scancode);
 }
 
@@ -67,9 +66,9 @@ fn program_ioapic_route(irq_line: u8) {
         panic!("IRQ: Failed to program IOAPIC route");
     }
 
-    driver_irq_set_route(irq_line, gsi);
+    irq_set_route(irq_line, gsi);
 
-    let masked = driver_irq_is_masked(irq_line);
+    let masked = irq_is_masked(irq_line);
 
     let polarity = if legacy_flags & IOAPIC_FLAG_POLARITY_LOW != 0 {
         "active-low"
@@ -110,25 +109,25 @@ fn setup_ioapic_routes() {
 }
 
 pub fn init() {
-    driver_irq_init();
+    irq_init();
 
     setup_ioapic_routes();
     ps2::keyboard::init();
     ps2::mouse::init();
 
-    let _ = driver_irq_register_handler(
+    let _ = irq_register_handler(
         DRIVER_LEGACY_IRQ_TIMER,
         Some(timer_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
-    let _ = driver_irq_register_handler(
+    let _ = irq_register_handler(
         DRIVER_LEGACY_IRQ_KEYBOARD,
         Some(keyboard_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
-    let _ = driver_irq_register_handler(
+    let _ = irq_register_handler(
         DRIVER_LEGACY_IRQ_MOUSE,
         Some(mouse_irq_handler),
         core::ptr::null_mut(),

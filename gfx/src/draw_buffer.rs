@@ -262,21 +262,15 @@ impl Canvas for DrawBuffer<'_> {
 
     #[inline]
     fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, pixel: EncodedPixel) {
-        if row < 0 || row >= self.height as i32 {
+        let Some((row, x0, x1)) = self.clip_row_span(row, x0, x1) else {
             return;
-        }
-        let w = self.width as i32;
-        let x0 = x0.max(0);
-        let x1 = x1.min(w - 1);
-        if x0 > x1 {
-            return;
-        }
+        };
 
         let color = pixel.to_u32();
         let bytes_pp = self.bytes_pp as usize;
         let pitch = self.pitch;
-        let span_w = (x1 - x0 + 1) as usize;
-        let row_off = (row as usize) * pitch + (x0 as usize) * bytes_pp;
+        let span_w = x1 - x0 + 1;
+        let row_off = row * pitch + x0 * bytes_pp;
 
         match bytes_pp {
             4 => {

@@ -1,13 +1,8 @@
 use crate::io::Port;
 
 pub const COM1: Port<u8> = Port::new(0x3F8);
-pub const COM2: Port<u8> = Port::new(0x2F8);
-pub const COM3: Port<u8> = Port::new(0x3E8);
-pub const COM4: Port<u8> = Port::new(0x2E8);
 
 pub const PIT_CHANNEL0: Port<u8> = Port::new(0x40);
-pub const PIT_CHANNEL1: Port<u8> = Port::new(0x41);
-pub const PIT_CHANNEL2: Port<u8> = Port::new(0x42);
 pub const PIT_COMMAND: Port<u8> = Port::new(0x43);
 
 pub const PS2_DATA: Port<u8> = Port::new(0x60);
@@ -17,11 +12,7 @@ pub const PS2_COMMAND: Port<u8> = Port::new(0x64);
 pub const PCI_CONFIG_ADDRESS: Port<u32> = Port::new(0xCF8);
 pub const PCI_CONFIG_DATA: Port<u32> = Port::new(0xCFC);
 
-pub const CMOS_ADDRESS: Port<u8> = Port::new(0x70);
-pub const CMOS_DATA: Port<u8> = Port::new(0x71);
-
 pub const QEMU_DEBUG_EXIT: Port<u8> = Port::new(0xF4);
-pub const BOCHS_DEBUG: Port<u8> = Port::new(0xE9);
 
 pub const IO_DELAY: Port<u8> = Port::new(0x80);
 

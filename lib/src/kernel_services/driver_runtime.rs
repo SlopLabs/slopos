@@ -36,102 +36,13 @@ crate::define_service! {
     }
 }
 
+/// Manual wrapper for the `@no_wrapper` service method.
 #[inline(always)]
-pub fn driver_irq_register_handler(
+pub fn irq_register_handler(
     irq_line: u8,
     handler: Option<DriverIrqHandler>,
     context: *mut c_void,
     name: *const c_char,
 ) -> i32 {
     (driver_runtime_services().irq_register_handler)(irq_line, handler, context, name)
-}
-
-#[inline(always)]
-pub fn driver_save_preempt_context(frame: *mut InterruptFrame) {
-    save_preempt_context(frame)
-}
-
-#[inline(always)]
-pub fn driver_scheduler_timer_tick() {
-    scheduler_timer_tick()
-}
-
-#[inline(always)]
-pub fn driver_request_reschedule_from_interrupt() {
-    request_reschedule_from_interrupt()
-}
-
-#[inline(always)]
-pub fn driver_scheduler_is_enabled() -> c_int {
-    scheduler_is_enabled()
-}
-
-#[inline(always)]
-pub fn driver_current_task() -> DriverTaskHandle {
-    current_task()
-}
-
-#[inline(always)]
-pub fn driver_current_task_id() -> u32 {
-    current_task_id()
-}
-
-#[inline(always)]
-pub fn driver_block_current_task() {
-    block_current_task()
-}
-
-#[inline(always)]
-pub fn driver_unblock_task(task: DriverTaskHandle) -> c_int {
-    unblock_task(task)
-}
-
-#[inline(always)]
-pub fn driver_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
-    register_idle_wakeup_callback(callback)
-}
-
-#[inline(always)]
-pub fn driver_signal_process_group(pgid: u32, signum: u8) -> bool {
-    signal_process_group(pgid, signum)
-}
-
-#[inline(always)]
-pub fn driver_irq_init() {
-    irq_init()
-}
-
-#[inline(always)]
-pub fn driver_irq_set_route(irq_line: u8, gsi: u32) {
-    irq_set_route(irq_line, gsi)
-}
-
-#[inline(always)]
-pub fn driver_irq_is_masked(irq_line: u8) -> bool {
-    irq_is_masked(irq_line)
-}
-
-#[inline(always)]
-pub fn driver_irq_enable_line(irq_line: u8) {
-    irq_enable_line(irq_line)
-}
-
-#[inline(always)]
-pub fn driver_irq_disable_line(irq_line: u8) {
-    irq_disable_line(irq_line)
-}
-
-#[inline(always)]
-pub fn driver_irq_get_timer_ticks() -> u64 {
-    irq_get_timer_ticks()
-}
-
-#[inline(always)]
-pub fn driver_irq_increment_timer_ticks() {
-    irq_increment_timer_ticks()
-}
-
-#[inline(always)]
-pub fn driver_irq_increment_keyboard_events() {
-    irq_increment_keyboard_events()
 }
