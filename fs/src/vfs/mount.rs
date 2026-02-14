@@ -135,6 +135,71 @@ impl MountTable {
     pub fn mount_count(&self) -> usize {
         self.count
     }
+
+    /// Iterate over mount points that are direct children of `parent_path`.
+    ///
+    /// For each child mount, calls `callback` with the child's name component
+    /// (e.g., `b"tmp"` when parent is `b"/"` and mount is `b"/tmp"`).
+    /// Returns the number of children visited. This is the kernel-level
+    /// mechanism that lets directory listings include mounted sub-filesystems,
+    /// mirroring how Linux VFS synthesises mount-point entries in readdir.
+    pub fn for_each_child_mount(
+        &self,
+        parent_path: &[u8],
+        callback: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> usize {
+        // Normalise parent: strip trailing slashes (keep root "/")
+        let plen = {
+            let mut len = parent_path.len();
+            while len > 1 && parent_path[len - 1] == b'/' {
+                len -= 1;
+            }
+            len
+        };
+        let parent = &parent_path[..plen];
+
+        let mut count = 0;
+        for mp in self.mounts.iter() {
+            if !mp.is_active() {
+                continue;
+            }
+            let mp_path = mp.path_bytes();
+
+            // Skip the mount at the parent path itself
+            if mp_path.len() == plen && &mp_path[..plen] == parent {
+                continue;
+            }
+
+            // Determine where the child component starts
+            let child_start = if parent == b"/" {
+                // Root parent: child mounts look like "/X"
+                if mp_path.len() <= 1 || mp_path[0] != b'/' {
+                    continue;
+                }
+                1
+            } else {
+                // Non-root parent: child mounts look like "<parent>/X"
+                if mp_path.len() <= plen + 1 || &mp_path[..plen] != parent || mp_path[plen] != b'/'
+                {
+                    continue;
+                }
+                plen + 1
+            };
+
+            let child_part = &mp_path[child_start..];
+
+            // Must be a single path component (no further slashes)
+            if child_part.is_empty() || child_part.contains(&b'/') {
+                continue;
+            }
+
+            if !callback(child_part) {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
 }
 
 static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(MountTable::new());

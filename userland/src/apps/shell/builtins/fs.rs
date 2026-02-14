@@ -69,9 +69,6 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             return 1;
         }
 
-        let is_root = path_buf_is_root(path as *const u8);
-        let mut saw_tmp = false;
-        let mut saw_dev = false;
         let mut shown = 0usize;
 
         for i in 0..list.count {
@@ -82,12 +79,6 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             }
             if name_len == 2 && entry.name[0] == b'.' && entry.name[1] == b'.' {
                 continue;
-            }
-            if name_len == 3 && &entry.name[..3] == b"tmp" {
-                saw_tmp = true;
-            }
-            if name_len == 3 && &entry.name[..3] == b"dev" {
-                saw_dev = true;
             }
             if entry.is_directory() {
                 shell_write(b"[");
@@ -101,17 +92,6 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             shown += 1;
         }
 
-        if is_root {
-            if !saw_tmp && stat_is_dir(b"/tmp\0") {
-                shell_write(b"[tmp]\n");
-                shown += 1;
-            }
-            if !saw_dev && stat_is_dir(b"/dev\0") {
-                shell_write(b"[dev]\n");
-                shown += 1;
-            }
-        }
-
         if shown == 0 {
             shell_write(b"(empty)\n");
         }
@@ -119,18 +99,6 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     });
 
     result
-}
-
-fn stat_is_dir(path: &[u8]) -> bool {
-    let mut stat = UserFsStat::default();
-    fs::stat_path(path.as_ptr() as *const c_char, &mut stat).is_ok() && stat.is_directory()
-}
-
-fn path_buf_is_root(path: *const u8) -> bool {
-    if path.is_null() {
-        return false;
-    }
-    unsafe { *path == b'/' && *path.add(1) == 0 }
 }
 
 pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {

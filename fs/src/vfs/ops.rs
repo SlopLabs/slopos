@@ -1,3 +1,4 @@
+use crate::vfs::mount::with_mount_table;
 use crate::vfs::path::{resolve_parent, resolve_path};
 use crate::vfs::traits::{FileType, InodeId, VfsError, VfsResult};
 use slopos_abi::fs::{FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_UNKNOWN, UserFsEntry};
@@ -117,6 +118,41 @@ pub fn vfs_list(path: &[u8], entries: &mut [UserFsEntry]) -> VfsResult<usize> {
             entries[i].size = child_stat.size as u32;
         }
     }
+
+    // Overlay child mount points (Linux VFS behaviour: mount points appear
+    // as directory entries in the parent listing even when the underlying
+    // filesystem has no matching entry).
+    with_mount_table(|mt| {
+        mt.for_each_child_mount(path, &mut |child_name| {
+            if count >= max {
+                return false;
+            }
+
+            // If an entry with this name already exists, just ensure it
+            // shows as a directory (mount points are always directories).
+            for i in 0..count {
+                let elen = entries[i]
+                    .name
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(entries[i].name.len());
+                if elen == child_name.len() && &entries[i].name[..elen] == child_name {
+                    entries[i].type_ = FS_TYPE_DIRECTORY;
+                    return true;
+                }
+            }
+
+            let entry = &mut entries[count];
+            *entry = UserFsEntry::new();
+            let nlen = child_name.len().min(entry.name.len() - 1);
+            entry.name[..nlen].copy_from_slice(&child_name[..nlen]);
+            entry.name[nlen] = 0;
+            entry.type_ = FS_TYPE_DIRECTORY;
+            entry.size = 0;
+            count += 1;
+            true
+        });
+    });
 
     Ok(count)
 }
