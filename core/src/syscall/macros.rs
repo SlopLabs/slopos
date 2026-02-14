@@ -37,7 +37,10 @@ macro_rules! define_syscall {
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]
             let Some($ctx) = $crate::syscall::context::SyscallContext::new(task, frame) else {
-                return $crate::syscall::common::syscall_return_err(frame, u64::MAX);
+                return $crate::syscall::common::syscall_return_err(
+                    frame,
+                    slopos_abi::syscall::ERRNO_EINVAL,
+                );
             };
             $crate::define_syscall!(@expand_reqs $ctx, $($req)*);
             #[allow(unused_variables)]

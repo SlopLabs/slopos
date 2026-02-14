@@ -1,0 +1,161 @@
+use core::ffi::c_char;
+
+use slopos_abi::syscall::{ERRNO_EINVAL, UserSysInfo};
+use slopos_abi::task::{TaskExitReason, TaskFaultReason};
+use slopos_lib::{InterruptFrame, klog_debug};
+
+use crate::platform;
+use crate::sched::{
+    clear_scheduler_current_task, get_scheduler_stats, schedule, scheduler_is_preemption_enabled,
+    sleep_current_task_ms, yield_,
+};
+use crate::scheduler::task_struct::Task;
+use crate::syscall::common::{
+    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
+    syscall_return_err,
+};
+use crate::syscall::context::SyscallContext;
+use crate::syscall_services::tty;
+use crate::task::{get_task_stats, task_terminate};
+
+use slopos_mm::page_alloc::get_page_allocator_stats;
+use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_ptr::UserPtr;
+
+pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, ERRNO_EINVAL);
+    };
+    let _ = ctx.ok(0);
+    yield_();
+    SyscallDisposition::Ok
+}
+
+define_syscall!(syscall_get_time_ms(ctx, args) {
+    let _ = args;
+    let ms = platform::get_time_ms();
+    ctx.ok(ms)
+});
+
+pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+    platform::kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
+    #[allow(unreachable_code)]
+    SyscallDisposition::Ok
+}
+
+pub fn syscall_reboot(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+    platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
+    #[allow(unreachable_code)]
+    SyscallDisposition::Ok
+}
+
+define_syscall!(syscall_sleep_ms(ctx, args) {
+    let mut ms = args.arg0;
+    if ms > 60000 {
+        ms = 60000;
+    }
+    let rc = if scheduler_is_preemption_enabled() != 0 {
+        sleep_current_task_ms(ms as u32)
+    } else {
+        crate::platform::timer_poll_delay_ms(ms as u32);
+        0
+    };
+    if rc == 0 {
+        ctx.ok(0)
+    } else {
+        ctx.err()
+    }
+});
+
+pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let ctx = SyscallContext::new(task, frame);
+    let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
+    klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
+    if let Some(ref c) = ctx {
+        if let Some(t) = c.task_mut() {
+            t.exit_reason = TaskExitReason::Normal;
+            t.fault_reason = TaskFaultReason::None;
+            t.exit_code = 0;
+        }
+    }
+    klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
+    task_terminate(task_id);
+    clear_scheduler_current_task();
+    schedule();
+    klog_debug!(
+        "SYSCALL_EXIT: task {} schedule returned (should not happen)",
+        task_id
+    );
+    SyscallDisposition::NoReturn
+}
+
+define_syscall!(syscall_user_write(ctx, args) {
+    let mut tmp = [0u8; USER_IO_MAX_BYTES];
+    require_nonzero!(ctx, args.arg0);
+    let write_len = try_or_err!(ctx, syscall_bounded_from_user(&mut tmp, args.arg0, args.arg1, USER_IO_MAX_BYTES));
+    platform::console_puts(&tmp[..write_len]);
+    ctx.ok(write_len as u64)
+});
+
+define_syscall!(syscall_user_read(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+    require_nonzero!(ctx, args.arg1);
+
+    let mut tmp = [0u8; USER_IO_MAX_BYTES];
+    let max_len = args.arg1_usize().min(USER_IO_MAX_BYTES);
+
+    let mut read_len = tty::read_line(tmp.as_mut_ptr(), max_len);
+    if max_len > 0 {
+        read_len = read_len.min(max_len.saturating_sub(1));
+        tmp[read_len] = 0;
+    }
+
+    let copy_len = read_len.saturating_add(1).min(max_len);
+    try_or_err!(ctx, syscall_copy_to_user_bounded(args.arg0, &tmp[..copy_len]));
+    ctx.ok(read_len as u64)
+});
+
+define_syscall!(syscall_user_read_char(ctx, args) {
+    let _ = args;
+    let mut c = 0u8;
+    check_result!(ctx, tty::read_char_blocking(&mut c as *mut u8));
+    ctx.ok(c as u64)
+});
+
+define_syscall!(syscall_sys_info(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+
+    let mut info = UserSysInfo {
+        total_pages: 0,
+        free_pages: 0,
+        allocated_pages: 0,
+        total_tasks: 0,
+        active_tasks: 0,
+        task_context_switches: 0,
+        scheduler_context_switches: 0,
+        scheduler_yields: 0,
+        ready_tasks: 0,
+        schedule_calls: 0,
+    };
+
+    get_page_allocator_stats(
+        &mut info.total_pages,
+        &mut info.free_pages,
+        &mut info.allocated_pages,
+    );
+    get_task_stats(
+        &mut info.total_tasks,
+        &mut info.active_tasks,
+        &mut info.task_context_switches,
+    );
+    get_scheduler_stats(
+        &mut info.scheduler_context_switches,
+        &mut info.scheduler_yields,
+        &mut info.ready_tasks,
+        &mut info.schedule_calls,
+    );
+
+    let user_ptr = try_or_err!(ctx, UserPtr::<UserSysInfo>::try_new(args.arg0));
+    try_or_err!(ctx, copy_to_user(user_ptr, &info));
+    ctx.ok(0)
+});

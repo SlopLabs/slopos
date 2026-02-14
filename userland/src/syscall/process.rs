@@ -30,7 +30,7 @@ pub fn waitpid(task_id: u32) -> i32 {
 #[inline(always)]
 pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
     let rc = unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 1) as i64 };
-    if rc == u64::MAX as i64 {
+    if rc == ERRNO_EAGAIN as i64 {
         None
     } else {
         Some(rc as i32)

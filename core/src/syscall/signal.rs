@@ -19,14 +19,6 @@ use crate::scheduler::task_struct::{SignalAction, Task};
 use crate::syscall::common::{SyscallDisposition, syscall_return_err};
 use crate::syscall::context::SyscallContext;
 
-fn errno(ctx: &SyscallContext, value: u64) -> SyscallDisposition {
-    let disp = ctx.err();
-    unsafe {
-        (*ctx.frame_ptr()).rax = value;
-    }
-    disp
-}
-
 fn parse_signum(raw: u64) -> Option<u8> {
     if raw == 0 || raw as usize > NSIG {
         None
@@ -146,47 +138,47 @@ pub fn syscall_rt_sigaction(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
 
     let args = ctx.args();
     if args.arg3 != core::mem::size_of::<SigSet>() as u64 {
-        return errno(&ctx, ERRNO_EINVAL);
+        return ctx.err_with(ERRNO_EINVAL);
     }
 
     let Some(signum) = parse_signum(args.arg0) else {
-        return errno(&ctx, ERRNO_EINVAL);
+        return ctx.err_with(ERRNO_EINVAL);
     };
 
     let task_ref = match ctx.task_mut() {
         Some(t) => t,
-        None => return errno(&ctx, ERRNO_EINVAL),
+        None => return ctx.err_with(ERRNO_EINVAL),
     };
     let idx = (signum - 1) as usize;
 
     if args.arg2 != 0 {
         let old_ptr = match UserPtr::<UserSigaction>::try_new(args.arg2) {
             Ok(p) => p,
-            Err(_) => return errno(&ctx, ERRNO_EFAULT),
+            Err(_) => return ctx.err_with(ERRNO_EFAULT),
         };
         let old_action = action_to_user(&task_ref.signal_actions[idx]);
         if copy_to_user(old_ptr, &old_action).is_err() {
-            return errno(&ctx, ERRNO_EFAULT);
+            return ctx.err_with(ERRNO_EFAULT);
         }
     }
 
     if args.arg1 != 0 {
         if (sig_bit(signum) & SIG_UNCATCHABLE) != 0 {
-            return errno(&ctx, ERRNO_EINVAL);
+            return ctx.err_with(ERRNO_EINVAL);
         }
         let new_ptr = match UserPtr::<UserSigaction>::try_new(args.arg1) {
             Ok(p) => p,
-            Err(_) => return errno(&ctx, ERRNO_EFAULT),
+            Err(_) => return ctx.err_with(ERRNO_EFAULT),
         };
         let new_action = match copy_from_user(new_ptr) {
             Ok(a) => a,
-            Err(_) => return errno(&ctx, ERRNO_EFAULT),
+            Err(_) => return ctx.err_with(ERRNO_EFAULT),
         };
         if new_action.sa_handler != SIG_DFL
             && new_action.sa_handler != SIG_IGN
             && new_action.sa_restorer == 0
         {
-            return errno(&ctx, ERRNO_EINVAL);
+            return ctx.err_with(ERRNO_EINVAL);
         }
         task_ref.signal_actions[idx] = action_from_user(new_action);
     }
@@ -201,32 +193,32 @@ pub fn syscall_rt_sigprocmask(task: *mut Task, frame: *mut InterruptFrame) -> Sy
 
     let args = ctx.args();
     if args.arg3 != core::mem::size_of::<SigSet>() as u64 {
-        return errno(&ctx, ERRNO_EINVAL);
+        return ctx.err_with(ERRNO_EINVAL);
     }
 
     let task_ref = match ctx.task_mut() {
         Some(t) => t,
-        None => return errno(&ctx, ERRNO_EINVAL),
+        None => return ctx.err_with(ERRNO_EINVAL),
     };
 
     if args.arg2 != 0 {
         let old_ptr = match UserPtr::<SigSet>::try_new(args.arg2) {
             Ok(p) => p,
-            Err(_) => return errno(&ctx, ERRNO_EFAULT),
+            Err(_) => return ctx.err_with(ERRNO_EFAULT),
         };
         if copy_to_user(old_ptr, &task_ref.signal_blocked).is_err() {
-            return errno(&ctx, ERRNO_EFAULT);
+            return ctx.err_with(ERRNO_EFAULT);
         }
     }
 
     if args.arg1 != 0 {
         let new_ptr = match UserPtr::<SigSet>::try_new(args.arg1) {
             Ok(p) => p,
-            Err(_) => return errno(&ctx, ERRNO_EFAULT),
+            Err(_) => return ctx.err_with(ERRNO_EFAULT),
         };
         let set = match copy_from_user(new_ptr) {
             Ok(v) => v,
-            Err(_) => return errno(&ctx, ERRNO_EFAULT),
+            Err(_) => return ctx.err_with(ERRNO_EFAULT),
         };
 
         let mut blocked = task_ref.signal_blocked;
@@ -234,7 +226,7 @@ pub fn syscall_rt_sigprocmask(task: *mut Task, frame: *mut InterruptFrame) -> Sy
             slopos_abi::signal::SIG_BLOCK => blocked |= set,
             SIG_UNBLOCK => blocked &= !set,
             SIG_SETMASK => blocked = set,
-            _ => return errno(&ctx, ERRNO_EINVAL),
+            _ => return ctx.err_with(ERRNO_EINVAL),
         }
         task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
     }
@@ -252,7 +244,7 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 
     let raw_pid = args.arg0 as i64;
     if raw_pid < i32::MIN as i64 || raw_pid > i32::MAX as i64 {
-        return errno(&ctx, ERRNO_ESRCH);
+        return ctx.err_with(ERRNO_ESRCH);
     }
     let pid = raw_pid as i32;
 
@@ -260,40 +252,40 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     if pid > 0 {
         let target_id = pid as u32;
         if task_find_by_id(target_id).is_null() {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         targets.push(target_id);
     } else if pid == 0 {
         if caller_id == INVALID_TASK_ID {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         let caller = task_find_by_id(caller_id);
         if caller.is_null() {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         let caller_pgid = unsafe { (*caller).pgid };
         if caller_pgid == INVALID_TASK_ID {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         collect_targets_for_group(caller_pgid, &mut targets);
     } else if pid == -1 {
         if caller_id == INVALID_TASK_ID {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         collect_targets_for_all(caller_id, &mut targets);
     } else {
         if pid == i32::MIN {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         let group_id = (-pid) as u32;
         if group_id == INVALID_TASK_ID {
-            return errno(&ctx, ERRNO_ESRCH);
+            return ctx.err_with(ERRNO_ESRCH);
         }
         collect_targets_for_group(group_id, &mut targets);
     }
 
     if targets.len == 0 {
-        return errno(&ctx, ERRNO_ESRCH);
+        return ctx.err_with(ERRNO_ESRCH);
     }
 
     if args.arg1 == 0 {
@@ -301,7 +293,7 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
 
     let Some(signum) = parse_signum(args.arg1) else {
-        return errno(&ctx, ERRNO_EINVAL);
+        return ctx.err_with(ERRNO_EINVAL);
     };
 
     let mut signaled = 0usize;
@@ -333,7 +325,7 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
 
     if signaled == 0 {
-        return errno(&ctx, ERRNO_ESRCH);
+        return ctx.err_with(ERRNO_ESRCH);
     }
 
     if caller_terminated {
@@ -357,13 +349,13 @@ pub fn syscall_rt_sigreturn(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
 
     let task_ref = match ctx.task_mut() {
         Some(t) => t,
-        None => return errno(&ctx, ERRNO_EINVAL),
+        None => return ctx.err_with(ERRNO_EINVAL),
     };
 
     let rsp = unsafe { (*frame).rsp };
     let sigframe = match read_signal_frame(rsp).or_else(|| read_signal_frame(rsp.wrapping_sub(8))) {
         Some(sf) => sf,
-        None => return errno(&ctx, ERRNO_EFAULT),
+        None => return ctx.err_with(ERRNO_EFAULT),
     };
 
     task_ref.signal_blocked = sigframe.saved_mask & !SIG_UNCATCHABLE;

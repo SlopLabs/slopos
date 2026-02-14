@@ -147,6 +147,10 @@ impl<'a> Ext2Fs<'a> {
         self.remove_path_internal(path)
     }
 
+    pub fn unlink_entry(&mut self, parent_inode: u32, name: &[u8]) -> Result<(), Ext2Error> {
+        self.unlink_entry_internal(parent_inode, name)
+    }
+
     pub(crate) fn init_internal(device: &'a mut dyn BlockDevice) -> Result<Self, Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         device
@@ -326,19 +330,7 @@ impl<'a> Ext2Fs<'a> {
                 inode = self.parent_inode(inode)?;
                 continue;
             }
-            let mut found = None;
-            self.for_each_dir_entry_internal(inode, &mut |entry| {
-                if entry.name == component {
-                    found = Some(entry.inode);
-                    return false;
-                }
-                true
-            })?;
-            if let Some(next) = found {
-                inode = next;
-            } else {
-                return Err(Ext2Error::PathNotFound);
-            }
+            inode = self.lookup_child_inode(inode, component)?;
         }
         Ok(inode)
     }
@@ -347,16 +339,38 @@ impl<'a> Ext2Fs<'a> {
         if path.is_empty() || path == b"/" {
             return Err(Ext2Error::PathNotFound);
         }
-        let target_inode = self.resolve_path_internal(path)?;
-        let inode_data = self.read_inode_internal(target_inode)?;
-        if inode_data.is_directory() {
-            return Err(Ext2Error::NotFile);
-        }
         let (parent, name) = split_parent(path).ok_or(Ext2Error::PathNotFound)?;
         if name == b"." || name == b".." {
             return Err(Ext2Error::PathNotFound);
         }
         let parent_inode = self.resolve_path_internal(parent)?;
+        self.unlink_entry_internal(parent_inode, name)
+    }
+
+    fn lookup_child_inode(&mut self, parent_inode: u32, name: &[u8]) -> Result<u32, Ext2Error> {
+        let mut found = None;
+        self.for_each_dir_entry_internal(parent_inode, &mut |entry| {
+            if entry.name == name {
+                found = Some(entry.inode);
+                false
+            } else {
+                true
+            }
+        })?;
+        found.ok_or(Ext2Error::PathNotFound)
+    }
+
+    fn unlink_entry_internal(&mut self, parent_inode: u32, name: &[u8]) -> Result<(), Ext2Error> {
+        if name.is_empty() || name == b"." || name == b".." {
+            return Err(Ext2Error::PathNotFound);
+        }
+
+        let target_inode = self.lookup_child_inode(parent_inode, name)?;
+        let inode_data = self.read_inode_internal(target_inode)?;
+        if inode_data.is_directory() {
+            return Err(Ext2Error::NotFile);
+        }
+
         self.remove_dir_entry(parent_inode, name)?;
         self.release_file_blocks(&inode_data)?;
         self.free_inode(target_inode)?;

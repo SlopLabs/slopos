@@ -1,5 +1,6 @@
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
+use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
 use slopos_lib::InterruptFrame;
 use slopos_lib::wl_currency::{self, WL_DELTA};
@@ -117,9 +118,29 @@ impl SyscallContext {
     }
 
     #[inline]
+    pub fn ok_i64(&self, value: i64) -> SyscallDisposition {
+        self.ok(value as u64)
+    }
+
+    #[inline]
     pub fn err(&self) -> SyscallDisposition {
+        self.err_with(ERRNO_EINVAL)
+    }
+
+    #[inline]
+    pub fn err_with(&self, errno: u64) -> SyscallDisposition {
         wl_currency::adjust_balance(-WL_DELTA);
-        syscall_return_err(self.frame_ptr, u64::MAX)
+        syscall_return_err(self.frame_ptr, errno)
+    }
+
+    #[inline]
+    pub fn invalid_arg(&self) -> SyscallDisposition {
+        self.err_with(ERRNO_EINVAL)
+    }
+
+    #[inline]
+    pub fn bad_address(&self) -> SyscallDisposition {
+        self.err_with(ERRNO_EFAULT)
     }
 
     #[inline]
@@ -174,7 +195,7 @@ impl SyscallContext {
 
     #[inline]
     pub fn err_user_ptr(&self, _err: slopos_mm::user_ptr::UserPtrError) -> SyscallDisposition {
-        self.err()
+        self.err_with(ERRNO_EFAULT)
     }
 
     #[inline]
