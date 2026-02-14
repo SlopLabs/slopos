@@ -385,6 +385,50 @@ Handle Ctrl+C and Ctrl+Z in the shell.
 - Prompt-time `[N] Done` notifications for completed background jobs are still pending shell wiring.
 - External argv passing remains blocked by Phase 6 `SYSCALL_EXEC` ABI extension.
 
+### 2G: Phase 2 Finalization Checklist (Required Before Marking Complete)
+
+This checklist is the finish line for Phase 2. Do not mark the phase complete until all items below are done and verified.
+
+- [ ] **2G.1 Kernel kill process-group semantics**
+  - Extend `SYSCALL_KILL` to support POSIX group signaling semantics:
+    - `pid > 0`: signal one task (current behavior)
+    - `pid == 0`: signal caller's process group
+    - `pid < -1`: signal process group `abs(pid)`
+  - Keep `sig==0` existence/probe behavior.
+  - Validate with a pipeline (`cmd1 | cmd2`) where all members receive SIGINT.
+
+- [ ] **2G.2 Userland process wrapper for group signaling**
+  - Add signed PID wrapper in `userland/src/syscall/process.rs` (e.g. `kill_pid(pid: i32, signum: u8)`).
+  - Keep existing `kill(u32, u8)` for compatibility, but route shell foreground signaling through signed API.
+
+- [ ] **2G.3 Shell Ctrl+C targets foreground process group, not a single PID**
+  - Replace single-`FOREGROUND_PID` model with explicit foreground PGID tracking.
+  - In `maybe_handle_ctrl_c()`, send `SIGINT` to foreground PGID (group-wide), not one process.
+  - Verify: long-running external app/pipeline is interrupted immediately without waiting for window close.
+
+- [ ] **2G.4 Terminal foreground control wiring (`tcsetpgrp`/`tcgetpgrp`)**
+  - Add userland syscall wrappers for `SYSCALL_IOCTL` + `TIOCSPGRP` / `TIOCGPGRP`.
+  - Shell foreground launch path:
+    - before wait: `tcsetpgrp(STDIN, job_pgid)`
+    - after completion/interrupt: `tcsetpgrp(STDIN, shell_pgid)`
+  - Apply same handoff in `fg` builtin.
+
+- [ ] **2G.5 Prompt-time done notifications**
+  - On each prompt cycle, poll background jobs via non-blocking `waitpid` and print `[N] Done  <command>` once.
+  - Do not silently discard completed jobs before notification.
+
+- [ ] **2G.6 End-to-end verification matrix (manual boot test)**
+  - `file_manager` launch from shell: shell blocks/unblocks correctly.
+  - `ls > /tmp/listing` and `echo hello >> /tmp/listing`: redirection works.
+  - `echo hello | cat` and `ls | cat`: pipelines work.
+  - `sysinfo &`, `jobs`, `fg %1`, `kill %1`: job control works.
+  - While foreground app is running and shell window is not focused, Ctrl+C still interrupts foreground job group immediately.
+
+- [ ] **2G.7 Regression safety**
+  - `make build` clean
+  - `make test` pass
+  - No regression in existing 14 builtins and Phase 1 line-edit/history behavior
+
 ---
 
 ## 6. Phase 3: Environment & Variables
