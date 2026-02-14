@@ -10,7 +10,7 @@ use core::ffi::c_char;
 use slopos_lib::klog_info;
 use slopos_lib::ports::QEMU_DEBUG_EXIT;
 
-use slopos_core::platform;
+use slopos_lib::kernel_services::platform;
 
 /// Request test harness shutdown via QEMU debug exit port.
 ///

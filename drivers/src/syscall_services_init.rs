@@ -1,6 +1,7 @@
-use slopos_core::syscall_services::{
-    InputServices, TtyServices, register_input_services, register_tty_services,
+use slopos_lib::kernel_services::syscall_services::input::{
+    InputServices, register_input_services,
 };
+use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
 use crate::{input_event, tty};
 

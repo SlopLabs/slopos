@@ -32,6 +32,7 @@ pub mod alignment;
 pub mod cpu_local;
 pub mod init_flag;
 pub mod kdiag;
+pub mod kernel_services;
 pub mod klog;
 pub mod memory;
 pub mod numfmt;

@@ -1,6 +1,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_core::irq;
+use slopos_lib::kernel_services::driver_runtime::{
+    driver_irq_disable_line, driver_irq_enable_line, driver_irq_get_timer_ticks,
+};
 use slopos_lib::ports::{
     IO_DELAY, PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0, PIT_COMMAND, PIT_COMMAND_ACCESS_LOHI,
     PIT_COMMAND_BINARY, PIT_COMMAND_CHANNEL0, PIT_COMMAND_MODE_SQUARE, PIT_DEFAULT_FREQUENCY_HZ,
@@ -76,11 +78,11 @@ pub fn pit_get_frequency() -> u32 {
 }
 
 pub fn pit_enable_irq() {
-    irq::enable_line(PIT_IRQ_LINE);
+    driver_irq_enable_line(PIT_IRQ_LINE);
 }
 
 pub fn pit_disable_irq() {
-    irq::disable_line(PIT_IRQ_LINE);
+    driver_irq_disable_line(PIT_IRQ_LINE);
 }
 
 fn pit_read_count() -> u16 {
@@ -133,10 +135,10 @@ pub fn pit_sleep_ms(ms: u32) {
         ticks_needed = 1;
     }
 
-    let start = irq::get_timer_ticks();
+    let start = driver_irq_get_timer_ticks();
     let target = start.wrapping_add(ticks_needed);
 
-    while irq::get_timer_ticks() < target {
+    while driver_irq_get_timer_ticks() < target {
         cpu::hlt();
     }
 }

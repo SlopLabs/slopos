@@ -7,20 +7,18 @@ use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
 use crate::ps2::keyboard;
 use crate::serial;
-use slopos_abi::signal::{SIGINT, sig_bit};
-use slopos_abi::task::TaskStatus;
-use slopos_core::sched::{
-    block_current_task, scheduler_get_current_task, scheduler_is_enabled,
-    scheduler_register_idle_wakeup_callback, unblock_task,
+use slopos_abi::signal::SIGINT;
+use slopos_lib::kernel_services::driver_runtime::{
+    DriverTaskHandle, driver_block_current_task, driver_current_task, driver_current_task_id,
+    driver_register_idle_wakeup_callback, driver_scheduler_is_enabled, driver_signal_process_group,
+    driver_unblock_task,
 };
-use slopos_core::scheduler::task::task_iterate_active;
-use slopos_core::scheduler::task_struct::Task;
 
 const TTY_MAX_WAITERS: usize = 32;
 
 #[repr(C)]
 struct TtyWaitQueue {
-    tasks: [*mut Task; TTY_MAX_WAITERS],
+    tasks: [DriverTaskHandle; TTY_MAX_WAITERS],
     head: usize,
     tail: usize,
     count: usize,
@@ -31,13 +29,13 @@ struct TtyWaitQueue {
 unsafe impl Send for TtyWaitQueue {}
 
 static TTY_WAIT_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
-    tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
+    tasks: [ptr::null_mut::<c_void>(); TTY_MAX_WAITERS],
     head: 0,
     tail: 0,
     count: 0,
 });
 static TTY_FOCUS_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
-    tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
+    tasks: [ptr::null_mut::<c_void>(); TTY_MAX_WAITERS],
     head: 0,
     tail: 0,
     count: 0,
@@ -45,46 +43,13 @@ static TTY_FOCUS_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
 static TTY_FOCUSED_TASK_ID: AtomicU32 = AtomicU32::new(0);
 static TTY_FOREGROUND_PGRP: AtomicU32 = AtomicU32::new(0);
 
-struct GroupSignalContext {
-    pgid: u32,
-    signum: u8,
-    matched: bool,
-}
-
-fn signal_group_member(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
-        return;
-    }
-
-    let ctx = unsafe { &mut *(context as *mut GroupSignalContext) };
-    if unsafe { (*task).pgid } != ctx.pgid {
-        return;
-    }
-
-    unsafe {
-        (*task)
-            .signal_pending
-            .fetch_or(sig_bit(ctx.signum), Ordering::AcqRel);
-    }
-    let _ = unblock_task(task);
-    ctx.matched = true;
-}
-
 fn tty_signal_foreground_pgrp(signum: u8) {
     let pgid = tty_get_foreground_pgrp();
     if pgid == 0 {
         return;
     }
 
-    let mut ctx = GroupSignalContext {
-        pgid,
-        signum,
-        matched: false,
-    };
-    task_iterate_active(
-        Some(signal_group_member),
-        (&mut ctx as *mut GroupSignalContext).cast(),
-    );
+    let _ = driver_signal_process_group(pgid, signum);
 }
 
 use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
@@ -120,10 +85,10 @@ fn tty_register_idle_callback() {
     if REGISTERED.swap(true, Ordering::AcqRel) {
         return;
     }
-    scheduler_register_idle_wakeup_callback(Some(tty_input_available_cb));
+    driver_register_idle_wakeup_callback(Some(tty_input_available_cb));
 }
 
-fn tty_wait_queue_pop() -> *mut Task {
+fn tty_wait_queue_pop() -> DriverTaskHandle {
     let mut queue = TTY_WAIT_QUEUE.lock();
     if queue.count == 0 {
         return ptr::null_mut();
@@ -134,7 +99,7 @@ fn tty_wait_queue_pop() -> *mut Task {
     task
 }
 
-fn tty_wait_queue_push(task: *mut Task) -> bool {
+fn tty_wait_queue_push(task: DriverTaskHandle) -> bool {
     if task.is_null() {
         return false;
     }
@@ -155,7 +120,7 @@ fn tty_wait_queue_push(task: *mut Task) -> bool {
     true
 }
 
-fn tty_focus_queue_push(task: *mut Task) -> bool {
+fn tty_focus_queue_push(task: DriverTaskHandle) -> bool {
     if task.is_null() {
         return false;
     }
@@ -176,7 +141,7 @@ fn tty_focus_queue_push(task: *mut Task) -> bool {
     true
 }
 
-fn tty_focus_queue_pop() -> *mut Task {
+fn tty_focus_queue_pop() -> DriverTaskHandle {
     let mut queue = TTY_FOCUS_QUEUE.lock();
     if queue.count == 0 {
         return ptr::null_mut();
@@ -188,11 +153,11 @@ fn tty_focus_queue_pop() -> *mut Task {
 }
 
 fn tty_current_task_id() -> Option<u32> {
-    let task = scheduler_get_current_task();
-    if task.is_null() {
+    let task_id = driver_current_task_id();
+    if task_id == 0 {
         return None;
     }
-    unsafe { Some((*(task as *mut Task)).task_id) }
+    Some(task_id)
 }
 
 fn tty_task_has_focus(task_id: u32) -> bool {
@@ -210,10 +175,10 @@ fn tty_wait_for_focus(task_id: u32) {
     if tty_task_has_focus(task_id) {
         return;
     }
-    if scheduler_is_enabled() != 0 {
-        let current = scheduler_get_current_task() as *mut Task;
+    if driver_scheduler_is_enabled() != 0 {
+        let current = driver_current_task();
         if tty_focus_queue_push(current) {
-            block_current_task();
+            driver_block_current_task();
             return;
         }
     }
@@ -222,23 +187,20 @@ fn tty_wait_for_focus(task_id: u32) {
     }
 }
 pub fn tty_notify_input_ready() {
-    if scheduler_is_enabled() == 0 {
+    if driver_scheduler_is_enabled() == 0 {
         return;
     }
 
     let task = tty_wait_queue_pop();
 
     if !task.is_null() {
-        let status = unsafe { (*task).status() };
-        if status == TaskStatus::Blocked || status == TaskStatus::Ready {
-            unblock_task(task);
-        }
+        let _ = driver_unblock_task(task);
     }
 }
 
 pub fn tty_set_focus(task_id: u32) -> c_int {
     TTY_FOCUSED_TASK_ID.store(task_id, Ordering::Relaxed);
-    if scheduler_is_enabled() == 0 {
+    if driver_scheduler_is_enabled() == 0 {
         return 0;
     }
 
@@ -247,7 +209,7 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         if candidate.is_null() {
             break;
         }
-        let _ = unblock_task(candidate);
+        let _ = driver_unblock_task(candidate);
     }
     0
 }
@@ -308,10 +270,10 @@ fn tty_block_until_input_ready() {
     if tty_input_available() != 0 {
         return;
     }
-    if scheduler_is_enabled() != 0 {
-        let current = scheduler_get_current_task() as *mut Task;
+    if driver_scheduler_is_enabled() != 0 {
+        let current = driver_current_task();
         if tty_wait_queue_push(current) {
-            block_current_task();
+            driver_block_current_task();
             return;
         }
     }

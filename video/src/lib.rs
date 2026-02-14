@@ -9,10 +9,12 @@ use slopos_abi::FramebufferData;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
-use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
 #[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
+use slopos_lib::kernel_services::syscall_services::video::{
+    VideoServices, register_video_services,
+};
 use slopos_lib::{klog_info, klog_warn};
 
 pub mod compositor_context;

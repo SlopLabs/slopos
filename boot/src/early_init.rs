@@ -507,6 +507,7 @@ pub fn kernel_main_impl() {
 
     // Register platform and syscall service tables before the init phases run.
     crate::boot_impl::register_boot_services();
+    slopos_core::driver_hooks::register_driver_services();
     slopos_drivers::syscall_services_init::init_syscall_services();
 
     serial::write_line("BOOT: entering boot init");

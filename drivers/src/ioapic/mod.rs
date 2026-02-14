@@ -11,7 +11,7 @@ use regs::*;
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMode};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
-use slopos_core::platform;
+use slopos_lib::kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 

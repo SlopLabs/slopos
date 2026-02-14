@@ -7,13 +7,13 @@
 //!
 //! Events are routed to the focused task for each input type.
 
-use slopos_core::irq;
+use slopos_lib::kernel_services::driver_runtime::driver_irq_get_timer_ticks;
 use slopos_lib::{IrqMutex, RingBuffer};
 
 use crate::pit::pit_get_frequency;
 
 pub fn get_timestamp_ms() -> u64 {
-    let ticks = irq::get_timer_ticks();
+    let ticks = driver_irq_get_timer_ticks();
     let freq = pit_get_frequency();
     if freq == 0 {
         return 0;

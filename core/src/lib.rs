@@ -6,6 +6,7 @@ use core::arch::global_asm;
 
 global_asm!(include_str!("../context_switch.s"), options(att_syntax));
 
+pub mod driver_hooks;
 pub mod exec;
 pub mod irq;
 #[cfg(feature = "itests")]
