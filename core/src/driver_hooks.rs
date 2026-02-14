@@ -27,6 +27,11 @@ fn runtime_scheduler_timer_tick() {
 }
 
 #[inline]
+fn runtime_scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
+    scheduler::scheduler_handle_timer_interrupt(frame);
+}
+
+#[inline]
 fn runtime_request_reschedule_from_interrupt() {
     scheduler::scheduler_request_reschedule_from_interrupt();
 }
@@ -162,6 +167,7 @@ fn runtime_irq_increment_keyboard_events() {
 static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     save_preempt_context: runtime_save_preempt_context,
     scheduler_timer_tick: runtime_scheduler_timer_tick,
+    scheduler_handle_timer_interrupt: runtime_scheduler_handle_timer_interrupt,
     request_reschedule_from_interrupt: runtime_request_reschedule_from_interrupt,
     scheduler_is_enabled: runtime_scheduler_is_enabled,
     current_task: runtime_current_task,

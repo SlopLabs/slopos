@@ -15,11 +15,10 @@ use slopos_lib::InitFlag;
 use slopos_lib::IrqMutex;
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
-use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE};
+use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
 use crate::platform;
-use crate::scheduler::scheduler::scheduler_handle_post_irq;
+use crate::scheduler::scheduler::{TrapExitSource, scheduler_handoff_on_trap_exit};
 
 /// Maximum number of IRQ lines supported.
 pub const IRQ_LINES: usize = 16;
@@ -394,14 +393,7 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
     }
 
     acknowledge_irq();
-
-    let rsp = cpu::read_rsp();
-    let ist_region_end = EXCEPTION_STACK_REGION_BASE + 7 * EXCEPTION_STACK_REGION_STRIDE;
-    let on_ist_stack = rsp >= EXCEPTION_STACK_REGION_BASE && rsp < ist_region_end;
-
-    if !on_ist_stack {
-        scheduler_handle_post_irq();
-    }
+    scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
 }
 
 /// IRQ statistics structure.

@@ -5,13 +5,19 @@ use core::ptr;
 
 use super::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
-use slopos_lib::{assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult};
+use slopos_lib::{
+    InterruptFrame, assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult,
+};
 
-use super::scheduler::{init_scheduler, scheduler_shutdown};
+use super::scheduler::{
+    init_scheduler, save_task_context_from_interrupt_frame, scheduler_shutdown,
+};
 use super::task::{
     MAX_TASKS, init_task_manager, task_create, task_find_by_id, task_get_info, task_set_state,
     task_shutdown_all, task_terminate,
 };
+use super::task_struct::TaskContext;
+use slopos_lib::arch::gdt::SegmentSelector;
 
 struct ContextFixture;
 
@@ -359,6 +365,115 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult {
+    let mut task = Task::invalid();
+    task.context = TaskContext::zero();
+    task.user_started = 0;
+    task.context_from_user = 0;
+
+    let mut frame = InterruptFrame {
+        r15: 0x15,
+        r14: 0x14,
+        r13: 0x13,
+        r12: 0x12,
+        r11: 0x11,
+        r10: 0x10,
+        r9: 0x9,
+        r8: 0x8,
+        rbp: 0xBEEF,
+        rdi: 0xD1,
+        rsi: 0x51,
+        rdx: 0xD2,
+        rcx: 0xC1,
+        rbx: 0xB1,
+        rax: 0xA1,
+        vector: 0x80,
+        error_code: 0,
+        rip: 0x4000,
+        cs: SegmentSelector::USER_CODE.bits() as u64,
+        rflags: 0x202,
+        rsp: 0x8000,
+        ss: SegmentSelector::USER_DATA.bits() as u64,
+    };
+
+    save_task_context_from_interrupt_frame(&mut task, &mut frame, true);
+
+    assert_eq_test!(task.context.rax, 0xA1);
+    assert_eq_test!(task.context.rbx, 0xB1);
+    assert_eq_test!(task.context.rcx, 0xC1);
+    assert_eq_test!(task.context.rdx, 0xD2);
+    assert_eq_test!(task.context.rsi, 0x51);
+    assert_eq_test!(task.context.rdi, 0xD1);
+    assert_eq_test!(task.context.r8, 0x8);
+    assert_eq_test!(task.context.r9, 0x9);
+    assert_eq_test!(task.context.r10, 0x10);
+    assert_eq_test!(task.context.r11, 0x11);
+    assert_eq_test!(task.context.r12, 0x12);
+    assert_eq_test!(task.context.r13, 0x13);
+    assert_eq_test!(task.context.r14, 0x14);
+    assert_eq_test!(task.context.r15, 0x15);
+    assert_eq_test!(task.context.rip, 0x4000);
+    assert_eq_test!(task.context.rsp, 0x8000);
+    assert_eq_test!(task.context.rflags, 0x202);
+    assert_eq_test!(task.context.cs, SegmentSelector::USER_CODE.bits() as u64);
+    assert_eq_test!(task.context.ss, SegmentSelector::USER_DATA.bits() as u64);
+    assert_eq_test!(
+        task.context.ds,
+        SegmentSelector::USER_DATA.bits() as u64,
+        "ds should always be user data selector"
+    );
+    assert_eq_test!(
+        task.context.es,
+        SegmentSelector::USER_DATA.bits() as u64,
+        "es should always be user data selector"
+    );
+    assert_eq_test!(task.context.fs, 0);
+    assert_eq_test!(task.context.gs, 0);
+    assert_eq_test!(task.context_from_user, 1);
+    assert_eq_test!(task.user_started, 1);
+
+    TestResult::Pass
+}
+
+pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestResult {
+    let mut task = Task::invalid();
+    task.context = TaskContext::zero();
+    task.user_started = 0;
+    task.context_from_user = 0;
+
+    let mut frame = InterruptFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rbp: 0,
+        rdi: 0,
+        rsi: 0,
+        rdx: 0,
+        rcx: 0,
+        rbx: 0,
+        rax: 0,
+        vector: 32,
+        error_code: 0,
+        rip: 0,
+        cs: SegmentSelector::USER_CODE.bits() as u64,
+        rflags: 0,
+        rsp: 0,
+        ss: SegmentSelector::USER_DATA.bits() as u64,
+    };
+
+    save_task_context_from_interrupt_frame(&mut task, &mut frame, false);
+
+    assert_eq_test!(task.context_from_user, 1);
+    assert_eq_test!(task.user_started, 0);
+
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     context,
     [
@@ -379,5 +494,7 @@ slopos_lib::define_test_suite!(
         test_switch_context_zero_init,
         test_switch_context_setup_initial,
         test_task_has_switch_ctx,
+        test_save_task_context_from_interrupt_frame_marks_started,
+        test_save_task_context_from_interrupt_frame_keeps_user_started,
     ]
 );

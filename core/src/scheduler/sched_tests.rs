@@ -14,6 +14,7 @@ use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
 use super::per_cpu::{pause_all_aps, resume_all_aps_if_not_nested};
+use super::runtime::{self, IdleStackResolveError};
 use super::scheduler::{
     self, get_scheduler_stats, init_scheduler, schedule, schedule_task, scheduler_is_enabled,
     scheduler_shutdown, scheduler_timer_tick, unschedule_task,
@@ -911,7 +912,7 @@ pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResu
         return TestResult::Fail;
     }
 
-    let (idle_task, stack_top) = match scheduler::resolve_idle_stack_for_cpu(0) {
+    let (idle_task, stack_top) = match runtime::resolve_idle_stack_for_cpu(0) {
         Ok(values) => values,
         Err(err) => {
             klog_info!("SCHED_TEST: Failed to resolve BSP idle stack: {:?}", err);
@@ -956,8 +957,8 @@ pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
     })
     .unwrap_or(ptr::null_mut());
 
-    let result = match scheduler::resolve_idle_stack_for_cpu(0) {
-        Err(scheduler::IdleStackResolveError::MissingIdleTask) => TestResult::Pass,
+    let result = match runtime::resolve_idle_stack_for_cpu(0) {
+        Err(IdleStackResolveError::MissingIdleTask) => TestResult::Pass,
         Err(other) => {
             klog_info!(
                 "SCHED_TEST: Expected MissingIdleTask, got different error: {:?}",
@@ -1003,8 +1004,8 @@ pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
         (*idle_task).kernel_stack_top = 0;
     }
 
-    let result = match scheduler::resolve_idle_stack_for_cpu(0) {
-        Err(scheduler::IdleStackResolveError::MissingKernelStack) => TestResult::Pass,
+    let result = match runtime::resolve_idle_stack_for_cpu(0) {
+        Err(IdleStackResolveError::MissingKernelStack) => TestResult::Pass,
         Err(other) => {
             klog_info!(
                 "SCHED_TEST: Expected MissingKernelStack, got different error: {:?}",

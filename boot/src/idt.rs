@@ -81,7 +81,8 @@ use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
 
 use slopos_core::sched::{
-    schedule, scheduler_get_current_task, scheduler_request_reschedule_from_interrupt,
+    RescheduleReason, TrapExitSource, schedule, scheduler_get_current_task,
+    scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
 use slopos_core::task::task_terminate;
 
@@ -317,7 +318,8 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     if vector == RESCHEDULE_IPI_VECTOR {
         send_eoi();
-        scheduler_request_reschedule_from_interrupt();
+        scheduler_request_reschedule(RescheduleReason::RescheduleIpi);
+        scheduler_handoff_on_trap_exit(TrapExitSource::RescheduleIpi);
         return;
     }
 

@@ -9,7 +9,7 @@ use slopos_lib::kernel_services::driver_runtime::{
     DRIVER_IRQ_LINES, DRIVER_LEGACY_IRQ_COM1, DRIVER_LEGACY_IRQ_KEYBOARD, DRIVER_LEGACY_IRQ_MOUSE,
     DRIVER_LEGACY_IRQ_TIMER, irq_get_timer_ticks, irq_increment_keyboard_events,
     irq_increment_timer_ticks, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
-    save_preempt_context, scheduler_timer_tick,
+    scheduler_handle_timer_interrupt,
 };
 use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
 
@@ -21,8 +21,7 @@ extern "C" fn timer_irq_handler(_irq: u8, frame: *mut InterruptFrame, _ctx: *mut
     if tick <= 3 {
         klog_debug!("IRQ: Timer tick #{}", tick);
     }
-    save_preempt_context(frame);
-    scheduler_timer_tick();
+    scheduler_handle_timer_interrupt(frame);
 }
 
 extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {

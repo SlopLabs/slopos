@@ -15,6 +15,7 @@ crate::define_service! {
     driver_runtime => DriverRuntimeServices {
         save_preempt_context(frame: *mut InterruptFrame);
         scheduler_timer_tick();
+        scheduler_handle_timer_interrupt(frame: *mut InterruptFrame);
         request_reschedule_from_interrupt();
         scheduler_is_enabled() -> c_int;
         current_task() -> DriverTaskHandle;
