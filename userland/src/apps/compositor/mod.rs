@@ -384,6 +384,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     loop {
         let frame_start_ms = sys_core::get_time_ms();
 
+        window::drain_queue();
         sys_input::drain_queue();
 
         wm.input.update_mouse();

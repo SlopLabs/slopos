@@ -1,6 +1,7 @@
 //! Builtin command dispatch table and helpers.
 
 pub mod fs;
+pub mod process;
 pub mod system;
 
 use super::display::shell_write;
@@ -46,11 +47,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         desc: b"Show kernel memory and scheduler stats",
     },
     BuiltinEntry {
-        name: b"sysinfo",
-        func: system::cmd_sysinfo,
-        desc: b"Launch the sysinfo program",
-    },
-    BuiltinEntry {
         name: b"ls",
         func: fs::cmd_ls,
         desc: b"List directory contents",
@@ -84,6 +80,41 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         name: b"pwd",
         func: fs::cmd_pwd,
         desc: b"Print working directory",
+    },
+    BuiltinEntry {
+        name: b"jobs",
+        func: process::cmd_jobs,
+        desc: b"List background jobs",
+    },
+    BuiltinEntry {
+        name: b"fg",
+        func: process::cmd_fg,
+        desc: b"Bring a job to foreground",
+    },
+    BuiltinEntry {
+        name: b"bg",
+        func: process::cmd_bg,
+        desc: b"Resume a stopped job",
+    },
+    BuiltinEntry {
+        name: b"kill",
+        func: process::cmd_kill,
+        desc: b"Send signal to pid or %job",
+    },
+    BuiltinEntry {
+        name: b"ps",
+        func: process::cmd_ps,
+        desc: b"Show process counters",
+    },
+    BuiltinEntry {
+        name: b"wait",
+        func: process::cmd_wait,
+        desc: b"Wait for a pid",
+    },
+    BuiltinEntry {
+        name: b"exec",
+        func: process::cmd_exec,
+        desc: b"Replace shell with program",
     },
 ];
 

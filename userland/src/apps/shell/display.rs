@@ -6,7 +6,7 @@ use slopos_abi::draw::Color32;
 
 use crate::gfx::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
 use crate::gfx::{self, DrawBuffer};
-use crate::syscall::{DisplayInfo, window};
+use crate::syscall::{DisplayInfo, fs, window};
 
 use super::SyncUnsafeCell;
 use super::surface;
@@ -88,6 +88,7 @@ impl DisplayState {
 unsafe impl Sync for DisplayState {}
 
 pub static DISPLAY: DisplayState = DisplayState::new();
+static OUTPUT_FD: SyncUnsafeCell<i32> = SyncUnsafeCell::new(-1);
 
 // =============================================================================
 // Scrollback module: safe accessors for large arrays
@@ -631,9 +632,26 @@ pub fn shell_console_write(buf: &[u8]) {
 }
 
 pub fn shell_write(buf: &[u8]) {
+    let redirected_fd = unsafe { *OUTPUT_FD.get() };
+    if redirected_fd >= 0 {
+        let _ = fs::write_slice(redirected_fd, buf);
+        return;
+    }
     let _ = crate::syscall::tty::write(buf);
     shell_console_write(buf);
     shell_console_commit();
+}
+
+pub fn shell_set_output_fd(fd: i32) {
+    unsafe {
+        *OUTPUT_FD.get() = fd;
+    }
+}
+
+pub fn shell_clear_output_fd() {
+    unsafe {
+        *OUTPUT_FD.get() = -1;
+    }
 }
 
 pub fn shell_echo_char(c: u8) {

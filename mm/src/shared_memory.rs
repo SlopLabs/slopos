@@ -479,6 +479,20 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
     // Return virtual address to free list for reuse
     registry.free_vaddr(mapping_vaddr, buffer_size);
 
+    if registry.buffers[buf_idx].active
+        && registry.buffers[buf_idx].owner_task == 0
+        && registry.buffers[buf_idx].mapping_count == 0
+    {
+        let pages = registry.buffers[buf_idx].pages;
+        let phys_addr = registry.buffers[buf_idx].phys_addr;
+        let token = registry.buffers[buf_idx].token;
+        for i in 0..pages {
+            free_page_frame(phys_addr.offset((i as u64) * PAGE_SIZE_4KB));
+        }
+        registry.buffers[buf_idx] = SharedBuffer::empty();
+        klog_debug!("shm_unmap: finalized deferred destroy token={}", token);
+    }
+
     klog_debug!(
         "shm_unmap: unmapped vaddr={:#x} for process={}, returned to free list",
         virt_addr,
@@ -704,48 +718,32 @@ pub fn shm_cleanup_task(task_id: u32) {
         }
     }
 
-    let mut vaddrs_from_owned: [(VirtAddr, usize); MAX_SHARED_BUFFERS] =
-        [(VirtAddr::NULL, 0); MAX_SHARED_BUFFERS];
-    let mut owned_vaddr_count = 0;
-
     for i in 0..owned_count {
         let slot = owned_buffer_slots[i];
         let buffer = &mut registry.buffers[slot];
-        let buffer_size = buffer.size;
         let phys_addr = buffer.phys_addr;
         let pages = buffer.pages;
 
-        for j in 0..pages {
-            free_page_frame(phys_addr.offset((j as u64) * PAGE_SIZE_4KB));
-        }
-
-        for mapping in buffer.mappings.iter_mut() {
-            if mapping.active {
-                if owned_vaddr_count < MAX_SHARED_BUFFERS {
-                    vaddrs_from_owned[owned_vaddr_count] = (mapping.virt_addr, buffer_size);
-                    owned_vaddr_count += 1;
-                }
-
-                let page_dir = process_vm_get_page_dir(mapping.task_id);
-                if !page_dir.is_null() {
-                    for j in 0..pages {
-                        let page_vaddr = mapping.virt_addr.offset((j as u64) * PAGE_SIZE_4KB);
-                        unmap_page_in_dir(page_dir, page_vaddr);
-                    }
-                }
+        if buffer.mapping_count == 0 {
+            for j in 0..pages {
+                free_page_frame(phys_addr.offset((j as u64) * PAGE_SIZE_4KB));
             }
+            klog_debug!("shm_cleanup_task: destroyed buffer token={}", buffer.token);
+            *buffer = SharedBuffer::empty();
+        } else {
+            buffer.owner_task = 0;
+            buffer.surface_width = 0;
+            buffer.surface_height = 0;
+            klog_debug!(
+                "shm_cleanup_task: deferred destroy token={} (mappings={})",
+                buffer.token,
+                buffer.mapping_count
+            );
         }
-
-        klog_debug!("shm_cleanup_task: destroyed buffer token={}", buffer.token);
-        *buffer = SharedBuffer::empty();
     }
 
     for i in 0..mapping_vaddr_count {
         let (vaddr, size) = vaddrs_from_mappings[i];
-        registry.free_vaddr(vaddr, size);
-    }
-    for i in 0..owned_vaddr_count {
-        let (vaddr, size) = vaddrs_from_owned[i];
         registry.free_vaddr(vaddr, size);
     }
 }

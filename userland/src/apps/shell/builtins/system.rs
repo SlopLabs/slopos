@@ -1,6 +1,3 @@
-//! System builtin commands: help, echo, clear, info, sysinfo, shutdown, reboot.
-
-use crate::program_registry;
 use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
@@ -87,17 +84,5 @@ pub fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     print_kv(b"", info.ready_tasks as u64);
     shell_write(b"  schedule() calls=");
     print_kv(b"", info.schedule_calls as u64);
-    0
-}
-
-pub fn cmd_sysinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
-    let rc = match program_registry::resolve_program(b"sysinfo") {
-        Some(spec) => process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags),
-        None => -1,
-    };
-    if rc <= 0 {
-        shell_write(b"sysinfo: failed to spawn\n");
-        return 1;
-    }
     0
 }

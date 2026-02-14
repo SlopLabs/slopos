@@ -16,6 +16,11 @@ pub fn fb_flip(token: u32) -> i64 {
 }
 
 #[inline(always)]
+pub fn drain_queue() -> i64 {
+    unsafe { syscall0(SYSCALL_DRAIN_QUEUE) as i64 }
+}
+
+#[inline(always)]
 pub fn fb_flip_damage(token: u32, damage: &[DamageRect]) -> i64 {
     if damage.is_empty() {
         return fb_flip(token);

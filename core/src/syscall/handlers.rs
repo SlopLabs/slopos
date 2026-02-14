@@ -574,6 +574,7 @@ define_syscall!(syscall_spawn_path(ctx, args) {
 
 define_syscall!(syscall_waitpid(ctx, args) {
     let target_id = args.arg0 as u32;
+    let options = args.arg1 as u32;
     if target_id == 0 || target_id == INVALID_TASK_ID {
         return ctx.err();
     }
@@ -581,6 +582,10 @@ define_syscall!(syscall_waitpid(ctx, args) {
     let mut record = TaskExitRecord::empty();
     if task_get_exit_record(target_id, &mut record) == 0 {
         return ctx.ok(record.exit_code as u64);
+    }
+
+    if (options & 0x1) != 0 {
+        return ctx.ok(u64::MAX);
     }
 
     // Block caller until target terminates via release_task_dependents wake path

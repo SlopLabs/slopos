@@ -1,7 +1,7 @@
 //! Process management syscalls: spawn, exec, fork, halt, reboot.
 
 use super::numbers::*;
-use super::raw::{syscall0, syscall1, syscall4};
+use super::raw::{syscall0, syscall1, syscall2, syscall4};
 
 #[inline(always)]
 pub fn spawn_path(path: &[u8]) -> i32 {
@@ -23,7 +23,17 @@ pub fn spawn_path_with_attrs(path: &[u8], priority: u8, flags: u16) -> i32 {
 
 #[inline(always)]
 pub fn waitpid(task_id: u32) -> i32 {
-    unsafe { syscall1(SYSCALL_WAITPID, task_id as u64) as i32 }
+    unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 0) as i32 }
+}
+
+#[inline(always)]
+pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
+    let rc = unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 1) as i64 };
+    if rc == u64::MAX as i64 {
+        None
+    } else {
+        Some(rc as i32)
+    }
 }
 
 #[inline(always)]
@@ -37,8 +47,28 @@ pub fn exec(path: &[u8]) -> i64 {
 }
 
 #[inline(always)]
+pub fn exec_ptr(path: *const u8) -> i64 {
+    unsafe { syscall1(SYSCALL_EXEC, path as u64) as i64 }
+}
+
+#[inline(always)]
 pub fn fork() -> i32 {
     unsafe { syscall0(SYSCALL_FORK) as i32 }
+}
+
+#[inline(always)]
+pub fn setpgid(pid: u32, pgid: u32) -> i32 {
+    unsafe { syscall2(SYSCALL_SETPGID, pid as u64, pgid as u64) as i32 }
+}
+
+#[inline(always)]
+pub fn getpgid(pid: u32) -> i32 {
+    unsafe { syscall1(SYSCALL_GETPGID, pid as u64) as i32 }
+}
+
+#[inline(always)]
+pub fn kill(pid: u32, signum: u8) -> i32 {
+    unsafe { syscall2(SYSCALL_KILL, pid as u64, signum as u64) as i32 }
 }
 
 #[inline(always)]

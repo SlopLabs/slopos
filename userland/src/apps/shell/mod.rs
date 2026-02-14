@@ -5,8 +5,10 @@ pub mod buffers;
 pub mod builtins;
 pub mod completion;
 pub mod display;
+pub mod exec;
 pub mod history;
 pub mod input;
+pub mod jobs;
 pub mod parser;
 mod surface;
 
@@ -115,9 +117,8 @@ pub fn shell_user_main(_arg: *mut c_void) {
             continue;
         }
 
-        if let Some(b) = builtins::find_builtin(tokens[0]) {
-            (b.func)(token_count, &tokens);
-        } else {
+        let rc = exec::execute_tokens(token_count, &tokens);
+        if rc == 127 {
             shell_write(UNKNOWN_CMD);
         }
     }

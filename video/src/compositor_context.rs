@@ -47,9 +47,6 @@ enum ClientOp {
         height: u32,
         shm_token: u32,
     },
-    Unregister {
-        task_id: u32,
-    },
     /// Request a frame callback (Wayland wl_surface.frame)
     RequestFrameCallback {
         task_id: u32,
@@ -83,6 +80,21 @@ enum ClientOp {
         task_id: u32,
         title: [u8; 32],
     },
+}
+
+impl ClientOp {
+    fn task_id(&self) -> u32 {
+        match self {
+            ClientOp::Commit { task_id }
+            | ClientOp::Register { task_id, .. }
+            | ClientOp::RequestFrameCallback { task_id }
+            | ClientOp::AddDamage { task_id, .. }
+            | ClientOp::SetRole { task_id, .. }
+            | ClientOp::SetParent { task_id, .. }
+            | ClientOp::SetRelativePosition { task_id, .. }
+            | ClientOp::SetTitle { task_id, .. } => *task_id,
+        }
+    }
 }
 
 // =============================================================================
@@ -279,10 +291,17 @@ pub fn register_surface_for_task(
 }
 
 /// Unregister a surface for a task (called on task exit or surface destruction).
-/// Called by kernel during task cleanup. Enqueues the unregistration.
 pub fn unregister_surface_for_task(task_id: u32) {
     let mut ctx = CONTEXT.lock();
-    ctx.queue.push_back(ClientOp::Unregister { task_id });
+    ctx.surfaces.remove(&task_id);
+
+    let mut filtered = VecDeque::new();
+    while let Some(op) = ctx.queue.pop_front() {
+        if op.task_id() != task_id {
+            filtered.push_back(op);
+        }
+    }
+    ctx.queue = filtered;
 }
 
 // =============================================================================
@@ -339,9 +358,6 @@ pub fn drain_queue() {
                 surface.window_y = 50 + offset;
 
                 ctx.surfaces.insert(task_id, surface);
-            }
-            ClientOp::Unregister { task_id } => {
-                ctx.surfaces.remove(&task_id);
             }
             ClientOp::RequestFrameCallback { task_id } => {
                 if let Some(surface) = ctx.surfaces.get_mut(&task_id) {

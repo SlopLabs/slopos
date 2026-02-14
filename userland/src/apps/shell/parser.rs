@@ -98,14 +98,39 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
         if cursor >= line.len() || line[cursor] == 0 {
             break;
         }
+
         let start = cursor;
-        while cursor < line.len() && line[cursor] != 0 && !is_space(line[cursor]) {
+        let token_len;
+
+        if line[cursor] == b'|' || line[cursor] == b'<' || line[cursor] == b'&' {
+            token_len = 1;
             cursor += 1;
+        } else if line[cursor] == b'>' {
+            cursor += 1;
+            token_len = if cursor < line.len() && line[cursor] == b'>' {
+                cursor += 1;
+                2
+            } else {
+                1
+            };
+        } else {
+            while cursor < line.len()
+                && line[cursor] != 0
+                && !is_space(line[cursor])
+                && line[cursor] != b'|'
+                && line[cursor] != b'<'
+                && line[cursor] != b'>'
+                && line[cursor] != b'&'
+            {
+                cursor += 1;
+            }
+            token_len = cursor - start;
         }
+
         if count >= tokens.len() {
             continue;
         }
-        let token_len = cmp::min(cursor - start, SHELL_MAX_TOKEN_LENGTH - 1);
+        let token_len = cmp::min(token_len, SHELL_MAX_TOKEN_LENGTH - 1);
 
         buffers::with_token_storage(|storage| {
             storage[count][..token_len].copy_from_slice(&line[start..start + token_len]);
