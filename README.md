@@ -61,6 +61,11 @@ make boot VIDEO=1   # spins the wheel
 ```bash
 QEMU_DISPLAY=cocoa make boot VIDEO=1  # Force Cocoa (macOS default)
 QEMU_DISPLAY=sdl make boot VIDEO=1    # Force SDL (if installed)
+make show-qemu-resolution             # Show detected framebuffer mode
+QEMU_FB_AUTO=0 make boot VIDEO=1      # Disable auto-detection, use defaults
+QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 make boot VIDEO=1  # Manual override
+QEMU_FB_AUTO_POLICY=max make boot VIDEO=1  # Multi-monitor: pick largest display
+QEMU_FB_AUTO_OUTPUT=DP-1 make boot VIDEO=1 # Multi-monitor: pin specific output
 DEBUG=1 make boot VIDEO=1             # Debug logging
 ```
 

@@ -1,6 +1,6 @@
 # Convenience targets for building, booting, and testing SlopOS (Rust rewrite)
 
-.PHONY: setup build build-userland fs-image iso iso-notests iso-tests boot boot-log test clean distclean
+.PHONY: setup build build-userland fs-image iso iso-notests iso-tests boot boot-log test show-qemu-resolution clean distclean
 
 # macOS support: detect OS and set paths accordingly
 UNAME_S := $(shell uname -s)
@@ -46,6 +46,10 @@ TEST_CMDLINE ?= itests=on itests.shutdown=on itests.verbosity=summary boot.debug
 VIDEO ?= 0
 QEMU_FB_WIDTH ?= 1920
 QEMU_FB_HEIGHT ?= 1080
+QEMU_FB_AUTO ?= 1
+QEMU_FB_DETECT_SCRIPT ?= scripts/detect_qemu_resolution.sh
+QEMU_FB_AUTO_POLICY ?= primary
+QEMU_FB_AUTO_OUTPUT ?=
 QEMU_GTK_ZOOM_TO_FIT ?= off
 # On macOS, prefer cocoa; otherwise let the logic decide
 ifeq ($(UNAME_S),Darwin)
@@ -123,6 +127,22 @@ define ensure_smp_power_of_two
 		echo "QEMU_SMP must be a power of 2 (got $(QEMU_SMP))" >&2; \
 		exit 1; \
 	fi;
+endef
+
+define resolve_qemu_video_args
+	fb_width="$(QEMU_FB_WIDTH)"; \
+	fb_height="$(QEMU_FB_HEIGHT)"; \
+	if [ "$${QEMU_FB_AUTO:-$(QEMU_FB_AUTO)}" != "0" ] && [ "$${VIDEO:-0}" != "0" ] && [ -x "$(QEMU_FB_DETECT_SCRIPT)" ]; then \
+		detected="$$(QEMU_FB_WIDTH="$$fb_width" QEMU_FB_HEIGHT="$$fb_height" QEMU_FB_AUTO_POLICY="$${QEMU_FB_AUTO_POLICY:-$(QEMU_FB_AUTO_POLICY)}" QEMU_FB_AUTO_OUTPUT="$${QEMU_FB_AUTO_OUTPUT:-$(QEMU_FB_AUTO_OUTPUT)}" "$(QEMU_FB_DETECT_SCRIPT)")"; \
+		detected_w="$${detected%% *}"; \
+		detected_h="$${detected##* }"; \
+		if [ -n "$$detected_w" ] && [ -n "$$detected_h" ]; then \
+			fb_width="$$detected_w"; \
+			fb_height="$$detected_h"; \
+			echo "QEMU framebuffer auto-detected: $$fb_width x $$fb_height"; \
+		fi; \
+	fi; \
+	VIDEO_ARGS="-vga none -device VGA,edid=on,xres=$$fb_width,yres=$$fb_height";
 endef
 
 define ensure_rust_toolchain
@@ -313,7 +333,7 @@ boot: iso-notests
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
 	DISPLAY_ARGS="-display none"; \
-	VIDEO_ARGS="-vga none -device VGA,edid=on,xres=$(QEMU_FB_WIDTH),yres=$(QEMU_FB_HEIGHT)"; \
+	$(call resolve_qemu_video_args) \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	HAS_COCOA=0; \
@@ -378,7 +398,7 @@ boot-log: iso-notests
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
 	DISPLAY_ARGS="-display none"; \
-	VIDEO_ARGS="-vga none -device VGA,edid=on,xres=$(QEMU_FB_WIDTH),yres=$(QEMU_FB_HEIGHT)"; \
+	$(call resolve_qemu_video_args) \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	HAS_COCOA=0; \
@@ -447,6 +467,7 @@ test: iso-tests
 	cleanup(){ rm -f "$$OVMF_VARS_RUNTIME"; }; \
 	trap cleanup EXIT INT TERM; \
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
+	$(call resolve_qemu_video_args) \
 	echo "Starting QEMU for interrupt test harness..."; \
 	set +e; \
 	$(QEMU_BIN) \
@@ -464,8 +485,7 @@ test: iso-tests
 	  -serial stdio \
 	  -monitor none \
 	  -nographic \
-	  -vga none \
-	  -device VGA,edid=on,xres=$(QEMU_FB_WIDTH),yres=$(QEMU_FB_HEIGHT) \
+	  $$VIDEO_ARGS \
 	  -usb -device usb-tablet \
 	  -device isa-debug-exit,iobase=0xf4,iosize=0x01 \
 	  -no-reboot; \
@@ -481,6 +501,15 @@ test: iso-tests
 	else \
 		echo "Unexpected QEMU exit status $$status" >&2; \
 		exit $$status; \
+	fi
+
+show-qemu-resolution:
+	@set -e; \
+	VIDEO=1; \
+	$(call resolve_qemu_video_args) \
+	echo "Configured framebuffer mode: $$fb_width x $$fb_height"; \
+	if [ "$${QEMU_FB_AUTO:-$(QEMU_FB_AUTO)}" = "0" ]; then \
+		echo "Auto-detection disabled (QEMU_FB_AUTO=0)."; \
 	fi
 
 clean:
