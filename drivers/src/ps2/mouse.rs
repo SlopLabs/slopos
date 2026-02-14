@@ -25,8 +25,8 @@ impl MouseState {
             buttons: 0,
             packet_byte: 0,
             packet: [0; 3],
-            max_x: 1920,
-            max_y: 1080,
+            max_x: 1,
+            max_y: 1,
         }
     }
 }
@@ -70,6 +70,10 @@ pub fn init() {
 }
 
 pub fn set_bounds(width: i32, height: i32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
     let mut state = STATE.lock();
     state.max_x = width;
     state.max_y = height;

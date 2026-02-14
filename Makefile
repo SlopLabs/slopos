@@ -44,6 +44,9 @@ BOOT_LOG_TIMEOUT ?= 15
 BOOT_CMDLINE ?= itests=off
 TEST_CMDLINE ?= itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on
 VIDEO ?= 0
+QEMU_FB_WIDTH ?= 1920
+QEMU_FB_HEIGHT ?= 1080
+QEMU_GTK_ZOOM_TO_FIT ?= off
 # On macOS, prefer cocoa; otherwise let the logic decide
 ifeq ($(UNAME_S),Darwin)
 QEMU_DISPLAY ?= cocoa
@@ -309,7 +312,8 @@ boot: iso-notests
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
-	DISPLAY_ARGS="-display none -vga std"; \
+	DISPLAY_ARGS="-display none"; \
+	VIDEO_ARGS="-vga none -device VGA,edid=on,xres=$(QEMU_FB_WIDTH),yres=$(QEMU_FB_HEIGHT)"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	HAS_COCOA=0; \
@@ -321,17 +325,17 @@ boot: iso-notests
 	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
 		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
+			DISPLAY_ARGS="-display cocoa"; \
 		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
-			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt"; \
 		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
-			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=$(QEMU_GTK_ZOOM_TO_FIT)"; \
 		elif [ "$$HAS_COCOA" = "1" ]; then \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
+			DISPLAY_ARGS="-display cocoa"; \
 		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
-			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt"; \
 		else \
-			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=$(QEMU_GTK_ZOOM_TO_FIT)"; \
 		fi; \
 	fi; \
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
@@ -350,6 +354,7 @@ boot: iso-notests
 	  -serial stdio \
 	  -monitor none \
 	  $$DISPLAY_ARGS \
+	  $$VIDEO_ARGS \
 	  $$USB_ARGS \
 	  $$EXTRA_ARGS \
 	  $${QEMU_PCI_DEVICES:-}
@@ -372,7 +377,8 @@ boot-log: iso-notests
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
-	DISPLAY_ARGS="-display none -vga std"; \
+	DISPLAY_ARGS="-display none"; \
+	VIDEO_ARGS="-vga none -device VGA,edid=on,xres=$(QEMU_FB_WIDTH),yres=$(QEMU_FB_HEIGHT)"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	HAS_COCOA=0; \
@@ -384,17 +390,17 @@ boot-log: iso-notests
 	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
 		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
+			DISPLAY_ARGS="-display cocoa"; \
 		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
-			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt"; \
 		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
-			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=$(QEMU_GTK_ZOOM_TO_FIT)"; \
 		elif [ "$$HAS_COCOA" = "1" ]; then \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
+			DISPLAY_ARGS="-display cocoa"; \
 		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
-			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt"; \
 		else \
-			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=$(QEMU_GTK_ZOOM_TO_FIT)"; \
 		fi; \
 	fi; \
 	echo "Starting QEMU with $(BOOT_LOG_TIMEOUT)s timeout (logging to $(LOG_FILE))..."; \
@@ -414,6 +420,7 @@ boot-log: iso-notests
 	  -serial stdio \
 	  -monitor none \
 	  $$DISPLAY_ARGS \
+	  $$VIDEO_ARGS \
 	  $$USB_ARGS \
 	  $$EXTRA_ARGS \
 	  $${QEMU_PCI_DEVICES:-} \
@@ -457,7 +464,8 @@ test: iso-tests
 	  -serial stdio \
 	  -monitor none \
 	  -nographic \
-	  -vga std \
+	  -vga none \
+	  -device VGA,edid=on,xres=$(QEMU_FB_WIDTH),yres=$(QEMU_FB_HEIGHT) \
 	  -usb -device usb-tablet \
 	  -device isa-debug-exit,iobase=0xf4,iosize=0x01 \
 	  -no-reboot; \

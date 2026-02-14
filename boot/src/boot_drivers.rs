@@ -27,6 +27,18 @@ use slopos_mm::tlb;
 
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
+fn sync_mouse_bounds(display: Option<slopos_abi::FramebufferData>) {
+    let Some(display) = display else {
+        return;
+    };
+
+    let width = display.info.width as i32;
+    let height = display.info.height as i32;
+    if width > 0 && height > 0 {
+        slopos_drivers::mouse::set_bounds(width, height);
+    }
+}
+
 fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
@@ -109,6 +121,7 @@ fn boot_step_timer_setup_fn() {
         info: bf.info,
     });
     video::init(fb, backend);
+    sync_mouse_bounds(fb);
 }
 
 fn boot_step_apic_setup_fn() {
@@ -186,6 +199,7 @@ fn boot_step_pci_init_fn() {
             });
             let xe_fb = xe::xe_framebuffer_init(fb);
             video::init(xe_fb, backend);
+            sync_mouse_bounds(xe_fb);
         }
     }
 }
