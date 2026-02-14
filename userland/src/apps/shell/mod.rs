@@ -5,6 +5,7 @@ pub mod buffers;
 pub mod builtins;
 pub mod completion;
 pub mod display;
+pub mod env;
 pub mod exec;
 pub mod history;
 pub mod input;
@@ -46,6 +47,10 @@ pub(crate) const SHELL_IO_MAX: usize = 512;
 const CWD_MAX: usize = 256;
 static CWD: SyncUnsafeCell<[u8; CWD_MAX]> = SyncUnsafeCell::new([0; CWD_MAX]);
 
+static LAST_EXIT_CODE: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
+static LAST_BG_PID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static SHELL_PID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+
 pub fn cwd_bytes() -> [u8; CWD_MAX] {
     unsafe { *CWD.get() }
 }
@@ -55,6 +60,26 @@ pub fn cwd_set(path: &[u8]) {
     let len = path.len().min(CWD_MAX - 1);
     cwd[..len].copy_from_slice(&path[..len]);
     cwd[len] = 0;
+}
+
+pub fn last_exit_code() -> i32 {
+    unsafe { *LAST_EXIT_CODE.get() }
+}
+
+pub fn set_last_exit_code(code: i32) {
+    unsafe { *LAST_EXIT_CODE.get() = code }
+}
+
+pub fn last_bg_pid() -> u32 {
+    unsafe { *LAST_BG_PID.get() }
+}
+
+pub fn set_last_bg_pid(pid: u32) {
+    unsafe { *LAST_BG_PID.get() = pid }
+}
+
+pub fn shell_pid() -> u32 {
+    unsafe { *SHELL_PID.get() }
 }
 
 fn build_prompt(buf: &mut [u8; 280]) -> usize {
@@ -99,6 +124,8 @@ pub fn shell_user_main(_arg: *mut c_void) {
     window::surface_set_title("SlopOS Shell");
 
     cwd_set(b"/");
+    env::initialize_defaults();
+    unsafe { *SHELL_PID.get() = process::getpid() }
     exec::initialize_job_control();
     let _ = process::ignore_signal(SIGINT);
 
@@ -124,6 +151,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
         }
 
         let rc = exec::execute_tokens(token_count, &tokens);
+        set_last_exit_code(rc);
         if rc == 127 {
             shell_write(UNKNOWN_CMD);
         }

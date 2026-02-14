@@ -1,5 +1,6 @@
 //! Builtin command dispatch table and helpers.
 
+pub mod env;
 pub mod fs;
 pub mod process;
 pub mod system;
@@ -115,6 +116,26 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         name: b"exec",
         func: process::cmd_exec,
         desc: b"Replace shell with program",
+    },
+    BuiltinEntry {
+        name: b"export",
+        func: env::cmd_export,
+        desc: b"Set environment variable",
+    },
+    BuiltinEntry {
+        name: b"unset",
+        func: env::cmd_unset,
+        desc: b"Remove environment variable",
+    },
+    BuiltinEntry {
+        name: b"env",
+        func: env::cmd_env,
+        desc: b"List environment variables",
+    },
+    BuiltinEntry {
+        name: b"set",
+        func: env::cmd_set,
+        desc: b"Show or set variables",
     },
 ];
 

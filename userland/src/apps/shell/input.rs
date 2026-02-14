@@ -285,8 +285,18 @@ fn input_loop(
         buf[capped] = 0;
     });
 
+    let expanded_len = buffers::with_line_buf(|line_buf| {
+        let line_len = line_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(line_buf.len());
+        buffers::with_expand_buf(|expand_buf| {
+            super::parser::expand_variables(line_buf, line_len, expand_buf)
+        })
+    });
+
     *tokens = [ptr::null(); SHELL_MAX_TOKENS];
-    buffers::with_line_buf(|buf| shell_parse_line(buf, tokens))
+    buffers::with_expand_buf(|expand_buf| shell_parse_line(&expand_buf[..expanded_len], tokens))
 }
 
 fn delete_char_before_cursor(len: &mut usize, cursor_pos: &mut usize) {

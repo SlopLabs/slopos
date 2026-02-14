@@ -5,6 +5,11 @@ use super::raw::{syscall0, syscall1, syscall2, syscall4};
 use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
 
 #[inline(always)]
+pub fn getpid() -> u32 {
+    unsafe { syscall0(SYSCALL_GETPID) as u32 }
+}
+
+#[inline(always)]
 pub fn spawn_path(path: &[u8]) -> i32 {
     spawn_path_with_attrs(path, 5, 0)
 }

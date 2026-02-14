@@ -1,6 +1,5 @@
 //! Command line parsing and path normalization.
 
-use core::cmp;
 use core::ptr;
 
 use crate::runtime;
@@ -141,6 +140,167 @@ pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) 
     0
 }
 
+fn is_var_char(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric()
+}
+
+fn write_u32_to_buf(value: u32, dst: &mut [u8]) -> usize {
+    if value == 0 {
+        if !dst.is_empty() {
+            dst[0] = b'0';
+        }
+        return 1;
+    }
+    let mut rev = [0u8; 12];
+    let mut r = 0usize;
+    let mut n = value;
+    while n != 0 && r < rev.len() {
+        rev[r] = b'0' + (n % 10) as u8;
+        n /= 10;
+        r += 1;
+    }
+    let len = r.min(dst.len());
+    for i in 0..len {
+        dst[i] = rev[r - 1 - i];
+    }
+    len
+}
+
+fn write_i32_to_buf(value: i32, dst: &mut [u8]) -> usize {
+    if value < 0 {
+        if dst.is_empty() {
+            return 0;
+        }
+        dst[0] = b'-';
+        1 + write_u32_to_buf(value.unsigned_abs(), &mut dst[1..])
+    } else {
+        write_u32_to_buf(value as u32, dst)
+    }
+}
+
+fn emit(dst: &mut [u8], pos: &mut usize, b: u8) {
+    if *pos < dst.len() - 1 {
+        dst[*pos] = b;
+        *pos += 1;
+    }
+}
+
+fn emit_slice(dst: &mut [u8], pos: &mut usize, src: &[u8], src_len: usize) {
+    let avail = dst.len().saturating_sub(*pos + 1);
+    let n = src_len.min(avail);
+    dst[*pos..*pos + n].copy_from_slice(&src[..n]);
+    *pos += n;
+}
+
+pub fn expand_variables(input: &[u8], input_len: usize, output: &mut [u8]) -> usize {
+    let mut out = 0usize;
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < input_len && input[i] != 0 {
+        let c = input[i];
+
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+            emit(output, &mut out, c);
+            i += 1;
+            continue;
+        }
+        if c == b'"' && !in_single {
+            in_double = !in_double;
+            emit(output, &mut out, c);
+            i += 1;
+            continue;
+        }
+
+        if in_single {
+            emit(output, &mut out, c);
+            i += 1;
+            continue;
+        }
+
+        if c == b'\\' && i + 1 < input_len {
+            let next = input[i + 1];
+            if next == b'$' {
+                emit(output, &mut out, b'$');
+                i += 2;
+                continue;
+            }
+            if in_double && (next == b'"' || next == b'\\') {
+                emit(output, &mut out, next);
+                i += 2;
+                continue;
+            }
+        }
+
+        if c == b'$' && i + 1 < input_len {
+            let next = input[i + 1];
+
+            if next == b'?' {
+                let val = super::last_exit_code();
+                let n = write_i32_to_buf(val, &mut output[out..]);
+                out += n;
+                i += 2;
+                continue;
+            }
+            if next == b'$' {
+                let val = super::shell_pid();
+                let n = write_u32_to_buf(val, &mut output[out..]);
+                out += n;
+                i += 2;
+                continue;
+            }
+            if next == b'!' {
+                let val = super::last_bg_pid();
+                let n = write_u32_to_buf(val, &mut output[out..]);
+                out += n;
+                i += 2;
+                continue;
+            }
+            if next == b'{' {
+                i += 2;
+                let var_start = i;
+                while i < input_len && input[i] != b'}' && input[i] != 0 {
+                    i += 1;
+                }
+                let var_name = &input[var_start..i];
+                if i < input_len && input[i] == b'}' {
+                    i += 1;
+                }
+                if let Some((val, val_len)) = super::env::get(var_name) {
+                    emit_slice(output, &mut out, &val, val_len);
+                }
+                continue;
+            }
+            if is_var_char(next) && next != b'0' || next == b'_' || next.is_ascii_alphabetic() {
+                i += 1;
+                let var_start = i;
+                while i < input_len && is_var_char(input[i]) {
+                    i += 1;
+                }
+                let var_name = &input[var_start..i];
+                if let Some((val, val_len)) = super::env::get(var_name) {
+                    emit_slice(output, &mut out, &val, val_len);
+                }
+                continue;
+            }
+        }
+
+        emit(output, &mut out, c);
+        i += 1;
+    }
+
+    if out < output.len() {
+        output[out] = 0;
+    }
+    out
+}
+
+fn is_operator(b: u8) -> bool {
+    b == b'|' || b == b'<' || b == b'>' || b == b'&'
+}
+
 pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     if line.is_empty() || tokens.is_empty() {
         return 0;
@@ -148,7 +308,7 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     let mut count = 0usize;
     let mut cursor = 0usize;
 
-    while cursor < line.len() {
+    while cursor < line.len() && count < tokens.len() {
         while cursor < line.len() && is_space(line[cursor]) {
             cursor += 1;
         }
@@ -156,45 +316,95 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
             break;
         }
 
-        let start = cursor;
-        let token_len;
-
         if line[cursor] == b'|' || line[cursor] == b'<' || line[cursor] == b'&' {
-            token_len = 1;
+            let mut tok = [0u8; SHELL_MAX_TOKEN_LENGTH];
+            tok[0] = line[cursor];
             cursor += 1;
-        } else if line[cursor] == b'>' {
-            cursor += 1;
-            token_len = if cursor < line.len() && line[cursor] == b'>' {
-                cursor += 1;
-                2
-            } else {
-                1
-            };
-        } else {
-            while cursor < line.len()
-                && line[cursor] != 0
-                && !is_space(line[cursor])
-                && line[cursor] != b'|'
-                && line[cursor] != b'<'
-                && line[cursor] != b'>'
-                && line[cursor] != b'&'
-            {
-                cursor += 1;
-            }
-            token_len = cursor - start;
-        }
-
-        if count >= tokens.len() {
+            buffers::with_token_storage(|storage| {
+                storage[count][0] = tok[0];
+                storage[count][1] = 0;
+            });
+            tokens[count] = buffers::token_ptr(count);
+            count += 1;
             continue;
         }
-        let token_len = cmp::min(token_len, SHELL_MAX_TOKEN_LENGTH - 1);
+        if line[cursor] == b'>' {
+            cursor += 1;
+            let is_append = cursor < line.len() && line[cursor] == b'>';
+            if is_append {
+                cursor += 1;
+            }
+            buffers::with_token_storage(|storage| {
+                storage[count][0] = b'>';
+                if is_append {
+                    storage[count][1] = b'>';
+                    storage[count][2] = 0;
+                } else {
+                    storage[count][1] = 0;
+                }
+            });
+            tokens[count] = buffers::token_ptr(count);
+            count += 1;
+            continue;
+        }
 
-        buffers::with_token_storage(|storage| {
-            storage[count][..token_len].copy_from_slice(&line[start..start + token_len]);
-            storage[count][token_len] = 0;
-        });
-        tokens[count] = buffers::token_ptr(count);
-        count += 1;
+        let mut tok = [0u8; SHELL_MAX_TOKEN_LENGTH];
+        let mut tok_len = 0usize;
+        let mut in_single = false;
+        let mut in_double = false;
+
+        while cursor < line.len() && line[cursor] != 0 {
+            let c = line[cursor];
+
+            if c == b'\'' && !in_double {
+                in_single = !in_single;
+                cursor += 1;
+                continue;
+            }
+            if c == b'"' && !in_single {
+                in_double = !in_double;
+                cursor += 1;
+                continue;
+            }
+
+            if in_single || in_double {
+                if tok_len < SHELL_MAX_TOKEN_LENGTH - 1 {
+                    tok[tok_len] = c;
+                    tok_len += 1;
+                }
+                cursor += 1;
+                continue;
+            }
+
+            if is_space(c) || is_operator(c) {
+                break;
+            }
+
+            if c == b'\\' && cursor + 1 < line.len() {
+                cursor += 1;
+                if tok_len < SHELL_MAX_TOKEN_LENGTH - 1 {
+                    tok[tok_len] = line[cursor];
+                    tok_len += 1;
+                }
+                cursor += 1;
+                continue;
+            }
+
+            if tok_len < SHELL_MAX_TOKEN_LENGTH - 1 {
+                tok[tok_len] = c;
+                tok_len += 1;
+            }
+            cursor += 1;
+        }
+
+        if tok_len > 0 {
+            buffers::with_token_storage(|storage| {
+                storage[count][..tok_len].copy_from_slice(&tok[..tok_len]);
+                storage[count][tok_len] = 0;
+            });
+            tokens[count] = buffers::token_ptr(count);
+            count += 1;
+        }
     }
 
     if count < tokens.len() {

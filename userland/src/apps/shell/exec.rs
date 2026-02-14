@@ -221,6 +221,47 @@ fn parse_pipeline(argc: i32, argv: &[*const u8], out: &mut ParsedPipeline) -> Re
     Ok(())
 }
 
+fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> Option<*const u8> {
+    use super::env;
+
+    let (path_val, path_len) = env::get(b"PATH")?;
+    if path_len == 0 {
+        return None;
+    }
+
+    let mut seg_start = 0usize;
+    while seg_start < path_len {
+        let mut seg_end = seg_start;
+        while seg_end < path_len && path_val[seg_end] != b':' {
+            seg_end += 1;
+        }
+        let dir = &path_val[seg_start..seg_end];
+        if !dir.is_empty() {
+            let needs_sep = dir[dir.len() - 1] != b'/';
+            let total = dir.len() + if needs_sep { 1 } else { 0 } + name.len();
+            if total < tmp.len() {
+                let mut pos = 0usize;
+                tmp[pos..pos + dir.len()].copy_from_slice(dir);
+                pos += dir.len();
+                if needs_sep {
+                    tmp[pos] = b'/';
+                    pos += 1;
+                }
+                tmp[pos..pos + name.len()].copy_from_slice(name);
+                pos += name.len();
+                tmp[pos] = 0;
+
+                let mut stat = UserFsStat::default();
+                if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() {
+                    return Some(tmp.as_ptr());
+                }
+            }
+        }
+        seg_start = seg_end + 1;
+    }
+    None
+}
+
 fn resolve_exec_path(command: *const u8, tmp: &mut [u8; 256]) -> Option<*const u8> {
     if command.is_null() {
         return None;
@@ -250,7 +291,7 @@ fn resolve_exec_path(command: *const u8, tmp: &mut [u8; 256]) -> Option<*const u
         return Some(tmp.as_ptr());
     }
 
-    None
+    resolve_via_path(name, tmp)
 }
 
 fn is_builtin_command(cmd: &ParsedCommand) -> bool {
@@ -329,6 +370,7 @@ fn command_resolves(cmd: &ParsedCommand) -> bool {
 }
 
 fn print_background_job_started(job_id: u16, pid: u32) {
+    super::set_last_bg_pid(pid);
     shell_write(b"[");
     jobs::write_u64(job_id as u64);
     shell_write(b"] ");
