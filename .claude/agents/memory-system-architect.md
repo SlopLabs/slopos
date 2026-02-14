@@ -38,9 +38,9 @@ Your core responsibilities include:
 - Ensure proper memory reservation for kernel, stack, and heap areas
 
 **Technical Constraints:**
-- Work within freestanding C/C++ environment (no stdlib)
-- Follow SlopOS cross-compilation setup with LLVM/Clang
-- Maintain compatibility with UEFI boot protocol and Multiboot2
+- Work within freestanding Rust `no_std` constraints (no host stdlib)
+- Follow SlopOS cargo + `rust-lld` cross-compilation setup
+- Maintain compatibility with Limine + UEFI boot flow and kernel linker/target constraints
 - Ensure all memory operations are efficient and safe
 - Never implement interrupt handling (outside your domain)
 

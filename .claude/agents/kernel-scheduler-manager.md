@@ -34,12 +34,12 @@ Your primary responsibilities include:
 - Handle memory allocation failures and resource exhaustion gracefully
 
 **Technical Implementation Guidelines:**
-- Follow SlopOS freestanding C/C++ constraints (no stdlib, custom implementations)
+- Follow SlopOS freestanding Rust `no_std` constraints (no host stdlib, kernel-safe abstractions)
 - Ensure all code works in higher-half kernel mapping (0xFFFFFFFF80000000)
-- Use AT&T assembly syntax for low-level interrupt/exception entry points
+- Use Intel-syntax assembly for low-level interrupt/exception entry points
 - Implement thread-safe operations using appropriate locking mechanisms
 - Optimize for minimal memory footprint and fast context switching
-- Ensure compatibility with UEFI boot environment and Multiboot2 protocol
+- Ensure compatibility with Limine + UEFI boot environment and current interrupt/boot wiring
 
 **Code Quality Standards:**
 - Write self-documenting code with clear variable and function names
