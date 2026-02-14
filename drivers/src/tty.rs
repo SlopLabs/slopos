@@ -1,4 +1,5 @@
 use core::ffi::c_int;
+use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -6,11 +7,13 @@ use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
 use crate::ps2::keyboard;
 use crate::serial;
+use slopos_abi::signal::{SIGINT, sig_bit};
 use slopos_abi::task::TaskStatus;
 use slopos_core::sched::{
     block_current_task, scheduler_get_current_task, scheduler_is_enabled,
     scheduler_register_idle_wakeup_callback, unblock_task,
 };
+use slopos_core::scheduler::task::task_iterate_active;
 use slopos_core::scheduler::task_struct::Task;
 
 const TTY_MAX_WAITERS: usize = 32;
@@ -40,6 +43,49 @@ static TTY_FOCUS_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
     count: 0,
 });
 static TTY_FOCUSED_TASK_ID: AtomicU32 = AtomicU32::new(0);
+static TTY_FOREGROUND_PGRP: AtomicU32 = AtomicU32::new(0);
+
+struct GroupSignalContext {
+    pgid: u32,
+    signum: u8,
+    matched: bool,
+}
+
+fn signal_group_member(task: *mut Task, context: *mut c_void) {
+    if task.is_null() || context.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &mut *(context as *mut GroupSignalContext) };
+    if unsafe { (*task).pgid } != ctx.pgid {
+        return;
+    }
+
+    unsafe {
+        (*task)
+            .signal_pending
+            .fetch_or(sig_bit(ctx.signum), Ordering::AcqRel);
+    }
+    let _ = unblock_task(task);
+    ctx.matched = true;
+}
+
+fn tty_signal_foreground_pgrp(signum: u8) {
+    let pgid = tty_get_foreground_pgrp();
+    if pgid == 0 {
+        return;
+    }
+
+    let mut ctx = GroupSignalContext {
+        pgid,
+        signum,
+        matched: false,
+    };
+    task_iterate_active(
+        Some(signal_group_member),
+        (&mut ctx as *mut GroupSignalContext).cast(),
+    );
+}
 
 use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
 
@@ -208,6 +254,21 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
 
 pub fn tty_get_focus() -> u32 {
     TTY_FOCUSED_TASK_ID.load(Ordering::Relaxed)
+}
+
+pub fn tty_set_foreground_pgrp(pgid: u32) -> c_int {
+    TTY_FOREGROUND_PGRP.store(pgid, Ordering::Release);
+    0
+}
+
+pub fn tty_get_foreground_pgrp() -> u32 {
+    TTY_FOREGROUND_PGRP.load(Ordering::Acquire)
+}
+
+pub fn tty_handle_input_char(c: u8) {
+    if c == 0x03 {
+        tty_signal_foreground_pgrp(SIGINT);
+    }
 }
 
 #[inline]

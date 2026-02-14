@@ -20,6 +20,7 @@ use slopos_fs::fileio::{
     file_poll_fd, file_read_fd, file_seek_fd, file_stat_path, file_unlink_path, file_write_fd,
 };
 
+use crate::syscall_services::tty;
 use slopos_lib::IrqMutex;
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{
@@ -33,7 +34,6 @@ const SELECT_MAX_FDS: usize = 256;
 struct TtyIoctlState {
     termios: UserTermios,
     winsize: UserWinsize,
-    fg_pgrp: u32,
 }
 
 impl TtyIoctlState {
@@ -55,7 +55,6 @@ impl TtyIoctlState {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            fg_pgrp: 0,
         }
     }
 }
@@ -530,16 +529,15 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
         TIOCGPGRP => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let state = *TTY_IOCTL_STATE.lock();
-            try_or_err!(ctx, copy_to_user(ptr, &state.fg_pgrp));
+            let fg_pgrp = tty::get_foreground_pgrp();
+            try_or_err!(ctx, copy_to_user(ptr, &fg_pgrp));
             ctx.ok(0)
         }
         TIOCSPGRP => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let pgrp = try_or_err!(ctx, copy_from_user(ptr));
-            TTY_IOCTL_STATE.lock().fg_pgrp = pgrp;
-            ctx.ok(0)
+            ctx.from_bool_value(tty::set_foreground_pgrp(pgrp) == 0, 0)
         }
         _ => ctx.err(),
     }

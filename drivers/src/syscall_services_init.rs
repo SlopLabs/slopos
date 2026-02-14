@@ -53,6 +53,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     read_char_blocking: tty::tty_read_char_blocking,
     set_focus: tty::tty_set_focus,
     get_focus: tty::tty_get_focus,
+    set_foreground_pgrp: tty::tty_set_foreground_pgrp,
+    get_foreground_pgrp: tty::tty_get_foreground_pgrp,
 };
 
 pub fn init_syscall_services() {

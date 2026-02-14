@@ -4,7 +4,7 @@ use core::ptr;
 use crate::program_registry;
 use crate::runtime;
 use crate::syscall::{
-    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
+    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsStat,
     core as sys_core, fs, process,
 };
 
@@ -87,22 +87,54 @@ impl SavedFd {
     }
 }
 
-static FOREGROUND_PID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static FOREGROUND_PGID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static SHELL_PGID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
-pub fn foreground_pid() -> u32 {
-    unsafe { *FOREGROUND_PID.get() }
+pub fn foreground_pgid() -> u32 {
+    unsafe { *FOREGROUND_PGID.get() }
 }
 
-pub fn set_foreground_pid(pid: u32) {
+pub fn set_foreground_pgid(pgid: u32) {
     unsafe {
-        *FOREGROUND_PID.get() = pid;
+        *FOREGROUND_PGID.get() = pgid;
     }
 }
 
-pub fn clear_foreground_pid() {
+pub fn clear_foreground_pgid() {
     unsafe {
-        *FOREGROUND_PID.get() = 0;
+        *FOREGROUND_PGID.get() = 0;
     }
+}
+
+pub fn initialize_job_control() {
+    let _ = process::setpgid(0, 0);
+    let shell_pgid = process::getpgid(0);
+    if shell_pgid > 0 {
+        unsafe {
+            *SHELL_PGID.get() = shell_pgid as u32;
+        }
+        let _ = fs::tcsetpgrp(0, shell_pgid as u32);
+    }
+}
+
+fn shell_pgid() -> u32 {
+    unsafe { *SHELL_PGID.get() }
+}
+
+pub fn enter_foreground(pgid: u32) {
+    if pgid == 0 {
+        return;
+    }
+    set_foreground_pgid(pgid);
+    let _ = fs::tcsetpgrp(0, pgid);
+}
+
+pub fn leave_foreground() {
+    let pgid = shell_pgid();
+    if pgid != 0 {
+        let _ = fs::tcsetpgrp(0, pgid);
+    }
+    clear_foreground_pgid();
 }
 
 fn token_is(token: *const u8, text: &[u8]) -> bool {
@@ -204,6 +236,10 @@ fn resolve_exec_path(command: *const u8, tmp: &mut [u8; 256]) -> Option<*const u
         if normalize_path(command, tmp) != 0 {
             return None;
         }
+        let mut stat = UserFsStat::default();
+        if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_err() {
+            return None;
+        }
         return Some(tmp.as_ptr());
     }
 
@@ -269,7 +305,11 @@ fn registry_spec_for_command(
 ) -> Option<&'static program_registry::ProgramSpec> {
     let name = command_name_bytes(cmd)?;
     if name.contains(&b'/') {
-        return None;
+        let mut tmp = [0u8; 256];
+        if normalize_path(cmd.argv[0], &mut tmp) != 0 {
+            return None;
+        }
+        return program_registry::resolve_program_path(&tmp);
     }
     program_registry::resolve_program(name)
 }
@@ -324,9 +364,9 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         return Some(0);
     }
 
-    set_foreground_pid(pid);
+    enter_foreground(pid);
     let status = process::waitpid(pid);
-    clear_foreground_pid();
+    leave_foreground();
     Some(status)
 }
 
@@ -653,12 +693,12 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
         return 0;
     }
 
-    set_foreground_pid(pgid);
+    enter_foreground(pgid);
     let mut status = 0;
     for pid in pids.iter().take(pipeline.command_count) {
         status = process::waitpid(*pid);
     }
-    clear_foreground_pid();
+    leave_foreground();
     status
 }
 

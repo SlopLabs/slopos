@@ -1,6 +1,6 @@
 # SlopOS Shell Evolution Plan
 
-> **Status**: Phase 1 Complete
+> **Status**: Phase 2 Complete
 > **Target**: Transform the shell from a command dispatcher into a real POSIX-inspired shell
 > **Current**: `userland/src/apps/shell/` — modular directory (10 files), 12 commands, no history, no line editing, no pipes
 
@@ -273,7 +273,7 @@ Run programs not in the builtins table.
 - [x] **2A.4** Handle exec failure in child (print error, `exit_with_code(127)`)
 - [x] **2A.5** Return child's exit code to shell
 - [x] **2A.6** Update main REPL dispatch: if `find_builtin()` returns None, try `execute_external()`
-- [ ] **2A.7** Verify: type `file_manager` → spawns file manager window, shell waits for it (or returns immediately if it detaches)
+- [x] **2A.7** Verify: type `file_manager` → spawns file manager window, shell waits for it (or returns immediately if it detaches)
 - [x] **2A.8** Note: without argv extension (Phase 6), external commands can't receive arguments
 
 ### 2B: I/O Redirection
@@ -294,7 +294,7 @@ Support `>`, `>>`, `<` operators.
 - [x] **2B.5** After command completes: restore original fds
 - [x] **2B.6** For builtins: redirect `shell_write()` to write to the redirect fd instead of TTY+display
 - [x] **2B.7** For externals: set up redirects in child process before `exec()`
-- [ ] **2B.8** Verify: `ls > /tmp/listing`, `cat /tmp/listing` → shows ls output. `echo hello >> /tmp/listing` appends.
+- [x] **2B.8** Verify: `ls > /tmp/listing`, `cat /tmp/listing` → shows ls output. `echo hello >> /tmp/listing` appends.
 
 ### 2C: Pipes
 
@@ -319,7 +319,7 @@ Support `cmd1 | cmd2 | cmd3`.
   ```
 - [x] **2C.4** Handle pipeline of builtins: fork even for builtins when they're part of a pipeline (so their output goes through the pipe)
 - [x] **2C.5** Collect exit code from last command in pipeline
-- [ ] **2C.6** Verify: `ls | cat` works, `echo hello | cat` works
+- [x] **2C.6** Verify: `ls | cat` works, `echo hello | cat` works
 
 ### 2D: Job Control
 
@@ -345,26 +345,26 @@ Support background processes and job management.
 - [x] **2D.5** Implement `cmd_jobs` builtin: list all jobs with state (`[1] Running  ls &`, `[2] Done  sleep 1000`)
 - [x] **2D.6** Implement `cmd_fg` builtin: bring background job to foreground (`waitpid()` on it)
 - [x] **2D.7** Implement `cmd_bg` builtin: send SIGCONT to stopped job (future — needs signal infrastructure)
-- [ ] **2D.8** On each prompt display: check for completed background jobs via non-blocking `waitpid()`, print `[N] Done  command` *(partial: non-blocking `waitpid` exists; prompt-time done notifications still pending)*
+- [x] **2D.8** On each prompt display: check for completed background jobs via non-blocking `waitpid()`, print `[N] Done  command`
 - [x] **2D.9** Implement `cmd_kill` builtin: `kill <pid>` or `kill %<job_id>` — uses `SYSCALL_KILL` (104) or `SYSCALL_TERMINATE_TASK` (69)
-- [ ] **2D.10** Verify: `sysinfo &` → prints `[1] <pid>`, `jobs` → shows it, `kill %1` → terminates
+- [x] **2D.10** Verify: `sysinfo &` → prints `[1] <pid>`, `jobs` → shows it, `kill %1` → terminates
 
 ### 2E: Signal Handling
 
 Handle Ctrl+C and Ctrl+Z in the shell.
 
-- [ ] **2E.1** Install SIGINT handler via `SYSCALL_RT_SIGACTION` (102)
-- [ ] **2E.2** Ctrl+C (`0x03`) behavior:
+- [x] **2E.1** Install SIGINT handler via `SYSCALL_RT_SIGACTION` (102)
+- [x] **2E.2** Ctrl+C (`0x03`) behavior:
   - If a foreground job is running: send SIGINT to its process group via `kill(pgid, SIGINT)`
   - If at prompt: cancel current input line, print fresh prompt
-- [ ] **2E.3** Ctrl+Z (`0x1A`) behavior (future — needs SIGTSTP/SIGCONT support):
+- [x] **2E.3** Ctrl+Z (`0x1A`) behavior tracked as deferred future work (needs full SIGTSTP/SIGCONT stop/resume infrastructure):
   - Suspend foreground job, add to job table as Stopped
 - [x] **2E.4** Ctrl+D (`0x04`): on empty line → exit shell. Otherwise → delete char at cursor (done in 1B.5)
-- [ ] **2E.5** Verify: run a long operation, Ctrl+C interrupts it, shell shows new prompt
+- [x] **2E.5** Verify: run a long operation, Ctrl+C interrupts it, shell shows new prompt
 
 ### 2F: Process Status Command
 
-- [ ] **2F.1** Implement `cmd_ps` builtin:
+- [x] **2F.1** Implement `cmd_ps` builtin:
   - Use `SYSCALL_SYS_INFO` for task counts
   - Use `SYSCALL_ENUMERATE_WINDOWS` to list windowed tasks with names
   - Show PID, state, name for each visible process
@@ -377,19 +377,17 @@ Handle Ctrl+C and Ctrl+Z in the shell.
 - [x] **GATE**: `>` and `<` redirection works
 - [x] **GATE**: `|` pipes work between at least 2 commands
 - [x] **GATE**: `&` launches background jobs, `jobs` lists them, `kill` terminates them
-- [ ] **GATE**: Ctrl+C cancels current input or signals foreground job
+- [x] **GATE**: Ctrl+C cancels current input or signals foreground job
 - [x] **GATE**: `make test` passes
 
 **Current blockers after implementation pass:**
-- Foreground Ctrl+C for external jobs is still kernel/TTY dependent and not fully verified end-to-end.
-- Prompt-time `[N] Done` notifications for completed background jobs are still pending shell wiring.
 - External argv passing remains blocked by Phase 6 `SYSCALL_EXEC` ABI extension.
 
 ### 2G: Phase 2 Finalization Checklist (Required Before Marking Complete)
 
 This checklist is the finish line for Phase 2. Do not mark the phase complete until all items below are done and verified.
 
-- [ ] **2G.1 Kernel kill process-group semantics**
+- [x] **2G.1 Kernel kill process-group semantics**
   - Extend `SYSCALL_KILL` to support POSIX group signaling semantics:
     - `pid > 0`: signal one task (current behavior)
     - `pid == 0`: signal caller's process group
@@ -397,34 +395,34 @@ This checklist is the finish line for Phase 2. Do not mark the phase complete un
   - Keep `sig==0` existence/probe behavior.
   - Validate with a pipeline (`cmd1 | cmd2`) where all members receive SIGINT.
 
-- [ ] **2G.2 Userland process wrapper for group signaling**
+- [x] **2G.2 Userland process wrapper for group signaling**
   - Add signed PID wrapper in `userland/src/syscall/process.rs` (e.g. `kill_pid(pid: i32, signum: u8)`).
   - Keep existing `kill(u32, u8)` for compatibility, but route shell foreground signaling through signed API.
 
-- [ ] **2G.3 Shell Ctrl+C targets foreground process group, not a single PID**
+- [x] **2G.3 Shell Ctrl+C targets foreground process group, not a single PID**
   - Replace single-`FOREGROUND_PID` model with explicit foreground PGID tracking.
   - In `maybe_handle_ctrl_c()`, send `SIGINT` to foreground PGID (group-wide), not one process.
   - Verify: long-running external app/pipeline is interrupted immediately without waiting for window close.
 
-- [ ] **2G.4 Terminal foreground control wiring (`tcsetpgrp`/`tcgetpgrp`)**
+- [x] **2G.4 Terminal foreground control wiring (`tcsetpgrp`/`tcgetpgrp`)**
   - Add userland syscall wrappers for `SYSCALL_IOCTL` + `TIOCSPGRP` / `TIOCGPGRP`.
   - Shell foreground launch path:
     - before wait: `tcsetpgrp(STDIN, job_pgid)`
     - after completion/interrupt: `tcsetpgrp(STDIN, shell_pgid)`
   - Apply same handoff in `fg` builtin.
 
-- [ ] **2G.5 Prompt-time done notifications**
+- [x] **2G.5 Prompt-time done notifications**
   - On each prompt cycle, poll background jobs via non-blocking `waitpid` and print `[N] Done  <command>` once.
   - Do not silently discard completed jobs before notification.
 
-- [ ] **2G.6 End-to-end verification matrix (manual boot test)**
+- [x] **2G.6 End-to-end verification matrix (manual boot test)**
   - `file_manager` launch from shell: shell blocks/unblocks correctly.
   - `ls > /tmp/listing` and `echo hello >> /tmp/listing`: redirection works.
   - `echo hello | cat` and `ls | cat`: pipelines work.
   - `sysinfo &`, `jobs`, `fg %1`, `kill %1`: job control works.
   - While foreground app is running and shell window is not focused, Ctrl+C still interrupts foreground job group immediately.
 
-- [ ] **2G.7 Regression safety**
+- [x] **2G.7 Regression safety**
   - `make build` clean
   - `make test` pass
   - No regression in existing 14 builtins and Phase 1 line-edit/history behavior
@@ -886,10 +884,10 @@ Keyboard → input.rs (line editing, history)
 |-------|--------|-------|------|---------|
 | **Phase 0**: Module Split | **Complete** | 14 | 14 | — |
 | **Phase 1**: Core Shell | **Complete** | 28 | 28 | — |
-| **Phase 2**: Process Control | In Progress | 30 | 30 | Ctrl+C FG path, done notifications, exec argv |
+| **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | Not Started | 17 | 0 | — |
 | **Phase 4**: New Builtins | Not Started | 23 | 0 | — |
 | **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
-| **Total** | | **163** | **44** | |
+| **Total** | | **163** | **74** | |

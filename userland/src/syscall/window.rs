@@ -115,13 +115,13 @@ pub fn surface_set_title(title: &str) -> i64 {
 }
 
 #[inline(always)]
-pub fn enumerate_windows(windows: &mut [WindowInfo]) -> u64 {
+pub fn enumerate_windows(windows: &mut [WindowInfo]) -> i64 {
     unsafe {
         syscall2(
             SYSCALL_ENUMERATE_WINDOWS,
             windows.as_mut_ptr() as u64,
             windows.len() as u64,
-        )
+        ) as i64
     }
 }
 

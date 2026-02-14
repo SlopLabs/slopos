@@ -1,3 +1,4 @@
+use core::ffi::c_void;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{
@@ -5,13 +6,15 @@ use slopos_abi::signal::{
     SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
 };
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_ESRCH};
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{
+    INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
+};
 use slopos_lib::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 
 use crate::sched::{clear_scheduler_current_task, schedule, unblock_task};
-use crate::scheduler::task::{task_find_by_id, task_terminate};
+use crate::scheduler::task::{task_find_by_id, task_iterate_active, task_terminate};
 use crate::scheduler::task_struct::{SignalAction, Task};
 use crate::syscall::common::{SyscallDisposition, syscall_return_err};
 use crate::syscall::context::SyscallContext;
@@ -30,6 +33,92 @@ fn parse_signum(raw: u64) -> Option<u8> {
     } else {
         Some(raw as u8)
     }
+}
+
+struct TargetSet {
+    ids: [u32; MAX_TASKS],
+    len: usize,
+}
+
+impl TargetSet {
+    const fn new() -> Self {
+        Self {
+            ids: [INVALID_TASK_ID; MAX_TASKS],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, task_id: u32) {
+        if task_id == INVALID_TASK_ID || self.len >= self.ids.len() {
+            return;
+        }
+        for id in &self.ids[..self.len] {
+            if *id == task_id {
+                return;
+            }
+        }
+        self.ids[self.len] = task_id;
+        self.len += 1;
+    }
+}
+
+struct GroupCollectContext {
+    pgid: u32,
+    targets: *mut TargetSet,
+}
+
+struct AllCollectContext {
+    exclude_task_id: u32,
+    targets: *mut TargetSet,
+}
+
+fn collect_group_member(task: *mut Task, context: *mut c_void) {
+    if task.is_null() || context.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &mut *(context as *mut GroupCollectContext) };
+    if unsafe { (*task).pgid } != ctx.pgid {
+        return;
+    }
+
+    unsafe { (&mut *ctx.targets).push((*task).task_id) };
+}
+
+fn collect_all_members(task: *mut Task, context: *mut c_void) {
+    if task.is_null() || context.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &mut *(context as *mut AllCollectContext) };
+    let task_id = unsafe { (*task).task_id };
+    if task_id == INVALID_TASK_ID || task_id == ctx.exclude_task_id {
+        return;
+    }
+
+    unsafe { (&mut *ctx.targets).push(task_id) };
+}
+
+fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
+    let mut ctx = GroupCollectContext {
+        pgid,
+        targets: targets as *mut TargetSet,
+    };
+    task_iterate_active(
+        Some(collect_group_member),
+        (&mut ctx as *mut GroupCollectContext).cast(),
+    );
+}
+
+fn collect_targets_for_all(exclude_task_id: u32, targets: &mut TargetSet) {
+    let mut ctx = AllCollectContext {
+        exclude_task_id,
+        targets: targets as *mut TargetSet,
+    };
+    task_iterate_active(
+        Some(collect_all_members),
+        (&mut ctx as *mut AllCollectContext).cast(),
+    );
 }
 
 fn action_from_user(new_action: UserSigaction) -> SignalAction {
@@ -160,17 +249,50 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 
     let args = ctx.args();
     let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
-    let target_id = if args.arg0_u32() == 0 {
-        caller_id
-    } else {
-        args.arg0_u32()
-    };
-    if target_id == INVALID_TASK_ID {
+
+    let raw_pid = args.arg0 as i64;
+    if raw_pid < i32::MIN as i64 || raw_pid > i32::MAX as i64 {
         return errno(&ctx, ERRNO_ESRCH);
     }
+    let pid = raw_pid as i32;
 
-    let target = task_find_by_id(target_id);
-    if target.is_null() {
+    let mut targets = TargetSet::new();
+    if pid > 0 {
+        let target_id = pid as u32;
+        if task_find_by_id(target_id).is_null() {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        targets.push(target_id);
+    } else if pid == 0 {
+        if caller_id == INVALID_TASK_ID {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        let caller = task_find_by_id(caller_id);
+        if caller.is_null() {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        let caller_pgid = unsafe { (*caller).pgid };
+        if caller_pgid == INVALID_TASK_ID {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        collect_targets_for_group(caller_pgid, &mut targets);
+    } else if pid == -1 {
+        if caller_id == INVALID_TASK_ID {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        collect_targets_for_all(caller_id, &mut targets);
+    } else {
+        if pid == i32::MIN {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        let group_id = (-pid) as u32;
+        if group_id == INVALID_TASK_ID {
+            return errno(&ctx, ERRNO_ESRCH);
+        }
+        collect_targets_for_group(group_id, &mut targets);
+    }
+
+    if targets.len == 0 {
         return errno(&ctx, ERRNO_ESRCH);
     }
 
@@ -182,24 +304,44 @@ pub fn syscall_kill(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         return errno(&ctx, ERRNO_EINVAL);
     };
 
-    if signum == SIGKILL {
-        if task_terminate(target_id) != 0 {
-            return errno(&ctx, ERRNO_ESRCH);
+    let mut signaled = 0usize;
+    let mut caller_terminated = false;
+
+    for target_id in &targets.ids[..targets.len] {
+        let target = task_find_by_id(*target_id);
+        if target.is_null() {
+            continue;
         }
-        if target_id == caller_id {
-            clear_scheduler_current_task();
-            schedule();
-            return SyscallDisposition::NoReturn;
+
+        if signum == SIGKILL {
+            if task_terminate(*target_id) == 0 {
+                signaled += 1;
+                if *target_id == caller_id {
+                    caller_terminated = true;
+                }
+            }
+            continue;
         }
-        return ctx.ok(0);
+
+        unsafe {
+            (*target)
+                .signal_pending
+                .fetch_or(sig_bit(signum), Ordering::AcqRel);
+        }
+        let _ = unblock_task(target);
+        signaled += 1;
     }
 
-    unsafe {
-        (*target)
-            .signal_pending
-            .fetch_or(sig_bit(signum), Ordering::AcqRel);
+    if signaled == 0 {
+        return errno(&ctx, ERRNO_ESRCH);
     }
-    let _ = unblock_task(target);
+
+    if caller_terminated {
+        clear_scheduler_current_task();
+        schedule();
+        return SyscallDisposition::NoReturn;
+    }
+
     ctx.ok(0)
 }
 

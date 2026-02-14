@@ -87,6 +87,9 @@ pub struct ShellState {
 }
 
 pub fn shell_user_main(_arg: *mut c_void) {
+    use slopos_abi::signal::SIGINT;
+
+    use crate::syscall::process;
     use crate::syscall::window;
     use display::shell_write;
 
@@ -96,6 +99,8 @@ pub fn shell_user_main(_arg: *mut c_void) {
     window::surface_set_title("SlopOS Shell");
 
     cwd_set(b"/");
+    exec::initialize_job_control();
+    let _ = process::ignore_signal(SIGINT);
 
     shell_write(WELCOME);
 
@@ -105,6 +110,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
     };
 
     loop {
+        jobs::notify_completed_jobs();
         state.prompt_len = build_prompt(&mut state.prompt_buf);
         let prompt = &state.prompt_buf[..state.prompt_len];
 

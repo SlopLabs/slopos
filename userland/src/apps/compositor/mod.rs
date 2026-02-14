@@ -71,7 +71,11 @@ impl WindowManager {
         let saved_bounds = self.prev_window_bounds;
 
         let raw_count = window::enumerate_windows(&mut self.windows);
-        self.window_count = (raw_count as usize).min(MAX_WINDOWS) as u32;
+        self.window_count = if raw_count > 0 {
+            (raw_count as usize).min(MAX_WINDOWS) as u32
+        } else {
+            0
+        };
 
         self.surface_cache
             .cleanup_stale(&self.windows, self.window_count);

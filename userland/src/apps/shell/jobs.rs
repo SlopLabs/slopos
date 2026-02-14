@@ -161,15 +161,43 @@ pub fn refresh_liveness() {
             }
 
             if process::waitpid_nohang(job.pid).is_some() {
-                *job = Job::empty();
+                job.state = JobState::Done;
                 continue;
             }
 
             if process::kill(job.pid, 0) < 0 {
-                *job = Job::empty();
+                job.state = JobState::Done;
             }
         }
     });
+}
+
+pub fn notify_completed_jobs() {
+    refresh_liveness();
+    with_jobs(|table| {
+        for job in &mut table.jobs {
+            if !job.active || job.state != JobState::Done {
+                continue;
+            }
+            shell_write(b"[");
+            write_u64(job.job_id as u64);
+            shell_write(b"] Done  ");
+            shell_write(&job.command[..job.command_len]);
+            shell_write(b"\n");
+            *job = Job::empty();
+        }
+    });
+}
+
+pub fn find_pgid_by_job_id(job_id: u16) -> Option<u32> {
+    with_jobs(|table| {
+        for job in &table.jobs {
+            if job.active && job.job_id == job_id {
+                return Some(job.pgid);
+            }
+        }
+        None
+    })
 }
 
 pub fn write_u64(value: u64) {

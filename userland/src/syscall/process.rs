@@ -2,6 +2,7 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall4};
+use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
 
 #[inline(always)]
 pub fn spawn_path(path: &[u8]) -> i32 {
@@ -68,7 +69,31 @@ pub fn getpgid(pid: u32) -> i32 {
 
 #[inline(always)]
 pub fn kill(pid: u32, signum: u8) -> i32 {
-    unsafe { syscall2(SYSCALL_KILL, pid as u64, signum as u64) as i32 }
+    kill_pid(pid as i32, signum)
+}
+
+#[inline(always)]
+pub fn kill_pid(pid: i32, signum: u8) -> i32 {
+    unsafe { syscall2(SYSCALL_KILL, pid as i64 as u64, signum as u64) as i32 }
+}
+
+#[inline(always)]
+pub fn ignore_signal(signum: u8) -> i32 {
+    let action = UserSigaction {
+        sa_handler: SIG_IGN,
+        sa_flags: 0,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGACTION,
+            signum as u64,
+            (&action as *const UserSigaction) as u64,
+            0,
+            core::mem::size_of::<SigSet>() as u64,
+        ) as i32
+    }
 }
 
 #[inline(always)]

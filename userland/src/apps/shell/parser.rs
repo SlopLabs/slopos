@@ -38,6 +38,61 @@ pub fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
     normalize_path_with_cwd(input, buffer, &cwd)
 }
 
+fn collapse_absolute_path(buffer: &mut [u8], len: usize) -> usize {
+    if buffer.is_empty() {
+        return 0;
+    }
+    if len == 0 || buffer[0] != b'/' {
+        buffer[0] = b'/';
+        return 1;
+    }
+
+    let mut write = 1usize;
+    let mut read = 1usize;
+
+    while read < len {
+        while read < len && buffer[read] == b'/' {
+            read += 1;
+        }
+        if read >= len {
+            break;
+        }
+
+        let seg_start = read;
+        while read < len && buffer[read] != b'/' {
+            read += 1;
+        }
+        let seg_len = read - seg_start;
+
+        if seg_len == 1 && buffer[seg_start] == b'.' {
+            continue;
+        }
+        if seg_len == 2 && buffer[seg_start] == b'.' && buffer[seg_start + 1] == b'.' {
+            if write > 1 {
+                write -= 1;
+                while write > 0 && buffer[write] != b'/' {
+                    write -= 1;
+                }
+                if write == 0 {
+                    write = 1;
+                }
+            }
+            continue;
+        }
+
+        if write > 1 {
+            buffer[write] = b'/';
+            write += 1;
+        }
+        for j in 0..seg_len {
+            buffer[write + j] = buffer[seg_start + j];
+        }
+        write += seg_len;
+    }
+
+    if write == 0 { 1 } else { write }
+}
+
 pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) -> i32 {
     if buffer.is_empty() {
         return -1;
@@ -57,7 +112,8 @@ pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) 
                 return -1;
             }
             ptr::copy_nonoverlapping(input, buffer.as_mut_ptr(), len);
-            buffer[len] = 0;
+            let collapsed_len = collapse_absolute_path(buffer, len);
+            buffer[collapsed_len] = 0;
             return 0;
         }
     }
@@ -80,7 +136,8 @@ pub fn normalize_path_with_cwd(input: *const u8, buffer: &mut [u8], cwd: &[u8]) 
     unsafe {
         ptr::copy_nonoverlapping(input, buffer.as_mut_ptr().add(cwd_len + sep_len), input_len);
     }
-    buffer[total] = 0;
+    let collapsed_len = collapse_absolute_path(buffer, total);
+    buffer[collapsed_len] = 0;
     0
 }
 

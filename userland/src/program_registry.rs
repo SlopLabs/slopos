@@ -58,3 +58,10 @@ pub fn resolve_program(name: &[u8]) -> Option<&'static ProgramSpec> {
         .iter()
         .find(|spec| trim_nul_bytes(spec.name) == requested)
 }
+
+pub fn resolve_program_path(path: &[u8]) -> Option<&'static ProgramSpec> {
+    let requested = trim_nul_bytes(path);
+    PROGRAM_REGISTRY
+        .iter()
+        .find(|spec| trim_nul_bytes(spec.path) == requested)
+}

@@ -335,6 +335,88 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_kill_process_group_semantics() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let leader_id = create_test_user_task();
+    assert_test!(leader_id != INVALID_TASK_ID, "failed to create leader task");
+    let leader_ptr = task_find_by_id(leader_id);
+    assert_not_null!(leader_ptr, "leader lookup failed");
+
+    let member_id = task_fork(leader_ptr);
+    assert_test!(member_id != INVALID_TASK_ID, "failed to fork member task");
+    let member_ptr = task_find_by_id(member_id);
+    assert_not_null!(member_ptr, "member lookup failed");
+
+    let mut setpgid_frame = zero_frame();
+    setpgid_frame.rdi = member_id as u64;
+    setpgid_frame.rsi = leader_id as u64;
+    let _ = syscall_setpgid(leader_ptr, &mut setpgid_frame);
+    assert_eq_test!(setpgid_frame.rax, 0, "setpgid should succeed for member");
+
+    let leader_pid = unsafe { (*leader_ptr).process_id };
+    let member_pid = unsafe { (*member_ptr).process_id };
+
+    let mut probe_frame = zero_frame();
+    probe_frame.rdi = (-(leader_id as i32) as i64) as u64;
+    probe_frame.rsi = 0;
+    let _ = with_user_process_context(leader_pid, || syscall_kill(leader_ptr, &mut probe_frame));
+    assert_eq_test!(probe_frame.rax, 0, "kill(group, 0) probe should succeed");
+
+    unsafe {
+        (*leader_ptr).signal_pending.store(0, Ordering::Release);
+        (*member_ptr).signal_pending.store(0, Ordering::Release);
+    }
+
+    let mut negative_group_frame = zero_frame();
+    negative_group_frame.rdi = (-(leader_id as i32) as i64) as u64;
+    negative_group_frame.rsi = SIGUSR1 as u64;
+    let _ = with_user_process_context(leader_pid, || {
+        syscall_kill(leader_ptr, &mut negative_group_frame)
+    });
+    assert_eq_test!(negative_group_frame.rax, 0, "kill(-pgid, SIGUSR1) failed");
+
+    let pending_bit = sig_bit(SIGUSR1);
+    let leader_pending = unsafe { (*leader_ptr).signal_pending.load(Ordering::Acquire) };
+    let member_pending = unsafe { (*member_ptr).signal_pending.load(Ordering::Acquire) };
+    assert_test!(
+        (leader_pending & pending_bit) != 0,
+        "leader did not receive group signal"
+    );
+    assert_test!(
+        (member_pending & pending_bit) != 0,
+        "member did not receive group signal"
+    );
+
+    unsafe {
+        (*leader_ptr).signal_pending.store(0, Ordering::Release);
+        (*member_ptr).signal_pending.store(0, Ordering::Release);
+    }
+
+    let mut caller_group_frame = zero_frame();
+    caller_group_frame.rdi = 0;
+    caller_group_frame.rsi = SIGUSR1 as u64;
+    let _ = with_user_process_context(member_pid, || {
+        syscall_kill(member_ptr, &mut caller_group_frame)
+    });
+    assert_eq_test!(caller_group_frame.rax, 0, "kill(0, SIGUSR1) failed");
+
+    let leader_pending_after = unsafe { (*leader_ptr).signal_pending.load(Ordering::Acquire) };
+    let member_pending_after = unsafe { (*member_ptr).signal_pending.load(Ordering::Acquire) };
+    assert_test!(
+        (leader_pending_after & pending_bit) != 0,
+        "leader missing kill(0) group signal"
+    );
+    assert_test!(
+        (member_pending_after & pending_bit) != 0,
+        "member missing kill(0) group signal"
+    );
+
+    task_terminate(member_id);
+    task_terminate(leader_id);
+    TestResult::Pass
+}
+
 pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1380,6 +1462,7 @@ slopos_lib::define_test_suite!(
         test_arch_prctl_set_get_fs_roundtrip,
         test_pipe_poll_eof_baseline,
         test_process_group_session_syscalls_baseline,
+        test_kill_process_group_semantics,
         test_vm_mmap_munmap_stress_baseline,
     ]
 );
@@ -1391,6 +1474,7 @@ slopos_lib::define_test_suite!(
         test_phase7_syscall_lookup_valid,
         test_pipe_poll_eof_baseline,
         test_process_group_session_syscalls_baseline,
+        test_kill_process_group_semantics,
         test_sigchld_and_wait_interaction,
         test_clone_thread_tls_isolation,
         test_futex_wait_mismatch_and_wake_no_waiters,

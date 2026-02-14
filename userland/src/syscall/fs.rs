@@ -220,6 +220,34 @@ pub fn select(
     demux(result).map(|v| v as usize)
 }
 
+#[inline(always)]
+pub fn tcgetpgrp(fd: RawFd) -> SyscallResult<u32> {
+    let mut pgid = 0u32;
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            TIOCGPGRP,
+            (&mut pgid as *mut u32) as u64,
+        )
+    };
+    demux(result).map(|_| pgid)
+}
+
+#[inline(always)]
+pub fn tcsetpgrp(fd: RawFd, pgid: u32) -> SyscallResult<()> {
+    let mut target = pgid;
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            TIOCSPGRP,
+            (&mut target as *mut u32) as u64,
+        )
+    };
+    demux(result).map(|_| ())
+}
+
 // =============================================================================
 // Raw C-ABI Wrappers (for libc layer only)
 // =============================================================================

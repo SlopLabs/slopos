@@ -705,6 +705,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     if !is_current {
         cleanup_terminated_task_resources(task_ptr, resolved_id);
+    } else {
+        video_task_cleanup(resolved_id);
+        shm_cleanup_task(resolved_id);
     }
 
     with_task_manager(|mgr| {
