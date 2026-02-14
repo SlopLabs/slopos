@@ -23,8 +23,7 @@ knowledge/index.sqlite-shm
 knowledge/index.sqlite-wal
 knowledge/index.sqlite-journal
 
-# Node/Bun artifacts for MCP tooling
-**/node_modules/
+# Bun artifacts for MCP tooling
 mcp/.bun/
 mcp/.turbo/
 mcp/.cache/
