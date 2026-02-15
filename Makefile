@@ -299,7 +299,7 @@ $(FS_IMAGE): build-userland
 	@echo "Rebuilding ext2 image at $@ ($(FS_IMAGE_SIZE))"
 	@rm -f "$@"
 	@truncate -s $(FS_IMAGE_SIZE) "$@"
-	@mkfs.ext2 -F "$@" >/dev/null
+	@mkfs.ext2 -F -b 4096 "$@" >/dev/null
 	@debugfs -w -R "mkdir /bin" "$@" >/dev/null
 	@debugfs -w -R "mkdir /sbin" "$@" >/dev/null
 	@for bin in $(ROOTFS_USERLAND_BINS); do \
