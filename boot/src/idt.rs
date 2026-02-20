@@ -84,10 +84,12 @@ use slopos_core::sched::{
     RescheduleReason, TrapExitSource, schedule, scheduler_get_current_task,
     scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
+use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
 use slopos_core::task::task_terminate;
 
-use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
 use slopos_core::scheduler::task_struct::Task;
+use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
 unsafe extern "C" {
     fn isr0();
@@ -299,10 +301,63 @@ fn handle_tlb_shootdown_ipi() {
     send_eoi();
 }
 
+/// RAII guard that holds preempt_count elevated without triggering the
+/// reschedule callback on drop.  Used for IST-based exception handlers
+/// where yielding would leave the handler suspended on a reusable IST stack.
+struct IstPreemptHold {
+    active: bool,
+}
+
+impl IstPreemptHold {
+    /// Increment preempt_count to prevent deferred rescheduling.
+    #[inline]
+    fn new(active: bool) -> Self {
+        if active {
+            unsafe {
+                slopos_lib::pcr::current_pcr()
+                    .preempt_count
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Self { active }
+    }
+}
+
+impl Drop for IstPreemptHold {
+    #[inline]
+    fn drop(&mut self) {
+        if self.active {
+            // Decrement WITHOUT calling the reschedule callback.
+            // Any pending reschedule will be handled naturally by the next
+            // timer tick or voluntary yield after we return via IRET.
+            unsafe {
+                slopos_lib::pcr::current_pcr()
+                    .preempt_count
+                    .fetch_sub(1, core::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+}
+
 /// Implementation of common_exception_handler - called from FFI boundary
 pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let frame_ref = unsafe { &mut *frame };
     let vector = (frame_ref.vector & 0xFF) as u8;
+
+    // Prevent deferred rescheduling during IST-based exception handlers.
+    //
+    // IST stacks are per-vector, per-CPU fixed addresses.  If an IrqMutex guard
+    // drops while preempt_count is 1, the PreemptGuard::drop callback will call
+    // the scheduler, context-switching away from the IST stack.  A subsequent
+    // exception of the same vector would reuse the same IST stack, overwriting
+    // the suspended handler's state → corruption / triple fault.
+    //
+    // By bumping preempt_count here (and manually decrementing on exit WITHOUT
+    // calling the reschedule callback), we ensure all inner IrqMutex drops see
+    // preempt_count > 1 and skip the callback.
+    //
+    // All CPU exceptions (vectors 0-31) use IST stacks in SlopOS.
+    let _ist_hold = IstPreemptHold::new(vector < 32);
 
     ist_stacks::ist_record_usage(vector, frame as u64);
 
@@ -419,12 +474,49 @@ fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
     unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }
 }
 
+#[inline]
+fn resolve_user_fault_task() -> *mut Task {
+    let hw_cr3 = cpu::read_cr3() & !0xFFF;
+    let mut task = scheduler_get_current_task() as *mut Task;
+
+    if !task.is_null() && task_pointer_is_valid(task as *const Task) {
+        let task_cr3 =
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.cr3)) } & !0xFFF;
+        if task_cr3 == hw_cr3 {
+            return task;
+        }
+    } else {
+        task = core::ptr::null_mut();
+    }
+
+    let by_cr3 = task_find_by_cr3(hw_cr3);
+    if !by_cr3.is_null() {
+        return by_cr3;
+    }
+
+    task
+}
+
 fn terminate_user_task(
     reason: TaskFaultReason,
     frame: &slopos_lib::InterruptFrame,
     detail: &'static CStr,
 ) {
-    let task = scheduler_get_current_task() as *mut Task;
+    let task = resolve_user_fault_task();
+
+    if task.is_null() {
+        klog_info!(
+            "Terminating user fault context without a valid current task: {}",
+            detail.to_str().unwrap_or("<invalid utf-8>")
+        );
+        kdiag_dump_interrupt_frame(frame as *const _);
+        panic_with_frame(
+            "user fault with invalid current task",
+            frame as *const _ as *mut _,
+        );
+        return;
+    }
+
     let tid = if task.is_null() {
         INVALID_TASK_ID
     } else {
@@ -562,22 +654,46 @@ fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
         return false;
     }
 
-    let task_ptr = scheduler_get_current_task() as *mut Task;
+    let task_ptr = resolve_user_fault_task();
     if task_ptr.is_null() {
         return false;
     }
 
     let pid = unsafe { (*task_ptr).process_id };
+    if pid == INVALID_PROCESS_ID || (pid as usize) >= MAX_PROCESSES {
+        return false;
+    }
+    let tid = unsafe { (*task_ptr).task_id };
     let page_dir = process_vm::process_vm_get_page_dir(pid);
-    if page_dir.is_null() {
+    if page_dir.is_null() || (page_dir as u64) < 0xffff_8000_0000_0000 {
         return false;
     }
 
     // Copy-on-Write resolution.
     if cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr) {
-        if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
+        klog_debug!(
+            "PF: COW fault task {} (pid {}) at cr2=0x{:x} err=0x{:x} rip=0x{:x}",
+            tid,
+            pid,
+            fault_addr,
+            frame_ref.error_code,
+            frame_ref.rip
+        );
+        let result = cow::handle_cow_fault(page_dir, fault_addr);
+
+        if result.is_ok() {
+            klog_debug!(
+                "PF: COW resolved for task {} at cr2=0x{:x}",
+                tid,
+                fault_addr
+            );
             return true;
         }
+        klog_info!(
+            "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
+            tid,
+            fault_addr
+        );
     }
 
     // Demand paging resolution.
@@ -661,7 +777,7 @@ fn log_user_page_fault_diagnostics(frame_ref: &slopos_lib::InterruptFrame, fault
     let mut ctx_rip = 0u64;
     let mut ctx_rsp = 0u64;
 
-    let task_ptr = scheduler_get_current_task() as *mut Task;
+    let task_ptr = resolve_user_fault_task();
     if !task_ptr.is_null() {
         pid = unsafe { (*task_ptr).process_id };
         unsafe {

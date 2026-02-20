@@ -226,6 +226,14 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Filesystem,
         func: fs::cmd_diff,
     },
+    BuiltinEntry {
+        name: b"tee",
+        desc: b"Copy stdin to stdout and file",
+        usage: b"tee [-a] [file]",
+        detail: b"Read from standard input and write to both stdout\nand a file. Use -a to append instead of overwrite.\nWithout a file argument, passes stdin through.",
+        category: Filesystem,
+        func: fs::cmd_tee,
+    },
     // ── Process Control ─────────────────────────────────────────────────────
     BuiltinEntry {
         name: b"jobs",

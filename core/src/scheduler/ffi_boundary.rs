@@ -9,6 +9,7 @@
 //! All other Rust-to-Rust calls should use regular Rust functions without extern "C".
 
 use super::task::TaskContext;
+use slopos_lib::klog_info;
 
 // ============================================================================
 // Functions called FROM assembly (must be extern "C")
@@ -19,6 +20,45 @@ use super::task::TaskContext;
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_task_exit() -> ! {
     super::scheduler::scheduler_task_exit_impl()
+}
+
+/// Recovery hook called from context_switch.s when a kernel-mode switch target
+/// has an invalid RIP outside kernel .text.
+#[unsafe(no_mangle)]
+pub extern "C" fn context_switch_bad_target(new_context: *const TaskContext) -> ! {
+    let (rip, cs, rsp, cr3) = if new_context.is_null() {
+        (0u64, 0u64, 0u64, 0u64)
+    } else {
+        unsafe {
+            (
+                core::ptr::read_unaligned(core::ptr::addr_of!((*new_context).rip)),
+                core::ptr::read_unaligned(core::ptr::addr_of!((*new_context).cs)),
+                core::ptr::read_unaligned(core::ptr::addr_of!((*new_context).rsp)),
+                core::ptr::read_unaligned(core::ptr::addr_of!((*new_context).cr3)),
+            )
+        }
+    };
+
+    klog_info!(
+        "SCHED: blocked invalid kernel context target cs=0x{:x} rip=0x{:x} rsp=0x{:x} cr3=0x{:x}",
+        cs,
+        rip,
+        rsp,
+        cr3
+    );
+
+    let current = super::scheduler::scheduler_get_current_task();
+    if !current.is_null() && super::task::task_pointer_is_valid(current as *const _) {
+        let task_id = unsafe { (*current).task_id };
+        let _ = crate::task::task_terminate(task_id);
+    }
+
+    super::scheduler::clear_scheduler_current_task();
+    super::scheduler::schedule();
+
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 // ============================================================================

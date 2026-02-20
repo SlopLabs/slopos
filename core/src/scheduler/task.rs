@@ -218,6 +218,47 @@ pub fn task_find_by_id(task_id: u32) -> *mut Task {
     })
 }
 
+/// Find a live task whose active address space matches `cr3`.
+///
+/// This is primarily used by exception paths that need to recover the faulting
+/// task even if per-CPU scheduler current-task metadata is temporarily stale.
+pub fn task_find_by_cr3(cr3: u64) -> *mut Task {
+    if cr3 == 0 {
+        return ptr::null_mut();
+    }
+
+    let target = cr3 & !0xFFF;
+
+    with_task_manager(|mgr| {
+        let mut fallback: *mut Task = ptr::null_mut();
+
+        for task in mgr.tasks.iter_mut() {
+            let status = task.status();
+            if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
+                continue;
+            }
+
+            let task_cr3 =
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(task.context.cr3)) }
+                    & !0xFFF;
+            if task_cr3 != target {
+                continue;
+            }
+
+            let task_ptr = task as *mut Task;
+            if status == TaskStatus::Running {
+                return task_ptr;
+            }
+
+            if fallback.is_null() {
+                fallback = task_ptr;
+            }
+        }
+
+        fallback
+    })
+}
+
 fn release_task_dependents(completed_task_id: u32) {
     // Collect task pointers first, then try to wake outside the lock
     // This prevents holding the task manager lock during wake operations
@@ -384,8 +425,25 @@ fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<us
         return None;
     }
     let start = mgr.tasks.as_ptr() as usize;
-    let idx = (task as usize - start) / mem::size_of::<Task>();
-    if idx < MAX_TASKS { Some(idx) } else { None }
+    let task_size = mem::size_of::<Task>();
+    let total_span = task_size.saturating_mul(MAX_TASKS);
+    let end = start.saturating_add(total_span);
+    let addr = task as usize;
+
+    if addr < start || addr >= end {
+        return None;
+    }
+
+    let rel = addr - start;
+    if rel % task_size != 0 {
+        return None;
+    }
+
+    Some(rel / task_size)
+}
+
+pub fn task_pointer_is_valid(task: *const Task) -> bool {
+    with_task_manager(|mgr| task_slot_index_inner(mgr, task).is_some())
 }
 
 enum ReserveTaskSlotError {
@@ -708,6 +766,23 @@ pub fn task_terminate(task_id: u32) -> c_int {
     } else {
         video_task_cleanup(resolved_id);
         shm_cleanup_task(resolved_id);
+
+        // Current-task termination path (e.g. syscall exit):
+        // close process-owned FDs immediately so pipe reader/writer counts
+        // are decremented before we schedule away. This prevents stuck pipe
+        // readers waiting forever on EOF after writer exit.
+        unsafe {
+            if (*task_ptr).process_id != INVALID_PROCESS_ID {
+                let process_id = (*task_ptr).process_id;
+                let task_id = (*task_ptr).task_id;
+                if !process_has_other_live_tasks(process_id, task_id) {
+                    fileio_destroy_table_for_process(process_id);
+                }
+            }
+        }
+
+        // Do not free/defer the current task structure here: we are still
+        // executing on its kernel stack until syscall_exit switches away.
     }
 
     with_task_manager(|mgr| {
@@ -1070,7 +1145,14 @@ pub fn task_is_invalid(task: *const Task) -> bool {
     task_get_state(task) == TaskStatus::Invalid
 }
 
-pub fn task_fork(parent_task: *mut Task) -> u32 {
+/// Fork the current task, creating a new child process.
+///
+/// `syscall_frame` is the InterruptFrame from the SYSCALL/INT 0x80 entry.
+/// The child's context is built from this frame (user-mode RIP, RSP, RFLAGS,
+/// etc.) so that the child always returns to user mode — even if the parent
+/// was preempted by a timer tick (which would overwrite the Task's `context`
+/// field with a kernel-mode snapshot).
+pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_lib::InterruptFrame) -> u32 {
     if parent_task.is_null() {
         klog_info!("task_fork: null parent task");
         return INVALID_TASK_ID;
@@ -1136,7 +1218,41 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     child.kernel_stack_top = child_kernel_stack as u64 + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    child.context.rax = 0;
+    // Build the child's context from the SYSCALL entry frame, NOT from
+    // the parent's Task.context (which may reflect a timer-tick preemption
+    // with CS=0x08 / kernel RIP).  The child must return to user mode as
+    // if fork() just returned 0.
+    if !syscall_frame.is_null() {
+        let sf = unsafe { &*syscall_frame };
+        child.context.rip = sf.rip;
+        child.context.rsp = sf.rsp;
+        child.context.rflags = sf.rflags;
+        // Fork always returns to user mode. Force user segments even if the
+        // parent's saved Task.context currently contains kernel selectors.
+        child.context.cs = if (sf.cs & 0x3) == 0x3 { sf.cs } else { 0x23 };
+        child.context.ss = if (sf.ss & 0x3) == 0x3 { sf.ss } else { 0x1B };
+        child.context.ds = 0x1B;
+        child.context.es = 0x1B;
+        child.context.fs = 0;
+        child.context.gs = 0;
+        child.context.rbx = sf.rbx;
+        child.context.rcx = sf.rcx;
+        child.context.rdx = sf.rdx;
+        child.context.rsi = sf.rsi;
+        child.context.rdi = sf.rdi;
+        child.context.rbp = sf.rbp;
+        child.context.r8 = sf.r8;
+        child.context.r9 = sf.r9;
+        child.context.r10 = sf.r10;
+        child.context.r11 = sf.r11;
+        child.context.r12 = sf.r12;
+        child.context.r13 = sf.r13;
+        child.context.r14 = sf.r14;
+        child.context.r15 = sf.r15;
+    }
+    // Mark as returning from user mode so the scheduler uses IRETQ.
+    child.context_from_user = 1;
+    child.context.rax = 0; // fork() returns 0 in child
 
     let child_page_dir = process_vm_get_page_dir(child_process_id);
     if !child_page_dir.is_null() {
@@ -1147,13 +1263,16 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
 
     record_task_created();
 
-    klog_info!(
+    klog_debug!(
         "task_fork: created child task {} (process {}) from parent task {} (process {})",
         child_task_id,
         child_process_id,
         parent.task_id,
         parent.process_id
     );
+
+    // Enqueue the child in the scheduler's per-CPU ready queue so it actually runs.
+    scheduler::schedule_task(child_task_ptr);
 
     child_task_id
 }
@@ -1372,6 +1491,9 @@ pub fn task_clone(
         parent.task_id,
         parent.process_id
     );
+
+    // Enqueue the child in the scheduler's per-CPU ready queue so it actually runs.
+    scheduler::schedule_task(child_task_ptr);
 
     Ok(child_task_id)
 }

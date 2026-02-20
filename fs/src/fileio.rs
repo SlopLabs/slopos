@@ -10,6 +10,10 @@ use slopos_abi::syscall::{
     POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET,
 };
 
+use slopos_lib::kernel_services::driver_runtime::{
+    DriverTaskHandle, block_current_task, current_task, scheduler_is_enabled, unblock_task,
+};
+
 use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
 #[allow(non_camel_case_types)]
@@ -28,6 +32,7 @@ const FILEIO_MAX_OPEN_FILES: usize = 32;
 const MAX_PIPES: usize = 64;
 const PIPE_BUFFER_SIZE: usize = 4096;
 const INVALID_PIPE_ID: u32 = u32::MAX;
+const PIPE_MAX_WAITERS: usize = 8;
 
 #[derive(Clone, Copy)]
 struct PipeSlot {
@@ -38,6 +43,10 @@ struct PipeSlot {
     readers: u16,
     writers: u16,
     buffer: [u8; PIPE_BUFFER_SIZE],
+    reader_waiters: [DriverTaskHandle; PIPE_MAX_WAITERS],
+    reader_waiter_count: usize,
+    writer_waiters: [DriverTaskHandle; PIPE_MAX_WAITERS],
+    writer_waiter_count: usize,
 }
 
 impl PipeSlot {
@@ -50,6 +59,10 @@ impl PipeSlot {
             readers: 0,
             writers: 0,
             buffer: [0; PIPE_BUFFER_SIZE],
+            reader_waiters: [core::ptr::null_mut(); PIPE_MAX_WAITERS],
+            reader_waiter_count: 0,
+            writer_waiters: [core::ptr::null_mut(); PIPE_MAX_WAITERS],
+            writer_waiter_count: 0,
         }
     }
 }
@@ -57,6 +70,10 @@ impl PipeSlot {
 struct PipeState {
     slots: [PipeSlot; MAX_PIPES],
 }
+
+// SAFETY: PipeSlot contains DriverTaskHandle (*mut c_void) pointers managed by the
+// scheduler. Access is synchronized through the PIPE_STATE IrqMutex.
+unsafe impl Send for PipeState {}
 
 impl PipeState {
     const fn new() -> Self {
@@ -173,9 +190,17 @@ fn reset_descriptor(desc: &mut FileDescriptor) {
             if slot.valid {
                 if desc.pipe_read_end && slot.readers > 0 {
                     slot.readers -= 1;
+                    if slot.readers == 0 {
+                        // No more readers: wake ALL blocked writers (broken pipe)
+                        pipe_wake_all_writers(slot);
+                    }
                 }
                 if desc.pipe_write_end && slot.writers > 0 {
                     slot.writers -= 1;
+                    if slot.writers == 0 {
+                        // No more writers: wake ALL blocked readers (EOF)
+                        pipe_wake_all_readers(slot);
+                    }
                 }
                 if slot.readers == 0 && slot.writers == 0 {
                     *slot = PipeSlot::new();
@@ -266,6 +291,83 @@ fn pipe_revents(slot: &PipeSlot, desc: &FileDescriptor, events: u16) -> u16 {
     }
 
     revents
+}
+
+/// Add a task to a wait queue. Returns true if added or already present.
+fn pipe_wait_queue_push(
+    waiters: &mut [DriverTaskHandle; PIPE_MAX_WAITERS],
+    count: &mut usize,
+    task: DriverTaskHandle,
+) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // Check for duplicates
+    for i in 0..*count {
+        if waiters[i] == task {
+            return true;
+        }
+    }
+    if *count >= PIPE_MAX_WAITERS {
+        return false;
+    }
+    waiters[*count] = task;
+    *count += 1;
+    true
+}
+
+/// Remove and return the first waiter from a wait queue (FIFO).
+fn pipe_wait_queue_pop(
+    waiters: &mut [DriverTaskHandle; PIPE_MAX_WAITERS],
+    count: &mut usize,
+) -> DriverTaskHandle {
+    if *count == 0 {
+        return core::ptr::null_mut();
+    }
+    let task = waiters[0];
+    // Shift remaining entries down
+    for i in 1..*count {
+        waiters[i - 1] = waiters[i];
+    }
+    *count -= 1;
+    waiters[*count] = core::ptr::null_mut();
+    task
+}
+
+/// Wake one blocked reader on this pipe slot.
+fn pipe_wake_one_reader(slot: &mut PipeSlot) {
+    let task = pipe_wait_queue_pop(&mut slot.reader_waiters, &mut slot.reader_waiter_count);
+    if !task.is_null() {
+        let _ = unblock_task(task);
+    }
+}
+
+/// Wake one blocked writer on this pipe slot.
+fn pipe_wake_one_writer(slot: &mut PipeSlot) {
+    let task = pipe_wait_queue_pop(&mut slot.writer_waiters, &mut slot.writer_waiter_count);
+    if !task.is_null() {
+        let _ = unblock_task(task);
+    }
+}
+
+/// Wake ALL blocked readers (used when writers hit 0 -- EOF).
+fn pipe_wake_all_readers(slot: &mut PipeSlot) {
+    while slot.reader_waiter_count > 0 {
+        let task = pipe_wait_queue_pop(&mut slot.reader_waiters, &mut slot.reader_waiter_count);
+        if !task.is_null() {
+            let _ = unblock_task(task);
+        }
+    }
+}
+
+/// Wake ALL blocked writers (used when readers hit 0 -- broken pipe).
+fn pipe_wake_all_writers(slot: &mut PipeSlot) {
+    while slot.writer_waiter_count > 0 {
+        let task = pipe_wait_queue_pop(&mut slot.writer_waiters, &mut slot.writer_waiter_count);
+        if !task.is_null() {
+            let _ = unblock_task(task);
+        }
+    }
 }
 
 fn clone_descriptor_for_dup(src: &FileDescriptor) -> Option<FileDescriptor> {
@@ -593,52 +695,104 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
         return 0;
     }
 
-    with_tables(|kernel, processes| {
+    // First, check if this FD is a pipe read end by peeking under the file table lock.
+    let pipe_info: Option<(u32, bool)> = with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return -1;
+            return None;
         };
         if !table.in_use {
-            return -1;
+            return None;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
             drop(guard);
-            return -1;
+            return None;
         };
         if (desc.flags & FILE_OPEN_READ) == 0 {
             drop(guard);
-            return -1;
+            return None;
         }
+        let is_pipe = desc.pipe_id != INVALID_PIPE_ID;
+        let pipe_id = desc.pipe_id;
+        let is_read_end = desc.pipe_read_end;
+        let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
+        drop(guard);
+        if is_pipe {
+            if !is_read_end {
+                return None; // writing end, can't read
+            }
+            Some((pipe_id, is_nonblock))
+        } else {
+            // Signal "not a pipe" -- fall through to normal path below
+            Some((INVALID_PIPE_ID, false))
+        }
+    });
 
-        if desc.pipe_id != INVALID_PIPE_ID {
-            if !desc.pipe_read_end {
-                drop(guard);
+    let Some((pipe_id, is_nonblock)) = pipe_info else {
+        return -1; // Invalid FD or not readable
+    };
+
+    // Non-pipe path: handle inside with_tables as before
+    if pipe_id == INVALID_PIPE_ID {
+        return with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1;
+            };
+            if !table.in_use {
                 return -1;
             }
-            let mut local = [0u8; 512];
-            let mut remaining = count;
-            let mut total = 0usize;
-            while remaining > 0 {
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                drop(guard);
+                return -1;
+            };
+
+            // Console descriptors: stdin returns 0 (no data available).
+            if desc.console {
+                drop(guard);
+                return 0;
+            }
+
+            let fs = match desc.fs {
+                Some(fs) => fs,
+                None => {
+                    drop(guard);
+                    return -1;
+                }
+            };
+
+            let buf = unsafe { slice::from_raw_parts_mut(buffer as *mut u8, count) };
+            let rc = fs.read(desc.inode, desc.position as u64, buf);
+            if let Ok(read_len) = rc {
+                desc.position = desc.position.saturating_add(read_len);
+                drop(guard);
+                return read_len as ssize_t;
+            }
+            drop(guard);
+            -1
+        });
+    }
+
+    // Pipe read path -- operates on PIPE_STATE only (no file table lock held while blocking).
+    let mut local = [0u8; 512];
+    let mut total = 0usize;
+    let mut remaining = count;
+
+    loop {
+        let mut need_block = false;
+
+        {
+            let mut pipe_state = PIPE_STATE.lock();
+            let Some(slot) = pipe_slot_mut(&mut pipe_state, pipe_id) else {
+                return if total > 0 { total as ssize_t } else { -1 };
+            };
+
+            // Try to read as much as we can
+            while remaining > 0 && slot.len > 0 {
                 let chunk = remaining.min(local.len());
-                let copied = {
-                    let mut pipe_state = PIPE_STATE.lock();
-                    let Some(slot) = pipe_slot_mut(&mut pipe_state, desc.pipe_id) else {
-                        drop(guard);
-                        return -1;
-                    };
-                    if slot.len == 0 {
-                        if slot.writers == 0 {
-                            break;
-                        }
-                        if total == 0 {
-                            drop(guard);
-                            return -1;
-                        }
-                        break;
-                    }
-                    pipe_read_into(slot, &mut local[..chunk])
-                };
+                let copied = pipe_read_into(slot, &mut local[..chunk]);
                 if copied == 0 {
                     break;
                 }
@@ -651,115 +805,208 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
                 }
                 total += copied;
                 remaining -= copied;
+
+                // Wake one blocked writer since we freed buffer space
+                pipe_wake_one_writer(slot);
             }
-            drop(guard);
-            return total as ssize_t;
-        }
 
-        // Console descriptors: stdin returns 0 (no data available).
-        // Interactive console input is handled by SYSCALL_READ / SYSCALL_READ_CHAR.
-        if desc.console {
-            drop(guard);
-            return 0;
-        }
-
-        let fs = match desc.fs {
-            Some(fs) => fs,
-            None => {
-                drop(guard);
-                return -1;
+            // If we got some data, return it
+            if total > 0 {
+                return total as ssize_t;
             }
-        };
 
-        let buf = unsafe { slice::from_raw_parts_mut(buffer as *mut u8, count) };
-        let rc = fs.read(desc.inode, desc.position as u64, buf);
-        if let Ok(read_len) = rc {
-            desc.position = desc.position.saturating_add(read_len);
-            drop(guard);
-            return read_len as ssize_t;
+            // Pipe is empty
+            if slot.writers == 0 {
+                // EOF: no writers left, return 0
+                return 0;
+            }
+
+            // Non-blocking mode: return EAGAIN (-11)
+            if is_nonblock {
+                return -11;
+            }
+
+            // Need to block: add to wait queue, then block after dropping lock
+            if scheduler_is_enabled() != 0 {
+                let task = current_task();
+                if pipe_wait_queue_push(
+                    &mut slot.reader_waiters,
+                    &mut slot.reader_waiter_count,
+                    task,
+                ) {
+                    need_block = true;
+                }
+            }
+            // PIPE_STATE lock is dropped here
         }
-        drop(guard);
-        -1
-    })
+
+        if need_block {
+            block_current_task();
+            // After waking: loop back and re-check pipe state.
+            // We might have been woken by: data arrival, writer close (EOF), or signal.
+            continue;
+        }
+
+        // Scheduler not enabled or wait queue full -- spin-yield fallback
+        // (should not happen in normal operation)
+        return -1;
+    }
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
     }
-    with_tables(|kernel, processes| {
+
+    // Peek at the FD under the file table lock to determine if it's a pipe.
+    let pipe_info: Option<(u32, bool)> = with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return -1;
+            return None;
         };
         if !table.in_use {
-            return -1;
+            return None;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
             drop(guard);
-            return -1;
+            return None;
         };
         if (desc.flags & FILE_OPEN_WRITE) == 0 {
             drop(guard);
-            return -1;
+            return None;
         }
+        let is_pipe = desc.pipe_id != INVALID_PIPE_ID;
+        let pipe_id = desc.pipe_id;
+        let is_write_end = desc.pipe_write_end;
+        let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
+        drop(guard);
+        if is_pipe {
+            if !is_write_end {
+                return None;
+            }
+            Some((pipe_id, is_nonblock))
+        } else {
+            Some((INVALID_PIPE_ID, false))
+        }
+    });
 
-        if desc.pipe_id != INVALID_PIPE_ID {
-            if !desc.pipe_write_end {
-                drop(guard);
+    let Some((pipe_id, is_nonblock)) = pipe_info else {
+        return -1;
+    };
+
+    // Non-pipe path: handle inside with_tables as before
+    if pipe_id == INVALID_PIPE_ID {
+        return with_tables(|kernel, processes| {
+            let Some(table) = table_for_pid(kernel, processes, process_id) else {
+                return -1;
+            };
+            if !table.in_use {
                 return -1;
             }
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                drop(guard);
+                return -1;
+            };
 
-            let input = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
-            let written = {
-                let mut pipe_state = PIPE_STATE.lock();
-                let Some(slot) = pipe_slot_mut(&mut pipe_state, desc.pipe_id) else {
-                    drop(guard);
-                    return -1;
-                };
-                if slot.readers == 0 {
+            // Console descriptors: route stdout/stderr writes to serial port.
+            if desc.console {
+                drop(guard);
+                let bytes = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
+                unsafe {
+                    slopos_lib::ports::serial_write_bytes(slopos_lib::ports::COM1, bytes);
+                }
+                return count as ssize_t;
+            }
+
+            let fs = match desc.fs {
+                Some(fs) => fs,
+                None => {
                     drop(guard);
                     return -1;
                 }
-                pipe_write_from(slot, input)
             };
-            drop(guard);
-            if written == 0 {
-                return -1;
-            }
-            return written as ssize_t;
-        }
 
-        // Console descriptors: route stdout/stderr writes to serial port.
-        if desc.console {
-            drop(guard);
-            let bytes = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
-            // SAFETY: COM1 is always valid on x86_64 QEMU targets.
-            unsafe {
-                slopos_lib::ports::serial_write_bytes(slopos_lib::ports::COM1, bytes);
-            }
-            return count as ssize_t;
-        }
-
-        let fs = match desc.fs {
-            Some(fs) => fs,
-            None => {
+            let buf = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
+            let rc = fs.write(desc.inode, desc.position as u64, buf);
+            if let Ok(written) = rc {
+                desc.position = desc.position.saturating_add(written);
                 drop(guard);
-                return -1;
+                return written as ssize_t;
             }
-        };
-
-        let buf = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
-        let rc = fs.write(desc.inode, desc.position as u64, buf);
-        if let Ok(written) = rc {
-            desc.position = desc.position.saturating_add(written);
             drop(guard);
-            return written as ssize_t;
+            -1
+        });
+    }
+
+    // Pipe write path -- operates on PIPE_STATE only (no file table lock held while blocking).
+    let input = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
+    let mut total = 0usize;
+
+    loop {
+        let mut need_block = false;
+
+        {
+            let mut pipe_state = PIPE_STATE.lock();
+            let Some(slot) = pipe_slot_mut(&mut pipe_state, pipe_id) else {
+                return if total > 0 { total as ssize_t } else { -1 };
+            };
+
+            // No readers: broken pipe
+            if slot.readers == 0 {
+                return if total > 0 { total as ssize_t } else { -1 };
+            }
+
+            // Try to write as much as we can
+            if total < count && slot.len < PIPE_BUFFER_SIZE {
+                let written = pipe_write_from(slot, &input[total..]);
+                if written > 0 {
+                    total += written;
+                    // Wake one blocked reader since we added data
+                    pipe_wake_one_reader(slot);
+                }
+            }
+
+            // If we wrote everything, return
+            if total >= count {
+                return total as ssize_t;
+            }
+
+            // If we wrote something and pipe is full, return partial write
+            // (POSIX: writes <= PIPE_BUF are atomic, but we return what we can)
+            if total > 0 {
+                return total as ssize_t;
+            }
+
+            // Pipe is full and we wrote nothing yet
+            if is_nonblock {
+                return -11; // EAGAIN
+            }
+
+            // Need to block: add to writer wait queue
+            if scheduler_is_enabled() != 0 {
+                let task = current_task();
+                if pipe_wait_queue_push(
+                    &mut slot.writer_waiters,
+                    &mut slot.writer_waiter_count,
+                    task,
+                ) {
+                    need_block = true;
+                }
+            }
+            // PIPE_STATE lock dropped here
         }
-        drop(guard);
-        -1
-    })
+
+        if need_block {
+            block_current_task();
+            // After waking: loop back and re-check (data consumed? readers gone?)
+            continue;
+        }
+
+        return -1;
+    }
 }
 
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {

@@ -21,10 +21,10 @@ use slopos_abi::signal::{
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
-    FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE,
-    SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_PIPE, SYSCALL_PIPE2,
-    SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN,
-    SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
+    FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL,
+    SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_PIPE,
+    SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK,
+    SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
@@ -41,9 +41,11 @@ use crate::scheduler::task::{
     init_task_manager, task_clone, task_create, task_find_by_id, task_fork, task_set_state,
     task_shutdown_all, task_terminate,
 };
+use crate::scheduler::{per_cpu, task};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_fs::fileio::{
     file_close_fd, file_pipe_create, file_poll_fd, file_read_fd, file_write_fd,
+    fileio_clone_table_for_process, fileio_destroy_table_for_process,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 
@@ -288,7 +290,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     let parent_ptr = task_find_by_id(parent_id);
     assert_not_null!(parent_ptr);
 
-    let child_id = task_fork(parent_ptr);
+    let child_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID);
     let child_ptr = task_find_by_id(child_id);
     assert_not_null!(child_ptr);
@@ -343,7 +345,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     let leader_ptr = task_find_by_id(leader_id);
     assert_not_null!(leader_ptr, "leader lookup failed");
 
-    let member_id = task_fork(leader_ptr);
+    let member_id = task_fork(leader_ptr, core::ptr::null());
     assert_test!(member_id != INVALID_TASK_ID, "failed to fork member task");
     let member_ptr = task_find_by_id(member_id);
     assert_not_null!(member_ptr, "member lookup failed");
@@ -458,7 +460,7 @@ pub fn test_fork_null_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     use crate::scheduler::task::task_fork;
-    let child_id = task_fork(ptr::null_mut());
+    let child_id = task_fork(ptr::null_mut(), core::ptr::null());
     assert_test!(
         child_id == INVALID_TASK_ID,
         "fork with null parent should fail"
@@ -476,7 +478,7 @@ pub fn test_fork_kernel_task() -> TestResult {
     assert_not_null!(kernel_task);
 
     use crate::scheduler::task::task_fork;
-    let child_id = task_fork(kernel_task);
+    let child_id = task_fork(kernel_task, core::ptr::null());
     assert_test!(
         child_id == INVALID_TASK_ID,
         "kernel tasks should not be forkable"
@@ -535,7 +537,7 @@ pub fn test_fork_terminated_parent() -> TestResult {
     if !task_ptr_after.is_null() {
         let state = unsafe { (*task_ptr_after).status() };
         if state == TaskStatus::Terminated {
-            let child_id = task_fork(task_ptr_after);
+            let child_id = task_fork(task_ptr_after, core::ptr::null());
             assert_test!(
                 child_id == INVALID_TASK_ID,
                 "fork terminated parent should fail"
@@ -559,7 +561,7 @@ pub fn test_fork_blocked_parent() -> TestResult {
 
     task_set_state(task_id, TaskStatus::Blocked);
 
-    let child_id = task_fork(task_ptr);
+    let child_id = task_fork(task_ptr, core::ptr::null());
 
     task_terminate(task_id);
     if child_id != INVALID_TASK_ID {
@@ -927,7 +929,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
         }
     };
 
-    let fork_id = task_fork(parent_ptr);
+    let fork_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(fork_id != INVALID_TASK_ID, "fork after clone failed");
 
     let thread_ptr = task_find_by_id(thread_id);
@@ -1318,7 +1320,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     let parent_ptr = task_find_by_id(parent_id);
     assert_not_null!(parent_ptr, "parent lookup failed");
 
-    let child_id = task_fork(parent_ptr);
+    let child_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
 
     unsafe {
@@ -1427,6 +1429,340 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
+// =============================================================================
+// Pipe Blocking & EOF Tests
+// =============================================================================
+
+/// Basic pipe write-then-read: write "hello", read it back, verify content.
+pub fn test_pipe_write_read_basic() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let payload = b"hello";
+    let written = file_write_fd(
+        pid,
+        write_fd,
+        payload.as_ptr() as *const c_char,
+        payload.len(),
+    );
+    assert_eq_test!(
+        written as usize,
+        payload.len(),
+        "write returned wrong count"
+    );
+
+    let mut out = [0u8; 16];
+    let nread = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, payload.len());
+    assert_eq_test!(nread as usize, payload.len(), "read returned wrong count");
+    assert_test!(&out[..payload.len()] == payload, "read payload mismatch");
+
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// EOF returns 0, not -1: write data, close writer, read data, read again for EOF.
+pub fn test_pipe_eof_returns_zero() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let payload = b"data";
+    let written = file_write_fd(
+        pid,
+        write_fd,
+        payload.as_ptr() as *const c_char,
+        payload.len(),
+    );
+    assert_eq_test!(written as usize, payload.len(), "write failed");
+
+    // Close the write end before reading -- this sets up the EOF condition.
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
+
+    // First read: should return the data.
+    let mut out = [0u8; 16];
+    let nread = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    assert_eq_test!(nread as usize, payload.len(), "first read wrong count");
+    assert_test!(
+        &out[..payload.len()] == payload,
+        "first read payload mismatch"
+    );
+
+    // Second read: pipe empty + no writers = EOF (0), NOT error (-1).
+    let eof = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    assert_eq_test!(eof, 0, "EOF read should return 0, not -1");
+
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Broken pipe: writing to a pipe with no readers should return -1.
+pub fn test_pipe_broken_pipe() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    // Close read end first, then try to write.
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
+
+    let payload = b"orphan";
+    let result = file_write_fd(
+        pid,
+        write_fd,
+        payload.as_ptr() as *const c_char,
+        payload.len(),
+    );
+    assert_eq_test!(result, -1, "write to broken pipe should return -1");
+
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Multiple writes accumulate: write "aaa" then "bbb", read should yield "aaabbb".
+pub fn test_pipe_multi_write_read() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let a = b"aaa";
+    let b = b"bbb";
+    let w1 = file_write_fd(pid, write_fd, a.as_ptr() as *const c_char, a.len());
+    assert_eq_test!(w1 as usize, a.len(), "first write failed");
+
+    let w2 = file_write_fd(pid, write_fd, b.as_ptr() as *const c_char, b.len());
+    assert_eq_test!(w2 as usize, b.len(), "second write failed");
+
+    let mut out = [0u8; 16];
+    let nread = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    assert_eq_test!(nread as usize, 6, "read should return all 6 bytes");
+    assert_test!(&out[..6] == b"aaabbb", "accumulated data mismatch");
+
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Partial read: write 100 bytes, read 50, then read remaining 50.
+pub fn test_pipe_partial_read() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    // Write 100 bytes (pattern: 0..99)
+    let mut payload = [0u8; 100];
+    for i in 0..100 {
+        payload[i] = i as u8;
+    }
+    let written = file_write_fd(
+        pid,
+        write_fd,
+        payload.as_ptr() as *const c_char,
+        payload.len(),
+    );
+    assert_eq_test!(written as usize, 100, "write 100 bytes failed");
+
+    // Read first 50
+    let mut buf1 = [0u8; 50];
+    let r1 = file_read_fd(pid, read_fd, buf1.as_mut_ptr() as *mut c_char, 50);
+    assert_eq_test!(r1 as usize, 50, "first partial read wrong count");
+    assert_test!(
+        &buf1[..] == &payload[..50],
+        "first partial read data mismatch"
+    );
+
+    // Read remaining 50
+    let mut buf2 = [0u8; 50];
+    let r2 = file_read_fd(pid, read_fd, buf2.as_mut_ptr() as *mut c_char, 50);
+    assert_eq_test!(r2 as usize, 50, "second partial read wrong count");
+    assert_test!(
+        &buf2[..] == &payload[50..100],
+        "second partial read data mismatch"
+    );
+
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Buffer full: fill the 4096-byte pipe buffer, then try to write 1 more byte
+/// in non-blocking mode -- should return EAGAIN (-11).
+pub fn test_pipe_buffer_full() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    // Create pipe with O_NONBLOCK so writes don't block when full.
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create (nonblock) failed"
+    );
+
+    // Fill the pipe buffer (4096 bytes) in chunks.
+    let chunk = [0xABu8; 512];
+    let mut total_written: usize = 0;
+    for _ in 0..8 {
+        let w = file_write_fd(pid, write_fd, chunk.as_ptr() as *const c_char, chunk.len());
+        assert_test!(w > 0, "write chunk failed while filling buffer");
+        total_written += w as usize;
+    }
+    assert_eq_test!(total_written, 4096, "did not fill pipe buffer to 4096");
+
+    // Now the pipe should be full. A non-blocking write of 1 byte should return EAGAIN.
+    let extra = [0xCDu8; 1];
+    let over = file_write_fd(pid, write_fd, extra.as_ptr() as *const c_char, extra.len());
+    assert_eq_test!(over, -11, "write to full pipe should return EAGAIN (-11)");
+
+    // Also verify reading from an empty non-blocking pipe returns EAGAIN.
+    // First drain the buffer.
+    let mut drain = [0u8; 4096];
+    let drained = file_read_fd(pid, read_fd, drain.as_mut_ptr() as *mut c_char, drain.len());
+    assert_eq_test!(drained as usize, 4096, "drain read wrong count");
+
+    // Pipe is now empty with writers still open: non-blocking read should return EAGAIN.
+    let mut one = [0u8; 1];
+    let empty_read = file_read_fd(pid, read_fd, one.as_mut_ptr() as *mut c_char, 1);
+    assert_eq_test!(
+        empty_read,
+        -11,
+        "read from empty nonblock pipe should return EAGAIN (-11)"
+    );
+
+    assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
+    assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Regression: when the current task exits, its file table must be destroyed
+/// so pipe writer refs are released and peer readers observe EOF.
+pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+
+    let p1 = task_find_by_id(t1);
+    let p2 = task_find_by_id(t2);
+    assert_not_null!(p1, "task1 lookup failed");
+    assert_not_null!(p2, "task2 lookup failed");
+
+    let pid1 = unsafe { (*p1).process_id };
+    let pid2 = unsafe { (*p2).process_id };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid1, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    // Replace pid2's default console table with a clone of pid1.
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_clone_table_for_process(pid1, pid2),
+        0,
+        "file table clone failed"
+    );
+
+    // Keep only the read end in pid2.
+    assert_eq_test!(file_close_fd(pid2, write_fd), 0, "pid2 close write failed");
+
+    // Make task1 appear as current so task_terminate() takes the current-task
+    // cleanup path (the path that previously leaked file descriptors).
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(p1));
+    assert_eq_test!(task::task_terminate(t1), 0, "current-task terminate failed");
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    // If writer refs were released correctly, empty nonblocking read returns EOF (0),
+    // not EAGAIN (-11).
+    let mut one = [0u8; 1];
+    let r = file_read_fd(pid2, read_fd, one.as_mut_ptr() as *mut c_char, 1);
+    assert_eq_test!(r, 0, "reader should observe EOF after current task exit");
+
+    assert_eq_test!(file_close_fd(pid2, read_fd), 0, "pid2 close read failed");
+    task_terminate(t2);
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     syscall_valid,
     [
@@ -1461,6 +1797,13 @@ slopos_lib::define_test_suite!(
         test_sigchld_and_wait_interaction,
         test_arch_prctl_set_get_fs_roundtrip,
         test_pipe_poll_eof_baseline,
+        test_pipe_write_read_basic,
+        test_pipe_eof_returns_zero,
+        test_pipe_broken_pipe,
+        test_pipe_multi_write_read,
+        test_pipe_partial_read,
+        test_pipe_buffer_full,
+        test_exit_current_task_releases_pipe_refs,
         test_process_group_session_syscalls_baseline,
         test_kill_process_group_semantics,
         test_vm_mmap_munmap_stress_baseline,
@@ -1473,6 +1816,13 @@ slopos_lib::define_test_suite!(
         test_phase56_syscall_lookup_valid,
         test_phase7_syscall_lookup_valid,
         test_pipe_poll_eof_baseline,
+        test_pipe_write_read_basic,
+        test_pipe_eof_returns_zero,
+        test_pipe_broken_pipe,
+        test_pipe_multi_write_read,
+        test_pipe_partial_read,
+        test_pipe_buffer_full,
+        test_exit_current_task_releases_pipe_refs,
         test_process_group_session_syscalls_baseline,
         test_kill_process_group_semantics,
         test_sigchld_and_wait_interaction,

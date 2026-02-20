@@ -9,6 +9,7 @@ use slopos_mm::tlb;
 
 use crate::gdt::syscall_msr_init;
 use crate::idt::idt_load;
+use crate::ist_stacks;
 use crate::limine_protocol;
 
 static NEXT_CPU_ID: AtomicUsize = AtomicUsize::new(1);
@@ -32,6 +33,10 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
         (*ap_pcr).init_gdt();
         (*ap_pcr).install();
     }
+
+    // APs have per-CPU TSS structures; re-bind IST pointers after installing
+    // the AP GDT/TSS so exceptions (notably #PF) do not enter with IST=0.
+    ist_stacks::ist_bind_current_cpu();
 
     idt_load();
     syscall_msr_init();

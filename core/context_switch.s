@@ -82,6 +82,21 @@ context_switch:
 .Lctx_load:
     movq    %rsi, %r15
 
+    # Validate kernel-mode switch targets before touching CR3/segments.
+    # If CS is ring 0, RIP must be inside kernel .text. Otherwise divert
+    # to a recovery handler instead of retq'ing into data memory.
+    movq    0x90(%r15), %rax
+    testb   $0x3, %al
+    jnz     .Lctx_target_ok
+    movq    0x80(%r15), %rax
+    leaq    _text_start(%rip), %rcx
+    cmpq    %rcx, %rax
+    jb      .Lctx_bad_kernel_target
+    leaq    _text_end(%rip), %rcx
+    cmpq    %rcx, %rax
+    jae     .Lctx_bad_kernel_target
+.Lctx_target_ok:
+
     # Switch CR3 if needed
     movq    0xC0(%r15), %rax
     movq    %cr3, %rdx
@@ -133,6 +148,11 @@ context_switch:
     movq    0x78(%r15), %r15
 
     retq
+
+.Lctx_bad_kernel_target:
+    movq    %r15, %rdi
+    callq   context_switch_bad_target
+    ud2
 
 #
 # context_switch_user(void *old_context, void *new_context)

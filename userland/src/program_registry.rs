@@ -8,7 +8,7 @@ pub struct ProgramSpec {
     pub flags: u16,
 }
 
-const PROGRAM_REGISTRY: [ProgramSpec; 6] = [
+const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: b"init",
         path: b"/sbin/init",
@@ -42,6 +42,13 @@ const PROGRAM_REGISTRY: [ProgramSpec; 6] = [
     ProgramSpec {
         name: b"sysinfo",
         path: b"/bin/sysinfo",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+    },
+    #[cfg(feature = "testbins")]
+    ProgramSpec {
+        name: b"fork_test",
+        path: b"/bin/fork_test",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
     },

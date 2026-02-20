@@ -59,7 +59,7 @@ use slopos_lib::arch::idt::{
     EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
 };
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::{MAX_CPUS, get_current_cpu, klog_debug, klog_info};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::{
     EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
@@ -314,6 +314,9 @@ static IST_METRICS: [IstStackMetrics; IST_STACK_COUNT] = [
     IstStackMetrics::new(),
 ];
 
+/// Tracks whether a given CPU already has its IST virtual stacks mapped.
+static CPU_IST_MAPPED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
 // =============================================================================
 // Private Helpers
 // =============================================================================
@@ -323,17 +326,42 @@ fn find_index_by_vector(vector: u8) -> Option<usize> {
     IST_CONFIGS.iter().position(|cfg| cfg.vector == vector)
 }
 
-/// Finds the IST stack index by fault address (for guard page detection).
-fn find_index_by_address(addr: u64) -> Option<usize> {
-    IST_CONFIGS
-        .iter()
-        .position(|cfg| addr >= cfg.guard_start && addr < cfg.stack_top)
+#[inline]
+fn stack_region_base_for_cpu(cpu_id: usize, stack_idx: usize) -> u64 {
+    EXCEPTION_STACK_REGION_BASE
+        + ((cpu_id as u64 * IST_STACK_COUNT as u64) + stack_idx as u64)
+            * EXCEPTION_STACK_REGION_STRIDE
 }
 
-/// Maps physical pages for an IST stack.
-fn map_stack_pages(stack: &IstStackConfig) {
+#[inline]
+fn stack_bounds_for_cpu(cpu_id: usize, stack_idx: usize) -> (u64, u64, u64, u64) {
+    let guard_start = stack_region_base_for_cpu(cpu_id, stack_idx);
+    let guard_end = guard_start + EXCEPTION_STACK_GUARD_SIZE;
+    let stack_base = guard_end;
+    let stack_top = stack_base + EXCEPTION_STACK_SIZE;
+    (guard_start, guard_end, stack_base, stack_top)
+}
+
+/// Finds the IST stack index by fault address (for guard page detection).
+fn find_index_by_address(addr: u64) -> Option<(usize, usize)> {
+    for cpu_id in 0..MAX_CPUS {
+        if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
+            continue;
+        }
+        for idx in 0..IST_STACK_COUNT {
+            let (guard_start, _guard_end, _stack_base, stack_top) =
+                stack_bounds_for_cpu(cpu_id, idx);
+            if addr >= guard_start && addr < stack_top {
+                return Some((cpu_id, idx));
+            }
+        }
+    }
+    None
+}
+
+fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
     for page in 0..EXCEPTION_STACK_PAGES {
-        let virt_addr = stack.stack_base + page * PAGE_SIZE_4KB;
+        let virt_addr = stack_base + page * PAGE_SIZE_4KB;
         let phys_addr = alloc_page_frame(0);
         if phys_addr.is_null() {
             panic!(
@@ -375,6 +403,22 @@ fn map_stack_pages(stack: &IstStackConfig) {
     }
 }
 
+fn ensure_cpu_stacks_mapped(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
+    if CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
+        return;
+    }
+
+    for (idx, stack) in IST_CONFIGS.iter().enumerate() {
+        let (_guard_start, _guard_end, stack_base, _stack_top) = stack_bounds_for_cpu(cpu_id, idx);
+        map_stack_pages(stack, stack_base);
+    }
+
+    CPU_IST_MAPPED[cpu_id].store(true, Ordering::Release);
+}
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -400,29 +444,16 @@ pub fn ist_stacks_init() {
         IST_STACK_COUNT
     );
 
-    for (i, stack) in IST_CONFIGS.iter().enumerate() {
+    for (i, _stack) in IST_CONFIGS.iter().enumerate() {
         // Reset metrics for this stack
         IST_METRICS[i].reset();
-
-        // Allocate and map the stack pages
-        map_stack_pages(stack);
-
-        // Register stack top in TSS
-        gdt_set_ist(stack.ist_index, stack.stack_top);
-
-        // Configure IDT to use this IST for the vector
-        idt_set_ist(stack.vector, stack.ist_index);
-
-        klog_debug!(
-            "IST: {} [{}] vec={} IST{} @ 0x{:x}-0x{:x}",
-            stack.name_str(),
-            stack.category.name(),
-            stack.vector,
-            stack.ist_index,
-            stack.stack_base,
-            stack.stack_top
-        );
     }
+
+    // BSP gets CPU-local IST mappings during early IDT setup.
+    ensure_cpu_stacks_mapped(0);
+
+    // Bind IST pointers for the CPU that performed initialization (BSP).
+    ist_bind_current_cpu();
 
     klog_info!(
         "IST: Initialized {} stacks ({} exceptions, {} IRQs)",
@@ -436,6 +467,36 @@ pub fn ist_stacks_init() {
             .filter(|c| c.category == IstCategory::HighFreqIrq)
             .count()
     );
+}
+
+/// Bind preallocated IST stacks into the current CPU's TSS/IDT context.
+///
+/// This must run on every CPU after its per-CPU GDT/TSS is installed. The
+/// stack memory is globally allocated once by `ist_stacks_init`; this routine
+/// only updates CPU-local TSS IST pointers.
+pub fn ist_bind_current_cpu() {
+    let cpu_id = get_current_cpu();
+    ensure_cpu_stacks_mapped(cpu_id);
+
+    for (idx, stack) in IST_CONFIGS.iter().enumerate() {
+        let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);
+        // Register stack top in current CPU TSS.
+        gdt_set_ist(stack.ist_index, stack_top);
+
+        // Keep IDT entry IST selectors synchronized for all CPUs.
+        idt_set_ist(stack.vector, stack.ist_index);
+
+        klog_debug!(
+            "IST: CPU{} {} [{}] vec={} IST{} @ 0x{:x}-0x{:x}",
+            cpu_id,
+            stack.name_str(),
+            stack.category.name(),
+            stack.vector,
+            stack.ist_index,
+            stack_base,
+            stack_top
+        );
+    }
 }
 
 /// Records stack usage for a given interrupt vector.
@@ -454,28 +515,31 @@ pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
 
     let stack = &IST_CONFIGS[idx];
     let metrics = &IST_METRICS[idx];
+    let cpu_id = get_current_cpu();
+    let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);
 
     // Record that this stack was entered
     metrics.record_entry();
 
     // Check if RSP is within expected bounds
-    if frame_ptr < stack.stack_base || frame_ptr > stack.stack_top {
+    if frame_ptr < stack_base || frame_ptr > stack_top {
         // RSP is outside our managed stack - might be using kernel stack
         // or something is very wrong. Report once to avoid log spam.
         if metrics.mark_out_of_bounds_once() {
             klog_info!(
-                "IST WARNING: RSP 0x{:x} outside {} stack bounds (0x{:x}-0x{:x})",
+                "IST WARNING: CPU{} RSP 0x{:x} outside {} stack bounds (0x{:x}-0x{:x})",
+                cpu_id,
                 frame_ptr,
                 stack.name_str(),
-                stack.stack_base,
-                stack.stack_top
+                stack_base,
+                stack_top
             );
         }
         return;
     }
 
     // Calculate usage (stack grows down, so top - current = used)
-    let usage = stack.stack_top - frame_ptr;
+    let usage = stack_top - frame_ptr;
 
     metrics.record_usage(usage);
 }
@@ -494,11 +558,12 @@ pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
 /// * `1` if the fault address is in an IST guard page (stack overflow detected)
 /// * `0` if the fault address is not in any IST guard page
 pub fn ist_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
-    if let Some(idx) = find_index_by_address(fault_addr) {
+    if let Some((cpu_id, idx)) = find_index_by_address(fault_addr) {
         let stack = &IST_CONFIGS[idx];
+        let (guard_start, guard_end, _stack_base, _stack_top) = stack_bounds_for_cpu(cpu_id, idx);
 
         // Check if the address is specifically in the guard page region
-        if fault_addr >= stack.guard_start && fault_addr < stack.guard_end {
+        if fault_addr >= guard_start && fault_addr < guard_end {
             // This is a guard page hit - stack overflow detected!
             if !stack_name.is_null() {
                 unsafe {
@@ -512,9 +577,16 @@ pub fn ist_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
 }
 
 pub fn ist_is_on_ist_stack(rsp: u64) -> bool {
-    for stack in IST_CONFIGS.iter() {
-        if rsp >= stack.stack_base && rsp <= stack.stack_top {
-            return true;
+    for cpu_id in 0..MAX_CPUS {
+        if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
+            continue;
+        }
+        for idx in 0..IST_STACK_COUNT {
+            let (_guard_start, _guard_end, stack_base, stack_top) =
+                stack_bounds_for_cpu(cpu_id, idx);
+            if rsp >= stack_base && rsp <= stack_top {
+                return true;
+            }
         }
     }
     false

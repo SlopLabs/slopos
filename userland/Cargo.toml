@@ -37,8 +37,13 @@ path = "src/bin/sysinfo.rs"
 name = "init"
 path = "src/bin/init.rs"
 
+[[bin]]
+name = "fork_test"
+path = "src/bin/tests/fork_test.rs"
+
 [features]
 default = []
+testbins = []
 
 [dependencies]
 slopos-abi = { workspace = true }

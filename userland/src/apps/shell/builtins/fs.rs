@@ -7,8 +7,8 @@ use core::ptr;
 
 use crate::runtime;
 use crate::syscall::{
-    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry, UserFsList, UserFsStat,
-    fs,
+    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
+    UserFsList, UserFsStat, fs,
 };
 
 use super::super::buffers;
@@ -949,6 +949,79 @@ pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
     }
 
     if differ { 1 } else { 0 }
+}
+
+pub fn cmd_tee(argc: i32, argv: &[*const u8]) -> i32 {
+    let mut append = false;
+    let mut file_arg: Option<usize> = None;
+
+    // Parse arguments: tee [-a] [file]
+    let mut i = 1usize;
+    while i < argc as usize {
+        if i >= argv.len() || argv[i].is_null() {
+            i += 1;
+            continue;
+        }
+        let arg = argv[i];
+        let len = runtime::u_strlen(arg);
+        let bytes = unsafe { core::slice::from_raw_parts(arg, len) };
+        if len == 2 && bytes[0] == b'-' && bytes[1] == b'a' {
+            append = true;
+        } else {
+            file_arg = Some(i);
+        }
+        i += 1;
+    }
+
+    // Open file if specified
+    let file_fd = if let Some(idx) = file_arg {
+        buffers::with_path_buf(|path_buf| {
+            if normalize_path(argv[idx], path_buf) != 0 {
+                shell_write(PATH_TOO_LONG);
+                return -1i32;
+            }
+            let flags = if append {
+                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT | USER_FS_OPEN_APPEND
+            } else {
+                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT
+            };
+            // For truncate mode, remove existing file first
+            if !append {
+                let _ = fs::unlink_path(path_buf.as_ptr() as *const c_char);
+            }
+            match fs::open_path(path_buf.as_ptr() as *const c_char, flags) {
+                Ok(fd) => fd as i32,
+                Err(_) => {
+                    shell_write(b"tee: cannot open file\n");
+                    -1i32
+                }
+            }
+        })
+    } else {
+        -1i32
+    };
+
+    if file_arg.is_some() && file_fd < 0 {
+        return 1;
+    }
+
+    let mut buf = [0u8; SHELL_IO_MAX];
+    loop {
+        let n = match fs::read_slice(0, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        shell_write(&buf[..n]);
+        if file_fd >= 0 {
+            let _ = fs::write_slice(file_fd as i32, &buf[..n]);
+        }
+    }
+
+    if file_fd >= 0 {
+        let _ = fs::close_fd(file_fd as i32);
+    }
+    0
 }
 
 fn entry_name_gt(a: &UserFsEntry, b: &UserFsEntry) -> bool {

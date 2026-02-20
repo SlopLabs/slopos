@@ -891,6 +891,59 @@ pub fn paging_mark_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int 
     0
 }
 
+/// Resolve a COW page by making it writable in-place (no page copy, no free).
+/// Used when the page's refcount is 1 — just flip the flags on the existing PTE.
+pub fn paging_resolve_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
+    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
+        return -1;
+    }
+
+    let aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !(PAGE_SIZE_4KB - 1));
+
+    unsafe {
+        let pml4 = (*page_dir).pml4;
+        let pml4_idx = PageTableLevel::Four.index_of(aligned_vaddr);
+        let pdpt_idx = PageTableLevel::Three.index_of(aligned_vaddr);
+        let pd_idx = PageTableLevel::Two.index_of(aligned_vaddr);
+        let pt_idx = PageTableLevel::One.index_of(aligned_vaddr);
+
+        let pml4_entry = (&*pml4).entry(pml4_idx);
+        if !pml4_entry.is_present() {
+            return -1;
+        }
+
+        let pdpt = pml4_entry.table_ptr();
+        let pdpt_entry = (&*pdpt).entry(pdpt_idx);
+        if !pdpt_entry.is_present() {
+            return -1;
+        }
+        if pdpt_entry.is_huge() {
+            return -1;
+        }
+
+        let pd = pdpt_entry.table_ptr();
+        let pd_entry = (&*pd).entry(pd_idx);
+        if !pd_entry.is_present() {
+            return -1;
+        }
+        if pd_entry.is_huge() {
+            return -1;
+        }
+
+        let pt = pd_entry.table_ptr();
+        let pt_entry = (&mut *pt).entry_mut(pt_idx);
+        if !pt_entry.is_present() {
+            return -1;
+        }
+
+        pt_entry.remove_flags(PageFlags::COW);
+        pt_entry.add_flags(PageFlags::WRITABLE);
+        tlb::flush_page(aligned_vaddr);
+    }
+
+    0
+}
+
 pub fn paging_is_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> bool {
     if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
         return false;

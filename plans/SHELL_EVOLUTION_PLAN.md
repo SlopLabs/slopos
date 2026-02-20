@@ -1,8 +1,8 @@
 # SlopOS Shell Evolution Plan
 
-> **Status**: Phase 4A In Progress (11/12 commands done; tee deferred)
+> **Status**: Phase 4A Complete (12/12 commands done)
 > **Target**: Transform the shell from a command dispatcher into a real POSIX-inspired shell
-> **Current**: `userland/src/apps/shell/` — modular directory (13 files), 24 commands, history, line editing, pipes, env vars, PATH, quoting
+> **Current**: `userland/src/apps/shell/` — modular directory (13 files), 25 commands, history, line editing, pipes, env vars, PATH, quoting
 
 ---
 
@@ -538,7 +538,7 @@ Support double and single quotes in command arguments.
 - [x] **4A.8** `cat` enhancement: support multiple files (`cat file1 file2`)
 - [x] **4A.9** `ls` enhancement: show file sizes with `name (size)`, mark directories with `/`, sort alphabetically (case-insensitive)
 - [x] **4A.10** `hexdump <file> [n]` — show first N bytes as hex + ASCII (default 256, max 512)
-- [ ] **4A.11** `tee <file>` — read stdin, write to both stdout and file (useful with pipes, Phase 2). **Deferred**: requires kernel-side pipe/fork fixes (blocking pipe reads, COW TLB handling, child context fixup) that are not yet landed
+- [x] **4A.11** `tee <file>` — read stdin, write to both stdout and file (useful with pipes, Phase 2). Implemented after kernel pipe blocking landed.
 - [x] **4A.12** `diff <file1> <file2>` — basic line-by-line comparison (2048 byte buffer per file)
 
 ### 4B: System Information Commands
@@ -564,7 +564,7 @@ Support double and single quotes in command arguments.
 
 ### Phase 4 Gate
 
-- [x] **GATE**: At least 10 new commands implemented and working (11 in Phase 4A: stat, touch, cp, mv, head, tail, wc, hexdump, diff + ls/cat enhancements; tee deferred pending kernel pipe fixes)
+- [x] **GATE**: At least 10 new commands implemented and working (12 in Phase 4A: stat, touch, cp, mv, head, tail, wc, hexdump, diff, tee + ls/cat enhancements)
 - [ ] **GATE**: `stat`, `touch`, `cp`, `uptime`, `free` work correctly (stat/touch/cp done — uptime/free require Phase 4B)
 - [ ] **GATE**: `make test` passes
 
@@ -886,7 +886,7 @@ Keyboard → input.rs (line editing, history)
 | **Phase 1**: Core Shell | **Complete** | 28 | 28 | — |
 | **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | **Complete** | 17 | 17 | — |
-| **Phase 4**: New Builtins | **4A In Progress** | 27 | 11 | tee requires kernel pipe/fork fixes |
+| **Phase 4**: New Builtins | **4A Complete** | 27 | 12 | — |
 | **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |

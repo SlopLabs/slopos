@@ -1,10 +1,10 @@
 use slopos_lib::arch::gdt::SegmentSelector;
 use slopos_lib::preempt::PreemptGuard;
-use slopos_lib::{InterruptFrame, cpu};
+use slopos_lib::{InterruptFrame, MAX_CPUS, cpu};
 use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE};
 
 use super::scheduler::{
-    is_scheduling_active, schedule, scheduler_get_current_task, scheduler_timer_tick,
+    is_scheduling_active, schedule_from_trap_exit, scheduler_get_current_task, scheduler_timer_tick,
 };
 use super::task::{TASK_FLAG_USER_MODE, Task, TaskContext};
 
@@ -24,7 +24,8 @@ pub enum TrapExitSource {
 #[inline]
 fn trap_running_on_exception_stack() -> bool {
     let rsp = cpu::read_rsp();
-    let ist_region_end = EXCEPTION_STACK_REGION_BASE + 7 * EXCEPTION_STACK_REGION_STRIDE;
+    let ist_region_end =
+        EXCEPTION_STACK_REGION_BASE + (MAX_CPUS as u64) * 7 * EXCEPTION_STACK_REGION_STRIDE;
     rsp >= EXCEPTION_STACK_REGION_BASE && rsp < ist_region_end
 }
 
@@ -124,7 +125,7 @@ pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {
 
     if is_scheduling_active() {
         PreemptGuard::clear_reschedule_pending();
-        schedule();
+        schedule_from_trap_exit();
     }
 }
 

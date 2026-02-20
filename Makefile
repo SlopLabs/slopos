@@ -1,6 +1,6 @@
 # Convenience targets for building, booting, and testing SlopOS (Rust rewrite)
 
-.PHONY: setup build build-userland fs-image iso iso-notests iso-tests boot boot-log test show-qemu-resolution clean distclean
+.PHONY: setup build build-userland build-userland-tests fs-image fs-image-tests iso iso-notests iso-tests boot boot-log test show-qemu-resolution clean distclean
 
 # macOS support: detect OS and set paths accordingly
 UNAME_S := $(shell uname -s)
@@ -37,8 +37,10 @@ LOG_FILE ?= test_output.log
 
 FS_IMAGE_DIR := fs/assets
 FS_IMAGE := $(FS_IMAGE_DIR)/ext2.img
+FS_IMAGE_TESTS := $(FS_IMAGE_DIR)/ext2-tests.img
 FS_IMAGE_SIZE ?= 8M
 ROOTFS_USERLAND_BINS := init shell compositor roulette file_manager sysinfo
+ROOTFS_TEST_USERLAND_BINS := $(ROOTFS_USERLAND_BINS) fork_test
 
 BOOT_LOG_TIMEOUT ?= 15
 BOOT_CMDLINE ?= itests=off
@@ -271,6 +273,25 @@ build-userland:
 	fi; \
 	echo "Userland binaries built: $(BUILD_DIR)/init.elf $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf $(BUILD_DIR)/sysinfo.elf"
 
+build-userland-tests: build-userland
+	@set -e; \
+	$(call ensure_rust_toolchain) \
+	mkdir -p $(BUILD_DIR); \
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
+	$(CARGO) +$(RUST_CHANNEL) build \
+	  -Zbuild-std=core,alloc \
+	  -Zunstable-options \
+	  --target targets/x86_64-slos-userland.json \
+	  --package slopos-userland \
+	  --bin fork_test \
+	  --features testbins \
+	  --no-default-features \
+	  --release; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/fork_test ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/fork_test" "$(BUILD_DIR)/fork_test.elf"; \
+	fi; \
+	echo "Userland test binary built: $(BUILD_DIR)/fork_test.elf"
+
 build: fs-image
 	@$(call build_kernel)
 
@@ -280,11 +301,12 @@ iso: build
 iso-notests: build
 	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE_EFFECTIVE))
 
-iso-tests: fs-image
+iso-tests: fs-image-tests
 	@$(call build_kernel,slopos-drivers/qemu-exit kernel/builtin-tests)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
 
 fs-image: build-userland $(FS_IMAGE)
+fs-image-tests: build-userland-tests $(FS_IMAGE_TESTS)
 
 $(FS_IMAGE): build-userland
 	@mkdir -p $(FS_IMAGE_DIR)
@@ -303,6 +325,34 @@ $(FS_IMAGE): build-userland
 	@debugfs -w -R "mkdir /bin" "$@" >/dev/null
 	@debugfs -w -R "mkdir /sbin" "$@" >/dev/null
 	@for bin in $(ROOTFS_USERLAND_BINS); do \
+		src="$(BUILD_DIR)/$$bin.elf"; \
+		if [ ! -f "$$src" ]; then \
+			echo "Missing userland binary: $$src" >&2; \
+			exit 1; \
+		fi; \
+		dst="/bin/$$bin"; \
+		if [ "$$bin" = "init" ]; then dst="/sbin/init"; fi; \
+		debugfs -w -R "write $$src $$dst" "$@" >/dev/null; \
+		debugfs -w -R "set_inode_field $$dst mode 0100755" "$@" >/dev/null; \
+	done
+
+$(FS_IMAGE_TESTS): build-userland-tests
+	@mkdir -p $(FS_IMAGE_DIR)
+	@if ! command -v mkfs.ext2 >/dev/null 2>&1; then \
+		echo "mkfs.ext2 is required to create $(FS_IMAGE_TESTS)" >&2; \
+		exit 1; \
+	fi
+	@if ! command -v debugfs >/dev/null 2>&1; then \
+		echo "debugfs is required to populate $(FS_IMAGE_TESTS)" >&2; \
+		exit 1; \
+	fi
+	@echo "Rebuilding ext2 image at $@ ($(FS_IMAGE_SIZE))"
+	@rm -f "$@"
+	@truncate -s $(FS_IMAGE_SIZE) "$@"
+	@mkfs.ext2 -F -b 4096 "$@" >/dev/null
+	@debugfs -w -R "mkdir /bin" "$@" >/dev/null
+	@debugfs -w -R "mkdir /sbin" "$@" >/dev/null
+	@for bin in $(ROOTFS_TEST_USERLAND_BINS); do \
 		src="$(BUILD_DIR)/$$bin.elf"; \
 		if [ ! -f "$$src" ]; then \
 			echo "Missing userland binary: $$src" >&2; \
@@ -479,7 +529,7 @@ test: iso-tests
 	  -device ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3 \
 	  -drive if=none,id=cdrom,media=cdrom,readonly=on,file="$$ISO" \
 	  -device ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0 \
-	  -drive file="$(FS_IMAGE)",if=none,id=virtio-disk0,format=raw \
+	  -drive file="$(FS_IMAGE_TESTS)",if=none,id=virtio-disk0,format=raw \
 	  -device virtio-blk-pci,drive=virtio-disk0,disable-legacy=on \
 	  -boot order=d,menu=on \
 	  -serial stdio \
@@ -518,3 +568,4 @@ clean:
 
 distclean: clean
 	@rm -rf $(BUILD_DIR) $(ISO) $(ISO_NO_TESTS) $(ISO_TESTS) $(LOG_FILE)
+	@rm -f $(FS_IMAGE) $(FS_IMAGE_TESTS)

@@ -6,7 +6,9 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_get_ref};
-use crate::paging::{ProcessPageDir, map_page_4kb_in_dir, paging_is_cow, virt_to_phys_in_dir};
+use crate::paging::{
+    ProcessPageDir, map_page_4kb_in_dir, paging_is_cow, paging_resolve_cow, virt_to_phys_in_dir,
+};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::tlb;
 
@@ -40,15 +42,11 @@ fn resolve_single_ref(
     page_dir: *mut ProcessPageDir,
     aligned_vaddr: VirtAddr,
 ) -> Result<(), MmError> {
-    let old_phys = virt_to_phys_in_dir(page_dir, aligned_vaddr);
-
-    let new_flags = PageFlags::USER_RW;
-
-    if map_page_4kb_in_dir(page_dir, aligned_vaddr, old_phys, new_flags.bits()) != 0 {
+    // Sole owner: just flip PTE flags in-place (remove COW, add WRITABLE).
+    // Do NOT use map_page_4kb_in_dir here — it would free the page we're remapping.
+    if paging_resolve_cow(page_dir, aligned_vaddr) != 0 {
         return Err(MmError::MappingFailed);
     }
-
-    tlb::flush_page(aligned_vaddr);
     Ok(())
 }
 
@@ -80,14 +78,15 @@ fn resolve_multi_ref(
 
     let new_flags = PageFlags::USER_RW;
 
+    // map_page_4kb_in_dir replaces the old PTE and frees old_phys (decrementing
+    // its refcount). Do NOT call free_page_frame(old_phys) again — that would
+    // double-decrement, freeing a page the other process still maps.
     if map_page_4kb_in_dir(page_dir, aligned_vaddr, new_phys, new_flags.bits()) != 0 {
         free_page_frame(new_phys);
         return Err(MmError::MappingFailed);
     }
 
     tlb::flush_page(aligned_vaddr);
-
-    free_page_frame(old_phys);
 
     Ok(())
 }

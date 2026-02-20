@@ -317,7 +317,7 @@ pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         return syscall_return_err(frame, ERRNO_EINVAL);
     };
 
-    let child_id = task_fork(task);
+    let child_id = task_fork(task, frame as *const InterruptFrame);
     ctx.from_bool_value(
         child_id != slopos_abi::task::INVALID_TASK_ID,
         child_id as u64,

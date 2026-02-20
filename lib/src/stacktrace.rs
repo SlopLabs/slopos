@@ -7,9 +7,16 @@ pub struct StacktraceEntry {
     pub return_address: u64,
 }
 
+const KERNEL_ADDR_MIN: u64 = 0xffff_8000_0000_0000;
+
 fn is_canonical_address(address: u64) -> bool {
     let upper = address >> 47;
     upper == 0 || upper == 0x1FFFF
+}
+
+#[inline]
+fn is_kernel_address(address: u64) -> bool {
+    is_canonical_address(address) && address >= KERNEL_ADDR_MIN
 }
 
 fn basic_sanity_check(current_rbp: u64, next_rbp: u64) -> bool {
@@ -35,21 +42,33 @@ pub fn stacktrace_capture_from(
     let max_entries = max_entries as usize;
 
     while rbp != 0 && count < max_entries {
-        if rbp & 0x7 != 0 || !is_canonical_address(rbp) {
+        // Frame pointer chain is expected to stay in kernel canonical space.
+        // Bail out on anything suspicious instead of dereferencing garbage.
+        if rbp & 0x7 != 0 || !is_kernel_address(rbp) {
+            break;
+        }
+        let Some(ret_slot) = rbp.checked_add(core::mem::size_of::<u64>() as u64) else {
+            break;
+        };
+        if !is_kernel_address(ret_slot) {
             break;
         }
 
         unsafe {
             let frame = rbp as *const u64;
-            let next_rbp = *frame;
-            let return_address = *frame.add(1);
+            let next_rbp = core::ptr::read_unaligned(frame);
+            let return_address = core::ptr::read_unaligned(frame.add(1));
 
             let entry_ptr = entries.add(count);
             (*entry_ptr).frame_pointer = rbp;
             (*entry_ptr).return_address = return_address;
             count += 1;
 
-            if !is_canonical_address(next_rbp) {
+            // Zero terminates the frame chain.
+            if next_rbp == 0 {
+                break;
+            }
+            if !is_kernel_address(next_rbp) {
                 break;
             }
             if !basic_sanity_check(rbp, next_rbp) {

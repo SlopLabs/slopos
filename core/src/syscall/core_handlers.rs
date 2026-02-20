@@ -72,10 +72,11 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
     if let Some(ref c) = ctx {
+        let code = c.args().arg0 as u32;
         if let Some(t) = c.task_mut() {
             t.exit_reason = TaskExitReason::Normal;
             t.fault_reason = TaskFaultReason::None;
-            t.exit_code = 0;
+            t.exit_code = code;
         }
     }
     klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
