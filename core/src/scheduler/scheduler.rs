@@ -23,16 +23,16 @@ pub use super::runtime::{
 pub use super::sleep::{cancel_sleep, sleep_current_task_ms};
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, task_get_info,
-    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
-    task_pointer_is_valid, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
+    task_is_terminated, task_pointer_is_valid, task_record_context_switch, task_record_yield,
+    task_set_current, task_set_state, Task, TaskContext, TaskStatus, INVALID_PROCESS_ID,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
+    TASK_PRIORITY_IDLE,
 };
 pub use super::trap::{
-    RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
-    scheduler_handle_post_irq, scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit,
-    scheduler_request_reschedule, scheduler_request_reschedule_from_interrupt,
+    save_preempt_context, save_task_context_from_interrupt_frame, scheduler_handle_post_irq,
+    scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
+    scheduler_request_reschedule_from_interrupt, RescheduleReason, TrapExitSource,
 };
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
@@ -404,7 +404,12 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         let is_user_mode = (*to_task).flags & TASK_FLAG_USER_MODE != 0;
 
         if is_user_mode {
-            slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, (*to_task).fs_base);
+            let fs = (*to_task).fs_base;
+            if fs == 0 || slopos_abi::addr::VirtAddr::is_canonical(fs) {
+                slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, fs);
+            } else {
+                slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, 0);
+            }
         } else {
             slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, 0);
         }

@@ -17,7 +17,7 @@ use crate::syscall::signal::{
 };
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::signal::{
-    SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
+    sig_bit, SigSet, SignalFrame, UserSigaction, SIGCHLD, SIGUSR1, SIG_SETMASK, SIG_UNBLOCK,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
@@ -26,10 +26,10 @@ use slopos_abi::syscall::{
     SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK,
     SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
 };
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
+use slopos_abi::task::{TaskStatus, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE};
 use slopos_lib::InterruptFrame;
 use slopos_lib::{assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult};
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
+use slopos_mm::page_alloc::{alloc_page_frame, ALLOC_FLAG_ZERO};
 use slopos_mm::paging::map_page_4kb_in_dir;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
@@ -53,15 +53,18 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 // Test Helpers
 // =============================================================================
 
-struct SyscallFixture;
+struct SyscallFixture {
+    aps_paused: bool,
+}
 
 impl SyscallFixture {
     fn new() -> Self {
+        let aps_paused = crate::scheduler::per_cpu::pause_all_aps();
         task_shutdown_all();
         scheduler_shutdown();
         let _ = init_task_manager();
         let _ = init_scheduler();
-        Self
+        Self { aps_paused }
     }
 }
 
@@ -69,6 +72,7 @@ impl Drop for SyscallFixture {
     fn drop(&mut self) {
         task_shutdown_all();
         scheduler_shutdown();
+        crate::scheduler::per_cpu::resume_all_aps_if_not_nested(self.aps_paused);
     }
 }
 
@@ -86,13 +90,20 @@ fn create_test_kernel_task() -> u32 {
 
 fn create_test_user_task() -> u32 {
     let user_entry = unsafe { core::mem::transmute(PROCESS_CODE_START_VA as usize) };
-    task_create(
+    let id = task_create(
         b"UserTest\0".as_ptr() as *const c_char,
         user_entry,
         ptr::null_mut(),
         1,
         TASK_FLAG_USER_MODE,
-    )
+    );
+    // Block the task immediately so the scheduler on other CPUs never picks
+    // it up.  These tests only inspect task structures — they never need the
+    // task to actually run user-mode code.
+    if id != INVALID_TASK_ID {
+        task_set_state(id, TaskStatus::Blocked);
+    }
+    id
 }
 
 fn zero_frame() -> InterruptFrame {
@@ -292,6 +303,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
 
     let child_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID);
+    task_set_state(child_id, TaskStatus::Blocked);
     let child_ptr = task_find_by_id(child_id);
     assert_not_null!(child_ptr);
 
@@ -347,6 +359,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
 
     let member_id = task_fork(leader_ptr, core::ptr::null());
     assert_test!(member_id != INVALID_TASK_ID, "failed to fork member task");
+    task_set_state(member_id, TaskStatus::Blocked);
     let member_ptr = task_find_by_id(member_id);
     assert_not_null!(member_ptr, "member lookup failed");
 
@@ -780,7 +793,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
     }
 
     use slopos_abi::addr::PhysAddr;
-    use slopos_mm::page_alloc::{ALLOC_FLAG_NO_PCP, alloc_page_frame, free_page_frame};
+    use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_NO_PCP};
 
     let mut stress_pages: [PhysAddr; 128] = [PhysAddr::NULL; 128];
     let mut stress_count = 0usize;
@@ -871,12 +884,15 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     assert_not_null!(parent_ptr, "parent task lookup failed");
 
     unsafe {
-        (*parent_ptr).fs_base = 0x1111_2222_3333_4444;
+        (*parent_ptr).fs_base = 0x0000_1111_2222_3000;
     }
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
-    let child_id = match task_clone(parent_ptr, flags, 0, 0, 0, 0x5555_6666_7777_8888) {
-        Ok(id) => id,
+    let child_id = match task_clone(parent_ptr, flags, 0, 0, 0, 0x0000_5555_6666_7000) {
+        Ok(id) => {
+            task_set_state(id, TaskStatus::Blocked);
+            id
+        }
         Err(_) => {
             task_terminate(parent_id);
             return TestResult::Fail;
@@ -894,12 +910,12 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
         );
         assert_eq_test!(
             (*child_ptr).fs_base,
-            0x5555_6666_7777_8888,
+            0x0000_5555_6666_7000,
             "child TLS base not set by CLONE_SETTLS"
         );
         assert_eq_test!(
             (*parent_ptr).fs_base,
-            0x1111_2222_3333_4444,
+            0x0000_1111_2222_3000,
             "parent TLS base unexpectedly modified"
         );
     }
@@ -922,7 +938,10 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
 
     let thread_flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
     let thread_id = match task_clone(parent_ptr, thread_flags, 0, 0, 0, 0) {
-        Ok(id) => id,
+        Ok(id) => {
+            task_set_state(id, TaskStatus::Blocked);
+            id
+        }
         Err(_) => {
             task_terminate(parent_id);
             return TestResult::Fail;
@@ -931,6 +950,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
 
     let fork_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(fork_id != INVALID_TASK_ID, "fork after clone failed");
+    task_set_state(fork_id, TaskStatus::Blocked);
 
     let thread_ptr = task_find_by_id(thread_id);
     let fork_ptr = task_find_by_id(fork_id);
@@ -1322,6 +1342,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
 
     let child_id = task_fork(parent_ptr, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
+    task_set_state(child_id, TaskStatus::Blocked);
 
     unsafe {
         (*parent_ptr).waiting_on.store(child_id, Ordering::Release);

@@ -20,10 +20,10 @@ use super::scheduler::{
     scheduler_shutdown, scheduler_timer_tick, unschedule_task,
 };
 use super::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
-    TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create, task_find_by_id,
-    task_get_info, task_set_state, task_shutdown_all, task_terminate,
+    init_task_manager, task_create, task_find_by_id, task_get_info, task_set_state,
+    task_shutdown_all, task_terminate, IdtEntry, Task, TaskStatus, INVALID_PROCESS_ID,
+    INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH,
+    TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL,
 };
 use slopos_lib::arch::gdt::SegmentSelector;
 use slopos_lib::arch::idt::SYSCALL_VECTOR;
@@ -1483,6 +1483,8 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         klog_info!("SCHED_TEST: user task creation failed");
         return TestResult::Fail;
     }
+    // Prevent the scheduler on other CPUs from running this stub task.
+    task_set_state(user_task_id, TaskStatus::Blocked);
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     if task_get_info(user_task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
