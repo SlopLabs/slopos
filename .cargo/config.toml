@@ -5,6 +5,7 @@ target-dir = "builddir/target"
 [unstable]
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
 
 [target."targets/x86_64-slos.json"]
 linker = "rust-lld"
