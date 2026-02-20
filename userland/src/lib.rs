@@ -1,5 +1,6 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
+#![feature(sync_unsafe_cell)]
 
 pub mod appkit;
 pub mod apps;

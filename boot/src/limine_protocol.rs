@@ -1,5 +1,5 @@
 use core::{
-    cell::UnsafeCell,
+    cell::{SyncUnsafeCell, UnsafeCell},
     ffi::{c_char, c_void},
     ptr,
 };
@@ -187,7 +187,6 @@ unsafe impl Sync for SystemInfoCell {}
 
 static SYSTEM_INFO: SystemInfoCell = SystemInfoCell(UnsafeCell::new(SystemInfo::new()));
 
-#[allow(static_mut_refs)]
 fn sysinfo_mut() -> &'static mut SystemInfo {
     unsafe { &mut *SYSTEM_INFO.0.get() }
 }
@@ -466,19 +465,27 @@ pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
         .map(|e| limine_entry_to_region(e))
 }
 
-static mut LEGACY_MEMMAP_ENTRIES: [LimineMemmapEntry; 256] = [LimineMemmapEntry {
-    base: 0,
-    length: 0,
-    typ: 0,
-}; 256];
+static LEGACY_MEMMAP_ENTRIES: SyncUnsafeCell<[LimineMemmapEntry; 256]> = SyncUnsafeCell::new(
+    [LimineMemmapEntry {
+        base: 0,
+        length: 0,
+        typ: 0,
+    }; 256],
+);
 
-static mut LEGACY_MEMMAP_PTRS: [*const LimineMemmapEntry; 256] = [ptr::null(); 256];
+#[repr(transparent)]
+struct SyncMemmapPtrArray([*const LimineMemmapEntry; 256]);
+unsafe impl Sync for SyncMemmapPtrArray {}
 
-static mut LEGACY_MEMMAP_RESPONSE: LimineMemmapResponse = LimineMemmapResponse {
-    revision: 0,
-    entry_count: 0,
-    entries: ptr::null(),
-};
+static LEGACY_MEMMAP_PTRS: SyncUnsafeCell<SyncMemmapPtrArray> =
+    SyncUnsafeCell::new(SyncMemmapPtrArray([ptr::null(); 256]));
+
+static LEGACY_MEMMAP_RESPONSE: SyncUnsafeCell<LimineMemmapResponse> =
+    SyncUnsafeCell::new(LimineMemmapResponse {
+        revision: 0,
+        entry_count: 0,
+        entries: ptr::null(),
+    });
 
 static LEGACY_MEMMAP_INIT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -498,9 +505,9 @@ fn init_legacy_memmap() {
     let count = entries.len().min(256);
 
     unsafe {
-        let entries_ptr = &raw mut LEGACY_MEMMAP_ENTRIES;
-        let ptrs_ptr = &raw mut LEGACY_MEMMAP_PTRS;
-        let response_ptr = &raw mut LEGACY_MEMMAP_RESPONSE;
+        let entries_ptr = LEGACY_MEMMAP_ENTRIES.get();
+        let ptrs_ptr = LEGACY_MEMMAP_PTRS.get();
+        let response_ptr = LEGACY_MEMMAP_RESPONSE.get();
 
         for (i, entry) in entries.iter().take(count).enumerate() {
             (*entries_ptr)[i] = LimineMemmapEntry {
@@ -508,15 +515,15 @@ fn init_legacy_memmap() {
                 length: entry.length,
                 typ: entry_type_to_u64(entry.entry_type),
             };
-            (*ptrs_ptr)[i] = &(*entries_ptr)[i];
+            (*ptrs_ptr).0[i] = &(*entries_ptr)[i];
         }
 
         (*response_ptr).entry_count = count as u64;
-        (*response_ptr).entries = (*ptrs_ptr).as_ptr();
+        (*response_ptr).entries = (*ptrs_ptr).0.as_ptr();
     }
 }
 
 pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     init_legacy_memmap();
-    &raw const LEGACY_MEMMAP_RESPONSE
+    LEGACY_MEMMAP_RESPONSE.get() as *const LimineMemmapResponse
 }

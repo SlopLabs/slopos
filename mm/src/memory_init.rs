@@ -18,6 +18,7 @@ use crate::page_alloc::{
 use crate::paging::{init_paging, map_page_4kb};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::init_process_vm;
+use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
@@ -58,9 +59,9 @@ pub struct AllocatorPlan {
     capacity_frames: u32,
 }
 
-static mut REGION_BOOT_BUFFER: [MmRegion; BOOT_REGION_STATIC_CAP] =
-    [MmRegion::zeroed(); BOOT_REGION_STATIC_CAP];
-static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
+static REGION_BOOT_BUFFER: SyncUnsafeCell<[MmRegion; BOOT_REGION_STATIC_CAP]> =
+    SyncUnsafeCell::new([MmRegion::zeroed(); BOOT_REGION_STATIC_CAP]);
+static INIT_STATS: SyncUnsafeCell<MemoryInitStats> = SyncUnsafeCell::new(MemoryInitStats {
     total_memory_bytes: 0,
     available_memory_bytes: 0,
     reserved_device_bytes: 0,
@@ -69,7 +70,7 @@ static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
     hhdm_offset: 0,
     tracked_page_frames: 0,
     allocator_metadata_bytes: 0,
-};
+});
 static EARLY_PAGING_INIT: InitFlag = InitFlag::new();
 static MEMORY_SYSTEM_INIT: InitFlag = InitFlag::new();
 #[derive(Clone, Copy)]
@@ -79,10 +80,11 @@ struct FramebufferReservation {
     height: u64,
 }
 
-static mut FRAMEBUFFER_RESERVATION: Option<FramebufferReservation> = None;
+static FRAMEBUFFER_RESERVATION: SyncUnsafeCell<Option<FramebufferReservation>> =
+    SyncUnsafeCell::new(None);
 
 fn framebuffer_reservation() -> Option<FramebufferReservation> {
-    unsafe { FRAMEBUFFER_RESERVATION }
+    unsafe { *FRAMEBUFFER_RESERVATION.get() }
 }
 
 fn configure_region_store(memmap: *const LimineMemmapResponse) {
@@ -114,7 +116,7 @@ fn configure_region_store(memmap: *const LimineMemmapResponse) {
             BOOT_REGION_STATIC_CAP as u32
         };
 
-        mm_region_map_configure(REGION_BOOT_BUFFER.as_mut_ptr(), capacity);
+        mm_region_map_configure((*REGION_BOOT_BUFFER.get()).as_mut_ptr(), capacity);
         mm_region_map_reset();
     }
 }
@@ -159,7 +161,7 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
         if response.entry_count == 0 || response.entries.is_null() {
             panic!("MM: Missing Limine memmap for usable regions");
         }
-        INIT_STATS.total_memory_bytes = 0;
+        (*INIT_STATS.get()).total_memory_bytes = 0;
         for i in 0..response.entry_count {
             let entry_ptr = *response.entries.add(i as usize);
             if entry_ptr.is_null() {
@@ -169,8 +171,9 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
             if entry.length == 0 {
                 continue;
             }
-            INIT_STATS.total_memory_bytes =
-                INIT_STATS.total_memory_bytes.saturating_add(entry.length);
+            (*INIT_STATS.get()).total_memory_bytes = (*INIT_STATS.get())
+                .total_memory_bytes
+                .saturating_add(entry.length);
             if entry.typ != LIMINE_MEMMAP_USABLE {
                 continue;
             }
@@ -187,24 +190,26 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
 fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     let _ = memmap;
     unsafe {
-        INIT_STATS.hhdm_offset = hhdm_offset;
-        INIT_STATS.memory_regions_count = mm_region_count();
-        INIT_STATS.available_memory_bytes = mm_region_total_bytes(MmRegionKind::Usable);
-        if INIT_STATS.available_memory_bytes == 0 {
-            INIT_STATS.tracked_page_frames = 0;
+        (*INIT_STATS.get()).hhdm_offset = hhdm_offset;
+        (*INIT_STATS.get()).memory_regions_count = mm_region_count();
+        (*INIT_STATS.get()).available_memory_bytes = mm_region_total_bytes(MmRegionKind::Usable);
+        if (*INIT_STATS.get()).available_memory_bytes == 0 {
+            (*INIT_STATS.get()).tracked_page_frames = 0;
         } else {
             let highest_frame = mm_region_highest_usable_frame();
-            INIT_STATS.tracked_page_frames = if highest_frame >= u32::MAX as u64 {
+            (*INIT_STATS.get()).tracked_page_frames = if highest_frame >= u32::MAX as u64 {
                 0
             } else {
                 (highest_frame + 1) as u32
             };
         }
-        if INIT_STATS.tracked_page_frames == 0 && INIT_STATS.available_memory_bytes > 0 {
+        if (*INIT_STATS.get()).tracked_page_frames == 0
+            && (*INIT_STATS.get()).available_memory_bytes > 0
+        {
             panic!("MM: Usable memory exceeds supported frame range");
         }
-        INIT_STATS.reserved_region_count = mm_reservations_count();
-        INIT_STATS.reserved_device_bytes =
+        (*INIT_STATS.get()).reserved_region_count = mm_reservations_count();
+        (*INIT_STATS.get()).reserved_device_bytes =
             mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
     }
 }
@@ -427,14 +432,14 @@ fn plan_allocator_metadata(
     hhdm_offset: u64,
 ) -> AllocatorPlan {
     unsafe {
-        if INIT_STATS.tracked_page_frames == 0 {
+        if (*INIT_STATS.get()).tracked_page_frames == 0 {
             panic!("MM: No tracked frames available for allocator sizing");
         }
-        let desc_bytes =
-            (INIT_STATS.tracked_page_frames as u64) * page_allocator_descriptor_size() as u64;
+        let desc_bytes = ((*INIT_STATS.get()).tracked_page_frames as u64)
+            * page_allocator_descriptor_size() as u64;
         let mut aligned_bytes = align_up_u64(desc_bytes, DESC_ALIGN_BYTES);
         aligned_bytes = align_up_u64(aligned_bytes, PAGE_SIZE_4KB);
-        INIT_STATS.allocator_metadata_bytes = desc_bytes;
+        (*INIT_STATS.get()).allocator_metadata_bytes = desc_bytes;
 
         let phys_base = select_allocator_window(aligned_bytes);
         if phys_base == 0 {
@@ -451,15 +456,15 @@ fn plan_allocator_metadata(
             buffer: (phys_base + hhdm_offset) as *mut u8,
             phys_base,
             bytes: aligned_bytes,
-            capacity_frames: INIT_STATS.tracked_page_frames,
+            capacity_frames: (*INIT_STATS.get()).tracked_page_frames,
         }
     }
 }
 
 fn finalize_reserved_regions() {
     unsafe {
-        INIT_STATS.reserved_region_count = mm_reservations_count();
-        INIT_STATS.reserved_device_bytes =
+        (*INIT_STATS.get()).reserved_region_count = mm_reservations_count();
+        (*INIT_STATS.get()).reserved_device_bytes =
             mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
         log_reserved_regions();
@@ -523,27 +528,36 @@ fn display_memory_summary() {
         klog_info!("Early Paging:          {}", early_paging_str);
         klog_info!(
             "Reserved Regions:      {}",
-            INIT_STATS.reserved_region_count
+            (*INIT_STATS.get()).reserved_region_count
         );
-        klog_info!("Tracked Frames:        {}", INIT_STATS.tracked_page_frames);
+        klog_info!(
+            "Tracked Frames:        {}",
+            (*INIT_STATS.get()).tracked_page_frames
+        );
         klog_info!(
             "Allocator Metadata:    {} KB",
-            INIT_STATS.allocator_metadata_bytes / 1024
+            (*INIT_STATS.get()).allocator_metadata_bytes / 1024
         );
         klog_info!(
             "Reserved Device Mem:   {} KB",
-            INIT_STATS.reserved_device_bytes / 1024
+            (*INIT_STATS.get()).reserved_device_bytes / 1024
         );
         klog_info!(
             "Total Memory:          {} MB",
-            INIT_STATS.total_memory_bytes / (1024 * 1024)
+            (*INIT_STATS.get()).total_memory_bytes / (1024 * 1024)
         );
         klog_info!(
             "Available Memory:      {} MB",
-            INIT_STATS.available_memory_bytes / (1024 * 1024)
+            (*INIT_STATS.get()).available_memory_bytes / (1024 * 1024)
         );
-        klog_info!("Memory Regions:        {}", INIT_STATS.memory_regions_count);
-        klog_info!("HHDM Offset:           0x{:x}", INIT_STATS.hhdm_offset);
+        klog_info!(
+            "Memory Regions:        {}",
+            (*INIT_STATS.get()).memory_regions_count
+        );
+        klog_info!(
+            "HHDM Offset:           0x{:x}",
+            (*INIT_STATS.get()).hhdm_offset
+        );
         klog_info!("=====================================================");
     }
 }
@@ -557,7 +571,7 @@ pub fn init_memory_system(
         klog_debug!("========== SlopOS Memory System Initialization ==========");
         klog_debug!("Initializing complete memory management system...");
 
-        FRAMEBUFFER_RESERVATION = framebuffer.map(|(addr, info)| FramebufferReservation {
+        *FRAMEBUFFER_RESERVATION.get() = framebuffer.map(|(addr, info)| FramebufferReservation {
             address: addr,
             pitch: info.pitch as u64,
             height: info.height as u64,
@@ -645,14 +659,15 @@ pub fn get_memory_statistics(
     regions_count_out: *mut u32,
 ) {
     unsafe {
+        let stats = &*INIT_STATS.get();
         if !total_memory_out.is_null() {
-            *total_memory_out = INIT_STATS.total_memory_bytes;
+            *total_memory_out = stats.total_memory_bytes;
         }
         if !available_memory_out.is_null() {
-            *available_memory_out = INIT_STATS.available_memory_bytes;
+            *available_memory_out = stats.available_memory_bytes;
         }
         if !regions_count_out.is_null() {
-            *regions_count_out = INIT_STATS.memory_regions_count;
+            *regions_count_out = stats.memory_regions_count;
         }
     }
 }

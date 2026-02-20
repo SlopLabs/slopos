@@ -1,6 +1,7 @@
 // Test harness types: TestSuiteResult, TestSuiteDesc, TestRunSummary.
 // Suites are auto-registered via #[link_section = ".test_registry"] in define_test_suite!.
 
+use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
@@ -140,10 +141,10 @@ impl TestRunSummary {
 // Time measurement utilities
 // =============================================================================
 
-static mut CACHED_CYCLES_PER_MS: u64 = 0;
+static CACHED_CYCLES_PER_MS: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
 
 fn cached_cycles_per_ms_mut() -> *mut u64 {
-    &raw mut CACHED_CYCLES_PER_MS
+    CACHED_CYCLES_PER_MS.get()
 }
 
 /// Estimate CPU cycles per millisecond using CPUID if available.

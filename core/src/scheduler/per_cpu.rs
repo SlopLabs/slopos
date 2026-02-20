@@ -14,7 +14,7 @@
 //! - `return_context`: wrapped in `UnsafeCell`, only written during
 //!   single-threaded init and read by the owning CPU.
 
-use core::cell::UnsafeCell;
+use core::cell::{SyncUnsafeCell, UnsafeCell};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
@@ -568,10 +568,10 @@ impl PerCpuScheduler {
     }
 }
 
-static mut CPU_SCHEDULERS: [PerCpuScheduler; MAX_CPUS] = {
+static CPU_SCHEDULERS: SyncUnsafeCell<[PerCpuScheduler; MAX_CPUS]> = SyncUnsafeCell::new({
     const INIT: PerCpuScheduler = PerCpuScheduler::new();
     [INIT; MAX_CPUS]
-};
+});
 
 static SCHEDULERS_INIT: InitFlag = InitFlag::new();
 
@@ -580,7 +580,7 @@ pub fn init_percpu_scheduler(cpu_id: usize) {
         return;
     }
     unsafe {
-        CPU_SCHEDULERS[cpu_id].init(cpu_id);
+        (*CPU_SCHEDULERS.get())[cpu_id].init(cpu_id);
     }
     klog_debug!("SCHED: Per-CPU scheduler initialized for CPU {}", cpu_id);
 }
@@ -592,7 +592,7 @@ pub fn init_all_percpu_schedulers() {
 
     for cpu_id in 0..MAX_CPUS {
         unsafe {
-            CPU_SCHEDULERS[cpu_id].init(cpu_id);
+            (*CPU_SCHEDULERS.get())[cpu_id].init(cpu_id);
         }
     }
 }
@@ -601,13 +601,13 @@ pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {
     if cpu_id >= MAX_CPUS {
         return false;
     }
-    unsafe { CPU_SCHEDULERS[cpu_id].is_initialized() }
+    unsafe { (*CPU_SCHEDULERS.get())[cpu_id].is_initialized() }
 }
 
 pub fn with_local_scheduler<R>(f: impl FnOnce(&PerCpuScheduler) -> R) -> R {
     let cpu_id = slopos_lib::get_current_cpu();
     // SAFETY: cpu_id < MAX_CPUS guaranteed by get_current_cpu; shared ref only
-    let sched = unsafe { &CPU_SCHEDULERS[cpu_id] };
+    let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
     f(sched)
 }
 
@@ -616,7 +616,7 @@ pub fn with_cpu_scheduler<R>(cpu_id: usize, f: impl FnOnce(&PerCpuScheduler) -> 
         return None;
     }
     // SAFETY: bounds checked; shared ref only — interior mutability handles mutation
-    let sched = unsafe { &CPU_SCHEDULERS[cpu_id] };
+    let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
     if !sched.is_initialized() {
         return None;
     }
@@ -820,7 +820,7 @@ pub fn get_ap_return_context(cpu_id: usize) -> *mut TaskContext {
     }
     // SAFETY: return_context is only written during single-threaded init
     // and read by the owning CPU
-    unsafe { CPU_SCHEDULERS[cpu_id].return_context.get() }
+    unsafe { (*CPU_SCHEDULERS.get())[cpu_id].return_context.get() }
 }
 
 /// Check if the given task is the idle task for any CPU
@@ -922,7 +922,7 @@ pub fn clear_cpu_queues(cpu_id: usize) {
         return;
     }
     // SAFETY: bounds checked; interior mutability via queue_lock + UnsafeCell
-    let sched = unsafe { &CPU_SCHEDULERS[cpu_id] };
+    let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
     let _guard = sched.queue_lock.lock();
     // SAFETY: queue_lock held
     let queues = unsafe { &mut *sched.ready_queues.get() };

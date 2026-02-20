@@ -15,6 +15,7 @@
 //! - `boot/idt_handlers.s` (syscall_entry)
 //! - `core/context_switch.s` (context_switch_user)
 
+use core::cell::SyncUnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
@@ -264,17 +265,24 @@ pub mod offsets {
 // ==================== STATIC STORAGE ====================
 
 /// BSP's PCR (statically allocated).
-static mut BSP_PCR: ProcessorControlRegion = ProcessorControlRegion::new();
+static BSP_PCR: SyncUnsafeCell<ProcessorControlRegion> =
+    SyncUnsafeCell::new(ProcessorControlRegion::new());
 
 /// Statically-allocated AP PCRs.
-static mut AP_PCRS: [ProcessorControlRegion; MAX_STATIC_APS] = {
+static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> = SyncUnsafeCell::new({
     const INIT: ProcessorControlRegion = ProcessorControlRegion::new();
     [INIT; MAX_STATIC_APS]
-};
+});
 
-/// Array of pointers to all PCRs (BSP + APs).
-/// Index 0 = BSP, Index 1+ = APs.
-static mut ALL_PCRS: [*mut ProcessorControlRegion; MAX_CPUS] = [ptr::null_mut(); MAX_CPUS];
+/// Wrapper to allow `[*mut ProcessorControlRegion; N]` in a static.
+/// Raw pointers are not `Sync`; this is safe because all access is
+/// already guarded by single-writer semantics during boot init.
+#[repr(transparent)]
+struct PcrPtrArray([*mut ProcessorControlRegion; MAX_CPUS]);
+unsafe impl Sync for PcrPtrArray {}
+
+static ALL_PCRS: SyncUnsafeCell<PcrPtrArray> =
+    SyncUnsafeCell::new(PcrPtrArray([ptr::null_mut(); MAX_CPUS]));
 
 /// Number of initialized PCRs.
 static PCR_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -343,14 +351,14 @@ pub unsafe fn init_bsp_pcr(apic_id: u32) {
 
     BSP_APIC_ID.store(apic_id, Ordering::Release);
 
-    let pcr = &raw mut BSP_PCR;
+    let pcr = BSP_PCR.get();
 
     (*pcr).self_ref = pcr;
     (*pcr).cpu_id = 0;
     (*pcr).apic_id = apic_id;
     (*pcr).kernel_rsp = (*pcr).kernel_stack_top();
 
-    ALL_PCRS[0] = pcr;
+    (*ALL_PCRS.get()).0[0] = pcr;
     PCR_COUNT.store(1, Ordering::Release);
 
     // Register APIC mapping and mark BSP online.
@@ -373,14 +381,14 @@ pub unsafe fn init_ap_pcr(cpu_id: usize, apic_id: u32) -> *mut ProcessorControlR
         panic!("init_ap_pcr: too many APs (max {})", MAX_STATIC_APS);
     }
 
-    let pcr = &raw mut AP_PCRS[cpu_id - 1];
+    let pcr = &raw mut (*AP_PCRS.get())[cpu_id - 1];
 
     (*pcr).self_ref = pcr;
     (*pcr).cpu_id = cpu_id as u32;
     (*pcr).apic_id = apic_id;
     (*pcr).kernel_rsp = (*pcr).kernel_stack_top();
 
-    ALL_PCRS[cpu_id] = pcr;
+    (*ALL_PCRS.get()).0[cpu_id] = pcr;
 
     let current_count = PCR_COUNT.load(Ordering::Acquire);
     if cpu_id as u32 >= current_count {
@@ -465,7 +473,7 @@ pub fn get_pcr(cpu_id: usize) -> Option<&'static ProcessorControlRegion> {
         return None;
     }
     unsafe {
-        let ptr = ALL_PCRS[cpu_id];
+        let ptr = (*ALL_PCRS.get()).0[cpu_id];
         if ptr.is_null() { None } else { Some(&*ptr) }
     }
 }
@@ -478,7 +486,7 @@ pub unsafe fn get_pcr_mut(cpu_id: usize) -> Option<&'static mut ProcessorControl
     if cpu_id >= MAX_CPUS {
         return None;
     }
-    let ptr = ALL_PCRS[cpu_id];
+    let ptr = (*ALL_PCRS.get()).0[cpu_id];
     if ptr.is_null() { None } else { Some(&mut *ptr) }
 }
 

@@ -1,3 +1,4 @@
+use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
@@ -64,22 +65,25 @@ struct RegionStore {
 unsafe impl Send for RegionStore {}
 unsafe impl Sync for RegionStore {}
 
-static mut STATIC_REGION_STORE: [MmRegion; MM_REGION_STATIC_CAP] =
-    [MmRegion::zeroed(); MM_REGION_STATIC_CAP];
-static mut REGION_STORE: RegionStore = RegionStore {
-    regions: unsafe { STATIC_REGION_STORE.as_ptr() as *mut MmRegion },
+static STATIC_REGION_STORE: SyncUnsafeCell<[MmRegion; MM_REGION_STATIC_CAP]> =
+    SyncUnsafeCell::new([MmRegion::zeroed(); MM_REGION_STATIC_CAP]);
+static REGION_STORE: SyncUnsafeCell<RegionStore> = SyncUnsafeCell::new(RegionStore {
+    regions: ptr::null_mut(),
     capacity: MM_REGION_STATIC_CAP as u32,
     count: 0,
     overflows: 0,
     configured: false,
-};
+});
 
 fn ensure_storage() -> &'static mut RegionStore {
     unsafe {
-        if REGION_STORE.regions.is_null() || REGION_STORE.capacity == 0 {
-            panic!("MM: region storage not configured");
+        let store = &mut *REGION_STORE.get();
+        if store.regions.is_null() || store.capacity == 0 {
+            // Lazily initialize to point at static storage on first access.
+            store.regions = STATIC_REGION_STORE.get() as *mut MmRegion;
+            store.capacity = MM_REGION_STATIC_CAP as u32;
         }
-        &mut REGION_STORE
+        store
     }
 }
 
@@ -311,18 +315,20 @@ pub fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
         panic!("MM: invalid region storage configuration");
     }
     unsafe {
-        REGION_STORE.regions = buffer;
-        REGION_STORE.capacity = capacity;
-        REGION_STORE.configured = true;
+        let store = &mut *REGION_STORE.get();
+        store.regions = buffer;
+        store.capacity = capacity;
+        store.configured = true;
     }
     clear_store();
 }
 pub fn mm_region_map_reset() {
     unsafe {
-        if !REGION_STORE.configured {
-            REGION_STORE.regions = STATIC_REGION_STORE.as_mut_ptr();
-            REGION_STORE.capacity = MM_REGION_STATIC_CAP as u32;
-            REGION_STORE.configured = true;
+        let store = &mut *REGION_STORE.get();
+        if !store.configured {
+            store.regions = STATIC_REGION_STORE.get() as *mut MmRegion;
+            store.capacity = MM_REGION_STATIC_CAP as u32;
+            store.configured = true;
         }
     }
     clear_store();

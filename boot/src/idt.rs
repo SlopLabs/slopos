@@ -1,7 +1,7 @@
-#![allow(static_mut_refs)]
 #![allow(bad_asm_style)]
 
 use core::arch::{asm, global_asm};
+use core::cell::SyncUnsafeCell;
 use core::ffi::{CStr, c_char, c_void};
 
 use slopos_lib::cpu;
@@ -31,21 +31,26 @@ struct IdtPtr {
 
 type ExceptionHandler = fn(*mut slopos_lib::InterruptFrame);
 
-static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry {
-    offset_low: 0,
-    selector: 0,
-    ist: 0,
-    type_attr: 0,
-    offset_mid: 0,
-    offset_high: 0,
-    zero: 0,
-}; IDT_ENTRIES];
+static IDT: SyncUnsafeCell<[IdtEntry; IDT_ENTRIES]> = SyncUnsafeCell::new(
+    [IdtEntry {
+        offset_low: 0,
+        selector: 0,
+        ist: 0,
+        type_attr: 0,
+        offset_mid: 0,
+        offset_high: 0,
+        zero: 0,
+    }; IDT_ENTRIES],
+);
 
-static mut IDT_POINTER: IdtPtr = IdtPtr { limit: 0, base: 0 };
+static IDT_POINTER: SyncUnsafeCell<IdtPtr> = SyncUnsafeCell::new(IdtPtr { limit: 0, base: 0 });
 
-static mut PANIC_HANDLERS: [ExceptionHandler; 32] = [exception_default_panic; 32];
-static mut OVERRIDE_HANDLERS: [Option<ExceptionHandler>; 32] = [None; 32];
-static mut CURRENT_EXCEPTION_MODE: ExceptionMode = ExceptionMode::Normal;
+static PANIC_HANDLERS: SyncUnsafeCell<[ExceptionHandler; 32]> =
+    SyncUnsafeCell::new([exception_default_panic; 32]);
+static OVERRIDE_HANDLERS: SyncUnsafeCell<[Option<ExceptionHandler>; 32]> =
+    SyncUnsafeCell::new([None; 32]);
+static CURRENT_EXCEPTION_MODE: SyncUnsafeCell<ExceptionMode> =
+    SyncUnsafeCell::new(ExceptionMode::Normal);
 
 #[inline(always)]
 fn handler_ptr(f: unsafe extern "C" fn()) -> u64 {
@@ -137,12 +142,12 @@ pub fn idt_init() {
     klog_debug!("IDT: init start");
     unsafe {
         core::ptr::write_bytes(
-            IDT.as_mut_ptr() as *mut u8,
+            (*IDT.get()).as_mut_ptr() as *mut u8,
             0,
             core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>(),
         );
-        IDT_POINTER.limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
-        IDT_POINTER.base = IDT.as_ptr() as u64;
+        (*IDT_POINTER.get()).limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
+        (*IDT_POINTER.get()).base = (*IDT.get()).as_ptr() as u64;
     }
 
     idt_set_gate(0, handler_ptr(isr0), 0x08, IDT_GATE_INTERRUPT);
@@ -206,19 +211,19 @@ pub fn idt_init() {
     initialize_handler_tables();
 
     klog_debug!("IDT: Configured 256 interrupt vectors");
-    let base = unsafe { IDT_POINTER.base };
-    let limit = unsafe { IDT_POINTER.limit };
+    let base = unsafe { (*IDT_POINTER.get()).base };
+    let limit = unsafe { (*IDT_POINTER.get()).limit };
     klog_debug!("IDT: init prepared base=0x{:x} limit=0x{:x}", base, limit);
 }
 pub fn idt_set_gate_priv(vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
     unsafe {
-        IDT[vector as usize].offset_low = (handler & 0xFFFF) as u16;
-        IDT[vector as usize].selector = selector;
-        IDT[vector as usize].ist = 0;
-        IDT[vector as usize].type_attr = typ | 0x80 | ((dpl & 0x3) << 5);
-        IDT[vector as usize].offset_mid = ((handler >> 16) & 0xFFFF) as u16;
-        IDT[vector as usize].offset_high = (handler >> 32) as u32;
-        IDT[vector as usize].zero = 0;
+        (*IDT.get())[vector as usize].offset_low = (handler & 0xFFFF) as u16;
+        (*IDT.get())[vector as usize].selector = selector;
+        (*IDT.get())[vector as usize].ist = 0;
+        (*IDT.get())[vector as usize].type_attr = typ | 0x80 | ((dpl & 0x3) << 5);
+        (*IDT.get())[vector as usize].offset_mid = ((handler >> 16) & 0xFFFF) as u16;
+        (*IDT.get())[vector as usize].offset_high = (handler >> 32) as u32;
+        (*IDT.get())[vector as usize].zero = 0;
     }
 }
 pub fn idt_set_gate(vector: u8, handler: u64, selector: u16, typ: u8) {
@@ -229,7 +234,7 @@ pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
         return -1;
     }
     unsafe {
-        *out_entry = IDT[vector as usize];
+        *out_entry = (*IDT.get())[vector as usize];
     }
     0
 }
@@ -250,7 +255,7 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
         return;
     }
     unsafe {
-        OVERRIDE_HANDLERS[vector as usize] = Some(handler);
+        (*OVERRIDE_HANDLERS.get())[vector as usize] = Some(handler);
         klog_debug!("IDT: Registered override handler for exception {}", vector);
     }
 }
@@ -265,14 +270,14 @@ pub fn idt_set_ist(vector: u8, ist_index: u8) {
     }
 
     unsafe {
-        IDT[vector as usize].ist = ist_index & 0x7;
+        (*IDT.get())[vector as usize].ist = ist_index & 0x7;
     }
 }
 pub fn exception_set_mode(mode: ExceptionMode) {
     unsafe {
-        CURRENT_EXCEPTION_MODE = mode;
+        *CURRENT_EXCEPTION_MODE.get() = mode;
         if let ExceptionMode::Normal = mode {
-            OVERRIDE_HANDLERS = [None; 32];
+            *OVERRIDE_HANDLERS.get() = [None; 32];
         }
     }
 }
@@ -281,9 +286,9 @@ pub fn exception_is_critical(vector: u8) -> i32 {
 }
 pub fn idt_load() {
     unsafe {
-        IDT_POINTER.limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
-        IDT_POINTER.base = IDT.as_ptr() as u64;
-        let idtr = &raw const IDT_POINTER;
+        (*IDT_POINTER.get()).limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
+        (*IDT_POINTER.get()).base = (*IDT.get()).as_ptr() as u64;
+        let idtr = IDT_POINTER.get() as *const IdtPtr;
         asm!("lidt [{}]", in(reg) idtr, options(nostack, preserves_flags));
     }
 }
@@ -414,15 +419,20 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     let critical = is_critical_exception_internal(vector);
     unsafe {
-        if critical || !matches!(CURRENT_EXCEPTION_MODE, ExceptionMode::Test) {
+        if critical || !matches!(*CURRENT_EXCEPTION_MODE.get(), ExceptionMode::Test) {
             let name = slopos_lib::arch::exception::get_exception_name(vector);
             klog_info!("EXCEPTION: Vector {} ({})", vector, name);
         }
     }
 
-    let mut handler = unsafe { PANIC_HANDLERS[vector as usize] };
-    if !critical && matches!(unsafe { CURRENT_EXCEPTION_MODE }, ExceptionMode::Test) {
-        if let Some(override_handler) = unsafe { OVERRIDE_HANDLERS[vector as usize] } {
+    let mut handler = unsafe { (*PANIC_HANDLERS.get())[vector as usize] };
+    if !critical
+        && matches!(
+            unsafe { *CURRENT_EXCEPTION_MODE.get() },
+            ExceptionMode::Test
+        )
+    {
+        if let Some(override_handler) = unsafe { (*OVERRIDE_HANDLERS.get())[vector as usize] } {
             handler = override_handler;
         }
     }
@@ -431,32 +441,34 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 }
 fn initialize_handler_tables() {
     unsafe {
-        PANIC_HANDLERS = [exception_default_panic; 32];
-        OVERRIDE_HANDLERS = [None; 32];
+        *PANIC_HANDLERS.get() = [exception_default_panic; 32];
+        *OVERRIDE_HANDLERS.get() = [None; 32];
 
         // Fatal: log name, dump frame, panic.
-        PANIC_HANDLERS[EXCEPTION_DIVIDE_ERROR as usize] = exception_fatal;
-        PANIC_HANDLERS[EXCEPTION_NMI as usize] = exception_fatal;
-        PANIC_HANDLERS[EXCEPTION_DOUBLE_FAULT as usize] = exception_fatal;
-        PANIC_HANDLERS[EXCEPTION_INVALID_TSS as usize] = exception_fatal;
-        PANIC_HANDLERS[EXCEPTION_SEGMENT_NOT_PRES as usize] = exception_fatal;
-        PANIC_HANDLERS[EXCEPTION_STACK_FAULT as usize] = exception_fatal;
-        PANIC_HANDLERS[EXCEPTION_MACHINE_CHECK as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_DIVIDE_ERROR as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_NMI as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_DOUBLE_FAULT as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_INVALID_TSS as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_SEGMENT_NOT_PRES as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_STACK_FAULT as usize] = exception_fatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_MACHINE_CHECK as usize] = exception_fatal;
 
         // Non-fatal: log name, dump frame, resume.
-        PANIC_HANDLERS[EXCEPTION_DEBUG as usize] = exception_nonfatal;
-        PANIC_HANDLERS[EXCEPTION_BREAKPOINT as usize] = exception_nonfatal;
-        PANIC_HANDLERS[EXCEPTION_OVERFLOW as usize] = exception_nonfatal;
-        PANIC_HANDLERS[EXCEPTION_BOUND_RANGE as usize] = exception_nonfatal;
-        PANIC_HANDLERS[EXCEPTION_FPU_ERROR as usize] = exception_nonfatal;
-        PANIC_HANDLERS[EXCEPTION_ALIGNMENT_CHECK as usize] = exception_nonfatal;
-        PANIC_HANDLERS[EXCEPTION_SIMD_FP_EXCEPTION as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_DEBUG as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_BREAKPOINT as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_OVERFLOW as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_BOUND_RANGE as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_FPU_ERROR as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_ALIGNMENT_CHECK as usize] = exception_nonfatal;
+        (*PANIC_HANDLERS.get())[EXCEPTION_SIMD_FP_EXCEPTION as usize] = exception_nonfatal;
 
         // Specialized: user-mode check before fatal/nonfatal fallback.
-        PANIC_HANDLERS[EXCEPTION_INVALID_OPCODE as usize] = exception_invalid_opcode;
-        PANIC_HANDLERS[EXCEPTION_DEVICE_NOT_AVAIL as usize] = exception_device_not_available;
-        PANIC_HANDLERS[EXCEPTION_GENERAL_PROTECTION as usize] = exception_general_protection;
-        PANIC_HANDLERS[EXCEPTION_PAGE_FAULT as usize] = exception_page_fault;
+        (*PANIC_HANDLERS.get())[EXCEPTION_INVALID_OPCODE as usize] = exception_invalid_opcode;
+        (*PANIC_HANDLERS.get())[EXCEPTION_DEVICE_NOT_AVAIL as usize] =
+            exception_device_not_available;
+        (*PANIC_HANDLERS.get())[EXCEPTION_GENERAL_PROTECTION as usize] =
+            exception_general_protection;
+        (*PANIC_HANDLERS.get())[EXCEPTION_PAGE_FAULT as usize] = exception_page_fault;
     }
 }
 

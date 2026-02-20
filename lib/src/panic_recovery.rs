@@ -1,4 +1,5 @@
 use core::arch::naked_asm;
+use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use crate::pcr::get_current_cpu;
@@ -32,7 +33,7 @@ impl JumpBuf {
 
 static RECOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RECOVERY_CPU: AtomicUsize = AtomicUsize::new(0);
-static mut RECOVERY_BUF: JumpBuf = JumpBuf::zeroed();
+static RECOVERY_BUF: SyncUnsafeCell<JumpBuf> = SyncUnsafeCell::new(JumpBuf::zeroed());
 
 pub type PanicCleanupFn = fn();
 
@@ -121,7 +122,7 @@ pub fn recovery_set_active(active: bool) {
 }
 
 pub fn get_recovery_buf() -> *mut JumpBuf {
-    &raw mut RECOVERY_BUF
+    RECOVERY_BUF.get()
 }
 
 #[macro_export]

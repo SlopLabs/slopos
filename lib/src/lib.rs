@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(c_variadic)]
+#![feature(sync_unsafe_cell)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod arch;

@@ -165,7 +165,6 @@ fn boot_state() -> &'static BootState {
     unsafe { &*BOOT_STATE.0.get() }
 }
 
-#[allow(static_mut_refs)]
 fn boot_state_mut() -> &'static mut BootState {
     unsafe { &mut *BOOT_STATE.0.get() }
 }

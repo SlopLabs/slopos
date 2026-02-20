@@ -3,6 +3,8 @@
 //! Randomizes stack (1MB range) and heap (16MB range) to mitigate exploitation.
 //! Uses TSC-seeded LFSR64 RNG.
 
+use core::cell::SyncUnsafeCell;
+
 use crate::memory_layout_defs::ProcessMemoryLayout;
 use crate::paging_defs::PAGE_SIZE_4KB;
 use slopos_lib::tsc;
@@ -38,20 +40,20 @@ impl Default for AslrConfig {
     }
 }
 
-static mut ASLR_CONFIG: AslrConfig = AslrConfig::default_config();
+static ASLR_CONFIG: SyncUnsafeCell<AslrConfig> = SyncUnsafeCell::new(AslrConfig::default_config());
 
 pub fn get_config() -> AslrConfig {
-    unsafe { ASLR_CONFIG }
+    unsafe { *ASLR_CONFIG.get() }
 }
 
 pub fn set_enabled(enabled: bool) {
     unsafe {
-        ASLR_CONFIG.enabled = enabled;
+        (*ASLR_CONFIG.get()).enabled = enabled;
     }
 }
 
 pub fn is_enabled() -> bool {
-    unsafe { ASLR_CONFIG.enabled }
+    unsafe { (*ASLR_CONFIG.get()).enabled }
 }
 
 fn get_random() -> u64 {

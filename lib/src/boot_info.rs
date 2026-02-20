@@ -15,6 +15,9 @@ pub struct LimineMemmapResponse {
     pub entries: *const *const LimineMemmapEntry,
 }
 
+unsafe impl Send for LimineMemmapResponse {}
+unsafe impl Sync for LimineMemmapResponse {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
 pub enum MemoryRegionKind {

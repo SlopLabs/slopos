@@ -1,5 +1,6 @@
 //! IRQ dispatch tests - targeting untested edge cases and error paths.
 
+use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
@@ -160,14 +161,14 @@ pub fn test_irq_stats_valid_line() -> TestResult {
 }
 
 pub fn test_irq_context_pointer_preserved() -> TestResult {
-    static mut CONTEXT_VALUE: u64 = 0;
-    static mut HANDLER_CALLED: bool = false;
+    static CONTEXT_VALUE: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
+    static HANDLER_CALLED: SyncUnsafeCell<bool> = SyncUnsafeCell::new(false);
 
     extern "C" fn context_handler(_: u8, _: *mut InterruptFrame, ctx: *mut c_void) {
         unsafe {
-            HANDLER_CALLED = true;
+            *HANDLER_CALLED.get() = true;
             if !ctx.is_null() {
-                CONTEXT_VALUE = *(ctx as *const u64);
+                *CONTEXT_VALUE.get() = *(ctx as *const u64);
             }
         }
     }

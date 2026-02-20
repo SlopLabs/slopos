@@ -1,3 +1,4 @@
+use core::cell::SyncUnsafeCell;
 use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -28,18 +29,21 @@ pub struct ProcessPageDir {
     pub kernel_mapping_gen: u64,
 }
 
-pub static mut EARLY_PML4: PageTable = PageTable::EMPTY;
-pub static mut EARLY_PDPT: PageTable = PageTable::EMPTY;
-pub static mut EARLY_PD: PageTable = PageTable::EMPTY;
+unsafe impl Send for ProcessPageDir {}
+unsafe impl Sync for ProcessPageDir {}
 
-static mut KERNEL_PAGE_DIR: ProcessPageDir = ProcessPageDir {
-    pml4: unsafe { &mut EARLY_PML4 as *mut PageTable },
+pub static EARLY_PML4: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::EMPTY);
+pub static EARLY_PDPT: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::EMPTY);
+pub static EARLY_PD: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::EMPTY);
+
+static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(ProcessPageDir {
+    pml4: ptr::null_mut(),
     pml4_phys: PhysAddr::NULL,
     ref_count: 1,
     process_id: 0,
     next: ptr::null_mut(),
     kernel_mapping_gen: 0,
-};
+});
 
 fn table_empty(table: &PageTable) -> bool {
     table.iter().all(|e| !e.is_present())
@@ -151,12 +155,12 @@ pub fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
         return;
     }
     unsafe {
-        if KERNEL_PAGE_DIR.pml4.is_null() {
+        if (*KERNEL_PAGE_DIR.get()).pml4.is_null() {
             klog_info!("paging_copy_kernel_mappings: Kernel PML4 unavailable");
             return;
         }
         for i in 0..512 {
-            *(&mut *dest_pml4).entry_mut(i) = *(&*KERNEL_PAGE_DIR.pml4).entry(i);
+            *(&mut *dest_pml4).entry_mut(i) = *(&*(*KERNEL_PAGE_DIR.get()).pml4).entry(i);
         }
         for i in 0..256 {
             *(&mut *dest_pml4).entry_mut(i) = PageTableEntry::EMPTY;
@@ -174,11 +178,11 @@ pub fn paging_sync_kernel_mappings(page_dir: *mut ProcessPageDir) {
             return;
         }
         let dest_pml4 = (*page_dir).pml4;
-        if dest_pml4.is_null() || KERNEL_PAGE_DIR.pml4.is_null() {
+        if dest_pml4.is_null() || (*KERNEL_PAGE_DIR.get()).pml4.is_null() {
             return;
         }
         for i in 256..512 {
-            *(&mut *dest_pml4).entry_mut(i) = *(&*KERNEL_PAGE_DIR.pml4).entry(i);
+            *(&mut *dest_pml4).entry_mut(i) = *(&*(*KERNEL_PAGE_DIR.get()).pml4).entry(i);
         }
         (*page_dir).kernel_mapping_gen = current_gen;
     }
@@ -210,7 +214,7 @@ pub fn virt_to_phys_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
 }
 
 pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
-    unsafe { virt_to_phys_for_dir(&mut KERNEL_PAGE_DIR, vaddr) }
+    virt_to_phys_for_dir(KERNEL_PAGE_DIR.get(), vaddr)
 }
 
 pub fn virt_to_phys_process(vaddr: VirtAddr, page_dir: *mut ProcessPageDir) -> PhysAddr {
@@ -367,11 +371,11 @@ pub fn map_page_4kb_in_dir(
 }
 
 pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
-    unsafe { map_page_in_directory(&mut KERNEL_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_4KB) }
+    map_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr, paddr, flags, PAGE_SIZE_4KB)
 }
 
 pub fn map_page_2mb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
-    unsafe { map_page_in_directory(&mut KERNEL_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_2MB) }
+    map_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr, paddr, flags, PAGE_SIZE_2MB)
 }
 
 pub fn paging_map_shared_kernel_page(
@@ -390,7 +394,7 @@ pub fn paging_map_shared_kernel_page(
         return -1;
     }
 
-    let phys = virt_to_phys_in_dir(unsafe { &mut KERNEL_PAGE_DIR }, kernel_vaddr);
+    let phys = virt_to_phys_in_dir(KERNEL_PAGE_DIR.get(), kernel_vaddr);
     if phys.is_null() {
         return -1;
     }
@@ -500,7 +504,7 @@ pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_in
 }
 
 pub fn unmap_page(vaddr: VirtAddr) -> c_int {
-    unsafe { unmap_page_in_directory(&mut KERNEL_PAGE_DIR, vaddr) }
+    unmap_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr)
 }
 
 pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
@@ -514,7 +518,7 @@ pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
 }
 
 pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
-    unsafe { &mut KERNEL_PAGE_DIR }
+    KERNEL_PAGE_DIR.get()
 }
 
 /// Recursively free a page table hierarchy from the given level down.
@@ -589,13 +593,13 @@ pub fn paging_free_user_space(page_dir: *mut ProcessPageDir) {
 pub fn init_paging() {
     unsafe {
         let cr3 = get_cr3();
-        KERNEL_PAGE_DIR.pml4_phys = cr3;
+        (*KERNEL_PAGE_DIR.get()).pml4_phys = cr3;
 
-        let pml4_ptr = phys_to_table(KERNEL_PAGE_DIR.pml4_phys);
+        let pml4_ptr = phys_to_table((*KERNEL_PAGE_DIR.get()).pml4_phys);
         if pml4_ptr.is_null() {
             panic!("Failed to translate kernel PML4 physical address");
         }
-        KERNEL_PAGE_DIR.pml4 = pml4_ptr;
+        (*KERNEL_PAGE_DIR.get()).pml4 = pml4_ptr;
 
         let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
         if kernel_phys.is_null() {
@@ -635,7 +639,7 @@ pub fn is_mapped(vaddr: VirtAddr) -> c_int {
 
 pub fn get_page_size(vaddr: VirtAddr) -> u64 {
     unsafe {
-        let page_dir = &mut KERNEL_PAGE_DIR as *mut ProcessPageDir;
+        let page_dir = KERNEL_PAGE_DIR.get();
         if (*page_dir).pml4.is_null() {
             return 0;
         }

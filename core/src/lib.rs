@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(sync_unsafe_cell)]
 
 extern crate alloc;
 

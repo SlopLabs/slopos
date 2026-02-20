@@ -1,6 +1,6 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
-#![allow(static_mut_refs)]
+#![feature(sync_unsafe_cell)]
 
 pub mod aslr;
 pub mod cow;
@@ -42,6 +42,7 @@ pub mod vma_flags;
 pub mod vma_tree;
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::SyncUnsafeCell;
 use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -58,7 +59,7 @@ const HEAP_SIZE: usize = 2 * 1024 * 1024;
 struct AlignedHeap([u8; HEAP_SIZE]);
 
 #[unsafe(link_section = ".bss.heap")]
-static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
+static HEAP: SyncUnsafeCell<AlignedHeap> = SyncUnsafeCell::new(AlignedHeap([0; HEAP_SIZE]));
 
 pub struct BumpAllocator {
     next: AtomicUsize,
@@ -82,7 +83,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
             return ptr::null_mut();
         }
         self.next.store(offset + size, Ordering::Relaxed);
-        unsafe { HEAP.0.as_mut_ptr().add(offset) }
+        unsafe { (*HEAP.get()).0.as_mut_ptr().add(offset) }
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {

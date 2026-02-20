@@ -1,31 +1,38 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use core::cell::SyncUnsafeCell;
 use core::ffi::c_char;
 
 pub type MainFn =
     extern "C" fn(argc: isize, argv: *const *const c_char, envp: *const *const c_char) -> i32;
 
-static mut MAIN_FN: Option<MainFn> = None;
-static mut ARGC: isize = 0;
-static mut ARGV: *const *const c_char = core::ptr::null();
-static mut ENVP: *const *const c_char = core::ptr::null();
+#[repr(transparent)]
+struct SyncCharPtrPtr(*const *const c_char);
+unsafe impl Sync for SyncCharPtrPtr {}
+
+static MAIN_FN: SyncUnsafeCell<Option<MainFn>> = SyncUnsafeCell::new(None);
+static ARGC: SyncUnsafeCell<isize> = SyncUnsafeCell::new(0);
+static ARGV: SyncUnsafeCell<SyncCharPtrPtr> =
+    SyncUnsafeCell::new(SyncCharPtrPtr(core::ptr::null()));
+static ENVP: SyncUnsafeCell<SyncCharPtrPtr> =
+    SyncUnsafeCell::new(SyncCharPtrPtr(core::ptr::null()));
 
 pub fn set_main(main: MainFn) {
     unsafe {
-        MAIN_FN = Some(main);
+        *MAIN_FN.get() = Some(main);
     }
 }
 
 pub fn argc() -> isize {
-    unsafe { ARGC }
+    unsafe { *ARGC.get() }
 }
 
 pub fn argv() -> *const *const c_char {
-    unsafe { ARGV }
+    unsafe { (*ARGV.get()).0 }
 }
 
 pub fn envp() -> *const *const c_char {
-    unsafe { ENVP }
+    unsafe { (*ENVP.get()).0 }
 }
 
 /// Parse argc/argv/envp from the kernel-prepared user stack and store
@@ -56,17 +63,17 @@ pub unsafe fn init_from_stack() {
 
         let raw_argc = *stack_ptr as isize;
         if raw_argc < 0 || raw_argc > 1024 {
-            ARGC = 0;
-            ARGV = core::ptr::null();
-            ENVP = core::ptr::null();
+            *ARGC.get() = 0;
+            (*ARGV.get()).0 = core::ptr::null();
+            (*ENVP.get()).0 = core::ptr::null();
             return;
         }
 
-        ARGC = raw_argc;
-        ARGV = stack_ptr.add(1) as *const *const c_char;
+        *ARGC.get() = raw_argc;
+        (*ARGV.get()).0 = stack_ptr.add(1) as *const *const c_char;
 
         let envp_offset = 1 + (raw_argc as usize) + 1;
-        ENVP = stack_ptr.add(envp_offset) as *const *const c_char;
+        (*ENVP.get()).0 = stack_ptr.add(envp_offset) as *const *const c_char;
     }
 }
 
@@ -77,8 +84,8 @@ pub unsafe fn crt0_start() -> ! {
 
     init_from_stack();
 
-    if let Some(main) = MAIN_FN {
-        let ret = main(ARGC, ARGV, ENVP);
+    if let Some(main) = *MAIN_FN.get() {
+        let ret = main(*ARGC.get(), (*ARGV.get()).0, (*ENVP.get()).0);
         sys_exit(ret);
     } else {
         sys_exit(127);
@@ -87,10 +94,10 @@ pub unsafe fn crt0_start() -> ! {
 
 pub fn get_arg(index: usize) -> Option<&'static [u8]> {
     unsafe {
-        if index >= ARGC as usize {
+        if index >= (*ARGC.get()) as usize {
             return None;
         }
-        let arg_ptr = *ARGV.add(index);
+        let arg_ptr = *(*ARGV.get()).0.add(index);
         if arg_ptr.is_null() {
             return None;
         }
@@ -104,12 +111,12 @@ pub fn get_arg(index: usize) -> Option<&'static [u8]> {
 
 pub fn get_env(name: &[u8]) -> Option<&'static [u8]> {
     unsafe {
-        if ENVP.is_null() {
+        if (*ENVP.get()).0.is_null() {
             return None;
         }
         let mut i = 0;
         loop {
-            let env_ptr = *ENVP.add(i);
+            let env_ptr = *(*ENVP.get()).0.add(i);
             if env_ptr.is_null() {
                 break;
             }
