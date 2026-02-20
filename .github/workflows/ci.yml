@@ -31,13 +31,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Setup Rust toolchain
-        run: make setup
+        run: just setup
 
       - name: Check formatting
-        run: |
-          RUST_CHANNEL=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
-          cargo +$RUST_CHANNEL fmt --all -- --check
+        run: just fmt
 
       - name: Install system dependencies
         run: |
@@ -57,12 +58,12 @@ jobs:
           cache-on-failure: true
 
       - name: Build kernel
-        run: make build
+        run: just build
 
       - name: Run tests
         run: |
           set -o pipefail
-          make test 2>&1 | tee ci-test.log
+          just test 2>&1 | tee ci-test.log
 
       - name: Upload test log on failure
         if: failure()
