@@ -314,14 +314,137 @@ struct TaskCreateResources {
     kernel_stack_size: u64,
 }
 
-fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
-    let stack = kmalloc(TASK_STACK_SIZE as usize);
-    if stack.is_null() {
-        klog_info!("task_create: Failed to allocate kernel stack");
-        return None;
+/// Owns process-scoped resources during task setup and tears them down on failure.
+///
+/// This keeps partial setup paths correct without open-coded cleanup in each caller.
+struct ProcessResourceLease {
+    process_id: u32,
+    owns_vm: bool,
+    owns_file_table: bool,
+}
+
+impl ProcessResourceLease {
+    const fn none() -> Self {
+        Self {
+            process_id: INVALID_PROCESS_ID,
+            owns_vm: false,
+            owns_file_table: false,
+        }
     }
 
-    let stack_base = stack as u64;
+    #[inline]
+    const fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    fn create_user_process() -> Option<Self> {
+        let process_id = create_process_vm();
+        if process_id == INVALID_PROCESS_ID {
+            klog_info!("task_create: Failed to create process VM");
+            return None;
+        }
+
+        if fileio_create_table_for_process(process_id) != 0 {
+            destroy_process_vm(process_id);
+            return None;
+        }
+
+        Some(Self {
+            process_id,
+            owns_vm: true,
+            owns_file_table: true,
+        })
+    }
+
+    fn clone_from_parent(parent_process_id: u32) -> Option<Self> {
+        let child_process_id = process_vm_clone_cow(parent_process_id);
+        if child_process_id == INVALID_PROCESS_ID {
+            return None;
+        }
+
+        if fileio_clone_table_for_process(parent_process_id, child_process_id) != 0 {
+            destroy_process_vm(child_process_id);
+            return None;
+        }
+
+        Some(Self {
+            process_id: child_process_id,
+            owns_vm: true,
+            owns_file_table: true,
+        })
+    }
+
+    /// Transfer ownership to the task lifecycle.
+    fn disarm(mut self) -> u32 {
+        let process_id = self.process_id;
+        self.process_id = INVALID_PROCESS_ID;
+        self.owns_vm = false;
+        self.owns_file_table = false;
+        process_id
+    }
+
+    fn cleanup_owned_process(process_id: u32, owns_vm: bool, owns_file_table: bool) {
+        if process_id == INVALID_PROCESS_ID {
+            return;
+        }
+
+        if owns_file_table {
+            fileio_destroy_table_for_process(process_id);
+        }
+        if owns_vm {
+            destroy_process_vm(process_id);
+        }
+    }
+}
+
+impl Drop for ProcessResourceLease {
+    fn drop(&mut self) {
+        Self::cleanup_owned_process(self.process_id, self.owns_vm, self.owns_file_table);
+    }
+}
+
+/// Owns a kernel stack allocation during setup and frees it unless transferred.
+struct KernelStackLease {
+    base: *mut c_void,
+}
+
+impl KernelStackLease {
+    fn allocate(size: u64, failure_message: &'static str) -> Option<Self> {
+        let stack = kmalloc(size as usize);
+        if stack.is_null() {
+            klog_info!("{}", failure_message);
+            return None;
+        }
+        Some(Self { base: stack })
+    }
+
+    #[inline]
+    fn base_u64(&self) -> u64 {
+        self.base as u64
+    }
+
+    fn disarm(mut self) -> *mut c_void {
+        let base = self.base;
+        self.base = ptr::null_mut();
+        base
+    }
+}
+
+impl Drop for KernelStackLease {
+    fn drop(&mut self) {
+        if !self.base.is_null() {
+            kfree(self.base);
+            self.base = ptr::null_mut();
+        }
+    }
+}
+
+fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
+    let stack = KernelStackLease::allocate(
+        TASK_STACK_SIZE,
+        "task_create: Failed to allocate kernel stack",
+    )?;
+    let stack_base = stack.disarm() as u64;
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
         stack_base,
@@ -331,36 +454,24 @@ fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
 }
 
 fn allocate_user_task_resources() -> Option<TaskCreateResources> {
-    let process_id = create_process_vm();
-    if process_id == INVALID_PROCESS_ID {
-        klog_info!("task_create: Failed to create process VM");
-        return None;
-    }
+    let process = ProcessResourceLease::create_user_process()?;
+    let process_id = process.process_id();
 
     let stack_top = process_vm_get_stack_top(process_id);
     if stack_top == 0 {
         klog_info!("task_create: Failed to get process stack");
-        destroy_process_vm(process_id);
         return None;
     }
 
-    let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
-    if kstack.is_null() {
-        klog_info!("task_create: Failed to allocate kernel RSP0 stack");
-        destroy_process_vm(process_id);
-        return None;
-    }
-
-    if fileio_create_table_for_process(process_id) != 0 {
-        kfree(kstack);
-        destroy_process_vm(process_id);
-        return None;
-    }
+    let kstack = KernelStackLease::allocate(
+        TASK_KERNEL_STACK_SIZE,
+        "task_create: Failed to allocate kernel RSP0 stack",
+    )?;
 
     Some(TaskCreateResources {
-        process_id,
+        process_id: process.disarm(),
         stack_base: stack_top - TASK_STACK_SIZE,
-        kernel_stack_base: kstack as u64,
+        kernel_stack_base: kstack.disarm() as u64,
         kernel_stack_size: TASK_KERNEL_STACK_SIZE,
     })
 }
@@ -374,14 +485,7 @@ fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
 }
 
 fn cleanup_task_create_resources(process_id: u32, kernel_stack_base: u64) {
-    if process_id != INVALID_PROCESS_ID {
-        fileio_destroy_table_for_process(process_id);
-        destroy_process_vm(process_id);
-        if kernel_stack_base != 0 {
-            kfree(kernel_stack_base as *mut c_void);
-        }
-        return;
-    }
+    ProcessResourceLease::cleanup_owned_process(process_id, true, true);
 
     if kernel_stack_base != 0 {
         kfree(kernel_stack_base as *mut c_void);
@@ -406,18 +510,33 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.refcnt.store(0, Ordering::Release);
 }
 
-fn cleanup_fork_setup_resources(
-    child_process_id: u32,
-    child_kernel_stack: *mut c_void,
-    destroy_file_table: bool,
+enum TaskProcessCleanupMode {
+    KeepVm,
+    DropVm,
+}
+
+fn cleanup_task_process_resources(
+    task_ptr: *mut Task,
+    resolved_id: u32,
+    mode: TaskProcessCleanupMode,
 ) {
-    if destroy_file_table {
-        fileio_destroy_table_for_process(child_process_id);
+    unsafe {
+        video_task_cleanup(resolved_id);
+        shm_cleanup_task(resolved_id);
+
+        if (*task_ptr).process_id == INVALID_PROCESS_ID {
+            return;
+        }
+
+        let process_id = (*task_ptr).process_id;
+        let task_id = (*task_ptr).task_id;
+        if !process_has_other_live_tasks(process_id, task_id) {
+            fileio_destroy_table_for_process(process_id);
+            if matches!(mode, TaskProcessCleanupMode::DropVm) {
+                destroy_process_vm(process_id);
+            }
+        }
     }
-    if !child_kernel_stack.is_null() {
-        kfree(child_kernel_stack);
-    }
-    destroy_process_vm(child_process_id);
 }
 
 fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<usize> {
@@ -764,22 +883,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
     if !is_current {
         cleanup_terminated_task_resources(task_ptr, resolved_id);
     } else {
-        video_task_cleanup(resolved_id);
-        shm_cleanup_task(resolved_id);
-
-        // Current-task termination path (e.g. syscall exit):
-        // close process-owned FDs immediately so pipe reader/writer counts
-        // are decremented before we schedule away. This prevents stuck pipe
-        // readers waiting forever on EOF after writer exit.
-        unsafe {
-            if (*task_ptr).process_id != INVALID_PROCESS_ID {
-                let process_id = (*task_ptr).process_id;
-                let task_id = (*task_ptr).task_id;
-                if !process_has_other_live_tasks(process_id, task_id) {
-                    fileio_destroy_table_for_process(process_id);
-                }
-            }
-        }
+        cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::KeepVm);
 
         // Do not free/defer the current task structure here: we are still
         // executing on its kernel stack until syscall_exit switches away.
@@ -854,18 +958,9 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 }
 
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
-    unsafe {
-        if (*task_ptr).process_id != INVALID_PROCESS_ID {
-            let process_id = (*task_ptr).process_id;
-            let task_id = (*task_ptr).task_id;
-            video_task_cleanup(resolved_id);
-            shm_cleanup_task(resolved_id);
-            if !process_has_other_live_tasks(process_id, task_id) {
-                fileio_destroy_table_for_process(process_id);
-                destroy_process_vm(process_id);
-            }
-        }
+    cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
 
+    unsafe {
         if (*task_ptr).ref_count() > 0 {
             defer_task_cleanup(task_ptr);
         } else {
@@ -1170,30 +1265,28 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_lib::Inter
         return INVALID_TASK_ID;
     }
 
-    let child_process_id = process_vm_clone_cow(parent.process_id);
-    if child_process_id == INVALID_PROCESS_ID {
-        klog_info!("task_fork: process_vm_clone_cow failed");
-        return INVALID_TASK_ID;
-    }
+    let child_process = match ProcessResourceLease::clone_from_parent(parent.process_id) {
+        Some(process) => process,
+        None => {
+            klog_info!("task_fork: process_vm_clone_cow failed");
+            return INVALID_TASK_ID;
+        }
+    };
+    let child_process_id = child_process.process_id();
 
-    let child_kernel_stack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
-    if child_kernel_stack.is_null() {
-        klog_info!("task_fork: failed to allocate kernel stack");
-        cleanup_fork_setup_resources(child_process_id, ptr::null_mut(), false);
-        return INVALID_TASK_ID;
-    }
-
-    if fileio_clone_table_for_process(parent.process_id, child_process_id) != 0 {
-        klog_info!("task_fork: failed to clone file table");
-        cleanup_fork_setup_resources(child_process_id, child_kernel_stack, false);
-        return INVALID_TASK_ID;
-    }
+    let child_kernel_stack = match KernelStackLease::allocate(
+        TASK_KERNEL_STACK_SIZE,
+        "task_fork: failed to allocate kernel stack",
+    ) {
+        Some(stack) => stack,
+        None => return INVALID_TASK_ID,
+    };
+    let child_kernel_stack_base = child_kernel_stack.base_u64();
 
     let (child_task_ptr, child_task_id) = match reserve_task_slot() {
         Ok(values) => values,
         Err(_) => {
             klog_info!("task_fork: no free task slots");
-            cleanup_fork_setup_resources(child_process_id, child_kernel_stack, true);
             return INVALID_TASK_ID;
         }
     };
@@ -1214,8 +1307,8 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_lib::Inter
     child.clear_child_tid = 0;
     child.set_status(TaskStatus::Ready);
 
-    child.kernel_stack_base = child_kernel_stack as u64;
-    child.kernel_stack_top = child_kernel_stack as u64 + TASK_KERNEL_STACK_SIZE;
+    child.kernel_stack_base = child_kernel_stack_base;
+    child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // Build the child's context from the SYSCALL entry frame, NOT from
@@ -1260,6 +1353,9 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_lib::Inter
     }
 
     reset_task_runtime_fields(child);
+    // Ownership is now carried by the child task lifecycle.
+    let _ = child_process.disarm();
+    let _ = child_kernel_stack.disarm();
 
     record_task_created();
 
@@ -1333,55 +1429,39 @@ pub fn task_clone(
     }
 
     let share_vm = flags & CLONE_VM != 0;
-    let share_files = flags & CLONE_FILES != 0;
     let is_thread = flags & CLONE_THREAD != 0;
 
-    // Determine the child's process ID.
-    // CLONE_VM: child shares parent's address space (same process_id).
-    // No CLONE_VM: child gets a COW copy (new process_id), like fork.
+    let child_process = if share_vm {
+        ProcessResourceLease::none()
+    } else {
+        match ProcessResourceLease::clone_from_parent(parent.process_id) {
+            Some(process) => process,
+            None => {
+                klog_info!("task_clone: process_vm_clone_cow failed");
+                return Err(ERRNO_ENOMEM);
+            }
+        }
+    };
     let child_process_id = if share_vm {
         parent.process_id
     } else {
-        let pid = process_vm_clone_cow(parent.process_id);
-        if pid == INVALID_PROCESS_ID {
-            klog_info!("task_clone: process_vm_clone_cow failed");
-            return Err(ERRNO_ENOMEM);
-        }
-        pid
+        child_process.process_id()
     };
 
     // Allocate a kernel stack for the child.
-    let child_kernel_stack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
-    if child_kernel_stack.is_null() {
-        if !share_vm {
-            cleanup_fork_setup_resources(child_process_id, ptr::null_mut(), false);
-        }
-        return Err(ERRNO_ENOMEM);
-    }
-
-    // Clone file table if not sharing and we made a new process.
-    if !share_vm && !share_files {
-        if fileio_clone_table_for_process(parent.process_id, child_process_id) != 0 {
-            if !share_vm {
-                cleanup_fork_setup_resources(child_process_id, child_kernel_stack, false);
-            } else {
-                kfree(child_kernel_stack);
-            }
-            return Err(ERRNO_ENOMEM);
-        }
-    }
+    let child_kernel_stack = match KernelStackLease::allocate(
+        TASK_KERNEL_STACK_SIZE,
+        "task_clone: failed to allocate kernel stack",
+    ) {
+        Some(stack) => stack,
+        None => return Err(ERRNO_ENOMEM),
+    };
+    let child_kernel_stack_base = child_kernel_stack.base_u64();
 
     // Reserve a task slot for the child.
     let (child_task_ptr, child_task_id) = match reserve_task_slot() {
         Ok(values) => values,
-        Err(_) => {
-            if !share_vm {
-                cleanup_fork_setup_resources(child_process_id, child_kernel_stack, !share_files);
-            } else {
-                kfree(child_kernel_stack);
-            }
-            return Err(ERRNO_EAGAIN);
-        }
+        Err(_) => return Err(ERRNO_EAGAIN),
     };
 
     let child = unsafe { &mut *child_task_ptr };
@@ -1412,8 +1492,8 @@ pub fn task_clone(
     child.set_status(TaskStatus::Ready);
 
     // Set up kernel stack.
-    child.kernel_stack_base = child_kernel_stack as u64;
-    child.kernel_stack_top = child_kernel_stack as u64 + TASK_KERNEL_STACK_SIZE;
+    child.kernel_stack_base = child_kernel_stack_base;
+    child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // Child returns 0 from clone.
@@ -1445,6 +1525,11 @@ pub fn task_clone(
     // If sharing VM, CR3 is already inherited from clone_from_raw.
 
     reset_task_runtime_fields(child);
+    // Ownership is now carried by the child task lifecycle.
+    if !share_vm {
+        let _ = child_process.disarm();
+    }
+    let _ = child_kernel_stack.disarm();
     record_task_created();
 
     // CLONE_PARENT_SETTID: write child TID into parent's memory.
