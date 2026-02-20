@@ -476,9 +476,9 @@ To verify privilege separation is working:
 
 1. **Build and run the kernel:**
    ```bash
-   make build
-   make iso
-   make boot
+   just build
+   just iso
+   just boot
    ```
 
 2. **Check boot logs for:**

@@ -27,21 +27,22 @@
 
 ## Get It Running
 
-> **You need:** QEMU, xorriso, mkfs.ext2, and mass skill issue tolerance
+> **You need:** QEMU, xorriso, mkfs.ext2, [`just`](https://github.com/casey/just), and mass skill issue tolerance
 
 ```bash
 # macOS
-brew install qemu xorriso e2fsprogs
+brew install qemu xorriso e2fsprogs just
 
 # Debian/Ubuntu
 sudo apt install qemu-system-x86 xorriso e2fsprogs
+cargo install just  # or: https://github.com/casey/just#installation
 
 # Arch (btw)
-sudo pacman -S qemu-full xorriso e2fsprogs
+sudo pacman -S qemu-full xorriso e2fsprogs just
 
 # Then:
-make setup          # installs rust nightly
-make boot VIDEO=1   # spins the wheel
+just setup          # installs rust nightly
+just boot           # spins the wheel
 ```
 
 > **macOS Note:** The Cocoa display backend is automatically detected and used. If you see display errors, run `qemu-system-x86_64 -display help` to check available backends.
@@ -50,26 +51,28 @@ make boot VIDEO=1   # spins the wheel
 
 |  | Command | What it does |
 |:--:|---------|--------------|
-| | `make boot VIDEO=1` | Boot with display window |
-| | `make boot` | Headless boot (serial only) |
-| | `make boot-log` | Boot with timeout, saves to `test_output.log` |
-| | `make test` | Run the test harness |
+| | `just boot` | Boot with display window |
+| | `just boot-headless` | Headless boot (serial only) |
+| | `just boot-log` | Boot with timeout, saves to `test_output.log` |
+| | `just test` | Run the test harness |
+| | `just --list` | Show all available recipes |
 
 <details>
 <summary><b>Advanced Options</b></summary>
 
 ```bash
-QEMU_DISPLAY=cocoa make boot VIDEO=1  # Force Cocoa (macOS default)
-QEMU_DISPLAY=sdl make boot VIDEO=1    # Force SDL (if installed)
-make show-qemu-resolution             # Show detected framebuffer mode
-QEMU_FB_AUTO=0 make boot VIDEO=1      # Disable auto-detection, use defaults
-QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 make boot VIDEO=1  # Manual override
-QEMU_FB_AUTO_POLICY=max make boot VIDEO=1  # Multi-monitor: pick largest display
-QEMU_FB_AUTO_OUTPUT=DP-1 make boot VIDEO=1 # Multi-monitor: pin specific output
-DEBUG=1 make boot VIDEO=1             # Debug logging
+QEMU_DISPLAY=cocoa just boot           # Force Cocoa (macOS default)
+QEMU_DISPLAY=sdl just boot             # Force SDL (if installed)
+just show-qemu-resolution              # Show detected framebuffer mode
+QEMU_FB_AUTO=0 just boot               # Disable auto-detection, use defaults
+QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 just boot  # Manual override
+QEMU_FB_AUTO_POLICY=max just boot      # Multi-monitor: pick largest display
+QEMU_FB_AUTO_OUTPUT=DP-1 just boot     # Multi-monitor: pin specific output
+DEBUG=1 just boot                      # Debug logging
+just boot-log video=1                  # Timed boot with display window
 ```
 
-**Note:** On macOS, GTK is not available. The Makefile automatically uses Cocoa display.
+**Note:** On macOS, GTK is not available. The justfile automatically uses Cocoa display.
 
 </details>
 
