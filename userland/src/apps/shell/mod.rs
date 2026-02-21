@@ -81,46 +81,141 @@ pub fn shell_pid() -> u32 {
     unsafe { *SHELL_PID.get() }
 }
 
-fn build_prompt(buf: &mut [u8; 280]) -> usize {
-    let cwd = unsafe { &*CWD.get() };
-    let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(0);
-    let mut pos = 0;
+pub(crate) const PROMPT_BUF_MAX: usize = 280;
 
-    buf[pos] = b'[';
-    pos += 1;
+// Fallback: matches the previous hardcoded `[/path] $ ` format.
+const DEFAULT_PS1: &[u8] = b"[\\w] \\$ ";
 
-    let copy_len = cwd_len.min(buf.len() - 5);
-    buf[pos..pos + copy_len].copy_from_slice(&cwd[..copy_len]);
-    pos += copy_len;
+/// Expand PS1 escape sequences (`\w` `\u` `\h` `\$` `\t` `\n` `\\`) into
+/// `text_buf`/`color_buf`. Returns bytes written.
+fn expand_ps1(
+    ps1: &[u8],
+    text_buf: &mut [u8; PROMPT_BUF_MAX],
+    color_buf: &mut [u8; PROMPT_BUF_MAX],
+) -> usize {
+    use crate::syscall::core as sys_core;
+    use crate::syscall::process;
+    use display::{
+        COLOR_COMMENT_GRAY, COLOR_DEFAULT, COLOR_EXEC_GREEN, COLOR_PATH_BLUE, COLOR_PROMPT_ACCENT,
+    };
 
-    buf[pos] = b']';
-    pos += 1;
-    buf[pos] = b' ';
-    pos += 1;
-    buf[pos] = b'$';
-    pos += 1;
-    buf[pos] = b' ';
-    pos += 1;
+    let mut out = 0usize;
+    let mut i = 0usize;
 
-    pos
+    while i < ps1.len() && out < PROMPT_BUF_MAX {
+        if ps1[i] == b'\\' && i + 1 < ps1.len() {
+            i += 1;
+            match ps1[i] {
+                b'w' => {
+                    let cwd = unsafe { &*CWD.get() };
+                    let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(0);
+                    let avail = PROMPT_BUF_MAX - out;
+                    let copy = cwd_len.min(avail);
+                    text_buf[out..out + copy].copy_from_slice(&cwd[..copy]);
+                    fill_color(color_buf, out, copy, COLOR_PATH_BLUE);
+                    out += copy;
+                }
+                b'u' => {
+                    out += emit_segment(text_buf, color_buf, out, b"root", COLOR_EXEC_GREEN);
+                }
+                b'h' => {
+                    out += emit_segment(text_buf, color_buf, out, b"sloptopia", COLOR_EXEC_GREEN);
+                }
+                b'$' => {
+                    let ch = if process::getuid() == 0 { b'#' } else { b'$' };
+                    if out < PROMPT_BUF_MAX {
+                        text_buf[out] = ch;
+                        color_buf[out] = COLOR_PROMPT_ACCENT;
+                        out += 1;
+                    }
+                }
+                b't' => {
+                    let ms = sys_core::get_time_ms();
+                    let total_secs = (ms / 1000) as u32;
+                    let h = total_secs / 3600;
+                    let m = (total_secs % 3600) / 60;
+                    let s = total_secs % 60;
+                    let mut time_buf = [0u8; 8];
+                    time_buf[0] = b'0' + (h / 10 % 10) as u8;
+                    time_buf[1] = b'0' + (h % 10) as u8;
+                    time_buf[2] = b':';
+                    time_buf[3] = b'0' + (m / 10) as u8;
+                    time_buf[4] = b'0' + (m % 10) as u8;
+                    time_buf[5] = b':';
+                    time_buf[6] = b'0' + (s / 10) as u8;
+                    time_buf[7] = b'0' + (s % 10) as u8;
+                    out += emit_segment(text_buf, color_buf, out, &time_buf, COLOR_COMMENT_GRAY);
+                }
+                b'n' => {
+                    if out < PROMPT_BUF_MAX {
+                        text_buf[out] = b'\n';
+                        color_buf[out] = COLOR_DEFAULT;
+                        out += 1;
+                    }
+                }
+                b'\\' => {
+                    if out < PROMPT_BUF_MAX {
+                        text_buf[out] = b'\\';
+                        color_buf[out] = COLOR_DEFAULT;
+                        out += 1;
+                    }
+                }
+                other => {
+                    if out < PROMPT_BUF_MAX {
+                        text_buf[out] = b'\\';
+                        color_buf[out] = COLOR_DEFAULT;
+                        out += 1;
+                    }
+                    if out < PROMPT_BUF_MAX {
+                        text_buf[out] = other;
+                        color_buf[out] = COLOR_DEFAULT;
+                        out += 1;
+                    }
+                }
+            }
+            i += 1;
+        } else {
+            text_buf[out] = ps1[i];
+            color_buf[out] = display::COLOR_DEFAULT;
+            out += 1;
+            i += 1;
+        }
+    }
+
+    out
 }
 
-/// Color indices for `[/path] $ `: brackets+path in PATH_BLUE, `$` in PROMPT_ACCENT.
-fn build_prompt_colors(buf: &mut [u8; 280], prompt_len: usize) {
-    use display::{COLOR_DEFAULT, COLOR_PATH_BLUE, COLOR_PROMPT_ACCENT};
+#[inline]
+fn emit_segment(
+    buf: &mut [u8; PROMPT_BUF_MAX],
+    colors: &mut [u8; PROMPT_BUF_MAX],
+    offset: usize,
+    segment: &[u8],
+    color_idx: u8,
+) -> usize {
+    let avail = PROMPT_BUF_MAX - offset;
+    let copy = segment.len().min(avail);
+    buf[offset..offset + copy].copy_from_slice(&segment[..copy]);
+    fill_color(colors, offset, copy, color_idx);
+    copy
+}
 
-    let cwd = unsafe { &*CWD.get() };
-    let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(0);
-    let bracket_and_path = 1 + cwd_len.min(275) + 1;
+#[inline]
+fn fill_color(colors: &mut [u8; PROMPT_BUF_MAX], offset: usize, count: usize, color_idx: u8) {
+    let end = (offset + count).min(PROMPT_BUF_MAX);
+    for slot in &mut colors[offset..end] {
+        *slot = color_idx;
+    }
+}
 
-    for i in 0..prompt_len.min(280) {
-        buf[i] = if i < bracket_and_path {
-            COLOR_PATH_BLUE
-        } else if i == bracket_and_path + 1 {
-            COLOR_PROMPT_ACCENT
-        } else {
-            COLOR_DEFAULT
-        };
+fn build_prompt(
+    text_buf: &mut [u8; PROMPT_BUF_MAX],
+    color_buf: &mut [u8; PROMPT_BUF_MAX],
+) -> usize {
+    let ps1 = env::get(b"PS1");
+    match ps1 {
+        Some((val, len)) => expand_ps1(&val[..len], text_buf, color_buf),
+        None => expand_ps1(DEFAULT_PS1, text_buf, color_buf),
     }
 }
 
@@ -146,8 +241,8 @@ fn write_colored_prompt(prompt: &[u8], colors: &[u8]) {
 }
 
 pub struct ShellState {
-    pub prompt_buf: [u8; 280],
-    pub prompt_colors: [u8; 280],
+    pub prompt_buf: [u8; PROMPT_BUF_MAX],
+    pub prompt_colors: [u8; PROMPT_BUF_MAX],
     pub prompt_len: usize,
 }
 
@@ -172,15 +267,14 @@ pub fn shell_user_main(_arg: *mut c_void) {
     shell_write(WELCOME);
 
     let mut state = ShellState {
-        prompt_buf: [0; 280],
-        prompt_colors: [0; 280],
+        prompt_buf: [0; PROMPT_BUF_MAX],
+        prompt_colors: [0; PROMPT_BUF_MAX],
         prompt_len: 0,
     };
 
     loop {
         jobs::notify_completed_jobs();
-        state.prompt_len = build_prompt(&mut state.prompt_buf);
-        build_prompt_colors(&mut state.prompt_colors, state.prompt_len);
+        state.prompt_len = build_prompt(&mut state.prompt_buf, &mut state.prompt_colors);
         let prompt = &state.prompt_buf[..state.prompt_len];
 
         write_colored_prompt(prompt, &state.prompt_colors[..state.prompt_len]);

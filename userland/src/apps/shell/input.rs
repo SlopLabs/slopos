@@ -34,7 +34,8 @@ const CTRL_L: u8 = 0x0C;
 const CTRL_U: u8 = 0x15;
 const CTRL_W: u8 = 0x17;
 
-static PROMPT_COLORS: super::SyncUnsafeCell<[u8; 280]> = super::SyncUnsafeCell::new([0; 280]);
+static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
+    super::SyncUnsafeCell::new([0; super::PROMPT_BUF_MAX]);
 static PROMPT_COLORS_LEN: super::SyncUnsafeCell<usize> = super::SyncUnsafeCell::new(0);
 
 pub fn read_command_line(
@@ -44,7 +45,7 @@ pub fn read_command_line(
 ) -> i32 {
     unsafe {
         let colors = &mut *PROMPT_COLORS.get();
-        let copy_len = prompt_colors.len().min(280);
+        let copy_len = prompt_colors.len().min(super::PROMPT_BUF_MAX);
         colors[..copy_len].copy_from_slice(&prompt_colors[..copy_len]);
         *PROMPT_COLORS_LEN.get() = copy_len;
     }
@@ -57,7 +58,7 @@ pub fn read_command_line(
 fn prompt_colors_slice() -> &'static [u8] {
     unsafe {
         let len = *PROMPT_COLORS_LEN.get();
-        let colors: &[u8; 280] = &*PROMPT_COLORS.get();
+        let colors: &[u8; super::PROMPT_BUF_MAX] = &*PROMPT_COLORS.get();
         &colors[..len]
     }
 }

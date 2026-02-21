@@ -129,6 +129,7 @@ pub fn initialize_defaults() {
     set(b"HOME", b"/");
     set(b"USER", b"root");
     set(b"TERM", b"slopos");
+    set(b"PS1", b"\\u@\\h:\\w\\$ ");
 }
 
 pub fn for_each<F: FnMut(&[u8], &[u8])>(mut f: F) {

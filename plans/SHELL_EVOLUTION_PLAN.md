@@ -614,15 +614,15 @@ Support double and single quotes in command arguments.
 
 ### 5C: Prompt Customization
 
-- [ ] **5C.1** Parse `$PS1` environment variable for prompt format:
+- [x] **5C.1** Parse `$PS1` environment variable for prompt format:
   - `\w` → current working directory
   - `\u` → username (always `root`)
   - `\h` → hostname (always `sloptopia`)
   - `\$` → `$` for normal user, `#` for root
   - `\t` → current time
   - `\n` → newline
-- [ ] **5C.2** Default PS1: `\u@\h:\w\$ ` → `root@sloptopia:/path$ `
-- [ ] **5C.3** Verify: `export PS1="[\w] # "` → changes prompt
+- [x] **5C.2** Default PS1: `\u@\h:\w\$ ` → `root@sloptopia:/path$ `
+- [x] **5C.3** Verify: `export PS1="[\w] # "` → changes prompt
 
 ### 5D: Visual Improvements
 
@@ -899,7 +899,7 @@ Keyboard → input.rs (line editing, history)
 | **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | **Complete** | 17 | 17 | — |
 | **Phase 4**: New Builtins | **Complete** | 27 | 27 | — |
-| **Phase 5**: Polish & Color | In Progress | 13 | 9 | Phase 1 |
+| **Phase 5**: Polish & Color | In Progress | 13 | 12 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
-| **Total** | | **163** | **104** | |
+| **Total** | | **163** | **107** | |
