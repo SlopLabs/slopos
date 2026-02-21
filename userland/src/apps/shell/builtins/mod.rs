@@ -4,6 +4,7 @@ pub mod env;
 pub mod fs;
 pub mod process;
 pub mod system;
+pub mod utils;
 
 use super::display::shell_write;
 use super::parser::u_streq_slice;
@@ -16,6 +17,7 @@ pub enum BuiltinCategory {
     Filesystem,
     Process,
     Environment,
+    Utility,
 }
 
 impl BuiltinCategory {
@@ -24,6 +26,7 @@ impl BuiltinCategory {
         BuiltinCategory::Filesystem,
         BuiltinCategory::Process,
         BuiltinCategory::Environment,
+        BuiltinCategory::Utility,
     ];
 
     pub fn label(self) -> &'static [u8] {
@@ -32,6 +35,7 @@ impl BuiltinCategory {
             BuiltinCategory::Filesystem => b"Filesystem",
             BuiltinCategory::Process => b"Process Control",
             BuiltinCategory::Environment => b"Environment",
+            BuiltinCategory::Utility => b"Utility",
         }
     }
 }
@@ -379,6 +383,71 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         detail: b"Set shell variables or, without arguments, list\nall current variables.",
         category: Environment,
         func: env::cmd_set,
+    },
+    // ── Utility ─────────────────────────────────────────────────────────────
+    BuiltinEntry {
+        name: b"sleep",
+        desc: b"Sleep for N milliseconds",
+        usage: b"sleep <ms>",
+        detail: b"Pause execution for the specified number of\nmilliseconds.",
+        category: Utility,
+        func: utils::cmd_sleep,
+    },
+    BuiltinEntry {
+        name: b"true",
+        desc: b"Return success",
+        usage: b"true",
+        detail: b"Do nothing and return exit code 0.",
+        category: Utility,
+        func: utils::cmd_true,
+    },
+    BuiltinEntry {
+        name: b"false",
+        desc: b"Return failure",
+        usage: b"false",
+        detail: b"Do nothing and return exit code 1.",
+        category: Utility,
+        func: utils::cmd_false,
+    },
+    BuiltinEntry {
+        name: b"seq",
+        desc: b"Print number sequence",
+        usage: b"seq [start] <end>",
+        detail: b"Print integers from start to end, one per line.\nIf only one argument is given, start defaults to 1.",
+        category: Utility,
+        func: utils::cmd_seq,
+    },
+    BuiltinEntry {
+        name: b"yes",
+        desc: b"Repeat a string",
+        usage: b"yes [string]",
+        detail: b"Repeatedly print a string (default 'y') followed\nby a newline. Useful in pipelines (yes | head -5).\nStandalone runs are capped at 100000 iterations.",
+        category: Utility,
+        func: utils::cmd_yes,
+    },
+    BuiltinEntry {
+        name: b"random",
+        desc: b"Print a random number",
+        usage: b"random [max]",
+        detail: b"Print a random number. With max, prints a value\nin the range 0..max (exclusive). Without max,\nprints a raw 32-bit random value.",
+        category: Utility,
+        func: utils::cmd_random,
+    },
+    BuiltinEntry {
+        name: b"roulette",
+        desc: b"Spin the Wheel of Fate",
+        usage: b"roulette",
+        detail: b"Gamble with destiny. A win awards +10 W's.\nA loss reboots the system. The house always wins.\nEventually.",
+        category: Utility,
+        func: utils::cmd_roulette,
+    },
+    BuiltinEntry {
+        name: b"wl",
+        desc: b"Show W/L balance",
+        usage: b"wl",
+        detail: b"Display the current W/L currency balance from\nthe Wheel of Fate's ledger.",
+        category: Utility,
+        func: utils::cmd_wl,
     },
 ];
 

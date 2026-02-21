@@ -1,6 +1,6 @@
 # SlopOS Shell Evolution Plan
 
-> **Status**: Phase 4A Complete (12/12 commands done)
+> **Status**: Phase 4 Complete (27/27 commands done)
 > **Target**: Transform the shell from a command dispatcher into a real POSIX-inspired shell
 > **Current**: `userland/src/apps/shell/` — modular directory (13 files), 25 commands, history, line editing, pipes, env vars, PATH, quoting
 
@@ -553,20 +553,20 @@ Support double and single quotes in command arguments.
 
 ### 4C: Utility Commands
 
-- [ ] **4C.1** `sleep <ms>` — sleep for N milliseconds. Uses `SYSCALL_SLEEP_MS` (5)
-- [ ] **4C.2** `true` — always returns exit code 0
-- [ ] **4C.3** `false` — always returns exit code 1
-- [ ] **4C.4** `seq <start> <end>` — print numbers from start to end
-- [ ] **4C.5** `yes [string]` — repeatedly print string (default "y") until killed
-- [ ] **4C.6** `random [max]` — print random number (0..max). Uses `SYSCALL_RANDOM_NEXT` (12)
-- [ ] **4C.7** `roulette` — spin the Wheel of Fate from the command line! Uses `SYSCALL_ROULETTE` (4). Award W/L accordingly
-- [ ] **4C.8** `wl` — show current W/L balance (ties into the W/L currency system)
+- [x] **4C.1** `sleep <ms>` — sleep for N milliseconds. Uses `SYSCALL_SLEEP_MS` (5)
+- [x] **4C.2** `true` — always returns exit code 0
+- [x] **4C.3** `false` — always returns exit code 1
+- [x] **4C.4** `seq <start> <end>` — print numbers from start to end
+- [x] **4C.5** `yes [string]` — repeatedly print string (default "y") until killed
+- [x] **4C.6** `random [max]` — print random number (0..max). Uses `SYSCALL_RANDOM_NEXT` (12)
+- [x] **4C.7** `roulette` — spin the Wheel of Fate from the command line! Uses `SYSCALL_ROULETTE` (4). Award W/L accordingly
+- [x] **4C.8** `wl` — show current W/L balance (ties into the W/L currency system)
 
 ### Phase 4 Gate
 
 - [x] **GATE**: At least 10 new commands implemented and working (12 in Phase 4A: stat, touch, cp, mv, head, tail, wc, hexdump, diff, tee + ls/cat enhancements)
 - [x] **GATE**: `stat`, `touch`, `cp`, `uptime`, `free` work correctly
-- [ ] **GATE**: `make test` passes
+- [x] **GATE**: `make test` passes (402/402)
 
 ---
 
@@ -886,8 +886,8 @@ Keyboard → input.rs (line editing, history)
 | **Phase 1**: Core Shell | **Complete** | 28 | 28 | — |
 | **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | **Complete** | 17 | 17 | — |
-| **Phase 4**: New Builtins | **4A+4B Complete** | 27 | 19 | — |
+| **Phase 4**: New Builtins | **Complete** | 27 | 27 | — |
 | **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
-| **Total** | | **163** | **91** | |
+| **Total** | | **163** | **99** | |
