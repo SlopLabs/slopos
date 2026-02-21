@@ -545,4 +545,5 @@ pub struct UserSysInfo {
     pub scheduler_yields: u64,
     pub ready_tasks: u32,
     pub schedule_calls: u32,
+    pub wl_balance: i64,
 }

@@ -137,6 +137,7 @@ define_syscall!(syscall_sys_info(ctx, args) {
         scheduler_yields: 0,
         ready_tasks: 0,
         schedule_calls: 0,
+        wl_balance: slopos_lib::wl_currency::check_balance(),
     };
 
     get_page_allocator_stats(
