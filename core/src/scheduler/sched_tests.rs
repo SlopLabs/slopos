@@ -20,10 +20,10 @@ use super::scheduler::{
     scheduler_shutdown, scheduler_timer_tick, unschedule_task,
 };
 use super::task::{
-    init_task_manager, task_create, task_find_by_id, task_get_info, task_set_state,
-    task_shutdown_all, task_terminate, IdtEntry, Task, TaskStatus, INVALID_PROCESS_ID,
-    INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH,
-    TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
+    TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create, task_find_by_id,
+    task_get_info, task_set_state, task_shutdown_all, task_terminate,
 };
 use slopos_lib::arch::gdt::SegmentSelector;
 use slopos_lib::arch::idt::SYSCALL_VECTOR;
