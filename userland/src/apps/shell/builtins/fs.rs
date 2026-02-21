@@ -12,7 +12,7 @@ use crate::syscall::{
 };
 
 use super::super::buffers;
-use super::super::display::shell_write;
+use super::super::display::{COLOR_DIR_BLUE, COLOR_ERROR_RED, shell_write, shell_write_idx};
 use super::super::jobs;
 use super::super::parser::normalize_path;
 use super::super::{
@@ -22,7 +22,7 @@ use super::super::{
 
 pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -38,7 +38,7 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             path_buf.as_ptr()
         } else {
             if normalize_path(path_ptr, path_buf) != 0 {
-                shell_write(PATH_TOO_LONG);
+                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
                 return ptr::null();
             }
             path_buf.as_ptr()
@@ -52,11 +52,11 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     let result = buffers::with_list_entries(|entries| {
         let mut stat = UserFsStat::default();
         if fs::stat_path(path as *const c_char, &mut stat).is_err() {
-            shell_write(ERR_NO_SUCH);
+            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
             return 1;
         }
         if !stat.is_directory() {
-            shell_write(b"ls: not a directory\n");
+            shell_write_idx(b"ls: not a directory\n", COLOR_ERROR_RED);
             return 1;
         }
 
@@ -67,7 +67,7 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
         };
 
         if fs::list_dir(path as *const c_char, &mut list).is_err() {
-            shell_write(ERR_NO_SUCH);
+            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
             return 1;
         }
 
@@ -96,8 +96,8 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
                 continue;
             }
             if entry.is_directory() {
-                shell_write(&entry.name[..name_len]);
-                shell_write(b"/\n");
+                shell_write_idx(&entry.name[..name_len], COLOR_DIR_BLUE);
+                shell_write_idx(b"/\n", COLOR_DIR_BLUE);
             } else {
                 shell_write(&entry.name[..name_len]);
                 shell_write(b" (");
@@ -141,7 +141,7 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
         }
         let result = buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[i], path_buf) != 0 {
-                shell_write(PATH_TOO_LONG);
+                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
                 return 1;
             }
 
@@ -149,8 +149,8 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
             let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
                 Ok(fd) => fd,
                 Err(_) => {
-                    shell_write(b"cat: ");
-                    shell_write(ERR_NO_SUCH);
+                    shell_write_idx(b"cat: ", COLOR_ERROR_RED);
+                    shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
                     return 1;
                 }
             };
@@ -158,7 +158,7 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
                 Ok(n) => n,
                 Err(_) => {
                     let _ = fs::close_fd(fd);
-                    shell_write(b"cat: read error\n");
+                    shell_write_idx(b"cat: read error\n", COLOR_ERROR_RED);
                     return 1;
                 }
             };
@@ -186,27 +186,27 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(ERR_MISSING_FILE);
+        shell_write_idx(ERR_MISSING_FILE, COLOR_ERROR_RED);
         return 1;
     }
     if argc < 3 {
-        shell_write(ERR_MISSING_TEXT);
+        shell_write_idx(ERR_MISSING_TEXT, COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
 
         let text = argv[2];
         if text.is_null() {
-            shell_write(ERR_MISSING_TEXT);
+            shell_write_idx(ERR_MISSING_TEXT, COLOR_ERROR_RED);
             return 1;
         }
 
@@ -223,7 +223,7 @@ pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
         ) {
             Ok(fd) => fd,
             Err(_) => {
-                shell_write(b"write failed\n");
+                shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -231,13 +231,13 @@ pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
             Ok(n) => n,
             Err(_) => {
                 let _ = fs::close_fd(fd);
-                shell_write(b"write failed\n");
+                shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
         let _ = fs::close_fd(fd);
         if w != len {
-            shell_write(b"write failed\n");
+            shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
             return 1;
         }
         0
@@ -246,21 +246,21 @@ pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(ERR_MISSING_OPERAND);
+        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
         return 1;
     }
     if argc > 2 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
         if fs::mkdir_path(path_buf.as_ptr() as *const c_char).is_err() {
-            shell_write(b"mkdir failed\n");
+            shell_write_idx(b"mkdir failed\n", COLOR_ERROR_RED);
             return 1;
         }
         0
@@ -269,21 +269,21 @@ pub fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(ERR_MISSING_OPERAND);
+        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
         return 1;
     }
     if argc > 2 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
         if fs::unlink_path(path_buf.as_ptr() as *const c_char).is_err() {
-            shell_write(b"rm failed\n");
+            shell_write_idx(b"rm failed\n", COLOR_ERROR_RED);
             return 1;
         }
         0
@@ -292,7 +292,7 @@ pub fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -332,7 +332,7 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
                     }
                 }
             } else if normalize_path(arg, &mut resolved) != 0 {
-                shell_write(PATH_TOO_LONG);
+                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
                 return 1;
             }
         }
@@ -346,11 +346,11 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
 
     let mut stat = UserFsStat::default();
     if fs::stat_path(resolved.as_ptr() as *const c_char, &mut stat).is_err() {
-        shell_write(ERR_NO_SUCH);
+        shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
         return 1;
     }
     if !stat.is_directory() {
-        shell_write(b"cd: not a directory\n");
+        shell_write_idx(b"cd: not a directory\n", COLOR_ERROR_RED);
         return 1;
     }
 
@@ -368,23 +368,23 @@ pub fn cmd_pwd(_argc: i32, _argv: &[*const u8]) -> i32 {
 
 pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(ERR_MISSING_OPERAND);
+        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
         return 1;
     }
     if argc > 2 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
 
         let mut stat = UserFsStat::default();
         if fs::stat_path(path_buf.as_ptr() as *const c_char, &mut stat).is_err() {
-            shell_write(ERR_NO_SUCH);
+            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
             return 1;
         }
 
@@ -412,7 +412,7 @@ pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(ERR_MISSING_OPERAND);
+        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -423,7 +423,7 @@ pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
         }
         let result = buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[i], path_buf) != 0 {
-                shell_write(PATH_TOO_LONG);
+                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
                 return 1;
             }
 
@@ -438,7 +438,7 @@ pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
             ) {
                 Ok(fd) => fd,
                 Err(_) => {
-                    shell_write(b"touch: cannot create file\n");
+                    shell_write_idx(b"touch: cannot create file\n", COLOR_ERROR_RED);
                     return 1;
                 }
             };
@@ -454,11 +454,11 @@ pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 3 {
-        shell_write(b"cp: missing operand\n");
+        shell_write_idx(b"cp: missing operand\n", COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -466,16 +466,19 @@ pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
     let mut dst_path = [0u8; 256];
 
     if normalize_path(argv[1], &mut src_path) != 0 {
-        shell_write(PATH_TOO_LONG);
+        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
         return 1;
     }
     if normalize_path(argv[2], &mut dst_path) != 0 {
-        shell_write(PATH_TOO_LONG);
+        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
         return 1;
     }
 
     if paths_equal(&src_path, &dst_path) {
-        shell_write(b"cp: source and destination are the same\n");
+        shell_write_idx(
+            b"cp: source and destination are the same\n",
+            COLOR_ERROR_RED,
+        );
         return 1;
     }
 
@@ -484,11 +487,11 @@ pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 3 {
-        shell_write(b"mv: missing operand\n");
+        shell_write_idx(b"mv: missing operand\n", COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -496,16 +499,19 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
     let mut dst_path = [0u8; 256];
 
     if normalize_path(argv[1], &mut src_path) != 0 {
-        shell_write(PATH_TOO_LONG);
+        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
         return 1;
     }
     if normalize_path(argv[2], &mut dst_path) != 0 {
-        shell_write(PATH_TOO_LONG);
+        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
         return 1;
     }
 
     if paths_equal(&src_path, &dst_path) {
-        shell_write(b"mv: source and destination are the same\n");
+        shell_write_idx(
+            b"mv: source and destination are the same\n",
+            COLOR_ERROR_RED,
+        );
         return 1;
     }
 
@@ -515,7 +521,7 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
     }
 
     if fs::unlink_path(src_path.as_ptr() as *const c_char).is_err() {
-        shell_write(b"mv: cannot remove source\n");
+        shell_write_idx(b"mv: cannot remove source\n", COLOR_ERROR_RED);
         return 1;
     }
     0
@@ -523,7 +529,7 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -543,7 +549,7 @@ pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
         let n = match jobs::parse_u32_arg(argv[2]) {
             Some(n) if n > 0 => n as usize,
             _ => {
-                shell_write(b"head: invalid line count\n");
+                shell_write_idx(b"head: invalid line count\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -556,14 +562,14 @@ pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[file_arg_idx], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
 
         let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
             Ok(fd) => fd,
             Err(_) => {
-                shell_write(ERR_NO_SUCH);
+                shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -606,7 +612,7 @@ fn head_from_fd(fd: i32, n_lines: usize) -> i32 {
 
 pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -621,7 +627,7 @@ pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
         let n = match jobs::parse_u32_arg(argv[2]) {
             Some(n) if n > 0 => n as usize,
             _ => {
-                shell_write(b"tail: invalid line count\n");
+                shell_write_idx(b"tail: invalid line count\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -634,14 +640,14 @@ pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[file_arg_idx], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
 
         let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
             Ok(fd) => fd,
             Err(_) => {
-                shell_write(ERR_NO_SUCH);
+                shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -752,15 +758,15 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
         }
         let result = buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[i], path_buf) != 0 {
-                shell_write(PATH_TOO_LONG);
+                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
                 return 1;
             }
 
             let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
                 Ok(fd) => fd,
                 Err(_) => {
-                    shell_write(b"wc: ");
-                    shell_write(ERR_NO_SUCH);
+                    shell_write_idx(b"wc: ", COLOR_ERROR_RED);
+                    shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
                     return 1;
                 }
             };
@@ -820,11 +826,11 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(ERR_MISSING_FILE);
+        shell_write_idx(ERR_MISSING_FILE, COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -832,7 +838,7 @@ pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
         match jobs::parse_u32_arg(argv[2]) {
             Some(n) => n as usize,
             None => {
-                shell_write(b"hexdump: invalid byte count\n");
+                shell_write_idx(b"hexdump: invalid byte count\n", COLOR_ERROR_RED);
                 return 1;
             }
         }
@@ -842,14 +848,14 @@ pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write(PATH_TOO_LONG);
+            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
             return 1;
         }
 
         let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
             Ok(fd) => fd,
             Err(_) => {
-                shell_write(ERR_NO_SUCH);
+                shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -860,7 +866,7 @@ pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
             Ok(n) => n,
             Err(_) => {
                 let _ = fs::close_fd(fd);
-                shell_write(b"hexdump: read error\n");
+                shell_write_idx(b"hexdump: read error\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -911,11 +917,11 @@ pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 3 {
-        shell_write(b"diff: missing operand\n");
+        shell_write_idx(b"diff: missing operand\n", COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write(ERR_TOO_MANY_ARGS);
+        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -923,11 +929,11 @@ pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
     let mut path2 = [0u8; 256];
 
     if normalize_path(argv[1], &mut path1) != 0 {
-        shell_write(PATH_TOO_LONG);
+        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
         return 1;
     }
     if normalize_path(argv[2], &mut path2) != 0 {
-        shell_write(PATH_TOO_LONG);
+        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
         return 1;
     }
 
@@ -1016,7 +1022,7 @@ pub fn cmd_tee(argc: i32, argv: &[*const u8]) -> i32 {
     let file_fd = if let Some(idx) = file_arg {
         buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[idx], path_buf) != 0 {
-                shell_write(PATH_TOO_LONG);
+                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
                 return -1i32;
             }
             let flags = if append {
@@ -1031,7 +1037,7 @@ pub fn cmd_tee(argc: i32, argv: &[*const u8]) -> i32 {
             match fs::open_path(path_buf.as_ptr() as *const c_char, flags) {
                 Ok(fd) => fd as i32,
                 Err(_) => {
-                    shell_write(b"tee: cannot open file\n");
+                    shell_write_idx(b"tee: cannot open file\n", COLOR_ERROR_RED);
                     -1i32
                 }
             }
@@ -1081,18 +1087,18 @@ fn entry_name_gt(a: &UserFsEntry, b: &UserFsEntry) -> bool {
 fn copy_file_inner(src_path: &[u8], dst_path: &[u8]) -> i32 {
     let mut stat = UserFsStat::default();
     if fs::stat_path(src_path.as_ptr() as *const c_char, &mut stat).is_err() {
-        shell_write(ERR_NO_SUCH);
+        shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
         return 1;
     }
     if stat.is_directory() {
-        shell_write(b"cannot copy directory\n");
+        shell_write_idx(b"cannot copy directory\n", COLOR_ERROR_RED);
         return 1;
     }
 
     let src_fd = match fs::open_path(src_path.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
         Ok(fd) => fd,
         Err(_) => {
-            shell_write(b"cannot open source\n");
+            shell_write_idx(b"cannot open source\n", COLOR_ERROR_RED);
             return 1;
         }
     };
@@ -1105,7 +1111,7 @@ fn copy_file_inner(src_path: &[u8], dst_path: &[u8]) -> i32 {
         Ok(fd) => fd,
         Err(_) => {
             let _ = fs::close_fd(src_fd);
-            shell_write(b"cannot create destination\n");
+            shell_write_idx(b"cannot create destination\n", COLOR_ERROR_RED);
             return 1;
         }
     };
@@ -1117,7 +1123,7 @@ fn copy_file_inner(src_path: &[u8], dst_path: &[u8]) -> i32 {
             Err(_) => {
                 let _ = fs::close_fd(src_fd);
                 let _ = fs::close_fd(dst_fd);
-                shell_write(b"read error\n");
+                shell_write_idx(b"read error\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
@@ -1127,7 +1133,7 @@ fn copy_file_inner(src_path: &[u8], dst_path: &[u8]) -> i32 {
         if fs::write_slice(dst_fd, &buf[..n]).is_err() {
             let _ = fs::close_fd(src_fd);
             let _ = fs::close_fd(dst_fd);
-            shell_write(b"write error\n");
+            shell_write_idx(b"write error\n", COLOR_ERROR_RED);
             return 1;
         }
     }
@@ -1141,7 +1147,7 @@ fn read_file_into_buf(path: &[u8], buf: &mut [u8]) -> Option<usize> {
     let fd = match fs::open_path(path.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
         Ok(fd) => fd,
         Err(_) => {
-            shell_write(ERR_NO_SUCH);
+            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
             return None;
         }
     };
