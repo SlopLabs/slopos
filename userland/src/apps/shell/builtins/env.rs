@@ -1,7 +1,7 @@
 use crate::runtime;
 
 use super::super::NL;
-use super::super::display::shell_write;
+use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
 use super::super::env;
 
 fn find_eq(data: &[u8]) -> Option<usize> {
@@ -35,15 +35,15 @@ pub fn cmd_export(argc: i32, argv: &[*const u8]) -> i32 {
             let key = &bytes[..eq_pos];
             let value = &bytes[eq_pos + 1..];
             if key.is_empty() {
-                shell_write(b"export: invalid identifier\n");
+                shell_write_idx(b"export: invalid identifier\n", COLOR_ERROR_RED);
                 return 1;
             }
             env::set(key, value);
         } else {
             if env::get(bytes).is_none() {
-                shell_write(b"export: ");
-                shell_write(bytes);
-                shell_write(b": not found\n");
+                shell_write_idx(b"export: ", COLOR_ERROR_RED);
+                shell_write_idx(bytes, COLOR_ERROR_RED);
+                shell_write_idx(b": not found\n", COLOR_ERROR_RED);
                 return 1;
             }
         }
@@ -53,7 +53,7 @@ pub fn cmd_export(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_unset(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(b"unset: missing variable name\n");
+        shell_write_idx(b"unset: missing variable name\n", COLOR_ERROR_RED);
         return 1;
     }
     for i in 1..argc as usize {
@@ -105,12 +105,12 @@ pub fn cmd_set(argc: i32, argv: &[*const u8]) -> i32 {
             let key = &bytes[..eq_pos];
             let value = &bytes[eq_pos + 1..];
             if key.is_empty() {
-                shell_write(b"set: invalid identifier\n");
+                shell_write_idx(b"set: invalid identifier\n", COLOR_ERROR_RED);
                 return 1;
             }
             env::set(key, value);
         } else {
-            shell_write(b"set: expected KEY=VALUE\n");
+            shell_write_idx(b"set: expected KEY=VALUE\n", COLOR_ERROR_RED);
             return 1;
         }
     }

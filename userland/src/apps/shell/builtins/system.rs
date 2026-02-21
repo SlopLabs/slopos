@@ -1,7 +1,10 @@
 use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
-use super::super::display::{shell_console_clear, shell_write};
+use super::super::display::{
+    COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT,
+    shell_console_clear, shell_write, shell_write_idx,
+};
 use super::super::jobs::write_u64;
 use super::super::parser::u_streq_slice;
 use super::super::{HALTED, NL, REBOOTING};
@@ -10,8 +13,8 @@ use super::{BUILTINS, BuiltinCategory, print_kv};
 const NAME_COL_WIDTH: usize = 12;
 const PADDING: &[u8] = b"            ";
 
-fn write_padded(name: &[u8]) {
-    shell_write(name);
+fn write_padded_colored(name: &[u8], color: u8) {
+    shell_write_idx(name, color);
     let pad = NAME_COL_WIDTH.saturating_sub(name.len());
     if pad > 0 {
         shell_write(&PADDING[..pad]);
@@ -23,18 +26,18 @@ pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
         return cmd_help_single(argv[1]);
     }
 
-    shell_write(b"SlopOS Shell v0.2\n");
+    shell_write_idx(b"SlopOS Shell v0.2\n", COLOR_PROMPT_ACCENT);
     shell_write(b"Type 'help <command>' for detailed usage.\n\n");
 
     for &cat in BuiltinCategory::ALL {
-        shell_write(cat.label());
+        shell_write_idx(cat.label(), COLOR_PROMPT_ACCENT);
         shell_write(b":\n");
         for entry in BUILTINS {
             if entry.category != cat {
                 continue;
             }
             shell_write(b"  ");
-            write_padded(entry.name);
+            write_padded_colored(entry.name, COLOR_EXEC_GREEN);
             shell_write(entry.desc);
             shell_write(NL);
         }
@@ -48,10 +51,11 @@ fn cmd_help_single(name: *const u8) -> i32 {
         if !u_streq_slice(name, entry.name) {
             continue;
         }
-        shell_write(entry.name);
+        shell_write_idx(entry.name, COLOR_EXEC_GREEN);
         shell_write(b" - ");
         shell_write(entry.desc);
-        shell_write(b"\n\nUsage: ");
+        shell_write(b"\n\n");
+        shell_write_idx(b"Usage: ", COLOR_COMMENT_GRAY);
         shell_write(entry.usage);
         shell_write(b"\n\n");
         if !entry.detail.is_empty() {
@@ -60,10 +64,13 @@ fn cmd_help_single(name: *const u8) -> i32 {
         }
         return 0;
     }
-    shell_write(b"help: unknown command '");
+    shell_write_idx(b"help: unknown command '", COLOR_ERROR_RED);
     let len = runtime::u_strlen(name);
-    shell_write(unsafe { core::slice::from_raw_parts(name, len) });
-    shell_write(b"'\n");
+    shell_write_idx(
+        unsafe { core::slice::from_raw_parts(name, len) },
+        COLOR_ERROR_RED,
+    );
+    shell_write_idx(b"'\n", COLOR_ERROR_RED);
     1
 }
 
@@ -108,29 +115,29 @@ pub fn cmd_reboot(_argc: i32, _argv: &[*const u8]) -> i32 {
 pub fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
-        shell_write(b"info: failed\n");
+        shell_write_idx(b"info: failed\n", COLOR_ERROR_RED);
         return 1;
     }
-    shell_write(b"Kernel information:\n");
-    shell_write(b"  Memory: total pages=");
+    shell_write_idx(b"Kernel information:\n", COLOR_PROMPT_ACCENT);
+    shell_write_idx(b"  Memory: total pages=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.total_pages as u64);
-    shell_write(b"  Free pages=");
+    shell_write_idx(b"  Free pages=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.free_pages as u64);
-    shell_write(b"  Allocated pages=");
+    shell_write_idx(b"  Allocated pages=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.allocated_pages as u64);
-    shell_write(b"  Tasks: total=");
+    shell_write_idx(b"  Tasks: total=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.total_tasks as u64);
-    shell_write(b"  Active tasks=");
+    shell_write_idx(b"  Active tasks=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.active_tasks as u64);
-    shell_write(b"  Task ctx switches=");
+    shell_write_idx(b"  Task ctx switches=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.task_context_switches);
-    shell_write(b"  Scheduler: switches=");
+    shell_write_idx(b"  Scheduler: switches=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.scheduler_context_switches);
-    shell_write(b"  Yields=");
+    shell_write_idx(b"  Yields=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.scheduler_yields);
-    shell_write(b"  Ready=");
+    shell_write_idx(b"  Ready=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.ready_tasks as u64);
-    shell_write(b"  schedule() calls=");
+    shell_write_idx(b"  schedule() calls=", COLOR_COMMENT_GRAY);
     print_kv(b"", info.schedule_calls as u64);
     0
 }
@@ -172,11 +179,12 @@ pub fn cmd_cpuinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
     let cpu_count = sys_core::get_cpu_count();
     let current = sys_core::get_current_cpu();
 
-    shell_write(b"Architecture:  x86_64\n");
-    shell_write(b"CPU(s):        ");
+    shell_write_idx(b"Architecture:  ", COLOR_COMMENT_GRAY);
+    shell_write(b"x86_64\n");
+    shell_write_idx(b"CPU(s):        ", COLOR_COMMENT_GRAY);
     write_u64(cpu_count as u64);
     shell_write(NL);
-    shell_write(b"Current CPU:   ");
+    shell_write_idx(b"Current CPU:   ", COLOR_COMMENT_GRAY);
     write_u64(current as u64);
     shell_write(NL);
     0
@@ -185,7 +193,7 @@ pub fn cmd_cpuinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
 pub fn cmd_free(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
-        shell_write(b"free: failed to query system info\n");
+        shell_write_idx(b"free: failed to query system info\n", COLOR_ERROR_RED);
         return 1;
     }
 
@@ -195,21 +203,24 @@ pub fn cmd_free(_argc: i32, _argv: &[*const u8]) -> i32 {
     let free_kb = info.free_pages as u64 * PAGE_SIZE_KB;
     let used_kb = info.allocated_pages as u64 * PAGE_SIZE_KB;
 
-    shell_write(b"              total       free       used\n");
+    shell_write_idx(
+        b"              total       free       used\n",
+        COLOR_COMMENT_GRAY,
+    );
 
-    shell_write(b"Pages:   ");
+    shell_write_idx(b"Pages:   ", COLOR_COMMENT_GRAY);
     write_right_aligned(info.total_pages as u64, 10);
     write_right_aligned(info.free_pages as u64, 11);
     write_right_aligned(info.allocated_pages as u64, 11);
     shell_write(NL);
 
-    shell_write(b"KiB:     ");
+    shell_write_idx(b"KiB:     ", COLOR_COMMENT_GRAY);
     write_right_aligned(total_kb, 10);
     write_right_aligned(free_kb, 11);
     write_right_aligned(used_kb, 11);
     shell_write(NL);
 
-    shell_write(b"MiB:     ");
+    shell_write_idx(b"MiB:     ", COLOR_COMMENT_GRAY);
     write_right_aligned(total_kb / 1024, 10);
     write_right_aligned(free_kb / 1024, 11);
     write_right_aligned(used_kb / 1024, 11);
@@ -252,7 +263,7 @@ fn format_u64(value: u64, buf: &mut [u8; 20]) -> usize {
 
 pub fn cmd_time(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(b"time: missing command\n");
+        shell_write_idx(b"time: missing command\n", COLOR_ERROR_RED);
         return 1;
     }
 

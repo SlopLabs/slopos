@@ -4,7 +4,7 @@ use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, roulette};
 
 use super::super::NL;
-use super::super::display::shell_write;
+use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
 use super::super::jobs::{parse_u32_arg, write_u64};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -74,11 +74,11 @@ fn parse_u64_arg(ptr: *const u8) -> Option<u64> {
 
 pub fn cmd_sleep(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(b"sleep: missing operand (milliseconds)\n");
+        shell_write_idx(b"sleep: missing operand (milliseconds)\n", COLOR_ERROR_RED);
         return 1;
     }
     let Some(ms) = parse_u32_arg(argv[1]) else {
-        shell_write(b"sleep: invalid number\n");
+        shell_write_idx(b"sleep: invalid number\n", COLOR_ERROR_RED);
         return 1;
     };
     if ms == 0 {
@@ -98,23 +98,23 @@ pub fn cmd_false(_argc: i32, _argv: &[*const u8]) -> i32 {
 
 pub fn cmd_seq(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write(b"seq: missing operand\n");
+        shell_write_idx(b"seq: missing operand\n", COLOR_ERROR_RED);
         return 1;
     }
 
     let (start, end) = if argc >= 3 {
         let Some(s) = parse_u64_arg(argv[1]) else {
-            shell_write(b"seq: invalid start\n");
+            shell_write_idx(b"seq: invalid start\n", COLOR_ERROR_RED);
             return 1;
         };
         let Some(e) = parse_u64_arg(argv[2]) else {
-            shell_write(b"seq: invalid end\n");
+            shell_write_idx(b"seq: invalid end\n", COLOR_ERROR_RED);
             return 1;
         };
         (s, e)
     } else {
         let Some(e) = parse_u64_arg(argv[1]) else {
-            shell_write(b"seq: invalid number\n");
+            shell_write_idx(b"seq: invalid number\n", COLOR_ERROR_RED);
             return 1;
         };
         (1u64, e)
@@ -165,11 +165,11 @@ pub fn cmd_random(argc: i32, argv: &[*const u8]) -> i32 {
     let raw = sys_core::random_next();
     let value = if argc >= 2 {
         let Some(max) = parse_u32_arg(argv[1]) else {
-            shell_write(b"random: invalid max\n");
+            shell_write_idx(b"random: invalid max\n", COLOR_ERROR_RED);
             return 1;
         };
         if max == 0 {
-            shell_write(b"random: max must be > 0\n");
+            shell_write_idx(b"random: max must be > 0\n", COLOR_ERROR_RED);
             return 1;
         }
         raw % max
@@ -211,7 +211,7 @@ pub fn cmd_roulette(_argc: i32, _argv: &[*const u8]) -> i32 {
 pub fn cmd_wl(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
-        shell_write(b"wl: failed to query balance\n");
+        shell_write_idx(b"wl: failed to query balance\n", COLOR_ERROR_RED);
         return 1;
     }
 
