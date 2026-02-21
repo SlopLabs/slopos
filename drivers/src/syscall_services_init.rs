@@ -43,6 +43,8 @@ static INPUT_SERVICES: InputServices = InputServices {
     get_pointer_focus: input_event::input_get_pointer_focus,
     get_pointer_position: input_event::input_get_pointer_position,
     get_button_state: input_get_button_state_adapter,
+    clipboard_copy: input_event::clipboard_copy,
+    clipboard_paste: input_event::clipboard_paste,
 };
 
 // =============================================================================
@@ -52,6 +54,7 @@ static INPUT_SERVICES: InputServices = InputServices {
 static TTY_SERVICES: TtyServices = TtyServices {
     read_line: tty::tty_read_line,
     read_char_blocking: tty::tty_read_char_blocking,
+    read_char_nonblocking: tty::tty_read_char_nonblocking,
     set_focus: tty::tty_set_focus,
     get_focus: tty::tty_get_focus,
     set_foreground_pgrp: tty::tty_set_foreground_pgrp,

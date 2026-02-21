@@ -70,6 +70,11 @@ const KEY_HOME: u8 = 0x86;
 const KEY_END: u8 = 0x87;
 const KEY_DELETE: u8 = 0x88;
 
+const KEY_SHIFT_LEFT: u8 = 0x94;
+const KEY_SHIFT_RIGHT: u8 = 0x95;
+const KEY_SHIFT_HOME: u8 = 0x96;
+const KEY_SHIFT_END: u8 = 0x97;
+
 const SCANCODE_LETTERS: [u8; 0x80] = [
     0x00, 0x00, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x2D, 0x3D, 0x00, 0x09,
     0x71, 0x77, 0x65, 0x72, 0x74, 0x79, 0x75, 0x69, 0x6F, 0x70, 0x5B, 0x5D, 0x00, 0x00, 0x61, 0x73,
@@ -211,13 +216,38 @@ pub fn handle_scancode(scancode: u8) {
         if !is_press {
             return;
         }
+        let shift = state.modifiers.is_shift();
         let extended_key = match make_code {
             0x48 => KEY_UP,
             0x50 => KEY_DOWN,
-            0x4B => KEY_LEFT,
-            0x4D => KEY_RIGHT,
-            0x47 => KEY_HOME,
-            0x4F => KEY_END,
+            0x4B => {
+                if shift {
+                    KEY_SHIFT_LEFT
+                } else {
+                    KEY_LEFT
+                }
+            }
+            0x4D => {
+                if shift {
+                    KEY_SHIFT_RIGHT
+                } else {
+                    KEY_RIGHT
+                }
+            }
+            0x47 => {
+                if shift {
+                    KEY_SHIFT_HOME
+                } else {
+                    KEY_HOME
+                }
+            }
+            0x4F => {
+                if shift {
+                    KEY_SHIFT_END
+                } else {
+                    KEY_END
+                }
+            }
             0x53 => KEY_DELETE,
             0x49 => KEY_PAGE_UP,
             0x51 => KEY_PAGE_DOWN,

@@ -56,6 +56,7 @@ pub const SYSCALL_FS_LIST: u64 = 21;
 pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
 pub const SYSCALL_READ_CHAR: u64 = 25;
+pub const SYSCALL_READ_CHAR_NB: u64 = 119;
 pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_REBOOT: u64 = 85;
@@ -68,6 +69,7 @@ pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
 pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
 pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
 pub const SYSCALL_RAISE_WINDOW: u64 = 33;
+pub const SYSCALL_SET_CURSOR_SHAPE: u64 = 118;
 
 // =============================================================================
 // Input events
@@ -81,6 +83,8 @@ pub const SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET: u64 = 65;
 pub const SYSCALL_INPUT_GET_POINTER_POS: u64 = 66;
 pub const SYSCALL_INPUT_GET_BUTTON_STATE: u64 = 67;
 pub const SYSCALL_INPUT_REQUEST_CLOSE: u64 = 84;
+pub const SYSCALL_CLIPBOARD_COPY: u64 = 116;
+pub const SYSCALL_CLIPBOARD_PASTE: u64 = 117;
 
 // =============================================================================
 // Surface / Compositor

@@ -1,6 +1,6 @@
 # SlopOS Shell Evolution Plan
 
-> **Status**: Phase 4 Complete (27/27 commands done)
+> **Status**: Phase 5 Complete (all visual polish done)
 > **Target**: Transform the shell from a command dispatcher into a real POSIX-inspired shell
 > **Current**: `userland/src/apps/shell/` — modular directory (13 files), 25 commands, history, line editing, pipes, env vars, PATH, quoting
 
@@ -626,17 +626,17 @@ Support double and single quotes in command arguments.
 
 ### 5D: Visual Improvements
 
-- [ ] **5D.1** Blinking cursor (toggle cursor char on timer tick)
-- [ ] **5D.2** Selection highlighting (Shift+Arrow to select text — stretch goal)
-- [ ] **5D.3** Smoother scrollback scroll (render partial lines at boundaries)
-- [ ] **5D.4** Welcome banner: SlopOS ASCII art + version + W/L balance on shell start
+- [x] **5D.1** Blinking cursor (toggle cursor char on timer tick)
+- [x] **5D.2** Selection highlighting (Shift+Arrow to select text — stretch goal)
+- [x] **5D.3** Smoother scrollback scroll (render partial lines at boundaries)
+- [x] **5D.4** Welcome banner: SlopOS ASCII art + version + W/L balance on shell start
 
 ### Phase 5 Gate
 
-- [ ] **GATE**: `ls` output shows directories in color
-- [ ] **GATE**: Prompt shows cwd with color
-- [ ] **GATE**: Error messages are red
-- [ ] **GATE**: `make test` passes
+- [x] **GATE**: `ls` output shows directories in color
+- [x] **GATE**: Prompt shows cwd with color
+- [x] **GATE**: Error messages are red
+- [x] **GATE**: `make test` passes (402/402)
 
 ---
 
@@ -899,7 +899,7 @@ Keyboard → input.rs (line editing, history)
 | **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | **Complete** | 17 | 17 | — |
 | **Phase 4**: New Builtins | **Complete** | 27 | 27 | — |
-| **Phase 5**: Polish & Color | In Progress | 13 | 12 | Phase 1 |
+| **Phase 5**: Polish & Color | **Complete** | 17 | 17 | — |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
-| **Total** | | **163** | **107** | |
+| **Total** | | **167** | **124** | |

@@ -6,7 +6,8 @@ use slopos_abi::syscall::*;
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
     syscall_exit, syscall_get_time_ms, syscall_halt, syscall_reboot, syscall_sleep_ms,
-    syscall_sys_info, syscall_user_read, syscall_user_read_char, syscall_user_write, syscall_yield,
+    syscall_sys_info, syscall_user_read, syscall_user_read_char, syscall_user_read_char_nb,
+    syscall_user_write, syscall_yield,
 };
 use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
@@ -28,13 +29,14 @@ use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
 pub use crate::syscall::ui_handlers::{
-    syscall_buffer_age, syscall_drain_queue, syscall_enumerate_windows, syscall_fb_flip,
-    syscall_fb_info, syscall_input_get_button_state, syscall_input_get_pointer_pos,
-    syscall_input_has_events, syscall_input_poll, syscall_input_poll_batch,
-    syscall_input_request_close, syscall_input_set_focus, syscall_input_set_focus_with_offset,
-    syscall_mark_frames_done, syscall_poll_frame_done, syscall_raise_window, syscall_random_next,
-    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
-    syscall_set_window_position, syscall_set_window_state, syscall_shm_acquire, syscall_shm_create,
+    syscall_buffer_age, syscall_clipboard_copy, syscall_clipboard_paste, syscall_drain_queue,
+    syscall_enumerate_windows, syscall_fb_flip, syscall_fb_info, syscall_input_get_button_state,
+    syscall_input_get_pointer_pos, syscall_input_has_events, syscall_input_poll,
+    syscall_input_poll_batch, syscall_input_request_close, syscall_input_set_focus,
+    syscall_input_set_focus_with_offset, syscall_mark_frames_done, syscall_poll_frame_done,
+    syscall_raise_window, syscall_random_next, syscall_roulette_draw, syscall_roulette_result,
+    syscall_roulette_spin, syscall_set_cursor_shape, syscall_set_window_position,
+    syscall_set_window_state, syscall_shm_acquire, syscall_shm_create,
     syscall_shm_create_with_format, syscall_shm_destroy, syscall_shm_get_formats, syscall_shm_map,
     syscall_shm_poll_released, syscall_shm_release, syscall_shm_unmap, syscall_surface_attach,
     syscall_surface_commit, syscall_surface_damage, syscall_surface_frame,
@@ -70,7 +72,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_EXIT]           => syscall_exit,           "exit";
     [SYSCALL_WRITE]          => syscall_user_write,     "write";
     [SYSCALL_READ]           => syscall_user_read,      "read";
-    [SYSCALL_READ_CHAR]      => syscall_user_read_char, "read_char";
+    [SYSCALL_READ_CHAR]      => syscall_user_read_char,    "read_char";
+    [SYSCALL_READ_CHAR_NB]   => syscall_user_read_char_nb, "read_char_nb";
     [SYSCALL_SLEEP_MS]       => syscall_sleep_ms,       "sleep_ms";
     [SYSCALL_FB_INFO]        => syscall_fb_info,        "fb_info";
     [SYSCALL_GET_TIME_MS]    => syscall_get_time_ms,    "get_time_ms";
@@ -101,6 +104,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_ENUMERATE_WINDOWS]   => syscall_enumerate_windows,   "enumerate_windows";
     [SYSCALL_SET_WINDOW_POSITION] => syscall_set_window_position, "set_window_position";
     [SYSCALL_SET_WINDOW_STATE]    => syscall_set_window_state,    "set_window_state";
+    [SYSCALL_SET_CURSOR_SHAPE]    => syscall_set_cursor_shape,    "set_cursor_shape";
     [SYSCALL_RAISE_WINDOW]        => syscall_raise_window,        "raise_window";
 
     // Surface / Compositor
@@ -138,6 +142,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_INPUT_GET_POINTER_POS]      => syscall_input_get_pointer_pos,      "input_get_pointer_pos";
     [SYSCALL_INPUT_GET_BUTTON_STATE]     => syscall_input_get_button_state,     "input_get_button_state";
     [SYSCALL_INPUT_REQUEST_CLOSE]        => syscall_input_request_close,        "input_request_close";
+    [SYSCALL_CLIPBOARD_COPY]             => syscall_clipboard_copy,             "clipboard_copy";
+    [SYSCALL_CLIPBOARD_PASTE]            => syscall_clipboard_paste,            "clipboard_paste";
 
     // Task management
     [SYSCALL_SPAWN_PATH]     => syscall_spawn_path,     "spawn_path";

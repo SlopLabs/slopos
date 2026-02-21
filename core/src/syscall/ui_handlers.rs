@@ -9,7 +9,7 @@ use crate::syscall_services::{input, tty, video};
 
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_mm::process_vm::process_vm_get_page_dir;
-use slopos_mm::user_copy::{copy_bytes_from_user, copy_to_user};
+use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 define_syscall!(syscall_random_next(ctx, args) {
@@ -216,6 +216,49 @@ define_syscall!(syscall_input_request_close(ctx, args) requires(compositor) {
     }
 
     ctx.ok(0)
+});
+
+define_syscall!(syscall_clipboard_copy(ctx, args) requires(let task_id) {
+    let _ = task_id;
+    let src_ptr = args.arg0;
+    let src_len = args.arg1_usize();
+
+    if src_ptr == 0 || src_len == 0 {
+        return ctx.ok(0);
+    }
+
+    let copy_len = src_len.min(slopos_abi::CLIPBOARD_MAX_SIZE);
+    let user_bytes = try_or_err!(ctx, UserBytes::try_new(src_ptr, copy_len));
+    let mut buf = [0u8; slopos_abi::CLIPBOARD_MAX_SIZE];
+    try_or_err!(ctx, copy_bytes_from_user(user_bytes, &mut buf[..copy_len]));
+    let stored = input::clipboard_copy(&buf[..copy_len]);
+    ctx.ok(stored as u64)
+});
+
+define_syscall!(syscall_clipboard_paste(ctx, args) requires(let task_id) {
+    let _ = task_id;
+    let dst_ptr = args.arg0;
+    let max_len = args.arg1_usize();
+
+    if dst_ptr == 0 || max_len == 0 {
+        return ctx.ok(0);
+    }
+
+    let mut buf = [0u8; slopos_abi::CLIPBOARD_MAX_SIZE];
+    let pasted = input::clipboard_paste(&mut buf);
+    if pasted == 0 {
+        return ctx.ok(0);
+    }
+
+    let write_len = pasted.min(max_len);
+    let user_ptr = try_or_err!(ctx, UserBytes::try_new(dst_ptr, write_len));
+    try_or_err!(ctx, copy_bytes_to_user(user_ptr, &buf[..write_len]));
+    ctx.ok(write_len as u64)
+});
+
+define_syscall!(syscall_set_cursor_shape(ctx, args) requires(let task_id) {
+    let shape = args.arg0 as u8;
+    ctx.from_result(video::surface_set_cursor_shape(task_id, shape))
 });
 
 define_syscall!(syscall_tty_set_focus(ctx, args) requires(compositor) {

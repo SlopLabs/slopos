@@ -80,6 +80,11 @@ enum ClientOp {
         task_id: u32,
         title: [u8; 32],
     },
+    /// Set cursor shape for a surface (e.g. text I-beam, crosshair)
+    SetCursorShape {
+        task_id: u32,
+        shape: u8,
+    },
 }
 
 impl ClientOp {
@@ -92,7 +97,8 @@ impl ClientOp {
             | ClientOp::SetRole { task_id, .. }
             | ClientOp::SetParent { task_id, .. }
             | ClientOp::SetRelativePosition { task_id, .. }
-            | ClientOp::SetTitle { task_id, .. } => *task_id,
+            | ClientOp::SetTitle { task_id, .. }
+            | ClientOp::SetCursorShape { task_id, .. } => *task_id,
         }
     }
 }
@@ -144,6 +150,7 @@ struct SurfaceState {
     relative_y: i32,
     /// Window title (UTF-8, null-terminated)
     title: [u8; 32],
+    cursor_shape: u8,
 }
 
 impl SurfaceState {
@@ -170,6 +177,7 @@ impl SurfaceState {
             relative_x: 0,
             relative_y: 0,
             title: [0; 32],
+            cursor_shape: 0,
         }
     }
 
@@ -435,6 +443,11 @@ pub fn drain_queue() {
                     surface.dirty = true;
                 }
             }
+            ClientOp::SetCursorShape { task_id, shape } => {
+                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                    surface.cursor_shape = shape;
+                }
+            }
         }
         processed += 1;
     }
@@ -464,6 +477,13 @@ pub fn surface_set_window_state(task_id: u32, state: u8) -> Result<(), Composito
     } else {
         Err(CompositorError::SurfaceNotFound)
     }
+}
+
+pub fn surface_set_cursor_shape(task_id: u32, shape: u8) -> Result<(), CompositorError> {
+    let mut ctx = CONTEXT.lock();
+    ctx.queue
+        .push_back(ClientOp::SetCursorShape { task_id, shape });
+    Ok(())
 }
 
 /// Raise window (increase z-order). IMMEDIATE - called by COMPOSITOR only.
@@ -545,7 +565,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.height = surface.height;
             info.state = surface.window_state;
             info.damage_count = dmg_count;
-            info._padding = [0; 2];
+            info.cursor_shape = surface.cursor_shape;
+            info._padding = 0;
             info.shm_token = surface.shm_token;
             info.damage_regions = regions;
             info.title = surface.title;

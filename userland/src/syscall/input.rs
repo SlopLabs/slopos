@@ -74,3 +74,29 @@ pub fn drain_queue() {
         syscall0(SYSCALL_DRAIN_QUEUE);
     }
 }
+
+pub fn clipboard_copy(data: &[u8]) -> usize {
+    if data.is_empty() {
+        return 0;
+    }
+    unsafe {
+        syscall2(
+            SYSCALL_CLIPBOARD_COPY,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        ) as usize
+    }
+}
+
+pub fn clipboard_paste(buf: &mut [u8]) -> usize {
+    if buf.is_empty() {
+        return 0;
+    }
+    unsafe {
+        syscall2(
+            SYSCALL_CLIPBOARD_PASTE,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as usize
+    }
+}

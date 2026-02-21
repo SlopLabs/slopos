@@ -83,6 +83,30 @@ impl InputHandler {
         (self.mouse_buttons & 0x01) != 0
     }
 
+    /// Update pointer focus to the topmost visible window under the cursor.
+    ///
+    /// Following the Wayland compositor pattern (wlroots `tinywl.c`), pointer
+    /// focus is tracked **continuously on every frame** — not only on click.
+    /// This ensures the correct window already has focus by the time a PS/2
+    /// button IRQ fires, so button events are routed to the right client.
+    pub fn update_pointer_focus(
+        &mut self,
+        windows: &[UserWindowInfo; MAX_WINDOWS],
+        window_count: u32,
+    ) {
+        for i in (0..window_count as usize).rev() {
+            let window = windows[i];
+            if window.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+            if self.hit_test_content_area(&window) {
+                input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
+                return;
+            }
+        }
+        input::set_pointer_focus(0);
+    }
+
     pub fn handle_mouse_events(
         &mut self,
         fb_height: i32,

@@ -22,6 +22,7 @@ pub const COLOR_WARN_YELLOW: u8 = 4;
 pub const COLOR_PROMPT_ACCENT: u8 = 5;
 pub const COLOR_COMMENT_GRAY: u8 = 6;
 pub const COLOR_PATH_BLUE: u8 = 7;
+pub const COLOR_SELECTION_BG: u8 = 8;
 
 pub const PALETTE_SIZE: usize = 16;
 
@@ -35,7 +36,7 @@ pub static PALETTE: [Color32; PALETTE_SIZE] = [
     Color32::rgb(0xC6, 0x78, 0xDD), // 5: prompt accent
     Color32::rgb(0x5C, 0x63, 0x70), // 6: comment gray
     Color32::rgb(0x61, 0xAF, 0xEF), // 7: path blue
-    SHELL_FG_COLOR,
+    Color32::rgb(0x26, 0x4F, 0x78), // 8: selection background
     SHELL_FG_COLOR,
     SHELL_FG_COLOR,
     SHELL_FG_COLOR,
@@ -553,41 +554,7 @@ fn console_clear(display: &DisplayState) {
     });
 }
 
-fn console_page_up(display: &DisplayState) {
-    if display.total_lines.get() <= display.rows.get() {
-        return;
-    }
-
-    let step = display.rows.get().max(1);
-    let new_top = (display.view_top.get() - step).max(0);
-    let delta = (display.view_top.get() - new_top).max(0);
-
-    if delta == 0 {
-        return;
-    }
-
-    display.view_top.set(new_top);
-    display.follow.set(false);
-
-    surface::draw(|buf| {
-        let rows = display.rows.get();
-        if delta < rows {
-            let shift = delta * FONT_CHAR_HEIGHT;
-            let width = display.width.get();
-            let height = display.height.get();
-            buf.blit(0, 0, 0, shift, width, height - shift);
-
-            let view_top = display.view_top.get();
-            for row in 0..delta {
-                draw_row_from_scrollback(buf, display, view_top + row, row);
-            }
-        } else {
-            redraw_view(buf, display);
-        }
-    });
-}
-
-fn console_page_down(display: &DisplayState) {
+fn scroll_view(display: &DisplayState, delta: i32) {
     let rows = display.rows.get();
     let total_lines = display.total_lines.get();
 
@@ -596,33 +563,55 @@ fn console_page_down(display: &DisplayState) {
     }
 
     let max_top = (total_lines - rows).max(0);
-    let step = rows.max(1);
-    let new_top = (display.view_top.get() + step).min(max_top);
-    let delta = (new_top - display.view_top.get()).max(0);
+    let current = display.view_top.get();
+    let new_top = (current + delta).clamp(0, max_top);
+    let actual_delta = new_top - current;
 
-    if delta == 0 {
+    if actual_delta == 0 {
         return;
     }
 
     display.view_top.set(new_top);
     display.follow.set(new_top == max_top);
 
+    let abs_delta = actual_delta.unsigned_abs() as i32;
+
     surface::draw(|buf| {
-        if delta < rows {
-            let shift = delta * FONT_CHAR_HEIGHT;
+        if abs_delta < rows {
+            let shift = abs_delta * FONT_CHAR_HEIGHT;
             let width = display.width.get();
             let height = display.height.get();
-            buf.blit(0, shift, 0, 0, width, height - shift);
 
-            let start = rows - delta;
-            let view_top = display.view_top.get();
-            for row in start..rows {
-                draw_row_from_scrollback(buf, display, view_top + row, row);
+            if actual_delta < 0 {
+                buf.blit(0, 0, 0, shift, width, height - shift);
+                let view_top = display.view_top.get();
+                for row in 0..abs_delta {
+                    draw_row_from_scrollback(buf, display, view_top + row, row);
+                }
+            } else {
+                buf.blit(0, shift, 0, 0, width, height - shift);
+                let start = rows - abs_delta;
+                let view_top = display.view_top.get();
+                for row in start..rows {
+                    draw_row_from_scrollback(buf, display, view_top + row, row);
+                }
             }
         } else {
             redraw_view(buf, display);
         }
     });
+}
+
+fn half_page_step(display: &DisplayState) -> i32 {
+    (display.rows.get() / 2).max(1)
+}
+
+fn console_page_up(display: &DisplayState) {
+    scroll_view(display, -half_page_step(display));
+}
+
+fn console_page_down(display: &DisplayState) {
+    scroll_view(display, half_page_step(display));
 }
 
 fn console_ensure_follow(display: &DisplayState) {
@@ -635,12 +624,39 @@ fn console_ensure_follow(display: &DisplayState) {
     });
 }
 
+/// Selection range within the input buffer (offsets relative to input, not prompt).
+/// When `sel_start == sel_end`, no selection is active.
+pub struct InputSelection {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl InputSelection {
+    pub const NONE: Self = Self { start: 0, end: 0 };
+
+    pub fn is_active(&self) -> bool {
+        self.start != self.end
+    }
+
+    pub fn ordered(&self) -> (usize, usize) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
+
+const SELECTION_BG: Color32 = Color32::rgb(0x26, 0x4F, 0x78);
+
 fn console_rewrite_input(
     display: &DisplayState,
     prompt: &[u8],
     prompt_colors: &[u8],
     input: &[u8],
     cursor_pos: usize,
+    cursor_visible: bool,
+    selection: &InputSelection,
 ) {
     if !display.enabled.get() {
         return;
@@ -680,14 +696,37 @@ fn console_rewrite_input(
             surface::draw(|buf| {
                 draw_row_from_scrollback(buf, display, cursor_line, row);
 
-                let cursor_col = (prompt.len() + cursor_pos) as i32;
-                if cursor_col < display.cols.get() {
-                    let ch = if cursor_pos < input.len() {
-                        input[cursor_pos]
-                    } else {
-                        b' '
-                    };
-                    draw_char_at(buf, cursor_col, row, ch, display.bg.get(), display.fg.get());
+                if selection.is_active() {
+                    let (sel_lo, sel_hi) = selection.ordered();
+                    let prompt_len = prompt.len();
+                    let sel_col_start = (prompt_len + sel_lo) as i32;
+                    let sel_col_end = (prompt_len + sel_hi) as i32;
+
+                    for col in sel_col_start..sel_col_end.min(display.cols.get()) {
+                        let ch = if (col as usize) < idx {
+                            combined[col as usize]
+                        } else {
+                            b' '
+                        };
+                        if ch == 0 {
+                            continue;
+                        }
+                        let fg_idx = scrollback::get_color(slot, col as usize);
+                        let fg = PALETTE[fg_idx as usize % PALETTE_SIZE];
+                        draw_char_at(buf, col, row, ch, fg, SELECTION_BG);
+                    }
+                }
+
+                if cursor_visible {
+                    let cursor_col = (prompt.len() + cursor_pos) as i32;
+                    if cursor_col < display.cols.get() {
+                        let ch = if cursor_pos < input.len() {
+                            input[cursor_pos]
+                        } else {
+                            b' '
+                        };
+                        draw_char_at(buf, cursor_col, row, ch, display.bg.get(), display.fg.get());
+                    }
                 }
             });
         }
@@ -866,9 +905,19 @@ pub fn shell_redraw_input(
     prompt_colors: &[u8],
     input: &[u8],
     cursor_pos: usize,
+    cursor_visible: bool,
+    selection: &InputSelection,
 ) {
     if DISPLAY.enabled.get() {
-        console_rewrite_input(&DISPLAY, prompt, prompt_colors, input, cursor_pos);
+        console_rewrite_input(
+            &DISPLAY,
+            prompt,
+            prompt_colors,
+            input,
+            cursor_pos,
+            cursor_visible,
+            selection,
+        );
         shell_console_commit();
     }
 }

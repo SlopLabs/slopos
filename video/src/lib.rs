@@ -71,6 +71,7 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
     surface_enumerate_windows: compositor_context::surface_enumerate_windows,
     surface_set_window_position: compositor_context::surface_set_window_position,
     surface_set_window_state: compositor_context::surface_set_window_state,
+    surface_set_cursor_shape: compositor_context::surface_set_cursor_shape,
     surface_raise_window: compositor_context::surface_raise_window,
     surface_commit: compositor_context::surface_commit,
     register_surface: compositor_context::register_surface_for_task,

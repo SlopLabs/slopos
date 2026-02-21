@@ -333,7 +333,7 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
     }
 
     let mut mgr = INPUT_MANAGER.lock();
-    let idx = match mgr.find_queue(task_id) {
+    let idx = match mgr.find_or_create_queue(task_id) {
         Some(i) => i,
         None => return 0,
     };
@@ -380,6 +380,41 @@ pub fn input_event_count(task_id: u32) -> u32 {
     } else {
         0
     }
+}
+
+struct ClipboardState {
+    data: [u8; slopos_abi::CLIPBOARD_MAX_SIZE],
+    len: usize,
+}
+
+impl ClipboardState {
+    const fn new() -> Self {
+        Self {
+            data: [0u8; slopos_abi::CLIPBOARD_MAX_SIZE],
+            len: 0,
+        }
+    }
+}
+
+static CLIPBOARD: IrqMutex<ClipboardState> = IrqMutex::new(ClipboardState::new());
+
+pub fn clipboard_copy(src: &[u8]) -> usize {
+    let mut clip = CLIPBOARD.lock();
+    let copy_len = src.len().min(slopos_abi::CLIPBOARD_MAX_SIZE);
+    clip.data[..copy_len].copy_from_slice(&src[..copy_len]);
+    clip.len = copy_len;
+    copy_len
+}
+
+pub fn clipboard_paste(dst: &mut [u8]) -> usize {
+    let clip = CLIPBOARD.lock();
+    if clip.len == 0 {
+        return 0;
+    }
+
+    let copy_len = clip.len.min(dst.len());
+    dst[..copy_len].copy_from_slice(&clip.data[..copy_len]);
+    copy_len
 }
 
 // =============================================================================

@@ -1,6 +1,7 @@
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 
+mod banner;
 pub mod buffers;
 pub mod builtins;
 pub mod completion;
@@ -30,7 +31,6 @@ impl<T> SyncUnsafeCell<T> {
 unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 
 pub(crate) static NL: &[u8] = b"\n";
-static WELCOME: &[u8] = b"SlopOS Shell v0.2 (userland)\n";
 pub(crate) static UNKNOWN_CMD: &[u8] = b"Unknown command. Type 'help'.\n";
 pub(crate) static PATH_TOO_LONG: &[u8] = b"path too long\n";
 pub(crate) static ERR_NO_SUCH: &[u8] = b"No such file or directory\n";
@@ -251,12 +251,12 @@ pub fn shell_user_main(_arg: *mut c_void) {
 
     use crate::syscall::process;
     use crate::syscall::window;
-    use display::shell_write;
 
     display::shell_console_init();
     display::shell_console_clear();
 
     window::surface_set_title("SlopOS Shell");
+    window::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
 
     cwd_set(b"/");
     env::initialize_defaults();
@@ -264,7 +264,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
     exec::initialize_job_control();
     let _ = process::ignore_signal(SIGINT);
 
-    shell_write(WELCOME);
+    banner::print_welcome_banner();
 
     let mut state = ShellState {
         prompt_buf: [0; PROMPT_BUF_MAX],

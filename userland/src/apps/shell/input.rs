@@ -4,7 +4,7 @@ use core::ptr;
 
 use crate::runtime;
 use crate::syscall::core as sys_core;
-use crate::syscall::tty;
+use crate::syscall::{InputEvent, InputEventType, input, tty};
 
 use super::buffers;
 use super::completion;
@@ -25,6 +25,11 @@ const KEY_HOME: u8 = 0x86;
 const KEY_END: u8 = 0x87;
 const KEY_DELETE: u8 = 0x88;
 
+const KEY_SHIFT_LEFT: u8 = 0x94;
+const KEY_SHIFT_RIGHT: u8 = 0x95;
+const KEY_SHIFT_HOME: u8 = 0x96;
+const KEY_SHIFT_END: u8 = 0x97;
+
 const CTRL_A: u8 = 0x01;
 const CTRL_C: u8 = 0x03;
 const CTRL_D: u8 = 0x04;
@@ -32,7 +37,11 @@ const CTRL_E: u8 = 0x05;
 const CTRL_K: u8 = 0x0B;
 const CTRL_L: u8 = 0x0C;
 const CTRL_U: u8 = 0x15;
+const CTRL_V: u8 = 0x16;
 const CTRL_W: u8 = 0x17;
+
+const MOUSE_LEFT: u8 = 0x01;
+const MOUSE_EVENT_BUF_SIZE: usize = 8;
 
 static PROMPT_COLORS: super::SyncUnsafeCell<[u8; super::PROMPT_BUF_MAX]> =
     super::SyncUnsafeCell::new([0; super::PROMPT_BUF_MAX]);
@@ -69,16 +78,113 @@ fn input_loop(
     mut len: usize,
     mut cursor_pos: usize,
 ) -> i32 {
-    let (_, line_row) = super::display::shell_console_get_cursor();
-    redraw(line_row, prompt, len, cursor_pos);
+    use super::display::InputSelection;
+
+    let mut line_row = super::display::shell_console_get_cursor().1;
+
+    const BLINK_INTERVAL_MS: u64 = 500;
+    let mut cursor_visible = true;
+    let mut last_blink_ms = sys_core::get_time_ms();
+
+    let mut sel = InputSelection::NONE;
+    let mut mouse_dragging = false;
+    let mut prev_left_pressed = false;
+    let mut has_pointer_focus = false;
+    let mut last_ptr_x: i32 = 0;
+    let mut last_ptr_y: i32 = 0;
+    let mut button_state: u8 = 0;
+
+    macro_rules! rd {
+        () => {
+            redraw(line_row, prompt, len, cursor_pos, cursor_visible, &sel)
+        };
+    }
+
+    rd!();
 
     loop {
-        let rc = tty::read_char();
+        line_row = super::display::shell_console_get_cursor().1;
+
+        let mut events = [InputEvent::default(); MOUSE_EVENT_BUF_SIZE];
+        let count = input::poll_batch(&mut events) as usize;
+        for i in 0..count.min(MOUSE_EVENT_BUF_SIZE) {
+            match events[i].event_type {
+                InputEventType::PointerMotion | InputEventType::PointerEnter => {
+                    last_ptr_x = events[i].pointer_x();
+                    last_ptr_y = events[i].pointer_y();
+                    has_pointer_focus = true;
+                }
+                InputEventType::PointerLeave => {
+                    has_pointer_focus = false;
+                }
+                InputEventType::PointerButtonPress => {
+                    button_state |= events[i].pointer_button_code();
+                }
+                InputEventType::PointerButtonRelease => {
+                    button_state &= !events[i].pointer_button_code();
+                }
+                _ => {}
+            }
+        }
+
+        let mut mouse_acted = false;
+        let left_pressed = has_pointer_focus && (button_state & MOUSE_LEFT) != 0;
+        let newly_pressed = left_pressed && !prev_left_pressed;
+        let newly_released = !left_pressed && prev_left_pressed;
+
+        if newly_pressed && is_on_input_row(last_ptr_y, line_row) {
+            if let Some(off) = pixel_to_input_offset(last_ptr_x, prompt.len(), len) {
+                cursor_pos = off;
+                sel = InputSelection {
+                    start: off,
+                    end: off,
+                };
+                mouse_dragging = true;
+                cursor_visible = true;
+                last_blink_ms = sys_core::get_time_ms();
+                mouse_acted = true;
+            }
+        } else if mouse_dragging && left_pressed {
+            if is_on_input_row(last_ptr_y, line_row) {
+                if let Some(off) = pixel_to_input_offset(last_ptr_x, prompt.len(), len) {
+                    if off != sel.end {
+                        cursor_pos = off;
+                        sel.end = off;
+                        mouse_acted = true;
+                    }
+                }
+            }
+        }
+
+        if newly_released && mouse_dragging {
+            mouse_dragging = false;
+            if !sel.is_active() {
+                sel = InputSelection::NONE;
+            }
+            mouse_acted = true;
+        }
+        prev_left_pressed = left_pressed;
+        if mouse_acted {
+            rd!();
+        }
+
+        let rc = tty::try_read_char();
         if rc < 0 {
-            sys_core::yield_now();
+            let now = sys_core::get_time_ms();
+            if now.wrapping_sub(last_blink_ms) >= BLINK_INTERVAL_MS {
+                cursor_visible = !cursor_visible;
+                last_blink_ms = now;
+                rd!();
+            }
+            if !mouse_acted {
+                sys_core::yield_now();
+            }
             continue;
         }
         let c = rc as u8;
+
+        cursor_visible = true;
+        last_blink_ms = sys_core::get_time_ms();
 
         if c == KEY_PAGE_UP {
             shell_console_page_up();
@@ -93,8 +199,25 @@ fn input_loop(
             shell_console_follow_bottom();
         }
 
+        let preserves_selection = matches!(
+            c,
+            KEY_SHIFT_LEFT
+                | KEY_SHIFT_RIGHT
+                | KEY_SHIFT_HOME
+                | KEY_SHIFT_END
+                | CTRL_C
+                | CTRL_V
+                | KEY_PAGE_UP
+                | KEY_PAGE_DOWN
+        );
+        if !preserves_selection && sel.is_active() {
+            sel = InputSelection::NONE;
+        }
+
         match c {
             b'\n' | b'\r' => {
+                sel = InputSelection::NONE;
+                redraw(line_row, prompt, len, cursor_pos, true, &sel);
                 super::display::shell_echo_char(b'\n');
                 buffers::with_line_buf(|buf| {
                     history::push(buf, len);
@@ -104,16 +227,22 @@ fn input_loop(
             }
 
             b'\x08' | 0x7f => {
-                if cursor_pos > 0 {
+                if sel.is_active() {
+                    delete_selection(&mut sel, &mut len, &mut cursor_pos);
+                    rd!();
+                } else if cursor_pos > 0 {
                     delete_char_before_cursor(&mut len, &mut cursor_pos);
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
             KEY_DELETE => {
-                if cursor_pos < len {
+                if sel.is_active() {
+                    delete_selection(&mut sel, &mut len, &mut cursor_pos);
+                    rd!();
+                } else if cursor_pos < len {
                     delete_char_at_cursor(&mut len, cursor_pos);
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -127,7 +256,7 @@ fn input_loop(
                 if let Some(nl) = new_len {
                     len = nl;
                     cursor_pos = nl;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -136,35 +265,79 @@ fn input_loop(
                 if let Some(nl) = new_len {
                     len = nl;
                     cursor_pos = nl;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
             KEY_LEFT => {
                 if cursor_pos > 0 {
                     cursor_pos -= 1;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
             KEY_RIGHT => {
                 if cursor_pos < len {
                     cursor_pos += 1;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
+                }
+            }
+
+            KEY_SHIFT_LEFT => {
+                if cursor_pos > 0 {
+                    if !sel.is_active() {
+                        sel.start = cursor_pos;
+                    }
+                    cursor_pos -= 1;
+                    sel.end = cursor_pos;
+                    rd!();
+                }
+            }
+
+            KEY_SHIFT_RIGHT => {
+                if cursor_pos < len {
+                    if !sel.is_active() {
+                        sel.start = cursor_pos;
+                    }
+                    cursor_pos += 1;
+                    sel.end = cursor_pos;
+                    rd!();
+                }
+            }
+
+            KEY_SHIFT_HOME => {
+                if cursor_pos != 0 {
+                    if !sel.is_active() {
+                        sel.start = cursor_pos;
+                    }
+                    cursor_pos = 0;
+                    sel.end = 0;
+                    rd!();
+                }
+            }
+
+            KEY_SHIFT_END => {
+                if cursor_pos != len {
+                    if !sel.is_active() {
+                        sel.start = cursor_pos;
+                    }
+                    cursor_pos = len;
+                    sel.end = len;
+                    rd!();
                 }
             }
 
             KEY_HOME | CTRL_A => {
                 if cursor_pos != 0 {
                     cursor_pos = 0;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
             KEY_END | CTRL_E => {
                 if cursor_pos != len {
                     cursor_pos = len;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -176,7 +349,7 @@ fn input_loop(
                         }
                     });
                     len = cursor_pos;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -193,7 +366,7 @@ fn input_loop(
                     });
                     len = shift;
                     cursor_pos = 0;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -218,7 +391,7 @@ fn input_loop(
                     });
                     len -= old_cursor - new_cursor;
                     cursor_pos = new_cursor;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -230,6 +403,18 @@ fn input_loop(
             }
 
             CTRL_C => {
+                if sel.is_active() {
+                    let (lo, hi) = sel.ordered();
+                    let hi = hi.min(len);
+                    if lo < hi {
+                        buffers::with_line_buf(|buf| {
+                            input::clipboard_copy(&buf[lo..hi]);
+                        });
+                    }
+                    sel = InputSelection::NONE;
+                    rd!();
+                    continue;
+                }
                 if super::builtins::process::maybe_handle_ctrl_c() {
                     continue;
                 }
@@ -238,13 +423,35 @@ fn input_loop(
                 return 0;
             }
 
+            CTRL_V => {
+                if sel.is_active() {
+                    delete_selection(&mut sel, &mut len, &mut cursor_pos);
+                }
+                let mut paste_buf = [0u8; 256];
+                let pasted = input::clipboard_paste(&mut paste_buf);
+                if pasted > 0 {
+                    let mut filtered = [0u8; 256];
+                    let mut flen = 0;
+                    for &b in &paste_buf[..pasted] {
+                        if (0x20..=0x7E).contains(&b) {
+                            filtered[flen] = b;
+                            flen += 1;
+                        }
+                    }
+                    if flen > 0 {
+                        insert_text(&filtered, flen, &mut len, &mut cursor_pos);
+                        rd!();
+                    }
+                }
+            }
+
             CTRL_D => {
                 if len == 0 {
                     return -1;
                 }
                 if cursor_pos < len {
                     delete_char_at_cursor(&mut len, cursor_pos);
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -277,11 +484,14 @@ fn input_loop(
                         &mut len,
                         &mut cursor_pos,
                     );
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
             0x20..=0x7E => {
+                if sel.is_active() {
+                    delete_selection(&mut sel, &mut len, &mut cursor_pos);
+                }
                 let max_len = buffers::with_line_buf(|buf| buf.len());
                 if len + 1 < max_len {
                     buffers::with_line_buf(|buf| {
@@ -294,7 +504,7 @@ fn input_loop(
                     });
                     len += 1;
                     cursor_pos += 1;
-                    redraw(line_row, prompt, len, cursor_pos);
+                    rd!();
                 }
             }
 
@@ -319,6 +529,54 @@ fn input_loop(
 
     *tokens = [ptr::null(); SHELL_MAX_TOKENS];
     buffers::with_expand_buf(|expand_buf| shell_parse_line(&expand_buf[..expanded_len], tokens))
+}
+
+/// Convert a pixel x-coordinate to a character offset within the input buffer.
+/// Returns `None` if the click is outside the input area (e.g. on the prompt).
+fn pixel_to_input_offset(px: i32, prompt_len: usize, input_len: usize) -> Option<usize> {
+    use crate::gfx::font::FONT_CHAR_WIDTH;
+    let col = px / FONT_CHAR_WIDTH;
+    if col < 0 {
+        return None;
+    }
+    let col = col as usize;
+    if col < prompt_len {
+        return Some(0);
+    }
+    let offset = col - prompt_len;
+    Some(offset.min(input_len))
+}
+
+/// Check whether a pixel y-coordinate falls on the current input line row.
+fn is_on_input_row(py: i32, line_row: i32) -> bool {
+    use crate::gfx::font::FONT_CHAR_HEIGHT;
+    let row = py / FONT_CHAR_HEIGHT;
+    row == line_row
+}
+
+fn delete_selection(
+    sel: &mut super::display::InputSelection,
+    len: &mut usize,
+    cursor_pos: &mut usize,
+) {
+    let (lo, hi) = sel.ordered();
+    if lo >= hi || lo >= *len {
+        *sel = super::display::InputSelection::NONE;
+        return;
+    }
+    let hi = hi.min(*len);
+    let removed = hi - lo;
+    buffers::with_line_buf(|buf| {
+        for i in lo..*len - removed {
+            buf[i] = buf[i + removed];
+        }
+        for i in *len - removed..*len {
+            buf[i] = 0;
+        }
+    });
+    *len -= removed;
+    *cursor_pos = lo;
+    *sel = super::display::InputSelection::NONE;
 }
 
 fn delete_char_before_cursor(len: &mut usize, cursor_pos: &mut usize) {
@@ -370,7 +628,14 @@ fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut u
     *cursor_pos += insert_len;
 }
 
-fn redraw(line_row: i32, prompt: &[u8], len: usize, cursor_pos: usize) {
+fn redraw(
+    line_row: i32,
+    prompt: &[u8],
+    len: usize,
+    cursor_pos: usize,
+    cursor_visible: bool,
+    selection: &super::display::InputSelection,
+) {
     buffers::with_line_buf(|buf| {
         shell_redraw_input(
             line_row,
@@ -378,6 +643,8 @@ fn redraw(line_row: i32, prompt: &[u8], len: usize, cursor_pos: usize) {
             prompt_colors_slice(),
             &buf[..len],
             cursor_pos,
+            cursor_visible,
+            selection,
         );
     });
 }

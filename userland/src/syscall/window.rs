@@ -146,3 +146,8 @@ pub fn set_window_state(task_id: u32, state: u8) -> i64 {
 pub fn raise_window(task_id: u32) -> i64 {
     unsafe { syscall1(SYSCALL_RAISE_WINDOW, task_id as u64) as i64 }
 }
+
+#[inline(always)]
+pub fn set_cursor_shape(shape: u8) -> i64 {
+    unsafe { syscall1(SYSCALL_SET_CURSOR_SHAPE, shape as u64) as i64 }
+}

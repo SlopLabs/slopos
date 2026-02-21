@@ -47,6 +47,7 @@ impl Renderer {
         start_menu_open: bool,
         mouse_x: i32,
         mouse_y: i32,
+        cursor_shape: u8,
         hover: &HoverRegistry,
         surface_cache: &mut ClientSurfaceCache,
         force_full: bool,
@@ -82,7 +83,7 @@ impl Renderer {
                 &full_clip,
             );
             self.draw_start_menu(buf, start_menu_open, hover, &full_clip);
-            self.draw_cursor(buf, mouse_x, mouse_y, &full_clip);
+            self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, &full_clip);
             RenderMode::Full
         } else if damage_regions.is_empty() {
             RenderMode::Partial
@@ -97,6 +98,7 @@ impl Renderer {
                     start_menu_open,
                     mouse_x,
                     mouse_y,
+                    cursor_shape,
                     hover,
                     surface_cache,
                 );
@@ -115,6 +117,7 @@ impl Renderer {
         start_menu_open: bool,
         mouse_x: i32,
         mouse_y: i32,
+        cursor_shape: u8,
         hover: &HoverRegistry,
         surface_cache: &mut ClientSurfaceCache,
     ) {
@@ -191,14 +194,9 @@ impl Renderer {
             }
         }
 
-        let cursor_rect = DamageRect {
-            x0: mouse_x - 4,
-            y0: mouse_y - 4,
-            x1: mouse_x + 4,
-            y1: mouse_y + 4,
-        };
+        let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
         if intersect_rect(damage, &cursor_rect).is_some() {
-            self.draw_cursor(buf, mouse_x, mouse_y, damage);
+            self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, damage);
         }
     }
 
@@ -426,10 +424,49 @@ impl Renderer {
         }
     }
 
-    fn draw_cursor(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+    fn draw_cursor(
+        &self,
+        buf: &mut DrawBuffer,
+        mx: i32,
+        my: i32,
+        cursor_shape: u8,
+        clip: &DamageRect,
+    ) {
+        match cursor_shape {
+            1 => self.draw_cursor_text(buf, mx, my, clip),
+            _ => self.draw_cursor_default(buf, mx, my, clip),
+        }
+    }
+
+    fn draw_cursor_default(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const CURSOR_SIZE: i32 = 9;
         gfx::fill_rect_clipped(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR, clip);
         gfx::fill_rect_clipped(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR, clip);
+    }
+
+    fn draw_cursor_text(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
+        const BEAM_HEIGHT: i32 = 16;
+        const SERIF_WIDTH: i32 = 5;
+        let top = my - BEAM_HEIGHT / 2;
+        gfx::fill_rect_clipped(buf, mx, top, 1, BEAM_HEIGHT, COLOR_CURSOR, clip);
+        gfx::fill_rect_clipped(
+            buf,
+            mx - SERIF_WIDTH / 2,
+            top,
+            SERIF_WIDTH,
+            1,
+            COLOR_CURSOR,
+            clip,
+        );
+        gfx::fill_rect_clipped(
+            buf,
+            mx - SERIF_WIDTH / 2,
+            top + BEAM_HEIGHT - 1,
+            SERIF_WIDTH,
+            1,
+            COLOR_CURSOR,
+            clip,
+        );
     }
 
     fn draw_window_content(
@@ -568,6 +605,23 @@ fn title_to_str(title: &[u8; 32]) -> &str {
         return "";
     }
     core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
+}
+
+fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {
+    match cursor_shape {
+        1 => DamageRect {
+            x0: mx - 2,
+            y0: my - 8,
+            x1: mx + 2,
+            y1: my + 7,
+        },
+        _ => DamageRect {
+            x0: mx - 4,
+            y0: my - 4,
+            x1: mx + 4,
+            y1: my + 4,
+        },
+    }
 }
 
 fn draw_button_clipped(

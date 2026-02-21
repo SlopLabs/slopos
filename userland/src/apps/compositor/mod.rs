@@ -341,7 +341,7 @@ impl WindowManager {
     }
 
     fn add_cursor_damage_at(&mut self, x: i32, y: i32) {
-        self.output_damage.add_rect(x - 4, y - 4, x + 4, y + 4);
+        self.output_damage.add_rect(x - 4, y - 8, x + 4, y + 8);
     }
 
     fn needs_redraw(&self) -> bool {
@@ -393,6 +393,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
         wm.input.update_mouse();
         wm.refresh_windows();
+        wm.input.update_pointer_focus(&wm.windows, wm.window_count);
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
         wm.input
@@ -418,6 +419,21 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
+
+                let cursor_shape = {
+                    let mut shape = 0u8;
+                    for i in (0..wm.window_count as usize).rev() {
+                        if wm.windows[i].state == WINDOW_STATE_MINIMIZED {
+                            continue;
+                        }
+                        if wm.input.hit_test_content_area(&wm.windows[i]) {
+                            shape = wm.windows[i].cursor_shape;
+                            break;
+                        }
+                    }
+                    shape
+                };
+
                 mode = wm.renderer.render(
                     &mut buf,
                     &wm.windows,
@@ -426,6 +442,7 @@ pub fn compositor_user_main(_arg: *mut c_void) {
                     wm.input.start_menu_open,
                     wm.input.mouse_x,
                     wm.input.mouse_y,
+                    cursor_shape,
                     &wm.hover_registry,
                     &mut wm.surface_cache,
                     force_full,

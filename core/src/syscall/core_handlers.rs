@@ -123,6 +123,16 @@ define_syscall!(syscall_user_read_char(ctx, args) {
     ctx.ok(c as u64)
 });
 
+define_syscall!(syscall_user_read_char_nb(ctx, args) {
+    let _ = args;
+    let mut c = 0u8;
+    let rc = tty::read_char_nonblocking(&mut c as *mut u8);
+    if rc < 0 {
+        return ctx.ok_i64(-1);
+    }
+    ctx.ok(c as u64)
+});
+
 define_syscall!(syscall_sys_info(ctx, args) {
     require_nonzero!(ctx, args.arg0);
 

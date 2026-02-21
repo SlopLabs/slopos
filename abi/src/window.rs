@@ -6,6 +6,10 @@ pub use crate::damage::{
 
 pub const MAX_BUFFER_AGE: u8 = 8;
 
+pub const CURSOR_SHAPE_DEFAULT: u8 = 0;
+pub const CURSOR_SHAPE_TEXT: u8 = 1;
+pub const CURSOR_SHAPE_POINTER: u8 = 2;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct WindowInfo {
@@ -16,7 +20,8 @@ pub struct WindowInfo {
     pub height: u32,
     pub state: u8,
     pub damage_count: u8,
-    pub _padding: [u8; 2],
+    pub cursor_shape: u8,
+    pub _padding: u8,
     pub shm_token: u32,
     pub damage_regions: [DamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [u8; 32],
@@ -74,7 +79,8 @@ impl Default for WindowInfo {
             height: 0,
             state: 0,
             damage_count: 0,
-            _padding: [0; 2],
+            cursor_shape: 0,
+            _padding: 0,
             shm_token: 0,
             damage_regions: [DamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
             title: [0; 32],

@@ -5,6 +5,7 @@ pub const MAX_INPUT_TASKS: usize = 32;
 
 /// Maximum events per task queue
 pub const MAX_EVENTS_PER_TASK: usize = 64;
+pub const CLIPBOARD_MAX_SIZE: usize = 4096;
 
 /// Focus type for input_set_focus syscall
 pub const INPUT_FOCUS_KEYBOARD: u32 = 0;
