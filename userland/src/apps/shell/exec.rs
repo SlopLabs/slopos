@@ -548,7 +548,7 @@ fn run_in_child(
     cmd: &ParsedCommand,
     stdin_fd: i32,
     stdout_fd: i32,
-    pipes: &[[i32; 2]; MAX_PIPE_CMDS - 1],
+    pipes: &[[i32; 2]; MAX_PIPE_CMDS],
     pipe_count: usize,
     pgid: u32,
 ) -> ! {
@@ -673,11 +673,22 @@ fn execute_single_builtin(cmd: &ParsedCommand) -> i32 {
 }
 
 fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
-    let pipe_count = pipeline.command_count.saturating_sub(1);
-    let mut pipes = [[-1; 2]; MAX_PIPE_CMDS - 1];
-    for pair in pipes.iter_mut().take(pipe_count) {
+    let inter_pipes = pipeline.command_count.saturating_sub(1);
+    let capture_output = !pipeline.background;
+
+    let total_pipes = inter_pipes + if capture_output { 1 } else { 0 };
+    let mut pipes = [[-1; 2]; MAX_PIPE_CMDS];
+    for pair in pipes.iter_mut().take(total_pipes) {
         if fs::pipe(pair).is_err() {
             shell_write(b"pipe failed\n");
+            for p in pipes.iter().take(total_pipes) {
+                if p[0] >= 0 {
+                    let _ = fs::close_fd(p[0]);
+                }
+                if p[1] >= 0 {
+                    let _ = fs::close_fd(p[1]);
+                }
+            }
             return 1;
         }
     }
@@ -687,12 +698,18 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
 
     for i in 0..pipeline.command_count {
         let stdin_fd = if i > 0 { pipes[i - 1][0] } else { -1 };
-        let stdout_fd = if i < pipe_count { pipes[i][1] } else { -1 };
+        let stdout_fd = if i < inter_pipes {
+            pipes[i][1]
+        } else if capture_output {
+            pipes[inter_pipes][1]
+        } else {
+            -1
+        };
 
         let pid = process::fork();
         if pid < 0 {
             shell_write(b"fork failed\n");
-            for pair in pipes.iter().take(pipe_count) {
+            for pair in pipes.iter().take(total_pipes) {
                 let _ = fs::close_fd(pair[0]);
                 let _ = fs::close_fd(pair[1]);
             }
@@ -704,7 +721,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
                 stdin_fd,
                 stdout_fd,
                 &pipes,
-                pipe_count,
+                total_pipes,
                 pgid,
             );
         }
@@ -719,9 +736,15 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
         pids[i] = child_pid;
     }
 
-    for pair in pipes.iter().take(pipe_count) {
-        let _ = fs::close_fd(pair[0]);
-        let _ = fs::close_fd(pair[1]);
+    for pair in pipes.iter().take(total_pipes) {
+        if pair[1] >= 0 {
+            let _ = fs::close_fd(pair[1]);
+        }
+    }
+    for pair in pipes.iter().take(inter_pipes) {
+        if pair[0] >= 0 {
+            let _ = fs::close_fd(pair[0]);
+        }
     }
 
     if pipeline.background {
@@ -736,6 +759,23 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
     }
 
     enter_foreground(pgid);
+
+    let capture_fd = pipes[inter_pipes][0];
+    if capture_fd >= 0 {
+        let mut buf = [0u8; 512];
+        loop {
+            let n = match fs::read_slice(capture_fd, &mut buf) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            shell_write(&buf[..n]);
+        }
+        let _ = fs::close_fd(capture_fd);
+    }
+
     let mut status = 0;
     for pid in pids.iter().take(pipeline.command_count) {
         status = process::waitpid(*pid);
