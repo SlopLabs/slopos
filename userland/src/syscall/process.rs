@@ -10,6 +10,11 @@ pub fn getpid() -> u32 {
 }
 
 #[inline(always)]
+pub fn getuid() -> u32 {
+    unsafe { syscall0(SYSCALL_GETUID) as u32 }
+}
+
+#[inline(always)]
 pub fn spawn_path(path: &[u8]) -> i32 {
     spawn_path_with_attrs(path, 5, 0)
 }

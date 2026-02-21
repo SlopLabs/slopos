@@ -543,13 +543,13 @@ Support double and single quotes in command arguments.
 
 ### 4B: System Information Commands
 
-- [ ] **4B.1** `uptime` — show system uptime. Uses `SYSCALL_GET_TIME_MS` (39), format as hours:minutes:seconds
-- [ ] **4B.2** `cpuinfo` — show CPU count, current CPU. Uses `SYSCALL_GET_CPU_COUNT` (80) + `SYSCALL_GET_CURRENT_CPU` (81)
-- [ ] **4B.3** `free` — show memory stats (total/free/allocated pages, convert to KB/MB). Uses `SYSCALL_SYS_INFO` (22)
-- [ ] **4B.4** `time <command>` — execute command and print elapsed time. Wraps any command with `get_time_ms()` before/after
-- [ ] **4B.5** `date` — print current uptime as date-ish format (no RTC, so relative time)
-- [ ] **4B.6** `uname` — print system name (SlopOS), version, architecture (x86_64)
-- [ ] **4B.7** `whoami` — print `root` (uses `SYSCALL_GETUID`, always 0)
+- [x] **4B.1** `uptime` — show system uptime. Uses `SYSCALL_GET_TIME_MS` (39), format as hours:minutes:seconds
+- [x] **4B.2** `cpuinfo` — show CPU count, current CPU. Uses `SYSCALL_GET_CPU_COUNT` (80) + `SYSCALL_GET_CURRENT_CPU` (81)
+- [x] **4B.3** `free` — show memory stats (total/free/allocated pages, convert to KB/MB). Uses `SYSCALL_SYS_INFO` (22)
+- [x] **4B.4** `time <command>` — execute command and print elapsed time. Wraps any command with `get_time_ms()` before/after
+- [x] **4B.5** `date` — print current uptime as date-ish format (no RTC, so relative time)
+- [x] **4B.6** `uname` — print system name (SlopOS), version, architecture (x86_64)
+- [x] **4B.7** `whoami` — print `root` (uses `SYSCALL_GETUID`, always 0)
 
 ### 4C: Utility Commands
 
@@ -565,7 +565,7 @@ Support double and single quotes in command arguments.
 ### Phase 4 Gate
 
 - [x] **GATE**: At least 10 new commands implemented and working (12 in Phase 4A: stat, touch, cp, mv, head, tail, wc, hexdump, diff, tee + ls/cat enhancements)
-- [ ] **GATE**: `stat`, `touch`, `cp`, `uptime`, `free` work correctly (stat/touch/cp done — uptime/free require Phase 4B)
+- [x] **GATE**: `stat`, `touch`, `cp`, `uptime`, `free` work correctly
 - [ ] **GATE**: `make test` passes
 
 ---
@@ -886,7 +886,7 @@ Keyboard → input.rs (line editing, history)
 | **Phase 1**: Core Shell | **Complete** | 28 | 28 | — |
 | **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | **Complete** | 17 | 17 | — |
-| **Phase 4**: New Builtins | **4A Complete** | 27 | 12 | — |
+| **Phase 4**: New Builtins | **4A+4B Complete** | 27 | 19 | — |
 | **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
