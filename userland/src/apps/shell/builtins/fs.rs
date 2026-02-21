@@ -118,25 +118,18 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc == 1 {
-        let mut tmp = [0u8; SHELL_IO_MAX + 1];
-        let r = match fs::read_slice(0, &mut tmp[..SHELL_IO_MAX]) {
-            Ok(n) => n,
-            Err(_) => {
-                shell_write(b"cat: stdin read failed\n");
-                return 1;
+        let mut buf = [0u8; SHELL_IO_MAX];
+        loop {
+            let n = match fs::read_slice(0, &mut buf) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
             }
-        };
-        let len = cmp::min(r, tmp.len() - 1);
-        tmp[len] = 0;
-        if len == 0 {
-            return 0;
-        }
-        shell_write(&tmp[..len]);
-        if tmp[len - 1] != b'\n' {
-            shell_write(NL);
-        }
-        if r as usize == SHELL_IO_MAX {
-            shell_write(b"\n[truncated]\n");
+            if !shell_write(&buf[..n]) {
+                break;
+            }
         }
         return 0;
     }
@@ -406,7 +399,7 @@ pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
             1 => shell_write(b"directory"),
             2 => shell_write(b"character device"),
             _ => shell_write(b"unknown"),
-        }
+        };
         shell_write(NL);
 
         shell_write(b"  Size: ");
@@ -529,29 +522,40 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
 }
 
 pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
-    if argc < 2 {
-        shell_write(ERR_MISSING_FILE);
-        return 1;
-    }
     if argc > 3 {
         shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
 
-    let n_lines: usize = if argc >= 3 {
-        match jobs::parse_u32_arg(argv[2]) {
+    // Determine source (stdin vs file) and line count.
+    //   head            → stdin, 10 lines
+    //   head <N>        → stdin, N lines
+    //   head <file>     → file,  10 lines
+    //   head <file> <N> → file,  N lines
+    let (use_stdin, n_lines, file_arg_idx) = if argc < 2 {
+        (true, 10usize, 0usize)
+    } else if argc == 2 {
+        match jobs::parse_u32_arg(argv[1]) {
+            Some(n) if n > 0 => (true, n as usize, 0),
+            _ => (false, 10usize, 1),
+        }
+    } else {
+        let n = match jobs::parse_u32_arg(argv[2]) {
             Some(n) if n > 0 => n as usize,
             _ => {
                 shell_write(b"head: invalid line count\n");
                 return 1;
             }
-        }
-    } else {
-        10
+        };
+        (false, n, 1)
     };
 
+    if use_stdin {
+        return head_from_fd(0, n_lines);
+    }
+
     buffers::with_path_buf(|path_buf| {
-        if normalize_path(argv[1], path_buf) != 0 {
+        if normalize_path(argv[file_arg_idx], path_buf) != 0 {
             shell_write(PATH_TOO_LONG);
             return 1;
         }
@@ -564,62 +568,72 @@ pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
             }
         };
 
-        let mut lines_seen = 0usize;
-        let mut buf = [0u8; SHELL_IO_MAX];
-        let mut done = false;
-
-        while !done {
-            let n = match fs::read_slice(fd, &mut buf) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            if n == 0 {
-                break;
-            }
-
-            let mut output_end = n;
-            for i in 0..n {
-                if buf[i] == b'\n' {
-                    lines_seen += 1;
-                    if lines_seen >= n_lines {
-                        output_end = i + 1;
-                        done = true;
-                        break;
-                    }
-                }
-            }
-            shell_write(&buf[..output_end]);
-        }
-
+        let rc = head_from_fd(fd, n_lines);
         let _ = fs::close_fd(fd);
-        0
+        rc
     })
 }
 
-pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
-    if argc < 2 {
-        shell_write(ERR_MISSING_FILE);
-        return 1;
+fn head_from_fd(fd: i32, n_lines: usize) -> i32 {
+    let mut lines_seen = 0usize;
+    let mut buf = [0u8; SHELL_IO_MAX];
+    let mut done = false;
+
+    while !done {
+        let n = match fs::read_slice(fd, &mut buf) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut output_end = n;
+        for i in 0..n {
+            if buf[i] == b'\n' {
+                lines_seen += 1;
+                if lines_seen >= n_lines {
+                    output_end = i + 1;
+                    done = true;
+                    break;
+                }
+            }
+        }
+        shell_write(&buf[..output_end]);
     }
+    0
+}
+
+pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 3 {
         shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
 
-    let n_lines: usize = if argc >= 3 {
-        match jobs::parse_u32_arg(argv[2]) {
+    let (use_stdin, n_lines, file_arg_idx) = if argc < 2 {
+        (true, 10usize, 0usize)
+    } else if argc == 2 {
+        match jobs::parse_u32_arg(argv[1]) {
+            Some(n) if n > 0 => (true, n as usize, 0),
+            _ => (false, 10usize, 1),
+        }
+    } else {
+        let n = match jobs::parse_u32_arg(argv[2]) {
             Some(n) if n > 0 => n as usize,
             _ => {
                 shell_write(b"tail: invalid line count\n");
                 return 1;
             }
-        }
-    } else {
-        10
+        };
+        (false, n, 1)
     };
 
+    if use_stdin {
+        return tail_from_fd(0, n_lines);
+    }
+
     buffers::with_path_buf(|path_buf| {
-        if normalize_path(argv[1], path_buf) != 0 {
+        if normalize_path(argv[file_arg_idx], path_buf) != 0 {
             shell_write(PATH_TOO_LONG);
             return 1;
         }
@@ -632,71 +646,96 @@ pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
             }
         };
 
-        const TAIL_BUF: usize = 4096;
-        let mut data = [0u8; TAIL_BUF];
-        let mut total = 0usize;
+        let rc = tail_from_fd(fd, n_lines);
+        let _ = fs::close_fd(fd);
+        rc
+    })
+}
 
-        loop {
-            if total >= TAIL_BUF {
+fn tail_from_fd(fd: i32, n_lines: usize) -> i32 {
+    const TAIL_BUF: usize = 4096;
+    let mut data = [0u8; TAIL_BUF];
+    let mut total = 0usize;
+
+    loop {
+        if total >= TAIL_BUF {
+            break;
+        }
+        let chunk = (TAIL_BUF - total).min(SHELL_IO_MAX);
+        let n = match fs::read_slice(fd, &mut data[total..total + chunk]) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+
+    if total == 0 {
+        return 0;
+    }
+
+    let mut count = 0usize;
+    let scan_start = if data[total - 1] == b'\n' {
+        total.saturating_sub(1)
+    } else {
+        total
+    };
+
+    let mut start = 0usize;
+    let mut pos = scan_start;
+    while pos > 0 {
+        pos -= 1;
+        if data[pos] == b'\n' {
+            count += 1;
+            if count >= n_lines {
+                start = pos + 1;
                 break;
             }
-            let chunk = (TAIL_BUF - total).min(SHELL_IO_MAX);
-            let n = match fs::read_slice(fd, &mut data[total..total + chunk]) {
+        }
+    }
+
+    shell_write(&data[start..total]);
+    if data[total - 1] != b'\n' {
+        shell_write(NL);
+    }
+    0
+}
+
+pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
+    if argc < 2 {
+        let mut lines = 0usize;
+        let mut words = 0usize;
+        let mut chars = 0usize;
+        let mut in_word = false;
+        let mut buf = [0u8; SHELL_IO_MAX];
+        loop {
+            let n = match fs::read_slice(0, &mut buf) {
                 Ok(n) => n,
                 Err(_) => break,
             };
             if n == 0 {
                 break;
             }
-            total += n;
-        }
-
-        let _ = fs::close_fd(fd);
-
-        if total == 0 {
-            return 0;
-        }
-
-        // Skip trailing newline so it doesn't count as an extra empty line
-        let mut count = 0usize;
-        let scan_start = if data[total - 1] == b'\n' {
-            total.saturating_sub(1)
-        } else {
-            total
-        };
-
-        let mut start = 0usize;
-        let mut pos = scan_start;
-        while pos > 0 {
-            pos -= 1;
-            if data[pos] == b'\n' {
-                count += 1;
-                if count >= n_lines {
-                    start = pos + 1;
-                    break;
+            chars += n;
+            for j in 0..n {
+                if buf[j] == b'\n' {
+                    lines += 1;
+                }
+                if is_wc_space(buf[j]) {
+                    if in_word {
+                        words += 1;
+                        in_word = false;
+                    }
+                } else {
+                    in_word = true;
                 }
             }
         }
-
-        shell_write(&data[start..total]);
-        if data[total - 1] != b'\n' {
-            shell_write(NL);
+        if in_word {
+            words += 1;
         }
-        0
-    })
-}
-
-pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
-    if argc < 2 {
-        let mut buf = [0u8; SHELL_IO_MAX];
-        let n = match fs::read_slice(0, &mut buf) {
-            Ok(n) => n,
-            Err(_) => {
-                shell_write(b"wc: read error\n");
-                return 1;
-            }
-        };
-        let (lines, words, chars) = count_lwc(&buf[..n]);
         write_wc_line(lines, words, chars, b"");
         return 0;
     }
@@ -1137,32 +1176,6 @@ fn find_line_end(data: &[u8]) -> (usize, usize) {
         }
     }
     (data.len(), data.len())
-}
-
-fn count_lwc(data: &[u8]) -> (usize, usize, usize) {
-    let mut lines = 0usize;
-    let mut words = 0usize;
-    let chars = data.len();
-    let mut in_word = false;
-
-    for &b in data {
-        if b == b'\n' {
-            lines += 1;
-        }
-        if is_wc_space(b) {
-            if in_word {
-                words += 1;
-                in_word = false;
-            }
-        } else {
-            in_word = true;
-        }
-    }
-    if in_word {
-        words += 1;
-    }
-
-    (lines, words, chars)
 }
 
 fn is_wc_space(b: u8) -> bool {

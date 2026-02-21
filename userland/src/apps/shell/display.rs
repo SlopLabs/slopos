@@ -631,15 +631,20 @@ pub fn shell_console_write(buf: &[u8]) {
     }
 }
 
-pub fn shell_write(buf: &[u8]) {
+/// Write output to the current destination (pipe/redirect fd or TTY).
+///
+/// Returns `true` on success, `false` when the write fails (e.g. broken pipe).
+/// Callers in tight loops (like `yes`, `seq`) should check the return value and
+/// exit early on `false` to avoid spinning on a dead pipe.
+pub fn shell_write(buf: &[u8]) -> bool {
     let redirected_fd = unsafe { *OUTPUT_FD.get() };
     if redirected_fd >= 0 {
-        let _ = fs::write_slice(redirected_fd, buf);
-        return;
+        return fs::write_slice(redirected_fd, buf).is_ok();
     }
     let _ = crate::syscall::tty::write(buf);
     shell_console_write(buf);
     shell_console_commit();
+    true
 }
 
 pub fn shell_set_output_fd(fd: i32) {

@@ -202,7 +202,7 @@ pub fn cmd_ps(_argc: i32, _argv: &[*const u8]) -> i32 {
             1 => shell_write(b"min"),
             2 => shell_write(b"max"),
             _ => shell_write(b"?"),
-        }
+        };
         shell_write(b" ");
         let name_len = win
             .title

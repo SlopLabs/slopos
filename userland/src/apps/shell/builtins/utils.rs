@@ -127,7 +127,9 @@ pub fn cmd_seq(argc: i32, argv: &[*const u8]) -> i32 {
     let mut i = start;
     loop {
         write_u64(i);
-        shell_write(NL);
+        if !shell_write(NL) {
+            break;
+        }
         if i == end {
             break;
         }
@@ -151,9 +153,9 @@ pub fn cmd_yes(argc: i32, argv: &[*const u8]) -> i32 {
     };
 
     for _ in 0..MAX_ITERATIONS {
-        shell_write(text);
-        shell_write(NL);
-        // Yield so the scheduler runs and pipe-break signals propagate.
+        if !shell_write(text) || !shell_write(NL) {
+            break;
+        }
         sys_core::yield_now();
     }
     0

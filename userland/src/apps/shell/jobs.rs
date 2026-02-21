@@ -146,7 +146,7 @@ pub fn render_jobs() {
             match job.state {
                 JobState::Running => shell_write(b"Running "),
                 JobState::Done => shell_write(b"Done "),
-            }
+            };
             shell_write(&job.command[..job.command_len]);
             shell_write(b"\n");
         }
