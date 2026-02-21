@@ -105,8 +105,49 @@ fn build_prompt(buf: &mut [u8; 280]) -> usize {
     pos
 }
 
+/// Color indices for `[/path] $ `: brackets+path in PATH_BLUE, `$` in PROMPT_ACCENT.
+fn build_prompt_colors(buf: &mut [u8; 280], prompt_len: usize) {
+    use display::{COLOR_DEFAULT, COLOR_PATH_BLUE, COLOR_PROMPT_ACCENT};
+
+    let cwd = unsafe { &*CWD.get() };
+    let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(0);
+    let bracket_and_path = 1 + cwd_len.min(275) + 1;
+
+    for i in 0..prompt_len.min(280) {
+        buf[i] = if i < bracket_and_path {
+            COLOR_PATH_BLUE
+        } else if i == bracket_and_path + 1 {
+            COLOR_PROMPT_ACCENT
+        } else {
+            COLOR_DEFAULT
+        };
+    }
+}
+
+fn write_colored_prompt(prompt: &[u8], colors: &[u8]) {
+    use display::{COLOR_DEFAULT, shell_console_commit, shell_console_write_colored};
+
+    let _ = crate::syscall::tty::write(prompt);
+
+    let mut i = 0;
+    while i < prompt.len() {
+        let color = if i < colors.len() {
+            colors[i]
+        } else {
+            COLOR_DEFAULT
+        };
+        let start = i;
+        while i < prompt.len() && (i >= colors.len() || colors[i] == color) {
+            i += 1;
+        }
+        shell_console_write_colored(&prompt[start..i], color);
+    }
+    shell_console_commit();
+}
+
 pub struct ShellState {
     pub prompt_buf: [u8; 280],
+    pub prompt_colors: [u8; 280],
     pub prompt_len: usize,
 }
 
@@ -132,18 +173,21 @@ pub fn shell_user_main(_arg: *mut c_void) {
 
     let mut state = ShellState {
         prompt_buf: [0; 280],
+        prompt_colors: [0; 280],
         prompt_len: 0,
     };
 
     loop {
         jobs::notify_completed_jobs();
         state.prompt_len = build_prompt(&mut state.prompt_buf);
+        build_prompt_colors(&mut state.prompt_colors, state.prompt_len);
         let prompt = &state.prompt_buf[..state.prompt_len];
 
-        shell_write(prompt);
+        write_colored_prompt(prompt, &state.prompt_colors[..state.prompt_len]);
 
         let mut tokens = [core::ptr::null(); parser::SHELL_MAX_TOKENS];
-        let token_count = input::read_command_line(&mut tokens, prompt);
+        let prompt_colors = &state.prompt_colors[..state.prompt_len];
+        let token_count = input::read_command_line(&mut tokens, prompt, prompt_colors);
 
         if token_count <= 0 {
             continue;
@@ -152,7 +196,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
         let rc = exec::execute_tokens(token_count, &tokens);
         set_last_exit_code(rc);
         if rc == 127 {
-            shell_write(UNKNOWN_CMD);
+            display::shell_write_idx(UNKNOWN_CMD, display::COLOR_ERROR_RED);
         }
     }
 }

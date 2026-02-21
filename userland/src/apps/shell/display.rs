@@ -11,8 +11,39 @@ use crate::syscall::{DisplayInfo, fs, window};
 use super::SyncUnsafeCell;
 use super::surface;
 
-pub const SHELL_BG_COLOR: Color32 = Color32(0x1E1E_1EFF);
-pub const SHELL_FG_COLOR: Color32 = Color32(0xE6E6_E6FF);
+pub const SHELL_BG_COLOR: Color32 = Color32::rgb(0x1E, 0x1E, 0x1E);
+pub const SHELL_FG_COLOR: Color32 = Color32::rgb(0xE6, 0xE6, 0xE6);
+
+pub const COLOR_DEFAULT: u8 = 0;
+pub const COLOR_DIR_BLUE: u8 = 1;
+pub const COLOR_EXEC_GREEN: u8 = 2;
+pub const COLOR_ERROR_RED: u8 = 3;
+pub const COLOR_WARN_YELLOW: u8 = 4;
+pub const COLOR_PROMPT_ACCENT: u8 = 5;
+pub const COLOR_COMMENT_GRAY: u8 = 6;
+pub const COLOR_PATH_BLUE: u8 = 7;
+
+pub const PALETTE_SIZE: usize = 16;
+
+/// 4-bit indexed color palette for per-character foreground colors in scrollback.
+pub static PALETTE: [Color32; PALETTE_SIZE] = [
+    SHELL_FG_COLOR,                 // 0: default
+    Color32::rgb(0x5C, 0x9E, 0xD6), // 1: directory blue
+    Color32::rgb(0x98, 0xC3, 0x79), // 2: executable green
+    Color32::rgb(0xE0, 0x6C, 0x75), // 3: error red
+    Color32::rgb(0xE5, 0xC0, 0x7B), // 4: warning yellow
+    Color32::rgb(0xC6, 0x78, 0xDD), // 5: prompt accent
+    Color32::rgb(0x5C, 0x63, 0x70), // 6: comment gray
+    Color32::rgb(0x61, 0xAF, 0xEF), // 7: path blue
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+    SHELL_FG_COLOR,
+];
 
 pub const SHELL_WINDOW_WIDTH: i32 = 640;
 pub const SHELL_WINDOW_HEIGHT: i32 = 480;
@@ -89,6 +120,27 @@ unsafe impl Sync for DisplayState {}
 
 pub static DISPLAY: DisplayState = DisplayState::new();
 static OUTPUT_FD: SyncUnsafeCell<i32> = SyncUnsafeCell::new(-1);
+static CURRENT_COLOR_IDX: SyncUnsafeCell<u8> = SyncUnsafeCell::new(0);
+
+#[inline]
+fn current_color_idx() -> u8 {
+    unsafe { *CURRENT_COLOR_IDX.get() }
+}
+
+#[inline]
+fn set_current_color_idx(idx: u8) {
+    unsafe { *CURRENT_COLOR_IDX.get() = idx }
+}
+
+fn palette_index_for(color: Color32) -> u8 {
+    let target = color.to_u32();
+    for (i, c) in PALETTE.iter().enumerate() {
+        if c.to_u32() == target {
+            return i as u8;
+        }
+    }
+    COLOR_DEFAULT
+}
 
 // =============================================================================
 // Scrollback module: safe accessors for large arrays
@@ -98,6 +150,9 @@ pub mod scrollback {
     use super::*;
 
     static DATA: SyncUnsafeCell<[u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]> =
+        SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]);
+
+    static COLORS: SyncUnsafeCell<[u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]> =
         SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]);
 
     static LENS: SyncUnsafeCell<[u16; SHELL_SCROLLBACK_LINES]> =
@@ -145,13 +200,35 @@ pub mod scrollback {
         }
     }
 
+    #[inline]
+    pub fn set_color(slot: usize, col: usize, color_idx: u8) {
+        let slot = slot % SHELL_SCROLLBACK_LINES;
+        let col = col % SHELL_SCROLLBACK_COLS;
+        unsafe {
+            let colors = &mut *COLORS.get();
+            colors[slot * SHELL_SCROLLBACK_COLS + col] = color_idx;
+        }
+    }
+
+    #[inline]
+    pub fn get_color(slot: usize, col: usize) -> u8 {
+        let slot = slot % SHELL_SCROLLBACK_LINES;
+        let col = col % SHELL_SCROLLBACK_COLS;
+        unsafe {
+            let colors = &*COLORS.get();
+            colors[slot * SHELL_SCROLLBACK_COLS + col]
+        }
+    }
+
     pub fn clear_line(slot: usize) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         unsafe {
             let data = &mut *DATA.get();
+            let colors = &mut *COLORS.get();
             let start = slot * SHELL_SCROLLBACK_COLS;
             for i in start..start + SHELL_SCROLLBACK_COLS {
                 data[i] = 0;
+                colors[i] = 0;
             }
             (*LENS.get())[slot] = 0;
         }
@@ -163,6 +240,10 @@ pub mod scrollback {
             for byte in data.iter_mut() {
                 *byte = 0;
             }
+            let colors = &mut *COLORS.get();
+            for c in colors.iter_mut() {
+                *c = 0;
+            }
             let lens = &mut *LENS.get();
             for len in lens.iter_mut() {
                 *len = 0;
@@ -170,20 +251,40 @@ pub mod scrollback {
         }
     }
 
-    /// Write a line to scrollback (for prompt rewriting)
     pub fn write_line(slot: usize, content: &[u8]) {
         let slot = slot % SHELL_SCROLLBACK_LINES;
         let len = content.len().min(SHELL_SCROLLBACK_COLS);
         unsafe {
             let data = &mut *DATA.get();
+            let colors = &mut *COLORS.get();
             let start = slot * SHELL_SCROLLBACK_COLS;
-            // Clear first
             for i in start..start + SHELL_SCROLLBACK_COLS {
                 data[i] = 0;
+                colors[i] = 0;
             }
-            // Write content
             for (i, &b) in content.iter().take(len).enumerate() {
                 data[start + i] = b;
+            }
+            (*LENS.get())[slot] = len as u16;
+        }
+    }
+
+    pub fn write_line_colored(slot: usize, content: &[u8], color_indices: &[u8]) {
+        let slot = slot % SHELL_SCROLLBACK_LINES;
+        let len = content.len().min(SHELL_SCROLLBACK_COLS);
+        unsafe {
+            let data = &mut *DATA.get();
+            let colors = &mut *COLORS.get();
+            let start = slot * SHELL_SCROLLBACK_COLS;
+            for i in start..start + SHELL_SCROLLBACK_COLS {
+                data[i] = 0;
+                colors[i] = 0;
+            }
+            for (i, &b) in content.iter().take(len).enumerate() {
+                data[start + i] = b;
+                if i < color_indices.len() {
+                    colors[start + i] = color_indices[i];
+                }
             }
             (*LENS.get())[slot] = len as u16;
         }
@@ -206,12 +307,10 @@ fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: Color32) {
 
 fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logical: i32, row: i32) {
     let bg = display.bg.get();
-    let fg = display.fg.get();
     let width = display.width.get();
     let cols = display.cols.get();
     let total_lines = display.total_lines.get();
 
-    // Clear the row first
     clear_row(buf, row, width, bg);
 
     if logical < 0 || logical >= total_lines {
@@ -229,6 +328,8 @@ fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logica
     scrollback::with_line(slot, |line| {
         for (col, &ch) in line.iter().take(draw_len).enumerate() {
             if ch != 0 {
+                let color_idx = scrollback::get_color(slot, col);
+                let fg = PALETTE[color_idx as usize % PALETTE_SIZE];
                 draw_char_at(buf, col as i32, row, ch, fg, bg);
             }
         }
@@ -309,6 +410,7 @@ fn update_char_state(display: &DisplayState, c: u8) {
 
     if (cursor_col as usize) < SHELL_SCROLLBACK_COLS {
         scrollback::set_char(slot, cursor_col as usize, c);
+        scrollback::set_color(slot, cursor_col as usize, current_color_idx());
         let len = scrollback::get_line_len(slot) as i32;
         if cursor_col + 1 > len {
             scrollback::set_line_len(slot, (cursor_col + 1) as u16);
@@ -343,11 +445,10 @@ fn update_backspace_state(display: &DisplayState) {
     display.cursor_col.set(cursor_col);
     display.cursor_line.set(cursor_line);
 
-    // Clear character in scrollback
     let slot = display.line_slot(cursor_line);
     if (cursor_col as usize) < SHELL_SCROLLBACK_COLS {
         scrollback::set_char(slot, cursor_col as usize, 0);
-        // Trim trailing zeros from line length
+        scrollback::set_color(slot, cursor_col as usize, 0);
         let mut len = scrollback::get_line_len(slot) as i32;
         while len > 0 {
             if scrollback::get_char(slot, (len - 1) as usize) != 0 {
@@ -534,7 +635,13 @@ fn console_ensure_follow(display: &DisplayState) {
     });
 }
 
-fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8], cursor_pos: usize) {
+fn console_rewrite_input(
+    display: &DisplayState,
+    prompt: &[u8],
+    prompt_colors: &[u8],
+    input: &[u8],
+    cursor_pos: usize,
+) {
     if !display.enabled.get() {
         return;
     }
@@ -547,12 +654,23 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8], cu
     let write_len = total_len.min(cols);
 
     let mut combined = [0u8; SHELL_SCROLLBACK_COLS];
+    let mut colors = [0u8; SHELL_SCROLLBACK_COLS];
     let mut idx = 0;
-    for &b in prompt.iter().chain(input.iter()).take(write_len) {
+    for (i, &b) in prompt
+        .iter()
+        .chain(input.iter())
+        .take(write_len)
+        .enumerate()
+    {
         combined[idx] = b;
+        colors[idx] = if i < prompt_colors.len() {
+            prompt_colors[i]
+        } else {
+            COLOR_DEFAULT
+        };
         idx += 1;
     }
-    scrollback::write_line(slot, &combined[..idx]);
+    scrollback::write_line_colored(slot, &combined[..idx], &colors[..idx]);
     display.cursor_col.set(idx as i32);
 
     if display.follow.get() {
@@ -631,6 +749,15 @@ pub fn shell_console_write(buf: &[u8]) {
     }
 }
 
+pub fn shell_console_write_colored(buf: &[u8], color_idx: u8) {
+    if DISPLAY.enabled.get() {
+        let old = current_color_idx();
+        set_current_color_idx(color_idx);
+        console_write(&DISPLAY, buf);
+        set_current_color_idx(old);
+    }
+}
+
 /// Write output to the current destination (pipe/redirect fd or TTY).
 ///
 /// Returns `true` on success, `false` when the write fails (e.g. broken pipe).
@@ -643,6 +770,38 @@ pub fn shell_write(buf: &[u8]) -> bool {
     }
     let _ = crate::syscall::tty::write(buf);
     shell_console_write(buf);
+    shell_console_commit();
+    true
+}
+
+/// Write colored text to the current output destination.
+///
+/// When output is redirected (pipe / file), color is stripped and only the raw
+/// text is written.  Otherwise the text goes to the serial TTY (uncolored) and
+/// the compositor surface (colored via the palette index matching `fg`).
+pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
+    let redirected_fd = unsafe { *OUTPUT_FD.get() };
+    if redirected_fd >= 0 {
+        return fs::write_slice(redirected_fd, buf).is_ok();
+    }
+    let _ = crate::syscall::tty::write(buf);
+    let idx = palette_index_for(fg);
+    shell_console_write_colored(buf, idx);
+    shell_console_commit();
+    true
+}
+
+/// Write text with a palette color index to the current output destination.
+///
+/// Convenience wrapper that avoids a palette lookup when the caller already
+/// has an index.
+pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
+    let redirected_fd = unsafe { *OUTPUT_FD.get() };
+    if redirected_fd >= 0 {
+        return fs::write_slice(redirected_fd, buf).is_ok();
+    }
+    let _ = crate::syscall::tty::write(buf);
+    shell_console_write_colored(buf, color_idx);
     shell_console_commit();
     true
 }
@@ -701,9 +860,15 @@ pub fn shell_console_follow_bottom() {
     }
 }
 
-pub fn shell_redraw_input(_line_row: i32, prompt: &[u8], input: &[u8], cursor_pos: usize) {
+pub fn shell_redraw_input(
+    _line_row: i32,
+    prompt: &[u8],
+    prompt_colors: &[u8],
+    input: &[u8],
+    cursor_pos: usize,
+) {
     if DISPLAY.enabled.get() {
-        console_rewrite_input(&DISPLAY, prompt, input, cursor_pos);
+        console_rewrite_input(&DISPLAY, prompt, prompt_colors, input, cursor_pos);
         shell_console_commit();
     }
 }

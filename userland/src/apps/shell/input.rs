@@ -34,11 +34,32 @@ const CTRL_L: u8 = 0x0C;
 const CTRL_U: u8 = 0x15;
 const CTRL_W: u8 = 0x17;
 
-pub fn read_command_line(tokens: &mut [*const u8; SHELL_MAX_TOKENS], prompt: &[u8]) -> i32 {
+static PROMPT_COLORS: super::SyncUnsafeCell<[u8; 280]> = super::SyncUnsafeCell::new([0; 280]);
+static PROMPT_COLORS_LEN: super::SyncUnsafeCell<usize> = super::SyncUnsafeCell::new(0);
+
+pub fn read_command_line(
+    tokens: &mut [*const u8; SHELL_MAX_TOKENS],
+    prompt: &[u8],
+    prompt_colors: &[u8],
+) -> i32 {
+    unsafe {
+        let colors = &mut *PROMPT_COLORS.get();
+        let copy_len = prompt_colors.len().min(280);
+        colors[..copy_len].copy_from_slice(&prompt_colors[..copy_len]);
+        *PROMPT_COLORS_LEN.get() = copy_len;
+    }
     buffers::with_line_buf(|buf| {
         runtime::u_memset(buf.as_mut_ptr() as *mut c_void, 0, buf.len());
     });
     input_loop(tokens, prompt, 0, 0)
+}
+
+fn prompt_colors_slice() -> &'static [u8] {
+    unsafe {
+        let len = *PROMPT_COLORS_LEN.get();
+        let colors: &[u8; 280] = &*PROMPT_COLORS.get();
+        &colors[..len]
+    }
 }
 
 fn input_loop(
@@ -350,6 +371,12 @@ fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut u
 
 fn redraw(line_row: i32, prompt: &[u8], len: usize, cursor_pos: usize) {
     buffers::with_line_buf(|buf| {
-        shell_redraw_input(line_row, prompt, &buf[..len], cursor_pos);
+        shell_redraw_input(
+            line_row,
+            prompt,
+            prompt_colors_slice(),
+            &buf[..len],
+            cursor_pos,
+        );
     });
 }
