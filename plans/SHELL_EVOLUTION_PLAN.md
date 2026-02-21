@@ -579,26 +579,38 @@ Support double and single quotes in command arguments.
 
 ### 5A: ANSI Color Support
 
-- [ ] **5A.1** Define color palette constants in display module:
-  - Directory blue (`Color32(0x5C9E_D6FF)`)
-  - Executable green (`Color32(0x98C3_79FF)`)
-  - Error red (`Color32(0xE06C_75FF)`)
-  - Warning yellow (`Color32(0xE5C0_7BFF)`)
-  - Prompt accent (`Color32(0xC678_DDFF)`)
-  - Comment gray (`Color32(0x5C63_70FF)`)
-- [ ] **5A.2** Extend scrollback to store per-character color (add color attribute array parallel to text array)
-  - Option A: 4-bit color index (16 colors, 1 byte per char) → +40KB
-  - Option B: fg color index only (8 colors, 3 bits) packed into high bits of char byte
-- [ ] **5A.3** Update `draw_row_from_scrollback()` to use per-character color
-- [ ] **5A.4** Add `shell_write_colored(text: &[u8], fg: Color32)` function
+- [x] **5A.1** Define color palette constants in display module:
+  - Directory blue (`Color32::rgb(0x5C, 0x9E, 0xD6)`)
+  - Executable green (`Color32::rgb(0x98, 0xC3, 0x79)`)
+  - Error red (`Color32::rgb(0xE0, 0x6C, 0x75)`)
+  - Warning yellow (`Color32::rgb(0xE5, 0xC0, 0x7B)`)
+  - Prompt accent (`Color32::rgb(0xC6, 0x78, 0xDD)`)
+  - Comment gray (`Color32::rgb(0x5C, 0x63, 0x70)`)
+  - Path blue (`Color32::rgb(0x61, 0xAF, 0xEF)`)
+  - Fixed SHELL_BG_COLOR/SHELL_FG_COLOR to use correct Color32::rgb() format
+- [x] **5A.2** Extend scrollback to store per-character color (add color attribute array parallel to text array)
+  - Used Option A: 4-bit color index (16 colors, 1 byte per char) → +40KB
+  - Added COLORS parallel array, set_color/get_color accessors
+  - Updated clear_line, clear_all, write_line to also manage colors
+  - Added write_line_colored for future colored prompt support
+- [x] **5A.3** Update `draw_row_from_scrollback()` to use per-character color
+  - Each char reads its palette index from scrollback and resolves via PALETTE
+  - update_char_state stores current_color_idx alongside each character
+  - update_backspace_state clears color when clearing characters
+- [x] **5A.4** Add `shell_write_colored(text: &[u8], fg: Color32)` function
+  - Also added shell_write_idx(buf, color_idx) for callers with known indices
+  - Colors are stripped when output is redirected to pipes/files
+  - Serial TTY always receives uncolored text
 
 ### 5B: Colored Output
 
-- [ ] **5B.1** Colored `ls`: directories in blue, executables in green (check file type from `UserFsEntry`)
-- [ ] **5B.2** Colored prompt: `[path]` in blue, `$` in accent color, `#` if root
-- [ ] **5B.3** Colored error messages: `No such file or directory` in red
-- [ ] **5B.4** Colored `help`: command names in green, descriptions in default color
-- [ ] **5B.5** Colored `info`/`free`: labels in gray, values in white, warnings in yellow
+- [x] **5B.1** Colored `ls`: directories in blue (COLOR_DIR_BLUE), files in default color
+- [x] **5B.2** Colored prompt: `[path]` in PATH_BLUE, `$` in PROMPT_ACCENT
+  - Prompt colors threaded through input module via static color array
+  - `console_rewrite_input` writes colored prompt into scrollback on each redraw
+- [x] **5B.3** Colored error messages: all error output across fs.rs, system.rs, process.rs, utils.rs, env.rs, mod.rs uses COLOR_ERROR_RED
+- [x] **5B.4** Colored `help`: category headers in PROMPT_ACCENT, command names in EXEC_GREEN, "Usage:" in COMMENT_GRAY
+- [x] **5B.5** Colored `info`/`free`/`cpuinfo`: labels in COMMENT_GRAY, section headers in PROMPT_ACCENT, values in default
 
 ### 5C: Prompt Customization
 
@@ -887,7 +899,7 @@ Keyboard → input.rs (line editing, history)
 | **Phase 2**: Process Control | **Complete** | 30 | 30 | exec argv ABI (Phase 6) |
 | **Phase 3**: Environment | **Complete** | 17 | 17 | — |
 | **Phase 4**: New Builtins | **Complete** | 27 | 27 | — |
-| **Phase 5**: Polish & Color | Not Started | 13 | 0 | Phase 1 |
+| **Phase 5**: Polish & Color | In Progress | 13 | 9 | Phase 1 |
 | **Phase 6**: Kernel Unblocks | Not Started | 18 | 0 | Phase 2 |
 | **Phase 7**: Advanced | Not Started | 20 | 0 | Phases 1-3 |
-| **Total** | | **163** | **99** | |
+| **Total** | | **163** | **104** | |
