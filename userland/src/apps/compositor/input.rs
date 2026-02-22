@@ -168,6 +168,7 @@ impl InputHandler {
                 self.start_drag(&window);
                 window::raise_window(window.task_id);
                 tty::set_focus(window.task_id);
+                input::set_keyboard_focus(window.task_id);
                 self.focused_task = window.task_id;
                 return;
             }
@@ -175,6 +176,7 @@ impl InputHandler {
             if self.hit_test_content_area(&window) {
                 window::raise_window(window.task_id);
                 tty::set_focus(window.task_id);
+                input::set_keyboard_focus(window.task_id);
                 input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
                 self.focused_task = window.task_id;
                 return;
@@ -359,6 +361,7 @@ impl InputHandler {
             if let Some(task_id) = find_window_by_title(windows, window_count, title) {
                 window::raise_window(task_id);
                 tty::set_focus(task_id);
+                input::set_keyboard_focus(task_id);
                 self.focused_task = task_id;
                 return;
             }
@@ -417,6 +420,7 @@ impl InputHandler {
                 if new_state == WINDOW_STATE_NORMAL {
                     window::raise_window(w.task_id);
                     tty::set_focus(w.task_id);
+                    input::set_keyboard_focus(w.task_id);
                     self.focused_task = w.task_id;
                 }
                 self.needs_full_redraw = true;

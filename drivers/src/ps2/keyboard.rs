@@ -1,4 +1,4 @@
-use slopos_lib::{IrqMutex, RingBuffer, klog_debug};
+use slopos_lib::{IrqMutex, RingBuffer, klog_debug, klog_info, klog_warn};
 
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;
@@ -175,7 +175,28 @@ fn handle_modifier(modifiers: &mut ModifierState, make_code: u8, is_press: bool)
 }
 
 pub fn init() {
+    klog_info!("PS/2 keyboard: initialising device");
+
+    ps2::write_data(ps2::DEV_CMD_RESET);
+    if ps2::wait_data() {
+        let response = ps2::read_data_nowait();
+        if response == ps2::DEV_ACK {
+            if ps2::wait_data() {
+                let test_result = ps2::read_data_nowait();
+                if test_result != ps2::DEV_SELF_TEST_PASS {
+                    klog_warn!("PS/2 keyboard: self-test returned 0x{:02x}", test_result);
+                }
+            }
+        } else {
+            klog_warn!("PS/2 keyboard: reset NAK 0x{:02x}", response);
+        }
+    } else {
+        klog_warn!("PS/2 keyboard: reset timed out");
+    }
+
+    ps2::flush();
     STATE.lock().reset();
+    klog_info!("PS/2 keyboard: initialised");
 }
 
 pub fn handle_scancode(scancode: u8) {

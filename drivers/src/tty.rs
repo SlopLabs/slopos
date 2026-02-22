@@ -244,14 +244,12 @@ fn is_control_char(c: u8) -> bool {
 
 fn tty_dequeue_input_char(out_char: &mut u8) -> bool {
     tty_service_serial_input();
-
     if keyboard::has_input() != 0 {
         *out_char = keyboard::getchar();
         return true;
     }
 
     tty_service_serial_input();
-
     let mut raw = 0u8;
     if serial_buffer_read(COM1.address(), &mut raw as *mut u8) == 0 {
         if raw == b'\r' {

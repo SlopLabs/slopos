@@ -24,21 +24,26 @@ extern "C" fn timer_irq_handler(_irq: u8, frame: *mut InterruptFrame, _ctx: *mut
     scheduler_handle_timer_interrupt(frame);
 }
 
-extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
-    if !ps2::has_data() {
-        return;
-    }
-    let scancode = ps2::read_data_nowait();
-    irq_increment_keyboard_events();
-    ps2::keyboard::handle_scancode(scancode);
-}
-
-extern "C" fn mouse_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
-    if !ps2::is_mouse_data() {
+/// Unified PS/2 IRQ handler following the Linux i8042 pattern.
+///
+/// Both IRQ 1 (keyboard) and IRQ 12 (mouse) call this function.
+/// Demultiplexing is done via status register bit 5 (MOUSE_OBF),
+/// which is reliable on QEMU >= 6.1.  The status register is read
+/// exactly once per invocation — the data byte inherits the same
+/// source classification because QEMU's `kbd_safe_update_irq`
+/// prevents status changes while OBF is set.
+extern "C" fn ps2_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
+    let status = ps2::read_status();
+    if status & ps2::STATUS_OUTPUT_FULL == 0 {
         return;
     }
     let data = ps2::read_data_nowait();
-    ps2::mouse::handle_irq(data);
+    if status & ps2::STATUS_MOUSE_DATA != 0 {
+        ps2::mouse::handle_irq(data);
+    } else {
+        irq_increment_keyboard_events();
+        ps2::keyboard::handle_scancode(data);
+    }
 }
 
 fn program_ioapic_route(irq_line: u8) {
@@ -111,8 +116,16 @@ pub fn init() {
     irq_init();
 
     setup_ioapic_routes();
+
+    // Full PS/2 controller init: disable ports, flush, self-test, clean config
+    ps2::init_controller();
+
+    // Device-level init (controller is ready, IRQs still off)
     ps2::keyboard::init();
     ps2::mouse::init();
+
+    // Enable IRQs in the controller config byte now that devices are ready
+    ps2::enable_irqs();
 
     let _ = irq_register_handler(
         DRIVER_LEGACY_IRQ_TIMER,
@@ -122,13 +135,13 @@ pub fn init() {
     );
     let _ = irq_register_handler(
         DRIVER_LEGACY_IRQ_KEYBOARD,
-        Some(keyboard_irq_handler),
+        Some(ps2_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
     let _ = irq_register_handler(
         DRIVER_LEGACY_IRQ_MOUSE,
-        Some(mouse_irq_handler),
+        Some(ps2_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );

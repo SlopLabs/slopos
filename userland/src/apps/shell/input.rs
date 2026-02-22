@@ -132,23 +132,29 @@ fn input_loop(
         let newly_pressed = left_pressed && !prev_left_pressed;
         let newly_released = !left_pressed && prev_left_pressed;
 
-        if newly_pressed && is_on_input_row(last_ptr_y, line_row) {
-            if let Some(off) = pixel_to_input_offset(last_ptr_x, prompt.len(), len) {
-                cursor_pos = off;
-                sel = InputSelection {
-                    start: off,
-                    end: off,
-                };
-                mouse_dragging = true;
-                cursor_visible = true;
-                last_blink_ms = sys_core::get_time_ms();
-                mouse_acted = true;
+        if newly_pressed {
+            if is_on_input_row(last_ptr_y, line_row) {
+                if let Some(off) = pixel_to_input_offset(last_ptr_x, prompt.len(), len) {
+                    sel = InputSelection {
+                        start: off,
+                        end: off,
+                    };
+                    mouse_dragging = true;
+                    cursor_visible = true;
+                    last_blink_ms = sys_core::get_time_ms();
+                    mouse_acted = true;
+                }
+            } else {
+                mouse_dragging = false;
+                if sel.is_active() {
+                    sel = InputSelection::NONE;
+                    mouse_acted = true;
+                }
             }
         } else if mouse_dragging && left_pressed {
             if is_on_input_row(last_ptr_y, line_row) {
                 if let Some(off) = pixel_to_input_offset(last_ptr_x, prompt.len(), len) {
                     if off != sel.end {
-                        cursor_pos = off;
                         sel.end = off;
                         mouse_acted = true;
                     }
@@ -212,6 +218,7 @@ fn input_loop(
         );
         if !preserves_selection && sel.is_active() {
             sel = InputSelection::NONE;
+            mouse_dragging = false;
         }
 
         match c {

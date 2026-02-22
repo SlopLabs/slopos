@@ -1,4 +1,4 @@
-use slopos_lib::{IrqMutex, klog_debug, klog_info};
+use slopos_lib::{IrqMutex, klog_info};
 
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;
@@ -33,28 +33,23 @@ impl MouseState {
 
 static STATE: IrqMutex<MouseState> = IrqMutex::new(MouseState::new());
 
+/// Initialise the PS/2 mouse device.
+///
+/// Expects that `ps2::init_controller()` has already run (ports enabled,
+/// clean config written with IRQs off).  Sends set-defaults and enable-
+/// reporting commands via the AUX-aware ACK path so we never accidentally
+/// consume a keyboard byte as a mouse ACK.
 pub fn init() {
-    klog_info!("Initializing PS/2 mouse...");
+    klog_info!("PS/2 mouse: initialising device");
 
-    let mut config = ps2::read_config();
-    klog_debug!("PS/2 controller status: 0x{:02x}", config);
+    // Set defaults (sample rate, resolution, scaling)
+    ps2::write_aux_acked(ps2::DEV_CMD_DEFAULTS);
 
-    ps2::write_command(ps2::CMD_ENABLE_AUX);
+    // Enable data reporting
+    ps2::write_aux_acked(ps2::DEV_CMD_ENABLE);
 
-    config |= ps2::CONFIG_AUX_IRQ;
-    ps2::write_config(config);
-
-    ps2::write_aux(ps2::DEV_CMD_DEFAULTS);
-    let ack = ps2::read_data();
-    if ack != ps2::DEV_ACK {
-        klog_info!("Mouse set defaults NAK: 0x{:02x}", ack);
-    }
-
-    ps2::write_aux(ps2::DEV_CMD_ENABLE);
-    let ack = ps2::read_data();
-    if ack != ps2::DEV_ACK {
-        klog_info!("Mouse enable reporting NAK: 0x{:02x}", ack);
-    }
+    // Flush any trailing bytes the mouse may have sent during init
+    ps2::flush();
 
     let (x, y) = {
         let mut state = STATE.lock();
@@ -66,7 +61,7 @@ pub fn init() {
 
     input_event::input_route_pointer_motion(x, y, 0);
 
-    klog_info!("PS/2 mouse initialized at ({}, {})", x, y);
+    klog_info!("PS/2 mouse: initialised at ({}, {})", x, y);
 }
 
 pub fn set_bounds(width: i32, height: i32) {
@@ -81,9 +76,21 @@ pub fn set_bounds(width: i32, height: i32) {
     state.y = state.y.clamp(0, height - 1);
 }
 
+/// Process a single mouse data byte from the IRQ handler.
+///
+/// The byte is accumulated into a 3-byte packet.  Byte 0 is validated:
+/// bit 3 must be set (PS/2 protocol), and overflow bits (6:7) must be clear.
+/// Invalid byte-0 values reset the state machine.
 pub fn handle_irq(data: u8) {
     let mut state = STATE.lock();
     let byte_num = state.packet_byte;
+
+    // PS/2 mouse packet byte 0 always has bit 3 set (per protocol).
+    // If we're expecting byte 0 and bit 3 is clear, this isn't a valid
+    // mouse packet start.  Reset the state machine and discard.
+    if byte_num == 0 && data & 0x08 == 0 {
+        return;
+    }
 
     state.packet[byte_num as usize] = data;
     state.packet_byte = (byte_num + 1) % 3;
@@ -96,8 +103,8 @@ pub fn handle_irq(data: u8) {
     let dx_raw = state.packet[1];
     let dy_raw = state.packet[2];
 
+    // Overflow bits set — discard entire packet
     if packet_flags & 0xC0 != 0 {
-        klog_debug!("[MOUSE] Invalid packet flags: 0x{:02x}", packet_flags);
         return;
     }
 
@@ -106,12 +113,12 @@ pub fn handle_irq(data: u8) {
 
     let mut dx = dx_raw as i16;
     if packet_flags & 0x10 != 0 {
-        dx = (dx as i16) - 256;
+        dx -= 256;
     }
 
     let mut dy = dy_raw as i16;
     if packet_flags & 0x20 != 0 {
-        dy = (dy as i16) - 256;
+        dy -= 256;
     }
 
     dy = -dy;

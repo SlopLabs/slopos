@@ -720,12 +720,14 @@ fn console_rewrite_input(
                 if cursor_visible {
                     let cursor_col = (prompt.len() + cursor_pos) as i32;
                     if cursor_col < display.cols.get() {
-                        let ch = if cursor_pos < input.len() {
-                            input[cursor_pos]
-                        } else {
-                            b' '
-                        };
-                        draw_char_at(buf, cursor_col, row, ch, display.bg.get(), display.fg.get());
+                        draw_char_at(
+                            buf,
+                            cursor_col,
+                            row,
+                            b' ',
+                            display.bg.get(),
+                            display.fg.get(),
+                        );
                     }
                 }
             });
