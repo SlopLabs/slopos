@@ -124,6 +124,8 @@ pub fn init() {
     ps2::keyboard::init();
     ps2::mouse::init();
 
+    // Final flush before enabling IRQs to drain any stray init response bytes
+    ps2::flush();
     // Enable IRQs in the controller config byte now that devices are ready
     ps2::enable_irqs();
 
