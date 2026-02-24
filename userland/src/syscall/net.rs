@@ -1,6 +1,6 @@
-use super::numbers::SYSCALL_NET_SCAN;
-use super::raw::syscall3;
-use slopos_abi::net::UserNetMember;
+use super::numbers::{SYSCALL_NET_INFO, SYSCALL_NET_SCAN};
+use super::raw::{syscall1, syscall3};
+use slopos_abi::net::{UserNetInfo, UserNetMember};
 
 #[inline(always)]
 pub fn net_scan(out: &mut [UserNetMember], active_probe: bool) -> i64 {
@@ -16,4 +16,9 @@ pub fn net_scan(out: &mut [UserNetMember], active_probe: bool) -> i64 {
             if active_probe { 1 } else { 0 },
         ) as i64
     }
+}
+
+#[inline(always)]
+pub fn net_info(out: &mut UserNetInfo) -> i64 {
+    unsafe { syscall1(SYSCALL_NET_INFO, out as *mut UserNetInfo as u64) as i64 }
 }

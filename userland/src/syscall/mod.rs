@@ -48,11 +48,11 @@ pub use numbers::*;
 // Re-export ABI types used by syscalls
 pub use slopos_abi::syscall::UserSysInfo;
 pub use slopos_abi::{
-    DamageRect, DisplayInfo, InputEvent, InputEventData, InputEventType, PixelFormat, ShmError,
-    SurfaceRole, UserFsEntry, UserFsList, UserFsStat, UserNetMember, WindowInfo,
-    INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, MAX_WINDOW_DAMAGE_REGIONS, SHM_ACCESS_RO,
-    SHM_ACCESS_RW, USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
-    USER_NET_MAX_MEMBERS,
+    DamageRect, DisplayInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData,
+    InputEventType, MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW, ShmError,
+    SurfaceRole, USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
+    USER_NET_MAX_MEMBERS, UserFsEntry, UserFsList, UserFsStat, UserNetInfo, UserNetMember,
+    WindowInfo,
 };
 
 pub use wrappers::fd::FdGuard;

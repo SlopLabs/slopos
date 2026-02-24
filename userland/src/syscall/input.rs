@@ -2,15 +2,11 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3};
-use slopos_abi::{InputEvent, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER};
+use slopos_abi::{INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent};
 
 pub fn poll(event_out: &mut InputEvent) -> Option<InputEvent> {
     let result = unsafe { syscall1(SYSCALL_INPUT_POLL, event_out as *mut InputEvent as u64) };
-    if result == 1 {
-        Some(*event_out)
-    } else {
-        None
-    }
+    if result == 1 { Some(*event_out) } else { None }
 }
 
 #[inline(always)]
