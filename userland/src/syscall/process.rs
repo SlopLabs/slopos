@@ -1,8 +1,8 @@
 //! Process management syscalls: spawn, exec, fork, halt, reboot.
 
 use super::numbers::*;
-use super::raw::{syscall0, syscall1, syscall2, syscall4};
-use slopos_abi::signal::{SigSet, UserSigaction, SIG_IGN};
+use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
+use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
 
 #[inline(always)]
 pub fn getpid() -> u32 {
@@ -12,6 +12,16 @@ pub fn getpid() -> u32 {
 #[inline(always)]
 pub fn getuid() -> u32 {
     unsafe { syscall0(SYSCALL_GETUID) as u32 }
+}
+
+#[inline(always)]
+pub fn chdir(path: *const u8) -> i64 {
+    unsafe { syscall1(SYSCALL_CHDIR, path as u64) as i64 }
+}
+
+#[inline(always)]
+pub fn getcwd(buf: &mut [u8]) -> i64 {
+    unsafe { syscall2(SYSCALL_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64) as i64 }
 }
 
 #[inline(always)]
@@ -28,6 +38,21 @@ pub fn spawn_path_with_attrs(path: &[u8], priority: u8, flags: u16) -> i32 {
             path.len() as u64,
             priority as u64,
             flags as u64,
+        ) as i32
+    }
+}
+
+#[inline(always)]
+pub fn spawn_path_with_argv(path: &[u8], argv: &[*const u8], priority: u8, flags: u16) -> i32 {
+    unsafe {
+        syscall6(
+            SYSCALL_SPAWN_PATH,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            priority as u64,
+            flags as u64,
+            argv.as_ptr() as u64,
+            argv.len() as u64,
         ) as i32
     }
 }
@@ -60,6 +85,11 @@ pub fn exec(path: &[u8]) -> i64 {
 #[inline(always)]
 pub fn exec_ptr(path: *const u8) -> i64 {
     unsafe { syscall1(SYSCALL_EXEC, path as u64) as i64 }
+}
+
+#[inline(always)]
+pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i64 {
+    unsafe { syscall3(SYSCALL_EXEC, path as u64, argv as u64, envp as u64) as i64 }
 }
 
 #[inline(always)]

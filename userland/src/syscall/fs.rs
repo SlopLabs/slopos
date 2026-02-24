@@ -141,6 +141,22 @@ pub fn unlink_path(path: *const c_char) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
+/// Atomically rename/move a file or directory.
+///
+/// # Arguments
+/// * `old_path` - Null-terminated old path string
+/// * `new_path` - Null-terminated new path string
+///
+/// # Errors
+/// * `ENOENT` - Source not found
+/// * `EXDEV` - Cross-device rename
+/// * `ENOTSUP` - Filesystem doesn't support rename
+#[inline(always)]
+pub fn rename(old_path: *const c_char, new_path: *const c_char) -> SyscallResult<()> {
+    let result = unsafe { syscall2(SYSCALL_RENAME, old_path as u64, new_path as u64) };
+    demux(result).map(|_| ())
+}
+
 /// List directory contents.
 ///
 /// # Arguments
