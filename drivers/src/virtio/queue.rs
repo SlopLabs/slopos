@@ -3,12 +3,12 @@ use core::ptr;
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_ZERO};
+use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 
 use super::{
-    virtio_rmb, virtio_wmb, COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
+    COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
     COMMON_CFG_QUEUE_NOTIFY_OFF, COMMON_CFG_QUEUE_SELECT, COMMON_CFG_QUEUE_SIZE,
-    COMMON_CFG_QUEUE_USED,
+    COMMON_CFG_QUEUE_USED, virtio_rmb, virtio_wmb,
 };
 
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
