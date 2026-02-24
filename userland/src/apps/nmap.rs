@@ -1,6 +1,10 @@
 use core::ffi::c_void;
 
-use crate::syscall::{fs, net::net_scan, tty, UserNetMember, USER_NET_MAX_MEMBERS};
+use crate::syscall::{
+    USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember, fs,
+    net::{net_info, net_scan},
+    tty,
+};
 
 fn write_out(buf: &[u8]) {
     if fs::write_slice(1, buf).is_err() {
@@ -76,6 +80,46 @@ fn print_member(member: &UserNetMember) {
 }
 
 pub fn nmap_main(_arg: *mut c_void) -> ! {
+    let mut info = UserNetInfo::default();
+    if net_info(&mut info) != 0 {
+        write_out(b"nmap: net_info syscall failed\n");
+        crate::syscall::core::exit_with_code(1);
+    }
+
+    if info.nic_ready == 0 {
+        write_out(b"nmap: no network interface detected\n");
+        crate::syscall::core::exit_with_code(1);
+    }
+
+    if info.link_up == 0 {
+        write_out(b"nmap: network link is down\n");
+        crate::syscall::core::exit_with_code(1);
+    }
+
+    if info.ipv4 == [0; 4] {
+        write_out(b"nmap: no IP address (DHCP failed?)\n");
+        crate::syscall::core::exit_with_code(1);
+    }
+
+    let mut intro = [0u8; 64];
+    let mut i = 0usize;
+    let prefix = b"nmap: interface virtio0 ip ";
+    intro[i..i + prefix.len()].copy_from_slice(prefix);
+    i += prefix.len();
+    write_u8_dec(info.ipv4[0], &mut intro, &mut i);
+    intro[i] = b'.';
+    i += 1;
+    write_u8_dec(info.ipv4[1], &mut intro, &mut i);
+    intro[i] = b'.';
+    i += 1;
+    write_u8_dec(info.ipv4[2], &mut intro, &mut i);
+    intro[i] = b'.';
+    i += 1;
+    write_u8_dec(info.ipv4[3], &mut intro, &mut i);
+    intro[i] = b'\n';
+    i += 1;
+    write_out(&intro[..i]);
+
     write_out(b"nmap: scanning...\n");
 
     let mut members = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
@@ -87,7 +131,7 @@ pub fn nmap_main(_arg: *mut c_void) -> ! {
     }
 
     if count == 0 {
-        write_out(b"nmap: no members discovered\n");
+        write_out(b"nmap: no hosts discovered on network\n");
         crate::syscall::core::exit_with_code(1);
     }
 
