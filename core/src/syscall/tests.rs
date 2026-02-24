@@ -17,7 +17,7 @@ use crate::syscall::signal::{
 };
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::signal::{
-    sig_bit, SigSet, SignalFrame, UserSigaction, SIGCHLD, SIGUSR1, SIG_SETMASK, SIG_UNBLOCK,
+    SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
@@ -26,10 +26,10 @@ use slopos_abi::syscall::{
     SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK,
     SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
 };
-use slopos_abi::task::{TaskStatus, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE};
+use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
 use slopos_lib::{assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult};
-use slopos_mm::page_alloc::{alloc_page_frame, ALLOC_FLAG_ZERO};
+use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
 use slopos_mm::paging::map_page_4kb_in_dir;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
@@ -803,7 +803,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
     }
 
     use slopos_abi::addr::PhysAddr;
-    use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_NO_PCP};
+    use slopos_mm::page_alloc::{ALLOC_FLAG_NO_PCP, alloc_page_frame, free_page_frame};
 
     let mut stress_pages: [PhysAddr; 128] = [PhysAddr::NULL; 128];
     let mut stress_count = 0usize;

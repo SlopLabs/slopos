@@ -13,6 +13,7 @@ use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::syscall::*;
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
 use slopos_fs::vfs::traits::VfsError;
+
 use slopos_lib::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
@@ -133,11 +134,13 @@ define_syscall!(syscall_spawn_path(ctx, args) {
         .as_ref()
         .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
 
+    let parent_pid = ctx.process_id().unwrap_or(slopos_abi::task::INVALID_PROCESS_ID);
     match exec::spawn_program_with_attrs(
         &path_buf[..copied_len],
         argv_refs.as_deref(),
         priority,
         flags,
+        parent_pid,
     ) {
         Ok(task_id) => ctx.ok(task_id as u64),
         Err(err) => ctx.ok(err as i32 as u64),
