@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_lib::InitFlag;
 use slopos_lib::IrqMutex;
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
-use slopos_lib::kernel_services::driver_runtime::IRQ_LINES;
+pub use slopos_lib::kernel_services::driver_runtime::IRQ_LINES;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
