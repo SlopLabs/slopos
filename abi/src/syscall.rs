@@ -214,7 +214,7 @@ pub const SYSCALL_GETEGID: u64 = 91;
 /// * -ENOENT: path not found
 /// * -ENOTDIR: path is not a directory
 /// * -EFAULT: invalid pointer
-pub const SYSCALL_CHDIR: u64 = 120;
+pub const SYSCALL_CHDIR: u64 = 124;
 
 /// Get the current working directory of the calling task.
 ///
