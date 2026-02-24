@@ -1,6 +1,7 @@
-pub const ETHERTYPE_IPV4: u16 = 0x0800;
+pub const IPV4_HEADER_LEN: usize = 20;
 pub const IPV4_BROADCAST: [u8; 4] = [255, 255, 255, 255];
 pub const IPPROTO_UDP: u8 = 17;
+pub const IPPROTO_ICMP: u8 = 1;
 
 pub fn header_checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
