@@ -60,7 +60,12 @@ fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
 }
 
 pub fn launch_init() -> Result<u32, ExecError> {
-    spawn_program_with_attrs(INIT_PATH, EXEC_SPAWN_DEFAULT_PRIORITY, TASK_FLAG_USER_MODE)
+    spawn_program_with_attrs(
+        INIT_PATH,
+        None,
+        EXEC_SPAWN_DEFAULT_PRIORITY,
+        TASK_FLAG_USER_MODE,
+    )
 }
 
 fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError> {
@@ -86,6 +91,7 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError
 
 pub fn spawn_program_with_attrs(
     path: &[u8],
+    argv: Option<&[&[u8]]>,
     priority: u8,
     mut flags: u16,
 ) -> Result<u32, ExecError> {
@@ -125,7 +131,7 @@ pub fn spawn_program_with_attrs(
         if let Err(err) = do_exec(
             process_id,
             normalized_path,
-            None,
+            argv,
             None,
             &mut entry,
             &mut stack_ptr,
@@ -209,8 +215,8 @@ pub fn do_exec(
         elf_data.truncate(offset as usize);
     }
 
-    let exec_info =
-        process_vm_load_elf_data(process_id, &elf_data, entry_out).map_err(ExecError::from)?;
+    let exec_info = process_vm_load_elf_data(process_id, elf_data.as_slice(), entry_out)
+        .map_err(ExecError::from)?;
 
     let stack_top = setup_user_stack(process_id, argv, envp, &exec_info)?;
     *stack_ptr_out = stack_top;

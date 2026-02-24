@@ -1,24 +1,103 @@
+use alloc::vec::Vec;
+
 use crate::exec;
 use crate::sched::task_wait_for;
 use crate::scheduler::task::{task_find_by_id, task_fork, task_terminate};
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
-    SyscallDisposition, syscall_bounded_from_user, syscall_copy_user_str, syscall_return_err,
+    SyscallDisposition, syscall_bounded_from_user, syscall_copy_to_user_bounded,
+    syscall_copy_user_str, syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
+use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::syscall::*;
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
+use slopos_fs::vfs::traits::VfsError;
 use slopos_lib::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 
 use crate::task::task_get_exit_record;
 
+fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<Vec<u64>, ()> {
+    let mut out = Vec::new();
+    if out.try_reserve(max_count).is_err() {
+        return Err(());
+    }
+
+    for idx in 0..max_count {
+        let slot_addr = base_ptr
+            .checked_add((idx * core::mem::size_of::<u64>()) as u64)
+            .ok_or(())?;
+        let user_slot = UserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
+        let value = copy_from_user(user_slot).map_err(|_| ())?;
+        if value == 0 {
+            return Ok(out);
+        }
+        out.push(value);
+    }
+
+    Err(())
+}
+
+fn read_user_ptr_array_count(
+    base_ptr: u64,
+    count: usize,
+    max_count: usize,
+) -> Result<Vec<u64>, ()> {
+    if count > max_count {
+        return Err(());
+    }
+
+    let mut out = Vec::new();
+    if out.try_reserve(count).is_err() {
+        return Err(());
+    }
+
+    for idx in 0..count {
+        let slot_addr = base_ptr
+            .checked_add((idx * core::mem::size_of::<u64>()) as u64)
+            .ok_or(())?;
+        let user_slot = UserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
+        let value = copy_from_user(user_slot).map_err(|_| ())?;
+        if value == 0 {
+            break;
+        }
+        out.push(value);
+    }
+
+    Ok(out)
+}
+
+fn read_user_cstr_list(ptrs: &[u64]) -> Result<Vec<Vec<u8>>, ()> {
+    let mut out = Vec::new();
+    if out.try_reserve(ptrs.len()).is_err() {
+        return Err(());
+    }
+
+    for &ptr in ptrs {
+        let mut buf = [0u8; exec::EXEC_MAX_ARG_STRLEN];
+        syscall_copy_user_str(&mut buf, ptr).map_err(|_| ())?;
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+
+        let mut s = Vec::new();
+        if s.try_reserve(len).is_err() {
+            return Err(());
+        }
+        s.extend_from_slice(&buf[..len]);
+        out.push(s);
+    }
+
+    Ok(out)
+}
+
 define_syscall!(syscall_spawn_path(ctx, args) {
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     let priority = args.arg2 as u8;
     let flags = args.arg3 as u16;
+    let argv_ptr = args.arg4;
+    let argc = args.arg5 as usize;
 
     if path_ptr.is_null() || path_len == 0 || path_len > exec::EXEC_MAX_PATH {
         return ctx.err();
@@ -37,7 +116,29 @@ define_syscall!(syscall_spawn_path(ctx, args) {
         }
     };
 
-    match exec::spawn_program_with_attrs(&path_buf[..copied_len], priority, flags) {
+    let argv_storage = if argv_ptr != 0 && argc > 0 {
+        let argv_ptrs = match read_user_ptr_array_count(argv_ptr, argc, exec::EXEC_MAX_ARGS) {
+            Ok(ptrs) => ptrs,
+            Err(_) => return ctx.err(),
+        };
+        match read_user_cstr_list(argv_ptrs.as_slice()) {
+            Ok(values) => Some(values),
+            Err(_) => return ctx.err(),
+        }
+    } else {
+        None
+    };
+
+    let argv_refs = argv_storage
+        .as_ref()
+        .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
+
+    match exec::spawn_program_with_attrs(
+        &path_buf[..copied_len],
+        argv_refs.as_deref(),
+        priority,
+        flags,
+    ) {
         Ok(task_id) => ctx.ok(task_id as u64),
         Err(err) => ctx.ok(err as i32 as u64),
     }
@@ -99,6 +200,8 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 
     let args = ctx.args();
     let path_ptr = args.arg0;
+    let argv_ptr = args.arg1;
+    let envp_ptr = args.arg2;
 
     if path_ptr == 0 {
         return ctx.err();
@@ -115,14 +218,47 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         .unwrap_or(path_buf.len());
     let path = &path_buf[..path_len];
 
+    let argv_storage = if argv_ptr != 0 {
+        let argv_ptrs = match read_user_ptr_array_terminated(argv_ptr, exec::EXEC_MAX_ARGS) {
+            Ok(ptrs) => ptrs,
+            Err(_) => return ctx.err(),
+        };
+        match read_user_cstr_list(argv_ptrs.as_slice()) {
+            Ok(values) => Some(values),
+            Err(_) => return ctx.err(),
+        }
+    } else {
+        None
+    };
+
+    let envp_storage = if envp_ptr != 0 {
+        let envp_ptrs = match read_user_ptr_array_terminated(envp_ptr, exec::EXEC_MAX_ENVS) {
+            Ok(ptrs) => ptrs,
+            Err(_) => return ctx.err(),
+        };
+        match read_user_cstr_list(envp_ptrs.as_slice()) {
+            Ok(values) => Some(values),
+            Err(_) => return ctx.err(),
+        }
+    } else {
+        None
+    };
+
+    let argv_refs = argv_storage
+        .as_ref()
+        .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
+    let envp_refs = envp_storage
+        .as_ref()
+        .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
+
     let mut entry_point = 0u64;
     let mut stack_ptr = 0u64;
 
     match exec::do_exec(
         process_id,
         path,
-        None,
-        None,
+        argv_refs.as_deref(),
+        envp_refs.as_deref(),
         &mut entry_point,
         &mut stack_ptr,
     ) {
@@ -283,6 +419,67 @@ define_syscall!(syscall_geteuid(ctx, args) {
 define_syscall!(syscall_getegid(ctx, args) {
     let _ = args;
     ctx.ok(0)
+});
+
+define_syscall!(syscall_chdir(ctx, args) {
+    let path_ptr = args.arg0;
+    if path_ptr == 0 {
+        return ctx.bad_address();
+    }
+
+    let mut path_buf = [0u8; 256];
+    if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
+        return ctx.bad_address();
+    }
+
+    let path_len = path_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(path_buf.len());
+    if path_len == 0 {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    let path = &path_buf[..path_len];
+    match slopos_fs::vfs::ops::vfs_stat(path) {
+        Ok((file_type, _size)) => {
+            if file_type != FS_TYPE_DIRECTORY {
+                return ctx.err_with(ERRNO_ENOTDIR);
+            }
+        }
+        Err(VfsError::NotDirectory) => return ctx.err_with(ERRNO_ENOTDIR),
+        Err(VfsError::InvalidPath) => return ctx.err_with(ERRNO_EINVAL),
+        Err(_) => return ctx.err_with(ERRNO_ENOENT),
+    }
+
+    let task = some_or_err!(ctx, ctx.task_mut());
+    task.cwd[..=path_len].copy_from_slice(&path_buf[..=path_len]);
+    task.cwd_len = path_len as u16;
+
+    ctx.ok(0)
+});
+
+define_syscall!(syscall_getcwd(ctx, args) {
+    let buf_ptr = args.arg0;
+    let buf_size = args.arg1 as usize;
+
+    if buf_ptr == 0 {
+        return ctx.bad_address();
+    }
+
+    let task = some_or_err!(ctx, ctx.task_mut());
+    let cwd_len = task.cwd_len as usize;
+    let needed = cwd_len + 1;
+
+    if buf_size < needed {
+        return ctx.err_with(ERRNO_ERANGE);
+    }
+
+    if syscall_copy_to_user_bounded(buf_ptr, &task.cwd[..needed]).is_err() {
+        return ctx.bad_address();
+    }
+
+    ctx.ok(needed as u64)
 });
 
 pub fn syscall_arch_prctl(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
