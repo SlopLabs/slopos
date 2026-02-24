@@ -21,7 +21,17 @@ pub const MSG_OFFER: u8 = 2;
 pub const MSG_REQUEST: u8 = 3;
 pub const MSG_ACK: u8 = 5;
 
-pub const BOOTP_MIN_LEN: usize = 240;
+pub const BOOTP_HEADER_LEN: usize = 240;
+pub const BOOTP_MIN_LEN: usize = BOOTP_HEADER_LEN;
+
+#[derive(Clone, Copy, Default)]
+pub struct DhcpOptions {
+    pub message_type: u8,
+    pub server_id: [u8; 4],
+    pub subnet_mask: [u8; 4],
+    pub router: [u8; 4],
+    pub dns: [u8; 4],
+}
 
 #[derive(Clone, Copy)]
 pub struct DhcpLease {
@@ -65,7 +75,7 @@ pub fn build_discover(mac: [u8; 6], xid: u32, out: &mut [u8; 320]) -> usize {
     out[28..34].copy_from_slice(&mac);
     out[236..240].copy_from_slice(&MAGIC_COOKIE);
 
-    let mut i = BOOTP_MIN_LEN;
+    let mut i = BOOTP_HEADER_LEN;
     out[i] = OPTION_MSG_TYPE;
     out[i + 1] = 1;
     out[i + 2] = MSG_DISCOVER;
@@ -92,7 +102,7 @@ pub fn build_request(mac: [u8; 6], xid: u32, offer: DhcpOffer, out: &mut [u8; 32
     out[28..34].copy_from_slice(&mac);
     out[236..240].copy_from_slice(&MAGIC_COOKIE);
 
-    let mut i = BOOTP_MIN_LEN;
+    let mut i = BOOTP_HEADER_LEN;
     out[i] = OPTION_MSG_TYPE;
     out[i + 1] = 1;
     out[i + 2] = MSG_REQUEST;
@@ -119,14 +129,8 @@ pub fn build_request(mac: [u8; 6], xid: u32, offer: DhcpOffer, out: &mut [u8; 32
     i + 1
 }
 
-fn parse_options(
-    options: &[u8],
-    message_type: &mut u8,
-    server_id: &mut [u8; 4],
-    subnet_mask: &mut [u8; 4],
-    router: &mut [u8; 4],
-    dns: &mut [u8; 4],
-) {
+pub fn parse_options(options: &[u8]) -> DhcpOptions {
+    let mut opts = DhcpOptions::default();
     let mut i = 0usize;
     while i < options.len() {
         let code = options[i];
@@ -147,20 +151,22 @@ fn parse_options(
 
         let data = &options[i + 2..i + 2 + len];
         match code {
-            OPTION_MSG_TYPE if len >= 1 => *message_type = data[0],
-            OPTION_SERVER_ID if len >= 4 => server_id.copy_from_slice(&data[..4]),
-            OPTION_SUBNET_MASK if len >= 4 => subnet_mask.copy_from_slice(&data[..4]),
-            OPTION_ROUTER if len >= 4 => router.copy_from_slice(&data[..4]),
-            OPTION_DNS if len >= 4 => dns.copy_from_slice(&data[..4]),
+            OPTION_MSG_TYPE if len >= 1 => opts.message_type = data[0],
+            OPTION_SERVER_ID if len >= 4 => opts.server_id.copy_from_slice(&data[..4]),
+            OPTION_SUBNET_MASK if len >= 4 => opts.subnet_mask.copy_from_slice(&data[..4]),
+            OPTION_ROUTER if len >= 4 => opts.router.copy_from_slice(&data[..4]),
+            OPTION_DNS if len >= 4 => opts.dns.copy_from_slice(&data[..4]),
             _ => {}
         }
 
         i += 2 + len;
     }
+
+    opts
 }
 
 pub fn parse_bootp_reply(payload: &[u8], xid: u32, expected_type: u8) -> Option<DhcpOffer> {
-    if payload.len() < BOOTP_MIN_LEN {
+    if payload.len() < BOOTP_HEADER_LEN {
         return None;
     }
     if payload[0] != BOOTREPLY {
@@ -173,33 +179,20 @@ pub fn parse_bootp_reply(payload: &[u8], xid: u32, expected_type: u8) -> Option<
         return None;
     }
 
-    let mut message_type = 0u8;
-    let mut server_id = [0u8; 4];
-    let mut subnet_mask = [0u8; 4];
-    let mut router = [0u8; 4];
-    let mut dns = [0u8; 4];
+    let options = parse_options(&payload[BOOTP_HEADER_LEN..]);
 
-    parse_options(
-        &payload[240..],
-        &mut message_type,
-        &mut server_id,
-        &mut subnet_mask,
-        &mut router,
-        &mut dns,
-    );
-
-    if message_type != expected_type {
+    if options.message_type != expected_type {
         return None;
     }
-    if expected_type == MSG_OFFER && server_id == [0; 4] {
+    if expected_type == MSG_OFFER && options.server_id == [0; 4] {
         return None;
     }
 
     Some(DhcpOffer {
         yiaddr: [payload[16], payload[17], payload[18], payload[19]],
-        server_id,
-        subnet_mask,
-        router,
-        dns,
+        server_id: options.server_id,
+        subnet_mask: options.subnet_mask,
+        router: options.router,
+        dns: options.dns,
     })
 }
