@@ -171,6 +171,14 @@ fn boot_step_hpet_setup_fn() {
     klog_debug!("HPET: Initialization complete, main counter running.");
 }
 
+fn boot_step_lapic_calibration_fn() {
+    klog_debug!("Calibrating LAPIC timer...");
+    let freq = apic::timer::calibrate();
+    if freq == 0 {
+        klog_info!("BOOT: LAPIC timer calibration failed — scheduler will use PIT");
+    }
+}
+
 fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     virtio_blk_register_driver();
@@ -303,6 +311,13 @@ crate::boot_init!(
     b"hpet\0",
     boot_step_hpet_setup_fn,
     flags = boot_init_priority(55)
+);
+crate::boot_init!(
+    BOOT_STEP_LAPIC_CALIBRATION,
+    drivers,
+    b"lapic timer calibration\0",
+    boot_step_lapic_calibration_fn,
+    flags = boot_init_priority(57)
 );
 crate::boot_init!(
     BOOT_STEP_IRQ_SETUP,
