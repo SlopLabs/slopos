@@ -279,6 +279,10 @@ pub struct Task {
     pub tgid: u32,
     pub pgid: u32,
     pub sid: u32,
+    /// Current working directory path (null-terminated, max 256 bytes).
+    /// Initialized to "/" on task creation. Inherited from parent on fork/spawn.
+    pub cwd: [u8; 256],
+    pub cwd_len: u16,
     /// User-space address to clear (and futex-wake) on thread exit.
     /// Set by clone(CLONE_CHILD_CLEARTID). 0 means not set.
     pub clear_child_tid: u64,
@@ -339,6 +343,12 @@ impl Task {
             tgid: INVALID_TASK_ID,
             pgid: INVALID_TASK_ID,
             sid: INVALID_TASK_ID,
+            cwd: {
+                let mut c = [0u8; 256];
+                c[0] = b'/';
+                c
+            },
+            cwd_len: 1,
             clear_child_tid: 0,
             time_slice: 0,
             time_slice_remaining: 0,
