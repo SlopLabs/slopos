@@ -368,7 +368,14 @@ impl InputHandler {
         }
 
         if let Some(spec) = program_registry::resolve_program(program_name) {
-            process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+            let tid = process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+            if tid <= 0 {
+                tty::write(b"COMPOSITOR: spawn failed for program\n");
+            } else {
+                self.focused_task = tid as u32;
+            }
+        } else {
+            tty::write(b"COMPOSITOR: unknown program in start menu\n");
         }
     }
 

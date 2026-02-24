@@ -27,7 +27,7 @@ pub const START_MENU_ITEMS: [StartMenuItem; 3] = [
     },
     StartMenuItem {
         label: "Shell",
-        window_title: Some(b"SlopOS Shell"),
+        window_title: None,
         program_name: b"shell",
     },
 ];
