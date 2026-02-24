@@ -38,6 +38,10 @@ name = "init"
 path = "src/bin/init.rs"
 
 [[bin]]
+name = "nmap"
+path = "src/bin/nmap.rs"
+
+[[bin]]
 name = "fork_test"
 path = "src/bin/tests/fork_test.rs"
 

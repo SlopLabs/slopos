@@ -1,11 +1,11 @@
-use core::ffi::CStr;
 #[cfg(feature = "xe-gpu")]
 use core::ffi::c_char;
+use core::ffi::CStr;
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    TestRunSummary, tests_request_shutdown, tests_reset_panic_state, tests_run_all,
+    tests_request_shutdown, tests_reset_panic_state, tests_run_all, TestRunSummary,
 };
 use slopos_video as video;
 
@@ -22,6 +22,7 @@ use slopos_drivers::{
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
     virtio_blk::virtio_blk_register_driver,
+    virtio_net::virtio_net_register_driver,
 };
 use slopos_mm::tlb;
 
@@ -164,6 +165,7 @@ fn boot_step_ioapic_setup_fn() {
 fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     virtio_blk_register_driver();
+    virtio_net_register_driver();
     pci_init();
     pci_probe_drivers();
     #[cfg(feature = "xe-gpu")]

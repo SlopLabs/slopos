@@ -1,8 +1,10 @@
 use core::ffi::c_char;
+use core::mem::size_of;
 
-use slopos_abi::syscall::{ERRNO_EINVAL, UserSysInfo};
+use slopos_abi::syscall::{UserSysInfo, ERRNO_EINVAL};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
-use slopos_lib::{InterruptFrame, klog_debug};
+use slopos_abi::{UserNetMember, USER_NET_MAX_MEMBERS};
+use slopos_lib::{klog_debug, InterruptFrame};
 
 use crate::platform;
 use crate::sched::{
@@ -11,11 +13,11 @@ use crate::sched::{
 };
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
-    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_return_err,
+    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_return_err,
+    SyscallDisposition, USER_IO_MAX_BYTES,
 };
 use crate::syscall::context::SyscallContext;
-use crate::syscall_services::tty;
+use crate::syscall_services::{net, tty};
 use crate::task::{get_task_stats, task_terminate};
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
@@ -170,4 +172,31 @@ define_syscall!(syscall_sys_info(ctx, args) {
     let user_ptr = try_or_err!(ctx, UserPtr::<UserSysInfo>::try_new(args.arg0));
     try_or_err!(ctx, copy_to_user(user_ptr, &info));
     ctx.ok(0)
+});
+
+define_syscall!(syscall_net_scan(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+
+    let max_members = args.arg1_usize().min(USER_NET_MAX_MEMBERS);
+    if max_members == 0 {
+        return ctx.ok(0);
+    }
+
+    let active_probe = if args.arg2 != 0 { 1 } else { 0 };
+    let mut scratch = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
+    let discovered = net::scan_members(scratch.as_mut_ptr(), max_members, active_probe)
+        .min(max_members)
+        .min(USER_NET_MAX_MEMBERS);
+
+    let mut i = 0usize;
+    while i < discovered {
+        let dst = args
+            .arg0
+            .wrapping_add((i * size_of::<UserNetMember>()) as u64);
+        let user_ptr = try_or_err!(ctx, UserPtr::<UserNetMember>::try_new(dst));
+        try_or_err!(ctx, copy_to_user(user_ptr, &scratch[i]));
+        i += 1;
+    }
+
+    ctx.ok(discovered as u64)
 });

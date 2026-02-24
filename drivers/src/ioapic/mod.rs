@@ -5,7 +5,7 @@ pub mod tests;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
+use slopos_lib::{klog_debug, klog_info, InitFlag, StateFlag};
 
 use regs::*;
 use slopos_abi::addr::PhysAddr;
@@ -359,7 +359,11 @@ pub fn unmask_gsi(gsi: u32) -> i32 {
 }
 
 pub fn is_ready() -> i32 {
-    if IOAPIC_READY.is_set() { 1 } else { 0 }
+    if IOAPIC_READY.is_set() {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -> i32 {

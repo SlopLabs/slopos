@@ -3,14 +3,14 @@ use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::{IrqMutex, cpu, ports::COM1};
+use slopos_lib::{cpu, ports::COM1, IrqMutex};
 
 use crate::ps2::keyboard;
 use crate::serial;
 use slopos_abi::signal::SIGINT;
 use slopos_lib::kernel_services::driver_runtime::{
-    DriverTaskHandle, block_current_task, current_task, current_task_id,
-    register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, unblock_task,
+    block_current_task, current_task, current_task_id, register_idle_wakeup_callback,
+    scheduler_is_enabled, signal_process_group, unblock_task, DriverTaskHandle,
 };
 
 const TTY_MAX_WAITERS: usize = 32;

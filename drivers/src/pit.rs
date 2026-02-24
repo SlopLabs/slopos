@@ -105,7 +105,11 @@ pub fn pit_poll_delay_ms(ms: u32) {
 
     let reload = {
         let d = CURRENT_RELOAD_DIVISOR.load(Ordering::SeqCst);
-        if d == 0 { 0x10000 } else { d }
+        if d == 0 {
+            0x10000
+        } else {
+            d
+        }
     };
 
     let ticks_needed = ((ms as u64) * (PIT_BASE_FREQUENCY_HZ as u64) / 1000) as u32;

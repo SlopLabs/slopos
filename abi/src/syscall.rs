@@ -57,6 +57,7 @@ pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
 pub const SYSCALL_READ_CHAR: u64 = 25;
 pub const SYSCALL_READ_CHAR_NB: u64 = 119;
+pub const SYSCALL_NET_SCAN: u64 = 120;
 pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_REBOOT: u64 = 85;

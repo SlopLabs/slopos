@@ -6,12 +6,12 @@ use crate::ioapic::regs::{
 };
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::kernel_services::driver_runtime::{
+    irq_get_timer_ticks, irq_increment_keyboard_events, irq_increment_timer_ticks, irq_init,
+    irq_is_masked, irq_register_handler, irq_set_route, scheduler_handle_timer_interrupt,
     DRIVER_IRQ_LINES, DRIVER_LEGACY_IRQ_COM1, DRIVER_LEGACY_IRQ_KEYBOARD, DRIVER_LEGACY_IRQ_MOUSE,
-    DRIVER_LEGACY_IRQ_TIMER, irq_get_timer_ticks, irq_increment_keyboard_events,
-    irq_increment_timer_ticks, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
-    scheduler_handle_timer_interrupt,
+    DRIVER_LEGACY_IRQ_TIMER,
 };
-use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
+use slopos_lib::{cpu, klog_debug, klog_info, InterruptFrame};
 
 use crate::{apic, ioapic, ps2};
 

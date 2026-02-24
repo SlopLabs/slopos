@@ -3,12 +3,12 @@ use core::ptr;
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_ZERO};
 
 use super::{
-    COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
+    virtio_rmb, virtio_wmb, COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
     COMMON_CFG_QUEUE_NOTIFY_OFF, COMMON_CFG_QUEUE_SELECT, COMMON_CFG_QUEUE_SIZE,
-    COMMON_CFG_QUEUE_USED, virtio_rmb, virtio_wmb,
+    COMMON_CFG_QUEUE_USED,
 };
 
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
@@ -108,6 +108,11 @@ impl Virtqueue {
         unsafe { (self.used_virt as *const u16).add(1) }
     }
 
+    fn used_ring_elem_ptr(&self, idx: u16) -> *const VirtqUsedElem {
+        let ring_base = unsafe { self.used_virt.add(4) };
+        unsafe { (ring_base as *const VirtqUsedElem).add((idx % self.size) as usize) }
+    }
+
     pub fn read_used_idx(&self) -> u16 {
         unsafe { ptr::read_volatile(self.used_idx_ptr()) }
     }
@@ -148,6 +153,27 @@ impl Virtqueue {
             spins += 1;
             if spins > timeout_spins {
                 return false;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    pub fn pop_used(&mut self, timeout_spins: u32) -> Option<VirtqUsedElem> {
+        let mut spins = 0u32;
+        loop {
+            virtio_rmb();
+
+            let used_idx = self.read_used_idx();
+            if used_idx != self.last_used_idx {
+                let elem =
+                    unsafe { ptr::read_volatile(self.used_ring_elem_ptr(self.last_used_idx)) };
+                self.last_used_idx = self.last_used_idx.wrapping_add(1);
+                return Some(elem);
+            }
+
+            spins = spins.wrapping_add(1);
+            if spins > timeout_spins {
+                return None;
             }
             core::hint::spin_loop();
         }

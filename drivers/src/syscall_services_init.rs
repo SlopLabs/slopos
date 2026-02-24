@@ -1,9 +1,10 @@
 use slopos_lib::kernel_services::syscall_services::input::{
-    InputServices, register_input_services,
+    register_input_services, InputServices,
 };
-use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
+use slopos_lib::kernel_services::syscall_services::net::{register_net_services, NetServices};
+use slopos_lib::kernel_services::syscall_services::tty::{register_tty_services, TtyServices};
 
-use crate::{input_event, tty};
+use crate::{input_event, tty, virtio_net};
 
 // =============================================================================
 // Input services
@@ -61,7 +62,29 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_foreground_pgrp: tty::tty_get_foreground_pgrp,
 };
 
+fn net_scan_members_adapter(
+    out: *mut slopos_abi::net::UserNetMember,
+    max: usize,
+    active: u32,
+) -> usize {
+    virtio_net::virtio_net_scan_members(out, max, active != 0)
+}
+
+fn net_is_ready_adapter() -> u32 {
+    if virtio_net::virtio_net_is_ready() {
+        1
+    } else {
+        0
+    }
+}
+
+static NET_SERVICES: NetServices = NetServices {
+    scan_members: net_scan_members_adapter,
+    is_ready: net_is_ready_adapter,
+};
+
 pub fn init_syscall_services() {
     register_input_services(&INPUT_SERVICES);
     register_tty_services(&TTY_SERVICES);
+    register_net_services(&NET_SERVICES);
 }

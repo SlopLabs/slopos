@@ -2,7 +2,7 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall4};
-use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
+use slopos_abi::signal::{SigSet, UserSigaction, SIG_IGN};
 
 #[inline(always)]
 pub fn getpid() -> u32 {

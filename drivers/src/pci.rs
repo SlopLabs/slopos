@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_abi::PhysAddr;
 use slopos_lib::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InitFlag, IrqMutex, klog_info};
+use slopos_lib::{klog_info, InitFlag, IrqMutex};
 use slopos_mm::mmio::MmioRegion;
 
 pub use crate::pci_defs::*;

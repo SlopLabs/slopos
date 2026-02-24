@@ -45,6 +45,12 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
     },
+    ProgramSpec {
+        name: b"nmap",
+        path: b"/bin/nmap",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+    },
     #[cfg(feature = "testbins")]
     ProgramSpec {
         name: b"fork_test",

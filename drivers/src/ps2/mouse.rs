@@ -1,4 +1,4 @@
-use slopos_lib::{IrqMutex, klog_info};
+use slopos_lib::{klog_info, IrqMutex};
 
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;

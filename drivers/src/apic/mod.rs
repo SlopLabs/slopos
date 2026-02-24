@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Once;
 
-use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
+use slopos_lib::{cpu, klog_debug, klog_info, InitFlag};
 
 use regs::*;
 use slopos_abi::addr::PhysAddr;

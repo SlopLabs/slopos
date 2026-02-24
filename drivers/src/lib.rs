@@ -6,6 +6,7 @@ pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;
 pub mod irq;
+pub mod net;
 pub mod pci;
 pub mod pci_defs;
 pub mod pic;
@@ -19,6 +20,9 @@ pub mod syscall_services_init;
 pub mod tty;
 pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_net;
+#[cfg(feature = "itests")]
+pub mod virtio_net_tests;
 #[cfg(feature = "xe-gpu")]
 pub mod xe;
 

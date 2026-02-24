@@ -1,7 +1,7 @@
 //! File descriptor RAII wrapper.
 
 use crate::syscall::error::SyscallResult;
-use crate::syscall::{RawFd, fs};
+use crate::syscall::{fs, RawFd};
 
 pub struct FdGuard {
     fd: RawFd,

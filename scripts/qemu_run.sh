@@ -167,6 +167,8 @@ QEMU_ARGS=(
     -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
     -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
     -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on"
+    -netdev "user,id=slopnet0"
+    -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=on"
     -serial stdio
     -monitor none

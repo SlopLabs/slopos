@@ -1,7 +1,5 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
-use slopos_lib::IrqMutex;
-use slopos_lib::RingBuffer;
 use slopos_lib::cpu;
 use slopos_lib::io::Port;
 use slopos_lib::ports::{
@@ -13,6 +11,8 @@ use slopos_lib::ports::{
     UART_REG_IIR as REG_IIR, UART_REG_LCR as REG_LCR, UART_REG_LSR as REG_LSR,
     UART_REG_MCR as REG_MCR, UART_REG_RBR as REG_RBR, UART_REG_SCR as REG_SCR,
 };
+use slopos_lib::IrqMutex;
+use slopos_lib::RingBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UartType {

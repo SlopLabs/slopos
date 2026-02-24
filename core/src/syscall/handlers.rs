@@ -5,9 +5,9 @@ use slopos_abi::syscall::*;
 
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
-    syscall_exit, syscall_get_time_ms, syscall_halt, syscall_reboot, syscall_sleep_ms,
-    syscall_sys_info, syscall_user_read, syscall_user_read_char, syscall_user_read_char_nb,
-    syscall_user_write, syscall_yield,
+    syscall_exit, syscall_get_time_ms, syscall_halt, syscall_net_scan, syscall_reboot,
+    syscall_sleep_ms, syscall_sys_info, syscall_user_read, syscall_user_read_char,
+    syscall_user_read_char_nb, syscall_user_write, syscall_yield,
 };
 use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
@@ -78,6 +78,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FB_INFO]        => syscall_fb_info,        "fb_info";
     [SYSCALL_GET_TIME_MS]    => syscall_get_time_ms,    "get_time_ms";
     [SYSCALL_SYS_INFO]       => syscall_sys_info,       "sys_info";
+    [SYSCALL_NET_SCAN]       => syscall_net_scan,       "net_scan";
     [SYSCALL_HALT]           => syscall_halt,            "halt";
     [SYSCALL_REBOOT]         => syscall_reboot,          "reboot";
 

@@ -1,13 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
-use slopos_lib::{InitFlag, IrqMutex, align_up_u64, klog_info, klog_warn};
+use slopos_lib::{align_up_u64, klog_info, klog_warn, InitFlag, IrqMutex};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
+use slopos_mm::page_alloc::{alloc_page_frames, free_page_frame, ALLOC_FLAG_ZERO};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 
-use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
+use crate::pci::{pci_get_primary_gpu, PciDeviceInfo, PciGpuInfo};
 use crate::pci_defs::PCI_CLASS_DISPLAY;
 
 mod display;
