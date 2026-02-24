@@ -130,6 +130,8 @@ pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 /// * rsi (arg1): path length in bytes
 /// * rdx (arg2): task priority (`u8`)
 /// * r10 (arg3): task flags (`u16`, kernel enforces user-mode bit)
+/// * r8  (arg4): argv pointer (null-terminated array of null-terminated string pointers, or 0)
+/// * r9  (arg5): argc count (number of args, or 0)
 ///
 /// # Returns
 /// * positive task ID on success
@@ -146,8 +148,10 @@ pub const SYSCALL_TERMINATE_TASK: u64 = 69;
 ///
 /// # Arguments (via registers)
 /// * rdi (arg0): Pointer to null-terminated path string
-/// * rsi (arg1): Reserved for future argv support (must be zero)
-/// * rdx (arg2): Reserved for future envp support (must be zero)
+/// * rsi (arg1): argv pointer -- null-terminated array of null-terminated string pointers.
+///               0 means no argv and preserves legacy behavior.
+/// * rdx (arg2): envp pointer -- null-terminated array of null-terminated `KEY=VALUE\0`
+///               string pointers. 0 means no envp and preserves legacy behavior.
 ///
 /// # Returns
 /// * Does not return on success (process image is replaced)
@@ -194,6 +198,48 @@ pub const SYSCALL_GETUID: u64 = 88;
 pub const SYSCALL_GETGID: u64 = 89;
 pub const SYSCALL_GETEUID: u64 = 90;
 pub const SYSCALL_GETEGID: u64 = 91;
+
+// =============================================================================
+// Filesystem process context
+// =============================================================================
+
+/// Change the current working directory of the calling task.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to null-terminated path string
+///
+/// # Returns
+/// * 0 on success
+/// * -ENOENT: path not found
+/// * -ENOTDIR: path is not a directory
+/// * -EFAULT: invalid pointer
+pub const SYSCALL_CHDIR: u64 = 120;
+
+/// Get the current working directory of the calling task.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to user buffer
+/// * rsi (arg1): buffer size in bytes
+///
+/// # Returns
+/// * Length of cwd (including null terminator) on success
+/// * -ERANGE: buffer too small
+/// * -EFAULT: invalid pointer
+pub const SYSCALL_GETCWD: u64 = 121;
+
+/// Atomically rename/move a file or directory.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to null-terminated old path string
+/// * rsi (arg1): pointer to null-terminated new path string
+///
+/// # Returns
+/// * 0 on success
+/// * -ENOENT: source not found
+/// * -EXDEV: cross-device rename not supported
+/// * -ENOTSUP: filesystem doesn't support rename
+/// * -EFAULT: invalid pointer
+pub const SYSCALL_RENAME: u64 = 122;
 
 // =============================================================================
 // Memory management (POSIX)
@@ -520,6 +566,9 @@ pub const ERRNO_ENOMEM: u64 = (-12i64) as u64;
 pub const ERRNO_EAGAIN: u64 = (-11i64) as u64;
 pub const ERRNO_ESRCH: u64 = (-3i64) as u64;
 pub const ERRNO_EFAULT: u64 = (-14i64) as u64;
+pub const ERRNO_ENOENT: u64 = (-2i64) as u64;
+pub const ERRNO_ENOTDIR: u64 = (-20i64) as u64;
+pub const ERRNO_ERANGE: u64 = (-34i64) as u64;
 pub const ERRNO_ETIMEDOUT: u64 = (-110i64) as u64;
 
 // =============================================================================
