@@ -41,6 +41,7 @@ pub(crate) const LAPIC_LVT_DELIVERY_MODE_EXTINT: u32 = 0x7 << 8;
 // Timer Configuration
 // =============================================================================
 
+pub(crate) const LAPIC_TIMER_ONESHOT: u32 = 0x0000_0000;
 pub(crate) const LAPIC_TIMER_PERIODIC: u32 = 0x0002_0000;
 pub(crate) const LAPIC_TIMER_DIV_16: u32 = 0x3;
 

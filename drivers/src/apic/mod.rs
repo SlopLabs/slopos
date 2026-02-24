@@ -1,4 +1,5 @@
 pub(crate) mod regs;
+pub mod timer;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
