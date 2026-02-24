@@ -6,10 +6,9 @@ use crate::ioapic::regs::{
 };
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::kernel_services::driver_runtime::{
-    DRIVER_IRQ_LINES, DRIVER_LEGACY_IRQ_COM1, DRIVER_LEGACY_IRQ_KEYBOARD, DRIVER_LEGACY_IRQ_MOUSE,
-    DRIVER_LEGACY_IRQ_TIMER, irq_get_timer_ticks, irq_increment_keyboard_events,
-    irq_increment_timer_ticks, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
-    scheduler_handle_timer_interrupt,
+    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, LEGACY_IRQ_TIMER,
+    irq_get_timer_ticks, irq_increment_keyboard_events, irq_increment_timer_ticks, irq_init,
+    irq_is_masked, irq_register_handler, irq_set_route, scheduler_handle_timer_interrupt,
 };
 use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
 
@@ -47,7 +46,7 @@ extern "C" fn ps2_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut 
 }
 
 fn program_ioapic_route(irq_line: u8) {
-    if irq_line as usize >= DRIVER_IRQ_LINES {
+    if irq_line as usize >= IRQ_LINES {
         return;
     }
 
@@ -106,10 +105,10 @@ fn setup_ioapic_routes() {
         panic!("IRQ: APIC/IOAPIC not ready during dispatcher init");
     }
 
-    program_ioapic_route(DRIVER_LEGACY_IRQ_TIMER);
-    program_ioapic_route(DRIVER_LEGACY_IRQ_KEYBOARD);
-    program_ioapic_route(DRIVER_LEGACY_IRQ_MOUSE);
-    program_ioapic_route(DRIVER_LEGACY_IRQ_COM1);
+    program_ioapic_route(LEGACY_IRQ_TIMER);
+    program_ioapic_route(LEGACY_IRQ_KEYBOARD);
+    program_ioapic_route(LEGACY_IRQ_MOUSE);
+    program_ioapic_route(LEGACY_IRQ_COM1);
 }
 
 pub fn init() {
@@ -130,19 +129,19 @@ pub fn init() {
     ps2::enable_irqs();
 
     let _ = irq_register_handler(
-        DRIVER_LEGACY_IRQ_TIMER,
+        LEGACY_IRQ_TIMER,
         Some(timer_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
     let _ = irq_register_handler(
-        DRIVER_LEGACY_IRQ_KEYBOARD,
+        LEGACY_IRQ_KEYBOARD,
         Some(ps2_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
     let _ = irq_register_handler(
-        DRIVER_LEGACY_IRQ_MOUSE,
+        LEGACY_IRQ_MOUSE,
         Some(ps2_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),

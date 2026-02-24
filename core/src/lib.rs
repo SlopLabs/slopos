@@ -16,7 +16,6 @@ pub mod platform;
 pub mod scheduler;
 #[macro_use]
 pub mod syscall;
-pub mod syscall_services;
 
 #[cfg(feature = "itests")]
 pub use scheduler::context_tests;

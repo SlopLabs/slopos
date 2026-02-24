@@ -5,11 +5,11 @@ use crate::InterruptFrame;
 pub type DriverTaskHandle = *mut c_void;
 pub type DriverIrqHandler = extern "C" fn(u8, *mut InterruptFrame, *mut c_void);
 
-pub const DRIVER_LEGACY_IRQ_TIMER: u8 = 0;
-pub const DRIVER_LEGACY_IRQ_KEYBOARD: u8 = 1;
-pub const DRIVER_LEGACY_IRQ_COM1: u8 = 4;
-pub const DRIVER_LEGACY_IRQ_MOUSE: u8 = 12;
-pub const DRIVER_IRQ_LINES: usize = 16;
+pub const LEGACY_IRQ_TIMER: u8 = 0;
+pub const LEGACY_IRQ_KEYBOARD: u8 = 1;
+pub const LEGACY_IRQ_COM1: u8 = 4;
+pub const LEGACY_IRQ_MOUSE: u8 = 12;
+pub const IRQ_LINES: usize = 16;
 
 crate::define_service! {
     driver_runtime => DriverRuntimeServices {

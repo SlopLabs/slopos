@@ -14,20 +14,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_lib::InitFlag;
 use slopos_lib::IrqMutex;
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
+use slopos_lib::kernel_services::driver_runtime::IRQ_LINES;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
 use crate::platform;
 use crate::scheduler::scheduler::{TrapExitSource, scheduler_handoff_on_trap_exit};
-
-/// Maximum number of IRQ lines supported.
-pub const IRQ_LINES: usize = 16;
-
-/// Legacy IRQ numbers.
-pub const LEGACY_IRQ_TIMER: u8 = 0;
-pub const LEGACY_IRQ_KEYBOARD: u8 = 1;
-pub const LEGACY_IRQ_COM1: u8 = 4;
-pub const LEGACY_IRQ_MOUSE: u8 = 12;
 
 /// IRQ handler function signature.
 pub type IrqHandler = extern "C" fn(u8, *mut InterruptFrame, *mut c_void);

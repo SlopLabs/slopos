@@ -26,13 +26,11 @@ pub fn test_virtio_net_scan_discovers_network_members() -> TestResult {
     let mut members = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
     let mut count = 0usize;
 
-    let mut attempt = 0usize;
-    while attempt < 6 {
+    for _ in 0..6 {
         count = virtio_net::virtio_net_scan_members(members.as_mut_ptr(), members.len(), true);
         if count > 0 {
             break;
         }
-        attempt += 1;
     }
 
     if count == 0 {
@@ -40,15 +38,7 @@ pub fn test_virtio_net_scan_discovers_network_members() -> TestResult {
         return TestResult::Fail;
     }
 
-    let mut found_nonzero_ip = false;
-    let mut i = 0usize;
-    while i < count {
-        if members[i].ipv4 != [0; 4] {
-            found_nonzero_ip = true;
-            break;
-        }
-        i += 1;
-    }
+    let found_nonzero_ip = members[..count].iter().any(|m| m.ipv4 != [0; 4]);
 
     assert_test!(
         found_nonzero_ip,

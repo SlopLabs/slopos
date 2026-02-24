@@ -17,8 +17,8 @@ use crate::syscall::common::{
     syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
-use crate::syscall_services::{net, tty};
 use crate::task::{get_task_stats, task_terminate};
+use slopos_lib::kernel_services::syscall_services::{net, tty};
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;

@@ -9,8 +9,8 @@ use slopos_abi::syscall::{
 
 use slopos_fs::fileio::{file_is_console_fd, file_poll_fd};
 
-use crate::syscall_services::tty;
 use slopos_lib::IrqMutex;
+use slopos_lib::kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
