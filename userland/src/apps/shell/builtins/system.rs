@@ -1,3 +1,4 @@
+use crate::program_registry;
 use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
@@ -43,6 +44,17 @@ pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
         }
         shell_write(NL);
     }
+
+    shell_write_idx(b"Programs", COLOR_PROMPT_ACCENT);
+    shell_write(b":\n");
+    for spec in program_registry::user_programs() {
+        shell_write(b"  ");
+        write_padded_colored(spec.name, COLOR_EXEC_GREEN);
+        shell_write(spec.desc);
+        shell_write(NL);
+    }
+    shell_write(NL);
+
     0
 }
 
@@ -64,6 +76,18 @@ fn cmd_help_single(name: *const u8) -> i32 {
         }
         return 0;
     }
+
+    for spec in program_registry::user_programs() {
+        if !u_streq_slice(name, spec.name) {
+            continue;
+        }
+        shell_write_idx(spec.name, COLOR_EXEC_GREEN);
+        shell_write(b" - ");
+        shell_write(spec.desc);
+        shell_write(NL);
+        return 0;
+    }
+
     shell_write_idx(b"help: unknown command '", COLOR_ERROR_RED);
     let len = runtime::u_strlen(name);
     shell_write_idx(

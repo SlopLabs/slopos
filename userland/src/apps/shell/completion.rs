@@ -1,5 +1,6 @@
 use core::ffi::c_char;
 
+use crate::program_registry;
 use crate::syscall::{UserFsEntry, UserFsList, fs};
 
 use super::builtins::BUILTINS;
@@ -63,16 +64,18 @@ pub fn try_complete(input: &[u8], len: usize, cursor_pos: usize, cwd: &[u8]) -> 
 }
 
 fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionResult) {
-    let mut matches: [usize; 32] = [0; 32];
+    let mut matches: [&[u8]; 64] = [&[]; 64];
     let mut match_count = 0;
 
-    for (i, entry) in BUILTINS.iter().enumerate() {
-        if entry.name.len() >= prefix_len
-            && &entry.name[..prefix_len] == prefix
-            && match_count < matches.len()
-        {
-            matches[match_count] = i;
-            match_count += 1;
+    for entry in BUILTINS {
+        if entry.name.len() >= prefix_len && &entry.name[..prefix_len] == prefix {
+            push_command_match(entry.name, &mut matches, &mut match_count);
+        }
+    }
+
+    for spec in program_registry::user_programs() {
+        if spec.name.len() >= prefix_len && &spec.name[..prefix_len] == prefix {
+            push_command_match(spec.name, &mut matches, &mut match_count);
         }
     }
 
@@ -81,7 +84,7 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
     }
 
     if match_count == 1 {
-        let name = BUILTINS[matches[0]].name;
+        let name = matches[0];
         let remaining = name.len() - prefix_len;
         let insert_len = remaining + 1;
         if insert_len <= result.insertion.len() {
@@ -90,10 +93,10 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
             result.insertion_len = insert_len;
         }
     } else {
-        let first_name = BUILTINS[matches[0]].name;
+        let first_name = matches[0];
         let mut common_len = first_name.len();
         for i in 1..match_count {
-            let name = BUILTINS[matches[i]].name;
+            let name = matches[i];
             let mut j = prefix_len;
             while j < common_len && j < name.len() && first_name[j] == name[j] {
                 j += 1;
@@ -110,7 +113,7 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
         result.show_matches = true;
         let mut pos = 0;
         for i in 0..match_count {
-            let name = BUILTINS[matches[i]].name;
+            let name = matches[i];
             if pos + name.len() + 2 < result.matches_buf.len() {
                 result.matches_buf[pos..pos + name.len()].copy_from_slice(name);
                 pos += name.len();
@@ -125,6 +128,23 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
         }
         result.matches_len = pos;
     }
+}
+
+fn push_command_match(name: &'static [u8], matches: &mut [&'static [u8]; 64], count: &mut usize) {
+    if *count >= matches.len() {
+        return;
+    }
+
+    let mut i = 0usize;
+    while i < *count {
+        if matches[i] == name {
+            return;
+        }
+        i += 1;
+    }
+
+    matches[*count] = name;
+    *count += 1;
 }
 
 fn command_wants_dirs_only(input: &[u8], word_start: usize) -> bool {

@@ -383,12 +383,52 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         return None;
     }
     let spec = registry_spec_for_command(cmd)?;
+    // For text programs, redirect our fd 1 to a pipe before spawning so
+    // the child (which inherits our fd table) writes into the pipe.
+    // After spawning, restore fd 1 and drain the pipe into shell_write.
+    let capture = !spec.gui && !background;
+    let mut pipe_fds = [-1i32; 2];
+    let mut backup_fd = -1i32;
+
+    if capture {
+        if fs::pipe(&mut pipe_fds).is_err() {
+            shell_write(b"pipe failed\n");
+            return Some(1);
+        }
+        backup_fd = match fs::dup(1) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = fs::close_fd(pipe_fds[0]);
+                let _ = fs::close_fd(pipe_fds[1]);
+                shell_write(b"dup failed\n");
+                return Some(1);
+            }
+        };
+        if fs::dup2(pipe_fds[1], 1).is_err() {
+            let _ = fs::close_fd(pipe_fds[0]);
+            let _ = fs::close_fd(pipe_fds[1]);
+            let _ = fs::close_fd(backup_fd);
+            shell_write(b"dup2 failed\n");
+            return Some(1);
+        }
+        // Close extra write-end; child will inherit fd 1 = pipe write.
+        let _ = fs::close_fd(pipe_fds[1]);
+    }
+
     let tid = process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+
+    // Restore fd 1 immediately after spawn so shell output is normal again.
+    if capture {
+        let _ = fs::dup2(backup_fd, 1);
+        let _ = fs::close_fd(backup_fd);
+    }
     if tid <= 0 {
+        if capture {
+            let _ = fs::close_fd(pipe_fds[0]);
+        }
         shell_write(b"spawn failed\n");
         return Some(1);
     }
-
     let pid = tid as u32;
     if background {
         let mut cmd_buf = [0u8; 128];
@@ -407,6 +447,22 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
     }
 
     enter_foreground(pid);
+
+    // Drain the child's stdout from the pipe into the shell display.
+    if capture {
+        let mut buf = [0u8; 512];
+        loop {
+            let n = match fs::read_slice(pipe_fds[0], &mut buf) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            shell_write(&buf[..n]);
+        }
+        let _ = fs::close_fd(pipe_fds[0]);
+    }
     let status = process::waitpid(pid);
     leave_foreground();
     Some(status)

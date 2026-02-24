@@ -17,6 +17,7 @@ pub enum BuiltinCategory {
     Filesystem,
     Process,
     Environment,
+    Network,
     Utility,
 }
 
@@ -26,6 +27,7 @@ impl BuiltinCategory {
         BuiltinCategory::Filesystem,
         BuiltinCategory::Process,
         BuiltinCategory::Environment,
+        BuiltinCategory::Network,
         BuiltinCategory::Utility,
     ];
 
@@ -35,6 +37,7 @@ impl BuiltinCategory {
             BuiltinCategory::Filesystem => b"Filesystem",
             BuiltinCategory::Process => b"Process Control",
             BuiltinCategory::Environment => b"Environment",
+            BuiltinCategory::Network => b"Network",
             BuiltinCategory::Utility => b"Utility",
         }
     }
