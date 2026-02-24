@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: Not Started
+> **Status**: In Progress — Phase 0A (HPET Driver) complete
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -115,31 +115,31 @@ The LAPIC timer is already initialized in `drivers/src/apic/mod.rs` (lines 192�
 
 Parse the ACPI HPET table and implement a minimal HPET driver for system time and LAPIC calibration.
 
-- [ ] **0A.1** Add HPET table parsing to `acpi/src/`:
+- [x] **0A.1** Add HPET table parsing to `acpi/src/hpet.rs`:
   - Find HPET table signature (`"HPET"`) in XSDT
   - Parse base address (MMIO), minimum tick period, comparator count
   - Export `HpetInfo { base_phys: u64, period_fs: u32, num_comparators: u8 }`
-- [ ] **0A.2** Create `drivers/src/hpet.rs`:
+- [x] **0A.2** Create `drivers/src/hpet.rs`:
   - Map HPET MMIO registers via `MmioRegion::map()` (same pattern as IOAPIC)
   - Define register offsets: `GENERAL_CAP` (0x00), `GENERAL_CONFIG` (0x10), `MAIN_COUNTER` (0xF0), `TIMER_N_CONFIG` (0x100+0x20*N), `TIMER_N_COMPARATOR` (0x108+0x20*N)
   - Read capability register to get period (femtoseconds per tick) and number of timers
-- [ ] **0A.3** Implement `hpet_init()`:
+- [x] **0A.3** Implement `hpet::init()`:
   - Disable legacy replacement mode (clear bit 1 of GENERAL_CONFIG)
   - Enable main counter (set bit 0 of GENERAL_CONFIG)
   - Log: `"HPET: base 0x{:x}, period {} fs, {} comparators"`
-- [ ] **0A.4** Implement `hpet_read_counter() -> u64`:
+- [x] **0A.4** Implement `hpet::read_counter() -> u64`:
   - Read MAIN_COUNTER register (64-bit monotonic)
   - This is the primary precision time source
-- [ ] **0A.5** Implement `hpet_nanoseconds(ticks: u64) -> u64`:
+- [x] **0A.5** Implement `hpet::nanoseconds(ticks: u64) -> u64`:
   - Convert ticks to nanoseconds using period from capability register
   - `ns = ticks * period_fs / 1_000_000`
-- [ ] **0A.6** Implement `hpet_delay_ns(ns: u64)`:
+- [x] **0A.6** Implement `hpet::delay_ns(ns: u64)` and `hpet::delay_ms(ms: u32)`:
   - Spin-wait on main counter for the specified duration
   - Replaces `pit_poll_delay_ms()` for calibration and early-boot delays
-- [ ] **0A.7** Wire into boot sequence (`boot/src/boot_drivers.rs`):
+- [x] **0A.7** Wire into boot sequence (`boot/src/boot_drivers.rs`):
   - Add `BOOT_STEP_HPET_SETUP` after IOAPIC setup
   - Call `hpet::hpet_init()` using ACPI-discovered base address
-- [ ] **0A.8** Verify: boot prints HPET info, `hpet_read_counter()` returns increasing values
+- [x] **0A.8** Verify: boot prints HPET info, `hpet_read_counter()` returns increasing values, regression test suite passes (10 tests in `drivers/src/hpet_tests.rs`)
 
 ### 0B: LAPIC Timer Calibration
 
@@ -216,7 +216,7 @@ Reduce PIT to a calibration-only fallback, document the migration.
 
 ### Phase 0 Gate
 
-- [ ] **GATE**: HPET driver discovers and initializes the timer from ACPI
+- [x] **GATE**: HPET driver discovers and initializes the timer from ACPI
 - [ ] **GATE**: LAPIC timer calibrated against HPET (or PIT fallback)
 - [ ] **GATE**: Scheduler runs on LAPIC timer, not PIT
 - [ ] **GATE**: Each CPU has its own LAPIC timer tick (no shared IRQ)
@@ -916,7 +916,7 @@ Features that **cannot be implemented** until specific phases complete:
 
 | Phase | Status | Tasks | Done | Blocked |
 |---|---|---|---|---|
-| **Phase 0**: Timer Modernization | Not Started | 22 | 0 | — |
+| **Phase 0**: Timer Modernization | **0A Complete** | 22 | 8 | — |
 | **Phase 1**: XSAVE/XRSTOR | Not Started | 14 | 0 | — |
 | **Phase 2**: Spinlock Modernization | Not Started | 8 | 0 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |
@@ -924,4 +924,4 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **109** | **0** | |
+| **Total** | | **109** | **8** | |

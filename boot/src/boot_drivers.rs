@@ -17,7 +17,7 @@ use crate::smp::smp_init;
 #[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
 use slopos_drivers::{
-    apic, ioapic,
+    apic, hpet, ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
@@ -162,6 +162,15 @@ fn boot_step_ioapic_setup_fn() {
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
 }
 
+fn boot_step_hpet_setup_fn() {
+    klog_debug!("Discovering HPET via ACPI...");
+    if hpet::init() != 0 {
+        klog_info!("HPET: Not available, PIT remains the primary timer");
+        return;
+    }
+    klog_debug!("HPET: Initialization complete, main counter running.");
+}
+
 fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     virtio_blk_register_driver();
@@ -287,6 +296,13 @@ crate::boot_init!(
     b"ioapic\0",
     boot_step_ioapic_setup_fn,
     flags = boot_init_priority(50)
+);
+crate::boot_init!(
+    BOOT_STEP_HPET_SETUP,
+    drivers,
+    b"hpet\0",
+    boot_step_hpet_setup_fn,
+    flags = boot_init_priority(55)
 );
 crate::boot_init!(
     BOOT_STEP_IRQ_SETUP,

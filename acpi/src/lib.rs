@@ -8,6 +8,7 @@
 //!
 //! - [`tables`]: RSDP validation, XSDT/RSDT traversal, table lookup by signature.
 //! - [`madt`]: MADT (Multiple APIC Description Table) entry iteration.
+//! - [`hpet`]: HPET (High Precision Event Timer) table parsing.
 //!
 //! # Usage
 //!
@@ -30,5 +31,6 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub mod hpet;
 pub mod madt;
 pub mod tables;
