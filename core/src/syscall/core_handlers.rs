@@ -1,10 +1,10 @@
 use core::ffi::c_char;
 use core::mem::size_of;
 
-use slopos_abi::syscall::{UserSysInfo, ERRNO_EINVAL};
+use slopos_abi::syscall::{ERRNO_EINVAL, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
-use slopos_abi::{UserNetMember, USER_NET_MAX_MEMBERS};
-use slopos_lib::{klog_debug, InterruptFrame};
+use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
+use slopos_lib::{InterruptFrame, klog_debug};
 
 use crate::platform;
 use crate::sched::{
@@ -13,8 +13,8 @@ use crate::sched::{
 };
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
-    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_return_err,
-    SyscallDisposition, USER_IO_MAX_BYTES,
+    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
+    syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall_services::{net, tty};
@@ -199,4 +199,20 @@ define_syscall!(syscall_net_scan(ctx, args) {
     }
 
     ctx.ok(discovered as u64)
+});
+
+define_syscall!(syscall_net_info(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+
+    let ready = net::is_ready();
+    let mut info = UserNetInfo::default();
+    info.nic_ready = if ready != 0 { 1 } else { 0 };
+
+    if ready != 0 {
+        let _ = net::get_info(&mut info as *mut UserNetInfo);
+    }
+
+    let user_ptr = try_or_err!(ctx, UserPtr::<UserNetInfo>::try_new(args.arg0));
+    try_or_err!(ctx, copy_to_user(user_ptr, &info));
+    ctx.ok(0)
 });
