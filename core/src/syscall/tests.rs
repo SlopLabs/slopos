@@ -1794,6 +1794,88 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression test for the stale-argv spawn bug (compositor spawn failure).
+///
+/// Before the fix, `spawn_path_with_attrs()` used `syscall4` which left r8/r9
+/// (argv_ptr / argc) as stale garbage.  The kernel handler would try to parse
+/// argv from those garbage addresses, returning EINVAL instead of reaching the
+/// actual exec path.  After the fix (syscall6 with explicit 0,0), r8/r9 are
+/// always zero when no argv is passed.
+///
+/// This test verifies the two code paths return distinguishable errors:
+///   - Garbage r8/r9 → argv parsing failure → ERRNO_EINVAL (-22)
+///   - Zero   r8/r9 → exec path reached    → ExecError::NoEntry (-2)
+pub fn test_spawn_path_stale_argv_regression() -> TestResult {
+    use crate::syscall::handlers::syscall_spawn_path;
+    use slopos_abi::syscall::ERRNO_EINVAL;
+
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    let pid = unsafe { (*task_ptr).process_id };
+
+    // Map a user-accessible page and write a path that will fail at VFS open.
+    let user_page = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let path = b"/bin/noent";
+    assert_test!(
+        user_copy_out(pid, user_page, path),
+        "failed to write path into user memory"
+    );
+
+    // ---- Case A: Stale/garbage r8 (argv_ptr) and r9 (argc) ----
+    // Simulates the pre-fix bug where syscall4 left r8/r9 with junk.
+    let mut frame_stale = zero_frame();
+    frame_stale.rdi = user_page; // arg0 = path_ptr
+    frame_stale.rsi = path.len() as u64; // arg1 = path_len
+    frame_stale.rdx = 1; // arg2 = priority
+    frame_stale.r10 = 0; // arg3 = flags
+    frame_stale.r8 = 0xDEAD_BEEF_CAFE_BABEu64; // arg4 = garbage argv_ptr
+    frame_stale.r9 = 42; // arg5 = garbage argc
+    let _ = with_user_process_context(pid, || syscall_spawn_path(task_ptr, &mut frame_stale));
+    assert_eq_test!(
+        frame_stale.rax,
+        ERRNO_EINVAL,
+        "stale argv must trigger EINVAL from argv parsing failure"
+    );
+
+    // ---- Case B: Clean r8=0, r9=0 (the fixed behavior) ----
+    // With no argv, the handler skips argv parsing and reaches the exec path.
+    let mut frame_clean = zero_frame();
+    frame_clean.rdi = user_page; // arg0 = path_ptr
+    frame_clean.rsi = path.len() as u64; // arg1 = path_len
+    frame_clean.rdx = 1; // arg2 = priority
+    frame_clean.r10 = 0; // arg3 = flags
+    frame_clean.r8 = 0; // arg4 = no argv
+    frame_clean.r9 = 0; // arg5 = no argc
+    let _ = with_user_process_context(pid, || syscall_spawn_path(task_ptr, &mut frame_clean));
+
+    // ExecError::NoEntry = -2, returned via ctx.ok(err as i32 as u64)
+    let exec_no_entry = (-2i32) as u64;
+    assert_eq_test!(
+        frame_clean.rax,
+        exec_no_entry,
+        "clean argv must reach exec path and return NoEntry for missing binary"
+    );
+
+    // The two error codes must differ — that's the whole point of this regression.
+    assert_test!(
+        frame_stale.rax != frame_clean.rax,
+        "stale and clean argv paths must return different error codes"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     syscall_valid,
     [
@@ -1839,6 +1921,7 @@ slopos_lib::define_test_suite!(
         test_process_group_session_syscalls_baseline,
         test_kill_process_group_semantics,
         test_vm_mmap_munmap_stress_baseline,
+        test_spawn_path_stale_argv_regression,
     ]
 );
 
@@ -1862,5 +1945,6 @@ slopos_lib::define_test_suite!(
         test_clone_thread_tls_isolation,
         test_futex_wait_mismatch_and_wake_no_waiters,
         test_arch_prctl_set_get_fs_roundtrip,
+        test_spawn_path_stale_argv_regression,
     ]
 );

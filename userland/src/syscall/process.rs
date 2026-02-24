@@ -32,12 +32,14 @@ pub fn spawn_path(path: &[u8]) -> i32 {
 #[inline(always)]
 pub fn spawn_path_with_attrs(path: &[u8], priority: u8, flags: u16) -> i32 {
     unsafe {
-        syscall4(
+        syscall6(
             SYSCALL_SPAWN_PATH,
             path.as_ptr() as u64,
             path.len() as u64,
             priority as u64,
             flags as u64,
+            0,
+            0,
         ) as i32
     }
 }
