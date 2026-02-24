@@ -448,7 +448,21 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
 
     enter_foreground(pid);
 
-    // Drain the child's stdout from the pipe into the shell display.
+    // Wait for the child to exit BEFORE draining the pipe.
+    // This avoids a lost-wakeup race in the kernel pipe blocking path:
+    // on SMP, the child can write + wake the reader between the moment the
+    // reader drops the pipe lock and the moment it calls block_current_task(),
+    // causing the reader to sleep forever.  By waiting first, the child is
+    // dead, all its fds are closed (writers drops to 0), and the pipe read
+    // returns buffered data immediately followed by EOF -- no blocking needed.
+    let status = process::waitpid(pid);
+
+    // Now drain the child's stdout from the pipe into the shell display.
+    // The child is already terminated so all data is buffered in the pipe.
+    // NOTE: This approach works as long as child output fits in the pipe
+    // buffer (4096 bytes).  Programs producing more than that would deadlock
+    // (child blocks on write, nobody reads).  For current programs (ifconfig,
+    // nmap) output is well under this limit.
     if capture {
         let mut buf = [0u8; 512];
         loop {
@@ -463,7 +477,6 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         }
         let _ = fs::close_fd(pipe_fds[0]);
     }
-    let status = process::waitpid(pid);
     leave_foreground();
     Some(status)
 }

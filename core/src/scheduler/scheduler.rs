@@ -780,6 +780,18 @@ pub fn block_current_task() {
     if task_is_blocked(current) {
         return;
     }
+    // Check for a pending wakeup that arrived between dropping the
+    // subsystem lock (e.g. PIPE_STATE) and reaching this function.
+    // If another CPU already called unblock_task() while we were
+    // Running/Ready, it set this flag instead of changing state.
+    // Clearing it here prevents the lost-wakeup race on SMP.
+    if unsafe {
+        (*current)
+            .pending_wakeup
+            .swap(false, core::sync::atomic::Ordering::AcqRel)
+    } {
+        return;
+    }
     if task_set_state(unsafe { (*current).task_id }, TaskStatus::Blocked) != 0 {
         return;
     }
@@ -820,9 +832,16 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    // Only unblock if actually blocked - if task is already ready/running,
-    // that's success (idempotent unblock for SMP safety)
+    // If the task is not yet blocked, it may be in the window between
+    // dropping a subsystem lock and calling block_current_task().
+    // Set the pending_wakeup flag so block_current_task() will see it
+    // and skip the block -- this closes the lost-wakeup race on SMP.
     if !task_is_blocked(task) {
+        unsafe {
+            (*task)
+                .pending_wakeup
+                .store(true, core::sync::atomic::Ordering::Release)
+        };
         return 0;
     }
 
