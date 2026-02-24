@@ -13,6 +13,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [COMPOSITOR_HOVER_REGISTRY.md](./COMPOSITOR_HOVER_REGISTRY.md) | Replace ad-hoc hover tracking with a single reactive HoverRegion registry |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
 | [CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md](./CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md) | Detailed execution playbook with dependencies, tests, rollback strategy, phase gates, and task checklists |
+| [LEGACY_MODERNIZATION_PLAN.md](./LEGACY_MODERNIZATION_PLAN.md) | 8-phase roadmap to replace all legacy hardware (PIT, FXSAVE, port-I/O PCI, naive spinlocks) with modern equivalents (HPET, XSAVE, ECAM, ticket locks, MSI, TCP, PCID) — 109 tasks |
 | [ABI_SCOPE_CLEANUP.md](./ABI_SCOPE_CLEANUP.md) | Extract `gfx` crate from `abi` — move rendering algorithms out of the types crate |
 | [SHELL_EVOLUTION_PLAN.md](./SHELL_EVOLUTION_PLAN.md) | 7-phase plan to evolve the shell from command dispatcher to real POSIX-inspired shell (163 tasks) |
 
