@@ -35,8 +35,29 @@ pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisp
 
 define_syscall!(syscall_get_time_ms(ctx, args) {
     let _ = args;
-    let ms = platform::get_time_ms();
+    let ms = slopos_lib::clock::uptime_ms();
     ctx.ok(ms)
+});
+
+define_syscall!(syscall_clock_gettime(ctx, args) {
+    use slopos_abi::syscall::{CLOCK_MONOTONIC, Timespec};
+
+    let clock_id = args.arg0;
+    if clock_id != CLOCK_MONOTONIC {
+        return ctx.err();
+    }
+
+    require_nonzero!(ctx, args.arg1);
+
+    let ns = slopos_lib::clock::monotonic_ns();
+    let ts = Timespec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    };
+
+    let user_ptr = try_or_err!(ctx, UserPtr::<Timespec>::try_new(args.arg1));
+    try_or_err!(ctx, copy_to_user(user_ptr, &ts));
+    ctx.ok(0)
 });
 
 pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {

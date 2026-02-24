@@ -28,6 +28,8 @@ crate::define_service! {
         irq_send_eoi();
         irq_mask_gsi(gsi: u32) -> i32;
         irq_unmask_gsi(gsi: u32) -> i32;
+
+        @no_wrapper clock_monotonic_ns() -> u64;
     }
 }
 
@@ -48,10 +50,24 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
 #[inline(always)]
 pub fn get_time_ms() -> u64 {
+    let ns = clock_monotonic_ns();
+    if ns != 0 {
+        return ns / 1_000_000;
+    }
+    // Pre-HPET fallback: derive from tick counter.
     let ticks = timer_ticks();
     let freq = timer_frequency();
     if freq == 0 {
         return 0;
     }
     (ticks * 1000) / freq as u64
+}
+
+#[inline(always)]
+pub fn clock_monotonic_ns() -> u64 {
+    if !is_platform_initialized() {
+        // Fallback: tick-based approximation when platform services not yet wired.
+        return 0;
+    }
+    (platform_services().clock_monotonic_ns)()
 }

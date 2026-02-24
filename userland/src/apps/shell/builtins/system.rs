@@ -173,9 +173,26 @@ fn write_zero_padded(buf: &mut [u8], pos: usize, value: u64) {
     }
 }
 
+/// Write a value as a 6-digit zero-padded decimal (microseconds).
+fn write_zero_padded_6(value: u64) {
+    let mut buf = [b'0'; 6];
+    let mut v = value;
+    let mut i = 5usize;
+    loop {
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+    shell_write(&buf);
+}
+
 pub fn cmd_uptime(_argc: i32, _argv: &[*const u8]) -> i32 {
-    let ms = sys_core::get_time_ms();
-    let total_secs = ms / 1000;
+    let ns = sys_core::clock_gettime_ns();
+    let total_secs = ns / 1_000_000_000;
+    let sub_ms = (ns % 1_000_000_000) / 1_000_000;
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;
     let seconds = total_secs % 60;
@@ -193,8 +210,16 @@ pub fn cmd_uptime(_argc: i32, _argv: &[*const u8]) -> i32 {
     write_zero_padded(&mut time_buf, 3, seconds);
     shell_write(&time_buf);
 
+    shell_write(b".");
+    // Write milliseconds zero-padded to 3 digits.
+    let mut ms_buf = [0u8; 3];
+    ms_buf[0] = b'0' + ((sub_ms / 100) % 10) as u8;
+    ms_buf[1] = b'0' + ((sub_ms / 10) % 10) as u8;
+    ms_buf[2] = b'0' + (sub_ms % 10) as u8;
+    shell_write(&ms_buf);
+
     shell_write(b" (");
-    write_u64(ms);
+    write_u64(ns / 1_000_000);
     shell_write(b" ms)\n");
     0
 }
@@ -291,24 +316,19 @@ pub fn cmd_time(argc: i32, argv: &[*const u8]) -> i32 {
         return 1;
     }
 
-    let start = sys_core::get_time_ms();
+    let start_ns = sys_core::clock_gettime_ns();
     let rc = super::super::exec::execute_tokens(argc - 1, &argv[1..]);
-    let end = sys_core::get_time_ms();
-    let elapsed = end.saturating_sub(start);
+    let end_ns = sys_core::clock_gettime_ns();
+    let elapsed_ns = end_ns.saturating_sub(start_ns);
 
-    let secs = elapsed / 1000;
-    let millis = elapsed % 1000;
+    let secs = elapsed_ns / 1_000_000_000;
+    let sub_us = (elapsed_ns % 1_000_000_000) / 1_000;
 
     shell_write(b"\nreal\t");
     write_u64(secs);
     shell_write(b".");
-    if millis < 100 {
-        shell_write(b"0");
-    }
-    if millis < 10 {
-        shell_write(b"0");
-    }
-    write_u64(millis);
+    // Write microseconds zero-padded to 6 digits for sub-millisecond precision.
+    write_zero_padded_6(sub_us);
     shell_write(b"s\n");
 
     rc

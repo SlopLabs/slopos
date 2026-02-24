@@ -5,6 +5,7 @@
 
 pub mod arch;
 pub mod boot_info;
+pub mod clock;
 pub mod cpu;
 
 pub mod io;

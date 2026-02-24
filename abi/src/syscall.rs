@@ -63,6 +63,25 @@ pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_REBOOT: u64 = 85;
 
+/// Query a high-resolution clock.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): clock ID (`CLOCK_MONOTONIC` = 0)
+/// * rsi (arg1): pointer to [`Timespec`] output struct
+///
+/// # Returns
+/// * 0 on success
+/// * -EINVAL: unknown clock ID
+/// * -EFAULT: invalid pointer
+pub const SYSCALL_CLOCK_GETTIME: u64 = 125;
+
+// =============================================================================
+// Clock constants
+// =============================================================================
+
+/// Monotonic clock — nanoseconds since boot, never adjusted.
+pub const CLOCK_MONOTONIC: u64 = 0;
+
 // =============================================================================
 // Window management
 // =============================================================================
@@ -601,4 +620,12 @@ pub struct UserSysInfo {
     pub ready_tasks: u32,
     pub schedule_calls: u32,
     pub wl_balance: i64,
+}
+
+/// POSIX-style timespec returned by `SYSCALL_CLOCK_GETTIME`.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct Timespec {
+    pub tv_sec: u64,
+    pub tv_nsec: u64,
 }

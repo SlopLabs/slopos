@@ -85,6 +85,24 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     irq_send_eoi: || apic::send_eoi(),
     irq_mask_gsi: |gsi| ioapic::mask_gsi(gsi),
     irq_unmask_gsi: |gsi| ioapic::unmask_gsi(gsi),
+    clock_monotonic_ns: || {
+        if hpet::is_available() {
+            hpet::nanoseconds(hpet::read_counter())
+        } else {
+            // Fallback: derive from tick counter (low resolution, ~10ms granularity).
+            let ticks = slopos_core::irq::get_timer_ticks();
+            let freq = if apic::timer::is_calibrated() {
+                100u64
+            } else {
+                pit::pit_get_frequency() as u64
+            };
+            if freq == 0 {
+                0
+            } else {
+                ticks * 1_000_000_000 / freq
+            }
+        }
+    },
 };
 
 pub fn register_boot_services() {

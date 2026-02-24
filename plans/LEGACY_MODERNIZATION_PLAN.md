@@ -187,16 +187,16 @@ Replace PIT-driven scheduling ticks with LAPIC timer ticks.
 
 Expose a monotonic nanosecond clock to the kernel and userland.
 
-- [ ] **0D.1** Create `lib/src/clock.rs`:
+- [x] **0D.1** Create `lib/src/clock.rs`:
   - `clock_monotonic_ns() -> u64` — reads HPET main counter, converts to nanoseconds
   - `clock_uptime_ms() -> u64` — wraps monotonic, converts to milliseconds
   - Replaces the tick-counting approach in `irq_get_timer_ticks()`
-- [ ] **0D.2** Update `SYSCALL_GET_TIME_MS` (39) to use `clock_uptime_ms()` instead of PIT tick counting
-- [ ] **0D.3** Expose `SYSCALL_CLOCK_GETTIME` (new) for nanosecond precision:
+- [x] **0D.2** Update `SYSCALL_GET_TIME_MS` (39) to use `clock_uptime_ms()` instead of PIT tick counting
+- [x] **0D.3** Expose `SYSCALL_CLOCK_GETTIME` (new) for nanosecond precision:
   - `rdi` = clock ID (0 = MONOTONIC)
   - `rsi` = pointer to `{ seconds: u64, nanoseconds: u64 }`
-- [ ] **0D.4** Update userland `time` command and `uptime` to use nanosecond clock for better precision
-- [ ] **0D.5** Verify: `uptime` shows correct elapsed time, `time ls` shows sub-millisecond precision
+- [x] **0D.4** Update userland `time` command and `uptime` to use nanosecond clock for better precision
+- [x] **0D.5** Verify: `uptime` shows correct elapsed time, `time ls` shows sub-millisecond precision
 
 ### 0E: PIT Deprecation
 
@@ -220,7 +220,7 @@ Reduce PIT to a calibration-only fallback, document the migration.
 - [x] **GATE**: LAPIC timer calibrated against HPET (or PIT fallback)
 - [x] **GATE**: Scheduler runs on LAPIC timer, not PIT
 - [x] **GATE**: Each CPU has its own LAPIC timer tick (no shared IRQ)
-- [ ] **GATE**: `clock_monotonic_ns()` provides nanosecond precision
+- [x] **GATE**: `clock_monotonic_ns()` provides nanosecond precision
 - [x] **GATE**: PIT no longer receives interrupts in the default boot path
 - [x] **GATE**: `just test` passes
 - [x] **GATE**: `just boot` boots and schedules correctly
