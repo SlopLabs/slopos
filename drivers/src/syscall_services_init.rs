@@ -1,8 +1,8 @@
 use slopos_lib::kernel_services::syscall_services::input::{
-    register_input_services, InputServices,
+    InputServices, register_input_services,
 };
-use slopos_lib::kernel_services::syscall_services::net::{register_net_services, NetServices};
-use slopos_lib::kernel_services::syscall_services::tty::{register_tty_services, TtyServices};
+use slopos_lib::kernel_services::syscall_services::net::{NetServices, register_net_services};
+use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
 use crate::{input_event, tty, virtio_net};
 
@@ -78,9 +78,21 @@ fn net_is_ready_adapter() -> u32 {
     }
 }
 
+fn net_get_info_adapter(out: *mut slopos_abi::net::UserNetInfo) -> u32 {
+    if out.is_null() {
+        return 0;
+    }
+    unsafe {
+        // SAFETY: null is checked above and caller provides writable UserNetInfo storage.
+        virtio_net::virtio_net_get_info(&mut *out);
+    }
+    1
+}
+
 static NET_SERVICES: NetServices = NetServices {
     scan_members: net_scan_members_adapter,
     is_ready: net_is_ready_adapter,
+    get_info: net_get_info_adapter,
 };
 
 pub fn init_syscall_services() {
