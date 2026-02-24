@@ -145,20 +145,20 @@ Parse the ACPI HPET table and implement a minimal HPET driver for system time an
 
 Use HPET (or PIT as fallback) to measure the LAPIC timer frequency.
 
-- [ ] **0B.1** Implement `calibrate_lapic_timer() -> u64` in `drivers/src/apic/`:
+- [x] **0B.1** Implement `calibrate_lapic_timer() -> u64` in `drivers/src/apic/`:
   - Set LAPIC timer to one-shot mode with a large initial count (e.g., 0xFFFF_FFFF)
   - Set divisor to 16 (already used: `LAPIC_TIMER_DIV_16`)
   - Wait exactly 10ms using `hpet_delay_ns(10_000_000)` (or `pit_poll_delay_ms(10)` as fallback)
   - Read remaining count: `elapsed = initial - current_count`
   - Calculate frequency: `freq_hz = elapsed * 100` (since we measured 10ms)
   - Store in static: `LAPIC_TIMER_FREQ_HZ: AtomicU64`
-- [ ] **0B.2** Implement `lapic_timer_set_periodic_ms(ms: u32)`:
+- [x] **0B.2** Implement `lapic_timer_set_periodic_ms(ms: u32)`:
   - Calculate initial count: `count = freq_hz * ms / 1000`
   - Set periodic mode with the scheduler vector
   - This replaces PIT for scheduling ticks
-- [ ] **0B.3** Call calibration during boot after HPET init:
+- [x] **0B.3** Call calibration during boot after HPET init:
   - Log: `"APIC: Timer calibrated: {} Hz (via HPET)"` or `"(via PIT fallback)"`
-- [ ] **0B.4** Verify: calibration produces a reasonable frequency (typically 100MHz–1GHz range depending on QEMU)
+- [x] **0B.4** Verify: calibration produces a reasonable frequency (~62 MHz with div-16 on QEMU); 7 regression tests in `drivers/src/apic_timer_tests.rs` (425 total tests pass)
 
 ### 0C: Scheduler Migration to LAPIC Timer
 
@@ -217,7 +217,7 @@ Reduce PIT to a calibration-only fallback, document the migration.
 ### Phase 0 Gate
 
 - [x] **GATE**: HPET driver discovers and initializes the timer from ACPI
-- [ ] **GATE**: LAPIC timer calibrated against HPET (or PIT fallback)
+- [x] **GATE**: LAPIC timer calibrated against HPET (or PIT fallback)
 - [ ] **GATE**: Scheduler runs on LAPIC timer, not PIT
 - [ ] **GATE**: Each CPU has its own LAPIC timer tick (no shared IRQ)
 - [ ] **GATE**: `clock_monotonic_ns()` provides nanosecond precision
