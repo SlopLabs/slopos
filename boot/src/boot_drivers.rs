@@ -1,11 +1,11 @@
+use core::ffi::CStr;
 #[cfg(feature = "xe-gpu")]
 use core::ffi::c_char;
-use core::ffi::CStr;
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    tests_request_shutdown, tests_reset_panic_state, tests_run_all, TestRunSummary,
+    TestRunSummary, tests_request_shutdown, tests_reset_panic_state, tests_run_all,
 };
 use slopos_video as video;
 

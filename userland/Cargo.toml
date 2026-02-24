@@ -42,6 +42,10 @@ name = "nmap"
 path = "src/bin/nmap.rs"
 
 [[bin]]
+name = "ifconfig"
+path = "src/bin/ifconfig.rs"
+
+[[bin]]
 name = "fork_test"
 path = "src/bin/tests/fork_test.rs"
 

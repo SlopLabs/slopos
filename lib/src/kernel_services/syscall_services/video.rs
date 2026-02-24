@@ -1,11 +1,11 @@
 use core::ffi::c_int;
 
-use slopos_abi::addr::PhysAddr;
-use slopos_abi::damage::DamageRect;
-use slopos_abi::video_traits::VideoResult;
 use slopos_abi::CompositorError;
 use slopos_abi::DisplayInfo;
 use slopos_abi::WindowInfo;
+use slopos_abi::addr::PhysAddr;
+use slopos_abi::damage::DamageRect;
+use slopos_abi::video_traits::VideoResult;
 
 pub type CompositorResult = Result<(), CompositorError>;
 
