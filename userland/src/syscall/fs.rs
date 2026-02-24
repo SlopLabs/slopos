@@ -6,12 +6,12 @@
 //!
 //! Applications should use the typed APIs. The raw APIs are only for `libc/syscall.rs`.
 
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{CStr, c_char, c_void};
 
-use super::error::{demux, SyscallResult};
+use super::RawFd;
+use super::error::{SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
-use super::RawFd;
 use slopos_abi::syscall::{UserPollFd, UserTimeval};
 use slopos_abi::{UserFsList, UserFsStat};
 
