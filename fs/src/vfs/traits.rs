@@ -247,6 +247,30 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
+    /// Rename/move an entry within the same filesystem.
+    ///
+    /// # Arguments
+    /// * `old_parent` - Inode of the source directory
+    /// * `old_name` - Name of the entry to rename
+    /// * `new_parent` - Inode of the destination directory
+    /// * `new_name` - New name for the entry
+    ///
+    /// # Errors
+    /// * `NotFound` - Source entry doesn't exist
+    /// * `NotDirectory` - Parent is not a directory
+    /// * `AlreadyExists` - Destination name already exists (overwrite not supported)
+    /// * `NotSupported` - Filesystem doesn't support rename
+    fn rename(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+    ) -> VfsResult<()> {
+        let _ = (old_parent, old_name, new_parent, new_name);
+        Err(VfsError::NotSupported)
+    }
+
     /// Sync filesystem metadata and data to backing store.
     fn sync(&self) -> VfsResult<()> {
         // Default: no-op for in-memory filesystems

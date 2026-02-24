@@ -426,6 +426,72 @@ impl FileSystem for RamFs {
         })
     }
 
+    fn rename(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+    ) -> VfsResult<()> {
+        self.with_inner_mut(|inner| {
+            if old_parent == new_parent && old_name == new_name {
+                return Ok(());
+            }
+
+            let target_inode = {
+                let old_parent_node = inner.get_inode(old_parent)?;
+                if old_parent_node.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                old_parent_node.lookup(old_name)?
+            };
+
+            {
+                let new_parent_node = inner.get_inode(new_parent)?;
+                if new_parent_node.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                if new_parent_node.lookup(new_name).is_ok() {
+                    inner
+                        .get_inode_mut(new_parent)?
+                        .remove_dir_entry(new_name)?;
+                }
+            }
+
+            inner
+                .get_inode_mut(old_parent)?
+                .remove_dir_entry(old_name)?;
+            inner
+                .get_inode_mut(new_parent)?
+                .add_dir_entry(new_name, target_inode)?;
+
+            let is_dir = inner.get_inode(target_inode)?.file_type == FileType::Directory;
+            if is_dir {
+                let target_node = inner.get_inode_mut(target_inode)?;
+                for i in 0..target_node.dir_entry_count {
+                    if target_node.dir_entries[i].name_len == 2
+                        && target_node.dir_entries[i].name[0] == b'.'
+                        && target_node.dir_entries[i].name[1] == b'.'
+                    {
+                        target_node.dir_entries[i].inode = new_parent;
+                        break;
+                    }
+                }
+                target_node.parent = new_parent;
+
+                if old_parent != new_parent {
+                    let old_nlink = inner.get_inode(old_parent)?.nlink;
+                    inner.get_inode_mut(old_parent)?.nlink = old_nlink.saturating_sub(1);
+
+                    let new_nlink = inner.get_inode(new_parent)?.nlink;
+                    inner.get_inode_mut(new_parent)?.nlink = new_nlink.saturating_add(1);
+                }
+            }
+
+            Ok(())
+        })
+    }
+
     fn sync(&self) -> VfsResult<()> {
         Ok(())
     }

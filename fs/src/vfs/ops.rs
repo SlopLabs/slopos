@@ -76,6 +76,19 @@ pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
     parent.fs.unlink(parent.inode, name)
 }
 
+pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
+    let (old_parent, old_name) = resolve_parent(old_path)?;
+    let (new_parent, new_name) = resolve_parent(new_path)?;
+
+    if !core::ptr::eq(old_parent.fs, new_parent.fs) {
+        return Err(VfsError::CrossDevice);
+    }
+
+    old_parent
+        .fs
+        .rename(old_parent.inode, old_name, new_parent.inode, new_name)
+}
+
 pub fn vfs_list(path: &[u8], entries: &mut [UserFsEntry]) -> VfsResult<usize> {
     let resolved = resolve_path(path)?;
     let stat = resolved.fs.stat(resolved.inode)?;
