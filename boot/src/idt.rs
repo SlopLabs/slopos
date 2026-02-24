@@ -20,7 +20,7 @@ pub use slopos_lib::arch::idt::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    IdtEntry, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    IdtEntry, LAPIC_TIMER_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
 #[repr(C, packed)]
@@ -120,6 +120,7 @@ unsafe extern "C" {
     fn isr_tlb_shootdown();
     fn isr_shutdown_ipi();
     fn isr_spurious();
+    fn isr_lapic_timer();
 
     fn irq0();
     fn irq1();
@@ -207,6 +208,12 @@ pub fn idt_init() {
         IDT_GATE_INTERRUPT,
     );
     idt_set_gate(0xFF, handler_ptr(isr_spurious), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(
+        LAPIC_TIMER_VECTOR,
+        handler_ptr(isr_lapic_timer),
+        0x08,
+        IDT_GATE_INTERRUPT,
+    );
 
     initialize_handler_tables();
 
@@ -387,6 +394,16 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
         send_eoi();
         cpu::disable_interrupts();
         cpu::halt_loop();
+    }
+
+    // LAPIC timer: per-CPU preemption tick — handled directly, not through
+    // the IOAPIC IRQ dispatch table.  Each CPU has its own LAPIC timer.
+    if vector == LAPIC_TIMER_VECTOR {
+        slopos_core::irq::increment_timer_ticks();
+        slopos_core::sched::scheduler_handle_timer_interrupt(frame);
+        send_eoi();
+        scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+        return;
     }
 
     if vector >= IRQ_BASE_VECTOR {

@@ -107,6 +107,11 @@ pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 /// Used to wake a CPU from idle to run newly-queued tasks.
 pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
 
+/// LAPIC timer vector (0xEC).
+/// Each CPU's local APIC timer fires on this vector for scheduler preemption.
+/// Handled directly in the IDT path (not through the IOAPIC IRQ dispatch table).
+pub const LAPIC_TIMER_VECTOR: u8 = 0xEC;
+
 // =============================================================================
 // IDT Size
 // =============================================================================

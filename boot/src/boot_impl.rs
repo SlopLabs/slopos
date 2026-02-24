@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::{early_init, gdt, idt, limine_protocol, shutdown};
-use slopos_drivers::{apic, ioapic, pit, random, serial};
+use slopos_drivers::{apic, hpet, ioapic, pit, random, serial};
 use slopos_lib::kernel_services::platform::{PlatformServices, register_platform_services};
 
 fn kernel_shutdown_fn(reason: *const c_char) -> ! {
@@ -30,11 +30,44 @@ fn idt_get_gate_fn(vector: u8, entry: *mut c_void) -> c_int {
 
 static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     timer_ticks: || slopos_core::irq::get_timer_ticks(),
-    timer_frequency: || pit::pit_get_frequency(),
-    timer_poll_delay_ms: |ms| pit::pit_poll_delay_ms(ms),
-    timer_sleep_ms: |ms| pit::pit_sleep_ms(ms),
-    timer_enable_irq: || pit::pit_enable_irq(),
-    timer_disable_irq: || pit::pit_disable_irq(),
+    // LAPIC timer runs at a fixed 100 Hz (10 ms period).  When the LAPIC timer
+    // is not calibrated we fall back to the PIT frequency so the tick↔ms math
+    // remains correct in either configuration.
+    timer_frequency: || {
+        if apic::timer::is_calibrated() {
+            100
+        } else {
+            pit::pit_get_frequency()
+        }
+    },
+    timer_poll_delay_ms: |ms| {
+        if hpet::is_available() {
+            hpet::delay_ms(ms);
+        } else {
+            pit::pit_poll_delay_ms(ms);
+        }
+    },
+    timer_sleep_ms: |ms| {
+        if hpet::is_available() {
+            hpet::delay_ms(ms);
+        } else {
+            pit::pit_sleep_ms(ms);
+        }
+    },
+    timer_enable_irq: || {
+        if apic::timer::is_calibrated() {
+            apic::timer::unmask();
+        } else {
+            pit::pit_enable_irq();
+        }
+    },
+    timer_disable_irq: || {
+        if apic::timer::is_calibrated() {
+            apic::timer::mask();
+        } else {
+            pit::pit_disable_irq();
+        }
+    },
     console_putc: |c| serial::serial_putc_com1(c),
     console_puts: |s| {
         for &c in s {

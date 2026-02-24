@@ -111,6 +111,18 @@ pub fn delay_ms(ms: u32) {
     delay_ns(ms as u64 * 1_000_000);
 }
 
+/// Spin-wait for the specified milliseconds, falling back to the PIT polled
+/// counter when the HPET is unavailable.  Prefer this over raw `delay_ms` at
+/// call sites that must guarantee a real delay (e.g. hardware timeouts).
+#[inline]
+pub fn delay_ms_or_pit_fallback(ms: u32) {
+    if is_available() {
+        delay_ms(ms);
+    } else {
+        crate::pit::pit_poll_delay_ms(ms);
+    }
+}
+
 #[inline]
 pub fn is_available() -> bool {
     HPET_READY.is_set()

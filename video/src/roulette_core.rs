@@ -12,7 +12,7 @@
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::font::FONT_CHAR_WIDTH;
 use slopos_abi::video_traits::{VideoError, VideoResult};
-use slopos_drivers::pit::pit_poll_delay_ms;
+use slopos_drivers::hpet;
 use slopos_gfx::{canvas_font, canvas_ops};
 use slopos_lib::numfmt;
 
@@ -610,7 +610,7 @@ fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i
         draw_text_centered(ctx, center_x, panel_y + 132, detail, TEXT_COLOR);
 
         ctx.flush();
-        pit_poll_delay_ms(90);
+        hpet::delay_ms(90);
     }
 }
 
@@ -620,7 +620,7 @@ fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i
 
 fn flush_and_sleep(ctx: &GraphicsContext, ms: u32) {
     ctx.flush();
-    pit_poll_delay_ms(ms);
+    hpet::delay_ms(ms);
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_lib::{klog_debug, klog_info};
 
 use super::regs::*;
-use super::{is_enabled, timer_get_current_count, timer_set_divisor, write_register};
+use super::{
+    is_enabled, read_register, timer_get_current_count, timer_set_divisor, write_register,
+};
 
 // ---------------------------------------------------------------------------
 // Static state
@@ -153,6 +155,26 @@ pub fn frequency_hz() -> u64 {
 #[inline]
 pub fn is_calibrated() -> bool {
     LAPIC_TIMER_FREQ_HZ.load(Ordering::Acquire) != 0
+}
+
+/// Mask the LAPIC timer LVT entry (suppress interrupts without stopping the counter).
+#[inline]
+pub fn mask() {
+    if !is_enabled() {
+        return;
+    }
+    let lvt = read_register(LAPIC_LVT_TIMER);
+    write_register(LAPIC_LVT_TIMER, lvt | LAPIC_LVT_MASKED);
+}
+
+/// Unmask the LAPIC timer LVT entry (resume delivering interrupts).
+#[inline]
+pub fn unmask() {
+    if !is_enabled() {
+        return;
+    }
+    let lvt = read_register(LAPIC_LVT_TIMER);
+    write_register(LAPIC_LVT_TIMER, lvt & !LAPIC_LVT_MASKED);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0A (HPET Driver) complete
+> **Status**: In Progress — Phase 0A (HPET Driver), 0B (LAPIC Calibration), 0C (Scheduler Migration) complete
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -164,24 +164,24 @@ Use HPET (or PIT as fallback) to measure the LAPIC timer frequency.
 
 Replace PIT-driven scheduling ticks with LAPIC timer ticks.
 
-- [ ] **0C.1** In `boot/src/boot_drivers.rs`, after LAPIC calibration:
+- [x] **0C.1** In `boot/src/boot_drivers.rs`, after LAPIC calibration:
   - Call `lapic_timer_set_periodic_ms(10)` (100Hz, same as current PIT)
   - The LAPIC timer interrupt already routes through the IDT; ensure the scheduler tick handler is called
-- [ ] **0C.2** Update `drivers/src/irq.rs`:
+- [x] **0C.2** Update `drivers/src/irq.rs`:
   - The LAPIC timer fires on a local vector (not through IOAPIC)
   - Ensure the timer ISR calls `scheduler_timer_tick()` (same as PIT currently does)
   - Each CPU gets its own LAPIC timer interrupt — no shared IRQ line
-- [ ] **0C.3** Disable PIT scheduling role:
+- [x] **0C.3** Disable PIT scheduling role:
   - Stop calling `pit_init()` / `pit_enable_irq()` during boot
   - Keep PIT driver code for fallback calibration only
   - Remove PIT IRQ route from IOAPIC setup
-- [ ] **0C.4** Update `pit_sleep_ms()` callers:
+- [x] **0C.4** Update `pit_sleep_ms()` callers:
   - Replace with `hpet_delay_ns()` or a new `timer_sleep_ms()` that uses the scheduler's sleep queue
   - Audit all callers: `pit_sleep_ms`, `pit_poll_delay_ms` across the codebase
-- [ ] **0C.5** Per-CPU LAPIC timer setup for APs:
+- [x] **0C.5** Per-CPU LAPIC timer setup for APs:
   - Each AP must calibrate or inherit the BSP's calibrated frequency
   - Call `lapic_timer_set_periodic_ms()` during AP startup in `boot/src/smp.rs`
-- [ ] **0C.6** Verify: `just test` passes with LAPIC timer driving scheduling. PIT no longer receives IRQs.
+- [x] **0C.6** Verify: `just test` passes with LAPIC timer driving scheduling. PIT no longer receives IRQs.
 
 ### 0D: High-Resolution System Clock
 
@@ -218,12 +218,12 @@ Reduce PIT to a calibration-only fallback, document the migration.
 
 - [x] **GATE**: HPET driver discovers and initializes the timer from ACPI
 - [x] **GATE**: LAPIC timer calibrated against HPET (or PIT fallback)
-- [ ] **GATE**: Scheduler runs on LAPIC timer, not PIT
-- [ ] **GATE**: Each CPU has its own LAPIC timer tick (no shared IRQ)
+- [x] **GATE**: Scheduler runs on LAPIC timer, not PIT
+- [x] **GATE**: Each CPU has its own LAPIC timer tick (no shared IRQ)
 - [ ] **GATE**: `clock_monotonic_ns()` provides nanosecond precision
-- [ ] **GATE**: PIT no longer receives interrupts in the default boot path
-- [ ] **GATE**: `just test` passes
-- [ ] **GATE**: `just boot` boots and schedules correctly
+- [x] **GATE**: PIT no longer receives interrupts in the default boot path
+- [x] **GATE**: `just test` passes
+- [x] **GATE**: `just boot` boots and schedules correctly
 
 ---
 
@@ -916,7 +916,7 @@ Features that **cannot be implemented** until specific phases complete:
 
 | Phase | Status | Tasks | Done | Blocked |
 |---|---|---|---|---|
-| **Phase 0**: Timer Modernization | **0A Complete** | 22 | 8 | — |
+| **Phase 0**: Timer Modernization | **0A–0C Complete** | 28 | 18 | — |
 | **Phase 1**: XSAVE/XRSTOR | Not Started | 14 | 0 | — |
 | **Phase 2**: Spinlock Modernization | Not Started | 8 | 0 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |

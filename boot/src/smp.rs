@@ -40,6 +40,18 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
 
     idt_load();
     syscall_msr_init();
+
+    // Start per-CPU LAPIC timer using the BSP's calibrated frequency.
+    // The LAPIC_TIMER_FREQ_HZ global atomic is already set by boot-time
+    // calibration, so set_periodic_ms will compute the correct count.
+    {
+        use slopos_lib::arch::idt::LAPIC_TIMER_VECTOR;
+        if apic::timer::is_calibrated() {
+            if !apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10) {
+                klog_info!("MP: CPU {} LAPIC timer start failed", cpu_idx);
+            }
+        }
+    }
     cpu::enable_interrupts();
 
     cpu_info.extra.store(AP_STARTED_MAGIC, Ordering::Release);

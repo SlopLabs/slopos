@@ -238,6 +238,11 @@ irq15:
 isr_reschedule_ipi:
     INTERRUPT_HANDLER 252, 0
 
+# LAPIC Timer handler (vector 0xEC = 236)
+.global isr_lapic_timer
+isr_lapic_timer:
+    INTERRUPT_HANDLER 236, 0
+
 # TLB Shootdown IPI handler (vector 0xFD = 253)
 .global isr_tlb_shootdown
 isr_tlb_shootdown:

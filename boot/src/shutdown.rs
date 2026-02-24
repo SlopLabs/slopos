@@ -14,7 +14,7 @@ static SERIAL_DRAINED: StateFlag = StateFlag::new();
 use slopos_core::sched::scheduler_shutdown;
 use slopos_core::task::task_shutdown_all;
 use slopos_drivers::apic;
-use slopos_drivers::pit::pit_poll_delay_ms;
+use slopos_drivers::hpet;
 use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 
@@ -129,7 +129,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     klog_info!("Rebooting via keyboard controller...");
 
-    pit_poll_delay_ms(50);
+    hpet::delay_ms_or_pit_fallback(50);
     unsafe { PS2_COMMAND.write(0xFE) };
 
     klog_info!("Keyboard reset failed, attempting triple fault...");

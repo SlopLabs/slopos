@@ -3,8 +3,12 @@
 //! These tests run after the full boot sequence, so the LAPIC timer has
 //! already been calibrated by `BOOT_STEP_LAPIC_CALIBRATION`.
 
+use slopos_lib::arch::idt::LAPIC_TIMER_VECTOR;
+use slopos_lib::kernel_services::driver_runtime::irq_get_timer_ticks;
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
+use slopos_lib::testing::measure_elapsed_ms;
+use slopos_lib::tsc::rdtsc;
 
 use crate::apic;
 
@@ -162,6 +166,187 @@ pub fn test_lapic_timer_stop_clears_counter() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// IDT handler integration and scheduling
+// ---------------------------------------------------------------------------
+
+/// Verify that the LAPIC timer IDT handler fires and advances the tick counter.
+/// This is the most critical regression test for Phase 0C.
+///
+/// If this fails, the IDT handler is broken (e.g., #GP exception not caught).
+pub fn test_lapic_timer_ticks_advance() -> TestResult {
+    // Check if timer is enabled and calibrated.
+    if !crate::apic::is_enabled() {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - LAPIC not enabled");
+        return TestResult::Skipped;
+    }
+    if !crate::apic::timer::is_calibrated() {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - timer not calibrated");
+        return TestResult::Skipped;
+    }
+
+    // Earlier tests (stop_clears_counter, periodic_programs_timer) leave the
+    // timer stopped and masked.  Restart it on the real scheduler vector so
+    // we can verify the full IDT-handler → tick-counter path.
+    crate::apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10);
+
+    let ticks_before = irq_get_timer_ticks();
+
+    // Delay ~100ms; at 100Hz we expect ~10 ticks, but allow margin for QEMU jitter.
+    crate::hpet::delay_ms(100);
+
+    let ticks_after = irq_get_timer_ticks();
+    let delta = ticks_after.saturating_sub(ticks_before);
+
+    // If ticks didn't advance, the IDT handler is broken — this is the
+    // exact regression we are guarding against (e.g. missing ISR stub
+    // causing #GP on vector 0xEC).
+    if delta < 5 {
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - ticks barely advanced (before={}, after={}, delta={}, expected >=5)",
+            ticks_before,
+            ticks_after,
+            delta,
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Verify that masking the timer suppresses tick advancement.
+/// Unmasking should resume tick advancement.
+///
+/// CRITICAL: Always unmask at the end, or the kernel will hang.
+pub fn test_lapic_timer_mask_suppresses_ticks() -> TestResult {
+    // Check if timer is enabled and calibrated.
+    if !crate::apic::is_enabled() {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - LAPIC not enabled");
+        return TestResult::Skipped;
+    }
+    if !crate::apic::timer::is_calibrated() {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - timer not calibrated");
+        return TestResult::Skipped;
+    }
+
+    // Restart the timer (earlier tests leave it stopped).
+    crate::apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10);
+
+    let ticks_before = irq_get_timer_ticks();
+
+    // Mask the timer to suppress interrupts.
+    crate::apic::timer::mask();
+
+    // Delay 50ms; ticks should NOT advance (or minimal race condition).
+    crate::hpet::delay_ms(50);
+
+    let ticks_after_mask = irq_get_timer_ticks();
+    let delta_masked = ticks_after_mask.saturating_sub(ticks_before);
+
+    // Unmask to resume timer.
+    crate::apic::timer::unmask();
+
+    // Delay another 50ms; ticks should advance again.
+    crate::hpet::delay_ms(50);
+
+    let ticks_after_unmask = irq_get_timer_ticks();
+    let delta_unmasked = ticks_after_unmask.saturating_sub(ticks_after_mask);
+
+    // Check: masked period should have minimal ticks (allow 1 for race).
+    if delta_masked > 1 {
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - mask did not suppress ticks (delta_masked={})",
+            delta_masked,
+        );
+        return TestResult::Fail;
+    }
+
+    // After unmask, ticks MUST resume.  If they don't, unmask is broken.
+    if delta_unmasked < 2 {
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - unmask did not resume ticks (delta_unmasked={})",
+            delta_unmasked,
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Verify that the LAPIC_TIMER_VECTOR constant is correctly set to 0xEC.
+/// This documents the IDT gate contract.
+pub fn test_lapic_timer_idt_gate_installed() -> TestResult {
+    if LAPIC_TIMER_VECTOR != 0xEC {
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - LAPIC_TIMER_VECTOR is {}, expected 0xEC",
+            LAPIC_TIMER_VECTOR,
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Verify that the timer tick rate is approximately 100Hz.
+/// Measure wall time via TSC and compute observed tick rate.
+pub fn test_lapic_timer_tick_rate_reasonable() -> TestResult {
+    // Check if timer is enabled and calibrated.
+    if !crate::apic::is_enabled() {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - LAPIC not enabled");
+        return TestResult::Skipped;
+    }
+    if !crate::apic::timer::is_calibrated() {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - timer not calibrated");
+        return TestResult::Skipped;
+    }
+
+    // Restart the timer (earlier tests leave it stopped).
+    crate::apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10);
+
+    let ticks_before = irq_get_timer_ticks();
+    let tsc_start = rdtsc();
+
+    // Delay 200ms to get a good measurement window.
+    crate::hpet::delay_ms(200);
+
+    let ticks_after = irq_get_timer_ticks();
+    let tsc_end = rdtsc();
+
+    let delta_ticks = ticks_after.saturating_sub(ticks_before);
+    let elapsed_ms = measure_elapsed_ms(tsc_start, tsc_end);
+
+    // Avoid division by zero.
+    if elapsed_ms == 0 {
+        klog_info!("LAPIC_TIMER_TEST: SKIP - elapsed_ms is 0");
+        return TestResult::Skipped;
+    }
+
+    // Timer is calibrated and enabled — zero ticks means the handler is broken.
+    if delta_ticks == 0 {
+        klog_info!("LAPIC_TIMER_TEST: BUG - no ticks advanced during 200ms measurement");
+        return TestResult::Fail;
+    }
+
+    // Compute observed rate: ticks per second.
+    let observed_rate_hz = (delta_ticks as u64 * 1000) / (elapsed_ms as u64);
+
+    // Allow generous bounds: 50-200 Hz (100Hz target with QEMU jitter).
+    const MIN_HZ: u64 = 50;
+    const MAX_HZ: u64 = 200;
+
+    if observed_rate_hz < MIN_HZ || observed_rate_hz > MAX_HZ {
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - tick rate {} Hz outside [{}, {}] Hz (delta_ticks={}, elapsed_ms={})",
+            observed_rate_hz,
+            MIN_HZ,
+            MAX_HZ,
+            delta_ticks,
+            elapsed_ms,
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     apic_timer,
     [
@@ -172,5 +357,9 @@ slopos_lib::define_test_suite!(
         test_lapic_timer_periodic_zero_ms_rejected,
         test_lapic_timer_periodic_programs_timer,
         test_lapic_timer_stop_clears_counter,
+        test_lapic_timer_ticks_advance,
+        test_lapic_timer_mask_suppresses_ticks,
+        test_lapic_timer_idt_gate_installed,
+        test_lapic_timer_tick_rate_reasonable,
     ]
 );

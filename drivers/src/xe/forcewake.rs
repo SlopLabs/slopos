@@ -1,6 +1,6 @@
 use slopos_mm::mmio::MmioRegion;
 
-use crate::pit::pit_poll_delay_ms;
+use crate::hpet;
 
 use super::regs;
 
@@ -19,7 +19,7 @@ fn wait_for_ack(mmio_region: &MmioRegion, reg: usize, expect: u32) -> bool {
         if ack == expect {
             return true;
         }
-        pit_poll_delay_ms(1);
+        hpet::delay_ms_or_pit_fallback(1);
     }
     false
 }
