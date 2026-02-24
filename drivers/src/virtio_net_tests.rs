@@ -1,4 +1,4 @@
-use slopos_abi::net::{UserNetMember, USER_NET_MAX_MEMBERS};
+use slopos_abi::net::{USER_NET_MAX_MEMBERS, UserNetMember};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_test, klog_info};
 

@@ -4,19 +4,20 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_abi::net::{UserNetMember, USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4};
-use slopos_lib::{klog_debug, klog_info, InitFlag, IrqMutex};
+use slopos_abi::net::{
+    USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
+};
+use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
-use crate::net::{dhcp, ipv4};
-use crate::pci::{pci_register_driver, PciDeviceInfo, PciDriver};
+use crate::net::{arp, dhcp, ethernet, ipv4};
+use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self,
+    self, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     pci::{
-        enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok,
-        PCI_VENDOR_ID_VIRTIO,
+        PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
+        set_driver_ok,
     },
-    queue::{self, VirtqDesc, Virtqueue, DEFAULT_QUEUE_SIZE},
-    VirtioMmioCaps, VIRTQ_DESC_F_WRITE,
+    queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 
 use slopos_mm::page_alloc::OwnedPageFrame;
@@ -43,18 +44,11 @@ const DEFAULT_MTU: u16 = 1500;
 const PACKET_BUFFER_SIZE: usize = 2048;
 const MAX_NET_MEMBERS: usize = 32;
 
-const ETHERTYPE_ARP: u16 = 0x0806;
-const ETHERTYPE_IPV4: u16 = 0x0800;
-const ARP_HTYPE_ETHERNET: u16 = 1;
-const ARP_PTYPE_IPV4: u16 = ETHERTYPE_IPV4;
-const ARP_HLEN_ETHERNET: u8 = 6;
-const ARP_PLEN_IPV4: u8 = 4;
-const ARP_OPER_REQUEST: u16 = 1;
+const UDP_HEADER_LEN: usize = 8;
 
 const DHCP_RX_MAX_POLLS: usize = 64;
 
 static DHCP_XID_COUNTER: AtomicU32 = AtomicU32::new(0x534c_4f50);
-
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -209,26 +203,26 @@ fn add_or_update_member(state: &mut VirtioNetState, mac: [u8; 6], ipv4: [u8; 4],
 }
 
 fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
-    if frame.len() < 14 {
+    if frame.len() < ethernet::ETH_HEADER_LEN {
         return;
     }
 
     let src_mac = [frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]];
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
-    if ethertype == ETHERTYPE_ARP {
-        if frame.len() < 14 + 28 {
+    if ethertype == ethernet::ETHERTYPE_ARP {
+        if frame.len() < ethernet::ETH_HEADER_LEN + arp::ARP_HEADER_LEN {
             return;
         }
-        let arp = &frame[14..42];
+        let arp = &frame[ethernet::ETH_HEADER_LEN..ethernet::ETH_HEADER_LEN + arp::ARP_HEADER_LEN];
         let htype = u16::from_be_bytes([arp[0], arp[1]]);
         let ptype = u16::from_be_bytes([arp[2], arp[3]]);
         let hlen = arp[4];
         let plen = arp[5];
-        if htype != ARP_HTYPE_ETHERNET
-            || ptype != ARP_PTYPE_IPV4
-            || hlen != ARP_HLEN_ETHERNET
-            || plen != ARP_PLEN_IPV4
+        if htype != arp::ARP_HTYPE_ETHERNET
+            || ptype != arp::ARP_PTYPE_IPV4
+            || hlen != arp::ARP_HLEN_ETHERNET
+            || plen != arp::ARP_PLEN_IPV4
         {
             return;
         }
@@ -238,8 +232,8 @@ fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
         return;
     }
 
-    if ethertype == ETHERTYPE_IPV4 {
-        if frame.len() < 14 + 20 {
+    if ethertype == ethernet::ETHERTYPE_IPV4 {
+        if frame.len() < ethernet::ETH_HEADER_LEN + ipv4::IPV4_HEADER_LEN {
             return;
         }
         let src_ip = [frame[26], frame[27], frame[28], frame[29]];
@@ -261,7 +255,7 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
     let tx_phys = tx_page.phys_u64();
 
     let hdr_len = size_of::<VirtioNetHdrV1>();
-    let frame_len = 14usize + 28usize;
+    let frame_len = ethernet::ETH_HEADER_LEN + arp::ARP_HEADER_LEN;
     let total_len = hdr_len + frame_len;
 
     if total_len > PACKET_BUFFER_SIZE {
@@ -273,19 +267,28 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
 
         let frame = core::slice::from_raw_parts_mut(tx_virt.add(hdr_len), frame_len);
 
-        frame[0..6].copy_from_slice(&[0xff; 6]);
-        frame[6..12].copy_from_slice(&state.device.mac);
-        frame[12..14].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+        frame[0..ethernet::ETH_ADDR_LEN].copy_from_slice(&ethernet::ETH_BROADCAST);
+        frame[ethernet::ETH_ADDR_LEN..ethernet::ETH_ADDR_LEN * 2]
+            .copy_from_slice(&state.device.mac);
+        frame[ethernet::ETH_ADDR_LEN * 2..ethernet::ETH_HEADER_LEN]
+            .copy_from_slice(&ethernet::ETHERTYPE_ARP.to_be_bytes());
 
-        frame[14..16].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
-        frame[16..18].copy_from_slice(&ARP_PTYPE_IPV4.to_be_bytes());
-        frame[18] = ARP_HLEN_ETHERNET;
-        frame[19] = ARP_PLEN_IPV4;
-        frame[20..22].copy_from_slice(&ARP_OPER_REQUEST.to_be_bytes());
-        frame[22..28].copy_from_slice(&state.device.mac);
-        frame[28..32].copy_from_slice(&state.ipv4_addr);
-        frame[32..38].copy_from_slice(&[0; 6]);
-        frame[38..42].copy_from_slice(&target_ip);
+        frame[ethernet::ETH_HEADER_LEN..ethernet::ETH_HEADER_LEN + 2]
+            .copy_from_slice(&arp::ARP_HTYPE_ETHERNET.to_be_bytes());
+        frame[ethernet::ETH_HEADER_LEN + 2..ethernet::ETH_HEADER_LEN + 4]
+            .copy_from_slice(&arp::ARP_PTYPE_IPV4.to_be_bytes());
+        frame[ethernet::ETH_HEADER_LEN + 4] = arp::ARP_HLEN_ETHERNET;
+        frame[ethernet::ETH_HEADER_LEN + 5] = arp::ARP_PLEN_IPV4;
+        frame[ethernet::ETH_HEADER_LEN + 6..ethernet::ETH_HEADER_LEN + 8]
+            .copy_from_slice(&arp::ARP_OPER_REQUEST.to_be_bytes());
+        frame[ethernet::ETH_HEADER_LEN + 8..ethernet::ETH_HEADER_LEN + 14]
+            .copy_from_slice(&state.device.mac);
+        frame[ethernet::ETH_HEADER_LEN + 14..ethernet::ETH_HEADER_LEN + 18]
+            .copy_from_slice(&state.ipv4_addr);
+        frame[ethernet::ETH_HEADER_LEN + 18..ethernet::ETH_HEADER_LEN + 24]
+            .copy_from_slice(&[0; ethernet::ETH_ADDR_LEN]);
+        frame[ethernet::ETH_HEADER_LEN + 24..ethernet::ETH_HEADER_LEN + 28]
+            .copy_from_slice(&target_ip);
     }
 
     state.device.tx_queue.write_desc(
@@ -306,11 +309,16 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
         VIRTIO_NET_QUEUE_TX,
     );
 
-    state
+    let sent = state
         .device
         .tx_queue
         .pop_used(REQUEST_TIMEOUT_SPINS)
-        .is_some()
+        .is_some();
+    if !sent {
+        // Leak: device may still be DMA-ing; freeing would cause use-after-free
+        let _ = tx_page.into_phys();
+    }
+    sent
 }
 
 fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>) -> Option<usize> {
@@ -336,7 +344,14 @@ fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>)
         VIRTIO_NET_QUEUE_RX,
     );
 
-    let used = state.device.rx_queue.pop_used(REQUEST_TIMEOUT_SPINS)?;
+    let used = match state.device.rx_queue.pop_used(REQUEST_TIMEOUT_SPINS) {
+        Some(u) => u,
+        None => {
+            // Leak: device may still be DMA-ing; freeing would cause use-after-free
+            let _ = rx_page.into_phys();
+            return None;
+        }
+    };
     let hdr_len = size_of::<VirtioNetHdrV1>();
     if (used.len as usize) <= hdr_len {
         return Some(0);
@@ -371,9 +386,9 @@ fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
     let tx_phys = tx_page.phys_u64();
 
     let hdr_len = size_of::<VirtioNetHdrV1>();
-    let eth_len = 14usize;
-    let ip_len = 20usize;
-    let udp_len = 8usize;
+    let eth_len = ethernet::ETH_HEADER_LEN;
+    let ip_len = ipv4::IPV4_HEADER_LEN;
+    let udp_len = UDP_HEADER_LEN;
     let frame_len = eth_len + ip_len + udp_len + payload.len();
     let total_len = hdr_len + frame_len;
     if total_len > PACKET_BUFFER_SIZE {
@@ -384,11 +399,13 @@ fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
         *(tx_virt as *mut VirtioNetHdrV1) = VirtioNetHdrV1::default();
         let frame = core::slice::from_raw_parts_mut(tx_virt.add(hdr_len), frame_len);
 
-        frame[0..6].copy_from_slice(&[0xff; 6]);
-        frame[6..12].copy_from_slice(&state.device.mac);
-        frame[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        frame[0..ethernet::ETH_ADDR_LEN].copy_from_slice(&ethernet::ETH_BROADCAST);
+        frame[ethernet::ETH_ADDR_LEN..ethernet::ETH_ADDR_LEN * 2]
+            .copy_from_slice(&state.device.mac);
+        frame[ethernet::ETH_ADDR_LEN * 2..ethernet::ETH_HEADER_LEN]
+            .copy_from_slice(&ethernet::ETHERTYPE_IPV4.to_be_bytes());
 
-        let ip_off = 14usize;
+        let ip_off = ethernet::ETH_HEADER_LEN;
         frame[ip_off] = 0x45;
         frame[ip_off + 1] = 0;
         frame[ip_off + 2..ip_off + 4]
@@ -431,24 +448,33 @@ fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
         VIRTIO_NET_QUEUE_TX,
     );
 
-    state
+    let sent = state
         .device
         .tx_queue
         .pop_used(REQUEST_TIMEOUT_SPINS)
-        .is_some()
+        .is_some();
+    if !sent {
+        // Leak: device may still be DMA-ing; freeing would cause use-after-free
+        let _ = tx_page.into_phys();
+    }
+    sent
 }
 
 fn parse_dhcp_reply(frame: &[u8], xid: u32, expected_type: u8) -> Option<dhcp::DhcpOffer> {
-    if frame.len() < 14 + 20 + 8 + dhcp::BOOTP_MIN_LEN {
+    if frame.len()
+        < ethernet::ETH_HEADER_LEN + ipv4::IPV4_HEADER_LEN + UDP_HEADER_LEN + dhcp::BOOTP_HEADER_LEN
+    {
         return None;
     }
-    if u16::from_be_bytes([frame[12], frame[13]]) != ipv4::ETHERTYPE_IPV4 {
+    if u16::from_be_bytes([frame[12], frame[13]]) != ethernet::ETHERTYPE_IPV4 {
         return None;
     }
 
-    let ip_off = 14usize;
+    let ip_off = ethernet::ETH_HEADER_LEN;
     let ihl = ((frame[ip_off] & 0x0f) as usize) * 4;
-    if ihl < 20 || frame.len() < ip_off + ihl + 8 + dhcp::BOOTP_MIN_LEN {
+    if ihl < ipv4::IPV4_HEADER_LEN
+        || frame.len() < ip_off + ihl + UDP_HEADER_LEN + dhcp::BOOTP_HEADER_LEN
+    {
         return None;
     }
     if frame[ip_off + 9] != ipv4::IPPROTO_UDP {
@@ -463,11 +489,11 @@ fn parse_dhcp_reply(frame: &[u8], xid: u32, expected_type: u8) -> Option<dhcp::D
     }
 
     let udp_len = u16::from_be_bytes([frame[udp_off + 4], frame[udp_off + 5]]) as usize;
-    if udp_len < 8 + dhcp::BOOTP_MIN_LEN || frame.len() < udp_off + udp_len {
+    if udp_len < UDP_HEADER_LEN + dhcp::BOOTP_HEADER_LEN || frame.len() < udp_off + udp_len {
         return None;
     }
 
-    let payload = &frame[udp_off + 8..udp_off + udp_len];
+    let payload = &frame[udp_off + UDP_HEADER_LEN..udp_off + udp_len];
     dhcp::parse_bootp_reply(payload, xid, expected_type)
 }
 
@@ -480,7 +506,9 @@ fn wait_for_dhcp_reply(
     let mut polls = 0usize;
     while polls < DHCP_RX_MAX_POLLS {
         let len = poll_one_rx_frame(state, Some(&mut frame))?;
-        if len > 0 && let Some(reply) = parse_dhcp_reply(&frame[..len], xid, expected_type) {
+        if len > 0
+            && let Some(reply) = parse_dhcp_reply(&frame[..len], xid, expected_type)
+        {
             return Some(reply);
         }
         polls += 1;
@@ -489,7 +517,9 @@ fn wait_for_dhcp_reply(
 }
 
 fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
-    let xid = DHCP_XID_COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let xid = DHCP_XID_COUNTER
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
     let mut packet = [0u8; 320];
 
     let discover_len = dhcp::build_discover(state.device.mac, xid, &mut packet);
@@ -509,7 +539,11 @@ fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
     } else {
         ack.router
     };
-    let dns = if ack.dns == [0; 4] { offer.dns } else { ack.dns };
+    let dns = if ack.dns == [0; 4] {
+        offer.dns
+    } else {
+        ack.dns
+    };
     let subnet_mask = if ack.subnet_mask == [0; 4] {
         offer.subnet_mask
     } else {
@@ -522,11 +556,7 @@ fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
         router,
         dns,
     };
-    if lease.is_valid() {
-        Some(lease)
-    } else {
-        None
-    }
+    if lease.is_valid() { Some(lease) } else { None }
 }
 
 fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
@@ -694,12 +724,7 @@ pub fn virtio_net_scan_members(out: *mut UserNetMember, max: usize, active_probe
     let self_mac = state.device.mac;
     let self_ipv4 = state.ipv4_addr;
     if self_ipv4 != [0; 4] {
-        add_or_update_member(
-            &mut state,
-            self_mac,
-            self_ipv4,
-            USER_NET_MEMBER_FLAG_IPV4,
-        );
+        add_or_update_member(&mut state, self_mac, self_ipv4, USER_NET_MEMBER_FLAG_IPV4);
     }
 
     if active_probe {
@@ -780,6 +805,22 @@ pub fn virtio_net_ipv4_addr() -> Option<[u8; 4]> {
     Some(state.ipv4_addr)
 }
 
+pub fn virtio_net_get_info(out: &mut UserNetInfo) {
+    let state = VIRTIO_NET_STATE.lock();
+    out.nic_ready = if state.device.ready { 1 } else { 0 };
+    out.link_up = if state.device.ready && link_is_up(&state) {
+        1
+    } else {
+        0
+    };
+    out.mac = state.device.mac;
+    out.mtu = state.device.mtu;
+    out.ipv4 = state.ipv4_addr;
+    out.subnet_mask = state.subnet_mask;
+    out.gateway = state.router;
+    out.dns = state.dns;
+}
+
 pub fn virtio_net_transmit(packet: &[u8]) -> bool {
     if packet.is_empty() {
         return true;
@@ -831,11 +872,16 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
         VIRTIO_NET_QUEUE_TX,
     );
 
-    state
+    let sent = state
         .device
         .tx_queue
         .pop_used(REQUEST_TIMEOUT_SPINS)
-        .is_some()
+        .is_some();
+    if !sent {
+        // Leak: device may still be DMA-ing; freeing would cause use-after-free
+        let _ = tx_page.into_phys();
+    }
+    sent
 }
 
 pub fn virtio_net_receive(buffer: &mut [u8]) -> Option<usize> {
