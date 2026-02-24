@@ -9,7 +9,8 @@ use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
-use slopos_abi::task::{TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
+use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
+use slopos_fs::fileio::{fileio_clone_table_for_process, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_lib::klog_info;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
@@ -65,6 +66,7 @@ pub fn launch_init() -> Result<u32, ExecError> {
         None,
         EXEC_SPAWN_DEFAULT_PRIORITY,
         TASK_FLAG_USER_MODE,
+        INVALID_PROCESS_ID,
     )
 }
 
@@ -94,6 +96,7 @@ pub fn spawn_program_with_attrs(
     argv: Option<&[&[u8]]>,
     priority: u8,
     mut flags: u16,
+    inherit_fds_from: u32,
 ) -> Result<u32, ExecError> {
     let result = (|| {
         let normalized_path = trim_nul_bytes(path);
@@ -144,6 +147,15 @@ pub fn spawn_program_with_attrs(
             (*task_info).entry_point = entry;
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
+        }
+
+        // Clone the parent's fd table BEFORE scheduling so the child has
+        // stdin/stdout/stderr available from the moment it starts running.
+        // This avoids an SMP race where the child runs before the parent
+        // can set up the fd table post-spawn.
+        if inherit_fds_from != INVALID_PROCESS_ID {
+            fileio_destroy_table_for_process(process_id);
+            let _ = fileio_clone_table_for_process(inherit_fds_from, process_id);
         }
 
         if schedule_task(task_info) != 0 {
