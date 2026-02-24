@@ -8,6 +8,6 @@ pub use fd_handlers::{
 };
 pub use path_handlers::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
-    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
+    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_rename,
 };
 pub use poll_ioctl_handlers::{syscall_ioctl, syscall_poll, syscall_select};

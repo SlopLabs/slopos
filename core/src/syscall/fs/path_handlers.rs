@@ -5,7 +5,7 @@ use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
 use crate::syscall::common::{
     USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_copy_user_str_to_cstr,
+    syscall_copy_user_str, syscall_copy_user_str_to_cstr,
 };
 
 use slopos_fs::fileio::{
@@ -139,4 +139,37 @@ define_syscall!(syscall_fs_list(ctx, args) {
 
     kfree(tmp_ptr as *mut c_void);
     ctx.from_result(rc_hdr)
+});
+
+define_syscall!(syscall_rename(ctx, args) {
+    let old_path_ptr = args.arg0;
+    let new_path_ptr = args.arg1;
+
+    if old_path_ptr == 0 || new_path_ptr == 0 {
+        return ctx.bad_address();
+    }
+
+    let mut old_path = [0u8; 256];
+    if syscall_copy_user_str(&mut old_path, old_path_ptr).is_err() {
+        return ctx.bad_address();
+    }
+
+    let mut new_path = [0u8; 256];
+    if syscall_copy_user_str(&mut new_path, new_path_ptr).is_err() {
+        return ctx.bad_address();
+    }
+
+    let old_len = old_path
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(old_path.len());
+    let new_len = new_path
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(new_path.len());
+
+    match slopos_fs::vfs::ops::vfs_rename(&old_path[..old_len], &new_path[..new_len]) {
+        Ok(()) => ctx.ok(0),
+        Err(_) => ctx.err(),
+    }
 });

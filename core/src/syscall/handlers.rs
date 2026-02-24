@@ -13,17 +13,17 @@ use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
     syscall_fs_mkdir, syscall_fs_open, syscall_fs_read, syscall_fs_stat, syscall_fs_unlink,
     syscall_fs_write, syscall_fstat, syscall_ioctl, syscall_lseek, syscall_pipe, syscall_pipe2,
-    syscall_poll, syscall_select,
+    syscall_poll, syscall_rename, syscall_select,
 };
 pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_mmap, syscall_mprotect, syscall_munmap,
 };
 pub use crate::syscall::process_handlers::{
-    syscall_arch_prctl, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
-    syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getegid,
-    syscall_geteuid, syscall_getgid, syscall_getpgid, syscall_getpid, syscall_getppid,
-    syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid, syscall_spawn_path,
-    syscall_terminate_task, syscall_waitpid,
+    syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
+    syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
+    syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getpgid, syscall_getpid,
+    syscall_getppid, syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid,
+    syscall_spawn_path, syscall_terminate_task, syscall_waitpid,
 };
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
@@ -97,6 +97,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FS_MKDIR]  => syscall_fs_mkdir,  "fs_mkdir";
     [SYSCALL_FS_UNLINK] => syscall_fs_unlink, "fs_unlink";
     [SYSCALL_FS_LIST]   => syscall_fs_list,   "fs_list";
+    [SYSCALL_RENAME]    => syscall_rename,    "rename";
 
     // TTY
     [SYSCALL_TTY_SET_FOCUS] => syscall_tty_set_focus, "tty_set_focus";
@@ -175,6 +176,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETGID]  => syscall_getgid,  "getgid";
     [SYSCALL_GETEUID] => syscall_geteuid, "geteuid";
     [SYSCALL_GETEGID] => syscall_getegid, "getegid";
+    [SYSCALL_CHDIR]   => syscall_chdir,   "chdir";
+    [SYSCALL_GETCWD]  => syscall_getcwd,  "getcwd";
 
     [SYSCALL_RT_SIGACTION]   => syscall_rt_sigaction,   "rt_sigaction";
     [SYSCALL_RT_SIGPROCMASK] => syscall_rt_sigprocmask, "rt_sigprocmask";
