@@ -8,7 +8,7 @@ use core::ptr;
 use crate::runtime;
 use crate::syscall::{
     USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
-    UserFsList, UserFsStat, fs,
+    UserFsList, UserFsStat, fs, process,
 };
 
 use super::super::buffers;
@@ -355,6 +355,7 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
     }
 
     super::super::cwd_set(&resolved);
+    let _ = process::chdir(resolved.as_ptr());
     0
 }
 
@@ -513,6 +514,15 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
             COLOR_ERROR_RED,
         );
         return 1;
+    }
+
+    if fs::rename(
+        src_path.as_ptr() as *const c_char,
+        dst_path.as_ptr() as *const c_char,
+    )
+    .is_ok()
+    {
+        return 0;
     }
 
     let rc = copy_file_inner(&src_path, &dst_path);

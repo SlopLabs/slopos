@@ -630,7 +630,13 @@ fn run_in_child(
         sys_core::exit_with_code(127);
     };
 
-    let rc = process::exec_ptr(path_ptr);
+    let mut argv = [ptr::null(); SHELL_MAX_TOKENS + 1];
+    for (idx, arg) in cmd.argv.iter().take(cmd.argc).enumerate() {
+        argv[idx] = *arg;
+    }
+    argv[cmd.argc] = ptr::null();
+
+    let rc = process::execve(path_ptr, argv.as_ptr(), ptr::null());
     if rc < 0 {
         let _ = crate::syscall::tty::write(b"exec failed\n");
     }
