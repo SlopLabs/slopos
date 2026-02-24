@@ -9,7 +9,7 @@ use slopos_abi::FramebufferData;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
-use slopos_core::task::register_video_cleanup_hook;
+use slopos_core::task::register_task_resource_cleanup_hook;
 #[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
 use slopos_lib::kernel_services::syscall_services::video::{
@@ -97,7 +97,7 @@ fn task_cleanup_callback(task_id: u32) {
 // =============================================================================
 
 pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
-    register_video_cleanup_hook(task_cleanup_callback);
+    register_task_resource_cleanup_hook(task_cleanup_callback);
 
     #[cfg(feature = "xe-gpu")]
     if _backend == VideoBackend::Xe {

@@ -127,6 +127,12 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         &mut stack_ptr,
     ) {
         Ok(()) => {
+            // Point of no return: old image is gone.  Tear down task-bound
+            // resources (compositor surface, shm buffers, input queues, …)
+            // so the new program can register fresh ones.
+            let task_id = unsafe { (*task).task_id };
+            crate::scheduler::task::task_cleanup_for_exec(task_id);
+
             unsafe {
                 (*frame).rip = entry_point;
                 (*frame).rsp = stack_ptr;
