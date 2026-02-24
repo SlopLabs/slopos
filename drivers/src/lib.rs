@@ -2,6 +2,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod apic;
+#[cfg(feature = "itests")]
+pub mod apic_timer_tests;
 pub mod hpet;
 #[cfg(feature = "itests")]
 pub mod hpet_tests;
