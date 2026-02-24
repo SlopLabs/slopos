@@ -128,16 +128,30 @@ fn validate_user_pages(
 pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
     let dir = current_process_dir();
     validate_user_pages(src.addr(), core::mem::size_of::<T>(), dir)?;
-
-    unsafe { Ok(ptr::read(src.as_ptr())) }
+    // SAFETY: Byte-wise copy avoids alignment requirements on the user pointer.
+    // This mirrors Linux's copy_from_user which treats userspace as unaligned.
+    unsafe {
+        let mut val = core::mem::MaybeUninit::<T>::uninit();
+        ptr::copy_nonoverlapping(
+            src.as_ptr() as *const u8,
+            val.as_mut_ptr() as *mut u8,
+            core::mem::size_of::<T>(),
+        );
+        Ok(val.assume_init())
+    }
 }
 
 pub fn copy_to_user<T: Copy>(dst: UserPtr<T>, value: &T) -> Result<(), UserPtrError> {
     let dir = current_process_dir();
     validate_user_pages(dst.addr(), core::mem::size_of::<T>(), dir)?;
-
+    // SAFETY: Byte-wise copy avoids alignment requirements on the user pointer.
+    // This mirrors Linux's copy_to_user which treats userspace as unaligned.
     unsafe {
-        ptr::write(dst.as_mut_ptr(), *value);
+        ptr::copy_nonoverlapping(
+            value as *const T as *const u8,
+            dst.as_mut_ptr() as *mut u8,
+            core::mem::size_of::<T>(),
+        );
     }
     Ok(())
 }
