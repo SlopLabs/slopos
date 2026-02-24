@@ -1,6 +1,12 @@
 use core::ffi::c_void;
 
-use crate::syscall::{net::net_scan, tty, UserNetMember, USER_NET_MAX_MEMBERS};
+use crate::syscall::{fs, net::net_scan, tty, UserNetMember, USER_NET_MAX_MEMBERS};
+
+fn write_out(buf: &[u8]) {
+    if fs::write_slice(1, buf).is_err() {
+        let _ = tty::write(buf);
+    }
+}
 
 fn write_u8_dec(mut value: u8, out: &mut [u8], idx: &mut usize) {
     let mut tmp = [0u8; 3];
@@ -66,26 +72,26 @@ fn print_member(member: &UserNetMember) {
 
     line[i] = b'\n';
     i += 1;
-    let _ = tty::write(&line[..i]);
+    write_out(&line[..i]);
 }
 
 pub fn nmap_main(_arg: *mut c_void) -> ! {
-    let _ = tty::write(b"nmap: scanning...\n");
+    write_out(b"nmap: scanning...\n");
 
     let mut members = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
     let count = net_scan(&mut members, true);
 
     if count < 0 {
-        let _ = tty::write(b"nmap: scan syscall failed\n");
+        write_out(b"nmap: scan syscall failed\n");
         crate::syscall::core::exit_with_code(1);
     }
 
     if count == 0 {
-        let _ = tty::write(b"nmap: no members discovered\n");
+        write_out(b"nmap: no members discovered\n");
         crate::syscall::core::exit_with_code(1);
     }
 
-    let _ = tty::write(b"nmap: discovered members\n");
+    write_out(b"nmap: discovered members\n");
     let mut idx = 0usize;
     while idx < count as usize && idx < members.len() {
         print_member(&members[idx]);
