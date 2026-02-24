@@ -2,17 +2,16 @@ use core::ffi::c_int;
 use core::mem::size_of;
 use core::ptr;
 
-use slopos_lib::{klog_debug, klog_info, InitFlag, IrqMutex};
+use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
-use crate::pci::{pci_register_driver, PciDeviceInfo, PciDriver};
+use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self,
+    self, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     pci::{
-        enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok,
-        PCI_VENDOR_ID_VIRTIO,
+        PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
+        set_driver_ok,
     },
-    queue::{self, VirtqDesc, Virtqueue, DEFAULT_QUEUE_SIZE},
-    VirtioMmioCaps, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
+    queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 
 use slopos_mm::page_alloc::OwnedPageFrame;
