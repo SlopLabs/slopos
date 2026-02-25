@@ -114,7 +114,7 @@ fi
 
 # ── Resolve display and extra args per mode ──────────────────────────────────
 DISPLAY_ARGS=(-display none)
-USB_ARGS=(-usb -device usb-tablet)
+USB_ARGS=()
 EXTRA_ARGS=()
 
 case "$MODE" in
@@ -169,10 +169,11 @@ QEMU_ARGS=(
     -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
     -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
     -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
-    -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on"
+    -object "iothread,id=iot0"
+    -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
     -netdev "user,id=slopnet0"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
-    -boot "order=d,menu=on"
+    -boot "order=d,menu=off"
     -serial stdio
     -monitor none
     "${DISPLAY_ARGS[@]}"
