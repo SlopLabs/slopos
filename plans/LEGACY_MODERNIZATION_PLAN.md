@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1A (XSAVE Feature Detection) complete, Phase 1B (Enable XSAVE in Boot) complete
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1A (XSAVE Feature Detection) complete, Phase 1B (Enable XSAVE in Boot) complete, Phase 1C (Update Task FPU State) complete
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -279,18 +279,18 @@ The target JSON (`targets/x86_64-slos.json`) currently disables AVX with `"-mmx,
 
 ### 1C: Update Task FPU State
 
-- [ ] **1C.1** Replace fixed `FPU_STATE_SIZE = 512` in `core/src/scheduler/task_struct.rs`:
-  - Use the runtime-detected `XSAVE_AREA_SIZE` for allocation
-  - Allocate FPU state from the kernel heap (not inline in Task struct) if size > 512
-  - Alternative: use a compile-time maximum (e.g., 2688 bytes) and waste some space for simplicity
-- [ ] **1C.2** Update `FpuState::new_default()`:
-  - XSAVE area has a different layout than FXSAVE for the header (bytes 512–575)
-  - Initialize XSAVE header: `XSTATE_BV` = 0 (no components dirty), `XCOMP_BV` = 0
-  - x87/SSE defaults remain the same (FCW=0x037F, MXCSR=0x1F80)
-- [ ] **1C.3** Ensure 64-byte alignment for XSAVE area (required by hardware):
-  - FXSAVE only needs 16-byte alignment
-  - XSAVE needs 64-byte alignment
-  - Update allocation to enforce `align_of::<FpuState>() >= 64`
+- [x] **1C.1** Replace fixed `FPU_STATE_SIZE = 512` in `core/src/scheduler/task_struct.rs`:
+  - Compile-time maximum of 2688 bytes (covers FXSAVE, XSAVE+AVX, XSAVE+AVX-512)
+  - Runtime validation via `validate_fpu_state_size()` panics at boot if hardware exceeds the compile-time max
+  - `FXSAVE_AREA_SIZE = 512` constant retained for fallback reference
+- [x] **1C.2** Update `FpuState::new()`:
+  - XSAVE header (bytes 512–575) explicitly zeroed: `XSTATE_BV` = 0 (init values), `XCOMP_BV` = 0
+  - Legacy region defaults unchanged: FCW=0x037F, MXCSR=0x1F80
+  - XSAVE header constants defined: `XSAVE_HEADER_OFFSET`, `XSTATE_BV_OFFSET`, `XCOMP_BV_OFFSET`
+- [x] **1C.3** Ensure 64-byte alignment for XSAVE area (required by hardware):
+  - `#[repr(C, align(64))]` on `FpuState` (was `align(16)`)
+  - Compile-time assertions: `align_of::<FpuState>() >= 64`, `FPU_STATE_SIZE % align == 0`
+  - Assembly `FPU_STATE_OFFSET` unchanged at 0xD0 (compiler padding naturally satisfied)
 
 ### 1D: Update Context Switch Assembly
 
@@ -922,11 +922,11 @@ Features that **cannot be implemented** until specific phases complete:
 | Phase | Status | Tasks | Done | Blocked |
 |---|---|---|---|---|
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
-| **Phase 1**: XSAVE/XRSTOR | In Progress | 14 | 7 | — |
+| **Phase 1**: XSAVE/XRSTOR | In Progress | 14 | 10 | — |
 | **Phase 2**: Spinlock Modernization | Not Started | 8 | 0 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **109** | **15** | |
+| **Total** | | **109** | **18** | |

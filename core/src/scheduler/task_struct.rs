@@ -163,35 +163,88 @@ const _: () = {
 };
 
 // =============================================================================
-// FpuState — FXSAVE area for x87/MMX/SSE state (512 bytes, 16-byte aligned)
+// FpuState — XSAVE/FXSAVE area for x87/SSE/AVX state (64-byte aligned)
 // =============================================================================
 
-pub const FPU_STATE_SIZE: usize = 512;
+/// Maximum XSAVE area size we support (compile-time upper bound).
+///
+/// Covers all current Intel/AMD XSAVE components:
+/// - FXSAVE (x87 + SSE):    512 bytes
+/// - XSAVE  (+ AVX):        832 bytes
+/// - XSAVE  (+ AVX-512):  2,688 bytes
+///
+/// Tasks always allocate this much; the hardware only touches
+/// `xsave::area_size()` bytes at runtime.  The waste-per-task is at
+/// most ~2 KiB — acceptable for a fixed task table.
+pub const FPU_STATE_SIZE: usize = 2688;
+
+/// Legacy FXSAVE area size (512 B).  Used as the fallback when XSAVE
+/// is not available.
+pub const FXSAVE_AREA_SIZE: usize = 512;
+
 pub const MXCSR_DEFAULT: u32 = 0x1F80;
 
-const FXSAVE_FCW_OFFSET: usize = 0;
-const FXSAVE_MXCSR_OFFSET: usize = 24;
+/// x87 FPU Control Word offset within both FXSAVE and XSAVE legacy region.
+const LEGACY_FCW_OFFSET: usize = 0;
+/// MXCSR offset within both FXSAVE and XSAVE legacy region.
+const LEGACY_MXCSR_OFFSET: usize = 24;
 
-#[repr(C, align(16))]
+// --- XSAVE header layout (bytes 512–575) ---
+
+/// Offset of the XSAVE header within the save area.
+const XSAVE_HEADER_OFFSET: usize = 512;
+/// XSTATE_BV — bitmask of state components that contain valid data.
+const XSTATE_BV_OFFSET: usize = XSAVE_HEADER_OFFSET;
+/// XCOMP_BV — bitmask for compacted format (XSAVEC).  Bit 63 = compaction mode.
+const XCOMP_BV_OFFSET: usize = XSAVE_HEADER_OFFSET + 8;
+
+/// FPU/SIMD state save area.
+///
+/// Sized to `FPU_STATE_SIZE` (compile-time maximum for XSAVE with AVX-512)
+/// and aligned to 64 bytes as required by the `XSAVE`/`XRSTOR` instructions.
+/// When the CPU only supports FXSAVE, only the first 512 bytes are used.
+///
+/// The layout is intentionally a plain byte array so it can back both the
+/// 512-byte FXSAVE region and the variable-length XSAVE region without
+/// requiring separate types.
+#[repr(C, align(64))]
 #[derive(Clone, Copy)]
 pub struct FpuState {
     pub data: [u8; FPU_STATE_SIZE],
 }
 
 impl FpuState {
+    /// All-zeroes save area.
     pub const fn zero() -> Self {
         Self {
             data: [0u8; FPU_STATE_SIZE],
         }
     }
 
-    /// Default FCW (0x037F) and MXCSR (0x1F80) — all exceptions masked.
+    /// Default FPU state with x87/SSE exceptions masked and XSAVE header zeroed.
+    ///
+    /// Initialises the legacy region (bytes 0–511):
+    ///   - FCW = 0x037F (all x87 exceptions masked)
+    ///   - MXCSR = 0x1F80 (all SSE exceptions masked)
+    ///
+    /// The XSAVE header (bytes 512–575) is left zeroed:
+    ///   - `XSTATE_BV = 0` → all state components at initial values
+    ///   - `XCOMP_BV = 0` → standard (non-compacted) format
+    ///
+    /// This is correct for both FXSAVE and XSAVE: the hardware interprets
+    /// `XSTATE_BV = 0` as "use processor-reset defaults for every component"
+    /// during `XRSTOR`.
     pub const fn new() -> Self {
         let mut state = Self::zero();
-        state.data[FXSAVE_FCW_OFFSET] = 0x7F;
-        state.data[FXSAVE_FCW_OFFSET + 1] = 0x03;
-        state.data[FXSAVE_MXCSR_OFFSET] = 0x80;
-        state.data[FXSAVE_MXCSR_OFFSET + 1] = 0x1F;
+        // Legacy region: FCW and MXCSR defaults (same for FXSAVE and XSAVE).
+        state.data[LEGACY_FCW_OFFSET] = 0x7F;
+        state.data[LEGACY_FCW_OFFSET + 1] = 0x03;
+        state.data[LEGACY_MXCSR_OFFSET] = 0x80;
+        state.data[LEGACY_MXCSR_OFFSET + 1] = 0x1F;
+        // XSAVE header: XSTATE_BV = 0, XCOMP_BV = 0 (already zero from zero()).
+        // Explicit documentation — no-ops but make the invariant visible.
+        state.data[XSTATE_BV_OFFSET] = 0;
+        state.data[XCOMP_BV_OFFSET] = 0;
         state
     }
 
@@ -204,12 +257,46 @@ impl FpuState {
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.data.as_mut_ptr()
     }
+
+    /// Returns the number of bytes the hardware will actually touch during
+    /// `XSAVE`/`XRSTOR` (or `FXSAVE`/`FXRSTOR` on fallback).
+    ///
+    /// Always ≤ `FPU_STATE_SIZE`.
+    #[inline]
+    pub fn active_area_size() -> usize {
+        slopos_lib::cpu::xsave::area_size()
+    }
 }
 
 impl Default for FpuState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// Compile-time checks on FpuState.
+const _: () = {
+    // XSAVE requires 64-byte alignment.
+    assert!(core::mem::align_of::<FpuState>() >= 64);
+    // Buffer must be large enough for the FXSAVE legacy area.
+    assert!(FPU_STATE_SIZE >= FXSAVE_AREA_SIZE);
+    // Buffer size should be a multiple of the alignment for clean packing.
+    assert!(FPU_STATE_SIZE % core::mem::align_of::<FpuState>() == 0);
+};
+
+/// Panics at boot if the CPU's XSAVE area exceeds our compile-time maximum.
+///
+/// Call once from a boot step (after `xsave::init()`) to fail early rather
+/// than silently corrupting adjacent task memory.
+pub fn validate_fpu_state_size() {
+    let hw_size = slopos_lib::cpu::xsave::area_size();
+    assert!(
+        hw_size <= FPU_STATE_SIZE,
+        "XSAVE area size ({} B) exceeds compile-time FPU_STATE_SIZE ({} B) — \
+         increase FPU_STATE_SIZE in task_struct.rs",
+        hw_size,
+        FPU_STATE_SIZE,
+    );
 }
 
 // =============================================================================
@@ -245,9 +332,16 @@ impl SignalAction {
 // Task — the kernel task control block
 // =============================================================================
 
-// Verify assembly FPU_STATE_OFFSET (0xD0) matches the actual field distance.
-// Assembly in context_switch.s: `.equ FPU_STATE_OFFSET, 0xD0`
-const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == 0xD0);
+// Verify assembly FPU_STATE_OFFSET matches the actual field distance.
+// Assembly in context_switch.s uses `.equ FPU_STATE_OFFSET, <value>`.
+// Changing FpuState alignment from 16 to 64 may alter the padding and thus this offset.
+// We use a helper const to make the actual value available for debugging.
+pub const FPU_STATE_OFFSET: usize = {
+    // This value MUST match `offset_of!(Task, fpu_state) - offset_of!(Task, context)`.
+    // The assembly in context_switch.s uses `.equ FPU_STATE_OFFSET, <hex>`.
+    0xD0
+};
+const _: () = assert!(offset_of!(Task, fpu_state) - offset_of!(Task, context) == FPU_STATE_OFFSET);
 
 #[repr(C)]
 pub struct Task {

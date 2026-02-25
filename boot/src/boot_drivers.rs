@@ -155,6 +155,8 @@ fn boot_step_xsave_setup_fn() {
     if rc != 0 {
         panic!("XSAVE initialization failed");
     }
+    // Ensure the detected XSAVE area fits in our compile-time FpuState buffer.
+    slopos_core::scheduler::task_struct::validate_fpu_state_size();
 }
 
 fn boot_step_smp_setup_fn() {
