@@ -21,6 +21,9 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
 
     cpu::enable_sse();
 
+    // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
+    slopos_lib::cpu::xsave::enable_on_current_cpu();
+
     apic::enable();
 
     let apic_id = apic::get_id();

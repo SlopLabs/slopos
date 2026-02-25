@@ -33,6 +33,7 @@ qemu_smp     := env("QEMU_SMP", "2")
 qemu_mem     := env("QEMU_MEM", "512M")
 qemu_accel   := if os() == "macos" { env("QEMU_ACCEL", "hvf:tcg") } else { env("QEMU_ACCEL", "kvm:tcg") }
 qemu_display := if os() == "macos" { env("QEMU_DISPLAY", "cocoa") } else { env("QEMU_DISPLAY", "auto") }
+qemu_cpu     := env("QEMU_CPU", "host")
 
 qemu_fb_width       := env("QEMU_FB_WIDTH", "1920")
 qemu_fb_height      := env("QEMU_FB_HEIGHT", "1080")
@@ -117,7 +118,7 @@ _iso-tests: _fs-image-tests
 
 _qemu-boot mode video iso fs_image *extra_env:
     QEMU_BIN={{qemu_bin}} QEMU_SMP={{qemu_smp}} QEMU_MEM={{qemu_mem}} \
-    QEMU_ACCEL={{qemu_accel}} QEMU_DISPLAY={{qemu_display}} \
+    QEMU_ACCEL={{qemu_accel}} QEMU_CPU={{qemu_cpu}} QEMU_DISPLAY={{qemu_display}} \
     VIDEO={{video}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \

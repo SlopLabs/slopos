@@ -31,13 +31,15 @@ QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_SMP="${QEMU_SMP:-2}"
 QEMU_MEM="${QEMU_MEM:-512M}"
 
-# Platform-aware acceleration default
+# Platform-aware acceleration and CPU model defaults
 if [ "$(uname -s)" = "Darwin" ]; then
     QEMU_ACCEL="${QEMU_ACCEL:-hvf:tcg}"
     QEMU_DISPLAY="${QEMU_DISPLAY:-cocoa}"
+    QEMU_CPU="${QEMU_CPU:-host}"
 else
     QEMU_ACCEL="${QEMU_ACCEL:-kvm:tcg}"
     QEMU_DISPLAY="${QEMU_DISPLAY:-auto}"
+    QEMU_CPU="${QEMU_CPU:-host}"
 fi
 
 VIDEO="${VIDEO:-0}"
@@ -158,6 +160,7 @@ fi
 # ── Assemble common QEMU arguments ──────────────────────────────────────────
 QEMU_ARGS=(
     -machine "q35,accel=$QEMU_ACCEL"
+    -cpu "$QEMU_CPU"
     -smp "$QEMU_SMP"
     -m "$QEMU_MEM"
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"

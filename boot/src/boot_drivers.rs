@@ -149,6 +149,14 @@ fn boot_step_apic_setup_fn() {
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
 }
 
+fn boot_step_xsave_setup_fn() {
+    klog_debug!("Detecting XSAVE support...");
+    let rc = slopos_lib::cpu::xsave::init();
+    if rc != 0 {
+        panic!("XSAVE initialization failed");
+    }
+}
+
 fn boot_step_smp_setup_fn() {
     klog_debug!("Discovering CPUs and starting APs...");
     smp_init();
@@ -310,6 +318,13 @@ crate::boot_init!(
     b"apic\0",
     boot_step_apic_setup_fn,
     flags = boot_init_priority(40)
+);
+crate::boot_init!(
+    BOOT_STEP_XSAVE_SETUP,
+    drivers,
+    b"xsave\0",
+    boot_step_xsave_setup_fn,
+    flags = boot_init_priority(42)
 );
 crate::boot_init!(
     BOOT_STEP_SMP_SETUP,

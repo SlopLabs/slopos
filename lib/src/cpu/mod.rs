@@ -7,6 +7,7 @@ pub mod msr;
 pub mod sse;
 pub mod stack;
 pub mod tlb;
+pub mod xsave;
 
 pub use self::core::*;
 pub use apic_msr::*;
@@ -17,3 +18,5 @@ pub use msr::*;
 pub use sse::*;
 pub use stack::*;
 pub use tlb::*;
+// Note: xsave is NOT glob-exported — use `cpu::xsave::*` to avoid name
+// collisions with the cpuid free functions (`xsave_area_size`, etc.).

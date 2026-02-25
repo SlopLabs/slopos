@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1A (XSAVE Feature Detection) complete
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1A (XSAVE Feature Detection) complete, Phase 1B (Enable XSAVE in Boot) complete
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -268,14 +268,14 @@ The target JSON (`targets/x86_64-slos.json`) currently disables AVX with `"-mmx,
 
 ### 1B: Enable XSAVE in Boot
 
-- [ ] **1B.1** During boot (`boot/src/early_init.rs` or `boot/src/boot_drivers.rs`):
+- [x] **1B.1** During boot (`boot/src/boot_drivers.rs`):
   - Set `CR4.OSXSAVE` (bit 18) — already defined as `CR4_OSXSAVE` in `lib/src/cpu/control_regs.rs`
   - Write XCR0 with desired feature mask: `x87 | SSE` minimum, `| AVX` if supported
   - Log: `"XSAVE: enabled, area size {} bytes, features 0x{:x}"`
-- [ ] **1B.2** Store the active XSAVE area size in a global static:
+- [x] **1B.2** Store the active XSAVE area size in a global static:
   - `XSAVE_AREA_SIZE: AtomicUsize` — queried by task creation code
   - Minimum 512 (FXSAVE compat), typically 832 with AVX, 2688+ with AVX-512
-- [ ] **1B.3** Each AP must also set `CR4.OSXSAVE` and write `XCR0` during `ap_entry()` in `boot/src/smp.rs`
+- [x] **1B.3** Each AP must also set `CR4.OSXSAVE` and write `XCR0` during `ap_entry()` in `boot/src/smp.rs`
 
 ### 1C: Update Task FPU State
 
@@ -922,11 +922,11 @@ Features that **cannot be implemented** until specific phases complete:
 | Phase | Status | Tasks | Done | Blocked |
 |---|---|---|---|---|
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
-| **Phase 1**: XSAVE/XRSTOR | In Progress | 14 | 4 | — |
+| **Phase 1**: XSAVE/XRSTOR | In Progress | 14 | 7 | — |
 | **Phase 2**: Spinlock Modernization | Not Started | 8 | 0 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **109** | **12** | |
+| **Total** | | **109** | **15** | |
