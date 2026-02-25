@@ -6,40 +6,17 @@ use crate::ioapic::regs::{
 };
 use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
 use slopos_lib::kernel_services::driver_runtime::{
-    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, LEGACY_IRQ_TIMER,
-    irq_increment_keyboard_events, irq_increment_timer_ticks, irq_init, irq_is_masked,
-    irq_register_handler, irq_set_route, scheduler_handle_timer_interrupt,
+    IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE,
+    irq_increment_keyboard_events, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
 };
 use slopos_lib::{InterruptFrame, cpu, klog_info};
 
 use crate::{apic, ioapic, ps2};
 
-// NOTE: The PIT timer IRQ handler has been removed from the default boot path.
-// Scheduler preemption is now driven by the per-CPU LAPIC timer (vector
-// LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch — see boot/src/idt.rs.
-//
-// The PIT fallback handler below is only activated if LAPIC timer calibration
-// fails, via `enable_pit_timer_fallback()`.
-
-extern "C" fn pit_timer_irq_handler(_irq: u8, frame: *mut InterruptFrame, _ctx: *mut c_void) {
-    irq_increment_timer_ticks();
-    scheduler_handle_timer_interrupt(frame);
-}
-
-/// Enable the legacy PIT timer IRQ as a scheduling fallback.
-///
-/// Called only when the LAPIC timer is unavailable (calibration failed).
-/// Routes the PIT IRQ through IOAPIC and registers the tick handler.
-pub fn enable_pit_timer_fallback() {
-    program_ioapic_route(LEGACY_IRQ_TIMER);
-    let _ = irq_register_handler(
-        LEGACY_IRQ_TIMER,
-        Some(pit_timer_irq_handler),
-        core::ptr::null_mut(),
-        core::ptr::null(),
-    );
-    slopos_lib::klog_info!("IRQ: PIT timer fallback enabled for scheduling");
-}
+// PIT timer IRQ handler and fallback have been removed.
+// Scheduler preemption is driven exclusively by the per-CPU LAPIC timer
+// (vector LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch —
+// see boot/src/idt.rs.  HPET + LAPIC are mandatory since Phase 0E.
 
 /// Unified PS/2 IRQ handler following the Linux i8042 pattern.
 ///
@@ -124,7 +101,6 @@ fn setup_ioapic_routes() {
     }
 
     // PIT timer route removed — scheduler ticks come from the per-CPU LAPIC timer.
-    // program_ioapic_route(LEGACY_IRQ_TIMER);
     program_ioapic_route(LEGACY_IRQ_KEYBOARD);
     program_ioapic_route(LEGACY_IRQ_MOUSE);
     program_ioapic_route(LEGACY_IRQ_COM1);
@@ -147,7 +123,7 @@ pub fn init() {
     // Enable IRQs in the controller config byte now that devices are ready
     ps2::enable_irqs();
 
-    // PIT timer handler removed — LAPIC timer handler lives in boot/src/idt.rs.
+    // LAPIC timer handler lives in boot/src/idt.rs (per-CPU, not via IOAPIC).
     let _ = irq_register_handler(
         LEGACY_IRQ_KEYBOARD,
         Some(ps2_irq_handler),

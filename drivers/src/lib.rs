@@ -16,8 +16,6 @@ pub mod pci;
 pub mod pci_defs;
 pub mod pic;
 pub mod pit;
-#[cfg(feature = "itests")]
-pub mod pit_tests;
 pub mod ps2;
 pub mod random;
 pub mod serial;

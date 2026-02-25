@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0A (HPET Driver), 0B (LAPIC Calibration), 0C (Scheduler Migration) complete
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -200,19 +200,24 @@ Expose a monotonic nanosecond clock to the kernel and userland.
 
 ### 0E: PIT Deprecation
 
-Reduce PIT to a calibration-only fallback, document the migration.
+Reduce PIT to a calibration-only fallback.  HPET + LAPIC timer are now **mandatory**.
 
-- [ ] **0E.1** Guard PIT initialization behind a feature flag or boot parameter:
-  - `pit=on|off|calibrate-only` on the Limine command line
-  - Default to `calibrate-only` (used only if HPET is unavailable)
-- [ ] **0E.2** Remove `pit_enable_irq()` / `pit_disable_irq()` from the default boot path
-- [ ] **0E.3** Remove PIT IRQ routing from `setup_ioapic_routes()` in `drivers/src/irq.rs`
-- [ ] **0E.4** Update `TODO.md` to mark the LAPIC timer item as complete
-- [ ] **0E.5** Add deprecation comment to `drivers/src/pit.rs`:
+- [x] **0E.1** Make HPET + LAPIC timer mandatory at boot:
+  - `boot_step_hpet_setup_fn()` panics if HPET unavailable
+  - `boot_step_lapic_calibration_fn()` panics if calibration returns 0 Hz
+  - `boot_step_lapic_timer_start_fn()` panics if periodic mode fails
+  - PIT retained only as LAPIC calibration polled-delay fallback (dead path)
+- [x] **0E.2** Remove `pit_enable_irq()` / `pit_disable_irq()` from the default boot path
+- [x] **0E.3** Remove PIT IRQ routing — `enable_pit_timer_fallback()` and handler deleted
+- [x] **0E.4** Update `TODO.md` to mark the LAPIC timer item as complete
+- [x] **0E.5** Add deprecation comment to `drivers/src/pit.rs`:
   ```rust
-  //! Legacy PIT driver — retained for LAPIC timer calibration fallback only.
+  //! Legacy PIT (Intel 8254) driver — **calibration-only fallback**.
   //! The HPET + LAPIC timer is the primary timing source since Phase 0.
   ```
+- [x] **0E.6** Remove `delay_ms_or_pit_fallback()` from `hpet.rs` — all callers use `delay_ms()`
+- [x] **0E.7** Remove PIT fallback from PlatformServices (`boot_impl.rs`)
+- [x] **0E.8** Replace `pit_get_frequency()` in `input_event.rs` with HPET-based timestamp
 
 ### Phase 0 Gate
 
@@ -916,7 +921,7 @@ Features that **cannot be implemented** until specific phases complete:
 
 | Phase | Status | Tasks | Done | Blocked |
 |---|---|---|---|---|
-| **Phase 0**: Timer Modernization | **0A–0C Complete** | 28 | 18 | — |
+| **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | Not Started | 14 | 0 | — |
 | **Phase 2**: Spinlock Modernization | Not Started | 8 | 0 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |

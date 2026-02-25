@@ -1,95 +1,27 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+//! Legacy PIT (Intel 8254) — calibration-only polled delay.
+//!
+//! The HPET + LAPIC timer is the sole timing source.  This module exists
+//! **only** because [`pit_poll_delay_ms`] is used as the reference delay
+//! for LAPIC timer calibration when the HPET codepath falls through
+//! (a dead path since HPET is mandatory at boot).
+//!
+//! No IRQs are routed, no frequency is configured, and `pit_init()` is
+//! never called.  The hardware counter free-runs at its base oscillator
+//! frequency (~1.193 182 MHz) after power-on reset.
 
-use slopos_lib::kernel_services::driver_runtime::{
-    irq_disable_line, irq_enable_line, irq_get_timer_ticks,
-};
-use slopos_lib::ports::{
-    IO_DELAY, PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0, PIT_COMMAND, PIT_COMMAND_ACCESS_LOHI,
-    PIT_COMMAND_BINARY, PIT_COMMAND_CHANNEL0, PIT_COMMAND_MODE_SQUARE, PIT_DEFAULT_FREQUENCY_HZ,
-    PIT_IRQ_LINE,
-};
-use slopos_lib::{cpu, klog_debug, klog_info};
+use slopos_lib::ports::{PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0, PIT_COMMAND};
 
-static CURRENT_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(0);
-static CURRENT_RELOAD_DIVISOR: AtomicU32 = AtomicU32::new(0);
+/// Hardware default reload value (counter wraps at 0x10000 = 65 536).
+const DEFAULT_RELOAD: u32 = 0x10000;
 
-#[inline]
-fn pit_io_wait() {
-    unsafe { IO_DELAY.write(0) }
-}
-
-fn pit_calculate_divisor(mut frequency_hz: u32) -> u16 {
-    if frequency_hz == 0 {
-        frequency_hz = PIT_DEFAULT_FREQUENCY_HZ;
-    }
-    if frequency_hz > PIT_BASE_FREQUENCY_HZ {
-        frequency_hz = PIT_BASE_FREQUENCY_HZ;
-    }
-
-    let mut divisor = PIT_BASE_FREQUENCY_HZ / frequency_hz;
-    if divisor == 0 {
-        divisor = 1;
-    } else if divisor > 0xFFFF {
-        divisor = 0xFFFF;
-    }
-
-    let actual_freq = PIT_BASE_FREQUENCY_HZ / divisor;
-    CURRENT_FREQUENCY_HZ.store(actual_freq, Ordering::SeqCst);
-    CURRENT_RELOAD_DIVISOR.store(divisor, Ordering::SeqCst);
-    divisor as u16
-}
-
-pub fn pit_set_frequency(frequency_hz: u32) {
-    let divisor = pit_calculate_divisor(frequency_hz);
-
-    unsafe {
-        PIT_COMMAND.write(
-            PIT_COMMAND_CHANNEL0
-                | PIT_COMMAND_ACCESS_LOHI
-                | PIT_COMMAND_MODE_SQUARE
-                | PIT_COMMAND_BINARY,
-        );
-        PIT_CHANNEL0.write((divisor & 0xFF) as u8);
-        PIT_CHANNEL0.write(((divisor >> 8) & 0xFF) as u8);
-    }
-    pit_io_wait();
-
-    let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
-    klog_debug!("PIT: frequency set to {} Hz", freq);
-}
-
-pub fn pit_init(frequency_hz: u32) {
-    let freq = if frequency_hz == 0 {
-        PIT_DEFAULT_FREQUENCY_HZ
-    } else {
-        frequency_hz
-    };
-    klog_info!("PIT: Initializing timer at {} Hz", freq);
-    pit_set_frequency(freq);
-}
-
-pub fn pit_get_frequency() -> u32 {
-    let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
-    if freq == 0 {
-        PIT_DEFAULT_FREQUENCY_HZ
-    } else {
-        freq
-    }
-}
-
-pub fn pit_enable_irq() {
-    irq_enable_line(PIT_IRQ_LINE);
-}
-
-pub fn pit_disable_irq() {
-    irq_disable_line(PIT_IRQ_LINE);
-}
-
+/// Latch and read the PIT channel 0 down-counter.
+///
+/// Interrupts are briefly disabled to prevent a stale two-byte read.
+/// Safe to call at any point — the counter free-runs from power-on.
 fn pit_read_count() -> u16 {
-    // Must disable interrupts to prevent IRQ from corrupting the latch/read sequence
     let flags = slopos_lib::cpu::save_flags_cli();
     let count = unsafe {
-        PIT_COMMAND.write(0x00);
+        PIT_COMMAND.write(0x00); // latch channel 0
         let low = PIT_CHANNEL0.read();
         let high = PIT_CHANNEL0.read();
         ((high as u16) << 8) | (low as u16)
@@ -98,15 +30,15 @@ fn pit_read_count() -> u16 {
     count
 }
 
+/// Polled spin-wait for `ms` milliseconds using the PIT hardware counter.
+///
+/// Reads the free-running channel 0 counter directly — no prior
+/// initialisation, IRQ routing, or frequency configuration required.
+/// Timing is derived from [`PIT_BASE_FREQUENCY_HZ`] (1 193 182 Hz).
 pub fn pit_poll_delay_ms(ms: u32) {
     if ms == 0 {
         return;
     }
-
-    let reload = {
-        let d = CURRENT_RELOAD_DIVISOR.load(Ordering::SeqCst);
-        if d == 0 { 0x10000 } else { d }
-    };
 
     let ticks_needed = ((ms as u64) * (PIT_BASE_FREQUENCY_HZ as u64) / 1000) as u32;
     let mut last = pit_read_count();
@@ -119,26 +51,9 @@ pub fn pit_poll_delay_ms(ms: u32) {
         if current <= last {
             elapsed = elapsed.saturating_add((last - current) as u32);
         } else {
-            elapsed = elapsed.saturating_add(last as u32 + (reload.saturating_sub(current as u32)));
+            elapsed =
+                elapsed.saturating_add(last as u32 + DEFAULT_RELOAD.saturating_sub(current as u32));
         }
         last = current;
-    }
-}
-
-pub fn pit_sleep_ms(ms: u32) {
-    if ms == 0 {
-        return;
-    }
-    let freq = pit_get_frequency();
-    let mut ticks_needed = (ms as u64 * freq as u64) / 1000;
-    if ticks_needed == 0 {
-        ticks_needed = 1;
-    }
-
-    let start = irq_get_timer_ticks();
-    let target = start.wrapping_add(ticks_needed);
-
-    while irq_get_timer_ticks() < target {
-        cpu::hlt();
     }
 }

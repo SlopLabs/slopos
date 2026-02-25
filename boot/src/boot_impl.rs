@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::{early_init, gdt, idt, limine_protocol, shutdown};
-use slopos_drivers::{apic, hpet, ioapic, pit, random, serial};
+use slopos_drivers::{apic, hpet, ioapic, random, serial};
 use slopos_lib::kernel_services::platform::{PlatformServices, register_platform_services};
 
 fn kernel_shutdown_fn(reason: *const c_char) -> ! {
@@ -30,44 +30,13 @@ fn idt_get_gate_fn(vector: u8, entry: *mut c_void) -> c_int {
 
 static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     timer_ticks: || slopos_core::irq::get_timer_ticks(),
-    // LAPIC timer runs at a fixed 100 Hz (10 ms period).  When the LAPIC timer
-    // is not calibrated we fall back to the PIT frequency so the tick↔ms math
-    // remains correct in either configuration.
-    timer_frequency: || {
-        if apic::timer::is_calibrated() {
-            100
-        } else {
-            pit::pit_get_frequency()
-        }
-    },
-    timer_poll_delay_ms: |ms| {
-        if hpet::is_available() {
-            hpet::delay_ms(ms);
-        } else {
-            pit::pit_poll_delay_ms(ms);
-        }
-    },
-    timer_sleep_ms: |ms| {
-        if hpet::is_available() {
-            hpet::delay_ms(ms);
-        } else {
-            pit::pit_sleep_ms(ms);
-        }
-    },
-    timer_enable_irq: || {
-        if apic::timer::is_calibrated() {
-            apic::timer::unmask();
-        } else {
-            pit::pit_enable_irq();
-        }
-    },
-    timer_disable_irq: || {
-        if apic::timer::is_calibrated() {
-            apic::timer::mask();
-        } else {
-            pit::pit_disable_irq();
-        }
-    },
+    // LAPIC timer runs at a fixed 100 Hz (10 ms period).  HPET + LAPIC are
+    // mandatory since Phase 0E — there is no PIT fallback.
+    timer_frequency: || 100,
+    timer_poll_delay_ms: |ms| hpet::delay_ms(ms),
+    timer_sleep_ms: |ms| hpet::delay_ms(ms),
+    timer_enable_irq: || apic::timer::unmask(),
+    timer_disable_irq: || apic::timer::mask(),
     console_putc: |c| serial::serial_putc_com1(c),
     console_puts: |s| {
         for &c in s {
@@ -85,24 +54,7 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     irq_send_eoi: || apic::send_eoi(),
     irq_mask_gsi: |gsi| ioapic::mask_gsi(gsi),
     irq_unmask_gsi: |gsi| ioapic::unmask_gsi(gsi),
-    clock_monotonic_ns: || {
-        if hpet::is_available() {
-            hpet::nanoseconds(hpet::read_counter())
-        } else {
-            // Fallback: derive from tick counter (low resolution, ~10ms granularity).
-            let ticks = slopos_core::irq::get_timer_ticks();
-            let freq = if apic::timer::is_calibrated() {
-                100u64
-            } else {
-                pit::pit_get_frequency() as u64
-            };
-            if freq == 0 {
-                0
-            } else {
-                ticks * 1_000_000_000 / freq
-            }
-        }
-    },
+    clock_monotonic_ns: || hpet::nanoseconds(hpet::read_counter()),
 };
 
 pub fn register_boot_services() {

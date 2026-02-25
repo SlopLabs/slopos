@@ -45,12 +45,6 @@ pub const UART_MCR_RTS: u8 = 0x02;
 pub const UART_MCR_AUX2: u8 = 0x08;
 
 pub const PIT_BASE_FREQUENCY_HZ: u32 = 1_193_182;
-pub const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
-pub const PIT_COMMAND_CHANNEL0: u8 = 0x00;
-pub const PIT_COMMAND_ACCESS_LOHI: u8 = 0x30;
-pub const PIT_COMMAND_MODE_SQUARE: u8 = 0x06;
-pub const PIT_COMMAND_BINARY: u8 = 0x00;
-pub const PIT_IRQ_LINE: u8 = 0;
 
 // ---------------------------------------------------------------------------
 // Low-level serial I/O primitives

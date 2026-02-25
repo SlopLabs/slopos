@@ -129,7 +129,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     klog_info!("Rebooting via keyboard controller...");
 
-    hpet::delay_ms_or_pit_fallback(50);
+    hpet::delay_ms(50);
     unsafe { PS2_COMMAND.write(0xFE) };
 
     klog_info!("Keyboard reset failed, attempting triple fault...");

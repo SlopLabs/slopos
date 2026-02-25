@@ -19,7 +19,7 @@ fn wait_for_ack(mmio_region: &MmioRegion, reg: usize, expect: u32) -> bool {
         if ack == expect {
             return true;
         }
-        hpet::delay_ms_or_pit_fallback(1);
+        hpet::delay_ms(1);
     }
     false
 }

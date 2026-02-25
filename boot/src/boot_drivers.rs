@@ -20,13 +20,10 @@ use slopos_drivers::{
     apic, hpet, ioapic,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
-    pit::pit_init,
     virtio_blk::virtio_blk_register_driver,
     virtio_net::virtio_net_register_driver,
 };
 use slopos_mm::tlb;
-
-const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
 fn sync_mouse_bounds(display: Option<slopos_abi::FramebufferData>) {
     let Some(display) = display else {
@@ -94,22 +91,14 @@ fn boot_step_irq_setup_fn() {
 }
 
 fn boot_step_timer_setup_fn() {
-    // Always initialise the PIT hardware counter so pit_poll_delay_ms works
-    // as a polled spin-wait (reads the counter directly, no IRQ needed).
-    // This also keeps the PIT test suite functional.
-    pit_init(PIT_DEFAULT_FREQUENCY_HZ);
-
-    // The LAPIC timer is the primary scheduling clock (started at priority 58).
-    // If calibration failed, fall back to PIT-driven scheduling via IOAPIC.
-    if !apic::timer::is_calibrated() {
-        klog_info!("BOOT: LAPIC timer not calibrated — falling back to PIT for scheduling");
-        slopos_drivers::irq::enable_pit_timer_fallback();
-    }
+    // HPET + LAPIC timer are mandatory (enforced at boot priorities 55–58).
+    // The PIT hardware counter is left free-running for LAPIC calibration
+    // fallback only — no PIT init, no PIT IRQs.
 
     // Verify the timer tick counter is advancing.  With LAPIC timer active
     // we expect ticks to arrive during a polled delay.
     let ticks_before = slopos_core::irq::get_timer_ticks();
-    hpet::delay_ms_or_pit_fallback(100);
+    hpet::delay_ms(100);
     let ticks_after = slopos_core::irq::get_timer_ticks();
     klog_info!(
         "BOOT: Timer ticks after 100ms delay: {} -> {} (delta {})",
@@ -176,8 +165,7 @@ fn boot_step_ioapic_setup_fn() {
 fn boot_step_hpet_setup_fn() {
     klog_debug!("Discovering HPET via ACPI...");
     if hpet::init() != 0 {
-        klog_info!("HPET: Not available, PIT remains the primary timer");
-        return;
+        panic!("SlopOS requires HPET — ACPI HPET table not found or hardware unavailable");
     }
     klog_debug!("HPET: Initialization complete, main counter running.");
 }
@@ -186,7 +174,7 @@ fn boot_step_lapic_calibration_fn() {
     klog_debug!("Calibrating LAPIC timer...");
     let freq = apic::timer::calibrate();
     if freq == 0 {
-        klog_info!("BOOT: LAPIC timer calibration failed — scheduler will use PIT");
+        panic!("SlopOS requires a calibrated LAPIC timer — calibration returned 0 Hz");
     }
 }
 
@@ -196,14 +184,11 @@ const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 fn boot_step_lapic_timer_start_fn() {
     use slopos_lib::arch::idt::LAPIC_TIMER_VECTOR;
 
-    if !apic::timer::is_calibrated() {
-        klog_info!("BOOT: Skipping LAPIC timer start — not calibrated");
-        return;
-    }
-
     if !apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS) {
-        klog_info!("BOOT: LAPIC timer set_periodic_ms failed — scheduler will use PIT");
-        return;
+        panic!(
+            "SlopOS requires LAPIC timer — set_periodic_ms failed (vector 0x{:x}, {}ms)",
+            LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS
+        );
     }
 
     klog_info!(

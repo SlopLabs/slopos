@@ -1,7 +1,7 @@
 # Scheduler and Tasking TODO
 
 ## Scheduling Enhancements
-- [ ] Calibrate/use LAPIC timer for preemption (PIT-based preemption exists).
+- [x] Calibrate/use LAPIC timer for preemption (HPET + LAPIC timer mandatory since Phase 0E).
 
 ## Async Coordination
 - [ ] Extend join/wait primitives with timeout and cancellation support.

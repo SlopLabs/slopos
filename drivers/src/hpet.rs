@@ -1,11 +1,14 @@
 //! HPET (High Precision Event Timer) driver.
 //!
-//! High-resolution monotonic time source for LAPIC timer calibration and
-//! precision delays, replacing PIT-based busy-waits.
+//! Primary monotonic time source for SlopOS.  Provides LAPIC timer
+//! calibration reference and nanosecond-precision polled delays.
 //!
-//! Init after IOAPIC setup. The main counter is safe to read from any CPU
-//! without synchronization. Init is guarded by [`InitFlag`] + [`StateFlag`]
-//! for SMP safety.
+//! HPET is **mandatory** since Phase 0E — the kernel panics at boot if
+//! the ACPI HPET table is missing or the hardware is unavailable.
+//!
+//! Init after IOAPIC setup.  The main counter is safe to read from any
+//! CPU without synchronization.  Init is guarded by [`InitFlag`] +
+//! [`StateFlag`] for SMP safety.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -48,8 +51,8 @@ static MMIO_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize the HPET from ACPI tables.
 ///
-/// Returns `0` on success, `-1` on failure. Failure is non-fatal — PIT
-/// remains the fallback timer.
+/// Returns `0` on success, `-1` on failure.  The boot sequence treats
+/// failure as fatal (panics) since HPET is mandatory.
 pub fn init() -> i32 {
     if HPET_READY.is_set() {
         return 0;
@@ -91,8 +94,7 @@ pub fn nanoseconds(ticks: u64) -> u64 {
     ((ticks as u128 * period as u128) / 1_000_000) as u64
 }
 
-/// Spin-wait for the specified nanoseconds. Drop-in replacement for
-/// `pit_poll_delay_ms()` at nanosecond granularity.
+/// Spin-wait for the specified nanoseconds.
 pub fn delay_ns(ns: u64) {
     let period = PERIOD_FS.load(Ordering::Relaxed) as u64;
     if period == 0 {
@@ -105,22 +107,10 @@ pub fn delay_ns(ns: u64) {
     }
 }
 
-/// Spin-wait for the specified milliseconds. Drop-in for `pit_poll_delay_ms`.
+/// Spin-wait for the specified milliseconds.
 #[inline]
 pub fn delay_ms(ms: u32) {
     delay_ns(ms as u64 * 1_000_000);
-}
-
-/// Spin-wait for the specified milliseconds, falling back to the PIT polled
-/// counter when the HPET is unavailable.  Prefer this over raw `delay_ms` at
-/// call sites that must guarantee a real delay (e.g. hardware timeouts).
-#[inline]
-pub fn delay_ms_or_pit_fallback(ms: u32) {
-    if is_available() {
-        delay_ms(ms);
-    } else {
-        crate::pit::pit_poll_delay_ms(ms);
-    }
 }
 
 #[inline]

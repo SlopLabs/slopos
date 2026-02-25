@@ -7,18 +7,14 @@
 //!
 //! Events are routed to the focused task for each input type.
 
-use slopos_lib::kernel_services::driver_runtime::irq_get_timer_ticks;
 use slopos_lib::{IrqMutex, RingBuffer};
 
-use crate::pit::pit_get_frequency;
-
+/// Monotonic millisecond timestamp for input events.
+///
+/// Uses HPET hardware counter (mandatory since Phase 0E) for
+/// nanosecond-precision wall time, converted to milliseconds.
 pub fn get_timestamp_ms() -> u64 {
-    let ticks = irq_get_timer_ticks();
-    let freq = pit_get_frequency();
-    if freq == 0 {
-        return 0;
-    }
-    (ticks * 1000) / freq as u64
+    crate::hpet::nanoseconds(crate::hpet::read_counter()) / 1_000_000
 }
 
 // Re-export ABI types and constants for consumers.
