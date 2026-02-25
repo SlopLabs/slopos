@@ -1,9 +1,8 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use slopos_lib::IrqMutex;
 use slopos_lib::klog_info;
-use spin::Once;
+use slopos_lib::{IrqMutex, OnceLock};
 
 use super::per_cpu;
 use super::scheduler::{run_ready_task_from_idle, set_scheduler_enabled, r#yield};
@@ -13,7 +12,7 @@ use super::task::{
 };
 use super::work_steal::try_work_steal;
 
-static IDLE_WAKEUP_CB: Once<IrqMutex<Option<fn() -> c_int>>> = Once::new();
+static IDLE_WAKEUP_CB: OnceLock<IrqMutex<Option<fn() -> c_int>>> = OnceLock::new();
 
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
     IDLE_WAKEUP_CB.call_once(|| IrqMutex::new(None));

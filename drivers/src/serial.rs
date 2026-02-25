@@ -1,5 +1,5 @@
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_lib::IrqMutex;
 use slopos_lib::RingBuffer;
 use slopos_lib::cpu;
@@ -48,20 +48,28 @@ pub fn init() {
     slopos_lib::klog::klog_register_backend(serial_klog_backend);
 }
 
-/// PCR-independent spinlock for klog serial output.
+/// PCR-independent **ticket lock** for klog serial output.
 ///
 /// `IrqMutex` depends on the PCR (Per-CPU Record) via `PreemptGuard`, which
-/// is unavailable during AP boot.  This lock uses only `cli`/`sti` + an
-/// `AtomicBool`, making it safe from any CPU context.
-static KLOG_LOCK: AtomicBool = AtomicBool::new(false);
+/// is unavailable during AP boot.  This lock uses only `cli`/`sti` + a ticket
+/// pair (`AtomicU16`), providing FIFO fairness without any PCR dependency.
+static KLOG_NEXT_TICKET: AtomicU16 = AtomicU16::new(0);
+static KLOG_NOW_SERVING: AtomicU16 = AtomicU16::new(0);
 
 fn serial_klog_backend(args: fmt::Arguments<'_>) {
     let saved_flags = cpu::save_flags_cli();
-    while KLOG_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
+    // Take a ticket and spin until served (FIFO order, wrapping-safe).
+    let my_ticket = KLOG_NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+    loop {
+        let serving = KLOG_NOW_SERVING.load(Ordering::Acquire);
+        if serving == my_ticket {
+            break;
+        }
+        // Proportional backoff: pause more when further from being served.
+        let distance = my_ticket.wrapping_sub(serving) as u32;
+        for _ in 0..distance.min(64) {
+            core::hint::spin_loop();
+        }
     }
 
     struct KlogWriter;
@@ -75,7 +83,7 @@ fn serial_klog_backend(args: fmt::Arguments<'_>) {
     let _ = fmt::write(&mut KlogWriter, args);
     let _ = KlogWriter.write_str("\n");
 
-    KLOG_LOCK.store(false, Ordering::Release);
+    KLOG_NOW_SERVING.fetch_add(1, Ordering::Release);
     cpu::restore_flags(saved_flags);
 }
 

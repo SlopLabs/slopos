@@ -17,6 +17,5 @@ doctest = false
 bitflags.workspace = true
 paste.workspace = true
 slopos-abi = { workspace = true }
-spin.workspace = true
 x86_64.workspace = true
 

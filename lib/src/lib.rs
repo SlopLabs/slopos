@@ -38,6 +38,7 @@ pub mod kernel_services;
 pub mod klog;
 pub mod memory;
 pub mod numfmt;
+pub mod once_lock;
 pub mod panic_recovery;
 pub mod pcr;
 pub mod preempt;
@@ -69,6 +70,7 @@ pub use stacktrace::StacktraceEntry;
 
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
+pub use once_lock::OnceLock;
 pub use pcr::{
     MAX_CPUS, SendIpiToCpuFn, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id,
     get_cpu_count, get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,

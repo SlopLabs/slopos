@@ -20,8 +20,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use super::task_struct::{Task, TaskContext};
 use slopos_abi::task::TaskStatus;
-use slopos_lib::{InitFlag, MAX_CPUS, klog_debug, klog_info};
-use spin::Mutex;
+use slopos_lib::{InitFlag, IrqMutex, MAX_CPUS, klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
@@ -190,7 +189,7 @@ const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 pub struct PerCpuScheduler {
     pub cpu_id: usize,
     ready_queues: UnsafeCell<[ReadyQueue; NUM_PRIORITY_LEVELS]>,
-    queue_lock: Mutex<()>,
+    queue_lock: IrqMutex<()>,
     current_task_atomic: AtomicPtr<Task>,
     idle_task_atomic: AtomicPtr<Task>,
     pub enabled: AtomicBool,
@@ -216,7 +215,7 @@ impl PerCpuScheduler {
         Self {
             cpu_id: 0,
             ready_queues: UnsafeCell::new([EMPTY_QUEUE; NUM_PRIORITY_LEVELS]),
-            queue_lock: Mutex::new(()),
+            queue_lock: IrqMutex::new(()),
             current_task_atomic: AtomicPtr::new(ptr::null_mut()),
             idle_task_atomic: AtomicPtr::new(ptr::null_mut()),
             enabled: AtomicBool::new(false),

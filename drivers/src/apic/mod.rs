@@ -3,8 +3,7 @@ pub mod timer;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Once;
-
+use slopos_lib::OnceLock;
 use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
 use regs::*;
@@ -24,7 +23,7 @@ static APIC_BASE_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 
 /// MMIO region for Local APIC registers.
 /// Initialized once during detect() and used for all register access.
-static APIC_REGS: Once<MmioRegion> = Once::new();
+static APIC_REGS: OnceLock<MmioRegion> = OnceLock::new();
 
 pub fn detect() -> bool {
     klog_debug!("APIC: Detecting Local APIC availability...");

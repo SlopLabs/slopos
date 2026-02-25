@@ -21,4 +21,3 @@ itests = []
 bitflags.workspace = true
 slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }
-spin.workspace = true

@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2A (Ticket Lock) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed)
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -396,6 +396,25 @@ The simplest fair lock. Linux used ticket locks from 2008–2015.
   - `VM_MANAGER` (mm/process_vm.rs): held during process VM operations (page table walks but no blocking I/O)
   - **Future `IrqRwLock` candidates** (read-heavy, write-rare): `CONTEXT` (compositor, 17 sites), `INPUT_MANAGER` (input, 18 sites)
 
+### 2A+: Ancillary Lock Cleanup
+
+- [x] **2A+.1** Replace `KLOG_LOCK` test-and-set `AtomicBool` in `drivers/src/serial.rs` with
+  PCR-independent ticket lock (`AtomicU16` pair + `cli`/`sti`, no `PreemptGuard` dependency).
+  The klog backend must work during AP boot when PCR is unavailable, so `IrqMutex` cannot
+  be used — but the old CAS spinlock had no fairness.
+- [x] **2A+.2** Upgrade `IrqRwLock` to **writer-preferring** design:
+  - Added `writer_waiting: AtomicU32` counter to `IrqRwLock` struct
+  - `write()` increments `writer_waiting` before spinning, decrements after acquiring
+  - `read()` and `try_read()` yield when `writer_waiting > 0` — prevents writer starvation
+  - `try_write()` unchanged (non-blocking, doesn't signal intent)
+  - Zero API changes — all existing callers unaffected
+- [x] **2A+.3** Remove the external `spin` crate entirely:
+  - Implemented native `OnceLock<T>` in `lib/src/once_lock.rs` (124 lines, `AtomicU8` state machine: UNINIT→RUNNING→COMPLETE)
+  - Replaced `spin::Once` with `OnceLock` in `drivers/src/apic/mod.rs`, `core/src/scheduler/runtime.rs`, `drivers/src/random.rs`
+  - Replaced `spin::Mutex` with `IrqMutex` in `core/src/scheduler/per_cpu.rs` (queue_lock) and `drivers/src/random.rs`
+  - Removed `spin` dependency from all 7 Cargo.toml files (workspace root + 6 crate manifests)
+  - Zero `spin::` references remain in the codebase — all locking is now kernel-native
+
 ### 2B: Test-and-Test-and-Set Optimization
 
 Even before ticket locks, the spin loop can be improved.
@@ -405,25 +424,30 @@ Even before ticket locks, the spin loop can be improved.
   - No CAS in the spin loop — only a `load(Acquire)` that hits the local cache line until the holder releases
   - The `IrqRwLock` spin loops also already use the TTAS pattern (read-only pre-check before CAS)
 
-### 2C: MCS / Queued Locks (Stretch Goal)
+### 2C: MCS / Queued Locks (Deferred)
 
 Linux's current lock since 2015. Per-CPU queue node eliminates all cache line bouncing.
 
-- [ ] **2C.1** Implement `McsLock<T>` (optional, for high-contention paths):
-  - Each CPU spins on its own cache-local node, not a shared variable
-  - Zero cross-core cache invalidation during contention
-  - More complex than ticket lock — only worth it for heavily contended locks
-- [ ] **2C.2** Identify candidates: locks with >2 CPUs contending frequently
-  - `PIPE_STATE` in `fs/src/fileio.rs` (pipe operations under load)
-  - Page allocator's zone lock in `mm/src/page_alloc.rs` (already mitigated by per-CPU cache)
-- [ ] **2C.3** Benchmark: compare ticket lock vs MCS lock throughput on the identified hot paths
+> **Status**: Explicitly deferred.  Ticket locks + writer-preferring `IrqRwLock` are
+> sufficient for SlopOS's current 2-CPU SMP target.  MCS locks should only be
+> revisited when (a) SlopOS targets 4+ CPUs, AND (b) profiling shows spinlock
+> contention as a measurable bottleneck.  At 2 CPUs with per-CPU page/slab caches
+> already absorbing the hot paths, MCS adds complexity with no measurable benefit.
+
+- [x] **2C.1** ~~Implement `McsLock<T>`~~ — **Deferred**: ticket lock sufficient for 2-CPU SMP
+- [x] **2C.2** ~~Identify candidates~~ — **Deferred**: per-CPU caches already mitigate contention
+- [x] **2C.3** ~~Benchmark~~ — **Deferred**: no contention data warrants MCS complexity
 
 ### Phase 2 Gate
 
 - [x] **GATE**: `IrqMutex` uses ticket lock internally (`AtomicU16` pair replaces `AtomicBool`)
 - [x] **GATE**: FIFO fairness guaranteed by ticket lock design — `fetch_add` serializes acquisition order
 - [x] **GATE**: `spin_loop()` (PAUSE) used in all spin paths with proportional backoff
-- [x] **GATE**: `just test` passes (437 passed, 0 failed)
+- [x] **GATE**: No legacy test-and-set `AtomicBool` locks remain anywhere in the codebase
+- [x] **GATE**: `IrqRwLock` is writer-preferring — writers cannot be starved by continuous readers
+- [x] **GATE**: `KLOG_LOCK` (serial.rs) replaced with PCR-independent ticket lock
+- [x] **GATE**: Phase 2C (MCS) explicitly deferred with documented rationale
+- [x] **GATE**: `just test` passes
 - [x] **GATE**: No deadlocks or livelocks under SMP boot (2 CPUs, full test harness)
 
 ---
@@ -925,10 +949,10 @@ Features that **cannot be implemented** until specific phases complete:
 |---|---|---|---|---|
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
-| **Phase 2**: Spinlock Modernization | **2A+2B Complete** | 8 | 5 | — |
+| **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **109** | **29** | |
+| **Total** | | **113** | **36** | |

@@ -1,7 +1,7 @@
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use crate::cpu;
 use crate::preempt::PreemptGuard;
@@ -211,12 +211,16 @@ impl<'a, T> Drop for IrqMutexGuard<'a, T> {
 // IrqRwLock - Reader-Writer Lock with IRQ disable
 // =============================================================================
 
-/// A reader-writer lock that disables interrupts while held.
+/// A **writer-preferring** reader-writer lock that disables interrupts while held.
 /// Multiple readers can hold the lock simultaneously, but writers get exclusive access.
+/// When a writer is waiting, new readers yield to prevent writer starvation.
 /// Essential for kernel data structures that need concurrent read access but exclusive writes.
 pub struct IrqRwLock<T> {
     /// State: 0 = unlocked, -1 = write-locked, >0 = number of readers
     state: core::sync::atomic::AtomicI32,
+    /// Number of writers waiting for access.  When > 0, new readers yield
+    /// to prevent writer starvation under continuous read traffic.
+    writer_waiting: AtomicU32,
     data: UnsafeCell<T>,
 }
 
@@ -245,12 +249,13 @@ impl<T> IrqRwLock<T> {
     pub const fn new(data: T) -> Self {
         Self {
             state: core::sync::atomic::AtomicI32::new(0),
+            writer_waiting: AtomicU32::new(0),
             data: UnsafeCell::new(data),
         }
     }
 
     /// Acquire read access. Multiple readers can hold the lock simultaneously.
-    /// Blocks if a writer holds the lock.
+    /// Blocks if a writer holds the lock or if writers are waiting (writer preference).
     #[inline]
     pub fn read(&self) -> IrqRwLockReadGuard<'_, T> {
         let preempt = PreemptGuard::new();
@@ -258,8 +263,9 @@ impl<T> IrqRwLock<T> {
 
         loop {
             let state = self.state.load(Ordering::Relaxed);
-            // Can acquire read if no writer (state >= 0)
-            if state >= 0 {
+            // Yield to waiting writers: don't acquire read if a writer is queued.
+            // This prevents writer starvation under continuous read traffic.
+            if state >= 0 && self.writer_waiting.load(Ordering::Relaxed) == 0 {
                 if self
                     .state
                     .compare_exchange_weak(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
@@ -277,13 +283,15 @@ impl<T> IrqRwLock<T> {
     }
 
     /// Try to acquire read access without blocking.
+    /// Fails if the lock is write-held or if writers are waiting.
     #[inline]
     pub fn try_read(&self) -> Option<IrqRwLockReadGuard<'_, T>> {
         let preempt = PreemptGuard::new();
         let saved_flags = cpu::save_flags_cli();
 
         let state = self.state.load(Ordering::Relaxed);
-        if state >= 0 {
+        // Respect writer preference: fail if a writer is queued.
+        if state >= 0 && self.writer_waiting.load(Ordering::Relaxed) == 0 {
             if self
                 .state
                 .compare_exchange(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
@@ -302,11 +310,15 @@ impl<T> IrqRwLock<T> {
     }
 
     /// Acquire write access. Only one writer can hold the lock, and no readers.
+    /// Signals intent so new readers yield (writer preference).
     /// Blocks until exclusive access is available.
     #[inline]
     pub fn write(&self) -> IrqRwLockWriteGuard<'_, T> {
         let preempt = PreemptGuard::new();
         let saved_flags = cpu::save_flags_cli();
+
+        // Signal that a writer is waiting — new readers will yield.
+        self.writer_waiting.fetch_add(1, Ordering::Relaxed);
 
         loop {
             // Can acquire write only if completely unlocked (state == 0)
@@ -315,6 +327,8 @@ impl<T> IrqRwLock<T> {
                 .compare_exchange_weak(0, -1, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
+                // Acquired — no longer "waiting".
+                self.writer_waiting.fetch_sub(1, Ordering::Relaxed);
                 return IrqRwLockWriteGuard {
                     lock: self,
                     saved_flags,
