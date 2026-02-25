@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1A (XSAVE Feature Detection) complete
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -249,20 +249,20 @@ The target JSON (`targets/x86_64-slos.json`) currently disables AVX with `"-mmx,
 
 ### 1A: XSAVE Feature Detection
 
-- [ ] **1A.1** Add CPUID leaf 0x0D detection to `lib/src/cpu/cpuid.rs`:
+- [x] **1A.1** Add CPUID leaf 0x0D detection to `lib/src/cpu/cpuid.rs`:
   - Query `CPUID.0x0D.0:EBX` for XSAVE area size (with current XCR0)
   - Query `CPUID.0x0D.0:ECX` for maximum XSAVE area size (all features)
   - Query `CPUID.0x0D.0:EAX` for supported XCR0 feature bits
   - Export: `xsave_area_size() -> usize`, `xsave_max_size() -> usize`, `xcr0_supported() -> u64`
-- [ ] **1A.2** Define XCR0 feature bits in `lib/src/cpu/control_regs.rs`:
+- [x] **1A.2** Define XCR0 feature bits in `lib/src/cpu/control_regs.rs`:
   - Bit 0: x87 (always set)
   - Bit 1: SSE (MXCSR + XMM0-15)
   - Bit 2: AVX (YMM0-15 upper halves)
   - Bit 5-7: AVX-512 (opmask, ZMM upper, ZMM16-31)
-- [ ] **1A.3** Implement `xcr0_read() -> u64` and `xcr0_write(val: u64)`:
+- [x] **1A.3** Implement `xcr0_read() -> u64` and `xcr0_write(val: u64)`:
   - Uses `xgetbv` / `xsetbv` instructions
   - Only callable after `CR4.OSXSAVE` is set
-- [ ] **1A.4** Detect XSAVE support: `CPUID.1:ECX[bit 26]` (XSAVE) and `CPUID.1:ECX[bit 27]` (OSXSAVE)
+- [x] **1A.4** Detect XSAVE support: `CPUID.1:ECX[bit 26]` (XSAVE) and `CPUID.1:ECX[bit 27]` (OSXSAVE)
   - Also detect XSAVEC (compact format): `CPUID.0x0D.1:EAX[bit 1]`
   - Prefer XSAVEC when available (smaller save area, no gaps)
 
@@ -922,11 +922,11 @@ Features that **cannot be implemented** until specific phases complete:
 | Phase | Status | Tasks | Done | Blocked |
 |---|---|---|---|---|
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
-| **Phase 1**: XSAVE/XRSTOR | Not Started | 14 | 0 | — |
+| **Phase 1**: XSAVE/XRSTOR | In Progress | 14 | 4 | — |
 | **Phase 2**: Spinlock Modernization | Not Started | 8 | 0 | — |
 | **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **109** | **8** | |
+| **Total** | | **109** | **12** | |

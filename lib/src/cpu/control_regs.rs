@@ -207,3 +207,111 @@ pub const CR4_OSXSAVE: u64 = Cr4Flags::OSXSAVE.bits();
 pub const CR4_SMEP: u64 = Cr4Flags::SMEP.bits();
 pub const CR4_SMAP: u64 = Cr4Flags::SMAP.bits();
 pub const CR4_PKE: u64 = Cr4Flags::PKE.bits();
+
+// =============================================================================
+// XCR0 (Extended Control Register 0) — XSAVE feature enable mask
+// =============================================================================
+
+bitflags! {
+    /// Feature-enable bits for the Extended Control Register 0 (XCR0).
+    ///
+    /// XCR0 controls which processor state components are managed by the
+    /// XSAVE/XRSTOR family of instructions.  Writing to XCR0 requires
+    /// `CR4.OSXSAVE` to be set first (see [`Cr4Flags::OSXSAVE`]).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Xcr0Flags: u64 {
+        /// x87 FPU state (always set — hardware enforces bit 0 = 1).
+        const X87 = 1 << 0;
+        /// SSE state: MXCSR + XMM0–XMM15.
+        const SSE = 1 << 1;
+        /// AVX state: upper halves of YMM0–YMM15.
+        const AVX = 1 << 2;
+        /// MPX bound registers (BND0–BND3).  Deprecated on recent CPUs.
+        const BNDREG = 1 << 3;
+        /// MPX bound configuration/status (BNDCFGU + BNDSTATUS).
+        const BNDCSR = 1 << 4;
+        /// AVX-512 opmask registers (k0–k7).
+        const OPMASK = 1 << 5;
+        /// AVX-512 upper 256 bits of ZMM0–ZMM15.
+        const ZMM_HI256 = 1 << 6;
+        /// AVX-512 full ZMM16–ZMM31.
+        const HI16_ZMM = 1 << 7;
+        /// Processor Trace state.
+        const PT = 1 << 8;
+        /// Protection Key Rights for User pages.
+        const PKRU = 1 << 9;
+    }
+}
+
+/// Read the Extended Control Register 0 (XCR0) via `XGETBV`.
+///
+/// # Safety contract
+/// Caller must ensure `CR4.OSXSAVE` is set before calling this function.
+/// Reading XCR0 when OSXSAVE is clear triggers `#UD`.
+#[inline(always)]
+pub fn xcr0_read() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    // ECX = 0 selects XCR0.
+    unsafe {
+        asm!(
+            "xgetbv",
+            in("ecx") 0u32,
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Read XCR0 and return typed [`Xcr0Flags`].
+///
+/// See [`xcr0_read`] for safety requirements.
+#[inline(always)]
+pub fn xcr0_read_flags() -> Xcr0Flags {
+    Xcr0Flags::from_bits_truncate(xcr0_read())
+}
+
+/// Write the Extended Control Register 0 (XCR0) via `XSETBV`.
+///
+/// # Safety contract
+/// - `CR4.OSXSAVE` must be set.
+/// - `value` must have bit 0 (x87) set — hardware requires it.
+/// - Only bits reported as supported by `CPUID.0Dh:EAX` | `(EDX << 32)` may
+///   be set; setting unsupported bits triggers `#GP`.
+#[inline(always)]
+pub fn xcr0_write(value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
+    // ECX = 0 selects XCR0.
+    unsafe {
+        asm!(
+            "xsetbv",
+            in("ecx") 0u32,
+            in("eax") lo,
+            in("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Write XCR0 from typed [`Xcr0Flags`].
+///
+/// See [`xcr0_write`] for safety requirements.
+#[inline(always)]
+pub fn xcr0_write_flags(flags: Xcr0Flags) {
+    xcr0_write(flags.bits());
+}
+
+// Legacy-style constants for XCR0 bits (match CR0_*/CR4_* naming convention).
+pub const XCR0_X87: u64 = Xcr0Flags::X87.bits();
+pub const XCR0_SSE: u64 = Xcr0Flags::SSE.bits();
+pub const XCR0_AVX: u64 = Xcr0Flags::AVX.bits();
+pub const XCR0_BNDREG: u64 = Xcr0Flags::BNDREG.bits();
+pub const XCR0_BNDCSR: u64 = Xcr0Flags::BNDCSR.bits();
+pub const XCR0_OPMASK: u64 = Xcr0Flags::OPMASK.bits();
+pub const XCR0_ZMM_HI256: u64 = Xcr0Flags::ZMM_HI256.bits();
+pub const XCR0_HI16_ZMM: u64 = Xcr0Flags::HI16_ZMM.bits();
+pub const XCR0_PT: u64 = Xcr0Flags::PT.bits();
+pub const XCR0_PKRU: u64 = Xcr0Flags::PKRU.bits();
