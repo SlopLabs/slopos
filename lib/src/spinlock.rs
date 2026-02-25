@@ -1,7 +1,7 @@
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use crate::cpu;
 use crate::preempt::PreemptGuard;
@@ -9,17 +9,28 @@ use crate::preempt::PreemptGuard;
 /// Mutex that disables interrupts AND preemption while held.
 /// Essential for kernel code accessed from both normal and interrupt contexts.
 ///
+/// Uses a **ticket lock** internally for FIFO fairness: each acquirer takes a
+/// monotonically-increasing ticket and spins until `now_serving` matches. This
+/// guarantees that CPUs acquire the lock in the order they requested it,
+/// eliminating starvation under SMP contention.
+///
 /// Supports poisoning semantics for panic recovery: after a panic-time
 /// force-unlock via `poison_unlock()`, the mutex is marked poisoned.
 /// Callers can check `is_poisoned()` to determine if the protected data
 /// may be in an inconsistent state and needs reinitialization.
 pub struct IrqMutex<T> {
-    lock: AtomicBool,
+    /// Monotonically-increasing ticket counter. Each `lock()` call takes the
+    /// next ticket via `fetch_add(1)`. Wraps at `u16::MAX` — equality checks
+    /// handle wrap-around correctly.
+    next_ticket: AtomicU16,
+    /// The ticket currently being served. Incremented by `fetch_add(1)` on
+    /// unlock. A waiter spins until `now_serving == my_ticket`.
+    now_serving: AtomicU16,
     poisoned: AtomicBool,
     data: UnsafeCell<T>,
 }
 
-// SAFETY: IrqMutex provides exclusive access through atomic locking with
+// SAFETY: IrqMutex provides exclusive access through ticket-lock acquisition with
 // interrupts and preemption disabled, making it safe to share across contexts.
 unsafe impl<T: Send> Send for IrqMutex<T> {}
 unsafe impl<T: Send> Sync for IrqMutex<T> {}
@@ -34,13 +45,17 @@ impl<T> IrqMutex<T> {
     #[inline]
     pub const fn new(data: T) -> Self {
         Self {
-            lock: AtomicBool::new(false),
+            next_ticket: AtomicU16::new(0),
+            now_serving: AtomicU16::new(0),
             poisoned: AtomicBool::new(false),
             data: UnsafeCell::new(data),
         }
     }
 
     /// Force unlock the mutex without proper guard handling.
+    ///
+    /// Advances `now_serving` to match `next_ticket`, releasing the lock and
+    /// unblocking any waiters in FIFO order.
     ///
     /// # Safety
     /// This is ONLY safe to call after a panic recovery via longjmp, when we know
@@ -52,7 +67,10 @@ impl<T> IrqMutex<T> {
     /// that the protected data may be in an inconsistent state.
     #[inline]
     pub unsafe fn force_unlock(&self) {
-        self.lock.store(false, Ordering::Release);
+        // Snap now_serving forward to next_ticket, releasing the lock entirely.
+        // This is safe under the caller's contract (no concurrent holder).
+        self.now_serving
+            .store(self.next_ticket.load(Ordering::Relaxed), Ordering::Release);
     }
 
     /// Force unlock the mutex AND mark it as poisoned.
@@ -68,7 +86,8 @@ impl<T> IrqMutex<T> {
     #[inline]
     pub unsafe fn poison_unlock(&self) {
         self.poisoned.store(true, Ordering::Release);
-        self.lock.store(false, Ordering::Release);
+        self.now_serving
+            .store(self.next_ticket.load(Ordering::Relaxed), Ordering::Release);
     }
 
     /// Returns true if this mutex was force-unlocked during panic recovery.
@@ -86,10 +105,12 @@ impl<T> IrqMutex<T> {
         self.poisoned.store(false, Ordering::Release);
     }
 
-    /// Check if the lock is currently held.
+    /// Check if the lock is currently held (or has waiters).
     #[inline]
     pub fn is_locked(&self) -> bool {
-        self.lock.load(Ordering::Relaxed)
+        let next = self.next_ticket.load(Ordering::Relaxed);
+        let serving = self.now_serving.load(Ordering::Relaxed);
+        next != serving
     }
 
     #[inline]
@@ -97,12 +118,27 @@ impl<T> IrqMutex<T> {
         let preempt = PreemptGuard::new();
         let saved_flags = cpu::save_flags_cli();
 
-        while self
-            .lock
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            spin_loop();
+        // Take a ticket. fetch_add wraps at u16::MAX → 0; equality checks are
+        // wrap-safe so this is correct for any number of acquisitions.
+        let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+
+        // Spin until our ticket is being served.
+        // The read of `now_serving` is Acquire so that all writes made by the
+        // previous holder are visible once we observe our ticket being served.
+        //
+        // Proportional backoff: the further away our ticket is from now_serving,
+        // the more PAUSE iterations we issue per check. This reduces cache-line
+        // traffic when multiple CPUs are queued.
+        loop {
+            let serving = self.now_serving.load(Ordering::Acquire);
+            if serving == my_ticket {
+                break;
+            }
+            // Proportional backoff: pause 1× per ticket of distance, capped at 64.
+            let distance = my_ticket.wrapping_sub(serving) as u32;
+            for _ in 0..distance.min(64) {
+                spin_loop();
+            }
         }
 
         IrqMutexGuard {
@@ -117,9 +153,18 @@ impl<T> IrqMutex<T> {
         let preempt = PreemptGuard::new();
         let saved_flags = cpu::save_flags_cli();
 
+        // Succeed only if the lock is currently free (next_ticket == now_serving).
+        // CAS next_ticket forward by 1; if someone else grabbed a ticket in the
+        // meantime the CAS fails and we bail out without waiting.
+        let current = self.now_serving.load(Ordering::Relaxed);
         if self
-            .lock
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .next_ticket
+            .compare_exchange(
+                current,
+                current.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
             .is_ok()
         {
             Some(IrqMutexGuard {
@@ -154,7 +199,9 @@ impl<'a, T> DerefMut for IrqMutexGuard<'a, T> {
 impl<'a, T> Drop for IrqMutexGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
-        self.mutex.lock.store(false, Ordering::Release);
+        // Advance now_serving to hand the lock to the next waiter in FIFO order.
+        // Release ordering ensures our writes are visible to the next acquirer.
+        self.mutex.now_serving.fetch_add(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
         // _preempt drops after this, potentially triggering deferred reschedule
     }
