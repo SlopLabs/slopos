@@ -3,12 +3,52 @@
 # Low-level task context switching for x86_64
 # AT&T syntax for cooperative task switching
 #
+# FPU/SIMD state is saved/restored unconditionally using XSAVE64/XRSTOR64.
+# XSAVE is a hard boot requirement — the kernel panics in xsave::init() if
+# the CPU does not support it.  There is no FXSAVE fallback.
+#
+# The component mask ACTIVE_XCR0 (AtomicU64, #[no_mangle]) is defined in
+# lib/src/cpu/xsave.rs and referenced here via RIP-relative addressing.
+#
 
 .section .text
 .global context_switch
 
 # FPU state offset from TaskContext pointer (TaskContext is 200 bytes + 8 padding for 16-byte alignment)
 .equ FPU_STATE_OFFSET, 0xD0
+
+# ---------------------------------------------------------------------------
+# FPU_SAVE / FPU_RESTORE macros
+#
+# Save or restore the full FPU/SIMD state (x87, SSE, AVX, AVX-512) using
+# unconditional XSAVE64/XRSTOR64.  XSAVE is a hard boot requirement.
+#
+# Parameters:
+#   \ctx_reg — register holding the context / task pointer.
+#              Must NOT be %rax, %rcx, or %rdx.
+#
+# Clobbers: %rax, %rcx, %rdx  (all volatile / caller-saved).
+#
+# The FPU state buffer at FPU_STATE_OFFSET(\ctx_reg) must be 64-byte
+# aligned and at least `xsave::area_size()` bytes (see FpuState in
+# task_struct.rs — compile-time max 2688 B).
+# ---------------------------------------------------------------------------
+
+.macro FPU_SAVE ctx_reg
+    leaq    FPU_STATE_OFFSET(\ctx_reg), %rcx
+    movq    ACTIVE_XCR0(%rip), %rax
+    movq    %rax, %rdx
+    shrq    $32, %rdx
+    xsave64 (%rcx)
+.endm
+
+.macro FPU_RESTORE ctx_reg
+    leaq    FPU_STATE_OFFSET(\ctx_reg), %rcx
+    movq    ACTIVE_XCR0(%rip), %rax
+    movq    %rax, %rdx
+    shrq    $32, %rdx
+    xrstor64 (%rcx)
+.endm
 
 #
 # context_switch(void *old_context, void *new_context)
@@ -20,16 +60,16 @@
 #   0x80: rip, 0x88: rflags
 #   0x90-0xB8: segment registers
 #   0xC0: cr3
-# FPU state at offset 0xC8 from context pointer (512 bytes, 16-byte aligned)
+# FPU/SIMD state at FPU_STATE_OFFSET from context pointer (up to 2688 bytes, 64-byte aligned)
 #
 
 context_switch:
     test    %rdi, %rdi
     jz      .Lctx_load
 
-    # Save FPU/SSE state first (before we clobber any XMM regs)
-    leaq    FPU_STATE_OFFSET(%rdi), %rax
-    fxsave64 (%rax)
+    # Save FPU/SIMD state first (before we clobber any XMM/YMM/ZMM regs).
+    # Clobbers rax, rcx, rdx — all volatile and saved to context below.
+    FPU_SAVE %rdi
 
     # Save GPRs
     movq    %rax, 0x00(%rdi)
@@ -105,9 +145,9 @@ context_switch:
     movq    %rax, %cr3
 .Lctx_cr3_done:
 
-    # Restore FPU/SSE state before loading GPRs
-    leaq    FPU_STATE_OFFSET(%r15), %rax
-    fxrstor64 (%rax)
+    # Restore FPU/SIMD state before loading GPRs.
+    # Clobbers rax, rcx, rdx — all overwritten by GPR restore below.
+    FPU_RESTORE %r15
 
     # Segments - restore DS, ES, FS, SS but NOT GS
     # Writing to GS selector zeros IA32_GS_BASE MSR in long mode, breaking per-CPU access
@@ -163,9 +203,9 @@ context_switch_user:
     test    %rdi, %rdi
     jz      .Lctx_user_load
 
-    # Save FPU/SSE state first
-    leaq    FPU_STATE_OFFSET(%rdi), %rax
-    fxsave64 (%rax)
+    # Save FPU/SIMD state first.
+    # Clobbers rax, rcx, rdx — all volatile and saved to context below.
+    FPU_SAVE %rdi
 
     # Save GPRs
     movq    %rax, 0x00(%rdi)
@@ -235,9 +275,9 @@ context_switch_user:
     movq    0x80(%r15), %rax
     pushq   %rax
 
-    # Restore FPU/SSE state
-    leaq    FPU_STATE_OFFSET(%r15), %rax
-    fxrstor64 (%rax)
+    # Restore FPU/SIMD state.
+    # Clobbers rax, rcx, rdx — overwritten by MSR writes and GPR restore below.
+    FPU_RESTORE %r15
 
     # Segments (excluding GS - managed by SWAPGS for SYSCALL compatibility)
     movq    0x98(%r15), %rax
@@ -306,9 +346,9 @@ simple_context_switch:
     test    %r8, %r8
     jz      simple_load_new
 
-    # Save FPU/SSE state
-    leaq    FPU_STATE_OFFSET(%r8), %rax
-    fxsave64 (%rax)
+    # Save FPU/SIMD state.
+    # Clobbers rax, rcx, rdx — all volatile.
+    FPU_SAVE %r8
 
     # Save callee-saved registers (RSP+8: see context_switch save comment)
     leaq    8(%rsp), %rax
@@ -328,9 +368,9 @@ simple_context_switch:
     movq    %r9, %rsi
 
 simple_load_new:
-    # Restore FPU/SSE state
-    leaq    FPU_STATE_OFFSET(%r9), %rax
-    fxrstor64 (%rax)
+    # Restore FPU/SIMD state.
+    # Clobbers rax, rcx, rdx — overwritten by register restore below.
+    FPU_RESTORE %r9
 
     # Restore callee-saved registers
     movq    0x38(%r9), %rsp
