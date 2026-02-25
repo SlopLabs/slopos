@@ -13,6 +13,8 @@ pub mod ioapic;
 pub mod irq;
 pub mod net;
 pub mod pci;
+#[cfg(feature = "itests")]
+pub mod pci_cap_tests;
 pub mod pci_defs;
 pub mod pic;
 pub mod pit;

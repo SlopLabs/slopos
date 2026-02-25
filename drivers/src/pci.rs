@@ -137,6 +137,130 @@ pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u
     pci_config_write32(bus, device, function, offset, new_dword);
 }
 
+// =============================================================================
+// PCI Capability List Walking
+// =============================================================================
+
+/// Iterator over PCI capabilities in a device's configuration space.
+///
+/// Walks the capability linked list starting from the Capabilities Pointer
+/// (offset 0x34). Each capability header contains an 8-bit ID and a pointer
+/// to the next capability.
+///
+/// # Infinite-loop protection
+///
+/// A guard counter limits traversal to [`Self::MAX_CAPS`] entries to protect
+/// against malformed capability lists on buggy hardware.
+pub struct PciCapabilityIter {
+    bus: u8,
+    device: u8,
+    function: u8,
+    next_ptr: u8,
+    /// Remaining entries before we give up (infinite-loop guard).
+    remaining: u8,
+}
+
+impl PciCapabilityIter {
+    /// Maximum capabilities to visit before assuming a malformed list.
+    ///
+    /// The standard 256-byte config space can fit at most ~60 entries
+    /// (4 bytes minimum per capability, starting around offset 0x40).
+    /// 48 is a generous upper bound matching Linux's `PCI_FIND_CAP_TTL`.
+    const MAX_CAPS: u8 = 48;
+
+    /// Create a capability iterator for the specified PCI function.
+    ///
+    /// Returns an empty iterator if the device's Status register does not
+    /// advertise a capabilities list (bit 4 of Status).
+    pub fn new(bus: u8, device: u8, function: u8) -> Self {
+        let status = pci_config_read16(bus, device, function, PCI_STATUS_OFFSET);
+        let first_ptr = if (status & PCI_STATUS_CAP_LIST) != 0 {
+            // PCI spec: bottom 2 bits of the Capabilities Pointer are reserved.
+            pci_config_read8(bus, device, function, PCI_CAP_PTR_OFFSET) & 0xFC
+        } else {
+            0
+        };
+
+        Self {
+            bus,
+            device,
+            function,
+            next_ptr: first_ptr,
+            remaining: Self::MAX_CAPS,
+        }
+    }
+
+    /// Create a capability iterator for a known [`PciDeviceInfo`].
+    pub fn for_device(info: &PciDeviceInfo) -> Self {
+        Self::new(info.bus, info.device, info.function)
+    }
+}
+
+impl Iterator for PciCapabilityIter {
+    type Item = PciCapability;
+
+    fn next(&mut self) -> Option<PciCapability> {
+        if self.next_ptr == 0 || self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+
+        let offset = self.next_ptr;
+        let id = pci_config_read8(self.bus, self.device, self.function, offset);
+        // PCI spec: bottom 2 bits of the Next Pointer are reserved.
+        let next = pci_config_read8(self.bus, self.device, self.function, offset + 1) & 0xFC;
+
+        self.next_ptr = next;
+        Some(PciCapability { offset, id })
+    }
+}
+
+/// Find the first PCI capability with the given ID.
+///
+/// Returns the config-space byte offset of the capability header,
+/// or `None` if the device doesn't advertise that capability.
+pub fn pci_find_capability(bus: u8, device: u8, function: u8, cap_id: u8) -> Option<u8> {
+    PciCapabilityIter::new(bus, device, function)
+        .find(|cap| cap.id == cap_id)
+        .map(|cap| cap.offset)
+}
+
+/// Convenience methods for PCI capability queries on a known device.
+impl PciDeviceInfo {
+    /// Find the first capability with the given ID for this device.
+    pub fn find_capability(&self, cap_id: u8) -> Option<u8> {
+        pci_find_capability(self.bus, self.device, self.function, cap_id)
+    }
+
+    /// Iterate over all PCI capabilities of this device.
+    pub fn capabilities(&self) -> PciCapabilityIter {
+        PciCapabilityIter::for_device(self)
+    }
+}
+
+/// Human-readable name for a PCI capability ID (for boot log output).
+fn pci_cap_id_name(id: u8) -> &'static str {
+    match id {
+        0x01 => "PM",
+        0x02 => "AGP",
+        0x03 => "VPD",
+        0x04 => "SlotID",
+        PCI_CAP_ID_MSI => "MSI",
+        0x06 => "CompactPCI",
+        0x07 => "PCI-X",
+        0x08 => "HyperTransport",
+        PCI_CAP_ID_VNDR => "Vendor",
+        0x0A => "DebugPort",
+        0x0B => "CompactPCI-CRC",
+        0x0D => "Bridge-SubVID",
+        PCI_CAP_ID_PCIE => "PCIe",
+        PCI_CAP_ID_MSIX => "MSI-X",
+        0x12 => "SATA",
+        0x13 => "AF",
+        _ => "Unknown",
+    }
+}
+
 fn pci_read_vendor_id(bus: u8, device: u8, function: u8) -> u16 {
     pci_config_read16(bus, device, function, PCI_VENDOR_ID_OFFSET)
 }
@@ -229,6 +353,18 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
         }
     }
 
+    // ----- Capability list discovery (single walk) -----
+    let mut msi_cap_offset: Option<u8> = None;
+    let mut msix_cap_offset: Option<u8> = None;
+
+    for cap in PciCapabilityIter::new(bus, device, function) {
+        match cap.id {
+            PCI_CAP_ID_MSI if msi_cap_offset.is_none() => msi_cap_offset = Some(cap.offset),
+            PCI_CAP_ID_MSIX if msix_cap_offset.is_none() => msix_cap_offset = Some(cap.offset),
+            _ => {}
+        }
+    }
+
     let info = PciDeviceInfo {
         bus,
         device,
@@ -244,6 +380,8 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
         irq_pin: interrupt_pin,
         bar_count,
         bars,
+        msi_cap_offset,
+        msix_cap_offset,
     };
 
     if state.device_count < PCI_MAX_DEVICES {
@@ -263,6 +401,16 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
         prog_if,
         revision
     );
+
+    // Log capabilities (if any)
+    for cap in info.capabilities() {
+        klog_info!(
+            "    CAP: 0x{:02x} ({}) at offset 0x{:02x}",
+            cap.id,
+            pci_cap_id_name(cap.id),
+            cap.offset
+        );
+    }
 
     for (i, bar) in bars.iter().enumerate() {
         if bar.base != 0 || bar.size != 0 {
@@ -417,4 +565,19 @@ pub fn pci_probe_drivers() {
             }
         }
     }
+}
+
+/// Retrieve all devices that advertise MSI or MSI-X capability.
+pub fn pci_get_msi_capable_devices() -> ([PciDeviceInfo; PCI_MAX_DEVICES], usize) {
+    let state = ENUM_STATE.lock();
+    let mut result = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];
+    let mut count = 0;
+    for i in 0..state.device_count {
+        let dev = &state.devices[i];
+        if dev.has_msi() || dev.has_msix() {
+            result[count] = *dev;
+            count += 1;
+        }
+    }
+    (result, count)
 }

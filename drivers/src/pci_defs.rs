@@ -76,8 +76,17 @@ pub const PCI_CLASS_DISPLAY: u8 = 0x03;
 // Capability IDs
 // =============================================================================
 
+/// PCI Capability ID: MSI (Message Signaled Interrupts).
+pub const PCI_CAP_ID_MSI: u8 = 0x05;
+
 /// PCI Capability ID: Vendor-specific.
 pub const PCI_CAP_ID_VNDR: u8 = 0x09;
+
+/// PCI Capability ID: PCI Express.
+pub const PCI_CAP_ID_PCIE: u8 = 0x10;
+
+/// PCI Capability ID: MSI-X (Extended Message Signaled Interrupts).
+pub const PCI_CAP_ID_MSIX: u8 = 0x11;
 
 // =============================================================================
 // Known Vendor IDs
@@ -131,6 +140,18 @@ impl PciBarInfo {
     }
 }
 
+/// A single PCI capability discovered in the configuration space linked list.
+///
+/// Each capability header has an 8-bit ID (see `PCI_CAP_ID_*` constants) and
+/// occupies a variable-length region of config space starting at `offset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciCapability {
+    /// Byte offset of this capability header in configuration space.
+    pub offset: u8,
+    /// Capability ID (`PCI_CAP_ID_MSI`, `PCI_CAP_ID_MSIX`, etc.).
+    pub id: u8,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct PciDeviceInfo {
@@ -148,6 +169,10 @@ pub struct PciDeviceInfo {
     pub irq_pin: u8,
     pub bar_count: u8,
     pub bars: [PciBarInfo; PCI_MAX_BARS],
+    /// Config-space offset of the MSI capability, if present.
+    pub msi_cap_offset: Option<u8>,
+    /// Config-space offset of the MSI-X capability, if present.
+    pub msix_cap_offset: Option<u8>,
 }
 
 impl PciDeviceInfo {
@@ -167,6 +192,20 @@ impl PciDeviceInfo {
             irq_pin: 0,
             bar_count: 0,
             bars: [PciBarInfo::zeroed(); PCI_MAX_BARS],
+            msi_cap_offset: None,
+            msix_cap_offset: None,
         }
+    }
+
+    /// Whether this device advertises MSI capability.
+    #[inline]
+    pub const fn has_msi(&self) -> bool {
+        self.msi_cap_offset.is_some()
+    }
+
+    /// Whether this device advertises MSI-X capability.
+    #[inline]
+    pub const fn has_msix(&self) -> bool {
+        self.msix_cap_offset.is_some()
     }
 }

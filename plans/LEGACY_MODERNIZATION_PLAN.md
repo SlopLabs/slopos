@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed)
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -480,21 +480,29 @@ MSI (Message Signaled Interrupts) writes a message directly to the LAPIC — no 
 
 MSI/MSI-X are discovered through PCI capability structures.
 
-- [ ] **3A.1** Implement PCI capability list walking in `drivers/src/pci.rs`:
+- [x] **3A.1** Implement PCI capability list walking in `drivers/src/pci.rs`:
   - Read `Status Register` (offset 0x06) bit 4: capabilities list present
   - Read `Capabilities Pointer` (offset 0x34): points to first capability
   - Walk linked list: each entry has `{ cap_id: u8, next_ptr: u8, ... }`
   - Return capability offset for a given ID
-- [ ] **3A.2** Define capability IDs in `drivers/src/pci_defs.rs`:
-  - `PCI_CAP_MSI = 0x05`
-  - `PCI_CAP_MSIX = 0x11`
-  - `PCI_CAP_VENDOR = 0x09` (used by VirtIO)
-- [ ] **3A.3** Implement `pci_find_capability(bus, dev, func, cap_id) -> Option<u8>`:
-  - Walk the capability list, return offset of matching capability
+  - Implemented as `PciCapabilityIter` struct with `Iterator` trait — idiomatic Rust linked-list traversal
+  - Guard counter (48 iterations, matching Linux `PCI_FIND_CAP_TTL`) protects against malformed lists
+  - Bottom 2 bits of pointers masked per PCI spec (DWORD alignment)
+- [x] **3A.2** Define capability IDs in `drivers/src/pci_defs.rs`:
+  - `PCI_CAP_ID_MSI = 0x05`
+  - `PCI_CAP_ID_MSIX = 0x11`
+  - `PCI_CAP_ID_PCIE = 0x10` (added for Phase 4 readiness)
+  - `PCI_CAP_ID_VNDR = 0x09` (already existed, used by VirtIO)
+  - `PciCapability { offset: u8, id: u8 }` struct for iterator yield type
+- [x] **3A.3** Implement `pci_find_capability(bus, dev, func, cap_id) -> Option<u8>`:
+  - Wraps `PciCapabilityIter` with idiomatic `.find().map()` chain
+  - Convenience methods on `PciDeviceInfo`: `find_capability()`, `capabilities()`, `has_msi()`, `has_msix()`
   - Used by MSI, MSI-X, and VirtIO modern device detection
-- [ ] **3A.4** Store discovered capabilities in `PciDeviceInfo`:
-  - Add `msi_cap_offset: Option<u8>` and `msix_cap_offset: Option<u8>`
-  - Populated during PCI enumeration
+- [x] **3A.4** Store discovered capabilities in `PciDeviceInfo`:
+  - Added `msi_cap_offset: Option<u8>` and `msix_cap_offset: Option<u8>`
+  - Populated during PCI enumeration via single capability list walk
+  - All capabilities logged during enumeration: `CAP: 0x{id} ({name}) at offset 0x{off}`
+  - `pci_get_msi_capable_devices()` helper for downstream MSI/MSI-X consumers
 
 ### 3B: MSI Support
 
@@ -950,9 +958,9 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
-| **Phase 3**: MSI/MSI-X | Not Started | 14 | 0 | — |
+| **Phase 3**: MSI/MSI-X | 3A complete, 3B–3D not started | 14 | 4 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **113** | **36** | |
+| **Total** | | **113** | **40** | |
