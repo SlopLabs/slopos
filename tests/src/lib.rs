@@ -11,6 +11,7 @@ use slopos_lib::{StateFlag, klog_info};
 
 pub mod exception_tests;
 pub mod fpu_tests;
+pub mod xsave_tests;
 
 pub const TESTS_MAX_SUITES: usize = HARNESS_MAX_SUITES;
 
