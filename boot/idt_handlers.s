@@ -259,6 +259,53 @@ isr_spurious:
     INTERRUPT_HANDLER 255, 0
 
 # =============================================================================
+# MSI Interrupt Stubs (vectors 48-223)
+# =============================================================================
+#
+# Generated programmatically using .altmacro + .rept.
+# Each stub uses the same INTERRUPT_HANDLER macro as legacy IRQs —
+# the vector number is embedded in the frame so the Rust dispatcher
+# can route to the correct MSI handler.
+#
+# Address table: msi_vector_table[i] = address of stub for vector (48 + i)
+# Used by idt_init() in Rust to install IDT entries.
+
+.altmacro
+
+.macro MAKE_MSI_STUB vec
+    .global msi_vector_\vec
+    msi_vector_\vec:
+        INTERRUPT_HANDLER \vec, 0
+.endm
+
+.macro EMIT_MSI_TABLE_ENTRY vec
+    .quad msi_vector_\vec
+.endm
+
+# Generate 176 stubs for vectors 48 through 223
+.set _msi_vec, 48
+.rept 176
+    MAKE_MSI_STUB %_msi_vec
+    .set _msi_vec, _msi_vec + 1
+.endr
+
+# Export a table of stub entry-point addresses for Rust consumption.
+.section .rodata
+.align 8
+.global msi_vector_table
+msi_vector_table:
+.set _msi_vec, 48
+.rept 176
+    EMIT_MSI_TABLE_ENTRY %_msi_vec
+    .set _msi_vec, _msi_vec + 1
+.endr
+
+.noaltmacro
+
+# Resume .text for the SYSCALL handler that follows.
+.section .text
+
+# =============================================================================
 # SYSCALL Entry Point (modern fast syscall via SYSCALL instruction)
 # =============================================================================
 #

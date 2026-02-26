@@ -20,7 +20,8 @@ pub use slopos_lib::arch::idt::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    IdtEntry, LAPIC_TIMER_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    IdtEntry, LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, RESCHEDULE_IPI_VECTOR,
+    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
 #[repr(C, packed)]
@@ -138,6 +139,10 @@ unsafe extern "C" {
     fn irq13();
     fn irq14();
     fn irq15();
+
+    /// Table of MSI vector stub entry-point addresses (vectors 48–223).
+    /// Generated in `idt_handlers.s`; index i = address of stub for vector (48 + i).
+    static msi_vector_table: [u64; MSI_VECTOR_COUNT];
 }
 pub fn idt_init() {
     klog_debug!("IDT: init start");
@@ -213,6 +218,24 @@ pub fn idt_init() {
         handler_ptr(isr_lapic_timer),
         0x08,
         IDT_GATE_INTERRUPT,
+    );
+
+    // MSI interrupt vectors (48–223): install stubs from the assembly-generated table.
+    // Skip vectors that have dedicated handlers (e.g. SYSCALL_VECTOR = 0x80).
+    unsafe {
+        for i in 0..MSI_VECTOR_COUNT {
+            let vector = MSI_VECTOR_BASE.wrapping_add(i as u8);
+            if vector == SYSCALL_VECTOR {
+                continue;
+            }
+            idt_set_gate(vector, msi_vector_table[i], 0x08, IDT_GATE_INTERRUPT);
+        }
+    }
+    klog_debug!(
+        "IDT: Installed {} MSI vector stubs (vectors {}-{})",
+        MSI_VECTOR_COUNT,
+        MSI_VECTOR_BASE,
+        MSI_VECTOR_BASE as usize + MSI_VECTOR_COUNT - 1
     );
 
     initialize_handler_tables();
