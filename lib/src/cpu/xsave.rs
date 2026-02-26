@@ -1,7 +1,7 @@
 //! XSAVE / XRSTOR initialisation and runtime queries.
 //!
-//! Phase 1B of the Legacy Modernisation Plan: enable the XSAVE instruction
-//! family on the BSP during boot and on every AP during SMP bring-up.
+//! Enables the XSAVE instruction family on the BSP during boot and on every
+//! AP during SMP bring-up.
 //!
 //! **XSAVE is a hard boot requirement.**  If the CPU does not support XSAVE
 //! the kernel panics during `init()`.  There is no FXSAVE fallback — every

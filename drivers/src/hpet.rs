@@ -3,7 +3,7 @@
 //! Primary monotonic time source for SlopOS.  Provides LAPIC timer
 //! calibration reference and nanosecond-precision polled delays.
 //!
-//! HPET is **mandatory** since Phase 0E — the kernel panics at boot if
+//! HPET is mandatory; the kernel panics at boot if
 //! the ACPI HPET table is missing or the hardware is unavailable.
 //!
 //! Init after IOAPIC setup.  The main counter is safe to read from any

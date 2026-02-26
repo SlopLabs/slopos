@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -78,7 +78,7 @@ Phases 0–2 are self-contained kernel changes. Phase 3–4 build on each other.
 | System timer | PIT at 100Hz | `drivers/src/pit.rs` | 1981 chip, imprecise, wastes IRQs |
 | ~~FPU save~~ | ~~FXSAVE (512B fixed)~~ | `core/context_switch.s` | **Modernized** — XSAVE/XRSTOR (mandatory), FXSAVE removed |
 | ~~Spinlocks~~ | ~~CAS loop, no fairness~~ | `lib/src/spinlock.rs` | **Modernized** — Ticket lock (FIFO fairness), proportional backoff; MCS locks optional stretch |
-| PCI config | Port I/O 0xCF8/0xCFC | `drivers/src/pci.rs`, `lib/src/ports.rs` | 256B config space only, slow |
+| ~~PCI config~~ | ~~Port I/O 0xCF8/0xCFC~~ | `drivers/src/pci.rs`, `lib/src/ports.rs` | **Modernized** — ECAM MMIO is mandatory, full 4096-byte config space, legacy port I/O removed |
 | IRQ routing | Legacy IOAPIC lines only | `drivers/src/irq.rs` | No MSI/MSI-X, shared IRQ lines |
 | Network | UDP/ICMP/ARP only | `drivers/src/net/` | No TCP = no real networking |
 | TLB | PCID detected, not used | `mm/src/tlb.rs` | Unnecessary full TLB flushes |
@@ -654,7 +654,7 @@ ECAM (Enhanced Configuration Access Mechanism) maps the entire config space into
   - `EcamState` struct with `IrqMutex`-protected array of up to 16 `McfgEntry`s
   - `ECAM_BASE: AtomicU64` — lock-free cached base for segment 0
   - `ECAM_ENTRY_COUNT: AtomicU8` — lock-free availability check
-  - `pci_discover_mcfg()` called at start of `pci_init()` — non-fatal if MCFG absent (falls back to legacy port I/O)
+  - `pci_discover_mcfg()` called at start of `pci_init()` — mandatory in Phase 4D (panic if MCFG absent/invalid)
   - Public API: `pci_ecam_available()`, `pci_ecam_base()`, `pci_ecam_entry_count()`, `pci_ecam_entry(index)`, `pci_ecam_find_entry(segment, bus)`
   - QEMU q35 discovers ECAM at 0xe0000000 covering segment 0 buses 0–255 (256MB)
 
@@ -684,34 +684,63 @@ ECAM (Enhanced Configuration Access Mechanism) maps the entire config space into
   - Dual-path: lock-free primary segment + mutex fallback for multi-segment
 - [x] **4B.3** Implement `pci_ecam_write32/write16/write8(bus, dev, func, offset: u16, value) -> Option<()>`:
   - Same address pattern for writes, volatile MMIO writes
-- [x] **4B.4** Create `PciConfigBackend` abstraction:
+- [x] **4B.4** Create transitional `PciConfigBackend` abstraction (removed in Phase 4D):
   ```rust
   enum PciConfigBackend {
       LegacyPortIo,        // 0xCF8/0xCFC (fallback)
       Ecam,                // MMIO
   }
   ```
-  - `pci_config_read32()` / `pci_config_write32()` etc. dispatch to ECAM when active, fall back to port I/O
+  - `pci_config_read32()` / `pci_config_write32()` etc. initially dispatched to ECAM when active, falling back to port I/O
   - Original port I/O implementations renamed to private `pci_pio_*` functions
   - 88 existing call sites across 6 files transparently use ECAM — zero API changes
 ### 4C: Extended Config Space Usage
 
-- [ ] **4C.1** Update PCI enumeration to scan extended capabilities (offset 0x100+):
-  - Extended capability list starts at offset 0x100
-  - Each entry: `{ cap_id: u16, version: u4, next_offset: u12 }`
-  - Only accessible via ECAM (not through port I/O)
-- [ ] **4C.2** Implement `pci_find_ext_capability(bus, dev, func, cap_id) -> Option<u16>`
-- [ ] **4C.3** Log extended capabilities during PCI enumeration:
-  - `"PCI: BDF {}:{}.{} ext_cap 0x{:x} (name) at offset 0x{:x}"`
+- [x] **4C.1** Update PCI enumeration to scan extended capabilities (offset 0x100+):
+  - `PciExtCapabilityIter` struct with `Iterator` trait — mirrors `PciCapabilityIter` pattern
+  - Extended capability list starts at offset 0x100 (PCIe extended config space)
+  - Each entry: 32-bit DWORD — `{ cap_id: u16 [15:0], version: u4 [19:16], next_offset: u12 [31:20] }`
+  - Only accessible via ECAM (not through port I/O) — iterator yields nothing if ECAM inactive
+  - Guard counter (48 iterations, matching `PciCapabilityIter::MAX_CAPS`) protects against malformed lists
+  - Terminates on `next_offset == 0`, header `0x00000000`, or header `0xFFFFFFFF`
+  - Next offset validated: must be ≥ 0x100 and DWORD-aligned, else treated as end-of-list
+  - `PciExtCapability { offset: u16, id: u16, version: u8 }` struct in `pci_defs.rs`
+  - 15 extended capability ID constants defined (`PCI_EXT_CAP_ID_AER`, `PCI_EXT_CAP_ID_SRIOV`, etc.)
+- [x] **4C.2** Implement `pci_find_ext_capability(bus, dev, func, cap_id) -> Option<u16>`:
+  - Wraps `PciExtCapabilityIter` with idiomatic `.find().map()` chain
+  - Convenience methods on `PciDeviceInfo`: `find_ext_capability()`, `ext_capabilities()`
+- [x] **4C.3** Log extended capabilities during PCI enumeration:
+  - `"    EXT_CAP: 0x{:04x} ({name}) v{version} at offset 0x{:03x}"`
+  - `pci_ext_cap_id_name()` maps 15 known extended capability IDs to human-readable names
+
+### 4D: ECAM-Only Long-Term Migration
+
+- [x] **4D.1** Remove all legacy PCI port I/O fallback code from `drivers/src/pci.rs`:
+  - Removed `PciConfigBackend` enum, `pci_config_backend()`, and `pci_ecam_is_active()`
+  - Removed all private `pci_pio_*` implementations (0xCF8/0xCFC path)
+  - `pci_config_read*/write*` now route ECAM-only and fail fast on invalid access
+- [x] **4D.2** Make ECAM a hard boot requirement:
+  - `pci_discover_mcfg()` now panics if ACPI RSDP/MCFG is absent or invalid
+  - ECAM segment mapping failures panic during PCI init
+  - Primary segment (segment 0) mapping is required for enumeration
+- [x] **4D.3** Widen PCI config offsets from `u8` to `u16` across the stack:
+  - `pci_config_read*/write*` public signatures now use `offset: u16`
+  - All PCI config register offset constants in `pci_defs.rs` are now `u16`
+  - Capability offsets in `PciCapability`, `PciDeviceInfo`, MSI/MSI-X structs updated to `u16`
+  - Downstream call sites updated (`msi.rs`, `msix.rs`, `virtio/pci.rs`, tests)
+- [x] **4D.4** Remove obsolete legacy constants:
+  - Deleted `PCI_CONFIG_ADDRESS` and `PCI_CONFIG_DATA` from `lib/src/ports.rs`
+  - No remaining in-tree users of 0xCF8/0xCFC PCI config access
 
 ### Phase 4 Gate
 
 - [x] **GATE**: MCFG table parsed from ACPI (21 regression tests in `ecam_tests.rs`)
 - [x] **GATE**: ECAM MMIO region mapped and functional (17 Phase 4B regression tests)
 - [x] **GATE**: PCI config reads work through ECAM for the full 4096-byte space
-- [x] **GATE**: Legacy port I/O fallback still works when MCFG is absent (`PciConfigBackend::LegacyPortIo`)
-- [ ] **GATE**: Extended capability list scanned during enumeration (Phase 4C)
-- [x] **GATE**: `just test` passes (570/570 including 38 ECAM regression tests)
+- [x] **GATE**: Extended capability list scanned during enumeration (Phase 4C)
+- [x] **GATE**: Legacy 0xCF8/0xCFC PCI config path removed; ECAM is mandatory at boot
+- [x] **GATE**: All PCI config offset APIs widened to `u16` and call sites updated
+- [x] **GATE**: `just test` passes (571/571 including 38 ECAM regression tests)
 - [x] **GATE**: `just boot` — PCI devices discovered correctly through ECAM
 
 ---

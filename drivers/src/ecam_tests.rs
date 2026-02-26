@@ -1,6 +1,6 @@
-//! MCFG / ECAM regression tests for Phase 4A + 4B of the Legacy Modernisation Plan.
+//! MCFG / ECAM regression tests.
 //!
-//! Phase 4A tests verify:
+//! Discovery and state tests verify:
 //! - MCFG discovery ran and populated ECAM state on QEMU q35
 //! - Primary ECAM entry covers segment 0 with expected base address
 //! - Cached entry fields are valid (non-zero base, sane bus ranges)
@@ -12,9 +12,9 @@
 //! - Multiple reads return deterministic results
 //! - ECAM base address is page-aligned (4 KiB)
 //!
-//! Phase 4B tests verify:
+//! MMIO access tests verify:
 //! - ECAM MMIO region is mapped and accessible
-//! - ECAM reads via MMIO match legacy port I/O reads for standard config space
+//! - ECAM reads via MMIO return stable standard-config values
 //! - ECAM backend is active after successful mapping
 //! - Sub-DWORD ECAM reads (8-bit, 16-bit) return correct values
 //! - Extended config space (offset >= 0x100) is accessible through ECAM
@@ -29,14 +29,13 @@ use slopos_lib::testing::TestResult;
 use slopos_lib::{fail, pass};
 
 use crate::pci::{
-    PciConfigBackend, pci_config_backend, pci_ecam_available, pci_ecam_base, pci_ecam_entry,
-    pci_ecam_entry_count, pci_ecam_find_entry, pci_ecam_is_active, pci_ecam_mapped_region,
-    pci_ecam_primary_virt, pci_ecam_read8, pci_ecam_read16, pci_ecam_read32, pci_get_device,
-    pci_get_device_count,
+    pci_ecam_available, pci_ecam_base, pci_ecam_entry, pci_ecam_entry_count, pci_ecam_find_entry,
+    pci_ecam_mapped_region, pci_ecam_primary_virt, pci_ecam_read8, pci_ecam_read16,
+    pci_ecam_read32, pci_get_device, pci_get_device_count,
 };
 
 // =============================================================================
-// 1. MCFG discovery sanity (Phase 4A)
+// 1. MCFG discovery sanity
 // =============================================================================
 
 pub fn test_ecam_available() -> TestResult {
@@ -55,7 +54,7 @@ pub fn test_ecam_entry_count_nonzero() -> TestResult {
 }
 
 // =============================================================================
-// 2. Primary entry validation (Phase 4A)
+// 2. Primary entry validation
 // =============================================================================
 
 pub fn test_ecam_base_nonzero() -> TestResult {
@@ -96,7 +95,7 @@ pub fn test_primary_entry_covers_bus_zero() -> TestResult {
 }
 
 // =============================================================================
-// 3. Entry field validity (Phase 4A)
+// 3. Entry field validity
 // =============================================================================
 
 pub fn test_all_entries_base_nonzero() -> TestResult {
@@ -133,7 +132,7 @@ pub fn test_all_entries_bus_range_valid() -> TestResult {
 }
 
 // =============================================================================
-// 4. McfgEntry::region_size() correctness (Phase 4A)
+// 4. McfgEntry::region_size() correctness
 // =============================================================================
 
 pub fn test_region_size_formula() -> TestResult {
@@ -179,7 +178,7 @@ pub fn test_region_size_full_range() -> TestResult {
 }
 
 // =============================================================================
-// 5. McfgEntry::ecam_offset() correctness (Phase 4A)
+// 5. McfgEntry::ecam_offset() correctness
 // =============================================================================
 
 pub fn test_ecam_offset_zero_bdf() -> TestResult {
@@ -223,7 +222,7 @@ pub fn test_ecam_offset_known_bdf() -> TestResult {
 }
 
 // =============================================================================
-// 6. ecam_offset() boundary checks (Phase 4A)
+// 6. ecam_offset() boundary checks
 // =============================================================================
 
 pub fn test_ecam_offset_bus_below_range() -> TestResult {
@@ -287,7 +286,7 @@ pub fn test_ecam_offset_function_out_of_range() -> TestResult {
 }
 
 // =============================================================================
-// 7. pci_ecam_find_entry() lookup (Phase 4A)
+// 7. pci_ecam_find_entry() lookup
 // =============================================================================
 
 pub fn test_find_entry_segment0_bus0() -> TestResult {
@@ -312,7 +311,7 @@ pub fn test_find_entry_nonexistent_segment() -> TestResult {
 }
 
 // =============================================================================
-// 8. Lock-free vs mutex consistency (Phase 4A)
+// 8. Lock-free vs mutex consistency
 // =============================================================================
 
 pub fn test_ecam_base_matches_primary_entry() -> TestResult {
@@ -356,7 +355,7 @@ pub fn test_entry_count_matches_indexable() -> TestResult {
 }
 
 // =============================================================================
-// 9. Deterministic reads (Phase 4A)
+// 9. Deterministic reads
 // =============================================================================
 
 pub fn test_ecam_state_deterministic() -> TestResult {
@@ -399,20 +398,19 @@ pub fn test_ecam_state_deterministic() -> TestResult {
 }
 
 // =============================================================================
-// 10. ECAM MMIO mapping (Phase 4B)
+// 10. ECAM MMIO mapping
 // =============================================================================
 
 pub fn test_ecam_mmio_is_active() -> TestResult {
-    if !pci_ecam_is_active() {
-        return fail!("pci_ecam_is_active() returned false — ECAM MMIO not mapped on q35");
+    if !pci_ecam_available() {
+        return fail!("pci_ecam_available() returned false — ECAM MMIO not mapped on q35");
     }
     pass!()
 }
 
 pub fn test_ecam_backend_is_ecam() -> TestResult {
-    let backend = pci_config_backend();
-    if backend != PciConfigBackend::Ecam {
-        return fail!("pci_config_backend() = {:?}, expected Ecam on q35", backend);
+    if !pci_ecam_available() {
+        return fail!("ECAM not available — expected ECAM-only backend");
     }
     pass!()
 }
@@ -440,7 +438,7 @@ pub fn test_ecam_mapped_region_exists() -> TestResult {
 }
 
 // =============================================================================
-// 11. ECAM MMIO reads cross-validated against enumerated devices (Phase 4B)
+// 11. ECAM MMIO reads cross-validated against enumerated devices
 // =============================================================================
 
 pub fn test_ecam_read32_vendor_device_id() -> TestResult {
@@ -561,7 +559,7 @@ pub fn test_ecam_read8_revision() -> TestResult {
 }
 
 // =============================================================================
-// 12. Extended config space (Phase 4B)
+// 12. Extended config space
 // =============================================================================
 
 pub fn test_ecam_extended_config_readable() -> TestResult {
@@ -599,7 +597,7 @@ pub fn test_ecam_extended_config_end_boundary() -> TestResult {
 }
 
 // =============================================================================
-// 13. ECAM boundary/error handling (Phase 4B)
+// 13. ECAM boundary/error handling
 // =============================================================================
 
 pub fn test_ecam_read32_misaligned_returns_none() -> TestResult {
@@ -645,7 +643,7 @@ pub fn test_ecam_read_invalid_function_returns_none() -> TestResult {
 }
 
 // =============================================================================
-// 14. ECAM read determinism (Phase 4B)
+// 14. ECAM read determinism
 // =============================================================================
 
 pub fn test_ecam_reads_deterministic() -> TestResult {
@@ -686,7 +684,7 @@ pub fn test_ecam_reads_deterministic() -> TestResult {
 }
 
 // =============================================================================
-// 15. All-device ECAM sweep (Phase 4B)
+// 15. All-device ECAM sweep
 // =============================================================================
 
 pub fn test_ecam_sweep_all_devices() -> TestResult {
@@ -751,58 +749,58 @@ pub fn test_ecam_sweep_all_devices() -> TestResult {
 slopos_lib::define_test_suite!(
     ecam,
     [
-        // Phase 4A: MCFG discovery sanity
+        // MCFG discovery sanity
         test_ecam_available,
         test_ecam_entry_count_nonzero,
-        // Phase 4A: Primary entry validation
+        // Primary entry validation
         test_ecam_base_nonzero,
         test_ecam_base_page_aligned,
         test_primary_entry_covers_bus_zero,
-        // Phase 4A: Entry field validity
+        // Entry field validity
         test_all_entries_base_nonzero,
         test_all_entries_bus_range_valid,
-        // Phase 4A: region_size() correctness
+        // region_size() correctness
         test_region_size_formula,
         test_region_size_full_range,
-        // Phase 4A: ecam_offset() correctness
+        // ecam_offset() correctness
         test_ecam_offset_zero_bdf,
         test_ecam_offset_known_bdf,
-        // Phase 4A: ecam_offset() boundary checks
+        // ecam_offset() boundary checks
         test_ecam_offset_bus_below_range,
         test_ecam_offset_bus_above_range,
         test_ecam_offset_device_out_of_range,
         test_ecam_offset_function_out_of_range,
-        // Phase 4A: find_entry() lookup
+        // find_entry() lookup
         test_find_entry_segment0_bus0,
         test_find_entry_nonexistent_segment,
-        // Phase 4A: Lock-free vs mutex consistency
+        // Lock-free vs mutex consistency
         test_ecam_base_matches_primary_entry,
         test_entry_count_matches_indexable,
-        // Phase 4A: Deterministic reads
+        // Deterministic reads
         test_ecam_state_deterministic,
-        // Phase 4B: ECAM MMIO mapping
+        // ECAM MMIO mapping
         test_ecam_mmio_is_active,
         test_ecam_backend_is_ecam,
         test_ecam_primary_virt_nonzero,
         test_ecam_mapped_region_exists,
-        // Phase 4B: Cross-validated MMIO reads
+        // Cross-validated MMIO reads
         test_ecam_read32_vendor_device_id,
         test_ecam_read16_vendor_id,
         test_ecam_read16_device_id,
         test_ecam_read8_class_code,
         test_ecam_read8_revision,
-        // Phase 4B: Extended config space
+        // Extended config space
         test_ecam_extended_config_readable,
         test_ecam_extended_config_end_boundary,
-        // Phase 4B: Boundary/error handling
+        // Boundary/error handling
         test_ecam_read32_misaligned_returns_none,
         test_ecam_read16_misaligned_returns_none,
         test_ecam_read32_overflow_returns_none,
         test_ecam_read_invalid_device_returns_none,
         test_ecam_read_invalid_function_returns_none,
-        // Phase 4B: Read determinism
+        // Read determinism
         test_ecam_reads_deterministic,
-        // Phase 4B: All-device sweep
+        // All-device sweep
         test_ecam_sweep_all_devices,
     ]
 );

@@ -9,9 +9,6 @@ pub const PS2_DATA: Port<u8> = Port::new(0x60);
 pub const PS2_STATUS: Port<u8> = Port::new(0x64);
 pub const PS2_COMMAND: Port<u8> = Port::new(0x64);
 
-pub const PCI_CONFIG_ADDRESS: Port<u32> = Port::new(0xCF8);
-pub const PCI_CONFIG_DATA: Port<u32> = Port::new(0xCFC);
-
 pub const QEMU_DEBUG_EXIT: Port<u8> = Port::new(0xF4);
 
 pub const IO_DELAY: Port<u8> = Port::new(0x80);

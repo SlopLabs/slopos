@@ -1,5 +1,4 @@
-//! PCI capability list parsing regression tests for Phase 3A of the Legacy
-//! Modernisation Plan.
+//! PCI capability list parsing regression tests.
 //!
 //! These tests verify:
 //! - PCI subsystem is initialized and devices are enumerated

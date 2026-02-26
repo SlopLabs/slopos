@@ -60,17 +60,17 @@ const MSI_CTRL_PVM: u16 = 1 << 8;
 // Register offsets (relative to capability base)
 // =============================================================================
 
-const MSI_REG_CONTROL: u8 = 0x02;
-const MSI_REG_ADDR_LO: u8 = 0x04;
-const MSI_REG_ADDR_HI: u8 = 0x08; // only if 64-bit
+const MSI_REG_CONTROL: u16 = 0x02;
+const MSI_REG_ADDR_LO: u16 = 0x04;
+const MSI_REG_ADDR_HI: u16 = 0x08; // only if 64-bit
 
 // Data register offset depends on 64-bit capability:
-const MSI_REG_DATA_32: u8 = 0x08;
-const MSI_REG_DATA_64: u8 = 0x0C;
+const MSI_REG_DATA_32: u16 = 0x08;
+const MSI_REG_DATA_64: u16 = 0x0C;
 
 // Mask register offset depends on 64-bit capability:
-const MSI_REG_MASK_32: u8 = 0x10;
-const MSI_REG_MASK_64: u8 = 0x14;
+const MSI_REG_MASK_32: u16 = 0x10;
+const MSI_REG_MASK_64: u16 = 0x14;
 
 // =============================================================================
 // x86 LAPIC message address format (Intel SDM Vol. 3A §10.11.1)
@@ -104,7 +104,7 @@ const MSI_DATA_TRIGGER_EDGE: u16 = 0 << 15;
 #[derive(Debug, Clone, Copy)]
 pub struct MsiCapability {
     /// Byte offset of the MSI capability in PCI config space.
-    pub cap_offset: u8,
+    pub cap_offset: u16,
     /// Raw Message Control register value at parse time.
     pub control: u16,
     /// Whether the device supports 64-bit message addresses.
@@ -124,7 +124,7 @@ impl MsiCapability {
 
     /// Config-space offset of the Message Data register.
     #[inline]
-    const fn data_offset(&self) -> u8 {
+    const fn data_offset(&self) -> u16 {
         if self.is_64bit {
             self.cap_offset + MSI_REG_DATA_64
         } else {
@@ -134,7 +134,7 @@ impl MsiCapability {
 
     /// Config-space offset of the Mask Bits register, if supported.
     #[inline]
-    pub const fn mask_offset(&self) -> Option<u8> {
+    pub const fn mask_offset(&self) -> Option<u16> {
         if !self.has_per_vector_masking {
             return None;
         }
@@ -170,7 +170,7 @@ pub enum MsiError {
 /// `cap_offset` is the config-space byte offset of the MSI capability header
 /// (obtained from [`PciDeviceInfo::msi_cap_offset`] or
 /// [`pci_find_capability`]).
-pub fn msi_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u8) -> MsiCapability {
+pub fn msi_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u16) -> MsiCapability {
     let control = pci_config_read16(bus, dev, func, cap_offset + MSI_REG_CONTROL);
     MsiCapability {
         cap_offset,

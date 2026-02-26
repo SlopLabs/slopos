@@ -1,6 +1,6 @@
 //! VirtIO interrupt-driven completion regression tests.
 //!
-//! These tests verify the Phase 3E infrastructure: the `QueueEvent`
+//! These tests verify the interrupt-driven completion infrastructure: the `QueueEvent`
 //! primitive (signal/consume/reset/timeout), the replacement of
 //! busy-wait polling with MSI-X interrupt-driven I/O completion, and
 //! the HPET `period_fs()` accessor used for deadline computation.

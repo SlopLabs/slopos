@@ -1,12 +1,11 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
 use slopos_acpi::mcfg::{Mcfg, McfgEntry};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
 use slopos_lib::kernel_services::platform;
-use slopos_lib::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InitFlag, IrqMutex, klog_info};
 use slopos_mm::hhdm;
@@ -14,7 +13,7 @@ use slopos_mm::mmio::MmioRegion;
 
 pub use crate::pci_defs::*;
 
-const PCI_SECONDARY_BUS_OFFSET: u8 = 0x19;
+const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -89,7 +88,7 @@ static DRIVER_REGISTRY: IrqMutex<PciDriverRegistry> = IrqMutex::new(PciDriverReg
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
 // =============================================================================
-// MCFG / ECAM State (Phase 4A + 4B)
+// MCFG / ECAM State
 // =============================================================================
 
 /// Maximum number of ECAM segments we cache from the MCFG table.
@@ -135,7 +134,7 @@ static ECAM_BASE: AtomicU64 = AtomicU64::new(0);
 static ECAM_ENTRY_COUNT: AtomicU8 = AtomicU8::new(0);
 
 // -----------------------------------------------------------------------------
-// Lock-free primary ECAM cache (Phase 4B)
+// Lock-free primary ECAM cache
 //
 // The primary segment (segment 0) is the only segment on most systems, including
 // QEMU q35.  We cache its mapped MMIO virtual address, size, and bus range in
@@ -156,108 +155,21 @@ static ECAM_PRIMARY_BUS_START: AtomicU8 = AtomicU8::new(0);
 /// Last bus number covered by the primary ECAM entry (inclusive).
 static ECAM_PRIMARY_BUS_END: AtomicU8 = AtomicU8::new(0);
 
-/// Whether ECAM MMIO is active and should be used for config space access.
-/// Set to `true` after a successful MMIO mapping in [`pci_discover_mcfg`].
-static ECAM_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 // =============================================================================
-// PCI Configuration Access Backend (Phase 4B)
+// PCI Configuration Access
+//
+// ECAM MMIO is the sole configuration space backend.
+// Legacy port I/O (0xCF8/0xCFC) has been removed from the active path.
+// ECAM MMIO is mapped during pci_discover_mcfg() and is a hard boot
+// requirement — pci_init() panics if MCFG is absent or mapping fails.
 // =============================================================================
-
-/// Active PCI configuration space access mechanism.
-///
-/// After [`pci_init`], the backend is either `Ecam` (if MCFG was found and
-/// the MMIO region was successfully mapped) or `LegacyPortIo` (fallback).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PciConfigBackend {
-    /// Legacy port I/O via 0xCF8/0xCFC (256-byte config space only).
-    LegacyPortIo,
-    /// PCIe ECAM MMIO (full 4096-byte config space per function).
-    Ecam,
-}
-
-/// Return the currently active PCI configuration access backend.
-#[inline]
-pub fn pci_config_backend() -> PciConfigBackend {
-    if ECAM_ACTIVE.load(Ordering::Acquire) {
-        PciConfigBackend::Ecam
-    } else {
-        PciConfigBackend::LegacyPortIo
-    }
-}
-
-/// Check whether ECAM MMIO is active and being used for config space access.
-#[inline]
-pub fn pci_ecam_is_active() -> bool {
-    ECAM_ACTIVE.load(Ordering::Acquire)
-}
 
 fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
     unsafe { cstr_to_str(ptr as *const c_char) }
 }
 
 // =============================================================================
-// Legacy Port I/O Implementation (private)
-// =============================================================================
-
-/// Compute the 32-bit address for legacy PCI configuration port I/O.
-#[inline(always)]
-fn pci_pio_config_addr(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    0x8000_0000
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | ((offset as u32) & 0xFC)
-}
-
-/// Read a 32-bit value from PCI config space via legacy port I/O (0xCF8/0xCFC).
-fn pci_pio_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    unsafe {
-        PCI_CONFIG_ADDRESS.write(pci_pio_config_addr(bus, device, function, offset));
-        PCI_CONFIG_DATA.read()
-    }
-}
-
-/// Read a 16-bit value from PCI config space via legacy port I/O.
-fn pci_pio_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
-    let value = pci_pio_read32(bus, device, function, offset);
-    ((value >> ((offset & 0x2) * 8)) & 0xFFFF) as u16
-}
-
-/// Read an 8-bit value from PCI config space via legacy port I/O.
-fn pci_pio_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
-    let value = pci_pio_read32(bus, device, function, offset);
-    ((value >> ((offset & 0x3) * 8)) & 0xFF) as u8
-}
-
-/// Write a 32-bit value to PCI config space via legacy port I/O.
-fn pci_pio_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
-    unsafe {
-        PCI_CONFIG_ADDRESS.write(pci_pio_config_addr(bus, device, function, offset));
-        PCI_CONFIG_DATA.write(value);
-    }
-}
-
-/// Write a 16-bit value to PCI config space via legacy port I/O (read-modify-write).
-fn pci_pio_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
-    let dword = pci_pio_read32(bus, device, function, offset);
-    let shift = (offset & 0x2) * 8;
-    let mask = !(0xFFFF << shift);
-    let new_dword = (dword & mask) | ((value as u32) << shift);
-    pci_pio_write32(bus, device, function, offset, new_dword);
-}
-
-/// Write an 8-bit value to PCI config space via legacy port I/O (read-modify-write).
-fn pci_pio_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
-    let dword = pci_pio_read32(bus, device, function, offset);
-    let shift = (offset & 0x3) * 8;
-    let mask = !(0xFF << shift);
-    let new_dword = (dword & mask) | ((value as u32) << shift);
-    pci_pio_write32(bus, device, function, offset, new_dword);
-}
-
-// =============================================================================
-// ECAM MMIO Implementation (Phase 4B)
+// ECAM MMIO Implementation
 // =============================================================================
 
 /// Compute the virtual address for an ECAM config-space register access.
@@ -388,68 +300,56 @@ pub fn pci_ecam_write8(bus: u8, device: u8, function: u8, offset: u16, value: u8
 }
 
 // =============================================================================
-// Public PCI Configuration Access (dispatch)
+// Public PCI Configuration Access (ECAM-only)
 //
-// These functions transparently route to ECAM MMIO when available, falling
-// back to legacy port I/O (0xCF8/0xCFC) when MCFG is absent or the ECAM
-// region could not be mapped.
+// All config space reads/writes go through ECAM MMIO.  The offset parameter
+// is u16, supporting the full 4096-byte PCIe extended config space.
 //
-// The signatures are unchanged from Phase 4A — all 88 call sites across 6
-// files continue to work without modification.
+// These functions panic on ECAM read failure (which indicates a bug — the ECAM
+// region is validated at boot).  Use the `pci_ecam_read*` variants directly
+// if you need fallible access.
 // =============================================================================
 
-pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    if pci_ecam_is_active() {
-        if let Some(val) = pci_ecam_read32(bus, device, function, offset as u16) {
-            return val;
-        }
-    }
-    pci_pio_read32(bus, device, function, offset)
+/// Read a 32-bit value from PCI configuration space via ECAM MMIO.
+///
+/// Supports the full 4096-byte PCIe config space (offset 0x000–0xFFC).
+/// Panics if the ECAM read fails (offset misaligned or out of range).
+#[inline]
+pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u16) -> u32 {
+    pci_ecam_read32(bus, device, function, offset).expect("pci_config_read32: ECAM read failed")
 }
 
-pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
-    if pci_ecam_is_active() {
-        if let Some(val) = pci_ecam_read16(bus, device, function, offset as u16) {
-            return val;
-        }
-    }
-    pci_pio_read16(bus, device, function, offset)
+/// Read a 16-bit value from PCI configuration space via ECAM MMIO.
+#[inline]
+pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u16) -> u16 {
+    pci_ecam_read16(bus, device, function, offset).expect("pci_config_read16: ECAM read failed")
 }
 
-pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
-    if pci_ecam_is_active() {
-        if let Some(val) = pci_ecam_read8(bus, device, function, offset as u16) {
-            return val;
-        }
-    }
-    pci_pio_read8(bus, device, function, offset)
+/// Read an 8-bit value from PCI configuration space via ECAM MMIO.
+#[inline]
+pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u16) -> u8 {
+    pci_ecam_read8(bus, device, function, offset).expect("pci_config_read8: ECAM read failed")
 }
 
-pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
-    if pci_ecam_is_active() {
-        if pci_ecam_write32(bus, device, function, offset as u16, value).is_some() {
-            return;
-        }
-    }
-    pci_pio_write32(bus, device, function, offset, value);
+/// Write a 32-bit value to PCI configuration space via ECAM MMIO.
+#[inline]
+pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u16, value: u32) {
+    pci_ecam_write32(bus, device, function, offset, value)
+        .expect("pci_config_write32: ECAM write failed");
 }
 
-pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
-    if pci_ecam_is_active() {
-        if pci_ecam_write16(bus, device, function, offset as u16, value).is_some() {
-            return;
-        }
-    }
-    pci_pio_write16(bus, device, function, offset, value);
+/// Write a 16-bit value to PCI configuration space via ECAM MMIO.
+#[inline]
+pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u16, value: u16) {
+    pci_ecam_write16(bus, device, function, offset, value)
+        .expect("pci_config_write16: ECAM write failed");
 }
 
-pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
-    if pci_ecam_is_active() {
-        if pci_ecam_write8(bus, device, function, offset as u16, value).is_some() {
-            return;
-        }
-    }
-    pci_pio_write8(bus, device, function, offset, value);
+/// Write an 8-bit value to PCI configuration space via ECAM MMIO.
+#[inline]
+pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u16, value: u8) {
+    pci_ecam_write8(bus, device, function, offset, value)
+        .expect("pci_config_write8: ECAM write failed");
 }
 
 // =============================================================================
@@ -470,7 +370,7 @@ pub struct PciCapabilityIter {
     bus: u8,
     device: u8,
     function: u8,
-    next_ptr: u8,
+    next_ptr: u16,
     /// Remaining entries before we give up (infinite-loop guard).
     remaining: u8,
 }
@@ -491,7 +391,7 @@ impl PciCapabilityIter {
         let status = pci_config_read16(bus, device, function, PCI_STATUS_OFFSET);
         let first_ptr = if (status & PCI_STATUS_CAP_LIST) != 0 {
             // PCI spec: bottom 2 bits of the Capabilities Pointer are reserved.
-            pci_config_read8(bus, device, function, PCI_CAP_PTR_OFFSET) & 0xFC
+            (pci_config_read8(bus, device, function, PCI_CAP_PTR_OFFSET) & 0xFC) as u16
         } else {
             0
         };
@@ -523,10 +423,123 @@ impl Iterator for PciCapabilityIter {
         let offset = self.next_ptr;
         let id = pci_config_read8(self.bus, self.device, self.function, offset);
         // PCI spec: bottom 2 bits of the Next Pointer are reserved.
-        let next = pci_config_read8(self.bus, self.device, self.function, offset + 1) & 0xFC;
+        let next =
+            (pci_config_read8(self.bus, self.device, self.function, offset + 1) & 0xFC) as u16;
 
         self.next_ptr = next;
         Some(PciCapability { offset, id })
+    }
+}
+
+// =============================================================================
+// PCIe Extended Capability List Walking (offset 0x100+, ECAM-only)
+// =============================================================================
+
+/// Iterator over PCIe extended capabilities in a device's configuration space.
+///
+/// Extended capabilities occupy offsets 0x100–0xFFF and are only accessible via
+/// ECAM MMIO (4096-byte config space).  Each header is a 32-bit DWORD:
+///
+/// ```text
+///   bits [15:0]  — Capability ID (16-bit)
+///   bits [19:16] — Capability Version (4-bit)
+///   bits [31:20] — Next Capability Offset (12-bit, 0 = end of list)
+/// ```
+///
+/// A header value of `0x0000_0000` or `0xFFFF_FFFF` at the first extended
+/// capability offset (0x100) indicates the device has no extended capabilities.
+///
+/// # Infinite-loop protection
+///
+/// A guard counter limits traversal to [`Self::MAX_EXT_CAPS`] entries.
+pub struct PciExtCapabilityIter {
+    bus: u8,
+    device: u8,
+    function: u8,
+    next_offset: u16,
+    /// Remaining entries before we give up (infinite-loop guard).
+    remaining: u8,
+}
+
+impl PciExtCapabilityIter {
+    /// Maximum extended capabilities to visit before assuming a malformed list.
+    ///
+    /// The extended config space (0x100–0xFFF = 3840 bytes) can fit at most ~240
+    /// 16-byte entries.  48 matches the standard capability guard in
+    /// [`PciCapabilityIter`] and Linux's `PCI_FIND_CAP_TTL`.
+    const MAX_EXT_CAPS: u8 = 48;
+
+    /// Create an extended capability iterator for the specified PCI function.
+    ///
+    /// Returns an empty iterator (yielding no items) if:
+    /// - ECAM MMIO is not active (extended config space inaccessible)
+    /// - The first extended capability header is absent (`0x0000_0000` or
+    ///   `0xFFFF_FFFF` at offset 0x100)
+    pub fn new(bus: u8, device: u8, function: u8) -> Self {
+        let first_offset = if pci_ecam_available() {
+            match pci_ecam_read32(bus, device, function, PCI_EXT_CAP_START) {
+                // No extended capabilities or device not present.
+                Some(0x0000_0000) | Some(0xFFFF_FFFF) | None => 0,
+                // Valid header — start iteration at 0x100.
+                Some(_) => PCI_EXT_CAP_START,
+            }
+        } else {
+            // Extended config space requires ECAM.
+            0
+        };
+
+        Self {
+            bus,
+            device,
+            function,
+            next_offset: first_offset,
+            remaining: Self::MAX_EXT_CAPS,
+        }
+    }
+
+    /// Create an extended capability iterator for a known [`PciDeviceInfo`].
+    pub fn for_device(info: &PciDeviceInfo) -> Self {
+        Self::new(info.bus, info.device, info.function)
+    }
+}
+
+impl Iterator for PciExtCapabilityIter {
+    type Item = PciExtCapability;
+
+    fn next(&mut self) -> Option<PciExtCapability> {
+        if self.next_offset < PCI_EXT_CAP_START || self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+
+        let offset = self.next_offset;
+        let header = pci_ecam_read32(self.bus, self.device, self.function, offset)?;
+
+        // A zero or all-ones header terminates the list (shouldn't normally happen
+        // mid-list, but guard against malformed hardware).
+        if header == 0 || header == 0xFFFF_FFFF {
+            self.next_offset = 0;
+            return None;
+        }
+
+        let id = (header & 0xFFFF) as u16;
+        let version = ((header >> 16) & 0xF) as u8;
+        let next = ((header >> 20) & 0xFFF) as u16;
+
+        // PCIe spec: next offset must be either 0 (end) or ≥ 0x100 and
+        // DWORD-aligned.  Reject anything that points below 0x100 or is
+        // unaligned.
+        self.next_offset = if next == 0 || next < PCI_EXT_CAP_START || (next & 0x3) != 0 {
+            0
+        } else {
+            next
+        };
+
+        Some(PciExtCapability {
+            offset,
+            id,
+            version,
+        })
     }
 }
 
@@ -534,22 +547,47 @@ impl Iterator for PciCapabilityIter {
 ///
 /// Returns the config-space byte offset of the capability header,
 /// or `None` if the device doesn't advertise that capability.
-pub fn pci_find_capability(bus: u8, device: u8, function: u8, cap_id: u8) -> Option<u8> {
+pub fn pci_find_capability(bus: u8, device: u8, function: u8, cap_id: u8) -> Option<u16> {
     PciCapabilityIter::new(bus, device, function)
+        .find(|cap| cap.id == cap_id)
+        .map(|cap| cap.offset)
+}
+
+/// Find the first PCIe extended capability with the given ID.
+///
+/// Returns the config-space byte offset of the extended capability header,
+/// or `None` if the device has no extended capabilities or the requested
+/// capability is absent.  Requires ECAM MMIO to be active.
+pub fn pci_find_ext_capability(bus: u8, device: u8, function: u8, cap_id: u16) -> Option<u16> {
+    PciExtCapabilityIter::new(bus, device, function)
         .find(|cap| cap.id == cap_id)
         .map(|cap| cap.offset)
 }
 
 /// Convenience methods for PCI capability queries on a known device.
 impl PciDeviceInfo {
-    /// Find the first capability with the given ID for this device.
-    pub fn find_capability(&self, cap_id: u8) -> Option<u8> {
+    /// Find the first standard capability with the given ID for this device.
+    pub fn find_capability(&self, cap_id: u8) -> Option<u16> {
         pci_find_capability(self.bus, self.device, self.function, cap_id)
     }
 
-    /// Iterate over all PCI capabilities of this device.
+    /// Iterate over all standard PCI capabilities of this device.
     pub fn capabilities(&self) -> PciCapabilityIter {
         PciCapabilityIter::for_device(self)
+    }
+
+    /// Find the first PCIe extended capability with the given ID for this device.
+    ///
+    /// Returns `None` if ECAM is not active or the capability is absent.
+    pub fn find_ext_capability(&self, cap_id: u16) -> Option<u16> {
+        pci_find_ext_capability(self.bus, self.device, self.function, cap_id)
+    }
+
+    /// Iterate over all PCIe extended capabilities of this device.
+    ///
+    /// Yields no items if ECAM MMIO is not active.
+    pub fn ext_capabilities(&self) -> PciExtCapabilityIter {
+        PciExtCapabilityIter::for_device(self)
     }
 }
 
@@ -576,6 +614,28 @@ fn pci_cap_id_name(id: u8) -> &'static str {
     }
 }
 
+/// Human-readable name for a PCIe extended capability ID (for boot log output).
+fn pci_ext_cap_id_name(id: u16) -> &'static str {
+    match id {
+        PCI_EXT_CAP_ID_AER => "AER",
+        PCI_EXT_CAP_ID_VC => "VC",
+        PCI_EXT_CAP_ID_DSN => "DSN",
+        PCI_EXT_CAP_ID_PWR_BUDGET => "PwrBudget",
+        PCI_EXT_CAP_ID_VNDR => "VendorExt",
+        PCI_EXT_CAP_ID_ACS => "ACS",
+        PCI_EXT_CAP_ID_ARI => "ARI",
+        PCI_EXT_CAP_ID_ATS => "ATS",
+        PCI_EXT_CAP_ID_SRIOV => "SR-IOV",
+        PCI_EXT_CAP_ID_LTR => "LTR",
+        PCI_EXT_CAP_ID_SEC_PCIE => "SecPCIe",
+        PCI_EXT_CAP_ID_L1SS => "L1SS",
+        PCI_EXT_CAP_ID_DVSEC => "DVSEC",
+        PCI_EXT_CAP_ID_DLF => "DLF",
+        PCI_EXT_CAP_ID_PL16G => "PL16G",
+        _ => "Unknown",
+    }
+}
+
 fn pci_read_vendor_id(bus: u8, device: u8, function: u8) -> u16 {
     pci_config_read16(bus, device, function, PCI_VENDOR_ID_OFFSET)
 }
@@ -593,7 +653,7 @@ fn pci_get_secondary_bus(bus: u8, device: u8, function: u8) -> u8 {
 }
 
 fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
-    let bar_offset = PCI_BAR0_OFFSET + bar_idx * 4;
+    let bar_offset = PCI_BAR0_OFFSET + (bar_idx as u16) * 4;
     let original = pci_config_read32(bus, device, function, bar_offset);
     let is_io = (original & 1) != 0;
 
@@ -669,8 +729,8 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
     }
 
     // ----- Capability list discovery (single walk) -----
-    let mut msi_cap_offset: Option<u8> = None;
-    let mut msix_cap_offset: Option<u8> = None;
+    let mut msi_cap_offset: Option<u16> = None;
+    let mut msix_cap_offset: Option<u16> = None;
 
     for cap in PciCapabilityIter::new(bus, device, function) {
         match cap.id {
@@ -724,6 +784,17 @@ fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8)
             cap.id,
             pci_cap_id_name(cap.id),
             cap.offset
+        );
+    }
+
+    // Log extended capabilities (ECAM-only, offset 0x100+)
+    for ext_cap in info.ext_capabilities() {
+        klog_info!(
+            "    EXT_CAP: 0x{:04x} ({}) v{} at offset 0x{:03x}",
+            ext_cap.id,
+            pci_ext_cap_id_name(ext_cap.id),
+            ext_cap.version,
+            ext_cap.offset
         );
     }
 
@@ -811,39 +882,28 @@ fn pci_scan_bus_inner(state: &mut PciEnumState, bus: u8) {
 /// Discover and cache MCFG (PCIe ECAM) entries from ACPI tables, then map
 /// each entry's configuration space into virtual memory.
 ///
-/// Called during [`pci_init`] before bus enumeration.  Non-fatal: if MCFG is
-/// absent or MMIO mapping fails, PCI config access continues via legacy port
-/// I/O (0xCF8/0xCFC).
+/// Called during [`pci_init`] before bus enumeration. ECAM is mandatory and
+/// this function panics if MCFG is absent, empty, or the
+/// primary segment's MMIO region cannot be mapped.
 fn pci_discover_mcfg() {
     if !hhdm::is_available() {
-        klog_info!("PCI: HHDM unavailable, skipping MCFG discovery");
-        return;
+        panic!("PCI: ECAM requires HHDM — cannot initialize PCI subsystem");
     }
     if !platform::is_rsdp_available() {
-        klog_info!("PCI: ACPI RSDP unavailable, skipping MCFG discovery");
-        return;
+        panic!("PCI: ECAM requires ACPI RSDP — cannot initialize PCI subsystem");
     }
 
     let rsdp = platform::get_rsdp_address() as *const Rsdp;
-    let Some(tables) = AcpiTables::from_rsdp(rsdp) else {
-        klog_info!("PCI: ACPI tables validation failed, skipping MCFG");
-        return;
-    };
+    let tables = AcpiTables::from_rsdp(rsdp)
+        .expect("PCI: ACPI tables validation failed — ECAM requires valid ACPI");
 
-    let Some(mcfg) = Mcfg::from_tables(&tables) else {
-        // Not an error — older systems or QEMU without q35 may lack MCFG.
-        klog_info!("PCI: No MCFG table — using legacy port I/O config access");
-        return;
-    };
+    let mcfg = Mcfg::from_tables(&tables).expect("PCI: No MCFG table — ECAM MMIO is mandatory");
 
     let count = mcfg.count();
     if count == 0 {
-        klog_info!("PCI: MCFG table present but empty — using legacy port I/O");
-        return;
+        panic!("PCI: MCFG table present but empty — at least one ECAM entry required");
     }
 
-    // ---- Phase 4A: Store MCFG entries ----
-    // ---- Phase 4B: Map ECAM MMIO regions ----
     let mut primary_mapped = false;
     {
         let mut state = ECAM_STATE.lock();
@@ -863,55 +923,47 @@ fn pci_discover_mcfg() {
 
             // Map the ECAM MMIO region into virtual memory.
             let phys = PhysAddr::new(entry.base_phys);
-            match MmioRegion::map(phys, region_size) {
-                Some(region) => {
-                    klog_info!(
-                        "PCI: ECAM segment {} mapped at virt 0x{:x} ({}MB)",
-                        entry.segment,
-                        region.virt_base(),
-                        region_size / (1024 * 1024),
-                    );
-                    state.regions[i] = region;
+            let region = MmioRegion::map(phys, region_size).unwrap_or_else(|| {
+                panic!(
+                    "PCI: ECAM segment {} MMIO mapping failed ({}MB) — cannot continue",
+                    entry.segment,
+                    region_size / (1024 * 1024),
+                )
+            });
 
-                    // Cache the primary segment (segment 0) for lock-free access.
-                    if entry.segment == 0 && !primary_mapped {
-                        ECAM_PRIMARY_VIRT.store(region.virt_base(), Ordering::Release);
-                        ECAM_PRIMARY_SIZE.store(region_size as u64, Ordering::Release);
-                        ECAM_PRIMARY_BUS_START.store(entry.bus_start, Ordering::Release);
-                        ECAM_PRIMARY_BUS_END.store(entry.bus_end, Ordering::Release);
-                        primary_mapped = true;
-                    }
-                }
-                None => {
-                    klog_info!(
-                        "PCI: ECAM segment {} MMIO mapping failed ({}MB) — using port I/O for these buses",
-                        entry.segment,
-                        region_size / (1024 * 1024),
-                    );
-                }
+            klog_info!(
+                "PCI: ECAM segment {} mapped at virt 0x{:x} ({}MB)",
+                entry.segment,
+                region.virt_base(),
+                region_size / (1024 * 1024),
+            );
+            state.regions[i] = region;
+
+            // Cache the primary segment (segment 0) for lock-free access.
+            if entry.segment == 0 && !primary_mapped {
+                ECAM_PRIMARY_VIRT.store(region.virt_base(), Ordering::Release);
+                ECAM_PRIMARY_SIZE.store(region_size as u64, Ordering::Release);
+                ECAM_PRIMARY_BUS_START.store(entry.bus_start, Ordering::Release);
+                ECAM_PRIMARY_BUS_END.store(entry.bus_end, Ordering::Release);
+                primary_mapped = true;
             }
         }
         state.count = capped as u8;
     }
 
-    // Cache primary segment base for fast lock-free access (Phase 4A compat).
+    // Cache primary segment base for fast lock-free access.
     if let Some(primary) = mcfg.primary_entry() {
         ECAM_BASE.store(primary.base_phys, Ordering::Release);
     }
     ECAM_ENTRY_COUNT.store(count.min(MAX_ECAM_ENTRIES) as u8, Ordering::Release);
 
-    // Activate ECAM backend if at least the primary segment was mapped.
-    if primary_mapped {
-        ECAM_ACTIVE.store(true, Ordering::Release);
-        klog_info!(
-            "PCI: ECAM MMIO active — config access via memory-mapped PCIe (4096B per function)"
-        );
+    if !primary_mapped {
+        panic!("PCI: No primary ECAM segment (segment 0) mapped — cannot enumerate PCI");
     }
 
     klog_info!(
-        "PCI: MCFG discovery complete — {} ECAM entry(s) cached, backend: {:?}",
+        "PCI: ECAM MMIO active — config access via memory-mapped PCIe (4096B per function), {} entry(s) cached",
         count.min(MAX_ECAM_ENTRIES),
-        pci_config_backend(),
     );
 }
 
@@ -921,9 +973,7 @@ fn pci_discover_mcfg() {
 
 /// Check whether ECAM configuration space is available.
 ///
-/// Returns `true` if MCFG was successfully parsed and at least one ECAM
-/// entry is cached.  This does NOT imply MMIO is mapped — use
-/// [`pci_ecam_is_active`] to check if ECAM is the active config backend.
+/// Returns `true` after [`pci_init`] has successfully mapped ECAM MMIO.
 #[inline]
 pub fn pci_ecam_available() -> bool {
     ECAM_ENTRY_COUNT.load(Ordering::Acquire) > 0
@@ -997,8 +1047,6 @@ pub fn pci_init() {
 
     klog_info!("PCI: Initializing PCI subsystem");
 
-    // Discover MCFG (PCIe ECAM) before enumeration — non-fatal if absent.
-    // Phase 4B: also maps ECAM MMIO regions and activates ECAM backend.
     pci_discover_mcfg();
 
     let mut state = ENUM_STATE.lock();

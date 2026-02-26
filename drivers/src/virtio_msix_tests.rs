@@ -35,7 +35,7 @@ fn find_device(vendor: u16, device: u16) -> Option<crate::pci::PciDeviceInfo> {
 }
 
 /// Read the MSI-X Message Control register and return `(enabled, function_masked)`.
-fn msix_control_bits(dev: &crate::pci::PciDeviceInfo, cap_offset: u8) -> (bool, bool) {
+fn msix_control_bits(dev: &crate::pci::PciDeviceInfo, cap_offset: u16) -> (bool, bool) {
     let ctrl = pci_config_read16(dev.bus, dev.device, dev.function, cap_offset + 0x02);
     let enabled = (ctrl & (1 << 15)) != 0;
     let fmask = (ctrl & (1 << 14)) != 0;

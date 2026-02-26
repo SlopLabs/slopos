@@ -1,5 +1,4 @@
-//! XSAVE / FPU / SIMD regression tests for Phase 1 of the Legacy
-//! Modernisation Plan.
+//! XSAVE / FPU / SIMD regression tests.
 //!
 //! These tests verify:
 //! - XSAVE feature detection matches CPUID reality

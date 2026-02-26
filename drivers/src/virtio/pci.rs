@@ -57,14 +57,16 @@ pub fn parse_capabilities(info: &PciDeviceInfo) -> VirtioMmioCaps {
         return caps;
     }
 
-    let mut cap_ptr = pci_config_read8(info.bus, info.device, info.function, PCI_CAP_PTR_OFFSET);
+    let mut cap_ptr =
+        (pci_config_read8(info.bus, info.device, info.function, PCI_CAP_PTR_OFFSET) & 0xFC) as u16;
     let mut guard = 0u8;
 
     while cap_ptr != 0 && guard < 48 {
         guard += 1;
 
         let cap_id = pci_config_read8(info.bus, info.device, info.function, cap_ptr);
-        let cap_next = pci_config_read8(info.bus, info.device, info.function, cap_ptr + 1);
+        let cap_next =
+            (pci_config_read8(info.bus, info.device, info.function, cap_ptr + 1) & 0xFC) as u16;
         let cap_len = pci_config_read8(info.bus, info.device, info.function, cap_ptr + 2);
 
         if cap_id == PCI_CAP_ID_VNDR && cap_len >= 16 {

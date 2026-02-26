@@ -16,7 +16,7 @@ use crate::{apic, ioapic, ps2};
 // PIT timer IRQ handler and fallback have been removed.
 // Scheduler preemption is driven exclusively by the per-CPU LAPIC timer
 // (vector LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch —
-// see boot/src/idt.rs.  HPET + LAPIC are mandatory since Phase 0E.
+// see boot/src/idt.rs.  HPET + LAPIC are mandatory.
 
 /// Unified PS/2 IRQ handler following the Linux i8042 pattern.
 ///

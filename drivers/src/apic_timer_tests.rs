@@ -171,7 +171,7 @@ pub fn test_lapic_timer_stop_clears_counter() -> TestResult {
 // ---------------------------------------------------------------------------
 
 /// Verify that the LAPIC timer IDT handler fires and advances the tick counter.
-/// This is the most critical regression test for Phase 0C.
+/// This is the most critical regression test for scheduler timer wiring.
 ///
 /// If this fails, the IDT handler is broken (e.g., #GP exception not caught).
 pub fn test_lapic_timer_ticks_advance() -> TestResult {

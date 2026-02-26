@@ -62,9 +62,9 @@ const MSIX_CTRL_TABLE_SIZE_MASK: u16 = 0x7FF;
 // Register offsets (relative to capability base)
 // =============================================================================
 
-const MSIX_REG_CONTROL: u8 = 0x02;
-const MSIX_REG_TABLE_OFFSET: u8 = 0x04;
-const MSIX_REG_PBA_OFFSET: u8 = 0x08;
+const MSIX_REG_CONTROL: u16 = 0x02;
+const MSIX_REG_TABLE_OFFSET: u16 = 0x04;
+const MSIX_REG_PBA_OFFSET: u16 = 0x08;
 
 // =============================================================================
 // Table/PBA BIR and offset extraction
@@ -125,7 +125,7 @@ const MSIX_DATA_TRIGGER_EDGE: u32 = 0 << 15;
 #[derive(Debug, Clone, Copy)]
 pub struct MsixCapability {
     /// Byte offset of the MSI-X capability in PCI config space.
-    pub cap_offset: u8,
+    pub cap_offset: u16,
     /// Raw Message Control register value at parse time.
     pub control: u16,
     /// Number of table entries (1–2048).
@@ -257,7 +257,7 @@ pub enum MsixError {
 /// `cap_offset` is the config-space byte offset of the MSI-X capability header
 /// (obtained from [`PciDeviceInfo::msix_cap_offset`] or
 /// [`pci_find_capability`]).
-pub fn msix_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u8) -> MsixCapability {
+pub fn msix_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u16) -> MsixCapability {
     let control = pci_config_read16(bus, dev, func, cap_offset + MSIX_REG_CONTROL);
     let table_size = (control & MSIX_CTRL_TABLE_SIZE_MASK) + 1;
 

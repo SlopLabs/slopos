@@ -11,7 +11,7 @@ use slopos_lib::{IrqMutex, RingBuffer};
 
 /// Monotonic millisecond timestamp for input events.
 ///
-/// Uses HPET hardware counter (mandatory since Phase 0E) for
+/// Uses the HPET hardware counter for
 /// nanosecond-precision wall time, converted to milliseconds.
 pub fn get_timestamp_ms() -> u64 {
     crate::hpet::nanoseconds(crate::hpet::read_counter()) / 1_000_000

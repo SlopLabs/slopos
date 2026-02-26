@@ -1,4 +1,4 @@
-//! MSI-X regression tests for Phase 3C of the Legacy Modernisation Plan.
+//! MSI-X regression tests.
 //!
 //! These tests verify:
 //! - MSI-X capability parsing from QEMU VirtIO devices
@@ -41,7 +41,7 @@ fn find_device_by_vendor_device(vendor: u16, device: u16) -> Option<PciDeviceInf
 }
 
 /// Find first device with MSI-X capability and return (device, cap_offset).
-fn find_msix_device() -> Option<(PciDeviceInfo, u8)> {
+fn find_msix_device() -> Option<(PciDeviceInfo, u16)> {
     for i in 0..pci_get_device_count() {
         if let Some(dev) = pci_get_device(i) {
             if let Some(off) = dev.msix_cap_offset {

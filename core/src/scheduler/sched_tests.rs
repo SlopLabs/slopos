@@ -1263,7 +1263,7 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
 }
 
 /// Test: Timer tick drains inbox on all CPUs
-/// This is the key test for Phase 0 of the unified scheduler
+/// This is the key test for the unified scheduler inbox-drain path.
 pub fn test_timer_tick_drains_inbox() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1316,7 +1316,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
             .unwrap_or(true);
 
     if has_pending_after {
-        klog_info!("SCHED_TEST: Timer tick did not drain inbox (Phase 0 not implemented?)");
+        klog_info!("SCHED_TEST: Timer tick did not drain inbox");
         return TestResult::Fail;
     }
 
