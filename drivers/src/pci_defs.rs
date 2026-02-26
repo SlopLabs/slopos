@@ -65,6 +65,9 @@ pub const PCI_COMMAND_MEMORY_SPACE: u16 = 0x0002;
 /// Enable bus master capability (bit 2).
 pub const PCI_COMMAND_BUS_MASTER: u16 = 0x0004;
 
+/// Disable legacy INTx assertion (bit 10).
+/// Must be set when MSI or MSI-X is enabled.
+pub const PCI_COMMAND_INTX_DISABLE: u16 = 0x0400;
 // =============================================================================
 // Device Classes
 // =============================================================================

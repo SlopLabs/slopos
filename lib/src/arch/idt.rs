@@ -113,6 +113,21 @@ pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
 pub const LAPIC_TIMER_VECTOR: u8 = 0xEC;
 
 // =============================================================================
+// MSI Vector Range
+// =============================================================================
+
+/// First vector available for MSI allocation.
+/// Vectors 32–47 are reserved for legacy IOAPIC IRQs (IRQ0–IRQ15).
+pub const MSI_VECTOR_BASE: u8 = 48;
+
+/// One-past-the-last MSI vector (exclusive upper bound).
+/// Vectors 224–255 are reserved for system IPIs, LAPIC timer, and spurious.
+pub const MSI_VECTOR_END: u8 = 224;
+
+/// Total number of vectors available for MSI allocation.
+pub const MSI_VECTOR_COUNT: usize = (MSI_VECTOR_END - MSI_VECTOR_BASE) as usize;
+
+// =============================================================================
 // IDT Size
 // =============================================================================
 
