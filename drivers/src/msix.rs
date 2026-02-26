@@ -207,6 +207,30 @@ impl MsixTable {
         let pba_word: u64 = self.pba.read::<u64>(qword_idx * 8);
         Some((pba_word & (1u64 << bit)) != 0)
     }
+
+    /// Read the Message Data field for a table entry.
+    ///
+    /// Bits 7:0 contain the interrupt vector.  Returns `None` if
+    /// `entry_idx` is out of range.
+    pub fn read_msg_data(&self, entry_idx: u16) -> Option<u32> {
+        if entry_idx >= self.table_size {
+            return None;
+        }
+        let offset = (entry_idx as usize) * MSIX_ENTRY_SIZE + MSIX_ENTRY_DATA;
+        Some(self.table.read::<u32>(offset))
+    }
+
+    /// Read the Message Address (low 32 bits) for a table entry.
+    ///
+    /// Contains the destination APIC ID and addressing mode.  Returns
+    /// `None` if `entry_idx` is out of range.
+    pub fn read_msg_addr_lo(&self, entry_idx: u16) -> Option<u32> {
+        if entry_idx >= self.table_size {
+            return None;
+        }
+        let offset = (entry_idx as usize) * MSIX_ENTRY_SIZE + MSIX_ENTRY_ADDR_LO;
+        Some(self.table.read::<u32>(offset))
+    }
 }
 
 /// Errors that can occur during MSI-X operations.

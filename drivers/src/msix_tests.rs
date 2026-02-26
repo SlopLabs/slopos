@@ -18,11 +18,11 @@ use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, pass};
 
 use crate::msix::{
-    MsixCapability, MsixError, msix_clear_function_mask, msix_configure, msix_disable, msix_enable,
+    MsixCapability, MsixError, msix_clear_function_mask, msix_configure, msix_disable,
     msix_map_table, msix_mask_entry, msix_read_capability, msix_refresh_control,
     msix_set_function_mask, msix_unmask_entry,
 };
-use crate::pci::{pci_config_read16, pci_get_device, pci_get_device_count};
+use crate::pci::{pci_config_read16, pci_config_write16, pci_get_device, pci_get_device_count};
 use crate::pci_defs::*;
 
 // =============================================================================
@@ -55,6 +55,25 @@ fn find_msix_device() -> Option<(PciDeviceInfo, u8)> {
 /// Read the MSI-X Message Control register for a given capability.
 fn read_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability) -> u16 {
     pci_config_read16(dev.bus, dev.device, dev.function, cap.cap_offset + 0x02)
+}
+
+/// Enable MSI-X with function mask set in a single config write.
+///
+/// Unlike [`msix_enable`], this keeps the function mask bit set so that
+/// QEMU does not attempt to fire vectors through a stale notifier.  Use in
+/// tests that only need to verify the *enable bit* without actually
+/// delivering interrupts.
+fn enable_msix_masked(dev: &PciDeviceInfo, cap: &MsixCapability) {
+    let ctrl = pci_config_read16(dev.bus, dev.device, dev.function, cap.cap_offset + 0x02);
+    // Set enable (bit 15) AND function mask (bit 14).
+    let new_ctrl = ctrl | (1 << 15) | (1 << 14);
+    pci_config_write16(
+        dev.bus,
+        dev.device,
+        dev.function,
+        cap.cap_offset + 0x02,
+        new_ctrl,
+    );
 }
 
 // =============================================================================
@@ -494,14 +513,16 @@ pub fn test_msix_enable_sets_enable_bit() -> TestResult {
     };
     let cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    msix_enable(dev.bus, dev.device, dev.function, &cap);
+    // Enable with function mask to prevent QEMU from firing configured vectors.
+    enable_msix_masked(&dev, &cap);
 
     let ctrl = read_msix_control(&dev, &cap);
     let enabled = (ctrl & (1 << 15)) != 0;
     assert_test!(enabled, "MSI-X enable bit not set after msix_enable()");
 
-    // Clean up: disable.
+    // Clean up: disable then clear function mask.
     msix_disable(dev.bus, dev.device, dev.function, &cap);
+    msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
     pass!()
 }
 
@@ -513,8 +534,8 @@ pub fn test_msix_disable_clears_enable_bit() -> TestResult {
     };
     let cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // Enable first, then disable.
-    msix_enable(dev.bus, dev.device, dev.function, &cap);
+    // Enable with function mask, then disable.
+    enable_msix_masked(&dev, &cap);
     msix_disable(dev.bus, dev.device, dev.function, &cap);
 
     let ctrl = read_msix_control(&dev, &cap);
@@ -555,8 +576,8 @@ pub fn test_msix_refresh_control_updates_cap() -> TestResult {
     };
     let mut cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // Enable MSI-X so control changes.
-    msix_enable(dev.bus, dev.device, dev.function, &cap);
+    // Enable with function mask to prevent QEMU from firing configured vectors.
+    enable_msix_masked(&dev, &cap);
 
     let _old_ctrl = cap.control;
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
@@ -584,7 +605,6 @@ pub fn test_msix_cap_is_enabled_method() -> TestResult {
     };
     let mut cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // Initially not enabled (QEMU default).
     msix_disable(dev.bus, dev.device, dev.function, &cap);
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
     assert_test!(
@@ -592,7 +612,8 @@ pub fn test_msix_cap_is_enabled_method() -> TestResult {
         "is_enabled() should be false after disable"
     );
 
-    msix_enable(dev.bus, dev.device, dev.function, &cap);
+    // Enable with function mask to prevent QEMU from firing configured vectors.
+    enable_msix_masked(&dev, &cap);
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
     assert_test!(cap.is_enabled(), "is_enabled() should be true after enable");
 
