@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -535,23 +535,41 @@ Program basic MSI (1–32 vectors per device).
 
 MSI-X is the preferred mechanism (more vectors, per-vector masking, table-based).
 
-- [ ] **3C.1** Parse MSI-X capability structure:
-  ```
-  Offset+0: Cap ID (0x11) | Next
-  Offset+2: Message Control (table size, function mask, enable)
-  Offset+4: Table Offset/BIR (BAR index + offset)
-  Offset+8: PBA Offset/BIR (Pending Bit Array)
-  ```
-- [ ] **3C.2** Map MSI-X table:
-  - Read BIR (BAR Indicator Register) to find which BAR contains the table
-  - Map the BAR region via `MmioRegion::map()`
+- [x] **3C.1** Parse MSI-X capability structure:
+  - `msix_read_capability(bus, dev, func, cap_offset) -> MsixCapability`
+  - Parses Message Control (table size, function mask, enable), Table Offset/BIR, PBA Offset/BIR
+  - `MsixCapability` struct: `cap_offset`, `control`, `table_size` (1–2048), `table_bar`, `table_offset`, `pba_bar`, `pba_offset`
+  - Implemented in `drivers/src/msix.rs`
+- [x] **3C.2** Map MSI-X table:
+  - `msix_map_table(device: &PciDeviceInfo, cap: &MsixCapability) -> Result<MsixTable, MsixError>`
+  - Reads BIR to find which BAR contains the table; maps via `MmioRegion::map()`
+  - Maps both MSI-X table (16 bytes × table_size) and PBA (⌈table_size/64⌉ × 8 bytes)
+  - `MsixTable` struct with `read_vector_control()` and `is_pending()` accessors
   - Each table entry: `{ addr_low: u32, addr_high: u32, data: u32, vector_control: u32 }`
-- [ ] **3C.3** Implement `msix_configure(device, entry_idx, vector, cpu) -> Result<(), Error>`:
-  - Write message address/data to table entry
-  - Clear mask bit in vector_control
-- [ ] **3C.4** Implement `msix_enable(device)` / `msix_disable(device)`:
-  - Set/clear enable bit in MSI-X Message Control
-  - When enabling, also disable legacy INTx (set bit 10 in Command register)
+- [x] **3C.3** Implement `msix_configure(table, entry_idx, vector, target_apic_id) -> Result<(), MsixError>`:
+  - Masks entry → writes LAPIC message address/data → unmasks entry
+  - Same x86 message format as MSI (0xFEE00000 base + APIC ID shift)
+  - `msix_mask_entry()` / `msix_unmask_entry()` for per-vector masking
+  - `MsixError` enum: `InvalidVector`, `InvalidEntry`, `BarNotAvailable`, `MappingFailed`, `TableNotMapped`
+- [x] **3C.4** Implement `msix_enable(device)` / `msix_disable(device)`:
+  - `msix_enable()`: sets MSI-X enable bit, clears function mask, disables legacy INTx
+  - `msix_disable()`: clears MSI-X enable bit, re-enables legacy INTx
+  - `msix_set_function_mask()` / `msix_clear_function_mask()` for atomic bulk reconfiguration
+  - `msix_refresh_control()` to re-read Message Control register
+
+### Phase 3C Test Coverage
+
+25 tests in `drivers/src/msix_tests.rs` covering:
+- Capability parsing from QEMU VirtIO block (1af4:1042) and net (1af4:1041) devices
+- Field consistency: table_size range (1–2048), BIR range (0–5), DWORD-aligned offsets
+- Deterministic parsing across multiple reads
+- Table mapping: MMIO region creation, accessor bounds checking (read_vector_control, is_pending)
+- Entry configuration: valid vector programming, InvalidVector/InvalidEntry error paths
+- Mask/unmask operations: per-entry masking with vector control bit verification, out-of-range rejection
+- Enable/disable: config-space enable bit toggling, function mask toggling, refresh_control
+- MsixCapability helper methods: is_enabled(), is_function_masked()
+- Sweep of all MSI-X devices for field validity
+- Negative test: SATA controller (8086:2922) correctly reports no MSI-X
 
 ### 3D: VirtIO MSI-X Integration
 
@@ -571,11 +589,11 @@ Wire MSI-X into the existing VirtIO drivers.
 
 - [x] **GATE**: PCI capability list walking implemented
 - [x] **GATE**: MSI can be configured for at least one device
-- [ ] **GATE**: MSI-X table mapped and entries programmable
+- [x] **GATE**: MSI-X table mapped and entries programmable
 - [ ] **GATE**: VirtIO block device works with MSI-X (or falls back to legacy)
 - [x] **GATE**: Vector allocator manages the MSI vector space
-- [x] **GATE**: `just test` passes (452/452)
-- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 452/452 tests pass including IOAPIC-routed keyboard/serial tests)
+- [x] **GATE**: `just test` passes (502/502, including 25 new MSI-X regression tests)
+- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 502/502 tests pass including IOAPIC-routed keyboard/serial tests)
 
 ---
 
@@ -961,9 +979,9 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
-| **Phase 3**: MSI/MSI-X | 3A complete, 3B **complete**, 3C–3D not started | 14 | 8 | — |
+| **Phase 3**: MSI/MSI-X | 3A complete, 3B **complete**, 3C **complete**, 3D not started | 14 | 12 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **113** | **44** | |
+| **Total** | | **113** | **48** | |
