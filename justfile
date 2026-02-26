@@ -29,7 +29,7 @@ log_file     := env("LOG_FILE", "test_output.log")
 # ── QEMU ─────────────────────────────────────────────────────────────────────
 
 qemu_bin     := env("QEMU_BIN", "qemu-system-x86_64")
-qemu_smp     := env("QEMU_SMP", "2")
+qemu_smp     := env("QEMU_SMP", "4")
 qemu_mem     := env("QEMU_MEM", "512M")
 qemu_accel   := if os() == "macos" { env("QEMU_ACCEL", "hvf:tcg") } else { env("QEMU_ACCEL", "kvm:tcg") }
 qemu_display := if os() == "macos" { env("QEMU_DISPLAY", "cocoa") } else { env("QEMU_DISPLAY", "auto") }

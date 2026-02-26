@@ -28,7 +28,7 @@ FS_IMAGE="${3:?Usage: qemu_run.sh <mode> <iso> <fs_image>}"
 
 # ── Configuration with defaults ──────────────────────────────────────────────
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
-QEMU_SMP="${QEMU_SMP:-2}"
+QEMU_SMP="${QEMU_SMP:-4}"
 QEMU_MEM="${QEMU_MEM:-512M}"
 
 # Platform-aware acceleration and CPU model defaults

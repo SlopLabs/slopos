@@ -269,9 +269,9 @@ pub fn test_create_max_tasks() -> TestResult {
         MAX_TASKS
     );
 
-    // We should be able to create at least close to MAX_TASKS
-    // (might be slightly less due to idle task or other overhead)
-    let min_expected = MAX_TASKS.saturating_sub(2); // Allow 2 slots for overhead
+    let cpu_count = slopos_lib::get_cpu_count() as usize;
+    let reserved_idle_slots = cpu_count.max(1);
+    let min_expected = MAX_TASKS.saturating_sub(reserved_idle_slots + 1);
     if success_count < min_expected {
         klog_info!(
             "SCHED_TEST: Only created {} tasks, expected at least {}",
@@ -1399,9 +1399,26 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Pass; // Skip on single-CPU systems
     }
 
-    slopos_lib::mark_cpu_online(1);
-    if super::per_cpu::with_cpu_scheduler(1, |sched| sched.enable()).is_none() {
-        klog_info!("SCHED_TEST: Failed to enable target CPU 1 scheduler");
+    let current_cpu = slopos_lib::get_current_cpu() as usize;
+    let target_cpu =
+        match (0..cpu_count).find(|cpu| *cpu != current_cpu && *cpu < u32::BITS as usize) {
+            Some(cpu) => cpu,
+            None => {
+                klog_info!(
+                    "SCHED_TEST: Skipping cross-CPU test (no target CPU != {} in affinity range)",
+                    current_cpu
+                );
+                return TestResult::Pass;
+            }
+        };
+    let target_cpu_u8 = target_cpu as u8;
+
+    slopos_lib::mark_cpu_online(target_cpu);
+    if super::per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enable()).is_none() {
+        klog_info!(
+            "SCHED_TEST: Failed to enable target CPU {} scheduler",
+            target_cpu
+        );
         return TestResult::Fail;
     }
 
@@ -1421,39 +1438,39 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
         return TestResult::Fail;
     }
-    let cpu_id = slopos_lib::get_current_cpu();
-
-    // Set affinity to CPU 1 to force cross-CPU scheduling.
     // Keep last_cpu on the current CPU so the scheduler must migrate it.
     unsafe {
-        (*task_ptr).cpu_affinity = 1 << 1; // Only CPU 1
-        (*task_ptr).last_cpu = cpu_id as u8;
+        (*task_ptr).cpu_affinity = 1u32 << target_cpu;
+        (*task_ptr).last_cpu = current_cpu as u8;
     }
 
-    // Schedule task - should use lock-free path to CPU 1
     let result = schedule_task(task_ptr);
     if result != 0 {
         klog_info!("SCHED_TEST: Cross-CPU schedule_task failed");
         return TestResult::Fail;
     }
 
-    // The task should be in CPU 1's inbox or ready queue
     // After drain, it should be in ready queue
-    super::per_cpu::with_cpu_scheduler(1, |sched| {
+    super::per_cpu::with_cpu_scheduler(target_cpu, |sched| {
         sched.drain_remote_inbox();
     });
 
-    let ready_on_cpu1 =
-        super::per_cpu::with_cpu_scheduler(1, |sched| sched.total_ready_count()).unwrap_or(0);
+    let ready_on_target =
+        super::per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.total_ready_count())
+            .unwrap_or(0);
 
-    if ready_on_cpu1 == 0 {
-        klog_info!("SCHED_TEST: Task not found on CPU 1 after cross-CPU schedule");
+    if ready_on_target == 0 {
+        klog_info!(
+            "SCHED_TEST: Task not found on CPU {} after cross-CPU schedule",
+            target_cpu
+        );
         return TestResult::Fail;
     }
 
-    if unsafe { (*task_ptr).last_cpu } != 1 {
+    if unsafe { (*task_ptr).last_cpu } != target_cpu_u8 {
         klog_info!(
-            "SCHED_TEST: last_cpu not updated to target CPU (expected 1, got {})",
+            "SCHED_TEST: last_cpu not updated to target CPU (expected {}, got {})",
+            target_cpu,
             unsafe { (*task_ptr).last_cpu }
         );
         return TestResult::Fail;
