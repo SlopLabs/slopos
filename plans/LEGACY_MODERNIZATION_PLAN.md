@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -508,7 +508,7 @@ MSI/MSI-X are discovered through PCI capability structures.
 
 Program basic MSI (1–32 vectors per device).
 
-- [ ] **3B.1** Parse MSI capability structure:
+- [x] **3B.1** Parse MSI capability structure:
   ```
   Offset+0: Cap ID (0x05) | Next
   Offset+2: Message Control (enable, multi-message capable/enable, 64-bit, per-vector masking)
@@ -516,17 +516,20 @@ Program basic MSI (1–32 vectors per device).
   Offset+8: Message Address (high 32 bits, if 64-bit capable)
   Offset+C: Message Data
   ```
-- [ ] **3B.2** Implement `msi_configure(device, vector, cpu) -> Result<(), Error>`:
+- [x] **3B.2** Implement `msi_configure(device, vector, cpu) -> Result<(), Error>`:
   - Message Address: `0xFEE00000 | (cpu_apic_id << 12)`
   - Message Data: `vector | (edge_trigger << 15) | (fixed_delivery << 8)`
   - Set enable bit in Message Control
-  - Disable IOAPIC route for this device's legacy IRQ (if any)
-- [ ] **3B.3** Allocate interrupt vectors for MSI:
-  - Create a vector allocator in `core/src/irq.rs` or `drivers/src/irq.rs`
-  - Reserve vectors 32–47 for legacy IOAPIC, 48–223 for MSI allocation
-  - `alloc_vector() -> Option<u8>`
-- [ ] **3B.4** Register MSI handler in IDT:
-  - Existing IDT infrastructure handles this — just register the handler at the allocated vector
+  - Disable INTx via PCI command register when MSI is active
+- [x] **3B.3** Allocate interrupt vectors for MSI:
+  - Lock-free bitmap allocator in `core/src/irq.rs` using `AtomicU64` CAS
+  - Vectors 32–47 reserved for legacy IOAPIC, 48–223 for MSI allocation (176 vectors)
+  - `msi_alloc_vector() -> Option<u8>`, `msi_free_vector(vector: u8)`
+- [x] **3B.4** Register MSI handler in IDT:
+  - 176 assembly stubs generated via macro in `boot/idt_handlers.s`
+  - Address table exported to Rust via `msi_vector_table` in `.rodata`
+  - IDT entries installed in `idt_init()` (skipping SYSCALL_VECTOR 0x80)
+  - MSI dispatch integrated into `irq_dispatch()` with handler table + EOI + scheduler handoff
 
 ### 3C: MSI-X Support
 
@@ -566,13 +569,13 @@ Wire MSI-X into the existing VirtIO drivers.
 
 ### Phase 3 Gate
 
-- [ ] **GATE**: PCI capability list walking implemented
-- [ ] **GATE**: MSI can be configured for at least one device
+- [x] **GATE**: PCI capability list walking implemented
+- [x] **GATE**: MSI can be configured for at least one device
 - [ ] **GATE**: MSI-X table mapped and entries programmable
 - [ ] **GATE**: VirtIO block device works with MSI-X (or falls back to legacy)
-- [ ] **GATE**: Vector allocator manages the MSI vector space
-- [ ] **GATE**: `just test` passes
-- [ ] **GATE**: Legacy IOAPIC routing still works for PS/2, serial
+- [x] **GATE**: Vector allocator manages the MSI vector space
+- [x] **GATE**: `just test` passes (452/452)
+- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 452/452 tests pass including IOAPIC-routed keyboard/serial tests)
 
 ---
 
@@ -958,9 +961,9 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
-| **Phase 3**: MSI/MSI-X | 3A complete, 3B–3D not started | 14 | 4 | — |
+| **Phase 3**: MSI/MSI-X | 3A complete, 3B **complete**, 3C–3D not started | 14 | 8 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **113** | **40** | |
+| **Total** | | **113** | **44** | |
