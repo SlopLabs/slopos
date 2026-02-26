@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -587,6 +587,25 @@ Wire MSI-X into the existing VirtIO drivers.
   - `setup_interrupts` returns `Result` — callers handle the error explicitly
   - `irq_mode` field removed from driver state structs (redundant with `msix_state`)
 
+### 3E: Interrupt-Driven VirtIO Completion
+
+Replace busy-wait polling with real MSI-X interrupt-driven I/O completion.
+
+- [x] **3E.1** Remove dead ISR capability code:
+  - `VIRTIO_PCI_CAP_ISR_CFG` constant, `isr_cfg` field, PCI cap parsing arm, debug log references
+- [x] **3E.2** Add `QueueEvent` completion primitive (`drivers/src/virtio/mod.rs`):
+  - `AtomicBool`-backed signal/reset/consume
+  - `wait_timeout_ms()` using HPET deadline + x86 `cli; sti; hlt` wakeup pattern
+  - Prevents lost-wakeup race: `sti` defers interrupt delivery until after `hlt`
+- [x] **3E.3** Wire MSI-X IRQ handlers to signal `QueueEvent`:
+  - `virtio-blk`: `BLK_QUEUE_EVENT` static, handler calls `.signal()`
+  - `virtio-net`: `NET_RX_EVENT` + `NET_TX_EVENT` statics, handler uses queue-index ctx
+- [x] **3E.4** Replace polling with event waits:
+  - `poll_used()` removed from `queue.rs`
+  - `pop_used()` → non-blocking `try_pop_used()` + `advance_used()`
+  - `REQUEST_TIMEOUT_SPINS` (arbitrary spin count) → `REQUEST_TIMEOUT_MS` (5s real-time via HPET)
+- [x] **3E.5** Expose `hpet::period_fs()` for deadline computation
+
 ### Phase 3 Gate
 
 - [x] **GATE**: PCI capability list walking implemented
@@ -594,7 +613,7 @@ Wire MSI-X into the existing VirtIO drivers.
 - [x] **GATE**: MSI-X table mapped and entries programmable
 - [x] **GATE**: VirtIO block device works with MSI-X (MSI minimum, legacy polling removed)
 - [x] **GATE**: Vector allocator manages the MSI vector space
-- [x] **GATE**: `just test` passes (520/520, including 25 MSI-X regression tests + 18 VirtIO MSI-X integration tests)
+- [x] **GATE**: `just test` passes (520/520, including 25 MSI-X regression tests + 18 VirtIO MSI-X integration tests + interrupt-driven completion verified)
 - [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 520/520 tests pass including IOAPIC-routed keyboard/serial tests)
 
 ---
@@ -981,7 +1000,7 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
-| **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D all done) | 17 | 17 | — |
+| **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 22 | 22 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
