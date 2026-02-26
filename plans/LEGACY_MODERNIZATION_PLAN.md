@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -575,25 +575,27 @@ MSI-X is the preferred mechanism (more vectors, per-vector masking, table-based)
 
 Wire MSI-X into the existing VirtIO drivers.
 
-- [ ] **3D.1** Update `drivers/src/virtio_blk.rs`:
+- [x] **3D.1** Update `drivers/src/virtio_blk.rs`:
   - During probe: check for MSI-X capability
   - If available: allocate vectors, configure MSI-X table entries
   - Map virtqueue interrupts to MSI-X vectors instead of legacy IRQ
-- [ ] **3D.2** Update `drivers/src/virtio_net.rs`:
+- [x] **3D.2** Update `drivers/src/virtio_net.rs`:
   - Same treatment — MSI-X enables separate vectors for RX and TX queues
   - Multi-queue: each queue pair gets its own vector (enables parallel processing)
-- [ ] **3D.3** Fallback: if MSI-X not available, use MSI; if MSI not available, use legacy IOAPIC
-  - Maintain backward compatibility with current working setup
+- [x] **3D.3** MSI-X required, MSI as minimum fallback; legacy polling removed
+  - `InterruptMode::None` variant eliminated — probe panics if neither MSI-X nor MSI available
+  - `setup_interrupts` returns `Result` — callers handle the error explicitly
+  - `irq_mode` field removed from driver state structs (redundant with `msix_state`)
 
 ### Phase 3 Gate
 
 - [x] **GATE**: PCI capability list walking implemented
 - [x] **GATE**: MSI can be configured for at least one device
 - [x] **GATE**: MSI-X table mapped and entries programmable
-- [ ] **GATE**: VirtIO block device works with MSI-X (or falls back to legacy)
+- [x] **GATE**: VirtIO block device works with MSI-X (MSI minimum, legacy polling removed)
 - [x] **GATE**: Vector allocator manages the MSI vector space
-- [x] **GATE**: `just test` passes (502/502, including 25 new MSI-X regression tests)
-- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 502/502 tests pass including IOAPIC-routed keyboard/serial tests)
+- [x] **GATE**: `just test` passes (520/520, including 25 MSI-X regression tests + 18 VirtIO MSI-X integration tests)
+- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 520/520 tests pass including IOAPIC-routed keyboard/serial tests)
 
 ---
 
@@ -979,9 +981,9 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
-| **Phase 3**: MSI/MSI-X | 3A complete, 3B **complete**, 3C **complete**, 3D not started | 14 | 12 | — |
+| **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D all done) | 17 | 17 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **113** | **48** | |
+| **Total** | | **116** | **53** | |
