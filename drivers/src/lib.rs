@@ -12,6 +12,9 @@ pub mod interrupt_test;
 pub mod ioapic;
 pub mod irq;
 pub mod msi;
+pub mod msix;
+#[cfg(feature = "itests")]
+pub mod msix_tests;
 pub mod net;
 pub mod pci;
 #[cfg(feature = "itests")]
