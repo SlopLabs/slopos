@@ -30,6 +30,8 @@ pub mod tty;
 pub mod virtio;
 pub mod virtio_blk;
 #[cfg(feature = "itests")]
+pub mod virtio_completion_tests;
+#[cfg(feature = "itests")]
 pub mod virtio_msix_tests;
 pub mod virtio_net;
 #[cfg(feature = "itests")]
