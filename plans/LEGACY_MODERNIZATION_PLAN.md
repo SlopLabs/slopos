@@ -613,8 +613,8 @@ Replace busy-wait polling with real MSI-X interrupt-driven I/O completion.
 - [x] **GATE**: MSI-X table mapped and entries programmable
 - [x] **GATE**: VirtIO block device works with MSI-X (MSI minimum, legacy polling removed)
 - [x] **GATE**: Vector allocator manages the MSI vector space
-- [x] **GATE**: `just test` passes (520/520, including 25 MSI-X regression tests + 18 VirtIO MSI-X integration tests + interrupt-driven completion verified)
-- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 520/520 tests pass including IOAPIC-routed keyboard/serial tests)
+- [x] **GATE**: `just test` passes (533/533, including 25 MSI-X regression tests + 18 VirtIO MSI-X integration tests + 13 interrupt-driven completion tests)
+- [x] **GATE**: Legacy IOAPIC routing still works for PS/2, serial (verified: 533/533 tests pass including IOAPIC-routed keyboard/serial tests)
 
 ---
 
@@ -1000,7 +1000,7 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 0**: Timer Modernization | **Complete** | 31 | 31 | — |
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
-| **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 22 | 22 | — |
+| **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
 | **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
