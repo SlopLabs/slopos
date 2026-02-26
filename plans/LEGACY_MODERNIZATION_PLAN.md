@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -642,13 +642,34 @@ ECAM (Enhanced Configuration Access Mechanism) maps the entire config space into
 
 ### 4A: ACPI MCFG Table Parsing
 
-- [ ] **4A.1** Add MCFG table parsing to `acpi/src/`:
-  - Find `"MCFG"` signature in XSDT
-  - Parse entries: each entry has `{ base_address: u64, segment_group: u16, start_bus: u8, end_bus: u8 }`
-  - Export: `McfgEntry { base_phys: u64, segment: u16, bus_start: u8, bus_end: u8 }`
-- [ ] **4A.2** Store MCFG data in `drivers/src/pci.rs`:
-  - Static array of MCFG entries (typically 1 entry covering buses 0–255)
-  - `ECAM_BASE: Option<u64>` for the primary segment
+- [x] **4A.1** Add MCFG table parsing to `acpi/src/mcfg.rs`:
+  - Finds `"MCFG"` signature via `AcpiTables::find_table()` (same pattern as HPET/MADT)
+  - Parses raw `RawMcfgTable` (44-byte header: 36-byte SDT + 8 reserved) and variable-length `RawMcfgEntry` array (16 bytes each)
+  - Exports `McfgEntry { base_phys: u64, segment: u16, bus_start: u8, bus_end: u8 }`
+  - `Mcfg` struct with `from_tables()`, `entries()`, `find_entry(segment, bus)`, `primary_entry()` methods
+  - `McfgEntry::region_size()` computes ECAM MMIO size; `ecam_offset(bus, dev, func)` computes BDF offset
+  - Validates base address non-zero and bus range ordering; caps at 16 entries
+  - Module declared in `acpi/src/lib.rs`
+- [x] **4A.2** Store MCFG data in `drivers/src/pci.rs`:
+  - `EcamState` struct with `IrqMutex`-protected array of up to 16 `McfgEntry`s
+  - `ECAM_BASE: AtomicU64` — lock-free cached base for segment 0
+  - `ECAM_ENTRY_COUNT: AtomicU8` — lock-free availability check
+  - `pci_discover_mcfg()` called at start of `pci_init()` — non-fatal if MCFG absent (falls back to legacy port I/O)
+  - Public API: `pci_ecam_available()`, `pci_ecam_base()`, `pci_ecam_entry_count()`, `pci_ecam_entry(index)`, `pci_ecam_find_entry(segment, bus)`
+  - QEMU q35 discovers ECAM at 0xe0000000 covering segment 0 buses 0–255 (256MB)
+
+### Phase 4A Test Coverage
+
+21 tests in `drivers/src/ecam_tests.rs` covering:
+- MCFG discovery sanity: `pci_ecam_available()` returns true, entry count > 0 on QEMU q35
+- Primary entry validation: non-zero base address, 4 KiB page-aligned, covers bus 0
+- Entry field validity: all entries have non-zero base_phys, bus_start ≤ bus_end
+- `McfgEntry::region_size()`: correct formula `(bus_end - bus_start + 1) * 256 * 4096`, full-range = 256 MiB
+- `McfgEntry::ecam_offset()`: zero-BDF returns 0, known BDF matches `(bus<<20)|(dev<<15)|(func<<12)`
+- Boundary rejection: bus below/above range returns None, device ≥ 32 returns None, function ≥ 8 returns None
+- `pci_ecam_find_entry()`: finds segment 0 bus 0, returns None for nonexistent segment 0xFFFF
+- Lock-free vs mutex consistency: `pci_ecam_base()` matches primary entry `base_phys`, `entry_count` matches indexable range
+- Deterministic reads: consecutive reads of all ECAM state return identical results
 
 ### 4B: ECAM MMIO Config Access
 
@@ -684,12 +705,12 @@ ECAM (Enhanced Configuration Access Mechanism) maps the entire config space into
 
 ### Phase 4 Gate
 
-- [ ] **GATE**: MCFG table parsed from ACPI
+- [x] **GATE**: MCFG table parsed from ACPI (21 regression tests in `ecam_tests.rs`, 553/553 total pass)
 - [ ] **GATE**: ECAM MMIO region mapped and functional
 - [ ] **GATE**: PCI config reads work through ECAM for the full 4096-byte space
 - [ ] **GATE**: Legacy port I/O fallback still works when MCFG is absent
 - [ ] **GATE**: Extended capability list scanned during enumeration
-- [ ] **GATE**: `just test` passes
+- [ ] **GATE**: `just test` passes (553/553 including 21 ECAM regression tests)
 - [ ] **GATE**: `just boot` — PCI devices discovered correctly through ECAM
 
 ---
@@ -1001,8 +1022,8 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
-| **Phase 4**: PCIe ECAM | Not Started | 9 | 0 | — |
+| **Phase 4**: PCIe ECAM | 4A **Complete** | 9 | 2 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **116** | **53** | |
+| **Total** | | **116** | **55** | |

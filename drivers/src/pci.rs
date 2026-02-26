@@ -1,11 +1,15 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
+use slopos_acpi::mcfg::{Mcfg, McfgEntry};
+use slopos_acpi::tables::{AcpiTables, Rsdp};
+use slopos_lib::kernel_services::platform;
 use slopos_lib::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InitFlag, IrqMutex, klog_info};
+use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 
 pub use crate::pci_defs::*;
@@ -83,6 +87,45 @@ static PCI_INIT: InitFlag = InitFlag::new();
 static ENUM_STATE: IrqMutex<PciEnumState> = IrqMutex::new(PciEnumState::new());
 static DRIVER_REGISTRY: IrqMutex<PciDriverRegistry> = IrqMutex::new(PciDriverRegistry::new());
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
+
+// =============================================================================
+// MCFG / ECAM State (Phase 4A)
+// =============================================================================
+
+/// Maximum number of ECAM segments we cache from the MCFG table.
+const MAX_ECAM_ENTRIES: usize = 16;
+
+/// Cached MCFG entries discovered from ACPI.
+///
+/// Populated during [`pci_init`]; read by ECAM config access (Phase 4B).
+/// Protected by `IrqMutex` for SMP-safe access.
+struct EcamState {
+    entries: [McfgEntry; MAX_ECAM_ENTRIES],
+    count: u8,
+}
+
+impl EcamState {
+    const fn new() -> Self {
+        Self {
+            entries: [McfgEntry {
+                base_phys: 0,
+                segment: 0,
+                bus_start: 0,
+                bus_end: 0,
+            }; MAX_ECAM_ENTRIES],
+            count: 0,
+        }
+    }
+}
+
+static ECAM_STATE: IrqMutex<EcamState> = IrqMutex::new(EcamState::new());
+
+/// Cached ECAM base address for segment 0 — fast lock-free read path.
+/// Set to 0 if MCFG is absent or segment 0 is not covered.
+static ECAM_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Number of ECAM entries discovered (lock-free read for quick availability check).
+static ECAM_ENTRY_COUNT: AtomicU8 = AtomicU8::new(0);
 
 fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
     unsafe { cstr_to_str(ptr as *const c_char) }
@@ -489,12 +532,126 @@ fn pci_scan_bus_inner(state: &mut PciEnumState, bus: u8) {
     }
 }
 
+// =============================================================================
+// MCFG / ECAM Discovery
+// =============================================================================
+
+/// Discover and cache MCFG (PCIe ECAM) entries from ACPI tables.
+///
+/// Called during [`pci_init`] before bus enumeration.  Non-fatal: if MCFG is
+/// absent, PCI config access continues via legacy port I/O (0xCF8/0xCFC).
+fn pci_discover_mcfg() {
+    if !hhdm::is_available() {
+        klog_info!("PCI: HHDM unavailable, skipping MCFG discovery");
+        return;
+    }
+    if !platform::is_rsdp_available() {
+        klog_info!("PCI: ACPI RSDP unavailable, skipping MCFG discovery");
+        return;
+    }
+
+    let rsdp = platform::get_rsdp_address() as *const Rsdp;
+    let Some(tables) = AcpiTables::from_rsdp(rsdp) else {
+        klog_info!("PCI: ACPI tables validation failed, skipping MCFG");
+        return;
+    };
+
+    let Some(mcfg) = Mcfg::from_tables(&tables) else {
+        // Not an error — older systems or QEMU without q35 may lack MCFG.
+        klog_info!("PCI: No MCFG table — using legacy port I/O config access");
+        return;
+    };
+
+    let count = mcfg.count();
+    if count == 0 {
+        klog_info!("PCI: MCFG table present but empty — using legacy port I/O");
+        return;
+    }
+
+    // Store entries in the ECAM state.
+    {
+        let mut state = ECAM_STATE.lock();
+        let capped = count.min(MAX_ECAM_ENTRIES);
+        for (i, entry) in mcfg.entries().iter().enumerate().take(capped) {
+            state.entries[i] = *entry;
+            klog_info!(
+                "PCI: ECAM segment {} buses {}..{} at phys 0x{:x} ({}MB)",
+                entry.segment,
+                entry.bus_start,
+                entry.bus_end,
+                entry.base_phys,
+                entry.region_size() / (1024 * 1024),
+            );
+        }
+        state.count = capped as u8;
+    }
+
+    // Cache primary segment base for fast lock-free access.
+    if let Some(primary) = mcfg.primary_entry() {
+        ECAM_BASE.store(primary.base_phys, Ordering::Release);
+    }
+    ECAM_ENTRY_COUNT.store(count.min(MAX_ECAM_ENTRIES) as u8, Ordering::Release);
+
+    klog_info!(
+        "PCI: MCFG discovery complete — {} ECAM entry(s) cached",
+        count.min(MAX_ECAM_ENTRIES),
+    );
+}
+
+/// Check whether ECAM configuration space is available.
+///
+/// Returns `true` if MCFG was successfully parsed and at least one ECAM
+/// entry is cached.  Phase 4B will use this to decide between ECAM MMIO
+/// and legacy port I/O for config reads.
+#[inline]
+pub fn pci_ecam_available() -> bool {
+    ECAM_ENTRY_COUNT.load(Ordering::Acquire) > 0
+}
+
+/// Return the physical base address of the primary ECAM region (segment 0).
+///
+/// Returns `0` if MCFG was not found or does not cover segment 0.
+#[inline]
+pub fn pci_ecam_base() -> u64 {
+    ECAM_BASE.load(Ordering::Acquire)
+}
+
+/// Return the number of cached ECAM entries.
+#[inline]
+pub fn pci_ecam_entry_count() -> u8 {
+    ECAM_ENTRY_COUNT.load(Ordering::Acquire)
+}
+
+/// Retrieve a specific ECAM entry by index.
+pub fn pci_ecam_entry(index: usize) -> Option<McfgEntry> {
+    let state = ECAM_STATE.lock();
+    if index < state.count as usize {
+        Some(state.entries[index])
+    } else {
+        None
+    }
+}
+
+/// Find the ECAM entry that covers a given segment and bus.
+pub fn pci_ecam_find_entry(segment: u16, bus: u8) -> Option<McfgEntry> {
+    let state = ECAM_STATE.lock();
+    state.entries[..state.count as usize]
+        .iter()
+        .find(|e| {
+            e.segment == segment && bus >= e.bus_start && bus <= e.bus_end && e.base_phys != 0
+        })
+        .copied()
+}
+
 pub fn pci_init() {
     if !PCI_INIT.init_once() {
         return;
     }
 
     klog_info!("PCI: Initializing PCI subsystem");
+
+    // Discover MCFG (PCIe ECAM) before enumeration — non-fatal if absent.
+    pci_discover_mcfg();
 
     let mut state = ENUM_STATE.lock();
     state.device_count = 0;

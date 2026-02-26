@@ -9,6 +9,7 @@
 //! - [`tables`]: RSDP validation, XSDT/RSDT traversal, table lookup by signature.
 //! - [`madt`]: MADT (Multiple APIC Description Table) entry iteration.
 //! - [`hpet`]: HPET (High Precision Event Timer) table parsing.
+//! - [`mcfg`]: MCFG (PCI Express ECAM configuration space) table parsing.
 //!
 //! # Usage
 //!
@@ -33,4 +34,5 @@
 
 pub mod hpet;
 pub mod madt;
+pub mod mcfg;
 pub mod tables;
