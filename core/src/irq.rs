@@ -13,7 +13,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_lib::InitFlag;
 use slopos_lib::IrqMutex;
-use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
+use slopos_lib::arch::idt::{
+    IRQ_BASE_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, MSI_VECTOR_END, SYSCALL_VECTOR,
+};
 pub use slopos_lib::kernel_services::driver_runtime::IRQ_LINES;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
@@ -354,6 +356,13 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
 
     let irq = vector - IRQ_BASE_VECTOR;
     if irq as usize >= IRQ_LINES {
+        // Check if this is an MSI vector before rejecting.
+        if vector >= MSI_VECTOR_BASE && vector < MSI_VECTOR_END {
+            msi_dispatch_inner(vector, frame);
+            acknowledge_irq();
+            scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+            return;
+        }
         log_unhandled_irq(0xFF, vector);
         acknowledge_irq();
         return;
@@ -405,4 +414,241 @@ pub fn get_stats(irq: u8, out_stats: *mut IrqStats) -> i32 {
         (*out_stats).last_timestamp = table[irq as usize].last_timestamp;
     });
     0
+}
+
+// =============================================================================
+// MSI (Message Signaled Interrupts) Vector Allocator & Dispatch
+// =============================================================================
+//
+// MSI bypasses the IOAPIC — devices write directly to the LAPIC.
+// Vectors 48–223 (MSI_VECTOR_BASE..MSI_VECTOR_END) are reserved for MSI.
+// The allocator is a simple atomic bitmap; the handler table is lock-protected.
+
+/// MSI handler function signature.
+///
+/// `vector`: the IDT vector that fired (48–223).
+/// `frame`:  pointer to the saved interrupt frame.
+/// `ctx`:    opaque context pointer supplied at registration.
+pub type MsiHandler = extern "C" fn(vector: u8, frame: *mut InterruptFrame, ctx: *mut c_void);
+
+/// Per-vector MSI registration entry.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // device_bdf stored for future diagnostics / /proc/interrupts
+struct MsiEntry {
+    handler: Option<MsiHandler>,
+    context: *mut c_void,
+    /// BDF identifier for diagnostics (bus << 16 | dev << 8 | func).
+    device_bdf: u32,
+    count: u64,
+}
+
+impl MsiEntry {
+    const fn empty() -> Self {
+        Self {
+            handler: None,
+            context: core::ptr::null_mut(),
+            device_bdf: 0,
+            count: 0,
+        }
+    }
+}
+
+/// Bitmap words covering MSI_VECTOR_COUNT bits.
+/// 176 vectors → 3 × u64 = 192 bits (top 16 bits unused).
+const MSI_BITMAP_WORDS: usize = (MSI_VECTOR_COUNT + 63) / 64;
+
+static MSI_BITMAP: [AtomicU64; MSI_BITMAP_WORDS] = {
+    // const-initialise each word to 0 (all free).
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MSI_BITMAP_WORDS]
+};
+
+/// MSI handler table container.
+struct MsiTables {
+    entries: UnsafeCell<[MsiEntry; MSI_VECTOR_COUNT]>,
+}
+
+// SAFETY: access is serialised by MSI_TABLE_LOCK.
+unsafe impl Sync for MsiTables {}
+
+impl MsiTables {
+    const fn new() -> Self {
+        const EMPTY: MsiEntry = MsiEntry::empty();
+        Self {
+            entries: UnsafeCell::new([EMPTY; MSI_VECTOR_COUNT]),
+        }
+    }
+}
+
+static MSI_TABLE: MsiTables = MsiTables::new();
+static MSI_TABLE_LOCK: IrqMutex<()> = IrqMutex::new(());
+
+/// Access the MSI handler table under lock.
+#[inline]
+fn with_msi_table<R>(f: impl FnOnce(&mut [MsiEntry; MSI_VECTOR_COUNT]) -> R) -> R {
+    let _guard = MSI_TABLE_LOCK.lock();
+    unsafe { f(&mut *MSI_TABLE.entries.get()) }
+}
+
+// ---------------------------------------------------------------------------
+// Vector allocator
+// ---------------------------------------------------------------------------
+
+/// Allocate a single MSI vector.
+///
+/// Returns the IDT vector number (48–223) or `None` if exhausted.
+pub fn msi_alloc_vector() -> Option<u8> {
+    for word_idx in 0..MSI_BITMAP_WORDS {
+        loop {
+            let current = MSI_BITMAP[word_idx].load(Ordering::Relaxed);
+            if current == u64::MAX {
+                break; // this word is full
+            }
+            let bit = (!current).trailing_zeros() as usize;
+            let abs_bit = word_idx * 64 + bit;
+            if abs_bit >= MSI_VECTOR_COUNT {
+                return None; // past the valid range
+            }
+            let vector = MSI_VECTOR_BASE + abs_bit as u8;
+            let new = current | (1u64 << bit);
+            if vector == SYSCALL_VECTOR {
+                // SYSCALL_VECTOR (0x80) lives inside the MSI range but is
+                // reserved for the INT 0x80 trap gate.  Mark the bit as used
+                // so future scans skip it, and continue searching.
+                let _ = MSI_BITMAP[word_idx].compare_exchange_weak(
+                    current,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                );
+                break; // move to next word (or retry if CAS failed)
+            }
+            if MSI_BITMAP[word_idx]
+                .compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(vector);
+            }
+            // CAS raced — retry this word.
+        }
+    }
+    None
+}
+
+/// Free a previously-allocated MSI vector.
+///
+/// Also clears the handler table entry so stale interrupts are safely ignored.
+pub fn msi_free_vector(vector: u8) {
+    if vector < MSI_VECTOR_BASE || vector >= MSI_VECTOR_END {
+        return;
+    }
+    let idx = (vector - MSI_VECTOR_BASE) as usize;
+    let word_idx = idx / 64;
+    let bit = idx % 64;
+    MSI_BITMAP[word_idx].fetch_and(!(1u64 << bit), Ordering::Release);
+    with_msi_table(|table| {
+        table[idx] = MsiEntry::empty();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Handler registration
+// ---------------------------------------------------------------------------
+
+/// Register an interrupt handler for an allocated MSI vector.
+///
+/// `vector` must have been returned by [`msi_alloc_vector`].
+/// `device_bdf` is `(bus << 16) | (dev << 8) | func` for debug logging.
+pub fn msi_register_handler(
+    vector: u8,
+    handler: MsiHandler,
+    context: *mut c_void,
+    device_bdf: u32,
+) -> i32 {
+    if vector < MSI_VECTOR_BASE || vector >= MSI_VECTOR_END {
+        klog_info!(
+            "MSI: register_handler: vector 0x{:02x} out of range",
+            vector
+        );
+        return -1;
+    }
+    let idx = (vector - MSI_VECTOR_BASE) as usize;
+    with_msi_table(|table| {
+        table[idx] = MsiEntry {
+            handler: Some(handler),
+            context,
+            device_bdf,
+            count: 0,
+        };
+    });
+    klog_debug!(
+        "MSI: Registered handler for vector 0x{:02x} (BDF 0x{:06x})",
+        vector,
+        device_bdf
+    );
+    0
+}
+
+/// Unregister the handler for an MSI vector.
+pub fn msi_unregister_handler(vector: u8) {
+    if vector < MSI_VECTOR_BASE || vector >= MSI_VECTOR_END {
+        return;
+    }
+    let idx = (vector - MSI_VECTOR_BASE) as usize;
+    with_msi_table(|table| {
+        table[idx] = MsiEntry::empty();
+    });
+    klog_debug!("MSI: Unregistered handler for vector 0x{:02x}", vector);
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+/// Dispatch an MSI interrupt.  Called from [`irq_dispatch`] for vectors in
+/// the MSI range.  EOI is sent by the caller.
+fn msi_dispatch_inner(vector: u8, frame: *mut InterruptFrame) {
+    let idx = (vector - MSI_VECTOR_BASE) as usize;
+
+    let snapshot = with_msi_table(|table| {
+        let entry = &mut table[idx];
+        match entry.handler {
+            Some(h) => {
+                entry.count = entry.count.wrapping_add(1);
+                Some((h, entry.context))
+            }
+            None => None,
+        }
+    });
+
+    if let Some((handler, context)) = snapshot {
+        handler(vector, frame, context);
+    } else {
+        // No handler registered — log once, then ignore.
+        klog_debug!("MSI: Unhandled vector 0x{:02x}", vector);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query helpers (used by drivers)
+// ---------------------------------------------------------------------------
+
+/// Return the number of currently-allocated MSI vectors.
+pub fn msi_allocated_count() -> usize {
+    let mut count = 0usize;
+    for word_idx in 0..MSI_BITMAP_WORDS {
+        count += MSI_BITMAP[word_idx].load(Ordering::Relaxed).count_ones() as usize;
+    }
+    count
+}
+
+/// Check whether a specific vector is allocated.
+pub fn msi_vector_is_allocated(vector: u8) -> bool {
+    if vector < MSI_VECTOR_BASE || vector >= MSI_VECTOR_END {
+        return false;
+    }
+    let idx = (vector - MSI_VECTOR_BASE) as usize;
+    let word_idx = idx / 64;
+    let bit = idx % 64;
+    (MSI_BITMAP[word_idx].load(Ordering::Relaxed) & (1u64 << bit)) != 0
 }
