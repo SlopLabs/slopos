@@ -10,10 +10,10 @@ use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 use crate::net::{self, dhcp};
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
+    self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
-        set_driver_ok,
+        register_irq_handlers, set_driver_ok, setup_interrupts,
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
@@ -87,6 +87,7 @@ impl VirtioNetDevice {
 struct VirtioNetState {
     device: VirtioNetDevice,
     caps: VirtioMmioCaps,
+    msix_state: Option<VirtioMsixState>,
     ipv4_addr: [u8; 4],
     subnet_mask: [u8; 4],
     router: [u8; 4],
@@ -100,6 +101,7 @@ impl VirtioNetState {
         Self {
             device: VirtioNetDevice::new(),
             caps: VirtioMmioCaps::empty(),
+            msix_state: None,
             ipv4_addr: [0; 4],
             subnet_mask: [0; 4],
             router: [0; 4],
@@ -547,6 +549,19 @@ fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
 // PCI probe
 // =============================================================================
 
+/// MSI-X / MSI interrupt handler for virtio-net.
+///
+/// The `ctx` pointer encodes the queue index (0 = RX, 1 = TX).  Completion is
+/// detected by the polling loop, so this handler is intentionally minimal.
+extern "C" fn virtio_net_irq_handler(
+    _vector: u8,
+    _frame: *mut slopos_lib::InterruptFrame,
+    _ctx: *mut core::ffi::c_void,
+) {
+    // Intentional NOP — the polling path detects completion.
+    // Future: signal a condvar / event to wake blocked RX/TX waiters.
+}
+
 fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-net: already claimed");
@@ -596,21 +611,52 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         return -1;
     }
 
-    let Some(rx_queue) =
-        queue::setup_queue(&caps.common_cfg, VIRTIO_NET_QUEUE_RX, DEFAULT_QUEUE_SIZE)
-    else {
+    // --- MSI-X / MSI interrupt setup ---
+    // Request 2 vectors: one for RX (queue 0), one for TX (queue 1).
+    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 2).unwrap_or_else(|msg| {
+        panic!(
+            "virtio-net: {}:{}.{} {}",
+            info.bus, info.device, info.function, msg
+        )
+    });
+    let rx_msix_entry = msix_state.as_ref().map_or(VIRTIO_MSI_NO_VECTOR, |s| {
+        s.queue_msix_entry(VIRTIO_NET_QUEUE_RX)
+    });
+    let tx_msix_entry = msix_state.as_ref().map_or(VIRTIO_MSI_NO_VECTOR, |s| {
+        s.queue_msix_entry(VIRTIO_NET_QUEUE_TX)
+    });
+
+    let Some(rx_queue) = queue::setup_queue(
+        &caps.common_cfg,
+        VIRTIO_NET_QUEUE_RX,
+        DEFAULT_QUEUE_SIZE,
+        rx_msix_entry,
+    ) else {
         klog_info!("virtio-net: rx queue setup failed");
         DEVICE_CLAIMED.reset();
         return -1;
     };
 
-    let Some(tx_queue) =
-        queue::setup_queue(&caps.common_cfg, VIRTIO_NET_QUEUE_TX, DEFAULT_QUEUE_SIZE)
-    else {
+    let Some(tx_queue) = queue::setup_queue(
+        &caps.common_cfg,
+        VIRTIO_NET_QUEUE_TX,
+        DEFAULT_QUEUE_SIZE,
+        tx_msix_entry,
+    ) else {
         klog_info!("virtio-net: tx queue setup failed");
         DEVICE_CLAIMED.reset();
         return -1;
     };
+
+    // Register MSI-X/MSI handlers (NOPs — completion detected by polling).
+    let device_bdf =
+        ((info.bus as u32) << 16) | ((info.device as u32) << 8) | (info.function as u32);
+    register_irq_handlers(
+        &irq_mode,
+        msix_state.as_ref(),
+        virtio_net_irq_handler,
+        device_bdf,
+    );
 
     let negotiated_features = feat_result.driver_features;
     let mac = read_mac(&caps, negotiated_features);
@@ -629,6 +675,7 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
             ready: true,
         };
         state.caps = caps;
+        state.msix_state = msix_state;
         state.ipv4_addr = [0; 4];
         state.subnet_mask = [0; 4];
         state.router = [0; 4];
@@ -660,19 +707,19 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     }
 
     klog_info!(
-        "virtio-net: ready mtu={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        "virtio-net: ready mtu={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} irq {:?}",
         mtu,
         mac[0],
         mac[1],
         mac[2],
         mac[3],
         mac[4],
-        mac[5]
+        mac[5],
+        irq_mode,
     );
 
     0
 }
-
 // =============================================================================
 // Driver registration & public API
 // =============================================================================
@@ -839,4 +886,17 @@ pub fn virtio_net_receive(buffer: &mut [u8]) -> Option<usize> {
     }
 
     poll_one_rx_frame(&mut state, Some(buffer))
+}
+
+// =============================================================================
+// Test-only accessors
+// =============================================================================
+
+/// Return a snapshot of the MSI-X state for the claimed VirtIO-net device.
+///
+/// Only available in test builds (`itests` feature).  Returns `None` if the
+/// device was not probed or MSI-X was not configured (i.e. MSI fallback).
+#[cfg(feature = "itests")]
+pub fn virtio_net_msix_state() -> Option<VirtioMsixState> {
+    VIRTIO_NET_STATE.lock().msix_state
 }

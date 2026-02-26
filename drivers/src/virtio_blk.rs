@@ -6,10 +6,11 @@ use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
+    self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
+    VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
-        set_driver_ok,
+        register_irq_handlers, set_driver_ok, setup_interrupts,
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
@@ -51,11 +52,13 @@ impl VirtioBlkDevice {
     }
 }
 
-/// Combined device + MMIO caps under a single lock, ensuring ownership/claim
-/// state and the request path share one coherent synchronization model.
+/// Combined device + MMIO caps + interrupt state under a single lock,
+/// ensuring ownership/claim state and the request path share one coherent
+/// synchronization model.
 struct VirtioBlkState {
     device: VirtioBlkDevice,
     caps: VirtioMmioCaps,
+    msix_state: Option<VirtioMsixState>,
 }
 
 impl VirtioBlkState {
@@ -63,6 +66,7 @@ impl VirtioBlkState {
         Self {
             device: VirtioBlkDevice::new(),
             caps: VirtioMmioCaps::empty(),
+            msix_state: None,
         }
     }
 }
@@ -208,6 +212,20 @@ fn do_request(
     success
 }
 
+/// MSI-X / MSI interrupt handler for virtio-blk.
+///
+/// The device fires this when a used buffer is available.  Completion is
+/// detected by the polling loop in [`do_request`], so this handler is
+/// intentionally minimal — the IRQ dispatch layer sends EOI automatically.
+extern "C" fn virtio_blk_irq_handler(
+    _vector: u8,
+    _frame: *mut slopos_lib::InterruptFrame,
+    _ctx: *mut core::ffi::c_void,
+) {
+    // Intentional NOP — the polling path detects completion.
+    // Future: signal a condvar / event to wake blocked I/O waiters.
+}
+
 fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-blk: already claimed");
@@ -249,7 +267,19 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         return -1;
     }
 
-    let queue = match queue::setup_queue(&caps.common_cfg, 0, DEFAULT_QUEUE_SIZE) {
+    // --- MSI-X / MSI interrupt setup ---
+    // VirtIO modern on q35 always has MSI-X; MSI is the minimum fallback.
+    let (irq_mode, msix_state) = setup_interrupts(info, &caps, 1).unwrap_or_else(|msg| {
+        panic!(
+            "virtio-blk: {}:{}.{} {}",
+            info.bus, info.device, info.function, msg
+        )
+    });
+    let q0_msix_entry = msix_state
+        .as_ref()
+        .map_or(VIRTIO_MSI_NO_VECTOR, |s| s.queue_msix_entry(0));
+
+    let queue = match queue::setup_queue(&caps.common_cfg, 0, DEFAULT_QUEUE_SIZE, q0_msix_entry) {
         Some(q) => q,
         None => {
             klog_info!("virtio-blk: queue setup failed");
@@ -257,6 +287,16 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
             return -1;
         }
     };
+
+    // Register MSI-X/MSI handlers (NOPs — completion detected by polling).
+    let device_bdf =
+        ((info.bus as u32) << 16) | ((info.device as u32) << 8) | (info.function as u32);
+    register_irq_handlers(
+        &irq_mode,
+        msix_state.as_ref(),
+        virtio_blk_irq_handler,
+        device_bdf,
+    );
 
     set_driver_ok(&caps);
 
@@ -272,17 +312,18 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         let mut state = VIRTIO_BLK_STATE.lock();
         state.device = dev;
         state.caps = caps;
+        state.msix_state = msix_state;
     }
 
     klog_info!(
-        "virtio-blk: ready, capacity {} sectors ({} MB)",
+        "virtio-blk: ready, capacity {} sectors ({} MB), irq {:?}",
         capacity_sectors,
-        (capacity_sectors * SECTOR_SIZE) / (1024 * 1024)
+        (capacity_sectors * SECTOR_SIZE) / (1024 * 1024),
+        irq_mode,
     );
 
     0
 }
-
 static VIRTIO_BLK_DRIVER: PciDriver = PciDriver {
     name: b"virtio-blk\0".as_ptr(),
     match_fn: Some(virtio_blk_match),
@@ -389,4 +430,17 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
     }
 
     true
+}
+
+// =============================================================================
+// Test-only accessors
+// =============================================================================
+
+/// Return a snapshot of the MSI-X state for the claimed VirtIO-blk device.
+///
+/// Only available in test builds (`itests` feature).  Returns `None` if the
+/// device was not probed or MSI-X was not configured (i.e. MSI fallback).
+#[cfg(feature = "itests")]
+pub fn virtio_blk_msix_state() -> Option<VirtioMsixState> {
+    VIRTIO_BLK_STATE.lock().msix_state
 }

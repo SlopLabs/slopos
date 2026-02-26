@@ -54,6 +54,15 @@ pub const VIRTQ_DESC_F_WRITE: u16 = 2;
 /// Buffer contains a list of buffer descriptors
 pub const VIRTQ_DESC_F_INDIRECT: u16 = 4;
 
+/// VirtIO MSI-X "no vector" sentinel (§4.1.4.3).
+///
+/// Writing this to `queue_msix_vector` or `msix_config` disables MSI-X
+/// delivery for the respective queue or configuration change notification.
+pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xFFFF;
+
+/// Maximum number of virtqueues tracked for per-queue MSI-X vectors.
+pub const MAX_MSIX_QUEUES: usize = 4;
+
 pub use crate::pci_defs::{
     PCI_CAP_ID_VNDR, PCI_CAP_PTR_OFFSET, PCI_STATUS_CAP_LIST, PCI_STATUS_OFFSET,
 };
@@ -70,6 +79,14 @@ pub const COMMON_CFG_DEVICE_FEATURE: usize = 0x04;
 pub const COMMON_CFG_DRIVER_FEATURE_SELECT: usize = 0x08;
 /// Offset to driver_feature in common config
 pub const COMMON_CFG_DRIVER_FEATURE: usize = 0x0C;
+/// Offset to msix_config in common config (configuration change MSI-X vector)
+pub const COMMON_CFG_MSIX_CONFIG: usize = 0x10;
+/// Offset to num_queues in common config
+pub const COMMON_CFG_NUM_QUEUES: usize = 0x12;
+/// Offset to config_generation in common config
+pub const COMMON_CFG_CONFIG_GENERATION: usize = 0x15;
+/// Offset to queue_msix_vector in common config (per-queue MSI-X vector)
+pub const COMMON_CFG_QUEUE_MSIX_VECTOR: usize = 0x1A;
 /// Offset to device_status in common config
 pub const COMMON_CFG_DEVICE_STATUS: usize = 0x14;
 /// Offset to queue_select in common config
@@ -137,6 +154,74 @@ impl VirtioMmioCaps {
     #[inline]
     pub fn has_device_cfg(&self) -> bool {
         self.device_cfg.is_mapped()
+    }
+}
+
+// =============================================================================
+// VirtIO Interrupt Mode
+// =============================================================================
+
+/// Active interrupt delivery mechanism for a VirtIO device.
+///
+/// VirtIO modern devices on QEMU q35 always expose MSI-X.  The kernel
+/// requires at least MSI as a fallback; legacy polling is not supported.
+/// Probe will panic if neither MSI-X nor MSI can be configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptMode {
+    /// MSI: single shared vector for all queues.
+    Msi {
+        /// Allocated IDT vector (48–223).
+        vector: u8,
+    },
+    /// MSI-X: per-queue vectors via the MSI-X table.
+    Msix {
+        /// Number of queues with assigned MSI-X entries.
+        num_queues: u8,
+    },
+}
+
+/// Per-device MSI-X state produced by [`pci::try_setup_msix`].
+///
+/// Stores the mapped MSI-X table, the allocated IDT vectors for each
+/// virtqueue, and the overall enable state.  Callers must keep this alive
+/// for the lifetime of the device because it owns the MMIO mappings and
+/// the vector allocations.
+#[derive(Clone, Copy)]
+pub struct VirtioMsixState {
+    /// Parsed MSI-X capability from PCI config space.
+    pub cap: crate::msix::MsixCapability,
+    /// Mapped MSI-X table (MMIO).
+    pub table: crate::msix::MsixTable,
+    /// Allocated IDT vector for each queue (0 = not assigned).
+    pub queue_vectors: [u8; MAX_MSIX_QUEUES],
+    /// Number of queues that were assigned MSI-X vectors.
+    pub num_queues: u8,
+}
+
+impl VirtioMsixState {
+    /// Get the MSI-X table entry index for `queue_idx`.
+    ///
+    /// Convention: entry 0..N-1 map to queues 0..N-1 (no config-change entry).
+    /// Returns [`VIRTIO_MSI_NO_VECTOR`] if the queue has no vector assigned.
+    #[inline]
+    pub fn queue_msix_entry(&self, queue_idx: u16) -> u16 {
+        let i = queue_idx as usize;
+        if i < self.num_queues as usize && self.queue_vectors[i] != 0 {
+            queue_idx
+        } else {
+            VIRTIO_MSI_NO_VECTOR
+        }
+    }
+
+    /// IDT vector allocated to the given queue, or `None`.
+    #[inline]
+    pub fn queue_idt_vector(&self, queue_idx: u16) -> Option<u8> {
+        let i = queue_idx as usize;
+        if i < self.num_queues as usize && self.queue_vectors[i] != 0 {
+            Some(self.queue_vectors[i])
+        } else {
+            None
+        }
     }
 }
 

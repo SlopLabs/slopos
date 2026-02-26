@@ -7,8 +7,8 @@ use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 
 use super::{
     COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
-    COMMON_CFG_QUEUE_NOTIFY_OFF, COMMON_CFG_QUEUE_SELECT, COMMON_CFG_QUEUE_SIZE,
-    COMMON_CFG_QUEUE_USED, virtio_rmb, virtio_wmb,
+    COMMON_CFG_QUEUE_MSIX_VECTOR, COMMON_CFG_QUEUE_NOTIFY_OFF, COMMON_CFG_QUEUE_SELECT,
+    COMMON_CFG_QUEUE_SIZE, COMMON_CFG_QUEUE_USED, VIRTIO_MSI_NO_VECTOR, virtio_rmb, virtio_wmb,
 };
 
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
@@ -180,7 +180,20 @@ impl Virtqueue {
     }
 }
 
-pub fn setup_queue(common_cfg: &MmioRegion, queue_index: u16, max_size: u16) -> Option<Virtqueue> {
+/// Set up a virtqueue on the device.
+///
+/// `msix_vector` is the MSI-X table entry index to assign to this queue.
+/// Pass [`VIRTIO_MSI_NO_VECTOR`] (0xFFFF) when MSI-X is not in use.
+///
+/// Per VirtIO spec §4.1.4.3, the `queue_msix_vector` register is written
+/// **before** `queue_enable` so the device sees the vector assignment atomically
+/// with queue activation.
+pub fn setup_queue(
+    common_cfg: &MmioRegion,
+    queue_index: u16,
+    max_size: u16,
+    msix_vector: u16,
+) -> Option<Virtqueue> {
     if !common_cfg.is_mapped() {
         return None;
     }
@@ -219,6 +232,20 @@ pub fn setup_queue(common_cfg: &MmioRegion, queue_index: u16, max_size: u16) -> 
     common_cfg.write::<u64>(COMMON_CFG_QUEUE_DESC, desc_page.as_u64());
     common_cfg.write::<u64>(COMMON_CFG_QUEUE_AVAIL, avail_page.as_u64());
     common_cfg.write::<u64>(COMMON_CFG_QUEUE_USED, used_page.as_u64());
+
+    // Write MSI-X vector BEFORE enabling the queue (VirtIO spec §4.1.4.3.2).
+    if msix_vector != VIRTIO_MSI_NO_VECTOR {
+        common_cfg.write::<u16>(COMMON_CFG_QUEUE_MSIX_VECTOR, msix_vector);
+        let readback = common_cfg.read::<u16>(COMMON_CFG_QUEUE_MSIX_VECTOR);
+        if readback == VIRTIO_MSI_NO_VECTOR {
+            // Device rejected the vector — clean up and fail.
+            free_page_frame(desc_page);
+            free_page_frame(avail_page);
+            free_page_frame(used_page);
+            return None;
+        }
+    }
+
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_ENABLE, 1);
 
     let notify_off = common_cfg.read::<u16>(COMMON_CFG_QUEUE_NOTIFY_OFF);
