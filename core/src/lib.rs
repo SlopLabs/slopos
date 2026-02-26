@@ -12,6 +12,8 @@ pub mod exec;
 pub mod irq;
 #[cfg(feature = "itests")]
 pub mod irq_tests;
+#[cfg(feature = "itests")]
+pub mod msi_tests;
 pub mod platform;
 pub mod scheduler;
 #[macro_use]
