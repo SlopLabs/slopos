@@ -10,7 +10,7 @@ use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 use crate::net::{self, dhcp};
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
+    self, QueueEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
         register_irq_handlers, set_driver_ok, setup_interrupts,
@@ -37,7 +37,7 @@ const DEV_CFG_MAC_OFFSET: usize = 0x00;
 const DEV_CFG_STATUS_OFFSET: usize = 0x06;
 const DEV_CFG_MTU_OFFSET: usize = 0x0A;
 
-const REQUEST_TIMEOUT_SPINS: u32 = 1_000_000;
+const REQUEST_TIMEOUT_MS: u32 = 5000;
 const DEFAULT_MTU: u16 = 1500;
 const PACKET_BUFFER_SIZE: usize = 2048;
 const MAX_NET_MEMBERS: usize = 32;
@@ -118,6 +118,8 @@ impl VirtioNetState {
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static VIRTIO_NET_STATE: IrqMutex<VirtioNetState> = IrqMutex::new(VirtioNetState::new());
+static NET_RX_EVENT: QueueEvent = QueueEvent::new();
+static NET_TX_EVENT: QueueEvent = QueueEvent::new();
 
 // =============================================================================
 // Device configuration helpers
@@ -271,15 +273,12 @@ fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -
         VIRTIO_NET_QUEUE_TX,
     );
 
-    let sent = state
-        .device
-        .tx_queue
-        .pop_used(REQUEST_TIMEOUT_SPINS)
-        .is_some();
-    if !sent {
+    if !NET_TX_EVENT.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
         let _ = page.into_phys();
+        return false;
     }
-    sent
+
+    state.device.tx_queue.try_pop_used().is_some()
 }
 
 /// Allocate a page and write the virtio-net header at the start.
@@ -366,14 +365,12 @@ fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>)
         VIRTIO_NET_QUEUE_RX,
     );
 
-    let used = match state.device.rx_queue.pop_used(REQUEST_TIMEOUT_SPINS) {
-        Some(u) => u,
-        None => {
-            // Intentional leak: device may still be DMA-ing
-            let _ = rx_page.into_phys();
-            return None;
-        }
-    };
+    if !NET_RX_EVENT.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
+        // Intentional leak: device may still be DMA-ing.
+        let _ = rx_page.into_phys();
+        return None;
+    }
+    let used = state.device.rx_queue.try_pop_used()?;
 
     let hdr_len = size_of::<VirtioNetHdrV1>();
     if (used.len as usize) <= hdr_len {
@@ -551,15 +548,18 @@ fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
 
 /// MSI-X / MSI interrupt handler for virtio-net.
 ///
-/// The `ctx` pointer encodes the queue index (0 = RX, 1 = TX).  Completion is
-/// detected by the polling loop, so this handler is intentionally minimal.
+/// The `ctx` pointer encodes the queue index (0 = RX, 1 = TX).
+/// The handler signals the matching queue completion event.
 extern "C" fn virtio_net_irq_handler(
     _vector: u8,
     _frame: *mut slopos_lib::InterruptFrame,
-    _ctx: *mut core::ffi::c_void,
+    ctx: *mut core::ffi::c_void,
 ) {
-    // Intentional NOP — the polling path detects completion.
-    // Future: signal a condvar / event to wake blocked RX/TX waiters.
+    match ctx as usize {
+        0 => NET_RX_EVENT.signal(),
+        1 => NET_TX_EVENT.signal(),
+        _ => {}
+    }
 }
 
 fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
@@ -582,10 +582,9 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 
     let caps = parse_capabilities(info);
     klog_debug!(
-        "virtio-net: caps common={} notify={} isr={} device={}",
+        "virtio-net: caps common={} notify={} device={}",
         caps.has_common_cfg(),
         caps.has_notify_cfg(),
-        caps.isr_cfg.is_mapped(),
         caps.has_device_cfg()
     );
 
@@ -648,7 +647,7 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         return -1;
     };
 
-    // Register MSI-X/MSI handlers (NOPs — completion detected by polling).
+    // Register MSI-X/MSI handlers that signal queue completion events.
     let device_bdf =
         ((info.bus as u32) << 16) | ((info.device as u32) << 8) | (info.function as u32);
     register_irq_handlers(

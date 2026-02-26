@@ -1,12 +1,13 @@
 use core::ffi::c_int;
 use core::mem::size_of;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
+    self, QueueEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
     VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
@@ -25,7 +26,7 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_S_OK: u8 = 0;
 
 const SECTOR_SIZE: u64 = 512;
-const REQUEST_TIMEOUT_SPINS: u32 = 1_000_000;
+const REQUEST_TIMEOUT_MS: u32 = 5000;
 
 #[repr(C)]
 struct VirtioBlkReqHeader {
@@ -73,6 +74,28 @@ impl VirtioBlkState {
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static VIRTIO_BLK_STATE: IrqMutex<VirtioBlkState> = IrqMutex::new(VirtioBlkState::new());
+static BLK_QUEUE_EVENT: QueueEvent = QueueEvent::new();
+static BLK_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct RequestGuard;
+
+impl RequestGuard {
+    fn acquire(flag: &AtomicBool) -> Self {
+        while flag
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        Self
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        BLK_REQUEST_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
 
 struct RequestBuffers {
     req_page: OwnedPageFrame,
@@ -110,15 +133,14 @@ fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     lo | (hi << 32)
 }
 
-fn do_request(
-    state: &mut VirtioBlkState,
-    sector: u64,
-    buffer: *mut u8,
-    len: usize,
-    write: bool,
-) -> bool {
-    if !state.device.queue.is_ready() {
-        return false;
+fn do_request(sector: u64, buffer: *mut u8, len: usize, write: bool) -> bool {
+    let _request_guard = RequestGuard::acquire(&BLK_REQUEST_IN_FLIGHT);
+
+    {
+        let state = VIRTIO_BLK_STATE.lock();
+        if !state.device.queue.is_ready() {
+            return false;
+        }
     }
 
     let buffers = match RequestBuffers::allocate() {
@@ -153,51 +175,64 @@ fn do_request(
         *status_ptr = 0xFF;
     }
 
-    state.device.queue.write_desc(
-        0,
-        VirtqDesc {
-            addr: req_phys,
-            len: size_of::<VirtioBlkReqHeader>() as u32,
-            flags: VIRTQ_DESC_F_NEXT,
-            next: 1,
-        },
-    );
+    {
+        let mut state = VIRTIO_BLK_STATE.lock();
+        BLK_QUEUE_EVENT.reset();
 
-    state.device.queue.write_desc(
-        1,
-        VirtqDesc {
-            addr: bounce_phys,
-            len: len as u32,
-            flags: if write {
-                VIRTQ_DESC_F_NEXT
-            } else {
-                VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
+        state.device.queue.write_desc(
+            0,
+            VirtqDesc {
+                addr: req_phys,
+                len: size_of::<VirtioBlkReqHeader>() as u32,
+                flags: VIRTQ_DESC_F_NEXT,
+                next: 1,
             },
-            next: 2,
-        },
-    );
+        );
 
-    state.device.queue.write_desc(
-        2,
-        VirtqDesc {
-            addr: status_phys,
-            len: 1,
-            flags: VIRTQ_DESC_F_WRITE,
-            next: 0,
-        },
-    );
+        state.device.queue.write_desc(
+            1,
+            VirtqDesc {
+                addr: bounce_phys,
+                len: len as u32,
+                flags: if write {
+                    VIRTQ_DESC_F_NEXT
+                } else {
+                    VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
+                },
+                next: 2,
+            },
+        );
 
-    state.device.queue.submit(0);
-    queue::notify_queue(
-        &state.caps.notify_cfg,
-        state.caps.notify_off_multiplier,
-        &state.device.queue,
-        0,
-    );
+        state.device.queue.write_desc(
+            2,
+            VirtqDesc {
+                addr: status_phys,
+                len: 1,
+                flags: VIRTQ_DESC_F_WRITE,
+                next: 0,
+            },
+        );
 
-    if !state.device.queue.poll_used(REQUEST_TIMEOUT_SPINS) {
+        state.device.queue.submit(0);
+        queue::notify_queue(
+            &state.caps.notify_cfg,
+            state.caps.notify_off_multiplier,
+            &state.device.queue,
+            0,
+        );
+    }
+
+    if !BLK_QUEUE_EVENT.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
         klog_info!("virtio-blk: request timeout");
         return false;
+    }
+
+    {
+        let mut state = VIRTIO_BLK_STATE.lock();
+        if !state.device.queue.advance_used() {
+            klog_info!("virtio-blk: signaled without used completion");
+            return false;
+        }
     }
 
     let status = unsafe { *status_ptr };
@@ -214,16 +249,14 @@ fn do_request(
 
 /// MSI-X / MSI interrupt handler for virtio-blk.
 ///
-/// The device fires this when a used buffer is available.  Completion is
-/// detected by the polling loop in [`do_request`], so this handler is
-/// intentionally minimal — the IRQ dispatch layer sends EOI automatically.
+/// The device fires this when a used buffer is available.
+/// The handler signals the queue completion event used by [`do_request`].
 extern "C" fn virtio_blk_irq_handler(
     _vector: u8,
     _frame: *mut slopos_lib::InterruptFrame,
     _ctx: *mut core::ffi::c_void,
 ) {
-    // Intentional NOP — the polling path detects completion.
-    // Future: signal a condvar / event to wake blocked I/O waiters.
+    BLK_QUEUE_EVENT.signal();
 }
 
 fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
@@ -247,10 +280,9 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     let caps = parse_capabilities(info);
 
     klog_debug!(
-        "virtio-blk: caps common={} notify={} isr={} device={}",
+        "virtio-blk: caps common={} notify={} device={}",
         caps.has_common_cfg(),
         caps.has_notify_cfg(),
-        caps.isr_cfg.is_mapped(),
         caps.has_device_cfg()
     );
 
@@ -288,7 +320,7 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         }
     };
 
-    // Register MSI-X/MSI handlers (NOPs — completion detected by polling).
+    // Register MSI-X/MSI handlers that signal queue completion events.
     let device_bdf =
         ((info.bus as u32) << 16) | ((info.device as u32) << 8) | (info.function as u32);
     register_irq_handlers(
@@ -351,8 +383,7 @@ pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
         return true;
     }
 
-    let mut state = VIRTIO_BLK_STATE.lock();
-    if !state.device.ready {
+    if !virtio_blk_is_ready() {
         return false;
     }
 
@@ -365,7 +396,7 @@ pub fn virtio_blk_read(offset: u64, buffer: &mut [u8]) -> bool {
     let mut buf_pos = 0usize;
     for i in 0..sectors_needed {
         let sector = start_sector + i as u64;
-        let ok = do_request(&mut state, sector, sector_buf.as_mut_ptr(), 512, false);
+        let ok = do_request(sector, sector_buf.as_mut_ptr(), 512, false);
         if !ok {
             return false;
         }
@@ -390,8 +421,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
         return true;
     }
 
-    let mut state = VIRTIO_BLK_STATE.lock();
-    if !state.device.ready {
+    if !virtio_blk_is_ready() {
         return false;
     }
 
@@ -410,7 +440,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
         let copy_len = dst_end - dst_start;
 
         if dst_start != 0 || dst_end != 512 {
-            let ok = do_request(&mut state, sector, sector_buf.as_mut_ptr(), 512, false);
+            let ok = do_request(sector, sector_buf.as_mut_ptr(), 512, false);
             if !ok {
                 return false;
             }
@@ -418,7 +448,7 @@ pub fn virtio_blk_write(offset: u64, buffer: &[u8]) -> bool {
 
         sector_buf[dst_start..dst_end].copy_from_slice(&buffer[buf_pos..buf_pos + copy_len]);
 
-        let ok = do_request(&mut state, sector, sector_buf.as_mut_ptr(), 512, true);
+        let ok = do_request(sector, sector_buf.as_mut_ptr(), 512, true);
         if !ok {
             return false;
         }

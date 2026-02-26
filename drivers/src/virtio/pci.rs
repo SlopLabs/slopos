@@ -16,9 +16,9 @@ use super::{
     COMMON_CFG_DRIVER_FEATURE_SELECT, COMMON_CFG_MSIX_CONFIG, InterruptMode, MAX_MSIX_QUEUES,
     PCI_CAP_ID_VNDR, PCI_CAP_PTR_OFFSET, PCI_STATUS_CAP_LIST, PCI_STATUS_OFFSET,
     VIRTIO_MSI_NO_VECTOR, VIRTIO_PCI_CAP_COMMON_CFG, VIRTIO_PCI_CAP_DEVICE_CFG,
-    VIRTIO_PCI_CAP_ISR_CFG, VIRTIO_PCI_CAP_NOTIFY_CFG, VIRTIO_STATUS_ACKNOWLEDGE,
-    VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK, VirtioMmioCaps,
-    VirtioMsixState, get_device_status, reset_device, set_device_status,
+    VIRTIO_PCI_CAP_NOTIFY_CFG, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
+    VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK, VirtioMmioCaps, VirtioMsixState,
+    get_device_status, reset_device, set_device_status,
 };
 
 pub use crate::pci_defs::PCI_VENDOR_ID_VIRTIO;
@@ -82,7 +82,6 @@ pub fn parse_capabilities(info: &PciDeviceInfo) -> VirtioMmioCaps {
                     caps.notify_off_multiplier =
                         pci_config_read32(info.bus, info.device, info.function, cap_ptr + 16);
                 }
-                VIRTIO_PCI_CAP_ISR_CFG => caps.isr_cfg = region,
                 VIRTIO_PCI_CAP_DEVICE_CFG => {
                     caps.device_cfg = region;
                     caps.device_cfg_len = length;

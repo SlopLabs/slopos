@@ -6,6 +6,7 @@
 pub mod pci;
 pub mod queue;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_mm::mmio::MmioRegion;
 
 // =============================================================================
@@ -16,8 +17,6 @@ use slopos_mm::mmio::MmioRegion;
 pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 0x01;
 /// VirtIO PCI capability type: Notification area
 pub const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 0x02;
-/// VirtIO PCI capability type: ISR status
-pub const VIRTIO_PCI_CAP_ISR_CFG: u8 = 0x03;
 /// VirtIO PCI capability type: Device-specific configuration
 pub const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 0x04;
 
@@ -117,8 +116,6 @@ pub struct VirtioMmioCaps {
     pub notify_cfg: MmioRegion,
     /// Notify offset multiplier (from PCI cap)
     pub notify_off_multiplier: u32,
-    /// ISR status region
-    pub isr_cfg: MmioRegion,
     /// Device-specific configuration region
     pub device_cfg: MmioRegion,
     /// Length of device config region
@@ -132,7 +129,6 @@ impl VirtioMmioCaps {
             common_cfg: MmioRegion::empty(),
             notify_cfg: MmioRegion::empty(),
             notify_off_multiplier: 0,
-            isr_cfg: MmioRegion::empty(),
             device_cfg: MmioRegion::empty(),
             device_cfg_len: 0,
         }
@@ -154,6 +150,103 @@ impl VirtioMmioCaps {
     #[inline]
     pub fn has_device_cfg(&self) -> bool {
         self.device_cfg.is_mapped()
+    }
+}
+
+/// Per-queue interrupt completion event.
+///
+/// The MSI-X handler calls [`signal`] when the device places entries
+/// in the used ring. The I/O path calls [`wait_timeout_ms`] which
+/// halts the CPU (via `sti; hlt`) until the interrupt fires or a
+/// HPET-based deadline expires.
+pub struct QueueEvent {
+    signaled: AtomicBool,
+}
+
+impl QueueEvent {
+    pub const fn new() -> Self {
+        Self {
+            signaled: AtomicBool::new(false),
+        }
+    }
+
+    /// Called from the MSI-X IRQ handler to signal I/O completion.
+    #[inline]
+    pub fn signal(&self) {
+        self.signaled.store(true, Ordering::Release);
+    }
+
+    /// Reset the event (consume the signal).
+    #[inline]
+    pub fn reset(&self) {
+        self.signaled.store(false, Ordering::Release);
+    }
+
+    /// Try to consume the signal. Returns `true` if it was set.
+    #[inline]
+    pub fn try_consume(&self) -> bool {
+        self.signaled
+            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Wait for signal or timeout.
+    ///
+    /// Uses x86 `cli; sti; hlt` to atomically enable interrupts and
+    /// halt, preventing the lost-wakeup race. The HPET main counter
+    /// provides real-time deadline tracking.
+    ///
+    /// Returns `true` if signaled, `false` on timeout.
+    pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
+        use crate::hpet;
+
+        if self.try_consume() {
+            return true;
+        }
+
+        let period_fs = hpet::period_fs();
+        if period_fs == 0 {
+            for _ in 0..100_000u32 {
+                if self.try_consume() {
+                    return true;
+                }
+                core::hint::spin_loop();
+            }
+            return self.try_consume();
+        }
+
+        let ticks_needed =
+            ((timeout_ms as u128) * 1_000_000_000_000u128 / period_fs as u128) as u64;
+        let start = hpet::read_counter();
+
+        loop {
+            // SAFETY: `cli` is privileged and valid in kernel ring-0 context.
+            unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+            }
+
+            if self.signaled.load(Ordering::Acquire) {
+                // SAFETY: `sti` is privileged and valid in kernel ring-0 context.
+                unsafe {
+                    core::arch::asm!("sti", options(nomem, nostack));
+                }
+                self.signaled.store(false, Ordering::Release);
+                return true;
+            }
+
+            if hpet::read_counter().wrapping_sub(start) >= ticks_needed {
+                // SAFETY: `sti` is privileged and valid in kernel ring-0 context.
+                unsafe {
+                    core::arch::asm!("sti", options(nomem, nostack));
+                }
+                return false;
+            }
+
+            // SAFETY: `sti; hlt` atomically enables interrupts then halts.
+            unsafe {
+                core::arch::asm!("sti", "hlt", options(nomem, nostack));
+            }
+        }
     }
 }
 

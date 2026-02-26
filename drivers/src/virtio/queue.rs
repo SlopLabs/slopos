@@ -138,44 +138,30 @@ impl Virtqueue {
         }
     }
 
-    pub fn poll_used(&mut self, timeout_spins: u32) -> bool {
-        let mut spins = 0u32;
-        loop {
-            // Acquire barrier BEFORE reading used_idx to ensure we see device's write.
-            // Per VirtIO spec 2.7.13: read barrier before reading used ring.
-            virtio_rmb();
-
-            let used_idx = self.read_used_idx();
-            if used_idx != self.last_used_idx {
-                self.last_used_idx = used_idx;
-                return true;
-            }
-            spins += 1;
-            if spins > timeout_spins {
-                return false;
-            }
-            core::hint::spin_loop();
+    /// Try to pop one entry from the used ring without waiting.
+    /// Returns `None` if no new entries are available.
+    pub fn try_pop_used(&mut self) -> Option<VirtqUsedElem> {
+        virtio_rmb();
+        let used_idx = self.read_used_idx();
+        if used_idx == self.last_used_idx {
+            return None;
         }
+
+        let elem = unsafe { ptr::read_volatile(self.used_ring_elem_ptr(self.last_used_idx)) };
+        self.last_used_idx = self.last_used_idx.wrapping_add(1);
+        Some(elem)
     }
 
-    pub fn pop_used(&mut self, timeout_spins: u32) -> Option<VirtqUsedElem> {
-        let mut spins = 0u32;
-        loop {
-            virtio_rmb();
-
-            let used_idx = self.read_used_idx();
-            if used_idx != self.last_used_idx {
-                let elem =
-                    unsafe { ptr::read_volatile(self.used_ring_elem_ptr(self.last_used_idx)) };
-                self.last_used_idx = self.last_used_idx.wrapping_add(1);
-                return Some(elem);
-            }
-
-            spins = spins.wrapping_add(1);
-            if spins > timeout_spins {
-                return None;
-            }
-            core::hint::spin_loop();
+    /// Advance the used ring index if the device posted new entries.
+    /// Returns `true` if at least one new entry was consumed.
+    pub fn advance_used(&mut self) -> bool {
+        virtio_rmb();
+        let used_idx = self.read_used_idx();
+        if used_idx != self.last_used_idx {
+            self.last_used_idx = used_idx;
+            true
+        } else {
+            false
         }
     }
 }

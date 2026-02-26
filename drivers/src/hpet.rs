@@ -124,6 +124,12 @@ pub fn period_femtoseconds() -> u32 {
     PERIOD_FS.load(Ordering::Relaxed)
 }
 
+/// Return the HPET tick period in femtoseconds (0 if not initialized).
+#[inline]
+pub fn period_fs() -> u32 {
+    PERIOD_FS.load(Ordering::Relaxed)
+}
+
 fn init_inner() -> i32 {
     if !hhdm::is_available() {
         klog_info!("HPET: HHDM unavailable, cannot map MMIO registers");
