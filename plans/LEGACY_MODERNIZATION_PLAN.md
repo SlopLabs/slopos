@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -673,26 +673,27 @@ ECAM (Enhanced Configuration Access Mechanism) maps the entire config space into
 
 ### 4B: ECAM MMIO Config Access
 
-- [ ] **4B.1** Map the ECAM region via `MmioRegion::map()`:
-  - Size: `(end_bus - start_bus + 1) * 256 * 4096` bytes
-  - For buses 0–255: 256 * 256 * 4096 = 256MB (but QEMU often only exposes 0–63)
-  - May need multiple mappings or lazy mapping
-- [ ] **4B.2** Implement `pci_ecam_read32(bus, dev, func, offset) -> u32`:
-  - Address: `ecam_base + (bus << 20) | (dev << 15) | (func << 12) | offset`
-  - Use `read_volatile` (same pattern as IOAPIC/APIC MMIO)
-  - Works for the full 4096-byte config space (not just 256 bytes)
-- [ ] **4B.3** Implement `pci_ecam_write32(bus, dev, func, offset, value)`:
-  - Same address calculation, `write_volatile`
-- [ ] **4B.4** Create `PciConfigAccess` abstraction:
+- [x] **4B.1** Map the ECAM region via `MmioRegion::map()`:
+  - Each MCFG entry's MMIO region mapped during `pci_discover_mcfg()`
+  - Primary segment (segment 0) cached in lock-free atomics (`ECAM_PRIMARY_VIRT`, `ECAM_PRIMARY_SIZE`, `ECAM_PRIMARY_BUS_START`, `ECAM_PRIMARY_BUS_END`) for fast-path access
+  - Multi-segment fallback via `ECAM_STATE` mutex for rare cases
+  - QEMU q35 maps segment 0 buses 0–255 (256 MiB) at 0xE0000000
+- [x] **4B.2** Implement `pci_ecam_read32/read16/read8(bus, dev, func, offset: u16) -> Option<T>`:
+  - Full 4096-byte config space access via volatile MMIO reads
+  - `ecam_virt_addr()` helper centralizes address computation and bounds checking
+  - Dual-path: lock-free primary segment + mutex fallback for multi-segment
+- [x] **4B.3** Implement `pci_ecam_write32/write16/write8(bus, dev, func, offset: u16, value) -> Option<()>`:
+  - Same address pattern for writes, volatile MMIO writes
+- [x] **4B.4** Create `PciConfigBackend` abstraction:
   ```rust
-  enum PciConfigAccess {
+  enum PciConfigBackend {
       LegacyPortIo,        // 0xCF8/0xCFC (fallback)
-      Ecam { base: u64 },  // MMIO
+      Ecam,                // MMIO
   }
   ```
-  - `pci_config_read32()` / `pci_config_write32()` dispatch to the active backend
-  - Prefer ECAM when available, fall back to port I/O if MCFG absent
-
+  - `pci_config_read32()` / `pci_config_write32()` etc. dispatch to ECAM when active, fall back to port I/O
+  - Original port I/O implementations renamed to private `pci_pio_*` functions
+  - 88 existing call sites across 6 files transparently use ECAM — zero API changes
 ### 4C: Extended Config Space Usage
 
 - [ ] **4C.1** Update PCI enumeration to scan extended capabilities (offset 0x100+):
@@ -705,13 +706,13 @@ ECAM (Enhanced Configuration Access Mechanism) maps the entire config space into
 
 ### Phase 4 Gate
 
-- [x] **GATE**: MCFG table parsed from ACPI (21 regression tests in `ecam_tests.rs`, 553/553 total pass)
-- [ ] **GATE**: ECAM MMIO region mapped and functional
-- [ ] **GATE**: PCI config reads work through ECAM for the full 4096-byte space
-- [ ] **GATE**: Legacy port I/O fallback still works when MCFG is absent
-- [ ] **GATE**: Extended capability list scanned during enumeration
-- [ ] **GATE**: `just test` passes (553/553 including 21 ECAM regression tests)
-- [ ] **GATE**: `just boot` — PCI devices discovered correctly through ECAM
+- [x] **GATE**: MCFG table parsed from ACPI (21 regression tests in `ecam_tests.rs`)
+- [x] **GATE**: ECAM MMIO region mapped and functional (17 Phase 4B regression tests)
+- [x] **GATE**: PCI config reads work through ECAM for the full 4096-byte space
+- [x] **GATE**: Legacy port I/O fallback still works when MCFG is absent (`PciConfigBackend::LegacyPortIo`)
+- [ ] **GATE**: Extended capability list scanned during enumeration (Phase 4C)
+- [x] **GATE**: `just test` passes (570/570 including 38 ECAM regression tests)
+- [x] **GATE**: `just boot` — PCI devices discovered correctly through ECAM
 
 ---
 
@@ -1022,8 +1023,8 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
-| **Phase 4**: PCIe ECAM | 4A **Complete** | 9 | 2 | — |
+| **Phase 4**: PCIe ECAM | 4A+4B **Complete** | 9 | 6 | — |
 | **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **116** | **55** | |
+| **Total** | | **116** | **59** | |
