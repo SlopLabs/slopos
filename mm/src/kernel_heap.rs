@@ -271,7 +271,27 @@ fn slab_alloc_from_cache(heap: &mut KernelHeap, idx: usize) -> *mut c_void {
                 if obj.is_null() {
                     return ptr::null_mut();
                 }
-                (*slab).free_list = *(obj as *mut *mut u8);
+                let next = *(obj as *mut *mut u8);
+                let slab_start = slab as usize;
+                let slab_end = slab_start + PAGE_SIZE_4KB as usize;
+                if !next.is_null() {
+                    let next_addr = next as usize;
+                    if next_addr < slab_start || next_addr >= slab_end {
+                        klog_info!(
+                            "slab_alloc: corrupt next ptr 0x{:x} in obj 0x{:x}, slab [0x{:x}..0x{:x}], obj_size={}",
+                            next_addr,
+                            obj as usize,
+                            slab_start,
+                            slab_end,
+                            (*slab).object_size
+                        );
+                        // Sever the corrupt chain — lose some objects but stay alive.
+                        (*slab).free_list = ptr::null_mut();
+                        (*slab).free_count = 0;
+                        return obj as *mut c_void;
+                    }
+                }
+                (*slab).free_list = next;
                 (*slab).free_count = (*slab).free_count.saturating_sub(1);
                 heap.stats.record_slab_alloc((*slab).object_size as u64);
                 return obj as *mut c_void;
@@ -384,9 +404,24 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
             return -1;
         }
 
+        let slab_start = base as usize;
+        let slab_end = slab_start + PAGE_SIZE_4KB as usize;
         let mut current = (*base).free_list;
         while !current.is_null() {
-            if current as usize == ptr_addr {
+            let cur_addr = current as usize;
+            if cur_addr < slab_start || cur_addr >= slab_end {
+                // Free-list pointer escaped the slab page — metadata is corrupt.
+                // Break the walk to avoid dereferencing into unmapped memory.
+                klog_info!(
+                    "slab_free: corrupt free-list ptr 0x{:x} outside slab [0x{:x}..0x{:x}], obj_size={}",
+                    cur_addr,
+                    slab_start,
+                    slab_end,
+                    object_size
+                );
+                break;
+            }
+            if cur_addr == ptr_addr {
                 return -1;
             }
             current = *(current as *mut *mut u8);

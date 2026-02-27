@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{IrqMutex, align_down, align_up, klog_info};
+use slopos_lib::{IrqMutex, align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
@@ -1016,15 +1016,25 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
     }
 
     unsafe {
+        klog_debug!(
+            "destroy_process_vm({}): teardown_process_mappings",
+            process_id
+        );
         teardown_process_mappings(process_ptr);
+        klog_debug!("destroy_process_vm({}): paging_free_user_space", process_id);
         paging_free_user_space((*process_ptr).page_dir);
         if !(*process_ptr).page_dir.is_null() {
             if !(*(*process_ptr).page_dir).pml4_phys.is_null() {
                 free_page_frame((*(*process_ptr).page_dir).pml4_phys);
             }
+            klog_debug!("destroy_process_vm({}): kfree(page_dir)", process_id);
             kfree((*process_ptr).page_dir as *mut _);
             (*process_ptr).page_dir = ptr::null_mut();
         }
+        klog_debug!(
+            "destroy_process_vm({}): page table cleanup done",
+            process_id
+        );
     }
 
     let mut manager = VM_MANAGER.lock();
