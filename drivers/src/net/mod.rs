@@ -4,6 +4,7 @@
 //! logic lives in the [`dhcp`] submodule.
 
 pub mod dhcp;
+pub mod tcp;
 
 // =============================================================================
 // Ethernet
@@ -33,6 +34,7 @@ pub const ARP_HEADER_LEN: usize = 28;
 
 pub const IPV4_HEADER_LEN: usize = 20;
 pub const IPV4_BROADCAST: [u8; 4] = [255, 255, 255, 255];
+pub const IPPROTO_TCP: u8 = 6;
 pub const IPPROTO_UDP: u8 = 17;
 pub const IPPROTO_ICMP: u8 = 1;
 

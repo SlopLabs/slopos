@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -767,24 +767,68 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 ### 5A: TCP State Machine
 
-- [ ] **5A.1** Create `drivers/src/net/tcp.rs`:
-  - Define TCP header structure (20 bytes minimum + options)
-  - Parse/construct TCP segments with proper field handling
-  - Implement checksum calculation (pseudo-header + TCP header + data)
-- [ ] **5A.2** Implement the TCP state machine (RFC 793 + RFC 7413):
-  - States: `CLOSED`, `LISTEN`, `SYN_SENT`, `SYN_RECEIVED`, `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`, `CLOSING`, `LAST_ACK`, `TIME_WAIT`
-  - Transitions driven by incoming segments and user actions
-- [ ] **5A.3** Implement the TCP connection table:
-  - Key: `(local_ip, local_port, remote_ip, remote_port)`
-  - Store connection state, sequence numbers, window size, retransmit queue
-  - Max connections: start with 64
-- [ ] **5A.4** Implement three-way handshake (active open):
-  - `SYN` → `SYN_SENT` → receive `SYN+ACK` → send `ACK` → `ESTABLISHED`
-- [ ] **5A.5** Implement three-way handshake (passive open / listen):
-  - `LISTEN` → receive `SYN` → send `SYN+ACK` → `SYN_RECEIVED` → receive `ACK` → `ESTABLISHED`
-- [ ] **5A.6** Implement connection teardown:
-  - `FIN` handshake with `TIME_WAIT` timeout
-  - `RST` handling for aborted connections
+- [x] **5A.1** Create `drivers/src/net/tcp.rs`:
+  - `TcpHeader` struct with all 10 fields, parse/construct via `parse_header()`/`write_header()`
+  - Flag helpers: `is_syn()`, `is_ack()`, `is_fin()`, `is_rst()`, `is_psh()`, `is_urg()`, `is_syn_ack()`, `is_fin_ack()`
+  - MSS option parsing/writing: `parse_mss_option()`, `write_mss_option()`
+  - TCP checksum with IPv4 pseudo-header: `tcp_checksum()`, `verify_checksum()`
+  - One's-complement accumulator with trailing odd-byte handling
+  - Added `IPPROTO_TCP = 6` to `net/mod.rs`
+- [x] **5A.2** Implement the TCP state machine (RFC 793 + RFC 7413):
+  - 11 states: `Closed`, `Listen`, `SynSent`, `SynReceived`, `Established`, `FinWait1`, `FinWait2`, `CloseWait`, `Closing`, `LastAck`, `TimeWait`
+  - `TcpState` enum with `name()`, `is_open()`, `is_closing()` helpers
+  - `tcp_input()` dispatches to per-state processors: `process_listen()`, `process_syn_sent()`, `process_syn_received()`, `process_established_and_closing()`, `process_time_wait()`
+  - Sequence number arithmetic: `seq_lt()`, `seq_le()`, `seq_gt()`, `seq_ge()` with wrapping comparison (RFC 793 §3.3)
+  - ISN generator: monotonic counter incremented by 64000 per connection
+  - Ephemeral port allocator: 49152–65535 range
+- [x] **5A.3** Implement the TCP connection table:
+  - `TcpConnectionTable` with 64-slot `[TcpConnection; MAX_CONNECTIONS]` array
+  - `TcpTuple` four-tuple key with wildcard matching for listen sockets
+  - Two-pass lookup: exact match first, then wildcard listen sockets
+  - `port_in_use()` for bind conflict detection
+  - Global `TCP_TABLE: IrqMutex<TcpConnectionTable>` for thread-safe access
+  - `tcp_reset_all()` for test isolation
+- [x] **5A.4** Implement three-way handshake (active open):
+  - `tcp_connect()`: allocates slot, generates ISN, returns `(idx, SYN segment)`
+  - `process_syn_sent()`: validates ACK range, handles RST, processes SYN+ACK → ESTABLISHED
+  - MSS negotiation from SYN+ACK options
+  - Bad ACK detection with RST response
+  - Simultaneous open support (SYN without ACK → SYN_RECEIVED)
+- [x] **5A.5** Implement three-way handshake (passive open / listen):
+  - `tcp_listen()`: binds port with duplicate detection (`AddrInUse` error)
+  - `process_listen()`: creates child connection in SYN_RECEIVED, sends SYN+ACK
+  - `process_syn_received()`: validates ACK range → ESTABLISHED
+  - Listen socket persists independently of accepted connections
+  - ACK to LISTEN socket correctly generates RST
+- [x] **5A.6** Implement connection teardown:
+  - `tcp_close()`: ESTABLISHED→FIN_WAIT_1, CLOSE_WAIT→LAST_ACK
+  - Active close: FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT
+  - Passive close: ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED
+  - Simultaneous close: FIN_WAIT_1 → CLOSING → TIME_WAIT
+  - FIN+ACK fast path: FIN_WAIT_1 → TIME_WAIT (when FIN+ACK acks our FIN)
+  - `tcp_abort()`: sends RST and releases immediately
+  - `tcp_timer_tick()`: expires TIME_WAIT after 2×MSL (60s)
+  - Retransmitted FIN in TIME_WAIT correctly re-ACKed
+
+### Phase 5A Test Coverage
+
+61 tests in `drivers/src/tcp_tests.rs` covering:
+
+| Category | Count | What It Catches |
+|---|---|---|
+| Header parsing | 6 | Malformed headers, short buffers, invalid data_offset, all flags |
+| Header construction | 3 | Write/parse roundtrip, buffer overflow, options area zeroing |
+| MSS options | 5 | MSS parse/write, NOP padding, missing MSS, buffer overflow |
+| Checksum | 5 | Zero/non-zero payload, odd-length, wrong IP detection, determinism |
+| Sequence arithmetic | 4 | Wrapping comparison correctness for lt/le/gt/ge |
+| Connection table | 10 | Create/find/release, table full, port conflict, abort, close-not-found |
+| Active handshake | 4 | Full handshake, RST in SYN_SENT, bad ACK, MSS negotiation |
+| Passive handshake | 3 | Full handshake, RST in SYN_RECEIVED, ACK-to-LISTEN RST |
+| Teardown | 3 | Active close, passive close, simultaneous close |
+| TIME_WAIT | 2 | 2×MSL expiry, retransmitted FIN re-ACK |
+| RST handling | 3 | RST in ESTABLISHED, RST to unknown, SYN in ESTABLISHED |
+| Misc | 8 | No-connection RST, ephemeral ports, state helpers, tuple matching |
+| Integration | 4 | Wildcard find, simultaneous open, multiple connections, defaults |
 
 ### 5B: TCP Data Transfer
 
@@ -1053,7 +1097,7 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
 | **Phase 4**: PCIe ECAM | 4A+4B **Complete** | 9 | 6 | — |
-| **Phase 5**: TCP Networking | Not Started | 17 | 0 | — |
+| **Phase 5**: TCP Networking | 5A **Complete** | 17 | 6 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **116** | **59** | |
+| **Total** | | **116** | **65** | |

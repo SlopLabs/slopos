@@ -28,6 +28,8 @@ pub mod ps2;
 pub mod random;
 pub mod serial;
 pub mod syscall_services_init;
+#[cfg(feature = "itests")]
+pub mod tcp_tests;
 pub mod tty;
 pub mod virtio;
 pub mod virtio_blk;

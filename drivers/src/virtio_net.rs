@@ -38,6 +38,10 @@ const DEV_CFG_STATUS_OFFSET: usize = 0x06;
 const DEV_CFG_MTU_OFFSET: usize = 0x0A;
 
 const REQUEST_TIMEOUT_MS: u32 = 5000;
+/// Short timeout for ARP probe / scan operations (ms).  ARP replies on a
+/// local LAN arrive in < 10 ms; 150 ms is generous while keeping the scan
+/// responsive enough that it doesn't block the compositor for seconds.
+const SCAN_RX_TIMEOUT_MS: u32 = 150;
 const DEFAULT_MTU: u16 = 1500;
 const PACKET_BUFFER_SIZE: usize = 2048;
 const MAX_NET_MEMBERS: usize = 32;
@@ -343,6 +347,14 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
 // =============================================================================
 
 fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>) -> Option<usize> {
+    poll_one_rx_frame_timeout(state, out_payload, REQUEST_TIMEOUT_MS)
+}
+
+fn poll_one_rx_frame_timeout(
+    state: &mut VirtioNetState,
+    out_payload: Option<&mut [u8]>,
+    timeout_ms: u32,
+) -> Option<usize> {
     let rx_page = OwnedPageFrame::alloc_zeroed()?;
     let rx_virt = rx_page.as_mut_ptr::<u8>();
     let rx_phys = rx_page.phys_u64();
@@ -365,7 +377,7 @@ fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>)
         VIRTIO_NET_QUEUE_RX,
     );
 
-    if !NET_RX_EVENT.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
+    if !NET_RX_EVENT.wait_timeout_ms(timeout_ms) {
         // Intentional leak: device may still be DMA-ing.
         let _ = rx_page.into_phys();
         return None;
@@ -782,12 +794,12 @@ pub fn virtio_net_scan_members(out: *mut UserNetMember, max: usize, active_probe
 
         for target in &targets[..target_count] {
             let _ = transmit_arp_request(&mut state, *target);
-            let _ = poll_one_rx_frame(&mut state, None);
+            let _ = poll_one_rx_frame_timeout(&mut state, None, SCAN_RX_TIMEOUT_MS);
         }
 
         // Drain any remaining rx frames from the above probes
         for _ in 0..8 {
-            if poll_one_rx_frame(&mut state, None).is_none() {
+            if poll_one_rx_frame_timeout(&mut state, None, SCAN_RX_TIMEOUT_MS).is_none() {
                 break;
             }
         }
