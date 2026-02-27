@@ -1,5 +1,4 @@
 use core::ffi::{c_char, c_int};
-use core::mem::{self, MaybeUninit};
 use core::slice;
 
 use slopos_lib::{InitFlag, IrqMutex};
@@ -145,19 +144,16 @@ unsafe impl Send for FileTableSlot {}
 
 struct FileioState {
     initialized: bool,
-    kernel: MaybeUninit<FileTableSlot>,
-    processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES],
+    kernel: FileTableSlot,
+    processes: [FileTableSlot; MAX_PROCESSES],
 }
 
 impl FileioState {
     const fn uninitialized() -> Self {
-        let processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES] = unsafe {
-            MaybeUninit::<[MaybeUninit<FileTableSlot>; MAX_PROCESSES]>::uninit().assume_init()
-        };
         Self {
             initialized: false,
-            kernel: MaybeUninit::uninit(),
-            processes,
+            kernel: FileTableSlot::new(true),
+            processes: [const { FileTableSlot::new(false) }; MAX_PROCESSES],
         }
     }
 }
@@ -177,10 +173,8 @@ fn with_tables<R>(
 ) -> R {
     with_state(|state| {
         ensure_initialized(state);
-        let kernel = unsafe { state.kernel.assume_init_mut() };
-        let processes = unsafe {
-            mem::transmute::<_, &mut [FileTableSlot; MAX_PROCESSES]>(&mut state.processes)
-        };
+        let kernel = &mut state.kernel;
+        let processes = &mut state.processes;
         f(kernel, processes)
     })
 }
@@ -456,14 +450,13 @@ fn ensure_initialized(state: &mut FileioState) {
         return;
     }
 
-    state.kernel.write(FileTableSlot::new(true));
+    state.kernel = FileTableSlot::new(true);
     for slot in state.processes.iter_mut() {
-        slot.write(FileTableSlot::new(false));
+        *slot = FileTableSlot::new(false);
     }
-    let kernel = unsafe { state.kernel.assume_init_mut() };
+    let kernel = &mut state.kernel;
     reset_table(kernel);
-    let processes =
-        unsafe { mem::transmute::<_, &mut [FileTableSlot; MAX_PROCESSES]>(&mut state.processes) };
+    let processes = &mut state.processes;
     for slot in processes.iter_mut() {
         reset_table(slot);
         slot.process_id = INVALID_PROCESS_ID;

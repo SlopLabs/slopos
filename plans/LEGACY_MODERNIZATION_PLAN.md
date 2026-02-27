@@ -388,9 +388,10 @@ The simplest fair lock. Linux used ticket locks from 2008–2015.
   - The `IrqMutex` API (IRQ disable + preemption disable + lock) stays the same
   - Only the inner locking mechanism changed (`AtomicBool` → `AtomicU16` pair)
   - All existing callers (211 lock sites across 29 files) are unaffected — zero API changes
-  - [x] **2A.4** Audited all 211 lock sites across 29 files for hold-time:
+- [x] **2A.4** Audited all 211 lock sites across 29 files for hold-time:
   - **All lock holds are short-lived critical sections** — no lock is held across blocking I/O, sleep, or wait
   - `PIPE_STATE` / `FILEIO_STATE` (fs/fileio.rs): correctly scoped — lock acquired in `{}` block, released before any blocking wait
+  - **Post-Phase 5C stability fix (2026-02-27)**: replaced `FileioState` storage that used `MaybeUninit` + `mem::transmute` with fully typed initialized fields (`kernel: FileTableSlot`, `processes: [FileTableSlot; MAX_PROCESSES]`) to remove UB-prone alias/reinterpretation in `with_tables`/`ensure_initialized`; this resolved observed 64-byte slab corruption during process file-table lifecycle
   - `KERNEL_HEAP` (mm/kernel_heap.rs): held during kmalloc/kfree; classic pattern, unavoidable. Per-CPU slab cache already mitigates contention
   - `PAGE_ALLOCATOR` (mm/page_alloc.rs): held during page frame allocation; per-CPU page cache (PCP) already mitigates hot-path contention
   - `VM_MANAGER` (mm/process_vm.rs): held during process VM operations (page table walks but no blocking I/O)
