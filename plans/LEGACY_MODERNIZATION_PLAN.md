@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**, Phase 5B (TCP Data Transfer) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**, Phase 5B (TCP Data Transfer) **complete**, Phase 5C (Socket Abstraction Layer) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -853,7 +853,7 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 ### 5C: Socket Abstraction Layer
 
-- [ ] **5C.1** Define socket syscall interface in `abi/src/syscall.rs`:
+- [x] **5C.1** Define socket syscall interface in `abi/src/syscall.rs`:
   - `SYSCALL_SOCKET` — create a socket (AF_INET, SOCK_STREAM / SOCK_DGRAM)
   - `SYSCALL_BIND` — bind to local address/port
   - `SYSCALL_LISTEN` — mark socket as listening
@@ -861,31 +861,140 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
   - `SYSCALL_CONNECT` — initiate TCP connection
   - `SYSCALL_SEND` / `SYSCALL_RECV` — transfer data
   - `SYSCALL_CLOSE` — close socket (reuse existing close syscall)
-- [ ] **5C.2** Implement socket file descriptors:
+- [x] **5C.2** Implement socket file descriptors:
   - Sockets are file descriptors (POSIX model)
   - `read()` / `write()` on a socket FD maps to `recv()` / `send()`
   - Integrate with `poll()` for event-driven I/O
-- [ ] **5C.3** Implement kernel socket structures in `core/src/net/` (new crate or module):
-  - `Socket { domain, sock_type, protocol, state, local_addr, remote_addr, ... }`
-  - Per-process socket table (or integrate with file descriptor table)
-- [ ] **5C.4** Add userland wrappers in `userland/src/syscall/`:
+- [x] **5C.3** Implement kernel socket structures in `drivers/src/net/socket.rs`:
+  - `SocketEntry { domain, sock_type, state, tcp_idx, local_addr, remote_addr, ... }`
+  - Global socket table with FD integration (socket_idx field on FileDescriptor)
+- [x] **5C.4** Add userland wrappers in `userland/src/syscall/`:
   - `socket()`, `bind()`, `listen()`, `accept()`, `connect()`, `send()`, `recv()`
   - These mirror the POSIX socket API
 
-### 5D: DNS Client (Optional, Stretch)
+### 5D: Async Network I/O & NAPI-Style Completion
 
-- [ ] **5D.1** Implement DNS query construction (UDP port 53)
-- [ ] **5D.2** Parse DNS response (A records, CNAME)
-- [ ] **5D.3** Simple resolver: `resolve(hostname) -> Option<Ipv4Addr>`
+> Replace the synchronous, one-packet-at-a-time VirtIO net path and stubbed socket
+> readiness with a proper interrupt→poll→wakeup pipeline modeled on Linux's NAPI +
+> socket wait queue architecture. Eliminates the hardcoded `REQUEST_TIMEOUT_MS = 5000`
+> safety timeout in `drivers/src/virtio_net.rs` with a real event-driven design.
+
+#### 5D.1: NAPI-Style Receive Pipeline
+
+- [ ] **5D.1a** Implement `NapiContext` in `drivers/src/net/napi.rs`:
+  - Budget-limited polling: process up to N packets per poll cycle (default 64)
+  - State machine: `Idle` → `Scheduled` → `Polling` → `Idle`
+  - `napi_schedule()`: disables virtqueue callbacks, marks scheduled, triggers softirq/deferred work
+  - `napi_complete()`: re-enables virtqueue callbacks, returns to idle
+- [ ] **5D.1b** Refactor RX path in `drivers/src/virtio_net.rs`:
+  - MSI-X RX handler calls `napi_schedule()` instead of `NET_RX_EVENT.signal()`
+  - Remove `poll_one_rx_frame()` / `poll_one_rx_frame_timeout()` synchronous paths
+  - New `virtnet_poll(budget) -> processed_count` drains used ring in a batch
+  - Pre-post multiple RX buffers (ring of 256) instead of posting one at a time
+  - Refill RX ring after each poll cycle
+- [ ] **5D.1c** Wire poll cycle into the existing timer tick / deferred work mechanism:
+  - If no softirq infrastructure exists, use a per-CPU deferred work queue or piggyback on timer tick
+  - Ensure poll runs on the same CPU that received the interrupt (cache locality)
+
+#### 5D.2: Asynchronous TX Completion
+
+- [ ] **5D.2a** Make TX fire-and-forget:
+  - `submit_tx()` returns immediately after posting descriptor (no `wait_timeout_ms`)
+  - Remove `NET_TX_EVENT` blocking wait
+  - Track in-flight TX buffers in a completion ring
+- [ ] **5D.2b** Lazy TX cleanup:
+  - `virtnet_poll_cleantx()`: free completed TX buffers during RX poll or on next TX
+  - Reclaim pages from used ring without blocking the sender
+- [ ] **5D.2c** TX queue backpressure:
+  - If TX ring is full, return `-EAGAIN` to caller (or block in socket layer, not driver)
+  - Track available TX descriptors, wake blocked senders when space freed
+
+#### 5D.3: Socket Wait Queues
+
+- [ ] **5D.3a** Implement `WaitQueue` primitive in `lib/src/sync/waitqueue.rs`:
+  - `WaitQueue { head: IrqMutex<WaitQueueHead> }`
+  - `wait_event(wq, condition)`: add current task to queue, set `Blocked`, yield to scheduler
+  - `wake_one(wq)` / `wake_all(wq)`: move tasks from wait queue to run queue
+  - Interruptible variant: `wait_event_interruptible()` that respects signals
+- [ ] **5D.3b** Add per-socket wait queues to `SocketEntry`:
+  - `recv_wq: WaitQueue` — woken when data arrives in TCP receive buffer
+  - `accept_wq: WaitQueue` — woken when a new connection completes handshake
+  - `send_wq: WaitQueue` — woken when TX window opens / send buffer drains
+- [ ] **5D.3c** Wire TCP data delivery to socket wakeup:
+  - `tcp_input()` → data queued in receive buffer → `recv_wq.wake_one()`
+  - `tcp_input()` → handshake complete (new ESTABLISHED child) → `accept_wq.wake_one()`
+  - TX completion / window update → `send_wq.wake_one()`
+
+#### 5D.4: Blocking Socket Syscalls
+
+- [ ] **5D.4a** Implement blocking `recv()`:
+  - If receive buffer empty and socket is blocking: `recv_wq.wait_event(|| has_data())`
+  - Respect `SO_RCVTIMEO` (if set) as the wait timeout instead of hardcoded 5s
+  - Non-blocking (`O_NONBLOCK`): return `-EAGAIN` immediately (current behavior)
+- [ ] **5D.4b** Implement blocking `accept()`:
+  - If no pending connections: `accept_wq.wait_event(|| has_pending())`
+  - Non-blocking: return `-EAGAIN` (current behavior, preserved)
+- [ ] **5D.4c** Implement blocking `send()` with backpressure:
+  - If send buffer full: `send_wq.wait_event(|| has_space())`
+  - Partial writes: send what fits, return bytes written
+- [ ] **5D.4d** Implement `SO_RCVTIMEO` / `SO_SNDTIMEO` socket options:
+  - `setsockopt()` / `getsockopt()` syscalls (or simplified kernel-internal API)
+  - Pass timeout to `wait_event_timeout()` instead of blocking indefinitely
+
+#### 5D.5: Real `poll()` / Readiness Notification
+
+- [ ] **5D.5a** Implement `socket_poll()` in `drivers/src/net/socket.rs`:
+  - Check actual socket state: data in receive buffer → `POLLIN`, send space → `POLLOUT`
+  - Pending accept → `POLLIN` on listening socket
+  - Connection refused / reset → `POLLERR` / `POLLHUP`
+  - Replace the current stub that returns "always ready"
+- [ ] **5D.5b** Wire socket wait queues into `poll()` syscall:
+  - `poll()` adds calling task to each socket's wait queue
+  - When any socket becomes ready, task is woken and `poll()` re-checks all FDs
+  - Remove task from all wait queues on return
+- [ ] **5D.5c** Extend `poll()` to handle mixed FD types:
+  - Pipes, files, and sockets in the same `poll()` call
+  - Each FD type implements a `poll_check() -> PollFlags` method
+
+#### 5D.6: Remove Legacy Synchronous Paths
+
+- [ ] **5D.6a** Remove `REQUEST_TIMEOUT_MS` constant and `QueueEvent`-based TX/RX blocking
+- [ ] **5D.6b** Remove `NET_TX_EVENT` / `NET_RX_EVENT` statics (replaced by NAPI + wait queues)
+- [ ] **5D.6c** Audit DHCP path — convert to use new async RX (may keep polling for boot-time simplicity)
+- [ ] **5D.6d** Audit ARP path — convert scan operations to use NAPI pipeline
+- [ ] **5D.6e** Update `drivers/src/net/virtio_transport.rs` to use batched TX/RX
+
+#### Phase 5D Test Coverage
+
+- [ ] **5D.T1** NAPI poll: verify budget limiting (post 100 packets, poll with budget=64, confirm 64 processed)
+- [ ] **5D.T2** TX fire-and-forget: verify `submit_tx` returns immediately, cleanup happens lazily
+- [ ] **5D.T3** Wait queue: unit test `wait_event` / `wake_one` / `wake_all` with mock tasks
+- [ ] **5D.T4** Blocking recv: verify task sleeps when no data, wakes on data arrival
+- [ ] **5D.T5** Blocking accept: verify task sleeps on empty backlog, wakes on new connection
+- [ ] **5D.T6** Socket poll: verify correct `POLLIN`/`POLLOUT` flags for each socket state
+- [ ] **5D.T7** Non-blocking preserved: verify `O_NONBLOCK` still returns `-EAGAIN`
+- [ ] **5D.T8** Timeout: verify `SO_RCVTIMEO` wakes recv after deadline
+- [ ] **5D.T9** Backpressure: verify send blocks when buffer full, resumes when drained
+- [ ] **5D.T10** Regression: all existing TCP/socket tests still pass
+
+### 5E: DNS Client (Optional, Stretch)
+
+- [ ] **5E.1** Implement DNS query construction (UDP port 53)
+- [ ] **5E.2** Parse DNS response (A records, CNAME)
+- [ ] **5E.3** Simple resolver: `resolve(hostname) -> Option<Ipv4Addr>`
 
 ### Phase 5 Gate
 
 - [ ] **GATE**: TCP three-way handshake works (connect to a remote server)
 - [ ] **GATE**: TCP data transfer works (send/receive payloads)
-- [ ] **GATE**: Socket syscalls implemented (socket, connect, send, recv, close)
+- [x] **GATE**: Socket syscalls implemented (socket, connect, send, recv, close)
 - [ ] **GATE**: Simple TCP echo test passes (connect, send, receive echo, close)
-- [ ] **GATE**: `just test` passes
+- [x] **GATE**: `just test` passes
 - [ ] **GATE**: Can connect to a TCP server from QEMU guest (e.g., netcat)
+- [ ] **GATE**: VirtIO net uses NAPI-style batched RX (no per-packet blocking)
+- [ ] **GATE**: TX is fire-and-forget (no `REQUEST_TIMEOUT_MS` blocking)
+- [ ] **GATE**: `recv()`/`accept()` properly sleep via wait queues
+- [ ] **GATE**: `poll()` returns real socket readiness (not stubbed)
 
 ---
 
@@ -1039,6 +1148,8 @@ Phase 3: MSI/MSI-X ──────────┤──→ Phase 4: ECAM ─�
   (PCI cap parsing first)    │     (MCFG parsing)    (needs ECAM + MSI)
                               │
 Phase 5: TCP ─────────────────┤ (independent, builds on existing VirtIO net)
+  5A-5C: state machine,      │   5D: NAPI + wait queues + async I/O
+  data transfer, sockets      │   5E: DNS (optional stretch)
                               │
 Phase 6: PCID ────────────────┘ (independent, best after Phase 0+2)
 
@@ -1084,6 +1195,8 @@ Features that **cannot be implemented** until specific phases complete:
 | USB keyboard/mouse | No xHCI driver | Phase 7A (USB) |
 | Hardware-accelerated graphics | No VirtIO GPU driver | Phase 7B |
 | Wall-clock time / date | No RTC integration | Phase 7C |
+| Proper async `recv()`/`accept()` | Per-packet blocking in VirtIO net | Phase 5D (Async I/O) |
+| Real `poll()` readiness on sockets | `poll()` stubbed to always-ready | Phase 5D (Async I/O) |
 | Clean ACPI shutdown (non-QEMU) | Hardcoded port addresses | Phase 7D |
 
 ---
@@ -1097,7 +1210,7 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
 | **Phase 4**: PCIe ECAM | 4A+4B **Complete** | 9 | 6 | — |
-| **Phase 5**: TCP Networking | 5A+5B **Complete** | 17 | 11 | — |
+| **Phase 5**: TCP Networking | 5A+5B+5C **Complete**, 5D next | 54 | 15 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **116** | **70** | |
+| **Total** | | **153** | **74** | |

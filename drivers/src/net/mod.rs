@@ -4,6 +4,7 @@
 //! logic lives in the [`dhcp`] submodule.
 
 pub mod dhcp;
+pub mod socket;
 pub mod tcp;
 
 // =============================================================================

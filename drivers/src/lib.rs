@@ -27,6 +27,8 @@ pub mod pit;
 pub mod ps2;
 pub mod random;
 pub mod serial;
+#[cfg(feature = "itests")]
+pub mod socket_tests;
 pub mod syscall_services_init;
 #[cfg(feature = "itests")]
 pub mod tcp_data_tests;

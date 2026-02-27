@@ -24,7 +24,7 @@ use slopos_abi::syscall::{
     FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL,
     SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_NET_SCAN,
     SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK,
-    SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
+    SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID, SYSCALL_TABLE_SIZE,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
@@ -183,7 +183,10 @@ pub fn test_syscall_lookup_invalid_number() -> TestResult {
         syscall_lookup(0xFFFF).is_null(),
         "should reject out-of-bounds"
     );
-    assert_test!(syscall_lookup(128).is_null(), "should reject boundary");
+    assert_test!(
+        syscall_lookup(SYSCALL_TABLE_SIZE as u64).is_null(),
+        "should reject boundary"
+    );
     assert_test!(syscall_lookup(u64::MAX).is_null(), "should reject u64::MAX");
     TestResult::Pass
 }

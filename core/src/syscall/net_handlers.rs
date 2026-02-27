@@ -1,0 +1,211 @@
+use crate::syscall::common::SyscallDisposition;
+use crate::syscall::context::SyscallContext;
+use slopos_abi::net::{AF_INET, INVALID_SOCKET_IDX, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
+use slopos_abi::syscall::*;
+use slopos_lib::kernel_services::syscall_services::socket;
+use slopos_mm::user_copy::{copy_from_user, copy_to_user};
+use slopos_mm::user_ptr::UserPtr;
+
+fn errno_i32(errno: i32) -> u64 {
+    (errno as i64) as u64
+}
+
+fn rc_i32(ctx: &SyscallContext, rc: i32) -> SyscallDisposition {
+    if rc < 0 {
+        ctx.err_with(errno_i32(rc))
+    } else {
+        ctx.ok(rc as u64)
+    }
+}
+
+fn rc_i64(ctx: &SyscallContext, rc: i64) -> SyscallDisposition {
+    if rc < 0 {
+        ctx.err_with((rc as u64) as u64)
+    } else {
+        ctx.ok(rc as u64)
+    }
+}
+
+fn socket_idx_for_fd(process_id: u32, fd: i32) -> Result<u32, u64> {
+    let idx = slopos_fs::fileio_get_socket_idx(process_id, fd).unwrap_or(INVALID_SOCKET_IDX);
+    if idx == INVALID_SOCKET_IDX {
+        Err(ERRNO_ENOTSOCK)
+    } else {
+        Ok(idx)
+    }
+}
+
+define_syscall!(syscall_socket(ctx, args) requires(let process_id) {
+    let domain = args.arg0 as u16;
+    let sock_type = args.arg1 as u16;
+    let protocol = args.arg2 as u16;
+
+    if domain != AF_INET {
+        return ctx.err_with(ERRNO_EAFNOSUPPORT);
+    }
+    if sock_type != SOCK_STREAM && sock_type != SOCK_DGRAM {
+        return ctx.err_with(ERRNO_EPROTONOSUPPORT);
+    }
+
+    let sock_idx = socket::create(domain, sock_type, protocol);
+    if sock_idx < 0 {
+        return ctx.err_with(errno_i32(sock_idx));
+    }
+
+    let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32);
+    if fd < 0 {
+        let _ = socket::close(sock_idx as u32);
+        return ctx.err_with(ERRNO_ENOMEM);
+    }
+
+    ctx.ok(fd as u64)
+});
+
+define_syscall!(syscall_bind(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    if args.arg1 == 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+    if args.arg2_usize() < core::mem::size_of::<SockAddrIn>() {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
+    let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+    let port = u16::from_be(sock_addr.port);
+    rc_i32(&ctx, socket::bind(sock_idx, sock_addr.addr, port))
+});
+
+define_syscall!(syscall_listen(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let backlog = args.arg1_u32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+    rc_i32(&ctx, socket::listen(sock_idx, backlog))
+});
+
+define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    let mut peer_ip = [0u8; 4];
+    let mut peer_port = 0u16;
+    let want_peer = args.arg1 != 0;
+    if want_peer && args.arg2_usize() < core::mem::size_of::<SockAddrIn>() {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    let accepted_idx = socket::accept(
+        sock_idx,
+        if want_peer {
+            &mut peer_ip as *mut [u8; 4]
+        } else {
+            core::ptr::null_mut()
+        },
+        if want_peer {
+            &mut peer_port as *mut u16
+        } else {
+            core::ptr::null_mut()
+        },
+    );
+    if accepted_idx < 0 {
+        return ctx.err_with(errno_i32(accepted_idx));
+    }
+
+    let new_fd = slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32);
+    if new_fd < 0 {
+        let _ = socket::close(accepted_idx as u32);
+        return ctx.err_with(ERRNO_ENOMEM);
+    }
+
+    if want_peer {
+        let peer = SockAddrIn {
+            family: AF_INET,
+            port: peer_port.to_be(),
+            addr: peer_ip,
+            _pad: [0; 8],
+        };
+        let user_peer = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
+        try_or_err!(ctx, copy_to_user(user_peer, &peer));
+    }
+
+    ctx.ok(new_fd as u64)
+});
+
+define_syscall!(syscall_connect(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    if args.arg1 == 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+    if args.arg2_usize() < core::mem::size_of::<SockAddrIn>() {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
+    let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+    let port = u16::from_be(sock_addr.port);
+    rc_i32(&ctx, socket::connect(sock_idx, sock_addr.addr, port))
+});
+
+define_syscall!(syscall_send(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    if args.arg1 == 0 && args.arg2 != 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let len = args.arg2_usize().min(4096);
+    let mut scratch = [0u8; 4096];
+    if len > 0 {
+        let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
+        let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]));
+        return rc_i64(&ctx, socket::send(sock_idx, scratch.as_ptr(), copied));
+    }
+
+    rc_i64(&ctx, socket::send(sock_idx, core::ptr::null(), 0))
+});
+
+define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    if args.arg1 == 0 && args.arg2 != 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let len = args.arg2_usize().min(4096);
+    let mut scratch = [0u8; 4096];
+    let rc = socket::recv(sock_idx, scratch.as_mut_ptr(), len);
+    if rc < 0 {
+        return ctx.err_with(rc as u64);
+    }
+
+    let copied = rc as usize;
+    if copied > 0 {
+        let user_out = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, copied));
+        try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_out, &scratch[..copied]));
+    }
+    ctx.ok(copied as u64)
+});

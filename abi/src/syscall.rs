@@ -262,6 +262,95 @@ pub const SYSCALL_GETCWD: u64 = 121;
 pub const SYSCALL_RENAME: u64 = 122;
 
 // =============================================================================
+// Socket operations
+// =============================================================================
+
+/// Create a socket.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): domain (AF_INET = 2)
+/// * rsi (arg1): type (SOCK_STREAM = 1, SOCK_DGRAM = 2)
+/// * rdx (arg2): protocol (0 = auto-select)
+///
+/// # Returns
+/// * File descriptor on success
+/// * Negative errno on failure
+pub const SYSCALL_SOCKET: u64 = 126;
+
+/// Bind a socket to a local address.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to SockAddrIn struct
+/// * rdx (arg2): address length
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_BIND: u64 = 127;
+
+/// Mark a socket as listening for incoming connections.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): backlog (ignored for now)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_LISTEN: u64 = 128;
+
+/// Accept an incoming connection on a listening socket.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): listening socket file descriptor
+/// * rsi (arg1): pointer to SockAddrIn for peer address (or 0)
+/// * rdx (arg2): pointer to address length (or 0)
+///
+/// # Returns
+/// * New file descriptor for accepted connection on success
+/// * Negative errno on failure
+pub const SYSCALL_ACCEPT: u64 = 129;
+
+/// Initiate a TCP connection.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to SockAddrIn with remote address
+/// * rdx (arg2): address length
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_CONNECT: u64 = 130;
+
+/// Send data on a connected socket.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to data buffer
+/// * rdx (arg2): data length
+/// * r10 (arg3): flags (0 for now)
+///
+/// # Returns
+/// * Number of bytes sent on success
+/// * Negative errno on failure
+pub const SYSCALL_SEND: u64 = 131;
+
+/// Receive data from a connected socket.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): pointer to receive buffer
+/// * rdx (arg2): buffer length
+/// * r10 (arg3): flags (0 for now)
+///
+/// # Returns
+/// * Number of bytes received on success (0 = connection closed)
+/// * Negative errno on failure
+pub const SYSCALL_RECV: u64 = 132;
+
+// =============================================================================
 // Memory management (POSIX)
 // =============================================================================
 
@@ -590,13 +679,20 @@ pub const ERRNO_ENOENT: u64 = (-2i64) as u64;
 pub const ERRNO_ENOTDIR: u64 = (-20i64) as u64;
 pub const ERRNO_ERANGE: u64 = (-34i64) as u64;
 pub const ERRNO_ETIMEDOUT: u64 = (-110i64) as u64;
+pub const ERRNO_EADDRINUSE: u64 = (-98i64) as u64;
+pub const ERRNO_ECONNREFUSED: u64 = (-111i64) as u64;
+pub const ERRNO_ENOTCONN: u64 = (-107i64) as u64;
+pub const ERRNO_EISCONN: u64 = (-106i64) as u64;
+pub const ERRNO_ENOTSOCK: u64 = (-88i64) as u64;
+pub const ERRNO_EAFNOSUPPORT: u64 = (-97i64) as u64;
+pub const ERRNO_EPROTONOSUPPORT: u64 = (-93i64) as u64;
 
 // =============================================================================
 // Syscall ABI stability
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 128;
+pub const SYSCALL_TABLE_SIZE: usize = 136;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

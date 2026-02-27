@@ -2,9 +2,12 @@ use slopos_lib::kernel_services::syscall_services::input::{
     InputServices, register_input_services,
 };
 use slopos_lib::kernel_services::syscall_services::net::{NetServices, register_net_services};
+use slopos_lib::kernel_services::syscall_services::socket::{
+    SocketServices, register_socket_services,
+};
 use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
-use crate::{input_event, tty, virtio_net};
+use crate::{input_event, net::socket, tty, virtio_net};
 
 // =============================================================================
 // Input services
@@ -95,8 +98,30 @@ static NET_SERVICES: NetServices = NetServices {
     get_info: net_get_info_adapter,
 };
 
+fn socket_send_adapter(sock_idx: u32, data: *const u8, len: usize) -> i64 {
+    socket::socket_send(sock_idx, data, len)
+}
+
+fn socket_recv_adapter(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
+    socket::socket_recv(sock_idx, buf, len)
+}
+
+static SOCKET_SERVICES: SocketServices = SocketServices {
+    create: socket::socket_create,
+    bind: socket::socket_bind,
+    listen: socket::socket_listen,
+    accept: socket::socket_accept,
+    connect: socket::socket_connect,
+    send: socket_send_adapter,
+    recv: socket_recv_adapter,
+    close: socket::socket_close,
+    poll_readable: socket::socket_poll_readable,
+    poll_writable: socket::socket_poll_writable,
+};
+
 pub fn init_syscall_services() {
     register_input_services(&INPUT_SERVICES);
     register_tty_services(&TTY_SERVICES);
     register_net_services(&NET_SERVICES);
+    register_socket_services(&SOCKET_SERVICES);
 }

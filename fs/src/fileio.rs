@@ -5,6 +5,7 @@ use core::slice;
 use slopos_lib::{InitFlag, IrqMutex};
 
 use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
+use slopos_abi::net::INVALID_SOCKET_IDX;
 use slopos_abi::syscall::{
     F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, POLLERR,
     POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET,
@@ -13,6 +14,7 @@ use slopos_abi::syscall::{
 use slopos_lib::kernel_services::driver_runtime::{
     DriverTaskHandle, block_current_task, current_task, scheduler_is_enabled, unblock_task,
 };
+use slopos_lib::kernel_services::syscall_services::socket;
 
 use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
@@ -96,6 +98,7 @@ struct FileDescriptor {
     /// When true, reads/writes route to the platform console/TTY instead of a filesystem.
     console: bool,
     pipe_id: u32,
+    socket_idx: u32,
     pipe_read_end: bool,
     pipe_write_end: bool,
 }
@@ -111,6 +114,7 @@ impl FileDescriptor {
             cloexec: false,
             console: false,
             pipe_id: INVALID_PIPE_ID,
+            socket_idx: INVALID_SOCKET_IDX,
             pipe_read_end: false,
             pipe_write_end: false,
         }
@@ -182,6 +186,10 @@ fn with_tables<R>(
 }
 
 fn reset_descriptor(desc: &mut FileDescriptor) {
+    if desc.valid && desc.socket_idx != INVALID_SOCKET_IDX {
+        let _ = socket::close(desc.socket_idx);
+    }
+
     if desc.valid && desc.pipe_id != INVALID_PIPE_ID {
         let mut pipe_state = PIPE_STATE.lock();
         let idx = desc.pipe_id as usize;
@@ -217,6 +225,7 @@ fn reset_descriptor(desc: &mut FileDescriptor) {
     desc.cloexec = false;
     desc.console = false;
     desc.pipe_id = INVALID_PIPE_ID;
+    desc.socket_idx = INVALID_SOCKET_IDX;
     desc.pipe_read_end = false;
     desc.pipe_write_end = false;
 }
@@ -505,6 +514,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         cloexec: false,
         console: true,
         pipe_id: INVALID_PIPE_ID,
+        socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
         pipe_write_end: false,
     };
@@ -518,6 +528,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         cloexec: false,
         console: true,
         pipe_id: INVALID_PIPE_ID,
+        socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
         pipe_write_end: false,
     };
@@ -531,6 +542,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         cloexec: false,
         console: true,
         pipe_id: INVALID_PIPE_ID,
+        socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
         pipe_write_end: false,
     };
@@ -682,6 +694,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         desc.valid = true;
         desc.console = false;
         desc.pipe_id = INVALID_PIPE_ID;
+        desc.socket_idx = INVALID_SOCKET_IDX;
         desc.pipe_read_end = false;
         desc.pipe_write_end = false;
 
@@ -723,6 +736,8 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
                 return None; // writing end, can't read
             }
             Some((pipe_id, is_nonblock))
+        } else if desc.socket_idx != INVALID_SOCKET_IDX {
+            Some((INVALID_PIPE_ID, is_nonblock))
         } else {
             // Signal "not a pipe" -- fall through to normal path below
             Some((INVALID_PIPE_ID, false))
@@ -753,6 +768,12 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
             if desc.console {
                 drop(guard);
                 return 0;
+            }
+
+            if desc.socket_idx != INVALID_SOCKET_IDX {
+                let socket_idx = desc.socket_idx;
+                drop(guard);
+                return socket::recv(socket_idx, buffer as *mut u8, count) as ssize_t;
             }
 
             let fs = match desc.fs {
@@ -886,6 +907,8 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
                 return None;
             }
             Some((pipe_id, is_nonblock))
+        } else if desc.socket_idx != INVALID_SOCKET_IDX {
+            Some((INVALID_PIPE_ID, is_nonblock))
         } else {
             Some((INVALID_PIPE_ID, false))
         }
@@ -919,6 +942,12 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
                     slopos_lib::ports::serial_write_bytes(slopos_lib::ports::COM1, bytes);
                 }
                 return count as ssize_t;
+            }
+
+            if desc.socket_idx != INVALID_SOCKET_IDX {
+                let socket_idx = desc.socket_idx;
+                drop(guard);
+                return socket::send(socket_idx, buffer as *const u8, count) as ssize_t;
             }
 
             let fs = match desc.fs {
@@ -1023,6 +1052,10 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
             drop(guard);
             return -1;
         };
+        if desc.socket_idx != INVALID_SOCKET_IDX {
+            let _ = socket::close(desc.socket_idx);
+            desc.socket_idx = INVALID_SOCKET_IDX;
+        }
         reset_descriptor(desc);
         drop(guard);
         0
@@ -1275,6 +1308,7 @@ pub fn file_pipe_create(
             cloexec,
             console: false,
             pipe_id,
+            socket_idx: INVALID_SOCKET_IDX,
             pipe_read_end: true,
             pipe_write_end: false,
         };
@@ -1288,6 +1322,7 @@ pub fn file_pipe_create(
             cloexec,
             console: false,
             pipe_id,
+            socket_idx: INVALID_SOCKET_IDX,
             pipe_read_end: false,
             pipe_write_end: true,
         };
@@ -1342,6 +1377,19 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
                 Some(slot) => pipe_revents(slot, desc, events),
                 None => POLLERR,
             };
+            drop(guard);
+            return revents;
+        }
+
+        if desc.socket_idx != INVALID_SOCKET_IDX {
+            let mut revents = 0u16;
+            let socket_idx = desc.socket_idx;
+            if (events & POLLIN) != 0 && socket::poll_readable(socket_idx) != 0 {
+                revents |= POLLIN;
+            }
+            if (events & POLLOUT) != 0 && socket::poll_writable(socket_idx) != 0 {
+                revents |= POLLOUT;
+            }
             drop(guard);
             return revents;
         }
@@ -1681,5 +1729,63 @@ pub fn file_fstat_fd(process_id: u32, fd: c_int, out_stat: &mut UserFsStat) -> c
                 -1
             }
         }
+    })
+}
+
+pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
+    with_tables(|kernel, processes| {
+        let kernel_ptr = kernel as *mut FileTableSlot;
+        let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
+            t as *mut FileTableSlot
+        } else if let Some(t) = find_free_table(processes) {
+            t as *mut FileTableSlot
+        } else {
+            kernel_ptr
+        };
+
+        let table = unsafe { &mut *table_ptr };
+        if !table.in_use {
+            table.in_use = true;
+            table.process_id = process_id;
+            reset_table(table);
+        }
+
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(slot_idx) = find_free_slot(table) else {
+            drop(guard);
+            return -1;
+        };
+
+        table.descriptors[slot_idx] = FileDescriptor {
+            inode: 0,
+            fs: None,
+            position: 0,
+            flags: FILE_OPEN_READ | FILE_OPEN_WRITE,
+            valid: true,
+            cloexec: false,
+            console: false,
+            pipe_id: INVALID_PIPE_ID,
+            socket_idx,
+            pipe_read_end: false,
+            pipe_write_end: false,
+        };
+        drop(guard);
+        slot_idx as i32
+    })
+}
+
+pub fn fileio_get_socket_idx(process_id: u32, fd: i32) -> Option<u32> {
+    with_tables(|kernel, processes| {
+        let table = table_for_pid(kernel, processes, process_id)?;
+        if !table.in_use {
+            return None;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let out = unsafe { get_descriptor(&mut *table_ptr, fd) }
+            .map(|d| d.socket_idx)
+            .filter(|idx| *idx != INVALID_SOCKET_IDX);
+        drop(guard);
+        out
     })
 }

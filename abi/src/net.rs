@@ -24,3 +24,33 @@ pub const USER_NET_MEMBER_FLAG_ARP: u16 = 1 << 0;
 pub const USER_NET_MEMBER_FLAG_IPV4: u16 = 1 << 1;
 
 pub const USER_NET_MAX_MEMBERS: usize = 32;
+
+// =============================================================================
+// Socket ABI types
+// =============================================================================
+
+/// Address family: IPv4 Internet protocols.
+pub const AF_INET: u16 = 2;
+
+/// Socket type: byte-stream (TCP).
+pub const SOCK_STREAM: u16 = 1;
+/// Socket type: datagram (UDP).
+pub const SOCK_DGRAM: u16 = 2;
+
+/// IPv4 socket address — mirrors POSIX `sockaddr_in` layout.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SockAddrIn {
+    pub family: u16,
+    /// Port in **network** byte order (big-endian).
+    pub port: u16,
+    /// IPv4 address in network byte order.
+    pub addr: [u8; 4],
+    pub _pad: [u8; 8],
+}
+
+/// Maximum number of kernel sockets (shared across all processes).
+pub const MAX_SOCKETS: usize = 64;
+
+/// Socket descriptor index indicating "no socket".
+pub const INVALID_SOCKET_IDX: u32 = u32::MAX;

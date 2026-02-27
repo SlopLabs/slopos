@@ -18,6 +18,10 @@ use crate::syscall::fs::{
 pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_mmap, syscall_mprotect, syscall_munmap,
 };
+use crate::syscall::net_handlers::{
+    syscall_accept, syscall_bind, syscall_connect, syscall_listen, syscall_recv, syscall_send,
+    syscall_socket,
+};
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
     syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
@@ -100,6 +104,14 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FS_UNLINK] => syscall_fs_unlink, "fs_unlink";
     [SYSCALL_FS_LIST]   => syscall_fs_list,   "fs_list";
     [SYSCALL_RENAME]    => syscall_rename,    "rename";
+
+    [SYSCALL_SOCKET]  => syscall_socket,  "socket";
+    [SYSCALL_BIND]    => syscall_bind,    "bind";
+    [SYSCALL_LISTEN]  => syscall_listen,  "listen";
+    [SYSCALL_ACCEPT]  => syscall_accept,  "accept";
+    [SYSCALL_CONNECT] => syscall_connect, "connect";
+    [SYSCALL_SEND]    => syscall_send,    "send";
+    [SYSCALL_RECV]    => syscall_recv,    "recv";
 
     // TTY
     [SYSCALL_TTY_SET_FOCUS] => syscall_tty_set_focus, "tty_set_focus";
