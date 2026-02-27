@@ -29,6 +29,8 @@ pub mod random;
 pub mod serial;
 pub mod syscall_services_init;
 #[cfg(feature = "itests")]
+pub mod tcp_data_tests;
+#[cfg(feature = "itests")]
 pub mod tcp_tests;
 pub mod tty;
 pub mod virtio;

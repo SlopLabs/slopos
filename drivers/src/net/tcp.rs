@@ -43,6 +43,15 @@ pub const TIME_WAIT_MS: u64 = 60_000;
 /// Maximum retransmission attempts before giving up.
 pub const MAX_RETRANSMITS: u8 = 8;
 
+/// Size of per-connection send/receive ring buffers.
+pub const TCP_BUFFER_SIZE: usize = 16384;
+/// Delayed ACK timeout in milliseconds (RFC 1122 §4.2.3.2).
+pub const DELAYED_ACK_MS: u64 = 200;
+/// Send ACK after this many unacknowledged data segments.
+pub const DELAYED_ACK_SEGMENTS: u8 = 2;
+/// Zero-window probe interval in milliseconds.
+pub const ZWP_INTERVAL_MS: u64 = 5000;
+
 // ---------------------------------------------------------------------------
 // TCP flag bits (in the flags byte of the header)
 // ---------------------------------------------------------------------------
@@ -544,6 +553,257 @@ impl TcpConnection {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TcpRingBuffer {
+    data: [u8; TCP_BUFFER_SIZE],
+    head: usize,
+    tail: usize,
+    len: usize,
+}
+
+impl TcpRingBuffer {
+    pub const fn new() -> Self {
+        Self {
+            data: [0; TCP_BUFFER_SIZE],
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+
+    pub const fn capacity(&self) -> usize {
+        TCP_BUFFER_SIZE
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn free_space(&self) -> usize {
+        TCP_BUFFER_SIZE - self.len
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> usize {
+        let to_write = core::cmp::min(data.len(), self.free_space());
+        let mut written = 0usize;
+
+        while written < to_write {
+            self.data[self.head] = data[written];
+            self.head = (self.head + 1) % TCP_BUFFER_SIZE;
+            written += 1;
+        }
+
+        self.len += written;
+        written
+    }
+
+    pub fn read(&mut self, out: &mut [u8]) -> usize {
+        let to_read = core::cmp::min(out.len(), self.len);
+        let mut read = 0usize;
+
+        while read < to_read {
+            out[read] = self.data[self.tail];
+            self.tail = (self.tail + 1) % TCP_BUFFER_SIZE;
+            read += 1;
+        }
+
+        self.len -= read;
+        read
+    }
+
+    pub fn peek(&self, offset: usize, out: &mut [u8]) -> usize {
+        if offset >= self.len {
+            return 0;
+        }
+
+        let available = self.len - offset;
+        let to_read = core::cmp::min(out.len(), available);
+        let mut idx = (self.tail + offset) % TCP_BUFFER_SIZE;
+
+        for dst in out.iter_mut().take(to_read) {
+            *dst = self.data[idx];
+            idx = (idx + 1) % TCP_BUFFER_SIZE;
+        }
+
+        to_read
+    }
+
+    pub fn consume(&mut self, n: usize) {
+        let consumed = core::cmp::min(n, self.len);
+        self.tail = (self.tail + consumed) % TCP_BUFFER_SIZE;
+        self.len -= consumed;
+    }
+
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.len = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TcpSendState {
+    pub buf: TcpRingBuffer,
+    pub inflight: usize,
+    pub rto_deadline_ms: u64,
+    pub needs_retransmit: bool,
+}
+
+impl TcpSendState {
+    pub const fn new() -> Self {
+        Self {
+            buf: TcpRingBuffer::new(),
+            inflight: 0,
+            rto_deadline_ms: 0,
+            needs_retransmit: false,
+        }
+    }
+
+    pub fn enqueue(&mut self, data: &[u8]) -> usize {
+        self.buf.write(data)
+    }
+
+    pub fn unsent_len(&self) -> usize {
+        self.buf.len().saturating_sub(self.inflight)
+    }
+
+    pub fn buffered_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn free_space(&self) -> usize {
+        self.buf.free_space()
+    }
+
+    pub fn peek_unsent(&self, out: &mut [u8]) -> usize {
+        self.buf.peek(self.inflight, out)
+    }
+
+    pub fn mark_sent(&mut self, n: usize) {
+        let unsent = self.unsent_len();
+        let sent = core::cmp::min(n, unsent);
+        self.inflight += sent;
+        if sent > 0 {
+            self.needs_retransmit = false;
+        }
+    }
+
+    pub fn process_ack(&mut self, acked: usize) {
+        if acked == 0 {
+            return;
+        }
+
+        let consumed = core::cmp::min(acked, self.buf.len());
+        self.buf.consume(consumed);
+        self.inflight = self.inflight.saturating_sub(consumed);
+        if self.inflight == 0 {
+            self.rto_deadline_ms = 0;
+        }
+    }
+
+    pub fn retransmit_timeout(&mut self) {
+        self.inflight = 0;
+        self.needs_retransmit = true;
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.inflight = 0;
+        self.rto_deadline_ms = 0;
+        self.needs_retransmit = false;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TcpRecvState {
+    pub buf: TcpRingBuffer,
+    pub segments_since_ack: u8,
+    pub ack_pending: bool,
+    pub delayed_ack_deadline_ms: u64,
+}
+
+impl TcpRecvState {
+    pub const fn new() -> Self {
+        Self {
+            buf: TcpRingBuffer::new(),
+            segments_since_ack: 0,
+            ack_pending: false,
+            delayed_ack_deadline_ms: 0,
+        }
+    }
+
+    pub fn enqueue(&mut self, data: &[u8], now_ms: u64) -> usize {
+        if data.is_empty() {
+            return 0;
+        }
+
+        let wrote = self.buf.write(data);
+        if wrote > 0 {
+            self.ack_pending = true;
+            self.segments_since_ack = self.segments_since_ack.saturating_add(1);
+            if self.segments_since_ack == 1 {
+                self.delayed_ack_deadline_ms = now_ms.saturating_add(DELAYED_ACK_MS);
+            }
+        }
+        wrote
+    }
+
+    pub fn dequeue(&mut self, out: &mut [u8]) -> usize {
+        self.buf.read(out)
+    }
+
+    pub fn available(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn window(&self) -> u16 {
+        core::cmp::min(self.buf.free_space(), u16::MAX as usize) as u16
+    }
+
+    pub fn should_ack_now(&self, now_ms: u64) -> bool {
+        self.ack_pending
+            && (self.segments_since_ack >= DELAYED_ACK_SEGMENTS
+                || (self.delayed_ack_deadline_ms != 0 && now_ms >= self.delayed_ack_deadline_ms))
+    }
+
+    pub fn ack_sent(&mut self) {
+        self.segments_since_ack = 0;
+        self.ack_pending = false;
+        self.delayed_ack_deadline_ms = 0;
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.segments_since_ack = 0;
+        self.ack_pending = false;
+        self.delayed_ack_deadline_ms = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TcpBufferPair {
+    pub send: TcpSendState,
+    pub recv: TcpRecvState,
+}
+
+impl TcpBufferPair {
+    pub const fn new() -> Self {
+        Self {
+            send: TcpSendState::new(),
+            recv: TcpRecvState::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.send.clear();
+        self.recv.clear();
+    }
+}
+
 // =============================================================================
 // Sequence number arithmetic (RFC 793 §3.3)
 // =============================================================================
@@ -611,12 +871,14 @@ static TCP_TABLE: IrqMutex<TcpConnectionTable> = IrqMutex::new(TcpConnectionTabl
 
 pub struct TcpConnectionTable {
     connections: [TcpConnection; MAX_CONNECTIONS],
+    buffers: [TcpBufferPair; MAX_CONNECTIONS],
 }
 
 impl TcpConnectionTable {
     pub const fn new() -> Self {
         Self {
             connections: [TcpConnection::empty(); MAX_CONNECTIONS],
+            buffers: unsafe { core::mem::zeroed() },
         }
     }
 
@@ -687,6 +949,9 @@ impl TcpConnectionTable {
     pub fn release(&mut self, idx: usize) {
         if let Some(conn) = self.connections.get_mut(idx) {
             *conn = TcpConnection::empty();
+        }
+        if let Some(bufs) = self.buffers.get_mut(idx) {
+            bufs.clear();
         }
     }
 }
@@ -954,7 +1219,7 @@ pub fn tcp_input(
     dst_ip: [u8; 4],
     hdr: &TcpHeader,
     options: &[u8],
-    _payload_len: usize,
+    payload: &[u8],
     now_ms: u64,
 ) -> TcpInputResult {
     let incoming_tuple = TcpTuple {
@@ -999,7 +1264,9 @@ pub fn tcp_input(
         | TcpState::FinWait2
         | TcpState::CloseWait
         | TcpState::Closing
-        | TcpState::LastAck => process_established_and_closing(&mut table, conn_idx, hdr, now_ms),
+        | TcpState::LastAck => {
+            process_established_and_closing(&mut table, conn_idx, hdr, payload, now_ms)
+        }
 
         TcpState::TimeWait => process_time_wait(&mut table, conn_idx, hdr),
     }
@@ -1281,6 +1548,7 @@ fn process_established_and_closing(
     table: &mut TcpConnectionTable,
     idx: usize,
     hdr: &TcpHeader,
+    payload: &[u8],
     now_ms: u64,
 ) -> TcpInputResult {
     let current_state = table.connections[idx].state;
@@ -1329,19 +1597,93 @@ fn process_established_and_closing(
     }
 
     // Update snd_una / snd_wnd from the ACK.
-    let conn = &mut table.connections[idx];
-    if seq_gt(hdr.ack_num, conn.snd_una) && seq_le(hdr.ack_num, conn.snd_nxt) {
-        conn.snd_una = hdr.ack_num;
-        conn.snd_wnd = hdr.window_size;
+    let old_snd_una = table.connections[idx].snd_una;
+    let mut ack_advanced = false;
+    {
+        let conn = &mut table.connections[idx];
+        if seq_gt(hdr.ack_num, conn.snd_una) && seq_le(hdr.ack_num, conn.snd_nxt) {
+            conn.snd_una = hdr.ack_num;
+            conn.snd_wnd = hdr.window_size;
+            ack_advanced = true;
+        }
+    }
+
+    if ack_advanced && seq_gt(hdr.ack_num, old_snd_una) {
+        let acked = hdr.ack_num.wrapping_sub(old_snd_una) as usize;
+        table.buffers[idx].send.process_ack(acked);
+    }
+
+    let mut accepted_payload_len = 0usize;
+    if !payload.is_empty() && matches!(current_state, TcpState::Established | TcpState::CloseWait) {
+        let expected_seq = table.connections[idx].rcv_nxt;
+        if hdr.seq_num != expected_seq {
+            let conn = &table.connections[idx];
+            let seg = TcpOutSegment {
+                tuple: conn.tuple,
+                seq_num: conn.snd_nxt,
+                ack_num: conn.rcv_nxt,
+                flags: TCP_FLAG_ACK,
+                window_size: table.buffers[idx].recv.window(),
+                mss: 0,
+            };
+            return TcpInputResult {
+                response: Some(seg),
+                conn_idx: Some(idx),
+                new_state: Some(conn.state),
+                accepted_idx: None,
+                reset: false,
+            };
+        }
+
+        let wrote = table.buffers[idx].recv.enqueue(payload, now_ms);
+        accepted_payload_len = wrote;
+        let recv_window = table.buffers[idx].recv.window();
+        {
+            let conn = &mut table.connections[idx];
+            conn.rcv_nxt = conn.rcv_nxt.wrapping_add(wrote as u32);
+            conn.rcv_wnd = recv_window;
+        }
+
+        if table.buffers[idx].recv.should_ack_now(now_ms) {
+            let conn = &table.connections[idx];
+            let seg = TcpOutSegment {
+                tuple: conn.tuple,
+                seq_num: conn.snd_nxt,
+                ack_num: conn.rcv_nxt,
+                flags: TCP_FLAG_ACK,
+                window_size: conn.rcv_wnd,
+                mss: 0,
+            };
+            table.buffers[idx].recv.ack_sent();
+            return TcpInputResult {
+                response: Some(seg),
+                conn_idx: Some(idx),
+                new_state: Some(conn.state),
+                accepted_idx: None,
+                reset: false,
+            };
+        }
+
+        if !hdr.is_fin() {
+            let state = table.connections[idx].state;
+            return TcpInputResult {
+                response: None,
+                conn_idx: Some(idx),
+                new_state: Some(state),
+                accepted_idx: None,
+                reset: false,
+            };
+        }
     }
 
     // State-specific ACK processing.
     match current_state {
         TcpState::FinWait1 => {
             // If our FIN is acknowledged.
-            if hdr.ack_num == conn.snd_nxt {
+            if hdr.ack_num == table.connections[idx].snd_nxt {
                 if hdr.is_fin() {
                     // Simultaneous close: FIN+ACK acks our FIN and carries theirs.
+                    let conn = &mut table.connections[idx];
                     conn.rcv_nxt = hdr.seq_num.wrapping_add(1);
                     conn.state = TcpState::TimeWait;
                     conn.time_wait_start_ms = now_ms;
@@ -1366,12 +1708,14 @@ fn process_established_and_closing(
                         reset: false,
                     };
                 }
+                let conn = &mut table.connections[idx];
                 conn.state = TcpState::FinWait2;
                 klog_debug!("tcp: FIN_WAIT_1 -> FIN_WAIT_2 idx={}", idx);
             }
         }
         TcpState::Closing => {
-            if hdr.ack_num == conn.snd_nxt {
+            if hdr.ack_num == table.connections[idx].snd_nxt {
+                let conn = &mut table.connections[idx];
                 conn.state = TcpState::TimeWait;
                 conn.time_wait_start_ms = now_ms;
                 klog_debug!("tcp: CLOSING -> TIME_WAIT idx={}", idx);
@@ -1385,7 +1729,7 @@ fn process_established_and_closing(
             }
         }
         TcpState::LastAck => {
-            if hdr.ack_num == conn.snd_nxt {
+            if hdr.ack_num == table.connections[idx].snd_nxt {
                 klog_debug!("tcp: LAST_ACK -> CLOSED idx={}", idx);
                 table.release(idx);
                 return TcpInputResult {
@@ -1403,7 +1747,25 @@ fn process_established_and_closing(
     // Step 4: Check FIN.
     if hdr.is_fin() {
         let conn = &mut table.connections[idx];
-        conn.rcv_nxt = hdr.seq_num.wrapping_add(1);
+        let fin_seq = hdr.seq_num.wrapping_add(accepted_payload_len as u32);
+        if fin_seq != conn.rcv_nxt {
+            let seg = TcpOutSegment {
+                tuple: conn.tuple,
+                seq_num: conn.snd_nxt,
+                ack_num: conn.rcv_nxt,
+                flags: TCP_FLAG_ACK,
+                window_size: conn.rcv_wnd,
+                mss: 0,
+            };
+            return TcpInputResult {
+                response: Some(seg),
+                conn_idx: Some(idx),
+                new_state: Some(conn.state),
+                accepted_idx: None,
+                reset: false,
+            };
+        }
+        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
 
         let new_state = match current_state {
             TcpState::Established => {
@@ -1546,11 +1908,234 @@ pub fn tcp_find(tuple: &TcpTuple) -> Option<usize> {
     TCP_TABLE.lock().find(tuple)
 }
 
+/// Write data into a connection's send buffer.
+/// Returns the number of bytes written (may be less than data.len() if buffer is full).
+pub fn tcp_send(idx: usize, data: &[u8]) -> Result<usize, TcpError> {
+    let mut table = TCP_TABLE.lock();
+    let state = table.get(idx).ok_or(TcpError::NotFound)?.state;
+    if !matches!(state, TcpState::Established | TcpState::CloseWait) {
+        return Err(TcpError::InvalidState);
+    }
+    Ok(table.buffers[idx].send.enqueue(data))
+}
+
+/// Read data from a connection's receive buffer.
+/// Returns the number of bytes read.
+pub fn tcp_recv(idx: usize, out: &mut [u8]) -> Result<usize, TcpError> {
+    let mut table = TCP_TABLE.lock();
+    if table.get(idx).is_none() {
+        return Err(TcpError::NotFound);
+    }
+
+    let read = table.buffers[idx].recv.dequeue(out);
+    let recv_window = table.buffers[idx].recv.window();
+    if let Some(conn) = table.get_mut(idx) {
+        conn.rcv_wnd = recv_window;
+    }
+    Ok(read)
+}
+
+/// Generate the next outgoing data segment for a connection.
+/// Fills `payload_buf` with payload data. Returns (header_info, payload_len) or None.
+/// Caller should call repeatedly until None.
+pub fn tcp_poll_transmit(
+    idx: usize,
+    payload_buf: &mut [u8],
+    now_ms: u64,
+) -> Option<(TcpOutSegment, usize)> {
+    let mut table = TCP_TABLE.lock();
+    let (state, tuple, seq, ack_num, rto_ms, peer_mss, snd_wnd) = {
+        let conn = table.get(idx)?;
+        (
+            conn.state,
+            conn.tuple,
+            conn.snd_nxt,
+            conn.rcv_nxt,
+            conn.rto_ms as u64,
+            conn.peer_mss as usize,
+            conn.snd_wnd as usize,
+        )
+    };
+
+    if !matches!(
+        state,
+        TcpState::Established | TcpState::CloseWait | TcpState::FinWait1
+    ) {
+        return None;
+    }
+
+    let inflight = table.buffers[idx].send.inflight;
+    let wnd_avail = snd_wnd.saturating_sub(inflight);
+    let unsent = table.buffers[idx].send.unsent_len();
+    let mut max_send = core::cmp::min(unsent, peer_mss);
+    max_send = core::cmp::min(max_send, wnd_avail);
+    max_send = core::cmp::min(max_send, payload_buf.len());
+
+    if max_send == 0 {
+        return None;
+    }
+
+    let payload_len = table.buffers[idx]
+        .send
+        .peek_unsent(&mut payload_buf[..max_send]);
+    if payload_len == 0 {
+        return None;
+    }
+
+    table.buffers[idx].send.mark_sent(payload_len);
+    table.connections[idx].snd_nxt = table.connections[idx]
+        .snd_nxt
+        .wrapping_add(payload_len as u32);
+    if table.buffers[idx].send.rto_deadline_ms == 0 {
+        table.buffers[idx].send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
+    }
+
+    let seg = TcpOutSegment {
+        tuple,
+        seq_num: seq,
+        ack_num,
+        flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
+        window_size: table.buffers[idx].recv.window(),
+        mss: 0,
+    };
+
+    Some((seg, payload_len))
+}
+
+/// Check all connections for retransmission timeouts.
+/// Returns connection index for first expired connection, or None.
+/// After this returns Some, caller should call tcp_poll_transmit to get retransmit segments.
+pub fn tcp_retransmit_check(now_ms: u64) -> Option<usize> {
+    let mut table = TCP_TABLE.lock();
+
+    for idx in 0..MAX_CONNECTIONS {
+        if !table.connections[idx].active {
+            continue;
+        }
+
+        let send = &table.buffers[idx].send;
+        if send.inflight == 0 || send.rto_deadline_ms == 0 || now_ms < send.rto_deadline_ms {
+            continue;
+        }
+
+        {
+            let conn = &mut table.connections[idx];
+            conn.retransmits = conn.retransmits.saturating_add(1);
+            if conn.retransmits > MAX_RETRANSMITS {
+                conn.active = false;
+            }
+
+            conn.rto_ms = core::cmp::min(conn.rto_ms.saturating_mul(2), MAX_RTO_MS);
+        }
+
+        if !table.connections[idx].active {
+            table.release(idx);
+            continue;
+        }
+
+        table.buffers[idx].send.retransmit_timeout();
+        {
+            let conn = &mut table.connections[idx];
+            conn.snd_nxt = conn.snd_una;
+            table.buffers[idx].send.rto_deadline_ms = now_ms.saturating_add(conn.rto_ms as u64);
+        }
+        return Some(idx);
+    }
+
+    None
+}
+
+/// Check all connections for pending delayed ACKs.
+/// Returns (conn_idx, ack_segment) for first pending, or None.
+pub fn tcp_delayed_ack_check(now_ms: u64) -> Option<(usize, TcpOutSegment)> {
+    let mut table = TCP_TABLE.lock();
+
+    for i in 0..MAX_CONNECTIONS {
+        if !table.connections[i].active {
+            continue;
+        }
+
+        if table.buffers[i].recv.should_ack_now(now_ms) {
+            let conn = &table.connections[i];
+            let seg = TcpOutSegment {
+                tuple: conn.tuple,
+                seq_num: conn.snd_nxt,
+                ack_num: conn.rcv_nxt,
+                flags: TCP_FLAG_ACK,
+                window_size: table.buffers[i].recv.window(),
+                mss: 0,
+            };
+            table.buffers[i].recv.ack_sent();
+            return Some((i, seg));
+        }
+    }
+
+    None
+}
+
+/// Generate a zero-window probe for a connection with snd_wnd == 0.
+/// Returns probe segment or None if window is not zero or no data to send.
+pub fn tcp_zero_window_probe(idx: usize, _now_ms: u64) -> Option<TcpOutSegment> {
+    let table = TCP_TABLE.lock();
+    let conn = table.get(idx)?;
+    let send = &table.buffers[idx].send;
+
+    if conn.snd_wnd != 0 || send.buffered_len() == 0 {
+        return None;
+    }
+
+    let mut byte = [0u8; 1];
+    let peeked = send.peek_unsent(&mut byte);
+    if peeked == 0 {
+        return None;
+    }
+
+    Some(TcpOutSegment {
+        tuple: conn.tuple,
+        seq_num: conn.snd_nxt,
+        ack_num: conn.rcv_nxt,
+        flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
+        window_size: table.buffers[idx].recv.window(),
+        mss: 0,
+    })
+}
+
+/// Available send buffer space for a connection.
+pub fn tcp_send_buffer_space(idx: usize) -> usize {
+    let table = TCP_TABLE.lock();
+    if table.get(idx).is_some() {
+        table.buffers[idx].send.free_space()
+    } else {
+        0
+    }
+}
+
+/// Bytes available to read from a connection's receive buffer.
+pub fn tcp_recv_available(idx: usize) -> usize {
+    let table = TCP_TABLE.lock();
+    if table.get(idx).is_some() {
+        table.buffers[idx].recv.available()
+    } else {
+        0
+    }
+}
+
+/// Whether a connection has data pending transmission.
+pub fn tcp_has_pending_data(idx: usize) -> bool {
+    let table = TCP_TABLE.lock();
+    if table.get(idx).is_some() {
+        table.buffers[idx].send.unsent_len() > 0
+    } else {
+        false
+    }
+}
+
 /// Release all connections (for testing).
 pub fn tcp_reset_all() {
     let mut table = TCP_TABLE.lock();
     for i in 0..MAX_CONNECTIONS {
         table.connections[i] = TcpConnection::empty();
+        table.buffers[i].clear();
     }
     // Reset ISN counter and ephemeral port for deterministic tests.
     ISN_COUNTER.store(0x4F50_534C, Ordering::Relaxed);

@@ -595,7 +595,7 @@ pub fn test_tcp_active_handshake_complete() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
     assert_eq_test!(result.new_state, Some(TcpState::Established), "ESTABLISHED");
     assert_test!(result.response.is_some(), "should send ACK");
     let ack_seg = result.response.unwrap();
@@ -634,7 +634,7 @@ pub fn test_tcp_active_rst_in_syn_sent() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(remote_ip, local_ip, &rst, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &rst, &[], &[], 0);
     assert_test!(result.reset, "reset flag should be set");
     assert_eq_test!(
         result.new_state,
@@ -666,7 +666,7 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(remote_ip, local_ip, &bad_synack, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &bad_synack, &[], &[], 0);
     // Should respond with RST.
     assert_test!(result.response.is_some(), "should send RST for bad ACK");
     let seg = result.response.unwrap();
@@ -704,7 +704,7 @@ pub fn test_tcp_active_mss_negotiation() -> TestResult {
     };
     let mss_opt = [tcp::TCP_OPT_MSS, tcp::TCP_OPT_MSS_LEN, 0x02, 0x18]; // 536
 
-    let _ = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &mss_opt, 0, 0);
+    let _ = tcp::tcp_input(remote_ip, local_ip, &syn_ack, &mss_opt, &[], 0);
 
     let conn = tcp::tcp_get_connection(idx).unwrap();
     assert_eq_test!(conn.peer_mss, 536, "peer MSS should be 536");
@@ -739,7 +739,7 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
     };
     let mss_opt = [tcp::TCP_OPT_MSS, tcp::TCP_OPT_MSS_LEN, 0x05, 0xB4]; // 1460
 
-    let result = tcp::tcp_input(client_ip, server_ip, &syn, &mss_opt, 0, 0);
+    let result = tcp::tcp_input(client_ip, server_ip, &syn, &mss_opt, &[], 0);
     assert_test!(result.accepted_idx.is_some(), "new connection accepted");
     let child_idx = result.accepted_idx.unwrap();
     assert_eq_test!(
@@ -780,7 +780,7 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
         urgent_ptr: 0,
     };
 
-    let result = tcp::tcp_input(client_ip, server_ip, &ack, &[], 0, 0);
+    let result = tcp::tcp_input(client_ip, server_ip, &ack, &[], &[], 0);
     assert_eq_test!(result.new_state, Some(TcpState::Established), "ESTABLISHED");
 
     let conn = tcp::tcp_get_connection(child_idx).unwrap();
@@ -810,7 +810,7 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(client_ip, server_ip, &syn, &[], 0, 0);
+    let result = tcp::tcp_input(client_ip, server_ip, &syn, &[], &[], 0);
     let child_idx = result.accepted_idx.unwrap();
 
     // Client sends RST.
@@ -825,7 +825,7 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(client_ip, server_ip, &rst, &[], 0, 0);
+    let result = tcp::tcp_input(client_ip, server_ip, &rst, &[], &[], 0);
     assert_test!(result.reset, "reset flag");
     assert_eq_test!(result.new_state, Some(TcpState::Closed), "closed");
 
@@ -850,7 +850,7 @@ pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], 0, 0);
+    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack, &[], &[], 0);
     assert_test!(result.response.is_some(), "should send RST");
     let seg = result.response.unwrap();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
@@ -883,7 +883,7 @@ fn establish_client_connection(
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], 0, 0);
+    tcp::tcp_input(remote_ip, local_ip, &syn_ack, &[], &[], 0);
     (idx, server_iss, client_port)
 }
 
@@ -923,7 +923,7 @@ pub fn test_tcp_active_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &ack, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
     assert_eq_test!(result.new_state, Some(TcpState::FinWait2), "FIN_WAIT_2");
 
     // Step 3: Server sends its FIN.
@@ -938,7 +938,7 @@ pub fn test_tcp_active_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], 0, 100);
+    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 100);
     assert_eq_test!(result.new_state, Some(TcpState::TimeWait), "TIME_WAIT");
     assert_test!(result.response.is_some(), "ACK the server's FIN");
     let ack_seg = result.response.unwrap();
@@ -965,7 +965,7 @@ pub fn test_tcp_passive_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 0);
     assert_eq_test!(result.new_state, Some(TcpState::CloseWait), "CLOSE_WAIT");
     assert_test!(result.response.is_some(), "ACK the FIN");
 
@@ -987,7 +987,7 @@ pub fn test_tcp_passive_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_ack, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &server_ack, &[], &[], 0);
     assert_eq_test!(result.new_state, Some(TcpState::Closed), "CLOSED");
     assert_eq_test!(tcp::tcp_active_count(), 0, "connection released");
     pass!()
@@ -1023,7 +1023,7 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 0);
     assert_eq_test!(result.new_state, Some(TcpState::Closing), "CLOSING");
     assert_test!(result.response.is_some(), "ACK the peer FIN");
 
@@ -1039,7 +1039,7 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &ack, &[], 0, 200);
+    let result = tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 200);
     assert_eq_test!(result.new_state, Some(TcpState::TimeWait), "TIME_WAIT");
     pass!()
 }
@@ -1071,7 +1071,7 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &ack, &[], 0, 0);
+    tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
 
     // Server sends FIN → TIME_WAIT.
     let server_fin = TcpHeader {
@@ -1085,7 +1085,7 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], 0, 1000);
+    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
     assert_eq_test!(
         tcp::tcp_get_state(idx),
         Some(TcpState::TimeWait),
@@ -1130,7 +1130,7 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &ack, &[], 0, 0);
+    tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
 
     let server_fin = TcpHeader {
         src_port: 80,
@@ -1143,7 +1143,7 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], 0, 500);
+    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 500);
     assert_eq_test!(
         tcp::tcp_get_state(idx),
         Some(TcpState::TimeWait),
@@ -1151,7 +1151,7 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
     );
 
     // Server retransmits FIN in TIME_WAIT → should re-ACK.
-    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], 0, 1000);
+    let result = tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
     assert_test!(result.response.is_some(), "re-ACK the retransmitted FIN");
     let seg = result.response.unwrap();
     assert_test!(seg.flags & TCP_FLAG_ACK != 0, "ACK flag");
@@ -1185,7 +1185,7 @@ pub fn test_tcp_rst_in_established() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &rst, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &rst, &[], &[], 0);
     assert_test!(result.reset, "reset flag");
     assert_eq_test!(result.new_state, Some(TcpState::Closed), "closed");
     assert_eq_test!(tcp::tcp_active_count(), 0, "released");
@@ -1206,7 +1206,7 @@ pub fn test_tcp_rst_to_unknown_ignored() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &rst, &[], 0, 0);
+    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &rst, &[], &[], 0);
     assert_test!(
         result.response.is_none(),
         "no response to RST for unknown connection"
@@ -1233,7 +1233,7 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &syn, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &syn, &[], &[], 0);
     assert_test!(result.response.is_some(), "RST response");
     let seg = result.response.unwrap();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
@@ -1259,7 +1259,7 @@ pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &syn, &[], 0, 0);
+    let result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &syn, &[], &[], 0);
     assert_test!(result.response.is_some(), "RST response expected");
     let seg = result.response.unwrap();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
@@ -1437,7 +1437,7 @@ pub fn test_tcp_simultaneous_open() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let result = tcp::tcp_input(remote_ip, local_ip, &peer_syn, &[], 0, 0);
+    let result = tcp::tcp_input(remote_ip, local_ip, &peer_syn, &[], &[], 0);
     assert_eq_test!(
         result.new_state,
         Some(TcpState::SynReceived),

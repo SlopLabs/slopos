@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**, Phase 5B (TCP Data Transfer) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -832,21 +832,21 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 ### 5B: TCP Data Transfer
 
-- [ ] **5B.1** Implement send buffer:
+- [x] **5B.1** Implement send buffer:
   - Ring buffer per connection (e.g., 16KB)
   - Track `SND.UNA`, `SND.NXT`, `SND.WND` per RFC 793
   - Segment outgoing data into MSS-sized chunks
-- [ ] **5B.2** Implement receive buffer:
+- [x] **5B.2** Implement receive buffer:
   - Ring buffer per connection
   - Track `RCV.NXT`, `RCV.WND`
   - Handle out-of-order segments (simple: drop and let sender retransmit)
-- [ ] **5B.3** Implement acknowledgment:
+- [x] **5B.3** Implement acknowledgment:
   - Delayed ACK (200ms timer or every other segment)
   - Cumulative ACK
-- [ ] **5B.4** Implement retransmission:
+- [x] **5B.4** Implement retransmission:
   - Retransmission timeout (RTO) with exponential backoff
   - Start with fixed 1s RTO, later implement Karn/Partridge algorithm
-- [ ] **5B.5** Implement flow control:
+- [x] **5B.5** Implement flow control:
   - Window size advertisement in ACK segments
   - Respect remote window size when sending
   - Zero window probing
@@ -1097,7 +1097,7 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
 | **Phase 4**: PCIe ECAM | 4A+4B **Complete** | 9 | 6 | — |
-| **Phase 5**: TCP Networking | 5A **Complete** | 17 | 6 | — |
+| **Phase 5**: TCP Networking | 5A+5B **Complete** | 17 | 11 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **116** | **65** | |
+| **Total** | | **116** | **70** | |
