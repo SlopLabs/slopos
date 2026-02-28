@@ -7,8 +7,11 @@ pub mod packetbuf;
 pub mod pool;
 pub mod types;
 
+pub mod arp;
 pub mod dhcp;
 pub mod dns;
+pub mod ingress;
+pub mod ipv4;
 pub mod napi;
 pub mod socket;
 pub mod tcp;
