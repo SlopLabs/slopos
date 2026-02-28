@@ -3,11 +3,16 @@
 //! Protocol-level definitions shared across network drivers. DHCP client
 //! logic lives in the [`dhcp`] submodule.
 
+pub mod types;
+
 pub mod dhcp;
 pub mod dns;
 pub mod napi;
 pub mod socket;
 pub mod tcp;
+
+// Re-export key type-safe primitives for convenient access.
+pub use types::{DevIndex, EtherType, IpProtocol, Ipv4Addr, MacAddr, NetError, Port, SockAddr};
 
 // =============================================================================
 // Ethernet
