@@ -321,3 +321,42 @@ define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
 
     ctx.ok(copied as u64)
 });
+
+define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
+    // arg0 = hostname pointer, arg1 = hostname length, arg2 = result pointer
+    if args.arg0 == 0 || args.arg2 == 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let hostname_len = args.arg1_usize();
+    if hostname_len == 0 || hostname_len > 253 {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    // Copy hostname from user memory
+    let mut hostname_buf = [0u8; 253];
+    let user_hostname = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg0, hostname_len));
+    let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_hostname, &mut hostname_buf[..hostname_len]));
+    if copied != hostname_len {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    // Call DNS resolver via service
+    use slopos_lib::kernel_services::syscall_services::dns;
+    let mut result_addr = [0u8; 4];
+    let rc = dns::resolve(
+        hostname_buf[..hostname_len].as_ptr(),
+        hostname_len,
+        &mut result_addr as *mut [u8; 4],
+    );
+
+    if rc < 0 {
+        return ctx.err_with(ERRNO_EHOSTUNREACH);
+    }
+
+    // Copy result to user memory
+    let user_result = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg2, 4));
+    try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_result, &result_addr));
+
+    ctx.ok(0)
+});

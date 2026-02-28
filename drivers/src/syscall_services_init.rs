@@ -1,3 +1,4 @@
+use slopos_lib::kernel_services::syscall_services::dns::{DnsServices, register_dns_services};
 use slopos_lib::kernel_services::syscall_services::input::{
     InputServices, register_input_services,
 };
@@ -7,7 +8,11 @@ use slopos_lib::kernel_services::syscall_services::socket::{
 };
 use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
-use crate::{input_event, net::socket, tty, virtio_net};
+use crate::{
+    input_event,
+    net::{dns, socket},
+    tty, virtio_net,
+};
 
 // =============================================================================
 // Input services
@@ -142,9 +147,34 @@ static SOCKET_SERVICES: SocketServices = SocketServices {
     set_nonblocking: socket::socket_set_nonblocking,
 };
 
+// =============================================================================
+// DNS services
+// =============================================================================
+
+fn dns_resolve_adapter(hostname: *const u8, hostname_len: usize, result: *mut [u8; 4]) -> i32 {
+    if hostname.is_null() || result.is_null() || hostname_len == 0 || hostname_len > 253 {
+        return -22; // EINVAL
+    }
+    let hostname_slice = unsafe { core::slice::from_raw_parts(hostname, hostname_len) };
+    match dns::dns_resolve(hostname_slice) {
+        Some(addr) => {
+            unsafe {
+                *result = addr;
+            }
+            0
+        }
+        None => -113, // EHOSTUNREACH
+    }
+}
+
+static DNS_SERVICES: DnsServices = DnsServices {
+    resolve: dns_resolve_adapter,
+};
+
 pub fn init_syscall_services() {
     register_input_services(&INPUT_SERVICES);
     register_tty_services(&TTY_SERVICES);
     register_net_services(&NET_SERVICES);
     register_socket_services(&SOCKET_SERVICES);
+    register_dns_services(&DNS_SERVICES);
 }

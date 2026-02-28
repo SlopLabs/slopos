@@ -1,3 +1,4 @@
+pub mod dns;
 pub mod input;
 pub mod net;
 pub mod socket;

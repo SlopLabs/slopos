@@ -135,6 +135,23 @@ static VIRTIO_NET_STATE: IrqMutex<VirtioNetState> = IrqMutex::new(VirtioNetState
 static DHCP_RX_EVENT: QueueEvent = QueueEvent::new();
 static NAPI_EVENT: QueueEvent = QueueEvent::new();
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
+static DNS_RX_EVENT: QueueEvent = QueueEvent::new();
+/// Buffer for the most recent DNS response payload (UDP body only).
+static DNS_RX_BUF: IrqMutex<DnsRxBuf> = IrqMutex::new(DnsRxBuf::new());
+
+struct DnsRxBuf {
+    data: [u8; 512],
+    len: usize,
+}
+
+impl DnsRxBuf {
+    const fn new() -> Self {
+        Self {
+            data: [0; 512],
+            len: 0,
+        }
+    }
+}
 
 // =============================================================================
 // Device configuration helpers
@@ -452,6 +469,17 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
         }
         net::IPPROTO_UDP => {
             if let Some((src_port, dst_port, udp_payload)) = net::parse_udp_header(ip_payload) {
+                // Intercept DNS responses (src port 53) for the in-kernel resolver
+                if src_port == net::dns::DNS_PORT {
+                    let copy_len = udp_payload.len().min(512);
+                    let mut dns_buf = DNS_RX_BUF.lock();
+                    dns_buf.data[..copy_len].copy_from_slice(&udp_payload[..copy_len]);
+                    dns_buf.len = copy_len;
+                    drop(dns_buf);
+                    DNS_RX_EVENT.signal();
+                }
+                // Always deliver to socket table too (userland might have a UDP
+                // socket bound to port 53 for its own purposes).
                 socket::socket_deliver_udp_from_dispatch(
                     src_ip,
                     dst_ip,
@@ -1149,6 +1177,60 @@ pub fn virtio_net_receive(buffer: &mut [u8]) -> Option<usize> {
     }
 
     poll_one_rx_frame(&mut state, Some(buffer))
+}
+
+// =============================================================================
+// DNS resolver accessors
+// =============================================================================
+
+/// Return the DHCP-provided DNS server address, or `None` if not configured.
+pub fn virtio_net_dns() -> Option<[u8; 4]> {
+    let state = VIRTIO_NET_STATE.lock();
+    if !state.device.ready || state.dns == [0; 4] {
+        return None;
+    }
+    Some(state.dns)
+}
+
+/// Clear any stale DNS response buffer.
+pub fn dns_rx_clear() {
+    DNS_RX_EVENT.try_consume();
+    let mut buf = DNS_RX_BUF.lock();
+    buf.len = 0;
+}
+
+/// Wait for a DNS response with timeout. Returns `true` if signaled.
+///
+/// The IRQ handler signals `NAPI_EVENT` (not `DNS_RX_EVENT`), so we must
+/// poll NAPI inline after each wakeup to process RX frames; NAPI's
+/// `dispatch_rx_frame` intercepts DNS replies and signals `DNS_RX_EVENT`.
+pub fn dns_rx_wait(timeout_ms: u32) -> bool {
+    let start = slopos_lib::clock::uptime_ms();
+    loop {
+        // Already arrived?
+        if DNS_RX_EVENT.try_consume() {
+            return true;
+        }
+        let elapsed = slopos_lib::clock::uptime_ms() - start;
+        if elapsed >= timeout_ms as u64 {
+            return false;
+        }
+        let remaining = (timeout_ms as u64 - elapsed) as u32;
+        // Wait for any RX interrupt (capped at 100 ms to avoid wedging).
+        NAPI_EVENT.wait_timeout_ms(remaining.min(100));
+        // Drive NAPI so dispatch_rx_frame() can intercept DNS packets.
+        let mut state = VIRTIO_NET_STATE.lock();
+        let _ = virtnet_poll(&mut state, 64);
+    }
+}
+
+/// Read the most recent DNS response into the provided buffer.
+/// Returns the number of bytes copied.
+pub fn dns_rx_read(out: &mut [u8]) -> usize {
+    let buf = DNS_RX_BUF.lock();
+    let copy_len = buf.len.min(out.len());
+    out[..copy_len].copy_from_slice(&buf.data[..copy_len]);
+    copy_len
 }
 
 // =============================================================================

@@ -2,7 +2,8 @@ use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::{
     SYSCALL_ACCEPT, SYSCALL_BIND, SYSCALL_CONNECT, SYSCALL_LISTEN, SYSCALL_NET_INFO,
-    SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_RECVFROM, SYSCALL_SEND, SYSCALL_SENDTO, SYSCALL_SOCKET,
+    SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_RECVFROM, SYSCALL_RESOLVE, SYSCALL_SEND,
+    SYSCALL_SENDTO, SYSCALL_SOCKET,
 };
 use super::raw::{syscall1, syscall2, syscall3, syscall4, syscall6};
 use slopos_abi::net::{SockAddrIn, UserNetInfo, UserNetMember};
@@ -144,4 +145,20 @@ pub fn recvfrom(
         )
     };
     demux(result).map(|v| v as usize)
+}
+
+/// Resolve a hostname to an IPv4 address via the in-kernel DNS client.
+///
+/// Returns `Some([a, b, c, d])` on success, or `None` if resolution fails.
+pub fn resolve(hostname: &[u8]) -> Option<[u8; 4]> {
+    let mut result = [0u8; 4];
+    let rc = unsafe {
+        syscall3(
+            SYSCALL_RESOLVE,
+            hostname.as_ptr() as u64,
+            hostname.len() as u64,
+            &mut result as *mut [u8; 4] as u64,
+        )
+    };
+    if (rc as i64) < 0 { None } else { Some(result) }
 }

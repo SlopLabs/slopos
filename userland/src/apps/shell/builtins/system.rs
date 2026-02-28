@@ -419,3 +419,45 @@ pub fn cmd_whoami(_argc: i32, _argv: &[*const u8]) -> i32 {
     }
     0
 }
+
+pub fn cmd_resolve(argc: i32, argv: &[*const u8]) -> i32 {
+    if argc < 2 || argv[1].is_null() {
+        shell_write(b"usage: resolve <hostname>\n");
+        return 1;
+    }
+
+    // Convert argv[1] to a byte slice
+    let hostname_ptr = argv[1];
+    let mut len = 0usize;
+    unsafe {
+        while *hostname_ptr.add(len) != 0 {
+            len += 1;
+            if len > 253 {
+                break;
+            }
+        }
+    }
+    let hostname = unsafe { core::slice::from_raw_parts(hostname_ptr, len) };
+
+    match crate::syscall::net::resolve(hostname) {
+        Some(addr) => {
+            shell_write(hostname);
+            shell_write(b" -> ");
+            write_u64(addr[0] as u64);
+            shell_write(b".");
+            write_u64(addr[1] as u64);
+            shell_write(b".");
+            write_u64(addr[2] as u64);
+            shell_write(b".");
+            write_u64(addr[3] as u64);
+            shell_write(NL);
+            0
+        }
+        None => {
+            shell_write(b"resolve: failed to resolve ");
+            shell_write(hostname);
+            shell_write(NL);
+            1
+        }
+    }
+}

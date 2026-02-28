@@ -452,6 +452,15 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Utility,
         func: utils::cmd_wl,
     },
+    // ── Network ────────────────────────────────────────────────────────────
+    BuiltinEntry {
+        name: b"resolve",
+        desc: b"Resolve hostname to IP",
+        usage: b"resolve <hostname>",
+        detail: b"Resolve a hostname to its IPv4 address using the\nin-kernel DNS client. Uses the DHCP-provided DNS\nserver (typically 10.0.2.3 on QEMU user-net).",
+        category: Network,
+        func: system::cmd_resolve,
+    },
 ];
 
 pub fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {

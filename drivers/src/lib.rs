@@ -5,6 +5,8 @@ pub mod apic;
 #[cfg(feature = "itests")]
 pub mod apic_timer_tests;
 #[cfg(feature = "itests")]
+pub mod dns_tests;
+#[cfg(feature = "itests")]
 pub mod ecam_tests;
 pub mod hpet;
 #[cfg(feature = "itests")]

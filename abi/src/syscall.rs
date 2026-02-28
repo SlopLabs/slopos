@@ -352,6 +352,21 @@ pub const SYSCALL_RECV: u64 = 132;
 pub const SYSCALL_SENDTO: u64 = 133;
 pub const SYSCALL_RECVFROM: u64 = 134;
 
+/// Resolve a hostname to an IPv4 address via the in-kernel DNS client.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to hostname bytes (not NUL-terminated)
+/// * rsi (arg1): hostname length in bytes
+/// * rdx (arg2): pointer to `[u8; 4]` output for resolved address
+///
+/// # Returns
+/// * 0 on success
+/// * -EHOSTUNREACH: DNS resolution failed
+/// * -ETIMEDOUT: DNS server did not respond
+/// * -EFAULT: invalid pointer
+/// * -EINVAL: hostname too long (>253 bytes)
+pub const SYSCALL_RESOLVE: u64 = 135;
+
 // =============================================================================
 // Memory management (POSIX)
 // =============================================================================
@@ -690,13 +705,14 @@ pub const ERRNO_EAFNOSUPPORT: u64 = (-97i64) as u64;
 pub const ERRNO_EPROTONOSUPPORT: u64 = (-93i64) as u64;
 pub const ERRNO_EDESTADDRREQ: u64 = (-89i64) as u64;
 pub const ERRNO_ENETUNREACH: u64 = (-101i64) as u64;
+pub const ERRNO_EHOSTUNREACH: u64 = (-113i64) as u64;
 
 // =============================================================================
 // Syscall ABI stability
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 136;
+pub const SYSCALL_TABLE_SIZE: usize = 137;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
