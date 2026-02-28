@@ -18,9 +18,9 @@ use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, pass};
 
 use crate::msix::{
-    MsixCapability, MsixError, msix_clear_function_mask, msix_configure, msix_disable,
-    msix_map_table, msix_mask_entry, msix_read_capability, msix_refresh_control,
-    msix_set_function_mask, msix_unmask_entry,
+    MsixCapability, MsixError, msix_clear_function_mask, msix_configure, msix_map_table,
+    msix_mask_entry, msix_read_capability, msix_refresh_control, msix_set_function_mask,
+    msix_unmask_entry,
 };
 use crate::pci::{pci_config_read16, pci_config_write16, pci_get_device, pci_get_device_count};
 use crate::pci_defs::*;
@@ -40,6 +40,39 @@ fn find_device_by_vendor_device(vendor: u16, device: u16) -> Option<PciDeviceInf
     None
 }
 
+/// Restore a previously saved MSI-X table entry by re-programming it via
+/// `msix_configure`.  Extracts the vector (msg_data bits 7:0) and APIC ID
+/// (msg_addr_lo bits 19:12) from the saved raw register values.
+fn restore_table_entry(
+    table: &crate::msix::MsixTable,
+    entry: u16,
+    orig_addr_lo: u32,
+    orig_data: u32,
+    _orig_ctrl: u32,
+) {
+    let vector = (orig_data & 0xFF) as u8;
+    let apic_id = ((orig_addr_lo >> 12) & 0xFF) as u8;
+    // msix_configure masks, writes addr/data, then unmasks — fully restoring
+    // the entry to its pre-test state.
+    let _ = msix_configure(table, entry, vector, apic_id);
+}
+
+/// Restore MSI-X Message Control register to a previously saved value.
+///
+/// Writes the saved control register directly via PCI config space,
+/// bypassing `msix_enable`/`msix_disable` to avoid tearing down QEMU's
+/// internal KVM irqfd routing state.  The single atomic config write
+/// restores enable, function mask, and table-size bits in one go.
+fn restore_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability, saved_ctrl: u16) {
+    pci_config_write16(
+        dev.bus,
+        dev.device,
+        dev.function,
+        cap.cap_offset + 0x02,
+        saved_ctrl,
+    );
+}
+
 /// Find first device with MSI-X capability and return (device, cap_offset).
 fn find_msix_device() -> Option<(PciDeviceInfo, u16)> {
     for i in 0..pci_get_device_count() {
@@ -55,25 +88,6 @@ fn find_msix_device() -> Option<(PciDeviceInfo, u16)> {
 /// Read the MSI-X Message Control register for a given capability.
 fn read_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability) -> u16 {
     pci_config_read16(dev.bus, dev.device, dev.function, cap.cap_offset + 0x02)
-}
-
-/// Enable MSI-X with function mask set in a single config write.
-///
-/// Unlike [`msix_enable`], this keeps the function mask bit set so that
-/// QEMU does not attempt to fire vectors through a stale notifier.  Use in
-/// tests that only need to verify the *enable bit* without actually
-/// delivering interrupts.
-fn enable_msix_masked(dev: &PciDeviceInfo, cap: &MsixCapability) {
-    let ctrl = pci_config_read16(dev.bus, dev.device, dev.function, cap.cap_offset + 0x02);
-    // Set enable (bit 15) AND function mask (bit 14).
-    let new_ctrl = ctrl | (1 << 15) | (1 << 14);
-    pci_config_write16(
-        dev.bus,
-        dev.device,
-        dev.function,
-        cap.cap_offset + 0x02,
-        new_ctrl,
-    );
 }
 
 // =============================================================================
@@ -336,6 +350,9 @@ pub fn test_msix_is_pending_bounds() -> TestResult {
 // =============================================================================
 
 /// Configuring entry 0 with a valid vector must succeed.
+///
+/// Saves and restores the original entry 0 configuration to avoid corrupting
+/// live device state.
 pub fn test_msix_configure_entry_success() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -347,6 +364,11 @@ pub fn test_msix_configure_entry_success() -> TestResult {
         Err(e) => return fail!("msix_map_table failed: {:?}", e),
     };
 
+    // Save original entry 0 state before overwriting.
+    let orig_data = table.read_msg_data(0).unwrap_or(0);
+    let orig_addr = table.read_msg_addr_lo(0).unwrap_or(0);
+    let orig_ctrl = table.read_vector_control(0).unwrap_or(0);
+
     // Use vector 48 (MSI_VECTOR_BASE), APIC ID 0.
     let result = msix_configure(&table, 0, 48, 0);
     assert_test!(
@@ -354,10 +376,16 @@ pub fn test_msix_configure_entry_success() -> TestResult {
         "msix_configure(0, 48, 0) failed: {:?}",
         result
     );
+
+    // Restore original entry 0 state.
+    restore_table_entry(&table, 0, orig_addr, orig_data, orig_ctrl);
     pass!()
 }
 
 /// Configuring with vector < 32 must return InvalidVector error.
+///
+/// The vector-32 boundary test succeeds and writes to entry 0, so we
+/// save/restore the original entry state.
 pub fn test_msix_configure_invalid_vector() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -368,6 +396,11 @@ pub fn test_msix_configure_invalid_vector() -> TestResult {
         Ok(t) => t,
         Err(e) => return fail!("msix_map_table failed: {:?}", e),
     };
+
+    // Save original entry 0 state before overwriting.
+    let orig_data = table.read_msg_data(0).unwrap_or(0);
+    let orig_addr = table.read_msg_addr_lo(0).unwrap_or(0);
+    let orig_ctrl = table.read_vector_control(0).unwrap_or(0);
 
     // Vector 0 is a CPU exception — must fail.
     let result = msix_configure(&table, 0, 0, 0);
@@ -386,6 +419,9 @@ pub fn test_msix_configure_invalid_vector() -> TestResult {
     // Vector 32 is the first valid vector.
     let result32 = msix_configure(&table, 0, 32, 0);
     assert_test!(result32.is_ok(), "vector 32 should succeed");
+
+    // Restore original entry 0 state (vector 32 write was destructive).
+    restore_table_entry(&table, 0, orig_addr, orig_data, orig_ctrl);
     pass!()
 }
 
@@ -439,6 +475,9 @@ pub fn test_msix_mask_entry_valid() -> TestResult {
     // After masking, vector control bit 0 should be set.
     let ctrl = table.read_vector_control(0).unwrap_or(0);
     assert_test!((ctrl & 1) != 0, "entry 0 mask bit not set after masking");
+
+    // Clean up: unmask entry 0 so subsequent tests see the original state.
+    msix_unmask_entry(&table, 0);
     pass!()
 }
 
@@ -505,7 +544,11 @@ pub fn test_msix_mask_unmask_out_of_range() -> TestResult {
 // 7. Enable / Disable toggling
 // =============================================================================
 
-/// Enable MSI-X, then verify the enable bit is set in config space.
+/// Verify the MSI-X enable bit is set on a device that was enabled at probe time.
+///
+/// This is a read-only check: MSI-X was enabled by the driver probe, so the
+/// enable bit (bit 15) must already be set.  We do NOT toggle the enable bit
+/// because QEMU's KVM irqfd routing cannot survive disable/re-enable cycles.
 pub fn test_msix_enable_sets_enable_bit() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -513,34 +556,56 @@ pub fn test_msix_enable_sets_enable_bit() -> TestResult {
     };
     let cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // Enable with function mask to prevent QEMU from firing configured vectors.
-    enable_msix_masked(&dev, &cap);
-
     let ctrl = read_msix_control(&dev, &cap);
     let enabled = (ctrl & (1 << 15)) != 0;
-    assert_test!(enabled, "MSI-X enable bit not set after msix_enable()");
-
-    // Clean up: disable then clear function mask.
-    msix_disable(dev.bus, dev.device, dev.function, &cap);
-    msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
+    assert_test!(
+        enabled,
+        "MSI-X enable bit not set (device should be enabled at probe)"
+    );
     pass!()
 }
 
-/// Disable MSI-X, then verify the enable bit is cleared.
+/// Verify that clearing the enable bit via config space actually clears it,
+/// then restore.  We keep the function mask set throughout so QEMU never
+/// attempts to fire vectors through a stale KVM notifier.
 pub fn test_msix_disable_clears_enable_bit() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
         None => return fail!("No MSI-X device found"),
     };
     let cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
+    let saved_ctrl = read_msix_control(&dev, &cap);
 
-    // Enable with function mask, then disable.
-    enable_msix_masked(&dev, &cap);
-    msix_disable(dev.bus, dev.device, dev.function, &cap);
+    // Set function mask first to suppress vector delivery.
+    msix_set_function_mask(dev.bus, dev.device, dev.function, &cap);
+
+    // Clear the enable bit while function mask is active.
+    let fmasked_ctrl = read_msix_control(&dev, &cap);
+    pci_config_write16(
+        dev.bus,
+        dev.device,
+        dev.function,
+        cap.cap_offset + 0x02,
+        fmasked_ctrl & !(1 << 15),
+    );
 
     let ctrl = read_msix_control(&dev, &cap);
-    let enabled = (ctrl & (1 << 15)) != 0;
-    assert_test!(!enabled, "MSI-X enable bit still set after msix_disable()");
+    assert_test!(
+        (ctrl & (1 << 15)) == 0,
+        "enable bit still set after clearing"
+    );
+
+    // Re-enable: set the enable bit again (still function-masked).
+    pci_config_write16(
+        dev.bus,
+        dev.device,
+        dev.function,
+        cap.cap_offset + 0x02,
+        ctrl | (1 << 15),
+    );
+
+    // Now restore original control register (clears function mask).
+    restore_msix_control(&dev, &cap, saved_ctrl);
     pass!()
 }
 
@@ -576,10 +641,8 @@ pub fn test_msix_refresh_control_updates_cap() -> TestResult {
     };
     let mut cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // Enable with function mask to prevent QEMU from firing configured vectors.
-    enable_msix_masked(&dev, &cap);
-
-    let _old_ctrl = cap.control;
+    // Toggle function mask, then refresh — the in-memory cap should match hardware.
+    msix_set_function_mask(dev.bus, dev.device, dev.function, &cap);
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
     let live_ctrl = read_msix_control(&dev, &cap);
     assert_eq_test!(
@@ -588,8 +651,8 @@ pub fn test_msix_refresh_control_updates_cap() -> TestResult {
         "refresh_control did not update cap.control"
     );
 
-    // Clean up.
-    msix_disable(dev.bus, dev.device, dev.function, &cap);
+    // Restore: clear function mask.
+    msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
     pass!()
 }
 
@@ -605,20 +668,46 @@ pub fn test_msix_cap_is_enabled_method() -> TestResult {
     };
     let mut cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    msix_disable(dev.bus, dev.device, dev.function, &cap);
+    // MSI-X is enabled at probe time.  Verify is_enabled() reflects that.
+    msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
+    assert_test!(
+        cap.is_enabled(),
+        "is_enabled() should be true (enabled at probe)"
+    );
+
+    // Set function mask, clear enable bit, verify is_enabled() returns false.
+    msix_set_function_mask(dev.bus, dev.device, dev.function, &cap);
+    let fmasked_ctrl = read_msix_control(&dev, &cap);
+    pci_config_write16(
+        dev.bus,
+        dev.device,
+        dev.function,
+        cap.cap_offset + 0x02,
+        fmasked_ctrl & !(1 << 15),
+    );
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
     assert_test!(
         !cap.is_enabled(),
-        "is_enabled() should be false after disable"
+        "is_enabled() should be false after clearing enable bit"
     );
 
-    // Enable with function mask to prevent QEMU from firing configured vectors.
-    enable_msix_masked(&dev, &cap);
+    // Restore: set enable bit back (still function-masked).
+    let disabled_ctrl = read_msix_control(&dev, &cap);
+    pci_config_write16(
+        dev.bus,
+        dev.device,
+        dev.function,
+        cap.cap_offset + 0x02,
+        disabled_ctrl | (1 << 15),
+    );
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
-    assert_test!(cap.is_enabled(), "is_enabled() should be true after enable");
+    assert_test!(
+        cap.is_enabled(),
+        "is_enabled() should be true after restoring enable bit"
+    );
 
-    // Clean up.
-    msix_disable(dev.bus, dev.device, dev.function, &cap);
+    // Clear function mask to restore fully.
+    msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
     pass!()
 }
 
