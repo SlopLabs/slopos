@@ -13,6 +13,8 @@ pub mod ecam_tests;
 pub mod hpet;
 #[cfg(feature = "itests")]
 pub mod hpet_tests;
+#[cfg(feature = "itests")]
+pub mod ingress_tests;
 pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;

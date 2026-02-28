@@ -1,13 +1,25 @@
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
 };
 use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
-use crate::net::{self, dhcp, napi::NapiContext, socket, tcp};
+use crate::net::{
+    self, PACKET_POOL, dhcp, ingress,
+    napi::NapiContext,
+    netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
+    packetbuf::PacketBuf,
+    pool::PacketPool,
+    socket, tcp,
+    types::{MacAddr, NetError},
+};
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
     self, QueueEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
@@ -31,6 +43,7 @@ const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
 const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
 const VIRTIO_NET_F_MTU: u64 = 1 << 3;
+const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1;
 
 const VIRTIO_NET_S_LINK_UP: u16 = 1;
 
@@ -139,6 +152,23 @@ static DNS_RX_EVENT: QueueEvent = QueueEvent::new();
 /// Buffer for the most recent DNS response payload (UDP body only).
 static DNS_RX_BUF: IrqMutex<DnsRxBuf> = IrqMutex::new(DnsRxBuf::new());
 
+static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
+
+fn get_device_handle() -> Option<&'static DeviceHandle> {
+    let ptr = DEVICE_HANDLE_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*ptr })
+    }
+}
+
+fn set_device_handle(handle: DeviceHandle) {
+    let boxed = Box::new(handle);
+    let ptr = Box::into_raw(boxed);
+    DEVICE_HANDLE_PTR.store(ptr, Ordering::Release);
+}
+
 struct DnsRxBuf {
     data: [u8; 512],
     len: usize,
@@ -151,6 +181,142 @@ impl DnsRxBuf {
             len: 0,
         }
     }
+}
+
+pub struct VirtioNetDev;
+
+impl NetDevice for VirtioNetDev {
+    fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
+        let mut state = VIRTIO_NET_STATE.lock();
+        if !state.device.ready || !link_is_up(&state) {
+            return Err(NetError::NoBufferSpace);
+        }
+
+        let payload = pkt.payload();
+        let hdr_len = size_of::<VirtioNetHdrV1>();
+        if payload.len() + hdr_len > PACKET_BUFFER_SIZE {
+            return Err(NetError::NoBufferSpace);
+        }
+
+        let Some(tx_page) = alloc_tx_page() else {
+            return Err(NetError::NoBufferSpace);
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                payload.as_ptr(),
+                tx_page.as_mut_ptr::<u8>().add(hdr_len),
+                payload.len(),
+            );
+        }
+
+        if submit_tx(&mut state, tx_page, (hdr_len + payload.len()) as u32) {
+            Ok(())
+        } else {
+            Err(NetError::NoBufferSpace)
+        }
+    }
+
+    fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> Vec<PacketBuf> {
+        let mut state = VIRTIO_NET_STATE.lock();
+        let _ = virtnet_clean_tx(&mut state);
+
+        let mut packets = Vec::with_capacity(budget.min(64));
+        let mut posted = 0usize;
+
+        for _ in 0..budget {
+            let Some(used) = state.device.rx_queue.try_pop_used() else {
+                break;
+            };
+
+            let idx = (used.id as usize) % RX_RING_SIZE;
+            let Some(page) = state.rx_buffers[idx].take() else {
+                continue;
+            };
+
+            let hdr_len = size_of::<VirtioNetHdrV1>();
+            if (used.len as usize) > hdr_len {
+                let payload_len = (used.len as usize) - hdr_len;
+                let frame = unsafe {
+                    core::slice::from_raw_parts(page.as_mut_ptr::<u8>().add(hdr_len), payload_len)
+                };
+                if let Some(pkt) = PacketBuf::from_raw_copy(frame) {
+                    packets.push(pkt);
+                }
+            }
+
+            if let Some(new_page) = OwnedPageFrame::alloc_zeroed() {
+                state.device.rx_queue.write_desc(
+                    idx as u16,
+                    VirtqDesc {
+                        addr: new_page.phys_u64(),
+                        len: PACKET_BUFFER_SIZE as u32,
+                        flags: VIRTQ_DESC_F_WRITE,
+                        next: 0,
+                    },
+                );
+                state.rx_buffers[idx] = Some(new_page);
+                state.device.rx_queue.submit(idx as u16);
+                posted += 1;
+            }
+        }
+
+        if posted > 0 {
+            queue::notify_queue(
+                &state.caps.notify_cfg,
+                state.caps.notify_off_multiplier,
+                &state.device.rx_queue,
+                VIRTIO_NET_QUEUE_RX,
+            );
+        }
+
+        packets
+    }
+
+    fn set_up(&self) {}
+
+    fn set_down(&self) {
+        let mut state = VIRTIO_NET_STATE.lock();
+        state.device.ready = false;
+    }
+
+    fn mtu(&self) -> u16 {
+        VIRTIO_NET_STATE.lock().device.mtu
+    }
+
+    fn mac(&self) -> MacAddr {
+        MacAddr(VIRTIO_NET_STATE.lock().device.mac)
+    }
+
+    fn stats(&self) -> NetDeviceStats {
+        NetDeviceStats::new()
+    }
+
+    fn features(&self) -> NetDeviceFeatures {
+        let feats = VIRTIO_NET_STATE.lock().device.negotiated_features;
+        let mut flags = NetDeviceFeatures::empty();
+        if feats & VIRTIO_NET_F_CSUM != 0 {
+            flags |= NetDeviceFeatures::CHECKSUM_TX;
+        }
+        if feats & VIRTIO_NET_F_GUEST_CSUM != 0 {
+            flags |= NetDeviceFeatures::CHECKSUM_RX;
+        }
+        flags
+    }
+}
+
+pub fn dns_intercept_response(payload: &[u8]) {
+    let copy_len = payload.len().min(512);
+    let mut dns_buf = DNS_RX_BUF.lock();
+    dns_buf.data[..copy_len].copy_from_slice(&payload[..copy_len]);
+    dns_buf.len = copy_len;
+    drop(dns_buf);
+    DNS_RX_EVENT.signal();
+}
+
+pub fn sniff_packet_for_members(frame: &[u8]) {
+    let mut state = VIRTIO_NET_STATE.lock();
+    sniff_frame_for_members(&mut state, frame);
 }
 
 // =============================================================================
@@ -802,13 +968,26 @@ fn virtnet_napi_poll_loop() {
         return;
     }
 
-    let mut state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready || !link_is_up(&state) {
+    let Some(handle) = get_device_handle() else {
         napi_complete();
         return;
+    };
+
+    {
+        let state = VIRTIO_NET_STATE.lock();
+        if !state.device.ready || !link_is_up(&state) {
+            drop(state);
+            napi_complete();
+            return;
+        }
     }
 
-    let processed = virtnet_poll(&mut state, NAPI_CONTEXT.budget());
+    let packets = handle.poll_rx(NAPI_CONTEXT.budget() as usize, &PACKET_POOL);
+    let processed = packets.len();
+    for pkt in packets {
+        sniff_packet_for_members(pkt.payload());
+        ingress::net_rx(handle, pkt);
+    }
     NAPI_CONTEXT.add_processed(processed as u32);
     napi_complete();
 
@@ -887,8 +1066,11 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     }
 
     let required_features = virtio::VIRTIO_F_VERSION_1;
-    let optional_features =
-        VIRTIO_NET_F_CSUM | VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS | VIRTIO_NET_F_MTU;
+    let optional_features = VIRTIO_NET_F_CSUM
+        | VIRTIO_NET_F_GUEST_CSUM
+        | VIRTIO_NET_F_MAC
+        | VIRTIO_NET_F_STATUS
+        | VIRTIO_NET_F_MTU;
     let feat_result = negotiate_features(&caps, required_features, optional_features);
     if !feat_result.success {
         klog_info!("virtio-net: features negotiation failed");
@@ -991,6 +1173,19 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         }
 
         virtnet_prepost_rx_buffers(&mut state);
+
+        PACKET_POOL.init();
+
+        let dev = Box::new(VirtioNetDev);
+        if let Some(handle) = DEVICE_REGISTRY.register(dev) {
+            klog_info!(
+                "virtio-net: registered as dev {} in device registry",
+                handle.index()
+            );
+            set_device_handle(handle);
+        } else {
+            klog_info!("virtio-net: failed to register in device registry");
+        }
     }
 
     register_idle_wakeup_callback(Some(virtnet_idle_wakeup_cb));
@@ -1218,9 +1413,7 @@ pub fn dns_rx_wait(timeout_ms: u32) -> bool {
         let remaining = (timeout_ms as u64 - elapsed) as u32;
         // Wait for any RX interrupt (capped at 100 ms to avoid wedging).
         NAPI_EVENT.wait_timeout_ms(remaining.min(100));
-        // Drive NAPI so dispatch_rx_frame() can intercept DNS packets.
-        let mut state = VIRTIO_NET_STATE.lock();
-        let _ = virtnet_poll(&mut state, 64);
+        virtnet_napi_poll_loop();
     }
 }
 
