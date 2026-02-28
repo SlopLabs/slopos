@@ -37,6 +37,8 @@ pub mod tcp_data_tests;
 #[cfg(feature = "itests")]
 pub mod tcp_tests;
 pub mod tty;
+#[cfg(feature = "itests")]
+pub mod udp_socket_tests;
 pub mod virtio;
 pub mod virtio_blk;
 #[cfg(feature = "itests")]

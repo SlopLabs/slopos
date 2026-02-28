@@ -2,9 +2,9 @@ use core::cmp;
 
 use slopos_abi::net::{AF_INET, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
-    ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EFAULT,
-    ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK,
-    ERRNO_EPROTONOSUPPORT, POLLERR, POLLHUP, POLLIN, POLLOUT,
+    ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ,
+    ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN,
+    ERRNO_ENOTSOCK, ERRNO_EPROTONOSUPPORT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_lib::{IrqMutex, WaitQueue};
 
@@ -15,6 +15,8 @@ use crate::net::tcp::{
 use crate::virtio_net;
 
 const TCP_TX_MAX: usize = 1460;
+pub const UDP_DGRAM_MAX_PAYLOAD: usize = 1472;
+pub const UDP_RX_QUEUE_SIZE: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SocketState {
@@ -24,6 +26,77 @@ pub enum SocketState {
     Connecting,
     Connected,
     Closed,
+}
+
+#[derive(Clone, Copy)]
+pub struct UdpDatagram {
+    pub src_ip: [u8; 4],
+    pub src_port: u16,
+    pub len: u16,
+    pub data: [u8; UDP_DGRAM_MAX_PAYLOAD],
+}
+
+impl UdpDatagram {
+    pub const fn empty() -> Self {
+        Self {
+            src_ip: [0; 4],
+            src_port: 0,
+            len: 0,
+            data: [0; UDP_DGRAM_MAX_PAYLOAD],
+        }
+    }
+}
+
+pub struct UdpReceiveQueue {
+    slots: [UdpDatagram; UDP_RX_QUEUE_SIZE],
+    head: usize,
+    len: usize,
+}
+
+impl UdpReceiveQueue {
+    pub const fn new() -> Self {
+        Self {
+            slots: [UdpDatagram::empty(); UDP_RX_QUEUE_SIZE],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, dgram: &UdpDatagram) {
+        if self.len == UDP_RX_QUEUE_SIZE {
+            self.slots[self.head] = *dgram;
+            self.head = (self.head + 1) % UDP_RX_QUEUE_SIZE;
+            return;
+        }
+
+        let tail = (self.head + self.len) % UDP_RX_QUEUE_SIZE;
+        self.slots[tail] = *dgram;
+        self.len += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<UdpDatagram> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let dgram = self.slots[self.head];
+        self.head = (self.head + 1) % UDP_RX_QUEUE_SIZE;
+        self.len -= 1;
+        Some(dgram)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +189,38 @@ impl SocketTable {
             .iter()
             .any(|s| s.active && s.tcp_idx == Some(tcp_idx) && s.state != SocketState::Closed)
     }
+
+    fn find_udp_socket(&self, dst_ip: [u8; 4], dst_port: u16) -> Option<u32> {
+        for (idx, sock) in self.sockets.iter().enumerate() {
+            if !sock.active
+                || sock.sock_type != SOCK_DGRAM
+                || !matches!(sock.state, SocketState::Bound | SocketState::Connected)
+                || sock.local_port != dst_port
+            {
+                continue;
+            }
+
+            if sock.local_ip == dst_ip {
+                return Some(idx as u32);
+            }
+        }
+
+        for (idx, sock) in self.sockets.iter().enumerate() {
+            if !sock.active
+                || sock.sock_type != SOCK_DGRAM
+                || !matches!(sock.state, SocketState::Bound | SocketState::Connected)
+                || sock.local_port != dst_port
+            {
+                continue;
+            }
+
+            if sock.local_ip == [0; 4] {
+                return Some(idx as u32);
+            }
+        }
+
+        None
+    }
 }
 
 static SOCKET_TABLE: IrqMutex<SocketTable> = IrqMutex::new(SocketTable::new());
@@ -132,6 +237,8 @@ static SEND_WQS: [WaitQueue; MAX_SOCKETS] = {
     const WAIT_QUEUE: WaitQueue = WaitQueue::new();
     [WAIT_QUEUE; MAX_SOCKETS]
 };
+pub static UDP_RX_QUEUES: [IrqMutex<UdpReceiveQueue>; MAX_SOCKETS] =
+    [const { IrqMutex::new(UdpReceiveQueue::new()) }; MAX_SOCKETS];
 
 fn errno_i32(errno: u64) -> i32 {
     errno as i64 as i32
@@ -152,6 +259,19 @@ fn map_tcp_err(err: TcpError) -> i32 {
 
 fn map_tcp_err_i64(err: TcpError) -> i64 {
     map_tcp_err(err) as i64
+}
+
+fn alloc_ephemeral_port(table: &SocketTable) -> Option<u16> {
+    for port in 49152u16..=65535u16 {
+        let used = table
+            .sockets
+            .iter()
+            .any(|s| s.active && s.local_port == port && s.state != SocketState::Closed);
+        if !used {
+            return Some(port);
+        }
+    }
+    None
 }
 
 fn be_port(port: u16) -> [u8; 2] {
@@ -241,6 +361,43 @@ pub(crate) fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i3
 
 fn socket_wake_recv(sock_idx: u32) {
     RECV_WQS[sock_idx as usize].wake_all();
+}
+
+fn make_udp_datagram(src_ip: [u8; 4], src_port: u16, payload: &[u8]) -> UdpDatagram {
+    let copy_len = cmp::min(payload.len(), UDP_DGRAM_MAX_PAYLOAD);
+    let mut dgram = UdpDatagram::empty();
+    dgram.src_ip = src_ip;
+    dgram.src_port = src_port;
+    dgram.len = copy_len as u16;
+    dgram.data[..copy_len].copy_from_slice(&payload[..copy_len]);
+    dgram
+}
+
+pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
+    if (sock_idx as usize) >= MAX_SOCKETS {
+        return;
+    }
+
+    let dgram = make_udp_datagram(src_ip, src_port, payload);
+    UDP_RX_QUEUES[sock_idx as usize].lock().push(&dgram);
+    socket_wake_recv(sock_idx);
+}
+
+pub fn socket_deliver_udp_from_dispatch(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) {
+    let sock_idx = {
+        let table = SOCKET_TABLE.lock();
+        table.find_udp_socket(dst_ip, dst_port)
+    };
+
+    if let Some(sock_idx) = sock_idx {
+        socket_deliver_udp(sock_idx, src_ip, src_port, payload);
+    }
 }
 
 fn socket_wake_send(sock_idx: u32) {
@@ -360,7 +517,139 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16) -> i32 {
     sock.protocol = protocol;
     sock.state = SocketState::Unbound;
     sock.process_id = 0;
+    UDP_RX_QUEUES[idx as usize].lock().clear();
     idx as i32
+}
+
+pub fn socket_sendto(
+    sock_idx: u32,
+    data: *const u8,
+    len: usize,
+    dst_ip: [u8; 4],
+    dst_port: u16,
+) -> i64 {
+    if data.is_null() && len != 0 {
+        return errno_i32(ERRNO_EFAULT) as i64;
+    }
+    if dst_port == 0 {
+        return errno_i32(ERRNO_EDESTADDRREQ) as i64;
+    }
+    if len > UDP_DGRAM_MAX_PAYLOAD {
+        return errno_i32(ERRNO_EINVAL) as i64;
+    }
+
+    let (local_ip, local_port) = {
+        let mut table = SOCKET_TABLE.lock();
+        let idx = sock_idx as usize;
+        if idx >= MAX_SOCKETS || !table.sockets[idx].active {
+            return errno_i32(ERRNO_ENOTSOCK) as i64;
+        }
+
+        if table.sockets[idx].sock_type != SOCK_DGRAM {
+            return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
+        }
+
+        if table.sockets[idx].local_port == 0 {
+            let Some(port) = alloc_ephemeral_port(&table) else {
+                return errno_i32(ERRNO_ENOMEM) as i64;
+            };
+            let local_ip = virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]);
+
+            let sock = &mut table.sockets[idx];
+            sock.local_ip = local_ip;
+            sock.local_port = port;
+            if sock.state == SocketState::Unbound {
+                sock.state = SocketState::Bound;
+            }
+        }
+
+        let sock = &table.sockets[idx];
+        (sock.local_ip, sock.local_port)
+    };
+
+    let payload = if len == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(data, len) }
+    };
+
+    if !virtio_net::virtio_net_is_ready() {
+        return len as i64;
+    }
+
+    if virtio_net::transmit_udp_packet(local_ip, dst_ip, local_port, dst_port, payload) {
+        len as i64
+    } else {
+        errno_i32(ERRNO_ENETUNREACH) as i64
+    }
+}
+
+pub fn socket_recvfrom(
+    sock_idx: u32,
+    buf: *mut u8,
+    len: usize,
+    src_ip: *mut [u8; 4],
+    src_port: *mut u16,
+) -> i64 {
+    if buf.is_null() && len != 0 {
+        return errno_i32(ERRNO_EFAULT) as i64;
+    }
+
+    let (sock_type, nonblocking, timeout_ms) = {
+        let table = SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx) else {
+            return errno_i32(ERRNO_ENOTSOCK) as i64;
+        };
+        (sock.sock_type, sock.nonblocking, sock.recv_timeout_ms)
+    };
+
+    if sock_type != SOCK_DGRAM {
+        return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
+    }
+
+    let out = if len == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buf, len) }
+    };
+
+    loop {
+        if let Some(dgram) = UDP_RX_QUEUES[sock_idx as usize].lock().pop() {
+            let copy_len = cmp::min(out.len(), dgram.len as usize);
+            out[..copy_len].copy_from_slice(&dgram.data[..copy_len]);
+
+            if !src_ip.is_null() {
+                unsafe {
+                    *src_ip = dgram.src_ip;
+                }
+            }
+            if !src_port.is_null() {
+                unsafe {
+                    *src_port = dgram.src_port;
+                }
+            }
+
+            return copy_len as i64;
+        }
+
+        if nonblocking {
+            return errno_i32(ERRNO_EAGAIN) as i64;
+        }
+
+        let wait_ok = if timeout_ms > 0 {
+            RECV_WQS[sock_idx as usize].wait_event_timeout(
+                || !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty(),
+                timeout_ms,
+            )
+        } else {
+            RECV_WQS[sock_idx as usize]
+                .wait_event(|| !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty())
+        };
+
+        if !wait_ok {
+            return errno_i32(ERRNO_EAGAIN) as i64;
+        }
+    }
 }
 
 pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
@@ -496,43 +785,115 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         return errno_i32(ERRNO_ENOTSOCK);
     };
 
-    if sock.sock_type != SOCK_STREAM {
-        return errno_i32(ERRNO_EPROTONOSUPPORT);
-    }
-
-    if matches!(sock.state, SocketState::Connected | SocketState::Connecting) {
-        return errno_i32(ERRNO_EISCONN);
-    }
-
-    let local_ip = if sock.local_ip != [0; 4] {
-        sock.local_ip
-    } else {
-        virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4])
-    };
-
-    match tcp::tcp_connect(local_ip, addr, port) {
-        Ok((tcp_idx, syn)) => {
-            let send_rc = socket_send_tcp_segment(&syn, &[]);
-            if send_rc != 0 {
-                let _ = tcp::tcp_abort(tcp_idx);
-                return send_rc;
+    match sock.sock_type {
+        SOCK_STREAM => {
+            if matches!(sock.state, SocketState::Connected | SocketState::Connecting) {
+                return errno_i32(ERRNO_EISCONN);
             }
 
-            sock.local_ip = syn.tuple.local_ip;
-            sock.local_port = syn.tuple.local_port;
+            let local_ip = if sock.local_ip != [0; 4] {
+                sock.local_ip
+            } else {
+                virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4])
+            };
+
+            match tcp::tcp_connect(local_ip, addr, port) {
+                Ok((tcp_idx, syn)) => {
+                    let send_rc = socket_send_tcp_segment(&syn, &[]);
+                    if send_rc != 0 {
+                        let _ = tcp::tcp_abort(tcp_idx);
+                        return send_rc;
+                    }
+
+                    sock.local_ip = syn.tuple.local_ip;
+                    sock.local_port = syn.tuple.local_port;
+                    sock.remote_ip = addr;
+                    sock.remote_port = port;
+                    sock.tcp_idx = Some(tcp_idx);
+                    sock.state = SocketState::Connecting;
+                    0
+                }
+                Err(e) => map_tcp_err(e),
+            }
+        }
+        SOCK_DGRAM => {
             sock.remote_ip = addr;
             sock.remote_port = port;
-            sock.tcp_idx = Some(tcp_idx);
-            sock.state = SocketState::Connecting;
+            sock.state = SocketState::Connected;
             0
         }
-        Err(e) => map_tcp_err(e),
+        _ => errno_i32(ERRNO_EPROTONOSUPPORT),
     }
 }
 
 pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
     if data.is_null() && len != 0 {
         return errno_i32(ERRNO_EFAULT) as i64;
+    }
+
+    let sock_type = {
+        let table = SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx) else {
+            return errno_i32(ERRNO_ENOTSOCK) as i64;
+        };
+        sock.sock_type
+    };
+
+    if sock_type == SOCK_DGRAM {
+        if len > UDP_DGRAM_MAX_PAYLOAD {
+            return errno_i32(ERRNO_EINVAL) as i64;
+        }
+
+        let (state, remote_ip, remote_port, local_ip, local_port) = {
+            let mut table = SOCKET_TABLE.lock();
+            let idx = sock_idx as usize;
+            if idx >= MAX_SOCKETS || !table.sockets[idx].active {
+                return errno_i32(ERRNO_ENOTSOCK) as i64;
+            }
+
+            if table.sockets[idx].state == SocketState::Unbound
+                || table.sockets[idx].local_port == 0
+            {
+                let Some(port) = alloc_ephemeral_port(&table) else {
+                    return errno_i32(ERRNO_ENOMEM) as i64;
+                };
+                let local_ip = virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]);
+                let sock = &mut table.sockets[idx];
+                sock.local_ip = local_ip;
+                sock.local_port = port;
+                if sock.state == SocketState::Unbound {
+                    sock.state = SocketState::Bound;
+                }
+            }
+
+            let sock = &table.sockets[idx];
+            (
+                sock.state,
+                sock.remote_ip,
+                sock.remote_port,
+                sock.local_ip,
+                sock.local_port,
+            )
+        };
+
+        if state != SocketState::Connected || remote_port == 0 {
+            return errno_i32(ERRNO_ENOTCONN) as i64;
+        }
+
+        let payload = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(data, len) }
+        };
+
+        if !virtio_net::virtio_net_is_ready() {
+            return len as i64;
+        }
+
+        if virtio_net::transmit_udp_packet(local_ip, remote_ip, local_port, remote_port, payload) {
+            return len as i64;
+        }
+        return errno_i32(ERRNO_ENETUNREACH) as i64;
     }
 
     let (tcp_idx, state, nonblocking, timeout_ms) = {
@@ -637,6 +998,76 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
+    let sock_type = {
+        let table = SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx) else {
+            return errno_i32(ERRNO_ENOTSOCK) as i64;
+        };
+        sock.sock_type
+    };
+
+    if sock_type == SOCK_DGRAM {
+        let (nonblocking, timeout_ms, peer_filter) = {
+            let table = SOCKET_TABLE.lock();
+            let Some(sock) = table.get(sock_idx) else {
+                return errno_i32(ERRNO_ENOTSOCK) as i64;
+            };
+            let filter = if sock.state == SocketState::Connected {
+                Some((sock.remote_ip, sock.remote_port))
+            } else {
+                None
+            };
+            (sock.nonblocking, sock.recv_timeout_ms, filter)
+        };
+
+        let out = if len == 0 {
+            &mut [][..]
+        } else {
+            unsafe { core::slice::from_raw_parts_mut(buf, len) }
+        };
+
+        loop {
+            let maybe_dgram = {
+                let mut queue = UDP_RX_QUEUES[sock_idx as usize].lock();
+                let mut found = None;
+                while let Some(dgram) = queue.pop() {
+                    if let Some((peer_ip, peer_port)) = peer_filter
+                        && (dgram.src_ip != peer_ip || dgram.src_port != peer_port)
+                    {
+                        continue;
+                    }
+                    found = Some(dgram);
+                    break;
+                }
+                found
+            };
+
+            if let Some(dgram) = maybe_dgram {
+                let copy_len = cmp::min(out.len(), dgram.len as usize);
+                out[..copy_len].copy_from_slice(&dgram.data[..copy_len]);
+                return copy_len as i64;
+            }
+
+            if nonblocking {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+
+            let wait_ok = if timeout_ms > 0 {
+                RECV_WQS[sock_idx as usize].wait_event_timeout(
+                    || !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty(),
+                    timeout_ms,
+                )
+            } else {
+                RECV_WQS[sock_idx as usize]
+                    .wait_event(|| !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty())
+            };
+
+            if !wait_ok {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+        }
+    }
+
     let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx) else {
@@ -727,6 +1158,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
     socket_wake_recv(sock_idx);
     socket_wake_send(sock_idx);
     socket_wake_accept(sock_idx);
+    UDP_RX_QUEUES[sock_idx as usize].lock().clear();
 
     if let Some(tcp_idx) = tcp_idx {
         match tcp::tcp_close(tcp_idx) {
@@ -756,6 +1188,13 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     if sock.state == SocketState::Listening {
         let table = SOCKET_TABLE.lock();
         if find_established_child(&sock, &table).is_some() {
+            return POLLIN as u32;
+        }
+        return 0;
+    }
+
+    if sock.sock_type == SOCK_DGRAM {
+        if !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty() {
             return POLLIN as u32;
         }
         return 0;
@@ -791,14 +1230,18 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
 }
 
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
-    let (tcp_idx, state) = {
+    let (sock_type, tcp_idx, state) = {
         let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx) else {
             return 0;
         };
         sync_socket_state(sock);
-        (sock.tcp_idx, sock.state)
+        (sock.sock_type, sock.tcp_idx, sock.state)
     };
+
+    if sock_type == SOCK_DGRAM {
+        return POLLOUT as u32;
+    }
 
     let Some(tcp_idx) = tcp_idx else {
         return 0;
@@ -858,6 +1301,7 @@ pub fn socket_reset_all() {
         RECV_WQS[idx].wake_all();
         ACCEPT_WQS[idx].wake_all();
         SEND_WQS[idx].wake_all();
+        UDP_RX_QUEUES[idx].lock().clear();
         table.sockets[idx] = KernelSocket::empty();
     }
     tcp::tcp_reset_all();

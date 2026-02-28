@@ -209,3 +209,115 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
     }
     ctx.ok(copied as u64)
 });
+
+define_syscall!(syscall_sendto(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    if args.arg1 == 0 && args.arg2 != 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+    if args.arg4 == 0 {
+        return ctx.err_with(ERRNO_EDESTADDRREQ);
+    }
+    if args.arg5_usize() < core::mem::size_of::<SockAddrIn>() {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg4));
+    let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
+    if sock_addr.family != AF_INET {
+        return ctx.err_with(ERRNO_EAFNOSUPPORT);
+    }
+
+    let len = args.arg2_usize().min(4096);
+    let mut scratch = [0u8; 4096];
+    let copied = if len > 0 {
+        let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
+        try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]))
+    } else {
+        0
+    };
+
+    rc_i64(
+        &ctx,
+        socket::sendto(
+            sock_idx,
+            if copied == 0 {
+                core::ptr::null()
+            } else {
+                scratch.as_ptr()
+            },
+            copied,
+            sock_addr.addr,
+            u16::from_be(sock_addr.port),
+        ),
+    )
+});
+
+define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    if args.arg1 == 0 && args.arg2 != 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let want_src = args.arg4 != 0;
+    if want_src && args.arg5_usize() < core::mem::size_of::<SockAddrIn>() {
+        return ctx.err_with(ERRNO_EINVAL);
+    }
+
+    let len = args.arg2_usize().min(4096);
+    let mut scratch = [0u8; 4096];
+    let mut src_ip = [0u8; 4];
+    let mut src_port = 0u16;
+
+    let rc = socket::recvfrom(
+        sock_idx,
+        if len == 0 {
+            core::ptr::null_mut()
+        } else {
+            scratch.as_mut_ptr()
+        },
+        len,
+        if want_src {
+            &mut src_ip as *mut [u8; 4]
+        } else {
+            core::ptr::null_mut()
+        },
+        if want_src {
+            &mut src_port as *mut u16
+        } else {
+            core::ptr::null_mut()
+        },
+    );
+    if rc < 0 {
+        return ctx.err_with(rc as u64);
+    }
+
+    let copied = rc as usize;
+    if copied > 0 {
+        let user_out = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, copied));
+        try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_to_user(user_out, &scratch[..copied]));
+    }
+
+    if want_src {
+        let peer = SockAddrIn {
+            family: AF_INET,
+            port: src_port.to_be(),
+            addr: src_ip,
+            _pad: [0; 8],
+        };
+        let user_peer = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg4));
+        try_or_err!(ctx, copy_to_user(user_peer, &peer));
+    }
+
+    ctx.ok(copied as u64)
+});

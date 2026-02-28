@@ -451,7 +451,15 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
             socket::socket_notify_tcp_activity(&result);
         }
         net::IPPROTO_UDP => {
-            let _ = (src_ip, dst_ip, ip_payload);
+            if let Some((src_port, dst_port, udp_payload)) = net::parse_udp_header(ip_payload) {
+                socket::socket_deliver_udp_from_dispatch(
+                    src_ip,
+                    dst_ip,
+                    src_port,
+                    dst_port,
+                    udp_payload,
+                );
+            }
         }
         net::IPPROTO_ICMP => {
             let _ = (src_ip, dst_ip, ip_payload);
@@ -570,12 +578,15 @@ fn poll_one_rx_frame_timeout(
     }
 }
 
-// =============================================================================
-// DHCP client
-// =============================================================================
-
-fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
-    if !state.device.ready || !state.device.tx_queue.is_ready() {
+fn transmit_udp_packet_locked(
+    state: &mut VirtioNetState,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> bool {
+    if !state.device.ready || !state.device.tx_queue.is_ready() || !link_is_up(state) {
         return false;
     }
 
@@ -586,7 +597,7 @@ fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
     let hdr_len = size_of::<VirtioNetHdrV1>();
     let frame_len = net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN + UDP_HEADER_LEN + payload.len();
     let total_len = hdr_len + frame_len;
-    if total_len > PACKET_BUFFER_SIZE {
+    if total_len > PACKET_BUFFER_SIZE || payload.len() > u16::MAX as usize - UDP_HEADER_LEN {
         return false;
     }
 
@@ -594,41 +605,65 @@ fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
         let frame =
             core::slice::from_raw_parts_mut(tx_page.as_mut_ptr::<u8>().add(hdr_len), frame_len);
 
-        // Ethernet header
         frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::ETH_BROADCAST);
         frame[net::ETH_ADDR_LEN..net::ETH_ADDR_LEN * 2].copy_from_slice(&state.device.mac);
         frame[net::ETH_ADDR_LEN * 2..net::ETH_HEADER_LEN]
             .copy_from_slice(&net::ETHERTYPE_IPV4.to_be_bytes());
 
-        // IPv4 header
         let ip = net::ETH_HEADER_LEN;
         let ip_total = net::IPV4_HEADER_LEN + UDP_HEADER_LEN + payload.len();
-        frame[ip] = 0x45; // version=4, IHL=5
-        frame[ip + 1] = 0; // DSCP/ECN
+        frame[ip] = 0x45;
+        frame[ip + 1] = 0;
         frame[ip + 2..ip + 4].copy_from_slice(&(ip_total as u16).to_be_bytes());
-        frame[ip + 4..ip + 6].copy_from_slice(&0u16.to_be_bytes()); // identification
-        frame[ip + 6..ip + 8].copy_from_slice(&0u16.to_be_bytes()); // flags/fragment
-        frame[ip + 8] = 64; // TTL
+        frame[ip + 4..ip + 6].copy_from_slice(&0u16.to_be_bytes());
+        frame[ip + 6..ip + 8].copy_from_slice(&0u16.to_be_bytes());
+        frame[ip + 8] = 64;
         frame[ip + 9] = net::IPPROTO_UDP;
-        frame[ip + 10..ip + 12].copy_from_slice(&0u16.to_be_bytes()); // checksum placeholder
-        frame[ip + 12..ip + 16].copy_from_slice(&[0; 4]); // src: 0.0.0.0
-        frame[ip + 16..ip + 20].copy_from_slice(&net::IPV4_BROADCAST);
-        let csum = net::ipv4_header_checksum(&frame[ip..ip + net::IPV4_HEADER_LEN]);
-        frame[ip + 10..ip + 12].copy_from_slice(&csum.to_be_bytes());
+        frame[ip + 10..ip + 12].copy_from_slice(&0u16.to_be_bytes());
+        frame[ip + 12..ip + 16].copy_from_slice(&src_ip);
+        frame[ip + 16..ip + 20].copy_from_slice(&dst_ip);
+        let ip_csum = net::ipv4_header_checksum(&frame[ip..ip + net::IPV4_HEADER_LEN]);
+        frame[ip + 10..ip + 12].copy_from_slice(&ip_csum.to_be_bytes());
 
-        // UDP header
         let udp = ip + net::IPV4_HEADER_LEN;
         let udp_total = UDP_HEADER_LEN + payload.len();
-        frame[udp..udp + 2].copy_from_slice(&dhcp::UDP_PORT_CLIENT.to_be_bytes());
-        frame[udp + 2..udp + 4].copy_from_slice(&dhcp::UDP_PORT_SERVER.to_be_bytes());
+        frame[udp..udp + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[udp + 2..udp + 4].copy_from_slice(&dst_port.to_be_bytes());
         frame[udp + 4..udp + 6].copy_from_slice(&(udp_total as u16).to_be_bytes());
-        frame[udp + 6..udp + 8].copy_from_slice(&0u16.to_be_bytes()); // checksum (optional)
-
-        // DHCP payload
+        frame[udp + 6..udp + 8].copy_from_slice(&0u16.to_be_bytes());
         frame[udp + UDP_HEADER_LEN..udp + UDP_HEADER_LEN + payload.len()].copy_from_slice(payload);
+
+        let udp_csum = net::udp_checksum(src_ip, dst_ip, src_port, dst_port, payload);
+        frame[udp + 6..udp + 8].copy_from_slice(&udp_csum.to_be_bytes());
     }
 
     submit_tx(state, tx_page, total_len as u32)
+}
+
+pub fn transmit_udp_packet(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> bool {
+    let mut state = VIRTIO_NET_STATE.lock();
+    transmit_udp_packet_locked(&mut state, src_ip, dst_ip, src_port, dst_port, payload)
+}
+
+// =============================================================================
+// DHCP client
+// =============================================================================
+
+fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
+    transmit_udp_packet_locked(
+        state,
+        [0; 4],
+        net::IPV4_BROADCAST,
+        dhcp::UDP_PORT_CLIENT,
+        dhcp::UDP_PORT_SERVER,
+        payload,
+    )
 }
 
 fn parse_dhcp_reply(frame: &[u8], xid: u32, expected_type: u8) -> Option<dhcp::DhcpOffer> {

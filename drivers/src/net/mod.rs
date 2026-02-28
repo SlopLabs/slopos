@@ -40,6 +40,22 @@ pub const IPPROTO_TCP: u8 = 6;
 pub const IPPROTO_UDP: u8 = 17;
 pub const IPPROTO_ICMP: u8 = 1;
 
+pub fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
+    if payload.len() < 8 {
+        return None;
+    }
+
+    let src_port = u16::from_be_bytes([payload[0], payload[1]]);
+    let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
+    let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+
+    if udp_len < 8 || udp_len > payload.len() {
+        return None;
+    }
+
+    Some((src_port, dst_port, &payload[8..udp_len]))
+}
+
 /// Compute the one's-complement checksum for an IPv4 header.
 pub fn ipv4_header_checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
@@ -55,4 +71,47 @@ pub fn ipv4_header_checksum(header: &[u8]) -> u16 {
     }
 
     !(sum as u16)
+}
+
+pub fn udp_checksum(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> u16 {
+    let udp_len = 8usize + payload.len();
+    let mut sum = 0u32;
+
+    let add_word = |sum: &mut u32, word: u16| {
+        *sum = sum.wrapping_add(word as u32);
+    };
+
+    add_word(&mut sum, u16::from_be_bytes([src_ip[0], src_ip[1]]));
+    add_word(&mut sum, u16::from_be_bytes([src_ip[2], src_ip[3]]));
+    add_word(&mut sum, u16::from_be_bytes([dst_ip[0], dst_ip[1]]));
+    add_word(&mut sum, u16::from_be_bytes([dst_ip[2], dst_ip[3]]));
+    add_word(&mut sum, IPPROTO_UDP as u16);
+    add_word(&mut sum, udp_len as u16);
+
+    add_word(&mut sum, src_port);
+    add_word(&mut sum, dst_port);
+    add_word(&mut sum, udp_len as u16);
+    add_word(&mut sum, 0);
+
+    let mut i = 0usize;
+    while i + 1 < payload.len() {
+        add_word(&mut sum, u16::from_be_bytes([payload[i], payload[i + 1]]));
+        i += 2;
+    }
+    if i < payload.len() {
+        add_word(&mut sum, u16::from_be_bytes([payload[i], 0]));
+    }
+
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    let checksum = !(sum as u16);
+    if checksum == 0 { 0xffff } else { checksum }
 }

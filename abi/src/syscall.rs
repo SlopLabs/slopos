@@ -349,6 +349,8 @@ pub const SYSCALL_SEND: u64 = 131;
 /// * Number of bytes received on success (0 = connection closed)
 /// * Negative errno on failure
 pub const SYSCALL_RECV: u64 = 132;
+pub const SYSCALL_SENDTO: u64 = 133;
+pub const SYSCALL_RECVFROM: u64 = 134;
 
 // =============================================================================
 // Memory management (POSIX)
@@ -686,6 +688,8 @@ pub const ERRNO_EISCONN: u64 = (-106i64) as u64;
 pub const ERRNO_ENOTSOCK: u64 = (-88i64) as u64;
 pub const ERRNO_EAFNOSUPPORT: u64 = (-97i64) as u64;
 pub const ERRNO_EPROTONOSUPPORT: u64 = (-93i64) as u64;
+pub const ERRNO_EDESTADDRREQ: u64 = (-89i64) as u64;
+pub const ERRNO_ENETUNREACH: u64 = (-101i64) as u64;
 
 // =============================================================================
 // Syscall ABI stability

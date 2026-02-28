@@ -1,6 +1,6 @@
 # SlopOS Legacy Modernization Plan
 
-> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**, Phase 5B (TCP Data Transfer) **complete**, Phase 5C (Socket Abstraction Layer) **complete**, Phase 5D (Async Network I/O & NAPI-Style Completion) **complete**
+> **Status**: In Progress — Phase 0 (Timer Modernization) **complete**, Phase 0E (PIT Deprecation) complete, Phase 1 (FPU/SIMD State Modernization) **complete**, Phase 2 (Spinlock Modernization) **complete** (2C MCS deferred, `spin` crate fully removed), Phase 3A (PCI Capability List Parsing) **complete**, Phase 3B (MSI Support) **complete**, Phase 3C (MSI-X Support) **complete**, Phase 3D (VirtIO MSI-X Integration) **complete**, Phase 3E (Interrupt-Driven VirtIO Completion) **complete**, Phase 4A (ACPI MCFG Table Parsing) **complete**, Phase 4B (ECAM MMIO Config Access) **complete**, Phase 4C (Extended Config Space Usage) **complete**, Phase 4D (ECAM-Only Long-Term Migration) **complete**, Phase 5A (TCP State Machine) **complete**, Phase 5B (TCP Data Transfer) **complete**, Phase 5C (Socket Abstraction Layer) **complete**, Phase 5D (Async Network I/O & NAPI-Style Completion) **complete**, Phase 5E (UDP Datagram Socket Completion) **complete**
 > **Target**: Replace all legacy/outdated hardware interfaces and patterns with modern equivalents as SlopOS approaches MVP
 > **Scope**: Timers, FPU state, interrupts, spinlocks, PCI, networking, and beyond
 
@@ -988,10 +988,10 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 #### 5E.1: Per-Socket UDP Receive Buffer
 
-- [ ] **5E.1a** Define `UdpDatagram` struct in `drivers/src/net/socket.rs`:
+- [x] **5E.1a** Define `UdpDatagram` struct in `drivers/src/net/socket.rs`:
   - `{ src_ip: [u8; 4], src_port: u16, len: u16, data: [u8; UDP_DGRAM_MAX] }`
   - `UDP_DGRAM_MAX_PAYLOAD = 1472` (MTU 1500 − IPv4 header 20 − UDP header 8)
-- [ ] **5E.1b** Add `UdpReceiveQueue` per socket:
+- [x] **5E.1b** Add `UdpReceiveQueue` per socket:
   - Fixed ring of 16 `UdpDatagram` slots (statically sized, no heap allocation)
   - `push()` drops oldest on overflow (UDP is unreliable by design)
   - `pop() -> Option<&UdpDatagram>` for consumer
@@ -999,88 +999,88 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 #### 5E.2: UDP RX Dispatch
 
-- [ ] **5E.2a** Implement UDP header parsing in `drivers/src/net/mod.rs`:
+- [x] **5E.2a** Implement UDP header parsing in `drivers/src/net/mod.rs`:
   - `parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])>` — returns (src_port, dst_port, udp_payload)
   - Validate minimum 8-byte header, length field ≤ payload length
-- [ ] **5E.2b** Wire `IPPROTO_UDP` arm in `dispatch_rx_frame()` (`virtio_net.rs`):
+- [x] **5E.2b** Wire `IPPROTO_UDP` arm in `dispatch_rx_frame()` (`virtio_net.rs`):
   - Replace the no-op `let _ = (src_ip, dst_ip, ip_payload)` with real dispatch
   - Parse UDP header from `ip_payload`
   - Look up bound socket by `(dst_ip, dst_port)` in socket table
   - Enqueue `UdpDatagram { src_ip, src_port, data }` into socket's receive queue
   - Wake socket's `recv_wq` wait queue
-- [ ] **5E.2c** Add UDP port→socket lookup to `SocketTable`:
+- [x] **5E.2c** Add UDP port→socket lookup to `SocketTable`:
   - `find_udp_socket(dst_ip: [u8; 4], dst_port: u16) -> Option<u32>` (socket index)
   - Wildcard match: bound to `0.0.0.0` matches any local IP
   - Only searches `SOCK_DGRAM` sockets in `Bound` or `Connected` state
 
 #### 5E.3: Generic UDP Transmit
 
-- [ ] **5E.3a** Factor `transmit_dhcp_packet()` into generic `transmit_udp_packet()` in `virtio_net.rs`:
+- [x] **5E.3a** Factor `transmit_dhcp_packet()` into generic `transmit_udp_packet()` in `virtio_net.rs`:
   - `pub fn transmit_udp_packet(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -> bool`
   - Builds Ethernet + IPv4 + UDP headers (same frame layout as current DHCP path)
   - ARP-resolves destination MAC via existing ARP table (gateway MAC for non-local destinations, broadcast for `255.255.255.255`)
   - Rewrite `transmit_dhcp_packet()` as a thin wrapper calling `transmit_udp_packet()`
-- [ ] **5E.3b** Add UDP checksum calculation in `net/mod.rs`:
+- [x] **5E.3b** Add UDP checksum calculation in `net/mod.rs`:
   - `udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp_header: &[u8], payload: &[u8]) -> u16`
   - IPv4 pseudo-header + UDP header + payload (same one's-complement accumulator as TCP/IPv4)
   - DHCP currently sends checksum=0 (optional per RFC 768); real UDP sockets should compute it
 
 #### 5E.4: `sendto()` / `recvfrom()` Syscalls
 
-- [ ] **5E.4a** Define `SYSCALL_SENDTO` and `SYSCALL_RECVFROM` in `abi/src/syscall.rs`:
+- [x] **5E.4a** Define `SYSCALL_SENDTO` and `SYSCALL_RECVFROM` in `abi/src/syscall.rs`:
   - `SYSCALL_SENDTO`: `(sock_idx, buf_ptr, len, flags, dest_addr: *const SockAddrIn)` → bytes sent or negative errno
   - `SYSCALL_RECVFROM`: `(sock_idx, buf_ptr, len, flags, src_addr: *mut SockAddrIn)` → bytes received or negative errno
-- [ ] **5E.4b** Implement `socket_sendto()` in `drivers/src/net/socket.rs`:
+- [x] **5E.4b** Implement `socket_sendto()` in `drivers/src/net/socket.rs`:
   - Validate socket is `SOCK_DGRAM` and bound (or auto-bind to ephemeral port 49152–65535)
   - Build UDP packet via `transmit_udp_packet()` with destination from `SockAddrIn`
   - Return payload length on success, `ERRNO_ENETUNREACH` if NIC not ready
-- [ ] **5E.4c** Implement `socket_recvfrom()` in `drivers/src/net/socket.rs`:
+- [x] **5E.4c** Implement `socket_recvfrom()` in `drivers/src/net/socket.rs`:
   - Dequeue from socket's `UdpReceiveQueue`
   - If empty and blocking: `recv_wq.wait_event(|| !queue.is_empty())`
   - If empty and non-blocking: return `ERRNO_EAGAIN`
   - Respect `SO_RCVTIMEO` via `wait_event_timeout()`
   - Fill `src_addr` with sender's IP and port
   - Return payload length
-- [ ] **5E.4d** Wire handlers in `core/src/syscall/net_handlers.rs`:
+- [x] **5E.4d** Wire handlers in `core/src/syscall/net_handlers.rs`:
   - Dispatch `SYSCALL_SENDTO` → `socket_sendto()`
   - Dispatch `SYSCALL_RECVFROM` → `socket_recvfrom()`
-- [ ] **5E.4e** Add userland wrappers in `userland/src/syscall/`:
+- [x] **5E.4e** Add userland wrappers in `userland/src/syscall/`:
   - `sendto(sock, buf, len, flags, addr) -> isize`
   - `recvfrom(sock, buf, len, flags, addr) -> isize`
 
 #### 5E.5: UDP-Aware `send()` / `recv()` / `connect()`
 
-- [ ] **5E.5a** Extend `socket_connect()` for `SOCK_DGRAM`:
+- [x] **5E.5a** Extend `socket_connect()` for `SOCK_DGRAM`:
   - Remove the `if sock.sock_type != SOCK_STREAM` early return
   - Set `remote_ip` / `remote_port` as default destination (POSIX semantics)
   - State → `Connected` (allows `send()`/`recv()` without specifying address)
   - No handshake, no packets sent — purely local state change
-- [ ] **5E.5b** Extend `socket_send()` for connected UDP:
+- [x] **5E.5b** Extend `socket_send()` for connected UDP:
   - If `sock_type == SOCK_DGRAM && state == Connected`: send to stored `remote_ip:remote_port`
   - Delegate to `transmit_udp_packet()`
-- [ ] **5E.5c** Extend `socket_recv()` for UDP:
+- [x] **5E.5c** Extend `socket_recv()` for UDP:
   - If `sock_type == SOCK_DGRAM`: dequeue from `UdpReceiveQueue` (discard source address)
   - Connected UDP only accepts datagrams from the connected peer (POSIX filtering)
 
 #### 5E.6: `poll()` Readiness for UDP Sockets
 
-- [ ] **5E.6a** Extend `socket_poll()` for `SOCK_DGRAM`:
+- [x] **5E.6a** Extend `socket_poll()` for `SOCK_DGRAM`:
   - `POLLIN`: UDP receive queue non-empty
   - `POLLOUT`: always ready (UDP has no send backpressure)
   - `POLLERR` / `POLLHUP`: socket error state
 
 #### Phase 5E Test Coverage
 
-- [ ] **5E.T1** UDP receive buffer: push/pop, overflow drops oldest, empty returns None
-- [ ] **5E.T2** UDP RX dispatch: packet to bound port delivered, unbound port silently dropped
-- [ ] **5E.T3** Generic UDP TX: construct frame, verify IPv4/UDP headers, checksum validation
-- [ ] **5E.T4** sendto/recvfrom roundtrip: send datagram, receive response, verify src_addr populated
-- [ ] **5E.T5** Connected UDP: `connect()` sets peer, `send()` uses default dest, `recv()` filters by peer
-- [ ] **5E.T6** poll() readiness: `POLLIN` set after enqueue, clear after dequeue
-- [ ] **5E.T7** Non-blocking: `recvfrom()` returns `EAGAIN` on empty queue
-- [ ] **5E.T8** Auto-bind: `sendto()` without prior `bind()` assigns ephemeral port
-- [ ] **5E.T9** DHCP regression: DHCP still works after `transmit_udp_packet()` refactor
-- [ ] **5E.T10** Regression: all existing TCP/socket tests still pass
+- [x] **5E.T1** UDP receive buffer: push/pop, overflow drops oldest, empty returns None
+- [x] **5E.T2** UDP RX dispatch: packet to bound port delivered, unbound port silently dropped
+- [x] **5E.T3** Generic UDP TX: construct frame, verify IPv4/UDP headers, checksum validation
+- [x] **5E.T4** sendto/recvfrom roundtrip: send datagram, receive response, verify src_addr populated
+- [x] **5E.T5** Connected UDP: `connect()` sets peer, `send()` uses default dest, `recv()` filters by peer
+- [x] **5E.T6** poll() readiness: `POLLIN` set after enqueue, clear after dequeue
+- [x] **5E.T7** Non-blocking: `recvfrom()` returns `EAGAIN` on empty queue
+- [x] **5E.T8** Auto-bind: `sendto()` without prior `bind()` assigns ephemeral port
+- [x] **5E.T9** DHCP regression: DHCP still works after `transmit_udp_packet()` refactor
+- [x] **5E.T10** Regression: all existing TCP/socket tests still pass (718/718)
 
 ### 5F: DNS Client
 
@@ -1180,9 +1180,9 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 - [x] **GATE**: TX is fire-and-forget (no `REQUEST_TIMEOUT_MS` blocking)
 - [x] **GATE**: `recv()`/`accept()` properly sleep via wait queues
 - [x] **GATE**: `poll()` returns real socket readiness (not stubbed)
-- [ ] **GATE**: UDP sockets work end-to-end (`sendto`/`recvfrom` on `SOCK_DGRAM`)
-- [ ] **GATE**: `dispatch_rx_frame()` delivers incoming UDP packets to bound sockets
-- [ ] **GATE**: DHCP still works after `transmit_udp_packet()` refactor
+- [x] **GATE**: UDP sockets work end-to-end (`sendto`/`recvfrom` on `SOCK_DGRAM`)
+- [x] **GATE**: `dispatch_rx_frame()` delivers incoming UDP packets to bound sockets
+- [x] **GATE**: DHCP still works after `transmit_udp_packet()` refactor
 - [ ] **GATE**: DNS resolver can resolve a hostname via QEMU user-net (10.0.2.3)
 - [ ] **GATE**: `resolve` command works from the userland shell
 
@@ -1401,8 +1401,8 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 1**: XSAVE/XRSTOR | **Complete** | 14 | 14 | — |
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
-| **Phase 4**: PCIe ECAM | 4A+4B **Complete** | 9 | 6 | — |
-| **Phase 5**: Network Stack | 5A+5B+5C+5D **Complete**, 5E next | 97 | 46 | — |
+| **Phase 4**: PCIe ECAM | **Complete** | 9 | 9 | — |
+| **Phase 5**: Network Stack | 5A+5B+5C+5D+5E **Complete**, 5F next | 97 | 73 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **196** | **105** | |
+| **Total** | | **196** | **132** | |

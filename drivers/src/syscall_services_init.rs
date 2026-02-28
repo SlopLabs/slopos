@@ -106,6 +106,26 @@ fn socket_recv_adapter(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     socket::socket_recv(sock_idx, buf, len)
 }
 
+fn socket_sendto_adapter(
+    sock_idx: u32,
+    data: *const u8,
+    len: usize,
+    dst_ip: [u8; 4],
+    dst_port: u16,
+) -> i64 {
+    socket::socket_sendto(sock_idx, data, len, dst_ip, dst_port)
+}
+
+fn socket_recvfrom_adapter(
+    sock_idx: u32,
+    buf: *mut u8,
+    len: usize,
+    src_ip: *mut [u8; 4],
+    src_port: *mut u16,
+) -> i64 {
+    socket::socket_recvfrom(sock_idx, buf, len, src_ip, src_port)
+}
+
 static SOCKET_SERVICES: SocketServices = SocketServices {
     create: socket::socket_create,
     bind: socket::socket_bind,
@@ -114,6 +134,8 @@ static SOCKET_SERVICES: SocketServices = SocketServices {
     connect: socket::socket_connect,
     send: socket_send_adapter,
     recv: socket_recv_adapter,
+    sendto: socket_sendto_adapter,
+    recvfrom: socket_recvfrom_adapter,
     close: socket::socket_close,
     poll_readable: socket::socket_poll_readable,
     poll_writable: socket::socket_poll_writable,

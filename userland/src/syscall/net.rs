@@ -2,9 +2,9 @@ use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::{
     SYSCALL_ACCEPT, SYSCALL_BIND, SYSCALL_CONNECT, SYSCALL_LISTEN, SYSCALL_NET_INFO,
-    SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_SEND, SYSCALL_SOCKET,
+    SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_RECVFROM, SYSCALL_SEND, SYSCALL_SENDTO, SYSCALL_SOCKET,
 };
-use super::raw::{syscall1, syscall2, syscall3, syscall4};
+use super::raw::{syscall1, syscall2, syscall3, syscall4, syscall6};
 use slopos_abi::net::{SockAddrIn, UserNetInfo, UserNetMember};
 
 #[inline(always)]
@@ -101,6 +101,46 @@ pub fn recv(fd: RawFd, buf: &mut [u8], flags: u32) -> SyscallResult<usize> {
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
             flags as u64,
+        )
+    };
+    demux(result).map(|v| v as usize)
+}
+
+pub fn sendto(fd: RawFd, data: &[u8], flags: u32, addr: &SockAddrIn) -> SyscallResult<usize> {
+    let result = unsafe {
+        syscall6(
+            SYSCALL_SENDTO,
+            fd as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+            flags as u64,
+            addr as *const _ as u64,
+            core::mem::size_of::<SockAddrIn>() as u64,
+        )
+    };
+    demux(result).map(|v| v as usize)
+}
+
+pub fn recvfrom(
+    fd: RawFd,
+    buf: &mut [u8],
+    flags: u32,
+    src_addr: Option<&mut SockAddrIn>,
+) -> SyscallResult<usize> {
+    let src_addr_ptr = src_addr.map(|a| a as *mut _ as u64).unwrap_or(0);
+    let result = unsafe {
+        syscall6(
+            SYSCALL_RECVFROM,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            flags as u64,
+            src_addr_ptr,
+            if src_addr_ptr != 0 {
+                core::mem::size_of::<SockAddrIn>() as u64
+            } else {
+                0
+            },
         )
     };
     demux(result).map(|v| v as usize)
