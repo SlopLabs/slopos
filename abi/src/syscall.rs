@@ -706,6 +706,14 @@ pub const ERRNO_EPROTONOSUPPORT: u64 = (-93i64) as u64;
 pub const ERRNO_EDESTADDRREQ: u64 = (-89i64) as u64;
 pub const ERRNO_ENETUNREACH: u64 = (-101i64) as u64;
 pub const ERRNO_EHOSTUNREACH: u64 = (-113i64) as u64;
+pub const ERRNO_ECONNRESET: u64 = (-104i64) as u64;
+pub const ERRNO_ECONNABORTED: u64 = (-103i64) as u64;
+pub const ERRNO_EADDRNOTAVAIL: u64 = (-99i64) as u64;
+pub const ERRNO_ENOBUFS: u64 = (-105i64) as u64;
+pub const ERRNO_EINPROGRESS: u64 = (-115i64) as u64;
+pub const ERRNO_EOPNOTSUPP: u64 = (-95i64) as u64;
+pub const ERRNO_EPIPE: u64 = (-32i64) as u64;
+pub const ERRNO_EPERM: u64 = (-1i64) as u64;
 
 // =============================================================================
 // Syscall ABI stability
