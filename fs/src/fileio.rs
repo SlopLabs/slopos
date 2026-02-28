@@ -1375,13 +1375,21 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
         }
 
         if desc.socket_idx != INVALID_SOCKET_IDX {
-            let mut revents = 0u16;
             let socket_idx = desc.socket_idx;
-            if (events & POLLIN) != 0 && socket::poll_readable(socket_idx) != 0 {
-                revents |= POLLIN;
+            let readable = socket::poll_readable(socket_idx) as u16;
+            let writable = socket::poll_writable(socket_idx) as u16;
+            let mut revents = 0u16;
+            if (events & POLLIN) != 0 {
+                if (readable & 1) != 0 {
+                    revents |= POLLIN;
+                }
+                revents |= readable & (POLLIN | POLLERR | POLLHUP);
             }
-            if (events & POLLOUT) != 0 && socket::poll_writable(socket_idx) != 0 {
-                revents |= POLLOUT;
+            if (events & POLLOUT) != 0 {
+                if (writable & 1) != 0 {
+                    revents |= POLLOUT;
+                }
+                revents |= writable & (POLLOUT | POLLERR | POLLHUP);
             }
             drop(guard);
             return revents;
@@ -1642,6 +1650,9 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
                 next_flags |= O_NONBLOCK as u32;
             }
             desc.flags = next_flags;
+            if desc.socket_idx != INVALID_SOCKET_IDX {
+                let _ = socket::set_nonblocking(desc.socket_idx, (arg & O_NONBLOCK) != 0);
+            }
             drop(guard);
             0
         }),
@@ -1762,6 +1773,7 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
             pipe_read_end: false,
             pipe_write_end: false,
         };
+        let _ = socket::set_nonblocking(socket_idx, false);
         drop(guard);
         slot_idx as i32
     })

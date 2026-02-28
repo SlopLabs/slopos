@@ -4,9 +4,9 @@ use slopos_abi::net::{AF_INET, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EFAULT,
     ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK,
-    ERRNO_EPROTONOSUPPORT,
+    ERRNO_EPROTONOSUPPORT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
-use slopos_lib::IrqMutex;
+use slopos_lib::{IrqMutex, WaitQueue};
 
 use crate::net;
 use crate::net::tcp::{
@@ -39,6 +39,12 @@ pub struct KernelSocket {
     pub remote_port: u16,
     pub tcp_idx: Option<usize>,
     pub process_id: u32,
+    pub recv_wq_idx: u8,
+    pub accept_wq_idx: u8,
+    pub send_wq_idx: u8,
+    pub recv_timeout_ms: u64,
+    pub send_timeout_ms: u64,
+    pub nonblocking: bool,
 }
 
 impl KernelSocket {
@@ -55,6 +61,12 @@ impl KernelSocket {
             remote_port: 0,
             tcp_idx: None,
             process_id: 0,
+            recv_wq_idx: 0,
+            accept_wq_idx: 0,
+            send_wq_idx: 0,
+            recv_timeout_ms: 0,
+            send_timeout_ms: 0,
+            nonblocking: true,
         }
     }
 }
@@ -76,6 +88,9 @@ impl SocketTable {
                 *sock = KernelSocket::empty();
                 sock.active = true;
                 sock.state = SocketState::Unbound;
+                sock.recv_wq_idx = idx as u8;
+                sock.accept_wq_idx = idx as u8;
+                sock.send_wq_idx = idx as u8;
                 return Some(idx as u32);
             }
         }
@@ -104,6 +119,19 @@ impl SocketTable {
 }
 
 static SOCKET_TABLE: IrqMutex<SocketTable> = IrqMutex::new(SocketTable::new());
+
+static RECV_WQS: [WaitQueue; MAX_SOCKETS] = {
+    const WAIT_QUEUE: WaitQueue = WaitQueue::new();
+    [WAIT_QUEUE; MAX_SOCKETS]
+};
+static ACCEPT_WQS: [WaitQueue; MAX_SOCKETS] = {
+    const WAIT_QUEUE: WaitQueue = WaitQueue::new();
+    [WAIT_QUEUE; MAX_SOCKETS]
+};
+static SEND_WQS: [WaitQueue; MAX_SOCKETS] = {
+    const WAIT_QUEUE: WaitQueue = WaitQueue::new();
+    [WAIT_QUEUE; MAX_SOCKETS]
+};
 
 fn errno_i32(errno: u64) -> i32 {
     errno as i64 as i32
@@ -163,7 +191,7 @@ fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) -> Opt
     Some(tcp_len)
 }
 
-fn socket_send_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
+pub(crate) fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     let src_mac = virtio_net::virtio_net_mac().unwrap_or([0; 6]);
     let dst_mac = [0xff; 6];
 
@@ -211,12 +239,80 @@ fn socket_send_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     }
 }
 
+fn socket_wake_recv(sock_idx: u32) {
+    RECV_WQS[sock_idx as usize].wake_all();
+}
+
+fn socket_wake_send(sock_idx: u32) {
+    SEND_WQS[sock_idx as usize].wake_all();
+}
+
+fn socket_wake_accept(sock_idx: u32) {
+    ACCEPT_WQS[sock_idx as usize].wake_all();
+}
+
+fn socket_notify_tcp_idx_waiters(tcp_idx: usize) {
+    let table = SOCKET_TABLE.lock();
+    for (sock_idx, sock) in table.sockets.iter().enumerate() {
+        if !sock.active {
+            continue;
+        }
+        if sock.tcp_idx == Some(tcp_idx) {
+            if tcp::tcp_recv_available(tcp_idx) > 0 {
+                RECV_WQS[sock_idx].wake_all();
+            }
+            if tcp::tcp_send_buffer_space(tcp_idx) > 0 {
+                SEND_WQS[sock_idx].wake_all();
+            }
+            if !matches!(
+                tcp::tcp_get_state(tcp_idx),
+                Some(TcpState::Established | TcpState::CloseWait)
+            ) {
+                RECV_WQS[sock_idx].wake_all();
+                SEND_WQS[sock_idx].wake_all();
+            }
+        }
+    }
+}
+
+fn socket_notify_accept_waiters() {
+    let table = SOCKET_TABLE.lock();
+    for (sock_idx, sock) in table.sockets.iter().enumerate() {
+        if !sock.active || sock.state != SocketState::Listening {
+            continue;
+        }
+        if find_established_child(sock, &table).is_some() {
+            ACCEPT_WQS[sock_idx].wake_all();
+        }
+    }
+}
+
+pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
+    if let Some(tcp_idx) = result.conn_idx {
+        socket_notify_tcp_idx_waiters(tcp_idx);
+    }
+    if result.accepted_idx.is_some() || result.new_state == Some(TcpState::Established) {
+        socket_notify_accept_waiters();
+    }
+}
+
 fn sync_socket_state(sock: &mut KernelSocket) {
     if let Some(tcp_idx) = sock.tcp_idx
         && let Some(state) = tcp::tcp_get_state(tcp_idx)
     {
         if state == TcpState::Established {
             sock.state = SocketState::Connected;
+        }
+        if matches!(
+            state,
+            TcpState::Closed
+                | TcpState::TimeWait
+                | TcpState::Closing
+                | TcpState::LastAck
+                | TcpState::FinWait1
+                | TcpState::FinWait2
+        ) {
+            sock.state = SocketState::Closed;
         }
     }
 }
@@ -308,49 +404,90 @@ pub fn socket_listen(sock_idx: u32, _backlog: u32) -> i32 {
 }
 
 pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(listen_sock) = table.get(sock_idx).copied() else {
-        return errno_i32(ERRNO_ENOTSOCK);
-    };
-    if listen_sock.state != SocketState::Listening {
-        return errno_i32(ERRNO_EINVAL);
-    }
+    loop {
+        let (listen_sock, nonblocking, recv_timeout_ms, send_timeout_ms) = {
+            let table = SOCKET_TABLE.lock();
+            let Some(sock) = table.get(sock_idx).copied() else {
+                return errno_i32(ERRNO_ENOTSOCK);
+            };
+            if sock.state != SocketState::Listening {
+                return errno_i32(ERRNO_EINVAL);
+            }
+            (
+                sock,
+                sock.nonblocking,
+                sock.recv_timeout_ms,
+                sock.send_timeout_ms,
+            )
+        };
 
-    let Some(tcp_idx) = find_established_child(&listen_sock, &table) else {
-        return errno_i32(ERRNO_EAGAIN);
-    };
-    let Some(conn) = tcp::tcp_get_connection(tcp_idx) else {
-        return errno_i32(ERRNO_EAGAIN);
-    };
+        {
+            let mut table = SOCKET_TABLE.lock();
+            if let Some(tcp_idx) = find_established_child(&listen_sock, &table)
+                && let Some(conn) = tcp::tcp_get_connection(tcp_idx)
+            {
+                let Some(new_idx) = table.alloc_slot() else {
+                    return errno_i32(ERRNO_ENOMEM);
+                };
+                let sock = table
+                    .get_mut(new_idx)
+                    .expect("allocated accepted socket slot must exist");
+                sock.domain = AF_INET;
+                sock.sock_type = SOCK_STREAM;
+                sock.protocol = 0;
+                sock.state = SocketState::Connected;
+                sock.local_ip = conn.tuple.local_ip;
+                sock.local_port = conn.tuple.local_port;
+                sock.remote_ip = conn.tuple.remote_ip;
+                sock.remote_port = conn.tuple.remote_port;
+                sock.tcp_idx = Some(tcp_idx);
+                sock.nonblocking = nonblocking;
+                sock.recv_timeout_ms = recv_timeout_ms;
+                sock.send_timeout_ms = send_timeout_ms;
 
-    let Some(new_idx) = table.alloc_slot() else {
-        return errno_i32(ERRNO_ENOMEM);
-    };
-    let sock = table
-        .get_mut(new_idx)
-        .expect("allocated accepted socket slot must exist");
-    sock.domain = AF_INET;
-    sock.sock_type = SOCK_STREAM;
-    sock.protocol = 0;
-    sock.state = SocketState::Connected;
-    sock.local_ip = conn.tuple.local_ip;
-    sock.local_port = conn.tuple.local_port;
-    sock.remote_ip = conn.tuple.remote_ip;
-    sock.remote_port = conn.tuple.remote_port;
-    sock.tcp_idx = Some(tcp_idx);
+                if !peer_addr.is_null() {
+                    unsafe {
+                        *peer_addr = conn.tuple.remote_ip;
+                    }
+                }
+                if !peer_port.is_null() {
+                    unsafe {
+                        *peer_port = conn.tuple.remote_port;
+                    }
+                }
+                return new_idx as i32;
+            }
+        }
 
-    if !peer_addr.is_null() {
-        unsafe {
-            *peer_addr = conn.tuple.remote_ip;
+        if nonblocking {
+            return errno_i32(ERRNO_EAGAIN);
+        }
+
+        let wait_ok = if recv_timeout_ms > 0 {
+            ACCEPT_WQS[sock_idx as usize].wait_event_timeout(
+                || {
+                    let table = SOCKET_TABLE.lock();
+                    let Some(sock) = table.get(sock_idx) else {
+                        return true;
+                    };
+                    find_established_child(sock, &table).is_some()
+                },
+                recv_timeout_ms,
+            )
+        } else {
+            ACCEPT_WQS[sock_idx as usize].wait_event(|| {
+                let table = SOCKET_TABLE.lock();
+                let Some(sock) = table.get(sock_idx) else {
+                    return true;
+                };
+                find_established_child(sock, &table).is_some()
+            })
+        };
+
+        if !wait_ok {
+            return errno_i32(ERRNO_EAGAIN);
         }
     }
-    if !peer_port.is_null() {
-        unsafe {
-            *peer_port = conn.tuple.remote_port;
-        }
-    }
-
-    new_idx as i32
 }
 
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
@@ -375,7 +512,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 
     match tcp::tcp_connect(local_ip, addr, port) {
         Ok((tcp_idx, syn)) => {
-            let send_rc = socket_send_segment(&syn, &[]);
+            let send_rc = socket_send_tcp_segment(&syn, &[]);
             if send_rc != 0 {
                 let _ = tcp::tcp_abort(tcp_idx);
                 return send_rc;
@@ -398,13 +535,18 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
-    let (tcp_idx, state) = {
+    let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
         sync_socket_state(sock);
-        (sock.tcp_idx, sock.state)
+        (
+            sock.tcp_idx,
+            sock.state,
+            sock.nonblocking,
+            sock.send_timeout_ms,
+        )
     };
 
     if !matches!(state, SocketState::Connected) {
@@ -420,10 +562,60 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         unsafe { core::slice::from_raw_parts(data, len) }
     };
 
-    let wrote = match tcp::tcp_send(tcp_idx, payload) {
-        Ok(n) => n,
-        Err(e) => return map_tcp_err_i64(e),
-    };
+    let mut total_wrote = 0usize;
+    while total_wrote < payload.len() {
+        let space = tcp::tcp_send_buffer_space(tcp_idx);
+        if space == 0 {
+            if total_wrote > 0 {
+                break;
+            }
+            if nonblocking {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+            let wait_ok = if timeout_ms > 0 {
+                SEND_WQS[sock_idx as usize]
+                    .wait_event_timeout(|| tcp::tcp_send_buffer_space(tcp_idx) > 0, timeout_ms)
+            } else {
+                SEND_WQS[sock_idx as usize].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
+            };
+            if !wait_ok {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+            continue;
+        }
+
+        let remaining = payload.len() - total_wrote;
+        let chunk_len = cmp::min(space, remaining);
+        let chunk = &payload[total_wrote..total_wrote + chunk_len];
+        let wrote = match tcp::tcp_send(tcp_idx, chunk) {
+            Ok(n) => n,
+            Err(e) => {
+                if total_wrote > 0 {
+                    break;
+                }
+                return map_tcp_err_i64(e);
+            }
+        };
+        if wrote == 0 {
+            if total_wrote > 0 {
+                break;
+            }
+            if nonblocking {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+            let wait_ok = if timeout_ms > 0 {
+                SEND_WQS[sock_idx as usize]
+                    .wait_event_timeout(|| tcp::tcp_send_buffer_space(tcp_idx) > 0, timeout_ms)
+            } else {
+                SEND_WQS[sock_idx as usize].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
+            };
+            if !wait_ok {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
+            continue;
+        }
+        total_wrote += wrote;
+    }
 
     let mut tx_payload = [0u8; TCP_TX_MAX];
     let now_ms = slopos_lib::clock::uptime_ms();
@@ -431,13 +623,13 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         let Some((seg, n)) = tcp::tcp_poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
             break;
         };
-        let rc = socket_send_segment(&seg, &tx_payload[..n]);
+        let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
         if rc != 0 {
             return rc as i64;
         }
     }
 
-    wrote as i64
+    total_wrote as i64
 }
 
 pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
@@ -445,13 +637,18 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
-    let (tcp_idx, state) = {
+    let (tcp_idx, state, nonblocking, timeout_ms) = {
         let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
         sync_socket_state(sock);
-        (sock.tcp_idx, sock.state)
+        (
+            sock.tcp_idx,
+            sock.state,
+            sock.nonblocking,
+            sock.recv_timeout_ms,
+        )
     };
 
     if !matches!(state, SocketState::Connected | SocketState::Connecting) {
@@ -468,9 +665,51 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         unsafe { core::slice::from_raw_parts_mut(buf, len) }
     };
 
-    match tcp::tcp_recv(tcp_idx, out) {
-        Ok(n) => n as i64,
-        Err(e) => map_tcp_err_i64(e),
+    loop {
+        match tcp::tcp_recv(tcp_idx, out) {
+            Ok(n) => {
+                if n > 0 {
+                    return n as i64;
+                }
+
+                if !matches!(
+                    tcp::tcp_get_state(tcp_idx),
+                    Some(TcpState::Established | TcpState::CloseWait)
+                ) {
+                    return 0;
+                }
+
+                if nonblocking {
+                    return errno_i32(ERRNO_EAGAIN) as i64;
+                }
+
+                let wait_ok = if timeout_ms > 0 {
+                    RECV_WQS[sock_idx as usize].wait_event_timeout(
+                        || {
+                            tcp::tcp_recv_available(tcp_idx) > 0
+                                || !matches!(
+                                    tcp::tcp_get_state(tcp_idx),
+                                    Some(TcpState::Established | TcpState::CloseWait)
+                                )
+                        },
+                        timeout_ms,
+                    )
+                } else {
+                    RECV_WQS[sock_idx as usize].wait_event(|| {
+                        tcp::tcp_recv_available(tcp_idx) > 0
+                            || !matches!(
+                                tcp::tcp_get_state(tcp_idx),
+                                Some(TcpState::Established | TcpState::CloseWait)
+                            )
+                    })
+                };
+
+                if !wait_ok {
+                    return errno_i32(ERRNO_EAGAIN) as i64;
+                }
+            }
+            Err(e) => return map_tcp_err_i64(e),
+        }
     }
 }
 
@@ -485,10 +724,15 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         tcp_idx
     };
 
+    socket_wake_recv(sock_idx);
+    socket_wake_send(sock_idx);
+    socket_wake_accept(sock_idx);
+
     if let Some(tcp_idx) = tcp_idx {
         match tcp::tcp_close(tcp_idx) {
             Ok(Some(seg)) => {
-                let _ = socket_send_segment(&seg, &[]);
+                let _ = socket_send_tcp_segment(&seg, &[]);
+                socket_notify_tcp_idx_waiters(tcp_idx);
                 0
             }
             Ok(None) => 0,
@@ -500,17 +744,50 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    let tcp_idx = {
-        let table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx) else {
+    let (sock, tcp_idx) = {
+        let mut table = SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx) else {
             return 0;
         };
-        sock.tcp_idx
+        sync_socket_state(sock);
+        (*sock, sock.tcp_idx)
     };
-    match tcp_idx {
-        Some(i) => u32::from(tcp::tcp_recv_available(i) > 0),
-        None => 0,
+
+    if sock.state == SocketState::Listening {
+        let table = SOCKET_TABLE.lock();
+        if find_established_child(&sock, &table).is_some() {
+            return POLLIN as u32;
+        }
+        return 0;
     }
+
+    let Some(tcp_idx) = tcp_idx else {
+        return 0;
+    };
+
+    let mut flags = 0u32;
+    if tcp::tcp_recv_available(tcp_idx) > 0 {
+        flags |= POLLIN as u32;
+    }
+
+    match tcp::tcp_get_state(tcp_idx) {
+        Some(TcpState::Established | TcpState::CloseWait) => {}
+        Some(
+            TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::Closing
+            | TcpState::LastAck
+            | TcpState::TimeWait,
+        ) => {
+            flags |= POLLHUP as u32;
+        }
+        Some(TcpState::Closed) | None => {
+            flags |= (POLLERR | POLLHUP) as u32;
+        }
+        _ => {}
+    }
+
+    flags
 }
 
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
@@ -523,23 +800,64 @@ pub fn socket_poll_writable(sock_idx: u32) -> u32 {
         (sock.tcp_idx, sock.state)
     };
 
-    if matches!(state, SocketState::Connected) {
-        match tcp_idx {
-            Some(i) => u32::from(tcp::tcp_send_buffer_space(i) > 0),
-            None => 0,
-        }
-    } else {
-        0
+    let Some(tcp_idx) = tcp_idx else {
+        return 0;
+    };
+
+    let mut flags = 0u32;
+    if matches!(state, SocketState::Connected) && tcp::tcp_send_buffer_space(tcp_idx) > 0 {
+        flags |= POLLOUT as u32;
     }
+
+    match tcp::tcp_get_state(tcp_idx) {
+        Some(TcpState::Established | TcpState::CloseWait) => {}
+        Some(TcpState::Closed) | None => {
+            flags |= (POLLERR | POLLHUP) as u32;
+        }
+        Some(
+            TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::Closing
+            | TcpState::LastAck
+            | TcpState::TimeWait,
+        ) => {
+            flags |= POLLHUP as u32;
+        }
+        _ => {}
+    }
+
+    flags
 }
 
 pub fn socket_get_state(sock_idx: u32) -> Option<SocketState> {
     SOCKET_TABLE.lock().get(sock_idx).map(|s| s.state)
 }
 
+pub fn socket_set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32 {
+    let mut table = SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx) else {
+        return errno_i32(ERRNO_ENOTSOCK);
+    };
+    sock.nonblocking = nonblocking;
+    0
+}
+
+pub fn socket_set_timeouts(sock_idx: u32, recv_timeout_ms: u64, send_timeout_ms: u64) -> i32 {
+    let mut table = SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx) else {
+        return errno_i32(ERRNO_ENOTSOCK);
+    };
+    sock.recv_timeout_ms = recv_timeout_ms;
+    sock.send_timeout_ms = send_timeout_ms;
+    0
+}
+
 pub fn socket_reset_all() {
     let mut table = SOCKET_TABLE.lock();
     for idx in 0..MAX_SOCKETS {
+        RECV_WQS[idx].wake_all();
+        ACCEPT_WQS[idx].wake_all();
+        SEND_WQS[idx].wake_all();
         table.sockets[idx] = KernelSocket::empty();
     }
     tcp::tcp_reset_all();
@@ -580,7 +898,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
         let Some((seg, n)) = tcp::tcp_poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
             break;
         };
-        let rc = socket_send_segment(&seg, &tx_payload[..n]);
+        let rc = socket_send_tcp_segment(&seg, &tx_payload[..n]);
         if rc != 0 {
             return rc;
         }
@@ -597,7 +915,7 @@ pub fn socket_process_timers() {
     }
 
     if let Some((_idx, seg)) = tcp::tcp_delayed_ack_check(now_ms) {
-        let _ = socket_send_segment(&seg, &[]);
+        let _ = socket_send_tcp_segment(&seg, &[]);
     }
 }
 

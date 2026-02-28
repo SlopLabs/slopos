@@ -7,7 +7,7 @@ use slopos_abi::net::{
 };
 use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
-use crate::net::{self, dhcp};
+use crate::net::{self, dhcp, napi::NapiContext, socket, tcp};
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
     self, QueueEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
@@ -17,6 +17,7 @@ use crate::virtio::{
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
+use slopos_lib::kernel_services::driver_runtime::register_idle_wakeup_callback;
 
 use slopos_mm::page_alloc::OwnedPageFrame;
 
@@ -37,7 +38,7 @@ const DEV_CFG_MAC_OFFSET: usize = 0x00;
 const DEV_CFG_STATUS_OFFSET: usize = 0x06;
 const DEV_CFG_MTU_OFFSET: usize = 0x0A;
 
-const REQUEST_TIMEOUT_MS: u32 = 5000;
+const DHCP_REQUEST_TIMEOUT_MS: u32 = 5000;
 /// Short timeout for ARP probe / scan operations (ms).  ARP replies on a
 /// local LAN arrive in < 10 ms; 150 ms is generous while keeping the scan
 /// responsive enough that it doesn't block the compositor for seconds.
@@ -49,6 +50,9 @@ const MAX_NET_MEMBERS: usize = 32;
 const UDP_HEADER_LEN: usize = 8;
 
 const DHCP_RX_MAX_POLLS: usize = 64;
+const RX_RING_SIZE: usize = 64;
+const TX_RING_SIZE: usize = 64;
+const NAPI_BUDGET: u32 = 64;
 
 static DHCP_XID_COUNTER: AtomicU32 = AtomicU32::new(0x534c_4f50);
 
@@ -98,6 +102,9 @@ struct VirtioNetState {
     dns: [u8; 4],
     members: [UserNetMember; MAX_NET_MEMBERS],
     member_count: usize,
+    rx_buffers: [Option<OwnedPageFrame>; RX_RING_SIZE],
+    tx_buffers: [Option<OwnedPageFrame>; TX_RING_SIZE],
+    tx_inflight: AtomicU32,
 }
 
 impl VirtioNetState {
@@ -116,14 +123,18 @@ impl VirtioNetState {
                 flags: 0,
             }; MAX_NET_MEMBERS],
             member_count: 0,
+            rx_buffers: [const { None }; RX_RING_SIZE],
+            tx_buffers: [const { None }; TX_RING_SIZE],
+            tx_inflight: AtomicU32::new(0),
         }
     }
 }
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static VIRTIO_NET_STATE: IrqMutex<VirtioNetState> = IrqMutex::new(VirtioNetState::new());
-static NET_RX_EVENT: QueueEvent = QueueEvent::new();
-static NET_TX_EVENT: QueueEvent = QueueEvent::new();
+static DHCP_RX_EVENT: QueueEvent = QueueEvent::new();
+static NAPI_EVENT: QueueEvent = QueueEvent::new();
+static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
 
 // =============================================================================
 // Device configuration helpers
@@ -254,13 +265,33 @@ fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
 // Virtqueue I/O helpers
 // =============================================================================
 
-/// Submit a filled TX buffer to the device and wait for completion.
-///
-/// On timeout the backing page is intentionally leaked — the device may still
-/// be DMA-ing into it, so freeing it would cause a use-after-free.
+fn virtnet_clean_tx(state: &mut VirtioNetState) -> usize {
+    let mut cleaned = 0usize;
+    while let Some(used) = state.device.tx_queue.try_pop_used() {
+        let idx = (used.id as usize) % TX_RING_SIZE;
+        let _ = state.tx_buffers[idx].take();
+        state.tx_inflight.fetch_sub(1, Ordering::Relaxed);
+        cleaned += 1;
+    }
+    cleaned
+}
+
 fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -> bool {
+    let _ = virtnet_clean_tx(state);
+
+    let mut slot = None;
+    for idx in 0..TX_RING_SIZE {
+        if state.tx_buffers[idx].is_none() {
+            slot = Some(idx);
+            break;
+        }
+    }
+    let Some(slot_idx) = slot else {
+        return false;
+    };
+
     state.device.tx_queue.write_desc(
-        0,
+        slot_idx as u16,
         VirtqDesc {
             addr: page.phys_u64(),
             len: total_len,
@@ -268,21 +299,17 @@ fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -
             next: 0,
         },
     );
+    state.tx_buffers[slot_idx] = Some(page);
+    state.tx_inflight.fetch_add(1, Ordering::Relaxed);
 
-    state.device.tx_queue.submit(0);
+    state.device.tx_queue.submit(slot_idx as u16);
     queue::notify_queue(
         &state.caps.notify_cfg,
         state.caps.notify_off_multiplier,
         &state.device.tx_queue,
         VIRTIO_NET_QUEUE_TX,
     );
-
-    if !NET_TX_EVENT.wait_timeout_ms(REQUEST_TIMEOUT_MS) {
-        let _ = page.into_phys();
-        return false;
-    }
-
-    state.device.tx_queue.try_pop_used().is_some()
+    true
 }
 
 /// Allocate a page and write the virtio-net header at the start.
@@ -346,8 +373,149 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
 // Receive path
 // =============================================================================
 
+fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) {
+    let mut posted = 0usize;
+    let queue_size = (state.device.rx_queue.size as usize).min(RX_RING_SIZE);
+    for idx in 0..queue_size {
+        if state.rx_buffers[idx].is_some() {
+            continue;
+        }
+        let Some(page) = OwnedPageFrame::alloc_zeroed() else {
+            continue;
+        };
+        state.device.rx_queue.write_desc(
+            idx as u16,
+            VirtqDesc {
+                addr: page.phys_u64(),
+                len: PACKET_BUFFER_SIZE as u32,
+                flags: VIRTQ_DESC_F_WRITE,
+                next: 0,
+            },
+        );
+        state.rx_buffers[idx] = Some(page);
+        state.device.rx_queue.submit(idx as u16);
+        posted += 1;
+    }
+
+    if posted > 0 {
+        queue::notify_queue(
+            &state.caps.notify_cfg,
+            state.caps.notify_off_multiplier,
+            &state.device.rx_queue,
+            VIRTIO_NET_QUEUE_RX,
+        );
+    }
+}
+
+fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
+    sniff_frame_for_members(state, frame);
+    if frame.len() < net::ETH_HEADER_LEN {
+        return;
+    }
+
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    if ethertype != net::ETHERTYPE_IPV4 {
+        return;
+    }
+    if frame.len() < net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN {
+        return;
+    }
+
+    let ip_off = net::ETH_HEADER_LEN;
+    let ihl = ((frame[ip_off] & 0x0f) as usize) * 4;
+    if ihl < net::IPV4_HEADER_LEN || frame.len() < ip_off + ihl {
+        return;
+    }
+
+    let proto = frame[ip_off + 9];
+    let src_ip: [u8; 4] = frame[ip_off + 12..ip_off + 16].try_into().unwrap_or([0; 4]);
+    let dst_ip: [u8; 4] = frame[ip_off + 16..ip_off + 20].try_into().unwrap_or([0; 4]);
+    let ip_payload = &frame[ip_off + ihl..];
+
+    match proto {
+        net::IPPROTO_TCP => {
+            let Some(hdr) = tcp::parse_header(ip_payload) else {
+                return;
+            };
+            let hdr_len = hdr.header_len();
+            if hdr_len < tcp::TCP_HEADER_LEN || ip_payload.len() < hdr_len {
+                return;
+            }
+            let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
+            let payload = &ip_payload[hdr_len..];
+            let now_ms = slopos_lib::clock::uptime_ms();
+            let result = tcp::tcp_input(src_ip, dst_ip, &hdr, options, payload, now_ms);
+            if let Some(seg) = result.response {
+                let _ = socket::socket_send_tcp_segment(&seg, &[]);
+            }
+            socket::socket_notify_tcp_activity(&result);
+        }
+        net::IPPROTO_UDP => {
+            let _ = (src_ip, dst_ip, ip_payload);
+        }
+        net::IPPROTO_ICMP => {
+            let _ = (src_ip, dst_ip, ip_payload);
+        }
+        _ => {}
+    }
+}
+
+fn virtnet_poll(state: &mut VirtioNetState, budget: u32) -> usize {
+    let mut processed = 0usize;
+    let mut posted = 0usize;
+    let _ = virtnet_clean_tx(state);
+
+    while (processed as u32) < budget {
+        let Some(used) = state.device.rx_queue.try_pop_used() else {
+            break;
+        };
+
+        let idx = (used.id as usize) % RX_RING_SIZE;
+        let Some(page) = state.rx_buffers[idx].take() else {
+            continue;
+        };
+
+        let hdr_len = size_of::<VirtioNetHdrV1>();
+        if (used.len as usize) > hdr_len {
+            let payload_len = (used.len as usize) - hdr_len;
+            let frame = unsafe {
+                core::slice::from_raw_parts(page.as_mut_ptr::<u8>().add(hdr_len), payload_len)
+            };
+            dispatch_rx_frame(state, frame);
+        }
+
+        processed += 1;
+
+        if let Some(new_page) = OwnedPageFrame::alloc_zeroed() {
+            state.device.rx_queue.write_desc(
+                idx as u16,
+                VirtqDesc {
+                    addr: new_page.phys_u64(),
+                    len: PACKET_BUFFER_SIZE as u32,
+                    flags: VIRTQ_DESC_F_WRITE,
+                    next: 0,
+                },
+            );
+            state.rx_buffers[idx] = Some(new_page);
+            state.device.rx_queue.submit(idx as u16);
+            posted += 1;
+        }
+    }
+
+    if posted > 0 {
+        queue::notify_queue(
+            &state.caps.notify_cfg,
+            state.caps.notify_off_multiplier,
+            &state.device.rx_queue,
+            VIRTIO_NET_QUEUE_RX,
+        );
+    }
+
+    processed
+}
+
 fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>) -> Option<usize> {
-    poll_one_rx_frame_timeout(state, out_payload, REQUEST_TIMEOUT_MS)
+    poll_one_rx_frame_timeout(state, out_payload, DHCP_REQUEST_TIMEOUT_MS)
 }
 
 fn poll_one_rx_frame_timeout(
@@ -377,7 +545,7 @@ fn poll_one_rx_frame_timeout(
         VIRTIO_NET_QUEUE_RX,
     );
 
-    if !NET_RX_EVENT.wait_timeout_ms(timeout_ms) {
+    if !DHCP_RX_EVENT.wait_timeout_ms(timeout_ms) {
         // Intentional leak: device may still be DMA-ing.
         let _ = rx_page.into_phys();
         return None;
@@ -558,6 +726,43 @@ fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
 // PCI probe
 // =============================================================================
 
+fn napi_schedule() {
+    let _ = NAPI_CONTEXT.schedule();
+}
+
+fn napi_complete() {
+    NAPI_CONTEXT.complete();
+}
+
+fn virtnet_napi_poll_loop() {
+    if !NAPI_CONTEXT.begin_poll() {
+        return;
+    }
+
+    let mut state = VIRTIO_NET_STATE.lock();
+    if !state.device.ready || !link_is_up(&state) {
+        napi_complete();
+        return;
+    }
+
+    let processed = virtnet_poll(&mut state, NAPI_CONTEXT.budget());
+    NAPI_CONTEXT.add_processed(processed as u32);
+    napi_complete();
+
+    if processed as u32 >= NAPI_CONTEXT.budget() {
+        napi_schedule();
+        NAPI_EVENT.signal();
+    }
+}
+
+fn virtnet_idle_wakeup_cb() -> c_int {
+    if NAPI_EVENT.try_consume() || NAPI_CONTEXT.is_scheduled() {
+        virtnet_napi_poll_loop();
+        return 1;
+    }
+    0
+}
+
 /// MSI-X / MSI interrupt handler for virtio-net.
 ///
 /// The `ctx` pointer encodes the queue index (0 = RX, 1 = TX).
@@ -568,8 +773,14 @@ extern "C" fn virtio_net_irq_handler(
     ctx: *mut core::ffi::c_void,
 ) {
     match ctx as usize {
-        0 => NET_RX_EVENT.signal(),
-        1 => NET_TX_EVENT.signal(),
+        0 => {
+            DHCP_RX_EVENT.signal();
+            napi_schedule();
+            NAPI_EVENT.signal();
+        }
+        1 => {
+            NAPI_EVENT.signal();
+        }
         _ => {}
     }
 }
@@ -715,7 +926,11 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         } else {
             klog_info!("virtio-net: DHCP lease unavailable");
         }
+
+        virtnet_prepost_rx_buffers(&mut state);
     }
+
+    register_idle_wakeup_callback(Some(virtnet_idle_wakeup_cb));
 
     klog_info!(
         "virtio-net: ready mtu={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} irq {:?}",
@@ -794,12 +1009,14 @@ pub fn virtio_net_scan_members(out: *mut UserNetMember, max: usize, active_probe
 
         for target in &targets[..target_count] {
             let _ = transmit_arp_request(&mut state, *target);
-            let _ = poll_one_rx_frame_timeout(&mut state, None, SCAN_RX_TIMEOUT_MS);
+            napi_schedule();
+            let _ = NAPI_EVENT.wait_timeout_ms(SCAN_RX_TIMEOUT_MS);
+            let _ = virtnet_poll(&mut state, NAPI_BUDGET);
         }
 
         // Drain any remaining rx frames from the above probes
         for _ in 0..8 {
-            if poll_one_rx_frame_timeout(&mut state, None, SCAN_RX_TIMEOUT_MS).is_none() {
+            if virtnet_poll(&mut state, NAPI_BUDGET) == 0 {
                 break;
             }
         }

@@ -117,6 +117,7 @@ static SOCKET_SERVICES: SocketServices = SocketServices {
     close: socket::socket_close,
     poll_readable: socket::socket_poll_readable,
     poll_writable: socket::socket_poll_writable,
+    set_nonblocking: socket::socket_set_nonblocking,
 };
 
 pub fn init_syscall_services() {

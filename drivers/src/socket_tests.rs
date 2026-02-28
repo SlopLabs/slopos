@@ -265,7 +265,10 @@ pub fn test_socket_poll_writable_connected() -> TestResult {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
-    assert_eq_test!(socket_poll_writable(sock), 1);
+    assert_eq_test!(
+        socket_poll_writable(sock) & slopos_abi::syscall::POLLOUT as u32,
+        slopos_abi::syscall::POLLOUT as u32
+    );
     pass!()
 }
 

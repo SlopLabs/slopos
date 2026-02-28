@@ -49,6 +49,7 @@ pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
 pub mod testing;
+pub mod waitqueue;
 pub mod wl_currency;
 
 #[doc(hidden)]
@@ -76,3 +77,4 @@ pub use pcr::{
     get_cpu_count, get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,
     mark_cpu_online, register_lapic_id_fn, register_send_ipi_to_cpu_fn, send_ipi_to_cpu,
 };
+pub use waitqueue::WaitQueue;

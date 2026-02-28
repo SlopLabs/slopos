@@ -17,6 +17,8 @@ pub mod msi;
 pub mod msix;
 #[cfg(feature = "itests")]
 pub mod msix_tests;
+#[cfg(feature = "itests")]
+pub mod napi_tests;
 pub mod net;
 pub mod pci;
 #[cfg(feature = "itests")]

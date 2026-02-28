@@ -10,5 +10,6 @@ crate::define_service! {
         close(sock_idx: u32) -> i32;
         poll_readable(sock_idx: u32) -> u32;
         poll_writable(sock_idx: u32) -> u32;
+        set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32;
     }
 }
