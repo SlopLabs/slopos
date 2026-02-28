@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: Planned — All phases pending
+> **Status**: In progress — Phase 1A complete, Phase 1B–1D pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -392,23 +392,23 @@ Phase 1 introduces type-safe network primitives (CAD-6), a pool-backed `PacketBu
 
 Define the type-safe primitives that all networking code will use.
 
-- [ ] **1A.1** Create `drivers/src/net/types.rs` with newtype wrappers:
+- [x] **1A.1** Create `drivers/src/net/types.rs` with newtype wrappers:
   - `Ipv4Addr([u8; 4])` — IPv4 address in network byte order with associated constants (`UNSPECIFIED`, `BROADCAST`, `LOCALHOST`) and methods (`is_loopback()`, `is_broadcast()`, `is_multicast()`, `is_unspecified()`, `in_subnet(addr, mask) -> bool`)
   - `Port(u16)` — port number in host byte order with methods (`to_network_bytes()`, `from_network_bytes()`, `is_ephemeral()`, `is_privileged()`)
   - `MacAddr([u8; 6])` — MAC address with constants (`BROADCAST`, `ZERO`) and methods (`is_broadcast()`, `is_multicast()`)
   - `DevIndex(usize)` — device index newtype
   - All types: derive `Clone, Copy, PartialEq, Eq, Hash`; implement `Debug` with human-readable formatting (e.g., `192.168.1.1` not `Ipv4Addr([192, 168, 1, 1])`)
-- [ ] **1A.2** Create `NetError` enum in `drivers/src/net/types.rs`:
+- [x] **1A.2** Create `NetError` enum in `drivers/src/net/types.rs`:
   - All variants listed in CAD-6 above
   - `to_errno(&self) -> i32` conversion method for the syscall boundary
   - `impl core::fmt::Display` for human-readable error messages in logs
   - Document which POSIX errno each variant maps to
-- [ ] **1A.3** Create `SockAddr` struct in `drivers/src/net/types.rs`:
+- [x] **1A.3** Create `SockAddr` struct in `drivers/src/net/types.rs`:
   - Fields: `ip: Ipv4Addr`, `port: Port`
   - `from_user(raw: &SockAddrIn) -> Result<Self, NetError>` — validates `sin_family == AF_INET`, converts byte order
   - `to_user(&self) -> SockAddrIn` — serializes to userspace-visible layout
   - This is the single conversion point between kernel and userspace address representations
-- [ ] **1A.4** Create `EtherType` and `IpProtocol` enums in `drivers/src/net/types.rs`:
+- [x] **1A.4** Create `EtherType` and `IpProtocol` enums in `drivers/src/net/types.rs`:
   - `EtherType { Ipv4 = 0x0800, Arp = 0x0806, Ipv6 = 0x86DD }` — with `from_u16()` that returns `Option`
   - `IpProtocol { Icmp = 1, Tcp = 6, Udp = 17 }` — with `from_u8()` that returns `Option`
   - Pattern matching on these enums replaces raw numeric comparisons throughout the stack
@@ -523,8 +523,8 @@ Wire VirtIO-net to implement `NetDevice` and build the single ingress demux path
 - [ ] **1.T3** Unit test `push_header` / `pull_header`: push 14 bytes (Ethernet), verify offset and slice correctness
 - [ ] **1.T4** Unit test `PacketBuf::from_raw_copy`: verify `payload()` returns full buffer, offsets are zero
 - [ ] **1.T5** Unit test `PacketBuf` drop: allocate, drop, verify pool slot is returned (pool.available() increases)
-- [ ] **1.T6** Unit test `Ipv4Addr` methods: `is_loopback`, `is_broadcast`, `in_subnet`, byte conversions
-- [ ] **1.T7** Unit test `Port` byte-order conversions: `to_network_bytes()` round-trips correctly
+- [x] **1.T6** Unit test `Ipv4Addr` methods: `is_loopback`, `is_broadcast`, `in_subnet`, byte conversions
+- [x] **1.T7** Unit test `Port` byte-order conversions: `to_network_bytes()` round-trips correctly
 - [ ] **1.T8** Unit test `NetDeviceStats` accumulation: increment fields, verify reads
 - [ ] **1.T9** Integration test: boot with VirtIO-net refactored, verify DHCP still completes
 - [ ] **1.T10** Integration test: send a UDP packet from userland, verify it reaches the ingress pipeline
