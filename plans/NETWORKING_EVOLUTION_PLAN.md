@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1C complete, Phase 1D pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2 pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -484,35 +484,35 @@ Implement the pool allocator and `PacketBuf` type.
 
 Wire VirtIO-net to implement `NetDevice` and build the single ingress demux path.
 
-- [ ] **1D.1** Refactor `drivers/src/virtio_net.rs` to implement `NetDevice`:
+- [x] **1D.1** Refactor `drivers/src/virtio_net.rs` to implement `NetDevice`:
   - Move DMA ring management, feature negotiation, and MSI-X setup into the struct
   - Implement `tx()` by enqueuing a `PacketBuf` into the TX virtqueue
   - Implement `poll_rx()` by draining the RX virtqueue: for each DMA buffer, call `PacketBuf::from_raw_copy(dma_data)` using the provided pool
   - Remove all protocol parsing from the driver — it becomes a pure byte mover
   - Negotiate `VIRTIO_NET_F_CSUM` and `VIRTIO_NET_F_GUEST_CSUM` features; map to `NetDeviceFeatures`
-- [ ] **1D.2** Create `drivers/src/net/ingress.rs` with `net_rx(handle: &DeviceHandle, pkt: PacketBuf)`:
+- [x] **1D.2** Create `drivers/src/net/ingress.rs` with `net_rx(handle: &DeviceHandle, pkt: PacketBuf)`:
   - Parse Ethernet header using `EtherType::from_u16()`, set `l2_offset`
   - Check destination MAC: accept if matches our MAC, broadcast, or multicast
   - Dispatch: `EtherType::Arp` to `arp::handle_rx()`, `EtherType::Ipv4` to `ipv4::handle_rx()`
   - Drop unknown ethertypes with a stat increment, no panic
   - This function is the single entry point for all received packets
-- [ ] **1D.3** Create `drivers/src/net/ipv4.rs` with `ipv4::handle_rx(dev: DevIndex, pkt: PacketBuf)`:
+- [x] **1D.3** Create `drivers/src/net/ipv4.rs` with `ipv4::handle_rx(dev: DevIndex, pkt: PacketBuf)`:
   - Validate IP version (must be 4), header length (≥20), total length (≤ packet size)
   - Verify IP header checksum (unless `CHECKSUM_RX` feature is set)
   - Set `l3_offset`, extract protocol field using `IpProtocol::from_u8()`
   - Dispatch: `IpProtocol::Udp` to `udp::handle_rx()`, `IpProtocol::Tcp` to `tcp::handle_rx()`, `IpProtocol::Icmp` to `icmp::handle_rx()` (stub in Phase 1)
   - Drop unknown protocols, increment stats
   - Drop packets with TTL=0 (do not forward yet)
-- [ ] **1D.4** Move existing ARP handling from `virtio_net.rs` into `drivers/src/net/arp.rs`:
+- [x] **1D.4** Move existing ARP handling from `virtio_net.rs` into `drivers/src/net/arp.rs`:
   - `arp::handle_rx(dev: DevIndex, pkt: PacketBuf)` — stub that logs and drops for now
   - `arp::send_request(dev: DevIndex, target_ip: Ipv4Addr)` — stub
   - Phase 2 will fill these in; Phase 1 just establishes the module boundary
-- [ ] **1D.5** Update the NAPI poll loop in `drivers/src/net/napi.rs`:
+- [x] **1D.5** Update the NAPI poll loop in `drivers/src/net/napi.rs`:
   - Obtain `DeviceHandle` once at registration, hold it for the device's lifetime
   - Call `handle.poll_rx(budget, &PACKET_POOL)` to get packets
   - Feed each packet to `net_rx(handle, pkt)`
   - Remove the old inline dispatch that called into TCP/UDP directly
-- [ ] **1D.6** Update `drivers/src/net/mod.rs` to declare all new submodules:
+- [x] **1D.6** Update `drivers/src/net/mod.rs` to declare all new submodules:
   - `pub mod types`, `pub mod pool`, `pub mod packetbuf`, `pub mod netdev`, `pub mod ingress`, `pub mod ipv4`, `pub mod arp`
   - Re-export key types: `Ipv4Addr`, `Port`, `MacAddr`, `DevIndex`, `NetError`, `SockAddr`, `PacketBuf`, `NetDevice`, `DeviceHandle`
 
@@ -526,18 +526,18 @@ Wire VirtIO-net to implement `NetDevice` and build the single ingress demux path
 - [x] **1.T6** Unit test `Ipv4Addr` methods: `is_loopback`, `is_broadcast`, `in_subnet`, byte conversions
 - [x] **1.T7** Unit test `Port` byte-order conversions: `to_network_bytes()` round-trips correctly
 - [x] **1.T8** Unit test `NetDeviceStats` accumulation: increment fields, verify reads
-- [ ] **1.T9** Integration test: boot with VirtIO-net refactored, verify DHCP still completes
-- [ ] **1.T10** Integration test: send a UDP packet from userland, verify it reaches the ingress pipeline
+- [x] **1.T9** Integration test: boot with VirtIO-net refactored, verify DHCP still completes
+- [x] **1.T10** Integration test: send a UDP packet from userland, verify it reaches the ingress pipeline
 - [x] **1.T11** Verify `DeviceHandle::tx()` does not acquire the registry lock (code review / assert)
 
 ### Phase 1 Gate
 
-- [ ] **GATE**: `PacketBuf` compiles with no warnings under `#![no_std]`, pool alloc/free are O(1)
-- [ ] **GATE**: `NetDevice` trait is implemented by `VirtioNet` and passes all method calls
-- [ ] **GATE**: `net_rx()` ingress path handles ARP and IPv4 dispatch without panicking on malformed input
-- [ ] **GATE**: Existing DHCP flow still works end-to-end after VirtIO-net refactor
-- [ ] **GATE**: No protocol parsing remains in `drivers/src/virtio_net.rs`
-- [ ] **GATE**: All networking code uses `Ipv4Addr`, `Port`, `MacAddr` — no raw `u32`/`u16` for addresses
+- [x] **GATE**: `PacketBuf` compiles with no warnings under `#![no_std]`, pool alloc/free are O(1)
+- [x] **GATE**: `NetDevice` trait is implemented by `VirtioNet` and passes all method calls
+- [x] **GATE**: `net_rx()` ingress path handles ARP and IPv4 dispatch without panicking on malformed input
+- [x] **GATE**: Existing DHCP flow still works end-to-end after VirtIO-net refactor
+- [x] **GATE**: No protocol parsing remains in `drivers/src/virtio_net.rs`
+- [x] **GATE**: All networking code uses `Ipv4Addr`, `Port`, `MacAddr` — no raw `u32`/`u16` for addresses
 
 ---
 
