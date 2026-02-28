@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A complete, Phase 1B–1D pending
+> **Status**: In progress — Phase 1A–1B complete, Phase 1C–1D pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -417,14 +417,14 @@ Define the type-safe primitives that all networking code will use.
 
 Implement the pool allocator and `PacketBuf` type.
 
-- [ ] **1B.1** Create `drivers/src/net/pool.rs` with `PacketPool`:
+- [x] **1B.1** Create `drivers/src/net/pool.rs` with `PacketPool`:
   - Pre-allocates `POOL_SIZE` (256 default) buffers of `BUF_SIZE` (2048) bytes each at `CACHE_LINE_ALIGN` (64-byte) alignment
   - `alloc() -> Option<PacketBuf>` — pops a free slot from the freelist, returns `None` if pool exhausted
   - `release(slot: u16)` — pushes slot back onto the freelist (called by `PacketBuf::drop`)
   - Freelist is a lock-free stack (atomic CAS on a head index) to allow alloc/release from interrupt context
   - `available() -> usize` — number of free buffers (for diagnostics)
   - The pool is a `static` global, initialized once at kernel boot before networking starts
-- [ ] **1B.2** Create `drivers/src/net/packetbuf.rs` with `PacketBuf` struct:
+- [x] **1B.2** Create `drivers/src/net/packetbuf.rs` with `PacketBuf` struct:
   - Fields as specified in CAD-1: `inner: PacketBufInner`, `head: u16`, `tail: u16`, `l2_offset: u16`, `l3_offset: u16`, `l4_offset: u16`
   - `PacketBufInner::Pooled { pool: &'static PacketPool, slot: u16 }` for normal packets
   - `PacketBufInner::Oversized { data: Vec<u8> }` for reassembly (Phase 8 only)
@@ -432,23 +432,23 @@ Implement the pool allocator and `PacketBuf` type.
   - Implement `Drop` to return pooled buffers automatically
   - Do NOT derive `Clone` — packets are move-only
   - Implement `Debug` manually to show metadata without dumping buffer contents
-- [ ] **1B.3** Implement `PacketBuf` constructors:
+- [x] **1B.3** Implement `PacketBuf` constructors:
   - `PacketBuf::alloc() -> Option<Self>` — allocates from pool, sets `head = HEADROOM`, `tail = HEADROOM`
   - `PacketBuf::from_raw_copy(data: &[u8]) -> Option<Self>` — allocates from pool, copies data, sets `head = 0`, `tail = data.len()` — used by RX path when copying from DMA buffer
   - `PacketBuf::oversized(capacity: usize) -> Self` — allocates from heap for reassembly buffers only
-- [ ] **1B.4** Implement header push/pull methods:
+- [x] **1B.4** Implement header push/pull methods:
   - `push_header(&mut self, len: usize) -> Result<&mut [u8], NetError>` — extends head backward into headroom, returns `Err(NoBufferSpace)` if insufficient headroom
   - `pull_header(&mut self, len: usize) -> Result<&[u8], NetError>` — advances head forward, returns consumed bytes, returns `Err(InvalidArgument)` if `len > self.len()`
   - `payload(&self) -> &[u8]` — returns `data[head..tail]`
   - `payload_mut(&mut self) -> &mut [u8]` — mutable variant
   - `len(&self) -> usize` — returns `tail - head`
   - `append(&mut self, data: &[u8]) -> Result<(), NetError>` — extends tail, copies data
-- [ ] **1B.5** Implement layer offset helpers:
+- [x] **1B.5** Implement layer offset helpers:
   - `set_l2(&mut self, offset: u16)`, `l2_header(&self) -> &[u8]` — slice from l2_offset to l3_offset
   - `set_l3(&mut self, offset: u16)`, `l3_header(&self) -> &[u8]` — slice from l3_offset to l4_offset
   - `set_l4(&mut self, offset: u16)`, `l4_header(&self) -> &[u8]` — slice from l4_offset to tail
   - Each returns `&[]` if offsets are not yet set (offset == 0 and not the first layer)
-- [ ] **1B.6** Implement checksum helpers on `PacketBuf`:
+- [x] **1B.6** Implement checksum helpers on `PacketBuf`:
   - `compute_ipv4_checksum(&self) -> u16` — computes over L3 header bytes
   - `compute_tcp_checksum(&self, src: Ipv4Addr, dst: Ipv4Addr) -> u16` — pseudo-header + L4
   - `compute_udp_checksum(&self, src: Ipv4Addr, dst: Ipv4Addr) -> u16` — pseudo-header + L4
@@ -518,11 +518,11 @@ Wire VirtIO-net to implement `NetDevice` and build the single ingress demux path
 
 ### Phase 1 Test Coverage
 
-- [ ] **1.T1** Unit test `PacketPool::alloc` + `release`: alloc fills pool, release restores, alloc again succeeds
-- [ ] **1.T2** Unit test `PacketBuf::alloc`: verify `payload()` is empty, headroom is accessible
-- [ ] **1.T3** Unit test `push_header` / `pull_header`: push 14 bytes (Ethernet), verify offset and slice correctness
-- [ ] **1.T4** Unit test `PacketBuf::from_raw_copy`: verify `payload()` returns full buffer, offsets are zero
-- [ ] **1.T5** Unit test `PacketBuf` drop: allocate, drop, verify pool slot is returned (pool.available() increases)
+- [x] **1.T1** Unit test `PacketPool::alloc` + `release`: alloc fills pool, release restores, alloc again succeeds
+- [x] **1.T2** Unit test `PacketBuf::alloc`: verify `payload()` is empty, headroom is accessible
+- [x] **1.T3** Unit test `push_header` / `pull_header`: push 14 bytes (Ethernet), verify offset and slice correctness
+- [x] **1.T4** Unit test `PacketBuf::from_raw_copy`: verify `payload()` returns full buffer, offsets are zero
+- [x] **1.T5** Unit test `PacketBuf` drop: allocate, drop, verify pool slot is returned (pool.available() increases)
 - [x] **1.T6** Unit test `Ipv4Addr` methods: `is_loopback`, `is_broadcast`, `in_subnet`, byte conversions
 - [x] **1.T7** Unit test `Port` byte-order conversions: `to_network_bytes()` round-trips correctly
 - [ ] **1.T8** Unit test `NetDeviceStats` accumulation: increment fields, verify reads
