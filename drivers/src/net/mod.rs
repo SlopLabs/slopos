@@ -1,7 +1,8 @@
 //! Network subsystem.
 //!
-//! Core abstractions (types, pool, packet buffers) and protocol modules
-//! (DHCP, DNS, TCP, UDP) shared across network drivers.
+//! Core abstractions (types, pool, packet buffers, device trait) and protocol
+//! modules (DHCP, DNS, TCP, UDP) shared across network drivers.
+pub mod netdev;
 pub mod packetbuf;
 pub mod pool;
 pub mod types;
@@ -13,6 +14,7 @@ pub mod socket;
 pub mod tcp;
 
 // Re-export key type-safe primitives for convenient access.
+pub use netdev::{DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};
 pub use packetbuf::PacketBuf;
 pub use pool::{PACKET_POOL, PacketPool};
 pub use types::{DevIndex, EtherType, IpProtocol, Ipv4Addr, MacAddr, NetError, Port, SockAddr};

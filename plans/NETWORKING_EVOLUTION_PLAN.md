@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1B complete, Phase 1C–1D pending
+> **Status**: In progress — Phase 1A–1C complete, Phase 1D pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -456,7 +456,7 @@ Implement the pool allocator and `PacketBuf` type.
 
 ### 1C: NetDevice Trait and Registry
 
-- [ ] **1C.1** Create `drivers/src/net/netdev.rs` with the `NetDevice` trait:
+- [x] **1C.1** Create `drivers/src/net/netdev.rs` with the `NetDevice` trait:
   - `fn tx(&mut self, pkt: PacketBuf) -> Result<(), NetError>` — transmit one packet
   - `fn poll_rx(&mut self, budget: usize, pool: &'static PacketPool) -> SmallVec<[PacketBuf; 8]>` — drain up to `budget` received packets, allocating from `pool`
   - `fn set_up(&mut self)` and `fn set_down(&mut self)` — link state control
@@ -464,14 +464,14 @@ Implement the pool allocator and `PacketBuf` type.
   - `fn mac(&self) -> MacAddr` — hardware MAC address
   - `fn stats(&self) -> NetDeviceStats` — read-only stats snapshot
   - `fn features(&self) -> NetDeviceFeatures` — capability flags
-- [ ] **1C.2** Add `NetDeviceStats` struct:
+- [x] **1C.2** Add `NetDeviceStats` struct:
   - Fields: `rx_packets: u64`, `tx_packets: u64`, `rx_bytes: u64`, `tx_bytes: u64`, `rx_errors: u64`, `tx_errors: u64`, `rx_dropped: u64`, `tx_dropped: u64`
-- [ ] **1C.3** Add `NetDeviceFeatures` bitflags:
+- [x] **1C.3** Add `NetDeviceFeatures` bitflags:
   - `CHECKSUM_TX` — driver can compute TX checksums
   - `CHECKSUM_RX` — driver has verified RX checksums
   - `TSO` — TCP segmentation offload (reserved, not implemented)
   - `VLAN_TAG` — driver strips/inserts VLAN tags (reserved)
-- [ ] **1C.4** Create `NetDeviceRegistry` and `DeviceHandle` in `drivers/src/net/netdev.rs`:
+- [x] **1C.4** Create `NetDeviceRegistry` and `DeviceHandle` in `drivers/src/net/netdev.rs`:
   - `NetDeviceRegistry`: spinlock-protected `Vec<Option<Box<dyn NetDevice>>>` — control plane only
   - `register(dev: Box<dyn NetDevice>) -> DeviceHandle` — assigns index, returns stable handle
   - `unregister(index: DevIndex)` — calls `set_down()`, invalidates handle, frees slot
@@ -525,10 +525,10 @@ Wire VirtIO-net to implement `NetDevice` and build the single ingress demux path
 - [x] **1.T5** Unit test `PacketBuf` drop: allocate, drop, verify pool slot is returned (pool.available() increases)
 - [x] **1.T6** Unit test `Ipv4Addr` methods: `is_loopback`, `is_broadcast`, `in_subnet`, byte conversions
 - [x] **1.T7** Unit test `Port` byte-order conversions: `to_network_bytes()` round-trips correctly
-- [ ] **1.T8** Unit test `NetDeviceStats` accumulation: increment fields, verify reads
+- [x] **1.T8** Unit test `NetDeviceStats` accumulation: increment fields, verify reads
 - [ ] **1.T9** Integration test: boot with VirtIO-net refactored, verify DHCP still completes
 - [ ] **1.T10** Integration test: send a UDP packet from userland, verify it reaches the ingress pipeline
-- [ ] **1.T11** Verify `DeviceHandle::tx()` does not acquire the registry lock (code review / assert)
+- [x] **1.T11** Verify `DeviceHandle::tx()` does not acquire the registry lock (code review / assert)
 
 ### Phase 1 Gate
 

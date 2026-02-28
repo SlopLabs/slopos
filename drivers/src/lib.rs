@@ -27,6 +27,8 @@ pub mod net;
 #[cfg(feature = "itests")]
 pub mod net_types_tests;
 #[cfg(feature = "itests")]
+pub mod netdev_tests;
+#[cfg(feature = "itests")]
 pub mod packetbuf_tests;
 pub mod pci;
 #[cfg(feature = "itests")]
