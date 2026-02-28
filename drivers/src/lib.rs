@@ -48,6 +48,8 @@ pub mod syscall_services_init;
 pub mod tcp_data_tests;
 #[cfg(feature = "itests")]
 pub mod tcp_tests;
+#[cfg(feature = "itests")]
+pub mod timer_tests;
 pub mod tty;
 #[cfg(feature = "itests")]
 pub mod udp_socket_tests;

@@ -991,6 +991,10 @@ fn virtnet_napi_poll_loop() {
     NAPI_CONTEXT.add_processed(processed as u32);
     napi_complete();
 
+    // Advance the network timer wheel — process ARP aging, TCP retransmit, etc.
+    // (Phase 2A wiring; dispatch stubs filled in by subsequent phases.)
+    crate::net::timer::net_timer_process();
+
     if processed as u32 >= NAPI_CONTEXT.budget() {
         napi_schedule();
         NAPI_EVENT.signal();
@@ -998,6 +1002,9 @@ fn virtnet_napi_poll_loop() {
 }
 
 fn virtnet_idle_wakeup_cb() -> c_int {
+    // Process network timers even when idle (ARP expiry, keepalives, etc.).
+    crate::net::timer::net_timer_process();
+
     if NAPI_EVENT.try_consume() || NAPI_CONTEXT.is_scheduled() {
         virtnet_napi_poll_loop();
         return 1;

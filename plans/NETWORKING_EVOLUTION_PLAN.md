@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2 pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A complete, Phase 2B–2C pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -554,29 +554,29 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### 2A: Data-Driven Timer Wheel
 
-- [ ] **2A.1** Create `drivers/src/net/timer.rs` with `NetTimerWheel`:
+- [x] **2A.1** Create `drivers/src/net/timer.rs` with `NetTimerWheel`:
   - 256 slots, each slot is a `Vec<TimerEntry>` (not linked list — simpler, cache-friendly)
   - `TimerEntry` struct as specified in CAD-4: `deadline_tick`, `kind: TimerKind`, `key: u32`, `token: TimerToken`, `cancelled: bool`
   - `next_token: AtomicU64` — monotonically increasing token generator
   - `current_tick: u64` — current position in the wheel
-- [ ] **2A.2** Implement `NetTimerWheel::schedule(delay_ticks: u64, kind: TimerKind, key: u32) -> TimerToken`:
+- [x] **2A.2** Implement `NetTimerWheel::schedule(delay_ticks: u64, kind: TimerKind, key: u32) -> TimerToken`:
   - Computes `deadline_tick = current_tick + delay_ticks`
   - Assigns a unique `TimerToken` from `next_token`
   - Inserts `TimerEntry` into slot `deadline_tick % 256`
   - Returns the token for cancellation
-- [ ] **2A.3** Implement `NetTimerWheel::cancel(token: TimerToken) -> bool`:
+- [x] **2A.3** Implement `NetTimerWheel::cancel(token: TimerToken) -> bool`:
   - Scans the entry's slot (O(slot_size), bounded by `MAX_ENTRIES_PER_SLOT`)
   - Marks the entry as `cancelled = true`
   - Returns `true` if found, `false` if already fired or not found
   - Alternative: maintain a `HashSet<TimerToken>` of cancelled tokens for O(1) cancel, checked on fire
-- [ ] **2A.4** Implement `NetTimerWheel::tick(subsystems: &mut NetSubsystems)`:
+- [x] **2A.4** Implement `NetTimerWheel::tick(subsystems: &mut NetSubsystems)`:
   - Called from the timer interrupt handler, advances `current_tick`
   - Drains entries from `slots[current_tick % 256]` where `deadline_tick <= current_tick`
   - Skips entries with `cancelled == true`
   - Dispatches each entry via `match entry.kind { ... }` as specified in CAD-4
   - Bounds per-tick work: if more than `MAX_TIMERS_PER_TICK` (32) fire, defer remainder
   - Protect with spinlock; document constraint: dispatch handlers must not re-acquire the timer lock
-- [ ] **2A.5** Wire `NetTimerWheel::tick()` into the existing timer interrupt handler:
+- [x] **2A.5** Wire `NetTimerWheel::tick()` into the existing timer interrupt handler:
   - The timer interrupt already fires at a known rate; add a call to `net_timer_wheel.tick()`
   - `NetSubsystems` is a struct holding `&mut NeighborCache`, `&mut TcpEngine`, `&mut ReassemblyBuffer` — passed by reference to avoid global state in timer callbacks
 
@@ -627,9 +627,9 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 - [ ] **2.T2** Unit test `insert_or_update` followed by `lookup` returns correct MAC
 - [ ] **2.T3** Unit test `Incomplete` state: queued packets are flushed when reply arrives
 - [ ] **2.T4** Unit test `Failed` state: packets are dropped, W/L loss is awarded
-- [ ] **2.T5** Unit test timer wheel: schedule a timer, advance ticks past deadline, verify dispatch fires with correct `kind` and `key`
-- [ ] **2.T6** Unit test timer cancellation: cancel before deadline, verify dispatch does not fire
-- [ ] **2.T7** Unit test timer `MAX_TIMERS_PER_TICK` bound: schedule 64 timers for same tick, verify only 32 fire per tick call
+- [x] **2.T5** Unit test timer wheel: schedule a timer, advance ticks past deadline, verify dispatch fires with correct `kind` and `key`
+- [x] **2.T6** Unit test timer cancellation: cancel before deadline, verify dispatch does not fire
+- [x] **2.T7** Unit test timer `MAX_TIMERS_PER_TICK` bound: schedule 64 timers for same tick, verify only 32 fire per tick call
 - [ ] **2.T8** Integration test: boot, send UDP to a new host, verify ARP request appears on wire, reply resolves the entry
 - [ ] **2.T9** Integration test: ARP entry ages to `Stale` after timeout, re-probe is sent on next use
 
