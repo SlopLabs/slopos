@@ -46,7 +46,7 @@ This plan has **8 phases**, ordered by impact and dependency:
 - **Phase 2**: Ticket/queued spinlocks — fixes SMP fairness
 - **Phase 3**: MSI/MSI-X for VirtIO and PCI devices
 - **Phase 4**: PCIe ECAM configuration space via MCFG
-- **Phase 5**: TCP in the network stack
+- **Phase 5**: Network stack completion (TCP + UDP sockets + DNS)
 - **Phase 6**: PCID-accelerated TLB management
 - **Phase 7**: Long-horizon items (USB/xHCI, virtio-gpu, RTC)
 
@@ -978,11 +978,195 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 - [x] **5D.T9** Backpressure: verify send blocks when buffer full, resumes when drained
 - [x] **5D.T10** Regression: all existing TCP/socket tests still pass (708/708)
 
-### 5E: DNS Client (Optional, Stretch)
+### 5E: UDP Datagram Socket Completion
 
-- [ ] **5E.1** Implement DNS query construction (UDP port 53)
-- [ ] **5E.2** Parse DNS response (A records, CNAME)
-- [ ] **5E.3** Simple resolver: `resolve(hostname) -> Option<Ipv4Addr>`
+> The socket layer accepts `SOCK_DGRAM` but every operation beyond `create()`
+> and `bind()` either returns `EPROTONOSUPPORT` or silently requires a TCP
+> connection index.  UDP RX packets are discarded in `dispatch_rx_frame()`.
+> This phase completes the UDP datagram path end-to-end, unblocking DNS (5F)
+> and every future connectionless protocol (NTP, mDNS, game networking).
+
+#### 5E.1: Per-Socket UDP Receive Buffer
+
+- [ ] **5E.1a** Define `UdpDatagram` struct in `drivers/src/net/socket.rs`:
+  - `{ src_ip: [u8; 4], src_port: u16, len: u16, data: [u8; UDP_DGRAM_MAX] }`
+  - `UDP_DGRAM_MAX_PAYLOAD = 1472` (MTU 1500 − IPv4 header 20 − UDP header 8)
+- [ ] **5E.1b** Add `UdpReceiveQueue` per socket:
+  - Fixed ring of 16 `UdpDatagram` slots (statically sized, no heap allocation)
+  - `push()` drops oldest on overflow (UDP is unreliable by design)
+  - `pop() -> Option<&UdpDatagram>` for consumer
+  - `is_empty()` / `len()` for poll readiness
+
+#### 5E.2: UDP RX Dispatch
+
+- [ ] **5E.2a** Implement UDP header parsing in `drivers/src/net/mod.rs`:
+  - `parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])>` — returns (src_port, dst_port, udp_payload)
+  - Validate minimum 8-byte header, length field ≤ payload length
+- [ ] **5E.2b** Wire `IPPROTO_UDP` arm in `dispatch_rx_frame()` (`virtio_net.rs`):
+  - Replace the no-op `let _ = (src_ip, dst_ip, ip_payload)` with real dispatch
+  - Parse UDP header from `ip_payload`
+  - Look up bound socket by `(dst_ip, dst_port)` in socket table
+  - Enqueue `UdpDatagram { src_ip, src_port, data }` into socket's receive queue
+  - Wake socket's `recv_wq` wait queue
+- [ ] **5E.2c** Add UDP port→socket lookup to `SocketTable`:
+  - `find_udp_socket(dst_ip: [u8; 4], dst_port: u16) -> Option<u32>` (socket index)
+  - Wildcard match: bound to `0.0.0.0` matches any local IP
+  - Only searches `SOCK_DGRAM` sockets in `Bound` or `Connected` state
+
+#### 5E.3: Generic UDP Transmit
+
+- [ ] **5E.3a** Factor `transmit_dhcp_packet()` into generic `transmit_udp_packet()` in `virtio_net.rs`:
+  - `pub fn transmit_udp_packet(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -> bool`
+  - Builds Ethernet + IPv4 + UDP headers (same frame layout as current DHCP path)
+  - ARP-resolves destination MAC via existing ARP table (gateway MAC for non-local destinations, broadcast for `255.255.255.255`)
+  - Rewrite `transmit_dhcp_packet()` as a thin wrapper calling `transmit_udp_packet()`
+- [ ] **5E.3b** Add UDP checksum calculation in `net/mod.rs`:
+  - `udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp_header: &[u8], payload: &[u8]) -> u16`
+  - IPv4 pseudo-header + UDP header + payload (same one's-complement accumulator as TCP/IPv4)
+  - DHCP currently sends checksum=0 (optional per RFC 768); real UDP sockets should compute it
+
+#### 5E.4: `sendto()` / `recvfrom()` Syscalls
+
+- [ ] **5E.4a** Define `SYSCALL_SENDTO` and `SYSCALL_RECVFROM` in `abi/src/syscall.rs`:
+  - `SYSCALL_SENDTO`: `(sock_idx, buf_ptr, len, flags, dest_addr: *const SockAddrIn)` → bytes sent or negative errno
+  - `SYSCALL_RECVFROM`: `(sock_idx, buf_ptr, len, flags, src_addr: *mut SockAddrIn)` → bytes received or negative errno
+- [ ] **5E.4b** Implement `socket_sendto()` in `drivers/src/net/socket.rs`:
+  - Validate socket is `SOCK_DGRAM` and bound (or auto-bind to ephemeral port 49152–65535)
+  - Build UDP packet via `transmit_udp_packet()` with destination from `SockAddrIn`
+  - Return payload length on success, `ERRNO_ENETUNREACH` if NIC not ready
+- [ ] **5E.4c** Implement `socket_recvfrom()` in `drivers/src/net/socket.rs`:
+  - Dequeue from socket's `UdpReceiveQueue`
+  - If empty and blocking: `recv_wq.wait_event(|| !queue.is_empty())`
+  - If empty and non-blocking: return `ERRNO_EAGAIN`
+  - Respect `SO_RCVTIMEO` via `wait_event_timeout()`
+  - Fill `src_addr` with sender's IP and port
+  - Return payload length
+- [ ] **5E.4d** Wire handlers in `core/src/syscall/net_handlers.rs`:
+  - Dispatch `SYSCALL_SENDTO` → `socket_sendto()`
+  - Dispatch `SYSCALL_RECVFROM` → `socket_recvfrom()`
+- [ ] **5E.4e** Add userland wrappers in `userland/src/syscall/`:
+  - `sendto(sock, buf, len, flags, addr) -> isize`
+  - `recvfrom(sock, buf, len, flags, addr) -> isize`
+
+#### 5E.5: UDP-Aware `send()` / `recv()` / `connect()`
+
+- [ ] **5E.5a** Extend `socket_connect()` for `SOCK_DGRAM`:
+  - Remove the `if sock.sock_type != SOCK_STREAM` early return
+  - Set `remote_ip` / `remote_port` as default destination (POSIX semantics)
+  - State → `Connected` (allows `send()`/`recv()` without specifying address)
+  - No handshake, no packets sent — purely local state change
+- [ ] **5E.5b** Extend `socket_send()` for connected UDP:
+  - If `sock_type == SOCK_DGRAM && state == Connected`: send to stored `remote_ip:remote_port`
+  - Delegate to `transmit_udp_packet()`
+- [ ] **5E.5c** Extend `socket_recv()` for UDP:
+  - If `sock_type == SOCK_DGRAM`: dequeue from `UdpReceiveQueue` (discard source address)
+  - Connected UDP only accepts datagrams from the connected peer (POSIX filtering)
+
+#### 5E.6: `poll()` Readiness for UDP Sockets
+
+- [ ] **5E.6a** Extend `socket_poll()` for `SOCK_DGRAM`:
+  - `POLLIN`: UDP receive queue non-empty
+  - `POLLOUT`: always ready (UDP has no send backpressure)
+  - `POLLERR` / `POLLHUP`: socket error state
+
+#### Phase 5E Test Coverage
+
+- [ ] **5E.T1** UDP receive buffer: push/pop, overflow drops oldest, empty returns None
+- [ ] **5E.T2** UDP RX dispatch: packet to bound port delivered, unbound port silently dropped
+- [ ] **5E.T3** Generic UDP TX: construct frame, verify IPv4/UDP headers, checksum validation
+- [ ] **5E.T4** sendto/recvfrom roundtrip: send datagram, receive response, verify src_addr populated
+- [ ] **5E.T5** Connected UDP: `connect()` sets peer, `send()` uses default dest, `recv()` filters by peer
+- [ ] **5E.T6** poll() readiness: `POLLIN` set after enqueue, clear after dequeue
+- [ ] **5E.T7** Non-blocking: `recvfrom()` returns `EAGAIN` on empty queue
+- [ ] **5E.T8** Auto-bind: `sendto()` without prior `bind()` assigns ephemeral port
+- [ ] **5E.T9** DHCP regression: DHCP still works after `transmit_udp_packet()` refactor
+- [ ] **5E.T10** Regression: all existing TCP/socket tests still pass
+
+### 5F: DNS Client
+
+> Implements DNS name resolution on top of the UDP datagram infrastructure from
+> Phase 5E.  The resolver lives in-kernel (matching the DHCP client pattern) with
+> a `SYSCALL_RESOLVE` interface for userland.  Future-compatible: can migrate to a
+> userspace libc `getaddrinfo()` once SlopOS's C runtime matures.
+
+#### 5F.1: DNS Wire Protocol
+
+- [ ] **5F.1a** Create `drivers/src/net/dns.rs`:
+  - `DnsHeader` struct (12 bytes): `id`, `flags`, `qdcount`, `ancount`, `nscount`, `arcount`
+  - `DnsFlags`: QR (query/response), RD (recursion desired), RA (recursion available), RCODE
+  - `DnsType` enum: `A = 1`, `CNAME = 5` (AAAA deferred — SlopOS is IPv4-only)
+  - `DnsClass::IN = 1`
+  - `DnsRcode` enum: `NoError = 0`, `ServFail = 2`, `NXDomain = 3`, `Refused = 5`
+- [ ] **5F.1b** Implement DNS name encoding:
+  - `dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize>`
+  - Length-prefixed labels: `"example.com"` → `[7, 'e','x','a','m','p','l','e', 3, 'c','o','m', 0]`
+  - Validate: no empty labels, each label ≤ 63 bytes, total name ≤ 253 bytes
+- [ ] **5F.1c** Implement DNS query construction:
+  - `dns_build_query(id: u16, hostname: &[u8], qtype: DnsType, buf: &mut [u8]) -> Option<usize>`
+  - Header: QR=0, OPCODE=0 (standard query), RD=1 (recursion desired), QDCOUNT=1
+  - Question section: encoded name + QTYPE + QCLASS(IN)
+
+#### 5F.2: DNS Response Parsing
+
+- [ ] **5F.2a** Implement DNS name decoding with compression pointer support:
+  - `dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(usize, usize)>`
+  - Label types: regular (0x00–0x3F length prefix), compression pointer (0xC0 high bits)
+  - Pointer loop detection: cap pointer follows at 16 to prevent infinite loops
+  - Returns `(decoded_name_len, wire_bytes_consumed)`
+- [ ] **5F.2b** Implement DNS answer section parsing:
+  - `dns_parse_response(packet: &[u8], expected_id: u16) -> Option<DnsResponse>`
+  - Validate: QR=1, ID matches query, RCODE == NoError
+  - Parse answer RRs: skip name, read TYPE, CLASS, TTL, RDLENGTH, RDATA
+  - Extract A records: RDATA = 4-byte IPv4 address
+  - Chase CNAME records: if answer is CNAME, follow the canonical name to its A record (max 8 hops)
+  - `DnsResponse { addr: [u8; 4], ttl: u32 }`
+
+#### 5F.3: Resolver
+
+- [ ] **5F.3a** Implement `dns_resolve(hostname: &[u8]) -> Option<[u8; 4]>`:
+  - Get DNS server IP from `VirtioNetState.dns` (DHCP-provided)
+  - Check cache first (`dns_cache_lookup()`)
+  - Build A-record query via `dns_build_query()`
+  - Send via `transmit_udp_packet()` (src port = ephemeral, dst port = 53)
+  - Wait for response with timeout via `DNS_RX_EVENT: QueueEvent` (same pattern as DHCP)
+  - Parse response via `dns_parse_response()`
+  - Cache result via `dns_cache_insert()`
+  - Retry once on timeout, then return `None`
+- [ ] **5F.3b** Wire DNS RX in `dispatch_rx_frame()`:
+  - When UDP src_port == 53: deliver payload to `DNS_RX_EVENT` + stash in `DNS_RX_BUF`
+  - Follows the existing `DHCP_RX_EVENT` pattern
+- [ ] **5F.3c** Implement DNS cache:
+  - 16-entry array: `DnsCacheEntry { hostname_hash: u32, addr: [u8; 4], expiry_ms: u64 }`
+  - TTL-based expiry via `clock::uptime_ms()`
+  - LRU eviction when full (track last-used timestamp)
+  - `dns_cache_lookup(hostname) -> Option<[u8; 4]>`
+  - `dns_cache_insert(hostname, addr, ttl_secs)`
+  - `dns_cache_flush()` for test isolation
+
+#### 5F.4: Syscall Interface
+
+- [ ] **5F.4a** Define `SYSCALL_RESOLVE` in `abi/src/syscall.rs`:
+  - `rdi` = hostname pointer (null-terminated `*const u8`)
+  - `rsi` = result pointer (`*mut [u8; 4]`)
+  - Returns 0 on success, negative errno on failure (`EHOSTUNREACH`, `ETIMEDOUT`)
+- [ ] **5F.4b** Implement handler in `core/src/syscall/net_handlers.rs`:
+  - Copy hostname from user memory (validate pointer, cap at 253 bytes)
+  - Call `dns_resolve()`, copy resolved address back to user pointer
+- [ ] **5F.4c** Add userland wrapper: `resolve(hostname: &[u8]) -> Option<[u8; 4]>` in `userland/src/syscall/`
+- [ ] **5F.4d** Add `resolve` userland command:
+  - Usage: `resolve example.com`
+  - Calls `SYSCALL_RESOLVE`, prints `example.com -> 93.184.216.34` or error message
+
+#### Phase 5F Test Coverage
+
+- [ ] **5F.T1** DNS name encoding: valid hostnames, empty label rejection, max-length enforcement
+- [ ] **5F.T2** DNS query construction: header flags, question section, wire format roundtrip
+- [ ] **5F.T3** DNS name decoding: regular labels, compression pointers, loop detection cutoff
+- [ ] **5F.T4** DNS response parsing: valid A record, CNAME chasing, RCODE error handling, ID mismatch rejection
+- [ ] **5F.T5** DNS cache: insert/lookup hit, TTL expiry miss, LRU eviction, flush
+- [ ] **5F.T6** Resolver integration: resolve known hostname via QEMU user-net DNS (10.0.2.3)
+- [ ] **5F.T7** Resolver timeout: unreachable DNS server returns `None` within timeout
+- [ ] **5F.T8** Regression: all existing TCP/socket/network tests still pass
 
 ### Phase 5 Gate
 
@@ -996,6 +1180,11 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 - [x] **GATE**: TX is fire-and-forget (no `REQUEST_TIMEOUT_MS` blocking)
 - [x] **GATE**: `recv()`/`accept()` properly sleep via wait queues
 - [x] **GATE**: `poll()` returns real socket readiness (not stubbed)
+- [ ] **GATE**: UDP sockets work end-to-end (`sendto`/`recvfrom` on `SOCK_DGRAM`)
+- [ ] **GATE**: `dispatch_rx_frame()` delivers incoming UDP packets to bound sockets
+- [ ] **GATE**: DHCP still works after `transmit_udp_packet()` refactor
+- [ ] **GATE**: DNS resolver can resolve a hostname via QEMU user-net (10.0.2.3)
+- [ ] **GATE**: `resolve` command works from the userland shell
 
 ---
 
@@ -1148,9 +1337,9 @@ Phase 2: Spinlocks ───────────┤
 Phase 3: MSI/MSI-X ──────────┤──→ Phase 4: ECAM ──→ Phase 7A: USB/xHCI
   (PCI cap parsing first)    │     (MCFG parsing)    (needs ECAM + MSI)
                               │
-Phase 5: TCP ─────────────────┤ (independent, builds on existing VirtIO net)
-  5A-5C: state machine,      │   5D: NAPI + wait queues + async I/O
-  data transfer, sockets      │   5E: DNS (optional stretch)
+Phase 5: Network ────────────┤ (independent, builds on existing VirtIO net)
+  5A-5C: TCP state machine,  │   5D: NAPI + wait queues + async I/O
+  data transfer, sockets      │   5E: UDP sockets   5F: DNS resolver
                               │
 Phase 6: PCID ────────────────┘ (independent, best after Phase 0+2)
 
@@ -1192,6 +1381,8 @@ Features that **cannot be implemented** until specific phases complete:
 | VirtIO multi-queue networking | Needs per-queue MSI-X vectors | Phase 3 (MSI-X) |
 | Full PCIe config space (4KB) | Port I/O limited to 256B | Phase 4 (ECAM) |
 | HTTP, SSH, any TCP protocol | No TCP state machine | Phase 5 (TCP) |
+| NTP, mDNS, any UDP protocol | No UDP socket send/receive | Phase 5E (UDP Sockets) |
+| DNS hostname resolution | No DNS resolver | Phase 5F (DNS) |
 | TLB-efficient context switch | PCID unused, full flush every switch | Phase 6 (PCID) |
 | USB keyboard/mouse | No xHCI driver | Phase 7A (USB) |
 | Hardware-accelerated graphics | No VirtIO GPU driver | Phase 7B |
@@ -1211,7 +1402,7 @@ Features that **cannot be implemented** until specific phases complete:
 | **Phase 2**: Spinlock Modernization | **Complete** (2C MCS deferred, `spin` removed) | 12 | 12 | — |
 | **Phase 3**: MSI/MSI-X | **Complete** (3A, 3B, 3C, 3D, 3E all done) | 27 | 27 | — |
 | **Phase 4**: PCIe ECAM | 4A+4B **Complete** | 9 | 6 | — |
-| **Phase 5**: TCP Networking | 5A+5B+5C **Complete**, 5D next | 54 | 15 | — |
+| **Phase 5**: Network Stack | 5A+5B+5C+5D **Complete**, 5E next | 97 | 46 | — |
 | **Phase 6**: PCID / TLB | Not Started | 9 | 0 | — |
 | **Phase 7**: Long-Horizon | Not Started | 16 | 0 | Phases 0–4 |
-| **Total** | | **153** | **74** | |
+| **Total** | | **196** | **105** | |
