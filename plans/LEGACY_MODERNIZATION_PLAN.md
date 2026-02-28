@@ -1091,29 +1091,29 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 #### 5F.1: DNS Wire Protocol
 
-- [ ] **5F.1a** Create `drivers/src/net/dns.rs`:
+- [x] **5F.1a** Create `drivers/src/net/dns.rs`:
   - `DnsHeader` struct (12 bytes): `id`, `flags`, `qdcount`, `ancount`, `nscount`, `arcount`
   - `DnsFlags`: QR (query/response), RD (recursion desired), RA (recursion available), RCODE
   - `DnsType` enum: `A = 1`, `CNAME = 5` (AAAA deferred — SlopOS is IPv4-only)
   - `DnsClass::IN = 1`
   - `DnsRcode` enum: `NoError = 0`, `ServFail = 2`, `NXDomain = 3`, `Refused = 5`
-- [ ] **5F.1b** Implement DNS name encoding:
+- [x] **5F.1b** Implement DNS name encoding:
   - `dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize>`
   - Length-prefixed labels: `"example.com"` → `[7, 'e','x','a','m','p','l','e', 3, 'c','o','m', 0]`
   - Validate: no empty labels, each label ≤ 63 bytes, total name ≤ 253 bytes
-- [ ] **5F.1c** Implement DNS query construction:
+- [x] **5F.1c** Implement DNS query construction:
   - `dns_build_query(id: u16, hostname: &[u8], qtype: DnsType, buf: &mut [u8]) -> Option<usize>`
   - Header: QR=0, OPCODE=0 (standard query), RD=1 (recursion desired), QDCOUNT=1
   - Question section: encoded name + QTYPE + QCLASS(IN)
 
 #### 5F.2: DNS Response Parsing
 
-- [ ] **5F.2a** Implement DNS name decoding with compression pointer support:
+- [x] **5F.2a** Implement DNS name decoding with compression pointer support:
   - `dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(usize, usize)>`
   - Label types: regular (0x00–0x3F length prefix), compression pointer (0xC0 high bits)
   - Pointer loop detection: cap pointer follows at 16 to prevent infinite loops
   - Returns `(decoded_name_len, wire_bytes_consumed)`
-- [ ] **5F.2b** Implement DNS answer section parsing:
+- [x] **5F.2b** Implement DNS answer section parsing:
   - `dns_parse_response(packet: &[u8], expected_id: u16) -> Option<DnsResponse>`
   - Validate: QR=1, ID matches query, RCODE == NoError
   - Parse answer RRs: skip name, read TYPE, CLASS, TTL, RDLENGTH, RDATA
@@ -1123,7 +1123,7 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 #### 5F.3: Resolver
 
-- [ ] **5F.3a** Implement `dns_resolve(hostname: &[u8]) -> Option<[u8; 4]>`:
+- [x] **5F.3a** Implement `dns_resolve(hostname: &[u8]) -> Option<[u8; 4]>`:
   - Get DNS server IP from `VirtioNetState.dns` (DHCP-provided)
   - Check cache first (`dns_cache_lookup()`)
   - Build A-record query via `dns_build_query()`
@@ -1132,10 +1132,10 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
   - Parse response via `dns_parse_response()`
   - Cache result via `dns_cache_insert()`
   - Retry once on timeout, then return `None`
-- [ ] **5F.3b** Wire DNS RX in `dispatch_rx_frame()`:
+- [x] **5F.3b** Wire DNS RX in `dispatch_rx_frame()`:
   - When UDP src_port == 53: deliver payload to `DNS_RX_EVENT` + stash in `DNS_RX_BUF`
   - Follows the existing `DHCP_RX_EVENT` pattern
-- [ ] **5F.3c** Implement DNS cache:
+- [x] **5F.3c** Implement DNS cache:
   - 16-entry array: `DnsCacheEntry { hostname_hash: u32, addr: [u8; 4], expiry_ms: u64 }`
   - TTL-based expiry via `clock::uptime_ms()`
   - LRU eviction when full (track last-used timestamp)
@@ -1145,28 +1145,28 @@ Missing: **TCP** — the protocol that powers HTTP, SSH, DNS over TCP, and nearl
 
 #### 5F.4: Syscall Interface
 
-- [ ] **5F.4a** Define `SYSCALL_RESOLVE` in `abi/src/syscall.rs`:
+- [x] **5F.4a** Define `SYSCALL_RESOLVE` in `abi/src/syscall.rs`:
   - `rdi` = hostname pointer (null-terminated `*const u8`)
   - `rsi` = result pointer (`*mut [u8; 4]`)
   - Returns 0 on success, negative errno on failure (`EHOSTUNREACH`, `ETIMEDOUT`)
-- [ ] **5F.4b** Implement handler in `core/src/syscall/net_handlers.rs`:
+- [x] **5F.4b** Implement handler in `core/src/syscall/net_handlers.rs`:
   - Copy hostname from user memory (validate pointer, cap at 253 bytes)
   - Call `dns_resolve()`, copy resolved address back to user pointer
-- [ ] **5F.4c** Add userland wrapper: `resolve(hostname: &[u8]) -> Option<[u8; 4]>` in `userland/src/syscall/`
-- [ ] **5F.4d** Add `resolve` userland command:
+- [x] **5F.4c** Add userland wrapper: `resolve(hostname: &[u8]) -> Option<[u8; 4]>` in `userland/src/syscall/`
+- [x] **5F.4d** Add `resolve` userland command:
   - Usage: `resolve example.com`
   - Calls `SYSCALL_RESOLVE`, prints `example.com -> 93.184.216.34` or error message
 
 #### Phase 5F Test Coverage
 
-- [ ] **5F.T1** DNS name encoding: valid hostnames, empty label rejection, max-length enforcement
-- [ ] **5F.T2** DNS query construction: header flags, question section, wire format roundtrip
-- [ ] **5F.T3** DNS name decoding: regular labels, compression pointers, loop detection cutoff
-- [ ] **5F.T4** DNS response parsing: valid A record, CNAME chasing, RCODE error handling, ID mismatch rejection
-- [ ] **5F.T5** DNS cache: insert/lookup hit, TTL expiry miss, LRU eviction, flush
-- [ ] **5F.T6** Resolver integration: resolve known hostname via QEMU user-net DNS (10.0.2.3)
-- [ ] **5F.T7** Resolver timeout: unreachable DNS server returns `None` within timeout
-- [ ] **5F.T8** Regression: all existing TCP/socket/network tests still pass
+- [x] **5F.T1** DNS name encoding: valid hostnames, empty label rejection, max-length enforcement
+- [x] **5F.T2** DNS query construction: header flags, question section, wire format roundtrip
+- [x] **5F.T3** DNS name decoding: regular labels, compression pointers, loop detection cutoff
+- [x] **5F.T4** DNS response parsing: valid A record, CNAME chasing, RCODE error handling, ID mismatch rejection
+- [x] **5F.T5** DNS cache: insert/lookup hit, TTL expiry miss, LRU eviction, flush
+- [x] **5F.T6** Resolver integration: resolve known hostname via QEMU user-net DNS (10.0.2.3)
+- [x] **5F.T7** Resolver timeout: unreachable DNS server returns `None` within timeout
+- [x] **5F.T8** Regression: all existing TCP/socket/network tests still pass
 
 ### Phase 5 Gate
 
