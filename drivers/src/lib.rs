@@ -1,6 +1,8 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 pub mod apic;
 #[cfg(feature = "itests")]
 pub mod apic_timer_tests;
@@ -24,6 +26,8 @@ pub mod napi_tests;
 pub mod net;
 #[cfg(feature = "itests")]
 pub mod net_types_tests;
+#[cfg(feature = "itests")]
+pub mod packetbuf_tests;
 pub mod pci;
 #[cfg(feature = "itests")]
 pub mod pci_cap_tests;
