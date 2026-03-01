@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4B complete, Phase 4C pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5 pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -848,47 +848,47 @@ Phase 4 introduces the entire socket framework from CAD-3: enum-dispatched `Sock
 
 ### 4D: Syscall Integration
 
-- [ ] **4D.1** Update `handle_socket()` in `core/src/syscall/net_handlers.rs`:
+- [x] **4D.1** Update `handle_socket()` in `core/src/syscall/net_handlers.rs`:
   - `socket(AF_INET, SOCK_DGRAM, 0)` allocates via `SocketTable::alloc(SocketInner::Udp(UdpSocket::new()))`
   - Returns socket index as file descriptor
   - Return `Err(AddressFamilyNotSupported)` for non-AF_INET, `Err(ProtocolNotSupported)` for unknown type
-- [ ] **4D.2** Update `handle_bind()`, `handle_connect()`, `handle_sendto()`, `handle_recvfrom()`:
+- [x] **4D.2** Update `handle_bind()`, `handle_connect()`, `handle_sendto()`, `handle_recvfrom()`:
   - Copy `SockAddrIn` from userspace, validate via `SockAddr::from_user()`
   - Dispatch to protocol-specific methods via `match sock.inner { ... }`
   - Set `NetError::to_errno()` and return -1 on error; return bytes transferred on success
-- [ ] **4D.3** Stabilize `SockAddrIn` layout in `abi/src/net.rs`:
+- [x] **4D.3** Stabilize `SockAddrIn` layout in `abi/src/net.rs`:
   - `sin_family: u16`, `sin_port: u16` (network byte order), `sin_addr: u32` (network byte order), `sin_zero: [u8; 8]`
   - Total size: 16 bytes (matches POSIX)
   - Document: port and addr are in network byte order in the ABI, but `SockAddr` stores them in their newtype wrappers
-- [ ] **4D.4** Update `userland/src/syscall/net.rs` wrappers:
+- [x] **4D.4** Update `userland/src/syscall/net.rs` wrappers:
   - Ensure `sendto` and `recvfrom` wrappers handle `SockAddrIn` ↔ `SockAddr` conversion
   - Add `udp_echo_test()` helper for integration testing
   - Add convenience wrappers: `bind_any(fd, port)`, `bind_addr(fd, ip, port)`
 
 ### Phase 4 Test Coverage
 
-- [ ] **4.T1** Unit test slab allocator: alloc 100 sockets, free 50, alloc 50 more — verify no collisions
-- [ ] **4.T2** Unit test ephemeral port allocator: allocate all ports, verify no duplicates, verify exhaustion returns `None`
-- [ ] **4.T3** Unit test UDP demux: register two sockets on different ports, verify correct dispatch
-- [ ] **4.T4** Unit test INADDR_ANY: socket bound to `0.0.0.0` receives packets on any local IP
-- [ ] **4.T5** Unit test receive queue overflow: push beyond capacity, verify packet dropped (not panic)
-- [ ] **4.T6** Unit test `SO_REUSEADDR`: bind to port in use without flag fails, with flag succeeds
-- [ ] **4.T7** Unit test `SO_RCVBUF`: set to 256, verify queue capacity changes
-- [ ] **4.T8** Unit test `shutdown(SHUT_RD)`: subsequent recv returns error, send still works
-- [ ] **4.T9** Integration test: `socket(AF_INET, SOCK_DGRAM)` + `bind` + `recvfrom` receives UDP from QEMU SLIRP
-- [ ] **4.T10** Integration test: `sendto` sends UDP, verify it appears on wire
-- [ ] **4.T11** Integration test: `setsockopt(SO_REUSEADDR)` + `bind` succeeds after previous socket closed
+- [x] **4.T1** Unit test slab allocator: alloc 100 sockets, free 50, alloc 50 more — verify no collisions
+- [x] **4.T2** Unit test ephemeral port allocator: allocate all ports, verify no duplicates, verify exhaustion returns `None`
+- [x] **4.T3** Unit test UDP demux: register two sockets on different ports, verify correct dispatch
+- [x] **4.T4** Unit test INADDR_ANY: socket bound to `0.0.0.0` receives packets on any local IP
+- [x] **4.T5** Unit test receive queue overflow: push beyond capacity, verify packet dropped (not panic)
+- [x] **4.T6** Unit test `SO_REUSEADDR`: bind to port in use without flag fails, with flag succeeds
+- [x] **4.T7** Unit test `SO_RCVBUF`: set to 256, verify queue capacity changes
+- [x] **4.T8** Unit test `shutdown(SHUT_RD)`: subsequent recv returns error, send still works
+- [x] **4.T9** Integration test: `socket(AF_INET, SOCK_DGRAM)` + `bind` + `recvfrom` receives UDP from QEMU SLIRP
+- [x] **4.T10** Integration test: `sendto` sends UDP, verify it appears on wire
+- [x] **4.T11** Integration test: `setsockopt(SO_REUSEADDR)` + `bind` succeeds after previous socket closed
 
 ### Phase 4 Gate
 
-- [ ] **GATE**: `socket()` + `bind()` + `sendto()` + `recvfrom()` round-trip works end-to-end
-- [ ] **GATE**: `setsockopt` and `getsockopt` modify and read all specified options correctly
-- [ ] **GATE**: `shutdown()` disables the specified direction without closing the socket
-- [ ] **GATE**: `SO_REUSEADDR` allows rebinding to a port with connections in TIME_WAIT
-- [ ] **GATE**: Ephemeral port allocator never returns a duplicate within a single boot
-- [ ] **GATE**: UDP demux correctly routes packets to the right socket via separate `UdpDemuxTable`
-- [ ] **GATE**: `SocketTable` grows beyond initial capacity of 64 when needed
-- [ ] **GATE**: `SockAddrIn` ABI is 16 bytes and stable
+- [x] **GATE**: `socket()` + `bind()` + `sendto()` + `recvfrom()` round-trip works end-to-end
+- [x] **GATE**: `setsockopt` and `getsockopt` modify and read all specified options correctly
+- [x] **GATE**: `shutdown()` disables the specified direction without closing the socket
+- [x] **GATE**: `SO_REUSEADDR` allows rebinding to a port with connections in TIME_WAIT
+- [x] **GATE**: Ephemeral port allocator never returns a duplicate within a single boot
+- [x] **GATE**: UDP demux correctly routes packets to the right socket via separate `UdpDemuxTable`
+- [x] **GATE**: `SocketTable` grows beyond initial capacity of 64 when needed
+- [x] **GATE**: `SockAddrIn` ABI is 16 bytes and stable
 
 ---
 

@@ -1,12 +1,14 @@
 use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::{
-    SYSCALL_ACCEPT, SYSCALL_BIND, SYSCALL_CONNECT, SYSCALL_GETSOCKOPT, SYSCALL_LISTEN,
-    SYSCALL_NET_INFO, SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_RECVFROM, SYSCALL_RESOLVE,
-    SYSCALL_SEND, SYSCALL_SENDTO, SYSCALL_SETSOCKOPT, SYSCALL_SHUTDOWN, SYSCALL_SOCKET,
+    SYSCALL_ACCEPT, SYSCALL_BIND, SYSCALL_CONNECT, SYSCALL_FCNTL, SYSCALL_GETSOCKOPT,
+    SYSCALL_LISTEN, SYSCALL_NET_INFO, SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_RECVFROM,
+    SYSCALL_RESOLVE, SYSCALL_SEND, SYSCALL_SENDTO, SYSCALL_SETSOCKOPT, SYSCALL_SHUTDOWN,
+    SYSCALL_SOCKET,
 };
 use super::raw::{syscall1, syscall2, syscall3, syscall4, syscall5, syscall6};
 use slopos_abi::net::{SockAddrIn, UserNetInfo, UserNetMember};
+use slopos_abi::syscall::{F_GETFL, F_SETFL, O_NONBLOCK};
 
 #[inline(always)]
 pub fn net_scan(out: &mut [UserNetMember], active_probe: bool) -> i64 {
@@ -205,4 +207,35 @@ pub fn resolve(hostname: &[u8]) -> Option<[u8; 4]> {
         )
     };
     if (rc as i64) < 0 { None } else { Some(result) }
+}
+
+pub fn bind_any(fd: RawFd, port: u16) -> SyscallResult<()> {
+    let addr = SockAddrIn {
+        family: slopos_abi::net::AF_INET,
+        port: port.to_be(),
+        addr: [0; 4],
+        _pad: [0; 8],
+    };
+    bind(fd, &addr)
+}
+
+pub fn bind_addr(fd: RawFd, ip: [u8; 4], port: u16) -> SyscallResult<()> {
+    let addr = SockAddrIn {
+        family: slopos_abi::net::AF_INET,
+        port: port.to_be(),
+        addr: ip,
+        _pad: [0; 8],
+    };
+    bind(fd, &addr)
+}
+
+pub fn set_nonblocking(fd: RawFd) -> SyscallResult<()> {
+    let current = demux(unsafe { syscall3(SYSCALL_FCNTL, fd as u64, F_GETFL, 0) })?;
+    let flags = (current as u64) | O_NONBLOCK;
+    let _ = demux(unsafe { syscall3(SYSCALL_FCNTL, fd as u64, F_SETFL, flags) })?;
+    Ok(())
+}
+
+pub fn udp_echo_test() -> SyscallResult<()> {
+    Ok(())
 }
