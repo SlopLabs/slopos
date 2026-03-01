@@ -206,46 +206,20 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
 // Stdin reading
 // ---------------------------------------------------------------------------
 
-/// Result of attempting to read a line from stdin.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum StdinRead {
-    /// A complete line was read with `n` bytes (excluding the newline).
-    /// `n == 0` means the user pressed Enter on an empty line.
-    Line(usize),
-    /// The user pressed Ctrl+C.
-    Interrupt,
-}
-
-/// Read one line from stdin via the TTY subsystem, blocking byte-by-byte.
+/// Read one line from stdin via the TTY line-discipline.
 ///
-/// SlopOS console file descriptors do not support fd-based reads
-/// (`fs::read_slice(0, ...)` returns 0 immediately for console fds),
-/// so we use `tty::read_char()` which goes through the blocking
-/// `SYSCALL_READ_CHAR` path instead.
+/// Uses `tty::read()` (`SYSCALL_READ` → `tty_read_line`) which provides:
+/// - **Character echo** so the user can see what they type,
+/// - **Backspace handling** for in-line editing,
+/// - **Blocking** until the user presses Enter.
 ///
-/// Returns [`StdinRead::Line(n)`] when a complete line is available
-/// (newline consumed but not stored), or [`StdinRead::Interrupt`] if
-/// the user pressed Ctrl+C (0x03).
-fn read_line_from_stdin(buf: &mut [u8]) -> StdinRead {
-    let mut pos = 0usize;
-    while pos < buf.len() {
-        let ch = tty::read_char();
-        if ch < 0 {
-            // Read error — treat as EOF (return what we have).
-            return StdinRead::Line(pos);
-        }
-        let byte = ch as u8;
-        if byte == 0x03 {
-            // Ctrl+C — signal interrupt regardless of buffered data.
-            return StdinRead::Interrupt;
-        }
-        if byte == b'\n' || byte == b'\r' {
-            return StdinRead::Line(pos);
-        }
-        buf[pos] = byte;
-        pos += 1;
-    }
-    StdinRead::Line(pos)
+/// Returns the number of bytes read (excluding the newline).  Returns 0
+/// when the user presses Enter on an empty line.  Ctrl+C is handled by
+/// `tty_handle_input_char` which sends `SIGINT` to the foreground process
+/// group; the character itself is discarded from the line buffer.
+fn read_line_from_stdin(buf: &mut [u8]) -> usize {
+    let n = tty::read(buf);
+    if n < 0 { 0 } else { n as usize }
 }
 
 /// Check for Ctrl+C (0x03) via non-blocking TTY read.

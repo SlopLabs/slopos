@@ -7,8 +7,8 @@ use crate::syscall::{
 };
 
 use super::{
-    NcConfig, StdinRead, check_interrupt, read_line_from_stdin, verbose_addr, verbose_bytes,
-    verbose_msg, write_out,
+    NcConfig, check_interrupt, read_line_from_stdin, verbose_addr, verbose_bytes, verbose_msg,
+    write_out,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,17 +72,10 @@ pub(super) fn tcp_client(config: &NcConfig) {
 
     // Main I/O loop (half-duplex: send → poll receive → repeat)
     loop {
-        // Send phase: read one line from stdin (blocks until Enter/Ctrl+C).
-        // Ctrl+C detection is integrated into read_line_from_stdin, so we
-        // do NOT call check_interrupt() here — both consume the same TTY buffer.
-        let n = match read_line_from_stdin(&mut line_buf) {
-            StdinRead::Interrupt => {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-            StdinRead::Line(n) => n,
-        };
+        // Send phase: read one line from stdin (blocks until Enter).
+        // tty::read() provides character echo and line editing.  Ctrl+C
+        // is delivered as SIGINT by the kernel TTY layer.
+        let n = read_line_from_stdin(&mut line_buf);
 
         // Send via TCP stream (skip empty lines)
         if n > 0 {
@@ -283,28 +276,16 @@ pub(super) fn tcp_listen(config: &NcConfig) {
                     verbose_bytes(config, b"received ", received);
 
                     // Reply: read one line from stdin and send back
-                    match read_line_from_stdin(&mut line_buf) {
-                        StdinRead::Interrupt => {
-                            verbose_msg(config, b"interrupted");
-                            let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                            exit_with_code(0);
-                        }
-                        StdinRead::Line(0) => {
-                            // Empty reply (just Enter) — receive-only mode
-                            verbose_msg(config, b"empty reply, receive-only");
-                        }
-                        StdinRead::Line(reply_n) => {
-                            match net::send(client_fd, &line_buf[..reply_n], 0) {
-                                Ok(sent) => {
-                                    verbose_bytes(config, b"sent ", sent);
-                                }
-                                Err(_) => {
-                                    write_out(b"nc: send failed (broken pipe)\n");
-                                    let _ =
-                                        net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                                    break;
-                                }
+                    let reply_n = read_line_from_stdin(&mut line_buf);
+                    if reply_n > 0 {
+                        match net::send(client_fd, &line_buf[..reply_n], 0) {
+                            Ok(sent) => {
+                                verbose_bytes(config, b"sent ", sent);
+                            }
+                            Err(_) => {
+                                write_out(b"nc: send failed (broken pipe)\n");
+                                let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
+                                break;
                             }
                         }
                     }
