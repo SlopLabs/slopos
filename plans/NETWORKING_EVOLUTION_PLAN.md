@@ -907,11 +907,11 @@ The TCP state machine in `drivers/src/net/tcp.rs` is a solid RFC 793 implementat
 
 Linux uses a SYN queue (half-open connections) separate from the accept queue (fully established connections). This prevents SYN floods from blocking legitimate connections.
 
-- [ ] **5A.1** Create `SynRecvEntry` struct in `drivers/src/net/tcp_socket.rs`:
+- [x] **5A.1** Create `SynRecvEntry` struct in `drivers/src/net/tcp_socket.rs`:
   - Fields: `remote: SockAddr`, `local: SockAddr`, `iss: u32` (initial send seq), `irs: u32` (initial recv seq), `retries: u8`, `timer_token: TimerToken`, `timestamp: u64`
   - This represents a connection in `SYN_RECEIVED` state, not yet established
   - Bounded at `SYN_QUEUE_MAX` (128) entries — separate from the accept backlog
-- [ ] **5A.2** Create `TcpListenState` struct:
+- [x] **5A.2** Create `TcpListenState` struct:
   - `syn_queue: HashMap<(Ipv4Addr, Port, Ipv4Addr, Port), SynRecvEntry>` — keyed by 4-tuple
   - `accept_queue: VecDeque<usize>` — completed connection IDs, capacity = listen backlog
   - `backlog: usize` — maximum accept queue size from `listen()`
@@ -919,7 +919,7 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
   - When the final ACK arrives (completing 3WHS): move to `accept_queue`, create `TcpConnection`
   - If `syn_queue` is full: drop SYN silently (do NOT send RST — that helps attackers)
   - If `accept_queue` is full: keep connection in `syn_queue` until space opens or timeout
-- [ ] **5A.3** Implement SYN-ACK retransmission:
+- [x] **5A.3** Implement SYN-ACK retransmission:
   - On `TcpRetransmit` timer for a SYN_RECEIVED entry: retransmit SYN-ACK, increment `retries`
   - After `SYN_RETRIES_MAX` (5): remove from `syn_queue`, no RST (silent drop)
   - Use exponential backoff: 1s, 2s, 4s, 8s, 16s

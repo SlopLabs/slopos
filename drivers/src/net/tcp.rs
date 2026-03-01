@@ -840,7 +840,7 @@ pub fn seq_ge(a: u32, b: u32) -> bool {
 /// recommends a clock-based or hash-based ISN; this is a minimal starting point).
 static ISN_COUNTER: AtomicU32 = AtomicU32::new(0x4F50_534C); // "OPSL"
 
-fn generate_isn() -> u32 {
+pub(crate) fn generate_isn() -> u32 {
     ISN_COUNTER.fetch_add(64000, Ordering::Relaxed)
 }
 

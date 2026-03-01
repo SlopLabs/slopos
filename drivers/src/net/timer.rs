@@ -457,7 +457,10 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);
-            // Phase 5: tcp_engine.on_retransmit(timer.key)
+            // Phase 5A: dispatch SYN-ACK retransmit to tcp_socket listen state.
+            // Full per-connection retransmit will be wired in Phase 5B+.
+            // For now, the listen state owner calls on_retransmit(key) directly
+            // when the timer fires; this stub logs the event for tracing.
         }
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);

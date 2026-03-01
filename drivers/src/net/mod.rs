@@ -23,6 +23,9 @@ pub mod socket;
 #[cfg(feature = "itests")]
 pub mod socket_option_tests;
 pub mod tcp;
+pub mod tcp_socket;
+#[cfg(feature = "itests")]
+pub mod tcp_socket_tests;
 pub mod timer;
 pub mod udp;
 #[cfg(feature = "itests")]
