@@ -131,6 +131,42 @@ fn socket_recvfrom_adapter(
     socket::socket_recvfrom(sock_idx, buf, len, src_ip, src_port)
 }
 
+fn socket_setsockopt_adapter(
+    sock_idx: u32,
+    level: i32,
+    optname: i32,
+    val: *const u8,
+    len: usize,
+) -> i32 {
+    if val.is_null() && len > 0 {
+        return -14;
+    }
+    let slice = if len > 0 {
+        unsafe { core::slice::from_raw_parts(val, len) }
+    } else {
+        &[]
+    };
+    socket::socket_setsockopt(sock_idx, level, optname, slice)
+}
+
+fn socket_getsockopt_adapter(
+    sock_idx: u32,
+    level: i32,
+    optname: i32,
+    out: *mut u8,
+    len: usize,
+) -> i32 {
+    if out.is_null() && len > 0 {
+        return -14;
+    }
+    let slice = if len > 0 {
+        unsafe { core::slice::from_raw_parts_mut(out, len) }
+    } else {
+        &mut []
+    };
+    socket::socket_getsockopt(sock_idx, level, optname, slice)
+}
+
 static SOCKET_SERVICES: SocketServices = SocketServices {
     create: socket::socket_create,
     bind: socket::socket_bind,
@@ -145,6 +181,9 @@ static SOCKET_SERVICES: SocketServices = SocketServices {
     poll_readable: socket::socket_poll_readable,
     poll_writable: socket::socket_poll_writable,
     set_nonblocking: socket::socket_set_nonblocking,
+    setsockopt: socket_setsockopt_adapter,
+    getsockopt: socket_getsockopt_adapter,
+    shutdown: socket::socket_shutdown,
 };
 
 // =============================================================================

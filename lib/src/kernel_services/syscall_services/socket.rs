@@ -19,5 +19,8 @@ crate::define_service! {
         poll_readable(sock_idx: u32) -> u32;
         poll_writable(sock_idx: u32) -> u32;
         set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32;
+        setsockopt(sock_idx: u32, level: i32, optname: i32, val: *const u8, len: usize) -> i32;
+        getsockopt(sock_idx: u32, level: i32, optname: i32, out: *mut u8, len: usize) -> i32;
+        shutdown(sock_idx: u32, how: i32) -> i32;
     }
 }
