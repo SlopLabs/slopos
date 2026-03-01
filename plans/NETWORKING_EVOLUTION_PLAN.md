@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A complete, Phase 4B pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4B complete, Phase 4C pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -777,34 +777,34 @@ Phase 4 introduces the entire socket framework from CAD-3: enum-dispatched `Sock
 
 ### 4B: setsockopt / getsockopt / shutdown Syscalls
 
-- [ ] **4B.1** Add `SYSCALL_SETSOCKOPT` to `abi/src/syscall.rs`:
+- [x] **4B.1** Add `SYSCALL_SETSOCKOPT` to `abi/src/syscall.rs`:
   - Signature: `setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: u32) -> i32`
   - Levels: `SOL_SOCKET = 1`, `IPPROTO_TCP = 6`
   - Socket-level options: `SO_REUSEADDR = 2`, `SO_RCVBUF = 8`, `SO_SNDBUF = 7`, `SO_RCVTIMEO = 20`, `SO_SNDTIMEO = 21`, `SO_KEEPALIVE = 9`
   - TCP-level options: `TCP_NODELAY = 1` (Phase 5+)
-- [ ] **4B.2** Add `SYSCALL_GETSOCKOPT` to `abi/src/syscall.rs`:
+- [x] **4B.2** Add `SYSCALL_GETSOCKOPT` to `abi/src/syscall.rs`:
   - Signature: `getsockopt(fd: i32, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> i32`
   - Returns the current value of the specified option
   - Add `SO_ERROR = 4` — retrieves and clears the pending socket error (used after async connect, ICMP errors)
-- [ ] **4B.3** Add `SYSCALL_SHUTDOWN` to `abi/src/syscall.rs`:
+- [x] **4B.3** Add `SYSCALL_SHUTDOWN` to `abi/src/syscall.rs`:
   - Signature: `shutdown(fd: i32, how: i32) -> i32`
   - `SHUT_RD = 0` — disallow further receives; incoming data is discarded
   - `SHUT_WR = 1` — disallow further sends; for TCP, sends FIN
   - `SHUT_RDWR = 2` — both
   - Returns `Err(NotConnected)` if socket is not connected (UDP or unconnected TCP)
-- [ ] **4B.4** Implement `handle_setsockopt()` in `core/src/syscall/net_handlers.rs`:
+- [x] **4B.4** Implement `handle_setsockopt()` in `core/src/syscall/net_handlers.rs`:
   - Copy `optval` from userspace with bounds checking
   - Dispatch on `(level, optname)` to modify `Socket.options`
   - Validate values: `SO_RCVBUF`/`SO_SNDBUF` must be in [min, max] range, resize `recv_queue`/`send_queue` capacity
   - Return `Err(InvalidArgument)` for unknown options (don't silently ignore)
-- [ ] **4B.5** Implement `handle_getsockopt()` in `core/src/syscall/net_handlers.rs`:
+- [x] **4B.5** Implement `handle_getsockopt()` in `core/src/syscall/net_handlers.rs`:
   - Copy current option value to userspace
   - `SO_ERROR`: read and clear the pending error from `Socket.pending_error`
-- [ ] **4B.6** Implement `handle_shutdown()` in `core/src/syscall/net_handlers.rs`:
+- [x] **4B.6** Implement `handle_shutdown()` in `core/src/syscall/net_handlers.rs`:
   - For UDP: `SHUT_RD` clears recv queue and marks read-shutdown, `SHUT_WR` marks write-shutdown, `SHUT_RDWR` does both
   - For TCP: `SHUT_WR` initiates FIN sequence (Phase 5 fills in), `SHUT_RD` discards incoming data
   - Set appropriate `SocketState` flags
-- [ ] **4B.7** Add userland wrappers in `userland/src/syscall/net.rs`:
+- [x] **4B.7** Add userland wrappers in `userland/src/syscall/net.rs`:
   - `setsockopt(fd, level, optname, val: &[u8]) -> Result<(), i32>`
   - `getsockopt(fd, level, optname, buf: &mut [u8]) -> Result<usize, i32>`
   - `shutdown(fd, how: i32) -> Result<(), i32>`
