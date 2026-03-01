@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
 use slopos_lib::{IrqMutex, klog_debug};
 
+use crate::net::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -525,8 +527,14 @@ pub struct TcpConnection {
     /// Retransmit counter.
     pub retransmits: u8,
 
+    /// Timer token for the pending retransmit timer (Phase 5E).
+    pub retransmit_timer_token: Option<TimerToken>,
+
     /// Timestamp (ms) when TIME_WAIT entered (for 2×MSL expiry).
     pub time_wait_start_ms: u64,
+
+    /// Timer token for the TIME_WAIT 2×MSL timer (Phase 5E).
+    pub time_wait_timer_token: Option<TimerToken>,
 
     /// Whether the connection slot is in use.
     pub active: bool,
@@ -550,7 +558,9 @@ impl TcpConnection {
             peer_mss: DEFAULT_MSS,
             rto_ms: INITIAL_RTO_MS,
             retransmits: 0,
+            retransmit_timer_token: None,
             time_wait_start_ms: 0,
+            time_wait_timer_token: None,
             active: false,
             socket_idx: None,
         }
@@ -952,6 +962,12 @@ impl TcpConnectionTable {
     /// Release a connection slot.
     pub fn release(&mut self, idx: usize) {
         if let Some(conn) = self.connections.get_mut(idx) {
+            if let Some(token) = conn.retransmit_timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
+            if let Some(token) = conn.time_wait_timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
             *conn = TcpConnection::empty();
         }
         if let Some(bufs) = self.buffers.get_mut(idx) {
@@ -1372,7 +1388,7 @@ pub fn tcp_input(
             process_established_and_closing(&mut table, conn_idx, hdr, payload, now_ms)
         }
 
-        TcpState::TimeWait => process_time_wait(&mut table, conn_idx, hdr),
+        TcpState::TimeWait => process_time_wait(&mut table, conn_idx, hdr, now_ms),
     }
 }
 
@@ -1715,6 +1731,24 @@ fn process_established_and_closing(
     if ack_advanced && seq_gt(hdr.ack_num, old_snd_una) {
         let acked = hdr.ack_num.wrapping_sub(old_snd_una) as usize;
         table.buffers[idx].send.process_ack(acked);
+        if table.buffers[idx].send.inflight == 0 {
+            if let Some(token) = table.connections[idx].retransmit_timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
+            table.connections[idx].retransmits = 0;
+        } else {
+            if let Some(token) = table.connections[idx].retransmit_timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
+            let rto_ms = table.connections[idx].rto_ms;
+            let delay_ticks = ((rto_ms as u64) / 10).max(1);
+            let new_token =
+                NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, idx as u32);
+            table.connections[idx].retransmit_timer_token = Some(new_token);
+            // Note: do NOT update rto_deadline_ms here — the polling-based
+            // tcp_retransmit_check() also reads it and needs the original deadline.
+            // The timer wheel tracks its own delay independently.
+        }
     }
 
     let mut accepted_payload_len = 0usize;
@@ -1791,6 +1825,19 @@ fn process_established_and_closing(
                     conn.rcv_nxt = hdr.seq_num.wrapping_add(1);
                     conn.state = TcpState::TimeWait;
                     conn.time_wait_start_ms = now_ms;
+                    if let Some(token) = conn.retransmit_timer_token.take() {
+                        NET_TIMER_WHEEL.cancel(token);
+                    }
+                    if let Some(token) = conn.time_wait_timer_token.take() {
+                        NET_TIMER_WHEEL.cancel(token);
+                    }
+                    let tw_delay_ticks = ((TIME_WAIT_MS as u64) / 10).max(1);
+                    let tw_token = NET_TIMER_WHEEL.schedule(
+                        tw_delay_ticks,
+                        TimerKind::TcpTimeWait,
+                        idx as u32,
+                    );
+                    conn.time_wait_timer_token = Some(tw_token);
                     klog_debug!(
                         "tcp: FIN_WAIT_1 -> TIME_WAIT idx={} (simultaneous close)",
                         idx
@@ -1822,6 +1869,16 @@ fn process_established_and_closing(
                 let conn = &mut table.connections[idx];
                 conn.state = TcpState::TimeWait;
                 conn.time_wait_start_ms = now_ms;
+                if let Some(token) = conn.retransmit_timer_token.take() {
+                    NET_TIMER_WHEEL.cancel(token);
+                }
+                if let Some(token) = conn.time_wait_timer_token.take() {
+                    NET_TIMER_WHEEL.cancel(token);
+                }
+                let tw_delay_ticks = ((TIME_WAIT_MS as u64) / 10).max(1);
+                let tw_token =
+                    NET_TIMER_WHEEL.schedule(tw_delay_ticks, TimerKind::TcpTimeWait, idx as u32);
+                conn.time_wait_timer_token = Some(tw_token);
                 klog_debug!("tcp: CLOSING -> TIME_WAIT idx={}", idx);
                 return TcpInputResult {
                     response: None,
@@ -1886,6 +1943,16 @@ fn process_established_and_closing(
             TcpState::FinWait2 => {
                 conn.state = TcpState::TimeWait;
                 conn.time_wait_start_ms = now_ms;
+                if let Some(token) = conn.retransmit_timer_token.take() {
+                    NET_TIMER_WHEEL.cancel(token);
+                }
+                if let Some(token) = conn.time_wait_timer_token.take() {
+                    NET_TIMER_WHEEL.cancel(token);
+                }
+                let tw_delay_ticks = ((TIME_WAIT_MS as u64) / 10).max(1);
+                let tw_token =
+                    NET_TIMER_WHEEL.schedule(tw_delay_ticks, TimerKind::TcpTimeWait, idx as u32);
+                conn.time_wait_timer_token = Some(tw_token);
                 klog_debug!("tcp: FIN_WAIT_2 -> TIME_WAIT idx={}", idx);
                 TcpState::TimeWait
             }
@@ -1924,6 +1991,7 @@ fn process_time_wait(
     table: &mut TcpConnectionTable,
     idx: usize,
     hdr: &TcpHeader,
+    now_ms: u64,
 ) -> TcpInputResult {
     let conn = &table.connections[idx];
 
@@ -1947,9 +2015,14 @@ fn process_time_wait(
             window_size: conn.rcv_wnd,
             mss: 0,
         };
-        // Restart TIME_WAIT timer.
         let conn = &mut table.connections[idx];
-        conn.time_wait_start_ms = 0; // Caller should set to current time.
+        conn.time_wait_start_ms = now_ms;
+        if let Some(token) = conn.time_wait_timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
+        }
+        let tw_delay_ticks = ((TIME_WAIT_MS as u64) / 10).max(1);
+        let tw_token = NET_TIMER_WHEEL.schedule(tw_delay_ticks, TimerKind::TcpTimeWait, idx as u32);
+        conn.time_wait_timer_token = Some(tw_token);
 
         return TcpInputResult {
             response: Some(seg),
@@ -1986,6 +2059,96 @@ pub fn tcp_timer_tick(now_ms: u64) -> usize {
         }
     }
     reaped
+}
+
+/// Handle a retransmit timer firing for connection `conn_id`.
+///
+/// Validates the connection still exists and has unacknowledged in-flight data.
+/// If valid, updates retransmit state and schedules the next retransmit timer.
+/// Returns the connection index so the caller can drive retransmission send.
+pub fn tcp_on_retransmit(conn_id: u32) -> Option<usize> {
+    let mut table = TCP_TABLE.lock();
+    let idx = conn_id as usize;
+    if idx >= MAX_CONNECTIONS {
+        return None;
+    }
+
+    let conn = table.connections.get(idx)?;
+    let send_state = matches!(
+        conn.state,
+        TcpState::Established
+            | TcpState::CloseWait
+            | TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::Closing
+            | TcpState::LastAck
+    );
+    if !conn.active || !send_state || table.buffers[idx].send.inflight == 0 {
+        return None;
+    }
+
+    table.connections[idx].retransmits = table.connections[idx].retransmits.saturating_add(1);
+    if table.connections[idx].retransmits > MAX_RETRANSMITS {
+        klog_debug!(
+            "tcp: retransmit timeout idx={} conn_id={} retransmits={} -> releasing",
+            idx,
+            conn_id,
+            table.connections[idx].retransmits
+        );
+        table.release(idx);
+        return None;
+    }
+
+    table.buffers[idx].send.retransmit_timeout();
+    table.connections[idx].snd_nxt = table.connections[idx].snd_una;
+    table.connections[idx].rto_ms =
+        core::cmp::min(table.connections[idx].rto_ms.saturating_mul(2), MAX_RTO_MS);
+
+    if let Some(token) = table.connections[idx].retransmit_timer_token.take() {
+        NET_TIMER_WHEEL.cancel(token);
+    }
+
+    let delay_ticks = ((table.connections[idx].rto_ms as u64) / 10).max(1);
+    let token = NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, conn_id);
+    table.connections[idx].retransmit_timer_token = Some(token);
+
+    let now_ms = slopos_lib::clock::uptime_ms();
+    table.buffers[idx].send.rto_deadline_ms =
+        now_ms.saturating_add(table.connections[idx].rto_ms as u64);
+
+    klog_debug!(
+        "tcp: retransmit fired idx={} conn_id={} rto_ms={} retransmits={}",
+        idx,
+        conn_id,
+        table.connections[idx].rto_ms,
+        table.connections[idx].retransmits
+    );
+
+    Some(idx)
+}
+
+/// Handle a TIME_WAIT timer expiry for connection `conn_id`.
+///
+/// Validates the connection is still active and in TIME_WAIT before release.
+pub fn tcp_on_time_wait_expire(conn_id: u32) {
+    let mut table = TCP_TABLE.lock();
+    let idx = conn_id as usize;
+    if idx >= MAX_CONNECTIONS {
+        return;
+    }
+
+    let Some(conn) = table.connections.get(idx) else {
+        return;
+    };
+
+    if conn.active && conn.state == TcpState::TimeWait {
+        klog_debug!(
+            "tcp: TIME_WAIT timer expired idx={} conn_id={}",
+            idx,
+            conn_id
+        );
+        table.release(idx);
+    }
 }
 
 // =============================================================================
@@ -2100,6 +2263,11 @@ pub fn tcp_poll_transmit(
         .wrapping_add(payload_len as u32);
     if table.buffers[idx].send.rto_deadline_ms == 0 {
         table.buffers[idx].send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
+        if table.connections[idx].retransmit_timer_token.is_none() {
+            let delay_ticks = (rto_ms / 10).max(1);
+            let token = NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, idx as u32);
+            table.connections[idx].retransmit_timer_token = Some(token);
+        }
     }
 
     let seg = TcpOutSegment {
@@ -2246,6 +2414,15 @@ pub fn tcp_has_pending_data(idx: usize) -> bool {
 pub fn tcp_reset_all() {
     let mut table = TCP_TABLE.lock();
     for i in 0..MAX_CONNECTIONS {
+        // Cancel any outstanding timer tokens before overwriting the connection.
+        // Without this, timers scheduled by Phase 5E (retransmit, TIME_WAIT)
+        // remain in the wheel and fire during later test suites.
+        if let Some(token) = table.connections[i].retransmit_timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
+        }
+        if let Some(token) = table.connections[i].time_wait_timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
+        }
         table.connections[i] = TcpConnection::empty();
         table.buffers[i].clear();
     }

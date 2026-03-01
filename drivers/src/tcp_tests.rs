@@ -1163,6 +1163,96 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
     pass!()
 }
 
+pub fn test_tcp_retransmit_timer() -> TestResult {
+    reset();
+
+    let local_ip = [10, 0, 0, 1];
+    let remote_ip = [10, 0, 0, 2];
+
+    let (idx, _server_iss, _client_port) = establish_client_connection(local_ip, remote_ip, 80);
+    assert_eq_test!(
+        tcp::tcp_get_state(idx),
+        Some(TcpState::Established),
+        "ESTABLISHED"
+    );
+
+    let wrote = tcp::tcp_send(idx, b"hello").unwrap();
+    assert_eq_test!(wrote, 5, "wrote 5 bytes to send buffer");
+
+    let mut payload = [0u8; 1460];
+    let now_ms = 0u64;
+    let seg = tcp::tcp_poll_transmit(idx, &mut payload, now_ms);
+    assert_test!(seg.is_some(), "segment produced for transmit");
+
+    let conn_before = tcp::tcp_get_connection(idx).unwrap();
+    assert_test!(
+        conn_before.retransmit_timer_token.is_some(),
+        "retransmit timer scheduled"
+    );
+
+    let result = tcp::tcp_on_retransmit(idx as u32);
+    assert_test!(result.is_some(), "retransmit handler returned conn idx");
+    assert_eq_test!(result.unwrap(), idx, "correct conn_id");
+
+    let conn_after = tcp::tcp_get_connection(idx).unwrap();
+    assert_test!(conn_after.rto_ms > conn_before.rto_ms, "RTO doubled");
+    assert_eq_test!(conn_after.retransmits, 1, "retransmit count incremented");
+
+    pass!()
+}
+
+pub fn test_tcp_time_wait_timer() -> TestResult {
+    reset();
+
+    let local_ip = [10, 0, 0, 1];
+    let remote_ip = [10, 0, 0, 2];
+
+    let (idx, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
+
+    let close_result = tcp::tcp_close(idx).unwrap().unwrap();
+    let fin_seq = close_result.seq_num;
+
+    let ack = TcpHeader {
+        src_port: 80,
+        dst_port: client_port,
+        seq_num: server_iss.wrapping_add(1),
+        ack_num: fin_seq.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    tcp::tcp_input(remote_ip, local_ip, &ack, &[], &[], 0);
+
+    let server_fin = TcpHeader {
+        src_port: 80,
+        dst_port: client_port,
+        seq_num: server_iss.wrapping_add(1),
+        ack_num: fin_seq.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    tcp::tcp_input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
+
+    let conn = tcp::tcp_get_connection(idx).unwrap();
+    assert_eq_test!(conn.state, TcpState::TimeWait, "in TIME_WAIT");
+    assert_test!(
+        conn.time_wait_timer_token.is_some(),
+        "TIME_WAIT timer scheduled"
+    );
+
+    tcp::tcp_on_time_wait_expire(idx as u32);
+
+    assert_eq_test!(tcp::tcp_get_state(idx), None, "connection released");
+    assert_eq_test!(tcp::tcp_active_count(), 0, "no active connections");
+
+    pass!()
+}
+
 // =============================================================================
 // 11. RST handling in various states
 // =============================================================================
@@ -1568,6 +1658,8 @@ slopos_lib::define_test_suite!(
         // TIME_WAIT (2)
         test_tcp_time_wait_expiry,
         test_tcp_time_wait_retransmitted_fin,
+        test_tcp_retransmit_timer,
+        test_tcp_time_wait_timer,
         // RST handling (3)
         test_tcp_rst_in_established,
         test_tcp_rst_to_unknown_ignored,

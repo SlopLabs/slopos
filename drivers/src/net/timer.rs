@@ -457,10 +457,10 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);
-            // Phase 5A: dispatch SYN-ACK retransmit to tcp_socket listen state.
-            // Full per-connection retransmit will be wired in Phase 5B+.
-            // For now, the listen state owner calls on_retransmit(key) directly
-            // when the timer fires; this stub logs the event for tracing.
+            let handled_by_listen = dispatch_tcp_syn_ack_retransmit(timer.key);
+            if !handled_by_listen && let Some(idx) = super::tcp::tcp_on_retransmit(timer.key) {
+                dispatch_tcp_retransmit_send(idx);
+            }
         }
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);
@@ -468,7 +468,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpTimeWait => {
             klog_debug!("net_timer: TCP TIME_WAIT expired, key={}", timer.key);
-            // Phase 5: tcp_engine.on_time_wait_expire(timer.key)
+            super::tcp::tcp_on_time_wait_expire(timer.key);
         }
         TimerKind::TcpKeepalive => {
             klog_debug!("net_timer: TCP keepalive fired, key={}", timer.key);
@@ -478,5 +478,24 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             klog_debug!("net_timer: reassembly timeout fired, key={}", timer.key);
             // Phase 8: reassembly.on_timeout(timer.key)
         }
+    }
+}
+
+fn dispatch_tcp_syn_ack_retransmit(key: u32) -> bool {
+    use super::socket;
+
+    if let Some(seg) = socket::socket_dispatch_syn_ack_retransmit(key) {
+        let _ = socket::socket_send_tcp_segment(&seg, &[]);
+        return true;
+    }
+
+    false
+}
+
+fn dispatch_tcp_retransmit_send(idx: usize) {
+    use super::socket;
+
+    if let Some(sock_idx) = socket::socket_from_tcp_idx_pub(idx) {
+        let _ = socket::socket_send_queued(sock_idx);
     }
 }

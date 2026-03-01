@@ -997,6 +997,17 @@ fn virtnet_napi_poll_loop() {
 
     napi_complete();
 
+    // Fix NAPI race: if an RX IRQ fired while we were in Polling state,
+    // napi_schedule() from the IRQ handler was a no-op (CAS Idle→Scheduled
+    // fails when state is Polling).  The IRQ did signal NAPI_EVENT, so
+    // consume that stale signal and re-schedule now that we are back in Idle.
+    // Without this, the stranded packet sits in the RX ring until the next
+    // unrelated IRQ — causing spurious DNS timeouts under QEMU SLIRP.
+    if NAPI_EVENT.try_consume() {
+        napi_schedule();
+        NAPI_EVENT.signal();
+    }
+
     // Advance the network timer wheel — process ARP aging, TCP retransmit, etc.
     // (Phase 2A wiring; dispatch stubs filled in by subsequent phases.)
     crate::net::timer::net_timer_process();

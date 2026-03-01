@@ -2456,6 +2456,30 @@ pub fn socket_process_timers() {
     }
 }
 
+/// Dispatch a SYN-ACK retransmit timer to the correct listening socket.
+/// Returns the SYN-ACK segment to retransmit, or None if not found.
+pub fn socket_dispatch_syn_ack_retransmit(key: u32) -> Option<tcp::TcpOutSegment> {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    for sock in table.slots.iter_mut().flatten() {
+        if sock.state != SocketState::Listening {
+            continue;
+        }
+
+        if let SocketInner::Tcp(ref mut tcp_inner) = sock.inner
+            && let Some(ref mut listen_state) = tcp_inner.listen
+            && listen_state.has_syn_entry_for_key(key)
+        {
+            return listen_state.on_retransmit(key);
+        }
+    }
+    None
+}
+
+/// Public wrapper for socket_from_tcp_idx (used by timer dispatch).
+pub fn socket_from_tcp_idx_pub(tcp_idx: usize) -> Option<u32> {
+    socket_from_tcp_idx(tcp_idx)
+}
+
 fn socket_from_tcp_idx(tcp_idx: usize) -> Option<u32> {
     let table = NEW_SOCKET_TABLE.lock();
     for (idx, sock) in table.slots.iter().enumerate() {

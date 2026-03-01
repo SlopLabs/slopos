@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5A–5D complete, Phase 5E pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5A–5E complete, Phase 5F pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -993,13 +993,18 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### 5E: Timer Integration for TCP
 
-- [ ] **5E.1** Wire TCP retransmit timer into `NetTimerWheel`:
+- [x] **5E.1** Wire TCP retransmit timer into `NetTimerWheel`:
   - On segment TX: `timer_wheel.schedule(rto_ticks, TcpRetransmit, conn_id)`
   - On ACK receipt: `timer_wheel.cancel(token)` using stored `TimerToken`
   - `on_retransmit(conn_id)`: validate connection still exists, retransmit unacknowledged segment, double RTO
-- [ ] **5E.2** Wire TCP TIME_WAIT timer:
+- [x] **5E.2** Wire TCP TIME_WAIT timer:
   - On entering `TimeWait`: `timer_wheel.schedule(2_MSL_TICKS, TcpTimeWait, conn_id)` (2*MSL = 4s)
   - `on_time_wait_expire(conn_id)`: transition to `Closed`, release connection slot, release port if `!SO_REUSEADDR`
+
+**Bug fixes during 5E integration:**
+- Fixed partial-ACK path in `process_established_and_closing` resetting `rto_deadline_ms` forward on timer-wheel reschedule (broke polling-based `tcp_retransmit_check`)
+- Fixed `tcp_reset_all()` overwriting connections without cancelling timer tokens (orphaned timers fired in later test suites)
+- Fixed NAPI race condition in `virtnet_napi_poll_loop()`: IRQs arriving during `Polling` state couldn't reschedule NAPI (CAS `Idle→Scheduled` fails), stranding packets in the RX ring. Added post-`napi_complete()` re-schedule when `NAPI_EVENT` was signaled during poll.
 
 ### 5F: Syscall Updates
 
@@ -1021,8 +1026,8 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 - [x] **5.T4** Unit test FIN handling: send FIN, verify `recv()` returns 0 after data drained
 - [x] **5.T5** Unit test `shutdown(SHUT_WR)`: sends FIN but `recv()` still works
 - [x] **5.T6** Unit test `shutdown(SHUT_RD)`: subsequent `recv()` returns 0, incoming data discarded
-- [ ] **5.T7** Unit test retransmit timer: send segment, don't ACK, verify retransmit fires with correct `conn_id`
-- [ ] **5.T8** Unit test TIME_WAIT: verify connection slot released after 2*MSL
+- [x] **5.T7** Unit test retransmit timer: send segment, don't ACK, verify retransmit fires with correct `conn_id`
+- [x] **5.T8** Unit test TIME_WAIT: verify connection slot released after 2*MSL
 - [x] **5.T9** Integration test: TCP client connects to QEMU SLIRP, sends "hello", receives echo
 - [x] **5.T10** Integration test: TCP server `listen()` + `accept()` + `recv()` + `send()` round-trip
 - [x] **5.T11** Integration test: connection teardown via FIN, verify clean close on both sides
@@ -1034,8 +1039,8 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 - [ ] **GATE**: `send()` and `recv()` move data through the TCP state machine correctly
 - [ ] **GATE**: `shutdown(SHUT_WR)` sends FIN without closing the read side
 - [ ] **GATE**: FIN delivers EOF to userspace, `recv()` returns 0
-- [ ] **GATE**: Retransmit timer fires and retransmits unacknowledged segments
-- [ ] **GATE**: TIME_WAIT releases connection slots after 2*MSL
+- [x] **GATE**: Retransmit timer fires and retransmits unacknowledged segments
+- [x] **GATE**: TIME_WAIT releases connection slots after 2*MSL
 - [ ] **GATE**: `SO_REUSEADDR` allows binding during TIME_WAIT
 
 ---
