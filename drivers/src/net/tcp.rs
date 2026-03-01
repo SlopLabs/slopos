@@ -1149,6 +1149,106 @@ pub fn tcp_abort(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
     Ok(seg)
 }
 
+/// Shutdown the write half of a connection (send FIN without releasing).
+///
+/// Like `tcp_close`, but keeps the connection alive for further reading.
+/// Transitions: Established → FinWait1, CloseWait → LastAck.
+pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
+    let mut table = TCP_TABLE.lock();
+    let conn = table.get_mut(idx).ok_or(TcpError::NotFound)?;
+
+    match conn.state {
+        TcpState::Established | TcpState::SynReceived => {
+            let seq = conn.snd_nxt;
+            conn.snd_nxt = seq.wrapping_add(1);
+            let prev = conn.state;
+            conn.state = TcpState::FinWait1;
+
+            let seg = TcpOutSegment {
+                tuple: conn.tuple,
+                seq_num: seq,
+                ack_num: conn.rcv_nxt,
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                window_size: conn.rcv_wnd,
+                mss: 0,
+            };
+
+            klog_debug!(
+                "tcp: SHUTDOWN_WR idx={} {} -> FIN_WAIT_1, FIN seq={}",
+                idx,
+                prev.name(),
+                seq
+            );
+            Ok(Some(seg))
+        }
+        TcpState::CloseWait => {
+            let seq = conn.snd_nxt;
+            conn.snd_nxt = seq.wrapping_add(1);
+            conn.state = TcpState::LastAck;
+
+            let seg = TcpOutSegment {
+                tuple: conn.tuple,
+                seq_num: seq,
+                ack_num: conn.rcv_nxt,
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                window_size: conn.rcv_wnd,
+                mss: 0,
+            };
+
+            klog_debug!(
+                "tcp: SHUTDOWN_WR idx={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
+                idx,
+                seq
+            );
+            Ok(Some(seg))
+        }
+        // Already sent FIN or not connected — no-op.
+        TcpState::FinWait1
+        | TcpState::FinWait2
+        | TcpState::Closing
+        | TcpState::LastAck
+        | TcpState::TimeWait => {
+            klog_debug!(
+                "tcp: SHUTDOWN_WR idx={} already closing ({})",
+                idx,
+                conn.state.name()
+            );
+            Ok(None)
+        }
+        TcpState::Closed | TcpState::Listen | TcpState::SynSent => Err(TcpError::InvalidState),
+    }
+}
+
+/// Discard all data in the receive buffer (for SHUT_RD).
+pub fn tcp_recv_discard(idx: usize) {
+    let mut table = TCP_TABLE.lock();
+    if table.get(idx).is_some() {
+        table.buffers[idx].recv.clear();
+        klog_debug!("tcp: RECV_DISCARD idx={} — recv buffer cleared", idx);
+    }
+}
+
+/// Check whether the peer has closed their write half (sent FIN).
+///
+/// Returns true when the connection is in CloseWait, LastAck, Closing,
+/// TimeWait, or Closed — i.e. the peer's FIN has been received.
+pub fn tcp_is_peer_closed(idx: usize) -> bool {
+    let table = TCP_TABLE.lock();
+    table
+        .get(idx)
+        .map(|c| {
+            matches!(
+                c.state,
+                TcpState::CloseWait
+                    | TcpState::LastAck
+                    | TcpState::Closing
+                    | TcpState::TimeWait
+                    | TcpState::Closed
+            )
+        })
+        .unwrap_or(true)
+}
+
 // =============================================================================
 // Incoming segment processing
 // =============================================================================

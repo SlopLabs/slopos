@@ -906,7 +906,7 @@ fn socket_notify_tcp_idx_waiters(tcp_idx: usize) {
         if socket_tcp_conn_id(slot) != Some(tcp_idx) {
             continue;
         }
-        if tcp::tcp_recv_available(tcp_idx) > 0 {
+        if tcp::tcp_recv_available(tcp_idx) > 0 || tcp::tcp_is_peer_closed(tcp_idx) {
             socket_wake_recv_hint(slot.recv_wq_idx);
         }
         if tcp::tcp_send_buffer_space(tcp_idx) > 0 {
@@ -1754,11 +1754,8 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
     };
 
     if is_shut_rd {
-        return if is_udp {
-            0
-        } else {
-            errno_i32(ERRNO_EPIPE) as i64
-        };
+        // SHUT_RD: return EOF (0) for both UDP and TCP.
+        return 0;
     }
 
     if is_udp {
@@ -1868,10 +1865,14 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     return n as i64;
                 }
 
+                // EOF conditions:
+                // 1. Connection is in a post-FIN state (FinWait1/2, Closing, etc.).
+                // 2. Peer sent FIN (CloseWait/LastAck) and recv buffer is drained.
                 if !matches!(
                     tcp::tcp_get_state(tcp_idx),
                     Some(TcpState::Established | TcpState::CloseWait)
-                ) {
+                ) || tcp::tcp_is_peer_closed(tcp_idx)
+                {
                     return 0;
                 }
 
@@ -1883,6 +1884,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
                         || {
                             tcp::tcp_recv_available(tcp_idx) > 0
+                                || tcp::tcp_is_peer_closed(tcp_idx)
                                 || !matches!(
                                     tcp::tcp_get_state(tcp_idx),
                                     Some(TcpState::Established | TcpState::CloseWait)
@@ -1893,6 +1895,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 } else {
                     RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
                         tcp::tcp_recv_available(tcp_idx) > 0
+                            || tcp::tcp_is_peer_closed(tcp_idx)
                             || !matches!(
                                 tcp::tcp_get_state(tcp_idx),
                                 Some(TcpState::Established | TcpState::CloseWait)
@@ -2367,29 +2370,54 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
 pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
     use slopos_abi::syscall::*;
 
-    let mut table = NEW_SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx as usize) else {
-        return errno_i32(ERRNO_ENOTSOCK);
+    let (tcp_idx, recv_hint) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
+            return errno_i32(ERRNO_ENOTSOCK);
+        };
+
+        let tcp_idx = socket_tcp_conn_id(sock);
+        let recv_hint = sock.recv_wq_idx;
+
+        match how {
+            SHUT_RD => {
+                sock.flags.set(SocketFlags::SHUT_RD);
+                if socket_is_udp(sock) {
+                    sock.recv_queue.clear();
+                }
+            }
+            SHUT_WR => {
+                sock.flags.set(SocketFlags::SHUT_WR);
+            }
+            SHUT_RDWR => {
+                sock.flags.set(SocketFlags::SHUT_RD);
+                sock.flags.set(SocketFlags::SHUT_WR);
+                if socket_is_udp(sock) {
+                    sock.recv_queue.clear();
+                }
+            }
+            _ => return errno_i32(ERRNO_EINVAL),
+        }
+
+        (tcp_idx, recv_hint)
     };
 
-    match how {
-        SHUT_RD => {
-            sock.flags.set(SocketFlags::SHUT_RD);
-            if socket_is_udp(sock) {
-                sock.recv_queue.clear();
+    // For TCP sockets, perform protocol-level shutdown actions.
+    if let Some(tcp_idx) = tcp_idx {
+        let shut_wr = how == SHUT_WR || how == SHUT_RDWR;
+        let shut_rd = how == SHUT_RD || how == SHUT_RDWR;
+
+        if shut_wr {
+            if let Ok(Some(seg)) = tcp::tcp_shutdown_write(tcp_idx) {
+                let _ = socket_send_tcp_segment(&seg, &[]);
             }
         }
-        SHUT_WR => {
-            sock.flags.set(SocketFlags::SHUT_WR);
+
+        if shut_rd {
+            tcp::tcp_recv_discard(tcp_idx);
+            // Wake recv waiters so they see EOF.
+            socket_wake_recv_hint(recv_hint);
         }
-        SHUT_RDWR => {
-            sock.flags.set(SocketFlags::SHUT_RD);
-            sock.flags.set(SocketFlags::SHUT_WR);
-            if socket_is_udp(sock) {
-                sock.recv_queue.clear();
-            }
-        }
-        _ => return errno_i32(ERRNO_EINVAL),
     }
 
     0

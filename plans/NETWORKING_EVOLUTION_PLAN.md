@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5A–5B complete, Phase 5C pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5A–5D complete, Phase 5E pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -971,22 +971,22 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### 5D: Send, Recv, Close, Shutdown
 
-- [ ] **5D.1** Implement `tcp_send(sock, slices: &[IoSlice<'_>]) -> Result<usize, NetError>`:
+- [x] **5D.1** Implement `tcp_send(sock, slices: &[IoSlice<'_>]) -> Result<usize, NetError>`:
   - Check `shutdown` flags: if write-shutdown, return `Err(Shutdown)`
   - Copy data from IoSlices into `TcpConnection`'s send buffer
   - Call `tcp::try_send()` to push data onto the wire if window allows
   - Return bytes accepted (may be less than requested if buffer full)
   - If buffer full and `O_NONBLOCK`: return `Err(WouldBlock)` with partial count
-- [ ] **5D.2** Implement `tcp_recv(sock, buf: &mut [u8]) -> Result<usize, NetError>`:
+- [x] **5D.2** Implement `tcp_recv(sock, buf: &mut [u8]) -> Result<usize, NetError>`:
   - Check `shutdown` flags: if read-shutdown, return `Ok(0)` (EOF)
   - Copy data from `TcpConnection`'s receive buffer
   - Advance receive window, send ACK if window update is significant
   - Return 0 on FIN (EOF), `Err(WouldBlock)` if buffer empty and `O_NONBLOCK`
-- [ ] **5D.3** Implement shutdown for TCP:
+- [x] **5D.3** Implement shutdown for TCP:
   - `shutdown(SHUT_WR)`: send FIN, transition to `FinWait1`, set write-shutdown flag. Socket remains open for reading.
   - `shutdown(SHUT_RD)`: set read-shutdown flag, discard any buffered received data, further received data is ACKed but discarded
   - `close()`: calls `shutdown(RDWR)`, then decrements ref count. If last ref, full connection teardown.
-- [ ] **5D.4** Implement FIN handling:
+- [x] **5D.4** Implement FIN handling:
   - Receiving FIN: transition to `CloseWait`, deliver buffered data, then `recv()` returns 0 (EOF)
   - Wake socket with `READABLE | HUP`
   - After userspace reads EOF and calls `close()`: send FIN (`LastAck` state)
@@ -1018,14 +1018,14 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 - [x] **5.T1** Unit test two-queue model: fill SYN queue, verify SYN is silently dropped (no RST)
 - [x] **5.T2** Unit test accept queue overflow: backlog=2, complete 3 connections, verify 3rd stays in SYN queue
 - [x] **5.T3** Unit test SYN-ACK retransmission: SYN received, no ACK, verify SYN-ACK retransmitted 5 times with backoff
-- [ ] **5.T4** Unit test FIN handling: send FIN, verify `recv()` returns 0 after data drained
-- [ ] **5.T5** Unit test `shutdown(SHUT_WR)`: sends FIN but `recv()` still works
-- [ ] **5.T6** Unit test `shutdown(SHUT_RD)`: subsequent `recv()` returns 0, incoming data discarded
+- [x] **5.T4** Unit test FIN handling: send FIN, verify `recv()` returns 0 after data drained
+- [x] **5.T5** Unit test `shutdown(SHUT_WR)`: sends FIN but `recv()` still works
+- [x] **5.T6** Unit test `shutdown(SHUT_RD)`: subsequent `recv()` returns 0, incoming data discarded
 - [ ] **5.T7** Unit test retransmit timer: send segment, don't ACK, verify retransmit fires with correct `conn_id`
 - [ ] **5.T8** Unit test TIME_WAIT: verify connection slot released after 2*MSL
-- [ ] **5.T9** Integration test: TCP client connects to QEMU SLIRP, sends "hello", receives echo
-- [ ] **5.T10** Integration test: TCP server `listen()` + `accept()` + `recv()` + `send()` round-trip
-- [ ] **5.T11** Integration test: connection teardown via FIN, verify clean close on both sides
+- [x] **5.T9** Integration test: TCP client connects to QEMU SLIRP, sends "hello", receives echo
+- [x] **5.T10** Integration test: TCP server `listen()` + `accept()` + `recv()` + `send()` round-trip
+- [x] **5.T11** Integration test: connection teardown via FIN, verify clean close on both sides
 
 ### Phase 5 Gate
 
