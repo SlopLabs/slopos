@@ -3,8 +3,10 @@ use crate::syscall::context::SyscallContext;
 use slopos_abi::net::{AF_INET, INVALID_SOCKET_IDX, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::syscall::*;
 use slopos_lib::kernel_services::syscall_services::socket;
-use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr;
+use slopos_mm::user_copy::{
+    copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
+};
+use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 fn errno_i32(errno: i32) -> u64 {
     (errno as i64) as u64
@@ -320,6 +322,84 @@ define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
     }
 
     ctx.ok(copied as u64)
+});
+
+define_syscall!(syscall_setsockopt(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    let level = args.arg1 as i32;
+    let optname = args.arg2 as i32;
+    let optval_ptr = args.arg3;
+    let optlen = args.arg4_usize();
+
+    if optval_ptr == 0 && optlen > 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let optlen = optlen.min(64);
+    let mut scratch = [0u8; 64];
+    if optlen > 0 {
+        let user_data = try_or_err!(ctx, UserBytes::try_new(optval_ptr, optlen));
+        try_or_err!(ctx, copy_bytes_from_user(user_data, &mut scratch[..optlen]));
+    }
+
+    rc_i32(
+        &ctx,
+        socket::setsockopt(sock_idx, level, optname, scratch[..optlen].as_ptr(), optlen),
+    )
+});
+
+define_syscall!(syscall_getsockopt(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    let level = args.arg1 as i32;
+    let optname = args.arg2 as i32;
+    let optval_ptr = args.arg3;
+    let optlen_ptr = args.arg4;
+
+    if optval_ptr == 0 || optlen_ptr == 0 {
+        return ctx.err_with(ERRNO_EFAULT);
+    }
+
+    let user_optlen = try_or_err!(ctx, UserPtr::<u32>::try_new(optlen_ptr));
+    let optlen = try_or_err!(ctx, copy_from_user(user_optlen)) as usize;
+    let optlen = optlen.min(64);
+
+    let mut scratch = [0u8; 64];
+    let rc = socket::getsockopt(sock_idx, level, optname, scratch.as_mut_ptr(), optlen);
+    if rc < 0 {
+        return ctx.err_with(errno_i32(rc));
+    }
+
+    let written = rc as usize;
+    if written > 0 {
+        let user_data = try_or_err!(ctx, UserBytes::try_new(optval_ptr, written));
+        try_or_err!(ctx, copy_bytes_to_user(user_data, &scratch[..written]));
+    }
+
+    let actual_len = written as u32;
+    try_or_err!(ctx, copy_to_user(user_optlen, &actual_len));
+
+    ctx.ok(0)
+});
+
+define_syscall!(syscall_shutdown(ctx, args) requires(let process_id) {
+    let fd = args.arg0_i32();
+    let sock_idx = match socket_idx_for_fd(process_id, fd) {
+        Ok(idx) => idx,
+        Err(errno) => return ctx.err_with(errno),
+    };
+
+    let how = args.arg1 as i32;
+    rc_i32(&ctx, socket::shutdown(sock_idx, how))
 });
 
 define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {

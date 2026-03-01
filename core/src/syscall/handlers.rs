@@ -19,8 +19,9 @@ pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_mmap, syscall_mprotect, syscall_munmap,
 };
 use crate::syscall::net_handlers::{
-    syscall_accept, syscall_bind, syscall_connect, syscall_listen, syscall_recv, syscall_recvfrom,
-    syscall_resolve, syscall_send, syscall_sendto, syscall_socket,
+    syscall_accept, syscall_bind, syscall_connect, syscall_getsockopt, syscall_listen,
+    syscall_recv, syscall_recvfrom, syscall_resolve, syscall_send, syscall_sendto,
+    syscall_setsockopt, syscall_shutdown, syscall_socket,
 };
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
@@ -115,6 +116,9 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SENDTO]  => syscall_sendto,  "sendto";
     [SYSCALL_RECVFROM] => syscall_recvfrom, "recvfrom";
     [SYSCALL_RESOLVE] => syscall_resolve, "resolve";
+    [SYSCALL_SETSOCKOPT] => syscall_setsockopt, "setsockopt";
+    [SYSCALL_GETSOCKOPT] => syscall_getsockopt, "getsockopt";
+    [SYSCALL_SHUTDOWN]   => syscall_shutdown,   "shutdown";
 
     // TTY
     [SYSCALL_TTY_SET_FOCUS] => syscall_tty_set_focus, "tty_set_focus";
