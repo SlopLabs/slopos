@@ -636,7 +636,7 @@ use slopos_abi::net::{AF_INET, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ,
     ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN,
-    ERRNO_ENOTSOCK, ERRNO_EPROTONOSUPPORT, POLLERR, POLLHUP, POLLIN, POLLOUT,
+    ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_lib::{IrqMutex, WaitQueue};
 
@@ -749,6 +749,14 @@ pub struct KernelSocket {
     pub send_wq_idx: u8,
     pub recv_timeout_ms: u64,
     pub send_timeout_ms: u64,
+    pub reuse_addr: bool,
+    pub keepalive: bool,
+    pub tcp_nodelay: bool,
+    pub recv_buf_size: usize,
+    pub send_buf_size: usize,
+    pub shut_rd: bool,
+    pub shut_wr: bool,
+    pub pending_error: i32,
     pub nonblocking: bool,
 }
 
@@ -771,6 +779,14 @@ impl KernelSocket {
             send_wq_idx: 0,
             recv_timeout_ms: 0,
             send_timeout_ms: 0,
+            reuse_addr: false,
+            keepalive: false,
+            tcp_nodelay: false,
+            recv_buf_size: 16384,
+            send_buf_size: 16384,
+            shut_rd: false,
+            shut_wr: false,
+            pending_error: 0,
             nonblocking: true,
         }
     }
@@ -1180,6 +1196,9 @@ pub fn socket_sendto(
         if table.sockets[idx].sock_type != SOCK_DGRAM {
             return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
         }
+        if table.sockets[idx].shut_wr {
+            return errno_i32(ERRNO_EPIPE) as i64;
+        }
 
         if table.sockets[idx].local_port == 0 {
             let Some(port) = alloc_ephemeral_port(&table) else {
@@ -1240,6 +1259,15 @@ pub fn socket_recvfrom(
 
     if sock_type != SOCK_DGRAM {
         return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
+    }
+
+    {
+        let table = SOCKET_TABLE.lock();
+        if let Some(sock) = table.get(sock_idx)
+            && sock.shut_rd
+        {
+            return 0;
+        }
     }
 
     let out = if len == 0 {
@@ -1477,6 +1505,15 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         sock.sock_type
     };
 
+    {
+        let table = SOCKET_TABLE.lock();
+        if let Some(sock) = table.get(sock_idx)
+            && sock.shut_wr
+        {
+            return errno_i32(ERRNO_EPIPE) as i64;
+        }
+    }
+
     if sock_type == SOCK_DGRAM {
         if len > UDP_DGRAM_MAX_PAYLOAD {
             return errno_i32(ERRNO_EINVAL) as i64;
@@ -1646,6 +1683,15 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         };
         sock.sock_type
     };
+
+    {
+        let table = SOCKET_TABLE.lock();
+        if let Some(sock) = table.get(sock_idx)
+            && sock.shut_rd
+        {
+            return errno_i32(ERRNO_EPIPE) as i64;
+        }
+    }
 
     if sock_type == SOCK_DGRAM {
         let (nonblocking, timeout_ms, peer_filter) = {
@@ -1963,6 +2009,204 @@ pub fn socket_count_active() -> usize {
         .iter()
         .filter(|s| s.active)
         .count()
+}
+
+pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) -> i32 {
+    use slopos_abi::syscall::*;
+    let mut table = SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx) else {
+        return errno_i32(ERRNO_ENOTSOCK);
+    };
+
+    match level {
+        SOL_SOCKET => match optname {
+            SO_REUSEADDR => {
+                if val.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
+                sock.reuse_addr = v != 0;
+                0
+            }
+            SO_RCVBUF => {
+                if val.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
+                if !(256..=262144).contains(&v) {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                sock.recv_buf_size = v;
+                0
+            }
+            SO_SNDBUF => {
+                if val.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
+                if !(256..=262144).contains(&v) {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                sock.send_buf_size = v;
+                0
+            }
+            SO_RCVTIMEO => {
+                if val.len() < 8 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let ms = u64::from_ne_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]);
+                sock.recv_timeout_ms = ms;
+                0
+            }
+            SO_SNDTIMEO => {
+                if val.len() < 8 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let ms = u64::from_ne_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]);
+                sock.send_timeout_ms = ms;
+                0
+            }
+            SO_KEEPALIVE => {
+                if val.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
+                sock.keepalive = v != 0;
+                0
+            }
+            _ => errno_i32(ERRNO_EINVAL),
+        },
+        IPPROTO_TCP => match optname {
+            TCP_NODELAY => {
+                if val.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
+                sock.tcp_nodelay = v != 0;
+                0
+            }
+            _ => errno_i32(ERRNO_EINVAL),
+        },
+        _ => errno_i32(ERRNO_EINVAL),
+    }
+}
+
+pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]) -> i32 {
+    use slopos_abi::syscall::*;
+    let mut table = SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx) else {
+        return errno_i32(ERRNO_ENOTSOCK);
+    };
+
+    match level {
+        SOL_SOCKET => match optname {
+            SO_REUSEADDR => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v: i32 = if sock.reuse_addr { 1 } else { 0 };
+                out[..4].copy_from_slice(&v.to_ne_bytes());
+                4
+            }
+            SO_ERROR => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let err = sock.pending_error;
+                sock.pending_error = 0;
+                out[..4].copy_from_slice(&err.to_ne_bytes());
+                4
+            }
+            SO_RCVBUF => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = sock.recv_buf_size as u32;
+                out[..4].copy_from_slice(&v.to_ne_bytes());
+                4
+            }
+            SO_SNDBUF => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v = sock.send_buf_size as u32;
+                out[..4].copy_from_slice(&v.to_ne_bytes());
+                4
+            }
+            SO_RCVTIMEO => {
+                if out.len() < 8 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                out[..8].copy_from_slice(&sock.recv_timeout_ms.to_ne_bytes());
+                8
+            }
+            SO_SNDTIMEO => {
+                if out.len() < 8 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                out[..8].copy_from_slice(&sock.send_timeout_ms.to_ne_bytes());
+                8
+            }
+            SO_KEEPALIVE => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v: i32 = if sock.keepalive { 1 } else { 0 };
+                out[..4].copy_from_slice(&v.to_ne_bytes());
+                4
+            }
+            _ => errno_i32(ERRNO_EINVAL),
+        },
+        IPPROTO_TCP => match optname {
+            TCP_NODELAY => {
+                if out.len() < 4 {
+                    return errno_i32(ERRNO_EINVAL);
+                }
+                let v: i32 = if sock.tcp_nodelay { 1 } else { 0 };
+                out[..4].copy_from_slice(&v.to_ne_bytes());
+                4
+            }
+            _ => errno_i32(ERRNO_EINVAL),
+        },
+        _ => errno_i32(ERRNO_EINVAL),
+    }
+}
+
+pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
+    use slopos_abi::syscall::*;
+    let clear_udp_queue = {
+        let mut table = SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx) else {
+            return errno_i32(ERRNO_ENOTSOCK);
+        };
+
+        match how {
+            SHUT_RD => {
+                sock.shut_rd = true;
+                sock.sock_type == SOCK_DGRAM
+            }
+            SHUT_WR => {
+                sock.shut_wr = true;
+                false
+            }
+            SHUT_RDWR => {
+                sock.shut_rd = true;
+                sock.shut_wr = true;
+                sock.sock_type == SOCK_DGRAM
+            }
+            _ => return errno_i32(ERRNO_EINVAL),
+        }
+    };
+
+    if clear_udp_queue {
+        UDP_RX_QUEUES[sock_idx as usize].lock().clear();
+    }
+
+    0
 }
 
 pub fn socket_send_queued(sock_idx: u32) -> i32 {

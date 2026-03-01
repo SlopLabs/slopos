@@ -18,6 +18,8 @@ pub mod neighbor;
 pub mod netstack;
 pub mod route;
 pub mod socket;
+#[cfg(feature = "itests")]
+pub mod socket_option_tests;
 pub mod tcp;
 pub mod timer;
 
