@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4 pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A complete, Phase 4B pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -746,7 +746,7 @@ Phase 4 introduces the entire socket framework from CAD-3: enum-dispatched `Sock
 
 ### 4A: Socket Framework
 
-- [ ] **4A.1** Rewrite `drivers/src/net/socket.rs` with the new `Socket` struct:
+- [x] **4A.1** Rewrite `drivers/src/net/socket.rs` with the new `Socket` struct:
   - `inner: SocketInner` (enum: `Udp(UdpSocket)`, `Tcp(TcpSocket)` placeholder, `Raw(RawSocket)` placeholder)
   - `state: SocketState` enum: `Unbound`, `Bound`, `Connected`, `Listening`, `Closed`
   - `flags: SocketFlags` (bitflags: `O_NONBLOCK`)
@@ -754,20 +754,20 @@ Phase 4 introduces the entire socket framework from CAD-3: enum-dispatched `Sock
   - `local_addr: Option<SockAddr>`, `remote_addr: Option<SockAddr>`
   - `recv_queue: BoundedQueue<(PacketBuf, SockAddr)>` — capacity from `options.recv_buf_size`
   - `wait_queue: WaitQueue` — stub for Phase 6 (just a `bool` flag for now)
-- [ ] **4A.2** Implement `SocketTable` as a slab allocator:
+- [x] **4A.2** Implement `SocketTable` as a slab allocator:
   - `slots: Vec<Option<Socket>>` + `freelist: Vec<usize>` — O(1) alloc/free
   - Initial capacity 64, grows by doubling when freelist is empty (up to `MAX_SOCKETS=1024`)
   - `alloc(inner: SocketInner) -> Option<usize>` — finds free slot, initializes Socket, returns index
   - `get(idx: usize) -> Option<&Socket>` and `get_mut(idx: usize) -> Option<&mut Socket>`
   - `free(idx: usize)` — runs cleanup (release port, cancel timers), sets slot to `None`, pushes to freelist
   - Protect with spinlock; document that the lock must not be held across blocking operations
-- [ ] **4A.3** Implement ephemeral port allocator in `drivers/src/net/socket.rs`:
+- [x] **4A.3** Implement ephemeral port allocator in `drivers/src/net/socket.rs`:
   - Range: 49152..65535 (IANA dynamic/private ports) — 16384 ports
   - `alloc_ephemeral() -> Option<Port>` — round-robin scan using atomic `next_port` counter, skip ports in use
   - `release_port(port: Port)` — marks port as available
   - Track allocated ports in a 2048-byte bitmap (16384 bits)
   - Use `Port` newtype — not raw `u16`
-- [ ] **4A.4** Implement `SocketOptions` defaults and validation:
+- [x] **4A.4** Implement `SocketOptions` defaults and validation:
   - `recv_buf_size`: default 16384, min 256, max 262144
   - `send_buf_size`: default 16384, min 256, max 262144
   - `reuse_addr`: default false
