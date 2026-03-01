@@ -26,6 +26,29 @@ fn read_user_u64(process_id: u32, addr: u64) -> Option<u64> {
     Some(unsafe { core::ptr::read_unaligned(virt.as_ptr::<u64>()) })
 }
 
+fn read_user_u8(process_id: u32, addr: u64) -> Option<u8> {
+    let page_dir = process_vm::process_vm_get_page_dir(process_id);
+    if page_dir.is_null() {
+        return None;
+    }
+    let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(addr));
+    let virt = phys.to_virt_checked()?;
+    Some(unsafe { core::ptr::read(virt.as_ptr::<u8>()) })
+}
+
+/// Read a null-terminated C string from user memory, up to `max_len` bytes.
+fn read_user_cstr(process_id: u32, addr: u64, max_len: usize) -> Option<alloc::vec::Vec<u8>> {
+    let mut buf = alloc::vec::Vec::new();
+    for i in 0..max_len {
+        let byte = read_user_u8(process_id, addr + i as u64)?;
+        if byte == 0 {
+            return Some(buf);
+        }
+        buf.push(byte);
+    }
+    Some(buf)
+}
+
 fn find_argc_slot(process_id: u32, sp: u64, expected_argc: u64) -> Option<u64> {
     for i in 0..16u64 {
         let slot = sp + i * 8;
@@ -535,6 +558,132 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
     TestResult::Pass
 }
 
+/// Verify that setup_user_stack writes the correct argc, argv pointers, and
+/// argv *string content* for a multi-argument command (e.g. `nc -u -l 12345`).
+/// This catches the class of bug where the stack structure looks correct but
+/// the string data is missing, truncated, or at the wrong address.
+pub fn test_setup_user_stack_argv_string_content() -> TestResult {
+    process_vm::init_process_vm();
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+
+    let args: [&[u8]; 4] = [b"nc", b"-u", b"-l", b"12345"];
+    let envs: [&[u8]; 1] = [b"PATH=/bin"];
+    let exec_info = ElfExecInfo {
+        entry: 0x401000,
+        phdr_addr: 0x402000,
+        phent_size: 56,
+        phnum: 1,
+    };
+
+    let sp = match super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info) {
+        Ok(v) => v,
+        Err(_) => {
+            klog_info!("EXEC_TEST: setup_user_stack failed in argv string test");
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+
+    // Locate argc on the stack
+    let base = match find_argc_slot(pid, sp, args.len() as u64) {
+        Some(v) => v,
+        None => {
+            klog_info!("EXEC_TEST: argc={} not found near sp={}", args.len(), sp);
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+
+    // Verify each argv[i] points to the correct null-terminated string
+    for (i, expected) in args.iter().enumerate() {
+        let ptr = match read_user_u64(pid, base + 8 * (1 + i as u64)) {
+            Some(p) if p != 0 => p,
+            _ => {
+                klog_info!("EXEC_TEST: argv[{}] pointer is null or unreadable", i);
+                process_vm::destroy_process_vm(pid);
+                return TestResult::Fail;
+            }
+        };
+        let actual = match read_user_cstr(pid, ptr, 256) {
+            Some(s) => s,
+            None => {
+                klog_info!(
+                    "EXEC_TEST: cannot read string at argv[{}] ptr={:#x}",
+                    i,
+                    ptr
+                );
+                process_vm::destroy_process_vm(pid);
+                return TestResult::Fail;
+            }
+        };
+        if actual.as_slice() != *expected {
+            klog_info!(
+                "EXEC_TEST: argv[{}] mismatch: expected len={} got len={}",
+                i,
+                expected.len(),
+                actual.len()
+            );
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    }
+
+    // Verify argv NULL terminator
+    let argv_null = read_user_u64(pid, base + 8 * (1 + args.len() as u64)).unwrap_or(u64::MAX);
+    if argv_null != 0 {
+        klog_info!(
+            "EXEC_TEST: argv null terminator missing, got {:#x}",
+            argv_null
+        );
+        process_vm::destroy_process_vm(pid);
+        return TestResult::Fail;
+    }
+
+    // Verify envp[0] points to the correct string
+    let envp0_slot = base + 8 * (1 + args.len() as u64 + 1);
+    let envp0_ptr = match read_user_u64(pid, envp0_slot) {
+        Some(p) if p != 0 => p,
+        _ => {
+            klog_info!("EXEC_TEST: envp[0] pointer is null or unreadable");
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+    let env_actual = match read_user_cstr(pid, envp0_ptr, 256) {
+        Some(s) => s,
+        None => {
+            klog_info!(
+                "EXEC_TEST: cannot read string at envp[0] ptr={:#x}",
+                envp0_ptr
+            );
+            process_vm::destroy_process_vm(pid);
+            return TestResult::Fail;
+        }
+    };
+    if env_actual.as_slice() != envs[0] {
+        klog_info!(
+            "EXEC_TEST: envp[0] mismatch: expected len={} got len={}",
+            envs[0].len(),
+            env_actual.len()
+        );
+        process_vm::destroy_process_vm(pid);
+        return TestResult::Fail;
+    }
+
+    // Verify sp is 16-byte aligned (SysV ABI requirement)
+    if sp % 16 != 0 {
+        klog_info!("EXEC_TEST: sp={:#x} not 16-byte aligned", sp);
+        process_vm::destroy_process_vm(pid);
+        return TestResult::Fail;
+    }
+
+    process_vm::destroy_process_vm(pid);
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     exec,
     [
@@ -561,5 +710,6 @@ slopos_lib::define_test_suite!(
         test_init_path_within_exec_limit,
         test_setup_user_stack_contract_layout,
         test_setup_user_stack_auxv_required_entries,
+        test_setup_user_stack_argv_string_content,
     ]
 );

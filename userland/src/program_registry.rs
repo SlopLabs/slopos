@@ -78,6 +78,14 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: b"Show network configuration",
         gui: false,
     },
+    ProgramSpec {
+        name: b"nc",
+        path: b"/bin/nc",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+        desc: b"Network Swiss army knife",
+        gui: false,
+    },
     #[cfg(feature = "testbins")]
     ProgramSpec {
         name: b"fork_test",

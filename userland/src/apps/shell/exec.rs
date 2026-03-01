@@ -4,8 +4,8 @@ use core::ptr;
 use crate::program_registry;
 use crate::runtime;
 use crate::syscall::{
-    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsStat,
-    core as sys_core, fs, process,
+    POLLHUP, POLLIN, USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ,
+    USER_FS_OPEN_WRITE, UserFsStat, UserPollFd, core as sys_core, fs, process,
 };
 
 use super::SyncUnsafeCell;
@@ -415,7 +415,8 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         let _ = fs::close_fd(pipe_fds[1]);
     }
 
-    let tid = process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+    let tid =
+        process::spawn_path_with_argv(spec.path, &cmd.argv[..cmd.argc], spec.priority, spec.flags);
 
     // Restore fd 1 immediately after spawn so shell output is normal again.
     if capture {
@@ -448,35 +449,61 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
 
     enter_foreground(pid);
 
-    // Wait for the child to exit BEFORE draining the pipe.
-    // This avoids a lost-wakeup race in the kernel pipe blocking path:
-    // on SMP, the child can write + wake the reader between the moment the
-    // reader drops the pipe lock and the moment it calls block_current_task(),
-    // causing the reader to sleep forever.  By waiting first, the child is
-    // dead, all its fds are closed (writers drops to 0), and the pipe read
-    // returns buffered data immediately followed by EOF -- no blocking needed.
-    let status = process::waitpid(pid);
-
-    // Now drain the child's stdout from the pipe into the shell display.
-    // The child is already terminated so all data is buffered in the pipe.
-    // NOTE: This approach works as long as child output fits in the pipe
-    // buffer (4096 bytes).  Programs producing more than that would deadlock
-    // (child blocks on write, nobody reads).  For current programs (ifconfig,
-    // nmap) output is well under this limit.
-    if capture {
+    // Stream child stdout to the shell display in real-time.
+    // We poll the pipe with infinite timeout (-1): the kernel blocks the
+    // task until POLLIN (child wrote data) or POLLHUP (child exited and
+    // pipe write-end closed).  This is truly event-driven — zero CPU
+    // while the child is idle, instant wake on output.  Same pattern
+    // Linux terminal emulators use on PTY master fds.
+    let status = if capture {
         let mut buf = [0u8; 512];
+        let exit_status;
         loop {
-            let n = match fs::read_slice(pipe_fds[0], &mut buf) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            if n == 0 {
+            // Poll the read-end of the pipe for available data.
+            let mut pfds = [UserPollFd {
+                fd: pipe_fds[0],
+                events: POLLIN,
+                revents: 0,
+            }];
+            let _ = fs::poll(&mut pfds, -1); // block until data or hangup
+
+            // Drain all currently available data from the pipe.
+            if pfds[0].revents & (POLLIN | POLLHUP) != 0 {
+                loop {
+                    match fs::read_slice(pipe_fds[0], &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            shell_write(&buf[..n]);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+
+            // Non-blocking check: has the child exited?
+            if let Some(st) = process::waitpid_nohang(pid) {
+                // Final drain: the child is dead so the pipe writer-count has
+                // dropped to zero.  Any remaining buffered data can be read
+                // without risk of blocking.
+                loop {
+                    match fs::read_slice(pipe_fds[0], &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            shell_write(&buf[..n]);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                exit_status = st;
                 break;
             }
-            shell_write(&buf[..n]);
         }
         let _ = fs::close_fd(pipe_fds[0]);
-    }
+        exit_status
+    } else {
+        // No capture — just wait for the child directly.
+        process::waitpid(pid)
+    };
     leave_foreground();
     Some(status)
 }

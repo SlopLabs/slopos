@@ -46,6 +46,9 @@ name = "ifconfig"
 path = "src/bin/ifconfig.rs"
 
 [[bin]]
+name = "nc"
+path = "src/bin/nc.rs"
+[[bin]]
 name = "fork_test"
 path = "src/bin/tests/fork_test.rs"
 

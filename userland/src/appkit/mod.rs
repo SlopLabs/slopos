@@ -47,6 +47,14 @@ pub use window::Window;
 /// If the application returns, the process exits with code 0 via
 /// `sys_exit`.
 ///
+/// # Stack Alignment
+///
+/// At ELF entry the SysV ABI guarantees `rsp` is 16-byte aligned with
+/// `[rsp] = argc`.  A compiler-generated `extern "C"` function assumes it
+/// was *called* (`rsp` 8-mod-16 due to the pushed return address).
+/// We use a naked stub so the `call` instruction itself pushes a return
+/// address and gives the callee the expected 8-mod-16 alignment.
+///
 /// # Usage
 ///
 /// ```rust,ignore
@@ -63,12 +71,28 @@ macro_rules! entry {
             $crate::syscall::core::exit_with_code(101);
         }
 
-        #[unsafe(no_mangle)]
+        /// Rust trampoline called from naked `_start`.
+        /// Invokes the application entry point then exits cleanly.
         #[allow(unreachable_code)]
-        pub extern "C" fn _start() -> ! {
+        #[inline(never)]
+        extern "C" fn __slopos_entry() -> ! {
             $main_fn(core::ptr::null_mut());
-            // If the app returns, exit cleanly instead of spinning.
             $crate::syscall::core::exit();
+        }
+
+        /// ELF entry point (naked).
+        ///
+        /// `rsp` is 16-byte aligned at entry.  `call` pushes a return
+        /// address so the callee sees 8-mod-16 — matching the C ABI.
+        #[unsafe(no_mangle)]
+        #[unsafe(naked)]
+        unsafe extern "C" fn _start() -> ! {
+            core::arch::naked_asm!(
+                "xor ebp, ebp",  // mark end of call chain
+                "call {}",
+                "ud2",
+                sym __slopos_entry,
+            );
         }
     };
 }

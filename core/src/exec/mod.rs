@@ -305,6 +305,16 @@ fn setup_user_stack(
 
     sp &= !0xF;
 
+    // SysV ABI: rsp must be 16-byte aligned at _start with argc at [rsp].
+    // Total 8-byte slots below this point: auxv (12) + envp_null (1) + envc +
+    // argv_null (1) + argc_slots (argc) + argc_word (1) = argc + envc + 15.
+    // If that total is odd, insert one 8-byte padding slot here (between the
+    // string area and auxv) so the final sp stays 16-byte aligned.
+    let total_slots = argc + envc + 15; // 12 auxv + 3 sentinel/argc
+    if total_slots % 2 != 0 {
+        sp = sp.wrapping_sub(8);
+    }
+
     let auxv = [
         (AT_PHDR, exec_info.phdr_addr),
         (AT_PHENT, exec_info.phent_size as u64),
@@ -339,11 +349,6 @@ fn setup_user_stack(
 
     sp = sp.wrapping_sub(8);
     write_u64_to_user_stack(page_dir, sp, argc as u64)?;
-
-    sp &= !0xF;
-    if ((stack_top - sp) / 8) % 2 != 0 {
-        sp = sp.wrapping_sub(8);
-    }
 
     Ok(sp)
 }

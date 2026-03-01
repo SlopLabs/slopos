@@ -23,7 +23,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig"
+BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig nc"
 
 # Ensure toolchain is available
 "$SCRIPT_DIR/ensure_toolchain.sh"
