@@ -161,7 +161,14 @@ fn tty_current_task_id() -> Option<u32> {
 
 fn tty_task_has_focus(task_id: u32) -> bool {
     let focused = TTY_FOCUSED_TASK_ID.load(Ordering::Relaxed);
-    focused != 0 && focused == task_id
+    if focused != 0 && focused == task_id {
+        return true;
+    }
+    // Foreground process group gets implicit TTY focus.  This allows
+    // child processes spawned by the shell (e.g. nc) to read TTY input
+    // even though the compositor set focus to the shell window.
+    let fg_pgrp = TTY_FOREGROUND_PGRP.load(Ordering::Acquire);
+    fg_pgrp != 0 && fg_pgrp == task_id
 }
 
 fn tty_ensure_focus_for_task(task_id: u32) {
