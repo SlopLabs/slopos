@@ -46,5 +46,7 @@ $CARGO +"$RUST_CHANNEL" build \
     --artifact-dir "$BUILD_DIR"
 
 if [ -f "$BUILD_DIR/kernel" ]; then
-    mv "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
+    if [ ! -e "$BUILD_DIR/kernel.elf" ] || [ ! "$BUILD_DIR/kernel" -ef "$BUILD_DIR/kernel.elf" ]; then
+        mv "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
+    fi
 fi

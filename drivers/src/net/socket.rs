@@ -731,148 +731,6 @@ impl UdpReceiveQueue {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct KernelSocket {
-    pub active: bool,
-    pub domain: u16,
-    pub sock_type: u16,
-    pub protocol: u16,
-    pub state: SocketState,
-    pub local_ip: [u8; 4],
-    pub local_port: u16,
-    pub remote_ip: [u8; 4],
-    pub remote_port: u16,
-    pub tcp_idx: Option<usize>,
-    pub process_id: u32,
-    pub recv_wq_idx: u8,
-    pub accept_wq_idx: u8,
-    pub send_wq_idx: u8,
-    pub recv_timeout_ms: u64,
-    pub send_timeout_ms: u64,
-    pub reuse_addr: bool,
-    pub keepalive: bool,
-    pub tcp_nodelay: bool,
-    pub recv_buf_size: usize,
-    pub send_buf_size: usize,
-    pub shut_rd: bool,
-    pub shut_wr: bool,
-    pub pending_error: i32,
-    pub nonblocking: bool,
-}
-
-impl KernelSocket {
-    const fn empty() -> Self {
-        Self {
-            active: false,
-            domain: 0,
-            sock_type: 0,
-            protocol: 0,
-            state: SocketState::Closed,
-            local_ip: [0; 4],
-            local_port: 0,
-            remote_ip: [0; 4],
-            remote_port: 0,
-            tcp_idx: None,
-            process_id: 0,
-            recv_wq_idx: 0,
-            accept_wq_idx: 0,
-            send_wq_idx: 0,
-            recv_timeout_ms: 0,
-            send_timeout_ms: 0,
-            reuse_addr: false,
-            keepalive: false,
-            tcp_nodelay: false,
-            recv_buf_size: 16384,
-            send_buf_size: 16384,
-            shut_rd: false,
-            shut_wr: false,
-            pending_error: 0,
-            nonblocking: true,
-        }
-    }
-}
-
-struct SocketTable {
-    sockets: [KernelSocket; MAX_SOCKETS],
-}
-
-impl SocketTable {
-    const fn new() -> Self {
-        Self {
-            sockets: [KernelSocket::empty(); MAX_SOCKETS],
-        }
-    }
-
-    fn alloc_slot(&mut self) -> Option<u32> {
-        for (idx, sock) in self.sockets.iter_mut().enumerate() {
-            if !sock.active {
-                *sock = KernelSocket::empty();
-                sock.active = true;
-                sock.state = SocketState::Unbound;
-                sock.recv_wq_idx = idx as u8;
-                sock.accept_wq_idx = idx as u8;
-                sock.send_wq_idx = idx as u8;
-                return Some(idx as u32);
-            }
-        }
-        None
-    }
-
-    fn get(&self, idx: u32) -> Option<&KernelSocket> {
-        self.sockets.get(idx as usize).filter(|s| s.active)
-    }
-
-    fn get_mut(&mut self, idx: u32) -> Option<&mut KernelSocket> {
-        self.sockets.get_mut(idx as usize).filter(|s| s.active)
-    }
-
-    fn release(&mut self, idx: u32) {
-        if let Some(sock) = self.sockets.get_mut(idx as usize) {
-            *sock = KernelSocket::empty();
-        }
-    }
-
-    fn tcp_idx_is_bound(&self, tcp_idx: usize) -> bool {
-        self.sockets
-            .iter()
-            .any(|s| s.active && s.tcp_idx == Some(tcp_idx) && s.state != SocketState::Closed)
-    }
-
-    fn find_udp_socket(&self, dst_ip: [u8; 4], dst_port: u16) -> Option<u32> {
-        for (idx, sock) in self.sockets.iter().enumerate() {
-            if !sock.active
-                || sock.sock_type != SOCK_DGRAM
-                || !matches!(sock.state, SocketState::Bound | SocketState::Connected)
-                || sock.local_port != dst_port
-            {
-                continue;
-            }
-
-            if sock.local_ip == dst_ip {
-                return Some(idx as u32);
-            }
-        }
-
-        for (idx, sock) in self.sockets.iter().enumerate() {
-            if !sock.active
-                || sock.sock_type != SOCK_DGRAM
-                || !matches!(sock.state, SocketState::Bound | SocketState::Connected)
-                || sock.local_port != dst_port
-            {
-                continue;
-            }
-
-            if sock.local_ip == [0; 4] {
-                return Some(idx as u32);
-            }
-        }
-
-        None
-    }
-}
-
-static SOCKET_TABLE: IrqMutex<SocketTable> = IrqMutex::new(SocketTable::new());
-
 static RECV_WQS: [WaitQueue; MAX_SOCKETS] = {
     const WAIT_QUEUE: WaitQueue = WaitQueue::new();
     [WAIT_QUEUE; MAX_SOCKETS]
@@ -924,17 +782,8 @@ fn map_net_err(err: NetError) -> i32 {
     }
 }
 
-fn alloc_ephemeral_port(table: &SocketTable) -> Option<u16> {
-    for port in 49152u16..=65535u16 {
-        let used = table
-            .sockets
-            .iter()
-            .any(|s| s.active && s.local_port == port && s.state != SocketState::Closed);
-        if !used {
-            return Some(port);
-        }
-    }
-    None
+fn alloc_ephemeral_port() -> Option<Port> {
+    EPHEMERAL_PORTS.lock().alloc()
 }
 
 fn be_port(port: u16) -> [u8; 2] {
@@ -1022,87 +871,63 @@ pub(crate) fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i3
     }
 }
 
-fn socket_wake_recv(sock_idx: u32) {
-    RECV_WQS[sock_idx as usize].wake_all();
+fn wq_slot(hint: u8) -> usize {
+    (hint as usize) % MAX_SOCKETS
 }
 
-fn make_udp_datagram(src_ip: [u8; 4], src_port: u16, payload: &[u8]) -> UdpDatagram {
-    let copy_len = cmp::min(payload.len(), UDP_DGRAM_MAX_PAYLOAD);
-    let mut dgram = UdpDatagram::empty();
-    dgram.src_ip = src_ip;
-    dgram.src_port = src_port;
-    dgram.len = copy_len as u16;
-    dgram.data[..copy_len].copy_from_slice(&payload[..copy_len]);
-    dgram
+fn socket_wake_recv_hint(wq_hint: u8) {
+    RECV_WQS[wq_slot(wq_hint)].wake_all();
 }
 
-pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
-    if (sock_idx as usize) >= MAX_SOCKETS {
-        return;
-    }
-
-    let dgram = make_udp_datagram(src_ip, src_port, payload);
-    UDP_RX_QUEUES[sock_idx as usize].lock().push(&dgram);
-    socket_wake_recv(sock_idx);
+fn socket_wake_send_hint(wq_hint: u8) {
+    SEND_WQS[wq_slot(wq_hint)].wake_all();
 }
 
-pub fn socket_deliver_udp_from_dispatch(
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-    payload: &[u8],
-) {
-    let sock_idx = {
-        let table = SOCKET_TABLE.lock();
-        table.find_udp_socket(dst_ip, dst_port)
-    };
+fn socket_wake_accept_hint(wq_hint: u8) {
+    ACCEPT_WQS[wq_slot(wq_hint)].wake_all();
+}
 
-    if let Some(sock_idx) = sock_idx {
-        socket_deliver_udp(sock_idx, src_ip, src_port, payload);
+fn socket_tcp_conn_id(sock: &Socket) -> Option<usize> {
+    match &sock.inner {
+        SocketInner::Tcp(tcp) => tcp.conn_id.map(|id| id as usize),
+        _ => None,
     }
 }
 
-fn socket_wake_send(sock_idx: u32) {
-    SEND_WQS[sock_idx as usize].wake_all();
-}
-
-fn socket_wake_accept(sock_idx: u32) {
-    ACCEPT_WQS[sock_idx as usize].wake_all();
+fn socket_is_udp(sock: &Socket) -> bool {
+    matches!(sock.inner, SocketInner::Udp(_))
 }
 
 fn socket_notify_tcp_idx_waiters(tcp_idx: usize) {
-    let table = SOCKET_TABLE.lock();
-    for (sock_idx, sock) in table.sockets.iter().enumerate() {
-        if !sock.active {
+    let table = NEW_SOCKET_TABLE.lock();
+    for slot in table.slots.iter().flatten() {
+        if socket_tcp_conn_id(slot) != Some(tcp_idx) {
             continue;
         }
-        if sock.tcp_idx == Some(tcp_idx) {
-            if tcp::tcp_recv_available(tcp_idx) > 0 {
-                RECV_WQS[sock_idx].wake_all();
-            }
-            if tcp::tcp_send_buffer_space(tcp_idx) > 0 {
-                SEND_WQS[sock_idx].wake_all();
-            }
-            if !matches!(
-                tcp::tcp_get_state(tcp_idx),
-                Some(TcpState::Established | TcpState::CloseWait)
-            ) {
-                RECV_WQS[sock_idx].wake_all();
-                SEND_WQS[sock_idx].wake_all();
-            }
+        if tcp::tcp_recv_available(tcp_idx) > 0 {
+            socket_wake_recv_hint(slot.recv_wq_idx);
+        }
+        if tcp::tcp_send_buffer_space(tcp_idx) > 0 {
+            socket_wake_send_hint(slot.send_wq_idx);
+        }
+        if !matches!(
+            tcp::tcp_get_state(tcp_idx),
+            Some(TcpState::Established | TcpState::CloseWait)
+        ) {
+            socket_wake_recv_hint(slot.recv_wq_idx);
+            socket_wake_send_hint(slot.send_wq_idx);
         }
     }
 }
 
 fn socket_notify_accept_waiters() {
-    let table = SOCKET_TABLE.lock();
-    for (sock_idx, sock) in table.sockets.iter().enumerate() {
-        if !sock.active || sock.state != SocketState::Listening {
+    let table = NEW_SOCKET_TABLE.lock();
+    for sock in table.slots.iter().flatten() {
+        if sock.state != SocketState::Listening {
             continue;
         }
         if find_established_child(sock, &table).is_some() {
-            ACCEPT_WQS[sock_idx].wake_all();
+            socket_wake_accept_hint(sock.accept_wq_idx);
         }
     }
 }
@@ -1116,8 +941,8 @@ pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
     }
 }
 
-fn sync_socket_state(sock: &mut KernelSocket) {
-    if let Some(tcp_idx) = sock.tcp_idx
+fn sync_socket_state(sock: &mut Socket) {
+    if let Some(tcp_idx) = socket_tcp_conn_id(sock)
         && let Some(state) = tcp::tcp_get_state(tcp_idx)
     {
         if state == TcpState::Established {
@@ -1137,7 +962,20 @@ fn sync_socket_state(sock: &mut KernelSocket) {
     }
 }
 
-fn find_established_child(listening: &KernelSocket, table: &SocketTable) -> Option<usize> {
+fn tcp_idx_is_bound(table: &SlabSocketTable, tcp_idx: usize) -> bool {
+    for sock in table.slots.iter().flatten() {
+        if socket_tcp_conn_id(sock) == Some(tcp_idx) && sock.state != SocketState::Closed {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_established_child(listening: &Socket, table: &SlabSocketTable) -> Option<usize> {
+    let Some(local_addr) = listening.local_addr else {
+        return None;
+    };
+
     for tcp_idx in 0..MAX_CONNECTIONS {
         let Some(conn): Option<TcpConnection> = tcp::tcp_get_connection(tcp_idx) else {
             continue;
@@ -1145,13 +983,13 @@ fn find_established_child(listening: &KernelSocket, table: &SocketTable) -> Opti
         if conn.state != TcpState::Established {
             continue;
         }
-        if conn.tuple.local_port != listening.local_port {
+        if conn.tuple.local_port != local_addr.port.0 {
             continue;
         }
-        if listening.local_ip != [0; 4] && conn.tuple.local_ip != listening.local_ip {
+        if local_addr.ip != Ipv4Addr::UNSPECIFIED && conn.tuple.local_ip != local_addr.ip.0 {
             continue;
         }
-        if table.tcp_idx_is_bound(tcp_idx) {
+        if tcp_idx_is_bound(table, tcp_idx) {
             continue;
         }
         return Some(tcp_idx);
@@ -1159,28 +997,94 @@ fn find_established_child(listening: &KernelSocket, table: &SocketTable) -> Opti
     None
 }
 
-pub fn socket_create(domain: u16, sock_type: u16, protocol: u16) -> i32 {
+pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
+    let packet = match PacketBuf::from_raw_copy(payload) {
+        Some(pkt) => pkt,
+        None => return,
+    };
+
+    let mut wake_hint = None;
+    {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
+            return;
+        };
+        if !socket_is_udp(sock) {
+            return;
+        }
+        let src = SockAddr::new(Ipv4Addr(src_ip), Port(src_port));
+        if sock.recv_queue.push((packet, src)) {
+            wake_hint = Some(sock.recv_wq_idx);
+        }
+    }
+
+    if let Some(hint) = wake_hint {
+        socket_wake_recv_hint(hint);
+    }
+}
+
+pub fn socket_deliver_udp_from_dispatch(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) {
+    let mut exact = None;
+    let mut wildcard = None;
+    {
+        let table = NEW_SOCKET_TABLE.lock();
+        for (idx, sock) in table.slots.iter().enumerate() {
+            let Some(sock) = sock else {
+                continue;
+            };
+            if !socket_is_udp(sock) {
+                continue;
+            }
+            if !matches!(sock.state, SocketState::Bound | SocketState::Connected) {
+                continue;
+            }
+            let Some(local) = sock.local_addr else {
+                continue;
+            };
+            if local.port.0 != dst_port {
+                continue;
+            }
+
+            if local.ip.0 == dst_ip {
+                exact = Some(idx as u32);
+                break;
+            }
+            if local.ip == Ipv4Addr::UNSPECIFIED {
+                wildcard = Some(idx as u32);
+            }
+        }
+    }
+
+    if let Some(sock_idx) = exact.or(wildcard) {
+        socket_deliver_udp(sock_idx, src_ip, src_port, payload);
+    }
+}
+
+pub fn socket_create(domain: u16, sock_type: u16, _protocol: u16) -> i32 {
     if domain != AF_INET {
         return errno_i32(ERRNO_EAFNOSUPPORT);
     }
-    if sock_type != SOCK_STREAM && sock_type != SOCK_DGRAM {
-        return errno_i32(ERRNO_EPROTONOSUPPORT);
-    }
 
-    let mut table = SOCKET_TABLE.lock();
-    let Some(idx) = table.alloc_slot() else {
-        return errno_i32(ERRNO_ENOMEM);
+    let inner = match sock_type {
+        SOCK_DGRAM => SocketInner::Udp(UdpSocketInner),
+        SOCK_STREAM => SocketInner::Tcp(TcpSocketInner { conn_id: None }),
+        _ => return errno_i32(ERRNO_EPROTONOSUPPORT),
     };
 
-    let sock = table
-        .get_mut(idx)
-        .expect("allocated socket slot must exist");
-    sock.domain = domain;
-    sock.sock_type = sock_type;
-    sock.protocol = protocol;
-    sock.state = SocketState::Unbound;
-    sock.process_id = 0;
-    UDP_RX_QUEUES[idx as usize].lock().clear();
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(idx) = table.alloc(inner) else {
+        return errno_i32(ERRNO_ENOMEM);
+    };
+    if let Some(sock) = table.get_mut(idx) {
+        sock.recv_queue.clear();
+        sock.set_nonblocking(true);
+    }
     idx as i32
 }
 
@@ -1201,63 +1105,53 @@ pub fn socket_sendto(
         return errno_i32(ERRNO_EINVAL) as i64;
     }
 
-    let (local_ip, local_port, auto_bind) = {
-        let mut table = SOCKET_TABLE.lock();
-        let idx = sock_idx as usize;
-        if idx >= MAX_SOCKETS || !table.sockets[idx].active {
+    let mut auto_bind: Option<(SockAddr, bool)> = None;
+    let local = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
-        }
-
-        if table.sockets[idx].sock_type != SOCK_DGRAM {
+        };
+        if !socket_is_udp(sock) {
             return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
         }
-        if table.sockets[idx].shut_wr {
+        if sock.is_write_shutdown() {
             return errno_i32(ERRNO_EPIPE) as i64;
         }
 
-        if table.sockets[idx].local_port == 0 {
-            let Some(port) = alloc_ephemeral_port(&table) else {
+        if sock.local_addr.is_none() || sock.local_addr.map(|a| a.port.0 == 0).unwrap_or(true) {
+            let Some(port) = alloc_ephemeral_port() else {
                 return errno_i32(ERRNO_ENOMEM) as i64;
             };
             let local_ip = crate::net::netstack::NET_STACK
                 .first_ipv4()
                 .map(|ip| ip.0)
                 .unwrap_or([0; 4]);
-
-            let sock = &mut table.sockets[idx];
-            sock.local_ip = local_ip;
-            sock.local_port = port;
+            let bind_addr = SockAddr::new(Ipv4Addr(local_ip), port);
+            sock.local_addr = Some(bind_addr);
             if sock.state == SocketState::Unbound {
                 sock.state = SocketState::Bound;
             }
-
-            let reuse_addr = sock.reuse_addr;
-            (
-                sock.local_ip,
-                sock.local_port,
-                Some((sock.local_ip, sock.local_port, reuse_addr)),
-            )
+            auto_bind = Some((bind_addr, sock.options.reuse_addr));
+            bind_addr
         } else {
-            let sock = &table.sockets[idx];
-            (sock.local_ip, sock.local_port, None)
+            sock.local_addr.unwrap()
         }
     };
 
-    if let Some((bind_ip, bind_port, reuse_addr)) = auto_bind
+    if let Some((bind_addr, reuse_addr)) = auto_bind
         && let Err(err) =
-            crate::net::udp::udp_bind(sock_idx, Ipv4Addr(bind_ip), Port(bind_port), reuse_addr)
+            crate::net::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
     {
-        let mut table = SOCKET_TABLE.lock();
-        if let Some(sock) = table.get_mut(sock_idx)
-            && sock.sock_type == SOCK_DGRAM
-            && sock.local_ip == bind_ip
-            && sock.local_port == bind_port
+        let mut table = NEW_SOCKET_TABLE.lock();
+        if let Some(sock) = table.get_mut(sock_idx as usize)
+            && socket_is_udp(sock)
+            && sock.local_addr == Some(bind_addr)
             && sock.state == SocketState::Bound
         {
-            sock.local_ip = [0; 4];
-            sock.local_port = 0;
+            sock.local_addr = None;
             sock.state = SocketState::Unbound;
         }
+        EPHEMERAL_PORTS.lock().release(bind_addr.port);
         return map_net_err(err) as i64;
     }
 
@@ -1267,7 +1161,7 @@ pub fn socket_sendto(
         unsafe { core::slice::from_raw_parts(data, len) }
     };
 
-    match crate::net::udp::udp_sendto(local_ip, dst_ip, local_port, dst_port, payload) {
+    match crate::net::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, payload) {
         Ok(n) => n as i64,
         Err(err) => map_net_err(err) as i64,
     }
@@ -1284,49 +1178,54 @@ pub fn socket_recvfrom(
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
-    let (sock_type, nonblocking, timeout_ms) = {
-        let table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx) else {
-            return errno_i32(ERRNO_ENOTSOCK) as i64;
-        };
-        (sock.sock_type, sock.nonblocking, sock.recv_timeout_ms)
-    };
-
-    if sock_type != SOCK_DGRAM {
-        return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
-    }
-
-    {
-        let table = SOCKET_TABLE.lock();
-        if let Some(sock) = table.get(sock_idx)
-            && sock.shut_rd
-        {
-            return 0;
-        }
-    }
-
     let out = if len == 0 {
         &mut [][..]
     } else {
         unsafe { core::slice::from_raw_parts_mut(buf, len) }
     };
 
+    let (nonblocking, timeout_ms, recv_hint) = {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx as usize) else {
+            return errno_i32(ERRNO_ENOTSOCK) as i64;
+        };
+        if !socket_is_udp(sock) {
+            return errno_i32(ERRNO_EPROTONOSUPPORT) as i64;
+        }
+        if sock.is_read_shutdown() {
+            return 0;
+        }
+        (
+            sock.is_nonblocking(),
+            sock.options.recv_timeout.unwrap_or(0),
+            sock.recv_wq_idx,
+        )
+    };
+
     loop {
-        if let Some(dgram) = UDP_RX_QUEUES[sock_idx as usize].lock().pop() {
-            let copy_len = cmp::min(out.len(), dgram.len as usize);
-            out[..copy_len].copy_from_slice(&dgram.data[..copy_len]);
+        let packet = {
+            let mut table = NEW_SOCKET_TABLE.lock();
+            let Some(sock) = table.get_mut(sock_idx as usize) else {
+                return errno_i32(ERRNO_ENOTSOCK) as i64;
+            };
+            sock.recv_queue.pop()
+        };
+
+        if let Some((pkt, src)) = packet {
+            let payload = pkt.payload();
+            let copy_len = cmp::min(out.len(), payload.len());
+            out[..copy_len].copy_from_slice(&payload[..copy_len]);
 
             if !src_ip.is_null() {
                 unsafe {
-                    *src_ip = dgram.src_ip;
+                    *src_ip = src.ip.0;
                 }
             }
             if !src_port.is_null() {
                 unsafe {
-                    *src_port = dgram.src_port;
+                    *src_port = src.port.0;
                 }
             }
-
             return copy_len as i64;
         }
 
@@ -1335,13 +1234,24 @@ pub fn socket_recvfrom(
         }
 
         let wait_ok = if timeout_ms > 0 {
-            RECV_WQS[sock_idx as usize].wait_event_timeout(
-                || !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty(),
+            RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
+                || {
+                    let table = NEW_SOCKET_TABLE.lock();
+                    table
+                        .get(sock_idx as usize)
+                        .map(|sock| !sock.recv_queue.is_empty())
+                        .unwrap_or(true)
+                },
                 timeout_ms,
             )
         } else {
-            RECV_WQS[sock_idx as usize]
-                .wait_event(|| !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty())
+            RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
+                let table = NEW_SOCKET_TABLE.lock();
+                table
+                    .get(sock_idx as usize)
+                    .map(|sock| !sock.recv_queue.is_empty())
+                    .unwrap_or(true)
+            })
         };
 
         if !wait_ok {
@@ -1351,9 +1261,10 @@ pub fn socket_recvfrom(
 }
 
 pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
-    let udp_bind_args = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get_mut(sock_idx) else {
+    let mut udp_bind_args: Option<(SockAddr, bool)> = None;
+    {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
 
@@ -1361,30 +1272,25 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             return errno_i32(ERRNO_EINVAL);
         }
 
-        sock.local_ip = addr;
-        sock.local_port = port;
+        let local = SockAddr::new(Ipv4Addr(addr), Port(port));
+        sock.local_addr = Some(local);
         sock.state = SocketState::Bound;
 
-        if sock.sock_type == SOCK_DGRAM {
-            Some((sock.local_ip, sock.local_port, sock.reuse_addr))
-        } else {
-            None
+        if socket_is_udp(sock) {
+            udp_bind_args = Some((local, sock.options.reuse_addr));
         }
-    };
+    }
 
-    if let Some((local_ip, local_port, reuse_addr)) = udp_bind_args
-        && let Err(err) =
-            crate::net::udp::udp_bind(sock_idx, Ipv4Addr(local_ip), Port(local_port), reuse_addr)
+    if let Some((local, reuse_addr)) = udp_bind_args
+        && let Err(err) = crate::net::udp::udp_bind(sock_idx, local.ip, local.port, reuse_addr)
     {
-        let mut table = SOCKET_TABLE.lock();
-        if let Some(sock) = table.get_mut(sock_idx)
-            && sock.sock_type == SOCK_DGRAM
-            && sock.local_ip == local_ip
-            && sock.local_port == local_port
+        let mut table = NEW_SOCKET_TABLE.lock();
+        if let Some(sock) = table.get_mut(sock_idx as usize)
+            && socket_is_udp(sock)
+            && sock.local_addr == Some(local)
             && sock.state == SocketState::Bound
         {
-            sock.local_ip = [0; 4];
-            sock.local_port = 0;
+            sock.local_addr = None;
             sock.state = SocketState::Unbound;
         }
         return map_net_err(err);
@@ -1394,22 +1300,27 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 }
 
 pub fn socket_listen(sock_idx: u32, _backlog: u32) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
 
-    if sock.sock_type != SOCK_STREAM {
+    let local = match sock.local_addr {
+        Some(addr) => addr,
+        None => return errno_i32(ERRNO_EINVAL),
+    };
+    if !matches!(sock.inner, SocketInner::Tcp(_)) {
         return errno_i32(ERRNO_EPROTONOSUPPORT);
     }
-
     if sock.state != SocketState::Bound {
         return errno_i32(ERRNO_EINVAL);
     }
 
-    match tcp::tcp_listen(sock.local_ip, sock.local_port) {
+    match tcp::tcp_listen(local.ip.0, local.port.0) {
         Ok(tcp_idx) => {
-            sock.tcp_idx = Some(tcp_idx);
+            if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
+                tcp_inner.conn_id = Some(tcp_idx as u32);
+            }
             sock.state = SocketState::Listening;
             0
         }
@@ -1419,45 +1330,59 @@ pub fn socket_listen(sock_idx: u32, _backlog: u32) -> i32 {
 
 pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16) -> i32 {
     loop {
-        let (listen_sock, nonblocking, recv_timeout_ms, send_timeout_ms) = {
-            let table = SOCKET_TABLE.lock();
-            let Some(sock) = table.get(sock_idx).copied() else {
+        let (nonblocking, timeout_ms, accept_hint) = {
+            let table = NEW_SOCKET_TABLE.lock();
+            let Some(sock) = table.get(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
             };
             if sock.state != SocketState::Listening {
                 return errno_i32(ERRNO_EINVAL);
             }
             (
-                sock,
-                sock.nonblocking,
-                sock.recv_timeout_ms,
-                sock.send_timeout_ms,
+                sock.is_nonblocking(),
+                sock.options.recv_timeout.unwrap_or(0),
+                sock.accept_wq_idx,
             )
         };
 
         {
-            let mut table = SOCKET_TABLE.lock();
-            if let Some(tcp_idx) = find_established_child(&listen_sock, &table)
+            let mut table = NEW_SOCKET_TABLE.lock();
+            let Some(listen_sock) = table.get(sock_idx as usize) else {
+                return errno_i32(ERRNO_ENOTSOCK);
+            };
+            let listen_opts = SocketOptions {
+                reuse_addr: listen_sock.options.reuse_addr,
+                recv_buf_size: listen_sock.options.recv_buf_size,
+                send_buf_size: listen_sock.options.send_buf_size,
+                recv_timeout: listen_sock.options.recv_timeout,
+                send_timeout: listen_sock.options.send_timeout,
+                keepalive: listen_sock.options.keepalive,
+                tcp_nodelay: listen_sock.options.tcp_nodelay,
+            };
+
+            if let Some(tcp_idx) = find_established_child(listen_sock, &table)
                 && let Some(conn) = tcp::tcp_get_connection(tcp_idx)
             {
-                let Some(new_idx) = table.alloc_slot() else {
+                let Some(new_idx) = table.alloc(SocketInner::Tcp(TcpSocketInner {
+                    conn_id: Some(tcp_idx as u32),
+                })) else {
                     return errno_i32(ERRNO_ENOMEM);
                 };
-                let sock = table
-                    .get_mut(new_idx)
-                    .expect("allocated accepted socket slot must exist");
-                sock.domain = AF_INET;
-                sock.sock_type = SOCK_STREAM;
-                sock.protocol = 0;
+
+                let Some(sock) = table.get_mut(new_idx) else {
+                    return errno_i32(ERRNO_ENOMEM);
+                };
                 sock.state = SocketState::Connected;
-                sock.local_ip = conn.tuple.local_ip;
-                sock.local_port = conn.tuple.local_port;
-                sock.remote_ip = conn.tuple.remote_ip;
-                sock.remote_port = conn.tuple.remote_port;
-                sock.tcp_idx = Some(tcp_idx);
-                sock.nonblocking = nonblocking;
-                sock.recv_timeout_ms = recv_timeout_ms;
-                sock.send_timeout_ms = send_timeout_ms;
+                sock.local_addr = Some(SockAddr::new(
+                    Ipv4Addr(conn.tuple.local_ip),
+                    Port(conn.tuple.local_port),
+                ));
+                sock.remote_addr = Some(SockAddr::new(
+                    Ipv4Addr(conn.tuple.remote_ip),
+                    Port(conn.tuple.remote_port),
+                ));
+                sock.options = listen_opts;
+                sock.set_nonblocking(nonblocking);
 
                 if !peer_addr.is_null() {
                     unsafe {
@@ -1477,21 +1402,21 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             return errno_i32(ERRNO_EAGAIN);
         }
 
-        let wait_ok = if recv_timeout_ms > 0 {
-            ACCEPT_WQS[sock_idx as usize].wait_event_timeout(
+        let wait_ok = if timeout_ms > 0 {
+            ACCEPT_WQS[wq_slot(accept_hint)].wait_event_timeout(
                 || {
-                    let table = SOCKET_TABLE.lock();
-                    let Some(sock) = table.get(sock_idx) else {
+                    let table = NEW_SOCKET_TABLE.lock();
+                    let Some(sock) = table.get(sock_idx as usize) else {
                         return true;
                     };
                     find_established_child(sock, &table).is_some()
                 },
-                recv_timeout_ms,
+                timeout_ms,
             )
         } else {
-            ACCEPT_WQS[sock_idx as usize].wait_event(|| {
-                let table = SOCKET_TABLE.lock();
-                let Some(sock) = table.get(sock_idx) else {
+            ACCEPT_WQS[wq_slot(accept_hint)].wait_event(|| {
+                let table = NEW_SOCKET_TABLE.lock();
+                let Some(sock) = table.get(sock_idx as usize) else {
                     return true;
                 };
                 find_established_child(sock, &table).is_some()
@@ -1505,25 +1430,23 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 }
 
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
 
-    match sock.sock_type {
-        SOCK_STREAM => {
+    match &mut sock.inner {
+        SocketInner::Tcp(tcp_inner) => {
             if matches!(sock.state, SocketState::Connected | SocketState::Connecting) {
                 return errno_i32(ERRNO_EISCONN);
             }
 
-            let local_ip = if sock.local_ip != [0; 4] {
-                sock.local_ip
-            } else {
+            let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
                 crate::net::netstack::NET_STACK
                     .first_ipv4()
                     .map(|ip| ip.0)
                     .unwrap_or([0; 4])
-            };
+            });
 
             match tcp::tcp_connect(local_ip, addr, port) {
                 Ok((tcp_idx, syn)) => {
@@ -1533,24 +1456,24 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                         return send_rc;
                     }
 
-                    sock.local_ip = syn.tuple.local_ip;
-                    sock.local_port = syn.tuple.local_port;
-                    sock.remote_ip = addr;
-                    sock.remote_port = port;
-                    sock.tcp_idx = Some(tcp_idx);
+                    sock.local_addr = Some(SockAddr::new(
+                        Ipv4Addr(syn.tuple.local_ip),
+                        Port(syn.tuple.local_port),
+                    ));
+                    sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
+                    tcp_inner.conn_id = Some(tcp_idx as u32);
                     sock.state = SocketState::Connecting;
                     0
                 }
                 Err(e) => map_tcp_err(e),
             }
         }
-        SOCK_DGRAM => {
-            sock.remote_ip = addr;
-            sock.remote_port = port;
+        SocketInner::Udp(_) => {
+            sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
             sock.state = SocketState::Connected;
             0
         }
-        _ => errno_i32(ERRNO_EPROTONOSUPPORT),
+        SocketInner::Raw(_) => errno_i32(ERRNO_EPROTONOSUPPORT),
     }
 }
 
@@ -1559,96 +1482,74 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
-    let sock_type = {
-        let table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx) else {
+    let is_udp = {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
-        sock.sock_type
-    };
-
-    {
-        let table = SOCKET_TABLE.lock();
-        if let Some(sock) = table.get(sock_idx)
-            && sock.shut_wr
-        {
+        if sock.is_write_shutdown() {
             return errno_i32(ERRNO_EPIPE) as i64;
         }
-    }
+        socket_is_udp(sock)
+    };
 
-    if sock_type == SOCK_DGRAM {
+    if is_udp {
         if len > UDP_DGRAM_MAX_PAYLOAD {
             return errno_i32(ERRNO_EINVAL) as i64;
         }
 
-        let (state, remote_ip, remote_port, local_ip, local_port, auto_bind) = {
-            let mut table = SOCKET_TABLE.lock();
-            let idx = sock_idx as usize;
-            if idx >= MAX_SOCKETS || !table.sockets[idx].active {
+        let mut auto_bind: Option<(SockAddr, bool)> = None;
+        let (local, remote, state) = {
+            let mut table = NEW_SOCKET_TABLE.lock();
+            let Some(sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK) as i64;
-            }
+            };
 
-            if table.sockets[idx].state == SocketState::Unbound
-                || table.sockets[idx].local_port == 0
-            {
-                let Some(port) = alloc_ephemeral_port(&table) else {
+            if sock.local_addr.is_none() || sock.local_addr.map(|a| a.port.0 == 0).unwrap_or(true) {
+                let Some(port) = alloc_ephemeral_port() else {
                     return errno_i32(ERRNO_ENOMEM) as i64;
                 };
                 let local_ip = crate::net::netstack::NET_STACK
                     .first_ipv4()
                     .map(|ip| ip.0)
                     .unwrap_or([0; 4]);
-                let sock = &mut table.sockets[idx];
-                sock.local_ip = local_ip;
-                sock.local_port = port;
+                let local = SockAddr::new(Ipv4Addr(local_ip), port);
+                sock.local_addr = Some(local);
                 if sock.state == SocketState::Unbound {
                     sock.state = SocketState::Bound;
                 }
-
-                let reuse_addr = sock.reuse_addr;
-                let state = sock.state;
-                let remote_ip = sock.remote_ip;
-                let remote_port = sock.remote_port;
-                (
-                    state,
-                    remote_ip,
-                    remote_port,
-                    sock.local_ip,
-                    sock.local_port,
-                    Some((sock.local_ip, sock.local_port, reuse_addr)),
-                )
-            } else {
-                let sock = &table.sockets[idx];
-                (
-                    sock.state,
-                    sock.remote_ip,
-                    sock.remote_port,
-                    sock.local_ip,
-                    sock.local_port,
-                    None,
-                )
+                auto_bind = Some((local, sock.options.reuse_addr));
             }
+
+            let local = match sock.local_addr {
+                Some(v) => v,
+                None => return errno_i32(ERRNO_ENOTCONN) as i64,
+            };
+            let remote = match sock.remote_addr {
+                Some(v) => v,
+                None => return errno_i32(ERRNO_ENOTCONN) as i64,
+            };
+            (local, remote, sock.state)
         };
 
-        if let Some((bind_ip, bind_port, reuse_addr)) = auto_bind
+        if let Some((bind_addr, reuse_addr)) = auto_bind
             && let Err(err) =
-                crate::net::udp::udp_bind(sock_idx, Ipv4Addr(bind_ip), Port(bind_port), reuse_addr)
+                crate::net::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
         {
-            let mut table = SOCKET_TABLE.lock();
-            if let Some(sock) = table.get_mut(sock_idx)
-                && sock.sock_type == SOCK_DGRAM
-                && sock.local_ip == bind_ip
-                && sock.local_port == bind_port
+            let mut table = NEW_SOCKET_TABLE.lock();
+            if let Some(sock) = table.get_mut(sock_idx as usize)
+                && socket_is_udp(sock)
+                && sock.local_addr == Some(bind_addr)
                 && sock.state == SocketState::Bound
             {
-                sock.local_ip = [0; 4];
-                sock.local_port = 0;
+                sock.local_addr = None;
                 sock.state = SocketState::Unbound;
             }
+            EPHEMERAL_PORTS.lock().release(bind_addr.port);
             return map_net_err(err) as i64;
         }
 
-        if state != SocketState::Connected || remote_port == 0 {
+        if state != SocketState::Connected {
             return errno_i32(ERRNO_ENOTCONN) as i64;
         }
 
@@ -1659,10 +1560,10 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         };
 
         return match crate::net::udp::udp_sendto(
-            local_ip,
-            remote_ip,
-            local_port,
-            remote_port,
+            local.ip.0,
+            remote.ip.0,
+            local.port.0,
+            remote.port.0,
             payload,
         ) {
             Ok(n) => n as i64,
@@ -1670,17 +1571,18 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         };
     }
 
-    let (tcp_idx, state, nonblocking, timeout_ms) = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get_mut(sock_idx) else {
+    let (tcp_idx, state, nonblocking, timeout_ms, send_hint) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
         sync_socket_state(sock);
         (
-            sock.tcp_idx,
+            socket_tcp_conn_id(sock),
             sock.state,
-            sock.nonblocking,
-            sock.send_timeout_ms,
+            sock.is_nonblocking(),
+            sock.options.send_timeout.unwrap_or(0),
+            sock.send_wq_idx,
         )
     };
 
@@ -1708,10 +1610,10 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 return errno_i32(ERRNO_EAGAIN) as i64;
             }
             let wait_ok = if timeout_ms > 0 {
-                SEND_WQS[sock_idx as usize]
+                SEND_WQS[wq_slot(send_hint)]
                     .wait_event_timeout(|| tcp::tcp_send_buffer_space(tcp_idx) > 0, timeout_ms)
             } else {
-                SEND_WQS[sock_idx as usize].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
+                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
             };
             if !wait_ok {
                 return errno_i32(ERRNO_EAGAIN) as i64;
@@ -1731,6 +1633,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 return map_tcp_err_i64(e);
             }
         };
+
         if wrote == 0 {
             if total_wrote > 0 {
                 break;
@@ -1739,10 +1642,10 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 return errno_i32(ERRNO_EAGAIN) as i64;
             }
             let wait_ok = if timeout_ms > 0 {
-                SEND_WQS[sock_idx as usize]
+                SEND_WQS[wq_slot(send_hint)]
                     .wait_event_timeout(|| tcp::tcp_send_buffer_space(tcp_idx) > 0, timeout_ms)
             } else {
-                SEND_WQS[sock_idx as usize].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
+                SEND_WQS[wq_slot(send_hint)].wait_event(|| tcp::tcp_send_buffer_space(tcp_idx) > 0)
             };
             if !wait_ok {
                 return errno_i32(ERRNO_EAGAIN) as i64;
@@ -1772,62 +1675,71 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
-    let sock_type = {
-        let table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx) else {
-            return errno_i32(ERRNO_ENOTSOCK) as i64;
-        };
-        sock.sock_type
+    let out = if len == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buf, len) }
     };
 
-    {
-        let table = SOCKET_TABLE.lock();
-        if let Some(sock) = table.get(sock_idx)
-            && sock.shut_rd
-        {
-            return errno_i32(ERRNO_EPIPE) as i64;
-        }
+    let (is_udp, is_shut_rd) = {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx as usize) else {
+            return errno_i32(ERRNO_ENOTSOCK) as i64;
+        };
+        (socket_is_udp(sock), sock.is_read_shutdown())
+    };
+
+    if is_shut_rd {
+        return if is_udp {
+            0
+        } else {
+            errno_i32(ERRNO_EPIPE) as i64
+        };
     }
 
-    if sock_type == SOCK_DGRAM {
-        let (nonblocking, timeout_ms, peer_filter) = {
-            let table = SOCKET_TABLE.lock();
-            let Some(sock) = table.get(sock_idx) else {
+    if is_udp {
+        let (nonblocking, timeout_ms, recv_hint, peer_filter) = {
+            let table = NEW_SOCKET_TABLE.lock();
+            let Some(sock) = table.get(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK) as i64;
             };
-            let filter = if sock.state == SocketState::Connected {
-                Some((sock.remote_ip, sock.remote_port))
+            let peer = if sock.state == SocketState::Connected {
+                sock.remote_addr
             } else {
                 None
             };
-            (sock.nonblocking, sock.recv_timeout_ms, filter)
-        };
-
-        let out = if len == 0 {
-            &mut [][..]
-        } else {
-            unsafe { core::slice::from_raw_parts_mut(buf, len) }
+            (
+                sock.is_nonblocking(),
+                sock.options.recv_timeout.unwrap_or(0),
+                sock.recv_wq_idx,
+                peer,
+            )
         };
 
         loop {
-            let maybe_dgram = {
-                let mut queue = UDP_RX_QUEUES[sock_idx as usize].lock();
+            let packet = {
+                let mut table = NEW_SOCKET_TABLE.lock();
+                let Some(sock) = table.get_mut(sock_idx as usize) else {
+                    return errno_i32(ERRNO_ENOTSOCK) as i64;
+                };
+
                 let mut found = None;
-                while let Some(dgram) = queue.pop() {
-                    if let Some((peer_ip, peer_port)) = peer_filter
-                        && (dgram.src_ip != peer_ip || dgram.src_port != peer_port)
+                while let Some((pkt, src)) = sock.recv_queue.pop() {
+                    if let Some(peer) = peer_filter
+                        && src != peer
                     {
                         continue;
                     }
-                    found = Some(dgram);
+                    found = Some((pkt, src));
                     break;
                 }
                 found
             };
 
-            if let Some(dgram) = maybe_dgram {
-                let copy_len = cmp::min(out.len(), dgram.len as usize);
-                out[..copy_len].copy_from_slice(&dgram.data[..copy_len]);
+            if let Some((pkt, _src)) = packet {
+                let payload = pkt.payload();
+                let copy_len = cmp::min(out.len(), payload.len());
+                out[..copy_len].copy_from_slice(&payload[..copy_len]);
                 return copy_len as i64;
             }
 
@@ -1836,13 +1748,24 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
             }
 
             let wait_ok = if timeout_ms > 0 {
-                RECV_WQS[sock_idx as usize].wait_event_timeout(
-                    || !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty(),
+                RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
+                    || {
+                        let table = NEW_SOCKET_TABLE.lock();
+                        table
+                            .get(sock_idx as usize)
+                            .map(|sock| !sock.recv_queue.is_empty())
+                            .unwrap_or(true)
+                    },
                     timeout_ms,
                 )
             } else {
-                RECV_WQS[sock_idx as usize]
-                    .wait_event(|| !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty())
+                RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
+                    let table = NEW_SOCKET_TABLE.lock();
+                    table
+                        .get(sock_idx as usize)
+                        .map(|sock| !sock.recv_queue.is_empty())
+                        .unwrap_or(true)
+                })
             };
 
             if !wait_ok {
@@ -1851,17 +1774,18 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         }
     }
 
-    let (tcp_idx, state, nonblocking, timeout_ms) = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get_mut(sock_idx) else {
+    let (tcp_idx, state, nonblocking, timeout_ms, recv_hint) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
         sync_socket_state(sock);
         (
-            sock.tcp_idx,
+            socket_tcp_conn_id(sock),
             sock.state,
-            sock.nonblocking,
-            sock.recv_timeout_ms,
+            sock.is_nonblocking(),
+            sock.options.recv_timeout.unwrap_or(0),
+            sock.recv_wq_idx,
         )
     };
 
@@ -1871,12 +1795,6 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
 
     let Some(tcp_idx) = tcp_idx else {
         return errno_i32(ERRNO_ENOTCONN) as i64;
-    };
-
-    let out = if len == 0 {
-        &mut [][..]
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(buf, len) }
     };
 
     loop {
@@ -1898,7 +1816,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 }
 
                 let wait_ok = if timeout_ms > 0 {
-                    RECV_WQS[sock_idx as usize].wait_event_timeout(
+                    RECV_WQS[wq_slot(recv_hint)].wait_event_timeout(
                         || {
                             tcp::tcp_recv_available(tcp_idx) > 0
                                 || !matches!(
@@ -1909,7 +1827,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                         timeout_ms,
                     )
                 } else {
-                    RECV_WQS[sock_idx as usize].wait_event(|| {
+                    RECV_WQS[wq_slot(recv_hint)].wait_event(|| {
                         tcp::tcp_recv_available(tcp_idx) > 0
                             || !matches!(
                                 tcp::tcp_get_state(tcp_idx),
@@ -1928,29 +1846,35 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
 }
 
 pub fn socket_close(sock_idx: u32) -> i32 {
-    let (tcp_idx, udp_unbind) = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx).copied() else {
+    let (tcp_idx, udp_unbind, recv_hint, send_hint, accept_hint) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
-        let tcp_idx = sock.tcp_idx;
-        let udp_unbind = if sock.sock_type == SOCK_DGRAM && sock.local_port != 0 {
-            Some((sock.local_ip, sock.local_port))
+
+        let tcp_idx = socket_tcp_conn_id(sock);
+        let udp_unbind = if socket_is_udp(sock) {
+            sock.local_addr
         } else {
             None
         };
-        table.release(sock_idx);
-        (tcp_idx, udp_unbind)
+        let recv_hint = sock.recv_wq_idx;
+        let send_hint = sock.send_wq_idx;
+        let accept_hint = sock.accept_wq_idx;
+        sock.recv_queue.clear();
+
+        table.free(sock_idx as usize);
+        (tcp_idx, udp_unbind, recv_hint, send_hint, accept_hint)
     };
 
-    if let Some((local_ip, local_port)) = udp_unbind {
-        crate::net::udp::udp_unbind(sock_idx, Ipv4Addr(local_ip), Port(local_port));
+    if let Some(local) = udp_unbind {
+        crate::net::udp::udp_unbind(sock_idx, local.ip, local.port);
+        EPHEMERAL_PORTS.lock().release(local.port);
     }
 
-    socket_wake_recv(sock_idx);
-    socket_wake_send(sock_idx);
-    socket_wake_accept(sock_idx);
-    UDP_RX_QUEUES[sock_idx as usize].lock().clear();
+    socket_wake_recv_hint(recv_hint);
+    socket_wake_send_hint(send_hint);
+    socket_wake_accept_hint(accept_hint);
 
     if let Some(tcp_idx) = tcp_idx {
         match tcp::tcp_close(tcp_idx) {
@@ -1968,28 +1892,33 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    let (sock, tcp_idx) = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get_mut(sock_idx) else {
+    let (state, is_udp, tcp_idx, has_udp_data) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return 0;
         };
         sync_socket_state(sock);
-        (*sock, sock.tcp_idx)
+        (
+            sock.state,
+            socket_is_udp(sock),
+            socket_tcp_conn_id(sock),
+            !sock.recv_queue.is_empty(),
+        )
     };
 
-    if sock.state == SocketState::Listening {
-        let table = SOCKET_TABLE.lock();
-        if find_established_child(&sock, &table).is_some() {
+    if state == SocketState::Listening {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx as usize) else {
+            return 0;
+        };
+        if find_established_child(sock, &table).is_some() {
             return POLLIN as u32;
         }
         return 0;
     }
 
-    if sock.sock_type == SOCK_DGRAM {
-        if !UDP_RX_QUEUES[sock_idx as usize].lock().is_empty() {
-            return POLLIN as u32;
-        }
-        return 0;
+    if is_udp {
+        return if has_udp_data { POLLIN as u32 } else { 0 };
     }
 
     let Some(tcp_idx) = tcp_idx else {
@@ -2022,16 +1951,16 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
 }
 
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
-    let (sock_type, tcp_idx, state) = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get_mut(sock_idx) else {
+    let (is_udp, tcp_idx, state) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
             return 0;
         };
         sync_socket_state(sock);
-        (sock.sock_type, sock.tcp_idx, sock.state)
+        (socket_is_udp(sock), socket_tcp_conn_id(sock), sock.state)
     };
 
-    if sock_type == SOCK_DGRAM {
+    if is_udp {
         return POLLOUT as u32;
     }
 
@@ -2065,62 +1994,110 @@ pub fn socket_poll_writable(sock_idx: u32) -> u32 {
 }
 
 pub fn socket_get_state(sock_idx: u32) -> Option<SocketState> {
-    SOCKET_TABLE.lock().get(sock_idx).map(|s| s.state)
+    NEW_SOCKET_TABLE
+        .lock()
+        .get(sock_idx as usize)
+        .map(|s| s.state)
 }
 
 pub fn socket_set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
-    sock.nonblocking = nonblocking;
+    sock.set_nonblocking(nonblocking);
     0
 }
 
 pub fn socket_set_timeouts(sock_idx: u32, recv_timeout_ms: u64, send_timeout_ms: u64) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
-    sock.recv_timeout_ms = recv_timeout_ms;
-    sock.send_timeout_ms = send_timeout_ms;
+    sock.options.recv_timeout = if recv_timeout_ms == 0 {
+        None
+    } else {
+        Some(recv_timeout_ms)
+    };
+    sock.options.send_timeout = if send_timeout_ms == 0 {
+        None
+    } else {
+        Some(send_timeout_ms)
+    };
     0
 }
 
 pub fn socket_reset_all() {
-    let mut table = SOCKET_TABLE.lock();
+    {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        table.init_if_needed();
+        let cap = table.capacity();
+        for idx in 0..cap {
+            if let Some(sock) = table.get(idx) {
+                socket_wake_recv_hint(sock.recv_wq_idx);
+                socket_wake_accept_hint(sock.accept_wq_idx);
+                socket_wake_send_hint(sock.send_wq_idx);
+            }
+            table.free(idx);
+        }
+    }
+
     for idx in 0..MAX_SOCKETS {
         RECV_WQS[idx].wake_all();
         ACCEPT_WQS[idx].wake_all();
         SEND_WQS[idx].wake_all();
-        UDP_RX_QUEUES[idx].lock().clear();
-        table.sockets[idx] = KernelSocket::empty();
     }
+
+    *EPHEMERAL_PORTS.lock() = EphemeralPortAllocator::new();
     crate::net::udp::UDP_DEMUX.lock().clear();
     tcp::tcp_reset_all();
 }
 
-pub fn socket_snapshot(sock_idx: u32) -> Option<KernelSocket> {
-    SOCKET_TABLE.lock().get(sock_idx).copied()
+#[derive(Clone, Copy)]
+pub struct SocketSnapshot {
+    pub state: SocketState,
+    pub local_ip: [u8; 4],
+    pub local_port: u16,
+    pub remote_ip: [u8; 4],
+    pub remote_port: u16,
+    pub nonblocking: bool,
+}
+
+pub fn socket_snapshot(sock_idx: u32) -> Option<SocketSnapshot> {
+    NEW_SOCKET_TABLE.lock().get(sock_idx as usize).map(|sock| {
+        let local = sock
+            .local_addr
+            .unwrap_or(SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)));
+        let remote = sock
+            .remote_addr
+            .unwrap_or(SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)));
+        SocketSnapshot {
+            state: sock.state,
+            local_ip: local.ip.0,
+            local_port: local.port.0,
+            remote_ip: remote.ip.0,
+            remote_port: remote.port.0,
+            nonblocking: sock.is_nonblocking(),
+        }
+    })
 }
 
 pub fn socket_lookup_tcp_idx(sock_idx: u32) -> Option<usize> {
-    SOCKET_TABLE.lock().get(sock_idx).and_then(|s| s.tcp_idx)
+    NEW_SOCKET_TABLE
+        .lock()
+        .get(sock_idx as usize)
+        .and_then(socket_tcp_conn_id)
 }
 
 pub fn socket_count_active() -> usize {
-    SOCKET_TABLE
-        .lock()
-        .sockets
-        .iter()
-        .filter(|s| s.active)
-        .count()
+    NEW_SOCKET_TABLE.lock().count_active()
 }
 
 pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) -> i32 {
     use slopos_abi::syscall::*;
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
 
@@ -2131,7 +2108,7 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
-                sock.reuse_addr = v != 0;
+                sock.options.reuse_addr = v != 0;
                 0
             }
             SO_RCVBUF => {
@@ -2139,10 +2116,11 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
-                if !(256..=262144).contains(&v) {
+                let Ok(size) = SocketOptions::validate_recv_buf_size(v) else {
                     return errno_i32(ERRNO_EINVAL);
-                }
-                sock.recv_buf_size = v;
+                };
+                sock.options.recv_buf_size = size;
+                sock.recv_queue.resize(size);
                 0
             }
             SO_SNDBUF => {
@@ -2150,10 +2128,10 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
-                if !(256..=262144).contains(&v) {
+                let Ok(size) = SocketOptions::validate_send_buf_size(v) else {
                     return errno_i32(ERRNO_EINVAL);
-                }
-                sock.send_buf_size = v;
+                };
+                sock.options.send_buf_size = size;
                 0
             }
             SO_RCVTIMEO => {
@@ -2163,7 +2141,7 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 let ms = u64::from_ne_bytes([
                     val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
                 ]);
-                sock.recv_timeout_ms = ms;
+                sock.options.recv_timeout = if ms == 0 { None } else { Some(ms) };
                 0
             }
             SO_SNDTIMEO => {
@@ -2173,7 +2151,7 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 let ms = u64::from_ne_bytes([
                     val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
                 ]);
-                sock.send_timeout_ms = ms;
+                sock.options.send_timeout = if ms == 0 { None } else { Some(ms) };
                 0
             }
             SO_KEEPALIVE => {
@@ -2181,7 +2159,7 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
-                sock.keepalive = v != 0;
+                sock.options.keepalive = v != 0;
                 0
             }
             _ => errno_i32(ERRNO_EINVAL),
@@ -2192,7 +2170,7 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
-                sock.tcp_nodelay = v != 0;
+                sock.options.tcp_nodelay = v != 0;
                 0
             }
             _ => errno_i32(ERRNO_EINVAL),
@@ -2203,8 +2181,9 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
 
 pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]) -> i32 {
     use slopos_abi::syscall::*;
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
 
@@ -2214,7 +2193,7 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v: i32 = if sock.reuse_addr { 1 } else { 0 };
+                let v: i32 = if sock.options.reuse_addr { 1 } else { 0 };
                 out[..4].copy_from_slice(&v.to_ne_bytes());
                 4
             }
@@ -2222,8 +2201,7 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let err = sock.pending_error;
-                sock.pending_error = 0;
+                let err = sock.take_pending_error().map(map_net_err).unwrap_or(0);
                 out[..4].copy_from_slice(&err.to_ne_bytes());
                 4
             }
@@ -2231,7 +2209,7 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v = sock.recv_buf_size as u32;
+                let v = sock.options.recv_buf_size as u32;
                 out[..4].copy_from_slice(&v.to_ne_bytes());
                 4
             }
@@ -2239,7 +2217,7 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v = sock.send_buf_size as u32;
+                let v = sock.options.send_buf_size as u32;
                 out[..4].copy_from_slice(&v.to_ne_bytes());
                 4
             }
@@ -2247,21 +2225,23 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 8 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                out[..8].copy_from_slice(&sock.recv_timeout_ms.to_ne_bytes());
+                let v = sock.options.recv_timeout.unwrap_or(0);
+                out[..8].copy_from_slice(&v.to_ne_bytes());
                 8
             }
             SO_SNDTIMEO => {
                 if out.len() < 8 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                out[..8].copy_from_slice(&sock.send_timeout_ms.to_ne_bytes());
+                let v = sock.options.send_timeout.unwrap_or(0);
+                out[..8].copy_from_slice(&v.to_ne_bytes());
                 8
             }
             SO_KEEPALIVE => {
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v: i32 = if sock.keepalive { 1 } else { 0 };
+                let v: i32 = if sock.options.keepalive { 1 } else { 0 };
                 out[..4].copy_from_slice(&v.to_ne_bytes());
                 4
             }
@@ -2272,7 +2252,7 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let v: i32 = if sock.tcp_nodelay { 1 } else { 0 };
+                let v: i32 = if sock.options.tcp_nodelay { 1 } else { 0 };
                 out[..4].copy_from_slice(&v.to_ne_bytes());
                 4
             }
@@ -2284,47 +2264,39 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
 
 pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
     use slopos_abi::syscall::*;
-    let clear_udp_queue = {
-        let mut table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get_mut(sock_idx) else {
-            return errno_i32(ERRNO_ENOTSOCK);
-        };
 
-        match how {
-            SHUT_RD => {
-                sock.shut_rd = true;
-                sock.sock_type == SOCK_DGRAM
-            }
-            SHUT_WR => {
-                sock.shut_wr = true;
-                false
-            }
-            SHUT_RDWR => {
-                sock.shut_rd = true;
-                sock.shut_wr = true;
-                sock.sock_type == SOCK_DGRAM
-            }
-            _ => return errno_i32(ERRNO_EINVAL),
-        }
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
+        return errno_i32(ERRNO_ENOTSOCK);
     };
 
-    if clear_udp_queue {
-        UDP_RX_QUEUES[sock_idx as usize].lock().clear();
+    match how {
+        SHUT_RD => {
+            sock.flags.set(SocketFlags::SHUT_RD);
+            if socket_is_udp(sock) {
+                sock.recv_queue.clear();
+            }
+        }
+        SHUT_WR => {
+            sock.flags.set(SocketFlags::SHUT_WR);
+        }
+        SHUT_RDWR => {
+            sock.flags.set(SocketFlags::SHUT_RD);
+            sock.flags.set(SocketFlags::SHUT_WR);
+            if socket_is_udp(sock) {
+                sock.recv_queue.clear();
+            }
+        }
+        _ => return errno_i32(ERRNO_EINVAL),
     }
 
     0
 }
 
 pub fn socket_send_queued(sock_idx: u32) -> i32 {
-    let tcp_idx = {
-        let table = SOCKET_TABLE.lock();
-        let Some(sock) = table.get(sock_idx) else {
-            return errno_i32(ERRNO_ENOTSOCK);
-        };
-        match sock.tcp_idx {
-            Some(i) => i,
-            None => return errno_i32(ERRNO_ENOTCONN),
-        }
+    let tcp_idx = match socket_lookup_tcp_idx(sock_idx) {
+        Some(i) => i,
+        None => return errno_i32(ERRNO_ENOTCONN),
     };
 
     let mut tx_payload = [0u8; TCP_TX_MAX];
@@ -2355,9 +2327,11 @@ pub fn socket_process_timers() {
 }
 
 fn socket_from_tcp_idx(tcp_idx: usize) -> Option<u32> {
-    let table = SOCKET_TABLE.lock();
-    for (idx, sock) in table.sockets.iter().enumerate() {
-        if sock.active && sock.tcp_idx == Some(tcp_idx) {
+    let table = NEW_SOCKET_TABLE.lock();
+    for (idx, sock) in table.slots.iter().enumerate() {
+        if let Some(sock) = sock
+            && socket_tcp_conn_id(sock) == Some(tcp_idx)
+        {
             return Some(idx as u32);
         }
     }
@@ -2365,19 +2339,19 @@ fn socket_from_tcp_idx(tcp_idx: usize) -> Option<u32> {
 }
 
 pub fn socket_debug_set_connected(sock_idx: u32, remote_ip: [u8; 4], remote_port: u16) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
-    let Some(tcp_idx) = sock.tcp_idx else {
+    let Some(tcp_idx) = socket_tcp_conn_id(sock) else {
         return errno_i32(ERRNO_ENOTCONN);
     };
+
     if let Some(conn) = tcp::tcp_get_connection(tcp_idx)
         && conn.state == TcpState::Established
     {
         sock.state = SocketState::Connected;
-        sock.remote_ip = remote_ip;
-        sock.remote_port = remote_port;
+        sock.remote_addr = Some(SockAddr::new(Ipv4Addr(remote_ip), Port(remote_port)));
         return 0;
     }
     errno_i32(ERRNO_ENOTCONN)

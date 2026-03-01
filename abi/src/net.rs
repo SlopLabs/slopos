@@ -49,6 +49,11 @@ pub struct SockAddrIn {
     pub _pad: [u8; 8],
 }
 
+const _: () = assert!(
+    core::mem::size_of::<SockAddrIn>() == 16,
+    "SockAddrIn must be exactly 16 bytes"
+);
+
 /// Maximum number of kernel sockets (shared across all processes).
 pub const MAX_SOCKETS: usize = 64;
 
