@@ -68,7 +68,7 @@ pub fn net_rx(handle: &DeviceHandle, mut pkt: PacketBuf) {
 
     // Dispatch by EtherType.
     match EtherType::from_u16(ethertype_raw) {
-        Some(EtherType::Arp) => arp::handle_rx(dev, pkt),
+        Some(EtherType::Arp) => arp::handle_rx(handle, pkt),
         Some(EtherType::Ipv4) => ipv4::handle_rx(dev, pkt, checksum_rx),
         Some(EtherType::Ipv6) => {
             // IPv6 not supported yet — silently drop.

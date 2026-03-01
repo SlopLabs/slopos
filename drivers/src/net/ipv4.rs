@@ -17,7 +17,7 @@ use slopos_lib::klog_debug;
 use super::socket;
 use super::tcp;
 use super::types::{DevIndex, IpProtocol};
-use crate::net::{self as net, packetbuf::PacketBuf};
+use crate::net::{self as net, NetError, packetbuf::PacketBuf};
 
 /// Handle an incoming IPv4 packet.
 ///
@@ -120,7 +120,7 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
         }
     }
 
-    let _ = dev; // Will be used in Phase 2 for per-device neighbor cache
+    let _ = dev;
 }
 
 // =============================================================================
@@ -170,4 +170,69 @@ fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     // Always deliver to the socket table — userland might have a UDP socket
     // bound to port 53 (or any other port) for its own purposes.
     socket::socket_deliver_udp_from_dispatch(src_ip, dst_ip, src_port, dst_port, udp_payload);
+}
+
+// =============================================================================
+// 2C.3 — IPv4 egress via neighbor cache
+// =============================================================================
+
+/// Send an IPv4 packet through the neighbor cache for MAC resolution.
+///
+/// This is the new egress entry point (Phase 2C.3).  The packet must have
+/// its Ethernet header space reserved (via [`PacketBuf::push_header`]) with
+/// a placeholder destination MAC.  The neighbor cache resolves the MAC and
+/// either transmits immediately or queues the packet pending ARP resolution.
+///
+/// `next_hop` is `dst_ip` for now — routing (Phase 3) will compute it.
+pub fn send(
+    handle: &super::netdev::DeviceHandle,
+    dst_ip: super::types::Ipv4Addr,
+    pkt: PacketBuf,
+) -> Result<(), NetError> {
+    use super::arp;
+    use super::neighbor::{NEIGHBOR_CACHE, ResolveOutcome};
+
+    let dev = handle.index();
+    let next_hop = dst_ip; // Phase 3: route_lookup(dst_ip).next_hop
+
+    // Broadcast/multicast: skip neighbor resolution, TX directly.
+    if dst_ip.is_broadcast() || dst_ip.is_multicast() {
+        if let Err(e) = handle.tx(pkt) {
+            klog_debug!("ipv4::send: broadcast tx failed: {}", e);
+            return Err(e);
+        }
+        return Ok(());
+    }
+
+    match NEIGHBOR_CACHE.resolve(dev, next_hop, pkt) {
+        ResolveOutcome::Resolved {
+            mac,
+            mut pkt,
+            action,
+        } => {
+            // MAC known — set dst MAC in Ethernet header and TX.
+            arp::set_dst_mac_in_eth_header(&mut pkt, mac);
+            if let Some(act) = action {
+                arp::execute_neighbor_action(handle, act);
+            }
+            if let Err(e) = handle.tx(pkt) {
+                klog_debug!("ipv4::send: tx failed: {}", e);
+                return Err(e);
+            }
+            Ok(())
+        }
+        ResolveOutcome::Queued => Ok(()),
+        ResolveOutcome::ArpNeeded(action) => {
+            arp::execute_neighbor_action(handle, action);
+            Ok(())
+        }
+        ResolveOutcome::Failed(e) => {
+            klog_debug!(
+                "ipv4::send: neighbor resolution failed for {}: {}",
+                dst_ip,
+                e
+            );
+            Err(e)
+        }
+    }
 }

@@ -13,6 +13,7 @@ pub mod dns;
 pub mod ingress;
 pub mod ipv4;
 pub mod napi;
+pub mod neighbor;
 pub mod socket;
 pub mod tcp;
 pub mod timer;

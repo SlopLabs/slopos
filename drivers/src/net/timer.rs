@@ -435,20 +435,25 @@ pub fn net_timer_process() {
 
 /// Dispatch a single fired timer to the appropriate subsystem.
 ///
-/// **Phase 2A stub**: logs each timer event.  Phase 2B will add:
-/// - `ArpExpire` → `neighbor_cache.on_expire(key)`
-/// - `ArpRetransmit` → `neighbor_cache.on_retransmit(key)`
-///
-/// Phase 5 will add TCP dispatch.  Phase 8 will add reassembly dispatch.
+/// ARP timers (Phase 2B) call into the [`NeighborCache`] and execute any
+/// returned I/O actions via the single VirtIO-net device handle.  TCP and
+/// reassembly dispatch remain stubbed for Phases 5 and 8.
 fn dispatch_fired_timer(timer: &FiredTimer) {
     match timer.kind {
         TimerKind::ArpExpire => {
             klog_debug!("net_timer: ARP expire fired, key={}", timer.key);
-            // Phase 2B: neighbor_cache.on_expire(timer.key)
+            super::neighbor::NEIGHBOR_CACHE.on_expire(timer.key);
         }
         TimerKind::ArpRetransmit => {
             klog_debug!("net_timer: ARP retransmit fired, key={}", timer.key);
-            // Phase 2B: neighbor_cache.on_retransmit(timer.key)
+            let (action, _dropped) = super::neighbor::NEIGHBOR_CACHE.on_retransmit(timer.key);
+            if let Some(act) = action {
+                // Execute the returned action (send ARP request).
+                // Phase 9 (multi-NIC) will need per-device handle lookup.
+                if let Some(handle) = crate::virtio_net::get_device_handle() {
+                    super::arp::execute_neighbor_action(handle, act);
+                }
+            }
         }
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);

@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A complete, Phase 2B–2C pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3 pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -582,24 +582,24 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### 2B: Neighbor Cache State Machine
 
-- [ ] **2B.1** Create `drivers/src/net/neighbor.rs` with `NeighborState` enum:
+- [x] **2B.1** Create `drivers/src/net/neighbor.rs` with `NeighborState` enum:
   - `Incomplete { retries: u8, pending: SmallVec<[PacketBuf; 4]> }` — ARP sent, packets queued (bounded at 4)
   - `Reachable { mac: MacAddr, confirmed_at: u64 }` — fresh entry
   - `Stale { mac: MacAddr, last_used: u64 }` — old but usable, will re-probe on next use
   - `Failed` — no reply after max retries, drop queued packets
-- [ ] **2B.2** Implement `NeighborEntry` and `NeighborCache`:
+- [x] **2B.2** Implement `NeighborEntry` and `NeighborCache`:
   - `NeighborEntry { ip: Ipv4Addr, state: NeighborState, timer_token: Option<TimerToken> }`
   - `NeighborCache` keyed by `(DevIndex, Ipv4Addr)` — per-interface from day one (CAD-5)
   - Fixed capacity of 256 entries with LRU eviction (evict oldest `Stale` first, then oldest `Reachable`)
   - `lookup(dev: DevIndex, ip: Ipv4Addr) -> Option<MacAddr>` — returns MAC if `Reachable` or `Stale`
   - `insert_or_update(dev: DevIndex, ip: Ipv4Addr, mac: MacAddr)` — called when ARP reply arrives
   - Each entry has an `entry_id: u32` used as the timer `key`
-- [ ] **2B.3** Implement `NeighborCache::resolve(dev: DevIndex, ip: Ipv4Addr, pkt: PacketBuf) -> Result<(), NetError>`:
+- [x] **2B.3** Implement `NeighborCache::resolve(dev: DevIndex, ip: Ipv4Addr, pkt: PacketBuf) -> Result<(), NetError>`:
   - If `Reachable` or `Stale`: set destination MAC in `pkt`, call `dev.tx(pkt)`, if `Stale` schedule re-probe
   - If `Incomplete`: push `pkt` onto pending queue (drop if queue full, award L), return `Ok(())`
   - If absent: create `Incomplete` entry, queue `pkt`, call `arp::send_request(dev, ip)`, schedule `ArpRetransmit` timer
   - If `Failed`: drop `pkt`, return `Err(HostUnreachable)`, award an L
-- [ ] **2B.4** Implement timer-driven state transitions:
+- [x] **2B.4** Implement timer-driven state transitions:
   - On `insert_or_update`: schedule `ArpExpire` timer for `REACHABLE_TIME` (30s), store token in entry
   - `on_expire(entry_id)`: transition `Reachable` to `Stale`, cancel old timer
   - On `Stale` entry use: schedule `ArpRetransmit` timer for `STALE_PROBE_TIME` (5s)
@@ -607,26 +607,26 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### 2C: ARP Protocol Handler
 
-- [ ] **2C.1** Implement `arp::handle_rx(dev: DevIndex, pkt: PacketBuf)` in `drivers/src/net/arp.rs`:
+- [x] **2C.1** Implement `arp::handle_rx(dev: DevIndex, pkt: PacketBuf)` in `drivers/src/net/arp.rs`:
   - Parse ARP header: validate `htype=1` (Ethernet), `ptype=0x0800` (IPv4), `hlen=6`, `plen=4`
   - On ARP reply (`oper=2`): call `NeighborCache::insert_or_update(dev, sender_ip, sender_mac)`, flush pending packets
   - On ARP request (`oper=1`) for our IP: send ARP reply with our MAC
   - On any ARP: opportunistically update cache if sender is already known (RFC 826)
   - Drop malformed ARP silently, increment error stat
-- [ ] **2C.2** Implement `arp::send_request(dev: DevIndex, target_ip: Ipv4Addr)`:
+- [x] **2C.2** Implement `arp::send_request(dev: DevIndex, target_ip: Ipv4Addr)`:
   - Allocate `PacketBuf::alloc()`, fill Ethernet header: dst = `MacAddr::BROADCAST`, src = our MAC
   - Fill ARP header: opcode = REQUEST, sender = our IP/MAC, target = `target_ip`, target MAC = `MacAddr::ZERO`
   - Call `dev_handle.tx(pkt)`
-- [ ] **2C.3** Wire `NeighborCache` into the IPv4 egress path:
+- [x] **2C.3** Wire `NeighborCache` into the IPv4 egress path:
   - `ipv4::send(dev: DevIndex, dst_ip: Ipv4Addr, pkt: PacketBuf)` calls `NeighborCache::resolve(dev, next_hop, pkt)`
   - Next-hop is `dst_ip` for now (routing table comes in Phase 3)
 
 ### Phase 2 Test Coverage
 
-- [ ] **2.T1** Unit test `NeighborCache::lookup` on empty cache returns `None`
-- [ ] **2.T2** Unit test `insert_or_update` followed by `lookup` returns correct MAC
-- [ ] **2.T3** Unit test `Incomplete` state: queued packets are flushed when reply arrives
-- [ ] **2.T4** Unit test `Failed` state: packets are dropped, W/L loss is awarded
+- [x] **2.T1** Unit test `NeighborCache::lookup` on empty cache returns `None`
+- [x] **2.T2** Unit test `insert_or_update` followed by `lookup` returns correct MAC
+- [x] **2.T3** Unit test `Incomplete` state: queued packets are flushed when reply arrives
+- [x] **2.T4** Unit test `Failed` state: packets are dropped, W/L loss is awarded
 - [x] **2.T5** Unit test timer wheel: schedule a timer, advance ticks past deadline, verify dispatch fires with correct `kind` and `key`
 - [x] **2.T6** Unit test timer cancellation: cancel before deadline, verify dispatch does not fire
 - [x] **2.T7** Unit test timer `MAX_TIMERS_PER_TICK` bound: schedule 64 timers for same tick, verify only 32 fire per tick call
@@ -635,12 +635,12 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### Phase 2 Gate
 
-- [ ] **GATE**: ARP request/reply cycle completes for a new host without manual cache population
-- [ ] **GATE**: Packets queued during `Incomplete` state are transmitted after reply arrives
-- [ ] **GATE**: Timer wheel fires entries within one tick of their deadline with correct `TimerKind`/`key`
-- [ ] **GATE**: Timer cancellation prevents firing (no stale callbacks)
-- [ ] **GATE**: No static ARP table remains in `drivers/src/virtio_net.rs`
-- [ ] **GATE**: Neighbor cache is keyed by `(DevIndex, Ipv4Addr)`, not a global map
+- [x] **GATE**: ARP request/reply cycle completes for a new host without manual cache population
+- [x] **GATE**: Packets queued during `Incomplete` state are transmitted after reply arrives
+- [x] **GATE**: Timer wheel fires entries within one tick of their deadline with correct `TimerKind`/`key`
+- [x] **GATE**: Timer cancellation prevents firing (no stale callbacks)
+- [x] **GATE**: No static ARP table remains in `drivers/src/virtio_net.rs`
+- [x] **GATE**: Neighbor cache is keyed by `(DevIndex, Ipv4Addr)`, not a global map
 
 ---
 

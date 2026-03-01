@@ -25,6 +25,8 @@ pub mod msix;
 pub mod msix_tests;
 #[cfg(feature = "itests")]
 pub mod napi_tests;
+#[cfg(feature = "itests")]
+pub mod neighbor_tests;
 pub mod net;
 #[cfg(feature = "itests")]
 pub mod net_types_tests;

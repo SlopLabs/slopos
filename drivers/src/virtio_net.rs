@@ -154,7 +154,7 @@ static DNS_RX_BUF: IrqMutex<DnsRxBuf> = IrqMutex::new(DnsRxBuf::new());
 
 static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
 
-fn get_device_handle() -> Option<&'static DeviceHandle> {
+pub fn get_device_handle() -> Option<&'static DeviceHandle> {
     let ptr = DEVICE_HANDLE_PTR.load(Ordering::Acquire);
     if ptr.is_null() {
         None
