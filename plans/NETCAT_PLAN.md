@@ -1,8 +1,8 @@
 # SlopOS Netcat (`nc`) Implementation Plan
 
-> **Status**: ✅ Phase A complete — Phase B blocked on TCP stack (networking Phase 5)
+> **Status**: ✅ Phase A+B complete — Phase C blocked on poll/select (networking Phase 6)
 > **Target**: Real, long-term `nc` command that grows with the networking stack
-> **Scope**: UDP client/listener (now), TCP (Phase 5), bidirectional I/O (Phase 6), scanning (Phase 6+)
+> **Scope**: UDP client/listener (done), TCP client/listener (done), bidirectional I/O (Phase 6), scanning (Phase 6+)
 > **Design principle**: Build the argument parser, config model, and output helpers once; add protocol modes as the stack evolves
 
 ---
@@ -232,8 +232,8 @@ Follow the existing app pattern (`ifconfig.rs`, `nmap.rs`):
 
 ### B.1: TCP Client
 
-- [ ] **B.1.1** Add `NcProtocol::Tcp` variant; make TCP the default (no flag = TCP, `-u` = UDP)
-- [ ] **B.1.2** Implement `tcp_client(config: &NcConfig)`:
+- [x] **B.1.1** Add `NcProtocol::Tcp` variant; make TCP the default (no flag = TCP, `-u` = UDP)
+- [x] **B.1.2** Implement `tcp_client(config: &NcConfig)`:
   - `socket(AF_INET, SOCK_STREAM, 0)` → `connect(fd, &addr)` → stream I/O loop
   - I/O loop: same half-duplex pattern as UDP client but using `send()`/`recv()` instead of `sendto()`/`recvfrom()`
   - On `recv()` returning 0: connection closed by remote, print if verbose, exit 0
@@ -241,27 +241,27 @@ Follow the existing app pattern (`ifconfig.rs`, `nmap.rs`):
 
 ### B.2: TCP Listener
 
-- [ ] **B.2.1** Implement `tcp_listen(config: &NcConfig)`:
+- [x] **B.2.1** Implement `tcp_listen(config: &NcConfig)`:
   - `socket(AF_INET, SOCK_STREAM, 0)` → `set_reuse_addr(fd)` → `bind()` → `listen(fd, 1)` → `accept(fd, &mut peer)`
   - After accept: I/O loop on the accepted fd
   - Print peer address if verbose: `nc: connection from <ip>:<port>`
   - After client disconnects: exit (single-shot, like real `nc -l`)
 
-- [ ] **B.2.2** Add `-k` flag (keep-listening): after one client disconnects, accept the next one
+- [x] **B.2.2** Add `-k` flag (keep-listening): after one client disconnects, accept the next one
 
 ### B.3: Argument Parser Update
 
-- [ ] **B.3.1** Remove the "UDP required" check from `parse_args()`
-- [ ] **B.3.2** Default protocol becomes `Tcp` when `-u` is not specified
-- [ ] **B.3.3** Update usage: `usage: nc [-ulvk] [-p port] [-w timeout] [host] port`
+- [x] **B.3.1** Remove the "UDP required" check from `parse_args()`
+- [x] **B.3.2** Default protocol becomes `Tcp` when `-u` is not specified
+- [x] **B.3.3** Update usage: `usage: nc [-ulvk] [-p port] [-w timeout] [host] port`
 
 ### Phase B Gate
 
-- [ ] **GATE**: `nc 10.0.2.2 80` connects via TCP (3-way handshake completes)
-- [ ] **GATE**: `nc -l 8080` accepts one TCP connection
-- [ ] **GATE**: Data flows in both directions (half-duplex)
-- [ ] **GATE**: FIN handling: remote close → `recv()` returns 0 → clean exit
-- [ ] **GATE**: `-k` flag accepts multiple sequential connections
+- [x] **GATE**: `nc 10.0.2.2 80` connects via TCP (3-way handshake completes)
+- [x] **GATE**: `nc -l 8080` accepts one TCP connection
+- [x] **GATE**: Data flows in both directions (half-duplex)
+- [x] **GATE**: FIN handling: remote close → `recv()` returns 0 → clean exit
+- [x] **GATE**: `-k` flag accepts multiple sequential connections
 
 ---
 
@@ -343,21 +343,17 @@ This requires loopback UDP to work end-to-end (Phase 3 loopback device exists).
 
 ## File Layout and Registration
 
-### New Files
+### Current Files (Phase B module extraction complete)
 
 ```
-userland/src/apps/nc.rs         — All nc logic (single file for Phase A, ~900 lines)
+userland/src/apps/nc/
+├── mod.rs                      — Types, arg parsing, output helpers, dispatch, tests (~880 lines)
+├── udp.rs                      — UDP client + listen modes (~240 lines)
+└── tcp.rs                      — TCP client + listen modes (~320 lines)
 userland/src/bin/nc.rs          — Entry point (naked _start with argc/argv extraction)
 ```
 
-When Phase B adds TCP (~200 lines), consider extracting to a module:
-```
-userland/src/apps/nc/
-├── mod.rs                      — Entry, arg parsing, dispatch
-├── udp.rs                      — UDP modes
-├── tcp.rs                      — TCP modes (Phase B)
-└── io.rs                       — Shared I/O loop (Phase C)
-```
+Phase C will add `io.rs` for shared full-duplex I/O loop via `poll()`.
 
 ### Registration Changes
 
@@ -408,14 +404,18 @@ extracts these before calling into the Rust entry point. This pattern can be reu
 
 ### Half-Duplex I/O Model
 
-Phase A uses half-duplex I/O (send → receive → repeat) because `poll()` is not yet available.
+Phases A and B both use half-duplex I/O (send → receive → repeat) because `poll()` is not yet
+available. UDP uses `sendto()`/`recvfrom()`; TCP uses `send()`/`recv()` after `connect()`/`accept()`.
 The receive phase uses a non-blocking socket with `sleep_ms(10)` polling. The default receive
-window is 500ms; `-w` overrides with a longer timeout. Phase C will replace this with `poll()`.
+window is 500ms; `-w` overrides with a longer timeout. TCP listen mode uses non-blocking `accept()`
+with the same polling pattern. Phase C will replace all polling loops with `poll()`.
 
 ### Tests
 
-Unit tests for parsing/formatting are in `#[cfg(test)]` within `nc.rs`. These use the standard
-Rust test harness and cannot run in the no_std kernel target. They serve as regression documentation
+Unit tests for parsing/formatting/argument handling are in `#[cfg(test)]` within `nc/mod.rs`.
+Phase B added extensive argument parsing tests via `parse_args_from_slices()` — a testable
+inner function separated from the raw C-pointer entry point. These use the standard Rust test
+harness and cannot run in the no_std kernel target. They serve as regression documentation
 and can be extracted to a host-side test crate if needed.
 
 ---
@@ -425,9 +425,9 @@ and can be extracted to a host-side test crate if needed.
 | nc Phase | Networking Phase Required | What It Unlocks |
 |---|---|---|
 | **A** (UDP) | Phase 4 ✅ (complete) | First userland socket test; UDP client + listener |
-| **B** (TCP) | Phase 5 (pending) | TCP connect/listen; stream I/O |
+| **B** (TCP) | Phase 5 ✅ (complete) | TCP connect/listen; stream I/O; `-k` keep-listening |
 | **C** (poll + scan) | Phase 6 (pending) | Full-duplex I/O; port scanning; no spin-polling |
-Phase A is implemented. Phase B is blocked on TCP stack (networking Phase 5).
+Phase A and B are implemented. Phase C is blocked on poll/select (networking Phase 6).
 
 ### Shell Output Streaming Fix
 
