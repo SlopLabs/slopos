@@ -645,9 +645,7 @@ use slopos_abi::syscall::{
 use slopos_lib::{IrqMutex, WaitQueue};
 
 use crate::net;
-use crate::net::tcp::{
-    self, MAX_CONNECTIONS, TCP_HEADER_LEN, TcpConnection, TcpError, TcpOutSegment, TcpState,
-};
+use crate::net::tcp::{self, TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
 use crate::virtio_net;
 
 const TCP_TX_MAX: usize = 1460;
@@ -925,12 +923,22 @@ fn socket_notify_tcp_idx_waiters(tcp_idx: usize) {
 }
 
 fn socket_notify_accept_waiters() {
-    let table = NEW_SOCKET_TABLE.lock();
-    for sock in table.slots.iter().flatten() {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    for sock in table.slots.iter_mut().flatten() {
         if sock.state != SocketState::Listening {
             continue;
         }
-        if find_established_child(sock, &table).is_some() {
+        // Phase 5C: Check accept queue in TcpListenState.
+        let has_pending = if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
+            tcp_inner
+                .listen
+                .as_ref()
+                .map(|ls| ls.accept_queue_len() > 0)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if has_pending {
             socket_wake_accept_hint(sock.accept_wq_idx);
         }
     }
@@ -951,6 +959,29 @@ pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
                     Port(conn.tuple.remote_port),
                     tcp_idx as u32,
                 );
+
+                // Phase 5C: Wire completed 3WHS into the listener's accept queue.
+                // When a server-side child connection transitions SYN_RECEIVED -> Established,
+                // find the parent listener and push an AcceptedConn to its accept queue.
+                let listener_sock_idx = tcp_socket::TCP_DEMUX
+                    .lock()
+                    .lookup_listener(Ipv4Addr(conn.tuple.local_ip), Port(conn.tuple.local_port));
+                if let Some(listener_idx) = listener_sock_idx {
+                    let mut table = NEW_SOCKET_TABLE.lock();
+                    if let Some(listener_sock) = table.get_mut(listener_idx as usize)
+                        && listener_sock.state == SocketState::Listening
+                        && let SocketInner::Tcp(ref mut tcp_inner) = listener_sock.inner
+                        && let Some(ref mut listen_state) = tcp_inner.listen
+                    {
+                        let accepted = tcp_socket::AcceptedConn {
+                            tuple: conn.tuple,
+                            iss: conn.iss,
+                            irs: conn.irs,
+                            peer_mss: conn.peer_mss,
+                        };
+                        listen_state.push_accepted(accepted);
+                    }
+                }
             }
         }
     }
@@ -978,41 +1009,6 @@ fn sync_socket_state(sock: &mut Socket) {
             sock.state = SocketState::Closed;
         }
     }
-}
-
-fn tcp_idx_is_bound(table: &SlabSocketTable, tcp_idx: usize) -> bool {
-    for sock in table.slots.iter().flatten() {
-        if socket_tcp_conn_id(sock) == Some(tcp_idx) && sock.state != SocketState::Closed {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_established_child(listening: &Socket, table: &SlabSocketTable) -> Option<usize> {
-    let Some(local_addr) = listening.local_addr else {
-        return None;
-    };
-
-    for tcp_idx in 0..MAX_CONNECTIONS {
-        let Some(conn): Option<TcpConnection> = tcp::tcp_get_connection(tcp_idx) else {
-            continue;
-        };
-        if conn.state != TcpState::Established {
-            continue;
-        }
-        if conn.tuple.local_port != local_addr.port.0 {
-            continue;
-        }
-        if local_addr.ip != Ipv4Addr::UNSPECIFIED && conn.tuple.local_ip != local_addr.ip.0 {
-            continue;
-        }
-        if tcp_idx_is_bound(table, tcp_idx) {
-            continue;
-        }
-        return Some(tcp_idx);
-    }
-    None
 }
 
 pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload: &[u8]) {
@@ -1320,7 +1316,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     0
 }
 
-pub fn socket_listen(sock_idx: u32, _backlog: u32) -> i32 {
+pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
     let mut table = NEW_SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
@@ -1341,6 +1337,8 @@ pub fn socket_listen(sock_idx: u32, _backlog: u32) -> i32 {
         Ok(tcp_idx) => {
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
                 tcp_inner.conn_id = Some(tcp_idx as u32);
+                // Phase 5C: Create TcpListenState with two-queue model.
+                tcp_inner.listen = Some(tcp_socket::TcpListenState::new(backlog as usize, local));
             }
             sock.state = SocketState::Listening;
 
@@ -1377,7 +1375,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 
         {
             let mut table = NEW_SOCKET_TABLE.lock();
-            let Some(listen_sock) = table.get(sock_idx as usize) else {
+            let Some(listen_sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
             };
             let listen_opts = SocketOptions {
@@ -1389,12 +1387,21 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 keepalive: listen_sock.options.keepalive,
                 tcp_nodelay: listen_sock.options.tcp_nodelay,
             };
+            let is_nonblocking = listen_sock.is_nonblocking();
 
-            if let Some(tcp_idx) = find_established_child(listen_sock, &table)
-                && let Some(conn) = tcp::tcp_get_connection(tcp_idx)
-            {
+            // Phase 5C: Dequeue from the TcpListenState accept queue.
+            let accepted = if let SocketInner::Tcp(ref mut tcp_inner) = listen_sock.inner {
+                tcp_inner.listen.as_mut().and_then(|ls| ls.accept())
+            } else {
+                None
+            };
+
+            if let Some(accepted_conn) = accepted {
+                // Find the TCP connection index for this accepted connection.
+                let tcp_idx = tcp::tcp_find(&accepted_conn.tuple);
+
                 let Some(new_idx) = table.alloc(SocketInner::Tcp(TcpSocketInner {
-                    conn_id: Some(tcp_idx as u32),
+                    conn_id: tcp_idx.map(|i| i as u32),
                     listen: None,
                 })) else {
                     return errno_i32(ERRNO_ENOMEM);
@@ -1405,28 +1412,31 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 };
                 sock.state = SocketState::Connected;
                 sock.local_addr = Some(SockAddr::new(
-                    Ipv4Addr(conn.tuple.local_ip),
-                    Port(conn.tuple.local_port),
+                    Ipv4Addr(accepted_conn.tuple.local_ip),
+                    Port(accepted_conn.tuple.local_port),
                 ));
                 sock.remote_addr = Some(SockAddr::new(
-                    Ipv4Addr(conn.tuple.remote_ip),
-                    Port(conn.tuple.remote_port),
+                    Ipv4Addr(accepted_conn.tuple.remote_ip),
+                    Port(accepted_conn.tuple.remote_port),
                 ));
                 sock.options = listen_opts;
-                sock.set_nonblocking(nonblocking);
+                sock.set_nonblocking(is_nonblocking);
 
                 if !peer_addr.is_null() {
                     unsafe {
-                        *peer_addr = conn.tuple.remote_ip;
+                        *peer_addr = accepted_conn.tuple.remote_ip;
                     }
                 }
                 if !peer_port.is_null() {
                     unsafe {
-                        *peer_port = conn.tuple.remote_port;
+                        *peer_port = accepted_conn.tuple.remote_port;
                     }
                 }
+
                 // Phase 5B: Set bidirectional socket↔connection link.
-                tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
+                if let Some(tcp_idx) = tcp_idx {
+                    tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
+                }
 
                 return new_idx as i32;
             }
@@ -1436,6 +1446,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             return errno_i32(ERRNO_EAGAIN);
         }
 
+        // Phase 5C: Wait for accept queue to become non-empty.
         let wait_ok = if timeout_ms > 0 {
             ACCEPT_WQS[wq_slot(accept_hint)].wait_event_timeout(
                 || {
@@ -1443,7 +1454,15 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                     let Some(sock) = table.get(sock_idx as usize) else {
                         return true;
                     };
-                    find_established_child(sock, &table).is_some()
+                    if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
+                        tcp_inner
+                            .listen
+                            .as_ref()
+                            .map(|ls| ls.accept_queue_len() > 0)
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    }
                 },
                 timeout_ms,
             )
@@ -1453,7 +1472,15 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 let Some(sock) = table.get(sock_idx as usize) else {
                     return true;
                 };
-                find_established_child(sock, &table).is_some()
+                if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
+                    tcp_inner
+                        .listen
+                        .as_ref()
+                        .map(|ls| ls.accept_queue_len() > 0)
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
             })
         };
 
@@ -1901,6 +1928,14 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         let accept_hint = sock.accept_wq_idx;
         sock.recv_queue.clear();
 
+        // Phase 5C: Clean up TcpListenState (cancels SYN-ACK retransmit timers).
+        if let SocketInner::Tcp(ref mut tcp_inner) = sock.inner {
+            if let Some(ref mut listen_state) = tcp_inner.listen {
+                listen_state.clear();
+            }
+            tcp_inner.listen = None;
+        }
+
         table.free(sock_idx as usize);
         (
             tcp_idx,
@@ -1964,11 +1999,21 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     };
 
     if state == SocketState::Listening {
+        // Phase 5C: Check accept queue in TcpListenState.
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return 0;
         };
-        if find_established_child(sock, &table).is_some() {
+        let has_pending = if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
+            tcp_inner
+                .listen
+                .as_ref()
+                .map(|ls| ls.accept_queue_len() > 0)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if has_pending {
             return POLLIN as u32;
         }
         return 0;

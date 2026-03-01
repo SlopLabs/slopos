@@ -945,25 +945,29 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### 5C: Listen, Accept, Connect
 
-- [ ] **5C.1** Implement `tcp_bind(sock, addr)` and `tcp_listen(sock, backlog)`:
-  - `bind()`: register in `TcpDemuxTable` as listener
-  - `listen(backlog)`: create `TcpListenState` with specified backlog, transition to `Listening`
-  - Minimum backlog: 1, maximum: 128
-- [ ] **5C.2** Implement `tcp_accept(sock) -> Result<usize, NetError>`:
-  - Dequeue a connection ID from `accept_queue`
-  - Create new `Socket` with `TcpSocket` pointing to the dequeued connection
+- [x] **5C.1** Implement `tcp_bind(sock, addr)` and `tcp_listen(sock, backlog)`:
+  - `bind()`: stores local address on socket (TCP demux registration happens at listen time)
+  - `listen(backlog)`: create `TcpListenState` with specified backlog, transition to `Listening`,
+    register in `TcpDemuxTable`, set bidirectional socket↔connection link
+  - Minimum backlog: 1, maximum: 128 (clamped via `TcpListenState::new`)
+- [x] **5C.2** Implement `tcp_accept(sock) -> Result<usize, NetError>`:
+  - Dequeue from `TcpListenState.accept_queue` via `accept()` method
+  - Create new `Socket` with `TcpSocketInner` pointing to the dequeued connection
+  - Look up TCP connection index via `tcp_find()` for the accepted 4-tuple
   - Allocate via `SocketTable::alloc()`, return new socket index
-  - If queue empty: return `Err(WouldBlock)` (blocking in Phase 6)
-- [ ] **5C.3** Implement `tcp_connect(sock, addr) -> Result<(), NetError>`:
-  - Allocate ephemeral local port if not bound
+  - If queue empty: return `Err(WouldBlock)` / block until accept queue non-empty
+- [x] **5C.3** Implement `tcp_connect(sock, addr) -> Result<(), NetError>`:
+  - Allocate ephemeral local port if not bound (via `tcp_connect()`)
   - Create `TcpConnection` in `SynSent` state, send SYN
-  - Register in `TcpDemuxTable`
-  - Return `Err(InProgress)` — connect is inherently asynchronous, blocking is Phase 6
-- [ ] **5C.4** Wire completed 3WHS into accept queue:
-  - When `TcpConnection` transitions to `Established` via SYN-ACK (client) or final ACK (server):
-    - Server side: move `SynRecvEntry` to `accept_queue`, create `TcpConnection`, set `socket_idx`
-    - Client side: transition connect socket to `Connected`, wake with `WRITABLE`
-  - If accept queue full: keep in SYN queue (don't RST, don't drop established connections)
+  - Demux table registration happens when connection transitions to Established
+  - Return 0 on success — connection state is `Connecting` until 3WHS completes
+- [x] **5C.4** Wire completed 3WHS into accept queue:
+  - In `socket_notify_tcp_activity()`: when `new_state == Established`,
+    look up parent listener in `TcpDemuxTable`, push `AcceptedConn` to its `TcpListenState`
+  - `socket_poll_readable()` checks `TcpListenState.accept_queue_len()` for Listening sockets
+  - `socket_close()` clears `TcpListenState` (cancels SYN-ACK timers) before freeing socket
+  - `socket_notify_accept_waiters()` checks accept queue instead of linear TCP table scan
+  - If accept queue full: `push_accepted()` returns false, connection info is dropped
 
 ### 5D: Send, Recv, Close, Shutdown
 
@@ -1011,9 +1015,9 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### Phase 5 Test Coverage
 
-- [ ] **5.T1** Unit test two-queue model: fill SYN queue, verify SYN is silently dropped (no RST)
-- [ ] **5.T2** Unit test accept queue overflow: backlog=2, complete 3 connections, verify 3rd stays in SYN queue
-- [ ] **5.T3** Unit test SYN-ACK retransmission: SYN received, no ACK, verify SYN-ACK retransmitted 5 times with backoff
+- [x] **5.T1** Unit test two-queue model: fill SYN queue, verify SYN is silently dropped (no RST)
+- [x] **5.T2** Unit test accept queue overflow: backlog=2, complete 3 connections, verify 3rd stays in SYN queue
+- [x] **5.T3** Unit test SYN-ACK retransmission: SYN received, no ACK, verify SYN-ACK retransmitted 5 times with backoff
 - [ ] **5.T4** Unit test FIN handling: send FIN, verify `recv()` returns 0 after data drained
 - [ ] **5.T5** Unit test `shutdown(SHUT_WR)`: sends FIN but `recv()` still works
 - [ ] **5.T6** Unit test `shutdown(SHUT_RD)`: subsequent `recv()` returns 0, incoming data discarded

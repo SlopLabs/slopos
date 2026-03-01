@@ -458,6 +458,240 @@ pub fn test_demux_clear() -> TestResult {
     pass!()
 }
 
+// =============================================================================
+// Phase 5C: TcpListenState — push_accepted enqueues completed connections
+// =============================================================================
+
+pub fn test_push_accepted_basic() -> TestResult {
+    reset_syn_entry_keys();
+    let mut listen = TcpListenState::new(4, local_addr());
+
+    // Push an accepted connection directly.
+    let accepted = super::tcp_socket::AcceptedConn {
+        tuple: super::tcp::TcpTuple {
+            local_ip: [10, 0, 0, 1],
+            local_port: 8080,
+            remote_ip: [192, 168, 1, 10],
+            remote_port: 50000,
+        },
+        iss: 1000,
+        irs: 2000,
+        peer_mss: 1460,
+    };
+
+    let ok = listen.push_accepted(accepted);
+    assert_test!(ok, "push_accepted should succeed when queue has room");
+    assert_eq_test!(
+        listen.accept_queue_len(),
+        1,
+        "accept queue should have 1 entry"
+    );
+
+    // Accept should dequeue it.
+    let dequeued = listen.accept();
+    assert_test!(
+        dequeued.is_some(),
+        "accept should return the pushed connection"
+    );
+    let conn = dequeued.unwrap();
+    assert_eq_test!(conn.tuple.remote_port, 50000, "remote port should match");
+    assert_eq_test!(conn.iss, 1000, "ISS should match");
+    assert_eq_test!(conn.irs, 2000, "IRS should match");
+    assert_eq_test!(conn.peer_mss, 1460, "peer MSS should match");
+
+    assert_eq_test!(
+        listen.accept_queue_len(),
+        0,
+        "accept queue should be empty after dequeue"
+    );
+
+    pass!()
+}
+
+// =============================================================================
+// Phase 5C: TcpListenState — push_accepted respects backlog
+// =============================================================================
+
+pub fn test_push_accepted_respects_backlog() -> TestResult {
+    reset_syn_entry_keys();
+    let backlog = 2usize;
+    let mut listen = TcpListenState::new(backlog, local_addr());
+
+    // Fill to backlog.
+    for i in 0..backlog as u16 {
+        let accepted = super::tcp_socket::AcceptedConn {
+            tuple: super::tcp::TcpTuple {
+                local_ip: [10, 0, 0, 1],
+                local_port: 8080,
+                remote_ip: [192, 168, 1, i as u8],
+                remote_port: 40000 + i,
+            },
+            iss: 1000 + i as u32,
+            irs: 2000 + i as u32,
+            peer_mss: 1460,
+        };
+        let ok = listen.push_accepted(accepted);
+        assert_test!(ok, "push_accepted should succeed within backlog");
+    }
+    assert_eq_test!(
+        listen.accept_queue_len(),
+        backlog,
+        "accept queue at backlog"
+    );
+
+    // Next push should fail (queue full).
+    let overflow = super::tcp_socket::AcceptedConn {
+        tuple: super::tcp::TcpTuple {
+            local_ip: [10, 0, 0, 1],
+            local_port: 8080,
+            remote_ip: [192, 168, 1, 99],
+            remote_port: 59999,
+        },
+        iss: 9999,
+        irs: 8888,
+        peer_mss: 1460,
+    };
+    let rejected = listen.push_accepted(overflow);
+    assert_test!(
+        !rejected,
+        "push_accepted should fail when accept queue is full"
+    );
+    assert_eq_test!(
+        listen.accept_queue_len(),
+        backlog,
+        "accept queue unchanged after overflow"
+    );
+
+    // Drain one, then push again — should succeed.
+    let _ = listen.accept();
+    assert_eq_test!(
+        listen.accept_queue_len(),
+        backlog - 1,
+        "accept queue drained by 1"
+    );
+
+    let ok = listen.push_accepted(overflow);
+    assert_test!(ok, "push_accepted should succeed after draining");
+    assert_eq_test!(
+        listen.accept_queue_len(),
+        backlog,
+        "accept queue back to backlog"
+    );
+
+    pass!()
+}
+
+// =============================================================================
+// Phase 5C: TcpListenState — backlog clamping
+// =============================================================================
+
+pub fn test_listen_state_backlog_clamping() -> TestResult {
+    reset_syn_entry_keys();
+
+    // Backlog 0 should clamp to BACKLOG_MIN (1).
+    let listen_min = TcpListenState::new(0, local_addr());
+    assert_eq_test!(
+        listen_min.backlog(),
+        super::tcp_socket::BACKLOG_MIN,
+        "backlog=0 should clamp to BACKLOG_MIN"
+    );
+
+    // Backlog 999 should clamp to BACKLOG_MAX (128).
+    let listen_max = TcpListenState::new(999, local_addr());
+    assert_eq_test!(
+        listen_max.backlog(),
+        super::tcp_socket::BACKLOG_MAX,
+        "backlog=999 should clamp to BACKLOG_MAX"
+    );
+
+    // Normal backlog should pass through.
+    let listen_normal = TcpListenState::new(16, local_addr());
+    assert_eq_test!(
+        listen_normal.backlog(),
+        16,
+        "backlog=16 should pass through"
+    );
+
+    pass!()
+}
+
+// =============================================================================
+// Phase 5C: TcpListenState — accept returns FIFO order
+// =============================================================================
+
+pub fn test_accept_fifo_order() -> TestResult {
+    reset_syn_entry_keys();
+    let mut listen = TcpListenState::new(8, local_addr());
+
+    // Push 3 connections with distinct remote ports.
+    for i in 0..3u16 {
+        let accepted = super::tcp_socket::AcceptedConn {
+            tuple: super::tcp::TcpTuple {
+                local_ip: [10, 0, 0, 1],
+                local_port: 8080,
+                remote_ip: [192, 168, 1, 1],
+                remote_port: 40000 + i,
+            },
+            iss: 1000 + i as u32,
+            irs: 2000 + i as u32,
+            peer_mss: 1460,
+        };
+        listen.push_accepted(accepted);
+    }
+
+    // Accept should return in FIFO order.
+    for i in 0..3u16 {
+        let conn = listen.accept();
+        assert_test!(conn.is_some(), "accept should return connection");
+        assert_eq_test!(
+            conn.unwrap().tuple.remote_port,
+            40000 + i,
+            "accept should return in FIFO order"
+        );
+    }
+
+    // Queue should be empty now.
+    let none = listen.accept();
+    assert_test!(none.is_none(), "accept on empty queue returns None");
+
+    pass!()
+}
+
+// =============================================================================
+// Phase 5C: TcpListenState — clear wipes both queues
+// =============================================================================
+
+pub fn test_listen_state_clear() -> TestResult {
+    reset_syn_entry_keys();
+    let mut listen = TcpListenState::new(16, local_addr());
+
+    // Add something to SYN queue.
+    let _ = listen.on_syn(client_addr(0), 1000, 1460, 0);
+    assert_eq_test!(listen.syn_queue_len(), 1, "SYN queue has 1 entry");
+
+    // Push to accept queue.
+    let accepted = super::tcp_socket::AcceptedConn {
+        tuple: super::tcp::TcpTuple {
+            local_ip: [10, 0, 0, 1],
+            local_port: 8080,
+            remote_ip: [192, 168, 1, 50],
+            remote_port: 55000,
+        },
+        iss: 3000,
+        irs: 4000,
+        peer_mss: 1460,
+    };
+    listen.push_accepted(accepted);
+    assert_eq_test!(listen.accept_queue_len(), 1, "accept queue has 1 entry");
+
+    // Clear both queues.
+    listen.clear();
+    assert_eq_test!(listen.syn_queue_len(), 0, "SYN queue cleared");
+    assert_eq_test!(listen.accept_queue_len(), 0, "accept queue cleared");
+
+    pass!()
+}
+
 slopos_lib::define_test_suite!(
     tcp_socket,
     [
@@ -474,5 +708,11 @@ slopos_lib::define_test_suite!(
         test_demux_listener_wildcard_fallback,
         test_demux_unregister_listener,
         test_demux_clear,
+        // Phase 5C tests
+        test_push_accepted_basic,
+        test_push_accepted_respects_backlog,
+        test_listen_state_backlog_clamping,
+        test_accept_fifo_order,
+        test_listen_state_clear,
     ]
 );

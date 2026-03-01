@@ -446,6 +446,19 @@ impl TcpListenState {
         self.accept_queue.pop_front()
     }
 
+    /// Push a completed connection directly into the accept queue (Phase 5C).
+    ///
+    /// Used by `socket_notify_tcp_activity()` when a server-side child connection
+    /// completes the 3WHS (SYN_RECEIVED → Established) in the TCP state machine.
+    /// Returns `true` if the connection was enqueued, `false` if the accept queue is full.
+    pub fn push_accepted(&mut self, conn: AcceptedConn) -> bool {
+        if self.accept_queue.len() >= self.backlog {
+            return false;
+        }
+        self.accept_queue.push_back(conn);
+        true
+    }
+
     // =========================================================================
     // Diagnostics
     // =========================================================================
