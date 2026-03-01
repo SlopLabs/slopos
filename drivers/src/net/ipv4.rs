@@ -168,20 +168,7 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
 ///
 /// Mirrors the logic previously in `dispatch_rx_frame()` in `virtio_net.rs`.
 fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
-    let ip_payload = pkt.payload();
-
-    let Some((src_port, dst_port, udp_payload)) = net::parse_udp_header(ip_payload) else {
-        return;
-    };
-
-    // Intercept DNS responses (src port 53) for the in-kernel resolver.
-    if src_port == net::dns::DNS_PORT {
-        crate::virtio_net::dns_intercept_response(udp_payload);
-    }
-
-    // Always deliver to the socket table — userland might have a UDP socket
-    // bound to port 53 (or any other port) for its own purposes.
-    socket::socket_deliver_udp_from_dispatch(src_ip, dst_ip, src_port, dst_port, udp_payload);
+    super::udp::handle_rx(src_ip, dst_ip, pkt);
 }
 
 // =============================================================================

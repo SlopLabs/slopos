@@ -5,7 +5,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::net::packetbuf::PacketBuf;
-use crate::net::types::{NetError, Port, SockAddr};
+use crate::net::types::{Ipv4Addr, NetError, Port, SockAddr};
 
 /// Internal storage for protocol-specific socket state.
 ///
@@ -909,6 +909,21 @@ fn map_tcp_err_i64(err: TcpError) -> i64 {
     map_tcp_err(err) as i64
 }
 
+fn map_net_err(err: NetError) -> i32 {
+    match err {
+        NetError::AddressInUse => errno_i32(ERRNO_EADDRINUSE),
+        NetError::AddressFamilyNotSupported => errno_i32(ERRNO_EAFNOSUPPORT),
+        NetError::WouldBlock => errno_i32(ERRNO_EAGAIN),
+        NetError::NotConnected => errno_i32(ERRNO_ENOTCONN),
+        NetError::AlreadyConnected => errno_i32(ERRNO_EISCONN),
+        NetError::ProtocolNotSupported => errno_i32(ERRNO_EPROTONOSUPPORT),
+        NetError::NetworkUnreachable | NetError::HostUnreachable => errno_i32(ERRNO_ENETUNREACH),
+        NetError::NoBufferSpace => errno_i32(ERRNO_ENOMEM),
+        NetError::Shutdown => errno_i32(ERRNO_EPIPE),
+        _ => errno_i32(ERRNO_EINVAL),
+    }
+}
+
 fn alloc_ephemeral_port(table: &SocketTable) -> Option<u16> {
     for port in 49152u16..=65535u16 {
         let used = table
@@ -1186,7 +1201,7 @@ pub fn socket_sendto(
         return errno_i32(ERRNO_EINVAL) as i64;
     }
 
-    let (local_ip, local_port) = {
+    let (local_ip, local_port, auto_bind) = {
         let mut table = SOCKET_TABLE.lock();
         let idx = sock_idx as usize;
         if idx >= MAX_SOCKETS || !table.sockets[idx].active {
@@ -1215,11 +1230,36 @@ pub fn socket_sendto(
             if sock.state == SocketState::Unbound {
                 sock.state = SocketState::Bound;
             }
-        }
 
-        let sock = &table.sockets[idx];
-        (sock.local_ip, sock.local_port)
+            let reuse_addr = sock.reuse_addr;
+            (
+                sock.local_ip,
+                sock.local_port,
+                Some((sock.local_ip, sock.local_port, reuse_addr)),
+            )
+        } else {
+            let sock = &table.sockets[idx];
+            (sock.local_ip, sock.local_port, None)
+        }
     };
+
+    if let Some((bind_ip, bind_port, reuse_addr)) = auto_bind
+        && let Err(err) =
+            crate::net::udp::udp_bind(sock_idx, Ipv4Addr(bind_ip), Port(bind_port), reuse_addr)
+    {
+        let mut table = SOCKET_TABLE.lock();
+        if let Some(sock) = table.get_mut(sock_idx)
+            && sock.sock_type == SOCK_DGRAM
+            && sock.local_ip == bind_ip
+            && sock.local_port == bind_port
+            && sock.state == SocketState::Bound
+        {
+            sock.local_ip = [0; 4];
+            sock.local_port = 0;
+            sock.state = SocketState::Unbound;
+        }
+        return map_net_err(err) as i64;
+    }
 
     let payload = if len == 0 {
         &[][..]
@@ -1227,14 +1267,9 @@ pub fn socket_sendto(
         unsafe { core::slice::from_raw_parts(data, len) }
     };
 
-    if !virtio_net::virtio_net_is_ready() {
-        return len as i64;
-    }
-
-    if virtio_net::transmit_udp_packet(local_ip, dst_ip, local_port, dst_port, payload) {
-        len as i64
-    } else {
-        errno_i32(ERRNO_ENETUNREACH) as i64
+    match crate::net::udp::udp_sendto(local_ip, dst_ip, local_port, dst_port, payload) {
+        Ok(n) => n as i64,
+        Err(err) => map_net_err(err) as i64,
     }
 }
 
@@ -1316,18 +1351,45 @@ pub fn socket_recvfrom(
 }
 
 pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
-    let mut table = SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx) else {
-        return errno_i32(ERRNO_ENOTSOCK);
+    let udp_bind_args = {
+        let mut table = SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx) else {
+            return errno_i32(ERRNO_ENOTSOCK);
+        };
+
+        if sock.state != SocketState::Unbound {
+            return errno_i32(ERRNO_EINVAL);
+        }
+
+        sock.local_ip = addr;
+        sock.local_port = port;
+        sock.state = SocketState::Bound;
+
+        if sock.sock_type == SOCK_DGRAM {
+            Some((sock.local_ip, sock.local_port, sock.reuse_addr))
+        } else {
+            None
+        }
     };
 
-    if sock.state != SocketState::Unbound {
-        return errno_i32(ERRNO_EINVAL);
+    if let Some((local_ip, local_port, reuse_addr)) = udp_bind_args
+        && let Err(err) =
+            crate::net::udp::udp_bind(sock_idx, Ipv4Addr(local_ip), Port(local_port), reuse_addr)
+    {
+        let mut table = SOCKET_TABLE.lock();
+        if let Some(sock) = table.get_mut(sock_idx)
+            && sock.sock_type == SOCK_DGRAM
+            && sock.local_ip == local_ip
+            && sock.local_port == local_port
+            && sock.state == SocketState::Bound
+        {
+            sock.local_ip = [0; 4];
+            sock.local_port = 0;
+            sock.state = SocketState::Unbound;
+        }
+        return map_net_err(err);
     }
 
-    sock.local_ip = addr;
-    sock.local_port = port;
-    sock.state = SocketState::Bound;
     0
 }
 
@@ -1519,7 +1581,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             return errno_i32(ERRNO_EINVAL) as i64;
         }
 
-        let (state, remote_ip, remote_port, local_ip, local_port) = {
+        let (state, remote_ip, remote_port, local_ip, local_port, auto_bind) = {
             let mut table = SOCKET_TABLE.lock();
             let idx = sock_idx as usize;
             if idx >= MAX_SOCKETS || !table.sockets[idx].active {
@@ -1542,17 +1604,49 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 if sock.state == SocketState::Unbound {
                     sock.state = SocketState::Bound;
                 }
-            }
 
-            let sock = &table.sockets[idx];
-            (
-                sock.state,
-                sock.remote_ip,
-                sock.remote_port,
-                sock.local_ip,
-                sock.local_port,
-            )
+                let reuse_addr = sock.reuse_addr;
+                let state = sock.state;
+                let remote_ip = sock.remote_ip;
+                let remote_port = sock.remote_port;
+                (
+                    state,
+                    remote_ip,
+                    remote_port,
+                    sock.local_ip,
+                    sock.local_port,
+                    Some((sock.local_ip, sock.local_port, reuse_addr)),
+                )
+            } else {
+                let sock = &table.sockets[idx];
+                (
+                    sock.state,
+                    sock.remote_ip,
+                    sock.remote_port,
+                    sock.local_ip,
+                    sock.local_port,
+                    None,
+                )
+            }
         };
+
+        if let Some((bind_ip, bind_port, reuse_addr)) = auto_bind
+            && let Err(err) =
+                crate::net::udp::udp_bind(sock_idx, Ipv4Addr(bind_ip), Port(bind_port), reuse_addr)
+        {
+            let mut table = SOCKET_TABLE.lock();
+            if let Some(sock) = table.get_mut(sock_idx)
+                && sock.sock_type == SOCK_DGRAM
+                && sock.local_ip == bind_ip
+                && sock.local_port == bind_port
+                && sock.state == SocketState::Bound
+            {
+                sock.local_ip = [0; 4];
+                sock.local_port = 0;
+                sock.state = SocketState::Unbound;
+            }
+            return map_net_err(err) as i64;
+        }
 
         if state != SocketState::Connected || remote_port == 0 {
             return errno_i32(ERRNO_ENOTCONN) as i64;
@@ -1564,14 +1658,16 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             unsafe { core::slice::from_raw_parts(data, len) }
         };
 
-        if !virtio_net::virtio_net_is_ready() {
-            return len as i64;
-        }
-
-        if virtio_net::transmit_udp_packet(local_ip, remote_ip, local_port, remote_port, payload) {
-            return len as i64;
-        }
-        return errno_i32(ERRNO_ENETUNREACH) as i64;
+        return match crate::net::udp::udp_sendto(
+            local_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            payload,
+        ) {
+            Ok(n) => n as i64,
+            Err(err) => map_net_err(err) as i64,
+        };
     }
 
     let (tcp_idx, state, nonblocking, timeout_ms) = {
@@ -1832,15 +1928,24 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
 }
 
 pub fn socket_close(sock_idx: u32) -> i32 {
-    let tcp_idx = {
+    let (tcp_idx, udp_unbind) = {
         let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx).copied() else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
         let tcp_idx = sock.tcp_idx;
+        let udp_unbind = if sock.sock_type == SOCK_DGRAM && sock.local_port != 0 {
+            Some((sock.local_ip, sock.local_port))
+        } else {
+            None
+        };
         table.release(sock_idx);
-        tcp_idx
+        (tcp_idx, udp_unbind)
     };
+
+    if let Some((local_ip, local_port)) = udp_unbind {
+        crate::net::udp::udp_unbind(sock_idx, Ipv4Addr(local_ip), Port(local_port));
+    }
 
     socket_wake_recv(sock_idx);
     socket_wake_send(sock_idx);
@@ -1991,6 +2096,7 @@ pub fn socket_reset_all() {
         UDP_RX_QUEUES[idx].lock().clear();
         table.sockets[idx] = KernelSocket::empty();
     }
+    crate::net::udp::UDP_DEMUX.lock().clear();
     tcp::tcp_reset_all();
 }
 
