@@ -1008,15 +1008,15 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### 5F: Syscall Updates
 
-- [ ] **5F.1** Update `handle_socket(AF_INET, SOCK_STREAM)`:
+- [x] **5F.1** Update `handle_socket(AF_INET, SOCK_STREAM)`:
   - Allocates `SocketTable::alloc(SocketInner::Tcp(TcpSocket::new()))`
-- [ ] **5F.2** Add `handle_listen()`, `handle_accept()` syscall handlers:
+- [x] **5F.2** Add `handle_listen()`, `handle_accept()` syscall handlers:
   - `listen(fd, backlog)` → `tcp_listen(sock, backlog)`
   - `accept(fd) -> i32` → `tcp_accept(sock)`, returns new FD or error
-- [ ] **5F.3** Update `handle_send()` and `handle_recv()`:
+- [x] **5F.3** Update `handle_send()` and `handle_recv()`:
   - Stream path: no address argument (unlike `sendto`/`recvfrom`)
   - Dispatch to `tcp_send` / `tcp_recv` via `SocketInner::Tcp`
-- [ ] **5F.4** Add userland wrappers: `listen()`, `accept()`, `send()`, `recv()` in `userland/src/syscall/net.rs`
+- [x] **5F.4** Add userland wrappers: `listen()`, `accept()`, `send()`, `recv()` in `userland/src/syscall/net.rs`
 
 ### Phase 5 Test Coverage
 
@@ -1034,14 +1034,14 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### Phase 5 Gate
 
-- [ ] **GATE**: TCP 3-way handshake completes via `socket()` + `connect()` or `listen()` + `accept()`
-- [ ] **GATE**: Two-queue model: SYN floods do not fill the accept queue
-- [ ] **GATE**: `send()` and `recv()` move data through the TCP state machine correctly
-- [ ] **GATE**: `shutdown(SHUT_WR)` sends FIN without closing the read side
-- [ ] **GATE**: FIN delivers EOF to userspace, `recv()` returns 0
+- [x] **GATE**: TCP 3-way handshake completes via `socket()` + `connect()` or `listen()` + `accept()`
+- [x] **GATE**: Two-queue model: SYN floods do not fill the accept queue
+- [x] **GATE**: `send()` and `recv()` move data through the TCP state machine correctly
+- [x] **GATE**: `shutdown(SHUT_WR)` sends FIN without closing the read side
+- [x] **GATE**: FIN delivers EOF to userspace, `recv()` returns 0
 - [x] **GATE**: Retransmit timer fires and retransmits unacknowledged segments
 - [x] **GATE**: TIME_WAIT releases connection slots after 2*MSL
-- [ ] **GATE**: `SO_REUSEADDR` allows binding during TIME_WAIT
+- [x] **GATE**: `SO_REUSEADDR` allows binding during TIME_WAIT
 
 ---
 

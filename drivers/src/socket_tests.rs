@@ -533,6 +533,191 @@ pub fn test_socket_new_defaults_and_helpers() -> TestResult {
     pass!()
 }
 
+pub fn test_tcp_send_on_established_returns_bytes() -> TestResult {
+    reset();
+    let (sock, _tcp_idx) = match connect_and_establish() {
+        Ok(v) => v,
+        Err(m) => return fail!("{}", m),
+    };
+    socket_set_nonblocking(sock, true);
+    let payload = [0xAA_u8; 64];
+    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    assert_test!(n > 0, "send on established should return bytes written");
+    assert_test!(
+        n as usize <= payload.len(),
+        "should not write more than requested"
+    );
+    pass!()
+}
+
+pub fn test_tcp_recv_after_peer_data() -> TestResult {
+    reset();
+    let (sock, tcp_idx) = match connect_and_establish() {
+        Ok(v) => v,
+        Err(m) => return fail!("{}", m),
+    };
+    socket_set_nonblocking(sock, true);
+
+    let conn = tcp::tcp_get_connection(tcp_idx).unwrap();
+    let data_hdr = TcpHeader {
+        src_port: conn.tuple.remote_port,
+        dst_port: conn.tuple.local_port,
+        seq_num: conn.rcv_nxt,
+        ack_num: conn.snd_nxt,
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let payload = b"hello";
+    let _ = tcp::tcp_input(
+        conn.tuple.remote_ip,
+        conn.tuple.local_ip,
+        &data_hdr,
+        &[],
+        payload,
+        0,
+    );
+
+    let mut buf = [0u8; 32];
+    let n = socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    assert_test!(n > 0, "recv should return data");
+    assert_eq_test!(n as usize, 5);
+    assert_eq_test!(&buf[..5], b"hello");
+    pass!()
+}
+
+pub fn test_tcp_shutdown_wr_transitions_to_fin_wait1() -> TestResult {
+    reset();
+    let (sock, tcp_idx) = match connect_and_establish() {
+        Ok(v) => v,
+        Err(m) => return fail!("{}", m),
+    };
+    use slopos_abi::syscall::SHUT_WR;
+    assert_eq_test!(socket_shutdown(sock, SHUT_WR), 0);
+    assert_eq_test!(
+        tcp::tcp_get_state(tcp_idx),
+        Some(TcpState::FinWait1),
+        "SHUT_WR should transition Established -> FinWait1"
+    );
+    pass!()
+}
+
+pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
+    reset();
+    let (sock, tcp_idx) = match connect_and_establish() {
+        Ok(v) => v,
+        Err(m) => return fail!("{}", m),
+    };
+    socket_set_nonblocking(sock, true);
+    use slopos_abi::syscall::SHUT_WR;
+    assert_eq_test!(socket_shutdown(sock, SHUT_WR), 0);
+
+    let conn = tcp::tcp_get_connection(tcp_idx).unwrap();
+    let data_hdr = TcpHeader {
+        src_port: conn.tuple.remote_port,
+        dst_port: conn.tuple.local_port,
+        seq_num: conn.rcv_nxt,
+        ack_num: conn.snd_nxt,
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let _ = tcp::tcp_input(
+        conn.tuple.remote_ip,
+        conn.tuple.local_ip,
+        &data_hdr,
+        &[],
+        b"post-fin",
+        0,
+    );
+
+    let mut buf = [0u8; 32];
+    let n = socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    assert_test!(n > 0, "recv after SHUT_WR should still work");
+    assert_eq_test!(n as usize, 8);
+    pass!()
+}
+
+pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
+    reset();
+    let (sock, _tcp_idx) = match connect_and_establish() {
+        Ok(v) => v,
+        Err(m) => return fail!("{}", m),
+    };
+    use slopos_abi::syscall::SHUT_WR;
+    assert_eq_test!(socket_shutdown(sock, SHUT_WR), 0);
+    let payload = [1u8; 4];
+    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    assert_test!(n < 0, "send after SHUT_WR should fail");
+    pass!()
+}
+
+pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
+    reset();
+    let listen_sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    assert_eq_test!(socket_bind(listen_sock, [10, 0, 0, 1], 80), 0);
+    assert_eq_test!(socket_listen(listen_sock, 4), 0);
+
+    socket_set_nonblocking(listen_sock, true);
+
+    let syn_hdr = TcpHeader {
+        src_port: 5000,
+        dst_port: 80,
+        seq_num: 1000,
+        ack_num: 0,
+        data_offset: 5,
+        flags: TCP_FLAG_SYN,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let syn_result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &syn_hdr, &[], &[], 0);
+
+    let child_idx = match syn_result.accepted_idx {
+        Some(idx) => idx,
+        None => return fail!("no child connection after SYN"),
+    };
+
+    let child = match tcp::tcp_get_connection(child_idx) {
+        Some(c) => c,
+        None => return fail!("no child connection snapshot"),
+    };
+    let ack_hdr = TcpHeader {
+        src_port: 5000,
+        dst_port: 80,
+        seq_num: 1001,
+        ack_num: child.iss.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let ack_result = tcp::tcp_input([10, 0, 0, 2], [10, 0, 0, 1], &ack_hdr, &[], &[], 0);
+    socket_notify_tcp_activity(&ack_result);
+
+    let mut peer_addr = [0u8; 4];
+    let mut peer_port = 0u16;
+    let new_sock = socket_accept(
+        listen_sock,
+        &mut peer_addr as *mut _,
+        &mut peer_port as *mut _,
+    );
+    assert_test!(new_sock >= 0, "accept should return a valid socket fd");
+    assert_eq_test!(peer_addr, [10, 0, 0, 2]);
+    assert_eq_test!(peer_port, 5000);
+
+    assert_eq_test!(
+        socket_get_state(new_sock as u32),
+        Some(SocketState::Connected)
+    );
+    pass!()
+}
+
 slopos_lib::define_test_suite!(
     socket,
     [
@@ -574,5 +759,11 @@ slopos_lib::define_test_suite!(
         test_socket_options_defaults_and_validation,
         test_socket_flags_set_clear_contains,
         test_socket_new_defaults_and_helpers,
+        test_tcp_send_on_established_returns_bytes,
+        test_tcp_recv_after_peer_data,
+        test_tcp_shutdown_wr_transitions_to_fin_wait1,
+        test_tcp_shutdown_wr_recv_still_works,
+        test_tcp_send_after_shutdown_wr_fails,
+        test_tcp_listen_accept_incoming_syn,
     ]
 );
