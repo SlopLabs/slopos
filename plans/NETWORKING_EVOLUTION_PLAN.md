@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3 pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4 pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -671,17 +671,17 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### 3B: Routing Table v1
 
-- [ ] **3B.1** Create `drivers/src/net/route.rs` with `RouteEntry` struct:
+- [x] **3B.1** Create `drivers/src/net/route.rs` with `RouteEntry` struct:
   - Fields: `prefix: Ipv4Addr`, `prefix_len: u8`, `gateway: Ipv4Addr` (`UNSPECIFIED` = directly connected), `dev: DevIndex`, `metric: u32`
   - `matches(&self, dst: Ipv4Addr) -> bool` — checks if dst falls within prefix/prefix_len
   - `next_hop(&self, dst: Ipv4Addr) -> Ipv4Addr` — returns gateway if non-zero, else dst (directly connected)
-- [ ] **3B.2** Implement `RouteTable` with prefix-length-bucketed LPM:
+- [x] **3B.2** Implement `RouteTable` with prefix-length-bucketed LPM:
   - Structure: `buckets: [SmallVec<[RouteEntry; 4]>; 33]` — index 0 = /0, index 32 = /32
   - `add(entry: RouteEntry)` — inserts into `buckets[entry.prefix_len]`, sorted by metric within bucket
   - `remove(prefix: Ipv4Addr, prefix_len: u8)` — removes matching entry
   - `lookup(dst: Ipv4Addr) -> Option<(DeviceHandle, Ipv4Addr)>` — iterates from /32 to /0, returns first match
   - O(32) worst case per lookup regardless of route count (vs O(n) for flat scan)
-- [ ] **3B.3** Wire `RouteTable::lookup()` into `ipv4::send()`:
+- [x] **3B.3** Wire `RouteTable::lookup()` into `ipv4::send()`:
   - Replace any hardcoded `dev_index = 0` with a route lookup
   - If no route found: drop packet, log warning, return `Err(NetworkUnreachable)`, award an L
   - Pass `(DeviceHandle, next_hop)` to `NeighborCache::resolve()`
@@ -689,22 +689,22 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### 3C: Loopback Device
 
-- [ ] **3C.1** Create `drivers/src/net/loopback.rs` with `LoopbackDev` implementing `NetDevice`:
+- [x] **3C.1** Create `drivers/src/net/loopback.rs` with `LoopbackDev` implementing `NetDevice`:
   - `tx()` pushes the packet onto an internal `VecDeque<PacketBuf>` (bounded at 256)
   - `poll_rx()` drains up to `budget` packets from the queue
   - `mtu()` returns 65535, `mac()` returns `MacAddr::ZERO`
   - `features()` returns `CHECKSUM_TX | CHECKSUM_RX` (loopback never needs checksum computation)
-- [ ] **3C.2** Register `LoopbackDev` at kernel init before VirtIO-net:
+- [x] **3C.2** Register `LoopbackDev` at kernel init before VirtIO-net:
   - It gets `DevIndex(0)` by convention
   - Configure it with `127.0.0.1/8`, no gateway, no DNS
   - Add connected route `127.0.0.0/8 -> DevIndex(0)` to the route table
-- [ ] **3C.3** Verify loopback delivery in `net_rx()`:
+- [x] **3C.3** Verify loopback delivery in `net_rx()`:
   - Packets received on the loopback device go through the same `net_rx()` ingress path
   - No special-casing needed if the ingress path is correct
 
 ### 3D: Internal IoSlice Abstraction
 
-- [ ] **3D.1** Create `IoSlice` and `IoSliceMut` in `drivers/src/net/types.rs`:
+- [x] **3D.1** Create `IoSlice` and `IoSliceMut` in `drivers/src/net/types.rs`:
   - `pub struct IoSlice<'a> { buf: &'a [u8] }` — immutable scatter slice
   - `pub struct IoSliceMut<'a> { buf: &'a mut [u8] }` — mutable scatter slice
   - All internal send/recv protocol APIs accept `&[IoSlice<'_>]` starting from Phase 4
@@ -712,22 +712,22 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### Phase 3 Test Coverage
 
-- [ ] **3.T1** Unit test `RouteTable::lookup` with connected route: dst on subnet returns correct DevIndex
-- [ ] **3.T2** Unit test `RouteTable::lookup` with default route: dst off subnet returns gateway
-- [ ] **3.T3** Unit test `RouteTable::lookup` with no routes: returns `None`
-- [ ] **3.T4** Unit test prefix-length bucketing: /24 beats /16 for a matching address
-- [ ] **3.T5** Unit test metric tie-breaking: lower metric wins within same prefix length
-- [ ] **3.T6** Integration test: send UDP to `127.0.0.1`, verify packet is delivered locally without hitting VirtIO
-- [ ] **3.T7** Integration test: DHCP lease populates `NetStack` and route table correctly
-- [ ] **3.T8** Integration test: `ifconfig` shell app reads `IfaceConfig` and displays correct IP/netmask/gateway
+- [x] **3.T1** Unit test `RouteTable::lookup` with connected route: dst on subnet returns correct DevIndex
+- [x] **3.T2** Unit test `RouteTable::lookup` with default route: dst off subnet returns gateway
+- [x] **3.T3** Unit test `RouteTable::lookup` with no routes: returns `None`
+- [x] **3.T4** Unit test prefix-length bucketing: /24 beats /16 for a matching address
+- [x] **3.T5** Unit test metric tie-breaking: lower metric wins within same prefix length
+- [x] **3.T6** Integration test: send UDP to `127.0.0.1`, verify packet is delivered locally without hitting VirtIO
+- [x] **3.T7** Integration test: DHCP lease populates `NetStack` and route table correctly
+- [x] **3.T8** Integration test: `ifconfig` shell app reads `IfaceConfig` and displays correct IP/netmask/gateway
 
 ### Phase 3 Gate
 
-- [ ] **GATE**: `RouteTable::lookup()` returns correct `(DeviceHandle, next_hop)` for all route types in O(32)
-- [ ] **GATE**: Loopback device delivers packets to `127.0.0.1` without touching VirtIO-net
-- [ ] **GATE**: DHCP lease populates `NetStack` and triggers route table update
-- [ ] **GATE**: `ipv4::send()` uses route lookup, not hardcoded device index
-- [ ] **GATE**: No IP address storage remains outside `NetStack`
+- [x] **GATE**: `RouteTable::lookup()` returns correct `(DeviceHandle, next_hop)` for all route types in O(32)
+- [x] **GATE**: Loopback device delivers packets to `127.0.0.1` without touching VirtIO-net
+- [x] **GATE**: DHCP lease populates `NetStack` and triggers route table update
+- [x] **GATE**: `ipv4::send()` uses route lookup, not hardcoded device index
+- [x] **GATE**: No IP address storage remains outside `NetStack`
 
 ---
 
