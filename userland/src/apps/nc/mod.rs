@@ -1,29 +1,33 @@
-//! nc — SlopOS network Swiss army knife (Phase A: UDP)
+//! nc — SlopOS network Swiss army knife (Phase A+B: UDP + TCP)
 //!
-//! Exercises the full socket lifecycle: socket() → bind() → sendto()/recvfrom() → shutdown().
+//! Exercises the full socket lifecycle: socket() → bind()/connect() → send/recv → shutdown().
 //! Phase A supports UDP client and listen modes with half-duplex I/O.
+//! Phase B adds TCP client, listen (with `-k` keep-listening), and makes TCP the default.
+
+pub mod tcp;
+pub mod udp;
 
 use core::ffi::c_void;
 
 use crate::syscall::{
-    SockAddrIn,
-    core::{exit, exit_with_code, get_time_ms, sleep_ms},
-    fs, net, tty,
+    core::{exit, exit_with_code},
+    fs, tty,
 };
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum NcMode {
     Client,
     Listen,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum NcProtocol {
     Udp,
+    Tcp,
 }
 
 /// Parsed command-line configuration — built once, never mutated.
@@ -35,15 +39,15 @@ struct NcConfig {
     local_port: u16,
     verbose: bool,
     timeout_ms: u32,
+    keep_listen: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum NcError {
     MissingHost,
     MissingPort,
     InvalidPort,
     ResolveFailed,
-    UdpRequired,
     UnknownFlag,
 }
 
@@ -236,11 +240,12 @@ fn check_interrupt() -> bool {
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    write_out(b"usage: nc [-ulv] [-p port] [-w timeout] [host] port\n");
+    write_out(b"usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n");
     write_out(b"\n");
-    write_out(b"  -u        UDP mode (required in current release)\n");
-    write_out(b"  -l        Listen mode (bind and receive)\n");
+    write_out(b"  -u        UDP mode (default is TCP)\n");
+    write_out(b"  -l        Listen mode (bind and accept/receive)\n");
     write_out(b"  -v        Verbose output\n");
+    write_out(b"  -k        Keep listening after client disconnects (TCP -l only)\n");
     write_out(b"  -p port   Source port (client mode)\n");
     write_out(b"  -w secs   Timeout in seconds\n");
     write_out(b"  host      Remote hostname or IP (client mode)\n");
@@ -253,7 +258,6 @@ fn print_error(err: NcError) {
         NcError::MissingPort => b"nc: missing port\n" as &[u8],
         NcError::InvalidPort => b"nc: invalid port number\n" as &[u8],
         NcError::ResolveFailed => b"nc: cannot resolve hostname\n" as &[u8],
-        NcError::UdpRequired => b"nc: -u flag required (only UDP supported)\n" as &[u8],
         NcError::UnknownFlag => b"nc: unknown flag\n" as &[u8],
     };
     write_out(msg);
@@ -320,7 +324,7 @@ fn resolve_host(host: &[u8]) -> Result<[u8; 4], NcError> {
         return Ok(ip);
     }
     // Try kernel DNS resolution
-    match net::resolve(host) {
+    match crate::syscall::net::resolve(host) {
         Some(ip) => Ok(ip),
         None => Err(NcError::ResolveFailed),
     }
@@ -341,30 +345,24 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-/// Parse argv into an NcConfig.
+/// Core argument parsing logic operating on clean Rust slices.
 ///
-/// Walks raw C-style argv pointers from the kernel.  The first element (argv[0])
-/// is the program name and is skipped.
-fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> {
+/// The first element (`args[0]`) is the program name and is skipped.
+/// This function is separated from the raw-pointer entry so it can be
+/// tested without constructing C-style argv arrays.
+fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
     let mut udp = false;
     let mut listen = false;
     let mut verbose = false;
+    let mut keep_listen = false;
     let mut local_port: u16 = 0;
     let mut timeout_secs: u32 = 0;
     let mut positional: [&[u8]; 2] = [&[], &[]];
     let mut pos_count = 0usize;
 
     let mut i = 1usize; // skip argv[0]
-    while i < argc {
-        let arg = unsafe {
-            let ptr = *argv.add(i);
-            if ptr.is_null() {
-                i += 1;
-                continue;
-            }
-            let len = crate::runtime::u_strlen(ptr);
-            core::slice::from_raw_parts(ptr, len)
-        };
+    while i < args.len() {
+        let arg = args[i];
 
         if arg.is_empty() {
             i += 1;
@@ -372,7 +370,7 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
         }
 
         if arg[0] == b'-' {
-            // Flag processing — may contain bundled flags like -ulv
+            // Flag processing — may contain bundled flags like -ulvk
             if bytes_eq(arg, b"-h") || bytes_eq(arg, b"--help") {
                 print_usage();
                 exit();
@@ -381,15 +379,10 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
             if bytes_eq(arg, b"-p") {
                 // Next arg is port number
                 i += 1;
-                if i >= argc {
+                if i >= args.len() {
                     return Err(NcError::MissingPort);
                 }
-                let next = unsafe {
-                    let ptr = *argv.add(i);
-                    let len = crate::runtime::u_strlen(ptr);
-                    core::slice::from_raw_parts(ptr, len)
-                };
-                local_port = parse_port(next).ok_or(NcError::InvalidPort)?;
+                local_port = parse_port(args[i]).ok_or(NcError::InvalidPort)?;
                 i += 1;
                 continue;
             }
@@ -397,17 +390,12 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
             if bytes_eq(arg, b"-w") {
                 // Next arg is timeout in seconds
                 i += 1;
-                if i >= argc {
+                if i >= args.len() {
                     return Err(NcError::InvalidPort); // reuse error for missing value
                 }
-                let next = unsafe {
-                    let ptr = *argv.add(i);
-                    let len = crate::runtime::u_strlen(ptr);
-                    core::slice::from_raw_parts(ptr, len)
-                };
                 // Parse timeout as u32
                 let mut t: u32 = 0;
-                for &b in next {
+                for &b in args[i] {
                     if b < b'0' || b > b'9' {
                         return Err(NcError::InvalidPort);
                     }
@@ -418,13 +406,14 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
                 continue;
             }
 
-            // Process bundled flags: -ulv
+            // Process bundled flags: -ulvk
             let mut j = 1usize;
             while j < arg.len() {
                 match arg[j] {
                     b'u' => udp = true,
                     b'l' => listen = true,
                     b'v' => verbose = true,
+                    b'k' => keep_listen = true,
                     _ => return Err(NcError::UnknownFlag),
                 }
                 j += 1;
@@ -440,10 +429,12 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
         i += 1;
     }
 
-    // Phase A: UDP is required
-    if !udp {
-        return Err(NcError::UdpRequired);
-    }
+    // TCP is the default; -u switches to UDP
+    let protocol = if udp {
+        NcProtocol::Udp
+    } else {
+        NcProtocol::Tcp
+    };
 
     let mode = if listen {
         NcMode::Listen
@@ -460,12 +451,13 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
             let port = parse_port(positional[0]).ok_or(NcError::InvalidPort)?;
             Ok(NcConfig {
                 mode,
-                protocol: NcProtocol::Udp,
+                protocol,
                 remote_addr: [0; 4],
                 remote_port: 0,
                 local_port: port,
                 verbose,
                 timeout_ms: timeout_secs * 1000,
+                keep_listen,
             })
         }
         NcMode::Client => {
@@ -480,244 +472,38 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
             let port = parse_port(positional[1]).ok_or(NcError::InvalidPort)?;
             Ok(NcConfig {
                 mode,
-                protocol: NcProtocol::Udp,
+                protocol,
                 remote_addr: addr,
                 remote_port: port,
                 local_port,
                 verbose,
                 timeout_ms: timeout_secs * 1000,
+                keep_listen,
             })
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// UDP Client
-// ---------------------------------------------------------------------------
+/// Parse argv into an NcConfig.
+///
+/// Converts raw C-style argv pointers from the kernel into Rust slices,
+/// then delegates to [`parse_args_from_slices`] for the actual parsing logic.
+fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> {
+    // Stack-allocated scratch space — 16 args is more than enough for nc.
+    let mut args: [&[u8]; 16] = [&[]; 16];
+    let count = if argc > 16 { 16 } else { argc };
 
-fn udp_client(config: &NcConfig) {
-    // Create UDP socket
-    let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_DGRAM, 0) {
-        Ok(fd) => fd,
-        Err(_) => {
-            write_out(b"nc: socket creation failed\n");
-            exit_with_code(1);
-        }
-    };
-
-    // Bind to local port if specified
-    if config.local_port != 0 {
-        if let Err(_) = net::bind_any(fd, config.local_port) {
-            write_out(b"nc: bind failed (port in use?)\n");
-            exit_with_code(1);
-        }
-    }
-
-    // Set non-blocking for receive polling
-    if let Err(_) = net::set_nonblocking(fd) {
-        write_out(b"nc: failed to set non-blocking\n");
-        exit_with_code(1);
-    }
-
-    verbose_addr(
-        config,
-        b"connected to ",
-        config.remote_addr,
-        config.remote_port,
-    );
-    verbose_msg(config, b"protocol: udp");
-
-    // Build destination address
-    let dest = SockAddrIn {
-        family: slopos_abi::net::AF_INET,
-        port: config.remote_port.to_be(),
-        addr: config.remote_addr,
-        _pad: [0; 8],
-    };
-
-    let mut line_buf = [0u8; 1024];
-    let mut recv_buf = [0u8; 2048];
-
-    // Main I/O loop (half-duplex: send → poll receive → repeat)
-    loop {
-        // Check for Ctrl+C
-        if check_interrupt() {
-            verbose_msg(config, b"interrupted");
-            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-            exit_with_code(0);
-        }
-
-        // Send phase: read one line from stdin
-        let n = read_line_from_stdin(&mut line_buf);
-        if n == 0 {
-            // EOF on stdin — done
-            verbose_msg(config, b"EOF on stdin");
-            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-            exit_with_code(0);
-        }
-
-        // Send the line as a UDP datagram
-        match net::sendto(fd, &line_buf[..n], 0, &dest) {
-            Ok(sent) => {
-                verbose_bytes(config, b"sent ", sent);
-            }
-            Err(_) => {
-                write_out(b"nc: send failed\n");
-                // Don't exit on transient send failure — continue
-            }
-        }
-
-        // Receive phase: poll for a response
-        let timeout = if config.timeout_ms > 0 {
-            config.timeout_ms
+    for idx in 0..count {
+        let ptr = unsafe { *argv.add(idx) };
+        if ptr.is_null() {
+            args[idx] = &[];
         } else {
-            500 // default 500ms receive window
-        };
-        let start = get_time_ms();
-        loop {
-            if check_interrupt() {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-
-            let mut src_addr = SockAddrIn::default();
-            match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
-                Ok(received) if received > 0 => {
-                    // Write received data to stdout
-                    write_out(&recv_buf[..received]);
-                    // Add newline if data doesn't end with one
-                    if recv_buf[received - 1] != b'\n' {
-                        write_out(b"\n");
-                    }
-                    verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
-                    break;
-                }
-                _ => {
-                    // WouldBlock or error — keep polling
-                    let elapsed = get_time_ms() - start;
-                    if elapsed >= timeout as u64 {
-                        if config.timeout_ms > 0 {
-                            verbose_msg(config, b"receive timeout");
-                        }
-                        break;
-                    }
-                    sleep_ms(10);
-                }
-            }
+            let len = crate::runtime::u_strlen(ptr);
+            args[idx] = unsafe { core::slice::from_raw_parts(ptr, len) };
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// UDP Listen
-// ---------------------------------------------------------------------------
-
-fn udp_listen(config: &NcConfig) {
-    // Create UDP socket
-    let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_DGRAM, 0) {
-        Ok(fd) => fd,
-        Err(_) => {
-            write_out(b"nc: socket creation failed\n");
-            exit_with_code(1);
-        }
-    };
-
-    // Set reuse addr for quick rebind during development
-    let _ = net::set_reuse_addr(fd);
-
-    // Bind to the listen port on all interfaces
-    if let Err(_) = net::bind_any(fd, config.local_port) {
-        write_out(b"nc: bind failed (port in use?)\n");
-        exit_with_code(1);
-    }
-
-    // Set non-blocking for polling
-    if let Err(_) = net::set_nonblocking(fd) {
-        write_out(b"nc: failed to set non-blocking\n");
-        exit_with_code(1);
-    }
-
-    // Print listen message
-    // Print a cleaner listen message
-    if config.verbose {
-        let mut line = [0u8; 128];
-        let mut i = 0usize;
-        append_bytes(&mut line, &mut i, b"nc: listening on 0.0.0.0:");
-        write_u16_dec(config.local_port, &mut line, &mut i);
-        append_bytes(&mut line, &mut i, b" (udp)\n");
-        write_out(&line[..i]);
-    }
-
-    let mut recv_buf = [0u8; 2048];
-    let mut line_buf = [0u8; 1024];
-    let last_activity = get_time_ms();
-    let mut last_activity_ms = last_activity;
-
-    loop {
-        // Check for Ctrl+C
-        if check_interrupt() {
-            verbose_msg(config, b"interrupted");
-            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-            exit_with_code(0);
-        }
-
-        // Timeout check
-        if config.timeout_ms > 0 {
-            let elapsed = get_time_ms() - last_activity_ms;
-            if elapsed >= config.timeout_ms as u64 {
-                write_out(b"nc: timeout\n");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(1);
-            }
-        }
-
-        let mut src_addr = SockAddrIn::default();
-        match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
-            Ok(received) if received > 0 => {
-                last_activity_ms = get_time_ms();
-
-                // Write received data to stdout
-                write_out(&recv_buf[..received]);
-                // Add newline if data doesn't end with one
-                if recv_buf[received - 1] != b'\n' {
-                    write_out(b"\n");
-                }
-
-                verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
-
-                // Reply: read one line from stdin and send back to sender
-                // Use non-blocking check: if stdin has data, send reply
-                // For now, attempt a non-blocking-ish approach: try reading
-                // with a very small effort. In half-duplex mode this blocks
-                // until user types a line — that's acceptable for Phase A.
-                let reply_n = read_line_from_stdin(&mut line_buf);
-                if reply_n > 0 {
-                    let reply_addr = SockAddrIn {
-                        family: slopos_abi::net::AF_INET,
-                        port: src_addr.port, // already in network byte order
-                        addr: src_addr.addr,
-                        _pad: [0; 8],
-                    };
-                    match net::sendto(fd, &line_buf[..reply_n], 0, &reply_addr) {
-                        Ok(sent) => {
-                            verbose_bytes(config, b"sent ", sent);
-                        }
-                        Err(_) => {
-                            write_out(b"nc: send failed\n");
-                        }
-                    }
-                } else {
-                    // stdin EOF — receive-only mode from now on
-                    verbose_msg(config, b"stdin EOF, receive-only mode");
-                }
-            }
-            _ => {
-                // WouldBlock — sleep briefly to avoid busy-wait
-                sleep_ms(10);
-            }
-        }
-    }
+    parse_args_from_slices(&args[..count])
 }
 
 // ---------------------------------------------------------------------------
@@ -742,8 +528,10 @@ pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
     };
 
     match (config.protocol, config.mode) {
-        (NcProtocol::Udp, NcMode::Client) => udp_client(&config),
-        (NcProtocol::Udp, NcMode::Listen) => udp_listen(&config),
+        (NcProtocol::Udp, NcMode::Client) => udp::udp_client(&config),
+        (NcProtocol::Udp, NcMode::Listen) => udp::udp_listen(&config),
+        (NcProtocol::Tcp, NcMode::Client) => tcp::tcp_client(&config),
+        (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
     }
 
     exit();
@@ -763,6 +551,10 @@ pub fn nc_main(_arg: *mut c_void) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helper function tests (carried forward from Phase A)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_parse_port_valid() {
@@ -893,5 +685,201 @@ mod tests {
         append_bytes(&mut buf, &mut idx, b"hello world");
         assert_eq!(idx, 5);
         assert_eq!(&buf[..], b"hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // Argument parsing tests (Phase B additions)
+    // -----------------------------------------------------------------------
+    //
+    // These test `parse_args_from_slices` which takes clean `&[&[u8]]` slices
+    // instead of raw C pointers, making them unit-testable.  The tests serve
+    // as regression documentation; they can be extracted to a host-side test
+    // crate if needed (the no_std kernel target cannot run them directly).
+
+    #[test]
+    fn test_tcp_is_default_protocol() {
+        // `nc host port` without -u should default to TCP
+        let args: &[&[u8]] = &[b"nc", b"10.0.2.2", b"80"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert_eq!(config.protocol, NcProtocol::Tcp);
+        assert_eq!(config.mode, NcMode::Client);
+        assert_eq!(config.remote_addr, [10, 0, 2, 2]);
+        assert_eq!(config.remote_port, 80);
+    }
+
+    #[test]
+    fn test_udp_with_u_flag() {
+        let args: &[&[u8]] = &[b"nc", b"-u", b"10.0.2.2", b"80"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert_eq!(config.protocol, NcProtocol::Udp);
+        assert_eq!(config.mode, NcMode::Client);
+    }
+
+    #[test]
+    fn test_tcp_listen_mode() {
+        let args: &[&[u8]] = &[b"nc", b"-l", b"8080"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert_eq!(config.protocol, NcProtocol::Tcp);
+        assert_eq!(config.mode, NcMode::Listen);
+        assert_eq!(config.local_port, 8080);
+        assert!(!config.keep_listen);
+    }
+
+    #[test]
+    fn test_udp_listen_mode() {
+        let args: &[&[u8]] = &[b"nc", b"-ul", b"12345"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert_eq!(config.protocol, NcProtocol::Udp);
+        assert_eq!(config.mode, NcMode::Listen);
+        assert_eq!(config.local_port, 12345);
+    }
+
+    #[test]
+    fn test_keep_listen_flag() {
+        let args: &[&[u8]] = &[b"nc", b"-l", b"-k", b"8080"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(config.keep_listen);
+        assert_eq!(config.mode, NcMode::Listen);
+        assert_eq!(config.protocol, NcProtocol::Tcp);
+    }
+
+    #[test]
+    fn test_keep_listen_bundled() {
+        let args: &[&[u8]] = &[b"nc", b"-lk", b"8080"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(config.keep_listen);
+        assert_eq!(config.mode, NcMode::Listen);
+    }
+
+    #[test]
+    fn test_all_flags_bundled() {
+        let args: &[&[u8]] = &[b"nc", b"-lvk", b"8080"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(config.verbose);
+        assert!(config.keep_listen);
+        assert_eq!(config.mode, NcMode::Listen);
+        assert_eq!(config.protocol, NcProtocol::Tcp);
+    }
+
+    #[test]
+    fn test_verbose_tcp_client() {
+        let args: &[&[u8]] = &[b"nc", b"-v", b"192.168.1.1", b"443"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(config.verbose);
+        assert_eq!(config.protocol, NcProtocol::Tcp);
+        assert_eq!(config.remote_addr, [192, 168, 1, 1]);
+        assert_eq!(config.remote_port, 443);
+    }
+
+    #[test]
+    fn test_timeout_flag() {
+        let args: &[&[u8]] = &[b"nc", b"-w", b"5", b"10.0.2.2", b"80"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert_eq!(config.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_source_port_flag() {
+        let args: &[&[u8]] = &[b"nc", b"-p", b"54321", b"10.0.2.2", b"80"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert_eq!(config.local_port, 54321);
+    }
+
+    #[test]
+    fn test_combined_flags_separate() {
+        // -v -u -l -k -p 1234 -w 10 8080
+        let args: &[&[u8]] = &[
+            b"nc", b"-v", b"-u", b"-l", b"-k", b"-p", b"1234", b"-w", b"10", b"8080",
+        ];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(config.verbose);
+        assert!(config.keep_listen);
+        assert_eq!(config.protocol, NcProtocol::Udp);
+        assert_eq!(config.mode, NcMode::Listen);
+        assert_eq!(config.local_port, 8080);
+        assert_eq!(config.timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn test_error_missing_host() {
+        // Client mode with no positional args
+        let args: &[&[u8]] = &[b"nc"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::MissingHost);
+    }
+
+    #[test]
+    fn test_error_missing_port_client() {
+        // Client mode with host but no port
+        let args: &[&[u8]] = &[b"nc", b"10.0.2.2"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::MissingPort);
+    }
+
+    #[test]
+    fn test_error_missing_port_listen() {
+        // Listen mode with no port
+        let args: &[&[u8]] = &[b"nc", b"-l"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::MissingPort);
+    }
+
+    #[test]
+    fn test_error_invalid_port() {
+        let args: &[&[u8]] = &[b"nc", b"-l", b"abc"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::InvalidPort);
+    }
+
+    #[test]
+    fn test_error_unknown_flag() {
+        let args: &[&[u8]] = &[b"nc", b"-x", b"10.0.2.2", b"80"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::UnknownFlag);
+    }
+
+    #[test]
+    fn test_error_port_out_of_range() {
+        let args: &[&[u8]] = &[b"nc", b"-l", b"99999"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::InvalidPort);
+    }
+
+    #[test]
+    fn test_error_port_zero() {
+        let args: &[&[u8]] = &[b"nc", b"-l", b"0"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::InvalidPort);
+    }
+
+    #[test]
+    fn test_keep_listen_default_false() {
+        let args: &[&[u8]] = &[b"nc", b"10.0.2.2", b"80"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(!config.keep_listen);
+    }
+
+    #[test]
+    fn test_keep_listen_in_client_mode_silently_accepted() {
+        // -k without -l is silently accepted (like BSD nc)
+        let args: &[&[u8]] = &[b"nc", b"-k", b"10.0.2.2", b"80"];
+        let config = parse_args_from_slices(args).unwrap();
+        assert!(config.keep_listen);
+        assert_eq!(config.mode, NcMode::Client);
+    }
+
+    #[test]
+    fn test_missing_p_value() {
+        let args: &[&[u8]] = &[b"nc", b"-p"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        assert_eq!(err, NcError::MissingPort);
+    }
+
+    #[test]
+    fn test_missing_w_value() {
+        let args: &[&[u8]] = &[b"nc", b"-w"];
+        let err = parse_args_from_slices(args).unwrap_err();
+        // Reuses InvalidPort for missing -w value
+        assert_eq!(err, NcError::InvalidPort);
     }
 }
