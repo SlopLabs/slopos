@@ -460,4 +460,53 @@ impl NetDeviceRegistry {
     pub fn device_count(&self) -> usize {
         self.inner.lock().count
     }
+
+    /// Transmit a packet through a device identified by index.
+    ///
+    /// Takes the registry lock briefly.  The device's `tx()` method uses
+    /// `&self` with interior mutability, so concurrent TX calls are safe
+    /// (serialized by the device's own internal lock).
+    ///
+    /// For hot-path TX where a [`DeviceHandle`] is already available,
+    /// prefer [`DeviceHandle::tx`] which bypasses the registry lock.
+    pub fn tx_by_index(&self, index: DevIndex, pkt: PacketBuf) -> Result<(), NetError> {
+        let inner = self.inner.lock();
+        match inner.slots.get(index.0) {
+            Some(Some(dev)) => dev.tx(pkt),
+            _ => Err(NetError::NetworkUnreachable),
+        }
+    }
+
+    /// Read the MAC address of a device by index.
+    ///
+    /// Returns `None` if the device is not registered.
+    pub fn mac_by_index(&self, index: DevIndex) -> Option<MacAddr> {
+        let inner = self.inner.lock();
+        inner.slots.get(index.0)?.as_ref().map(|dev| dev.mac())
+    }
+
+    /// Read the feature flags of a device by index.
+    ///
+    /// Returns `None` if the device is not registered.
+    pub fn features_by_index(&self, index: DevIndex) -> Option<NetDeviceFeatures> {
+        let inner = self.inner.lock();
+        inner.slots.get(index.0)?.as_ref().map(|dev| dev.features())
+    }
+
+    /// Poll RX packets from a device by index.
+    ///
+    /// Takes the registry lock briefly.  Returns an empty Vec if the device
+    /// is not registered.
+    pub fn poll_rx_by_index(
+        &self,
+        index: DevIndex,
+        budget: usize,
+        pool: &'static super::pool::PacketPool,
+    ) -> Vec<PacketBuf> {
+        let inner = self.inner.lock();
+        match inner.slots.get(index.0) {
+            Some(Some(dev)) => dev.poll_rx(budget, pool),
+            _ => Vec::new(),
+        }
+    }
 }

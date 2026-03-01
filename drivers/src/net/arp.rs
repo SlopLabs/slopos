@@ -278,3 +278,68 @@ fn get_our_ip() -> Ipv4Addr {
     // Legacy fallback — will be removed once all callers use NetStack.
     Ipv4Addr(crate::virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]))
 }
+
+// =============================================================================
+// Phase 3B — Registry-based ARP send (no DeviceHandle needed)
+// =============================================================================
+
+/// Send an ARP request via the device registry (index-based TX).
+///
+/// Equivalent to [`send_request`] but uses [`DEVICE_REGISTRY`] to transmit,
+/// so no [`DeviceHandle`] is required.  Used by the route-aware egress path
+/// where the device is identified by [`DevIndex`] from the routing table.
+pub fn send_request_via_registry(dev: super::types::DevIndex, target_ip: Ipv4Addr) {
+    use super::netdev::DEVICE_REGISTRY;
+
+    let our_mac = match DEVICE_REGISTRY.mac_by_index(dev) {
+        Some(mac) => mac,
+        None => {
+            klog_debug!("arp: send_request_via_registry — no device {}", dev);
+            return;
+        }
+    };
+    let our_ip = get_our_ip();
+
+    let Some(mut pkt) = PacketBuf::alloc() else {
+        klog_debug!("arp: send_request_via_registry — pool exhausted");
+        return;
+    };
+
+    // Build Ethernet header.
+    let eth = match pkt.push_header(ETH_HEADER_LEN) {
+        Ok(h) => h,
+        Err(_) => {
+            klog_debug!("arp: send_request_via_registry — insufficient headroom");
+            return;
+        }
+    };
+    eth[0..ETH_ADDR_LEN].copy_from_slice(&MacAddr::BROADCAST.0);
+    eth[ETH_ADDR_LEN..ETH_ADDR_LEN * 2].copy_from_slice(&our_mac.0);
+    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+
+    // Build ARP payload.
+    let mut arp_data = [0u8; ARP_HEADER_LEN];
+    arp_data[0..2].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
+    arp_data[2..4].copy_from_slice(&ARP_PTYPE_IPV4.to_be_bytes());
+    arp_data[4] = ARP_HLEN_ETHERNET;
+    arp_data[5] = ARP_PLEN_IPV4;
+    arp_data[6..8].copy_from_slice(&ARP_OPER_REQUEST.to_be_bytes());
+    arp_data[8..14].copy_from_slice(&our_mac.0);
+    arp_data[14..18].copy_from_slice(&our_ip.0);
+    arp_data[18..24].copy_from_slice(&MacAddr::ZERO.0);
+    arp_data[24..28].copy_from_slice(&target_ip.0);
+
+    if pkt.append(&arp_data).is_err() {
+        klog_debug!("arp: send_request_via_registry — append failed");
+        return;
+    }
+
+    klog_debug!(
+        "arp: sending request for {} on dev {} (via registry)",
+        target_ip,
+        dev
+    );
+    if let Err(e) = DEVICE_REGISTRY.tx_by_index(dev, pkt) {
+        klog_debug!("arp: send_request_via_registry tx failed: {}", e);
+    }
+}

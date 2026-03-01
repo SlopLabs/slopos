@@ -1,9 +1,21 @@
-//! IPv4 ingress handler — validates IP headers and dispatches to L4 protocols.
+//! IPv4 ingress and egress handlers.
 //!
-//! This module is the single entry point for all received IPv4 packets after
+//! # Ingress (Phase 1D)
+//!
+//! [`handle_rx`] is the single entry point for all received IPv4 packets after
 //! Ethernet demux.  It validates the IP header (version, length, checksum, TTL),
 //! sets the L4 layer offset on the [`PacketBuf`], and dispatches to the
 //! appropriate protocol handler (TCP, UDP, ICMP).
+//!
+//! # Egress (Phase 3B)
+//!
+//! [`send`] is the route-aware egress entry point.  It performs a routing table
+//! lookup to determine the outgoing device and next hop, then either transmits
+//! directly (broadcast/multicast/loopback) or delegates to the neighbor cache
+//! for ARP resolution.
+//!
+//! [`send_via`] is the lower-level egress path for callers that already have a
+//! [`DeviceHandle`] and know the next hop (e.g., timer-driven retransmits).
 //!
 //! # Phase 1D scope
 //!
@@ -173,18 +185,46 @@ fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
 }
 
 // =============================================================================
-// 2C.3 — IPv4 egress via neighbor cache
+// Phase 3B — Route-aware IPv4 egress
 // =============================================================================
 
-/// Send an IPv4 packet through the neighbor cache for MAC resolution.
+/// Route-aware IPv4 send.
 ///
-/// This is the new egress entry point (Phase 2C.3).  The packet must have
-/// its Ethernet header space reserved (via [`PacketBuf::push_header`]) with
-/// a placeholder destination MAC.  The neighbor cache resolves the MAC and
-/// either transmits immediately or queues the packet pending ARP resolution.
+/// Performs a routing table lookup to determine the outgoing device and next
+/// hop, selects the source IP from the outgoing interface, then sends through
+/// the neighbor cache (or directly for loopback/broadcast/multicast).
 ///
-/// `next_hop` is `dst_ip` for now — routing (Phase 3) will compute it.
-pub fn send(
+/// This is the primary egress entry point for the socket layer (Phase 4+).
+/// For callers that already hold a [`DeviceHandle`], use [`send_via`] instead.
+pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetError> {
+    use super::netdev::DEVICE_REGISTRY;
+    use super::route::ROUTE_TABLE;
+
+    let (dev, next_hop) = ROUTE_TABLE.lookup(dst_ip).ok_or_else(|| {
+        klog_debug!("ipv4::send: no route to {}", dst_ip);
+        NetError::NetworkUnreachable
+    })?;
+
+    // Loopback: skip neighbor resolution entirely — no ARP on lo.
+    if next_hop.is_loopback() || dst_ip.is_loopback() {
+        return DEVICE_REGISTRY.tx_by_index(dev, pkt);
+    }
+
+    // Broadcast/multicast: skip neighbor resolution, TX directly.
+    if dst_ip.is_broadcast() || dst_ip.is_multicast() {
+        return DEVICE_REGISTRY.tx_by_index(dev, pkt);
+    }
+
+    // Unicast on a physical device: neighbor cache resolution.
+    send_on_device(dev, next_hop, pkt)
+}
+
+/// Send an IPv4 packet through a specific device via neighbor cache.
+///
+/// This is the handle-based egress path from Phase 2C.3, preserved for callers
+/// that already have a [`DeviceHandle`] (e.g., timer-driven ARP retransmit).
+/// For route-aware sending, prefer [`send`].
+pub fn send_via(
     handle: &super::netdev::DeviceHandle,
     dst_ip: super::types::Ipv4Addr,
     pkt: PacketBuf,
@@ -193,12 +233,12 @@ pub fn send(
     use super::neighbor::{NEIGHBOR_CACHE, ResolveOutcome};
 
     let dev = handle.index();
-    let next_hop = dst_ip; // Phase 3: route_lookup(dst_ip).next_hop
+    let next_hop = dst_ip;
 
     // Broadcast/multicast: skip neighbor resolution, TX directly.
     if dst_ip.is_broadcast() || dst_ip.is_multicast() {
         if let Err(e) = handle.tx(pkt) {
-            klog_debug!("ipv4::send: broadcast tx failed: {}", e);
+            klog_debug!("ipv4::send_via: broadcast tx failed: {}", e);
             return Err(e);
         }
         return Ok(());
@@ -210,13 +250,12 @@ pub fn send(
             mut pkt,
             action,
         } => {
-            // MAC known — set dst MAC in Ethernet header and TX.
             arp::set_dst_mac_in_eth_header(&mut pkt, mac);
             if let Some(act) = action {
                 arp::execute_neighbor_action(handle, act);
             }
             if let Err(e) = handle.tx(pkt) {
-                klog_debug!("ipv4::send: tx failed: {}", e);
+                klog_debug!("ipv4::send_via: tx failed: {}", e);
                 return Err(e);
             }
             Ok(())
@@ -228,11 +267,82 @@ pub fn send(
         }
         ResolveOutcome::Failed(e) => {
             klog_debug!(
-                "ipv4::send: neighbor resolution failed for {}: {}",
+                "ipv4::send_via: neighbor resolution failed for {}: {}",
                 dst_ip,
                 e
             );
             Err(e)
         }
+    }
+}
+
+/// Internal: send a unicast packet on a specific device via neighbor cache.
+///
+/// Uses `DEVICE_REGISTRY` for TX (takes registry lock briefly).  This is the
+/// code path used by the route-aware [`send`] function for non-loopback,
+/// non-broadcast unicast traffic.
+fn send_on_device(
+    dev: DevIndex,
+    next_hop: super::types::Ipv4Addr,
+    pkt: PacketBuf,
+) -> Result<(), NetError> {
+    use super::arp;
+    use super::neighbor::{NEIGHBOR_CACHE, ResolveOutcome};
+    use super::netdev::DEVICE_REGISTRY;
+
+    match NEIGHBOR_CACHE.resolve(dev, next_hop, pkt) {
+        ResolveOutcome::Resolved {
+            mac,
+            mut pkt,
+            action,
+        } => {
+            arp::set_dst_mac_in_eth_header(&mut pkt, mac);
+            if let Some(act) = action {
+                execute_neighbor_action_via_registry(dev, act);
+            }
+            DEVICE_REGISTRY.tx_by_index(dev, pkt)
+        }
+        ResolveOutcome::Queued => Ok(()),
+        ResolveOutcome::ArpNeeded(action) => {
+            execute_neighbor_action_via_registry(dev, action);
+            Ok(())
+        }
+        ResolveOutcome::Failed(e) => {
+            klog_debug!(
+                "ipv4::send: neighbor resolution failed for {}: {}",
+                next_hop,
+                e
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Execute a neighbor action (ARP request, flush pending) via the device
+/// registry, without requiring a [`DeviceHandle`].
+fn execute_neighbor_action_via_registry(_dev: DevIndex, action: super::neighbor::NeighborAction) {
+    use super::arp;
+    use super::netdev::DEVICE_REGISTRY;
+
+    match action {
+        super::neighbor::NeighborAction::SendArpRequest { dev, target_ip } => {
+            // Build and send ARP request via registry.
+            arp::send_request_via_registry(dev, target_ip);
+        }
+        super::neighbor::NeighborAction::FlushPending {
+            packets,
+            dst_mac,
+            dev,
+        } => {
+            for mut pkt in packets {
+                arp::set_dst_mac_in_eth_header(&mut pkt, dst_mac);
+                let _ = DEVICE_REGISTRY.tx_by_index(dev, pkt);
+            }
+        }
+        super::neighbor::NeighborAction::TransmitPacket { pkt } => {
+            // Single packet TX — use default device (dev 1 = VirtIO).
+            let _ = DEVICE_REGISTRY.tx_by_index(DevIndex(1), pkt);
+        }
+        super::neighbor::NeighborAction::None => {}
     }
 }

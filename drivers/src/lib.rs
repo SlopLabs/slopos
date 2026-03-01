@@ -19,6 +19,8 @@ pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;
 pub mod irq;
+#[cfg(feature = "itests")]
+pub mod loopback_tests;
 pub mod msi;
 pub mod msix;
 #[cfg(feature = "itests")]
@@ -44,6 +46,8 @@ pub mod pic;
 pub mod pit;
 pub mod ps2;
 pub mod random;
+#[cfg(feature = "itests")]
+pub mod route_tests;
 pub mod serial;
 #[cfg(feature = "itests")]
 pub mod socket_tests;

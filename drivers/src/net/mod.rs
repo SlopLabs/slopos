@@ -12,20 +12,26 @@ pub mod dhcp;
 pub mod dns;
 pub mod ingress;
 pub mod ipv4;
+pub mod loopback;
 pub mod napi;
 pub mod neighbor;
 pub mod netstack;
+pub mod route;
 pub mod socket;
 pub mod tcp;
 pub mod timer;
 
 // Re-export key type-safe primitives for convenient access.
-pub use netdev::{DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};
+pub use netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};
 pub use netstack::{IfaceConfig, NET_STACK, NetStack};
 pub use packetbuf::PacketBuf;
 pub use pool::{PACKET_POOL, PacketPool};
+pub use route::{ROUTE_TABLE, RouteEntry, RouteTable};
 pub use timer::{FiredTimer, NetTimerWheel, TimerKind, TimerToken};
-pub use types::{DevIndex, EtherType, IpProtocol, Ipv4Addr, MacAddr, NetError, Port, SockAddr};
+pub use types::{
+    DevIndex, EtherType, IoSlice, IoSliceMut, IpProtocol, Ipv4Addr, MacAddr, NetError, Port,
+    SockAddr,
+};
 
 // =============================================================================
 // Ethernet

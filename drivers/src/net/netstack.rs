@@ -208,12 +208,39 @@ impl NetStack {
             inner.ifaces.push(config);
         }
 
-        // Phase 3B: trigger route table update here:
-        //   route_table.remove_device_routes(dev);
-        //   route_table.add(connected_route);
-        //   if !gateway.is_unspecified() { route_table.add(default_route); }
-    }
+        // Phase 3B: trigger route table update.
+        // Drop the inner lock first — route_table.add() takes its own lock.
+        drop(inner);
 
+        // Compute prefix_len from netmask for the connected route.
+        let prefix_len = netmask.to_u32_be().leading_ones() as u8;
+
+        // Compute the network prefix (addr & mask).
+        let prefix = Ipv4Addr::from_u32_be(addr.to_u32_be() & netmask.to_u32_be());
+
+        // Remove old routes for this device before adding new ones.
+        super::route::ROUTE_TABLE.remove_device_routes(dev);
+
+        // Add connected-subnet route.
+        super::route::ROUTE_TABLE.add(super::route::RouteEntry {
+            prefix,
+            prefix_len,
+            gateway: Ipv4Addr::UNSPECIFIED, // directly connected
+            dev,
+            metric: 0,
+        });
+
+        // Add default route via gateway (if one was provided).
+        if !gateway.is_unspecified() {
+            super::route::ROUTE_TABLE.add(super::route::RouteEntry {
+                prefix: Ipv4Addr::UNSPECIFIED, // 0.0.0.0/0
+                prefix_len: 0,
+                gateway,
+                dev,
+                metric: 100, // lower than host routes, higher metric = less preferred
+            });
+        }
+    }
     /// Look up the interface configuration for a device.
     ///
     /// Returns `None` if the device has not been configured.

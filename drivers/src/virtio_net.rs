@@ -989,15 +989,59 @@ fn virtnet_napi_poll_loop() {
         ingress::net_rx(handle, pkt);
     }
     NAPI_CONTEXT.add_processed(processed as u32);
+
+    // Phase 3C: also poll the loopback device.  Packets sent to 127.0.0.0/8
+    // are queued internally by LoopbackDev::tx() and need to be drained back
+    // through the ingress pipeline.
+    poll_loopback();
+
     napi_complete();
 
     // Advance the network timer wheel — process ARP aging, TCP retransmit, etc.
     // (Phase 2A wiring; dispatch stubs filled in by subsequent phases.)
     crate::net::timer::net_timer_process();
 
-    if processed as u32 >= NAPI_CONTEXT.budget() {
+    if (processed as u32) >= NAPI_CONTEXT.budget() {
         napi_schedule();
         NAPI_EVENT.signal();
+    }
+}
+
+/// Phase 3C: Poll the loopback device and feed packets through ingress.
+///
+/// Called from the NAPI loop and idle wakeup.  The loopback device (DevIndex 0)
+/// stores TX'd packets internally; this function drains them back through
+/// `net_rx()` so they appear as received local traffic.
+fn poll_loopback() {
+    use crate::net::netdev::DEVICE_REGISTRY;
+    use crate::net::types::DevIndex;
+
+    // The loopback device is at DevIndex(0).  Use the registry to poll it.
+    let lo_packets = DEVICE_REGISTRY.poll_rx_by_index(DevIndex(0), 32, &PACKET_POOL);
+
+    for pkt in lo_packets {
+        // Loopback packets bypass MAC filtering — they go straight
+        // to IPv4/ARP dispatch.  We call ipv4::handle_rx directly.
+        let checksum_rx = true; // Loopback doesn't need checksum verification.
+        let data = pkt.payload();
+        if data.len() >= crate::net::ETH_HEADER_LEN {
+            let ethertype_raw = u16::from_be_bytes([data[12], data[13]]);
+            let mut pkt = pkt;
+            // Set layer offsets.
+            pkt.set_l2(pkt.head());
+            pkt.set_l3(pkt.head() + crate::net::ETH_HEADER_LEN as u16);
+            // Pull Ethernet header.
+            if pkt.pull_header(crate::net::ETH_HEADER_LEN).is_ok() {
+                match crate::net::EtherType::from_u16(ethertype_raw) {
+                    Some(crate::net::EtherType::Ipv4) => {
+                        crate::net::ipv4::handle_rx(DevIndex(0), pkt, checksum_rx);
+                    }
+                    _ => {
+                        // Loopback only handles IPv4 for now.
+                    }
+                }
+            }
+        }
     }
 }
 
