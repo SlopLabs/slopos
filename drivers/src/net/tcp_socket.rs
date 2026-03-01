@@ -28,10 +28,11 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::klog_debug;
+use slopos_lib::{IrqMutex, klog_debug};
 
 use crate::net::tcp::{
-    self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpOutSegment, TcpTuple,
+    self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, MAX_CONNECTIONS, TCP_FLAG_ACK, TCP_FLAG_SYN,
+    TcpOutSegment, TcpTuple,
 };
 use crate::net::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 use crate::net::types::{Ipv4Addr, Port, SockAddr};
@@ -534,3 +535,194 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
         mss: DEFAULT_MSS,
     }
 }
+
+// =============================================================================
+// Phase 5B — TCP Demux Table
+// =============================================================================
+
+/// Entry in the established-connection demux table.
+///
+/// Maps a full four-tuple (local_ip, local_port, remote_ip, remote_port) to a
+/// connection index in [`TcpConnectionTable`].
+#[derive(Clone, Copy)]
+struct TcpEstablishedEntry {
+    local_ip: Ipv4Addr,
+    local_port: Port,
+    remote_ip: Ipv4Addr,
+    remote_port: Port,
+    conn_id: u32,
+}
+
+/// Entry in the listener demux table.
+///
+/// Maps a two-tuple (local_ip, local_port) to a socket index in the socket table.
+#[derive(Clone, Copy)]
+struct TcpListenerEntry {
+    local_ip: Ipv4Addr,
+    local_port: Port,
+    sock_idx: u32,
+}
+
+/// TCP demux table for fast connection and listener lookup.
+///
+/// Two separate tables:
+/// - **Established**: 4-tuple → connection index (used for data segments)
+/// - **Listener**: 2-tuple → socket index (used for SYN on listening sockets)
+///
+/// Modeled after [`UdpDemuxTable`](super::udp::UdpDemuxTable) but with separate
+/// established and listener lookup paths per TCP semantics.
+pub struct TcpDemuxTable {
+    established: [Option<TcpEstablishedEntry>; MAX_CONNECTIONS],
+    listeners: [Option<TcpListenerEntry>; MAX_CONNECTIONS],
+}
+
+impl TcpDemuxTable {
+    pub const fn new() -> Self {
+        Self {
+            established: [None; MAX_CONNECTIONS],
+            listeners: [None; MAX_CONNECTIONS],
+        }
+    }
+
+    /// Register an established connection (4-tuple → conn_id).
+    pub fn register_established(
+        &mut self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        remote_ip: Ipv4Addr,
+        remote_port: Port,
+        conn_id: u32,
+    ) -> Result<(), super::types::NetError> {
+        // Check for duplicate.
+        for slot in &self.established {
+            if let Some(entry) = slot
+                && entry.local_ip == local_ip
+                && entry.local_port == local_port
+                && entry.remote_ip == remote_ip
+                && entry.remote_port == remote_port
+            {
+                return Err(super::types::NetError::AddressInUse);
+            }
+        }
+
+        for slot in &mut self.established {
+            if slot.is_none() {
+                *slot = Some(TcpEstablishedEntry {
+                    local_ip,
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    conn_id,
+                });
+                return Ok(());
+            }
+        }
+
+        Err(super::types::NetError::NoBufferSpace)
+    }
+
+    /// Unregister an established connection by conn_id.
+    pub fn unregister_established(&mut self, conn_id: u32) {
+        for slot in &mut self.established {
+            if let Some(entry) = slot
+                && entry.conn_id == conn_id
+            {
+                *slot = None;
+                return;
+            }
+        }
+    }
+
+    /// Register a listener (2-tuple → sock_idx).
+    pub fn register_listener(
+        &mut self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        sock_idx: u32,
+    ) -> Result<(), super::types::NetError> {
+        // Check for duplicate.
+        for slot in &self.listeners {
+            if let Some(entry) = slot
+                && entry.local_ip == local_ip
+                && entry.local_port == local_port
+            {
+                return Err(super::types::NetError::AddressInUse);
+            }
+        }
+
+        for slot in &mut self.listeners {
+            if slot.is_none() {
+                *slot = Some(TcpListenerEntry {
+                    local_ip,
+                    local_port,
+                    sock_idx,
+                });
+                return Ok(());
+            }
+        }
+
+        Err(super::types::NetError::NoBufferSpace)
+    }
+
+    /// Unregister a listener by sock_idx.
+    pub fn unregister_listener(&mut self, sock_idx: u32) {
+        for slot in &mut self.listeners {
+            if let Some(entry) = slot
+                && entry.sock_idx == sock_idx
+            {
+                *slot = None;
+                return;
+            }
+        }
+    }
+
+    /// Look up an established connection by exact 4-tuple match.
+    pub fn lookup_established(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: Port,
+        remote_ip: Ipv4Addr,
+        remote_port: Port,
+    ) -> Option<u32> {
+        for entry in self.established.iter().flatten() {
+            if entry.local_ip == local_ip
+                && entry.local_port == local_port
+                && entry.remote_ip == remote_ip
+                && entry.remote_port == remote_port
+            {
+                return Some(entry.conn_id);
+            }
+        }
+        None
+    }
+
+    /// Look up a listener by 2-tuple (local_ip, local_port).
+    ///
+    /// Exact IP match first, then wildcard (UNSPECIFIED) fallback.
+    pub fn lookup_listener(&self, local_ip: Ipv4Addr, local_port: Port) -> Option<u32> {
+        // Exact match first.
+        for entry in self.listeners.iter().flatten() {
+            if entry.local_ip == local_ip && entry.local_port == local_port {
+                return Some(entry.sock_idx);
+            }
+        }
+
+        // Wildcard (0.0.0.0) fallback.
+        for entry in self.listeners.iter().flatten() {
+            if entry.local_ip == Ipv4Addr::UNSPECIFIED && entry.local_port == local_port {
+                return Some(entry.sock_idx);
+            }
+        }
+
+        None
+    }
+
+    /// Clear all entries.
+    pub fn clear(&mut self) {
+        self.established = [None; MAX_CONNECTIONS];
+        self.listeners = [None; MAX_CONNECTIONS];
+    }
+}
+
+/// Global TCP demux table (Phase 5B).
+pub static TCP_DEMUX: IrqMutex<TcpDemuxTable> = IrqMutex::new(TcpDemuxTable::new());

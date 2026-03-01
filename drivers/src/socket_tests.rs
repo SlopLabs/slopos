@@ -365,7 +365,10 @@ pub fn test_bounded_queue_clear_and_resize() -> TestResult {
 pub fn test_slab_socket_table_alloc_free_get_get_mut() -> TestResult {
     let mut table = SlabSocketTable::new(2, 8);
     let idx = table
-        .alloc(SocketInner::Tcp(TcpSocketInner { conn_id: None }))
+        .alloc(SocketInner::Tcp(TcpSocketInner {
+            conn_id: None,
+            listen: None,
+        }))
         .unwrap();
 
     assert_eq_test!(idx, 0);

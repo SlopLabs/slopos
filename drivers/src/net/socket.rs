@@ -5,6 +5,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::net::packetbuf::PacketBuf;
+use crate::net::tcp_socket;
 use crate::net::types::{Ipv4Addr, NetError, Port, SockAddr};
 
 /// Internal storage for protocol-specific socket state.
@@ -28,9 +29,12 @@ pub struct UdpSocketInner;
 /// TCP protocol-specific state placeholder.
 ///
 /// `conn_id` links the socket to a transport connection in future phases.
+/// `listen` holds the two-queue listen state for listening sockets (Phase 5B).
 pub struct TcpSocketInner {
     /// Optional transport connection identifier (Phase 5).
     pub conn_id: Option<u32>,
+    /// Two-queue listen state for TCP listening sockets (Phase 5B).
+    pub listen: Option<tcp_socket::TcpListenState>,
 }
 
 /// Raw socket protocol-specific state placeholder.
@@ -935,6 +939,20 @@ fn socket_notify_accept_waiters() {
 pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
     if let Some(tcp_idx) = result.conn_idx {
         socket_notify_tcp_idx_waiters(tcp_idx);
+
+        // Phase 5B: When a connection transitions to Established, register it
+        // in the TCP demux table for fast 4-tuple lookup.
+        if result.new_state == Some(TcpState::Established) {
+            if let Some(conn) = tcp::tcp_get_connection(tcp_idx) {
+                let _ = tcp_socket::TCP_DEMUX.lock().register_established(
+                    Ipv4Addr(conn.tuple.local_ip),
+                    Port(conn.tuple.local_port),
+                    Ipv4Addr(conn.tuple.remote_ip),
+                    Port(conn.tuple.remote_port),
+                    tcp_idx as u32,
+                );
+            }
+        }
     }
     if result.accepted_idx.is_some() || result.new_state == Some(TcpState::Established) {
         socket_notify_accept_waiters();
@@ -1073,7 +1091,10 @@ pub fn socket_create(domain: u16, sock_type: u16, _protocol: u16) -> i32 {
 
     let inner = match sock_type {
         SOCK_DGRAM => SocketInner::Udp(UdpSocketInner),
-        SOCK_STREAM => SocketInner::Tcp(TcpSocketInner { conn_id: None }),
+        SOCK_STREAM => SocketInner::Tcp(TcpSocketInner {
+            conn_id: None,
+            listen: None,
+        }),
         _ => return errno_i32(ERRNO_EPROTONOSUPPORT),
     };
 
@@ -1322,6 +1343,15 @@ pub fn socket_listen(sock_idx: u32, _backlog: u32) -> i32 {
                 tcp_inner.conn_id = Some(tcp_idx as u32);
             }
             sock.state = SocketState::Listening;
+
+            // Phase 5B: Register listener in TCP demux table.
+            let _ = tcp_socket::TCP_DEMUX
+                .lock()
+                .register_listener(local.ip, local.port, sock_idx);
+
+            // Phase 5B: Set bidirectional link on the connection.
+            tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
+
             0
         }
         Err(e) => map_tcp_err(e),
@@ -1365,6 +1395,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             {
                 let Some(new_idx) = table.alloc(SocketInner::Tcp(TcpSocketInner {
                     conn_id: Some(tcp_idx as u32),
+                    listen: None,
                 })) else {
                     return errno_i32(ERRNO_ENOMEM);
                 };
@@ -1394,6 +1425,9 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                         *peer_port = conn.tuple.remote_port;
                     }
                 }
+                // Phase 5B: Set bidirectional socket↔connection link.
+                tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
+
                 return new_idx as i32;
             }
         }
@@ -1463,6 +1497,9 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                     sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
                     tcp_inner.conn_id = Some(tcp_idx as u32);
                     sock.state = SocketState::Connecting;
+
+                    // Phase 5B: Set bidirectional socket↔connection link.
+                    tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
                     0
                 }
                 Err(e) => map_tcp_err(e),
@@ -1846,7 +1883,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
 }
 
 pub fn socket_close(sock_idx: u32) -> i32 {
-    let (tcp_idx, udp_unbind, recv_hint, send_hint, accept_hint) = {
+    let (tcp_idx, udp_unbind, recv_hint, send_hint, accept_hint, was_listener) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
@@ -1858,14 +1895,34 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         } else {
             None
         };
+        let was_listener = sock.state == SocketState::Listening;
         let recv_hint = sock.recv_wq_idx;
         let send_hint = sock.send_wq_idx;
         let accept_hint = sock.accept_wq_idx;
         sock.recv_queue.clear();
 
         table.free(sock_idx as usize);
-        (tcp_idx, udp_unbind, recv_hint, send_hint, accept_hint)
+        (
+            tcp_idx,
+            udp_unbind,
+            recv_hint,
+            send_hint,
+            accept_hint,
+            was_listener,
+        )
     };
+
+    // Phase 5B: Unregister from TCP demux table.
+    if was_listener {
+        tcp_socket::TCP_DEMUX.lock().unregister_listener(sock_idx);
+    }
+    if let Some(tcp_idx) = tcp_idx {
+        tcp_socket::TCP_DEMUX
+            .lock()
+            .unregister_established(tcp_idx as u32);
+        // Clear the bidirectional link.
+        tcp::tcp_set_socket_idx(tcp_idx, None);
+    }
 
     if let Some(local) = udp_unbind {
         crate::net::udp::udp_unbind(sock_idx, local.ip, local.port);

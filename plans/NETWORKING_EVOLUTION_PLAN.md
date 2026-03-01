@@ -1,6 +1,6 @@
 # SlopOS Networking Evolution Plan
 
-> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5 pending
+> **Status**: In progress — Phase 1A–1D complete, Phase 2A–2C complete, Phase 3A–3D complete, Phase 4A–4D complete, Phase 5A–5B complete, Phase 5C pending
 > **Target**: Evolve SlopOS networking from functional prototype to architecturally sound, BSD-socket-compatible TCP/IP stack
 > **Scope**: Buffer pools, netdev abstraction, ARP, routing, BSD sockets (UDP+TCP), I/O multiplexing, userspace DNS, IPv4 hardening, multi-NIC, packet filtering
 > **Design principles**: Linux-informed architecture, smoltcp-inspired Rust idioms, zero technical debt in foundational abstractions
@@ -926,19 +926,19 @@ Linux uses a SYN queue (half-open connections) separate from the accept queue (f
 
 ### 5B: TCP Socket and PCB Mapping
 
-- [ ] **5B.1** Create `TcpSocket` struct in `drivers/src/net/tcp_socket.rs`:
+- [x] **5B.1** Create `TcpSocket` struct in `drivers/src/net/tcp_socket.rs`:
   - Fields: `conn_id: Option<u32>` (index into `TcpConnection` table), `listen: Option<TcpListenState>`
   - Implements protocol-specific methods called via `SocketInner::Tcp`
-- [ ] **5B.2** Add `socket_idx: Option<usize>` field to `TcpConnection` in `drivers/src/net/tcp.rs`:
+- [x] **5B.2** Add `socket_idx: Option<usize>` field to `TcpConnection` in `drivers/src/net/tcp.rs`:
   - Bidirectional link: socket → connection via `conn_id`, connection → socket via `socket_idx`
   - When connection transitions to `Established`, set `socket_idx`
   - When connection closes, clear `socket_idx` and wake the socket's wait queue
-- [ ] **5B.3** Implement `TcpDemuxTable` in `drivers/src/net/tcp_socket.rs`:
+- [x] **5B.3** Implement `TcpDemuxTable` in `drivers/src/net/tcp_socket.rs`:
   - Maps `(local_ip, local_port, remote_ip, remote_port)` to connection ID — 4-tuple lookup
   - Also maps `(local_ip, local_port)` to listening socket index — 2-tuple listener lookup
   - `lookup_established(4-tuple) -> Option<u32>` and `lookup_listener(2-tuple) -> Option<usize>` are separate
   - Separate from the `SocketTable` — this is protocol-level demux
-- [ ] **5B.4** Update `tcp::handle_rx()` to use `TcpDemuxTable`:
+- [x] **5B.4** Update `tcp::handle_rx()` to use `TcpDemuxTable`:
   - First: `lookup_established()` for existing connections
   - Then: `lookup_listener()` for SYN on listening sockets → create SynRecvEntry
   - Fallback: send RST for unexpected segments (unless RST flag is already set)

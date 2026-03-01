@@ -530,6 +530,9 @@ pub struct TcpConnection {
 
     /// Whether the connection slot is in use.
     pub active: bool,
+
+    /// Socket table index that owns this connection (Phase 5B bidirectional link).
+    pub socket_idx: Option<usize>,
 }
 
 impl TcpConnection {
@@ -549,6 +552,7 @@ impl TcpConnection {
             retransmits: 0,
             time_wait_start_ms: 0,
             active: false,
+            socket_idx: None,
         }
     }
 }
@@ -1906,6 +1910,14 @@ pub fn tcp_active_count() -> usize {
 /// Find a connection index by tuple.
 pub fn tcp_find(tuple: &TcpTuple) -> Option<usize> {
     TCP_TABLE.lock().find(tuple)
+}
+
+/// Set or clear the socket_idx on a connection (Phase 5B bidirectional link).
+pub fn tcp_set_socket_idx(idx: usize, socket_idx: Option<usize>) {
+    let mut table = TCP_TABLE.lock();
+    if let Some(conn) = table.get_mut(idx) {
+        conn.socket_idx = socket_idx;
+    }
 }
 
 /// Write data into a connection's send buffer.
