@@ -812,35 +812,35 @@ Phase 4 introduces the entire socket framework from CAD-3: enum-dispatched `Sock
 
 ### 4C: UDP Socket Implementation
 
-- [ ] **4C.1** Create `drivers/src/net/udp.rs` with `UdpSocket` struct:
+- [x] **4C.1** Create `drivers/src/net/udp.rs` with `UdpSocket` struct:
   - No internal state beyond what `Socket` provides (UDP is stateless at protocol level)
   - Implements protocol-specific methods called via enum dispatch on `SocketInner::Udp`
-- [ ] **4C.2** Implement UDP bind:
+- [x] **4C.2** Implement UDP bind:
   - `udp_bind(sock: &mut Socket, addr: SockAddr) -> Result<(), NetError>`
   - Validates address: `INADDR_ANY` or a local interface address
   - If port is 0: allocate ephemeral port
   - Check `SO_REUSEADDR` before rejecting `AddressInUse`
   - Register in `UdpDemuxTable`, transition state to `Bound`
-- [ ] **4C.3** Implement `UdpDemuxTable` in `drivers/src/net/udp.rs`:
+- [x] **4C.3** Implement `UdpDemuxTable` in `drivers/src/net/udp.rs`:
   - Maps `(Ipv4Addr, Port)` to socket index — separate from `SocketTable`
   - `register(local_ip: Ipv4Addr, local_port: Port, sock_idx: usize)` — called by `bind()`
   - `lookup(dst_ip: Ipv4Addr, dst_port: Port) -> Option<usize>` — called by `udp::handle_rx()`
   - Wildcard: `INADDR_ANY` matches any destination IP
   - Protected by its own spinlock (not the socket table lock)
-- [ ] **4C.4** Implement `udp::handle_rx(dev: DevIndex, pkt: PacketBuf)`:
+- [x] **4C.4** Implement `udp::handle_rx(dev: DevIndex, pkt: PacketBuf)`:
   - Parse UDP header: src port, dst port, length, checksum (all using `Port` newtype)
   - Validate checksum if `!dev.features().contains(CHECKSUM_RX)` and checksum != 0
   - Look up socket via `UdpDemuxTable::lookup()`
   - If no socket found: send ICMP port unreachable (stub until Phase 8), drop, award L
   - Push `(pkt, sender_addr)` onto `sock.recv_queue`; drop if queue full (award L, increment `rx_dropped`)
   - Wake the socket's wait queue with `READABLE` (effective in Phase 6)
-- [ ] **4C.5** Implement `udp_sendto(sock: &Socket, slices: &[IoSlice<'_>], dst: SockAddr) -> Result<usize, NetError>`:
+- [x] **4C.5** Implement `udp_sendto(sock: &Socket, slices: &[IoSlice<'_>], dst: SockAddr) -> Result<usize, NetError>`:
   - Allocate `PacketBuf`, compute total payload length from IoSlices
   - If total > MTU - IP_HEADER - UDP_HEADER: return `Err(InvalidArgument)` (fragmentation is Phase 8)
   - Fill UDP header, compute checksum (using `PacketBuf::compute_udp_checksum`)
   - Fill IP header, call `ipv4::send()` via routing
   - Return total bytes sent
-- [ ] **4C.6** Implement `udp_recvfrom(sock: &mut Socket) -> Result<(PacketBuf, SockAddr), NetError>`:
+- [x] **4C.6** Implement `udp_recvfrom(sock: &mut Socket) -> Result<(PacketBuf, SockAddr), NetError>`:
   - Pop from `sock.recv_queue`
   - If queue empty and `O_NONBLOCK`: return `Err(WouldBlock)`
   - If queue empty and blocking: return `Err(WouldBlock)` (Phase 6 adds actual blocking)
