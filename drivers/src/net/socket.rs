@@ -1,3 +1,635 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::fmt;
+use core::sync::atomic::{AtomicU16, Ordering};
+
+use crate::net::packetbuf::PacketBuf;
+use crate::net::types::{NetError, Port, SockAddr};
+
+/// Internal storage for protocol-specific socket state.
+///
+/// Phase 4A defines this enum; legacy syscall paths continue on `KernelSocket`
+/// until Phase 4C/4D migration activates this framework.
+pub enum SocketInner {
+    /// UDP socket state (stateless at protocol level in Phase 4A).
+    Udp(UdpSocketInner),
+    /// TCP socket state placeholder (expanded in Phase 5).
+    Tcp(TcpSocketInner),
+    /// Raw socket state placeholder (expanded in Phase 9).
+    Raw(RawSocketInner),
+}
+
+/// UDP protocol-specific state.
+///
+/// Phase 4A keeps this empty because UDP per-socket protocol state is minimal.
+pub struct UdpSocketInner;
+
+/// TCP protocol-specific state placeholder.
+///
+/// `conn_id` links the socket to a transport connection in future phases.
+pub struct TcpSocketInner {
+    /// Optional transport connection identifier (Phase 5).
+    pub conn_id: Option<u32>,
+}
+
+/// Raw socket protocol-specific state placeholder.
+///
+/// This remains empty in Phase 4A and is expanded in Phase 9.
+pub struct RawSocketInner;
+
+/// Socket status and mode flags.
+///
+/// This is a small bitflags-like wrapper with no external dependency.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SocketFlags(u32);
+
+impl SocketFlags {
+    /// No flags set.
+    pub const NONE: Self = Self(0);
+    /// Non-blocking I/O mode.
+    pub const O_NONBLOCK: Self = Self(1 << 0);
+    /// Read side has been shut down.
+    pub const SHUT_RD: Self = Self(1 << 1);
+    /// Write side has been shut down.
+    pub const SHUT_WR: Self = Self(1 << 2);
+
+    /// Return `true` if all bits in `other` are set.
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// Set the given flag bits.
+    pub fn set(&mut self, flag: Self) {
+        self.0 |= flag.0;
+    }
+
+    /// Clear the given flag bits.
+    pub fn clear(&mut self, flag: Self) {
+        self.0 &= !flag.0;
+    }
+
+    /// Return raw bit representation.
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Construct from raw bits.
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+}
+
+/// Per-socket configurable options.
+///
+/// Phase 4A defines these fields; legacy syscall paths keep their existing
+/// option storage until migration phases activate this struct.
+pub struct SocketOptions {
+    /// Allow local address reuse.
+    pub reuse_addr: bool,
+    /// Receive buffer size in bytes.
+    ///
+    /// Default: 16384, valid range: 256..=262144.
+    pub recv_buf_size: usize,
+    /// Send buffer size in bytes.
+    ///
+    /// Default: 16384, valid range: 256..=262144.
+    pub send_buf_size: usize,
+    /// Receive timeout in milliseconds (`None` means infinite).
+    pub recv_timeout: Option<u64>,
+    /// Send timeout in milliseconds (`None` means infinite).
+    pub send_timeout: Option<u64>,
+    /// Enable keepalive (TCP-only behavior in later phases).
+    pub keepalive: bool,
+    /// Disable Nagle algorithm (TCP-only behavior in later phases).
+    pub tcp_nodelay: bool,
+}
+
+impl SocketOptions {
+    /// Default receive buffer size in bytes.
+    pub const RECV_BUF_DEFAULT: usize = 16_384;
+    /// Default send buffer size in bytes.
+    pub const SEND_BUF_DEFAULT: usize = 16_384;
+    /// Minimum allowed receive buffer size in bytes.
+    pub const RECV_BUF_MIN: usize = 256;
+    /// Maximum allowed receive buffer size in bytes.
+    pub const RECV_BUF_MAX: usize = 262_144;
+    /// Minimum allowed send buffer size in bytes.
+    pub const SEND_BUF_MIN: usize = 256;
+    /// Maximum allowed send buffer size in bytes.
+    pub const SEND_BUF_MAX: usize = 262_144;
+
+    /// Construct options with Phase 4A defaults.
+    pub const fn new() -> Self {
+        Self {
+            reuse_addr: false,
+            recv_buf_size: Self::RECV_BUF_DEFAULT,
+            send_buf_size: Self::SEND_BUF_DEFAULT,
+            recv_timeout: None,
+            send_timeout: None,
+            keepalive: false,
+            tcp_nodelay: false,
+        }
+    }
+
+    /// Validate and normalize a receive buffer size request.
+    ///
+    /// Returns `NetError::InvalidArgument` if the value is out of range.
+    pub fn validate_recv_buf_size(size: usize) -> Result<usize, NetError> {
+        if !(Self::RECV_BUF_MIN..=Self::RECV_BUF_MAX).contains(&size) {
+            return Err(NetError::InvalidArgument);
+        }
+        Ok(size)
+    }
+
+    /// Validate and normalize a send buffer size request.
+    ///
+    /// Returns `NetError::InvalidArgument` if the value is out of range.
+    pub fn validate_send_buf_size(size: usize) -> Result<usize, NetError> {
+        if !(Self::SEND_BUF_MIN..=Self::SEND_BUF_MAX).contains(&size) {
+            return Err(NetError::InvalidArgument);
+        }
+        Ok(size)
+    }
+}
+
+impl Default for SocketOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-capacity queue with ring-buffer semantics.
+///
+/// Phase 4A defines this queue for per-socket packets. Push never overwrites:
+/// it returns `false` when full.
+pub struct BoundedQueue<T> {
+    slots: Vec<Option<T>>,
+    head: usize,
+    len: usize,
+}
+
+impl<T> BoundedQueue<T> {
+    /// Create a queue with `capacity` slots.
+    pub fn new(capacity: usize) -> Self {
+        let slots = core::iter::repeat_with(|| None).take(capacity).collect();
+        Self {
+            slots,
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Push an item to the tail.
+    ///
+    /// Returns `false` if the queue is full; no item is overwritten.
+    pub fn push(&mut self, item: T) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        let cap = self.capacity();
+        if cap == 0 {
+            return false;
+        }
+        let tail = (self.head + self.len) % cap;
+        self.slots[tail] = Some(item);
+        self.len += 1;
+        true
+    }
+
+    /// Pop an item from the head.
+    pub fn pop(&mut self) -> Option<T> {
+        if self.is_empty() {
+            return None;
+        }
+        let cap = self.capacity();
+        if cap == 0 {
+            return None;
+        }
+        let idx = self.head;
+        self.head = (self.head + 1) % cap;
+        self.len -= 1;
+        self.slots[idx].take()
+    }
+
+    /// Return `true` if the queue has no elements.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Return `true` if the queue cannot accept more elements.
+    pub fn is_full(&self) -> bool {
+        self.len == self.capacity()
+    }
+
+    /// Number of queued items.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Maximum number of storable items.
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Clear all queued items.
+    pub fn clear(&mut self) {
+        for slot in &mut self.slots {
+            let _ = slot.take();
+        }
+        self.head = 0;
+        self.len = 0;
+    }
+
+    /// Resize queue capacity, preserving item order.
+    ///
+    /// If `new_capacity` is smaller than current length, oldest items are kept
+    /// until capacity is reached and the rest are dropped.
+    pub fn resize(&mut self, new_capacity: usize) {
+        let mut drained = Vec::with_capacity(self.len);
+        while let Some(item) = self.pop() {
+            drained.push(item);
+        }
+
+        self.slots = core::iter::repeat_with(|| None)
+            .take(new_capacity)
+            .collect::<Vec<Option<T>>>();
+        self.head = 0;
+        self.len = 0;
+
+        for item in drained {
+            if !self.push(item) {
+                break;
+            }
+        }
+    }
+}
+
+impl<T> fmt::Debug for BoundedQueue<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundedQueue")
+            .field("len", &self.len)
+            .field("capacity", &self.capacity())
+            .finish()
+    }
+}
+
+/// Next wait-queue hint used by `Socket::new` placeholders.
+///
+/// Phase 6 replaces these indices with real queue registrations.
+static SOCKET_WQ_HINT: AtomicU16 = AtomicU16::new(0);
+
+/// Unified socket object for the new framework.
+///
+/// Phase 4A defines this object. Legacy code paths continue using
+/// `KernelSocket` until Phase 4C/4D migration.
+pub struct Socket {
+    /// Protocol-specific socket state.
+    pub inner: SocketInner,
+    /// Generic lifecycle state.
+    pub state: SocketState,
+    /// Mode/shutdown flags.
+    pub flags: SocketFlags,
+    /// Socket options.
+    pub options: SocketOptions,
+    /// Optional bound local address.
+    pub local_addr: Option<SockAddr>,
+    /// Optional connected peer address.
+    pub remote_addr: Option<SockAddr>,
+    /// Receive queue of `(packet, source address)` tuples.
+    pub recv_queue: BoundedQueue<(PacketBuf, SockAddr)>,
+    /// Deferred error reported on next operation.
+    pub pending_error: Option<NetError>,
+    /// Owning process identifier.
+    pub process_id: u32,
+    /// Placeholder receive wait queue index (Phase 6 replacement planned).
+    pub recv_wq_idx: u8,
+    /// Placeholder accept wait queue index (Phase 6 replacement planned).
+    pub accept_wq_idx: u8,
+    /// Placeholder send wait queue index (Phase 6 replacement planned).
+    pub send_wq_idx: u8,
+}
+
+impl Socket {
+    /// Default receive queue capacity in packets.
+    pub const RECV_QUEUE_DEFAULT_CAPACITY: usize = 16;
+
+    /// Create a new socket object with Phase 4A defaults.
+    pub fn new(inner: SocketInner) -> Self {
+        let wq_idx = (SOCKET_WQ_HINT.fetch_add(1, Ordering::Relaxed) & 0x00FF) as u8;
+        Self {
+            inner,
+            state: SocketState::Unbound,
+            flags: SocketFlags::NONE,
+            options: SocketOptions::new(),
+            local_addr: None,
+            remote_addr: None,
+            recv_queue: BoundedQueue::new(Self::RECV_QUEUE_DEFAULT_CAPACITY),
+            pending_error: None,
+            process_id: 0,
+            recv_wq_idx: wq_idx,
+            accept_wq_idx: wq_idx,
+            send_wq_idx: wq_idx,
+        }
+    }
+
+    /// Return `true` if non-blocking mode is enabled.
+    pub fn is_nonblocking(&self) -> bool {
+        self.flags.contains(SocketFlags::O_NONBLOCK)
+    }
+
+    /// Return `true` if read shutdown is active.
+    pub fn is_read_shutdown(&self) -> bool {
+        self.flags.contains(SocketFlags::SHUT_RD)
+    }
+
+    /// Return `true` if write shutdown is active.
+    pub fn is_write_shutdown(&self) -> bool {
+        self.flags.contains(SocketFlags::SHUT_WR)
+    }
+
+    /// Enable or disable non-blocking mode.
+    pub fn set_nonblocking(&mut self, nonblocking: bool) {
+        if nonblocking {
+            self.flags.set(SocketFlags::O_NONBLOCK);
+        } else {
+            self.flags.clear(SocketFlags::O_NONBLOCK);
+        }
+    }
+
+    /// Take and clear any pending error.
+    pub fn take_pending_error(&mut self) -> Option<NetError> {
+        self.pending_error.take()
+    }
+}
+
+/// Slab-like socket table with freelist allocation.
+///
+/// Phase 4A defines this table. Syscall handlers still use the legacy table
+/// until Phase 4C/4D migration.
+pub struct SlabSocketTable {
+    slots: Vec<Option<Socket>>,
+    freelist: Vec<usize>,
+    max_capacity: usize,
+}
+
+impl SlabSocketTable {
+    /// Default initial slot count.
+    pub const INITIAL_CAPACITY: usize = 64;
+    /// Hard maximum slot count.
+    pub const MAX_CAPACITY: usize = 1024;
+
+    /// Create an empty, const-initializable table.
+    ///
+    /// This is used for global static initialization; first use should call
+    /// [`init_if_needed`](Self::init_if_needed).
+    pub const fn empty() -> Self {
+        Self {
+            slots: Vec::new(),
+            freelist: Vec::new(),
+            max_capacity: 0,
+        }
+    }
+
+    /// Lazily initialize with default capacities if currently empty.
+    pub fn init_if_needed(&mut self) {
+        if self.max_capacity == 0 {
+            *self = Self::new(Self::INITIAL_CAPACITY, Self::MAX_CAPACITY);
+        }
+    }
+
+    /// Create a slab table with explicit initial and maximum capacities.
+    ///
+    /// Freelist is populated in reverse so index 0 is allocated first.
+    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
+        let init_cap = core::cmp::min(initial_capacity, max_capacity);
+        let mut slots = core::iter::repeat_with(|| None)
+            .take(init_cap)
+            .collect::<Vec<Option<Socket>>>();
+        if slots.len() != init_cap {
+            slots.clear();
+        }
+        let freelist = (0..init_cap).rev().collect();
+        Self {
+            slots,
+            freelist,
+            max_capacity,
+        }
+    }
+
+    /// Allocate a new socket slot.
+    ///
+    /// Returns the socket index on success. If no free slots are available,
+    /// attempts to grow capacity (doubling, capped at `max_capacity`).
+    pub fn alloc(&mut self, inner: SocketInner) -> Option<usize> {
+        self.init_if_needed();
+        if self.freelist.is_empty() {
+            self.grow();
+        }
+        let idx = self.freelist.pop()?;
+        self.slots[idx] = Some(Socket::new(inner));
+        Some(idx)
+    }
+
+    /// Get an immutable socket reference by index.
+    pub fn get(&self, idx: usize) -> Option<&Socket> {
+        self.slots.get(idx)?.as_ref()
+    }
+
+    /// Get a mutable socket reference by index.
+    pub fn get_mut(&mut self, idx: usize) -> Option<&mut Socket> {
+        self.slots.get_mut(idx)?.as_mut()
+    }
+
+    /// Free an active slot and return it to the freelist.
+    pub fn free(&mut self, idx: usize) {
+        if let Some(slot) = self.slots.get_mut(idx) {
+            if slot.take().is_some() {
+                self.freelist.push(idx);
+            }
+        }
+    }
+
+    /// Number of active sockets.
+    pub fn count_active(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// Current slot capacity.
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Number of active sockets (alias of [`count_active`](Self::count_active)).
+    pub fn len(&self) -> usize {
+        self.count_active()
+    }
+
+    fn grow(&mut self) {
+        let current = self.slots.len();
+        if current >= self.max_capacity {
+            return;
+        }
+
+        let mut new_cap = if current == 0 {
+            Self::INITIAL_CAPACITY
+        } else {
+            current.saturating_mul(2)
+        };
+        if new_cap > self.max_capacity {
+            new_cap = self.max_capacity;
+        }
+        if new_cap <= current {
+            return;
+        }
+
+        let add = new_cap - current;
+        self.slots.extend(
+            core::iter::repeat_with(|| None)
+                .take(add)
+                .collect::<Vec<_>>(),
+        );
+        for idx in (current..new_cap).rev() {
+            self.freelist.push(idx);
+        }
+    }
+}
+
+/// Ephemeral port allocator for dynamic local port selection.
+///
+/// Phase 4A defines this allocator and both old/new socket paths may use it.
+/// Access must be serialized by the outer lock (no internal atomics).
+pub struct EphemeralPortAllocator {
+    bitmap: [u8; Self::BITMAP_SIZE],
+    next_port: u16,
+    allocated_count: usize,
+}
+
+impl EphemeralPortAllocator {
+    /// Start of IANA ephemeral range.
+    pub const EPHEMERAL_PORT_START: u16 = 49_152;
+    /// End of IANA ephemeral range.
+    pub const EPHEMERAL_PORT_END: u16 = 65_535;
+    /// Total number of ephemeral ports.
+    pub const EPHEMERAL_PORT_COUNT: usize = 16_384;
+    /// Bitmap size in bytes (`EPHEMERAL_PORT_COUNT / 8`).
+    pub const BITMAP_SIZE: usize = 2048;
+
+    /// Create a fresh allocator with no allocated ports.
+    pub const fn new() -> Self {
+        Self {
+            bitmap: [0; Self::BITMAP_SIZE],
+            next_port: Self::EPHEMERAL_PORT_START,
+            allocated_count: 0,
+        }
+    }
+
+    /// Allocate one ephemeral port using round-robin selection.
+    ///
+    /// Returns `None` if all ephemeral ports are currently allocated.
+    pub fn alloc(&mut self) -> Option<Port> {
+        if self.allocated_count >= Self::EPHEMERAL_PORT_COUNT {
+            return None;
+        }
+
+        let start = self.next_port;
+        for offset in 0..Self::EPHEMERAL_PORT_COUNT {
+            let candidate = Self::EPHEMERAL_PORT_START
+                + ((start - Self::EPHEMERAL_PORT_START + offset as u16)
+                    % Self::EPHEMERAL_PORT_COUNT as u16);
+            if !self.is_allocated(candidate) {
+                self.set_allocated(candidate);
+                self.allocated_count += 1;
+                self.next_port = if candidate == Self::EPHEMERAL_PORT_END {
+                    Self::EPHEMERAL_PORT_START
+                } else {
+                    candidate + 1
+                };
+                return Some(Port(candidate));
+            }
+        }
+
+        None
+    }
+
+    /// Release a previously allocated ephemeral port.
+    pub fn release(&mut self, port: Port) {
+        let p = port.0;
+        if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
+            return;
+        }
+        if self.is_allocated(p) {
+            self.clear_allocated(p);
+            self.allocated_count -= 1;
+        }
+    }
+
+    /// Return `true` if `port` is currently allocated.
+    pub fn is_in_use(&self, port: Port) -> bool {
+        let p = port.0;
+        if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
+            return false;
+        }
+        self.is_allocated(p)
+    }
+
+    /// Number of currently available ephemeral ports.
+    pub fn available(&self) -> usize {
+        Self::EPHEMERAL_PORT_COUNT - self.allocated_count
+    }
+
+    fn port_to_bit_index(port: u16) -> usize {
+        (port - Self::EPHEMERAL_PORT_START) as usize
+    }
+
+    fn is_allocated(&self, port: u16) -> bool {
+        let bit = Self::port_to_bit_index(port);
+        let byte = bit / 8;
+        let mask = 1u8 << (bit % 8);
+        (self.bitmap[byte] & mask) != 0
+    }
+
+    fn set_allocated(&mut self, port: u16) {
+        let bit = Self::port_to_bit_index(port);
+        let byte = bit / 8;
+        let mask = 1u8 << (bit % 8);
+        self.bitmap[byte] |= mask;
+    }
+
+    fn clear_allocated(&mut self, port: u16) {
+        let bit = Self::port_to_bit_index(port);
+        let byte = bit / 8;
+        let mask = 1u8 << (bit % 8);
+        self.bitmap[byte] &= !mask;
+    }
+}
+
+impl Default for EphemeralPortAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// New slab-based socket table (Phase 4A).
+///
+/// Initially unused by legacy socket syscalls. Migration occurs in Phase 4C/4D.
+pub static NEW_SOCKET_TABLE: slopos_lib::IrqMutex<SlabSocketTable> =
+    slopos_lib::IrqMutex::new(SlabSocketTable::empty());
+
+/// Ephemeral port allocator (Phase 4A).
+///
+/// Shared infrastructure for both legacy and future socket paths.
+pub static EPHEMERAL_PORTS: slopos_lib::IrqMutex<EphemeralPortAllocator> =
+    slopos_lib::IrqMutex::new(EphemeralPortAllocator::new());
+
+// =============================================================================
+// LEGACY: Existing socket infrastructure (pre-Phase 4A)
+//
+// The code below implements the current socket functionality using KernelSocket
+// and a fixed-size SocketTable. Phase 4C/4D will migrate this to use the new
+// Socket framework above. Until then, both coexist.
+// =============================================================================
+
 use core::cmp;
 
 use slopos_abi::net::{AF_INET, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
