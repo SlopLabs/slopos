@@ -22,6 +22,9 @@ pub mod socket;
 pub mod socket_option_tests;
 pub mod tcp;
 pub mod timer;
+pub mod udp;
+#[cfg(feature = "itests")]
+pub mod udp_demux_tests;
 
 // Re-export key type-safe primitives for convenient access.
 pub use netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};
