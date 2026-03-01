@@ -1175,6 +1175,24 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
                 lease.dns[2],
                 lease.dns[3]
             );
+
+            // Phase 3A: propagate DHCP lease to the centralised NetStack.
+            // The DeviceHandle hasn't been created yet, but we know VirtIO-net
+            // will get the next available slot.  We read the current count
+            // from the registry to predict the DevIndex.  (After Phase 3C adds
+            // loopback at index 0, VirtIO-net will be index 1.)
+            {
+                use crate::net::netstack::NET_STACK;
+                use crate::net::types::{DevIndex, Ipv4Addr};
+                let dev_idx = DevIndex(DEVICE_REGISTRY.device_count());
+                NET_STACK.configure(
+                    dev_idx,
+                    Ipv4Addr::from_bytes(lease.ipv4),
+                    Ipv4Addr::from_bytes(lease.subnet_mask),
+                    Ipv4Addr::from_bytes(lease.router),
+                    [Ipv4Addr::from_bytes(lease.dns), Ipv4Addr::UNSPECIFIED],
+                );
+            }
         } else {
             klog_info!("virtio-net: DHCP lease unavailable");
         }
@@ -1332,10 +1350,20 @@ pub fn virtio_net_get_info(out: &mut UserNetInfo) {
     out.link_up = u8::from(state.device.ready && link_is_up(&state));
     out.mac = state.device.mac;
     out.mtu = state.device.mtu;
-    out.ipv4 = state.ipv4_addr;
-    out.subnet_mask = state.subnet_mask;
-    out.gateway = state.router;
-    out.dns = state.dns;
+
+    // Phase 3A: prefer NetStack as the source of truth for IP config.
+    if let Some(iface) = crate::net::netstack::NET_STACK.first_iface() {
+        out.ipv4 = iface.ipv4_addr.0;
+        out.subnet_mask = iface.netmask.0;
+        out.gateway = iface.gateway.0;
+        out.dns = iface.dns[0].0;
+    } else {
+        // Legacy fallback — still read from VirtioNetState.
+        out.ipv4 = state.ipv4_addr;
+        out.subnet_mask = state.subnet_mask;
+        out.gateway = state.router;
+        out.dns = state.dns;
+    }
 }
 
 pub fn virtio_net_transmit(packet: &[u8]) -> bool {

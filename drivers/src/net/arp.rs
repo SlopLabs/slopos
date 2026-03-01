@@ -267,9 +267,14 @@ pub fn set_dst_mac_in_eth_header(pkt: &mut PacketBuf, mac: MacAddr) {
 // Helpers
 // =============================================================================
 
-/// Get our IPv4 address from the VirtIO-net driver state.
+/// Get our IPv4 address from the centralised [`NetStack`].
 ///
-/// Phase 3 will replace this with `NetStack::our_ip(dev)`.
+/// Tries the NetStack first (Phase 3A); falls back to the legacy
+/// `virtio_net_ipv4_addr()` if the NetStack has not been configured yet.
 fn get_our_ip() -> Ipv4Addr {
+    if let Some(ip) = super::netstack::NET_STACK.first_ipv4() {
+        return ip;
+    }
+    // Legacy fallback — will be removed once all callers use NetStack.
     Ipv4Addr(crate::virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]))
 }

@@ -625,7 +625,10 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
     }
 
     // Get our IP for source address
-    let src_ip = crate::virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]);
+    let src_ip = crate::net::netstack::NET_STACK
+        .first_ipv4()
+        .map(|ip| ip.0)
+        .unwrap_or([0; 4]);
 
     for attempt in 0..DNS_MAX_RETRIES {
         let id = QUERY_ID.fetch_add(1, Ordering::Relaxed);

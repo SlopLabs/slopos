@@ -553,7 +553,10 @@ pub fn socket_sendto(
             let Some(port) = alloc_ephemeral_port(&table) else {
                 return errno_i32(ERRNO_ENOMEM) as i64;
             };
-            let local_ip = virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]);
+            let local_ip = crate::net::netstack::NET_STACK
+                .first_ipv4()
+                .map(|ip| ip.0)
+                .unwrap_or([0; 4]);
 
             let sock = &mut table.sockets[idx];
             sock.local_ip = local_ip;
@@ -794,7 +797,10 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             let local_ip = if sock.local_ip != [0; 4] {
                 sock.local_ip
             } else {
-                virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4])
+                crate::net::netstack::NET_STACK
+                    .first_ipv4()
+                    .map(|ip| ip.0)
+                    .unwrap_or([0; 4])
             };
 
             match tcp::tcp_connect(local_ip, addr, port) {
@@ -857,7 +863,10 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 let Some(port) = alloc_ephemeral_port(&table) else {
                     return errno_i32(ERRNO_ENOMEM) as i64;
                 };
-                let local_ip = virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]);
+                let local_ip = crate::net::netstack::NET_STACK
+                    .first_ipv4()
+                    .map(|ip| ip.0)
+                    .unwrap_or([0; 4]);
                 let sock = &mut table.sockets[idx];
                 sock.local_ip = local_ip;
                 sock.local_port = port;

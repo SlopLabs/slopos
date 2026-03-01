@@ -653,18 +653,18 @@ The current ARP table is a static array inside `virtio_net.rs`. A real neighbor 
 
 ### 3A: Per-Interface IPv4 Configuration
 
-- [ ] **3A.1** Create `drivers/src/net/netstack.rs` with `IfaceConfig` struct:
+- [x] **3A.1** Create `drivers/src/net/netstack.rs` with `IfaceConfig` struct:
   - Fields: `dev_index: DevIndex`, `ipv4_addr: Ipv4Addr`, `netmask: Ipv4Addr`, `gateway: Ipv4Addr`, `dns: [Ipv4Addr; 2]`, `up: bool`
   - `broadcast(&self) -> Ipv4Addr` — computed from addr and netmask
   - `is_local(&self, ip: Ipv4Addr) -> bool` — true if ip is on the directly connected subnet
   - `prefix_len(&self) -> u8` — count leading ones in netmask
-- [ ] **3A.2** Create `NetStack` struct in `drivers/src/net/netstack.rs`:
+- [x] **3A.2** Create `NetStack` struct in `drivers/src/net/netstack.rs`:
   - Owns a `Vec<IfaceConfig>` (one per registered netdev)
   - `configure(dev: DevIndex, addr: Ipv4Addr, netmask: Ipv4Addr, gateway: Ipv4Addr, dns: [Ipv4Addr; 2])` — called by DHCP on lease
   - `iface_for_dev(dev: DevIndex) -> Option<&IfaceConfig>` — lookup by device index
   - `our_ip(dev: DevIndex) -> Option<Ipv4Addr>` — convenience accessor
   - `is_our_addr(ip: Ipv4Addr) -> bool` — checks all interfaces (needed for RX path multi-NIC)
-- [ ] **3A.3** Update `drivers/src/net/dhcp.rs` to call `NetStack::configure()` on ACK:
+- [x] **3A.3** Update `drivers/src/virtio_net.rs` to call `NetStack::configure()` on DHCP lease:
   - Remove any ad-hoc IP storage from the DHCP module
   - Pass parsed subnet, router, and DNS fields into `NetStack`
   - Trigger route table update: add connected route and default route after configuration
