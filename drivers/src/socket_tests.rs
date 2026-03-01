@@ -79,14 +79,17 @@ pub fn test_socket_create_invalid_type() -> TestResult {
 
 pub fn test_socket_table_full() -> TestResult {
     reset();
-    for _ in 0..64 {
+    // SlabSocketTable grows on demand up to MAX_CAPACITY (1024).
+    // Verify we can allocate beyond the initial 64-slot capacity.
+    for i in 0..128 {
         if socket_create(AF_INET, SOCK_STREAM, 0) < 0 {
-            return fail!("early socket allocation failure");
+            return fail!("socket allocation failed at index {}", i);
         }
     }
+    // 129th socket should still succeed (table grows to 256).
     assert_test!(
-        socket_create(AF_INET, SOCK_STREAM, 0) < 0,
-        "65th socket fails"
+        socket_create(AF_INET, SOCK_STREAM, 0) >= 0,
+        "129th socket succeeds (growable table)"
     );
     pass!()
 }
