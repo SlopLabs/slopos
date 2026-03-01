@@ -367,6 +367,83 @@ pub const SYSCALL_RECVFROM: u64 = 134;
 /// * -EINVAL: hostname too long (>253 bytes)
 pub const SYSCALL_RESOLVE: u64 = 135;
 
+/// Set a socket option.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): option level (SOL_SOCKET, IPPROTO_TCP)
+/// * rdx (arg2): option name (SO_REUSEADDR, SO_RCVBUF, etc.)
+/// * r10 (arg3): pointer to option value
+/// * r8  (arg4): option value length in bytes
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_SETSOCKOPT: u64 = 136;
+
+/// Get a socket option.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): option level
+/// * rdx (arg2): option name
+/// * r10 (arg3): pointer to output buffer for option value
+/// * r8  (arg4): pointer to u32 containing buffer length (updated on return)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_GETSOCKOPT: u64 = 137;
+
+/// Shut down part of a full-duplex connection.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): socket file descriptor
+/// * rsi (arg1): how (SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_SHUTDOWN: u64 = 138;
+
+// =============================================================================
+// Socket option constants
+// =============================================================================
+
+/// Socket option level: generic socket options.
+pub const SOL_SOCKET: i32 = 1;
+/// Socket option level: TCP protocol options.
+pub const IPPROTO_TCP: i32 = 6;
+
+/// Allow local address reuse.
+pub const SO_REUSEADDR: i32 = 2;
+/// Retrieve and clear pending socket error.
+pub const SO_ERROR: i32 = 4;
+/// Send buffer size in bytes.
+pub const SO_SNDBUF: i32 = 7;
+/// Receive buffer size in bytes.
+pub const SO_RCVBUF: i32 = 8;
+/// Enable keepalive probes.
+pub const SO_KEEPALIVE: i32 = 9;
+/// Receive timeout in milliseconds (as u64).
+pub const SO_RCVTIMEO: i32 = 20;
+/// Send timeout in milliseconds (as u64).
+pub const SO_SNDTIMEO: i32 = 21;
+
+/// Disable Nagle's algorithm (TCP only).
+pub const TCP_NODELAY: i32 = 1;
+
+// =============================================================================
+// Shutdown constants
+// =============================================================================
+
+/// Disallow further receives.
+pub const SHUT_RD: i32 = 0;
+/// Disallow further sends.
+pub const SHUT_WR: i32 = 1;
+/// Disallow further sends and receives.
+pub const SHUT_RDWR: i32 = 2;
+
 // =============================================================================
 // Memory management (POSIX)
 // =============================================================================
@@ -720,7 +797,7 @@ pub const ERRNO_EPERM: u64 = (-1i64) as u64;
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 137;
+pub const SYSCALL_TABLE_SIZE: usize = 139;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
