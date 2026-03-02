@@ -9,7 +9,6 @@ use slopos_abi::syscall::{
 
 use slopos_fs::fileio::{file_is_console_fd, file_poll_fd};
 
-use slopos_lib::IrqMutex;
 use slopos_lib::kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
@@ -17,13 +16,6 @@ use slopos_mm::user_copy::{
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 const SELECT_MAX_FDS: usize = 256;
-
-static TTY_WINSIZE: IrqMutex<UserWinsize> = IrqMutex::new(UserWinsize {
-    ws_row: 24,
-    ws_col: 80,
-    ws_xpixel: 0,
-    ws_ypixel: 0,
-});
 
 #[inline]
 fn fdset_bytes_len(nfds: usize) -> usize {
@@ -277,7 +269,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let mut t = UserTermios::default();
-            tty::get_termios(&mut t as *mut UserTermios);
+            tty::get_termios(0, &mut t as *mut UserTermios);
             try_or_err!(ctx, copy_to_user(ptr, &t));
             ctx.ok(0)
         }
@@ -285,27 +277,28 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            tty::set_termios(&val as *const UserTermios);
+            tty::set_termios(0, &val as *const UserTermios);
             ctx.ok(0)
         }
         TIOCGWINSZ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
-            let winsize = *TTY_WINSIZE.lock();
-            try_or_err!(ctx, copy_to_user(ptr, &winsize));
+            let mut ws = UserWinsize::default();
+            tty::get_winsize(0, &mut ws as *mut UserWinsize);
+            try_or_err!(ctx, copy_to_user(ptr, &ws));
             ctx.ok(0)
         }
         slopos_abi::syscall::TIOCSWINSZ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            *TTY_WINSIZE.lock() = val;
+            tty::set_winsize(0, &val as *const UserWinsize);
             ctx.ok(0)
         }
         TIOCGPGRP => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let fg_pgrp = tty::get_foreground_pgrp();
+            let fg_pgrp = tty::get_foreground_pgrp(0);
             try_or_err!(ctx, copy_to_user(ptr, &fg_pgrp));
             ctx.ok(0)
         }
@@ -313,7 +306,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let pgrp = try_or_err!(ctx, copy_from_user(ptr));
-            ctx.from_bool_value(tty::set_foreground_pgrp(pgrp) == 0, 0)
+            ctx.from_bool_value(tty::set_foreground_pgrp(0, pgrp) == 0, 0)
         }
         _ => ctx.err(),
     }

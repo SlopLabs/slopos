@@ -18,25 +18,28 @@ use crate::{apic, ioapic, ps2};
 // (vector LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch —
 // see boot/src/idt.rs.  HPET + LAPIC are mandatory.
 
-/// Unified PS/2 IRQ handler following the Linux i8042 pattern.
-///
-/// Both IRQ 1 (keyboard) and IRQ 12 (mouse) call this function.
-/// Demultiplexing is done via status register bit 5 (MOUSE_OBF),
-/// which is reliable on QEMU >= 6.1.  The status register is read
-/// exactly once per invocation — the data byte inherits the same
-/// source classification because QEMU's `kbd_safe_update_irq`
-/// prevents status changes while OBF is set.
 extern "C" fn ps2_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     let status = ps2::read_status();
     if status & ps2::STATUS_OUTPUT_FULL == 0 {
         return;
     }
     let data = ps2::read_data_nowait();
-    if status & ps2::STATUS_MOUSE_DATA != 0 {
-        ps2::mouse::handle_irq(data);
-    } else {
-        irq_increment_keyboard_events();
-        ps2::keyboard::handle_scancode(data);
+    match _irq {
+        LEGACY_IRQ_KEYBOARD => {
+            irq_increment_keyboard_events();
+            ps2::keyboard::handle_scancode(data);
+        }
+        LEGACY_IRQ_MOUSE => {
+            ps2::mouse::handle_irq(data);
+        }
+        _ => {
+            if status & ps2::STATUS_MOUSE_DATA != 0 {
+                ps2::mouse::handle_irq(data);
+            } else {
+                irq_increment_keyboard_events();
+                ps2::keyboard::handle_scancode(data);
+            }
+        }
     }
 }
 

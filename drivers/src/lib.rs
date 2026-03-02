@@ -19,7 +19,7 @@ pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;
 pub mod irq;
-pub mod line_disc;
+// line_disc is now a submodule of tty/ (drivers/src/tty/ldisc.rs)
 #[cfg(feature = "itests")]
 pub mod loopback_tests;
 pub mod msi;
@@ -60,6 +60,8 @@ pub mod tcp_tests;
 #[cfg(feature = "itests")]
 pub mod timer_tests;
 pub mod tty;
+#[cfg(feature = "itests")]
+pub mod tty_tests;
 #[cfg(feature = "itests")]
 pub mod udp_socket_tests;
 pub mod virtio;

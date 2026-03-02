@@ -57,18 +57,61 @@ static INPUT_SERVICES: InputServices = InputServices {
 };
 
 // =============================================================================
-// TTY services — all fields point directly at the driver implementation.
+// TTY services — thin adapters converting u8 → TtyIndex for the per-TTY API.
 // =============================================================================
 
+fn tty_read_adapter(tty_index: u8, buf: *mut u8, max: usize, nonblock: bool) -> isize {
+    tty::read(tty::TtyIndex(tty_index), buf, max, nonblock)
+}
+
+fn tty_has_cooked_data_adapter(tty_index: u8) -> bool {
+    tty::has_data(tty::TtyIndex(tty_index))
+}
+
+fn tty_set_termios_adapter(tty_index: u8, t: *const slopos_abi::syscall::UserTermios) {
+    tty::set_termios(tty::TtyIndex(tty_index), t)
+}
+
+fn tty_get_termios_adapter(tty_index: u8, t: *mut slopos_abi::syscall::UserTermios) {
+    tty::get_termios(tty::TtyIndex(tty_index), t)
+}
+
+fn tty_get_winsize_adapter(tty_index: u8, ws: *mut slopos_abi::syscall::UserWinsize) {
+    tty::get_winsize(tty::TtyIndex(tty_index), ws)
+}
+
+fn tty_set_winsize_adapter(tty_index: u8, ws: *const slopos_abi::syscall::UserWinsize) {
+    tty::set_winsize(tty::TtyIndex(tty_index), ws)
+}
+
+fn tty_set_focus_adapter(target: u32) -> i32 {
+    tty::set_focus(target)
+}
+
+fn tty_get_focus_adapter() -> u32 {
+    tty::get_focus()
+}
+
+fn tty_set_foreground_pgrp_adapter(tty_index: u8, pgid: u32) -> i32 {
+    tty::set_foreground_pgrp(tty::TtyIndex(tty_index), pgid);
+    0
+}
+
+fn tty_get_foreground_pgrp_adapter(tty_index: u8) -> u32 {
+    tty::get_foreground_pgrp(tty::TtyIndex(tty_index))
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
-    read_cooked: tty::tty_read_cooked,
-    has_cooked_data: tty::tty_has_cooked_data,
-    set_termios: tty::tty_set_termios,
-    get_termios: tty::tty_get_termios,
-    set_focus: tty::tty_set_focus,
-    get_focus: tty::tty_get_focus,
-    set_foreground_pgrp: tty::tty_set_foreground_pgrp,
-    get_foreground_pgrp: tty::tty_get_foreground_pgrp,
+    read_cooked: tty_read_adapter,
+    has_cooked_data: tty_has_cooked_data_adapter,
+    set_termios: tty_set_termios_adapter,
+    get_termios: tty_get_termios_adapter,
+    get_winsize: tty_get_winsize_adapter,
+    set_winsize: tty_set_winsize_adapter,
+    set_focus: tty_set_focus_adapter,
+    get_focus: tty_get_focus_adapter,
+    set_foreground_pgrp: tty_set_foreground_pgrp_adapter,
+    get_foreground_pgrp: tty_get_foreground_pgrp_adapter,
 };
 
 fn net_scan_members_adapter(

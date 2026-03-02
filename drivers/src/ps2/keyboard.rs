@@ -2,7 +2,7 @@ use slopos_lib::{IrqMutex, RingBuffer, klog_debug, klog_info, klog_warn};
 
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;
-use crate::tty::tty_handle_input_char;
+use crate::tty::{active_tty, push_input};
 use slopos_lib::kernel_services::driver_runtime::request_reschedule_from_interrupt;
 
 const BUFFER_SIZE: usize = 256;
@@ -276,7 +276,8 @@ pub fn handle_scancode(scancode: u8) {
         };
         if extended_key != 0 {
             drop(state);
-            tty_handle_input_char(extended_key);
+            let idx = active_tty();
+            push_input(idx, extended_key);
             request_reschedule_from_interrupt();
         }
         return;
@@ -291,7 +292,8 @@ pub fn handle_scancode(scancode: u8) {
     if ascii != 0 {
         klog_debug!("[KBD] Adding to buffer");
         drop(state);
-        tty_handle_input_char(ascii);
+        let idx = active_tty();
+        push_input(idx, ascii);
         request_reschedule_from_interrupt();
     }
 }

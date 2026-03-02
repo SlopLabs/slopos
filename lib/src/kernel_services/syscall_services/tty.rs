@@ -1,12 +1,14 @@
 crate::define_service! {
     tty => TtyServices {
-        read_cooked(buf: *mut u8, max: usize, nonblock: bool) -> isize;
-        has_cooked_data() -> bool;
-        set_termios(t: *const slopos_abi::syscall::UserTermios);
-        get_termios(t: *mut slopos_abi::syscall::UserTermios);
+        read_cooked(tty_index: u8, buf: *mut u8, max: usize, nonblock: bool) -> isize;
+        has_cooked_data(tty_index: u8) -> bool;
+        set_termios(tty_index: u8, t: *const slopos_abi::syscall::UserTermios);
+        get_termios(tty_index: u8, t: *mut slopos_abi::syscall::UserTermios);
+        get_winsize(tty_index: u8, ws: *mut slopos_abi::syscall::UserWinsize);
+        set_winsize(tty_index: u8, ws: *const slopos_abi::syscall::UserWinsize);
         set_focus(target: u32) -> i32;
         get_focus() -> u32;
-        set_foreground_pgrp(pgid: u32) -> i32;
-        get_foreground_pgrp() -> u32;
+        set_foreground_pgrp(tty_index: u8, pgid: u32) -> i32;
+        get_foreground_pgrp(tty_index: u8) -> u32;
     }
 }

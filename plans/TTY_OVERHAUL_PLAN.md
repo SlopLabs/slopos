@@ -1,9 +1,9 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Planned
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete (Phase 2 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty.rs` (373 lines), `drivers/src/line_disc.rs` (183 lines) — single global `LINE_DISC`, ad-hoc focus system
-> **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `tty_index: u8` for per-TTY operations
+> **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
 
@@ -39,7 +39,8 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 
 | Phase | What | Files Modified | New Files |
 |-------|------|---------------|-----------|
-| 1 | TTY core structs | `drivers/src/tty.rs` | `drivers/src/tty/mod.rs`, `tty/driver.rs`, `tty/table.rs` |
+| 1 | TTY core structs | `drivers/src/tty.rs` (deleted), `drivers/src/line_disc.rs` (deleted), `drivers/src/lib.rs` | `drivers/src/tty/mod.rs`, `tty/driver.rs`, `tty/table.rs`, `tty/ldisc.rs`, `tty/session.rs`, `drivers/src/tty_tests.rs` | **DONE** |
+| 1b | Shim removal | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/ps2/keyboard.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `core/src/syscall/core_handlers.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 2 | Line discipline | `drivers/src/line_disc.rs` | `drivers/src/tty/ldisc.rs` |
 | 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — |
 | 4 | Sessions/pgrps | `core/src/scheduler/task.rs` | `drivers/src/tty/session.rs` |
@@ -195,7 +196,17 @@ Additionally, `tty_drain_hw_input()` is called from multiple contexts (poll, rea
 
 ---
 
-## 5. Phase 1: TTY Core Abstraction
+## 5. Phase 1: TTY Core Abstraction ✅ COMPLETED
+
+**Status**: Completed. All 26 TTY regression tests pass. Build clean. `just test` passes (944/944).
+
+**Post-Phase-1 Hotfix (Read/Wakeup Regression)**: Completed. `tty::read()` now blocks on per-TTY wait queues using `WaitQueue::wait_event(...)` instead of raw `block_current_task()`. Input arrival (`push_input`/`notify_input_ready`) now wakes the matching per-TTY wait queue, and `set_focus()` wakes blocked readers so focus handoff no longer relies on idle-loop reschedule side effects.
+
+**Implementation note (lock ordering)**: In SlopOS, per-TTY wait queues are stored in a separate static array (`TTY_INPUT_WAITERS`) indexed by `TtyIndex`, while line discipline/session state remains in `TTY_TABLE`. This matches existing SlopOS socket wait-queue patterns and avoids sleeping while holding the `TTY_TABLE` lock.
+
+**Operational note (until Phase 4/5)**: Read-side focus gating is temporarily relaxed so stdin readers on console FDs are not hard-blocked by compositor focus state while FD routing is still fixed to TTY 0. Proper job-control/session enforcement remains Phase 4/5 work.
+
+**Phase 1b (Shim Removal)**: All backward-compatible shims removed. TtyServices now takes `tty_index: u8` for per-TTY operations. Focus state moved from global atomics into per-TTY `TtySession.focused_task_id`. Compat wait queue deleted. Keyboard driver calls `push_input(active_tty(), c)` directly. `TTY_WINSIZE` global in `poll_ioctl_handlers.rs` replaced with per-TTY `get_winsize`/`set_winsize` via TtyServices.
 
 **Goal**: Replace the global singleton with `Tty` struct, `TtyDriver` trait, and `TTY_TABLE`.
 
@@ -306,15 +317,23 @@ pub fn tty_handle_input_char(c: u8) {
 }
 ```
 
-### 5.6 Files modified
+### 5.6 Files modified (actual)
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty.rs` | Replaced by `drivers/src/tty/mod.rs` |
-| `drivers/src/line_disc.rs` | Moved to `drivers/src/tty/ldisc.rs` |
-| `drivers/src/lib.rs` | Update `mod tty` declaration |
-| `lib/src/kernel_services/syscall_services/tty.rs` | Update imports |
-| `fs/src/fileio.rs` | Update `use crate::...tty` paths |
+| `drivers/src/tty.rs` | **Deleted** — replaced by `drivers/src/tty/mod.rs` |
+| `drivers/src/line_disc.rs` | **Deleted** — moved to `drivers/src/tty/ldisc.rs` |
+| `drivers/src/lib.rs` | Removed `pub mod line_disc`, added `#[cfg(feature = "itests")] pub mod tty_tests` |
+| `drivers/src/tty/mod.rs` | **New** — `Tty` struct, `TtyIndex`, per-TTY API, backward-compatible shims |
+| `drivers/src/tty/driver.rs` | **New** — `TtyDriver` trait, `TtyDriverKind` enum, `SerialConsoleDriver`, `VConsoleDriver` |
+| `drivers/src/tty/table.rs` | **New** — `TTY_TABLE` global, `tty_table_init()`, `with_tty()` helpers |
+| `drivers/src/tty/ldisc.rs` | **New** — `LineDisc` (moved from `line_disc.rs`, identical logic) |
+| `drivers/src/tty/session.rs` | **New** — `TtySession` stub for Phase 4 |
+| `drivers/src/tty_tests.rs` | **New** — 26 regression tests (LineDisc, TtyIndex, TtyDriverKind, TTY table, compat shims) |
+| `drivers/src/ps2/keyboard.rs` | Unchanged — `crate::tty::tty_handle_input_char` path still valid |
+| `drivers/src/syscall_services_init.rs` | Unchanged — `crate::tty` path still valid |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Unchanged — no import changes needed |
+| `fs/src/fileio.rs` | Unchanged — calls `tty::read_cooked` via kernel services layer |
 
 ---
 

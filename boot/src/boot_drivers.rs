@@ -82,6 +82,7 @@ fn boot_step_idt_setup_fn() {
 fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
     slopos_drivers::irq::init();
+    slopos_drivers::tty::init();
     // Register input cleanup so exec() and task termination tear down
     // keyboard/pointer focus and event queues for the old process image.
     slopos_core::task::register_task_resource_cleanup_hook(
