@@ -7,7 +7,7 @@ use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
     syscall_clock_gettime, syscall_exit, syscall_get_time_ms, syscall_halt, syscall_net_info,
     syscall_net_scan, syscall_reboot, syscall_sleep_ms, syscall_sys_info, syscall_user_read,
-    syscall_user_read_char, syscall_user_read_char_nb, syscall_user_write, syscall_yield,
+    syscall_user_write, syscall_yield,
 };
 use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
@@ -77,8 +77,6 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_EXIT]           => syscall_exit,           "exit";
     [SYSCALL_WRITE]          => syscall_user_write,     "write";
     [SYSCALL_READ]           => syscall_user_read,      "read";
-    [SYSCALL_READ_CHAR]      => syscall_user_read_char,    "read_char";
-    [SYSCALL_READ_CHAR_NB]   => syscall_user_read_char_nb, "read_char_nb";
     [SYSCALL_SLEEP_MS]       => syscall_sleep_ms,       "sleep_ms";
     [SYSCALL_FB_INFO]        => syscall_fb_info,        "fb_info";
     [SYSCALL_GET_TIME_MS]    => syscall_get_time_ms,    "get_time_ms";

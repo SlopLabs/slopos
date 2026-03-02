@@ -14,6 +14,7 @@ use slopos_lib::kernel_services::driver_runtime::{
     DriverTaskHandle, block_current_task, current_task, scheduler_is_enabled, unblock_task,
 };
 use slopos_lib::kernel_services::syscall_services::socket;
+use slopos_lib::kernel_services::syscall_services::tty;
 
 use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
@@ -757,10 +758,10 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
                 return -1;
             };
 
-            // Console descriptors: stdin returns 0 (no data available).
             if desc.console {
+                let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
                 drop(guard);
-                return 0;
+                return tty::read_cooked(buffer as *mut u8, count, is_nonblock);
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {
@@ -1397,7 +1398,7 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
 
         if desc.console {
             let mut revents = 0u16;
-            if (events & POLLIN) != 0 {
+            if (events & POLLIN) != 0 && tty::has_cooked_data() {
                 revents |= POLLIN;
             }
             if (events & POLLOUT) != 0 {

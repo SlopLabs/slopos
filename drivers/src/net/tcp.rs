@@ -1752,7 +1752,12 @@ fn process_established_and_closing(
     }
 
     let mut accepted_payload_len = 0usize;
-    if !payload.is_empty() && matches!(current_state, TcpState::Established | TcpState::CloseWait) {
+    if !payload.is_empty()
+        && matches!(
+            current_state,
+            TcpState::Established | TcpState::CloseWait | TcpState::FinWait1 | TcpState::FinWait2
+        )
+    {
         let expected_seq = table.connections[idx].rcv_nxt;
         if hdr.seq_num != expected_seq {
             let conn = &table.connections[idx];

@@ -61,9 +61,10 @@ static INPUT_SERVICES: InputServices = InputServices {
 // =============================================================================
 
 static TTY_SERVICES: TtyServices = TtyServices {
-    read_line: tty::tty_read_line,
-    read_char_blocking: tty::tty_read_char_blocking,
-    read_char_nonblocking: tty::tty_read_char_nonblocking,
+    read_cooked: tty::tty_read_cooked,
+    has_cooked_data: tty::tty_has_cooked_data,
+    set_termios: tty::tty_set_termios,
+    get_termios: tty::tty_get_termios,
     set_focus: tty::tty_set_focus,
     get_focus: tty::tty_get_focus,
     set_foreground_pgrp: tty::tty_set_foreground_pgrp,

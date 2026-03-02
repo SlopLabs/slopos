@@ -1,39 +1,28 @@
-//! TCP client and listen modes for nc.
-
 use crate::syscall::{
-    SockAddrIn,
-    core::{exit_with_code, get_time_ms, sleep_ms},
-    net,
+    SockAddrIn, UserPollFd,
+    core::{get_time_ms, sleep_ms},
+    fs, net,
 };
+use slopos_abi::syscall::POLLIN;
 
-use super::{
-    NcConfig, StdinRead, check_interrupt, read_line_from_stdin, verbose_addr, verbose_bytes,
-    verbose_msg, write_out,
-};
+use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, write_out};
 
-// ---------------------------------------------------------------------------
-// TCP Client
-// ---------------------------------------------------------------------------
-
-pub(super) fn tcp_client(config: &NcConfig) {
-    // Create TCP socket
+pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
             write_out(b"nc: socket creation failed\n");
-            exit_with_code(1);
+            return 1;
         }
     };
 
-    // Bind to local port if specified
     if config.local_port != 0 {
         if let Err(_) = net::bind_any(fd, config.local_port) {
             write_out(b"nc: bind failed (port in use?)\n");
-            exit_with_code(1);
+            return 1;
         }
     }
 
-    // Connect to remote host
     let dest = SockAddrIn {
         family: slopos_abi::net::AF_INET,
         port: config.remote_port.to_be(),
@@ -50,7 +39,7 @@ pub(super) fn tcp_client(config: &NcConfig) {
 
     if let Err(_) = net::connect(fd, &dest) {
         write_out(b"nc: connect failed\n");
-        exit_with_code(1);
+        return 1;
     }
 
     verbose_addr(
@@ -61,126 +50,136 @@ pub(super) fn tcp_client(config: &NcConfig) {
     );
     verbose_msg(config, b"protocol: tcp");
 
-    // Set non-blocking for receive polling
     if let Err(_) = net::set_nonblocking(fd) {
         write_out(b"nc: failed to set non-blocking\n");
-        exit_with_code(1);
+        return 1;
     }
 
+    // Separate read buffer for raw chars from terminal.
+    let mut read_buf = [0u8; 64];
+    // Line accumulation buffer: chars build up here until Enter sends them.
     let mut line_buf = [0u8; 1024];
+    let mut line_pos = 0usize;
     let mut recv_buf = [0u8; 2048];
+    let mut stdin_closed = false;
+    let mut last_activity_ms = get_time_ms();
 
-    // Main I/O loop (half-duplex: send → poll receive → repeat)
     loop {
-        // Send phase: read one line from stdin (blocks until Enter/Ctrl+C).
-        // Ctrl+C detection is integrated into read_line_from_stdin, so we
-        // do NOT call check_interrupt() here — both consume the same TTY buffer.
-        let n = match read_line_from_stdin(&mut line_buf) {
-            StdinRead::Interrupt => {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-            StdinRead::Line(n) => n,
-        };
+        let mut pfds = [
+            UserPollFd {
+                fd: 0,
+                events: if stdin_closed { 0 } else { POLLIN },
+                revents: 0,
+            },
+            UserPollFd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
 
-        // Send via TCP stream (skip empty lines)
-        if n > 0 {
-            match net::send(fd, &line_buf[..n], 0) {
-                Ok(sent) => {
-                    verbose_bytes(config, b"sent ", sent);
+        let _ = fs::poll(&mut pfds, 100);
+
+        // --- stdin (raw char-by-char) ---
+        if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
+            match fs::read_slice(0, &mut read_buf) {
+                Ok(0) => {
+                    stdin_closed = true;
+                    verbose_msg(config, b"stdin EOF");
+                    let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_WR);
                 }
-                Err(_) => {
-                    write_out(b"nc: send failed (broken pipe)\n");
-                    let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                    exit_with_code(1);
+                Ok(n) => {
+                    for i in 0..n {
+                        match super::process_raw_stdin_char(
+                            read_buf[i],
+                            &mut line_buf,
+                            &mut line_pos,
+                        ) {
+                            StdinResult::SendLine(len) => {
+                                match net::send(fd, &line_buf[..len], 0) {
+                                    Ok(sent) => {
+                                        verbose_bytes(config, b"sent ", sent);
+                                        last_activity_ms = get_time_ms();
+                                    }
+                                    Err(_) => {
+                                        write_out(b"nc: send failed (broken pipe)\n");
+                                        let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                                        return 1;
+                                    }
+                                }
+                                line_pos = 0;
+                            }
+                            StdinResult::Continue => {}
+                        }
+                    }
                 }
+                Err(_) => {}
             }
         }
 
-        // Receive phase: poll for a response
-        let timeout = if config.timeout_ms > 0 {
-            config.timeout_ms
-        } else {
-            500 // default 500ms receive window
-        };
-        let start = get_time_ms();
-        loop {
-            if check_interrupt() {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-
+        // --- socket recv ---
+        if (pfds[1].revents & POLLIN) != 0 {
             match net::recv(fd, &mut recv_buf, 0) {
                 Ok(0) => {
-                    // Connection closed by remote
                     verbose_msg(config, b"connection closed by remote");
                     let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                    exit_with_code(0);
+                    return 0;
                 }
                 Ok(received) => {
-                    // Write received data to stdout
                     write_out(&recv_buf[..received]);
-                    // Add newline if data doesn't end with one
                     if recv_buf[received - 1] != b'\n' {
                         write_out(b"\n");
                     }
                     verbose_bytes(config, b"received ", received);
-                    break;
+                    last_activity_ms = get_time_ms();
                 }
-                Err(_) => {
-                    // WouldBlock or error — keep polling
-                    let elapsed = get_time_ms() - start;
-                    if elapsed >= timeout as u64 {
-                        if config.timeout_ms > 0 {
-                            verbose_msg(config, b"receive timeout");
-                        }
-                        break;
-                    }
-                    sleep_ms(10);
-                }
+                Err(_) => {}
+            }
+        }
+
+        if (pfds[1].revents & (slopos_abi::syscall::POLLHUP | slopos_abi::syscall::POLLERR)) != 0 {
+            verbose_msg(config, b"connection closed");
+            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+            return 0;
+        }
+
+        if config.timeout_ms > 0 {
+            let now = get_time_ms();
+            if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
+                write_out(b"nc: timeout\n");
+                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                return 1;
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// TCP Listen
-// ---------------------------------------------------------------------------
-
-pub(super) fn tcp_listen(config: &NcConfig) {
-    // Create TCP socket
+pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
             write_out(b"nc: socket creation failed\n");
-            exit_with_code(1);
+            return 1;
         }
     };
 
-    // Set reuse addr for quick rebind during development
     let _ = net::set_reuse_addr(fd);
 
-    // Bind to the listen port on all interfaces
     if let Err(_) = net::bind_any(fd, config.local_port) {
         write_out(b"nc: bind failed (port in use?)\n");
-        exit_with_code(1);
+        return 1;
     }
 
-    // Start listening with a backlog of 1
     if let Err(_) = net::listen(fd, 1) {
         write_out(b"nc: listen failed\n");
-        exit_with_code(1);
+        return 1;
     }
 
-    // Set listening socket non-blocking so we can poll for connections
     if let Err(_) = net::set_nonblocking(fd) {
         write_out(b"nc: failed to set non-blocking\n");
-        exit_with_code(1);
+        return 1;
     }
 
-    // Print listen message
     if config.verbose {
         let mut line = [0u8; 128];
         let mut i = 0usize;
@@ -192,33 +191,21 @@ pub(super) fn tcp_listen(config: &NcConfig) {
 
     let accept_start = get_time_ms();
 
-    // Outer loop: accept connections (runs once unless -k is set)
     loop {
-        // Poll for incoming connection (non-blocking)
         let mut peer = SockAddrIn::default();
         let client_fd = loop {
-            if check_interrupt() {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-
-            // Timeout check while waiting for connection
             if config.timeout_ms > 0 {
-                let elapsed = get_time_ms() - accept_start;
+                let elapsed = get_time_ms().wrapping_sub(accept_start);
                 if elapsed >= config.timeout_ms as u64 {
                     write_out(b"nc: timeout waiting for connection\n");
                     let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                    exit_with_code(1);
+                    return 1;
                 }
             }
 
             match net::accept(fd, Some(&mut peer)) {
                 Ok(cfd) => break cfd,
-                Err(_) => {
-                    // No connection pending — sleep briefly
-                    sleep_ms(10);
-                }
+                Err(_) => sleep_ms(10),
             }
         };
 
@@ -229,98 +216,126 @@ pub(super) fn tcp_listen(config: &NcConfig) {
             u16::from_be(peer.port),
         );
 
-        // Set accepted socket non-blocking for I/O polling
         if let Err(_) = net::set_nonblocking(client_fd) {
             write_out(b"nc: failed to set non-blocking on client socket\n");
             let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
             if !config.keep_listen {
-                exit_with_code(1);
+                return 1;
             }
             continue;
         }
 
-        // I/O loop on the accepted connection
-        let mut recv_buf = [0u8; 2048];
+        let mut read_buf = [0u8; 64];
         let mut line_buf = [0u8; 1024];
+        let mut line_pos = 0usize;
+        let mut recv_buf = [0u8; 2048];
+        let mut stdin_closed = false;
         let mut last_activity_ms = get_time_ms();
 
-        loop {
-            // Check for Ctrl+C
-            if check_interrupt() {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
+        let client_exit = 'client: loop {
+            let mut pfds = [
+                UserPollFd {
+                    fd: 0,
+                    events: if stdin_closed { 0 } else { POLLIN },
+                    revents: 0,
+                },
+                UserPollFd {
+                    fd: client_fd,
+                    events: POLLIN,
+                    revents: 0,
+                },
+            ];
 
-            // Timeout check during I/O
-            if config.timeout_ms > 0 {
-                let elapsed = get_time_ms() - last_activity_ms;
-                if elapsed >= config.timeout_ms as u64 {
-                    write_out(b"nc: timeout\n");
-                    let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                    break;
-                }
-            }
+            let _ = fs::poll(&mut pfds, 100);
 
-            match net::recv(client_fd, &mut recv_buf, 0) {
-                Ok(0) => {
-                    // Connection closed by remote peer
-                    verbose_msg(config, b"connection closed by remote");
-                    let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                    break;
-                }
-                Ok(received) => {
-                    last_activity_ms = get_time_ms();
-
-                    // Write received data to stdout
-                    write_out(&recv_buf[..received]);
-                    // Add newline if data doesn't end with one
-                    if recv_buf[received - 1] != b'\n' {
-                        write_out(b"\n");
+            // --- stdin (raw char-by-char) ---
+            if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
+                match fs::read_slice(0, &mut read_buf) {
+                    Ok(0) => {
+                        stdin_closed = true;
+                        verbose_msg(config, b"stdin EOF");
+                        let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_WR);
                     }
-
-                    verbose_bytes(config, b"received ", received);
-
-                    // Reply: read one line from stdin and send back
-                    match read_line_from_stdin(&mut line_buf) {
-                        StdinRead::Interrupt => {
-                            verbose_msg(config, b"interrupted");
-                            let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                            exit_with_code(0);
-                        }
-                        StdinRead::Line(0) => {
-                            // Empty reply (just Enter) — receive-only mode
-                            verbose_msg(config, b"empty reply, receive-only");
-                        }
-                        StdinRead::Line(reply_n) => {
-                            match net::send(client_fd, &line_buf[..reply_n], 0) {
-                                Ok(sent) => {
-                                    verbose_bytes(config, b"sent ", sent);
+                    Ok(n) => {
+                        for i in 0..n {
+                            match super::process_raw_stdin_char(
+                                read_buf[i],
+                                &mut line_buf,
+                                &mut line_pos,
+                            ) {
+                                StdinResult::SendLine(len) => {
+                                    match net::send(client_fd, &line_buf[..len], 0) {
+                                        Ok(sent) => {
+                                            verbose_bytes(config, b"sent ", sent);
+                                            last_activity_ms = get_time_ms();
+                                        }
+                                        Err(_) => {
+                                            write_out(b"nc: send failed (broken pipe)\n");
+                                            let _ = net::shutdown(
+                                                client_fd,
+                                                slopos_abi::syscall::SHUT_RDWR,
+                                            );
+                                            break 'client Some(1u8);
+                                        }
+                                    }
+                                    line_pos = 0;
                                 }
-                                Err(_) => {
-                                    write_out(b"nc: send failed (broken pipe)\n");
-                                    let _ =
-                                        net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
-                                    break;
-                                }
+                                StdinResult::Continue => {}
                             }
                         }
                     }
-                }
-                Err(_) => {
-                    // WouldBlock — sleep briefly to avoid busy-wait
-                    sleep_ms(10);
+                    Err(_) => {}
                 }
             }
+
+            // --- socket recv ---
+            if (pfds[1].revents & POLLIN) != 0 {
+                match net::recv(client_fd, &mut recv_buf, 0) {
+                    Ok(0) => {
+                        verbose_msg(config, b"connection closed by remote");
+                        let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
+                        break 'client None;
+                    }
+                    Ok(received) => {
+                        write_out(&recv_buf[..received]);
+                        if recv_buf[received - 1] != b'\n' {
+                            write_out(b"\n");
+                        }
+                        verbose_bytes(config, b"received ", received);
+                        last_activity_ms = get_time_ms();
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            if (pfds[1].revents & (slopos_abi::syscall::POLLHUP | slopos_abi::syscall::POLLERR))
+                != 0
+            {
+                verbose_msg(config, b"connection closed");
+                let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
+                break 'client None;
+            }
+
+            if config.timeout_ms > 0 {
+                let now = get_time_ms();
+                if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
+                    write_out(b"nc: timeout\n");
+                    let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
+                    break 'client None;
+                }
+            }
+        };
+
+        // If the inner loop requested a hard exit (broken pipe), propagate.
+        if let Some(code) = client_exit {
+            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+            return code;
         }
 
-        // After client disconnects: exit unless -k (keep-listening) is set
         if !config.keep_listen {
             verbose_msg(config, b"exiting (single connection mode)");
             let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-            exit_with_code(0);
+            return 0;
         }
 
         verbose_msg(config, b"waiting for next connection");

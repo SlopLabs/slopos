@@ -150,6 +150,12 @@ pub fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
     }
 }
 
+/// Lock the serial INPUT_BUFFER directly, without polling the UART first.
+/// The caller is expected to have called `serial_poll_receive` already.
+pub fn input_buffer_lock() -> slopos_lib::IrqMutexGuard<'static, SerialBuffer> {
+    INPUT_BUFFER.lock()
+}
+
 struct SerialPort {
     base: Port<u8>,
     caps: UartCapabilities,

@@ -999,12 +999,7 @@ fn sync_socket_state(sock: &mut Socket) {
         }
         if matches!(
             state,
-            TcpState::Closed
-                | TcpState::TimeWait
-                | TcpState::Closing
-                | TcpState::LastAck
-                | TcpState::FinWait1
-                | TcpState::FinWait2
+            TcpState::Closed | TcpState::TimeWait | TcpState::Closing | TcpState::LastAck
         ) {
             sock.state = SocketState::Closed;
         }
@@ -1865,12 +1860,18 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     return n as i64;
                 }
 
-                // EOF conditions:
-                // 1. Connection is in a post-FIN state (FinWait1/2, Closing, etc.).
-                // 2. Peer sent FIN (CloseWait/LastAck) and recv buffer is drained.
+                // EOF: recv buffer empty AND peer has closed their side.
+                // FIN_WAIT_1/2 mean WE sent FIN (write-shutdown) but can
+                // still receive — only return EOF when the peer also closed
+                // (Closing, TimeWait, Closed, LastAck) or tcp reports peer FIN.
                 if !matches!(
                     tcp::tcp_get_state(tcp_idx),
-                    Some(TcpState::Established | TcpState::CloseWait)
+                    Some(
+                        TcpState::Established
+                            | TcpState::CloseWait
+                            | TcpState::FinWait1
+                            | TcpState::FinWait2
+                    )
                 ) || tcp::tcp_is_peer_closed(tcp_idx)
                 {
                     return 0;
@@ -1887,7 +1888,12 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                                 || tcp::tcp_is_peer_closed(tcp_idx)
                                 || !matches!(
                                     tcp::tcp_get_state(tcp_idx),
-                                    Some(TcpState::Established | TcpState::CloseWait)
+                                    Some(
+                                        TcpState::Established
+                                            | TcpState::CloseWait
+                                            | TcpState::FinWait1
+                                            | TcpState::FinWait2
+                                    )
                                 )
                         },
                         timeout_ms,
@@ -1898,7 +1904,12 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                             || tcp::tcp_is_peer_closed(tcp_idx)
                             || !matches!(
                                 tcp::tcp_get_state(tcp_idx),
-                                Some(TcpState::Established | TcpState::CloseWait)
+                                Some(
+                                    TcpState::Established
+                                        | TcpState::CloseWait
+                                        | TcpState::FinWait1
+                                        | TcpState::FinWait2
+                                )
                             )
                     })
                 };

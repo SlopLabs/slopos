@@ -55,8 +55,6 @@ pub const SYSCALL_FS_LIST: u64 = 21;
 
 pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
-pub const SYSCALL_READ_CHAR: u64 = 25;
-pub const SYSCALL_READ_CHAR_NB: u64 = 119;
 pub const SYSCALL_NET_SCAN: u64 = 120;
 pub const SYSCALL_NET_INFO: u64 = 123;
 pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
@@ -590,15 +588,38 @@ pub struct UserTermios {
     pub c_ospeed: u32,
 }
 
+pub const ISIG: u32 = 0x01;
+pub const ICANON: u32 = 0x02;
+pub const ECHO: u32 = 0x08;
+pub const ECHOE: u32 = 0x10;
+pub const ECHOK: u32 = 0x20;
+pub const ECHONL: u32 = 0x40;
+
+pub const VINTR: usize = 0;
+pub const VQUIT: usize = 1;
+pub const VERASE: usize = 2;
+pub const VKILL: usize = 3;
+pub const VEOF: usize = 4;
+pub const VTIME: usize = 5;
+pub const VMIN: usize = 6;
+pub const VEOL: usize = 11;
+
 impl Default for UserTermios {
     fn default() -> Self {
+        let mut cc = [0u8; NCCS];
+        cc[VINTR] = 0x03;
+        cc[VQUIT] = 0x1C;
+        cc[VERASE] = 0x7F;
+        cc[VKILL] = 0x15;
+        cc[VEOF] = 0x04;
+        cc[VMIN] = 1;
         Self {
             c_iflag: 0,
             c_oflag: 0,
             c_cflag: 0,
-            c_lflag: 0,
+            c_lflag: ICANON | ECHO | ISIG | ECHOE,
             c_line: 0,
-            c_cc: [0; NCCS],
+            c_cc: cc,
             c_ispeed: 0,
             c_ospeed: 0,
         }

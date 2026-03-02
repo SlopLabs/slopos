@@ -428,7 +428,6 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
             let _ = fs::close_fd(pipe_fds[0]);
         }
         shell_write(b"spawn failed\n");
-        return Some(1);
     }
     let pid = tid as u32;
     if background {

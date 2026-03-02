@@ -9,10 +9,7 @@ pub mod udp;
 
 use core::ffi::c_void;
 
-use crate::syscall::{
-    core::{exit, exit_with_code},
-    fs, tty,
-};
+use crate::syscall::{core::exit_with_code, fs, process, tty};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,6 +55,55 @@ enum NcError {
 fn write_out(buf: &[u8]) {
     if fs::write_slice(1, buf).is_err() {
         let _ = tty::write(buf);
+    }
+}
+
+/// Result of processing a single raw stdin character.
+pub(super) enum StdinResult {
+    /// No action needed.
+    Continue,
+    /// Line is ready: send `line_buf[..len]`, then reset `line_pos` to 0.
+    SendLine(usize),
+}
+
+/// Process one raw stdin byte: echo printable chars, handle backspace, detect Enter.
+/// Caller is responsible for performing the actual network send when `SendLine` is returned.
+pub(super) fn process_raw_stdin_char(
+    c: u8,
+    line_buf: &mut [u8; 1024],
+    line_pos: &mut usize,
+) -> StdinResult {
+    match c {
+        0x08 | 0x7F => {
+            if *line_pos > 0 {
+                *line_pos -= 1;
+                write_out(b"\x08 \x08");
+            }
+            StdinResult::Continue
+        }
+        b'\n' | b'\r' => {
+            write_out(b"\n");
+            if *line_pos > 0 {
+                let send_len = if *line_pos < line_buf.len() {
+                    line_buf[*line_pos] = b'\n';
+                    *line_pos + 1
+                } else {
+                    *line_pos
+                };
+                StdinResult::SendLine(send_len)
+            } else {
+                StdinResult::Continue
+            }
+        }
+        0x20..=0x7E => {
+            if *line_pos < line_buf.len() - 1 {
+                line_buf[*line_pos] = c;
+                *line_pos += 1;
+                write_out(&[c]);
+            }
+            StdinResult::Continue
+        }
+        _ => StdinResult::Continue,
     }
 }
 
@@ -203,62 +249,6 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
 }
 
 // ---------------------------------------------------------------------------
-// Stdin reading
-// ---------------------------------------------------------------------------
-
-/// Result of attempting to read a line from stdin.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum StdinRead {
-    /// A complete line was read with `n` bytes (excluding the newline).
-    /// `n == 0` means the user pressed Enter on an empty line.
-    Line(usize),
-    /// The user pressed Ctrl+C.
-    Interrupt,
-}
-
-/// Read one line from stdin via the TTY subsystem, blocking byte-by-byte.
-///
-/// SlopOS console file descriptors do not support fd-based reads
-/// (`fs::read_slice(0, ...)` returns 0 immediately for console fds),
-/// so we use `tty::read_char()` which goes through the blocking
-/// `SYSCALL_READ_CHAR` path instead.
-///
-/// Returns [`StdinRead::Line(n)`] when a complete line is available
-/// (newline consumed but not stored), or [`StdinRead::Interrupt`] if
-/// the user pressed Ctrl+C (0x03).
-fn read_line_from_stdin(buf: &mut [u8]) -> StdinRead {
-    let mut pos = 0usize;
-    while pos < buf.len() {
-        let ch = tty::read_char();
-        if ch < 0 {
-            // Read error — treat as EOF (return what we have).
-            return StdinRead::Line(pos);
-        }
-        let byte = ch as u8;
-        if byte == 0x03 {
-            // Ctrl+C — signal interrupt regardless of buffered data.
-            return StdinRead::Interrupt;
-        }
-        if byte == b'\n' || byte == b'\r' {
-            return StdinRead::Line(pos);
-        }
-        buf[pos] = byte;
-        pos += 1;
-    }
-    StdinRead::Line(pos)
-}
-
-/// Check for Ctrl+C (0x03) via non-blocking TTY read.
-///
-/// Used in recv-poll loops where stdin is not being actively read.
-/// **Must not** be called in the same loop iteration as
-/// [`read_line_from_stdin`] — both consume from the same TTY buffer.
-fn check_interrupt() -> bool {
-    let ch = tty::try_read_char();
-    ch == 0x03
-}
-
-// ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
 
@@ -396,7 +386,7 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
             // Flag processing — may contain bundled flags like -ulvk
             if bytes_eq(arg, b"-h") || bytes_eq(arg, b"--help") {
                 print_usage();
-                exit();
+                exit_with_code(0);
             }
 
             if bytes_eq(arg, b"-p") {
@@ -550,14 +540,31 @@ pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
         }
     };
 
-    match (config.protocol, config.mode) {
+    // Disable kernel echo, canonical mode, AND signal generation — nc handles
+    // its own line editing and Ctrl+C detection.  Also ignore SIGPIPE so that
+    // a broken TCP connection returns an error instead of killing the process.
+    process::ignore_signal(slopos_abi::signal::SIGPIPE);
+    let saved_termios = fs::tcgetattr(0).ok();
+    if let Some(ref t) = saved_termios {
+        let mut raw = *t;
+        raw.c_lflag &=
+            !(slopos_abi::syscall::ECHO | slopos_abi::syscall::ICANON | slopos_abi::syscall::ISIG);
+        let _ = fs::tcsetattr(0, &raw);
+    }
+
+    let exit_code = match (config.protocol, config.mode) {
         (NcProtocol::Udp, NcMode::Client) => udp::udp_client(&config),
         (NcProtocol::Udp, NcMode::Listen) => udp::udp_listen(&config),
         (NcProtocol::Tcp, NcMode::Client) => tcp::tcp_client(&config),
         (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
+    };
+
+    // Restore termios before exiting.
+    if let Some(ref t) = saved_termios {
+        let _ = fs::tcsetattr(0, t);
     }
 
-    exit();
+    exit_with_code(exit_code as i32);
 }
 
 /// Legacy entry point for the standard entry! macro (no args).

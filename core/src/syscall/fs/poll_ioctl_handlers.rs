@@ -18,36 +18,12 @@ use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 const SELECT_MAX_FDS: usize = 256;
 
-#[derive(Clone, Copy)]
-struct TtyIoctlState {
-    termios: UserTermios,
-    winsize: UserWinsize,
-}
-
-impl TtyIoctlState {
-    const fn new() -> Self {
-        Self {
-            termios: UserTermios {
-                c_iflag: 0,
-                c_oflag: 0,
-                c_cflag: 0,
-                c_lflag: 0,
-                c_line: 0,
-                c_cc: [0; slopos_abi::syscall::NCCS],
-                c_ispeed: 0,
-                c_ospeed: 0,
-            },
-            winsize: UserWinsize {
-                ws_row: 24,
-                ws_col: 80,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            },
-        }
-    }
-}
-
-static TTY_IOCTL_STATE: IrqMutex<TtyIoctlState> = IrqMutex::new(TtyIoctlState::new());
+static TTY_WINSIZE: IrqMutex<UserWinsize> = IrqMutex::new(UserWinsize {
+    ws_row: 24,
+    ws_col: 80,
+    ws_xpixel: 0,
+    ws_ypixel: 0,
+});
 
 #[inline]
 fn fdset_bytes_len(nfds: usize) -> usize {
@@ -300,29 +276,30 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
         TCGETS => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
-            let state = *TTY_IOCTL_STATE.lock();
-            try_or_err!(ctx, copy_to_user(ptr, &state.termios));
+            let mut t = UserTermios::default();
+            tty::get_termios(&mut t as *mut UserTermios);
+            try_or_err!(ctx, copy_to_user(ptr, &t));
             ctx.ok(0)
         }
         TCSETS | TCSETSW | TCSETSF => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            TTY_IOCTL_STATE.lock().termios = val;
+            tty::set_termios(&val as *const UserTermios);
             ctx.ok(0)
         }
         TIOCGWINSZ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
-            let state = *TTY_IOCTL_STATE.lock();
-            try_or_err!(ctx, copy_to_user(ptr, &state.winsize));
+            let winsize = *TTY_WINSIZE.lock();
+            try_or_err!(ctx, copy_to_user(ptr, &winsize));
             ctx.ok(0)
         }
         slopos_abi::syscall::TIOCSWINSZ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            TTY_IOCTL_STATE.lock().winsize = val;
+            *TTY_WINSIZE.lock() = val;
             ctx.ok(0)
         }
         TIOCGPGRP => {

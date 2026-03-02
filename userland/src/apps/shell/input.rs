@@ -4,7 +4,8 @@ use core::ptr;
 
 use crate::runtime;
 use crate::syscall::core as sys_core;
-use crate::syscall::{InputEvent, InputEventType, input, tty};
+use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs, input};
+use slopos_abi::syscall::{ECHO, ECHOE, ICANON, ISIG, POLLIN};
 
 use super::buffers;
 use super::completion;
@@ -61,7 +62,24 @@ pub fn read_command_line(
     buffers::with_line_buf(|buf| {
         runtime::u_memset(buf.as_mut_ptr() as *mut c_void, 0, buf.len());
     });
-    input_loop(tokens, prompt, 0, 0)
+
+    // Set TTY to raw mode: shell handles its own rendering / line editing.
+    // This mirrors what bash/zsh do on real Linux — cfmakeraw() equivalent.
+    let saved_termios = fs::tcgetattr(0).ok();
+    if let Some(ref t) = saved_termios {
+        let mut raw = *t;
+        raw.c_lflag &= !(ICANON | ECHO | ISIG | ECHOE);
+        let _ = fs::tcsetattr(0, &raw);
+    }
+
+    let result = input_loop(tokens, prompt, 0, 0);
+
+    // Restore canonical mode so child processes (nc, etc.) get line-buffered input.
+    if let Some(ref t) = saved_termios {
+        let _ = fs::tcsetattr(0, t);
+    }
+
+    result
 }
 
 fn prompt_colors_slice() -> &'static [u8] {
@@ -174,7 +192,21 @@ fn input_loop(
             rd!();
         }
 
-        let rc = tty::try_read_char();
+        let mut pfds = [UserPollFd {
+            fd: 0,
+            events: POLLIN,
+            revents: 0,
+        }];
+        let _ = fs::poll(&mut pfds, 0);
+        let rc = if (pfds[0].revents & POLLIN) != 0 {
+            let mut ch = [0u8; 1];
+            match fs::read_slice(0, &mut ch) {
+                Ok(1) => ch[0] as i64,
+                _ => -1,
+            }
+        } else {
+            -1i64
+        };
         if rc < 0 {
             let now = sys_core::get_time_ms();
             if now.wrapping_sub(last_blink_ms) >= BLINK_INTERVAL_MS {

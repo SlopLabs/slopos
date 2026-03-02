@@ -19,6 +19,7 @@ pub mod input_event;
 pub mod interrupt_test;
 pub mod ioapic;
 pub mod irq;
+pub mod line_disc;
 #[cfg(feature = "itests")]
 pub mod loopback_tests;
 pub mod msi;

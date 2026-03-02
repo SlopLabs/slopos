@@ -1,42 +1,29 @@
-//! UDP client and listen modes for nc.
-
-use crate::syscall::{
-    SockAddrIn,
-    core::{exit_with_code, get_time_ms, sleep_ms},
-    net,
-};
+use crate::syscall::{SockAddrIn, UserPollFd, core::get_time_ms, fs, net};
+use slopos_abi::syscall::POLLIN;
 
 use super::{
-    NcConfig, StdinRead, check_interrupt, read_line_from_stdin, verbose_addr, verbose_bytes,
-    verbose_msg, verbose_recv, write_out,
+    NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv, write_out,
 };
 
-// ---------------------------------------------------------------------------
-// UDP Client
-// ---------------------------------------------------------------------------
-
-pub(super) fn udp_client(config: &NcConfig) {
-    // Create UDP socket
+pub(super) fn udp_client(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_DGRAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
             write_out(b"nc: socket creation failed\n");
-            exit_with_code(1);
+            return 1;
         }
     };
 
-    // Bind to local port if specified
     if config.local_port != 0 {
         if let Err(_) = net::bind_any(fd, config.local_port) {
             write_out(b"nc: bind failed (port in use?)\n");
-            exit_with_code(1);
+            return 1;
         }
     }
 
-    // Set non-blocking for receive polling
     if let Err(_) = net::set_nonblocking(fd) {
         write_out(b"nc: failed to set non-blocking\n");
-        exit_with_code(1);
+        return 1;
     }
 
     verbose_addr(
@@ -47,7 +34,6 @@ pub(super) fn udp_client(config: &NcConfig) {
     );
     verbose_msg(config, b"protocol: udp");
 
-    // Build destination address
     let dest = SockAddrIn {
         family: slopos_abi::net::AF_INET,
         port: config.remote_port.to_be(),
@@ -55,108 +41,110 @@ pub(super) fn udp_client(config: &NcConfig) {
         _pad: [0; 8],
     };
 
+    let mut read_buf = [0u8; 64];
     let mut line_buf = [0u8; 1024];
+    let mut line_pos = 0usize;
     let mut recv_buf = [0u8; 2048];
+    let mut stdin_closed = false;
+    let mut last_activity_ms = get_time_ms();
 
-    // Main I/O loop (half-duplex: send → poll receive → repeat)
     loop {
-        // Send phase: read one line from stdin (blocks until Enter/Ctrl+C).
-        let n = match read_line_from_stdin(&mut line_buf) {
-            StdinRead::Interrupt => {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-            StdinRead::Line(n) => n,
-        };
+        let mut pfds = [
+            UserPollFd {
+                fd: 0,
+                events: if stdin_closed { 0 } else { POLLIN },
+                revents: 0,
+            },
+            UserPollFd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
 
-        if n == 0 {
-            continue; // empty line — skip send, poll recv
+        let _ = fs::poll(&mut pfds, 100);
+
+        if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
+            match fs::read_slice(0, &mut read_buf) {
+                Ok(0) => {
+                    stdin_closed = true;
+                    verbose_msg(config, b"stdin EOF");
+                }
+                Ok(n) => {
+                    for i in 0..n {
+                        match super::process_raw_stdin_char(
+                            read_buf[i],
+                            &mut line_buf,
+                            &mut line_pos,
+                        ) {
+                            StdinResult::SendLine(len) => {
+                                match net::sendto(fd, &line_buf[..len], 0, &dest) {
+                                    Ok(sent) => {
+                                        verbose_bytes(config, b"sent ", sent);
+                                        last_activity_ms = get_time_ms();
+                                    }
+                                    Err(_) => {
+                                        write_out(b"nc: send failed\n");
+                                    }
+                                }
+                                line_pos = 0;
+                            }
+                            StdinResult::Continue => {}
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
         }
 
-        // Send the line as a UDP datagram
-        match net::sendto(fd, &line_buf[..n], 0, &dest) {
-            Ok(sent) => {
-                verbose_bytes(config, b"sent ", sent);
-            }
-            Err(_) => {
-                write_out(b"nc: send failed\n");
-                // Don't exit on transient send failure — continue
-            }
-        }
-
-        // Receive phase: poll for a response
-        let timeout = if config.timeout_ms > 0 {
-            config.timeout_ms
-        } else {
-            500 // default 500ms receive window
-        };
-        let start = get_time_ms();
-        loop {
-            if check_interrupt() {
-                verbose_msg(config, b"interrupted");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(0);
-            }
-
+        if (pfds[1].revents & POLLIN) != 0 {
             let mut src_addr = SockAddrIn::default();
             match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
-                Ok(received) if received > 0 => {
-                    // Write received data to stdout
+                Ok(0) => {}
+                Ok(received) => {
                     write_out(&recv_buf[..received]);
-                    // Add newline if data doesn't end with one
                     if recv_buf[received - 1] != b'\n' {
                         write_out(b"\n");
                     }
                     verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
-                    break;
+                    last_activity_ms = get_time_ms();
                 }
-                _ => {
-                    // WouldBlock or error — keep polling
-                    let elapsed = get_time_ms() - start;
-                    if elapsed >= timeout as u64 {
-                        if config.timeout_ms > 0 {
-                            verbose_msg(config, b"receive timeout");
-                        }
-                        break;
-                    }
-                    sleep_ms(10);
-                }
+                Err(_) => {}
+            }
+        }
+
+        if config.timeout_ms > 0 {
+            let now = get_time_ms();
+            if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
+                write_out(b"nc: timeout\n");
+                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                return 1;
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// UDP Listen
-// ---------------------------------------------------------------------------
-
-pub(super) fn udp_listen(config: &NcConfig) {
-    // Create UDP socket
+pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_DGRAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
             write_out(b"nc: socket creation failed\n");
-            exit_with_code(1);
+            return 1;
         }
     };
 
-    // Set reuse addr for quick rebind during development
     let _ = net::set_reuse_addr(fd);
 
-    // Bind to the listen port on all interfaces
     if let Err(_) = net::bind_any(fd, config.local_port) {
         write_out(b"nc: bind failed (port in use?)\n");
-        exit_with_code(1);
+        return 1;
     }
 
-    // Set non-blocking for polling
     if let Err(_) = net::set_nonblocking(fd) {
         write_out(b"nc: failed to set non-blocking\n");
-        exit_with_code(1);
+        return 1;
     }
 
-    // Print listen message
     if config.verbose {
         let mut line = [0u8; 128];
         let mut i = 0usize;
@@ -166,75 +154,95 @@ pub(super) fn udp_listen(config: &NcConfig) {
         write_out(&line[..i]);
     }
 
-    let mut recv_buf = [0u8; 2048];
+    let mut read_buf = [0u8; 64];
     let mut line_buf = [0u8; 1024];
-    let last_activity = get_time_ms();
-    let mut last_activity_ms = last_activity;
+    let mut line_pos = 0usize;
+    let mut recv_buf = [0u8; 2048];
+    let mut stdin_closed = false;
+    let mut last_peer = SockAddrIn::default();
+    let mut has_peer = false;
+    let mut last_activity_ms = get_time_ms();
 
     loop {
-        // Check for Ctrl+C
-        if check_interrupt() {
-            verbose_msg(config, b"interrupted");
-            let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-            exit_with_code(0);
-        }
+        let mut pfds = [
+            UserPollFd {
+                fd: 0,
+                events: if stdin_closed { 0 } else { POLLIN },
+                revents: 0,
+            },
+            UserPollFd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
 
-        // Timeout check
-        if config.timeout_ms > 0 {
-            let elapsed = get_time_ms() - last_activity_ms;
-            if elapsed >= config.timeout_ms as u64 {
-                write_out(b"nc: timeout\n");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                exit_with_code(1);
-            }
-        }
+        let _ = fs::poll(&mut pfds, 100);
 
-        let mut src_addr = SockAddrIn::default();
-        match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
-            Ok(received) if received > 0 => {
-                last_activity_ms = get_time_ms();
-
-                // Write received data to stdout
-                write_out(&recv_buf[..received]);
-                // Add newline if data doesn't end with one
-                if recv_buf[received - 1] != b'\n' {
-                    write_out(b"\n");
+        if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
+            match fs::read_slice(0, &mut read_buf) {
+                Ok(0) => {
+                    stdin_closed = true;
+                    verbose_msg(config, b"stdin EOF");
                 }
-
-                verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
-
-                // Reply: read one line from stdin and send back to sender
-                match read_line_from_stdin(&mut line_buf) {
-                    StdinRead::Interrupt => {
-                        verbose_msg(config, b"interrupted");
-                        let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
-                        exit_with_code(0);
-                    }
-                    StdinRead::Line(0) => {
-                        // Empty reply — receive-only mode
-                        verbose_msg(config, b"empty reply, receive-only");
-                    }
-                    StdinRead::Line(reply_n) => {
-                        let reply_addr = SockAddrIn {
-                            family: slopos_abi::net::AF_INET,
-                            port: src_addr.port, // already in network byte order
-                            addr: src_addr.addr,
-                            _pad: [0; 8],
-                        };
-                        match net::sendto(fd, &line_buf[..reply_n], 0, &reply_addr) {
-                            Ok(sent) => {
-                                verbose_bytes(config, b"sent ", sent);
+                Ok(n) => {
+                    for i in 0..n {
+                        match super::process_raw_stdin_char(
+                            read_buf[i],
+                            &mut line_buf,
+                            &mut line_pos,
+                        ) {
+                            StdinResult::SendLine(len) => {
+                                if has_peer {
+                                    match net::sendto(fd, &line_buf[..len], 0, &last_peer) {
+                                        Ok(sent) => {
+                                            verbose_bytes(config, b"sent ", sent);
+                                            last_activity_ms = get_time_ms();
+                                        }
+                                        Err(_) => {
+                                            write_out(b"nc: send failed\n");
+                                        }
+                                    }
+                                }
+                                line_pos = 0;
                             }
-                            Err(_) => {
-                                write_out(b"nc: send failed\n");
-                            }
+                            StdinResult::Continue => {}
                         }
                     }
                 }
+                Err(_) => {}
             }
-            _ => {
-                // WouldBlock — sleep briefly to avoid busy-wait
-                sleep_ms(10);
+        }
+
+        if (pfds[1].revents & POLLIN) != 0 {
+            let mut src_addr = SockAddrIn::default();
+            match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
+                Ok(0) => {}
+                Ok(received) => {
+                    write_out(&recv_buf[..received]);
+                    if recv_buf[received - 1] != b'\n' {
+                        write_out(b"\n");
+                    }
+                    verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
+                    last_peer = SockAddrIn {
+                        family: src_addr.family,
+                        port: src_addr.port,
+                        addr: src_addr.addr,
+                        _pad: [0; 8],
+                    };
+                    has_peer = true;
+                    last_activity_ms = get_time_ms();
+                }
+                Err(_) => {}
+            }
+        }
+
+        if config.timeout_ms > 0 {
+            let now = get_time_ms();
+            if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
+                write_out(b"nc: timeout\n");
+                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                return 1;
             }
         }
     }

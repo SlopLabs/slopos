@@ -3,11 +3,13 @@ use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::syscall::UserTermios;
 use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
+use crate::line_disc::{InputAction, LineDisc};
 use crate::ps2::keyboard;
 use crate::serial;
-use slopos_abi::signal::SIGINT;
+use crate::serial::serial_poll_receive;
 use slopos_lib::kernel_services::driver_runtime::{
     DriverTaskHandle, block_current_task, current_task, current_task_id,
     register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, unblock_task,
@@ -23,8 +25,6 @@ struct TtyWaitQueue {
     count: usize,
 }
 
-// SAFETY: The wait queue only stores task pointers managed by the scheduler,
-// and access is synchronized through the TTY_WAIT_QUEUE mutex.
 unsafe impl Send for TtyWaitQueue {}
 
 static TTY_WAIT_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
@@ -41,37 +41,71 @@ static TTY_FOCUS_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
 });
 static TTY_FOCUSED_TASK_ID: AtomicU32 = AtomicU32::new(0);
 static TTY_FOREGROUND_PGRP: AtomicU32 = AtomicU32::new(0);
+static LINE_DISC: IrqMutex<LineDisc> = IrqMutex::new(LineDisc::new());
 
 fn tty_signal_foreground_pgrp(signum: u8) {
     let pgid = tty_get_foreground_pgrp();
     if pgid == 0 {
         return;
     }
-
     let _ = signal_process_group(pgid, signum);
 }
-
-use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
 
 #[inline]
 fn tty_cpu_relax() {
     cpu::pause();
 }
 
-#[inline]
-fn tty_service_serial_input() {
+/// Drain ALL pending hardware input (serial UART + PS/2 keyboard) into the
+/// line discipline.  This is the canonical "push" path — every check for
+/// available cooked data and every blocking read MUST call this first so that
+/// `LINE_DISC` is the single source of truth for input readiness.
+///
+/// Modelled after Linux's `flush_to_ldisc` — hardware buffers are drained
+/// eagerly rather than lazily inside `read()`.
+fn tty_drain_hw_input() {
+    // 1. Poll the UART once — moves bytes from the hardware FIFO into
+    //    INPUT_BUFFER.  Do this exactly once to avoid redundant port I/O.
     serial_poll_receive(COM1.address());
+
+    // 2. Drain the keyboard char_buffer into LINE_DISC.
+    while keyboard::has_input() != 0 {
+        let c = keyboard::getchar();
+        process_raw_char(c);
+    }
+
+    // 3. Drain the serial INPUT_BUFFER into a local scratch array first,
+    //    avoiding the per-byte serial_poll_receive() that serial_buffer_read()
+    //    would otherwise perform.  Then feed through the line discipline.
+    let mut scratch = [0u8; 64];
+    let count = {
+        let mut buf = crate::serial::input_buffer_lock();
+        let mut n = 0usize;
+        while n < scratch.len() {
+            match buf.try_pop() {
+                Some(b) => {
+                    scratch[n] = b;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        n
+    };
+    for i in 0..count {
+        let mut c = scratch[i];
+        if c == b'\r' {
+            c = b'\n';
+        } else if c == 0x7F {
+            c = 0x08;
+        }
+        process_raw_char(c);
+    }
 }
 
 fn tty_input_available() -> c_int {
-    tty_service_serial_input();
-    if keyboard::has_input() != 0 {
-        return 1;
-    }
-    if serial_buffer_pending(COM1.address()) != 0 {
-        return 1;
-    }
-    0
+    tty_drain_hw_input();
+    LINE_DISC.lock().has_data() as c_int
 }
 
 fn tty_input_available_cb() -> c_int {
@@ -164,9 +198,6 @@ fn tty_task_has_focus(task_id: u32) -> bool {
     if focused != 0 && focused == task_id {
         return true;
     }
-    // Foreground process group gets implicit TTY focus.  This allows
-    // child processes spawned by the shell (e.g. nc) to read TTY input
-    // even though the compositor set focus to the shell window.
     let fg_pgrp = TTY_FOREGROUND_PGRP.load(Ordering::Acquire);
     fg_pgrp != 0 && fg_pgrp == task_id
 }
@@ -192,13 +223,13 @@ fn tty_wait_for_focus(task_id: u32) {
         tty_cpu_relax();
     }
 }
+
 pub fn tty_notify_input_ready() {
     if scheduler_is_enabled() == 0 {
         return;
     }
 
     let task = tty_wait_queue_pop();
-
     if !task.is_null() {
         let _ = unblock_task(task);
     }
@@ -233,41 +264,35 @@ pub fn tty_get_foreground_pgrp() -> u32 {
     TTY_FOREGROUND_PGRP.load(Ordering::Acquire)
 }
 
-pub fn tty_handle_input_char(c: u8) {
-    if c == 0x03 {
-        tty_signal_foreground_pgrp(SIGINT);
-    }
-}
-
 #[inline]
-fn is_printable(c: u8) -> bool {
-    (c >= 0x20 && c <= 0x7E) || c == b'\t'
+fn serial_putc(c: u8) {
+    serial::serial_putc_com1(c);
 }
 
-#[inline]
-fn is_control_char(c: u8) -> bool {
-    (c <= 0x1F) || c == 0x7F
-}
+fn process_raw_char(c: u8) {
+    let mut ld = LINE_DISC.lock();
+    let action = ld.input_char(c);
+    let has_data = ld.has_data();
+    drop(ld);
 
-fn tty_dequeue_input_char(out_char: &mut u8) -> bool {
-    tty_service_serial_input();
-    if keyboard::has_input() != 0 {
-        *out_char = keyboard::getchar();
-        return true;
-    }
-
-    tty_service_serial_input();
-    let mut raw = 0u8;
-    if serial_buffer_read(COM1.address(), &mut raw as *mut u8) == 0 {
-        if raw == b'\r' {
-            raw = b'\n';
-        } else if raw == 0x7F {
-            raw = b'\x08';
+    match action {
+        InputAction::Echo { buf, len } => {
+            for i in 0..len as usize {
+                serial_putc(buf[i]);
+            }
         }
-        *out_char = raw;
-        return true;
+        InputAction::Signal(sig) => {
+            tty_signal_foreground_pgrp(sig);
+        }
+        InputAction::None => {}
     }
-    false
+    if has_data {
+        tty_notify_input_ready();
+    }
+}
+
+pub fn tty_handle_input_char(c: u8) {
+    process_raw_char(c);
 }
 
 fn tty_block_until_input_ready() {
@@ -285,133 +310,64 @@ fn tty_block_until_input_ready() {
         if tty_input_available() != 0 {
             break;
         }
-        tty_service_serial_input();
+        tty_drain_hw_input();
         tty_cpu_relax();
     }
 }
 
-#[inline]
-fn serial_putc(c: u8) {
-    serial::serial_putc_com1(c);
-}
-pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
-    if buffer.is_null() || buffer_size == 0 {
+pub fn tty_read_cooked(buffer: *mut u8, max: usize, nonblock: bool) -> isize {
+    if buffer.is_null() || max == 0 {
         return 0;
     }
 
-    tty_register_idle_callback();
-    let task_id = match tty_current_task_id() {
-        Some(id) => id,
-        None => return 0,
-    };
-    tty_ensure_focus_for_task(task_id);
-
-    if buffer_size < 2 {
-        unsafe { *buffer = 0 };
-        return 0;
-    }
-
-    let mut pos = 0usize;
-    let max_pos = buffer_size - 1;
-
-    loop {
-        if !tty_task_has_focus(task_id) {
-            tty_wait_for_focus(task_id);
-            continue;
-        }
-        let mut c = 0u8;
-        if !tty_dequeue_input_char(&mut c) {
-            tty_block_until_input_ready();
-            continue;
-        }
-
-        if c == b'\n' || c == b'\r' {
-            unsafe {
-                *buffer.add(pos) = 0;
-            }
-            serial_putc(b'\n');
-            return pos;
-        }
-
-        if c == b'\x08' {
-            if pos > 0 {
-                pos -= 1;
-                serial_putc(b'\x08');
-                serial_putc(b' ');
-                serial_putc(b'\x08');
-            }
-            continue;
-        }
-
-        if pos >= max_pos {
-            continue;
-        }
-
-        if is_printable(c) {
-            unsafe {
-                *buffer.add(pos) = c;
-            }
-            pos += 1;
-            serial_putc(c);
-            continue;
-        }
-
-        if is_control_char(c) {
-            continue;
-        }
-
-        unsafe {
-            *buffer.add(pos) = c;
-        }
-        pos += 1;
-        serial_putc(c);
-    }
-}
-
-pub fn tty_read_char_blocking(out_char: *mut u8) -> c_int {
-    if out_char.is_null() {
-        return -1;
-    }
     tty_register_idle_callback();
     let task_id = match tty_current_task_id() {
         Some(id) => id,
         None => return -1,
     };
     tty_ensure_focus_for_task(task_id);
+
     loop {
         if !tty_task_has_focus(task_id) {
             tty_wait_for_focus(task_id);
             continue;
         }
-        let mut c = 0u8;
-        if tty_dequeue_input_char(&mut c) {
-            unsafe {
-                *out_char = c;
-            }
-            return 0;
+
+        tty_drain_hw_input();
+
+        let out = unsafe { core::slice::from_raw_parts_mut(buffer, max) };
+        let got = LINE_DISC.lock().read(out);
+        if got > 0 {
+            return got as isize;
         }
+
+        if nonblock {
+            return -11;
+        }
+
         tty_block_until_input_ready();
     }
 }
 
-pub fn tty_read_char_nonblocking(out_char: *mut u8) -> c_int {
-    if out_char.is_null() {
-        return -1;
+pub fn tty_has_cooked_data() -> bool {
+    tty_drain_hw_input();
+    LINE_DISC.lock().has_data()
+}
+
+pub fn tty_set_termios(t: *const UserTermios) {
+    if t.is_null() {
+        return;
     }
-    let task_id = match tty_current_task_id() {
-        Some(id) => id,
-        None => return -1,
-    };
-    tty_ensure_focus_for_task(task_id);
-    if !tty_task_has_focus(task_id) {
-        return -1;
+    let val = unsafe { *t };
+    LINE_DISC.lock().set_termios(&val);
+}
+
+pub fn tty_get_termios(t: *mut UserTermios) {
+    if t.is_null() {
+        return;
     }
-    let mut c = 0u8;
-    if tty_dequeue_input_char(&mut c) {
-        unsafe {
-            *out_char = c;
-        }
-        return 0;
+    let val = *LINE_DISC.lock().termios();
+    unsafe {
+        *t = val;
     }
-    -1
 }

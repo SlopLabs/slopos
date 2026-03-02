@@ -128,32 +128,14 @@ define_syscall!(syscall_user_read(ctx, args) {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let max_len = args.arg1_usize().min(USER_IO_MAX_BYTES);
 
-    let mut read_len = tty::read_line(tmp.as_mut_ptr(), max_len);
-    if max_len > 0 {
-        read_len = read_len.min(max_len.saturating_sub(1));
-        tmp[read_len] = 0;
+    let read_len = tty::read_cooked(tmp.as_mut_ptr(), max_len, false);
+    if read_len < 0 {
+        return ctx.err();
     }
 
-    let copy_len = read_len.saturating_add(1).min(max_len);
-    try_or_err!(ctx, syscall_copy_to_user_bounded(args.arg0, &tmp[..copy_len]));
-    ctx.ok(read_len as u64)
-});
-
-define_syscall!(syscall_user_read_char(ctx, args) {
-    let _ = args;
-    let mut c = 0u8;
-    check_result!(ctx, tty::read_char_blocking(&mut c as *mut u8));
-    ctx.ok(c as u64)
-});
-
-define_syscall!(syscall_user_read_char_nb(ctx, args) {
-    let _ = args;
-    let mut c = 0u8;
-    let rc = tty::read_char_nonblocking(&mut c as *mut u8);
-    if rc < 0 {
-        return ctx.ok_i64(-1);
-    }
-    ctx.ok(c as u64)
+    let n = read_len as usize;
+    try_or_err!(ctx, syscall_copy_to_user_bounded(args.arg0, &tmp[..n]));
+    ctx.ok(n as u64)
 });
 
 define_syscall!(syscall_sys_info(ctx, args) {
