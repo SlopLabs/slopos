@@ -26,6 +26,8 @@ iso_notests  := build_dir / "slop-notests.iso"
 iso_tests    := build_dir / "slop-tests.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
+ports        := ""
+
 # ── QEMU ─────────────────────────────────────────────────────────────────────
 
 qemu_bin     := env("QEMU_BIN", "qemu-system-x86_64")
@@ -128,11 +130,15 @@ _qemu-boot mode video iso fs_image *extra_env:
     {{extra_env}} \
         scripts/qemu_run.sh "{{mode}}" "{{iso}}" "{{fs_image}}"
 
-[doc("Boot SlopOS with display window")]
-boot: _iso-notests (_qemu-boot "interactive" "1" iso_notests fs_image)
+[doc("Boot SlopOS (ports=7777,8080 to enable host↔guest forwarding)")]
+boot:
+    just _iso-notests
+    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
-[doc("Boot SlopOS headless (serial only)")]
-boot-headless: _iso-notests (_qemu-boot "interactive" "0" iso_notests fs_image)
+[doc("Boot SlopOS headless (serial only, ports= for forwarding)")]
+boot-headless:
+    just _iso-notests
+    just _qemu-boot "interactive" "0" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)

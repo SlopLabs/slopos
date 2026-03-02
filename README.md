@@ -70,6 +70,8 @@ QEMU_FB_AUTO_POLICY=max just boot      # Multi-monitor: pick largest display
 QEMU_FB_AUTO_OUTPUT=DP-1 just boot     # Multi-monitor: pin specific output
 DEBUG=1 just boot                      # Debug logging
 just boot-log video=1                  # Timed boot with display window
+just ports=7777 boot                   # Expose guest:7777 on host:7777
+just ports=7777,8080 boot              # Expose multiple guest ports
 ```
 
 **Note:** On macOS, GTK is not available. The justfile automatically uses Cocoa display.

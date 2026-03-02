@@ -17,6 +17,7 @@ set -euo pipefail
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR,
+#   NET, NET_PORTS,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +53,9 @@ QEMU_FB_DETECT_SCRIPT="${QEMU_FB_DETECT_SCRIPT:-${SCRIPT_DIR}/detect_qemu_resolu
 QEMU_GTK_ZOOM_TO_FIT="${QEMU_GTK_ZOOM_TO_FIT:-off}"
 QEMU_ENABLE_ISA_EXIT="${QEMU_ENABLE_ISA_EXIT:-0}"
 QEMU_PCI_DEVICES="${QEMU_PCI_DEVICES:-}"
+
+NET="${NET:-0}"
+NET_PORTS="${NET_PORTS:-7777,8080,8081}"
 
 OVMF_DIR="${OVMF_DIR:-${REPO_ROOT}/third_party/ovmf}"
 OVMF_CODE="${OVMF_DIR}/OVMF_CODE.fd"
@@ -157,6 +161,25 @@ if [ -n "$QEMU_PCI_DEVICES" ]; then
     read -ra PCI_ARGS <<< "$QEMU_PCI_DEVICES"
 fi
 
+# ── Network port forwarding ────────────────────────────────────────────────
+NET_HOSTFWD=""
+if [[ "$NET" =~ ^(1|true|on|yes)$ ]]; then
+    IFS=',' read -ra _ports <<< "$NET_PORTS"
+    for _p in "${_ports[@]}"; do
+        if [[ "$_p" == *:* ]]; then
+            # host:guest format
+            _host="${_p%%:*}"
+            _guest="${_p#*:}"
+        else
+            # single port: same on both sides
+            _host="$_p"
+            _guest="$_p"
+        fi
+        NET_HOSTFWD+=",hostfwd=tcp::${_host}-:${_guest}"
+    done
+    echo "Network port forwarding enabled: ${NET_PORTS}"
+fi
+
 # ── Assemble common QEMU arguments ──────────────────────────────────────────
 QEMU_ARGS=(
     -machine "q35,accel=$QEMU_ACCEL"
@@ -171,7 +194,7 @@ QEMU_ARGS=(
     -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
     -object "iothread,id=iot0"
     -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
-    -netdev "user,id=slopnet0"
+    -netdev "user,id=slopnet0${NET_HOSTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
     -serial stdio
