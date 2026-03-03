@@ -2,6 +2,9 @@
 //!
 //! Tests the `LineDisc`, `TtyDriverKind`, `TtyIndex`, TTY table, and
 //! the per-TTY public API (focus, foreground pgrp, active TTY).
+//!
+//! Phase 2 additions: input flag processing, output processing, signal
+//! generation, flow control, VLNEXT, VWERASE, ECHOCTL.
 
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
@@ -9,7 +12,7 @@ use slopos_lib::testing::TestResult;
 use crate::tty;
 use crate::tty::TtyIndex;
 use crate::tty::driver::{TtyDriverKind, VConsoleDriver};
-use crate::tty::ldisc::{InputAction, LineDisc};
+use crate::tty::ldisc::{InputAction, LineDisc, OutputAction};
 use crate::tty::session::TtySession;
 use crate::tty::table::TTY_TABLE;
 
@@ -622,6 +625,395 @@ pub fn test_ldisc_backspace_empty() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 2: Input flag processing tests
+// ===========================================================================
+
+/// ICRNL: CR (0x0D) is mapped to NL (0x0A) when ICRNL is set.
+pub fn test_ldisc_icrnl() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable ICRNL in c_iflag.
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::ICRNL;
+    ld.set_termios(&t);
+
+    // Feed CR — should be treated as NL and flush edit buffer.
+    ld.input_char(b'a');
+    ld.input_char(b'b');
+    ld.input_char(0x0D); // CR
+
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - ICRNL did not flush on CR");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 16];
+    let n = ld.read(&mut buf);
+    // Should get "ab\n" (3 bytes) — CR was converted to NL.
+    if n != 3 || buf[2] != b'\n' {
+        klog_info!(
+            "TTY_TEST: BUG - ICRNL mismatch (n={}, b2=0x{:02x})",
+            n,
+            buf[2]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IGNCR: CR is discarded entirely when IGNCR is set.
+pub fn test_ldisc_igncr() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::IGNCR;
+    ld.set_termios(&t);
+
+    // Feed CR — should be silently discarded.
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+    ld.input_char(0x0D); // CR — should be ignored
+
+    // No newline was delivered, so canonical mode should NOT have flushed.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - IGNCR did not discard CR");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// INLCR: NL (0x0A) is mapped to CR (0x0D) when INLCR is set.
+pub fn test_ldisc_inlcr() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::INLCR;
+    // Disable ICANON so we can inspect raw bytes.
+    t.c_lflag &= !slopos_abi::syscall::ICANON;
+    ld.set_termios(&t);
+
+    ld.input_char(b'\n'); // NL — should become CR
+    let mut buf = [0u8; 4];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != b'\r' {
+        klog_info!(
+            "TTY_TEST: BUG - INLCR did not map NL to CR (got 0x{:02x})",
+            buf[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// ISTRIP: bit 7 is stripped from input bytes.
+pub fn test_ldisc_istrip() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::ISTRIP;
+    t.c_lflag &= !slopos_abi::syscall::ICANON;
+    ld.set_termios(&t);
+
+    ld.input_char(0xC1); // 0xC1 with bit 7 set -> 0x41 = 'A'
+    let mut buf = [0u8; 4];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != 0x41 {
+        klog_info!(
+            "TTY_TEST: BUG - ISTRIP did not strip bit 7 (got 0x{:02x})",
+            buf[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: Output processing tests
+// ===========================================================================
+
+/// OPOST+ONLCR: NL is converted to CR+NL on output.
+pub fn test_ldisc_opost_onlcr() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    ld.set_termios(&t);
+
+    match ld.process_output_byte(b'\n') {
+        OutputAction::Emit { buf, len } => {
+            if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
+                klog_info!("TTY_TEST: BUG - ONLCR expected CR+NL, got len={}", len);
+                return TestResult::Fail;
+            }
+        }
+        OutputAction::Suppress => {
+            klog_info!("TTY_TEST: BUG - ONLCR suppressed NL");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// OPOST+OCRNL: CR is converted to NL on output.
+pub fn test_ldisc_opost_ocrnl() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::OCRNL;
+    ld.set_termios(&t);
+
+    match ld.process_output_byte(b'\r') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\n' {
+                klog_info!("TTY_TEST: BUG - OCRNL expected NL, got 0x{:02x}", buf[0]);
+                return TestResult::Fail;
+            }
+        }
+        OutputAction::Suppress => {
+            klog_info!("TTY_TEST: BUG - OCRNL suppressed CR");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// No OPOST: bytes pass through unmodified.
+pub fn test_ldisc_output_raw() -> TestResult {
+    let ld = LineDisc::new();
+    // c_oflag defaults to 0 (no OPOST).
+    match ld.process_output_byte(b'\n') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\n' {
+                klog_info!("TTY_TEST: BUG - raw output modified NL");
+                return TestResult::Fail;
+            }
+        }
+        OutputAction::Suppress => {
+            klog_info!("TTY_TEST: BUG - raw output suppressed NL");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: Signal generation tests
+// ===========================================================================
+
+/// SIGQUIT: Ctrl+\ generates SIGQUIT (signal 3).
+pub fn test_ldisc_signal_ctrl_backslash() -> TestResult {
+    let mut ld = LineDisc::new();
+    let action = ld.input_char(0x1C); // Ctrl+\ = VQUIT default
+    match action {
+        InputAction::Signal(3) => TestResult::Pass,
+        InputAction::Signal(s) => {
+            klog_info!("TTY_TEST: BUG - expected SIGQUIT(3), got signal {}", s);
+            TestResult::Fail
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - Ctrl+\\ did not produce Signal action");
+            TestResult::Fail
+        }
+    }
+}
+
+/// SIGTSTP: Ctrl+Z generates SIGTSTP (signal 20).
+pub fn test_ldisc_signal_ctrl_z() -> TestResult {
+    let mut ld = LineDisc::new();
+    // VSUSP default = 0x1A = Ctrl+Z.
+    let action = ld.input_char(0x1A);
+    match action {
+        InputAction::Signal(20) => TestResult::Pass,
+        InputAction::Signal(s) => {
+            klog_info!("TTY_TEST: BUG - expected SIGTSTP(20), got signal {}", s);
+            TestResult::Fail
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - Ctrl+Z did not produce Signal action");
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
+// Phase 2: Flow control tests
+// ===========================================================================
+
+/// IXON: Ctrl+S stops output, Ctrl+Q resumes.
+pub fn test_ldisc_flow_control_ixon() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::IXON;
+    ld.set_termios(&t);
+
+    // Ctrl+S (VSTOP = 0x13) should stop output.
+    ld.input_char(0x13);
+    if !ld.is_stopped() {
+        klog_info!("TTY_TEST: BUG - IXON Ctrl+S did not stop output");
+        return TestResult::Fail;
+    }
+
+    // Ctrl+Q (VSTART = 0x11) should resume.
+    ld.input_char(0x11);
+    if ld.is_stopped() {
+        klog_info!("TTY_TEST: BUG - IXON Ctrl+Q did not resume output");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: ECHOCTL tests
+// ===========================================================================
+
+/// ECHOCTL: control characters are echoed as ^X.
+pub fn test_ldisc_echoctl() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::ECHOCTL;
+    // Disable ISIG so Ctrl+C is not caught as signal.
+    t.c_lflag &= !slopos_abi::syscall::ISIG;
+    ld.set_termios(&t);
+
+    // Feed Ctrl+C (0x03) — should echo ^C (2 bytes).
+    let action = ld.input_char(0x03);
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 2 || buf[0] != b'^' || buf[1] != b'C' {
+                klog_info!(
+                    "TTY_TEST: BUG - ECHOCTL expected ^C, got [{}, {}] len={}",
+                    buf[0] as char,
+                    buf[1] as char,
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - ECHOCTL did not produce Echo for Ctrl+C");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: VLNEXT (literal next) tests
+// ===========================================================================
+
+/// VLNEXT: Ctrl+V makes the next character literal.
+pub fn test_ldisc_vlnext() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    ld.set_termios(&t);
+
+    // Press Ctrl+V (VLNEXT = 0x16).
+    ld.input_char(0x16);
+
+    // Now press Ctrl+C (0x03) — should be inserted literally, not generate signal.
+    let action = ld.input_char(0x03);
+    match action {
+        InputAction::Signal(_) => {
+            klog_info!("TTY_TEST: BUG - VLNEXT did not prevent signal");
+            return TestResult::Fail;
+        }
+        _ => {} // Any non-signal action is correct.
+    }
+
+    // Flush and read — should contain 0x03 as a literal byte.
+    ld.input_char(b'\n');
+    let mut buf = [0u8; 16];
+    let n = ld.read(&mut buf);
+    // Expect: 0x03 + '\n' = 2 bytes.
+    if n < 2 || buf[0] != 0x03 {
+        klog_info!(
+            "TTY_TEST: BUG - VLNEXT literal byte missing (n={}, b0=0x{:02x})",
+            n,
+            buf[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: VWERASE (word erase) tests
+// ===========================================================================
+
+/// VWERASE: Ctrl+W erases the previous word.
+pub fn test_ldisc_vwerase() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    ld.set_termios(&t);
+
+    // Type "hello world".
+    for &c in b"hello world" {
+        ld.input_char(c);
+    }
+
+    // Ctrl+W (VWERASE = 0x17) should erase "world".
+    ld.input_char(0x17);
+
+    // Now press Enter — should get "hello \n" (the trailing space stays
+    // because word erase only removes the word, not trailing spaces before it).
+    ld.input_char(b'\n');
+    let mut buf = [0u8; 32];
+    let n = ld.read(&mut buf);
+    // "hello " + NL = 7 bytes.
+    if n != 7 || &buf[..6] != b"hello " {
+        klog_info!(
+            "TTY_TEST: BUG - VWERASE mismatch (n={}, data={:?})",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: edit_content() for ReprintLine
+// ===========================================================================
+
+/// edit_content returns current edit buffer contents.
+pub fn test_ldisc_edit_content() -> TestResult {
+    let mut ld = LineDisc::new();
+    for &c in b"hello" {
+        ld.input_char(c);
+    }
+    let content = ld.edit_content();
+    if content != b"hello" {
+        klog_info!("TTY_TEST: BUG - edit_content mismatch");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 2: Output processing via TTY write
+// ===========================================================================
+
+/// TTY write with OPOST+ONLCR: verify data.len() is returned (bytes consumed).
+pub fn test_tty_write_returns_input_len() -> TestResult {
+    tty::table::tty_table_init();
+    // Enable OPOST+ONLCR on TTY 0.
+    let mut t = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut t as *mut _);
+    let saved = t;
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    tty::set_termios(TtyIndex(0), &t as *const _);
+
+    let data = b"hello\n";
+    let n = tty::write(TtyIndex(0), data);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+    if n != data.len() {
+        klog_info!(
+            "TTY_TEST: BUG - write returned {} instead of {}",
+            n,
+            data.len()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -657,5 +1049,29 @@ slopos_lib::define_test_suite!(
         test_keyboard_enter_scancode_reaches_active_tty,
         test_keyboard_scancode_routes_to_active_tty_index,
         test_keyboard_extended_up_arrow_reaches_tty,
+        // Phase 2: Input flag processing
+        test_ldisc_icrnl,
+        test_ldisc_igncr,
+        test_ldisc_inlcr,
+        test_ldisc_istrip,
+        // Phase 2: Output processing
+        test_ldisc_opost_onlcr,
+        test_ldisc_opost_ocrnl,
+        test_ldisc_output_raw,
+        // Phase 2: Signal generation
+        test_ldisc_signal_ctrl_backslash,
+        test_ldisc_signal_ctrl_z,
+        // Phase 2: Flow control
+        test_ldisc_flow_control_ixon,
+        // Phase 2: ECHOCTL
+        test_ldisc_echoctl,
+        // Phase 2: VLNEXT
+        test_ldisc_vlnext,
+        // Phase 2: VWERASE
+        test_ldisc_vwerase,
+        // Phase 2: edit_content / reprint
+        test_ldisc_edit_content,
+        // Phase 2: Output processing via TTY write
+        test_tty_write_returns_input_len,
     ]
 );

@@ -36,7 +36,7 @@ use slopos_lib::kernel_services::driver_runtime::{
 use slopos_lib::ports::COM1;
 
 use self::driver::TtyDriverKind;
-use self::ldisc::{InputAction, LineDisc};
+use self::ldisc::{InputAction, LineDisc, OutputAction};
 use self::session::TtySession;
 use self::table::{TTY_INPUT_WAITERS, TTY_TABLE};
 
@@ -117,11 +117,20 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         let action = tty.ldisc.input_char(c);
         let has_data = tty.ldisc.has_data();
 
-        // Handle echo and signal actions while we hold the lock.
+        // Handle echo, reprint, and signal actions while we hold the lock.
         match action {
             InputAction::Echo { buf, len } => {
                 for i in 0..len as usize {
                     tty.driver.write_output(&[buf[i]]);
+                }
+                has_data
+            }
+            InputAction::ReprintLine => {
+                // Redisplay: newline + current edit buffer contents.
+                tty.driver.write_output(b"\n");
+                let content = tty.ldisc.edit_content();
+                for &b in content {
+                    tty.driver.write_output(&[b]);
                 }
                 has_data
             }
@@ -249,15 +258,22 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
 
 /// Write bytes to a specific TTY.
 ///
-/// Currently passes through directly to the driver.  Phase 2 will add
-/// output processing (OPOST, ONLCR, etc.).
+/// Applies output processing (`c_oflag`) — e.g. OPOST + ONLCR converts
+/// `\n` to `\r\n` before sending to the driver.
 pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
     let mut table = TTY_TABLE.lock();
     let tty = match table.get_mut(idx.0 as usize) {
         Some(Some(t)) => t,
         _ => return 0,
     };
-    tty.driver.write_output(data);
+    for &c in data {
+        match tty.ldisc.process_output_byte(c) {
+            OutputAction::Emit { buf, len } => {
+                tty.driver.write_output(&buf[..len as usize]);
+            }
+            OutputAction::Suppress => {}
+        }
+    }
     data.len()
 }
 
@@ -447,6 +463,16 @@ fn process_raw_char_for(idx: TtyIndex, c: u8) {
             if let Some(Some(tty)) = table.get(idx.0 as usize) {
                 for i in 0..len as usize {
                     tty.driver.write_output(&[buf[i]]);
+                }
+            }
+        }
+        InputAction::ReprintLine => {
+            let table = TTY_TABLE.lock();
+            if let Some(Some(tty)) = table.get(idx.0 as usize) {
+                tty.driver.write_output(b"\n");
+                let content = tty.ldisc.edit_content();
+                for &b in content {
+                    tty.driver.write_output(&[b]);
                 }
             }
         }
