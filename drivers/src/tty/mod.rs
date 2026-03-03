@@ -33,16 +33,11 @@ use slopos_abi::syscall::{UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group,
 };
-use slopos_lib::ports::COM1;
 
 use self::driver::TtyDriverKind;
 use self::ldisc::{InputAction, LineDisc, OutputAction};
 use self::session::TtySession;
 use self::table::{TTY_INPUT_WAITERS, TTY_TABLE};
-
-use crate::ps2::keyboard;
-use crate::serial;
-use crate::serial::serial_poll_receive;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -394,50 +389,31 @@ pub fn init() {
 // Hardware input drain
 // ---------------------------------------------------------------------------
 
-/// Drain pending hardware input (serial UART + PS/2 keyboard) into the
-/// line discipline for a specific TTY.
+/// Drain pending hardware input into the line discipline for a specific TTY.
+///
+/// Uses the driver's `drain_input` method to poll for hardware bytes (serial
+/// UART for TTY 0, no-op for virtual console TTY 1+), then feeds each byte
+/// through `process_raw_char_for`.
 fn drain_hw_input(idx: TtyIndex) {
-    // For the serial console (TTY 0), poll the UART and drain the keyboard
-    // char buffer (legacy path — keyboard events now come via push_input
-    // in Phase 3, but we keep the drain for serial and the legacy keyboard
-    // char_buffer).
-    if idx.0 == 0 {
-        serial_poll_receive(COM1.address());
-
-        // Drain keyboard char_buffer (legacy path).
-        while keyboard::has_input() != 0 {
-            let c = keyboard::getchar();
-            process_raw_char_for(idx, c);
+    let mut scratch = [0u8; 64];
+    let count = {
+        let table = TTY_TABLE.lock();
+        match table.get(idx.0 as usize) {
+            Some(Some(tty)) => tty.driver.drain_input(&mut scratch),
+            _ => return,
         }
+    };
 
-        // Drain serial INPUT_BUFFER.
-        let mut scratch = [0u8; 64];
-        let count = {
-            let mut buf = serial::input_buffer_lock();
-            let mut n = 0usize;
-            while n < scratch.len() {
-                match buf.try_pop() {
-                    Some(b) => {
-                        scratch[n] = b;
-                        n += 1;
-                    }
-                    None => break,
-                }
-            }
-            n
-        };
-        for i in 0..count {
-            let mut c = scratch[i];
-            if c == b'\r' {
-                c = b'\n';
-            } else if c == 0x7F {
-                c = 0x08;
-            }
-            process_raw_char_for(idx, c);
+    for i in 0..count {
+        let mut c = scratch[i];
+        // Serial terminals send CR for Enter and DEL (0x7F) for backspace.
+        if c == b'\r' {
+            c = b'\n';
+        } else if c == 0x7F {
+            c = 0x08;
         }
+        process_raw_char_for(idx, c);
     }
-    // For TTY 1+ (virtual console), input comes via push_input (interrupt).
-    // No polling needed.
 }
 
 /// Feed a raw character through the line discipline for a specific TTY.

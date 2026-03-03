@@ -1014,6 +1014,199 @@ pub fn test_tty_write_returns_input_len() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 3: Input pipeline cleanup tests
+// ===========================================================================
+
+/// Phase 3: Keyboard events no longer routed to the input_event compositor queue.
+/// After pressing a key, the compositor event queue should remain empty.
+pub fn test_keyboard_no_input_event_delivery() -> TestResult {
+    tty::table::tty_table_init();
+    tty::set_active_tty(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Set keyboard focus in the compositor to a dummy task.
+    let dummy_task: u32 = 9999;
+    crate::input_event::input_set_keyboard_focus(dummy_task);
+
+    // Press 'a' (scancode 0x1E).
+    crate::ps2::keyboard::handle_scancode(0x1E);
+
+    // The compositor queue for the dummy task should be empty.
+    let has_events = crate::input_event::input_has_events(dummy_task);
+
+    // Clean up keyboard focus.
+    crate::input_event::input_set_keyboard_focus(0);
+    drain_tty_nonblock(TtyIndex(0));
+
+    if has_events {
+        klog_info!("TTY_TEST: BUG - keyboard event leaked into input_event queue");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 3: Break codes (key release) do not produce TTY input.
+pub fn test_keyboard_break_code_no_input() -> TestResult {
+    tty::table::tty_table_init();
+    tty::set_active_tty(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Switch to raw mode so any delivered byte is immediately readable.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    tty::set_termios(TtyIndex(0), &raw as *const _);
+
+    // Send break code for 'a' (0x1E | 0x80 = 0x9E).
+    crate::ps2::keyboard::handle_scancode(0x9E);
+
+    let mut out = [0u8; 8];
+    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    if n > 0 {
+        klog_info!(
+            "TTY_TEST: BUG - break code produced input (n={}, b0=0x{:02x})",
+            n,
+            out[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 3: Modifier key presses (shift, ctrl, alt, caps lock) do not produce
+/// TTY input.
+pub fn test_keyboard_modifier_no_input() -> TestResult {
+    tty::table::tty_table_init();
+    tty::set_active_tty(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Switch to raw mode.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    tty::set_termios(TtyIndex(0), &raw as *const _);
+
+    // Press Left Shift (make code 0x2A), Left Ctrl (0x1D), Left Alt (0x38).
+    crate::ps2::keyboard::handle_scancode(0x2A); // shift press
+    crate::ps2::keyboard::handle_scancode(0x1D); // ctrl press
+    crate::ps2::keyboard::handle_scancode(0x38); // alt press
+
+    // Release them.
+    crate::ps2::keyboard::handle_scancode(0xAA); // shift release
+    crate::ps2::keyboard::handle_scancode(0x9D); // ctrl release
+    crate::ps2::keyboard::handle_scancode(0xB8); // alt release
+
+    let mut out = [0u8; 8];
+    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    if n > 0 {
+        klog_info!(
+            "TTY_TEST: BUG - modifier key produced input (n={}, b0=0x{:02x})",
+            n,
+            out[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 3: Press + release produces exactly one character (no duplication).
+pub fn test_keyboard_press_release_single_char() -> TestResult {
+    tty::table::tty_table_init();
+    tty::set_active_tty(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Switch to raw mode.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    tty::set_termios(TtyIndex(0), &raw as *const _);
+
+    // Press 'a' (0x1E) then release 'a' (0x9E).
+    crate::ps2::keyboard::handle_scancode(0x1E); // press
+    crate::ps2::keyboard::handle_scancode(0x9E); // release
+
+    let mut out = [0u8; 8];
+    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    if n != 1 || out[0] != b'a' {
+        klog_info!(
+            "TTY_TEST: BUG - press+release should yield 1 char 'a' (n={}, b0=0x{:02x})",
+            n,
+            out[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 3: VConsole driver drain_input returns 0 via drain_hw_input (interrupt-driven).
+pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
+    tty::table::tty_table_init();
+
+    // TTY 1 is VConsole — drain_hw_input should be a no-op (input is
+    // interrupt-driven via push_input), so no data should appear.
+    drain_tty_nonblock(TtyIndex(1));
+
+    // Switch to raw mode on TTY 1.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(1), &mut saved as *mut _);
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    tty::set_termios(TtyIndex(1), &raw as *const _);
+
+    // has_data should be false — no hardware polling for VConsole.
+    let has = tty::has_data(TtyIndex(1));
+    tty::set_termios(TtyIndex(1), &saved as *const _);
+
+    if has {
+        klog_info!("TTY_TEST: BUG - VConsole drain_hw_input produced phantom data");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 3: Multiple key presses produce correct sequence in active TTY.
+pub fn test_keyboard_multi_key_sequence() -> TestResult {
+    tty::table::tty_table_init();
+    tty::set_active_tty(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Switch to raw mode.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    tty::set_termios(TtyIndex(0), &raw as *const _);
+
+    // Press 'h' (0x23), 'i' (0x17).
+    crate::ps2::keyboard::handle_scancode(0x23); // 'h'
+    crate::ps2::keyboard::handle_scancode(0x17); // 'i'
+
+    let mut out = [0u8; 8];
+    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    if n != 2 || out[0] != b'h' || out[1] != b'i' {
+        klog_info!(
+            "TTY_TEST: BUG - multi-key sequence mismatch (n={}, b0=0x{:02x}, b1=0x{:02x})",
+            n,
+            out[0],
+            out[1]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -1073,5 +1266,12 @@ slopos_lib::define_test_suite!(
         test_ldisc_edit_content,
         // Phase 2: Output processing via TTY write
         test_tty_write_returns_input_len,
+        // Phase 3: Input pipeline cleanup
+        test_keyboard_no_input_event_delivery,
+        test_keyboard_break_code_no_input,
+        test_keyboard_modifier_no_input,
+        test_keyboard_press_release_single_char,
+        test_vconsole_drain_via_drain_hw_input,
+        test_keyboard_multi_key_sequence,
     ]
 );

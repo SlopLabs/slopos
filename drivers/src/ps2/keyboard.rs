@@ -1,6 +1,5 @@
 use slopos_lib::{IrqMutex, RingBuffer, klog_debug, klog_info, klog_warn};
 
-use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;
 use crate::tty::{active_tty, push_input};
 use slopos_lib::kernel_services::driver_runtime::request_reschedule_from_interrupt;
@@ -35,7 +34,6 @@ impl ModifierState {
 
 struct KeyboardState {
     modifiers: ModifierState,
-    char_buffer: Buffer,
     scancode_buffer: Buffer,
     extended_code: bool,
 }
@@ -44,7 +42,6 @@ impl KeyboardState {
     const fn new() -> Self {
         Self {
             modifiers: ModifierState::new(),
-            char_buffer: Buffer::new_with(0),
             scancode_buffer: Buffer::new_with(0),
             extended_code: false,
         }
@@ -52,7 +49,6 @@ impl KeyboardState {
 
     fn reset(&mut self) {
         self.modifiers = ModifierState::new();
-        self.char_buffer = Buffer::new_with(0);
         self.scancode_buffer = Buffer::new_with(0);
         self.extended_code = false;
     }
@@ -220,18 +216,13 @@ pub fn handle_scancode(scancode: u8) {
 
     state.scancode_buffer.push_overwrite(scancode);
 
-    let ascii = translate_scancode(scancode, &state.modifiers);
-    let timestamp_ms = get_timestamp_ms();
-
-    drop(state);
-    input_event::input_route_key_event(make_code, ascii, is_press, timestamp_ms);
-    let mut state = STATE.lock();
-
+    // Modifier keys: update state and return (no character to deliver).
     if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
         handle_modifier(&mut state.modifiers, make_code, is_press);
         return;
     }
 
+    // Extended keys (preceded by 0xE0).
     if state.extended_code {
         state.extended_code = false;
         if !is_press {
@@ -276,37 +267,25 @@ pub fn handle_scancode(scancode: u8) {
         };
         if extended_key != 0 {
             drop(state);
-            let idx = active_tty();
-            push_input(idx, extended_key);
+            push_input(active_tty(), extended_key);
             request_reschedule_from_interrupt();
         }
         return;
     }
 
+    // Only key-press events produce characters.
     if !is_press {
         return;
     }
 
+    let ascii = translate_scancode(scancode, &state.modifiers);
     klog_debug!("[KBD] ASCII: 0x{:02x}", ascii);
 
     if ascii != 0 {
         klog_debug!("[KBD] Adding to buffer");
         drop(state);
-        let idx = active_tty();
-        push_input(idx, ascii);
+        push_input(active_tty(), ascii);
         request_reschedule_from_interrupt();
-    }
-}
-
-pub fn getchar() -> u8 {
-    STATE.lock().char_buffer.try_pop().unwrap_or(0)
-}
-
-pub fn has_input() -> i32 {
-    if STATE.lock().char_buffer.is_empty() {
-        0
-    } else {
-        1
     }
 }
 
