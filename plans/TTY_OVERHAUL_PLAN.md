@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete (Phase 2 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + **Phase 2 Complete** (Phase 3 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `tty_index: u8` for per-TTY operations
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -41,7 +41,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 |-------|------|---------------|-----------|
 | 1 | TTY core structs | `drivers/src/tty.rs` (deleted), `drivers/src/line_disc.rs` (deleted), `drivers/src/lib.rs` | `drivers/src/tty/mod.rs`, `tty/driver.rs`, `tty/table.rs`, `tty/ldisc.rs`, `tty/session.rs`, `drivers/src/tty_tests.rs` | **DONE** |
 | 1b | Shim removal | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/ps2/keyboard.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `core/src/syscall/core_handlers.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 2 | Line discipline | `drivers/src/line_disc.rs` | `drivers/src/tty/ldisc.rs` |
+| 2 | Line discipline | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — |
 | 4 | Sessions/pgrps | `core/src/scheduler/task.rs` | `drivers/src/tty/session.rs` |
 | 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs` | — |
@@ -337,7 +337,22 @@ pub fn tty_handle_input_char(c: u8) {
 
 ---
 
-## 6. Phase 2: Enhanced Line Discipline
+## 6. Phase 2: Enhanced Line Discipline ✅ COMPLETED
+
+**Status**: Completed. All 962 tests pass (14 new Phase 2 regression tests). Build clean. `just test` passes.
+
+**Implementation summary**: `LineDisc` rewritten from 216 lines to ~590 lines with:
+- Input flag processing (`c_iflag`): ICRNL, INLCR, IGNCR, ISTRIP, IXON flow control
+- Output flag processing (`c_oflag`): OPOST, ONLCR, OCRNL, ONOCR, ONLRET via `OutputAction` enum
+- Additional signal generation: SIGQUIT (Ctrl+\\), SIGTSTP (Ctrl+Z) alongside existing SIGINT
+- Echo modes: ECHOCTL (^X for control chars), ECHOKE (kill with newline), column tracking
+- Canonical editing: VWERASE (Ctrl+W word erase), VREPRINT (Ctrl+R redisplay via `ReprintLine` action), VLNEXT (Ctrl+V literal next)
+- Flow control: IXON with VSTOP/VSTART (Ctrl+S / Ctrl+Q)
+- Non-canonical: VMIN/VTIME parsed in ABI but timing enforcement deferred
+- New ABI constants in `abi/src/syscall.rs`: 12 c_iflag bits, 5 c_oflag bits, 6 c_lflag bits, 6 new c_cc indices
+- `write()` in `mod.rs` now applies `c_oflag` output processing
+- `push_input`/`process_raw_char_for` handle `InputAction::ReprintLine`
+- Default termios unchanged (`c_iflag: 0`, `c_oflag: 0`) to preserve existing behavior; userland can enable OPOST+ONLCR via `tcsetattr`
 
 **Goal**: Bring `LineDisc` to feature parity with Linux's `n_tty` (simplified but complete).
 
