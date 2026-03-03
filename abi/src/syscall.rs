@@ -595,6 +595,35 @@ pub const ECHOE: u32 = 0x10;
 pub const ECHOK: u32 = 0x20;
 pub const ECHONL: u32 = 0x40;
 
+// c_iflag bits — input processing flags
+pub const IGNBRK: u32 = 0x001;
+pub const BRKINT: u32 = 0x002;
+pub const IGNPAR: u32 = 0x004;
+pub const PARMRK: u32 = 0x008;
+pub const INPCK: u32 = 0x010;
+pub const ISTRIP: u32 = 0x020;
+pub const INLCR: u32 = 0x040;
+pub const IGNCR: u32 = 0x080;
+pub const ICRNL: u32 = 0x100;
+pub const IXON: u32 = 0x400;
+pub const IXOFF: u32 = 0x1000;
+pub const IUTF8: u32 = 0x4000;
+
+// c_oflag bits — output processing flags
+pub const OPOST: u32 = 0x01;
+pub const ONLCR: u32 = 0x04;
+pub const OCRNL: u32 = 0x08;
+pub const ONOCR: u32 = 0x10;
+pub const ONLRET: u32 = 0x20;
+
+// c_lflag bits (additional — see ISIG..ECHONL above)
+pub const ECHOCTL: u32 = 0x200;
+pub const ECHOPRT: u32 = 0x400;
+pub const ECHOKE: u32 = 0x800;
+pub const NOFLSH: u32 = 0x80;
+pub const TOSTOP: u32 = 0x100;
+pub const IEXTEN: u32 = 0x8000;
+
 pub const VINTR: usize = 0;
 pub const VQUIT: usize = 1;
 pub const VERASE: usize = 2;
@@ -603,16 +632,28 @@ pub const VEOF: usize = 4;
 pub const VTIME: usize = 5;
 pub const VMIN: usize = 6;
 pub const VEOL: usize = 11;
+pub const VSTART: usize = 8;
+pub const VSTOP: usize = 9;
+pub const VSUSP: usize = 10;
+pub const VREPRINT: usize = 12;
+pub const VWERASE: usize = 14;
+pub const VLNEXT: usize = 15;
 
 impl Default for UserTermios {
     fn default() -> Self {
         let mut cc = [0u8; NCCS];
-        cc[VINTR] = 0x03;
-        cc[VQUIT] = 0x1C;
-        cc[VERASE] = 0x7F;
-        cc[VKILL] = 0x15;
-        cc[VEOF] = 0x04;
+        cc[VINTR] = 0x03; // Ctrl+C
+        cc[VQUIT] = 0x1C; // Ctrl+\
+        cc[VERASE] = 0x7F; // DEL
+        cc[VKILL] = 0x15; // Ctrl+U
+        cc[VEOF] = 0x04; // Ctrl+D
         cc[VMIN] = 1;
+        cc[VSTART] = 0x11; // Ctrl+Q
+        cc[VSTOP] = 0x13; // Ctrl+S
+        cc[VSUSP] = 0x1A; // Ctrl+Z
+        cc[VREPRINT] = 0x12; // Ctrl+R
+        cc[VWERASE] = 0x17; // Ctrl+W
+        cc[VLNEXT] = 0x16; // Ctrl+V
         Self {
             c_iflag: 0,
             c_oflag: 0,
