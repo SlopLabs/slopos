@@ -11,7 +11,9 @@
 //! - A `TtySession` (session/foreground pgrp + focused task)
 //! - A `WaitQueue` for tasks blocked on input
 //!
-//! The `TTY_TABLE` (in `table.rs`) holds up to `MAX_TTYS` terminal instances.
+//! The `TTY_SLOTS` array (in `table.rs`) holds up to `MAX_TTYS` terminal
+//! instances, each with its own `IrqMutex` for fully independent per-TTY
+//! locking (Phase 8).
 //!
 //! # Public API
 //!
@@ -36,10 +38,10 @@ use slopos_lib::kernel_services::driver_runtime::{
     scheduler_is_enabled, signal_process_group,
 };
 
-use self::driver::TtyDriverKind;
+use self::driver::{TtyDriverKind, write_driver_unlocked};
 use self::ldisc::{InputAction, LineDisc, OutputAction};
 use self::session::{ForegroundCheck, TtySession};
-use self::table::{TTY_INPUT_WAITERS, TTY_TABLE};
+use self::table::{TTY_INPUT_WAITERS, TTY_SLOTS};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -78,6 +80,58 @@ pub struct Tty {
 }
 
 // ---------------------------------------------------------------------------
+// Tty helper methods
+// ---------------------------------------------------------------------------
+
+impl Tty {
+    /// Drain pending hardware input into the line discipline.
+    ///
+    /// Called while holding the per-TTY lock.  Feeds bytes from the hardware
+    /// driver through `ldisc.input_char()`, echoing output via the driver.
+    ///
+    /// Returns a deferred signal `(pgid, signum)` if signal generation was
+    /// triggered (e.g. Ctrl+C on serial).  The caller **must** deliver the
+    /// signal **after** dropping the per-TTY lock to avoid deadlock.
+    fn drain_hw_input(&mut self) -> Option<(u32, u8)> {
+        let mut scratch = [0u8; 64];
+        let count = self.driver.drain_input(&mut scratch);
+        let mut deferred_signal = None;
+
+        for i in 0..count {
+            let mut c = scratch[i];
+            // Serial terminals send CR for Enter and DEL (0x7F) for backspace.
+            if c == b'\r' {
+                c = b'\n';
+            } else if c == 0x7F {
+                c = 0x08;
+            }
+
+            let action = self.ldisc.input_char(c);
+            match action {
+                InputAction::Echo { buf, len } => {
+                    for j in 0..len as usize {
+                        self.driver.write_output(&[buf[j]]);
+                    }
+                }
+                InputAction::Signal(sig) => {
+                    deferred_signal = Some((self.session.fg_pgrp, sig));
+                }
+                InputAction::ReprintLine => {
+                    self.driver.write_output(b"\n");
+                    let content = self.ldisc.edit_content();
+                    for &b in content {
+                        self.driver.write_output(&[b]);
+                    }
+                }
+                InputAction::None => {}
+            }
+        }
+
+        deferred_signal
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Active TTY tracking (for keyboard input routing)
 // ---------------------------------------------------------------------------
 
@@ -104,13 +158,14 @@ pub fn set_active_tty(idx: TtyIndex) {
 /// Called from interrupt context (keyboard ISR) or from `drain_hw_input`.
 /// Feeds the byte through the line discipline and handles echo/signal actions.
 pub fn push_input(idx: TtyIndex, c: u8) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+
     let wake = {
-        let mut table = TTY_TABLE.lock();
-        let slot = match table.get_mut(idx.0 as usize) {
-            Some(s) => s,
-            None => return,
-        };
-        let tty = match slot.as_mut() {
+        let mut guard = TTY_SLOTS[slot].lock();
+        let tty = match guard.as_mut() {
             Some(t) => t,
             None => return,
         };
@@ -142,7 +197,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
             InputAction::Signal(sig) => {
                 let pgid = tty.session.fg_pgrp;
                 // Release lock before signalling to avoid deadlock.
-                drop(table);
+                drop(guard);
                 if pgid != 0 {
                     let _ = signal_process_group(pgid, sig);
                 }
@@ -173,8 +228,12 @@ fn notify_input_ready(idx: TtyIndex) {
 /// a TTY for the first time.  If no session is attached yet, the calling
 /// task becomes the session leader with its own pgid as foreground group.
 fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid: u32) {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         // Set compositor focus if not already set.
         if tty.session.focused_task_id == 0 {
             tty.session.focused_task_id = task_id;
@@ -190,11 +249,15 @@ fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid
 ///
 /// Uses `TtySession::check_read()` as the sole read-side gate.  Background
 /// processes receive `SIGTTIN` instead of silently blocking.
+///
+/// Phase 8: drain + foreground check + read are merged into a single per-TTY
+/// lock acquisition per loop iteration (previously 5–6 separate locks).
 pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize {
     if buffer.is_null() || max == 0 {
         return 0;
     }
-    if (idx.0 as usize) >= MAX_TTYS {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
         return -1;
     }
 
@@ -209,94 +272,101 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
     }
 
     loop {
-        let (hung_up, has_data) = {
-            let table = TTY_TABLE.lock();
-            match table.get(idx.0 as usize) {
-                Some(Some(tty)) => (tty.hung_up, tty.ldisc.has_data()),
-                _ => return -1,
-            }
-        };
-
-        if hung_up && !has_data {
-            return if nonblock { -5 } else { 0 };
-        }
-
-        // ---- Foreground check via check_read() ----
-        if enforce_access {
-            let check = {
-                let table = TTY_TABLE.lock();
-                match table.get(idx.0 as usize) {
-                    Some(Some(tty)) => tty.session.check_read(caller_pgid, caller_sid),
-                    _ => ForegroundCheck::Allowed,
-                }
+        // --- Single lock acquisition: state check + drain + foreground + read ---
+        let deferred_signal;
+        {
+            let mut guard = TTY_SLOTS[slot].lock();
+            let tty = match guard.as_mut() {
+                Some(t) => t,
+                None => return -1,
             };
-            match check {
-                ForegroundCheck::BackgroundRead => {
-                    // POSIX: send SIGTTIN to the calling process group.
-                    if caller_pgid != 0 {
-                        let _ = signal_process_group(caller_pgid, SIGTTIN);
+
+            // Hung-up check (before drain).
+            if tty.hung_up && !tty.ldisc.has_data() {
+                return if nonblock { -5 } else { 0 };
+            }
+
+            // Foreground check via check_read().
+            if enforce_access {
+                match tty.session.check_read(caller_pgid, caller_sid) {
+                    ForegroundCheck::BackgroundRead => {
+                        drop(guard);
+                        if caller_pgid != 0 {
+                            let _ = signal_process_group(caller_pgid, SIGTTIN);
+                        }
+                        return -1;
                     }
-                    return -1; // Caller should retry after handling the signal.
+                    ForegroundCheck::Allowed | ForegroundCheck::NoSession => {}
+                    ForegroundCheck::BackgroundWrite => {
+                        // Should not happen on read path, treat as allowed.
+                    }
                 }
-                ForegroundCheck::Allowed | ForegroundCheck::NoSession => {
-                    // Proceed to read.
+            }
+
+            // Drain hardware input (merged — single lock for drain + read).
+            deferred_signal = tty.drain_hw_input();
+
+            // Try to read from the cooked buffer.
+            let out = unsafe { core::slice::from_raw_parts_mut(buffer, max) };
+            let got = tty.ldisc.read(out);
+
+            if got > 0 {
+                // Drop guard before delivering deferred signal.
+                drop(guard);
+                if let Some((pgid, sig)) = deferred_signal {
+                    if pgid != 0 {
+                        let _ = signal_process_group(pgid, sig);
+                    }
                 }
-                ForegroundCheck::BackgroundWrite => {
-                    // Should not happen on read path, but treat as allowed.
-                }
+                return got as isize;
+            }
+
+            // Check hung-up after drain (data may have been flushed by hangup).
+            if tty.hung_up {
+                return if nonblock { -5 } else { 0 };
             }
         }
+        // --- Per-TTY lock dropped ---
 
-        // Drain hardware input into the line discipline.
-        drain_hw_input(idx);
-
-        // Try to read from the cooked buffer.
-        let out = unsafe { core::slice::from_raw_parts_mut(buffer, max) };
-        let got = {
-            let mut table = TTY_TABLE.lock();
-            match table.get_mut(idx.0 as usize) {
-                Some(Some(tty)) => tty.ldisc.read(out),
-                _ => return -1,
+        // Deliver deferred signal from drain (e.g. Ctrl+C on serial).
+        if let Some((pgid, sig)) = deferred_signal {
+            if pgid != 0 {
+                let _ = signal_process_group(pgid, sig);
             }
-        };
-        if got > 0 {
-            return got as isize;
-        }
-
-        let hung_up_after_read = {
-            let table = TTY_TABLE.lock();
-            match table.get(idx.0 as usize) {
-                Some(Some(tty)) => tty.hung_up,
-                _ => return -1,
-            }
-        };
-
-        if hung_up_after_read {
-            return if nonblock { -5 } else { 0 };
         }
 
         if nonblock {
             return -11; // EAGAIN
         }
 
-        let wait_ok = TTY_INPUT_WAITERS[idx.0 as usize].wait_event(|| {
-            if enforce_access {
-                let table = TTY_TABLE.lock();
-                let check = match table.get(idx.0 as usize) {
-                    Some(Some(tty)) => tty.session.check_read(caller_pgid, caller_sid),
-                    _ => ForegroundCheck::Allowed,
-                };
-                drop(table);
-                if matches!(check, ForegroundCheck::BackgroundRead) {
-                    return false;
+        // Block on per-TTY wait queue.
+        let wait_ok = TTY_INPUT_WAITERS[slot].wait_event(|| {
+            let (sig, result) = {
+                let mut guard = TTY_SLOTS[slot].lock();
+                match guard.as_mut() {
+                    Some(tty) => {
+                        if enforce_access {
+                            if matches!(
+                                tty.session.check_read(caller_pgid, caller_sid),
+                                ForegroundCheck::BackgroundRead
+                            ) {
+                                return false;
+                            }
+                        }
+                        let sig = tty.drain_hw_input();
+                        let result = tty.hung_up || tty.ldisc.has_data();
+                        (sig, result)
+                    }
+                    None => return true,
+                }
+            };
+            // Deliver deferred signal outside lock.
+            if let Some((pgid, signum)) = sig {
+                if pgid != 0 {
+                    let _ = signal_process_group(pgid, signum);
                 }
             }
-            drain_hw_input(idx);
-            let table = TTY_TABLE.lock();
-            match table.get(idx.0 as usize) {
-                Some(Some(tty)) => tty.hung_up || tty.ldisc.has_data(),
-                _ => true,
-            }
+            result
         });
         if !wait_ok {
             return -11;
@@ -308,30 +378,78 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
 ///
 /// Applies output processing (`c_oflag`) — e.g. OPOST + ONLCR converts
 /// `\n` to `\r\n` before sending to the driver.
+///
+/// Phase 8: split-write pattern — output is processed through the line
+/// discipline under the per-TTY lock into a local stack buffer, the lock is
+/// dropped, and the buffered bytes are written to the hardware without
+/// holding any TTY lock.  This prevents slow serial I/O from blocking
+/// operations on other TTYs.
 pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
-    let mut table = TTY_TABLE.lock();
-    let tty = match table.get_mut(idx.0 as usize) {
-        Some(Some(t)) => t,
-        _ => return 0,
-    };
-    for &c in data {
-        match tty.ldisc.process_output_byte(c) {
-            OutputAction::Emit { buf, len } => {
-                tty.driver.write_output(&buf[..len as usize]);
-            }
-            OutputAction::Suppress => {}
-        }
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return 0;
     }
+
+    // Maximum output bytes per chunk.  Each input byte can expand to at most
+    // 2 output bytes (e.g. NL → CR+NL with ONLCR).  256 bytes leaves room
+    // for expansion while keeping the stack buffer small.
+    const OUT_BUF_CAP: usize = 256;
+
+    let mut pos = 0;
+    while pos < data.len() {
+        let mut out_buf = [0u8; OUT_BUF_CAP];
+        let mut out_len = 0;
+        let driver_id;
+
+        // Phase 1: Process output under per-TTY lock (fast — pure computation).
+        {
+            let mut guard = TTY_SLOTS[slot].lock();
+            let tty = match guard.as_mut() {
+                Some(t) => t,
+                None => return 0,
+            };
+            driver_id = tty.driver.id();
+
+            while pos < data.len() {
+                match tty.ldisc.process_output_byte(data[pos]) {
+                    OutputAction::Emit { buf, len } => {
+                        for i in 0..len as usize {
+                            if out_len < OUT_BUF_CAP {
+                                out_buf[out_len] = buf[i];
+                                out_len += 1;
+                            }
+                        }
+                    }
+                    OutputAction::Suppress => {}
+                }
+                pos += 1;
+                // If buffer nearly full, break to flush.
+                if out_len >= OUT_BUF_CAP - 2 {
+                    break;
+                }
+            }
+        }
+        // Per-TTY lock dropped.
+
+        // Phase 2: Driver I/O without any TTY lock (slow — hardware).
+        write_driver_unlocked(driver_id, &out_buf[..out_len]);
+    }
+
     data.len()
 }
 
 /// Check if a TTY has cooked data available for reading.
 pub fn has_data(idx: TtyIndex) -> bool {
-    drain_hw_input(idx);
-    let table = TTY_TABLE.lock();
-    match table.get(idx.0 as usize) {
-        Some(Some(tty)) => tty.ldisc.has_data(),
-        _ => false,
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return false;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
+        let _ = tty.drain_hw_input();
+        tty.ldisc.has_data()
+    } else {
+        false
     }
 }
 
@@ -340,8 +458,12 @@ pub fn get_termios(idx: TtyIndex, t: *mut UserTermios) {
     if t.is_null() {
         return;
     }
-    let table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_ref() {
         let val = *tty.ldisc.termios();
         unsafe { *t = val };
     }
@@ -353,8 +475,12 @@ pub fn set_termios(idx: TtyIndex, t: *const UserTermios) {
         return;
     }
     let val = unsafe { *t };
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         tty.ldisc.set_termios(&val);
         tty.driver.set_termios(&val);
     }
@@ -362,17 +488,25 @@ pub fn set_termios(idx: TtyIndex, t: *const UserTermios) {
 
 /// Get the foreground process group for a specific TTY.
 pub fn get_foreground_pgrp(idx: TtyIndex) -> u32 {
-    let table = TTY_TABLE.lock();
-    match table.get(idx.0 as usize) {
-        Some(Some(tty)) => tty.session.fg_pgrp,
-        _ => 0,
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return 0;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => tty.session.fg_pgrp,
+        None => 0,
     }
 }
 
 /// Set the foreground process group for a specific TTY.
 pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         tty.session.fg_pgrp = pgid;
     }
 }
@@ -382,8 +516,12 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) {
 /// Only processes in the same session as the TTY's controlling session may
 /// change the foreground pgrp.  Returns 0 on success, -1 on permission error.
 pub fn set_foreground_pgrp_checked(idx: TtyIndex, pgid: u32, caller_sid: u32) -> i32 {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return -1;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
             return 0;
         }
@@ -396,8 +534,12 @@ pub fn get_winsize(idx: TtyIndex, ws: *mut UserWinsize) {
     if ws.is_null() {
         return;
     }
-    let table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_ref() {
         unsafe { *ws = tty.winsize };
     }
 }
@@ -408,8 +550,12 @@ pub fn set_winsize(idx: TtyIndex, ws: *const UserWinsize) {
         return;
     }
     let val = unsafe { *ws };
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         tty.winsize = val;
     }
 }
@@ -427,17 +573,18 @@ pub fn set_winsize(idx: TtyIndex, ws: *const UserWinsize) {
 /// for job control signals and read/write access gating.
 pub fn set_compositor_focus(task_id: u32) -> i32 {
     let idx = active_tty();
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return -1;
+    }
     {
-        let mut table = TTY_TABLE.lock();
-        if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        let mut guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_mut() {
             tty.session.focused_task_id = task_id;
         }
     }
     if scheduler_is_enabled() != 0 {
-        let slot = idx.0 as usize;
-        if slot < MAX_TTYS {
-            TTY_INPUT_WAITERS[slot].wake_all();
-        }
+        TTY_INPUT_WAITERS[slot].wake_all();
     }
     0
 }
@@ -445,10 +592,14 @@ pub fn set_compositor_focus(task_id: u32) -> i32 {
 /// Get the compositor-focused task ID from the active TTY.
 pub fn get_compositor_focus() -> u32 {
     let idx = active_tty();
-    let table = TTY_TABLE.lock();
-    match table.get(idx.0 as usize) {
-        Some(Some(tty)) => tty.session.focused_task_id,
-        _ => 0,
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return 0;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => tty.session.focused_task_id,
+        None => 0,
     }
 }
 
@@ -463,10 +614,14 @@ pub fn init() {
 
 /// Get the session ID for a specific TTY.
 pub fn get_session_id(idx: TtyIndex) -> u32 {
-    let table = TTY_TABLE.lock();
-    match table.get(idx.0 as usize) {
-        Some(Some(tty)) => tty.session.session_id,
-        _ => 0,
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return 0;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => tty.session.session_id,
+        None => 0,
     }
 }
 
@@ -475,8 +630,12 @@ pub fn get_session_id(idx: TtyIndex) -> u32 {
 /// The session leader (`leader_pid`) becomes the controlling process.
 /// `leader_pgid` is set as the initial foreground process group.
 pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         tty.session.attach(leader_pid, leader_pgid);
     }
 }
@@ -486,8 +645,12 @@ pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
 /// Clears session leader, session ID, and foreground pgrp.
 /// Compositor focus (`focused_task_id`) is NOT cleared.
 pub fn detach_session(idx: TtyIndex) {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         tty.session.detach();
     }
 }
@@ -496,13 +659,16 @@ pub fn detach_session(idx: TtyIndex) {
 ///
 /// Called from `setsid()` when the session leader creates a new session —
 /// the old controlling terminal must be released.
+///
+/// Each per-TTY lock is acquired and released individually — no two locks
+/// are held simultaneously.
 pub fn detach_session_by_id(session_id: u32) {
     if session_id == 0 {
         return;
     }
-    let mut table = TTY_TABLE.lock();
-    for slot in table.iter_mut() {
-        if let Some(tty) = slot.as_mut() {
+    for i in 0..MAX_TTYS {
+        let mut guard = TTY_SLOTS[i].lock();
+        if let Some(tty) = guard.as_mut() {
             if tty.session.session_id == session_id {
                 tty.session.detach();
             }
@@ -511,8 +677,12 @@ pub fn detach_session_by_id(session_id: u32) {
 }
 
 pub fn open_ref(idx: TtyIndex) -> i32 {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return -1;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         tty.open_count = tty
             .open_count
             .checked_add(1)
@@ -524,8 +694,12 @@ pub fn open_ref(idx: TtyIndex) -> i32 {
 }
 
 pub fn close_ref(idx: TtyIndex) -> i32 {
-    let mut table = TTY_TABLE.lock();
-    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return -1;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
         if tty.open_count == 0 {
             return 0;
         }
@@ -541,11 +715,15 @@ pub fn close_ref(idx: TtyIndex) -> i32 {
 }
 
 pub fn hangup(idx: TtyIndex) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
     let fg_pgrp = {
-        let mut table = TTY_TABLE.lock();
-        let tty = match table.get_mut(idx.0 as usize) {
-            Some(Some(t)) => t,
-            _ => return,
+        let mut guard = TTY_SLOTS[slot].lock();
+        let tty = match guard.as_mut() {
+            Some(t) => t,
+            None => return,
         };
         let fg = tty.session.fg_pgrp;
         tty.ldisc.flush_all();
@@ -560,120 +738,52 @@ pub fn hangup(idx: TtyIndex) {
     }
 
     if scheduler_is_enabled() != 0 {
-        let slot = idx.0 as usize;
-        if slot < MAX_TTYS {
-            TTY_INPUT_WAITERS[slot].wake_all();
-        }
+        TTY_INPUT_WAITERS[slot].wake_all();
     }
 }
 
 pub fn is_hung_up(idx: TtyIndex) -> bool {
-    let table = TTY_TABLE.lock();
-    match table.get(idx.0 as usize) {
-        Some(Some(tty)) => tty.hung_up,
-        _ => false,
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return false;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => tty.hung_up,
+        None => false,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Hardware input drain
+// Idle callback (Phase 8: iterates ALL active TTYs)
 // ---------------------------------------------------------------------------
 
-/// Drain pending hardware input into the line discipline for a specific TTY.
+/// Idle-loop callback: drain hardware input and wake blocked readers.
 ///
-/// Uses the driver's `drain_input` method to poll for hardware bytes (serial
-/// UART for TTY 0, no-op for virtual console TTY 1+), then feeds each byte
-/// through `process_raw_char_for`.
-fn drain_hw_input(idx: TtyIndex) {
-    let mut scratch = [0u8; 64];
-    let count = {
-        let table = TTY_TABLE.lock();
-        match table.get(idx.0 as usize) {
-            Some(Some(tty)) => tty.driver.drain_input(&mut scratch),
-            _ => return,
-        }
-    };
-
-    for i in 0..count {
-        let mut c = scratch[i];
-        // Serial terminals send CR for Enter and DEL (0x7F) for backspace.
-        if c == b'\r' {
-            c = b'\n';
-        } else if c == 0x7F {
-            c = 0x08;
-        }
-        process_raw_char_for(idx, c);
-    }
-}
-
-/// Feed a raw character through the line discipline for a specific TTY.
-///
-/// This is the internal "process" path used by `drain_hw_input`.  For
-/// interrupt-driven input, use `push_input` instead.
-fn process_raw_char_for(idx: TtyIndex, c: u8) {
-    let (action, has_data, fg_pgrp) = {
-        let mut table = TTY_TABLE.lock();
-        let tty = match table.get_mut(idx.0 as usize) {
-            Some(Some(t)) => t,
-            _ => return,
-        };
-        let action = tty.ldisc.input_char(c);
-        let has_data = tty.ldisc.has_data();
-        let fg_pgrp = tty.session.fg_pgrp;
-        (action, has_data, fg_pgrp)
-    };
-
-    match action {
-        InputAction::Echo { buf, len } => {
-            let table = TTY_TABLE.lock();
-            if let Some(Some(tty)) = table.get(idx.0 as usize) {
-                for i in 0..len as usize {
-                    tty.driver.write_output(&[buf[i]]);
-                }
-            }
-        }
-        InputAction::ReprintLine => {
-            let table = TTY_TABLE.lock();
-            if let Some(Some(tty)) = table.get(idx.0 as usize) {
-                tty.driver.write_output(b"\n");
-                let content = tty.ldisc.edit_content();
-                for &b in content {
-                    tty.driver.write_output(&[b]);
-                }
-            }
-        }
-        InputAction::Signal(sig) => {
-            if fg_pgrp != 0 {
-                let _ = signal_process_group(fg_pgrp, sig);
-            }
-        }
-        InputAction::None => {}
-    }
-
-    if has_data {
-        notify_input_ready(idx);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Idle callback
-// ---------------------------------------------------------------------------
-
+/// Phase 8: now iterates all active TTYs instead of only TTY 0.  Each
+/// per-TTY lock is acquired and released individually.
 fn input_available_cb() -> c_int {
-    // Check TTY 0 for data availability (used by scheduler idle loop).
-    let idx = TtyIndex(0);
-    drain_hw_input(idx);
-    let has_data = {
-        let table = TTY_TABLE.lock();
-        match table.get(idx.0 as usize) {
-            Some(Some(tty)) => tty.ldisc.has_data(),
-            _ => false,
+    let mut any_data = false;
+    for i in 0..MAX_TTYS {
+        let has_data = {
+            let mut guard = TTY_SLOTS[i].lock();
+            if let Some(tty) = guard.as_mut() {
+                if tty.active {
+                    let _ = tty.drain_hw_input();
+                    tty.ldisc.has_data()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if has_data {
+            notify_input_ready(TtyIndex(i as u8));
+            any_data = true;
         }
-    };
-    if has_data {
-        notify_input_ready(idx);
     }
-    has_data as c_int
+    any_data as c_int
 }
 
 fn register_idle_callback() {

@@ -6,6 +6,10 @@
 //! Two initial implementations:
 //! - `SerialConsoleDriver` — wraps COM1 UART (polling-based)
 //! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer output (stub)
+//!
+//! Phase 8 adds `DriverId` for lock-free I/O dispatch: the TTY core copies
+//! the driver identifier while holding the per-TTY lock, drops the lock, and
+//! then writes the processed output via `write_driver_unlocked`.
 
 use slopos_abi::syscall::UserTermios;
 use slopos_lib::ports::COM1;
@@ -74,6 +78,63 @@ impl TtyDriverKind {
             Self::VConsole(d) => d.set_termios(termios),
             Self::None => {}
         }
+    }
+
+    /// Return a lightweight, copyable identifier for this driver variant.
+    ///
+    /// Used by the split-write path: the caller copies the `DriverId` while
+    /// holding the per-TTY lock, drops the lock, and then calls
+    /// [`write_driver_unlocked`] to perform the (slow) hardware I/O without
+    /// holding any TTY lock.
+    pub fn id(&self) -> DriverId {
+        match self {
+            Self::SerialConsole(_) => DriverId::SerialConsole,
+            Self::VConsole(_) => DriverId::VConsole,
+            Self::None => DriverId::None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lock-free driver I/O (Phase 8)
+// ---------------------------------------------------------------------------
+
+/// Lightweight driver identifier — copyable across lock boundaries.
+///
+/// This enum carries *no state* — it simply identifies which hardware backend
+/// to use.  The TTY core copies it out of the per-TTY lock, drops the lock,
+/// and then calls [`write_driver_unlocked`] to perform the actual I/O.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DriverId {
+    /// COM1 serial console.
+    SerialConsole,
+    /// PS/2 + framebuffer virtual console (currently mirrors to serial).
+    VConsole,
+    /// Empty / uninitialised slot.
+    None,
+}
+
+/// Write processed output bytes to the hardware **without** holding any TTY
+/// lock.
+///
+/// This is the second phase of the split-write pattern introduced in Phase 8:
+///
+/// 1. **Under per-TTY lock** — process output through the line discipline
+///    into a local stack buffer, copy `DriverId`, drop the lock.
+/// 2. **Without lock** — call this function to send the buffered bytes to the
+///    hardware driver.
+///
+/// This separation ensures that slow serial I/O (~86 μs/byte at 115200 baud)
+/// does not block operations on other TTYs.
+pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) {
+    match driver {
+        DriverId::SerialConsole | DriverId::VConsole => {
+            // Both currently output via COM1 serial.
+            for &b in data {
+                serial::serial_putc_com1(b);
+            }
+        }
+        DriverId::None => {}
     }
 }
 

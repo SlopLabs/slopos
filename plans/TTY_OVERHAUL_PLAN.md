@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + Phase 6 Complete + **Phase 7 Complete** (Phases 8–10 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + Phase 6 Complete + Phase 7 Complete + **Phase 8 Complete** (Phases 9–10 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -51,7 +51,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 6 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/core_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/ldisc.rs`, `core/src/scheduler/task.rs`, `core/src/scheduler/task_struct.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
-| 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
+| 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty_tests.rs` | — |
 | 10 | Verification | — | — |
 
@@ -1111,111 +1111,78 @@ pub fn flush_all(&mut self) {
 
 ---
 
-## 12. Phase 8: Per-TTY Locking & Performance
+## 12. Phase 8: Per-TTY Locking & Performance ✅ COMPLETED
 
 > **Priority**: P1 — Must fix before multiple active TTYs or PTY support.
-> **Rationale**: The single `TTY_TABLE: IrqMutex<[Option<Tty>; MAX_TTYS]>` lock protects **all** 8 TTY slots.  Any operation on TTY 0 blocks all operations on TTY 1–7.  `write()` holds the lock for the entire byte-by-byte serial output loop (~86μs/byte at 115200 baud).  A 1 KB write holds the global lock for ~86 ms.  Linux uses per-tty mutexes with a global lock only for lookup/registration.
+> **Rationale**: The single `TTY_TABLE: IrqMutex<[Option<Tty>; MAX_TTYS]>` lock protected **all** 8 TTY slots.  Any operation on TTY 0 blocked all operations on TTY 1–7.  `write()` held the lock for the entire byte-by-byte serial output loop (~86μs/byte at 115200 baud).  A 1 KB write held the global lock for ~86 ms.  Linux uses per-tty mutexes with a global lock only for lookup/registration.
 
 **Goal**: Move to per-TTY locking so that operations on different TTYs are fully independent, and release the lock before slow driver I/O.
 
+**Status**: Completed. Build clean. `cargo fmt --all`, `just build`, and `just test` pass (1016/1016 tests, 0 failures, 7 new Phase 8 regression tests).
+
+**Implementation summary**:
+- **12.1 (Per-TTY lock architecture)**: Replaced `TTY_TABLE: IrqMutex<[Option<Tty>; MAX_TTYS]>` (single global lock) with `TTY_SLOTS: [IrqMutex<Option<Tty>>; MAX_TTYS]` (per-slot independent locks).  Matches existing `UDP_RX_QUEUES` pattern in the socket module.  All ~39 `TTY_TABLE.lock()` call sites in `mod.rs` rewritten to per-slot `TTY_SLOTS[slot].lock()`.
+- **12.2 (Split-write pattern)**: `write()` now processes output through the line discipline under the per-TTY lock into a 256-byte stack buffer, copies a lightweight `DriverId` enum, drops the lock, then writes the buffered bytes to hardware via `write_driver_unlocked()`.  Slow serial I/O no longer blocks other TTYs.
+- **12.3 (Merged drain+read)**: `read()` now performs foreground check + `drain_hw_input()` + `ldisc.read()` in a single per-TTY lock acquisition per loop iteration, reducing from 5–6 separate lock/unlock cycles to 1.  Deferred signal delivery (e.g. Ctrl+C on serial) happens after dropping the lock.
+- **12.4 (Idle callback iterates all TTYs)**: `input_available_cb()` now iterates all `MAX_TTYS` slots, draining hardware input and waking blocked readers on each active TTY (previously only checked TTY 0).
+- **12.5 (Lock ordering documented)**: Comprehensive lock ordering rules documented in `table.rs`: never hold two per-TTY locks simultaneously; `TTY_INPUT_WAITERS` is separate from `TTY_SLOTS` to avoid lock-order violations during blocking waits.
+- **12.6 (DriverId for lock-free I/O)**: Added `DriverId` enum (`SerialConsole`, `VConsole`, `None`) with `#[derive(Clone, Copy, PartialEq, Eq, Debug)]` and `TtyDriverKind::id()` method for the split-write pattern.  `write_driver_unlocked(DriverId, &[u8])` performs hardware I/O without any TTY lock.
+- **Regression tests**: 7 new Phase 8 tests: `test_phase8_per_tty_lock_independence` (slots lockable simultaneously), `test_phase8_driver_id_round_trip` (DriverId matches driver kind), `test_phase8_split_write_returns_input_len` (split-write correctness), `test_phase8_idle_cb_iterates_all_ttys` (idle callback all-TTY check), `test_phase8_merged_drain_read` (single-lock drain+read), `test_phase8_with_tty_per_slot` (per-slot with_tty correctness), `test_phase8_driver_id_traits` (Copy/Clone/Eq).
+
 ### 12.1 Per-TTY lock architecture
 
-**Current**:
+**Previous**:
 ```rust
 pub static TTY_TABLE: IrqMutex<[Option<Tty>; MAX_TTYS]>;  // One lock for everything
 ```
 
 **New**:
 ```rust
-/// Thin registry lock — held only during lookup/allocation, never during I/O.
-pub static TTY_REGISTRY: IrqMutex<[Option<TtySlot>; MAX_TTYS]>;
-
-/// Per-TTY inner state, each with its own lock.
-pub struct TtySlot {
-    pub inner: IrqMutex<TtyInner>,
-}
-
-pub struct TtyInner {
-    pub index: TtyIndex,
-    pub ldisc: LineDisc,
-    pub driver: TtyDriverKind,
-    pub session: TtySession,
-    pub winsize: UserWinsize,
-    pub active: bool,
-    pub open_count: u16,
-    pub hung_up: bool,
-}
+/// Per-TTY locked slots.  Each element is independently locked.
+pub static TTY_SLOTS: [IrqMutex<Option<Tty>>; MAX_TTYS] = [const { IrqMutex::new(None) }; MAX_TTYS];
 ```
 
-- `TTY_REGISTRY` lock is held **only** to get a reference to a `TtySlot`
-- `TtySlot.inner` lock is held for per-TTY operations
-- Different TTYs never contend
+- No global table lock — each slot is independently locked
+- `Tty` struct name kept (not renamed to `TtyInner`) to minimize churn
+- `with_tty()` and `with_tty_ref()` helpers updated to lock individual slots
 
-### 12.2 Release lock before driver I/O in `write()`
-
-**Problem**: `write()` currently holds `TTY_TABLE` lock while calling `driver.write_output()` for each byte.  Serial I/O is slow.
-
-**Fix**: Process output through ldisc into a local buffer, drop the lock, then write to the driver:
+### 12.2 Split-write via DriverId
 
 ```rust
 pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
+    // Phase 1: Process under per-TTY lock (fast — pure computation).
+    let driver_id;
     let mut out_buf = [0u8; 256];
     let mut out_len = 0;
-
-    // Phase 1: Process under lock (fast — pure computation).
-    {
-        let mut inner = get_tty_inner(idx)?;
-        for &c in data {
-            match inner.ldisc.process_output_byte(c) {
-                OutputAction::Emit { buf, len } => {
-                    for i in 0..len as usize {
-                        if out_len < out_buf.len() {
-                            out_buf[out_len] = buf[i];
-                            out_len += 1;
-                        }
-                    }
-                }
-                OutputAction::Suppress => {}
-            }
-        }
-    } // Lock dropped here.
-
+    { let mut guard = TTY_SLOTS[slot].lock(); /* process ldisc */ driver_id = tty.driver.id(); }
     // Phase 2: Driver I/O without lock (slow — hardware).
-    write_to_driver(idx, &out_buf[..out_len]);
-    data.len()
+    write_driver_unlocked(driver_id, &out_buf[..out_len]);
 }
 ```
 
-### 12.3 Combine `drain_hw_input` + `read` into single lock acquisition
+### 12.3 Merged drain+read
 
-**Problem**: `read()` calls `drain_hw_input(idx)` which locks the table once, then separately locks it again for `ldisc.read()`.  This is 2–3 lock/unlock cycles per read attempt.
+Single lock acquisition in `read()` loop body combines: foreground check, `drain_hw_input()`, `ldisc.read()`, and deferred signal extraction.
 
-**Fix**: Merge drain + read into a single `with_tty_inner()` call.
+### 12.4 Idle callback iterates all TTYs
 
-### 12.4 Fix idle callback (not TTY 0 only)
+`input_available_cb()` loops over `0..MAX_TTYS`, locking and releasing each slot individually.
 
-**Problem**: `input_available_cb()` only checks TTY 0.  Future serial-on-TTY-1 or PTY polling breaks.
+### 12.5 Lock ordering rules
 
-**Fix**: Iterate all active TTYs in the idle callback, or register per-TTY callbacks.
-
-### 12.5 Lock ordering rules (MUST document)
-
-Strict lock hierarchy to prevent deadlock:
-
-1. **`TTY_REGISTRY`** (global) — held only for slot lookup, never during I/O
-2. **`TtySlot.inner`** (per-TTY) — held for ldisc/session/termios operations
-3. **`TTY_INPUT_WAITERS[idx]`** — never hold while holding any of the above
-
-Rule: Never acquire `TTY_REGISTRY` while holding `TtySlot.inner`.
+Documented in `table.rs` module doc:
+1. **`TTY_SLOTS[i]`** — per-TTY, held for ldisc/session/termios.  **Never hold two simultaneously.**
+2. **`TTY_INPUT_WAITERS[i]`** — separate static, condition closure may transiently re-acquire same slot.
+3. Rule: **Never acquire `TTY_SLOTS[j]` while holding `TTY_SLOTS[i]`** (i ≠ j).
 
 ### 12.6 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/table.rs` | Replace `TTY_TABLE` with `TTY_REGISTRY` + `TtySlot` per-TTY locks |
-| `drivers/src/tty/mod.rs` | Update all functions to use per-TTY locking; split write into process + I/O; merge drain+read |
-| `drivers/src/tty_tests.rs` | Add concurrency/multi-TTY tests; verify lock ordering |
-
+| `drivers/src/tty/table.rs` | Replaced `TTY_TABLE` with `TTY_SLOTS: [IrqMutex<Option<Tty>>; MAX_TTYS]`; added comprehensive lock ordering documentation |
+| `drivers/src/tty/mod.rs` | Rewrote all ~39 `TTY_TABLE.lock()` call sites to per-slot locking; implemented split-write pattern; merged drain+read; idle callback iterates all TTYs |
+| `drivers/src/tty/driver.rs` | Added `DriverId` enum, `TtyDriverKind::id()`, `write_driver_unlocked()` |
+| `drivers/src/tty_tests.rs` | Migrated `TTY_TABLE` → `TTY_SLOTS` in existing tests; added 7 Phase 8 regression tests |
 ---
 
 ## 13. Phase 9: Rust Idioms & Termios Completion

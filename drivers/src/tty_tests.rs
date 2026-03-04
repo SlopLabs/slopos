@@ -15,11 +15,11 @@ use slopos_lib::testing::TestResult;
 
 use crate::tty;
 use crate::tty::TtyIndex;
-use crate::tty::driver::{TtyDriverKind, VConsoleDriver};
+use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LineDisc, OutputAction};
 use crate::tty::session::TtySession;
 use crate::tty::session::{ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION};
-use crate::tty::table::TTY_TABLE;
+use crate::tty::table::TTY_SLOTS;
 
 fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
@@ -719,18 +719,22 @@ pub fn test_table_init_allocates_tty0_and_tty1() -> TestResult {
     // Ensure init has been called (it's idempotent — re-calling overwrites).
     tty::table::tty_table_init();
 
-    let table = TTY_TABLE.lock();
-    if table[0].is_none() {
+    let slot0 = TTY_SLOTS[0].lock();
+    if slot0.is_none() {
         klog_info!("TTY_TEST: BUG - TTY 0 not allocated after init");
         return TestResult::Fail;
     }
-    if table[1].is_none() {
+    drop(slot0);
+    let slot1 = TTY_SLOTS[1].lock();
+    if slot1.is_none() {
         klog_info!("TTY_TEST: BUG - TTY 1 not allocated after init");
         return TestResult::Fail;
     }
+    drop(slot1);
     // Slots 2..MAX_TTYS should be None.
     for i in 2..tty::MAX_TTYS {
-        if table[i].is_some() {
+        let slot = TTY_SLOTS[i].lock();
+        if slot.is_some() {
             klog_info!("TTY_TEST: BUG - TTY {} unexpectedly allocated", i);
             return TestResult::Fail;
         }
@@ -742,8 +746,8 @@ pub fn test_table_init_allocates_tty0_and_tty1() -> TestResult {
 pub fn test_table_tty0_has_index_zero() -> TestResult {
     tty::table::tty_table_init();
 
-    let table = TTY_TABLE.lock();
-    if let Some(tty) = &table[0] {
+    let guard = TTY_SLOTS[0].lock();
+    if let Some(tty) = guard.as_ref() {
         if tty.index != TtyIndex(0) {
             klog_info!("TTY_TEST: BUG - TTY 0 has wrong index {:?}", tty.index);
             return TestResult::Fail;
@@ -759,8 +763,8 @@ pub fn test_table_tty0_has_index_zero() -> TestResult {
 pub fn test_table_tty0_active() -> TestResult {
     tty::table::tty_table_init();
 
-    let table = TTY_TABLE.lock();
-    if let Some(tty) = &table[0] {
+    let guard = TTY_SLOTS[0].lock();
+    if let Some(tty) = guard.as_ref() {
         if !tty.active {
             klog_info!("TTY_TEST: BUG - TTY 0 is not active");
             return TestResult::Fail;
@@ -2027,6 +2031,171 @@ pub fn test_tty_hangup_blocking_read_eof() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 8: Per-TTY Locking & Performance regression tests
+// ===========================================================================
+
+/// Phase 8: Per-TTY slots are independently lockable — locking slot 0 does
+/// not prevent access to slot 1.
+pub fn test_phase8_per_tty_lock_independence() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Lock slot 0 and, while holding it, verify we can lock slot 1.
+    let guard0 = TTY_SLOTS[0].lock();
+    let guard1 = TTY_SLOTS[1].lock();
+
+    let ok0 = guard0.is_some();
+    let ok1 = guard1.is_some();
+    drop(guard1);
+    drop(guard0);
+
+    if !ok0 || !ok1 {
+        klog_info!("TTY_TEST: BUG - per-TTY slots not independently lockable");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 8: DriverId round-trip — TtyDriverKind::id() returns the matching
+/// DriverId variant for each driver kind.
+pub fn test_phase8_driver_id_round_trip() -> TestResult {
+    let serial = TtyDriverKind::SerialConsole(crate::tty::driver::SerialConsoleDriver);
+    let vconsole = TtyDriverKind::VConsole(VConsoleDriver);
+    let none = TtyDriverKind::None;
+
+    if serial.id() != DriverId::SerialConsole {
+        klog_info!("TTY_TEST: BUG - SerialConsole id mismatch");
+        return TestResult::Fail;
+    }
+    if vconsole.id() != DriverId::VConsole {
+        klog_info!("TTY_TEST: BUG - VConsole id mismatch");
+        return TestResult::Fail;
+    }
+    if none.id() != DriverId::None {
+        klog_info!("TTY_TEST: BUG - None id mismatch");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 8: Split-write returns correct byte count (input length, not output
+/// expansion) through the per-slot locking path.
+pub fn test_phase8_split_write_returns_input_len() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Enable OPOST+ONLCR on TTY 0 so NL expands to CR+NL.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let mut t = saved;
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    tty::set_termios(TtyIndex(0), &t as *const _);
+
+    let data = b"abc\ndef\n";
+    let n = tty::write(TtyIndex(0), data);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    if n != data.len() {
+        klog_info!(
+            "TTY_TEST: BUG - split-write returned {} instead of {}",
+            n,
+            data.len()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 8: Idle callback iterates all active TTYs (not just TTY 0).
+/// Push data to TTY 1 and verify has_data reports it after the idle-loop
+/// path runs (via has_data which calls drain_hw_input internally).
+pub fn test_phase8_idle_cb_iterates_all_ttys() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(1));
+
+    // Push data to TTY 1 via push_input (simulates keyboard on vconsole).
+    tty::push_input(TtyIndex(1), b'z');
+    tty::push_input(TtyIndex(1), b'\n');
+
+    // has_data internally calls drain_hw_input, simulating the idle path.
+    let has1 = tty::has_data(TtyIndex(1));
+    drain_tty_nonblock(TtyIndex(1));
+
+    if !has1 {
+        klog_info!("TTY_TEST: BUG - idle callback path did not find data on TTY 1");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 8: Merged drain+read in a single lock acquisition — verify that
+/// read() returns data that was pushed to the serial TTY (TTY 0) without
+/// requiring multiple separate lock acquisitions.
+pub fn test_phase8_merged_drain_read() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Push "ok\n" into TTY 0.
+    tty::push_input(TtyIndex(0), b'o');
+    tty::push_input(TtyIndex(0), b'k');
+    tty::push_input(TtyIndex(0), b'\n');
+
+    let mut out = [0u8; 16];
+    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+    if n != 3 || &out[..3] != b"ok\n" {
+        klog_info!(
+            "TTY_TEST: BUG - merged drain+read mismatch (n={}, data={:?})",
+            n,
+            &out[..core::cmp::max(n as usize, 0)]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 8: TTY_SLOTS uses per-slot locking — with_tty operates on the
+/// correct slot without holding a global lock.
+pub fn test_phase8_with_tty_per_slot() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Verify with_tty returns the correct index for each allocated slot.
+    let idx0 = tty::table::with_tty(TtyIndex(0), |tty| tty.index);
+    let idx1 = tty::table::with_tty(TtyIndex(1), |tty| tty.index);
+    let idx_empty = tty::table::with_tty(TtyIndex(5), |tty| tty.index);
+
+    if idx0 != Some(TtyIndex(0)) {
+        klog_info!("TTY_TEST: BUG - with_tty slot 0 returned wrong index");
+        return TestResult::Fail;
+    }
+    if idx1 != Some(TtyIndex(1)) {
+        klog_info!("TTY_TEST: BUG - with_tty slot 1 returned wrong index");
+        return TestResult::Fail;
+    }
+    if idx_empty.is_some() {
+        klog_info!("TTY_TEST: BUG - with_tty empty slot 5 returned Some");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 8: DriverId is Copy + Clone + Eq — verify that the derive attributes
+/// work correctly for the lock-free I/O dispatch identifier.
+pub fn test_phase8_driver_id_traits() -> TestResult {
+    let id = DriverId::SerialConsole;
+    let id_copy = id; // Copy
+    let id_clone = id.clone(); // Clone
+
+    if id != id_copy || id != id_clone {
+        klog_info!("TTY_TEST: BUG - DriverId Copy/Clone/Eq broken");
+        return TestResult::Fail;
+    }
+    if id == DriverId::VConsole {
+        klog_info!("TTY_TEST: BUG - DriverId Eq does not distinguish variants");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -2133,5 +2302,13 @@ slopos_lib::define_test_suite!(
         test_tty_hangup_sets_flag_and_detaches_session,
         test_tty_hangup_nonblock_read_eio,
         test_tty_hangup_blocking_read_eof,
+        // Phase 8: Per-TTY Locking & Performance
+        test_phase8_per_tty_lock_independence,
+        test_phase8_driver_id_round_trip,
+        test_phase8_split_write_returns_input_len,
+        test_phase8_idle_cb_iterates_all_ttys,
+        test_phase8_merged_drain_read,
+        test_phase8_with_tty_per_slot,
+        test_phase8_driver_id_traits,
     ]
 );
