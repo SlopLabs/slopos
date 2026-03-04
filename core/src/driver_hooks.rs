@@ -48,6 +48,14 @@ fn runtime_current_task_sid() -> u32 {
     unsafe { (*task).sid }
 }
 
+fn runtime_current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
+    let task = scheduler::scheduler_get_current_task();
+    if task.is_null() {
+        return None;
+    }
+    unsafe { (*task).controlling_tty }
+}
+
 fn runtime_unblock_task(task: DriverTaskHandle) -> i32 {
     scheduler::unblock_task(handle_to_task(task))
 }
@@ -110,6 +118,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     current_task_id: runtime_current_task_id,
     current_task_pgid: runtime_current_task_pgid,
     current_task_sid: runtime_current_task_sid,
+    current_task_controlling_tty: runtime_current_task_controlling_tty,
     block_current_task: scheduler::block_current_task,
     unblock_task: runtime_unblock_task,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,

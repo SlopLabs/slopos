@@ -79,6 +79,25 @@ pub struct Tty {
     pub hung_up: bool,
 }
 
+/// Kernel-internal error type for TTY operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtyError {
+    /// TTY index is out of range (>= MAX_TTYS).
+    InvalidIndex,
+    /// TTY slot is not allocated (None).
+    NotAllocated,
+    /// Caller is a background process — should receive SIGTTIN.
+    BackgroundRead,
+    /// Caller is a background process with TOSTOP — should receive SIGTTOU.
+    BackgroundWrite,
+    /// TTY is hung up — reads return EIO/EOF.
+    HungUp,
+    /// No data available and O_NONBLOCK is set — EAGAIN.
+    WouldBlock,
+    /// Permission denied (e.g. different session for TIOCSPGRP).
+    PermissionDenied,
+}
+
 // ---------------------------------------------------------------------------
 // Tty helper methods
 // ---------------------------------------------------------------------------
@@ -252,13 +271,13 @@ fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid
 ///
 /// Phase 8: drain + foreground check + read are merged into a single per-TTY
 /// lock acquisition per loop iteration (previously 5–6 separate locks).
-pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize {
-    if buffer.is_null() || max == 0 {
-        return 0;
+pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyError> {
+    if buf.is_empty() {
+        return Ok(0);
     }
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return -1;
+        return Err(TtyError::InvalidIndex);
     }
 
     register_idle_callback();
@@ -271,19 +290,27 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
         auto_attach_session(idx, task_id, caller_pgid, caller_sid);
     }
 
+    let mut total = 0usize;
+
     loop {
         // --- Single lock acquisition: state check + drain + foreground + read ---
         let deferred_signal;
+        let mut should_wait = false;
+        let mut wait_timeout_ms: Option<u64> = None;
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
                 Some(t) => t,
-                None => return -1,
+                None => return Err(TtyError::NotAllocated),
             };
 
             // Hung-up check (before drain).
             if tty.hung_up && !tty.ldisc.has_data() {
-                return if nonblock { -5 } else { 0 };
+                return if nonblock {
+                    Err(TtyError::HungUp)
+                } else {
+                    Ok(0)
+                };
             }
 
             // Foreground check via check_read().
@@ -294,7 +321,7 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
                         if caller_pgid != 0 {
                             let _ = signal_process_group(caller_pgid, SIGTTIN);
                         }
-                        return -1;
+                        return Err(TtyError::BackgroundRead);
                     }
                     ForegroundCheck::Allowed | ForegroundCheck::NoSession => {}
                     ForegroundCheck::BackgroundWrite => {
@@ -307,23 +334,96 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
             deferred_signal = tty.drain_hw_input();
 
             // Try to read from the cooked buffer.
-            let out = unsafe { core::slice::from_raw_parts_mut(buffer, max) };
-            let got = tty.ldisc.read(out);
+            let got = tty.ldisc.read(&mut buf[total..]);
+            total = total.saturating_add(got);
 
-            if got > 0 {
-                // Drop guard before delivering deferred signal.
-                drop(guard);
-                if let Some((pgid, sig)) = deferred_signal {
-                    if pgid != 0 {
-                        let _ = signal_process_group(pgid, sig);
+            let is_canonical = tty.ldisc.is_canonical();
+            let (vmin_u8, vtime_u8) = tty.ldisc.vmin_vtime();
+            let vmin = core::cmp::min(vmin_u8 as usize, buf.len());
+            let vtime_ms = (vtime_u8 as u64) * 100;
+
+            if is_canonical {
+                if total > 0 {
+                    // Drop guard before delivering deferred signal.
+                    drop(guard);
+                    if let Some((pgid, sig)) = deferred_signal {
+                        if pgid != 0 {
+                            let _ = signal_process_group(pgid, sig);
+                        }
+                    }
+                    return Ok(total);
+                }
+            } else {
+                match (vmin_u8, vtime_u8) {
+                    (0, 0) => {
+                        drop(guard);
+                        if let Some((pgid, sig)) = deferred_signal {
+                            if pgid != 0 {
+                                let _ = signal_process_group(pgid, sig);
+                            }
+                        }
+                        return Ok(total);
+                    }
+                    (0, _) => {
+                        if total > 0 {
+                            drop(guard);
+                            if let Some((pgid, sig)) = deferred_signal {
+                                if pgid != 0 {
+                                    let _ = signal_process_group(pgid, sig);
+                                }
+                            }
+                            return Ok(total);
+                        }
+                        should_wait = true;
+                        wait_timeout_ms = Some(vtime_ms);
+                    }
+                    (_, 0) => {
+                        if total >= vmin {
+                            drop(guard);
+                            if let Some((pgid, sig)) = deferred_signal {
+                                if pgid != 0 {
+                                    let _ = signal_process_group(pgid, sig);
+                                }
+                            }
+                            return Ok(total);
+                        }
+                        should_wait = true;
+                    }
+                    (_, _) => {
+                        if total >= vmin {
+                            drop(guard);
+                            if let Some((pgid, sig)) = deferred_signal {
+                                if pgid != 0 {
+                                    let _ = signal_process_group(pgid, sig);
+                                }
+                            }
+                            return Ok(total);
+                        }
+                        should_wait = true;
+                        wait_timeout_ms = Some(vtime_ms);
                     }
                 }
-                return got as isize;
             }
 
             // Check hung-up after drain (data may have been flushed by hangup).
             if tty.hung_up {
-                return if nonblock { -5 } else { 0 };
+                return if nonblock {
+                    Err(TtyError::HungUp)
+                } else {
+                    Ok(0)
+                };
+            }
+
+            if !is_canonical && !should_wait {
+                if total > 0 {
+                    drop(guard);
+                    if let Some((pgid, sig)) = deferred_signal {
+                        if pgid != 0 {
+                            let _ = signal_process_group(pgid, sig);
+                        }
+                    }
+                    return Ok(total);
+                }
             }
         }
         // --- Per-TTY lock dropped ---
@@ -336,11 +436,15 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
         }
 
         if nonblock {
-            return -11; // EAGAIN
+            return if total > 0 {
+                Ok(total)
+            } else {
+                Err(TtyError::WouldBlock)
+            };
         }
 
         // Block on per-TTY wait queue.
-        let wait_ok = TTY_INPUT_WAITERS[slot].wait_event(|| {
+        let wait_condition = || {
             let (sig, result) = {
                 let mut guard = TTY_SLOTS[slot].lock();
                 match guard.as_mut() {
@@ -367,9 +471,16 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
                 }
             }
             result
-        });
+        };
+
+        let wait_ok = match wait_timeout_ms {
+            Some(timeout_ms) => {
+                TTY_INPUT_WAITERS[slot].wait_event_timeout(wait_condition, timeout_ms)
+            }
+            None => TTY_INPUT_WAITERS[slot].wait_event(wait_condition),
+        };
         if !wait_ok {
-            return -11;
+            return if total > 0 { Ok(total) } else { Ok(0) };
         }
     }
 }
@@ -384,10 +495,10 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
 /// dropped, and the buffered bytes are written to the hardware without
 /// holding any TTY lock.  This prevents slow serial I/O from blocking
 /// operations on other TTYs.
-pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
+pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return 0;
+        return Err(TtyError::InvalidIndex);
     }
 
     // Maximum output bytes per chunk.  Each input byte can expand to at most
@@ -406,7 +517,7 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
                 Some(t) => t,
-                None => return 0,
+                None => return Err(TtyError::NotAllocated),
             };
             driver_id = tty.driver.id();
 
@@ -435,7 +546,7 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
         write_driver_unlocked(driver_id, &out_buf[..out_len]);
     }
 
-    data.len()
+    Ok(data.len())
 }
 
 /// Check if a TTY has cooked data available for reading.
@@ -454,60 +565,61 @@ pub fn has_data(idx: TtyIndex) -> bool {
 }
 
 /// Get termios for a specific TTY.
-pub fn get_termios(idx: TtyIndex, t: *mut UserTermios) {
-    if t.is_null() {
-        return;
-    }
+pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return Err(TtyError::InvalidIndex);
     }
     let guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_ref() {
-        let val = *tty.ldisc.termios();
-        unsafe { *t = val };
+    match guard.as_ref() {
+        Some(tty) => Ok(*tty.ldisc.termios()),
+        None => Err(TtyError::NotAllocated),
     }
 }
 
 /// Set termios for a specific TTY.
-pub fn set_termios(idx: TtyIndex, t: *const UserTermios) {
-    if t.is_null() {
-        return;
-    }
-    let val = unsafe { *t };
+pub fn set_termios(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return Err(TtyError::InvalidIndex);
     }
     let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        tty.ldisc.set_termios(&val);
-        tty.driver.set_termios(&val);
+    match guard.as_mut() {
+        Some(tty) => {
+            tty.ldisc.set_termios(t);
+            tty.driver.set_termios(t);
+            Ok(())
+        }
+        None => Err(TtyError::NotAllocated),
     }
 }
 
 /// Get the foreground process group for a specific TTY.
-pub fn get_foreground_pgrp(idx: TtyIndex) -> u32 {
+pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return 0;
+        return Err(TtyError::InvalidIndex);
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => tty.session.fg_pgrp,
-        None => 0,
+        Some(tty) => Ok(tty.session.fg_pgrp),
+        None => Err(TtyError::NotAllocated),
     }
 }
 
 /// Set the foreground process group for a specific TTY.
-pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) {
+pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return Err(TtyError::InvalidIndex);
     }
     let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        tty.session.fg_pgrp = pgid;
+    match guard.as_mut() {
+        Some(tty) => {
+            tty.session.fg_pgrp = pgid;
+            Ok(())
+        }
+        None => Err(TtyError::NotAllocated),
     }
 }
 
@@ -515,48 +627,54 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) {
 ///
 /// Only processes in the same session as the TTY's controlling session may
 /// change the foreground pgrp.  Returns 0 on success, -1 on permission error.
-pub fn set_foreground_pgrp_checked(idx: TtyIndex, pgid: u32, caller_sid: u32) -> i32 {
+pub fn set_foreground_pgrp_checked(
+    idx: TtyIndex,
+    pgid: u32,
+    caller_sid: u32,
+) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return -1;
+        return Err(TtyError::InvalidIndex);
     }
     let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
-            return 0;
+    match guard.as_mut() {
+        Some(tty) => {
+            if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
+                Ok(())
+            } else {
+                Err(TtyError::PermissionDenied)
+            }
         }
+        None => Err(TtyError::NotAllocated),
     }
-    -1
 }
 
 /// Get window size for a specific TTY.
-pub fn get_winsize(idx: TtyIndex, ws: *mut UserWinsize) {
-    if ws.is_null() {
-        return;
-    }
+pub fn get_winsize(idx: TtyIndex) -> Result<UserWinsize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return Err(TtyError::InvalidIndex);
     }
     let guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_ref() {
-        unsafe { *ws = tty.winsize };
+    match guard.as_ref() {
+        Some(tty) => Ok(tty.winsize),
+        None => Err(TtyError::NotAllocated),
     }
 }
 
 /// Set window size for a specific TTY.
-pub fn set_winsize(idx: TtyIndex, ws: *const UserWinsize) {
-    if ws.is_null() {
-        return;
-    }
-    let val = unsafe { *ws };
+pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return Err(TtyError::InvalidIndex);
     }
     let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        tty.winsize = val;
+    match guard.as_mut() {
+        Some(tty) => {
+            tty.winsize = *ws;
+            Ok(())
+        }
+        None => Err(TtyError::NotAllocated),
     }
 }
 
@@ -571,35 +689,40 @@ pub fn set_winsize(idx: TtyIndex, ws: *const UserWinsize) {
 ///
 /// Compositor focus is used for input routing; foreground pgrp is used
 /// for job control signals and read/write access gating.
-pub fn set_compositor_focus(task_id: u32) -> i32 {
+pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
     let idx = active_tty();
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return -1;
+        return Err(TtyError::InvalidIndex);
     }
+    let mut found = false;
     {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
             tty.session.focused_task_id = task_id;
+            found = true;
         }
+    }
+    if !found {
+        return Err(TtyError::NotAllocated);
     }
     if scheduler_is_enabled() != 0 {
         TTY_INPUT_WAITERS[slot].wake_all();
     }
-    0
+    Ok(())
 }
 
 /// Get the compositor-focused task ID from the active TTY.
-pub fn get_compositor_focus() -> u32 {
+pub fn get_compositor_focus() -> Result<u32, TtyError> {
     let idx = active_tty();
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return 0;
+        return Err(TtyError::InvalidIndex);
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => tty.session.focused_task_id,
-        None => 0,
+        Some(tty) => Ok(tty.session.focused_task_id),
+        None => Err(TtyError::NotAllocated),
     }
 }
 
@@ -613,15 +736,15 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 /// Get the session ID for a specific TTY.
-pub fn get_session_id(idx: TtyIndex) -> u32 {
+pub fn get_session_id(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return 0;
+        return Err(TtyError::InvalidIndex);
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => tty.session.session_id,
-        None => 0,
+        Some(tty) => Ok(tty.session.session_id),
+        None => Err(TtyError::NotAllocated),
     }
 }
 
@@ -676,10 +799,10 @@ pub fn detach_session_by_id(session_id: u32) {
     }
 }
 
-pub fn open_ref(idx: TtyIndex) -> i32 {
+pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return -1;
+        return Err(TtyError::InvalidIndex);
     }
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
@@ -688,20 +811,20 @@ pub fn open_ref(idx: TtyIndex) -> i32 {
             .checked_add(1)
             .unwrap_or_else(|| panic!("tty open_count overflow for idx {}", idx.0));
         tty.hung_up = false;
-        return tty.open_count as i32;
+        return Ok(tty.open_count);
     }
-    -1
+    Err(TtyError::NotAllocated)
 }
 
-pub fn close_ref(idx: TtyIndex) -> i32 {
+pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return -1;
+        return Err(TtyError::InvalidIndex);
     }
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
         if tty.open_count == 0 {
-            return 0;
+            return Ok(0);
         }
         tty.open_count -= 1;
         if tty.open_count == 0 {
@@ -709,9 +832,9 @@ pub fn close_ref(idx: TtyIndex) -> i32 {
             tty.session.detach();
             tty.hung_up = false;
         }
-        return tty.open_count as i32;
+        return Ok(tty.open_count);
     }
-    -1
+    Err(TtyError::NotAllocated)
 }
 
 pub fn hangup(idx: TtyIndex) {

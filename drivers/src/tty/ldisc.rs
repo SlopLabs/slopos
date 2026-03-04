@@ -175,6 +175,20 @@ impl LineDisc {
         &self.termios
     }
 
+    /// Returns (vmin, vtime_deciseconds) for non-canonical mode reads.
+    /// vtime is in deciseconds (100ms units) as per POSIX.
+    pub fn vmin_vtime(&self) -> (u8, u8) {
+        // c_cc layout: index 5 = VTIME, index 6 = VMIN
+        let vtime = self.termios.c_cc[5];
+        let vmin = self.termios.c_cc[6];
+        (vmin, vtime)
+    }
+
+    /// Returns true if in canonical mode.
+    pub fn is_canonical(&self) -> bool {
+        (self.termios.c_lflag & ICANON) != 0
+    }
+
     /// Update termios.  If canonical mode is toggled off, flushes the edit
     /// buffer so that any pending characters become available for raw reads.
     pub fn set_termios(&mut self, t: &UserTermios) {

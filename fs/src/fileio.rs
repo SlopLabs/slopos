@@ -11,7 +11,8 @@ use slopos_abi::syscall::{
 };
 
 use slopos_lib::kernel_services::driver_runtime::{
-    DriverTaskHandle, block_current_task, current_task, scheduler_is_enabled, unblock_task,
+    DriverTaskHandle, block_current_task, current_task, current_task_controlling_tty,
+    scheduler_is_enabled, unblock_task,
 };
 use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_lib::kernel_services::syscall_services::tty;
@@ -648,6 +649,60 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         Some(p) => p,
         None => return -1,
     };
+
+    if path_bytes == b"/dev/tty" {
+        return with_tables(|kernel, processes| {
+            let tty_idx = match current_task_controlling_tty() {
+                Some(idx) => idx,
+                None => return -6,
+            };
+
+            let kernel_ptr = kernel as *mut FileTableSlot;
+            let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
+                t as *mut FileTableSlot
+            } else if let Some(t) = find_free_table(processes) {
+                t as *mut FileTableSlot
+            } else {
+                kernel_ptr
+            };
+            let table: &mut FileTableSlot = unsafe { &mut *table_ptr };
+
+            if !table.in_use {
+                table.in_use = true;
+                table.process_id = process_id;
+                reset_table(table);
+            }
+
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+            let Some(slot_idx) = find_free_slot(table) else {
+                drop(guard);
+                return -1;
+            };
+
+            let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
+            desc.inode = 0;
+            desc.fs = None;
+            desc.flags = flags;
+            desc.position = 0;
+            desc.valid = true;
+            desc.tty_index = Some(tty_idx);
+            desc.pipe_id = INVALID_PIPE_ID;
+            desc.socket_idx = INVALID_SOCKET_IDX;
+            desc.pipe_read_end = false;
+            desc.pipe_write_end = false;
+
+            if tty::open_ref(tty_idx) < 0 {
+                reset_descriptor(desc);
+                drop(guard);
+                return -1;
+            }
+
+            drop(guard);
+            slot_idx as c_int
+        });
+    }
 
     let create = (flags & USER_FS_OPEN_CREAT) != 0;
 

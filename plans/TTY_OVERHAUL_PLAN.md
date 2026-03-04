@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + Phase 6 Complete + Phase 7 Complete + **Phase 8 Complete** (Phases 9–10 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + Phase 6 Complete + Phase 7 Complete + Phase 8 Complete + **Phase 9 Complete** (Phase 10 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -52,7 +52,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 6 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/core_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/ldisc.rs`, `core/src/scheduler/task.rs`, `core/src/scheduler/task_struct.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty_tests.rs` | — |
+| 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/syscall_services_init.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 10 | Verification | — | — |
 
 ---
@@ -84,8 +84,8 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | Output processing | OPOST, ONLCR, OCRNL, etc. | Yes | ❌ None |
 | Input flags | ICRNL, INLCR, IGNCR, ISTRIP, IXON/IXOFF | Yes | ❌ None |
 | Echo modes | ECHO, ECHOCTL, ECHOKE, ECHOPRT | Yes | ⚠️ ECHO, ECHOE, ECHOK only |
-| VMIN/VTIME | Full non-canonical timing | Yes | ❌ Parsed but not enforced |
-| Controlling terminal | Per-process `/dev/tty` | Per-process scheme | ❌ Ad-hoc `TTY_FOCUSED_TASK_ID` |
+| VMIN/VTIME | Full non-canonical timing | Yes | ✅ Enforced (all 4 POSIX cases) |
+| Controlling terminal | Per-process `/dev/tty` | Per-process scheme | ✅ `/dev/tty` resolves to controlling terminal |
 | Sessions | `setsid()`, session leader | Scheme-based | ❌ None |
 | Job control signals | SIGTTIN, SIGTTOU, SIGTSTP | Yes | ❌ Only SIGINT |
 | PTY | Full master/slave | `ptyd` | ❌ None |
@@ -1185,10 +1185,20 @@ Documented in `table.rs` module doc:
 | `drivers/src/tty_tests.rs` | Migrated `TTY_TABLE` → `TTY_SLOTS` in existing tests; added 7 Phase 8 regression tests |
 ---
 
-## 13. Phase 9: Rust Idioms & Termios Completion
+## 13. Phase 9: Rust Idioms & Termios Completion ✅ COMPLETED
 
 > **Priority**: P2 — Improves code quality and enables realistic userspace.
 > **Rationale**: The current codebase uses C-style error patterns (`isize`, `-1`, raw pointers) internally where Rust `Result` types and slices would catch bugs at compile time.  Additionally, `VMIN/VTIME` is parsed but not enforced — terminal applications like readline and curses depend on this for responsive input.
+
+**Status**: Completed. Build clean. `cargo fmt --all`, `just build`, and `just test` pass (1026/1026 tests, 0 failures, 10 new Phase 9 regression tests).
+
+**Implementation summary**:
+- **13.1 (Result-based error handling)**: Added `TtyError` enum with 7 variants (`InvalidIndex`, `NotAllocated`, `BackgroundRead`, `BackgroundWrite`, `HungUp`, `WouldBlock`, `PermissionDenied`). Converted all 14 public API functions (`read`, `write`, `get_termios`, `set_termios`, `get_winsize`, `set_winsize`, `get_foreground_pgrp`, `set_foreground_pgrp`, `set_foreground_pgrp_checked`, `get_session_id`, `open_ref`, `close_ref`, `set_compositor_focus`, `get_compositor_focus`) to return `Result<T, TtyError>`. Void/bool helpers (`push_input`, `hangup`, `attach_session`, etc.) left unchanged.
+- **13.2 (Slice-based internal API)**: `read()` now accepts `&mut [u8]`, `write()` accepts `&[u8]` internally. Raw pointer conversion happens only at the syscall adapter boundary in `syscall_services_init.rs` (16 adapter functions updated).
+- **13.3 (VMIN/VTIME enforcement)**: Implemented all 4 POSIX non-canonical read cases using `wait_event_timeout` from `lib/src/waitqueue.rs`. Added `vmin_vtime()` and `is_canonical()` helpers to `ldisc.rs`. Case matrix: VMIN=0/VTIME=0 (immediate return), VMIN=0/VTIME>0 (timed wait), VMIN>0/VTIME=0 (block until VMIN bytes), VMIN>0/VTIME>0 (inter-byte timeout).
+- **13.4 (`/dev/tty` support)**: Added intercept in `fs/src/fileio.rs::file_open_for_process()` that resolves `/dev/tty` to the calling process's controlling terminal via `current_task_controlling_tty()` from `DriverRuntimeServices`. Returns `-ENXIO` if no controlling terminal. Wired through `core/src/driver_hooks.rs` reading the task struct's `controlling_tty: Option<TtyIndex>` field.
+- **13.5 (ABI boundary preserved)**: The `TtyServices` trait in `lib/` was NOT modified — it retains raw pointer signatures for ABI stability. Result/slice conversion happens entirely in the adapter layer (`syscall_services_init.rs`). Error mapping: `WouldBlock → -11 (EAGAIN)`, `HungUp → -5 (EIO)`, others `→ -1`.
+- **Regression tests**: 10 new Phase 9 tests: `test_phase9_tty_error_variants` (all 7 error variants exist), `test_phase9_read_returns_result` (read returns Ok), `test_phase9_read_invalid_index_error` (out-of-range index), `test_phase9_read_not_allocated_error` (unallocated slot), `test_phase9_write_returns_result` (write returns Ok with count), `test_phase9_get_termios_returns_result` (termios retrieval), `test_phase9_vmin0_vtime0_immediate_return` (immediate non-canonical read), `test_phase9_vmin_enforcement` (VMIN byte count enforcement), `test_phase9_set_fg_pgrp_checked_permission_denied` (permission error on non-member pgrp), `test_phase9_hangup_read_returns_hung_up` (hung-up TTY returns HungUp error).
 
 **Goal**: Adopt Rust-idiomatic error handling internally, enforce VMIN/VTIME in non-canonical mode, and add `/dev/tty` support for POSIX compliance.
 

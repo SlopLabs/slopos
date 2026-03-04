@@ -14,6 +14,7 @@ use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
 use crate::tty;
+use crate::tty::TtyError;
 use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LineDisc, OutputAction};
@@ -24,9 +25,9 @@ use crate::tty::table::TTY_SLOTS;
 fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
-        let n = tty::read(idx, scratch.as_mut_ptr(), scratch.len(), true);
-        if n <= 0 {
-            break;
+        match tty::read(idx, &mut scratch, true) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => continue,
         }
     }
 }
@@ -546,7 +547,7 @@ pub fn test_session_set_fg_pgrp_checked_no_session() -> TestResult {
 /// Per-TTY API: get_session_id returns 0 when no session is attached.
 pub fn test_tty_get_session_id_default() -> TestResult {
     tty::table::tty_table_init();
-    let sid = tty::get_session_id(TtyIndex(0));
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     if sid != 0 {
         klog_info!(
             "TTY_TEST: BUG - default session_id should be 0, got {}",
@@ -561,7 +562,7 @@ pub fn test_tty_get_session_id_default() -> TestResult {
 pub fn test_tty_attach_session() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 300, 300);
-    let sid = tty::get_session_id(TtyIndex(0));
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     // Clean up.
     tty::detach_session(TtyIndex(0));
     if sid != 300 {
@@ -579,7 +580,7 @@ pub fn test_tty_detach_session() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 400, 400);
     tty::detach_session(TtyIndex(0));
-    let sid = tty::get_session_id(TtyIndex(0));
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     if sid != 0 {
         klog_info!(
             "TTY_TEST: BUG - detach_session did not reset session_id (got {})",
@@ -596,10 +597,10 @@ pub fn test_tty_detach_session_by_id() -> TestResult {
     tty::attach_session(TtyIndex(0), 500, 500);
     // Detach with wrong ID — should be a no-op.
     tty::detach_session_by_id(999);
-    let sid_after_wrong = tty::get_session_id(TtyIndex(0));
+    let sid_after_wrong = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     // Detach with correct ID.
     tty::detach_session_by_id(500);
-    let sid_after_correct = tty::get_session_id(TtyIndex(0));
+    let sid_after_correct = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     if sid_after_wrong != 500 {
         klog_info!(
             "TTY_TEST: BUG - detach_session_by_id with wrong ID should be no-op (got {})",
@@ -623,16 +624,16 @@ pub fn test_tty_set_fg_pgrp_checked() -> TestResult {
     tty::attach_session(TtyIndex(0), 600, 600);
     // Same session — should succeed.
     let ok = tty::set_foreground_pgrp_checked(TtyIndex(0), 700, 600);
-    let pgid = tty::get_foreground_pgrp(TtyIndex(0));
+    let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     // Different session — should fail.
     let denied = tty::set_foreground_pgrp_checked(TtyIndex(0), 800, 999);
-    let pgid_after = tty::get_foreground_pgrp(TtyIndex(0));
+    let pgid_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     // Clean up.
     tty::detach_session(TtyIndex(0));
-    tty::set_foreground_pgrp(TtyIndex(0), 0);
-    if ok != 0 {
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
+    if ok.is_err() {
         klog_info!(
-            "TTY_TEST: BUG - set_fg_pgrp_checked same-session returned {}",
+            "TTY_TEST: BUG - set_fg_pgrp_checked same-session returned {:?}",
             ok
         );
         return TestResult::Fail;
@@ -644,9 +645,9 @@ pub fn test_tty_set_fg_pgrp_checked() -> TestResult {
         );
         return TestResult::Fail;
     }
-    if denied != -1 {
+    if denied.is_ok() {
         klog_info!(
-            "TTY_TEST: BUG - set_fg_pgrp_checked different-session should return -1 (got {})",
+            "TTY_TEST: BUG - set_fg_pgrp_checked different-session should fail (got {:?})",
             denied
         );
         return TestResult::Fail;
@@ -841,9 +842,9 @@ pub fn test_set_active_tty() -> TestResult {
 /// set_foreground_pgrp / get_foreground_pgrp round-trip via per-TTY API.
 pub fn test_foreground_pgrp() -> TestResult {
     tty::table::tty_table_init();
-    tty::set_foreground_pgrp(TtyIndex(0), 42);
-    let pgid = tty::get_foreground_pgrp(TtyIndex(0));
-    tty::set_foreground_pgrp(TtyIndex(0), 0); // Reset.
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 42);
+    let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0); // Reset.
 
     if pgid != 42 {
         klog_info!(
@@ -860,9 +861,9 @@ pub fn test_foreground_pgrp() -> TestResult {
 /// Verifies that compositor focus only sets `focused_task_id`, NOT `fg_pgrp`.
 pub fn test_compositor_focus() -> TestResult {
     tty::table::tty_table_init();
-    tty::set_compositor_focus(99);
-    let focus = tty::get_compositor_focus();
-    tty::set_compositor_focus(0); // Reset.
+    let _ = tty::set_compositor_focus(99);
+    let focus = tty::get_compositor_focus().unwrap_or(0);
+    let _ = tty::set_compositor_focus(0); // Reset.
 
     if focus != 99 {
         klog_info!(
@@ -874,10 +875,10 @@ pub fn test_compositor_focus() -> TestResult {
 
     // Verify that fg_pgrp was NOT modified by set_compositor_focus.
     tty::table::tty_table_init();
-    let fg_before = tty::get_foreground_pgrp(TtyIndex(0));
-    tty::set_compositor_focus(42);
-    let fg_after = tty::get_foreground_pgrp(TtyIndex(0));
-    tty::set_compositor_focus(0); // Reset.
+    let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let _ = tty::set_compositor_focus(42);
+    let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let _ = tty::set_compositor_focus(0); // Reset.
 
     if fg_before != fg_after {
         klog_info!(
@@ -898,10 +899,10 @@ pub fn test_keyboard_enter_scancode_reaches_active_tty() -> TestResult {
     crate::ps2::keyboard::handle_scancode(0x1C);
 
     let mut out = [0u8; 8];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    if n != 1 || out[0] != b'\n' {
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    if n != Ok(1) || out[0] != b'\n' {
         klog_info!(
-            "TTY_TEST: BUG - enter scancode did not reach active tty (n={}, b0={})",
+            "TTY_TEST: BUG - enter scancode did not reach active tty (n={:?}, b0={})",
             n,
             out[0]
         );
@@ -920,15 +921,15 @@ pub fn test_keyboard_scancode_routes_to_active_tty_index() -> TestResult {
     crate::ps2::keyboard::handle_scancode(0x1C);
 
     let mut out0 = [0u8; 8];
-    let n0 = tty::read(TtyIndex(0), out0.as_mut_ptr(), out0.len(), true);
+    let n0 = tty::read(TtyIndex(0), &mut out0, true);
     let mut out1 = [0u8; 8];
-    let n1 = tty::read(TtyIndex(1), out1.as_mut_ptr(), out1.len(), true);
+    let n1 = tty::read(TtyIndex(1), &mut out1, true);
 
     tty::set_active_tty(TtyIndex(0));
 
-    if n0 != -11 || n1 != 1 || out1[0] != b'\n' {
+    if n0 != Err(TtyError::WouldBlock) || n1 != Ok(1) || out1[0] != b'\n' {
         klog_info!(
-            "TTY_TEST: BUG - active tty routing mismatch (n0={}, n1={}, b1={})",
+            "TTY_TEST: BUG - active tty routing mismatch (n0={:?}, n1={:?}, b1={})",
             n0,
             n1,
             out1[0]
@@ -944,21 +945,20 @@ pub fn test_keyboard_extended_up_arrow_reaches_tty() -> TestResult {
     tty::set_active_tty(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
 
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !slopos_abi::syscall::ICANON;
-    tty::set_termios(TtyIndex(0), &raw as *const _);
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     crate::ps2::keyboard::handle_scancode(0xE0);
     crate::ps2::keyboard::handle_scancode(0x48);
 
     let mut out = [0u8; 8];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
-    if n != 1 || out[0] != 0x82 {
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+    if n != Ok(1) || out[0] != 0x82 {
         klog_info!(
-            "TTY_TEST: BUG - extended up arrow not delivered (n={}, b0=0x{:02x})",
+            "TTY_TEST: BUG - extended up arrow not delivered (n={:?}, b0=0x{:02x})",
             n,
             out[0]
         );
@@ -1397,18 +1397,17 @@ pub fn test_ldisc_edit_content() -> TestResult {
 pub fn test_tty_write_returns_input_len() -> TestResult {
     tty::table::tty_table_init();
     // Enable OPOST+ONLCR on TTY 0.
-    let mut t = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut t as *mut _);
+    let mut t = tty::get_termios(TtyIndex(0)).unwrap();
     let saved = t;
     t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
-    tty::set_termios(TtyIndex(0), &t as *const _);
+    tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"hello\n";
     let n = tty::write(TtyIndex(0), data);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
-    if n != data.len() {
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+    if n != Ok(data.len()) {
         klog_info!(
-            "TTY_TEST: BUG - write returned {} instead of {}",
+            "TTY_TEST: BUG - write returned {:?} instead of Ok({})",
             n,
             data.len()
         );
@@ -1456,22 +1455,21 @@ pub fn test_keyboard_break_code_no_input() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
 
     // Switch to raw mode so any delivered byte is immediately readable.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !slopos_abi::syscall::ICANON;
-    tty::set_termios(TtyIndex(0), &raw as *const _);
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Send break code for 'a' (0x1E | 0x80 = 0x9E).
     crate::ps2::keyboard::handle_scancode(0x9E);
 
     let mut out = [0u8; 8];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    if n > 0 {
+    if matches!(n, Ok(v) if v > 0) {
         klog_info!(
-            "TTY_TEST: BUG - break code produced input (n={}, b0=0x{:02x})",
+            "TTY_TEST: BUG - break code produced input (n={:?}, b0=0x{:02x})",
             n,
             out[0]
         );
@@ -1488,11 +1486,10 @@ pub fn test_keyboard_modifier_no_input() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
 
     // Switch to raw mode.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !slopos_abi::syscall::ICANON;
-    tty::set_termios(TtyIndex(0), &raw as *const _);
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Press Left Shift (make code 0x2A), Left Ctrl (0x1D), Left Alt (0x38).
     crate::ps2::keyboard::handle_scancode(0x2A); // shift press
@@ -1505,12 +1502,12 @@ pub fn test_keyboard_modifier_no_input() -> TestResult {
     crate::ps2::keyboard::handle_scancode(0xB8); // alt release
 
     let mut out = [0u8; 8];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    if n > 0 {
+    if matches!(n, Ok(v) if v > 0) {
         klog_info!(
-            "TTY_TEST: BUG - modifier key produced input (n={}, b0=0x{:02x})",
+            "TTY_TEST: BUG - modifier key produced input (n={:?}, b0=0x{:02x})",
             n,
             out[0]
         );
@@ -1526,23 +1523,22 @@ pub fn test_keyboard_press_release_single_char() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
 
     // Switch to raw mode.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !slopos_abi::syscall::ICANON;
-    tty::set_termios(TtyIndex(0), &raw as *const _);
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Press 'a' (0x1E) then release 'a' (0x9E).
     crate::ps2::keyboard::handle_scancode(0x1E); // press
     crate::ps2::keyboard::handle_scancode(0x9E); // release
 
     let mut out = [0u8; 8];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    if n != 1 || out[0] != b'a' {
+    if n != Ok(1) || out[0] != b'a' {
         klog_info!(
-            "TTY_TEST: BUG - press+release should yield 1 char 'a' (n={}, b0=0x{:02x})",
+            "TTY_TEST: BUG - press+release should yield 1 char 'a' (n={:?}, b0=0x{:02x})",
             n,
             out[0]
         );
@@ -1560,15 +1556,14 @@ pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     drain_tty_nonblock(TtyIndex(1));
 
     // Switch to raw mode on TTY 1.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(1), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(1)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !slopos_abi::syscall::ICANON;
-    tty::set_termios(TtyIndex(1), &raw as *const _);
+    tty::set_termios(TtyIndex(1), &raw).unwrap();
 
     // has_data should be false — no hardware polling for VConsole.
     let has = tty::has_data(TtyIndex(1));
-    tty::set_termios(TtyIndex(1), &saved as *const _);
+    tty::set_termios(TtyIndex(1), &saved).unwrap();
 
     if has {
         klog_info!("TTY_TEST: BUG - VConsole drain_hw_input produced phantom data");
@@ -1584,23 +1579,22 @@ pub fn test_keyboard_multi_key_sequence() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
 
     // Switch to raw mode.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !slopos_abi::syscall::ICANON;
-    tty::set_termios(TtyIndex(0), &raw as *const _);
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Press 'h' (0x23), 'i' (0x17).
     crate::ps2::keyboard::handle_scancode(0x23); // 'h'
     crate::ps2::keyboard::handle_scancode(0x17); // 'i'
 
     let mut out = [0u8; 8];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    if n != 2 || out[0] != b'h' || out[1] != b'i' {
+    if n != Ok(2) || out[0] != b'h' || out[1] != b'i' {
         klog_info!(
-            "TTY_TEST: BUG - multi-key sequence mismatch (n={}, b0=0x{:02x}, b1=0x{:02x})",
+            "TTY_TEST: BUG - multi-key sequence mismatch (n={:?}, b0=0x{:02x}, b1=0x{:02x})",
             n,
             out[0],
             out[1]
@@ -1620,21 +1614,20 @@ pub fn test_keyboard_multi_key_sequence() -> TestResult {
 pub fn test_tty_write_output_processing() -> TestResult {
     tty::table::tty_table_init();
     // Save current termios.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     // Enable OPOST + ONLCR.
     let mut t = saved;
     t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
-    tty::set_termios(TtyIndex(0), &t as *const _);
+    tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"hello\nworld\n";
     let n = tty::write(TtyIndex(0), data);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
     // write() returns input length regardless of output expansion.
-    if n != data.len() {
+    if n != Ok(data.len()) {
         klog_info!(
-            "TTY_TEST: BUG - write with OPOST+ONLCR returned {} instead of {}",
+            "TTY_TEST: BUG - write with OPOST+ONLCR returned {:?} instead of Ok({})",
             n,
             data.len()
         );
@@ -1647,19 +1640,18 @@ pub fn test_tty_write_output_processing() -> TestResult {
 pub fn test_tty_write_raw_passthrough() -> TestResult {
     tty::table::tty_table_init();
     // Ensure c_oflag is 0 (no output processing — default).
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
     t.c_oflag = 0;
-    tty::set_termios(TtyIndex(0), &t as *const _);
+    tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"raw\ndata";
     let n = tty::write(TtyIndex(0), data);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    if n != data.len() {
+    if n != Ok(data.len()) {
         klog_info!(
-            "TTY_TEST: BUG - raw write returned {} instead of {}",
+            "TTY_TEST: BUG - raw write returned {:?} instead of Ok({})",
             n,
             data.len()
         );
@@ -1668,14 +1660,14 @@ pub fn test_tty_write_raw_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: tty::write to invalid TTY index returns 0.
+/// Phase 5: tty::write to non-existent slot returns NotAllocated.
 pub fn test_tty_write_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let data = b"nothing";
     let n = tty::write(TtyIndex(7), data); // Slot 7 is not allocated.
-    if n != 0 {
+    if n != Err(TtyError::NotAllocated) {
         klog_info!(
-            "TTY_TEST: BUG - write to invalid TTY returned {} instead of 0",
+            "TTY_TEST: BUG - write to invalid TTY returned {:?} instead of NotAllocated",
             n
         );
         return TestResult::Fail;
@@ -1689,22 +1681,19 @@ pub fn test_tty_per_tty_termios_isolation() -> TestResult {
     tty::table::tty_table_init();
 
     // Save TTY 0 and TTY 1 termios.
-    let mut t0_saved = slopos_abi::syscall::UserTermios::default();
-    let mut t1_saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut t0_saved as *mut _);
-    tty::get_termios(TtyIndex(1), &mut t1_saved as *mut _);
+    let t0_saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let t1_saved = tty::get_termios(TtyIndex(1)).unwrap();
 
     // Set OPOST on TTY 0 only.
     let mut t0_new = t0_saved;
     t0_new.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
-    tty::set_termios(TtyIndex(0), &t0_new as *const _);
+    tty::set_termios(TtyIndex(0), &t0_new).unwrap();
 
     // Read back TTY 1 — it should still have its original c_oflag.
-    let mut t1_check = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(1), &mut t1_check as *mut _);
+    let t1_check = tty::get_termios(TtyIndex(1)).unwrap();
 
     // Restore TTY 0.
-    tty::set_termios(TtyIndex(0), &t0_saved as *const _);
+    tty::set_termios(TtyIndex(0), &t0_saved).unwrap();
 
     if t1_check.c_oflag != t1_saved.c_oflag {
         klog_info!(
@@ -1722,10 +1711,8 @@ pub fn test_tty_per_tty_termios_isolation() -> TestResult {
 pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
     tty::table::tty_table_init();
 
-    let mut ws0_saved = slopos_abi::syscall::UserWinsize::default();
-    let mut ws1_saved = slopos_abi::syscall::UserWinsize::default();
-    tty::get_winsize(TtyIndex(0), &mut ws0_saved as *mut _);
-    tty::get_winsize(TtyIndex(1), &mut ws1_saved as *mut _);
+    let ws0_saved = tty::get_winsize(TtyIndex(0)).unwrap();
+    let ws1_saved = tty::get_winsize(TtyIndex(1)).unwrap();
 
     // Set a distinct winsize on TTY 0.
     let custom = slopos_abi::syscall::UserWinsize {
@@ -1734,14 +1721,13 @@ pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
         ws_xpixel: 1920,
         ws_ypixel: 1080,
     };
-    tty::set_winsize(TtyIndex(0), &custom as *const _);
+    tty::set_winsize(TtyIndex(0), &custom).unwrap();
 
     // Read back TTY 1 — should be unchanged.
-    let mut ws1_check = slopos_abi::syscall::UserWinsize::default();
-    tty::get_winsize(TtyIndex(1), &mut ws1_check as *mut _);
+    let ws1_check = tty::get_winsize(TtyIndex(1)).unwrap();
 
     // Restore TTY 0.
-    tty::set_winsize(TtyIndex(0), &ws0_saved as *const _);
+    tty::set_winsize(TtyIndex(0), &ws0_saved).unwrap();
 
     if ws1_check.ws_row != ws1_saved.ws_row || ws1_check.ws_col != ws1_saved.ws_col {
         klog_info!(
@@ -1761,15 +1747,15 @@ pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     tty::table::tty_table_init();
 
     // Set different foreground pgrps on TTY 0 and TTY 1.
-    tty::set_foreground_pgrp(TtyIndex(0), 100);
-    tty::set_foreground_pgrp(TtyIndex(1), 200);
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 100);
+    let _ = tty::set_foreground_pgrp(TtyIndex(1), 200);
 
-    let pgid0 = tty::get_foreground_pgrp(TtyIndex(0));
-    let pgid1 = tty::get_foreground_pgrp(TtyIndex(1));
+    let pgid0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let pgid1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
 
     // Clean up.
-    tty::set_foreground_pgrp(TtyIndex(0), 0);
-    tty::set_foreground_pgrp(TtyIndex(1), 0);
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
+    let _ = tty::set_foreground_pgrp(TtyIndex(1), 0);
 
     if pgid0 != 100 {
         klog_info!("TTY_TEST: BUG - TTY 0 fg_pgrp should be 100, got {}", pgid0);
@@ -1816,8 +1802,8 @@ pub fn test_tty_per_tty_session_isolation() -> TestResult {
     tty::table::tty_table_init();
 
     tty::attach_session(TtyIndex(0), 500, 500);
-    let sid0 = tty::get_session_id(TtyIndex(0));
-    let sid1 = tty::get_session_id(TtyIndex(1));
+    let sid0 = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+    let sid1 = tty::get_session_id(TtyIndex(1)).unwrap_or(0);
 
     // Clean up.
     tty::detach_session(TtyIndex(0));
@@ -1840,10 +1826,10 @@ pub fn test_tty_per_tty_session_isolation() -> TestResult {
 pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let mut buf = [0u8; 8];
-    let n = tty::read(TtyIndex(7), buf.as_mut_ptr(), buf.len(), true);
-    if n != -1 {
+    let n = tty::read(TtyIndex(7), &mut buf, true);
+    if n != Err(TtyError::NotAllocated) {
         klog_info!(
-            "TTY_TEST: BUG - read from invalid TTY returned {} instead of -1",
+            "TTY_TEST: BUG - read from invalid TTY returned {:?} instead of NotAllocated",
             n
         );
         return TestResult::Fail;
@@ -1891,13 +1877,13 @@ pub fn test_signal_constants() -> TestResult {
 pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
     tty::table::tty_table_init();
     // Set a known fg_pgrp first.
-    tty::set_foreground_pgrp(TtyIndex(0), 42);
-    let fg_before = tty::get_foreground_pgrp(TtyIndex(0));
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 42);
+    let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
 
     // Change compositor focus.
-    tty::set_compositor_focus(99);
-    let fg_after = tty::get_foreground_pgrp(TtyIndex(0));
-    tty::set_compositor_focus(0); // Reset.
+    let _ = tty::set_compositor_focus(99);
+    let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let _ = tty::set_compositor_focus(0); // Reset.
 
     if fg_before != fg_after {
         klog_info!(
@@ -1943,9 +1929,9 @@ pub fn test_tty_open_count_lifecycle() -> TestResult {
     let close1 = tty::close_ref(TtyIndex(0));
     let close2 = tty::close_ref(TtyIndex(0));
 
-    if open1 != 1 || open2 != 2 || close1 != 1 || close2 != 0 {
+    if open1 != Ok(1) || open2 != Ok(2) || close1 != Ok(1) || close2 != Ok(0) {
         klog_info!(
-            "TTY_TEST: BUG - open/close ref counts mismatch: {} {} {} {}",
+            "TTY_TEST: BUG - open/close ref counts mismatch: {:?} {:?} {:?} {:?}",
             open1,
             open2,
             close1,
@@ -1963,7 +1949,7 @@ pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
     tty::push_input(TtyIndex(0), b'\n');
 
     tty::hangup(TtyIndex(0));
-    let sid = tty::get_session_id(TtyIndex(0));
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     let hung = tty::is_hung_up(TtyIndex(0));
     let has_data = tty::has_data(TtyIndex(0));
 
@@ -1994,14 +1980,14 @@ pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
     tty::hangup(TtyIndex(0));
 
     let mut out = [0u8; 8];
-    let rc = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+    let rc = tty::read(TtyIndex(0), &mut out, true);
 
     let _ = tty::open_ref(TtyIndex(0));
     let _ = tty::close_ref(TtyIndex(0));
 
-    if rc != -5 {
+    if rc != Err(TtyError::HungUp) {
         klog_info!(
-            "TTY_TEST: BUG - nonblock read on hung tty expected -5, got {}",
+            "TTY_TEST: BUG - nonblock read on hung tty expected HungUp, got {:?}",
             rc
         );
         return TestResult::Fail;
@@ -2015,19 +2001,199 @@ pub fn test_tty_hangup_blocking_read_eof() -> TestResult {
     tty::hangup(TtyIndex(0));
 
     let mut out = [0u8; 8];
-    let rc = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), false);
+    let rc = tty::read(TtyIndex(0), &mut out, false);
 
     let _ = tty::open_ref(TtyIndex(0));
     let _ = tty::close_ref(TtyIndex(0));
 
-    if rc != 0 {
+    if rc != Ok(0) {
         klog_info!(
-            "TTY_TEST: BUG - blocking read on hung tty expected EOF 0, got {}",
+            "TTY_TEST: BUG - blocking read on hung tty expected EOF 0, got {:?}",
             rc
         );
         return TestResult::Fail;
     }
     TestResult::Pass
+}
+
+pub fn test_phase9_tty_error_variants() -> TestResult {
+    let e1 = TtyError::InvalidIndex;
+    let e2 = TtyError::NotAllocated;
+    let e3 = TtyError::WouldBlock;
+    let e4 = TtyError::HungUp;
+    let e5 = TtyError::PermissionDenied;
+    let e6 = TtyError::BackgroundRead;
+    if e1 == e2 || e2 == e3 || e3 == e4 || e4 == e5 || e5 == e6 {
+        klog_info!("TTY_TEST: BUG - TtyError variants not distinct");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase9_read_returns_result() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let mut buf = [0u8; 8];
+    match tty::read(TtyIndex(0), &mut buf, true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - empty nonblock read expected WouldBlock, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase9_read_invalid_index_error() -> TestResult {
+    let mut buf = [0u8; 8];
+    match tty::read(TtyIndex(99), &mut buf, true) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - expected InvalidIndex, got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_read_not_allocated_error() -> TestResult {
+    tty::table::tty_table_init();
+    let mut buf = [0u8; 8];
+    match tty::read(TtyIndex(5), &mut buf, true) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - expected NotAllocated, got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_write_returns_result() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::write(TtyIndex(0), b"hello") {
+        Ok(5) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - write expected Ok(5), got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_get_termios_returns_result() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::get_termios(TtyIndex(0)) {
+        Ok(t) => {
+            if (t.c_lflag & slopos_abi::syscall::ICANON) == 0 {
+                klog_info!("TTY_TEST: BUG - default termios should have ICANON");
+                return TestResult::Fail;
+            }
+            TestResult::Pass
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_termios failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_vmin0_vtime0_immediate_return() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[6] = 0;
+    raw.c_cc[5] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, false);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(0) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=0/VTIME=0 expected Ok(0), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_vmin_enforcement() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[6] = 3;
+    raw.c_cc[5] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'a');
+    tty::push_input(TtyIndex(0), b'b');
+    tty::push_input(TtyIndex(0), b'c');
+
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(n) if n >= 3 => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=3 read expected Ok(>=3), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_set_fg_pgrp_checked_permission_denied() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 10, 10);
+    match tty::set_foreground_pgrp_checked(TtyIndex(0), 20, 99) {
+        Err(TtyError::PermissionDenied) => {
+            tty::detach_session(TtyIndex(0));
+            TestResult::Pass
+        }
+        other => {
+            tty::detach_session(TtyIndex(0));
+            klog_info!("TTY_TEST: BUG - expected PermissionDenied, got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase9_hangup_read_returns_hung_up() -> TestResult {
+    tty::table::tty_table_init();
+    let _ = tty::open_ref(TtyIndex(0));
+    tty::hangup(TtyIndex(0));
+
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+
+    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::close_ref(TtyIndex(0));
+
+    match result {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - hangup nonblock read expected HungUp, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
 }
 
 // ===========================================================================
@@ -2083,19 +2249,18 @@ pub fn test_phase8_split_write_returns_input_len() -> TestResult {
     tty::table::tty_table_init();
 
     // Enable OPOST+ONLCR on TTY 0 so NL expands to CR+NL.
-    let mut saved = slopos_abi::syscall::UserTermios::default();
-    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
     t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
-    tty::set_termios(TtyIndex(0), &t as *const _);
+    tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"abc\ndef\n";
     let n = tty::write(TtyIndex(0), data);
-    tty::set_termios(TtyIndex(0), &saved as *const _);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    if n != data.len() {
+    if n != Ok(data.len()) {
         klog_info!(
-            "TTY_TEST: BUG - split-write returned {} instead of {}",
+            "TTY_TEST: BUG - split-write returned {:?} instead of Ok({})",
             n,
             data.len()
         );
@@ -2140,12 +2305,12 @@ pub fn test_phase8_merged_drain_read() -> TestResult {
     tty::push_input(TtyIndex(0), b'\n');
 
     let mut out = [0u8; 16];
-    let n = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
-    if n != 3 || &out[..3] != b"ok\n" {
+    let n = tty::read(TtyIndex(0), &mut out, true);
+    if n != Ok(3) || &out[..3] != b"ok\n" {
         klog_info!(
-            "TTY_TEST: BUG - merged drain+read mismatch (n={}, data={:?})",
+            "TTY_TEST: BUG - merged drain+read mismatch (n={:?}, data={:?})",
             n,
-            &out[..core::cmp::max(n as usize, 0)]
+            &out[..3]
         );
         return TestResult::Fail;
     }
@@ -2302,6 +2467,16 @@ slopos_lib::define_test_suite!(
         test_tty_hangup_sets_flag_and_detaches_session,
         test_tty_hangup_nonblock_read_eio,
         test_tty_hangup_blocking_read_eof,
+        test_phase9_tty_error_variants,
+        test_phase9_read_returns_result,
+        test_phase9_read_invalid_index_error,
+        test_phase9_read_not_allocated_error,
+        test_phase9_write_returns_result,
+        test_phase9_get_termios_returns_result,
+        test_phase9_vmin0_vtime0_immediate_return,
+        test_phase9_vmin_enforcement,
+        test_phase9_set_fg_pgrp_checked_permission_denied,
+        test_phase9_hangup_read_returns_hung_up,
         // Phase 8: Per-TTY Locking & Performance
         test_phase8_per_tty_lock_independence,
         test_phase8_driver_id_round_trip,
