@@ -10,8 +10,9 @@
 //! terminal without receiving `SIGTTIN` / `SIGTTOU`.
 //!
 //! The compositor still drives `focused_task_id` for window-level focus.
-//! `set_focus()` (called by the compositor) sets both `focused_task_id` and
-//! `fg_pgrp` for backward compatibility until Phase 5 wires FD-level routing.
+//! `set_compositor_focus()` (called by the compositor) sets only
+//! `focused_task_id` — it does NOT alter `fg_pgrp`.  The two concepts are
+//! independent (Phase 6 split).
 
 /// Sentinel value indicating "no session attached".
 pub const NO_SESSION: u32 = 0;
@@ -154,29 +155,8 @@ impl TtySession {
         ForegroundCheck::BackgroundWrite
     }
 
-    /// Check if a given task/pgrp has focus (for read-side gating).
-    ///
-    /// This is a transitional helper that combines the old focus-based check
-    /// with the new session-based foreground check.  Once Phase 5 wires
-    /// per-FD controlling TTY, this can be simplified.
-    pub fn task_has_access(&self, task_id: u32, caller_pgid: u32) -> bool {
-        // Compositor focus takes priority (matches pre-Phase-4 behavior).
-        if self.focused_task_id != 0 && self.focused_task_id == task_id {
-            return true;
-        }
-
-        // Session-based foreground check.
-        if self.fg_pgrp != NO_FOREGROUND_PGRP && self.fg_pgrp == caller_pgid {
-            return true;
-        }
-
-        // No session, no focus — allow (permissive boot path).
-        if !self.has_session() && self.focused_task_id == 0 {
-            return true;
-        }
-
-        false
-    }
+    // NOTE: `task_has_access()` has been removed in Phase 6.
+    // Use `check_read()` and `check_write()` directly instead.
 
     /// Set the foreground process group, with session validation.
     ///

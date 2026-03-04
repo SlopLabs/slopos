@@ -1,7 +1,7 @@
 use core::ffi::c_char;
 use core::mem::size_of;
 
-use slopos_abi::syscall::{ERRNO_EINVAL, UserSysInfo};
+use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
 use slopos_lib::{InterruptFrame, klog_debug};
@@ -128,7 +128,7 @@ define_syscall!(syscall_user_read(ctx, args) {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let max_len = args.arg1_usize().min(USER_IO_MAX_BYTES);
 
-    let read_len = tty::read_cooked(0, tmp.as_mut_ptr(), max_len, false);
+    let read_len = tty::read_cooked(TtyIndex(0), tmp.as_mut_ptr(), max_len, false);
     if read_len < 0 {
         return ctx.err();
     }

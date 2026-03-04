@@ -7,7 +7,7 @@ use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
 use slopos_abi::net::INVALID_SOCKET_IDX;
 use slopos_abi::syscall::{
     F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, POLLERR,
-    POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET,
+    POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
 };
 
 use slopos_lib::kernel_services::driver_runtime::{
@@ -97,7 +97,7 @@ struct FileDescriptor {
     cloexec: bool,
     /// When `Some(idx)`, reads/writes route to TTY `idx` instead of a filesystem.
     /// When `None`, this is not a TTY descriptor.
-    tty_index: Option<u8>,
+    tty_index: Option<TtyIndex>,
     pipe_id: u32,
     socket_idx: u32,
     pipe_read_end: bool,
@@ -507,7 +507,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_READ,
         valid: true,
         cloexec: false,
-        tty_index: Some(0),
+        tty_index: Some(TtyIndex(0)),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -521,7 +521,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_WRITE,
         valid: true,
         cloexec: false,
-        tty_index: Some(0),
+        tty_index: Some(TtyIndex(0)),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -535,7 +535,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_WRITE,
         valid: true,
         cloexec: false,
-        tty_index: Some(0),
+        tty_index: Some(TtyIndex(0)),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -1246,7 +1246,7 @@ pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
 /// Return the TTY index for an open file descriptor, or `None` if the FD is
 /// not a TTY.  Used by the ioctl dispatcher to route TTY ioctls to the
 /// correct per-TTY instance.
-pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<u8> {
+pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return None;

@@ -1,11 +1,15 @@
 //! Regression tests for the TTY subsystem.
 //!
 //! Tests the `LineDisc`, `TtyDriverKind`, `TtyIndex`, TTY table, and
-//! the per-TTY public API (focus, foreground pgrp, active TTY).
+//! the per-TTY public API (compositor focus, foreground pgrp, active TTY).
 //!
 //! Phase 2 additions: input flag processing, output processing, signal
 //! generation, flow control, VLNEXT, VWERASE, ECHOCTL.
+//!
+//! Phase 6 additions: compositor focus / fg_pgrp split, check_read() as sole
+//! read gate, TtyIndex type safety, signal constant verification.
 
+use slopos_abi::syscall::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -168,9 +172,9 @@ pub fn test_ldisc_signal_ctrl_c() -> TestResult {
 
     let action = ld.input_char(0x03); // Ctrl+C
     match action {
-        InputAction::Signal(2) => TestResult::Pass,
+        InputAction::Signal(SIGINT) => TestResult::Pass,
         InputAction::Signal(s) => {
-            klog_info!("TTY_TEST: BUG - expected signal 2 (SIGINT), got {}", s);
+            klog_info!("TTY_TEST: BUG - expected SIGINT({}), got {}", SIGINT, s);
             TestResult::Fail
         }
         _ => {
@@ -425,48 +429,52 @@ pub fn test_session_check_write_tostop_background() -> TestResult {
     }
 }
 
-/// task_has_access: focused task is allowed.
-pub fn test_session_task_has_access_focus() -> TestResult {
-    let mut s = TtySession::new();
-    s.focused_task_id = 42;
-    if !s.task_has_access(42, 0) {
-        klog_info!("TTY_TEST: BUG - focused task should have access");
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-/// task_has_access: foreground pgrp member is allowed.
-pub fn test_session_task_has_access_fg_pgrp() -> TestResult {
+/// Phase 6: check_read replaces task_has_access — foreground task allowed.
+pub fn test_session_check_read_replaces_task_has_access_foreground() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
-    if !s.task_has_access(999, 10) {
-        klog_info!("TTY_TEST: BUG - fg pgrp member should have access");
-        return TestResult::Fail;
+    match s.check_read(10, 10) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fg pgrp member should be Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
     }
-    TestResult::Pass
 }
 
-/// task_has_access: permissive when no session and no focus.
-pub fn test_session_task_has_access_permissive() -> TestResult {
-    let s = TtySession::new();
-    if !s.task_has_access(999, 999) {
-        klog_info!("TTY_TEST: BUG - no session + no focus should be permissive");
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-/// task_has_access: denied when session active and caller not in fg group.
-pub fn test_session_task_has_access_denied() -> TestResult {
+/// Phase 6: check_read replaces task_has_access — background task gets BackgroundRead.
+pub fn test_session_check_read_replaces_task_has_access_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     s.focused_task_id = 0; // No compositor focus.
-    if s.task_has_access(999, 99) {
-        klog_info!("TTY_TEST: BUG - background task should be denied");
-        return TestResult::Fail;
+    match s.check_read(99, 10) {
+        ForegroundCheck::BackgroundRead => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - background task should be BackgroundRead, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
     }
-    TestResult::Pass
+}
+
+/// Phase 6: check_read replaces task_has_access — permissive when no session.
+pub fn test_session_check_read_replaces_task_has_access_permissive() -> TestResult {
+    let s = TtySession::new();
+    match s.check_read(999, 0) {
+        ForegroundCheck::NoSession => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - no session should be NoSession, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
 }
 
 /// set_fg_pgrp_checked: allowed when caller is in the same session.
@@ -821,15 +829,36 @@ pub fn test_foreground_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-/// set_focus / get_focus round-trip via per-TTY API.
-pub fn test_focus() -> TestResult {
+/// Phase 6: set_compositor_focus / get_compositor_focus round-trip.
+///
+/// Verifies that compositor focus only sets `focused_task_id`, NOT `fg_pgrp`.
+pub fn test_compositor_focus() -> TestResult {
     tty::table::tty_table_init();
-    tty::set_focus(99);
-    let focus = tty::get_focus();
-    tty::set_focus(0); // Reset.
+    tty::set_compositor_focus(99);
+    let focus = tty::get_compositor_focus();
+    tty::set_compositor_focus(0); // Reset.
 
     if focus != 99 {
-        klog_info!("TTY_TEST: BUG - focus round-trip failed (got {})", focus);
+        klog_info!(
+            "TTY_TEST: BUG - compositor focus round-trip failed (got {})",
+            focus
+        );
+        return TestResult::Fail;
+    }
+
+    // Verify that fg_pgrp was NOT modified by set_compositor_focus.
+    tty::table::tty_table_init();
+    let fg_before = tty::get_foreground_pgrp(TtyIndex(0));
+    tty::set_compositor_focus(42);
+    let fg_after = tty::get_foreground_pgrp(TtyIndex(0));
+    tty::set_compositor_focus(0); // Reset.
+
+    if fg_before != fg_after {
+        klog_info!(
+            "TTY_TEST: BUG - set_compositor_focus changed fg_pgrp ({} -> {})",
+            fg_before,
+            fg_after
+        );
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -1140,9 +1169,13 @@ pub fn test_ldisc_signal_ctrl_backslash() -> TestResult {
     let mut ld = LineDisc::new();
     let action = ld.input_char(0x1C); // Ctrl+\ = VQUIT default
     match action {
-        InputAction::Signal(3) => TestResult::Pass,
+        InputAction::Signal(SIGQUIT) => TestResult::Pass,
         InputAction::Signal(s) => {
-            klog_info!("TTY_TEST: BUG - expected SIGQUIT(3), got signal {}", s);
+            klog_info!(
+                "TTY_TEST: BUG - expected SIGQUIT({}), got signal {}",
+                SIGQUIT,
+                s
+            );
             TestResult::Fail
         }
         _ => {
@@ -1158,9 +1191,13 @@ pub fn test_ldisc_signal_ctrl_z() -> TestResult {
     // VSUSP default = 0x1A = Ctrl+Z.
     let action = ld.input_char(0x1A);
     match action {
-        InputAction::Signal(20) => TestResult::Pass,
+        InputAction::Signal(SIGTSTP) => TestResult::Pass,
         InputAction::Signal(s) => {
-            klog_info!("TTY_TEST: BUG - expected SIGTSTP(20), got signal {}", s);
+            klog_info!(
+                "TTY_TEST: BUG - expected SIGTSTP({}), got signal {}",
+                SIGTSTP,
+                s
+            );
             TestResult::Fail
         }
         _ => {
@@ -1789,6 +1826,90 @@ pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 6: Control-Plane Correctness regression tests
+// ===========================================================================
+
+/// Phase 6: TtyIndex from ABI crate is the same type used in drivers.
+pub fn test_tty_index_abi_type() -> TestResult {
+    let idx: slopos_abi::syscall::TtyIndex = slopos_abi::syscall::TtyIndex(3);
+    let idx2: TtyIndex = TtyIndex(3);
+    if idx != idx2 {
+        klog_info!("TTY_TEST: BUG - ABI TtyIndex != drivers TtyIndex");
+        return TestResult::Fail;
+    }
+    if idx.0 != 3 {
+        klog_info!("TTY_TEST: BUG - TtyIndex inner value mismatch");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 6: Signal constants from ABI match expected POSIX values.
+pub fn test_signal_constants() -> TestResult {
+    if SIGINT != 2 {
+        klog_info!("TTY_TEST: BUG - SIGINT should be 2, got {}", SIGINT);
+        return TestResult::Fail;
+    }
+    if SIGQUIT != 3 {
+        klog_info!("TTY_TEST: BUG - SIGQUIT should be 3, got {}", SIGQUIT);
+        return TestResult::Fail;
+    }
+    if SIGTSTP != 20 {
+        klog_info!("TTY_TEST: BUG - SIGTSTP should be 20, got {}", SIGTSTP);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 6: set_compositor_focus does NOT modify fg_pgrp.
+pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
+    tty::table::tty_table_init();
+    // Set a known fg_pgrp first.
+    tty::set_foreground_pgrp(TtyIndex(0), 42);
+    let fg_before = tty::get_foreground_pgrp(TtyIndex(0));
+
+    // Change compositor focus.
+    tty::set_compositor_focus(99);
+    let fg_after = tty::get_foreground_pgrp(TtyIndex(0));
+    tty::set_compositor_focus(0); // Reset.
+
+    if fg_before != fg_after {
+        klog_info!(
+            "TTY_TEST: BUG - set_compositor_focus changed fg_pgrp: {} -> {}",
+            fg_before,
+            fg_after
+        );
+        return TestResult::Fail;
+    }
+    if fg_before != 42 {
+        klog_info!("TTY_TEST: BUG - fg_pgrp should be 42, got {}", fg_before);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 6: check_read is the sole read gate — BackgroundRead for non-fg pgrp.
+pub fn test_check_read_sole_gate_background() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    s.focused_task_id = 42; // compositor says task 42 is focused
+
+    // Even though task 42 has compositor focus, if its pgid (99) is NOT
+    // in the foreground pgrp (10), check_read must return BackgroundRead.
+    // This is the key Phase 6 semantic: compositor focus != POSIX foreground.
+    match s.check_read(99, 10) {
+        ForegroundCheck::BackgroundRead => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - compositor-focused but bg pgrp should be BackgroundRead, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -1817,10 +1938,10 @@ slopos_lib::define_test_suite!(
         test_session_check_read_kernel_task,
         test_session_check_write_no_tostop,
         test_session_check_write_tostop_background,
-        test_session_task_has_access_focus,
-        test_session_task_has_access_fg_pgrp,
-        test_session_task_has_access_permissive,
-        test_session_task_has_access_denied,
+        // Phase 6: check_read replaces task_has_access
+        test_session_check_read_replaces_task_has_access_foreground,
+        test_session_check_read_replaces_task_has_access_background,
+        test_session_check_read_replaces_task_has_access_permissive,
         test_session_set_fg_pgrp_checked_allowed,
         test_session_set_fg_pgrp_checked_denied,
         test_session_set_fg_pgrp_checked_no_session,
@@ -1840,7 +1961,7 @@ slopos_lib::define_test_suite!(
         test_active_tty_default,
         test_set_active_tty,
         test_foreground_pgrp,
-        test_focus,
+        test_compositor_focus,
         test_keyboard_enter_scancode_reaches_active_tty,
         test_keyboard_scancode_routes_to_active_tty_index,
         test_keyboard_extended_up_arrow_reaches_tty,
@@ -1885,5 +2006,10 @@ slopos_lib::define_test_suite!(
         test_tty_per_tty_has_data_isolation,
         test_tty_per_tty_session_isolation,
         test_tty_read_invalid_tty_returns_error,
+        // Phase 6: Control-Plane Correctness
+        test_tty_index_abi_type,
+        test_signal_constants,
+        test_set_compositor_focus_does_not_set_fg_pgrp,
+        test_check_read_sole_gate_background,
     ]
 );

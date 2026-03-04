@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + **Phase 5 Complete** (Phases 6–10 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + **Phase 6 Complete** (Phases 7–10 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `tty_index: u8` for per-TTY operations
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -49,7 +49,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — | **DONE** |
 | 4 | Sessions/pgrps | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `lib/`, `core/`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 6 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `drivers/src/tty_tests.rs` | — |
+| 6 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/core_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/session.rs`, `core/src/scheduler/task.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — |
 | 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty_tests.rs` | — |
@@ -893,12 +893,21 @@ fn syscall_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
 - `file_get_tty_index` is a standalone public function in `fileio.rs` to allow ioctl handlers to resolve TTY index without full FD lock
 ---
 
-## 10. Phase 6: Control-Plane Correctness
+## 10. Phase 6: Control-Plane Correctness ✅ COMPLETED
 
 > **Priority**: P0 — Must fix before any new feature work.
 > **Rationale**: The deep architectural review (comparing against Linux `tty_struct` + `n_tty` and RedoxOS) identified that the biggest risks in SlopOS's TTY are **not** parsing/processing logic (which is solid) but **control-plane correctness**: compositor focus is conflated with POSIX session foreground, the transitional `task_has_access()` permanently bypasses session control, and the `TtyIndex` type leaks to raw `u8` at the FD boundary.
 
 **Goal**: Establish correct POSIX-like control semantics by separating compositor focus from session foreground, making `check_read()` the authoritative gate, and enforcing type safety across crate boundaries.
+
+**Status**: Completed. All tests pass (58 suites, 0 failures). Build clean. `just test` passes.
+
+**Implementation summary**:
+- **10.1 (Compositor focus split)**: `set_focus()` → `set_compositor_focus()` / `get_focus()` → `get_compositor_focus()` — only sets `focused_task_id`, never touches `fg_pgrp`. Updated `TtyServices` and `ui_handlers.rs` call sites.
+- **10.2 (check_read as sole gate)**: Removed `task_has_access()` from `session.rs`. `tty::read()` now uses `check_read()` directly as the sole read-side gate. Background reads send `SIGTTIN` signal to the calling process.
+- **10.3 (TtyIndex type safety)**: Moved `TtyIndex` newtype to `abi/src/syscall.rs` (`#[repr(transparent)]` wrapper around `u8`) for cross-crate visibility. Changed `FileDescriptor.tty_index` from `Option<u8>` to `Option<TtyIndex>`. Updated all `TtyServices` signatures and adapter functions to accept `TtyIndex` directly.
+- **10.4 (Signal constants)**: Added `SIGINT=2`, `SIGQUIT=3`, `SIGTSTP=20`, `SIGTTIN=21` constants to `abi/src/syscall.rs`. Replaced all magic numbers in `ldisc.rs` signal generation with named constants.
+- **Regression tests**: Replaced 4 `task_has_access` tests with 3 `check_read` tests. Renamed `test_focus` → `test_compositor_focus`. Added 4 new Phase 6 regression tests: `test_tty_index_abi_type`, `test_signal_constants`, `test_set_compositor_focus_does_not_set_fg_pgrp`, `test_check_read_sole_gate_background`.
 
 ### 10.1 Split compositor focus from POSIX foreground
 

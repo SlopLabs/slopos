@@ -29,7 +29,7 @@ use core::ffi::c_int;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
-use slopos_abi::syscall::{UserTermios, UserWinsize};
+use slopos_abi::syscall::{SIGTTIN, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
     scheduler_is_enabled, signal_process_group,
@@ -37,16 +37,16 @@ use slopos_lib::kernel_services::driver_runtime::{
 
 use self::driver::TtyDriverKind;
 use self::ldisc::{InputAction, LineDisc, OutputAction};
-use self::session::TtySession;
+use self::session::{ForegroundCheck, TtySession};
 use self::table::{TTY_INPUT_WAITERS, TTY_TABLE};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Index into the global TTY table.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct TtyIndex(pub u8);
+/// Re-export `TtyIndex` from the ABI crate so that it is the single
+/// definition used across the entire kernel.
+pub use slopos_abi::syscall::TtyIndex;
 
 /// Maximum number of TTY instances.
 pub const MAX_TTYS: usize = 8;
@@ -160,20 +160,6 @@ fn notify_input_ready(idx: TtyIndex) {
     TTY_INPUT_WAITERS[slot].wake_one();
 }
 
-/// Check whether a task has access to read from a TTY.
-///
-/// Uses the session-based foreground check: the caller's process group ID
-/// is compared against the TTY's foreground pgrp.  Falls back to
-/// compositor focus for backward compatibility.
-fn task_has_access(idx: TtyIndex, task_id: u32, caller_pgid: u32) -> bool {
-    let table = TTY_TABLE.lock();
-    let tty = match table.get(idx.0 as usize) {
-        Some(Some(tty)) => tty,
-        _ => return false,
-    };
-    tty.session.task_has_access(task_id, caller_pgid)
-}
-
 /// Lazily attach a session and set focus for a task that is reading from
 /// a TTY for the first time.  If no session is attached yet, the calling
 /// task becomes the session leader with its own pgid as foreground group.
@@ -192,6 +178,9 @@ fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid
 }
 
 /// Read cooked data from a specific TTY.
+///
+/// Uses `TtySession::check_read()` as the sole read-side gate.  Background
+/// processes receive `SIGTTIN` instead of silently blocking.
 pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize {
     if buffer.is_null() || max == 0 {
         return 0;
@@ -211,16 +200,30 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
     }
 
     loop {
-        if enforce_access && !task_has_access(idx, task_id, caller_pgid) {
-            if nonblock {
-                return -11;
+        // ---- Foreground check via check_read() ----
+        if enforce_access {
+            let check = {
+                let table = TTY_TABLE.lock();
+                match table.get(idx.0 as usize) {
+                    Some(Some(tty)) => tty.session.check_read(caller_pgid, caller_sid),
+                    _ => ForegroundCheck::Allowed,
+                }
+            };
+            match check {
+                ForegroundCheck::BackgroundRead => {
+                    // POSIX: send SIGTTIN to the calling process group.
+                    if caller_pgid != 0 {
+                        let _ = signal_process_group(caller_pgid, SIGTTIN);
+                    }
+                    return -1; // Caller should retry after handling the signal.
+                }
+                ForegroundCheck::Allowed | ForegroundCheck::NoSession => {
+                    // Proceed to read.
+                }
+                ForegroundCheck::BackgroundWrite => {
+                    // Should not happen on read path, but treat as allowed.
+                }
             }
-            let wait_ok = TTY_INPUT_WAITERS[idx.0 as usize]
-                .wait_event(|| task_has_access(idx, task_id, caller_pgid));
-            if !wait_ok {
-                return -11;
-            }
-            continue;
         }
 
         // Drain hardware input into the line discipline.
@@ -244,8 +247,16 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
         }
 
         let wait_ok = TTY_INPUT_WAITERS[idx.0 as usize].wait_event(|| {
-            if enforce_access && !task_has_access(idx, task_id, caller_pgid) {
-                return false;
+            if enforce_access {
+                let table = TTY_TABLE.lock();
+                let check = match table.get(idx.0 as usize) {
+                    Some(Some(tty)) => tty.session.check_read(caller_pgid, caller_sid),
+                    _ => ForegroundCheck::Allowed,
+                };
+                drop(table);
+                if matches!(check, ForegroundCheck::BackgroundRead) {
+                    return false;
+                }
             }
             drain_hw_input(idx);
             let table = TTY_TABLE.lock();
@@ -370,18 +381,23 @@ pub fn set_winsize(idx: TtyIndex, ws: *const UserWinsize) {
     }
 }
 
-/// Set the focused task on the active TTY.
+/// Set the compositor-level focus on the active TTY.
 ///
-/// Called by the compositor when window focus changes.  Sets both the
-/// per-TTY `focused_task_id` and `fg_pgrp` so that `read()` allows the
-/// newly focused task to receive input.
-pub fn set_focus(task_id: u32) -> i32 {
+/// Called by the compositor when window focus changes.  Sets ONLY the
+/// `focused_task_id` — it does NOT alter the POSIX foreground process
+/// group (`fg_pgrp`).  The two concepts are independent:
+///
+/// - `focused_task_id` — which task the compositor considers "active"
+/// - `fg_pgrp` — which process group may read/write the terminal (POSIX)
+///
+/// Compositor focus is used for input routing; foreground pgrp is used
+/// for job control signals and read/write access gating.
+pub fn set_compositor_focus(task_id: u32) -> i32 {
     let idx = active_tty();
     {
         let mut table = TTY_TABLE.lock();
         if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
             tty.session.focused_task_id = task_id;
-            tty.session.fg_pgrp = task_id;
         }
     }
     if scheduler_is_enabled() != 0 {
@@ -393,8 +409,8 @@ pub fn set_focus(task_id: u32) -> i32 {
     0
 }
 
-/// Get the focused task ID from the active TTY.
-pub fn get_focus() -> u32 {
+/// Get the compositor-focused task ID from the active TTY.
+pub fn get_compositor_focus() -> u32 {
     let idx = active_tty();
     let table = TTY_TABLE.lock();
     match table.get(idx.0 as usize) {

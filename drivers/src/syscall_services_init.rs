@@ -57,68 +57,70 @@ static INPUT_SERVICES: InputServices = InputServices {
 };
 
 // =============================================================================
-// TTY services — thin adapters converting u8 → TtyIndex for the per-TTY API.
+// TTY services — adapters bridging TtyServices (TtyIndex) to per-TTY API.
 // =============================================================================
 
-fn tty_read_adapter(tty_index: u8, buf: *mut u8, max: usize, nonblock: bool) -> isize {
-    tty::read(tty::TtyIndex(tty_index), buf, max, nonblock)
+use slopos_abi::syscall::TtyIndex;
+
+fn tty_read_adapter(tty_index: TtyIndex, buf: *mut u8, max: usize, nonblock: bool) -> isize {
+    tty::read(tty_index, buf, max, nonblock)
 }
 
-fn tty_has_cooked_data_adapter(tty_index: u8) -> bool {
-    tty::has_data(tty::TtyIndex(tty_index))
+fn tty_has_cooked_data_adapter(tty_index: TtyIndex) -> bool {
+    tty::has_data(tty_index)
 }
 
-fn tty_set_termios_adapter(tty_index: u8, t: *const slopos_abi::syscall::UserTermios) {
-    tty::set_termios(tty::TtyIndex(tty_index), t)
+fn tty_set_termios_adapter(tty_index: TtyIndex, t: *const slopos_abi::syscall::UserTermios) {
+    tty::set_termios(tty_index, t)
 }
 
-fn tty_get_termios_adapter(tty_index: u8, t: *mut slopos_abi::syscall::UserTermios) {
-    tty::get_termios(tty::TtyIndex(tty_index), t)
+fn tty_get_termios_adapter(tty_index: TtyIndex, t: *mut slopos_abi::syscall::UserTermios) {
+    tty::get_termios(tty_index, t)
 }
 
-fn tty_get_winsize_adapter(tty_index: u8, ws: *mut slopos_abi::syscall::UserWinsize) {
-    tty::get_winsize(tty::TtyIndex(tty_index), ws)
+fn tty_get_winsize_adapter(tty_index: TtyIndex, ws: *mut slopos_abi::syscall::UserWinsize) {
+    tty::get_winsize(tty_index, ws)
 }
 
-fn tty_set_winsize_adapter(tty_index: u8, ws: *const slopos_abi::syscall::UserWinsize) {
-    tty::set_winsize(tty::TtyIndex(tty_index), ws)
+fn tty_set_winsize_adapter(tty_index: TtyIndex, ws: *const slopos_abi::syscall::UserWinsize) {
+    tty::set_winsize(tty_index, ws)
 }
 
-fn tty_set_focus_adapter(target: u32) -> i32 {
-    tty::set_focus(target)
+fn tty_set_compositor_focus_adapter(target: u32) -> i32 {
+    tty::set_compositor_focus(target)
 }
 
-fn tty_get_focus_adapter() -> u32 {
-    tty::get_focus()
+fn tty_get_compositor_focus_adapter() -> u32 {
+    tty::get_compositor_focus()
 }
 
-fn tty_set_foreground_pgrp_adapter(tty_index: u8, pgid: u32) -> i32 {
-    tty::set_foreground_pgrp(tty::TtyIndex(tty_index), pgid);
+fn tty_set_foreground_pgrp_adapter(tty_index: TtyIndex, pgid: u32) -> i32 {
+    tty::set_foreground_pgrp(tty_index, pgid);
     0
 }
 
-fn tty_get_foreground_pgrp_adapter(tty_index: u8) -> u32 {
-    tty::get_foreground_pgrp(tty::TtyIndex(tty_index))
+fn tty_get_foreground_pgrp_adapter(tty_index: TtyIndex) -> u32 {
+    tty::get_foreground_pgrp(tty_index)
 }
 
-fn tty_get_session_id_adapter(tty_index: u8) -> u32 {
-    tty::get_session_id(tty::TtyIndex(tty_index))
+fn tty_get_session_id_adapter(tty_index: TtyIndex) -> u32 {
+    tty::get_session_id(tty_index)
 }
 
-fn tty_set_foreground_pgrp_checked_adapter(tty_index: u8, pgid: u32, caller_sid: u32) -> i32 {
-    tty::set_foreground_pgrp_checked(tty::TtyIndex(tty_index), pgid, caller_sid)
+fn tty_set_foreground_pgrp_checked_adapter(tty_index: TtyIndex, pgid: u32, caller_sid: u32) -> i32 {
+    tty::set_foreground_pgrp_checked(tty_index, pgid, caller_sid)
 }
 
 fn tty_detach_session_by_id_adapter(session_id: u32) {
     tty::detach_session_by_id(session_id)
 }
 
-fn tty_write_bytes_adapter(tty_index: u8, buf: *const u8, len: usize) -> usize {
+fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
     }
     let data = unsafe { core::slice::from_raw_parts(buf, len) };
-    tty::write(tty::TtyIndex(tty_index), data)
+    tty::write(tty_index, data)
 }
 
 static TTY_SERVICES: TtyServices = TtyServices {
@@ -128,8 +130,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_termios: tty_get_termios_adapter,
     get_winsize: tty_get_winsize_adapter,
     set_winsize: tty_set_winsize_adapter,
-    set_focus: tty_set_focus_adapter,
-    get_focus: tty_get_focus_adapter,
+    set_compositor_focus: tty_set_compositor_focus_adapter,
+    get_compositor_focus: tty_get_compositor_focus_adapter,
     set_foreground_pgrp: tty_set_foreground_pgrp_adapter,
     get_foreground_pgrp: tty_get_foreground_pgrp_adapter,
     get_session_id: tty_get_session_id_adapter,

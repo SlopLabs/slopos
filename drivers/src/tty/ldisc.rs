@@ -42,6 +42,10 @@ use slopos_abi::syscall::{
     ONLRET,
     ONOCR,
     OPOST,
+    // Signal numbers
+    SIGINT,
+    SIGQUIT,
+    SIGTSTP,
     UserTermios,
     // c_cc indices
     VEOF,
@@ -238,13 +242,13 @@ impl LineDisc {
         // 3. Signal generation (ISIG).
         if (lflag & ISIG) != 0 {
             if c == self.cc(VINTR) {
-                return InputAction::Signal(2); // SIGINT
+                return InputAction::Signal(SIGINT);
             }
             if c == self.cc(VQUIT) {
-                return InputAction::Signal(3); // SIGQUIT
+                return InputAction::Signal(SIGQUIT);
             }
             if c == self.cc(VSUSP) {
-                return InputAction::Signal(20); // SIGTSTP
+                return InputAction::Signal(SIGTSTP);
             }
         }
 

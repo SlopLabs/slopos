@@ -263,7 +263,7 @@ define_syscall!(syscall_set_cursor_shape(ctx, args) requires(let task_id) {
 
 define_syscall!(syscall_tty_set_focus(ctx, args) requires(compositor) {
     let target = args.arg0_u32();
-    ctx.from_bool_value(tty::set_focus(target) == 0, tty::get_focus() as u64)
+    ctx.from_bool_value(tty::set_compositor_focus(target) == 0, tty::get_compositor_focus() as u64)
 });
 
 define_syscall!(syscall_enumerate_windows(ctx, args) requires(compositor) {
