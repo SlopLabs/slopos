@@ -95,8 +95,9 @@ struct FileDescriptor {
     flags: u32,
     valid: bool,
     cloexec: bool,
-    /// When true, reads/writes route to the platform console/TTY instead of a filesystem.
-    console: bool,
+    /// When `Some(idx)`, reads/writes route to TTY `idx` instead of a filesystem.
+    /// When `None`, this is not a TTY descriptor.
+    tty_index: Option<u8>,
     pipe_id: u32,
     socket_idx: u32,
     pipe_read_end: bool,
@@ -112,7 +113,7 @@ impl FileDescriptor {
             flags: 0,
             valid: false,
             cloexec: false,
-            console: false,
+            tty_index: None,
             pipe_id: INVALID_PIPE_ID,
             socket_idx: INVALID_SOCKET_IDX,
             pipe_read_end: false,
@@ -218,7 +219,7 @@ fn reset_descriptor(desc: &mut FileDescriptor) {
     desc.flags = 0;
     desc.valid = false;
     desc.cloexec = false;
-    desc.console = false;
+    desc.tty_index = None;
     desc.pipe_id = INVALID_PIPE_ID;
     desc.socket_idx = INVALID_SOCKET_IDX;
     desc.pipe_read_end = false;
@@ -506,7 +507,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_READ,
         valid: true,
         cloexec: false,
-        console: true,
+        tty_index: Some(0),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -520,7 +521,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_WRITE,
         valid: true,
         cloexec: false,
-        console: true,
+        tty_index: Some(0),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -534,7 +535,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_WRITE,
         valid: true,
         cloexec: false,
-        console: true,
+        tty_index: Some(0),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -686,7 +687,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         desc.flags = flags;
         desc.position = position;
         desc.valid = true;
-        desc.console = false;
+        desc.tty_index = None;
         desc.pipe_id = INVALID_PIPE_ID;
         desc.socket_idx = INVALID_SOCKET_IDX;
         desc.pipe_read_end = false;
@@ -758,10 +759,10 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
                 return -1;
             };
 
-            if desc.console {
+            if let Some(tty_idx) = desc.tty_index {
                 let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
                 drop(guard);
-                return tty::read_cooked(0, buffer as *mut u8, count, is_nonblock);
+                return tty::read_cooked(tty_idx, buffer as *mut u8, count, is_nonblock);
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {
@@ -928,14 +929,11 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
                 return -1;
             };
 
-            // Console descriptors: route stdout/stderr writes to serial port.
-            if desc.console {
+            // TTY descriptors: route through the TTY subsystem (output processing).
+            if let Some(tty_idx) = desc.tty_index {
                 drop(guard);
-                let bytes = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
-                unsafe {
-                    slopos_lib::ports::serial_write_bytes(slopos_lib::ports::COM1, bytes);
-                }
-                return count as ssize_t;
+                let written = tty::write_bytes(tty_idx, buffer as *const u8, count);
+                return written as ssize_t;
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {
@@ -1058,7 +1056,7 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
 
 /// POSIX lseek: reposition file offset.
 ///
-/// Returns the new offset on success, or -1 on error (ESPIPE for console FDs).
+/// Returns the new offset on success, or -1 on error (ESPIPE for TTY FDs).
 /// The offset parameter is signed to support negative seeks with SEEK_CUR/SEEK_END.
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
     with_tables(|kernel, processes| {
@@ -1075,8 +1073,8 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
             return -1;
         };
 
-        // Console descriptors are not seekable (POSIX ESPIPE).
-        if desc.console {
+        // TTY descriptors are not seekable (POSIX ESPIPE).
+        if desc.tty_index.is_some() {
             drop(guard);
             return -1;
         }
@@ -1238,10 +1236,29 @@ pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let is_console = unsafe { get_descriptor(&mut *table_ptr, fd) }
-            .map(|d| d.console)
+            .map(|d| d.tty_index.is_some())
             .unwrap_or(false);
         drop(guard);
         is_console
+    })
+}
+
+/// Return the TTY index for an open file descriptor, or `None` if the FD is
+/// not a TTY.  Used by the ioctl dispatcher to route TTY ioctls to the
+/// correct per-TTY instance.
+pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<u8> {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return None;
+        };
+        if !table.in_use {
+            return None;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let tty_idx = unsafe { get_descriptor(&mut *table_ptr, fd) }.and_then(|d| d.tty_index);
+        drop(guard);
+        tty_idx
     })
 }
 
@@ -1300,7 +1317,7 @@ pub fn file_pipe_create(
             flags: FILE_OPEN_READ | if nonblock { O_NONBLOCK as u32 } else { 0 },
             valid: true,
             cloexec,
-            console: false,
+            tty_index: None,
             pipe_id,
             socket_idx: INVALID_SOCKET_IDX,
             pipe_read_end: true,
@@ -1314,7 +1331,7 @@ pub fn file_pipe_create(
             flags: FILE_OPEN_WRITE | if nonblock { O_NONBLOCK as u32 } else { 0 },
             valid: true,
             cloexec,
-            console: false,
+            tty_index: None,
             pipe_id,
             socket_idx: INVALID_SOCKET_IDX,
             pipe_read_end: false,
@@ -1396,9 +1413,9 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
             return revents;
         }
 
-        if desc.console {
+        if let Some(tty_idx) = desc.tty_index {
             let mut revents = 0u16;
-            if (events & POLLIN) != 0 && tty::has_cooked_data(0) {
+            if (events & POLLIN) != 0 && tty::has_cooked_data(tty_idx) {
                 revents |= POLLIN;
             }
             if (events & POLLOUT) != 0 {
@@ -1706,8 +1723,8 @@ pub fn file_fstat_fd(process_id: u32, fd: c_int, out_stat: &mut UserFsStat) -> c
             return -1;
         };
 
-        // Console descriptors report as character devices with size 0.
-        if desc.console {
+        // TTY descriptors report as character devices with size 0.
+        if desc.tty_index.is_some() {
             out_stat.type_ = slopos_abi::fs::FS_TYPE_CHARDEV;
             out_stat.size = 0;
             drop(guard);
@@ -1768,7 +1785,7 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
             flags: FILE_OPEN_READ | FILE_OPEN_WRITE,
             valid: true,
             cloexec: false,
-            console: false,
+            tty_index: None,
             pipe_id: INVALID_PIPE_ID,
             socket_idx,
             pipe_read_end: false,
