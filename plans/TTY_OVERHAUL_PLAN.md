@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + Phase 6 Complete + Phase 7 Complete + Phase 8 Complete + **Phase 9 Complete** (Phase 10 Planned)
+> **Status**: Phases 1–9 Complete · **Phases 10–14 Planned** (Job Control, Timing, Defaults, ABI Cleanup, Responsibility Split) · Phase 15 Verify & Test
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -22,9 +22,14 @@
 11. [Phase 7: Lifecycle & Hangup Semantics](#11-phase-7-lifecycle--hangup-semantics)
 12. [Phase 8: Per-TTY Locking & Performance](#12-phase-8-per-tty-locking--performance)
 13. [Phase 9: Rust Idioms & Termios Completion](#13-phase-9-rust-idioms--termios-completion)
-14. [Phase 10: Verify & Test](#14-phase-10-verify--test)
-15. [File Inventory](#15-file-inventory)
-16. [Future: PTY Support](#16-future-pty-support)
+14. [Phase 10: Job Control Correctness](#14-phase-10-job-control-correctness)
+15. [Phase 11: Non-Canonical Timing Fix](#15-phase-11-non-canonical-timing-fix)
+16. [Phase 12: Sane Defaults & Output Column Tracking](#16-phase-12-sane-defaults--output-column-tracking)
+17. [Phase 13: ABI Signal Constant Unification](#17-phase-13-abi-signal-constant-unification)
+18. [Phase 14: Responsibility Split — PTY Foundation](#18-phase-14-responsibility-split--pty-foundation)
+19. [Phase 15: Verify & Test](#19-phase-15-verify--test)
+20. [File Inventory](#20-file-inventory)
+21. [Future: PTY Support](#21-future-pty-support)
 
 ---
 
@@ -53,7 +58,12 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/ldisc.rs`, `core/src/scheduler/task.rs`, `core/src/scheduler/task_struct.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/syscall_services_init.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 10 | Verification | — | — |
+|| 10 | Job control correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — |
+|| 11 | Non-canonical timing fix | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — |
+|| 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
+|| 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs` | — |
+|| 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — |
+|| 15 | Verification & testing | — | — |
 
 ---
 
@@ -1270,23 +1280,363 @@ Requires timer integration (scheduler or PIT-based timeout) for VTIME.
 
 ---
 
-## 14. Phase 10: Verify & Test
+## 14. Phase 10: Job Control Correctness
 
-### 14.1 Build verification
+> **Priority**: P0 — Must fix before any real shell or interactive program works correctly.
+> **Rationale**: The deep architectural review (comparing against Linux `tty_struct` + `n_tty` and RedoxOS) found that **write-side foreground enforcement is completely missing** — `write()` never calls `check_write()`, `SIGTTOU` is never delivered, and `check_read()` permits cross-session reads with a TODO comment. No job-control-aware shell (bash, zsh) can work correctly without these. Issues #2, #10, #12 from the review.
+
+**Goal**: Wire write-side foreground gating, deliver SIGTTOU for background writes, tighten read-side session enforcement, and close the remaining job-control gaps.
+
+### 14.1 Wire `check_write()` into `write()`
+
+**Problem**: `session.rs` defines `check_write()` returning `ForegroundCheck::BackgroundWrite`, but `mod.rs::write()` never calls it. Background processes can freely write to the terminal, overwriting foreground output.
+
+**Fix**:
+```rust
+// In tty::write() — add foreground check before output processing
+pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
+    let slot = idx.0 as usize;
+    // ... lock slot ...
+    
+    // Check TOSTOP: if set, background writers get SIGTTOU
+    if (tty.ldisc.termios().c_lflag & TOSTOP) != 0 {
+        match tty.session.check_write(caller_pgid, caller_sid) {
+            ForegroundCheck::Allowed => {}
+            ForegroundCheck::BackgroundWrite => {
+                let pgid = caller_pgid;
+                drop(guard);
+                signal_process_group(pgid, SIGTTOU);
+                return Err(TtyError::BackgroundWrite);
+            }
+            _ => {}
+        }
+    }
+    
+    // ... existing output processing ...
+}
+```
+
+### 14.2 Deliver SIGTTOU for background writes
+
+**Problem**: The `SIGTTOU` constant exists in `abi/src/signal.rs` (value 22) but is never used anywhere in the TTY subsystem. Linux sends SIGTTOU to background process groups that attempt to write when TOSTOP is set.
+
+**Fix**:
+- Add SIGTTOU delivery in `write()` when `check_write()` returns `BackgroundWrite`
+- Ensure `SIGTTOU` constant is accessible from `drivers/src/tty/mod.rs`
+- Match Linux behavior: only enforce when `TOSTOP` is set in `c_lflag`
+
+### 14.3 Tighten `check_read()` to reject cross-session access
+
+**Problem**: `session.rs::check_read()` currently allows reads from processes in a different session with a TODO comment ("Phase 5 will enforce"). This was never closed. Any process on the system can read any TTY regardless of session membership.
+
+**Fix**:
+```rust
+pub fn check_read(&self, caller_pgid: u64, caller_sid: u64) -> ForegroundCheck {
+    // No session → allow (bootstrap path)
+    if self.session_id == NO_SESSION {
+        return ForegroundCheck::Allowed;
+    }
+    
+    // Different session → reject (POSIX requirement)
+    if caller_sid != self.session_id as u64 {
+        return ForegroundCheck::NoSession;  // -EIO in read()
+    }
+    
+    // Same session, foreground group → allow
+    if self.fg_pgrp == NO_FOREGROUND_PGRP || caller_pgid == self.fg_pgrp as u64 {
+        return ForegroundCheck::Allowed;
+    }
+    
+    // Same session, background group → SIGTTIN
+    ForegroundCheck::BackgroundRead
+}
+```
+
+### 14.4 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Add `check_write()` call in `write()`, deliver SIGTTOU, return `BackgroundWrite` error |
+| `drivers/src/tty/session.rs` | Tighten `check_read()` to reject cross-session, remove permissive TODO |
+| `abi/src/syscall.rs` | Ensure `TOSTOP` flag is defined (already exists) |
+| `drivers/src/tty_tests.rs` | Add tests: background write blocked with TOSTOP, cross-session read rejected, SIGTTOU delivery |
+
+---
+
+## 15. Phase 11: Non-Canonical Timing Fix
+
+> **Priority**: P0 — Breaks interactive serial tools and terminal programs.
+> **Rationale**: POSIX specifies that when both VMIN > 0 and VTIME > 0, the timer starts **after the first byte arrives**, not when `read()` is called. The current implementation starts the timeout at call entry, meaning slow typists or serial devices get premature timeouts. Programs like minicom, picocom, and readline in raw mode depend on correct inter-byte timing.
+
+**Goal**: Fix the VMIN > 0 / VTIME > 0 case to use inter-byte timeout semantics per POSIX.
+
+### 15.1 Current behavior (incorrect)
+
+```rust
+// In read() — VMIN>0, VTIME>0 case
+// Timer starts at read() call entry
+let timeout_ms = vtime as u64 * 100;
+wait_event_timeout(&TTY_INPUT_WAITERS[slot], timeout_ms, || {
+    // Check if VMIN bytes available
+});
+```
+
+### 15.2 Correct POSIX behavior
+
+```rust
+// VMIN>0, VTIME>0: block indefinitely for first byte,
+// then start inter-byte timer for remaining bytes
+loop {
+    // Phase 1: Wait indefinitely for first byte (no timeout)
+    wait_event(&TTY_INPUT_WAITERS[slot], || {
+        has_at_least_n_bytes(1)
+    });
+    
+    // Phase 2: Start inter-byte timer for remaining VMIN-1 bytes
+    let timeout_ms = vtime as u64 * 100;
+    let got_all = wait_event_timeout(&TTY_INPUT_WAITERS[slot], timeout_ms, || {
+        has_at_least_n_bytes(vmin)
+    });
+    
+    // Return whatever we have (at least 1 byte, up to VMIN)
+    break;
+}
+```
+
+### 15.3 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Rewrite VMIN>0/VTIME>0 read case with two-phase wait |
+| `drivers/src/tty/ldisc.rs` | No changes needed (`vmin_vtime()` helper already correct) |
+| `drivers/src/tty_tests.rs` | Add test: VMIN>0/VTIME>0 returns after first byte even if VMIN not reached |
+
+---
+
+## 16. Phase 12: Sane Defaults & Output Column Tracking
+
+> **Priority**: P1 — Without this, every terminal program looks broken out of the box.
+> **Rationale**: Default `c_iflag: 0` and `c_oflag: 0` means `printf("hello\n")` doesn't produce a carriage return — the cursor advances to the next line but stays at the current column. Every userland program must manually `tcsetattr()` to enable ICRNL and ONLCR. Linux defaults have both on. Additionally, column tracking only happens in the input echo path, not the output path, breaking tab expansion and accurate line-erase.
+
+**Goal**: Set Linux-compatible default termios flags and implement bidirectional column tracking.
+
+### 16.1 Set sane default termios
+
+```rust
+// In LineDisc::new() or Tty::new()
+let default_termios = UserTermios {
+    c_iflag: ICRNL,                    // CR → NL on input
+    c_oflag: OPOST | ONLCR,           // NL → CRNL on output
+    c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE,
+    c_cflag: 0,                        // unchanged
+    c_cc: default_cc_array(),          // existing defaults
+};
+```
+
+### 16.2 Track columns in output path
+
+**Problem**: `process_output_byte()` in `ldisc.rs` doesn't update `self.column`. Only the input echo path tracks columns. This means ECHOKE can't accurately erase lines, and tab expansion can't compute stop positions.
+
+**Fix**:
+```rust
+pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
+    let oflag = self.termios.c_oflag;
+    if (oflag & OPOST) == 0 {
+        return OutputAction::Write(c);
+    }
+    
+    match c {
+        b'\n' if (oflag & ONLCR) != 0 => {
+            self.column = 0;
+            OutputAction::WritePair(b'\r', b'\n')
+        }
+        b'\r' => {
+            self.column = 0;
+            if (oflag & OCRNL) != 0 { OutputAction::Write(b'\n') }
+            else if (oflag & ONOCR) != 0 && self.column == 0 { OutputAction::Suppress }
+            else { OutputAction::Write(b'\r') }
+        }
+        b'\t' => {
+            let spaces = 8 - (self.column % 8);
+            self.column += spaces;
+            OutputAction::Tab(spaces as u8)
+        }
+        b'\x08' => {  // Backspace
+            if self.column > 0 { self.column -= 1; }
+            OutputAction::Write(c)
+        }
+        c if c >= 0x20 && c < 0x7F => {
+            self.column += 1;
+            OutputAction::Write(c)
+        }
+        _ => OutputAction::Write(c),
+    }
+}
+```
+
+### 16.3 Add `OutputAction::Tab` variant
+
+The existing `OutputAction` enum needs a new variant for tab expansion:
+```rust
+pub enum OutputAction {
+    Write(u8),
+    WritePair(u8, u8),
+    Tab(u8),       // New: expand to N spaces
+    Suppress,
+}
+```
+
+### 16.4 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/ldisc.rs` | Update default termios, add column tracking to `process_output_byte()`, add `OutputAction::Tab`, tab expansion |
+| `drivers/src/tty/mod.rs` | Handle `OutputAction::Tab` in `write()`, update default `Tty::new()` termios |
+| `drivers/src/tty_tests.rs` | Add tests: default termios has ICRNL/ONLCR, output column tracking, tab expansion, ONOCR at column 0 |
+
+---
+
+## 17. Phase 13: ABI Signal Constant Unification
+
+> **Priority**: P2 — Maintenance hazard, not a runtime bug yet.
+> **Rationale**: Signal constants (`SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, `SIGCONT`) are defined in **both** `abi/src/syscall.rs` and `abi/src/signal.rs`. The TTY subsystem imports from both: `mod.rs` uses `slopos_abi::signal::*` while `ldisc.rs` uses `slopos_abi::syscall::*`. If the values drift between files, signal delivery will silently break.
+
+**Goal**: Establish `abi/src/signal.rs` as the single canonical source for all signal constants. Remove duplicates from `abi/src/syscall.rs`.
+
+### 17.1 Remove duplicate signal constants from `syscall.rs`
+
+**Currently duplicated**:
+- `SIGINT` (2), `SIGQUIT` (3), `SIGHUP` (1), `SIGTSTP` (20), `SIGTTIN` (21), `SIGTTOU` (22), `SIGCONT` (18)
+
+**Action**: Delete these from `abi/src/syscall.rs`. Keep only in `abi/src/signal.rs`.
+
+### 17.2 Update imports across the codebase
+
+```rust
+// BEFORE (ldisc.rs):
+use slopos_abi::syscall::{SIGINT, SIGQUIT, SIGTSTP};
+
+// AFTER (ldisc.rs):
+use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
+```
+
+### 17.3 Re-export from `abi/src/lib.rs` if needed
+
+If other crates can't directly access `abi::signal::*`, add a re-export:
+```rust
+// abi/src/lib.rs
+pub mod signal;  // ensure public
+```
+
+### 17.4 Files modified
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Remove duplicate `SIGINT`, `SIGQUIT`, `SIGHUP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, `SIGCONT` |
+| `abi/src/signal.rs` | Verify all signal constants are present (already should be) |
+| `abi/src/lib.rs` | Ensure `pub mod signal` is exported |
+| `drivers/src/tty/ldisc.rs` | Update imports: `slopos_abi::syscall::SIG*` → `slopos_abi::signal::SIG*` |
+| `drivers/src/tty/mod.rs` | Verify imports use `slopos_abi::signal::*` (already does) |
+| Any other files importing signal constants from `syscall.rs` | Update imports |
+
+---
+
+## 18. Phase 14: Responsibility Split — PTY Foundation
+
+> **Priority**: P2 — Required before PTY implementation, not blocking current functionality.
+> **Rationale**: The current `Tty` struct (919 lines in `mod.rs`) mixes core state, I/O processing, session management, idle callbacks, and signal dispatch in one module. Linux separates these into `tty_io.c`, `tty_jobctrl.c`, `tty_port.c`, and the swappable `tty_ldisc` interface. Adding PTY support to the current monolithic `Tty` would compound coupling — PTY master needs raw passthrough (no line discipline), while PTY slave uses full N_TTY processing. Without a swappable line discipline abstraction, this can't be cleanly expressed.
+
+**Goal**: Split internal responsibilities to prepare for PTY master/slave pairs without redesigning the static slot model or public API.
+
+### 18.1 Extract session policy from `Tty`
+
+Move all session/job-control logic from `mod.rs` into `session.rs`:
+- `auto_attach_session()` → `session.rs`
+- `detach_session_by_id()` → `session.rs`
+- Foreground check wrappers → `session.rs`
+
+`Tty` retains a `session: TtySession` field but delegates all policy decisions.
+
+### 18.2 Add line discipline abstraction
+
+```rust
+// drivers/src/tty/ldisc.rs
+
+/// Line discipline operations — swappable per-TTY.
+pub enum LdiscKind {
+    /// Full N_TTY processing (canonical, echo, signals, etc.)
+    NTty(LineDisc),
+    /// Raw passthrough (for PTY master, future SLIP/PPP)
+    Raw,
+}
+
+impl LdiscKind {
+    pub fn process_input(&mut self, c: u8) -> InputAction { ... }
+    pub fn process_output(&mut self, c: u8) -> OutputAction { ... }
+    pub fn read(&mut self, buf: &mut [u8]) -> usize { ... }
+    pub fn has_data(&self) -> bool { ... }
+}
+```
+
+### 18.3 Prepare `TtyDriverKind` for PTY
+
+```rust
+pub enum TtyDriverKind {
+    SerialConsole(SerialConsoleDriver),
+    VConsole(VConsoleDriver),
+    PtyMaster { slave_idx: TtyIndex },   // Future
+    PtySlave { master_idx: TtyIndex },    // Future
+    None,
+}
+```
+
+### 18.4 Use sentinel newtypes for session/pgrp IDs
+
+Replace raw `u64` with `Option<NonZeroU64>` or dedicated newtypes:
+```rust
+pub struct SessionId(NonZeroU64);
+pub struct ProcessGroupId(NonZeroU64);
+
+pub struct TtySession {
+    pub session_leader: Option<SessionId>,
+    pub session_id: Option<SessionId>,
+    pub fg_pgrp: Option<ProcessGroupId>,
+}
+```
+
+This eliminates the `NO_SESSION = 0` / `NO_FOREGROUND_PGRP = 0` sentinel constants and makes invalid states unrepresentable.
+
+### 18.5 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Extract session policy methods to `session.rs`, use `LdiscKind` instead of bare `LineDisc` |
+| `drivers/src/tty/ldisc.rs` | Add `LdiscKind` enum, `Raw` variant with passthrough |
+| `drivers/src/tty/driver.rs` | Add `PtyMaster`/`PtySlave` variant stubs to `TtyDriverKind` |
+| `drivers/src/tty/session.rs` | Absorb extracted session methods, add `SessionId`/`ProcessGroupId` newtypes |
+| `drivers/src/tty_tests.rs` | Update for `LdiscKind`, add `Raw` passthrough tests, newtype tests |
+
+---
+
+## 19. Phase 15: Verify & Test
+
+> **Priority**: Final gate — comprehensive verification after all correctness and structural fixes.
+
+### 19.1 Build verification
 
 ```bash
 just build          # Must compile cleanly
-just test           # Must pass existing test harness
+just test           # Must pass existing test harness + all new phase tests
 ```
 
-### 14.2 Manual test cases
+### 19.2 Manual test cases (original)
 
 | Test | Expected Result |
 |------|----------------|
 | Boot to shell | Shell prompt appears, typing works normally (one char per keypress) |
 | Type "hello" in shell | Exactly "hello" appears (no doubling) |
 | Run `echo hello` | "hello" printed to serial |
-| Run `nc -v 8888` (with host listener) | Connects, typing echoes once, Enter sends line (TCP bug separate) |
+| Run `nc -v 8888` (with host listener) | Connects, typing echoes once, Enter sends line |
 | Ctrl+C in shell | "^C" echoed, line cancelled |
 | Ctrl+D on empty line | Shell exits (EOF) |
 | Backspace in shell | Erases one character |
@@ -1295,16 +1645,38 @@ just test           # Must pass existing test harness
 | Fork+exec child process | Child inherits TTY, can read/write, parent waits |
 | Child exit → parent resume | Parent shell resumes with working TTY |
 
-### 14.3 Regression checks
+### 19.3 New test cases (Phases 10–14)
+
+| Test | Expected Result | Phase |
+|------|----------------|-------|
+| Background process writes with TOSTOP set | Write blocked, SIGTTOU delivered | 10 |
+| Background process writes with TOSTOP unset | Write succeeds (Linux default) | 10 |
+| Cross-session read attempt | Returns -EIO, not data | 10 |
+| Same-session background read | Returns SIGTTIN | 10 |
+| VMIN=5, VTIME=1: type 3 chars, wait | Returns 3 chars after inter-byte timeout (not 0) | 11 |
+| VMIN=5, VTIME=1: type 5 chars quickly | Returns 5 chars immediately | 11 |
+| Default terminal: `printf("hello\n")` | Produces `hello\r\n` (ONLCR active by default) | 12 |
+| Default terminal: type Enter | CR mapped to NL (ICRNL active by default) | 12 |
+| Tab character output | Expanded to spaces at correct tab stop | 12 |
+| Column tracking after mixed output | Column position accurate after CR/NL/tab/printable | 12 |
+| Signal constants consistency | No duplicate definitions — all imports from `signal.rs` | 13 |
+| PTY master raw passthrough | Input bytes pass through without ldisc processing | 14 |
+| `LdiscKind::Raw` vs `NTty` switching | Correct behavior when swapping line discipline | 14 |
+| `SessionId`/`ProcessGroupId` newtypes | No sentinel 0 values — `Option::None` for absent | 14 |
+
+### 19.4 Regression checks
 
 - Shell scrollback still works
 - Serial output still works for klog
 - Mouse/pointer events still work (input_event.rs unchanged for mouse)
 - Pipe operations still work
 - File I/O still works (non-console FDs unchanged)
+- All 1026+ existing tests still pass
+- No new compiler warnings introduced
+
 ---
 
-## 15. File Inventory
+## 20. File Inventory
 
 ### New files
 
@@ -1312,10 +1684,10 @@ just test           # Must pass existing test harness
 |------|---------|
 | `drivers/src/tty/mod.rs` | TTY public API (replaces `tty.rs`) |
 | `drivers/src/tty/driver.rs` | `TtyDriver` trait, `SerialConsoleDriver`, `VConsoleDriver` |
-| `drivers/src/tty/table.rs` | `TTY_TABLE` global, init, lookup |
-| `drivers/src/tty/ldisc.rs` | Enhanced `LineDisc` (replaces `line_disc.rs`) |
-| `drivers/src/tty/session.rs` | `TtySession`, foreground checks |
-| `drivers/src/tty/wait_queue.rs` | Per-TTY `WaitQueue` |
+| `drivers/src/tty/table.rs` | `TTY_SLOTS` global array, init, lookup |
+| `drivers/src/tty/ldisc.rs` | Enhanced `LineDisc`, future `LdiscKind` abstraction |
+| `drivers/src/tty/session.rs` | `TtySession`, foreground checks, session policy |
+| `drivers/src/tty/wait_queue.rs` | Per-TTY `WaitQueue` (extracted from current tty.rs) |
 
 ### Modified files
 
@@ -1328,6 +1700,7 @@ just test           # Must pass existing test harness
 | `core/src/scheduler/task.rs` | Add `controlling_tty`, `pgrp`, `session_id` |
 | `lib/src/kernel_services/syscall_services/tty.rs` | Update to per-TTY API |
 | `abi/src/syscall.rs` | Add iflag/oflag/lflag constants, new c_cc indices |
+| `abi/src/signal.rs` | Canonical source for all signal constants |
 
 ### Deleted files
 
@@ -1338,9 +1711,9 @@ just test           # Must pass existing test harness
 
 ---
 
-## 16. Future: PTY Support
+## 21. Future: PTY Support
 
-Not in scope for this plan, but the architecture is designed to accommodate it:
+Not in scope for this plan, but the architecture (after Phase 14) is designed to accommodate it:
 
 ```rust
 pub struct PtyMasterDriver {
@@ -1355,8 +1728,8 @@ pub struct PtySlaveDriver {
 ```
 
 A PTY pair would be:
-- TTY N (slave) — has `PtySlaveDriver`, owns a `LineDisc`
-- TTY M (master) — has `PtyMasterDriver`, no line discipline
+- TTY N (slave) — has `PtySlaveDriver`, owns a `LineDisc` via `LdiscKind::NTty`
+- TTY M (master) — has `PtyMasterDriver`, uses `LdiscKind::Raw` (no ldisc processing)
 
 The master reads what the slave writes (after output processing), and the master writes directly to the slave's line discipline input.
 
@@ -1385,7 +1758,7 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
 
 3. **Read** (`n_tty_read`):
    - Canonical: return on newline or EOF
-   - Non-canonical: VMIN/VTIME timing
-   - Job control: SIGTTIN for background reads
+   - Non-canonical: VMIN/VTIME timing (inter-byte for VMIN>0/VTIME>0)
+   - Job control: SIGTTIN for background reads, SIGTTOU for background writes with TOSTOP
 
-The SlopOS implementation will follow this structure but simplified (no IUCLC, no TABDLY, no baud rate handling, no UTF-8 for now).
+The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now).
