@@ -20,6 +20,8 @@ crate::define_service! {
         scheduler_is_enabled() -> c_int;
         current_task() -> DriverTaskHandle;
         current_task_id() -> u32;
+        current_task_pgid() -> u32;
+        current_task_sid() -> u32;
         block_current_task();
         unblock_task(task: DriverTaskHandle) -> c_int;
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
