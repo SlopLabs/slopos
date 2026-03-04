@@ -18,11 +18,11 @@
 7. [Phase 3: Input Pipeline Cleanup](#7-phase-3-input-pipeline-cleanup)
 8. [Phase 4: Session & Process Group Management](#8-phase-4-session--process-group-management)
 9. [Phase 5: FD Integration](#9-phase-5-fd-integration)
-10. [Phase 6: Verify & Test](#10-phase-6-verify--test)
-11. [Phase 7: Control-Plane Correctness](#11-phase-7-control-plane-correctness)
-12. [Phase 8: Lifecycle & Hangup Semantics](#12-phase-8-lifecycle--hangup-semantics)
-13. [Phase 9: Per-TTY Locking & Performance](#13-phase-9-per-tty-locking--performance)
-14. [Phase 10: Rust Idioms & Termios Completion](#14-phase-10-rust-idioms--termios-completion)
+10. [Phase 6: Control-Plane Correctness](#10-phase-6-control-plane-correctness)
+11. [Phase 7: Lifecycle & Hangup Semantics](#11-phase-7-lifecycle--hangup-semantics)
+12. [Phase 8: Per-TTY Locking & Performance](#12-phase-8-per-tty-locking--performance)
+13. [Phase 9: Rust Idioms & Termios Completion](#13-phase-9-rust-idioms--termios-completion)
+14. [Phase 10: Verify & Test](#14-phase-10-verify--test)
 15. [File Inventory](#15-file-inventory)
 16. [Future: PTY Support](#16-future-pty-support)
 
@@ -49,11 +49,11 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — | **DONE** |
 | 4 | Sessions/pgrps | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `lib/`, `core/`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 6 | Verification | — | — |
-| 7 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `drivers/src/tty_tests.rs` | — |
-| 8 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/session.rs`, `core/src/scheduler/task.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — |
-| 9 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
-| 10 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty_tests.rs` | — |
+| 6 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `drivers/src/tty_tests.rs` | — |
+| 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/session.rs`, `core/src/scheduler/task.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — |
+| 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
+| 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty_tests.rs` | — |
+| 10 | Verification | — | — |
 
 ---
 
@@ -893,48 +893,14 @@ fn syscall_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
 - `file_get_tty_index` is a standalone public function in `fileio.rs` to allow ioctl handlers to resolve TTY index without full FD lock
 ---
 
-## 10. Phase 6: Verify & Test
-
-### 10.1 Build verification
-
-```bash
-just build          # Must compile cleanly
-just test           # Must pass existing test harness
-```
-
-### 10.2 Manual test cases
-
-| Test | Expected Result |
-|------|----------------|
-| Boot to shell | Shell prompt appears, typing works normally (one char per keypress) |
-| Type "hello" in shell | Exactly "hello" appears (no doubling) |
-| Run `echo hello` | "hello" printed to serial |
-| Run `nc -v 8888` (with host listener) | Connects, typing echoes once, Enter sends line (TCP bug separate) |
-| Ctrl+C in shell | "^C" echoed, line cancelled |
-| Ctrl+D on empty line | Shell exits (EOF) |
-| Backspace in shell | Erases one character |
-| Arrow keys in shell | Navigate history / cursor |
-| Run long command | Line editing works normally |
-| Fork+exec child process | Child inherits TTY, can read/write, parent waits |
-| Child exit → parent resume | Parent shell resumes with working TTY |
-
-### 10.3 Regression checks
-
-- Shell scrollback still works
-- Serial output still works for klog
-- Mouse/pointer events still work (input_event.rs unchanged for mouse)
-- Pipe operations still work
-- File I/O still works (non-console FDs unchanged)
-
-
-## 11. Phase 7: Control-Plane Correctness
+## 10. Phase 6: Control-Plane Correctness
 
 > **Priority**: P0 — Must fix before any new feature work.
 > **Rationale**: The deep architectural review (comparing against Linux `tty_struct` + `n_tty` and RedoxOS) identified that the biggest risks in SlopOS's TTY are **not** parsing/processing logic (which is solid) but **control-plane correctness**: compositor focus is conflated with POSIX session foreground, the transitional `task_has_access()` permanently bypasses session control, and the `TtyIndex` type leaks to raw `u8` at the FD boundary.
 
 **Goal**: Establish correct POSIX-like control semantics by separating compositor focus from session foreground, making `check_read()` the authoritative gate, and enforcing type safety across crate boundaries.
 
-### 11.1 Split compositor focus from POSIX foreground
+### 10.1 Split compositor focus from POSIX foreground
 
 **Problem**: `set_focus(task_id)` in `mod.rs` sets **both** `focused_task_id` AND `fg_pgrp` to the same value.  A task ID is not a process group ID.  Compositor window focus and POSIX foreground group are independent concepts.
 
@@ -953,7 +919,7 @@ pub fn set_focus(task_id: u32) -> i32 {
 - Update `core/src/syscall/ui_handlers.rs` to call the renamed function
 - Add `set_compositor_focus` / `get_compositor_focus` to `TtyServices`
 
-### 11.2 Replace `task_has_access()` with proper `check_read()` gating
+### 10.2 Replace `task_has_access()` with proper `check_read()` gating
 
 **Problem**: `task_has_access()` in `session.rs` is labeled "transitional" but is the primary read gate.  It OR's compositor focus with session foreground, meaning a background process with compositor focus can bypass POSIX session control.
 
@@ -979,7 +945,7 @@ pub fn task_has_access(&self, task_id: u32, caller_pgid: u32) -> bool {
 - Update `tty::read()` and `auto_attach_session()` to use `check_read()` directly
 - Add `BackgroundRead` → `SIGTTIN` signal delivery in `read()` when `check_read()` returns `BackgroundRead`
 
-### 11.3 Type safety: `Option<TtyIndex>` end-to-end
+### 10.3 Type safety: `Option<TtyIndex>` end-to-end
 
 **Problem**: `fs/src/fileio.rs` uses `tty_index: Option<u8>` and `TtyServices` bridge functions accept raw `u8`.  Any integer can be silently passed as a TTY index without compile-time checking.
 
@@ -990,7 +956,7 @@ pub fn task_has_access(&self, task_id: u32, caller_pgid: u32) -> bool {
 - Update all ioctl dispatch in `poll_ioctl_handlers.rs` to pass `TtyIndex`
 - Update `drivers/src/syscall_services_init.rs` adapters
 
-### 11.4 Replace hardcoded signal numbers with ABI constants
+### 10.4 Replace hardcoded signal numbers with ABI constants
 
 **Problem**: `ldisc.rs` uses magic numbers `2` (SIGINT), `3` (SIGQUIT), `20` (SIGTSTP) in `InputAction::Signal()`.
 
@@ -999,7 +965,7 @@ pub fn task_has_access(&self, task_id: u32, caller_pgid: u32) -> bool {
 - Replace all hardcoded signal numbers in `ldisc.rs` with named constants
 - Update test assertions to use the same constants
 
-### 11.5 Files modified
+### 10.5 Files modified
 
 | File | Change |
 |------|--------|
@@ -1015,14 +981,14 @@ pub fn task_has_access(&self, task_id: u32, caller_pgid: u32) -> bool {
 
 ---
 
-## 12. Phase 8: Lifecycle & Hangup Semantics
+## 11. Phase 7: Lifecycle & Hangup Semantics
 
 > **Priority**: P1 — Must fix before PTY implementation or proper shell exit.
 > **Rationale**: Linux's biggest TTY complexity is lifecycle management, and it exists for a reason.  Without open counts and hangup signaling, dead processes can hold TTY resources, PTY pairs can't clean up, and shell exit doesn't notify children.  This is the single biggest "pain later" item if deferred.
 
 **Goal**: Add TTY lifecycle management (open/close tracking, hangup signaling, controlling terminal acquisition) modeled after Linux's `tty_port` + `kref` pattern, adapted for SlopOS's static table.
 
-### 12.1 Add open count to `Tty`
+### 11.1 Add open count to `Tty`
 
 **What**: Track how many file descriptors reference each TTY.  This enables "last close" detection for cleanup.
 
@@ -1039,7 +1005,7 @@ pub struct Tty {
 - Decrement on `close()` / process exit when FD has `tty_index`
 - On `open_count == 0`: trigger cleanup (flush buffers, optionally deallocate for PTY slots)
 
-### 12.2 Implement `tty_hangup()`
+### 11.2 Implement `tty_hangup()`
 
 **What**: When a session leader exits or carrier is lost, the controlling TTY must signal the session.
 
@@ -1071,12 +1037,12 @@ pub fn hangup(idx: TtyIndex) {
 }
 ```
 
-### 12.3 Wire hangup into process/session leader exit
+### 11.3 Wire hangup into process/session leader exit
 
 - In `core/src/scheduler/task.rs` (or process exit path): when a session leader exits, find its controlling TTY and call `tty::hangup()`
 - In `setsid()`: already calls `detach_session_by_id()` — verify it also handles hangup if old session had a controlling terminal
 
-### 12.4 Controlling terminal acquisition (`TIOCSCTTY`)
+### 11.4 Controlling terminal acquisition (`TIOCSCTTY`)
 
 **What**: Implement the `TIOCSCTTY` ioctl so a session leader can explicitly acquire a controlling terminal.
 
@@ -1085,7 +1051,7 @@ pub fn hangup(idx: TtyIndex) {
 - Set `controlling_tty` in the process's task struct
 - Add `TIOCSCTTY` constant to `abi/src/syscall.rs` and dispatch in `poll_ioctl_handlers.rs`
 
-### 12.5 Add `flush_all()` to `LineDisc`
+### 11.5 Add `flush_all()` to `LineDisc`
 
 ```rust
 /// Clear both edit and cooked buffers (used during hangup/close).
@@ -1100,14 +1066,14 @@ pub fn flush_all(&mut self) {
 }
 ```
 
-### 12.6 Blocked reader behavior on hangup
+### 11.6 Blocked reader behavior on hangup
 
 - Readers blocked in `TTY_INPUT_WAITERS[idx].wait_event(...)` are woken by `hangup()`
 - On wakeup, `read()` re-checks: if session is detached and no data, return 0 (EOF)
 - Non-blocking reads return `-EIO` if TTY is hung up
 - Add a `hung_up: bool` flag to `Tty` to track post-hangup state
 
-### 12.7 Files modified
+### 11.7 Files modified
 
 | File | Change |
 |------|--------|
@@ -1123,14 +1089,14 @@ pub fn flush_all(&mut self) {
 
 ---
 
-## 13. Phase 9: Per-TTY Locking & Performance
+## 12. Phase 8: Per-TTY Locking & Performance
 
 > **Priority**: P1 — Must fix before multiple active TTYs or PTY support.
 > **Rationale**: The single `TTY_TABLE: IrqMutex<[Option<Tty>; MAX_TTYS]>` lock protects **all** 8 TTY slots.  Any operation on TTY 0 blocks all operations on TTY 1–7.  `write()` holds the lock for the entire byte-by-byte serial output loop (~86μs/byte at 115200 baud).  A 1 KB write holds the global lock for ~86 ms.  Linux uses per-tty mutexes with a global lock only for lookup/registration.
 
 **Goal**: Move to per-TTY locking so that operations on different TTYs are fully independent, and release the lock before slow driver I/O.
 
-### 13.1 Per-TTY lock architecture
+### 12.1 Per-TTY lock architecture
 
 **Current**:
 ```rust
@@ -1163,7 +1129,7 @@ pub struct TtyInner {
 - `TtySlot.inner` lock is held for per-TTY operations
 - Different TTYs never contend
 
-### 13.2 Release lock before driver I/O in `write()`
+### 12.2 Release lock before driver I/O in `write()`
 
 **Problem**: `write()` currently holds `TTY_TABLE` lock while calling `driver.write_output()` for each byte.  Serial I/O is slow.
 
@@ -1198,19 +1164,19 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> usize {
 }
 ```
 
-### 13.3 Combine `drain_hw_input` + `read` into single lock acquisition
+### 12.3 Combine `drain_hw_input` + `read` into single lock acquisition
 
 **Problem**: `read()` calls `drain_hw_input(idx)` which locks the table once, then separately locks it again for `ldisc.read()`.  This is 2–3 lock/unlock cycles per read attempt.
 
 **Fix**: Merge drain + read into a single `with_tty_inner()` call.
 
-### 13.4 Fix idle callback (not TTY 0 only)
+### 12.4 Fix idle callback (not TTY 0 only)
 
 **Problem**: `input_available_cb()` only checks TTY 0.  Future serial-on-TTY-1 or PTY polling breaks.
 
 **Fix**: Iterate all active TTYs in the idle callback, or register per-TTY callbacks.
 
-### 13.5 Lock ordering rules (MUST document)
+### 12.5 Lock ordering rules (MUST document)
 
 Strict lock hierarchy to prevent deadlock:
 
@@ -1220,7 +1186,7 @@ Strict lock hierarchy to prevent deadlock:
 
 Rule: Never acquire `TTY_REGISTRY` while holding `TtySlot.inner`.
 
-### 13.6 Files modified
+### 12.6 Files modified
 
 | File | Change |
 |------|--------|
@@ -1230,14 +1196,14 @@ Rule: Never acquire `TTY_REGISTRY` while holding `TtySlot.inner`.
 
 ---
 
-## 14. Phase 10: Rust Idioms & Termios Completion
+## 13. Phase 9: Rust Idioms & Termios Completion
 
 > **Priority**: P2 — Improves code quality and enables realistic userspace.
 > **Rationale**: The current codebase uses C-style error patterns (`isize`, `-1`, raw pointers) internally where Rust `Result` types and slices would catch bugs at compile time.  Additionally, `VMIN/VTIME` is parsed but not enforced — terminal applications like readline and curses depend on this for responsive input.
 
 **Goal**: Adopt Rust-idiomatic error handling internally, enforce VMIN/VTIME in non-canonical mode, and add `/dev/tty` support for POSIX compliance.
 
-### 14.1 Internal `Result<usize, Errno>` error handling
+### 13.1 Internal `Result<usize, Errno>` error handling
 
 **What**: Replace C-style `isize` returns with `Result` internally, converting at the syscall ABI boundary.
 
@@ -1268,11 +1234,11 @@ fn tty_read_adapter(idx: u8, buf: *mut u8, max: usize, nonblock: bool) -> isize 
 }
 ```
 
-### 14.2 Accept slices internally (not raw pointers)
+### 13.2 Accept slices internally (not raw pointers)
 
 **What**: Change internal functions from `read(idx, buffer: *mut u8, max: usize)` to `read(idx, buf: &mut [u8])`.  Keep raw pointers only at the syscall adapter boundary.
 
-### 14.3 VMIN/VTIME enforcement
+### 13.3 VMIN/VTIME enforcement
 
 **What**: Implement non-canonical read timing:
 
@@ -1283,7 +1249,7 @@ fn tty_read_adapter(idx: u8, buf: *mut u8, max: usize, nonblock: bool) -> isize 
 
 Requires timer integration (scheduler or PIT-based timeout) for VTIME.
 
-### 14.4 `/dev/tty` support
+### 13.4 `/dev/tty` support
 
 **What**: Allow a process to refer to "my controlling terminal" generically, needed for `isatty()`, `ttyname()`, and POSIX utilities.
 
@@ -1291,7 +1257,7 @@ Requires timer integration (scheduler or PIT-based timeout) for VTIME.
 - Return `-ENXIO` if no controlling terminal
 - Wire into VFS/devfs if present, or handle as a special path in `open()`
 
-### 14.5 Files modified
+### 13.5 Files modified
 
 | File | Change |
 |------|--------|
@@ -1303,6 +1269,40 @@ Requires timer integration (scheduler or PIT-based timeout) for VTIME.
 | `fs/src/fileio.rs` | Add `/dev/tty` resolution in `file_open_fd` |
 | `drivers/src/tty_tests.rs` | Update all tests for `Result` returns, add VMIN/VTIME tests, `/dev/tty` tests |
 
+---
+
+## 14. Phase 10: Verify & Test
+
+### 14.1 Build verification
+
+```bash
+just build          # Must compile cleanly
+just test           # Must pass existing test harness
+```
+
+### 14.2 Manual test cases
+
+| Test | Expected Result |
+|------|----------------|
+| Boot to shell | Shell prompt appears, typing works normally (one char per keypress) |
+| Type "hello" in shell | Exactly "hello" appears (no doubling) |
+| Run `echo hello` | "hello" printed to serial |
+| Run `nc -v 8888` (with host listener) | Connects, typing echoes once, Enter sends line (TCP bug separate) |
+| Ctrl+C in shell | "^C" echoed, line cancelled |
+| Ctrl+D on empty line | Shell exits (EOF) |
+| Backspace in shell | Erases one character |
+| Arrow keys in shell | Navigate history / cursor |
+| Run long command | Line editing works normally |
+| Fork+exec child process | Child inherits TTY, can read/write, parent waits |
+| Child exit → parent resume | Parent shell resumes with working TTY |
+
+### 14.3 Regression checks
+
+- Shell scrollback still works
+- Serial output still works for klog
+- Mouse/pointer events still work (input_event.rs unchanged for mouse)
+- Pipe operations still work
+- File I/O still works (non-console FDs unchanged)
 ---
 
 ## 15. File Inventory
