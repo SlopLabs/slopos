@@ -12,6 +12,7 @@ crate::define_service! {
         get_foreground_pgrp(tty_index: u8) -> u32;
         get_session_id(tty_index: u8) -> u32;
         set_foreground_pgrp_checked(tty_index: u8, pgid: u32, caller_sid: u32) -> i32;
+        write_bytes(tty_index: u8, buf: *const u8, len: usize) -> usize;
         detach_session_by_id(session_id: u32);
     }
 }

@@ -1548,6 +1548,247 @@ pub fn test_keyboard_multi_key_sequence() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 5: FD integration tests
+// ===========================================================================
+
+/// Phase 5: tty::write routes bytes through output processing.
+/// With OPOST+ONLCR enabled, writing "\n" should produce 2 bytes on the wire
+/// (CR+LF), but write() must return the *input* byte count.
+pub fn test_tty_write_output_processing() -> TestResult {
+    tty::table::tty_table_init();
+    // Save current termios.
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    // Enable OPOST + ONLCR.
+    let mut t = saved;
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    tty::set_termios(TtyIndex(0), &t as *const _);
+
+    let data = b"hello\nworld\n";
+    let n = tty::write(TtyIndex(0), data);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    // write() returns input length regardless of output expansion.
+    if n != data.len() {
+        klog_info!(
+            "TTY_TEST: BUG - write with OPOST+ONLCR returned {} instead of {}",
+            n,
+            data.len()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: tty::write with output processing disabled passes bytes through.
+pub fn test_tty_write_raw_passthrough() -> TestResult {
+    tty::table::tty_table_init();
+    // Ensure c_oflag is 0 (no output processing — default).
+    let mut saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut saved as *mut _);
+    let mut t = saved;
+    t.c_oflag = 0;
+    tty::set_termios(TtyIndex(0), &t as *const _);
+
+    let data = b"raw\ndata";
+    let n = tty::write(TtyIndex(0), data);
+    tty::set_termios(TtyIndex(0), &saved as *const _);
+
+    if n != data.len() {
+        klog_info!(
+            "TTY_TEST: BUG - raw write returned {} instead of {}",
+            n,
+            data.len()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: tty::write to invalid TTY index returns 0.
+pub fn test_tty_write_invalid_index() -> TestResult {
+    tty::table::tty_table_init();
+    let data = b"nothing";
+    let n = tty::write(TtyIndex(7), data); // Slot 7 is not allocated.
+    if n != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - write to invalid TTY returned {} instead of 0",
+            n
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: Per-TTY termios isolation — changing TTY 0's termios does not
+/// affect TTY 1.
+pub fn test_tty_per_tty_termios_isolation() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Save TTY 0 and TTY 1 termios.
+    let mut t0_saved = slopos_abi::syscall::UserTermios::default();
+    let mut t1_saved = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(0), &mut t0_saved as *mut _);
+    tty::get_termios(TtyIndex(1), &mut t1_saved as *mut _);
+
+    // Set OPOST on TTY 0 only.
+    let mut t0_new = t0_saved;
+    t0_new.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    tty::set_termios(TtyIndex(0), &t0_new as *const _);
+
+    // Read back TTY 1 — it should still have its original c_oflag.
+    let mut t1_check = slopos_abi::syscall::UserTermios::default();
+    tty::get_termios(TtyIndex(1), &mut t1_check as *mut _);
+
+    // Restore TTY 0.
+    tty::set_termios(TtyIndex(0), &t0_saved as *const _);
+
+    if t1_check.c_oflag != t1_saved.c_oflag {
+        klog_info!(
+            "TTY_TEST: BUG - TTY 1 c_oflag changed when TTY 0 was modified ({} vs {})",
+            t1_check.c_oflag,
+            t1_saved.c_oflag
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: Per-TTY winsize isolation — setting winsize on TTY 0 does not
+/// affect TTY 1.
+pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
+    tty::table::tty_table_init();
+
+    let mut ws0_saved = slopos_abi::syscall::UserWinsize::default();
+    let mut ws1_saved = slopos_abi::syscall::UserWinsize::default();
+    tty::get_winsize(TtyIndex(0), &mut ws0_saved as *mut _);
+    tty::get_winsize(TtyIndex(1), &mut ws1_saved as *mut _);
+
+    // Set a distinct winsize on TTY 0.
+    let custom = slopos_abi::syscall::UserWinsize {
+        ws_row: 42,
+        ws_col: 120,
+        ws_xpixel: 1920,
+        ws_ypixel: 1080,
+    };
+    tty::set_winsize(TtyIndex(0), &custom as *const _);
+
+    // Read back TTY 1 — should be unchanged.
+    let mut ws1_check = slopos_abi::syscall::UserWinsize::default();
+    tty::get_winsize(TtyIndex(1), &mut ws1_check as *mut _);
+
+    // Restore TTY 0.
+    tty::set_winsize(TtyIndex(0), &ws0_saved as *const _);
+
+    if ws1_check.ws_row != ws1_saved.ws_row || ws1_check.ws_col != ws1_saved.ws_col {
+        klog_info!(
+            "TTY_TEST: BUG - TTY 1 winsize changed when TTY 0 was modified ({}x{} vs {}x{})",
+            ws1_check.ws_row,
+            ws1_check.ws_col,
+            ws1_saved.ws_row,
+            ws1_saved.ws_col
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: Per-TTY foreground pgrp isolation.
+pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Set different foreground pgrps on TTY 0 and TTY 1.
+    tty::set_foreground_pgrp(TtyIndex(0), 100);
+    tty::set_foreground_pgrp(TtyIndex(1), 200);
+
+    let pgid0 = tty::get_foreground_pgrp(TtyIndex(0));
+    let pgid1 = tty::get_foreground_pgrp(TtyIndex(1));
+
+    // Clean up.
+    tty::set_foreground_pgrp(TtyIndex(0), 0);
+    tty::set_foreground_pgrp(TtyIndex(1), 0);
+
+    if pgid0 != 100 {
+        klog_info!("TTY_TEST: BUG - TTY 0 fg_pgrp should be 100, got {}", pgid0);
+        return TestResult::Fail;
+    }
+    if pgid1 != 200 {
+        klog_info!("TTY_TEST: BUG - TTY 1 fg_pgrp should be 200, got {}", pgid1);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: Per-TTY has_data isolation — data pushed to TTY 0 does not
+/// appear on TTY 1.
+pub fn test_tty_per_tty_has_data_isolation() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(1));
+
+    // Push a character + newline to TTY 0 only.
+    tty::push_input(TtyIndex(0), b'x');
+    tty::push_input(TtyIndex(0), b'\n');
+
+    let has0 = tty::has_data(TtyIndex(0));
+    let has1 = tty::has_data(TtyIndex(1));
+
+    // Clean up.
+    drain_tty_nonblock(TtyIndex(0));
+
+    if !has0 {
+        klog_info!("TTY_TEST: BUG - TTY 0 should have data after push_input");
+        return TestResult::Fail;
+    }
+    if has1 {
+        klog_info!("TTY_TEST: BUG - TTY 1 should NOT have data (isolation failure)");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: Per-TTY session isolation — attaching session to TTY 0 does not
+/// affect TTY 1's session.
+pub fn test_tty_per_tty_session_isolation() -> TestResult {
+    tty::table::tty_table_init();
+
+    tty::attach_session(TtyIndex(0), 500, 500);
+    let sid0 = tty::get_session_id(TtyIndex(0));
+    let sid1 = tty::get_session_id(TtyIndex(1));
+
+    // Clean up.
+    tty::detach_session(TtyIndex(0));
+
+    if sid0 != 500 {
+        klog_info!(
+            "TTY_TEST: BUG - TTY 0 session_id should be 500, got {}",
+            sid0
+        );
+        return TestResult::Fail;
+    }
+    if sid1 != 0 {
+        klog_info!("TTY_TEST: BUG - TTY 1 session_id should be 0, got {}", sid1);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 5: tty::read on non-existent TTY returns -1.
+pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
+    tty::table::tty_table_init();
+    let mut buf = [0u8; 8];
+    let n = tty::read(TtyIndex(7), buf.as_mut_ptr(), buf.len(), true);
+    if n != -1 {
+        klog_info!(
+            "TTY_TEST: BUG - read from invalid TTY returned {} instead of -1",
+            n
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -1634,5 +1875,15 @@ slopos_lib::define_test_suite!(
         test_keyboard_press_release_single_char,
         test_vconsole_drain_via_drain_hw_input,
         test_keyboard_multi_key_sequence,
+        // Phase 5: FD integration
+        test_tty_write_output_processing,
+        test_tty_write_raw_passthrough,
+        test_tty_write_invalid_index,
+        test_tty_per_tty_termios_isolation,
+        test_tty_per_tty_winsize_isolation,
+        test_tty_per_tty_fg_pgrp_isolation,
+        test_tty_per_tty_has_data_isolation,
+        test_tty_per_tty_session_isolation,
+        test_tty_read_invalid_tty_returns_error,
     ]
 );

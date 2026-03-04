@@ -113,6 +113,14 @@ fn tty_detach_session_by_id_adapter(session_id: u32) {
     tty::detach_session_by_id(session_id)
 }
 
+fn tty_write_bytes_adapter(tty_index: u8, buf: *const u8, len: usize) -> usize {
+    if buf.is_null() || len == 0 {
+        return 0;
+    }
+    let data = unsafe { core::slice::from_raw_parts(buf, len) };
+    tty::write(tty::TtyIndex(tty_index), data)
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     has_cooked_data: tty_has_cooked_data_adapter,
@@ -127,6 +135,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_session_id: tty_get_session_id_adapter,
     set_foreground_pgrp_checked: tty_set_foreground_pgrp_checked_adapter,
     detach_session_by_id: tty_detach_session_by_id_adapter,
+    write_bytes: tty_write_bytes_adapter,
 };
 
 fn net_scan_members_adapter(
