@@ -8,6 +8,7 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use crate::scheduler::task_struct::Task;
+use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
 };
@@ -25,6 +26,7 @@ use slopos_abi::syscall::{
     SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_NET_SCAN,
     SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK,
     SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID, SYSCALL_TABLE_SIZE,
+    TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
@@ -442,6 +444,68 @@ pub fn test_kill_process_group_semantics() -> TestResult {
 
     task_terminate(member_id);
     task_terminate(leader_id);
+    TestResult::Pass
+}
+
+pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    let mut frame = zero_frame();
+    frame.rdi = 0;
+    frame.rsi = TIOCSCTTY;
+    frame.rdx = 0;
+    let _ = syscall_ioctl(task_ptr, &mut frame);
+    assert_eq_test!(frame.rax, 0, "TIOCSCTTY should succeed for session leader");
+
+    let sid = unsafe { (*task_ptr).sid };
+    let ctty = unsafe { (*task_ptr).controlling_tty };
+    assert_eq_test!(ctty, Some(TtyIndex(0)), "controlling_tty should be tty0");
+
+    let tty_sid = slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
+    assert_eq_test!(tty_sid, sid, "tty session should match caller sid");
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+    let parent_ptr = task_find_by_id(parent_id);
+    assert_not_null!(parent_ptr, "parent lookup failed");
+
+    let child_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
+    task_set_state(child_id, TaskStatus::Blocked);
+
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr, "child lookup failed");
+
+    let mut frame = zero_frame();
+    frame.rdi = 0;
+    frame.rsi = TIOCSCTTY;
+    frame.rdx = 0;
+    let _ = syscall_ioctl(child_ptr, &mut frame);
+    assert_test!(
+        frame.rax != 0,
+        "TIOCSCTTY should fail for non-session leader"
+    );
+
+    assert_eq_test!(
+        unsafe { (*child_ptr).controlling_tty },
+        None,
+        "child ctty should remain None"
+    );
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
     TestResult::Pass
 }
 
@@ -1923,6 +1987,8 @@ slopos_lib::define_test_suite!(
         test_exit_current_task_releases_pipe_refs,
         test_process_group_session_syscalls_baseline,
         test_kill_process_group_semantics,
+        test_tiocsctty_session_leader_acquires_ctty,
+        test_tiocsctty_non_leader_rejected,
         test_vm_mmap_munmap_stress_baseline,
         test_spawn_path_stale_argv_regression,
     ]
@@ -1944,6 +2010,8 @@ slopos_lib::define_test_suite!(
         test_exit_current_task_releases_pipe_refs,
         test_process_group_session_syscalls_baseline,
         test_kill_process_group_semantics,
+        test_tiocsctty_session_leader_acquires_ctty,
+        test_tiocsctty_non_leader_rejected,
         test_sigchld_and_wait_interaction,
         test_clone_thread_tls_isolation,
         test_futex_wait_mismatch_and_wake_no_waiters,

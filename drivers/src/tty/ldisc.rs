@@ -203,6 +203,16 @@ impl LineDisc {
         copied
     }
 
+    pub fn flush_all(&mut self) {
+        self.edit_len = 0;
+        self.cooked_head = 0;
+        self.cooked_tail = 0;
+        self.cooked_count = 0;
+        self.stopped = false;
+        self.literal_next = false;
+        self.column = 0;
+    }
+
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
     pub fn edit_content(&self) -> &[u8] {
         &self.edit_buf[..self.edit_len]

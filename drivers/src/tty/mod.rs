@@ -29,6 +29,7 @@ use core::ffi::c_int;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
+use slopos_abi::signal::{SIGCONT, SIGHUP};
 use slopos_abi::syscall::{SIGTTIN, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
@@ -70,6 +71,10 @@ pub struct Tty {
 
     /// Whether this TTY is active/allocated.
     pub active: bool,
+
+    pub open_count: u32,
+
+    pub hung_up: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +114,10 @@ pub fn push_input(idx: TtyIndex, c: u8) {
             Some(t) => t,
             None => return,
         };
+
+        if tty.hung_up {
+            return;
+        }
 
         let action = tty.ldisc.input_char(c);
         let has_data = tty.ldisc.has_data();
@@ -200,6 +209,18 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
     }
 
     loop {
+        let (hung_up, has_data) = {
+            let table = TTY_TABLE.lock();
+            match table.get(idx.0 as usize) {
+                Some(Some(tty)) => (tty.hung_up, tty.ldisc.has_data()),
+                _ => return -1,
+            }
+        };
+
+        if hung_up && !has_data {
+            return if nonblock { -5 } else { 0 };
+        }
+
         // ---- Foreground check via check_read() ----
         if enforce_access {
             let check = {
@@ -242,6 +263,18 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
             return got as isize;
         }
 
+        let hung_up_after_read = {
+            let table = TTY_TABLE.lock();
+            match table.get(idx.0 as usize) {
+                Some(Some(tty)) => tty.hung_up,
+                _ => return -1,
+            }
+        };
+
+        if hung_up_after_read {
+            return if nonblock { -5 } else { 0 };
+        }
+
         if nonblock {
             return -11; // EAGAIN
         }
@@ -261,7 +294,7 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
             drain_hw_input(idx);
             let table = TTY_TABLE.lock();
             match table.get(idx.0 as usize) {
-                Some(Some(tty)) => tty.ldisc.has_data(),
+                Some(Some(tty)) => tty.hung_up || tty.ldisc.has_data(),
                 _ => true,
             }
         });
@@ -474,6 +507,71 @@ pub fn detach_session_by_id(session_id: u32) {
                 tty.session.detach();
             }
         }
+    }
+}
+
+pub fn open_ref(idx: TtyIndex) -> i32 {
+    let mut table = TTY_TABLE.lock();
+    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        tty.open_count = tty
+            .open_count
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("tty open_count overflow for idx {}", idx.0));
+        tty.hung_up = false;
+        return tty.open_count as i32;
+    }
+    -1
+}
+
+pub fn close_ref(idx: TtyIndex) -> i32 {
+    let mut table = TTY_TABLE.lock();
+    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        if tty.open_count == 0 {
+            return 0;
+        }
+        tty.open_count -= 1;
+        if tty.open_count == 0 {
+            tty.ldisc.flush_all();
+            tty.session.detach();
+            tty.hung_up = false;
+        }
+        return tty.open_count as i32;
+    }
+    -1
+}
+
+pub fn hangup(idx: TtyIndex) {
+    let fg_pgrp = {
+        let mut table = TTY_TABLE.lock();
+        let tty = match table.get_mut(idx.0 as usize) {
+            Some(Some(t)) => t,
+            _ => return,
+        };
+        let fg = tty.session.fg_pgrp;
+        tty.ldisc.flush_all();
+        tty.session.detach();
+        tty.hung_up = true;
+        fg
+    };
+
+    if fg_pgrp != 0 {
+        let _ = signal_process_group(fg_pgrp, SIGHUP);
+        let _ = signal_process_group(fg_pgrp, SIGCONT);
+    }
+
+    if scheduler_is_enabled() != 0 {
+        let slot = idx.0 as usize;
+        if slot < MAX_TTYS {
+            TTY_INPUT_WAITERS[slot].wake_all();
+        }
+    }
+}
+
+pub fn is_hung_up(idx: TtyIndex) -> bool {
+    let table = TTY_TABLE.lock();
+    match table.get(idx.0 as usize) {
+        Some(Some(tty)) => tty.hung_up,
+        _ => false,
     }
 }
 

@@ -3,8 +3,8 @@
 use core::ffi::c_int;
 
 use slopos_abi::syscall::{
-    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP, TIOCGSID, TIOCGWINSZ, TIOCSPGRP,
-    UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP, TIOCGSID, TIOCGWINSZ, TIOCSCTTY,
+    TIOCSPGRP, UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -255,7 +255,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
     }
 });
 
-define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
+define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_id) {
     let fd = args.arg0 as c_int;
     let cmd = args.arg1;
     let arg = args.arg2;
@@ -317,6 +317,37 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
             } else {
                 ctx.err()
             }
+        }
+        TIOCSCTTY => {
+            if arg != 0 {
+                return ctx.err();
+            }
+
+            let task_ptr = crate::task::task_find_by_id(task_id);
+            if task_ptr.is_null() {
+                return ctx.err();
+            }
+
+            let task = unsafe { &mut *task_ptr };
+            if task.sid == 0 || task.sid != task.task_id {
+                return ctx.err();
+            }
+
+            if let Some(current_tty) = task.controlling_tty {
+                if current_tty == tty_idx {
+                    return ctx.ok(0);
+                }
+                return ctx.err();
+            }
+
+            let tty_sid = tty::get_session_id(tty_idx);
+            if tty_sid != 0 && tty_sid != task.sid {
+                return ctx.err();
+            }
+
+            tty::attach_session(tty_idx, task.sid, task.pgid);
+            task.controlling_tty = Some(tty_idx);
+            ctx.ok(0)
         }
         TIOCGSID => {
             require_nonzero!(ctx, arg);

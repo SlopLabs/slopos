@@ -115,6 +115,26 @@ fn tty_detach_session_by_id_adapter(session_id: u32) {
     tty::detach_session_by_id(session_id)
 }
 
+fn tty_attach_session_adapter(tty_index: TtyIndex, leader_pid: u32, leader_pgid: u32) {
+    tty::attach_session(tty_index, leader_pid, leader_pgid)
+}
+
+fn tty_open_ref_adapter(tty_index: TtyIndex) -> i32 {
+    tty::open_ref(tty_index)
+}
+
+fn tty_close_ref_adapter(tty_index: TtyIndex) -> i32 {
+    tty::close_ref(tty_index)
+}
+
+fn tty_hangup_adapter(tty_index: TtyIndex) {
+    tty::hangup(tty_index)
+}
+
+fn tty_is_hung_up_adapter(tty_index: TtyIndex) -> bool {
+    tty::is_hung_up(tty_index)
+}
+
 fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
@@ -138,6 +158,11 @@ static TTY_SERVICES: TtyServices = TtyServices {
     set_foreground_pgrp_checked: tty_set_foreground_pgrp_checked_adapter,
     detach_session_by_id: tty_detach_session_by_id_adapter,
     write_bytes: tty_write_bytes_adapter,
+    attach_session: tty_attach_session_adapter,
+    open_ref: tty_open_ref_adapter,
+    close_ref: tty_close_ref_adapter,
+    hangup: tty_hangup_adapter,
+    is_hung_up: tty_is_hung_up_adapter,
 };
 
 fn net_scan_members_adapter(

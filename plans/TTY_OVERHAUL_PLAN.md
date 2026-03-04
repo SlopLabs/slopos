@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + **Phase 6 Complete** (Phases 7–10 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + Phase 5 Complete + Phase 6 Complete + **Phase 7 Complete** (Phases 8–10 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -50,7 +50,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 4 | Sessions/pgrps | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `lib/`, `core/`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 6 | Control-plane correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/core_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/session.rs`, `core/src/scheduler/task.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — |
+| 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/ldisc.rs`, `core/src/scheduler/task.rs`, `core/src/scheduler/task_struct.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty_tests.rs` | — |
 | 10 | Verification | — | — |
@@ -990,12 +990,21 @@ pub fn task_has_access(&self, task_id: u32, caller_pgid: u32) -> bool {
 
 ---
 
-## 11. Phase 7: Lifecycle & Hangup Semantics
+## 11. Phase 7: Lifecycle & Hangup Semantics ✅ COMPLETED
 
 > **Priority**: P1 — Must fix before PTY implementation or proper shell exit.
 > **Rationale**: Linux's biggest TTY complexity is lifecycle management, and it exists for a reason.  Without open counts and hangup signaling, dead processes can hold TTY resources, PTY pairs can't clean up, and shell exit doesn't notify children.  This is the single biggest "pain later" item if deferred.
 
 **Goal**: Add TTY lifecycle management (open/close tracking, hangup signaling, controlling terminal acquisition) modeled after Linux's `tty_port` + `kref` pattern, adapted for SlopOS's static table.
+
+**Status**: Completed. Build clean. `cargo fmt --all`, `just build`, and `just test` pass.
+
+**Implementation summary**:
+- Added lifecycle state to TTYs (`open_count`, `hung_up`) and wired robust hangup semantics (`hangup()`, wake blocked readers, EOF/EIO behavior) in `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, and `drivers/src/tty/ldisc.rs`.
+- Integrated full FD reference counting for TTY-backed descriptors across bootstrap, dup/fork cloning, and close/reset paths in `fs/src/fileio.rs`; exposed hangup via poll (`POLLHUP`).
+- Implemented controlling-terminal acquisition via `TIOCSCTTY` with session-leader checks in `core/src/syscall/fs/poll_ioctl_handlers.rs`, added `controlling_tty` task state in scheduler structs, and wired session-leader exit hangup in `core/src/scheduler/task.rs`.
+- Extended ABI/services for lifecycle operations (`TIOCSCTTY`, `SIGHUP`, `SIGCONT`, `open_ref`, `close_ref`, `hangup`, `is_hung_up`) across `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, and `drivers/src/syscall_services_init.rs`.
+- Added regression coverage in `drivers/src/tty_tests.rs` (flush-all, open-count lifecycle, hangup flag/detach, hangup read semantics) and `core/src/syscall/tests.rs` (`TIOCSCTTY` leader/non-leader behavior).
 
 ### 11.1 Add open count to `Tty`
 
@@ -1086,15 +1095,19 @@ pub fn flush_all(&mut self) {
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Add `hangup()`, update `read()` for EOF-on-hangup, add `open_count` management |
-| `drivers/src/tty/table.rs` | Add `open_count` to `Tty::new()` |
-| `drivers/src/tty/ldisc.rs` | Add `flush_all()` |
-| `drivers/src/tty/session.rs` | No changes (detach/attach already exist) |
-| `core/src/scheduler/task.rs` | Wire session-leader exit → `tty::hangup()` |
-| `fs/src/fileio.rs` | Increment/decrement `open_count` on FD open/close/dup/fork |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add `TIOCSCTTY` dispatch |
-| `abi/src/syscall.rs` | Add `TIOCSCTTY`, `SIGHUP`, `SIGCONT` constants |
-| `drivers/src/tty_tests.rs` | Tests: hangup wakes readers, flush_all, open_count lifecycle, TIOCSCTTY |
+| `drivers/src/tty/mod.rs` | Added `open_count`/`hung_up`; implemented `open_ref`, `close_ref`, `hangup`, `is_hung_up`; added EOF/EIO read behavior after hangup |
+| `drivers/src/tty/table.rs` | Initialized lifecycle fields in `Tty::new()` |
+| `drivers/src/tty/ldisc.rs` | Added `flush_all()` |
+| `fs/src/fileio.rs` | Wired TTY refcount lifecycle through bootstrap/dup/fork/close and exposed hangup through `POLLHUP` |
+| `core/src/scheduler/task_struct.rs` | Added `controlling_tty: Option<TtyIndex>` to task state |
+| `core/src/scheduler/task.rs` | Wired session-leader exit path to `tty::hangup()` |
+| `core/src/syscall/process_handlers.rs` | Cleared `controlling_tty` in `setsid()` |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Added `TIOCSCTTY` dispatch and session-leader ownership checks |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Added lifecycle service methods (`attach_session`, `open_ref`, `close_ref`, `hangup`, `is_hung_up`) |
+| `drivers/src/syscall_services_init.rs` | Added adapters and service wiring for new lifecycle methods |
+| `abi/src/syscall.rs` | Added `TIOCSCTTY`, `SIGHUP`, and `SIGCONT` constants |
+| `drivers/src/tty_tests.rs` | Added hangup/open-count/flush regression tests |
+| `core/src/syscall/tests.rs` | Added `TIOCSCTTY` regression tests (leader success, non-leader reject) |
 
 ---
 

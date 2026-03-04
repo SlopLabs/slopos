@@ -213,6 +213,12 @@ fn reset_descriptor(desc: &mut FileDescriptor) {
         }
     }
 
+    if desc.valid {
+        if let Some(idx) = desc.tty_index {
+            let _ = tty::close_ref(idx);
+        }
+    }
+
     desc.inode = 0;
     desc.fs = None;
     desc.position = 0;
@@ -377,6 +383,9 @@ fn pipe_wake_all_writers(slot: &mut PipeSlot) {
 
 fn clone_descriptor_for_dup(src: &FileDescriptor) -> Option<FileDescriptor> {
     let copy = *src;
+    if let Some(idx) = copy.tty_index {
+        let _ = tty::open_ref(idx);
+    }
     if copy.pipe_id == INVALID_PIPE_ID {
         return Some(copy);
     }
@@ -541,6 +550,10 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         pipe_read_end: false,
         pipe_write_end: false,
     };
+
+    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::open_ref(TtyIndex(0));
 }
 
 pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
@@ -1420,6 +1433,9 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
             }
             if (events & POLLOUT) != 0 {
                 revents |= POLLOUT;
+            }
+            if tty::is_hung_up(tty_idx) {
+                revents |= POLLHUP;
             }
             drop(guard);
             return revents;

@@ -101,6 +101,8 @@ impl Tty {
                 ws_ypixel: 0,
             },
             active: true,
+            open_count: 0,
+            hung_up: false,
         }
     }
 }

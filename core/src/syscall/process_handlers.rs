@@ -407,6 +407,7 @@ define_syscall!(syscall_setsid(ctx, args) requires(let task_id) {
         use slopos_lib::kernel_services::syscall_services::tty;
         tty::detach_session_by_id(old_sid);
     }
+    task.controlling_tty = None;
     // Create new session: task becomes session leader and pgrp leader.
     task.sid = task.task_id;
     task.pgid = task.task_id;

@@ -235,6 +235,7 @@ use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
     fileio_destroy_table_for_process,
 };
+use slopos_lib::kernel_services::syscall_services::tty;
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
     create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_page_dir,
@@ -873,6 +874,7 @@ pub fn task_create(
     task_ref.tgid = task_id;
     task_ref.pgid = task_id;
     task_ref.sid = task_id;
+    task_ref.controlling_tty = None;
     task_ref.clear_child_tid = 0;
     task_ref.parent_task_id = INVALID_TASK_ID;
     task_ref.stack_base = resources.stack_base;
@@ -972,6 +974,7 @@ fn resolve_termination_target(task_id: u32) -> (*mut Task, u32) {
 
 fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     let now = kdiag_timestamp();
+    let mut should_hangup = None;
     unsafe {
         if (*task_ptr).last_run_timestamp != 0 && now >= (*task_ptr).last_run_timestamp {
             (*task_ptr).total_runtime += now - (*task_ptr).last_run_timestamp;
@@ -1007,12 +1010,25 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
         }
 
         notify_parent_of_child_exit(task_ptr);
+
+        if (*task_ptr).sid != 0
+            && (*task_ptr).task_id != INVALID_TASK_ID
+            && (*task_ptr).sid == (*task_ptr).task_id
+            && (*task_ptr).controlling_tty.is_some()
+        {
+            should_hangup = (*task_ptr).controlling_tty;
+            (*task_ptr).controlling_tty = None;
+        }
     }
 
     scheduler::unschedule_task(task_ptr);
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     release_task_dependents(resolved_id);
+
+    if let Some(tty_idx) = should_hangup {
+        tty::hangup(tty_idx);
+    }
 }
 
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {

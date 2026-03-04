@@ -10,6 +10,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
+use slopos_abi::syscall::TtyIndex;
 
 pub use slopos_abi::task::{
     BlockReason, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -373,6 +374,7 @@ pub struct Task {
     pub tgid: u32,
     pub pgid: u32,
     pub sid: u32,
+    pub controlling_tty: Option<TtyIndex>,
     /// Current working directory path (null-terminated, max 256 bytes).
     /// Initialized to "/" on task creation. Inherited from parent on fork/spawn.
     pub cwd: [u8; 256],
@@ -442,6 +444,7 @@ impl Task {
             tgid: INVALID_TASK_ID,
             pgid: INVALID_TASK_ID,
             sid: INVALID_TASK_ID,
+            controlling_tty: None,
             cwd: {
                 let mut c = [0u8; 256];
                 c[0] = b'/';

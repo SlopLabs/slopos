@@ -13,6 +13,11 @@ crate::define_service! {
         get_session_id(tty_index: slopos_abi::syscall::TtyIndex) -> u32;
         set_foreground_pgrp_checked(tty_index: slopos_abi::syscall::TtyIndex, pgid: u32, caller_sid: u32) -> i32;
         write_bytes(tty_index: slopos_abi::syscall::TtyIndex, buf: *const u8, len: usize) -> usize;
+        attach_session(tty_index: slopos_abi::syscall::TtyIndex, leader_pid: u32, leader_pgid: u32);
+        open_ref(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
+        close_ref(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
+        hangup(tty_index: slopos_abi::syscall::TtyIndex);
+        is_hung_up(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         detach_session_by_id(session_id: u32);
     }
 }

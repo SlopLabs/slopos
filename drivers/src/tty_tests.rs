@@ -241,6 +241,28 @@ pub fn test_ldisc_set_termios_flush() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_ldisc_flush_all() -> TestResult {
+    let mut ld = LineDisc::new();
+    for &c in b"abc\n" {
+        ld.input_char(c);
+    }
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - expected data before flush_all");
+        return TestResult::Fail;
+    }
+    ld.flush_all();
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - flush_all left cooked data");
+        return TestResult::Fail;
+    }
+    let mut out = [0u8; 8];
+    if ld.read(&mut out) != 0 {
+        klog_info!("TTY_TEST: BUG - flush_all should empty read path");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 /// ECHO mode: printable characters return Echo action.
 pub fn test_ldisc_echo_printable() -> TestResult {
     let mut ld = LineDisc::new();
@@ -1909,6 +1931,101 @@ pub fn test_check_read_sole_gate_background() -> TestResult {
     }
 }
 
+pub fn test_tty_open_count_lifecycle() -> TestResult {
+    tty::table::tty_table_init();
+
+    let open1 = tty::open_ref(TtyIndex(0));
+    let open2 = tty::open_ref(TtyIndex(0));
+    let close1 = tty::close_ref(TtyIndex(0));
+    let close2 = tty::close_ref(TtyIndex(0));
+
+    if open1 != 1 || open2 != 2 || close1 != 1 || close2 != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - open/close ref counts mismatch: {} {} {} {}",
+            open1,
+            open2,
+            close1,
+            close2
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 500, 500);
+    tty::push_input(TtyIndex(0), b'x');
+    tty::push_input(TtyIndex(0), b'\n');
+
+    tty::hangup(TtyIndex(0));
+    let sid = tty::get_session_id(TtyIndex(0));
+    let hung = tty::is_hung_up(TtyIndex(0));
+    let has_data = tty::has_data(TtyIndex(0));
+
+    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::close_ref(TtyIndex(0));
+
+    if sid != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - hangup should detach session, got sid={}",
+            sid
+        );
+        return TestResult::Fail;
+    }
+    if !hung {
+        klog_info!("TTY_TEST: BUG - hangup did not set hung_up flag");
+        return TestResult::Fail;
+    }
+    if has_data {
+        klog_info!("TTY_TEST: BUG - hangup should flush cooked data");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
+    tty::table::tty_table_init();
+    let _ = tty::open_ref(TtyIndex(0));
+    tty::hangup(TtyIndex(0));
+
+    let mut out = [0u8; 8];
+    let rc = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), true);
+
+    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::close_ref(TtyIndex(0));
+
+    if rc != -5 {
+        klog_info!(
+            "TTY_TEST: BUG - nonblock read on hung tty expected -5, got {}",
+            rc
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_tty_hangup_blocking_read_eof() -> TestResult {
+    tty::table::tty_table_init();
+    let _ = tty::open_ref(TtyIndex(0));
+    tty::hangup(TtyIndex(0));
+
+    let mut out = [0u8; 8];
+    let rc = tty::read(TtyIndex(0), out.as_mut_ptr(), out.len(), false);
+
+    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::close_ref(TtyIndex(0));
+
+    if rc != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - blocking read on hung tty expected EOF 0, got {}",
+            rc
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -1925,6 +2042,7 @@ slopos_lib::define_test_suite!(
         test_ldisc_signal_ctrl_c,
         test_ldisc_raw_mode,
         test_ldisc_set_termios_flush,
+        test_ldisc_flush_all,
         test_ldisc_echo_printable,
         test_ldisc_echo_newline,
         test_ldisc_multiple_reads,
@@ -2011,5 +2129,9 @@ slopos_lib::define_test_suite!(
         test_signal_constants,
         test_set_compositor_focus_does_not_set_fg_pgrp,
         test_check_read_sole_gate_background,
+        test_tty_open_count_lifecycle,
+        test_tty_hangup_sets_flag_and_detaches_session,
+        test_tty_hangup_nonblock_read_eio,
+        test_tty_hangup_blocking_read_eof,
     ]
 );
