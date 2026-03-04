@@ -570,6 +570,7 @@ pub const TCSETSW: u64 = 0x5403;
 pub const TCSETSF: u64 = 0x5404;
 pub const TIOCGPGRP: u64 = 0x540F;
 pub const TIOCSPGRP: u64 = 0x5410;
+pub const TIOCGSID: u64 = 0x5429;
 pub const TIOCGWINSZ: u64 = 0x5413;
 pub const TIOCSWINSZ: u64 = 0x5414;
 
