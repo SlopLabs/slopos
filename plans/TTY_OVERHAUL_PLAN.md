@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + **Phase 4 Complete** (Phase 5 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + Phase 4 Complete + **Phase 5 Complete** (Phase 6 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `tty_index: u8` for per-TTY operations
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -44,7 +44,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 2 | Line discipline | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — | **DONE** |
 | 4 | Sessions/pgrps | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `lib/`, `core/`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs` | — |
+| 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 6 | Verification | — | — |
 
 ---
@@ -733,7 +733,9 @@ These are:
 
 ---
 
-## 9. Phase 5: FD Integration
+## 9. Phase 5: FD Integration ✅ COMPLETED
+
+**Status**: Completed. All 997 tests pass (9 new Phase 5 regression tests). Build clean. `just test` passes.
 
 **Goal**: Wire the new TTY subsystem into the file descriptor layer.
 
@@ -857,7 +859,7 @@ fn syscall_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
 }
 ```
 
-### 9.6 Files modified
+### 9.6 Files modified (planned)
 
 | File | Change |
 |------|--------|
@@ -865,6 +867,22 @@ fn syscall_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
 | `core/src/syscall/fs/poll_ioctl_handlers.rs` | Route ioctl to per-TTY, add TIOCGWINSZ/TIOCSWINSZ |
 | `lib/src/kernel_services/syscall_services/tty.rs` | Update to call `tty::*` with TTY index |
 
+### 9.7 Implementation Notes
+
+**Actual files modified:**
+
+| File | Change |
+|------|--------|
+| `fs/src/fileio.rs` | Replaced `console: bool` with `tty_index: Option<u8>` in `FileDescriptor`; routed `file_read_fd` through `tty::read_cooked(tty_idx, ...)`, `file_write_fd` through `tty::write_bytes(tty_idx, ...)`, `file_poll_fd` through `tty::has_cooked_data(tty_idx)`; added `file_get_tty_index(process_id, fd) -> Option<u8>` for ioctl dispatch; updated `bootstrap_console_fds` to set `tty_index: Some(0)` |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Rewrote `syscall_ioctl` to resolve TTY index from FD via `file_get_tty_index(pid, fd)` instead of hardcoded `0`; all TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ/TIOCGPGRP/TIOCSPGRP/TIOCGSID now use the resolved `tty_idx` |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Added `write_bytes(tty_index: u8, buf: *const u8, len: usize) -> usize` to `TtyServices` |
+| `drivers/src/syscall_services_init.rs` | Added `tty_write_bytes_adapter` function and registered it in `TTY_SERVICES` struct |
+| `drivers/src/tty_tests.rs` | Added 9 Phase 5 regression tests (output processing, raw passthrough, invalid index, per-TTY termios/winsize/pgrp/data/session isolation, invalid read) |
+
+**Key design decisions:**
+- Used `Option<u8>` for `tty_index` instead of `Option<TtyIndex>` to match existing per-TTY API signatures across the codebase
+- Added `write_bytes` as a new `TtyServices` function rather than modifying existing `write_char`, keeping backward compatibility
+- `file_get_tty_index` is a standalone public function in `fileio.rs` to allow ioctl handlers to resolve TTY index without full FD lock
 ---
 
 ## 10. Phase 6: Verify & Test
