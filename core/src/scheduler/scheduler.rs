@@ -1006,6 +1006,17 @@ pub fn scheduler_get_current_task() -> *mut Task {
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task()).unwrap_or(ptr::null_mut())
 }
 
+/// Get the current task's session ID (SID).
+///
+/// Returns 0 if there is no current task or the scheduler is not yet active.
+pub fn current_task_sid() -> u32 {
+    let task = scheduler_get_current_task();
+    if task.is_null() {
+        return 0;
+    }
+    unsafe { (*task).sid }
+}
+
 pub fn scheduler_set_preemption_enabled(enabled: c_int) {
     let val = if enabled != 0 { 1u8 } else { 0u8 };
     PREEMPTION_ENABLED.store(val, Ordering::Release);

@@ -396,9 +396,18 @@ define_syscall!(syscall_setsid(ctx, args) requires(let task_id) {
         return ctx.err();
     }
     let task = unsafe { &mut *task_ptr };
+    // POSIX: EPERM if the process is already a process group leader.
     if task.pgid == task.task_id {
         return ctx.err();
     }
+    // Detach any TTY whose session matches the old SID.
+    // This releases the controlling terminal for the old session.
+    let old_sid = task.sid;
+    if old_sid != 0 {
+        use slopos_lib::kernel_services::syscall_services::tty;
+        tty::detach_session_by_id(old_sid);
+    }
+    // Create new session: task becomes session leader and pgrp leader.
     task.sid = task.task_id;
     task.pgid = task.task_id;
     ctx.ok(task.sid as u64)

@@ -32,6 +32,22 @@ fn runtime_current_task_id() -> u32 {
     unsafe { (*task).task_id }
 }
 
+fn runtime_current_task_pgid() -> u32 {
+    let task = scheduler::scheduler_get_current_task();
+    if task.is_null() {
+        return 0;
+    }
+    unsafe { (*task).pgid }
+}
+
+fn runtime_current_task_sid() -> u32 {
+    let task = scheduler::scheduler_get_current_task();
+    if task.is_null() {
+        return 0;
+    }
+    unsafe { (*task).sid }
+}
+
 fn runtime_unblock_task(task: DriverTaskHandle) -> i32 {
     scheduler::unblock_task(handle_to_task(task))
 }
@@ -92,6 +108,8 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     scheduler_is_enabled: scheduler::scheduler_is_enabled,
     current_task: runtime_current_task,
     current_task_id: runtime_current_task_id,
+    current_task_pgid: runtime_current_task_pgid,
+    current_task_sid: runtime_current_task_sid,
     block_current_task: scheduler::block_current_task,
     unblock_task: runtime_unblock_task,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,

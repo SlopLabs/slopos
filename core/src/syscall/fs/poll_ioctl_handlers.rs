@@ -3,7 +3,7 @@
 use core::ffi::c_int;
 
 use slopos_abi::syscall::{
-    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP, TIOCGWINSZ, TIOCSPGRP,
+    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP, TIOCGSID, TIOCGWINSZ, TIOCSPGRP,
     UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
@@ -306,7 +306,21 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let pid: process_id) {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let pgrp = try_or_err!(ctx, copy_from_user(ptr));
-            ctx.from_bool_value(tty::set_foreground_pgrp(0, pgrp) == 0, 0)
+            // Use session-validated set: caller's SID must match the TTY's session.
+            let caller_sid = crate::sched::current_task_sid();
+            let rc = tty::set_foreground_pgrp_checked(0, pgrp, caller_sid);
+            if rc == 0 {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
+        }
+        TIOCGSID => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
+            let sid = tty::get_session_id(0);
+            try_or_err!(ctx, copy_to_user(ptr, &sid));
+            ctx.ok(0)
         }
         _ => ctx.err(),
     }
