@@ -31,7 +31,8 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::syscall::{UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
-    current_task_id, register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group,
+    current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
+    scheduler_is_enabled, signal_process_group,
 };
 
 use self::driver::TtyDriverKind;
@@ -159,27 +160,33 @@ fn notify_input_ready(idx: TtyIndex) {
     TTY_INPUT_WAITERS[slot].wake_one();
 }
 
-fn task_has_focus(idx: TtyIndex, task_id: u32) -> bool {
+/// Check whether a task has access to read from a TTY.
+///
+/// Uses the session-based foreground check: the caller's process group ID
+/// is compared against the TTY's foreground pgrp.  Falls back to
+/// compositor focus for backward compatibility.
+fn task_has_access(idx: TtyIndex, task_id: u32, caller_pgid: u32) -> bool {
     let table = TTY_TABLE.lock();
     let tty = match table.get(idx.0 as usize) {
         Some(Some(tty)) => tty,
         _ => return false,
     };
-
-    let focused = tty.session.focused_task_id;
-    if focused != 0 && focused == task_id {
-        return true;
-    }
-
-    let fg_pgrp = tty.session.fg_pgrp;
-    fg_pgrp != 0 && fg_pgrp == task_id
+    tty.session.task_has_access(task_id, caller_pgid)
 }
 
-fn ensure_focus(idx: TtyIndex, task_id: u32) {
+/// Lazily attach a session and set focus for a task that is reading from
+/// a TTY for the first time.  If no session is attached yet, the calling
+/// task becomes the session leader with its own pgid as foreground group.
+fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid: u32) {
     let mut table = TTY_TABLE.lock();
     if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        // Set compositor focus if not already set.
         if tty.session.focused_task_id == 0 {
             tty.session.focused_task_id = task_id;
+        }
+        // Auto-attach session if none exists (first reader becomes leader).
+        if !tty.session.has_session() && caller_sid != 0 {
+            tty.session.attach(caller_sid, caller_pgid);
         }
     }
 }
@@ -195,19 +202,21 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
 
     register_idle_callback();
     let task_id = current_task_id();
-    let enforce_focus = task_id != 0;
+    let caller_pgid = current_task_pgid();
+    let caller_sid = current_task_sid();
+    let enforce_access = task_id != 0;
 
-    if enforce_focus {
-        ensure_focus(idx, task_id);
+    if enforce_access {
+        auto_attach_session(idx, task_id, caller_pgid, caller_sid);
     }
 
     loop {
-        if enforce_focus && !task_has_focus(idx, task_id) {
+        if enforce_access && !task_has_access(idx, task_id, caller_pgid) {
             if nonblock {
                 return -11;
             }
-            let wait_ok =
-                TTY_INPUT_WAITERS[idx.0 as usize].wait_event(|| task_has_focus(idx, task_id));
+            let wait_ok = TTY_INPUT_WAITERS[idx.0 as usize]
+                .wait_event(|| task_has_access(idx, task_id, caller_pgid));
             if !wait_ok {
                 return -11;
             }
@@ -235,7 +244,7 @@ pub fn read(idx: TtyIndex, buffer: *mut u8, max: usize, nonblock: bool) -> isize
         }
 
         let wait_ok = TTY_INPUT_WAITERS[idx.0 as usize].wait_event(|| {
-            if enforce_focus && !task_has_focus(idx, task_id) {
+            if enforce_access && !task_has_access(idx, task_id, caller_pgid) {
                 return false;
             }
             drain_hw_input(idx);
@@ -324,6 +333,20 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) {
     }
 }
 
+/// Set foreground pgrp with session validation (POSIX TIOCSPGRP semantics).
+///
+/// Only processes in the same session as the TTY's controlling session may
+/// change the foreground pgrp.  Returns 0 on success, -1 on permission error.
+pub fn set_foreground_pgrp_checked(idx: TtyIndex, pgid: u32, caller_sid: u32) -> i32 {
+    let mut table = TTY_TABLE.lock();
+    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
+            return 0;
+        }
+    }
+    -1
+}
+
 /// Get window size for a specific TTY.
 pub fn get_winsize(idx: TtyIndex, ws: *mut UserWinsize) {
     if ws.is_null() {
@@ -383,6 +406,59 @@ pub fn get_focus() -> u32 {
 /// Initialise the TTY subsystem.  Call during early boot after serial is ready.
 pub fn init() {
     table::tty_table_init();
+}
+
+// ---------------------------------------------------------------------------
+// Session management API
+// ---------------------------------------------------------------------------
+
+/// Get the session ID for a specific TTY.
+pub fn get_session_id(idx: TtyIndex) -> u32 {
+    let table = TTY_TABLE.lock();
+    match table.get(idx.0 as usize) {
+        Some(Some(tty)) => tty.session.session_id,
+        _ => 0,
+    }
+}
+
+/// Attach a session to a TTY.
+///
+/// The session leader (`leader_pid`) becomes the controlling process.
+/// `leader_pgid` is set as the initial foreground process group.
+pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
+    let mut table = TTY_TABLE.lock();
+    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        tty.session.attach(leader_pid, leader_pgid);
+    }
+}
+
+/// Detach the controlling session from a TTY.
+///
+/// Clears session leader, session ID, and foreground pgrp.
+/// Compositor focus (`focused_task_id`) is NOT cleared.
+pub fn detach_session(idx: TtyIndex) {
+    let mut table = TTY_TABLE.lock();
+    if let Some(Some(tty)) = table.get_mut(idx.0 as usize) {
+        tty.session.detach();
+    }
+}
+
+/// Detach any TTY whose session matches `session_id`.
+///
+/// Called from `setsid()` when the session leader creates a new session —
+/// the old controlling terminal must be released.
+pub fn detach_session_by_id(session_id: u32) {
+    if session_id == 0 {
+        return;
+    }
+    let mut table = TTY_TABLE.lock();
+    for slot in table.iter_mut() {
+        if let Some(tty) = slot.as_mut() {
+            if tty.session.session_id == session_id {
+                tty.session.detach();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

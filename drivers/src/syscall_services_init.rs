@@ -101,6 +101,18 @@ fn tty_get_foreground_pgrp_adapter(tty_index: u8) -> u32 {
     tty::get_foreground_pgrp(tty::TtyIndex(tty_index))
 }
 
+fn tty_get_session_id_adapter(tty_index: u8) -> u32 {
+    tty::get_session_id(tty::TtyIndex(tty_index))
+}
+
+fn tty_set_foreground_pgrp_checked_adapter(tty_index: u8, pgid: u32, caller_sid: u32) -> i32 {
+    tty::set_foreground_pgrp_checked(tty::TtyIndex(tty_index), pgid, caller_sid)
+}
+
+fn tty_detach_session_by_id_adapter(session_id: u32) {
+    tty::detach_session_by_id(session_id)
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     has_cooked_data: tty_has_cooked_data_adapter,
@@ -112,6 +124,9 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_focus: tty_get_focus_adapter,
     set_foreground_pgrp: tty_set_foreground_pgrp_adapter,
     get_foreground_pgrp: tty_get_foreground_pgrp_adapter,
+    get_session_id: tty_get_session_id_adapter,
+    set_foreground_pgrp_checked: tty_set_foreground_pgrp_checked_adapter,
+    detach_session_by_id: tty_detach_session_by_id_adapter,
 };
 
 fn net_scan_members_adapter(
