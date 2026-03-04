@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + **Phase 2 Complete** (Phase 3 Planned)
+> **Status**: Phase 1 Complete + Shim Removal Complete + Read/Wakeup Hotfix Complete + Phase 2 Complete + Phase 3 Complete + **Phase 4 Complete** (Phase 5 Planned)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `tty_index: u8` for per-TTY operations
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -42,8 +42,8 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 1 | TTY core structs | `drivers/src/tty.rs` (deleted), `drivers/src/line_disc.rs` (deleted), `drivers/src/lib.rs` | `drivers/src/tty/mod.rs`, `tty/driver.rs`, `tty/table.rs`, `tty/ldisc.rs`, `tty/session.rs`, `drivers/src/tty_tests.rs` | **DONE** |
 | 1b | Shim removal | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/ps2/keyboard.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `core/src/syscall/core_handlers.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 2 | Line discipline | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — |
-| 4 | Sessions/pgrps | `core/src/scheduler/task.rs` | `drivers/src/tty/session.rs` |
+| 3 | Input pipeline | `drivers/src/ps2/keyboard.rs`, `drivers/src/input_event.rs` | — | **DONE** |
+| 4 | Sessions/pgrps | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `lib/`, `core/`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 5 | FD integration | `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs` | — |
 | 6 | Verification | — | — |
 
@@ -517,7 +517,7 @@ pub fn process_output(&self, c: u8) -> OutputAction {
 
 ---
 
-## 7. Phase 3: Input Pipeline Cleanup
+## 7. Phase 3: Input Pipeline Cleanup ✅ COMPLETED
 
 **Goal**: Establish a single, clean input path: keyboard → TTY. Remove dual delivery.
 
@@ -633,7 +633,20 @@ The `VConsoleDriver::drain_input` returns 0 (PS/2 input comes via interrupt, not
 
 ---
 
-## 8. Phase 4: Session & Process Group Management
+## 8. Phase 4: Session & Process Group Management ✅ COMPLETED
+
+**Status**: Completed. All 988 tests pass (21 new Phase 4 regression tests). Build clean. `just test` passes.
+
+**Implementation summary**: `TtySession` rewritten from 35-line stub to 202-line full implementation with:
+- `TtySession` struct with `session_leader`, `session_id`, `fg_pgrp`, `focused_task_id` fields
+- `ForegroundCheck` enum: `Allowed`, `NoSession`, `BackgroundRead`, `BackgroundWrite`
+- `check_read()` / `check_write()` for POSIX foreground access control
+- `task_has_access()` transitional helper combining compositor focus + session-based checks
+- `set_fg_pgrp_checked()` with same-session validation
+- `attach()` / `detach()` for session lifecycle management
+- Sentinel constants: `NO_SESSION`, `NO_FOREGROUND_PGRP`
+- Cross-crate wiring: `TIOCGSID` ioctl, `current_task_pgid/sid` runtime services, `setsid()` detaches controlling TTY, `TIOCSPGRP` validates caller session
+- 21 new regression tests covering session attach/detach, foreground checks, read/write access control, per-TTY API round-trips
 
 **Goal**: Replace ad-hoc `TTY_FOCUSED_TASK_ID` / `TTY_FOREGROUND_PGRP` with proper POSIX-like sessions.
 
