@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–10 Complete · **Phases 11–14 Planned** (Timing, Defaults, ABI Cleanup, Responsibility Split) · Phase 15 Verify & Test
+> **Status**: Phases 1–11 Complete · **Phases 12–14 Planned** (Defaults, ABI Cleanup, Responsibility Split) · Phase 15 Verify & Test
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -59,7 +59,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/syscall_services_init.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 10 | Job control correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-|| 11 | Non-canonical timing fix | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — |
+| 11 | Non-canonical timing fix | `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 || 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
 || 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs` | — |
 || 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — |
@@ -1370,55 +1370,52 @@ pub fn check_read(&self, caller_pgid: u64, caller_sid: u64) -> ForegroundCheck {
 | `drivers/src/tty_tests.rs` | Add 8 Phase 10 regression tests: background write blocked with TOSTOP, cross-session read rejected, SIGTTOU constant, foreground write allowed, kernel task exempted |
 ---
 
-## 15. Phase 11: Non-Canonical Timing Fix
+## 15. Phase 11: Non-Canonical Timing Fix ✅ COMPLETED
 
 > **Priority**: P0 — Breaks interactive serial tools and terminal programs.
 > **Rationale**: POSIX specifies that when both VMIN > 0 and VTIME > 0, the timer starts **after the first byte arrives**, not when `read()` is called. The current implementation starts the timeout at call entry, meaning slow typists or serial devices get premature timeouts. Programs like minicom, picocom, and readline in raw mode depend on correct inter-byte timing.
 
 **Goal**: Fix the VMIN > 0 / VTIME > 0 case to use inter-byte timeout semantics per POSIX.
 
-### 15.1 Current behavior (incorrect)
+**Status**: Completed. All tests pass (1039/1039, 5 new Phase 11 regression tests). Build clean. `cargo fmt --all`, `just build`, and `just test` pass.
+
+**Implementation summary**:
+- **15.1 (Two-phase wait for VMIN>0/VTIME>0)**: Rewrote the `(_, _)` match arm in `drivers/src/tty/mod.rs::read()` to implement correct POSIX inter-byte timeout semantics. When `total == 0` (no bytes received yet), `wait_timeout_ms` remains `None` so the read blocks indefinitely via `wait_event()` until the first byte arrives. Once `total > 0` (at least one byte received), `wait_timeout_ms` is set to `vtime_ms` so subsequent waits use `wait_event_timeout()` with the inter-byte timer. This matches the POSIX specification: the timer starts after the first byte, not at `read()` entry.
+- **15.2 (No ldisc changes needed)**: The `vmin_vtime()` helper and `is_canonical()` methods in `ldisc.rs` were already correct and required no modifications.
+- **Regression tests**: 5 new Phase 11 tests: `test_phase11_vmin_vtime_enough_data_returns_immediately` (VMIN bytes available returns immediately), `test_phase11_vmin_vtime_partial_nonblock` (partial data with nonblock returns available bytes), `test_phase11_vmin_vtime_no_data_nonblock` (no data returns WouldBlock), `test_phase11_vmin_vtime_interbyte_timeout_returns_partial` (blocking read with 1 byte returns after inter-byte timeout instead of blocking indefinitely), `test_phase11_ldisc_vmin_vtime_helper` (vmin_vtime accessor correctness).
+
+### 15.1 Previous behavior (incorrect)
 
 ```rust
 // In read() — VMIN>0, VTIME>0 case
-// Timer starts at read() call entry
-let timeout_ms = vtime as u64 * 100;
-wait_event_timeout(&TTY_INPUT_WAITERS[slot], timeout_ms, || {
-    // Check if VMIN bytes available
-});
+// Timer started at read() call entry — WRONG
+should_wait = true;
+wait_timeout_ms = Some(vtime_ms); // ← always set, even with no bytes yet
 ```
 
-### 15.2 Correct POSIX behavior
+### 15.2 Correct POSIX behavior (implemented)
 
 ```rust
-// VMIN>0, VTIME>0: block indefinitely for first byte,
-// then start inter-byte timer for remaining bytes
-loop {
-    // Phase 1: Wait indefinitely for first byte (no timeout)
-    wait_event(&TTY_INPUT_WAITERS[slot], || {
-        has_at_least_n_bytes(1)
-    });
-    
-    // Phase 2: Start inter-byte timer for remaining VMIN-1 bytes
-    let timeout_ms = vtime as u64 * 100;
-    let got_all = wait_event_timeout(&TTY_INPUT_WAITERS[slot], timeout_ms, || {
-        has_at_least_n_bytes(vmin)
-    });
-    
-    // Return whatever we have (at least 1 byte, up to VMIN)
-    break;
+// VMIN>0, VTIME>0: inter-byte timeout.
+// The timer starts after the first byte arrives,
+// NOT when read() is called.
+should_wait = true;
+// Phase 1: no bytes yet — wait indefinitely for the first byte.
+// Phase 2: at least one byte received — start inter-byte timer.
+if total > 0 {
+    wait_timeout_ms = Some(vtime_ms);
 }
+// else: wait_timeout_ms remains None (indefinite)
 ```
 
 ### 15.3 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Rewrite VMIN>0/VTIME>0 read case with two-phase wait |
+| `drivers/src/tty/mod.rs` | Rewrote `(_, _)` match arm in `read()` with two-phase wait: indefinite for first byte, inter-byte timeout after |
 | `drivers/src/tty/ldisc.rs` | No changes needed (`vmin_vtime()` helper already correct) |
-| `drivers/src/tty_tests.rs` | Add test: VMIN>0/VTIME>0 returns after first byte even if VMIN not reached |
+| `drivers/src/tty_tests.rs` | Added 5 Phase 11 regression tests (enough data immediate return, partial nonblock, no data WouldBlock, inter-byte timeout partial return, vmin_vtime helper) |
 
----
 
 ## 16. Phase 12: Sane Defaults & Output Column Tracking
 
