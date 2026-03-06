@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–18 Complete (PTY + Verify/Test landed)
+> **Status**: Phases 1–17 Complete; Phases 18–22 Planned; Phase 23 is the final verification gate
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, and compositor focus split from POSIX foreground; follow-up maturity work still remains for controlling-terminal ownership unification, strict cross-session denial, PTY pair atomicity, event-driven readiness, IXON stop enforcement, and real VConsole routing
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -30,9 +30,14 @@
 19. [Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase ✅](#19-phase-15-posix-quick-wins--line-boundaries-sigwinch-sighup-word-erase)
 20. [Phase 16: Termios Drain Semantics & Open Flags ✅](#20-phase-16-termios-drain-semantics--open-flags)
 21. [Phase 17: PTY Implementation](#21-phase-17-pty-implementation)
-22. [Phase 18: Verify & Test](#22-phase-18-verify--test)
-23. [File Inventory](#23-file-inventory)
-24. [Appendix: Linux N_TTY Reference](#24-appendix-linux-n_tty-reference)
+22. [Phase 18: Controlling Terminal Ownership Unification](#22-phase-18-controlling-terminal-ownership-unification)
+23. [Phase 19: Strict Session Gates & Foreground Outcomes](#23-phase-19-strict-session-gates--foreground-outcomes)
+24. [Phase 20: PTY Pair Atomicity & Lifecycle Hardening](#24-phase-20-pty-pair-atomicity--lifecycle-hardening)
+25. [Phase 21: Event-Driven Readiness & IXON Completion](#25-phase-21-event-driven-readiness--ixon-completion)
+26. [Phase 22: Operational Console Routing & Real VConsole](#26-phase-22-operational-console-routing--real-vconsole)
+27. [Phase 23: Verify & Test](#27-phase-23-verify--test)
+28. [File Inventory](#28-file-inventory)
+29. [Appendix: Linux N_TTY Reference](#29-appendix-linux-n_tty-reference)
 
 ---
 
@@ -69,7 +74,12 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 15 | POSIX quick wins (line boundaries, SIGWINCH, SIGHUP, word erase) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/signal.rs`, `core/src/scheduler/task.rs` | — | **DONE** |
 | 16 | Termios drain & open flags | `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 17 | PTY implementation | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs` | `drivers/src/tty/pty.rs` | **DONE** |
-| 18 | Final verification & testing | `plans/TTY_OVERHAUL_PLAN.md` | — | **DONE** |
+| 18 | Controlling terminal ownership unification | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
+| 19 | Strict session gates & foreground outcomes | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
+| 20 | PTY pair atomicity & lifecycle hardening | `drivers/src/tty/pty.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
+| 21 | Event-driven readiness & IXON completion | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/waitqueue.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
+| 22 | Operational console routing & real VConsole | `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/ps2/keyboard.rs`, `fs/src/fileio.rs`, `core/src/syscall/ui_handlers.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
+| 23 | Final verification & testing | `plans/TTY_OVERHAUL_PLAN.md` | — | **PENDING** |
 
 ---
 
@@ -2126,20 +2136,216 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 
 ---
 
-## 22. Phase 18: Verify & Test ✅ COMPLETED
+## 22. Phase 18: Controlling Terminal Ownership Unification
 
-**Status**: Completed. `cargo fmt --all`, `just build`, and `just test` pass. The final verification run finished with `TESTS SUMMARY: total=1090 passed=1090 failed=0`.
+> **Status**: **PLANNED**
+> **Priority**: P0 — Highest-value follow-up after the deep architecture review.
+> **Rationale**: The current control plane still has two sources of truth for terminal ownership. `read()` can auto-attach session state in `drivers/src/tty/session.rs`, while `TIOCSCTTY` separately sets `task.controlling_tty` in `core/src/syscall/fs/poll_ioctl_handlers.rs`. That split is convenient for bootstrap, but it is not the clean long-term POSIX model. The next phase should make controlling-terminal attachment explicit and coherent so task state, TTY session state, and ioctl semantics cannot drift apart.
 
-> **Priority**: Final gate — comprehensive verification after all correctness, structural, and PTY phases.
+**Goal**: Establish a single canonical ownership path for controlling terminals and session attachment.
 
-### 22.1 Build verification
+### 22.1 Make explicit control operations the source of truth
+
+- Keep `TIOCSCTTY` and session-detach operations (`setsid()`, shell exit, hangup) as the only durable ownership transitions.
+- Remove read-side auto-attach as a durable ownership mechanism; if a bootstrap exception is still needed for early console bring-up, confine it to a clearly marked early-boot path instead of the generic `read()` flow.
+- Ensure `/dev/tty` resolution and `O_NOCTTY` behavior depend on the same ownership state machine.
+
+### 22.2 Keep task and TTY state coherent
+
+- When a task acquires a controlling TTY, update both `task.controlling_tty` and `tty.session` under one coherent transition.
+- When ownership is dropped, detach both sides together so the TTY cannot retain a stale session after the task no longer owns it.
+- Add explicit invariants to the plan and tests: if `task.controlling_tty == Some(idx)`, then `TTY_SLOTS[idx]` must carry the same session identity.
+
+### 22.3 Tighten detach and hangup boundaries
+
+- Audit `setsid()`, `TIOCSCTTY`, `hangup()`, and task-exit paths so each ownership transition is one-way and explicit.
+- Decide whether `TIOCNOTTY` should be added now or intentionally deferred, but document the choice so ownership semantics stay comprehensible.
+- Keep compositor focus completely outside this ownership model; it remains UI policy, not POSIX control state.
+
+### 22.4 Files modified
+
+| File | Planned change |
+|------|----------------|
+| `drivers/src/tty/mod.rs` | Remove generic read-side ownership mutation; keep ownership transitions explicit |
+| `drivers/src/tty/session.rs` | Model canonical attach/detach rules and ownership invariants |
+| `fs/src/fileio.rs` | Keep `/dev/tty` and `O_NOCTTY` behavior aligned with the new ownership model |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Make `TIOCSCTTY` the canonical acquisition path |
+| `core/src/syscall/process_handlers.rs` | Re-check detach behavior in `setsid()` |
+| `core/src/scheduler/task.rs` | Keep exit/hangup ownership teardown coherent |
+| `drivers/src/tty_tests.rs` | Add ownership-coherence and detach-path regression tests |
+| `core/src/syscall/tests.rs` | Add syscall-level controlling-terminal transition tests |
+
+---
+
+## 23. Phase 19: Strict Session Gates & Foreground Outcomes
+
+> **Status**: **PLANNED**
+> **Priority**: P0 — Required for fully trustworthy POSIX TTY semantics.
+> **Rationale**: The review found that `ForegroundCheck::NoSession` currently conflates multiple cases: bootstrap permissiveness, missing foreground group, and cross-session denial. `drivers/src/tty/session.rs` marks cross-session reads as `NoSession`, while `drivers/src/tty/mod.rs` still allows `NoSession` in the read path. That makes the control plane look stricter on paper than it is in reality.
+
+**Goal**: Separate bootstrap permissiveness from real access denial and enforce read/write outcomes uniformly.
+
+### 23.1 Split foreground outcomes into explicit states
+
+- Replace the overloaded `NoSession` path with distinct outcomes such as `BootstrapAllowed`, `DeniedCrossSession`, `BackgroundRead`, and `BackgroundWrite`.
+- Keep kernel/early-boot permissiveness explicit instead of hiding it behind the same enum branch used for policy denial.
+- Make the read and write paths consume the same outcome model so the control plane is easy to reason about.
+
+### 23.2 Enforce strict cross-session denial
+
+- Cross-session reads should return a hard denial (`-EIO` or the chosen internal error) rather than falling through a permissive branch.
+- Same-session background reads should continue to deliver `SIGTTIN`.
+- Same-session background writes with `TOSTOP` should continue to deliver `SIGTTOU`.
+
+### 23.3 Reconcile `check_read()` / `check_write()` with user-visible behavior
+
+- Ensure ioctl, `/dev/tty`, PTY slave access, and inherited console FDs all observe the same session/foreground rules.
+- Document exactly which cases are allowed during bootstrap and which are forbidden in steady state.
+- Keep the Rust surface idiomatic: one internal enum, one mapping layer at the syscall boundary, no scattered ad-hoc booleans.
+
+### 23.4 Files modified
+
+| File | Planned change |
+|------|----------------|
+| `drivers/src/tty/session.rs` | Replace ambiguous `NoSession` semantics with explicit outcome variants |
+| `drivers/src/tty/mod.rs` | Enforce strict outcome handling in `read()` and `write()` |
+| `fs/src/fileio.rs` | Keep FD routing aligned with the stricter access model |
+| `drivers/src/tty_tests.rs` | Add exact coverage for cross-session denial vs bootstrap allowance |
+| `core/src/syscall/tests.rs` | Add syscall-facing regressions for `-EIO`, `SIGTTIN`, and `SIGTTOU` cases |
+
+---
+
+## 24. Phase 20: PTY Pair Atomicity & Lifecycle Hardening
+
+> **Status**: **PLANNED**
+> **Priority**: P1 — PTY functionality exists, but pair-level lifecycle still needs hardening.
+> **Rationale**: The current PTY implementation is structurally correct, but pair allocation/free still happens as separate slot operations. That is acceptable for the first landing, yet long-term PTY code should treat master/slave creation and teardown as one atomic lifecycle event so concurrent opens/closes cannot observe half-initialized or half-freed pairs.
+
+**Goal**: Make PTY pair allocation, teardown, and peer-closure semantics atomic at the pair level while preserving per-TTY fast-path locking.
+
+### 24.1 Introduce a pair-level allocation boundary
+
+- Allocate both master and slave from one critical section so there is no window where one side exists without the other.
+- Keep per-slot locks for the data path, but add a narrow allocator/lifecycle boundary for pair creation and destruction.
+- Prevent `/dev/ptmx` and `/dev/pts/N` from observing stale or partially initialized peer metadata.
+
+### 24.2 Harden close and hangup semantics
+
+- Make last-close transitions explicit for both master and slave.
+- Ensure master-close hangup, slave-close EOF, and pair-free decisions are derived from one pair state transition rather than two loosely ordered slot updates.
+- Re-check `open_ref()` / `close_ref()` so reference counting and pair teardown cannot race each other into inconsistent state.
+
+### 24.3 Verify pair identity and peer metadata
+
+- Keep `TIOCGPTN`, `/dev/pts/N`, and peer cross-links coherent even under repeated open/close cycles.
+- Add regression coverage for rapid allocation/free/reallocation of PTYs.
+- Preserve the Rust-idiomatic static-slot design; do not introduce heap-shared peer objects unless a later feature truly requires them.
+
+### 24.4 Files modified
+
+| File | Planned change |
+|------|----------------|
+| `drivers/src/tty/pty.rs` | Add pair-level allocation/free critical sections and lifecycle helpers |
+| `drivers/src/tty/table.rs` | Support atomic pair reservation / release without compromising per-slot locking |
+| `drivers/src/tty/mod.rs` | Tighten PTY close/hangup transitions |
+| `fs/src/fileio.rs` | Keep `/dev/ptmx` and `/dev/pts/N` opens coherent with the harder lifecycle model |
+| `drivers/src/tty_tests.rs` | Add allocation-race, close-order, and rapid-reuse regression tests |
+
+---
+
+## 25. Phase 21: Event-Driven Readiness & IXON Completion
+
+> **Status**: **PLANNED**
+> **Priority**: P1 — Needed for mature multiplexing behavior and complete software flow control.
+> **Rationale**: `poll()` / `select()` currently rely on short sleep loops rather than true event-driven readiness, and the line discipline tracks IXON stop state without fully enforcing it on the output path. Mature TTY stacks do not just parse control flow; they make readiness and stop/resume semantics real.
+
+**Goal**: Replace polling loops with wait-queue-backed readiness and fully wire IXON stop/resume into output emission.
+
+### 25.1 Make TTY readiness event-driven
+
+- Reuse per-TTY wait queues for `poll()` / `select()` instead of fixed sleep-and-recheck loops.
+- Wake readers and poll waiters from the same readiness events: new input, hangup, peer close, and output-state changes.
+- Keep semantics consistent with existing `POLLIN`, `POLLOUT`, `POLLHUP`, and `POLLERR` behavior.
+
+### 25.2 Enforce IXON stop/resume on writes
+
+- When `VSTOP` / `VSTART` toggles line-discipline stopped state, make `tty::write()` and PTY output honor it.
+- Define whether stopped output buffers, suppresses, or blocks, then encode that policy explicitly in the plan and tests.
+- Ensure wakeups happen when output resumes so blocked or waiting writers make progress.
+
+### 25.3 Keep readiness logic Rust-idiomatic
+
+- Prefer a single readiness state machine over duplicated ad-hoc checks in `fileio.rs` and syscall handlers.
+- Avoid Linux-style historical lock layering unless SlopOS actually needs it.
+- Keep the API explicit: one event source, one wait path, one mapping to poll/select bits.
+
+### 25.4 Files modified
+
+| File | Planned change |
+|------|----------------|
+| `drivers/src/tty/mod.rs` | Add event-driven readiness integration and IXON-aware write behavior |
+| `drivers/src/tty/ldisc.rs` | Expose stopped/resume semantics cleanly to the TTY core |
+| `fs/src/fileio.rs` | Route TTY FD readiness through wait-queue-backed helpers |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Replace sleep loops with event-driven TTY readiness waits |
+| `lib/src/waitqueue.rs` | Reuse or extend timeout/event helpers as needed |
+| `drivers/src/tty_tests.rs` | Add IXON stop/resume and readiness regressions |
+| `core/src/syscall/tests.rs` | Add syscall-level poll/select readiness regressions |
+
+---
+
+## 26. Phase 22: Operational Console Routing & Real VConsole
+
+> **Status**: **PLANNED**
+> **Priority**: P2 — Not a POSIX blocker, but important to complete the long-term TTY vision.
+> **Rationale**: The architecture now supports multiple TTYs, yet the operational console story is still serial-first: bootstrap stdio is pinned to `TtyIndex(0)` and `VConsoleDriver` still mirrors output to serial instead of acting as a real framebuffer-backed console. Linux and Redox both separate terminal semantics from transport/backend details; SlopOS should finish that separation too.
+
+**Goal**: Make the virtual console a first-class backend while keeping serial available for logging and early boot.
+
+### 26.1 Stop treating `tty0` as the forever-console by default
+
+- Keep early serial bootstrap if needed, but allow the active interactive console to move onto the real virtual console path once the compositor / framebuffer side is available.
+- Audit console FD bootstrap so the long-term interactive default is policy-driven instead of hardwired.
+- Keep kernel logging and user-facing TTY routing conceptually separate.
+
+### 26.2 Implement a real VConsole output path
+
+- Replace serial mirroring with the intended framebuffer/text rendering backend.
+- Keep keyboard input routed to `active_tty()`, but make output land on the matching visual console backend.
+- Preserve serial as a debugging sink, not as the only fully working terminal renderer.
+
+### 26.3 Prepare for multi-terminal operation
+
+- Make active-TTY switching semantics explicit and testable.
+- Keep compositor focus, active TTY selection, and POSIX foreground group as three separate concepts with well-defined boundaries.
+- Avoid backsliding into a hidden singleton model now that the per-TTY architecture exists.
+
+### 26.4 Files modified
+
+| File | Planned change |
+|------|----------------|
+| `drivers/src/tty/driver.rs` | Implement real VConsole output instead of serial mirroring |
+| `drivers/src/tty/mod.rs` | Clarify active-console vs POSIX foreground boundaries |
+| `drivers/src/ps2/keyboard.rs` | Keep active-TTY input routing aligned with the real console backend |
+| `fs/src/fileio.rs` | Revisit bootstrap console FD assignment policy |
+| `core/src/syscall/ui_handlers.rs` | Keep compositor-facing focus/activation hooks explicit |
+| `drivers/src/tty_tests.rs` | Add active-console and VConsole backend regressions |
+
+---
+
+## 27. Phase 23: Verify & Test
+
+**Status**: Pending re-run after Phases 18–22 land. The last completed verification run covered Phases 1–17 and finished with `TESTS SUMMARY: total=1090 passed=1090 failed=0`.
+
+> **Priority**: Final gate — comprehensive verification after all correctness, maturity, and backend phases.
+
+### 27.1 Build verification
 
 ```bash
 just build          # Must compile cleanly
 just test           # Must pass existing test harness + all new phase tests
 ```
 
-### 22.2 Manual test cases (original — Phases 1–9)
+### 27.2 Manual test cases (original — Phases 1–9)
 
 | Test | Expected Result |
 |------|----------------|
@@ -2155,7 +2361,7 @@ just test           # Must pass existing test harness + all new phase tests
 | Fork+exec child process | Child inherits TTY, can read/write, parent waits |
 | Child exit → parent resume | Parent shell resumes with working TTY |
 
-### 22.3 Phase 10–14 test cases
+### 27.3 Phase 10–14 test cases
 
 | Test | Expected Result | Phase |
 |------|----------------|-------|
@@ -2174,7 +2380,7 @@ just test           # Must pass existing test harness + all new phase tests
 | `LdiscKind::Raw` vs `NTty` switching | Correct behavior when swapping line discipline | 14 |
 | `SessionId`/`ProcessGroupId` newtypes | No sentinel 0 values — `Option::None` for absent | 14 |
 
-### 22.4 Phase 15–17 test cases (NEW)
+### 27.4 Phase 15–17 test cases
 
 | Test | Expected Result | Phase |
 |------|----------------|-------|
@@ -2197,14 +2403,31 @@ just test           # Must pass existing test harness + all new phase tests
 | PTY Ctrl+C on slave | Master writes 0x03, slave's foreground group receives SIGINT | 17 |
 | PTY canonical editing | Master writes keystrokes, slave reads complete lines only | 17 |
 
-### 22.5 Regression checks
+### 27.5 Phase 18–22 test cases (NEW)
+
+| Test | Expected Result | Phase |
+|------|----------------|-------|
+| `TIOCSCTTY` acquires ownership | `task.controlling_tty` and `tty.session` reflect the same session identity | 18 |
+| `setsid()` detaches old control TTY coherently | Task loses controlling TTY and old TTY loses session ownership | 18 |
+| `/dev/tty` after `O_NOCTTY` open | Open succeeds without accidentally attaching a controlling terminal | 18 |
+| Cross-session read attempt | Returns hard denial (`-EIO`/equivalent), never falls through permissive bootstrap path | 19 |
+| Same-session background read | Returns `SIGTTIN`, not data | 19 |
+| Same-session background write with `TOSTOP` | Returns `SIGTTOU`, not silent success | 19 |
+| Rapid PTY allocate/free loop | No stale `/dev/pts/N` state, no partially initialized peer visible | 20 |
+| Master/slave close race | Pair teardown stays coherent regardless of close order | 20 |
+| `poll()` on idle TTY | Sleeps on wait queue until real readiness event, not fixed busy loop | 21 |
+| IXON stop/resume | `Ctrl+S` pauses output, `Ctrl+Q` resumes it predictably | 21 |
+| Active interactive console switch | Visual console output follows active backend without changing POSIX foreground pgrp | 22 |
+| VConsole output path | Text appears on the framebuffer-backed console instead of serial mirroring | 22 |
+
+### 27.6 Regression checks
 
 - Shell scrollback still works
 - Serial output still works for klog
 - Mouse/pointer events still work (input_event.rs unchanged for mouse)
 - Pipe operations still work
 - File I/O still works (non-console FDs unchanged)
-- All existing 1053+ tests still pass
+- All existing 1090+ tests still pass
 - No new compiler warnings introduced
 - `/dev/tty` still resolves to controlling terminal
 - Existing VMIN/VTIME behavior unchanged
@@ -2212,7 +2435,7 @@ just test           # Must pass existing test harness + all new phase tests
 
 ---
 
-## 23. File Inventory
+## 28. File Inventory
 
 ### New files
 
@@ -2249,7 +2472,7 @@ just test           # Must pass existing test harness + all new phase tests
 
 ---
 
-## 24. Appendix: Linux N_TTY Reference
+## 29. Appendix: Linux N_TTY Reference
 
 For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.c`) handles:
 
@@ -2282,4 +2505,4 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
    - Slave write → output processed through slave's ldisc → stored in `tty->write_buf` → master reads it
    - Master close → `pty_close()` → slave gets hangup
 
-The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now).  Phases 15–17 close the remaining critical gaps.
+The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now). Phases 15–17 closed many critical gaps; Phases 18–22 now track the remaining maturity work needed to make the long-term design fully coherent.
