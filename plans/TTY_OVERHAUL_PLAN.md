@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–15 Complete · **Phases 16–18 Planned** (Drain & Flags, PTY, Verify & Test)
+> **Status**: Phases 1–16 Complete · **Phases 17–18 Planned** (PTY, Verify & Test)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -28,7 +28,7 @@
 17. [Phase 13: ABI Signal Constant Unification ✅](#17-phase-13-abi-signal-constant-unification)
 18. [Phase 14: Responsibility Split — PTY Foundation ✅](#18-phase-14-responsibility-split--pty-foundation)
 19. [Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase ✅](#19-phase-15-posix-quick-wins--line-boundaries-sigwinch-sighup-word-erase)
-20. [Phase 16: Termios Drain Semantics & Open Flags](#20-phase-16-termios-drain-semantics--open-flags)
+20. [Phase 16: Termios Drain Semantics & Open Flags ✅](#20-phase-16-termios-drain-semantics--open-flags)
 21. [Phase 17: PTY Implementation](#21-phase-17-pty-implementation)
 22. [Phase 18: Verify & Test](#22-phase-18-verify--test)
 23. [File Inventory](#23-file-inventory)
@@ -67,7 +67,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — | **DONE** |
 | 15 | POSIX quick wins (line boundaries, SIGWINCH, SIGHUP, word erase) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/signal.rs`, `core/src/scheduler/task.rs` | — |
-| 16 | Termios drain & open flags | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `fs/src/fileio.rs` | — |
+| 16 | Termios drain & open flags | `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 17 | PTY implementation | `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `fs/src/fileio.rs` | `drivers/src/tty/pty.rs` |
 | 18 | Final verification & testing | — | — |
 
@@ -1856,119 +1856,106 @@ All four sub-tasks implemented and verified:
 
 ---
 
-## 20. Phase 16: Termios Drain Semantics & Open Flags
+## 20. Phase 16: Termios Drain Semantics & Open Flags ✅
 
 > **Priority**: P1 — Affects correctness for programs that switch terminal modes (editors, curses apps).
 > **Rationale**: Three medium-effort POSIX requirements that are commonly needed by interactive programs: TCSETSW/TCSETSF drain-before-change semantics, O_NOCTTY for daemon correctness, and TIOCSETD for runtime line discipline switching (prerequisite for clean PTY operation).
+
+**Status**: Completed. Build clean. `cargo fmt --all`, `just build`, and `just test` pass (1084/1084 tests, 0 failures, 7 new Phase 16 regression tests).
 
 **Goal**: Implement termios change drain semantics, the `O_NOCTTY` open flag, and runtime line discipline switching.
 
 ### 20.1 TCSETSW / TCSETSF drain semantics
 
-**Problem**: Currently `TCSETS`, `TCSETSW`, and `TCSETSF` all call `set_termios()` identically.  POSIX requires:
+**Problem**: `TCSETS`, `TCSETSW`, and `TCSETSF` previously called the same immediate termios path. POSIX requires:
 - `TCSETSW` — Wait for all pending output to drain to hardware **before** changing termios
 - `TCSETSF` — Wait for output drain **and** flush pending input **before** changing termios
 
-Programs like `vim` exiting to shell use `TCSETSW` to ensure all screen-clearing escape sequences are sent before switching back to cooked mode.  Without drain semantics, characters can be processed under the wrong terminal mode during transitions.
+Programs like `vim` exiting to shell use `TCSETSW` so screen-clearing escape sequences are emitted before the terminal returns to cooked mode. Without a distinct drain step, data can cross a mode boundary under the wrong settings.
 
-**Fix**:
+**Implemented**:
 
 ```rust
-// New function in mod.rs:
 pub fn set_termios_wait(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
-    // Phase 1: Wait until the driver's output is idle.
-    // For serial, this means the TX shift register is empty.
-    // For now, a simple yield loop since serial_putc_com1 is synchronous.
-    // (True drain requires driver-level "output complete" notification.)
-    set_termios(idx, t)
+    set_termios_mode(idx, t, TermiosSetMode::Drain)
 }
 
 pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
-    // Flush input buffer first.
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS { return Err(TtyError::InvalidIndex); }
-    {
-        let mut guard = TTY_SLOTS[slot].lock();
-        if let Some(tty) = guard.as_mut() {
-            tty.ldisc.flush_all();
-        }
-    }
-    set_termios(idx, t)
+    set_termios_mode(idx, t, TermiosSetMode::DrainAndFlushInput)
 }
 ```
 
-Update `poll_ioctl_handlers.rs` to dispatch `TCSETSW` → `set_termios_wait()` and `TCSETSF` → `set_termios_flush()`.  The SlopOS serial driver is currently synchronous (`serial_putc_com1` blocks until the byte is sent), so the drain step is effectively a no-op for now — but the API separation is important for when the driver becomes interrupt-driven.
+`drivers/src/tty/mod.rs` now funnels all three `TCSETS*` variants through a shared `set_termios_mode(...)` helper with an explicit `TermiosSetMode` enum. The drain boundary is modeled by `wait_output_idle()` outside the per-TTY lock, which is a validated no-op today because `serial_putc_com1` is synchronous, but it creates the correct long-term seam for buffered or interrupt-driven transmit without redesigning the public API later. `TCSETSF` flushes unread input only, preserving output semantics.
 
 ### 20.2 O_NOCTTY open flag
 
-**Problem**: Opening a TTY can automatically acquire it as the controlling terminal (via `auto_attach_session` in `read()`).  POSIX defines `O_NOCTTY` to suppress this — critical for daemons that temporarily open a terminal for logging without wanting it as their controlling terminal.
+**Problem**: Opening a TTY could still acquire it as the controlling terminal through the read-side `auto_attach_session()` path. POSIX defines `O_NOCTTY` to suppress that behavior, which daemons and helper processes rely on when they temporarily open a terminal for logging or inspection.
 
-**Fix**:
+**Implemented**:
 
 ```rust
 // In abi/src/syscall.rs:
-pub const O_NOCTTY: u32 = 0x100;  // Match Linux value
+pub const O_NOCTTY: u32 = 0x100;
 
-// In fs/src/fileio.rs — file_open_for_process():
-// When opening a TTY device, check O_NOCTTY in flags.
-// If set, do NOT call auto_attach_session or set controlling_tty.
-
-// In tty::read() — skip auto_attach when FD was opened with O_NOCTTY.
-// This requires propagating the O_NOCTTY flag through FileDescriptor.
+// In fs/src/fileio.rs:
+let auto_attach = (desc.flags & O_NOCTTY as u32) == 0;
+tty::read_cooked_with_attach(desc.tty_index?, buf, nonblock, auto_attach)
 ```
 
-Add a `noctty: bool` field to `FileDescriptor` (or check it from the open flags stored in `FileDescriptor.flags`).  When set, `read()` skips the `auto_attach_session()` call.
+SlopOS keeps `O_NOCTTY` as a sticky per-FD policy bit in `FileDescriptor.flags` instead of introducing a parallel `noctty: bool`. That keeps terminal acquisition policy attached to the file descriptor that requested it, lets `F_GETFL` report the bit back to userspace, and ensures `F_SETFL` preserves `O_NOCTTY` instead of dropping it when mutating later status flags like `O_NONBLOCK` or `O_APPEND`.
 
 ### 20.3 Runtime line discipline switching (TIOCSETD)
 
-**Problem**: The `LdiscKind` enum (NTty / Raw) is set at TTY allocation time and cannot be changed at runtime.  POSIX defines `TIOCSETD` to switch the active line discipline.  This is a prerequisite for clean PTY operation where the master needs Raw and the slave needs NTty, and applications may want to switch between them.
+**Problem**: `LdiscKind` already supported `NTty` and `Raw`, but the active discipline was fixed at allocation time. POSIX `TIOCSETD` / `TIOCGETD` requires runtime switching, which is also a clean prerequisite for Phase 17 PTY master/slave behavior.
 
-**Fix**:
+**Implemented**:
 
 ```rust
-// New ioctl constant in abi/src/syscall.rs:
-pub const TIOCSETD: u64 = 0x5423;  // Set line discipline
-pub const TIOCGETD: u64 = 0x5424;  // Get line discipline
+pub const TIOCSETD: u64 = 0x5423;
+pub const TIOCGETD: u64 = 0x5424;
 
-// Line discipline IDs:
 pub const N_TTY: u32 = 0;
-pub const N_RAW: u32 = 1;  // SlopOS extension (not in Linux)
-
-// In tty::set_ldisc():
-pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS { return Err(TtyError::InvalidIndex); }
-    let mut guard = TTY_SLOTS[slot].lock();
-    match guard.as_mut() {
-        Some(tty) => {
-            // Flush old discipline's buffers before switching.
-            tty.ldisc.flush_all();
-            tty.ldisc = match ldisc_id {
-                N_TTY => LdiscKind::NTty(LineDisc::new()),
-                N_RAW => LdiscKind::Raw(RawDisc::new()),
-                _ => return Err(TtyError::InvalidIndex),  // Unknown ldisc
-            };
-            Ok(())
-        }
-        None => Err(TtyError::NotAllocated),
-    }
-}
+pub const N_RAW: u32 = 1;
 ```
 
-**Design note**: SlopOS keeps enum dispatch for `LdiscKind` (no trait objects) because there are only two variants and the `no_std` + no-alloc constraint makes `Box<dyn LdiscTrait>` impractical.  If future line disciplines are added (SLIP, PPP), a macro-generated delegation layer or a manual vtable can replace the current match arms without changing the public API.
+`drivers/src/tty/ldisc.rs` now exposes `LdiscKind::id()`, `LdiscKind::from_id(...)`, and `flush_input()`, while `drivers/src/tty/mod.rs` adds `get_ldisc()` / `set_ldisc()`. Runtime switching preserves the previous `termios` payload across the swap, updates `c_line` to the selected line discipline ID, flushes unread input from the old discipline, and rejects unsupported IDs with `TtyError::UnsupportedLineDiscipline`. `RawDisc` was also updated to source `VMIN`/`VTIME` from preserved termios state instead of hardcoding `(1, 0)`, so line-discipline flips do not silently lose non-canonical timing settings.
+
+**Design note**: SlopOS keeps enum dispatch for `LdiscKind` (no trait objects) because there are only two variants and the `no_std` + no-alloc constraint makes `Box<dyn LdiscTrait>` impractical. If future line disciplines are added (SLIP, PPP), a macro-generated delegation layer or a manual vtable can replace the current match arms without changing the public API.
 
 ### 20.4 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Add `set_termios_wait()`, `set_termios_flush()`, `set_ldisc()`, `get_ldisc()` |
-| `drivers/src/tty/ldisc.rs` | No changes needed — `LdiscKind` already supports both variants |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Dispatch `TCSETSW` → `set_termios_wait`, `TCSETSF` → `set_termios_flush`, `TIOCSETD` / `TIOCGETD` |
-| `abi/src/syscall.rs` | Add `O_NOCTTY`, `TIOCSETD`, `TIOCGETD`, `N_TTY`, `N_RAW` constants |
-| `fs/src/fileio.rs` | Propagate `O_NOCTTY` flag to `FileDescriptor`, skip auto-attach when set |
-| `lib/src/kernel_services/syscall_services/tty.rs` | Add `set_ldisc`/`get_ldisc` to `TtyServices` |
-| `drivers/src/syscall_services_init.rs` | Wire ldisc service adapters |
-| `drivers/src/tty_tests.rs` | Add regression tests: TCSETSF flushes input, O_NOCTTY flag, ldisc switching round-trip |
+| `abi/src/syscall.rs` | Add `O_NOCTTY`, `TIOCSETD`, `TIOCGETD`, `N_TTY`, and `N_RAW` constants |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Add attach-aware reads, drain/flush termios setters, and ldisc get/set service calls |
+| `drivers/src/syscall_services_init.rs` | Wire adapters for attach-aware reads, drain/flush setters, and ldisc get/set |
+| `drivers/src/tty/ldisc.rs` | Add `id()`, `from_id(...)`, `flush_input()`, and preserve raw `VMIN`/`VTIME` from termios |
+| `drivers/src/tty/mod.rs` | Add `TermiosSetMode`, attach-aware read path, drain/flush setters, and runtime `set_ldisc()` / `get_ldisc()` |
+| `fs/src/fileio.rs` | Preserve `O_NOCTTY` and `O_CLOEXEC`, route TTY reads through attach-aware service, keep `O_NOCTTY` sticky across `F_SETFL` |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Dispatch `TCSETSW` / `TCSETSF` correctly and add `TIOCSETD` / `TIOCGETD` |
+| `drivers/src/tty_tests.rs` | Add regression coverage for drain-vs-flush input handling, attach suppression, and ldisc round-trips |
+| `core/src/syscall/tests.rs` | Add `/dev/tty` `O_NOCTTY` flag propagation regression test |
+
+### 20.5 Implementation Summary
+
+All three Phase 16 requirements are now implemented and verified:
+
+1. **Distinct termios transition modes** — `TCSETS` remains immediate, `TCSETSW` waits through `set_termios_wait()`, and `TCSETSF` uses `set_termios_flush()` to drain output and flush unread input before applying new attributes. The shared `TermiosSetMode` enum keeps the semantic split explicit without duplicating state-transition logic.
+2. **`O_NOCTTY` as per-FD policy** — TTY reads now go through `read_cooked_with_attach(...)`, and descriptors opened with `O_NOCTTY` skip `auto_attach_session()`. The flag stays visible through `F_GETFL` and survives `F_SETFL` updates.
+3. **Runtime line discipline switching** — `TIOCGETD` / `TIOCSETD` now switch cleanly between `N_TTY` and `N_RAW` at runtime. The implementation preserves termios state, updates `c_line`, and rejects unsupported IDs cleanly.
+
+**Adjacent correctness fix**: While wiring open-flag propagation, `file_open_for_process()` was also corrected to carry `O_CLOEXEC` into `FileDescriptor.cloexec` for both regular opens and `/dev/tty`, fixing a real descriptor-state bug uncovered during Phase 16 work.
+
+**Tests added** (7 new tests, all passing):
+- `test_phase16_tcsetsw_preserves_pending_input` — drain path leaves unread input intact
+- `test_phase16_tcsetsf_flushes_pending_input` — flush path clears unread input before apply
+- `test_phase16_read_with_attach_false_skips_auto_attach` — attach suppression honors per-FD `O_NOCTTY`
+- `test_phase16_get_ldisc_default_is_ntty` — fresh TTY reports `N_TTY`
+- `test_phase16_set_ldisc_round_trip_preserves_termios` — ldisc swap keeps termios state stable
+- `test_phase16_set_ldisc_invalid_id_rejected` — unsupported IDs fail with the new error path
+- `test_open_dev_tty_with_o_noctty_preserves_flag` — `/dev/tty` open + `F_GETFL` keeps `O_NOCTTY`
+
+**Total test suite**: 1084 tests, 1084 passed, 0 failed.
 
 ---
 
