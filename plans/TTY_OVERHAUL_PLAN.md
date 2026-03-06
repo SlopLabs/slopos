@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–11 Complete · **Phases 12–14 Planned** (Defaults, ABI Cleanup, Responsibility Split) · Phase 15 Verify & Test
+> **Status**: Phases 1–13 Complete · **Phases 14–15 Planned** (Responsibility Split, Verify & Test)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -25,7 +25,7 @@
 14. [Phase 10: Job Control Correctness](#14-phase-10-job-control-correctness)
 15. [Phase 11: Non-Canonical Timing Fix](#15-phase-11-non-canonical-timing-fix)
 16. [Phase 12: Sane Defaults & Output Column Tracking ✅](#16-phase-12-sane-defaults--output-column-tracking)
-17. [Phase 13: ABI Signal Constant Unification](#17-phase-13-abi-signal-constant-unification)
+17. [Phase 13: ABI Signal Constant Unification ✅](#17-phase-13-abi-signal-constant-unification)
 18. [Phase 14: Responsibility Split — PTY Foundation](#18-phase-14-responsibility-split--pty-foundation)
 19. [Phase 15: Verify & Test](#19-phase-15-verify--test)
 20. [File Inventory](#20-file-inventory)
@@ -60,8 +60,8 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/syscall_services_init.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 10 | Job control correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 11 | Non-canonical timing fix | `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-|| 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
-|| 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs` | — |
+|| 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
+| 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 || 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — |
 || 15 | Verification & testing | — | — |
 
@@ -1522,19 +1522,30 @@ pub enum OutputAction {
 All 55 test suites pass (0 failures). `cargo fmt` clean.
 ---
 
-## 17. Phase 13: ABI Signal Constant Unification
+## 17. Phase 13: ABI Signal Constant Unification ✅
 
 > **Priority**: P2 — Maintenance hazard, not a runtime bug yet.
 > **Rationale**: Signal constants (`SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, `SIGCONT`) are defined in **both** `abi/src/syscall.rs` and `abi/src/signal.rs`. The TTY subsystem imports from both: `mod.rs` uses `slopos_abi::signal::*` while `ldisc.rs` uses `slopos_abi::syscall::*`. If the values drift between files, signal delivery will silently break.
 
 **Goal**: Establish `abi/src/signal.rs` as the single canonical source for all signal constants. Remove duplicates from `abi/src/syscall.rs`.
 
+**Status**: Completed. All tests pass (1053/1053, 4 new Phase 13 regression tests). Build clean. `cargo fmt --all`, `just build`, and `just test` pass.
+
+**Implementation summary**:
+- **17.1 (Remove duplicates)**: Deleted all 7 duplicate signal constants (`SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGCONT`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`) from `abi/src/syscall.rs`. The canonical definitions remain in `abi/src/signal.rs` which was already `pub mod signal` in `abi/src/lib.rs`.
+- **17.2 (Update imports)**: Migrated all TTY subsystem imports from `slopos_abi::syscall::SIG*` to `slopos_abi::signal::SIG*` across 3 files:
+  - `drivers/src/tty/ldisc.rs`: `SIGINT`, `SIGQUIT`, `SIGTSTP` moved to `slopos_abi::signal`
+  - `drivers/src/tty/mod.rs`: `SIGTTIN`, `SIGTTOU` moved to `slopos_abi::signal` (joined existing `SIGCONT`, `SIGHUP` import)
+  - `drivers/src/tty_tests.rs`: All 7 signal constants now imported from `slopos_abi::signal`
+- **17.3 (Re-export verification)**: Confirmed `pub mod signal` already exported in `abi/src/lib.rs` — no changes needed.
+- **Regression tests**: 4 new Phase 13 tests: `test_phase13_signal_values_from_signal_module` (all 7 signal values correct), `test_phase13_ldisc_signal_uses_signal_module` (Ctrl+C/Ctrl+\\/Ctrl+Z produce correct signals), `test_phase13_hangup_signals_from_signal_module` (SIGHUP=1, SIGCONT=18), `test_phase13_job_control_signals_from_signal_module` (SIGTTIN=21, SIGTTOU=22).
+
 ### 17.1 Remove duplicate signal constants from `syscall.rs`
 
-**Currently duplicated**:
+**Previously duplicated**:
 - `SIGINT` (2), `SIGQUIT` (3), `SIGHUP` (1), `SIGTSTP` (20), `SIGTTIN` (21), `SIGTTOU` (22), `SIGCONT` (18)
 
-**Action**: Delete these from `abi/src/syscall.rs`. Keep only in `abi/src/signal.rs`.
+**Action**: Deleted from `abi/src/syscall.rs`. Canonical source: `abi/src/signal.rs`.
 
 ### 17.2 Update imports across the codebase
 
@@ -1548,22 +1559,18 @@ use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 
 ### 17.3 Re-export from `abi/src/lib.rs` if needed
 
-If other crates can't directly access `abi::signal::*`, add a re-export:
-```rust
-// abi/src/lib.rs
-pub mod signal;  // ensure public
-```
+Already exported — `pub mod signal` on line 27 of `abi/src/lib.rs`. No changes needed.
 
 ### 17.4 Files modified
 
 | File | Change |
 |------|--------|
-| `abi/src/syscall.rs` | Remove duplicate `SIGINT`, `SIGQUIT`, `SIGHUP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, `SIGCONT` |
-| `abi/src/signal.rs` | Verify all signal constants are present (already should be) |
-| `abi/src/lib.rs` | Ensure `pub mod signal` is exported |
-| `drivers/src/tty/ldisc.rs` | Update imports: `slopos_abi::syscall::SIG*` → `slopos_abi::signal::SIG*` |
-| `drivers/src/tty/mod.rs` | Verify imports use `slopos_abi::signal::*` (already does) |
-| Any other files importing signal constants from `syscall.rs` | Update imports |
+| `abi/src/syscall.rs` | Removed 7 duplicate signal constants (`SIGINT`, `SIGQUIT`, `SIGHUP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`, `SIGCONT`) and their doc comments |
+| `abi/src/signal.rs` | Verified — all signal constants already present, no changes needed |
+| `abi/src/lib.rs` | Verified — `pub mod signal` already exported, no changes needed |
+| `drivers/src/tty/ldisc.rs` | Updated imports: `SIGINT`, `SIGQUIT`, `SIGTSTP` now from `slopos_abi::signal` |
+| `drivers/src/tty/mod.rs` | Updated imports: `SIGTTIN`, `SIGTTOU` moved from `syscall` to `signal` import |
+| `drivers/src/tty_tests.rs` | Updated imports: all signal constants from `slopos_abi::signal`; added 4 Phase 13 regression tests |
 
 ---
 
