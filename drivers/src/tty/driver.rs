@@ -3,15 +3,16 @@
 //! `TtyDriver` is the trait that abstracts over different terminal backends.
 //! `TtyDriverKind` is an enum dispatch so we avoid trait objects in `no_std`.
 //!
-//! Two initial implementations:
+//! Implementations:
 //! - `SerialConsoleDriver` — wraps COM1 UART (polling-based)
 //! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer output (stub)
+//! - `PtyMaster` / `PtySlave` — pseudo-terminal pair (stub, Phase 14)
 //!
 //! Phase 8 adds `DriverId` for lock-free I/O dispatch: the TTY core copies
 //! the driver identifier while holding the per-TTY lock, drops the lock, and
 //! then writes the processed output via `write_driver_unlocked`.
 
-use slopos_abi::syscall::UserTermios;
+use slopos_abi::syscall::{TtyIndex, UserTermios};
 use slopos_lib::ports::COM1;
 
 use crate::serial;
@@ -48,6 +49,10 @@ pub enum TtyDriverKind {
     SerialConsole(SerialConsoleDriver),
     /// PS/2 keyboard + framebuffer virtual console (stub for Phase 3+).
     VConsole(VConsoleDriver),
+    /// PTY master — writes go to the slave's input buffer (Phase 14 stub).
+    PtyMaster { slave_idx: TtyIndex },
+    /// PTY slave — writes go to the master's read buffer (Phase 14 stub).
+    PtySlave { master_idx: TtyIndex },
     /// Uninitialised / empty slot.
     None,
 }
@@ -58,6 +63,9 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(d) => d.write_output(buf),
             Self::VConsole(d) => d.write_output(buf),
+            Self::PtyMaster { .. } | Self::PtySlave { .. } => {
+                // TODO(PTY): Route to paired TTY's input buffer.
+            }
             Self::None => {}
         }
     }
@@ -67,6 +75,10 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(d) => d.drain_input(out),
             Self::VConsole(d) => d.drain_input(out),
+            Self::PtyMaster { .. } | Self::PtySlave { .. } => {
+                // PTY input arrives via push_input, not polling.
+                0
+            }
             Self::None => 0,
         }
     }
@@ -76,7 +88,7 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(d) => d.set_termios(termios),
             Self::VConsole(d) => d.set_termios(termios),
-            Self::None => {}
+            Self::PtyMaster { .. } | Self::PtySlave { .. } | Self::None => {}
         }
     }
 
@@ -90,6 +102,8 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(_) => DriverId::SerialConsole,
             Self::VConsole(_) => DriverId::VConsole,
+            Self::PtyMaster { .. } => DriverId::PtyMaster,
+            Self::PtySlave { .. } => DriverId::PtySlave,
             Self::None => DriverId::None,
         }
     }
@@ -110,6 +124,10 @@ pub enum DriverId {
     SerialConsole,
     /// PS/2 + framebuffer virtual console (currently mirrors to serial).
     VConsole,
+    /// PTY master (Phase 14 stub).
+    PtyMaster,
+    /// PTY slave (Phase 14 stub).
+    PtySlave,
     /// Empty / uninitialised slot.
     None,
 }
@@ -133,6 +151,9 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) {
             for &b in data {
                 serial::serial_putc_com1(b);
             }
+        }
+        DriverId::PtyMaster | DriverId::PtySlave => {
+            // TODO(PTY): Route output to paired TTY's input buffer.
         }
         DriverId::None => {}
     }

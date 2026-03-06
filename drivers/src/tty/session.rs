@@ -13,28 +13,107 @@
 //! `set_compositor_focus()` (called by the compositor) sets only
 //! `focused_task_id` — it does NOT alter `fg_pgrp`.  The two concepts are
 //! independent (Phase 6 split).
+//!
+//! # Phase 14: Sentinel Newtypes
+//!
+//! Raw `u32` sentinel constants (`NO_SESSION = 0`, `NO_FOREGROUND_PGRP = 0`)
+//! have been replaced with `Option<SessionId>` and `Option<ProcessGroupId>`.
+//! `None` represents the "no session" / "no foreground pgrp" state.  This
+//! makes invalid states unrepresentable at the type level.
 
-/// Sentinel value indicating "no session attached".
+use core::num::NonZeroU32;
+
+use super::table::TTY_SLOTS;
+use super::{MAX_TTYS, TtyIndex};
+
+// ---------------------------------------------------------------------------
+// Sentinel newtypes (Phase 14)
+// ---------------------------------------------------------------------------
+
+/// A non-zero session identifier.
+///
+/// Wraps `NonZeroU32` so that `Option<SessionId>` is the same size as `u32`
+/// (niche optimisation) and `None` replaces the old `NO_SESSION = 0` sentinel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SessionId(NonZeroU32);
+
+impl SessionId {
+    /// Create a `SessionId` from a raw `u32`.
+    ///
+    /// Returns `None` when `v == 0` (the "no session" sentinel).
+    pub const fn new(v: u32) -> Option<Self> {
+        match NonZeroU32::new(v) {
+            Some(nz) => Some(Self(nz)),
+            None => None,
+        }
+    }
+
+    /// Return the underlying `u32` value.
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// A non-zero process-group identifier.
+///
+/// Wraps `NonZeroU32` so that `Option<ProcessGroupId>` is the same size as
+/// `u32` (niche optimisation) and `None` replaces the old
+/// `NO_FOREGROUND_PGRP = 0` sentinel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ProcessGroupId(NonZeroU32);
+
+impl ProcessGroupId {
+    /// Create a `ProcessGroupId` from a raw `u32`.
+    ///
+    /// Returns `None` when `v == 0` (the "no foreground pgrp" sentinel).
+    pub const fn new(v: u32) -> Option<Self> {
+        match NonZeroU32::new(v) {
+            Some(nz) => Some(Self(nz)),
+            None => None,
+        }
+    }
+
+    /// Return the underlying `u32` value.
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy sentinel constants (backward compatibility)
+// ---------------------------------------------------------------------------
+
+/// Legacy sentinel — prefer `Option<SessionId>` (`None` = no session).
 pub const NO_SESSION: u32 = 0;
 
-/// Sentinel value indicating "no foreground process group".
+/// Legacy sentinel — prefer `Option<ProcessGroupId>` (`None` = no fg pgrp).
 pub const NO_FOREGROUND_PGRP: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// TtySession
+// ---------------------------------------------------------------------------
 
 /// Per-TTY session and foreground process-group state.
 ///
 /// In the POSIX model, each terminal has at most one controlling session,
 /// and within that session exactly one process group is "foreground" (allowed
 /// to read from / write to the terminal without signals).
+///
+/// Phase 14: Fields use `Option<SessionId>` / `Option<ProcessGroupId>` instead
+/// of raw `u32` with magic-zero sentinels.
 #[derive(Clone, Copy)]
 pub struct TtySession {
-    /// Session leader's PID (0 = no session attached).
-    pub session_leader: u32,
+    /// Session leader's PID (`None` = no session attached).
+    pub session_leader: Option<SessionId>,
     /// Session ID (typically == session leader's PID).
-    pub session_id: u32,
-    /// Foreground process group ID (0 = none).
-    pub fg_pgrp: u32,
+    pub session_id: Option<SessionId>,
+    /// Foreground process group ID (`None` = none).
+    pub fg_pgrp: Option<ProcessGroupId>,
     /// The task ID that currently has input focus on this TTY.
     /// Set by the compositor via `set_focus()`.  0 = no specific task focused.
+    ///
+    /// **Not** wrapped in a newtype — this is a compositor concept, not a POSIX
+    /// session/pgrp ID.
     pub focused_task_id: u32,
 }
 
@@ -56,16 +135,16 @@ impl TtySession {
     /// Create a new empty session (no controlling process).
     pub const fn new() -> Self {
         Self {
-            session_leader: NO_SESSION,
-            session_id: NO_SESSION,
-            fg_pgrp: NO_FOREGROUND_PGRP,
+            session_leader: None,
+            session_id: None,
+            fg_pgrp: None,
             focused_task_id: 0,
         }
     }
 
     /// Returns `true` if a session is currently attached to this TTY.
     pub fn has_session(&self) -> bool {
-        self.session_id != NO_SESSION
+        self.session_id.is_some()
     }
 
     /// Attach a session to this TTY.
@@ -74,9 +153,9 @@ impl TtySession {
     /// The session ID is set equal to the leader's PID, matching POSIX semantics.
     /// The foreground process group is initially set to the leader's process group.
     pub fn attach(&mut self, leader_pid: u32, leader_pgid: u32) {
-        self.session_leader = leader_pid;
-        self.session_id = leader_pid;
-        self.fg_pgrp = leader_pgid;
+        self.session_leader = SessionId::new(leader_pid);
+        self.session_id = SessionId::new(leader_pid);
+        self.fg_pgrp = ProcessGroupId::new(leader_pgid);
     }
 
     /// Detach the current session from this TTY.
@@ -84,11 +163,35 @@ impl TtySession {
     /// Called when the session leader calls `setsid()` on a different terminal,
     /// or when the session leader exits.
     pub fn detach(&mut self) {
-        self.session_leader = NO_SESSION;
-        self.session_id = NO_SESSION;
-        self.fg_pgrp = NO_FOREGROUND_PGRP;
+        self.session_leader = None;
+        self.session_id = None;
+        self.fg_pgrp = None;
         // Note: focused_task_id is NOT cleared — compositor focus is independent.
     }
+
+    // -- Raw u32 accessors (public API compatibility) -------------------------
+
+    /// Return the session ID as a raw `u32` (0 if no session).
+    pub fn session_id_raw(&self) -> u32 {
+        self.session_id.map_or(0, |sid| sid.get())
+    }
+
+    /// Return the session leader PID as a raw `u32` (0 if no session).
+    pub fn session_leader_raw(&self) -> u32 {
+        self.session_leader.map_or(0, |sid| sid.get())
+    }
+
+    /// Return the foreground pgrp as a raw `u32` (0 if none).
+    pub fn fg_pgrp_raw(&self) -> u32 {
+        self.fg_pgrp.map_or(0, |pgid| pgid.get())
+    }
+
+    /// Set the foreground pgrp from a raw `u32` (0 clears it).
+    pub fn set_fg_pgrp_raw(&mut self, pgid: u32) {
+        self.fg_pgrp = ProcessGroupId::new(pgid);
+    }
+
+    // -- Foreground checks ----------------------------------------------------
 
     /// Check whether a process with the given pgid and sid may **read** from
     /// this TTY.
@@ -105,19 +208,22 @@ impl TtySession {
         }
 
         // No foreground pgrp set — permissive.
-        if self.fg_pgrp == NO_FOREGROUND_PGRP {
+        if self.fg_pgrp.is_none() {
             return ForegroundCheck::NoSession;
         }
+
+        let sid_raw = self.session_id_raw();
+        let fg_raw = self.fg_pgrp_raw();
 
         // Phase 10: Cross-session access — reject.  A process from a
         // different session should not be reading this TTY.  Kernel tasks
         // (caller_sid == 0) are exempted for early-boot permissiveness.
-        if caller_sid != 0 && caller_sid != self.session_id {
+        if caller_sid != 0 && caller_sid != sid_raw {
             return ForegroundCheck::NoSession;
         }
 
         // Foreground check.
-        if caller_pgid == self.fg_pgrp {
+        if caller_pgid == fg_raw {
             return ForegroundCheck::Allowed;
         }
 
@@ -144,11 +250,13 @@ impl TtySession {
             return ForegroundCheck::Allowed;
         }
 
-        if !self.has_session() || self.fg_pgrp == NO_FOREGROUND_PGRP {
+        if !self.has_session() || self.fg_pgrp.is_none() {
             return ForegroundCheck::Allowed;
         }
 
-        if caller_pgid == 0 || caller_pgid == self.fg_pgrp {
+        let fg_raw = self.fg_pgrp_raw();
+
+        if caller_pgid == 0 || caller_pgid == fg_raw {
             return ForegroundCheck::Allowed;
         }
 
@@ -167,16 +275,64 @@ impl TtySession {
     pub fn set_fg_pgrp_checked(&mut self, pgid: u32, caller_sid: u32) -> bool {
         // If no session is attached, allow freely (pre-session path).
         if !self.has_session() {
-            self.fg_pgrp = pgid;
+            self.fg_pgrp = ProcessGroupId::new(pgid);
             return true;
         }
 
+        let sid_raw = self.session_id_raw();
+
         // Caller must be in the same session.
-        if caller_sid != 0 && caller_sid != self.session_id {
+        if caller_sid != 0 && caller_sid != sid_raw {
             return false;
         }
 
-        self.fg_pgrp = pgid;
+        self.fg_pgrp = ProcessGroupId::new(pgid);
         true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session policy functions (extracted from mod.rs in Phase 14)
+// ---------------------------------------------------------------------------
+
+/// Lazily attach a session and set focus for a task that is reading from
+/// a TTY for the first time.  If no session is attached yet, the calling
+/// task becomes the session leader with its own pgid as foreground group.
+pub fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid: u32) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
+        // Set compositor focus if not already set.
+        if tty.session.focused_task_id == 0 {
+            tty.session.focused_task_id = task_id;
+        }
+        // Auto-attach session if none exists (first reader becomes leader).
+        if !tty.session.has_session() && caller_sid != 0 {
+            tty.session.attach(caller_sid, caller_pgid);
+        }
+    }
+}
+
+/// Detach any TTY whose session matches `session_id`.
+///
+/// Called from `setsid()` when the session leader creates a new session —
+/// the old controlling terminal must be released.
+///
+/// Each per-TTY lock is acquired and released individually — no two locks
+/// are held simultaneously.
+pub fn detach_session_by_id(session_id: u32) {
+    if session_id == 0 {
+        return;
+    }
+    for i in 0..MAX_TTYS {
+        let mut guard = TTY_SLOTS[i].lock();
+        if let Some(tty) = guard.as_mut() {
+            if tty.session.session_id_raw() == session_id {
+                tty.session.detach();
+            }
+        }
     }
 }

@@ -35,7 +35,7 @@ use slopos_lib::IrqMutex;
 use slopos_lib::WaitQueue;
 
 use super::driver::{SerialConsoleDriver, TtyDriverKind, VConsoleDriver};
-use super::ldisc::LineDisc;
+use super::ldisc::{LdiscKind, LineDisc};
 use super::session::TtySession;
 use super::{MAX_TTYS, Tty, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
@@ -126,7 +126,7 @@ impl Tty {
     pub fn new(index: TtyIndex, driver: TtyDriverKind) -> Self {
         Self {
             index,
-            ldisc: LineDisc::new(),
+            ldisc: LdiscKind::NTty(LineDisc::new()),
             driver,
             session: TtySession::new(),
             winsize: UserWinsize {

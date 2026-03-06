@@ -679,3 +679,214 @@ impl LineDisc {
         self.edit_len = 0;
     }
 }
+
+// ---------------------------------------------------------------------------
+// RawDisc — minimal passthrough line discipline (Phase 14)
+// ---------------------------------------------------------------------------
+
+const RAW_BUF_SIZE: usize = 4096;
+
+/// Minimal passthrough line discipline for PTY masters and raw I/O paths.
+///
+/// No input processing, no echo, no signals, no canonical editing.
+/// Bytes pushed via `input_char` go directly to the cooked ring buffer;
+/// output bytes pass through without `c_oflag` processing.
+pub struct RawDisc {
+    termios: UserTermios,
+    buf: [u8; RAW_BUF_SIZE],
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl RawDisc {
+    /// Create a new `RawDisc` with default raw-mode termios.
+    pub const fn new() -> Self {
+        Self {
+            termios: UserTermios {
+                c_iflag: 0,
+                c_oflag: 0,
+                c_cflag: 0,
+                c_lflag: 0,
+                c_line: 0,
+                c_cc: [0; NCCS],
+                c_ispeed: 0,
+                c_ospeed: 0,
+            },
+            buf: [0; RAW_BUF_SIZE],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    pub fn termios(&self) -> &UserTermios {
+        &self.termios
+    }
+
+    pub fn set_termios(&mut self, t: &UserTermios) {
+        self.termios = *t;
+    }
+
+    pub fn vmin_vtime(&self) -> (u8, u8) {
+        // Raw mode: VMIN=1, VTIME=0 — block until at least 1 byte.
+        (1, 0)
+    }
+
+    pub fn is_canonical(&self) -> bool {
+        false
+    }
+
+    pub fn has_data(&self) -> bool {
+        self.count > 0
+    }
+
+    pub fn read(&mut self, out: &mut [u8]) -> usize {
+        let mut copied = 0usize;
+        while copied < out.len() && self.count > 0 {
+            out[copied] = self.buf[self.tail];
+            self.tail = (self.tail + 1) % RAW_BUF_SIZE;
+            self.count -= 1;
+            copied += 1;
+        }
+        copied
+    }
+
+    pub fn flush_all(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+    }
+
+    pub fn edit_content(&self) -> &[u8] {
+        // Raw mode has no edit buffer.
+        &[]
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        false
+    }
+
+    /// Raw input: push byte directly to buffer, no processing.
+    pub fn input_char(&mut self, c: u8) -> InputAction {
+        if self.count < RAW_BUF_SIZE {
+            self.buf[self.head] = c;
+            self.head = (self.head + 1) % RAW_BUF_SIZE;
+            self.count += 1;
+        }
+        InputAction::None
+    }
+
+    /// Raw output: emit byte directly, no `c_oflag` processing.
+    pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
+        OutputAction::Emit {
+            buf: [c, 0],
+            len: 1,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LdiscKind — swappable line discipline abstraction (Phase 14)
+// ---------------------------------------------------------------------------
+
+/// Swappable line discipline — each TTY owns one `LdiscKind`.
+///
+/// This allows PTY masters (and future SLIP/PPP) to use raw passthrough
+/// while normal terminals use full N_TTY processing.
+pub enum LdiscKind {
+    /// Full N_TTY processing (canonical, echo, signals, etc.)
+    NTty(LineDisc),
+    /// Raw passthrough (for PTY master, future SLIP/PPP).
+    Raw(RawDisc),
+}
+
+impl LdiscKind {
+    /// Immutable reference to the current termios.
+    pub fn termios(&self) -> &UserTermios {
+        match self {
+            LdiscKind::NTty(ld) => ld.termios(),
+            LdiscKind::Raw(rd) => rd.termios(),
+        }
+    }
+
+    /// Returns (vmin, vtime_deciseconds) for non-canonical mode reads.
+    pub fn vmin_vtime(&self) -> (u8, u8) {
+        match self {
+            LdiscKind::NTty(ld) => ld.vmin_vtime(),
+            LdiscKind::Raw(rd) => rd.vmin_vtime(),
+        }
+    }
+
+    /// Returns true if in canonical mode.
+    pub fn is_canonical(&self) -> bool {
+        match self {
+            LdiscKind::NTty(ld) => ld.is_canonical(),
+            LdiscKind::Raw(rd) => rd.is_canonical(),
+        }
+    }
+
+    /// Update termios.
+    pub fn set_termios(&mut self, t: &UserTermios) {
+        match self {
+            LdiscKind::NTty(ld) => ld.set_termios(t),
+            LdiscKind::Raw(rd) => rd.set_termios(t),
+        }
+    }
+
+    /// Returns `true` if cooked data is available for reading.
+    pub fn has_data(&self) -> bool {
+        match self {
+            LdiscKind::NTty(ld) => ld.has_data(),
+            LdiscKind::Raw(rd) => rd.has_data(),
+        }
+    }
+
+    /// Read cooked bytes into `out`, returning the number of bytes copied.
+    pub fn read(&mut self, out: &mut [u8]) -> usize {
+        match self {
+            LdiscKind::NTty(ld) => ld.read(out),
+            LdiscKind::Raw(rd) => rd.read(out),
+        }
+    }
+
+    /// Flush all buffers.
+    pub fn flush_all(&mut self) {
+        match self {
+            LdiscKind::NTty(ld) => ld.flush_all(),
+            LdiscKind::Raw(rd) => rd.flush_all(),
+        }
+    }
+
+    /// Return a slice of the current edit buffer contents (for VREPRINT echo).
+    pub fn edit_content(&self) -> &[u8] {
+        match self {
+            LdiscKind::NTty(ld) => ld.edit_content(),
+            LdiscKind::Raw(rd) => rd.edit_content(),
+        }
+    }
+
+    /// Whether output is currently stopped (XOFF / Ctrl+S).
+    pub fn is_stopped(&self) -> bool {
+        match self {
+            LdiscKind::NTty(ld) => ld.is_stopped(),
+            LdiscKind::Raw(rd) => rd.is_stopped(),
+        }
+    }
+
+    /// Process a single raw input byte through the line discipline.
+    pub fn input_char(&mut self, c: u8) -> InputAction {
+        match self {
+            LdiscKind::NTty(ld) => ld.input_char(c),
+            LdiscKind::Raw(rd) => rd.input_char(c),
+        }
+    }
+
+    /// Process a single byte through output processing before sending to the driver.
+    pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
+        match self {
+            LdiscKind::NTty(ld) => ld.process_output_byte(c),
+            LdiscKind::Raw(rd) => rd.process_output_byte(c),
+        }
+    }
+}

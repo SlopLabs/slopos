@@ -17,9 +17,11 @@ use crate::tty;
 use crate::tty::TtyError;
 use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
-use crate::tty::ldisc::{InputAction, LineDisc, OutputAction};
+use crate::tty::ldisc::{InputAction, LdiscKind, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
-use crate::tty::session::{ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION};
+use crate::tty::session::{
+    ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
+};
 use crate::tty::table::TTY_SLOTS;
 
 fn drain_tty_nonblock(idx: TtyIndex) {
@@ -311,9 +313,9 @@ pub fn test_ldisc_echo_newline() -> TestResult {
 /// New TtySession has zero values.
 pub fn test_session_new_empty() -> TestResult {
     let s = TtySession::new();
-    if s.session_leader != NO_SESSION
-        || s.session_id != NO_SESSION
-        || s.fg_pgrp != NO_FOREGROUND_PGRP
+    if s.session_leader_raw() != NO_SESSION
+        || s.session_id_raw() != NO_SESSION
+        || s.fg_pgrp_raw() != NO_FOREGROUND_PGRP
         || s.focused_task_id != 0
     {
         klog_info!("TTY_TEST: BUG - new TtySession has non-zero fields");
@@ -326,7 +328,7 @@ pub fn test_session_new_empty() -> TestResult {
 pub fn test_session_attach() -> TestResult {
     let mut s = TtySession::new();
     s.attach(100, 100);
-    if s.session_leader != 100 || s.session_id != 100 || s.fg_pgrp != 100 {
+    if s.session_leader_raw() != 100 || s.session_id_raw() != 100 || s.fg_pgrp_raw() != 100 {
         klog_info!("TTY_TEST: BUG - session attach did not set fields correctly");
         return TestResult::Fail;
     }
@@ -342,9 +344,9 @@ pub fn test_session_detach() -> TestResult {
     let mut s = TtySession::new();
     s.attach(200, 200);
     s.detach();
-    if s.session_leader != NO_SESSION
-        || s.session_id != NO_SESSION
-        || s.fg_pgrp != NO_FOREGROUND_PGRP
+    if s.session_leader_raw() != NO_SESSION
+        || s.session_id_raw() != NO_SESSION
+        || s.fg_pgrp_raw() != NO_FOREGROUND_PGRP
     {
         klog_info!("TTY_TEST: BUG - session detach did not reset fields");
         return TestResult::Fail;
@@ -508,7 +510,7 @@ pub fn test_session_set_fg_pgrp_checked_allowed() -> TestResult {
         klog_info!("TTY_TEST: BUG - set_fg_pgrp_checked should allow same-session caller");
         return TestResult::Fail;
     }
-    if s.fg_pgrp != 20 {
+    if s.fg_pgrp_raw() != 20 {
         klog_info!("TTY_TEST: BUG - fg_pgrp not updated to 20");
         return TestResult::Fail;
     }
@@ -523,7 +525,7 @@ pub fn test_session_set_fg_pgrp_checked_denied() -> TestResult {
         klog_info!("TTY_TEST: BUG - set_fg_pgrp_checked should deny different-session caller");
         return TestResult::Fail;
     }
-    if s.fg_pgrp != 10 {
+    if s.fg_pgrp_raw() != 10 {
         klog_info!("TTY_TEST: BUG - fg_pgrp should remain 10 after denied set");
         return TestResult::Fail;
     }
@@ -537,7 +539,7 @@ pub fn test_session_set_fg_pgrp_checked_no_session() -> TestResult {
         klog_info!("TTY_TEST: BUG - set_fg_pgrp_checked should allow when no session");
         return TestResult::Fail;
     }
-    if s.fg_pgrp != 50 {
+    if s.fg_pgrp_raw() != 50 {
         klog_info!("TTY_TEST: BUG - fg_pgrp not updated to 50");
         return TestResult::Fail;
     }
@@ -3074,6 +3076,287 @@ pub fn test_phase13_job_control_signals_from_signal_module() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 14: Responsibility Split — PTY Foundation
+// ===========================================================================
+
+// -- 18.4: SessionId / ProcessGroupId newtype tests --
+
+/// SessionId::new(0) returns None (zero is the "no session" sentinel).
+pub fn test_phase14_session_id_zero_is_none() -> TestResult {
+    if SessionId::new(0).is_some() {
+        klog_info!("TTY_TEST: BUG - SessionId::new(0) should be None");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// SessionId::new(non-zero) returns Some and round-trips through get().
+pub fn test_phase14_session_id_round_trip() -> TestResult {
+    match SessionId::new(42) {
+        Some(sid) => {
+            if sid.get() != 42 {
+                klog_info!(
+                    "TTY_TEST: BUG - SessionId(42).get() = {}, expected 42",
+                    sid.get()
+                );
+                return TestResult::Fail;
+            }
+            TestResult::Pass
+        }
+        None => {
+            klog_info!("TTY_TEST: BUG - SessionId::new(42) returned None");
+            TestResult::Fail
+        }
+    }
+}
+
+/// ProcessGroupId::new(0) returns None.
+pub fn test_phase14_pgrp_id_zero_is_none() -> TestResult {
+    if ProcessGroupId::new(0).is_some() {
+        klog_info!("TTY_TEST: BUG - ProcessGroupId::new(0) should be None");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// ProcessGroupId::new(non-zero) round-trips through get().
+pub fn test_phase14_pgrp_id_round_trip() -> TestResult {
+    match ProcessGroupId::new(99) {
+        Some(pgid) => {
+            if pgid.get() != 99 {
+                klog_info!(
+                    "TTY_TEST: BUG - ProcessGroupId(99).get() = {}, expected 99",
+                    pgid.get()
+                );
+                return TestResult::Fail;
+            }
+            TestResult::Pass
+        }
+        None => {
+            klog_info!("TTY_TEST: BUG - ProcessGroupId::new(99) returned None");
+            TestResult::Fail
+        }
+    }
+}
+
+/// TtySession uses Option-based fields: new() has None for all IDs.
+pub fn test_phase14_session_option_fields() -> TestResult {
+    let s = TtySession::new();
+    if s.session_leader.is_some() || s.session_id.is_some() || s.fg_pgrp.is_some() {
+        klog_info!("TTY_TEST: BUG - new TtySession should have None for all Option fields");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// After attach(), Option fields are Some; after detach(), they are None.
+pub fn test_phase14_session_option_attach_detach() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 20);
+    if s.session_leader.is_none() || s.session_id.is_none() || s.fg_pgrp.is_none() {
+        klog_info!("TTY_TEST: BUG - Option fields should be Some after attach");
+        return TestResult::Fail;
+    }
+    s.detach();
+    if s.session_leader.is_some() || s.session_id.is_some() || s.fg_pgrp.is_some() {
+        klog_info!("TTY_TEST: BUG - Option fields should be None after detach");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// -- 18.2: RawDisc / LdiscKind tests --
+
+/// RawDisc: new instance has no data.
+pub fn test_phase14_raw_disc_new_empty() -> TestResult {
+    let rd = RawDisc::new();
+    if rd.has_data() {
+        klog_info!("TTY_TEST: BUG - new RawDisc has data");
+        return TestResult::Fail;
+    }
+    if rd.is_canonical() {
+        klog_info!("TTY_TEST: BUG - RawDisc should not be canonical");
+        return TestResult::Fail;
+    }
+    if rd.is_stopped() {
+        klog_info!("TTY_TEST: BUG - RawDisc should not be stopped");
+        return TestResult::Fail;
+    }
+    if !rd.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - RawDisc edit_content should be empty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// RawDisc: input_char pushes byte, read retrieves it.
+pub fn test_phase14_raw_disc_input_read() -> TestResult {
+    let mut rd = RawDisc::new();
+    let _ = rd.input_char(b'A');
+    let _ = rd.input_char(b'B');
+    if !rd.has_data() {
+        klog_info!("TTY_TEST: BUG - RawDisc should have data after input_char");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 4];
+    let n = rd.read(&mut buf);
+    if n != 2 || buf[0] != b'A' || buf[1] != b'B' {
+        klog_info!(
+            "TTY_TEST: BUG - RawDisc read got {} bytes [{}, {}]",
+            n,
+            buf[0],
+            buf[1]
+        );
+        return TestResult::Fail;
+    }
+    if rd.has_data() {
+        klog_info!("TTY_TEST: BUG - RawDisc should be empty after reading all");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// RawDisc: process_output_byte passes through unchanged.
+pub fn test_phase14_raw_disc_output_passthrough() -> TestResult {
+    let mut rd = RawDisc::new();
+    match rd.process_output_byte(b'\n') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\n' {
+                klog_info!(
+                    "TTY_TEST: BUG - RawDisc output should passthrough, got len={} buf[0]={}",
+                    len,
+                    buf[0]
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - RawDisc output should emit, got other action");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// RawDisc: flush_all clears buffer.
+pub fn test_phase14_raw_disc_flush() -> TestResult {
+    let mut rd = RawDisc::new();
+    let _ = rd.input_char(b'X');
+    rd.flush_all();
+    if rd.has_data() {
+        klog_info!("TTY_TEST: BUG - RawDisc should be empty after flush_all");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// LdiscKind::NTty delegates to LineDisc correctly.
+pub fn test_phase14_ldisc_kind_ntty_delegation() -> TestResult {
+    let mut lk = LdiscKind::NTty(LineDisc::new());
+    // NTty should be canonical by default.
+    if !lk.is_canonical() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty should be canonical by default");
+        return TestResult::Fail;
+    }
+    if lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty should have no data initially");
+        return TestResult::Fail;
+    }
+    // Feed a character + newline to flush to cooked buffer.
+    let _ = lk.input_char(b'A');
+    let _ = lk.input_char(b'\n');
+    if !lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty should have data after newline");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 8];
+    let n = lk.read(&mut buf);
+    // Canonical: 'A' + '\n' = 2 bytes.
+    if n != 2 || buf[0] != b'A' || buf[1] != b'\n' {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty read got {} bytes", n);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// LdiscKind::Raw delegates to RawDisc correctly.
+pub fn test_phase14_ldisc_kind_raw_delegation() -> TestResult {
+    let mut lk = LdiscKind::Raw(RawDisc::new());
+    // Raw should NOT be canonical.
+    if lk.is_canonical() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw should not be canonical");
+        return TestResult::Fail;
+    }
+    // Input bytes should go directly to buffer.
+    let _ = lk.input_char(b'Z');
+    if !lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw should have data after input_char");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 4];
+    let n = lk.read(&mut buf);
+    if n != 1 || buf[0] != b'Z' {
+        klog_info!(
+            "TTY_TEST: BUG - LdiscKind::Raw read got {} bytes, buf[0]={}",
+            n,
+            buf[0]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// -- 18.3: PTY driver stub tests --
+
+/// PtyMaster and PtySlave DriverId variants exist and are distinct.
+pub fn test_phase14_pty_driver_id_variants() -> TestResult {
+    let master_id = DriverId::PtyMaster;
+    let slave_id = DriverId::PtySlave;
+    if master_id == slave_id {
+        klog_info!("TTY_TEST: BUG - PtyMaster and PtySlave DriverId should be distinct");
+        return TestResult::Fail;
+    }
+    // Also verify they differ from existing IDs.
+    if master_id == DriverId::SerialConsole
+        || master_id == DriverId::VConsole
+        || master_id == DriverId::None
+    {
+        klog_info!("TTY_TEST: BUG - PtyMaster should differ from SerialConsole/VConsole/None");
+        return TestResult::Fail;
+    }
+    if slave_id == DriverId::SerialConsole || slave_id == DriverId::VConsole || slave_id == DriverId::None
+    {
+        klog_info!("TTY_TEST: BUG - PtySlave should differ from SerialConsole/VConsole/None");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PtyMaster driver kind returns correct DriverId.
+pub fn test_phase14_pty_master_driver_kind() -> TestResult {
+    let drv = TtyDriverKind::PtyMaster {
+        slave_idx: TtyIndex(2),
+    };
+    if drv.id() != DriverId::PtyMaster {
+        klog_info!("TTY_TEST: BUG - PtyMaster TtyDriverKind should return DriverId::PtyMaster");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PtySlave driver kind returns correct DriverId.
+pub fn test_phase14_pty_slave_driver_kind() -> TestResult {
+    let drv = TtyDriverKind::PtySlave {
+        master_idx: TtyIndex(3),
+    };
+    if drv.id() != DriverId::PtySlave {
+        klog_info!("TTY_TEST: BUG - PtySlave TtyDriverKind should return DriverId::PtySlave");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -3229,5 +3512,21 @@ slopos_lib::define_test_suite!(
         test_phase13_ldisc_signal_uses_signal_module,
         test_phase13_hangup_signals_from_signal_module,
         test_phase13_job_control_signals_from_signal_module,
+        // Phase 14: Responsibility Split — PTY Foundation
+        test_phase14_session_id_zero_is_none,
+        test_phase14_session_id_round_trip,
+        test_phase14_pgrp_id_zero_is_none,
+        test_phase14_pgrp_id_round_trip,
+        test_phase14_session_option_fields,
+        test_phase14_session_option_attach_detach,
+        test_phase14_raw_disc_new_empty,
+        test_phase14_raw_disc_input_read,
+        test_phase14_raw_disc_output_passthrough,
+        test_phase14_raw_disc_flush,
+        test_phase14_ldisc_kind_ntty_delegation,
+        test_phase14_ldisc_kind_raw_delegation,
+        test_phase14_pty_driver_id_variants,
+        test_phase14_pty_master_driver_kind,
+        test_phase14_pty_slave_driver_kind,
     ]
 );

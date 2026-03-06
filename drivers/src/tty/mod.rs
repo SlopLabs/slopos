@@ -39,7 +39,7 @@ use slopos_lib::kernel_services::driver_runtime::{
 };
 
 use self::driver::{TtyDriverKind, write_driver_unlocked};
-use self::ldisc::{InputAction, LineDisc, OutputAction};
+use self::ldisc::{InputAction, LdiscKind, OutputAction};
 use self::session::{ForegroundCheck, TtySession};
 use self::table::{TTY_INPUT_WAITERS, TTY_SLOTS};
 
@@ -60,7 +60,7 @@ pub struct Tty {
     pub index: TtyIndex,
 
     /// The line discipline owned by this TTY.
-    pub ldisc: LineDisc,
+    pub ldisc: LdiscKind,
 
     /// Hardware driver backend.
     pub driver: TtyDriverKind,
@@ -133,7 +133,7 @@ impl Tty {
                     }
                 }
                 InputAction::Signal(sig) => {
-                    deferred_signal = Some((self.session.fg_pgrp, sig));
+                    deferred_signal = Some((self.session.fg_pgrp_raw(), sig));
                 }
                 InputAction::ReprintLine => {
                     self.driver.write_output(b"\n");
@@ -214,7 +214,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 has_data
             }
             InputAction::Signal(sig) => {
-                let pgid = tty.session.fg_pgrp;
+                let pgid = tty.session.fg_pgrp_raw();
                 // Release lock before signalling to avoid deadlock.
                 drop(guard);
                 if pgid != 0 {
@@ -243,26 +243,9 @@ fn notify_input_ready(idx: TtyIndex) {
     TTY_INPUT_WAITERS[slot].wake_one();
 }
 
-/// Lazily attach a session and set focus for a task that is reading from
-/// a TTY for the first time.  If no session is attached yet, the calling
-/// task becomes the session leader with its own pgid as foreground group.
-fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid: u32) {
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return;
-    }
-    let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        // Set compositor focus if not already set.
-        if tty.session.focused_task_id == 0 {
-            tty.session.focused_task_id = task_id;
-        }
-        // Auto-attach session if none exists (first reader becomes leader).
-        if !tty.session.has_session() && caller_sid != 0 {
-            tty.session.attach(caller_sid, caller_pgid);
-        }
-    }
-}
+/// Re-export `auto_attach_session` from `session.rs` (Phase 14 extraction).
+/// Kept module-private — only `read()` in this module calls it.
+use self::session::auto_attach_session;
 
 /// Read cooked data from a specific TTY.
 ///
@@ -647,7 +630,7 @@ pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(tty.session.fg_pgrp),
+        Some(tty) => Ok(tty.session.fg_pgrp_raw()),
         None => Err(TtyError::NotAllocated),
     }
 }
@@ -661,7 +644,7 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     let mut guard = TTY_SLOTS[slot].lock();
     match guard.as_mut() {
         Some(tty) => {
-            tty.session.fg_pgrp = pgid;
+            tty.session.set_fg_pgrp_raw(pgid);
             Ok(())
         }
         None => Err(TtyError::NotAllocated),
@@ -788,7 +771,7 @@ pub fn get_session_id(idx: TtyIndex) -> Result<u32, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(tty.session.session_id),
+        Some(tty) => Ok(tty.session.session_id_raw()),
         None => Err(TtyError::NotAllocated),
     }
 }
@@ -823,26 +806,8 @@ pub fn detach_session(idx: TtyIndex) {
     }
 }
 
-/// Detach any TTY whose session matches `session_id`.
-///
-/// Called from `setsid()` when the session leader creates a new session —
-/// the old controlling terminal must be released.
-///
-/// Each per-TTY lock is acquired and released individually — no two locks
-/// are held simultaneously.
-pub fn detach_session_by_id(session_id: u32) {
-    if session_id == 0 {
-        return;
-    }
-    for i in 0..MAX_TTYS {
-        let mut guard = TTY_SLOTS[i].lock();
-        if let Some(tty) = guard.as_mut() {
-            if tty.session.session_id == session_id {
-                tty.session.detach();
-            }
-        }
-    }
-}
+/// Re-export `detach_session_by_id` from `session.rs` (Phase 14 extraction).
+pub use self::session::detach_session_by_id;
 
 pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
@@ -893,7 +858,7 @@ pub fn hangup(idx: TtyIndex) {
             Some(t) => t,
             None => return,
         };
-        let fg = tty.session.fg_pgrp;
+        let fg = tty.session.fg_pgrp_raw();
         tty.ldisc.flush_all();
         tty.session.detach();
         tty.hung_up = true;
