@@ -109,11 +109,11 @@ impl TtySession {
             return ForegroundCheck::NoSession;
         }
 
-        // Caller not in the same session — should not be reading this TTY at
-        // all, but we allow it permissively (controlling-terminal enforcement
-        // is Phase 5 FD-layer work).
-        if caller_sid != self.session_id && caller_sid != 0 {
-            // For now, allow — Phase 5 will enforce per-FD controlling TTY.
+        // Phase 10: Cross-session access — reject.  A process from a
+        // different session should not be reading this TTY.  Kernel tasks
+        // (caller_sid == 0) are exempted for early-boot permissiveness.
+        if caller_sid != 0 && caller_sid != self.session_id {
+            return ForegroundCheck::NoSession;
         }
 
         // Foreground check.

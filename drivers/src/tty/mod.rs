@@ -32,7 +32,7 @@ use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGCONT, SIGHUP};
-use slopos_abi::syscall::{SIGTTIN, UserTermios, UserWinsize};
+use slopos_abi::syscall::{SIGTTIN, SIGTTOU, TOSTOP, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
     scheduler_is_enabled, signal_process_group,
@@ -495,10 +495,37 @@ pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyE
 /// dropped, and the buffered bytes are written to the hardware without
 /// holding any TTY lock.  This prevents slow serial I/O from blocking
 /// operations on other TTYs.
+///
+/// Phase 10: write-side foreground check — when `TOSTOP` is set in the
+/// TTY's `c_lflag`, background processes receive `SIGTTOU` instead of
+/// being silently allowed to write.  This matches POSIX job control.
 pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
+    }
+
+    // Phase 10: Write-side foreground check (TOSTOP).
+    // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
+    let task_id = current_task_id();
+    if task_id != 0 {
+        let caller_pgid = current_task_pgid();
+        let guard = TTY_SLOTS[slot].lock();
+        let check_result = match guard.as_ref() {
+            Some(tty) => {
+                let tostop = (tty.ldisc.termios().c_lflag & TOSTOP) != 0;
+                Some(tty.session.check_write(caller_pgid, tostop))
+            }
+            None => return Err(TtyError::NotAllocated),
+        };
+        drop(guard);
+
+        if let Some(ForegroundCheck::BackgroundWrite) = check_result {
+            if caller_pgid != 0 {
+                let _ = signal_process_group(caller_pgid, SIGTTOU);
+            }
+            return Err(TtyError::BackgroundWrite);
+        }
     }
 
     // Maximum output bytes per chunk.  Each input byte can expand to at most

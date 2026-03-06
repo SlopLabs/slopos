@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–9 Complete · **Phases 10–14 Planned** (Job Control, Timing, Defaults, ABI Cleanup, Responsibility Split) · Phase 15 Verify & Test
+> **Status**: Phases 1–10 Complete · **Phases 11–14 Planned** (Timing, Defaults, ABI Cleanup, Responsibility Split) · Phase 15 Verify & Test
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -58,7 +58,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 7 | Lifecycle & hangup | `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/ldisc.rs`, `core/src/scheduler/task.rs`, `core/src/scheduler/task_struct.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 8 | Per-TTY locking & perf | `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 9 | Rust idioms & termios | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/syscall_services_init.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-|| 10 | Job control correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — |
+| 10 | Job control correctness | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 || 11 | Non-canonical timing fix | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — |
 || 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — |
 || 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs` | — |
@@ -1280,10 +1280,18 @@ Requires timer integration (scheduler or PIT-based timeout) for VTIME.
 
 ---
 
-## 14. Phase 10: Job Control Correctness
+## 14. Phase 10: Job Control Correctness ✅ COMPLETED
 
 > **Priority**: P0 — Must fix before any real shell or interactive program works correctly.
 > **Rationale**: The deep architectural review (comparing against Linux `tty_struct` + `n_tty` and RedoxOS) found that **write-side foreground enforcement is completely missing** — `write()` never calls `check_write()`, `SIGTTOU` is never delivered, and `check_read()` permits cross-session reads with a TODO comment. No job-control-aware shell (bash, zsh) can work correctly without these. Issues #2, #10, #12 from the review.
+
+**Status**: Completed. All tests pass (11 suites, 0 failures). Build clean. `cargo fmt --all`, `just build`, and `just test` pass.
+
+**Implementation summary**:
+- **14.1 (Wire `check_write()` into `write()`)**: Added foreground check at the start of `write()` in `drivers/src/tty/mod.rs`. When `TOSTOP` is set in `c_lflag`, the write path reads the caller's task ID, looks up session/termios state from the locked TTY slot, and calls `check_write(caller_pgid, tostop)`. If `BackgroundWrite` is returned, `SIGTTOU` is delivered to the caller's process group (outside the lock) and `Err(TtyError::BackgroundWrite)` is returned. Kernel tasks (task_id == 0) are exempted to allow early-boot writes.
+- **14.2 (Deliver SIGTTOU)**: Added `pub const SIGTTOU: u8 = 22` to `abi/src/syscall.rs` (matching the existing definition in `abi/src/signal.rs`). Imported `SIGTTOU` and `TOSTOP` in `drivers/src/tty/mod.rs` for use in the write-side foreground check.
+- **14.3 (Tighten `check_read()`)**: Replaced the permissive cross-session TODO block in `session.rs::check_read()` with proper rejection — `caller_sid != 0 && caller_sid != self.session_id` now returns `ForegroundCheck::NoSession` (maps to `-EIO` in read). Kernel tasks (sid == 0) remain exempted for early-boot bootstrap.
+- **Regression tests**: Added 8 Phase 10 tests: `test_phase10_sigttou_constant`, `test_phase10_check_write_tostop_blocks_background`, `test_phase10_check_write_no_tostop_allows_background`, `test_phase10_check_write_tostop_allows_foreground`, `test_phase10_check_read_cross_session_rejected`, `test_phase10_check_read_same_session_foreground`, `test_phase10_check_read_kernel_task_allowed`, `test_phase10_tty_write_foreground_with_tostop`.
 
 **Goal**: Wire write-side foreground gating, deliver SIGTTOU for background writes, tighten read-side session enforcement, and close the remaining job-control gaps.
 
@@ -1358,9 +1366,8 @@ pub fn check_read(&self, caller_pgid: u64, caller_sid: u64) -> ForegroundCheck {
 |------|--------|
 | `drivers/src/tty/mod.rs` | Add `check_write()` call in `write()`, deliver SIGTTOU, return `BackgroundWrite` error |
 | `drivers/src/tty/session.rs` | Tighten `check_read()` to reject cross-session, remove permissive TODO |
-| `abi/src/syscall.rs` | Ensure `TOSTOP` flag is defined (already exists) |
-| `drivers/src/tty_tests.rs` | Add tests: background write blocked with TOSTOP, cross-session read rejected, SIGTTOU delivery |
-
+| `abi/src/syscall.rs` | Add `SIGTTOU` constant (value 22) |
+| `drivers/src/tty_tests.rs` | Add 8 Phase 10 regression tests: background write blocked with TOSTOP, cross-session read rejected, SIGTTOU constant, foreground write allowed, kernel task exempted |
 ---
 
 ## 15. Phase 11: Non-Canonical Timing Fix

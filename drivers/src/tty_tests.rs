@@ -9,7 +9,7 @@
 //! Phase 6 additions: compositor focus / fg_pgrp split, check_read() as sole
 //! read gate, TtyIndex type safety, signal constant verification.
 
-use slopos_abi::syscall::{SIGINT, SIGQUIT, SIGTSTP};
+use slopos_abi::syscall::{SIGINT, SIGQUIT, SIGTSTP, SIGTTOU};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -2361,6 +2361,149 @@ pub fn test_phase8_driver_id_traits() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 10: Job Control Correctness regression tests
+// ===========================================================================
+
+/// Phase 10: SIGTTOU constant is defined and has correct POSIX value (22).
+pub fn test_phase10_sigttou_constant() -> TestResult {
+    if SIGTTOU != 22 {
+        klog_info!("TTY_TEST: BUG - SIGTTOU should be 22, got {}", SIGTTOU);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 10: check_write with TOSTOP and background caller returns BackgroundWrite.
+/// This verifies the session-level check_write logic directly.
+pub fn test_phase10_check_write_tostop_blocks_background() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    // Background process (pgid=99), TOSTOP enabled.
+    match s.check_write(99, true) {
+        ForegroundCheck::BackgroundWrite => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TOSTOP bg write expected BackgroundWrite, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 10: check_write without TOSTOP always allows writes (even from background).
+pub fn test_phase10_check_write_no_tostop_allows_background() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Background process (pgid=99), TOSTOP not set.
+    match s.check_write(99, false) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - no TOSTOP bg write expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 10: check_write with TOSTOP allows foreground process.
+pub fn test_phase10_check_write_tostop_allows_foreground() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // fg_pgrp=10
+    // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
+    match s.check_write(10, true) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TOSTOP fg write expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 10: check_read rejects cross-session reads (tightened from permissive).
+pub fn test_phase10_check_read_cross_session_rejected() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    // Caller from a different session (sid=99) — should be rejected.
+    match s.check_read(10, 99) {
+        ForegroundCheck::NoSession => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - cross-session read expected NoSession, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 10: check_read still allows same-session foreground reads.
+pub fn test_phase10_check_read_same_session_foreground() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    match s.check_read(10, 10) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - same-session fg read expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 10: check_read still allows kernel tasks (pgid=0, sid=0).
+pub fn test_phase10_check_read_kernel_task_allowed() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Kernel task with pgid=0, sid=0 — should be allowed.
+    match s.check_read(0, 0) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task read expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 10: TTY write succeeds for foreground process even with TOSTOP.
+pub fn test_phase10_tty_write_foreground_with_tostop() -> TestResult {
+    tty::table::tty_table_init();
+    // This test verifies write() returns Ok even when TOSTOP is set,
+    // because in the test harness task_id=0 (kernel), which skips the
+    // foreground check.  The session-level check_write tests above
+    // verify the logic directly.
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut t = saved;
+    t.c_lflag |= slopos_abi::syscall::TOSTOP;
+    tty::set_termios(TtyIndex(0), &t).unwrap();
+
+    let data = b"hello";
+    let result = tty::write(TtyIndex(0), data);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(5) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fg write with TOSTOP expected Ok(5), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -2485,5 +2628,14 @@ slopos_lib::define_test_suite!(
         test_phase8_merged_drain_read,
         test_phase8_with_tty_per_slot,
         test_phase8_driver_id_traits,
+        // Phase 10: Job Control Correctness
+        test_phase10_sigttou_constant,
+        test_phase10_check_write_tostop_blocks_background,
+        test_phase10_check_write_no_tostop_allows_background,
+        test_phase10_check_write_tostop_allows_foreground,
+        test_phase10_check_read_cross_session_rejected,
+        test_phase10_check_read_same_session_foreground,
+        test_phase10_check_read_kernel_task_allowed,
+        test_phase10_tty_write_foreground_with_tostop,
     ]
 );

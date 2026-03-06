@@ -43,6 +43,9 @@ pub const SIGTSTP: u8 = 20;
 /// Signal sent to background processes attempting to read from their
 /// controlling terminal.
 pub const SIGTTIN: u8 = 21;
+/// Signal sent to background processes attempting to write to their
+/// controlling terminal when TOSTOP is set.
+pub const SIGTTOU: u8 = 22;
 
 // =============================================================================
 // Core syscalls
