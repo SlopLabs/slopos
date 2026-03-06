@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–13 Complete · **Phases 14–15 Planned** (Responsibility Split, Verify & Test)
+> **Status**: Phases 1–14 Complete · **Phases 15–18 Planned** (POSIX Quick Wins, Drain & Flags, PTY, Verify & Test)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -27,9 +27,12 @@
 16. [Phase 12: Sane Defaults & Output Column Tracking ✅](#16-phase-12-sane-defaults--output-column-tracking)
 17. [Phase 13: ABI Signal Constant Unification ✅](#17-phase-13-abi-signal-constant-unification)
 18. [Phase 14: Responsibility Split — PTY Foundation ✅](#18-phase-14-responsibility-split--pty-foundation)
-19. [Phase 15: Verify & Test](#19-phase-15-verify--test)
-20. [File Inventory](#20-file-inventory)
-21. [Future: PTY Support](#21-future-pty-support)
+19. [Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase](#19-phase-15-posix-quick-wins--line-boundaries-sigwinch-sighup-word-erase)
+20. [Phase 16: Termios Drain Semantics & Open Flags](#20-phase-16-termios-drain-semantics--open-flags)
+21. [Phase 17: PTY Implementation](#21-phase-17-pty-implementation)
+22. [Phase 18: Verify & Test](#22-phase-18-verify--test)
+23. [File Inventory](#23-file-inventory)
+24. [Appendix: Linux N_TTY Reference](#24-appendix-linux-n_tty-reference)
 
 ---
 
@@ -62,8 +65,11 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 11 | Non-canonical timing fix | `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 || 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-|| 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — |
-|| 15 | Verification & testing | — | — |
+| 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — | **DONE** |
+| 15 | POSIX quick wins (line boundaries, SIGWINCH, SIGHUP, word erase) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/signal.rs`, `core/src/scheduler/task.rs` | — |
+| 16 | Termios drain & open flags | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `fs/src/fileio.rs` | — |
+| 17 | PTY implementation | `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `fs/src/fileio.rs` | `drivers/src/tty/pty.rs` |
+| 18 | Final verification & testing | — | — |
 
 ---
 
@@ -1651,18 +1657,467 @@ This eliminates the `NO_SESSION = 0` / `NO_FOREGROUND_PGRP = 0` sentinel constan
 
 ---
 
-## 19. Phase 15: Verify & Test
+## 19. Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase
 
-> **Priority**: Final gate — comprehensive verification after all correctness and structural fixes.
+> **Priority**: P0 — Four targeted fixes that each take <50 lines but significantly improve POSIX correctness.
+> **Rationale**: A deep architectural review comparing SlopOS's TTY against Linux N_TTY, RedoxOS, and Kerla identified these as the highest-impact correctness gaps.  Each one breaks real-world programs (shells, editors, terminal apps).  All four are incremental fixes on the existing solid foundation — no architectural changes needed.
 
-### 19.1 Build verification
+**Goal**: Close the four most impactful POSIX compliance gaps with minimal, focused changes.
+
+### 19.1 Canonical line boundary tracking
+
+**Problem**: In canonical mode, `flush_edit_to_cooked()` dumps the entire edit buffer (including the trailing `\n`) into the cooked ring buffer.  If a user types fast enough for two lines to coalesce before `read()` runs, a single `read(fd, buf, 1024)` returns both lines concatenated.  POSIX requires that each `read()` in canonical mode returns **at most one complete line**.
+
+Linux solves this with `canon_head` / `line_start` markers in `n_tty.c` that track where each newline/EOF lands in the read buffer.  The Rust-idiomatic equivalent is simpler — a line counter.
+
+**Fix**:
+
+```rust
+// In LineDisc — add a line counter
+pub struct LineDisc {
+    // ... existing fields ...
+
+    /// Number of complete lines in the cooked buffer (incremented on
+    /// newline/EOF flush, decremented when read() consumes a line).
+    line_count: usize,
+}
+
+// In flush_edit_to_cooked():
+fn flush_edit_to_cooked(&mut self) {
+    for i in 0..self.edit_len {
+        self.push_cooked(self.edit_buf[i]);
+    }
+    self.edit_len = 0;
+    self.line_count += 1;  // One complete line flushed
+}
+
+// In read() — canonical mode stops after one line:
+pub fn read(&mut self, out: &mut [u8]) -> usize {
+    let mut copied = 0;
+    let is_canon = self.is_canonical();
+    while copied < out.len() && self.cooked_count > 0 {
+        let byte = self.cooked[self.cooked_tail];
+        out[copied] = byte;
+        self.cooked_tail = (self.cooked_tail + 1) % COOKED_BUF_SIZE;
+        self.cooked_count -= 1;
+        copied += 1;
+        // In canonical mode, stop after consuming one complete line.
+        if is_canon && byte == b'\n' {
+            self.line_count = self.line_count.saturating_sub(1);
+            break;
+        }
+    }
+    // Handle EOF flush (no trailing newline) — decrement line_count
+    // if we consumed data but didn't hit a newline.
+    if is_canon && copied > 0 && self.cooked_count == 0 && self.line_count > 0 {
+        self.line_count = self.line_count.saturating_sub(1);
+    }
+    copied
+}
+
+// In has_data() — canonical mode: data ready only when a full line exists:
+pub fn has_data(&self) -> bool {
+    if self.is_canonical() {
+        self.line_count > 0
+    } else {
+        self.cooked_count > 0
+    }
+}
+```
+
+This is simpler than Linux's `canon_head`/`line_start` marker approach because Rust's ownership model means we don't need to coordinate multiple pointers into a shared buffer.  A single `line_count` achieves the same POSIX guarantee.
+
+### 19.2 SIGWINCH on window size change
+
+**Problem**: `set_winsize()` updates the `Tty.winsize` struct but never signals the foreground process group.  POSIX specifies that `TIOCSWINSZ` should deliver `SIGWINCH` to the foreground pgrp when the size actually changes.
+
+**Fix**:
+
+```rust
+// In tty::set_winsize():
+pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS { return Err(TtyError::InvalidIndex); }
+    let fg_pgrp;
+    let changed;
+    {
+        let mut guard = TTY_SLOTS[slot].lock();
+        match guard.as_mut() {
+            Some(tty) => {
+                changed = tty.winsize.ws_row != ws.ws_row
+                       || tty.winsize.ws_col != ws.ws_col;
+                tty.winsize = *ws;
+                fg_pgrp = tty.session.fg_pgrp_raw();
+            }
+            None => return Err(TtyError::NotAllocated),
+        }
+    }
+    // Signal outside the lock — only if size actually changed.
+    if changed && fg_pgrp != 0 {
+        let _ = signal_process_group(fg_pgrp, SIGWINCH);
+    }
+    Ok(())
+}
+```
+
+Add `pub const SIGWINCH: u8 = 28;` to `abi/src/signal.rs`.
+
+Without this, `vim`, `less`, `htop`, `tmux`, and every terminal application that adapts to window resize will render garbled output after a resize.
+
+### 19.3 SIGHUP to entire session (not just foreground group)
+
+**Problem**: `hangup()` sends SIGHUP + SIGCONT only to `fg_pgrp`.  POSIX specifies that when a controlling terminal hangs up, SIGHUP is sent to **all processes in the controlling session** — foreground and background groups alike.
+
+**Fix**:
+
+```rust
+// In tty::hangup():
+pub fn hangup(idx: TtyIndex) {
+    // ... existing lock + flush + detach ...
+    let (session_id, fg_pgrp) = { /* extract both */ };
+
+    // POSIX: signal the entire session, not just foreground.
+    if session_id != 0 {
+        let _ = signal_session(session_id, SIGHUP);
+        let _ = signal_session(session_id, SIGCONT);
+    }
+    // ... wake blocked readers ...
+}
+```
+
+This requires adding a `signal_session(sid, sig)` helper to the driver runtime services that iterates all tasks with matching `session_id` and delivers the signal.  This parallels the existing `signal_process_group(pgid, sig)` pattern.
+
+Without this, background jobs don't get notified when the shell exits.  They become orphaned zombies.
+
+### 19.4 Word erase with proper word boundaries
+
+**Problem**: `word_erase()` in `ldisc.rs` uses `== b' '` as the sole word boundary.  POSIX and all real shells (bash, zsh, readline) define word boundaries as transitions between alphanumeric and non-alphanumeric characters.  Typing `/usr/local/bin` and pressing Ctrl+W should erase `bin` — currently it erases the entire path.
+
+**Fix**:
+
+```rust
+// Add helper to ldisc.rs:
+fn is_word_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+// In word_erase():
+fn word_erase(&mut self, lflag: u32) -> InputAction {
+    if self.edit_len == 0 { return InputAction::None; }
+    let mut erased = 0;
+
+    // Phase 1: skip trailing non-word characters (spaces, punctuation).
+    while self.edit_len > 0 && !is_word_char(self.edit_buf[self.edit_len - 1]) {
+        self.edit_len -= 1;
+        erased += 1;
+    }
+    // Phase 2: delete word characters (alphanumeric + underscore).
+    while self.edit_len > 0 && is_word_char(self.edit_buf[self.edit_len - 1]) {
+        self.edit_len -= 1;
+        erased += 1;
+    }
+    // ... rest unchanged ...
+}
+```
+
+### 19.5 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/ldisc.rs` | Add `line_count` field, update `read()`/`has_data()`/`flush_edit_to_cooked()`/`flush_all()`; fix `word_erase()` boundary logic; add `is_word_char()` helper |
+| `drivers/src/tty/mod.rs` | Update `set_winsize()` to signal SIGWINCH; update `hangup()` to signal entire session |
+| `abi/src/signal.rs` | Add `SIGWINCH` constant (value 28) |
+| `lib/src/kernel_services/driver_runtime.rs` | Add `signal_session(sid, sig)` service function |
+| `core/src/driver_hooks.rs` | Wire `signal_session` implementation (iterate tasks by session ID) |
+| `drivers/src/tty_tests.rs` | Add regression tests: canonical one-line-per-read, SIGWINCH constant, word erase boundaries |
+
+---
+
+## 20. Phase 16: Termios Drain Semantics & Open Flags
+
+> **Priority**: P1 — Affects correctness for programs that switch terminal modes (editors, curses apps).
+> **Rationale**: Three medium-effort POSIX requirements that are commonly needed by interactive programs: TCSETSW/TCSETSF drain-before-change semantics, O_NOCTTY for daemon correctness, and TIOCSETD for runtime line discipline switching (prerequisite for clean PTY operation).
+
+**Goal**: Implement termios change drain semantics, the `O_NOCTTY` open flag, and runtime line discipline switching.
+
+### 20.1 TCSETSW / TCSETSF drain semantics
+
+**Problem**: Currently `TCSETS`, `TCSETSW`, and `TCSETSF` all call `set_termios()` identically.  POSIX requires:
+- `TCSETSW` — Wait for all pending output to drain to hardware **before** changing termios
+- `TCSETSF` — Wait for output drain **and** flush pending input **before** changing termios
+
+Programs like `vim` exiting to shell use `TCSETSW` to ensure all screen-clearing escape sequences are sent before switching back to cooked mode.  Without drain semantics, characters can be processed under the wrong terminal mode during transitions.
+
+**Fix**:
+
+```rust
+// New function in mod.rs:
+pub fn set_termios_wait(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
+    // Phase 1: Wait until the driver's output is idle.
+    // For serial, this means the TX shift register is empty.
+    // For now, a simple yield loop since serial_putc_com1 is synchronous.
+    // (True drain requires driver-level "output complete" notification.)
+    set_termios(idx, t)
+}
+
+pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
+    // Flush input buffer first.
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS { return Err(TtyError::InvalidIndex); }
+    {
+        let mut guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_mut() {
+            tty.ldisc.flush_all();
+        }
+    }
+    set_termios(idx, t)
+}
+```
+
+Update `poll_ioctl_handlers.rs` to dispatch `TCSETSW` → `set_termios_wait()` and `TCSETSF` → `set_termios_flush()`.  The SlopOS serial driver is currently synchronous (`serial_putc_com1` blocks until the byte is sent), so the drain step is effectively a no-op for now — but the API separation is important for when the driver becomes interrupt-driven.
+
+### 20.2 O_NOCTTY open flag
+
+**Problem**: Opening a TTY can automatically acquire it as the controlling terminal (via `auto_attach_session` in `read()`).  POSIX defines `O_NOCTTY` to suppress this — critical for daemons that temporarily open a terminal for logging without wanting it as their controlling terminal.
+
+**Fix**:
+
+```rust
+// In abi/src/syscall.rs:
+pub const O_NOCTTY: u32 = 0x100;  // Match Linux value
+
+// In fs/src/fileio.rs — file_open_for_process():
+// When opening a TTY device, check O_NOCTTY in flags.
+// If set, do NOT call auto_attach_session or set controlling_tty.
+
+// In tty::read() — skip auto_attach when FD was opened with O_NOCTTY.
+// This requires propagating the O_NOCTTY flag through FileDescriptor.
+```
+
+Add a `noctty: bool` field to `FileDescriptor` (or check it from the open flags stored in `FileDescriptor.flags`).  When set, `read()` skips the `auto_attach_session()` call.
+
+### 20.3 Runtime line discipline switching (TIOCSETD)
+
+**Problem**: The `LdiscKind` enum (NTty / Raw) is set at TTY allocation time and cannot be changed at runtime.  POSIX defines `TIOCSETD` to switch the active line discipline.  This is a prerequisite for clean PTY operation where the master needs Raw and the slave needs NTty, and applications may want to switch between them.
+
+**Fix**:
+
+```rust
+// New ioctl constant in abi/src/syscall.rs:
+pub const TIOCSETD: u64 = 0x5423;  // Set line discipline
+pub const TIOCGETD: u64 = 0x5424;  // Get line discipline
+
+// Line discipline IDs:
+pub const N_TTY: u32 = 0;
+pub const N_RAW: u32 = 1;  // SlopOS extension (not in Linux)
+
+// In tty::set_ldisc():
+pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS { return Err(TtyError::InvalidIndex); }
+    let mut guard = TTY_SLOTS[slot].lock();
+    match guard.as_mut() {
+        Some(tty) => {
+            // Flush old discipline's buffers before switching.
+            tty.ldisc.flush_all();
+            tty.ldisc = match ldisc_id {
+                N_TTY => LdiscKind::NTty(LineDisc::new()),
+                N_RAW => LdiscKind::Raw(RawDisc::new()),
+                _ => return Err(TtyError::InvalidIndex),  // Unknown ldisc
+            };
+            Ok(())
+        }
+        None => Err(TtyError::NotAllocated),
+    }
+}
+```
+
+**Design note**: SlopOS keeps enum dispatch for `LdiscKind` (no trait objects) because there are only two variants and the `no_std` + no-alloc constraint makes `Box<dyn LdiscTrait>` impractical.  If future line disciplines are added (SLIP, PPP), a macro-generated delegation layer or a manual vtable can replace the current match arms without changing the public API.
+
+### 20.4 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Add `set_termios_wait()`, `set_termios_flush()`, `set_ldisc()`, `get_ldisc()` |
+| `drivers/src/tty/ldisc.rs` | No changes needed — `LdiscKind` already supports both variants |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Dispatch `TCSETSW` → `set_termios_wait`, `TCSETSF` → `set_termios_flush`, `TIOCSETD` / `TIOCGETD` |
+| `abi/src/syscall.rs` | Add `O_NOCTTY`, `TIOCSETD`, `TIOCGETD`, `N_TTY`, `N_RAW` constants |
+| `fs/src/fileio.rs` | Propagate `O_NOCTTY` flag to `FileDescriptor`, skip auto-attach when set |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Add `set_ldisc`/`get_ldisc` to `TtyServices` |
+| `drivers/src/syscall_services_init.rs` | Wire ldisc service adapters |
+| `drivers/src/tty_tests.rs` | Add regression tests: TCSETSF flushes input, O_NOCTTY flag, ldisc switching round-trip |
+
+---
+
+## 21. Phase 17: PTY Implementation
+
+> **Priority**: P1 — The single highest-impact missing feature.  Without PTY, no terminal multiplexer (`screen`, `tmux`), no `ssh`, no subshells with proper terminal control.
+> **Rationale**: The architectural foundation is ready (Phase 14 added `PtyMaster`/`PtySlave` driver stubs, `LdiscKind::Raw` for master passthrough, `DriverId` for lock-free cross-TTY routing, and per-TTY independent locking).  The remaining work is data routing, pair allocation, and lifecycle management.
+
+**Goal**: Implement functional pseudo-terminal pairs — `open("/dev/ptmx")` allocates a master/slave pair, data flows bidirectionally through the line discipline, and master close triggers slave hangup.
+
+### 21.1 Architecture overview
+
+```
+┌─────────────────┐          ┌──────────────────┐
+│  PTY Master FD  │          │   PTY Slave FD   │
+│  (terminal app) │          │   (shell/child)  │
+└────────┬────────┘          └────────┬─────────┘
+         │ write()                    │ write()
+         │                           │
+    ┌────▼────┐                 ┌────▼────┐
+    │ Raw     │                 │ N_TTY   │
+    │ LDisc   │                 │ LDisc   │
+    └────┬────┘                 └────┬────┘
+         │                           │
+    Master writes ──────────► Slave input (push_input)
+    Master reads  ◄──────────  Slave output (after OPOST)
+```
+
+**Data flow:**
+- Master `write(data)` → slave's `push_input(byte)` (through slave's N_TTY ldisc — canonical editing, echo, signals)
+- Slave `write(data)` → processed through slave's N_TTY output flags → master's read buffer
+- Master `read()` → gets slave's processed output
+- Slave `read()` → gets cooked input from its own N_TTY ldisc
+
+**Key Rust-idiomatic design decisions:**
+- No `Arc<Mutex<>>` or shared mutable state between master and slave — data is routed through `push_input()` which acquires per-TTY locks independently (one at a time, never both simultaneously)
+- PTY pairs are just two entries in `TTY_SLOTS[]` with cross-references via `TtyIndex`
+- `Option<TtyIndex>` for the paired peer — `None` when peer is closed (replaces C-style NULL pointer checks)
+
+### 21.2 PTY pair allocation
+
+```rust
+// New file: drivers/src/tty/pty.rs
+
+/// Allocate a PTY master/slave pair from the TTY table.
+///
+/// Returns `(master_idx, slave_idx)` or an error if no free slots.
+/// The master gets `LdiscKind::Raw` + `TtyDriverKind::PtyMaster`.
+/// The slave gets `LdiscKind::NTty` + `TtyDriverKind::PtySlave`.
+pub fn pty_alloc() -> Result<(TtyIndex, TtyIndex), TtyError> {
+    // Find two free slots (never hold two locks simultaneously).
+    let master_slot = find_free_slot()?;
+    let slave_slot = find_free_slot_excluding(master_slot)?;
+
+    let master_idx = TtyIndex(master_slot as u8);
+    let slave_idx = TtyIndex(slave_slot as u8);
+
+    // Initialize master (Raw ldisc, no session).
+    {
+        let mut guard = TTY_SLOTS[master_slot].lock();
+        *guard = Some(Tty::new_pty_master(master_idx, slave_idx));
+    }
+    // Initialize slave (NTty ldisc, inherits termios defaults).
+    {
+        let mut guard = TTY_SLOTS[slave_slot].lock();
+        *guard = Some(Tty::new_pty_slave(slave_idx, master_idx));
+    }
+
+    Ok((master_idx, slave_idx))
+}
+```
+
+### 21.3 Data routing in `TtyDriverKind`
+
+Replace the `TODO(PTY)` stubs in `driver.rs`:
+
+```rust
+impl TtyDriverKind {
+    pub fn write_output(&self, buf: &[u8]) {
+        match self {
+            // ... existing serial/vconsole ...
+            Self::PtyMaster { slave_idx } => {
+                // Master write → push to slave's input.
+                for &b in buf {
+                    super::push_input(*slave_idx, b);
+                }
+            }
+            Self::PtySlave { master_idx } => {
+                // Slave write (after ldisc output processing) →
+                // push to master's raw read buffer.
+                let slot = master_idx.0 as usize;
+                if slot < MAX_TTYS {
+                    let mut guard = TTY_SLOTS[slot].lock();
+                    if let Some(master) = guard.as_mut() {
+                        for &b in buf {
+                            master.ldisc.input_char(b);  // Raw ldisc — direct to buffer
+                        }
+                    }
+                }
+            }
+            // ...
+        }
+    }
+}
+```
+
+**Lock ordering safety**: The slave's `write()` (under slave's lock via split-write pattern) drops the lock **before** calling `write_driver_unlocked`.  The driver then acquires the **master's** lock to push data.  Since the slave lock is already released, no two `TTY_SLOTS` locks are held simultaneously.
+
+### 21.4 PTY lifecycle
+
+- **Master close** → slave receives hangup (blocked readers get EOF, future reads get `-EIO`)
+- **Slave close** → master reads get EOF (0 bytes returned)
+- **Both closed** → slots returned to free pool
+
+```rust
+// In close_ref() — detect PTY peer closure:
+pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
+    // ... existing decrement ...
+    if tty.open_count == 0 {
+        // If this is a PTY master, hangup the slave.
+        if let TtyDriverKind::PtyMaster { slave_idx } = tty.driver {
+            let slave = slave_idx;
+            drop(guard);  // Release our lock first!
+            hangup(slave);
+            return Ok(0);
+        }
+        // If this is a PTY slave, mark master as peer-closed.
+        if let TtyDriverKind::PtySlave { master_idx } = tty.driver {
+            let master = master_idx;
+            drop(guard);
+            // Wake master readers — they'll get EOF.
+            TTY_INPUT_WAITERS[master.0 as usize].wake_all();
+            return Ok(0);
+        }
+        // ... existing flush + detach for non-PTY ...
+    }
+}
+```
+
+### 21.5 `/dev/ptmx` and `/dev/pts/N`
+
+- `open("/dev/ptmx")` → calls `pty_alloc()`, returns FD to master side, creates `/dev/pts/N` for slave
+- `open("/dev/pts/N")` → opens the slave side of PTY pair N
+- Wire into `fs/src/fileio.rs` or devfs if available
+
+### 21.6 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/pty.rs` | **New** — PTY pair allocation, `find_free_slot()`, `Tty::new_pty_master/slave` constructors |
+| `drivers/src/tty/driver.rs` | Replace `TODO(PTY)` stubs with actual data routing in `write_output` and `write_driver_unlocked` |
+| `drivers/src/tty/mod.rs` | Add `pub mod pty`, update `close_ref()` with PTY lifecycle, expose `pty_alloc()` |
+| `drivers/src/tty/table.rs` | Add `find_free_slot()` / `find_free_slot_excluding()` helpers, `Tty::new_pty_master()` / `Tty::new_pty_slave()` constructors |
+| `fs/src/fileio.rs` | Intercept `open("/dev/ptmx")` and `open("/dev/pts/N")`, create TTY-backed FDs |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add PTY-specific ioctls if needed (e.g. `TIOCGPTN` to get slave number) |
+| `abi/src/syscall.rs` | Add `TIOCGPTN` constant |
+| `drivers/src/tty_tests.rs` | Add PTY tests: pair allocation, master→slave data flow, slave→master data flow, master close hangup, slave close EOF |
+
+---
+
+## 22. Phase 18: Verify & Test
+
+> **Priority**: Final gate — comprehensive verification after all correctness, structural, and PTY phases.
+
+### 22.1 Build verification
 
 ```bash
 just build          # Must compile cleanly
 just test           # Must pass existing test harness + all new phase tests
 ```
 
-### 19.2 Manual test cases (original)
+### 22.2 Manual test cases (original — Phases 1–9)
 
 | Test | Expected Result |
 |------|----------------|
@@ -1678,7 +2133,7 @@ just test           # Must pass existing test harness + all new phase tests
 | Fork+exec child process | Child inherits TTY, can read/write, parent waits |
 | Child exit → parent resume | Parent shell resumes with working TTY |
 
-### 19.3 New test cases (Phases 10–14)
+### 22.3 Phase 10–14 test cases
 
 | Test | Expected Result | Phase |
 |------|----------------|-------|
@@ -1697,19 +2152,45 @@ just test           # Must pass existing test harness + all new phase tests
 | `LdiscKind::Raw` vs `NTty` switching | Correct behavior when swapping line discipline | 14 |
 | `SessionId`/`ProcessGroupId` newtypes | No sentinel 0 values — `Option::None` for absent | 14 |
 
-### 19.4 Regression checks
+### 22.4 Phase 15–17 test cases (NEW)
+
+| Test | Expected Result | Phase |
+|------|----------------|-------|
+| Canonical read returns exactly one line | Type "foo\nbar\n" fast, first `read()` returns only "foo\n" | 15 |
+| `has_data()` in canonical mode | Returns false until a complete line is flushed (newline or EOF) | 15 |
+| SIGWINCH on `set_winsize()` | `SIGWINCH` delivered to foreground pgrp when size changes | 15 |
+| `set_winsize()` with same size | No signal delivered (size unchanged) | 15 |
+| SIGHUP on session leader exit | All session processes (foreground AND background) receive SIGHUP | 15 |
+| Ctrl+W on `/usr/local/bin` | Erases "bin", leaves "/usr/local/" | 15 |
+| Ctrl+W on "hello   world" | Erases "world", leaves "hello   " | 15 |
+| TCSETSF flushes input | Pending input bytes discarded after `TCSETSF` | 16 |
+| O_NOCTTY prevents controlling terminal | Open TTY with `O_NOCTTY`, verify no controlling terminal acquired | 16 |
+| TIOCSETD switches ldisc | Switch NTty→Raw, verify no echo; switch back, verify echo returns | 16 |
+| TIOCGETD returns current ldisc | Returns `N_TTY` for default, `N_RAW` after switch | 16 |
+| PTY pair allocation | `pty_alloc()` returns two distinct valid `TtyIndex` values | 17 |
+| PTY master→slave data flow | Master writes "hello", slave reads "hello" (through ldisc) | 17 |
+| PTY slave→master data flow | Slave writes "world\n", master reads "world\r\n" (ONLCR applied) | 17 |
+| PTY master close → slave hangup | Close master FD, slave `read()` returns 0 (EOF) / -EIO | 17 |
+| PTY slave close → master EOF | Close slave FD, master `read()` returns 0 | 17 |
+| PTY Ctrl+C on slave | Master writes 0x03, slave's foreground group receives SIGINT | 17 |
+| PTY canonical editing | Master writes keystrokes, slave reads complete lines only | 17 |
+
+### 22.5 Regression checks
 
 - Shell scrollback still works
 - Serial output still works for klog
 - Mouse/pointer events still work (input_event.rs unchanged for mouse)
 - Pipe operations still work
 - File I/O still works (non-console FDs unchanged)
-- All 1026+ existing tests still pass
+- All existing 1053+ tests still pass
 - No new compiler warnings introduced
+- `/dev/tty` still resolves to controlling terminal
+- Existing VMIN/VTIME behavior unchanged
+- Background job control (SIGTTIN/SIGTTOU) still works
 
 ---
 
-## 20. File Inventory
+## 23. File Inventory
 
 ### New files
 
@@ -1718,9 +2199,9 @@ just test           # Must pass existing test harness + all new phase tests
 | `drivers/src/tty/mod.rs` | TTY public API (replaces `tty.rs`) |
 | `drivers/src/tty/driver.rs` | `TtyDriver` trait, `SerialConsoleDriver`, `VConsoleDriver` |
 | `drivers/src/tty/table.rs` | `TTY_SLOTS` global array, init, lookup |
-| `drivers/src/tty/ldisc.rs` | Enhanced `LineDisc`, future `LdiscKind` abstraction |
-| `drivers/src/tty/session.rs` | `TtySession`, foreground checks, session policy |
-| `drivers/src/tty/wait_queue.rs` | Per-TTY `WaitQueue` (extracted from current tty.rs) |
+| `drivers/src/tty/ldisc.rs` | Enhanced `LineDisc`, `RawDisc`, `LdiscKind` abstraction |
+| `drivers/src/tty/session.rs` | `TtySession`, foreground checks, session policy, `SessionId`/`ProcessGroupId` newtypes |
+| `drivers/src/tty/pty.rs` | PTY pair allocation, constructors, free-slot helpers (Phase 17) |
 
 ### Modified files
 
@@ -1728,12 +2209,14 @@ just test           # Must pass existing test harness + all new phase tests
 |------|-----------------|
 | `drivers/src/lib.rs` | Update `mod tty` to module dir |
 | `drivers/src/ps2/keyboard.rs` | Remove `input_route_key_event`, call `tty::push_input` |
-| `fs/src/fileio.rs` | Replace `console` bool with `tty_index`, update routing |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Per-TTY ioctl dispatch |
+| `fs/src/fileio.rs` | Replace `console` bool with `tty_index`, update routing, `/dev/tty` + `/dev/ptmx` + `/dev/pts/N` intercepts, `O_NOCTTY` handling |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Per-TTY ioctl dispatch, `TCSETSW`/`TCSETSF`/`TIOCSETD`/`TIOCGETD`/`TIOCGPTN` |
 | `core/src/scheduler/task.rs` | Add `controlling_tty`, `pgrp`, `session_id` |
-| `lib/src/kernel_services/syscall_services/tty.rs` | Update to per-TTY API |
-| `abi/src/syscall.rs` | Add iflag/oflag/lflag constants, new c_cc indices |
-| `abi/src/signal.rs` | Canonical source for all signal constants |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Update to per-TTY API, add ldisc/PTY services |
+| `lib/src/kernel_services/driver_runtime.rs` | Add `signal_session()` service |
+| `core/src/driver_hooks.rs` | Wire `signal_session()` implementation |
+| `abi/src/syscall.rs` | Add iflag/oflag/lflag constants, new c_cc indices, `O_NOCTTY`, `TIOCSETD`/`TIOCGETD`/`TIOCGPTN`, `N_TTY`/`N_RAW` |
+| `abi/src/signal.rs` | Canonical source for all signal constants, add `SIGWINCH` |
 
 ### Deleted files
 
@@ -1744,36 +2227,7 @@ just test           # Must pass existing test harness + all new phase tests
 
 ---
 
-## 21. Future: PTY Support
-
-Not in scope for this plan, but the architecture (after Phase 14) is designed to accommodate it:
-
-```rust
-pub struct PtyMasterDriver {
-    slave_tty: TtyIndex,
-    // Master side: reads from slave's output, writes to slave's input
-}
-
-pub struct PtySlaveDriver {
-    master_tty: TtyIndex,
-    // Slave side: reads from line discipline, writes through line discipline
-}
-```
-
-A PTY pair would be:
-- TTY N (slave) — has `PtySlaveDriver`, owns a `LineDisc` via `LdiscKind::NTty`
-- TTY M (master) — has `PtyMasterDriver`, uses `LdiscKind::Raw` (no ldisc processing)
-
-The master reads what the slave writes (after output processing), and the master writes directly to the slave's line discipline input.
-
-This enables:
-- `ssh` / `screen` / `tmux` style multiplexing
-- Subshells with proper terminal control
-- Remote terminal access
-
----
-
-## Appendix: Linux N_TTY Reference
+## 24. Appendix: Linux N_TTY Reference
 
 For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.c`) handles:
 
@@ -1790,8 +2244,20 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
    - Column tracking for proper backspace echo
 
 3. **Read** (`n_tty_read`):
-   - Canonical: return on newline or EOF
+   - Canonical: return on newline or EOF — **one line at a time** via `canon_head`/`line_start`
    - Non-canonical: VMIN/VTIME timing (inter-byte for VMIN>0/VTIME>0)
    - Job control: SIGTTIN for background reads, SIGTTOU for background writes with TOSTOP
 
-The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now).
+4. **Lifecycle** (`tty_io.c`):
+   - Refcounted via `tty_kref` — last close triggers cleanup
+   - `tty_hangup()` signals entire session, flushes buffers, wakes blocked readers
+   - TCSETSW drains output via `tty_wait_until_sent()` before changing termios
+   - TCSETSF drains output AND flushes input (`n_tty_flush_buffer()`)
+
+5. **PTY** (`pty.c`):
+   - Master and slave are separate `tty_struct` instances linked via `tty->link`
+   - Master write → `pty_write()` → feeds bytes to slave's `receive_buf()` (through slave's ldisc)
+   - Slave write → output processed through slave's ldisc → stored in `tty->write_buf` → master reads it
+   - Master close → `pty_close()` → slave gets hangup
+
+The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now).  Phases 15–17 close the remaining critical gaps.
