@@ -23,6 +23,9 @@ crate::define_service! {
         close_ref(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         hangup(tty_index: slopos_abi::syscall::TtyIndex);
         is_hung_up(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
+        alloc_pty() -> i32;
+        get_pty_number(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
+        is_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         detach_session_by_id(session_id: u32);
     }
 }

@@ -503,6 +503,28 @@ unsafe fn path_bytes<'a>(path: *const c_char) -> Option<&'a [u8]> {
     }
 }
 
+fn parse_pts_path(path: &[u8]) -> Option<TtyIndex> {
+    let rest = path.strip_prefix(b"/dev/pts/")?;
+    if rest.is_empty() {
+        return None;
+    }
+
+    let mut value = 0u16;
+    for &byte in rest {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as u16)?;
+    }
+
+    let idx = value as u8;
+    if value > u8::MAX as u16 || idx < 2 {
+        return None;
+    }
+
+    Some(TtyIndex(idx))
+}
+
 /// Bootstrap FD 0 (stdin), 1 (stdout), 2 (stderr) as console descriptors.
 ///
 /// Console descriptors are valid file descriptors that route reads/writes
@@ -695,6 +717,116 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
             desc.pipe_write_end = false;
 
             if tty::open_ref(tty_idx) < 0 {
+                reset_descriptor(desc);
+                drop(guard);
+                return -1;
+            }
+
+            drop(guard);
+            slot_idx as c_int
+        });
+    }
+
+    if path_bytes == b"/dev/ptmx" {
+        return with_tables(|kernel, processes| {
+            let master_idx_raw = tty::alloc_pty();
+            if master_idx_raw < 0 {
+                return -1;
+            }
+            let master_idx = TtyIndex(master_idx_raw as u8);
+
+            let kernel_ptr = kernel as *mut FileTableSlot;
+            let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
+                t as *mut FileTableSlot
+            } else if let Some(t) = find_free_table(processes) {
+                t as *mut FileTableSlot
+            } else {
+                kernel_ptr
+            };
+            let table: &mut FileTableSlot = unsafe { &mut *table_ptr };
+
+            if !table.in_use {
+                table.in_use = true;
+                table.process_id = process_id;
+                reset_table(table);
+            }
+
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+            let Some(slot_idx) = find_free_slot(table) else {
+                drop(guard);
+                return -1;
+            };
+
+            let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
+            desc.inode = 0;
+            desc.fs = None;
+            desc.flags = flags | O_NOCTTY as u32;
+            desc.position = 0;
+            desc.valid = true;
+            desc.cloexec = (flags & O_CLOEXEC as u32) != 0;
+            desc.tty_index = Some(master_idx);
+            desc.pipe_id = INVALID_PIPE_ID;
+            desc.socket_idx = INVALID_SOCKET_IDX;
+            desc.pipe_read_end = false;
+            desc.pipe_write_end = false;
+
+            if tty::open_ref(master_idx) < 0 {
+                reset_descriptor(desc);
+                drop(guard);
+                return -1;
+            }
+
+            drop(guard);
+            slot_idx as c_int
+        });
+    }
+
+    if let Some(slave_idx) = parse_pts_path(path_bytes) {
+        if !tty::is_pty_slave(slave_idx) {
+            return -1;
+        }
+
+        return with_tables(|kernel, processes| {
+            let kernel_ptr = kernel as *mut FileTableSlot;
+            let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
+                t as *mut FileTableSlot
+            } else if let Some(t) = find_free_table(processes) {
+                t as *mut FileTableSlot
+            } else {
+                kernel_ptr
+            };
+            let table: &mut FileTableSlot = unsafe { &mut *table_ptr };
+
+            if !table.in_use {
+                table.in_use = true;
+                table.process_id = process_id;
+                reset_table(table);
+            }
+
+            let table_ptr: *mut FileTableSlot = table;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+            let Some(slot_idx) = find_free_slot(table) else {
+                drop(guard);
+                return -1;
+            };
+
+            let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
+            desc.inode = 0;
+            desc.fs = None;
+            desc.flags = flags;
+            desc.position = 0;
+            desc.valid = true;
+            desc.cloexec = (flags & O_CLOEXEC as u32) != 0;
+            desc.tty_index = Some(slave_idx);
+            desc.pipe_id = INVALID_PIPE_ID;
+            desc.socket_idx = INVALID_SOCKET_IDX;
+            desc.pipe_read_end = false;
+            desc.pipe_write_end = false;
+
+            if tty::open_ref(slave_idx) < 0 {
                 reset_descriptor(desc);
                 drop(guard);
                 return -1;

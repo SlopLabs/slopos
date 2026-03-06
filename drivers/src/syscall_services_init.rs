@@ -225,6 +225,24 @@ fn tty_is_hung_up_adapter(tty_index: TtyIndex) -> bool {
     tty::is_hung_up(tty_index)
 }
 
+fn tty_alloc_pty_adapter() -> i32 {
+    match tty::pty_alloc() {
+        Ok(idx) => idx.0 as i32,
+        Err(_) => -1,
+    }
+}
+
+fn tty_get_pty_number_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::get_pty_number(tty_index) {
+        Ok(number) => number as i32,
+        Err(_) => -1,
+    }
+}
+
+fn tty_is_pty_slave_adapter(tty_index: TtyIndex) -> bool {
+    tty::is_pty_slave(tty_index)
+}
+
 fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
@@ -258,6 +276,9 @@ static TTY_SERVICES: TtyServices = TtyServices {
     close_ref: tty_close_ref_adapter,
     hangup: tty_hangup_adapter,
     is_hung_up: tty_is_hung_up_adapter,
+    alloc_pty: tty_alloc_pty_adapter,
+    get_pty_number: tty_get_pty_number_adapter,
+    is_pty_slave: tty_is_pty_slave_adapter,
 };
 
 fn net_scan_members_adapter(

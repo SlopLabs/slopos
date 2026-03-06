@@ -3,8 +3,8 @@
 use core::ffi::c_int;
 
 use slopos_abi::syscall::{
-    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGSID, TIOCGWINSZ,
-    TIOCSCTTY, TIOCSETD, TIOCSPGRP, UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGPTN, TIOCGSID,
+    TIOCGWINSZ, TIOCSCTTY, TIOCSETD, TIOCSPGRP, UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -309,6 +309,18 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let ldisc_id = tty::get_ldisc(tty_idx);
             try_or_err!(ctx, copy_to_user(ptr, &ldisc_id));
             ctx.ok(0)
+        }
+        TIOCGPTN => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
+            let pty_number = tty::get_pty_number(tty_idx);
+            if pty_number < 0 {
+                ctx.err()
+            } else {
+                let pty_number = pty_number as u32;
+                try_or_err!(ctx, copy_to_user(ptr, &pty_number));
+                ctx.ok(0)
+            }
         }
         TIOCSETD => {
             require_nonzero!(ctx, arg);
