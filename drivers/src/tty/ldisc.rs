@@ -36,6 +36,8 @@ use slopos_abi::syscall::{
     ISIG,
     ISTRIP,
     IXON,
+    N_RAW,
+    N_TTY,
     NCCS,
     // c_oflag
     OCRNL,
@@ -50,11 +52,13 @@ use slopos_abi::syscall::{
     VINTR,
     VKILL,
     VLNEXT,
+    VMIN,
     VQUIT,
     VREPRINT,
     VSTART,
     VSTOP,
     VSUSP,
+    VTIME,
     VWERASE,
 };
 
@@ -156,7 +160,7 @@ impl LineDisc {
                 c_oflag: OPOST | ONLCR,
                 c_cflag: 0,
                 c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE,
-                c_line: 0,
+                c_line: N_TTY as u8,
                 c_cc: cc,
                 c_ispeed: 0,
                 c_ospeed: 0,
@@ -258,6 +262,15 @@ impl LineDisc {
         self.stopped = false;
         self.literal_next = false;
         self.column = 0;
+    }
+
+    pub fn flush_input(&mut self) {
+        self.edit_len = 0;
+        self.cooked_head = 0;
+        self.cooked_tail = 0;
+        self.cooked_count = 0;
+        self.line_count = 0;
+        self.literal_next = false;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -753,7 +766,7 @@ impl RawDisc {
                 c_oflag: 0,
                 c_cflag: 0,
                 c_lflag: 0,
-                c_line: 0,
+                c_line: N_RAW as u8,
                 c_cc: [0; NCCS],
                 c_ispeed: 0,
                 c_ospeed: 0,
@@ -774,8 +787,7 @@ impl RawDisc {
     }
 
     pub fn vmin_vtime(&self) -> (u8, u8) {
-        // Raw mode: VMIN=1, VTIME=0 — block until at least 1 byte.
-        (1, 0)
+        (self.termios.c_cc[VMIN], self.termios.c_cc[VTIME])
     }
 
     pub fn is_canonical(&self) -> bool {
@@ -798,6 +810,12 @@ impl RawDisc {
     }
 
     pub fn flush_all(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+    }
+
+    pub fn flush_input(&mut self) {
         self.head = 0;
         self.tail = 0;
         self.count = 0;
@@ -847,6 +865,29 @@ pub enum LdiscKind {
 }
 
 impl LdiscKind {
+    pub fn id(&self) -> u32 {
+        match self {
+            LdiscKind::NTty(_) => N_TTY,
+            LdiscKind::Raw(_) => N_RAW,
+        }
+    }
+
+    pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Option<Self> {
+        match ldisc_id {
+            N_TTY => {
+                let mut ld = LineDisc::new();
+                ld.set_termios(&termios);
+                Some(LdiscKind::NTty(ld))
+            }
+            N_RAW => {
+                let mut rd = RawDisc::new();
+                rd.set_termios(&termios);
+                Some(LdiscKind::Raw(rd))
+            }
+            _ => None,
+        }
+    }
+
     /// Immutable reference to the current termios.
     pub fn termios(&self) -> &UserTermios {
         match self {
@@ -900,6 +941,13 @@ impl LdiscKind {
         match self {
             LdiscKind::NTty(ld) => ld.flush_all(),
             LdiscKind::Raw(rd) => rd.flush_all(),
+        }
+    }
+
+    pub fn flush_input(&mut self) {
+        match self {
+            LdiscKind::NTty(ld) => ld.flush_input(),
+            LdiscKind::Raw(rd) => rd.flush_input(),
         }
     }
 

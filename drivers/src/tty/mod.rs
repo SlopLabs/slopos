@@ -96,6 +96,14 @@ pub enum TtyError {
     WouldBlock,
     /// Permission denied (e.g. different session for TIOCSPGRP).
     PermissionDenied,
+    UnsupportedLineDiscipline,
+}
+
+#[derive(Clone, Copy)]
+enum TermiosSetMode {
+    Now,
+    Drain,
+    DrainAndFlushInput,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +263,15 @@ use self::session::auto_attach_session;
 /// Phase 8: drain + foreground check + read are merged into a single per-TTY
 /// lock acquisition per loop iteration (previously 5–6 separate locks).
 pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyError> {
+    read_with_attach(idx, buf, nonblock, true)
+}
+
+pub fn read_with_attach(
+    idx: TtyIndex,
+    buf: &mut [u8],
+    nonblock: bool,
+    auto_attach: bool,
+) -> Result<usize, TtyError> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -269,7 +286,7 @@ pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyE
     let caller_sid = current_task_sid();
     let enforce_access = task_id != 0;
 
-    if enforce_access {
+    if enforce_access && auto_attach {
         auto_attach_session(idx, task_id, caller_pgid, caller_sid);
     }
 
@@ -605,21 +622,101 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
     }
 }
 
-/// Set termios for a specific TTY.
-pub fn set_termios(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
+fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(_) => Ok(()),
+        None => Err(TtyError::NotAllocated),
+    }
+}
+
+fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Result<(), TtyError> {
+    if matches!(
+        mode,
+        TermiosSetMode::Drain | TermiosSetMode::DrainAndFlushInput
+    ) {
+        wait_output_idle(idx)?;
+    }
+
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
     let mut guard = TTY_SLOTS[slot].lock();
     match guard.as_mut() {
         Some(tty) => {
+            if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
+                tty.ldisc.flush_input();
+            }
             tty.ldisc.set_termios(t);
             tty.driver.set_termios(t);
             Ok(())
         }
         None => Err(TtyError::NotAllocated),
     }
+}
+
+/// Set termios for a specific TTY.
+pub fn set_termios(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
+    set_termios_mode(idx, t, TermiosSetMode::Now)
+}
+
+pub fn set_termios_wait(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
+    set_termios_mode(idx, t, TermiosSetMode::Drain)
+}
+
+pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
+    set_termios_mode(idx, t, TermiosSetMode::DrainAndFlushInput)
+}
+
+pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => Ok(tty.ldisc.id()),
+        None => Err(TtyError::NotAllocated),
+    }
+}
+
+pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let mut guard = TTY_SLOTS[slot].lock();
+    let tty = match guard.as_mut() {
+        Some(tty) => tty,
+        None => return Err(TtyError::NotAllocated),
+    };
+
+    if tty.ldisc.id() == ldisc_id {
+        let mut termios = *tty.ldisc.termios();
+        termios.c_line = ldisc_id as u8;
+        tty.ldisc.set_termios(&termios);
+        tty.driver.set_termios(tty.ldisc.termios());
+        return Ok(());
+    }
+
+    let mut termios = *tty.ldisc.termios();
+    termios.c_line = ldisc_id as u8;
+    let Some(new_ldisc) = LdiscKind::from_id(ldisc_id, termios) else {
+        return Err(TtyError::UnsupportedLineDiscipline);
+    };
+
+    tty.ldisc.flush_input();
+    tty.ldisc = new_ldisc;
+    tty.driver.set_termios(tty.ldisc.termios());
+    Ok(())
 }
 
 /// Get the foreground process group for a specific TTY.
