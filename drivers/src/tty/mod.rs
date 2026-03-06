@@ -31,8 +31,8 @@ use core::ffi::c_int;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::{SIGCONT, SIGHUP};
-use slopos_abi::syscall::{SIGTTIN, SIGTTOU, TOSTOP, UserTermios, UserWinsize};
+use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU};
+use slopos_abi::syscall::{TOSTOP, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
     scheduler_is_enabled, signal_process_group,

@@ -9,7 +9,7 @@
 //! Phase 6 additions: compositor focus / fg_pgrp split, check_read() as sole
 //! read gate, TtyIndex type safety, signal constant verification.
 
-use slopos_abi::syscall::{SIGINT, SIGQUIT, SIGTSTP, SIGTTOU};
+use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -2969,6 +2969,111 @@ pub fn test_phase12_default_onlcr_newline_expands() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 13: ABI Signal Constant Unification
+// ===========================================================================
+
+/// Phase 13: All signal constants come from `abi/src/signal.rs` with correct
+/// POSIX-compatible values.  This test verifies every signal used by the TTY
+/// subsystem matches its expected numeric value.
+pub fn test_phase13_signal_values_from_signal_module() -> TestResult {
+    // These are now imported from slopos_abi::signal (the canonical source).
+    if SIGINT != 2 {
+        klog_info!("TTY_TEST: BUG - SIGINT should be 2, got {}", SIGINT);
+        return TestResult::Fail;
+    }
+    if SIGQUIT != 3 {
+        klog_info!("TTY_TEST: BUG - SIGQUIT should be 3, got {}", SIGQUIT);
+        return TestResult::Fail;
+    }
+    if SIGTSTP != 20 {
+        klog_info!("TTY_TEST: BUG - SIGTSTP should be 20, got {}", SIGTSTP);
+        return TestResult::Fail;
+    }
+    if SIGHUP != 1 {
+        klog_info!("TTY_TEST: BUG - SIGHUP should be 1, got {}", SIGHUP);
+        return TestResult::Fail;
+    }
+    if SIGCONT != 18 {
+        klog_info!("TTY_TEST: BUG - SIGCONT should be 18, got {}", SIGCONT);
+        return TestResult::Fail;
+    }
+    if SIGTTIN != 21 {
+        klog_info!("TTY_TEST: BUG - SIGTTIN should be 21, got {}", SIGTTIN);
+        return TestResult::Fail;
+    }
+    if SIGTTOU != 22 {
+        klog_info!("TTY_TEST: BUG - SIGTTOU should be 22, got {}", SIGTTOU);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 13: LineDisc signal generation uses constants from `signal.rs`.
+/// Verifies that ISIG + Ctrl+C still produces the correct signal number after
+/// the import migration.
+pub fn test_phase13_ldisc_signal_uses_signal_module() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Default termios has ISIG enabled.
+    match ld.input_char(3) {
+        // Ctrl+C = 0x03 → SIGINT
+        InputAction::Signal(sig) if sig == SIGINT => {}
+        _ => {
+            klog_info!("TTY_TEST: BUG - Ctrl+C should produce Signal(SIGINT=2)");
+            return TestResult::Fail;
+        }
+    }
+    // Ctrl+\\ = 0x1C → SIGQUIT
+    match ld.input_char(28) {
+        InputAction::Signal(sig) if sig == SIGQUIT => {}
+        _ => {
+            klog_info!("TTY_TEST: BUG - Ctrl+\\ should produce Signal(SIGQUIT=3)");
+            return TestResult::Fail;
+        }
+    }
+    // Ctrl+Z = 0x1A → SIGTSTP
+    match ld.input_char(26) {
+        InputAction::Signal(sig) if sig == SIGTSTP => {}
+        _ => {
+            klog_info!("TTY_TEST: BUG - Ctrl+Z should produce Signal(SIGTSTP=20)");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 13: SIGHUP and SIGCONT are used by the hangup path.  Verify the
+/// constants are accessible from the signal module and have correct values
+/// (these were previously only imported in `mod.rs` from `signal` — now they
+/// are the sole definition).
+pub fn test_phase13_hangup_signals_from_signal_module() -> TestResult {
+    // SIGHUP is sent to the foreground pgrp on TTY hangup.
+    if SIGHUP != 1 {
+        klog_info!("TTY_TEST: BUG - SIGHUP should be 1, got {}", SIGHUP);
+        return TestResult::Fail;
+    }
+    // SIGCONT is sent after SIGHUP to wake stopped processes.
+    if SIGCONT != 18 {
+        klog_info!("TTY_TEST: BUG - SIGCONT should be 18, got {}", SIGCONT);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 13: Background-read and background-write signals (SIGTTIN, SIGTTOU)
+/// are now sourced from `signal.rs` exclusively.  Verify values.
+pub fn test_phase13_job_control_signals_from_signal_module() -> TestResult {
+    if SIGTTIN != 21 {
+        klog_info!("TTY_TEST: BUG - SIGTTIN should be 21, got {}", SIGTTIN);
+        return TestResult::Fail;
+    }
+    if SIGTTOU != 22 {
+        klog_info!("TTY_TEST: BUG - SIGTTOU should be 22, got {}", SIGTTOU);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -3119,5 +3224,10 @@ slopos_lib::define_test_suite!(
         test_phase12_output_column_tracking_backspace,
         test_phase12_onocr_at_column_zero,
         test_phase12_default_onlcr_newline_expands,
+        // Phase 13: ABI Signal Constant Unification
+        test_phase13_signal_values_from_signal_module,
+        test_phase13_ldisc_signal_uses_signal_module,
+        test_phase13_hangup_signals_from_signal_module,
+        test_phase13_job_control_signals_from_signal_module,
     ]
 );

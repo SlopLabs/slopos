@@ -18,6 +18,7 @@
 //! [`InputAction`] / [`OutputAction`] values that the caller (the TTY core in
 //! `mod.rs`) translates into driver writes.
 
+use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
     ECHO,
     // c_lflag (additional)
@@ -42,10 +43,6 @@ use slopos_abi::syscall::{
     ONLRET,
     ONOCR,
     OPOST,
-    // Signal numbers
-    SIGINT,
-    SIGQUIT,
-    SIGTSTP,
     UserTermios,
     // c_cc indices
     VEOF,
