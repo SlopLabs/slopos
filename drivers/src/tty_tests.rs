@@ -2504,6 +2504,196 @@ pub fn test_phase10_tty_write_foreground_with_tostop() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 11: Non-Canonical Timing Fix regression tests
+// ===========================================================================
+
+/// Phase 11: VMIN>0/VTIME>0 — returns immediately when VMIN bytes are
+/// already available (no timeout needed).
+pub fn test_phase11_vmin_vtime_enough_data_returns_immediately() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[6] = 3; // VMIN = 3
+    raw.c_cc[5] = 1; // VTIME = 1 (100ms)
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    // Push exactly VMIN bytes.
+    tty::push_input(TtyIndex(0), b'a');
+    tty::push_input(TtyIndex(0), b'b');
+    tty::push_input(TtyIndex(0), b'c');
+
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(n) if n >= 3 => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=3/VTIME=1 with 3 bytes expected Ok(>=3), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 11: VMIN>0/VTIME>0 — with partial data available (less than VMIN),
+/// a nonblocking read returns what is available (WouldBlock if nothing).
+pub fn test_phase11_vmin_vtime_partial_nonblock() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[6] = 5; // VMIN = 5
+    raw.c_cc[5] = 2; // VTIME = 2 (200ms)
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    // Push fewer than VMIN bytes.
+    tty::push_input(TtyIndex(0), b'x');
+    tty::push_input(TtyIndex(0), b'y');
+
+    // Nonblocking read: should return the 2 bytes we have (not block).
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(2) => {
+            if buf[0] == b'x' && buf[1] == b'y' {
+                TestResult::Pass
+            } else {
+                klog_info!(
+                    "TTY_TEST: BUG - VMIN=5/VTIME=2 nonblock data mismatch ({}, {})",
+                    buf[0],
+                    buf[1]
+                );
+                TestResult::Fail
+            }
+        }
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=5/VTIME=2 nonblock with 2 bytes expected Ok(2), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 11: VMIN>0/VTIME>0 — with no data, nonblocking read returns
+/// WouldBlock (timer does NOT start without first byte).
+pub fn test_phase11_vmin_vtime_no_data_nonblock() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[6] = 3; // VMIN = 3
+    raw.c_cc[5] = 1; // VTIME = 1 (100ms)
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Err(TtyError::WouldBlock) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=3/VTIME=1 no data nonblock expected WouldBlock, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 11: VMIN>0/VTIME>0 — inter-byte timeout returns partial data.
+/// Push 1 byte (less than VMIN=3), then do a blocking read with a short
+/// VTIME.  The read should return the 1 byte after the inter-byte timeout
+/// expires (not block indefinitely waiting for VMIN).
+pub fn test_phase11_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[6] = 3; // VMIN = 3
+    raw.c_cc[5] = 1; // VTIME = 1 (100ms inter-byte timeout)
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    // Push 1 byte — less than VMIN but enough to start the inter-byte timer.
+    tty::push_input(TtyIndex(0), b'z');
+
+    // Blocking read: should wait for VMIN=3 bytes but the inter-byte timer
+    // (VTIME=100ms) will expire after the first byte, returning what we have.
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, false);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(n) if n >= 1 => {
+            if buf[0] != b'z' {
+                klog_info!(
+                    "TTY_TEST: BUG - inter-byte timeout data mismatch (got 0x{:02x})",
+                    buf[0]
+                );
+                TestResult::Fail
+            } else {
+                TestResult::Pass
+            }
+        }
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=3/VTIME=1 with 1 byte expected Ok(>=1) after timeout, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 11: Verify that the ldisc vmin_vtime() helper returns correct values
+/// after setting non-canonical parameters.
+pub fn test_phase11_ldisc_vmin_vtime_helper() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Default: VMIN=1, VTIME=0.
+    let (vmin, vtime) = ld.vmin_vtime();
+    if vmin != 1 || vtime != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - default vmin_vtime expected (1,0), got ({},{})",
+            vmin,
+            vtime
+        );
+        return TestResult::Fail;
+    }
+
+    // Set custom values.
+    let mut t = *ld.termios();
+    t.c_cc[6] = 5; // VMIN
+    t.c_cc[5] = 3; // VTIME
+    ld.set_termios(&t);
+    let (vmin2, vtime2) = ld.vmin_vtime();
+    if vmin2 != 5 || vtime2 != 3 {
+        klog_info!(
+            "TTY_TEST: BUG - custom vmin_vtime expected (5,3), got ({},{})",
+            vmin2,
+            vtime2
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -2637,5 +2827,11 @@ slopos_lib::define_test_suite!(
         test_phase10_check_read_same_session_foreground,
         test_phase10_check_read_kernel_task_allowed,
         test_phase10_tty_write_foreground_with_tostop,
+        // Phase 11: Non-Canonical Timing Fix
+        test_phase11_vmin_vtime_enough_data_returns_immediately,
+        test_phase11_vmin_vtime_partial_nonblock,
+        test_phase11_vmin_vtime_no_data_nonblock,
+        test_phase11_vmin_vtime_interbyte_timeout_returns_partial,
+        test_phase11_ldisc_vmin_vtime_helper,
     ]
 );

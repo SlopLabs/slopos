@@ -390,6 +390,9 @@ pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyE
                         should_wait = true;
                     }
                     (_, _) => {
+                        // POSIX VMIN>0 / VTIME>0: inter-byte timeout.
+                        // The timer starts after the first byte arrives,
+                        // NOT when read() is called.
                         if total >= vmin {
                             drop(guard);
                             if let Some((pgid, sig)) = deferred_signal {
@@ -400,7 +403,14 @@ pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyE
                             return Ok(total);
                         }
                         should_wait = true;
-                        wait_timeout_ms = Some(vtime_ms);
+                        // Phase 1: no bytes yet — wait indefinitely for
+                        // the first byte (timeout = None).
+                        // Phase 2: at least one byte received — start the
+                        // inter-byte timer for the remaining bytes.
+                        if total > 0 {
+                            wait_timeout_ms = Some(vtime_ms);
+                        }
+                        // else: wait_timeout_ms remains None (indefinite)
                     }
                 }
             }
