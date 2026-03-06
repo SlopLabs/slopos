@@ -568,11 +568,19 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
                             }
                         }
                     }
+                    OutputAction::Tab(n) => {
+                        for _ in 0..n as usize {
+                            if out_len < OUT_BUF_CAP {
+                                out_buf[out_len] = b' ';
+                                out_len += 1;
+                            }
+                        }
+                    }
                     OutputAction::Suppress => {}
                 }
                 pos += 1;
                 // If buffer nearly full, break to flush.
-                if out_len >= OUT_BUF_CAP - 2 {
+                if out_len >= OUT_BUF_CAP - 8 {
                     break;
                 }
             }

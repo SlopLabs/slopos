@@ -24,7 +24,7 @@
 13. [Phase 9: Rust Idioms & Termios Completion](#13-phase-9-rust-idioms--termios-completion)
 14. [Phase 10: Job Control Correctness](#14-phase-10-job-control-correctness)
 15. [Phase 11: Non-Canonical Timing Fix](#15-phase-11-non-canonical-timing-fix)
-16. [Phase 12: Sane Defaults & Output Column Tracking](#16-phase-12-sane-defaults--output-column-tracking)
+16. [Phase 12: Sane Defaults & Output Column Tracking ✅](#16-phase-12-sane-defaults--output-column-tracking)
 17. [Phase 13: ABI Signal Constant Unification](#17-phase-13-abi-signal-constant-unification)
 18. [Phase 14: Responsibility Split — PTY Foundation](#18-phase-14-responsibility-split--pty-foundation)
 19. [Phase 15: Verify & Test](#19-phase-15-verify--test)
@@ -1417,7 +1417,7 @@ if total > 0 {
 | `drivers/src/tty_tests.rs` | Added 5 Phase 11 regression tests (enough data immediate return, partial nonblock, no data WouldBlock, inter-byte timeout partial return, vmin_vtime helper) |
 
 
-## 16. Phase 12: Sane Defaults & Output Column Tracking
+## 16. Phase 12: Sane Defaults & Output Column Tracking ✅ COMPLETED
 
 > **Priority**: P1 — Without this, every terminal program looks broken out of the box.
 > **Rationale**: Default `c_iflag: 0` and `c_oflag: 0` means `printf("hello\n")` doesn't produce a carriage return — the cursor advances to the next line but stays at the current column. Every userland program must manually `tcsetattr()` to enable ICRNL and ONLCR. Linux defaults have both on. Additionally, column tracking only happens in the input echo path, not the output path, breaking tab expansion and accurate line-erase.
@@ -1496,8 +1496,30 @@ pub enum OutputAction {
 |------|--------|
 | `drivers/src/tty/ldisc.rs` | Update default termios, add column tracking to `process_output_byte()`, add `OutputAction::Tab`, tab expansion |
 | `drivers/src/tty/mod.rs` | Handle `OutputAction::Tab` in `write()`, update default `Tty::new()` termios |
-| `drivers/src/tty_tests.rs` | Add tests: default termios has ICRNL/ONLCR, output column tracking, tab expansion, ONOCR at column 0 |
+| `drivers/src/tty/mod.rs` | Handle `OutputAction::Tab` in `write()`, buffer threshold relaxed to `OUT_BUF_CAP - 8` |
+| `drivers/src/tty_tests.rs` | Fixed 3 existing tests for new defaults; added 10 Phase 12 regression tests |
 
+### 16.5 Implementation summary
+
+**Completed**: All three sub-tasks implemented and verified.
+
+1. **Sane defaults** (`LineDisc::new()`): `c_iflag: ICRNL`, `c_oflag: OPOST | ONLCR`, `c_lflag` gains `ECHOK | ECHOCTL | ECHOKE`.
+2. **Output column tracking** (`process_output_byte()`): Rewritten with full column accounting for printable chars (+1), NL/CR (→0), tab (8-stop expansion), backspace (−1), and control chars (no change). Non-OPOST path tracks via `update_column_raw()`. Proper ONOCR (suppress CR at col 0), ONLRET (NL resets col), OCRNL+ONLRET interaction.
+3. **Tab expansion**: New `OutputAction::Tab(u8)` variant returns the number of spaces; `Tty::write()` emits N spaces. Buffer split threshold relaxed from `OUT_BUF_CAP - 2` to `OUT_BUF_CAP - 8`.
+
+**Tests** (10 new, 3 fixed):
+- `test_phase12_default_termios_has_icrnl`
+- `test_phase12_default_termios_has_opost_onlcr`
+- `test_phase12_default_termios_has_full_lflag`
+- `test_phase12_output_column_tracking_printable`
+- `test_phase12_output_column_tracking_newline`
+- `test_phase12_output_column_tracking_cr`
+- `test_phase12_output_column_tracking_tab`
+- `test_phase12_output_column_tracking_backspace`
+- `test_phase12_onocr_at_column_zero`
+- `test_phase12_default_onlcr_newline_expands`
+
+All 55 test suites pass (0 failures). `cargo fmt` clean.
 ---
 
 ## 17. Phase 13: ABI Signal Constant Unification

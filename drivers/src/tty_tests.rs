@@ -1137,8 +1137,8 @@ pub fn test_ldisc_opost_onlcr() -> TestResult {
                 return TestResult::Fail;
             }
         }
-        OutputAction::Suppress => {
-            klog_info!("TTY_TEST: BUG - ONLCR suppressed NL");
+        OutputAction::Suppress | OutputAction::Tab(_) => {
+            klog_info!("TTY_TEST: BUG - ONLCR suppressed or tabbed NL");
             return TestResult::Fail;
         }
     }
@@ -1159,8 +1159,8 @@ pub fn test_ldisc_opost_ocrnl() -> TestResult {
                 return TestResult::Fail;
             }
         }
-        OutputAction::Suppress => {
-            klog_info!("TTY_TEST: BUG - OCRNL suppressed CR");
+        OutputAction::Suppress | OutputAction::Tab(_) => {
+            klog_info!("TTY_TEST: BUG - OCRNL suppressed or tabbed CR");
             return TestResult::Fail;
         }
     }
@@ -1169,8 +1169,12 @@ pub fn test_ldisc_opost_ocrnl() -> TestResult {
 
 /// No OPOST: bytes pass through unmodified.
 pub fn test_ldisc_output_raw() -> TestResult {
-    let ld = LineDisc::new();
-    // c_oflag defaults to 0 (no OPOST).
+    let mut ld = LineDisc::new();
+    // Explicitly disable OPOST (default now has OPOST|ONLCR since Phase 12).
+    let mut t = *ld.termios();
+    t.c_oflag = 0;
+    ld.set_termios(&t);
+
     match ld.process_output_byte(b'\n') {
         OutputAction::Emit { buf, len } => {
             if len != 1 || buf[0] != b'\n' {
@@ -1180,6 +1184,10 @@ pub fn test_ldisc_output_raw() -> TestResult {
         }
         OutputAction::Suppress => {
             klog_info!("TTY_TEST: BUG - raw output suppressed NL");
+            return TestResult::Fail;
+        }
+        OutputAction::Tab(_) => {
+            klog_info!("TTY_TEST: BUG - raw output produced Tab for NL");
             return TestResult::Fail;
         }
     }
@@ -2694,6 +2702,273 @@ pub fn test_phase11_ldisc_vmin_vtime_helper() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 12: Sane Defaults & Output Column Tracking
+// ===========================================================================
+
+/// Phase 12: Verify default termios c_iflag contains ICRNL.
+pub fn test_phase12_default_termios_has_icrnl() -> TestResult {
+    let ld = LineDisc::new();
+    let t = ld.termios();
+    if (t.c_iflag & slopos_abi::syscall::ICRNL) == 0 {
+        klog_info!(
+            "TTY_TEST: BUG - default c_iflag missing ICRNL (got 0x{:x})",
+            t.c_iflag
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Verify default termios c_oflag contains OPOST | ONLCR.
+pub fn test_phase12_default_termios_has_opost_onlcr() -> TestResult {
+    let ld = LineDisc::new();
+    let t = ld.termios();
+    let expected = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    if (t.c_oflag & expected) != expected {
+        klog_info!(
+            "TTY_TEST: BUG - default c_oflag missing OPOST|ONLCR (got 0x{:x})",
+            t.c_oflag
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Verify default termios c_lflag contains ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE.
+pub fn test_phase12_default_termios_has_full_lflag() -> TestResult {
+    let ld = LineDisc::new();
+    let t = ld.termios();
+    let expected = slopos_abi::syscall::ISIG
+        | slopos_abi::syscall::ICANON
+        | slopos_abi::syscall::ECHO
+        | slopos_abi::syscall::ECHOE
+        | slopos_abi::syscall::ECHOK
+        | slopos_abi::syscall::ECHOCTL
+        | slopos_abi::syscall::ECHOKE;
+    if (t.c_lflag & expected) != expected {
+        klog_info!(
+            "TTY_TEST: BUG - default c_lflag missing flags (got 0x{:x}, want 0x{:x})",
+            t.c_lflag,
+            expected
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Output column advances by 1 for each printable ASCII character.
+pub fn test_phase12_output_column_tracking_printable() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Defaults have OPOST|ONLCR which is fine — printable chars just advance column.
+    for ch in b"Hello" {
+        ld.process_output_byte(*ch);
+    }
+    // After 5 printable chars, column should be 5.
+    // Verify indirectly: a tab should expand to 8 - (5 % 8) = 3 spaces.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 3 {
+                klog_info!(
+                    "TTY_TEST: BUG - after 5 chars expected tab=3 spaces, got {}",
+                    n
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant for tab byte");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Newline with ONLCR resets column to 0.
+pub fn test_phase12_output_column_tracking_newline() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Print 5 chars, then newline (ONLCR expands to CR+NL which resets column).
+    for ch in b"Hello" {
+        ld.process_output_byte(*ch);
+    }
+    ld.process_output_byte(b'\n');
+    // Column should now be 0.  A tab at column 0 gives 8 spaces.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!("TTY_TEST: BUG - after NL expected tab=8 spaces, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: CR resets column to 0.
+pub fn test_phase12_output_column_tracking_cr() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Disable ONLCR so CR is not suppressed/converted.
+    let mut t = *ld.termios();
+    t.c_oflag = slopos_abi::syscall::OPOST; // OPOST only, no ONLCR
+    ld.set_termios(&t);
+
+    for ch in b"ABCDE" {
+        ld.process_output_byte(*ch);
+    }
+    ld.process_output_byte(b'\r');
+    // Column should be 0 — tab at col 0 = 8 spaces.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!("TTY_TEST: BUG - after CR expected tab=8 spaces, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Tab expands to correct number of spaces (8-column tab stops).
+pub fn test_phase12_output_column_tracking_tab() -> TestResult {
+    let mut ld = LineDisc::new();
+    // At column 0, tab should produce 8 spaces.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!("TTY_TEST: BUG - tab at col 0 expected 8 spaces, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant at col 0");
+            return TestResult::Fail;
+        }
+    }
+    // Column is now 8.  Print 3 chars (column=11), then tab => 8 - (11 % 8) = 5.
+    for ch in b"abc" {
+        ld.process_output_byte(*ch);
+    }
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 5 {
+                klog_info!("TTY_TEST: BUG - tab at col 11 expected 5 spaces, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant at col 11");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Backspace decrements column (but not below 0).
+pub fn test_phase12_output_column_tracking_backspace() -> TestResult {
+    let mut ld = LineDisc::new();
+    for ch in b"AB" {
+        ld.process_output_byte(*ch);
+    }
+    // Column=2.  Backspace -> column=1.
+    ld.process_output_byte(0x08);
+    // Tab at column 1 => 8 - (1 % 8) = 7.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 7 {
+                klog_info!("TTY_TEST: BUG - after BS expected tab=7 spaces, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant");
+            return TestResult::Fail;
+        }
+    }
+    // Backspace at column 0 should not underflow.
+    let mut ld2 = LineDisc::new();
+    ld2.process_output_byte(0x08); // should stay at 0
+    match ld2.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!(
+                    "TTY_TEST: BUG - BS at col 0 should stay 0, tab gave {} spaces",
+                    n
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: ONOCR suppresses CR when column is 0.
+pub fn test_phase12_onocr_at_column_zero() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONOCR;
+    ld.set_termios(&t);
+
+    // At column 0, CR should be suppressed.
+    match ld.process_output_byte(b'\r') {
+        OutputAction::Suppress => {}
+        _other => {
+            klog_info!("TTY_TEST: BUG - ONOCR at col 0 should suppress CR");
+            return TestResult::Fail;
+        }
+    }
+    // Move to column 3, then CR should NOT be suppressed.
+    for ch in b"abc" {
+        ld.process_output_byte(*ch);
+    }
+    match ld.process_output_byte(b'\r') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\r' {
+                klog_info!("TTY_TEST: BUG - ONOCR at col 3 should emit CR");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - ONOCR at col 3 should emit, not suppress");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 12: Default ONLCR correctly expands NL to CR+NL.
+pub fn test_phase12_default_onlcr_newline_expands() -> TestResult {
+    let mut ld = LineDisc::new();
+    // With defaults (OPOST|ONLCR), NL should expand to CR+NL.
+    match ld.process_output_byte(b'\n') {
+        OutputAction::Emit { buf, len } => {
+            if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
+                klog_info!(
+                    "TTY_TEST: BUG - default ONLCR should produce CR+NL, got len={}",
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - default ONLCR should emit, not suppress/tab");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 
@@ -2833,5 +3108,16 @@ slopos_lib::define_test_suite!(
         test_phase11_vmin_vtime_no_data_nonblock,
         test_phase11_vmin_vtime_interbyte_timeout_returns_partial,
         test_phase11_ldisc_vmin_vtime_helper,
+        // Phase 12: Sane Defaults & Output Column Tracking
+        test_phase12_default_termios_has_icrnl,
+        test_phase12_default_termios_has_opost_onlcr,
+        test_phase12_default_termios_has_full_lflag,
+        test_phase12_output_column_tracking_printable,
+        test_phase12_output_column_tracking_newline,
+        test_phase12_output_column_tracking_cr,
+        test_phase12_output_column_tracking_tab,
+        test_phase12_output_column_tracking_backspace,
+        test_phase12_onocr_at_column_zero,
+        test_phase12_default_onlcr_newline_expands,
     ]
 );

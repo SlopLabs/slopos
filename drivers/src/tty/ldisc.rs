@@ -87,6 +87,8 @@ pub enum InputAction {
 pub enum OutputAction {
     /// Emit these bytes to the driver (up to 2 bytes, e.g. `\r\n`).
     Emit { buf: [u8; 2], len: u8 },
+    /// Expand a tab to N spaces (tab stop expansion).
+    Tab(u8),
     /// Suppress this byte entirely (don't output anything).
     Suppress,
 }
@@ -147,10 +149,10 @@ impl LineDisc {
         ];
         Self {
             termios: UserTermios {
-                c_iflag: 0,
-                c_oflag: 0,
+                c_iflag: ICRNL,
+                c_oflag: OPOST | ONLCR,
                 c_cflag: 0,
-                c_lflag: ICANON | ECHO | ISIG | ECHOE,
+                c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE,
                 c_line: 0,
                 c_cc: cc,
                 c_ispeed: 0,
@@ -328,37 +330,86 @@ impl LineDisc {
     /// Process a single byte through `c_oflag` before sending to the driver.
     ///
     /// Called by the TTY core's `write()` function for each output byte.
-    pub fn process_output_byte(&self, c: u8) -> OutputAction {
+    pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
         let oflag = self.termios.c_oflag;
         if (oflag & OPOST) == 0 {
+            // No output processing — still track column for echo accuracy.
+            self.update_column_raw(c);
             return OutputAction::Emit {
                 buf: [c, 0],
                 len: 1,
             };
         }
         match c {
-            b'\n' if (oflag & ONLCR) != 0 => OutputAction::Emit {
-                buf: [b'\r', b'\n'],
-                len: 2,
-            },
-            b'\r' if (oflag & OCRNL) != 0 => OutputAction::Emit {
-                buf: [b'\n', 0],
-                len: 1,
-            },
-            b'\r' if (oflag & ONOCR) != 0 && self.column == 0 => OutputAction::Suppress,
-            b'\n' if (oflag & ONLRET) != 0 => {
-                // ONLRET: NL performs CR function — we still emit the NL but
-                // the column resets (handled by the caller's column tracking,
-                // which we don't have in the output path yet — emit as-is).
+            b'\n' if (oflag & ONLCR) != 0 => {
+                self.column = 0;
+                OutputAction::Emit {
+                    buf: [b'\r', b'\n'],
+                    len: 2,
+                }
+            }
+            b'\r' if (oflag & OCRNL) != 0 => {
+                // OCRNL: convert CR to NL.  If ONLRET is also set, reset column.
+                if (oflag & ONLRET) != 0 {
+                    self.column = 0;
+                }
                 OutputAction::Emit {
                     buf: [b'\n', 0],
                     len: 1,
                 }
             }
-            _ => OutputAction::Emit {
-                buf: [c, 0],
-                len: 1,
-            },
+            b'\r' if (oflag & ONOCR) != 0 && self.column == 0 => OutputAction::Suppress,
+            b'\n' if (oflag & ONLRET) != 0 => {
+                // ONLRET: NL performs CR function — reset column.
+                self.column = 0;
+                OutputAction::Emit {
+                    buf: [b'\n', 0],
+                    len: 1,
+                }
+            }
+            b'\r' => {
+                self.column = 0;
+                OutputAction::Emit {
+                    buf: [b'\r', 0],
+                    len: 1,
+                }
+            }
+            b'\n' => {
+                // Plain NL without ONLCR/ONLRET — no column reset per POSIX.
+                OutputAction::Emit {
+                    buf: [b'\n', 0],
+                    len: 1,
+                }
+            }
+            b'\t' => {
+                let spaces = 8 - (self.column % 8);
+                self.column += spaces;
+                OutputAction::Tab(spaces as u8)
+            }
+            0x08 => {
+                // Backspace — decrement column if possible.
+                if self.column > 0 {
+                    self.column -= 1;
+                }
+                OutputAction::Emit {
+                    buf: [c, 0],
+                    len: 1,
+                }
+            }
+            c if c >= 0x20 && c < 0x7F => {
+                self.column += 1;
+                OutputAction::Emit {
+                    buf: [c, 0],
+                    len: 1,
+                }
+            }
+            _ => {
+                // Non-printable control char — no column change.
+                OutputAction::Emit {
+                    buf: [c, 0],
+                    len: 1,
+                }
+            }
         }
     }
 
@@ -593,6 +644,22 @@ impl LineDisc {
     /// Returns `true` if `c` is a printable ASCII character or tab.
     fn is_printable(&self, c: u8) -> bool {
         (0x20..=0x7E).contains(&c) || c == b'\t'
+    }
+
+    /// Track column position for a raw byte (no OPOST processing).
+    /// Used when OPOST is disabled so echo column tracking stays accurate.
+    fn update_column_raw(&mut self, c: u8) {
+        match c {
+            b'\n' | b'\r' => self.column = 0,
+            b'\t' => self.column += 8 - (self.column % 8),
+            0x08 => {
+                if self.column > 0 {
+                    self.column -= 1;
+                }
+            }
+            c if c >= 0x20 && c < 0x7F => self.column += 1,
+            _ => {}
+        }
     }
 
     /// Push a single byte into the cooked ring buffer.
