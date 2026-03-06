@@ -3,8 +3,8 @@
 use core::ffi::c_int;
 
 use slopos_abi::syscall::{
-    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP, TIOCGSID, TIOCGWINSZ, TIOCSCTTY,
-    TIOCSPGRP, UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGSID, TIOCGWINSZ,
+    TIOCSCTTY, TIOCSETD, TIOCSPGRP, UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -276,12 +276,49 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             try_or_err!(ctx, copy_to_user(ptr, &t));
             ctx.ok(0)
         }
-        TCSETS | TCSETSW | TCSETSF => {
+        TCSETS => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
             tty::set_termios(tty_idx, &val as *const UserTermios);
             ctx.ok(0)
+        }
+        TCSETSW => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
+            let val = try_or_err!(ctx, copy_from_user(ptr));
+            if tty::set_termios_wait(tty_idx, &val as *const UserTermios) == 0 {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
+        }
+        TCSETSF => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
+            let val = try_or_err!(ctx, copy_from_user(ptr));
+            if tty::set_termios_flush(tty_idx, &val as *const UserTermios) == 0 {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
+        }
+        TIOCGETD => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
+            let ldisc_id = tty::get_ldisc(tty_idx);
+            try_or_err!(ctx, copy_to_user(ptr, &ldisc_id));
+            ctx.ok(0)
+        }
+        TIOCSETD => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
+            let ldisc_id = try_or_err!(ctx, copy_from_user(ptr));
+            if tty::set_ldisc(tty_idx, ldisc_id) == 0 {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
         }
         TIOCGWINSZ => {
             require_nonzero!(ctx, arg);

@@ -6,8 +6,8 @@ use slopos_lib::{InitFlag, IrqMutex};
 use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
 use slopos_abi::net::INVALID_SOCKET_IDX;
 use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, POLLERR,
-    POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
+    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
+    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
 };
 
 use slopos_lib::kernel_services::driver_runtime::{
@@ -687,6 +687,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
             desc.flags = flags;
             desc.position = 0;
             desc.valid = true;
+            desc.cloexec = (flags & O_CLOEXEC as u32) != 0;
             desc.tty_index = Some(tty_idx);
             desc.pipe_id = INVALID_PIPE_ID;
             desc.socket_idx = INVALID_SOCKET_IDX;
@@ -755,6 +756,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         desc.flags = flags;
         desc.position = position;
         desc.valid = true;
+        desc.cloexec = (flags & O_CLOEXEC as u32) != 0;
         desc.tty_index = None;
         desc.pipe_id = INVALID_PIPE_ID;
         desc.socket_idx = INVALID_SOCKET_IDX;
@@ -829,8 +831,15 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
 
             if let Some(tty_idx) = desc.tty_index {
                 let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
+                let auto_attach = (desc.flags & O_NOCTTY as u32) == 0;
                 drop(guard);
-                return tty::read_cooked(tty_idx, buffer as *mut u8, count, is_nonblock);
+                return tty::read_cooked_with_attach(
+                    tty_idx,
+                    buffer as *mut u8,
+                    count,
+                    is_nonblock,
+                    auto_attach,
+                );
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {
@@ -1734,7 +1743,8 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
                 return -1;
             };
             let mode_bits = desc.flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
-            let mut next_flags = mode_bits | (arg as u32 & FILE_OPEN_APPEND);
+            let sticky_flags = desc.flags & (O_NOCTTY as u32);
+            let mut next_flags = mode_bits | sticky_flags | (arg as u32 & FILE_OPEN_APPEND);
             if (arg & O_NONBLOCK) != 0 {
                 next_flags |= O_NONBLOCK as u32;
             }
