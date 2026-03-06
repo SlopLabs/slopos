@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–16 Complete · **Phases 17–18 Planned** (PTY, Verify & Test)
+> **Status**: Phases 1–18 Complete (PTY + Verify/Test landed)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -49,8 +49,8 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 
 ### Summary of changes
 
-| Phase | What | Files Modified | New Files |
-|-------|------|---------------|-----------|
+| Phase | What | Files Modified | New Files | Status |
+|-------|------|---------------|-----------|--------|
 | 1 | TTY core structs | `drivers/src/tty.rs` (deleted), `drivers/src/line_disc.rs` (deleted), `drivers/src/lib.rs` | `drivers/src/tty/mod.rs`, `tty/driver.rs`, `tty/table.rs`, `tty/ldisc.rs`, `tty/session.rs`, `drivers/src/tty_tests.rs` | **DONE** |
 | 1b | Shim removal | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/ps2/keyboard.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `core/src/syscall/core_handlers.rs`, `core/src/syscall/ui_handlers.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 2 | Line discipline | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
@@ -66,10 +66,10 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 || 12 | Sane defaults & column tracking | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 13 | ABI signal unification | `abi/src/syscall.rs`, `abi/src/signal.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 14 | Responsibility split (PTY prep) | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/ldisc.rs` | — | **DONE** |
-| 15 | POSIX quick wins (line boundaries, SIGWINCH, SIGHUP, word erase) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/signal.rs`, `core/src/scheduler/task.rs` | — |
+| 15 | POSIX quick wins (line boundaries, SIGWINCH, SIGHUP, word erase) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/signal.rs`, `core/src/scheduler/task.rs` | — | **DONE** |
 | 16 | Termios drain & open flags | `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
-| 17 | PTY implementation | `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `fs/src/fileio.rs` | `drivers/src/tty/pty.rs` |
-| 18 | Final verification & testing | — | — |
+| 17 | PTY implementation | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs` | `drivers/src/tty/pty.rs` | **DONE** |
+| 18 | Final verification & testing | `plans/TTY_OVERHAUL_PLAN.md` | — | **DONE** |
 
 ---
 
@@ -1959,7 +1959,17 @@ All three Phase 16 requirements are now implemented and verified:
 
 ---
 
-## 21. Phase 17: PTY Implementation
+## 21. Phase 17: PTY Implementation ✅ COMPLETED
+
+**Status**: Completed. Build clean. `cargo fmt --all`, `just build`, and `just test` pass (`1090/1090`, `0` failures, 6 new Phase 17 regression tests).
+
+Phase 17 is now fully implemented with the long-term Rust-idiomatic shape that the earlier phases were preparing for:
+
+- PTY master/slave pairs are modeled as ordinary `TTY_SLOTS` entries linked by `TtyIndex`, not ad-hoc shared heap state.
+- Master writes route into the slave's line discipline through `push_input()`, while slave writes are processed through output flags and delivered into the master's raw buffer.
+- PTY lifecycle semantics now match the plan: master close hangs up the slave, slave close produces EOF on the master, and fully unused pairs return both slots to the free pool.
+- `/dev/ptmx`, `/dev/pts/N`, and `TIOCGPTN` are wired through the existing FD/syscall layers instead of adding PTY-specific side channels.
+- Regression coverage was added in `drivers/src/tty_tests.rs` for allocation, both data-flow directions, hangup/EOF semantics, and canonical editing.
 
 > **Priority**: P1 — The single highest-impact missing feature.  Without PTY, no terminal multiplexer (`screen`, `tmux`), no `ssh`, no subshells with proper terminal control.
 > **Rationale**: The architectural foundation is ready (Phase 14 added `PtyMaster`/`PtySlave` driver stubs, `LdiscKind::Raw` for master passthrough, `DriverId` for lock-free cross-TTY routing, and per-TTY independent locking).  The remaining work is data routing, pair allocation, and lifecycle management.
@@ -1993,7 +2003,7 @@ All three Phase 16 requirements are now implemented and verified:
 **Key Rust-idiomatic design decisions:**
 - No `Arc<Mutex<>>` or shared mutable state between master and slave — data is routed through `push_input()` which acquires per-TTY locks independently (one at a time, never both simultaneously)
 - PTY pairs are just two entries in `TTY_SLOTS[]` with cross-references via `TtyIndex`
-- `Option<TtyIndex>` for the paired peer — `None` when peer is closed (replaces C-style NULL pointer checks)
+- Peer identity stays embedded in the driver variants, while EOF/hangup state is tracked explicitly in per-TTY state (`peer_closed`, `hung_up`) rather than with shared mutable peer objects
 
 ### 21.2 PTY pair allocation
 
@@ -2116,7 +2126,9 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 
 ---
 
-## 22. Phase 18: Verify & Test
+## 22. Phase 18: Verify & Test ✅ COMPLETED
+
+**Status**: Completed. `cargo fmt --all`, `just build`, and `just test` pass. The final verification run finished with `TESTS SUMMARY: total=1090 passed=1090 failed=0`.
 
 > **Priority**: Final gate — comprehensive verification after all correctness, structural, and PTY phases.
 
