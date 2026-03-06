@@ -33,6 +33,7 @@ pub const SIGSTOP: u8 = 19;
 pub const SIGTSTP: u8 = 20;
 pub const SIGTTIN: u8 = 21;
 pub const SIGTTOU: u8 = 22;
+pub const SIGWINCH: u8 = 28;
 
 // =============================================================================
 // Signal set — bitmask of up to 32 signals

@@ -112,6 +112,12 @@ pub struct LineDisc {
     cooked_tail: usize,
     cooked_count: usize,
 
+    // -- Canonical line boundary tracking (Phase 15) --
+    /// Number of complete lines in the cooked buffer (delimited by newline or
+    /// EOF flush).  In canonical mode `has_data()` checks this instead of
+    /// `cooked_count` so that `read()` blocks until a full line is available.
+    line_count: usize,
+
     // -- Flow control --
     /// Output stopped via XOFF (Ctrl+S / VSTOP).
     stopped: bool,
@@ -161,6 +167,7 @@ impl LineDisc {
             cooked_head: 0,
             cooked_tail: 0,
             cooked_count: 0,
+            line_count: 0,
             stopped: false,
             literal_next: false,
             column: 0,
@@ -199,20 +206,46 @@ impl LineDisc {
         }
     }
 
-    /// Returns `true` if the cooked ring buffer has bytes available for reading.
+    /// Returns `true` if the cooked ring buffer has data available for reading.
+    ///
+    /// In canonical mode, data is only "available" when at least one complete
+    /// line has been committed (newline pressed or EOF flush).  This prevents
+    /// `read()` from returning partial lines.
     pub fn has_data(&self) -> bool {
-        self.cooked_count > 0
+        if self.is_canonical() {
+            self.line_count > 0
+        } else {
+            self.cooked_count > 0
+        }
     }
 
     /// Read cooked bytes into `out`, returning the number of bytes copied.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
+        let canonical = self.is_canonical();
         let mut copied = 0usize;
         while copied < out.len() && self.cooked_count > 0 {
-            out[copied] = self.cooked[self.cooked_tail];
+            let byte = self.cooked[self.cooked_tail];
+            out[copied] = byte;
             self.cooked_tail = (self.cooked_tail + 1) % COOKED_BUF_SIZE;
             self.cooked_count -= 1;
             copied += 1;
+
+            // In canonical mode, stop after consuming one complete line.
+            // A line boundary is marked by a newline character.
+            if canonical && byte == b'\n' {
+                self.line_count = self.line_count.saturating_sub(1);
+                return copied;
+            }
         }
+        // If we drained ALL remaining cooked bytes in canonical mode without
+        // hitting a newline, this was an EOF-flushed chunk (Ctrl+D with no
+        // trailing newline).  Decrement line_count since the full line has
+        // been consumed.  If we merely filled the caller's buffer (cooked_count
+        // > 0), we are mid-line and must NOT decrement.
+        if canonical && copied > 0 && self.cooked_count == 0 && self.line_count > 0 {
+            self.line_count -= 1;
+        }
+
         copied
     }
 
@@ -221,6 +254,7 @@ impl LineDisc {
         self.cooked_head = 0;
         self.cooked_tail = 0;
         self.cooked_count = 0;
+        self.line_count = 0;
         self.stopped = false;
         self.literal_next = false;
         self.column = 0;
@@ -588,22 +622,32 @@ impl LineDisc {
         InputAction::None
     }
 
+    /// Returns `true` if `c` is a word character (alphanumeric or underscore).
+    /// Used by `word_erase()` for proper POSIX word boundaries.
+    fn is_word_char(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || c == b'_'
+    }
+
     /// Word erase (VWERASE / Ctrl+W): erase backward to start of previous word.
+    ///
+    /// Uses proper word boundaries (alphanumeric + underscore) instead of just
+    /// spaces, matching the behavior of most POSIX terminals.  This correctly
+    /// handles paths like `/usr/local/bin` -- Ctrl+W erases `bin`, then `local`,
+    /// etc.
     fn word_erase(&mut self, lflag: u32) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;
         }
 
-        // Skip trailing whitespace, then delete until whitespace or start.
         let mut erased = 0usize;
 
-        // Phase 1: skip trailing spaces.
-        while self.edit_len > 0 && self.edit_buf[self.edit_len - 1] == b' ' {
+        // Phase 1: skip trailing non-word characters (whitespace, punctuation).
+        while self.edit_len > 0 && !Self::is_word_char(self.edit_buf[self.edit_len - 1]) {
             self.edit_len -= 1;
             erased += 1;
         }
-        // Phase 2: delete word characters.
-        while self.edit_len > 0 && self.edit_buf[self.edit_len - 1] != b' ' {
+        // Phase 2: delete word characters (alphanumeric + underscore).
+        while self.edit_len > 0 && Self::is_word_char(self.edit_buf[self.edit_len - 1]) {
             self.edit_len -= 1;
             erased += 1;
         }
@@ -677,6 +721,7 @@ impl LineDisc {
             i += 1;
         }
         self.edit_len = 0;
+        self.line_count += 1;
     }
 }
 

@@ -27,6 +27,7 @@ crate::define_service! {
         unblock_task(task: DriverTaskHandle) -> c_int;
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
         signal_process_group(pgid: u32, signum: u8) -> bool;
+        signal_session(sid: u32, signum: u8) -> bool;
 
         irq_init();
         irq_set_route(irq_line: u8, gsi: u32);

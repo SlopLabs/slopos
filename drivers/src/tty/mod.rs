@@ -31,11 +31,11 @@ use core::ffi::c_int;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU};
+use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{TOSTOP, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
-    scheduler_is_enabled, signal_process_group,
+    scheduler_is_enabled, signal_process_group, signal_session,
 };
 
 use self::driver::{TtyDriverKind, write_driver_unlocked};
@@ -691,19 +691,39 @@ pub fn get_winsize(idx: TtyIndex) -> Result<UserWinsize, TtyError> {
 }
 
 /// Set window size for a specific TTY.
+///
+/// If the new size differs from the old size, sends SIGWINCH to the
+/// foreground process group so applications can re-query dimensions.
 pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let mut guard = TTY_SLOTS[slot].lock();
-    match guard.as_mut() {
-        Some(tty) => {
-            tty.winsize = *ws;
-            Ok(())
+
+    let signal_pgid = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        match guard.as_mut() {
+            Some(tty) => {
+                let old = tty.winsize;
+                tty.winsize = *ws;
+                // Only signal if dimensions actually changed.
+                if old.ws_row != ws.ws_row || old.ws_col != ws.ws_col {
+                    let pgid = tty.session.fg_pgrp_raw();
+                    if pgid != 0 { Some(pgid) } else { None }
+                } else {
+                    None
+                }
+            }
+            None => return Err(TtyError::NotAllocated),
         }
-        None => Err(TtyError::NotAllocated),
+    };
+
+    // Deliver SIGWINCH outside the lock to avoid deadlock.
+    if let Some(pgid) = signal_pgid {
+        let _ = signal_process_group(pgid, SIGWINCH);
     }
+
+    Ok(())
 }
 
 /// Set the compositor-level focus on the active TTY.
@@ -852,22 +872,25 @@ pub fn hangup(idx: TtyIndex) {
     if slot >= MAX_TTYS {
         return;
     }
-    let fg_pgrp = {
+
+    let session_id = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
             Some(t) => t,
             None => return,
         };
-        let fg = tty.session.fg_pgrp_raw();
+        let sid = tty.session.session_id_raw();
         tty.ldisc.flush_all();
         tty.session.detach();
         tty.hung_up = true;
-        fg
+        sid
     };
 
-    if fg_pgrp != 0 {
-        let _ = signal_process_group(fg_pgrp, SIGHUP);
-        let _ = signal_process_group(fg_pgrp, SIGCONT);
+    // Phase 15: Signal the entire session (not just fg_pgrp) so that all
+    // processes in the session receive SIGHUP + SIGCONT on hangup.
+    if session_id != 0 {
+        let _ = signal_session(session_id, SIGHUP);
+        let _ = signal_session(session_id, SIGCONT);
     }
 
     if scheduler_is_enabled() != 0 {

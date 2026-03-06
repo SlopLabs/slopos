@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–14 Complete · **Phases 15–18 Planned** (POSIX Quick Wins, Drain & Flags, PTY, Verify & Test)
+> **Status**: Phases 1–15 Complete · **Phases 16–18 Planned** (Drain & Flags, PTY, Verify & Test)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, no backward-compatible shims, `TtyServices` takes `TtyIndex` for per-TTY operations, compositor focus split from POSIX foreground, `check_read()` as sole read gate
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -27,7 +27,7 @@
 16. [Phase 12: Sane Defaults & Output Column Tracking ✅](#16-phase-12-sane-defaults--output-column-tracking)
 17. [Phase 13: ABI Signal Constant Unification ✅](#17-phase-13-abi-signal-constant-unification)
 18. [Phase 14: Responsibility Split — PTY Foundation ✅](#18-phase-14-responsibility-split--pty-foundation)
-19. [Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase](#19-phase-15-posix-quick-wins--line-boundaries-sigwinch-sighup-word-erase)
+19. [Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase ✅](#19-phase-15-posix-quick-wins--line-boundaries-sigwinch-sighup-word-erase)
 20. [Phase 16: Termios Drain Semantics & Open Flags](#20-phase-16-termios-drain-semantics--open-flags)
 21. [Phase 17: PTY Implementation](#21-phase-17-pty-implementation)
 22. [Phase 18: Verify & Test](#22-phase-18-verify--test)
@@ -1657,8 +1657,9 @@ This eliminates the `NO_SESSION = 0` / `NO_FOREGROUND_PGRP = 0` sentinel constan
 
 ---
 
-## 19. Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase
+## 19. Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, SIGHUP, Word Erase ✅
 
+> **Status**: ✅ COMPLETED
 > **Priority**: P0 — Four targeted fixes that each take <50 lines but significantly improve POSIX correctness.
 > **Rationale**: A deep architectural review comparing SlopOS's TTY against Linux N_TTY, RedoxOS, and Kerla identified these as the highest-impact correctness gaps.  Each one breaks real-world programs (shells, editors, terminal apps).  All four are incremental fixes on the existing solid foundation — no architectural changes needed.
 
@@ -1830,6 +1831,28 @@ fn word_erase(&mut self, lflag: u32) -> InputAction {
 | `lib/src/kernel_services/driver_runtime.rs` | Add `signal_session(sid, sig)` service function |
 | `core/src/driver_hooks.rs` | Wire `signal_session` implementation (iterate tasks by session ID) |
 | `drivers/src/tty_tests.rs` | Add regression tests: canonical one-line-per-read, SIGWINCH constant, word erase boundaries |
+
+
+### 19.6 Implementation Summary
+
+All four sub-tasks implemented and verified:
+
+1. **Canonical line boundary tracking** — Added `line_count: usize` to `LineDisc`. Incremented in `flush_edit_to_cooked()`, decremented in `read()` on newline or EOF-flush. `has_data()` in canonical mode checks `line_count > 0`. `flush_all()` resets it. Correctly handles partial reads (mid-line buffer fills do not decrement count).
+2. **SIGWINCH on window size change** — Added `SIGWINCH = 28` to `abi/src/signal.rs`. `set_winsize()` now compares old/new `ws_row`/`ws_col` and signals the foreground process group via `signal_process_group()` if dimensions changed, delivering the signal outside the per-TTY lock.
+3. **SIGHUP to entire session** — Added `signal_session(sid, signum)` service function via `define_service!` macro. Implementation in `driver_hooks.rs` uses `SignalSessionContext` + `task_iterate_active` callback filtering on `(*task).sid`. `hangup()` now extracts `session_id` and calls `signal_session()` instead of `signal_process_group()` for both SIGHUP and SIGCONT.
+4. **Word erase with proper word boundaries** — Added `is_word_char()` helper (alphanumeric + underscore). `word_erase()` Phase 1 now skips non-word chars (not just spaces), Phase 2 deletes word chars. Correctly handles paths (`/usr/local/bin`), mixed boundaries (`hello---world`), and trailing spaces.
+
+**Tests added** (8 new tests, all passing):
+- `test_phase15_canonical_one_line_per_read` — Two lines coalesced, read returns one at a time
+- `test_phase15_canonical_has_data_line_count` — `has_data()` gated by `line_count` in canonical mode
+- `test_phase15_canonical_eof_line_boundary` — EOF flush counts as line boundary
+- `test_phase15_sigwinch_constant` — SIGWINCH == 28
+- `test_phase15_word_erase_path_boundary` — `/usr/local/bin` + Ctrl+W = `/usr/local/`
+- `test_phase15_word_erase_mixed_boundary` — `hello---world` + Ctrl+W = `hello---`
+- `test_phase15_word_erase_trailing_spaces` — `hello   ` + Ctrl+W erases everything
+- `test_phase15_canonical_small_buffer_read` — Partial buffer reads don't lose data
+
+**Total test suite**: 1076 tests, 1076 passed, 0 failed.
 
 ---
 

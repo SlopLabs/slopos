@@ -9,7 +9,7 @@
 //! Phase 6 additions: compositor focus / fg_pgrp split, check_read() as sole
 //! read gate, TtyIndex type safety, signal constant verification.
 
-use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU};
+use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -3324,7 +3324,9 @@ pub fn test_phase14_pty_driver_id_variants() -> TestResult {
         klog_info!("TTY_TEST: BUG - PtyMaster should differ from SerialConsole/VConsole/None");
         return TestResult::Fail;
     }
-    if slave_id == DriverId::SerialConsole || slave_id == DriverId::VConsole || slave_id == DriverId::None
+    if slave_id == DriverId::SerialConsole
+        || slave_id == DriverId::VConsole
+        || slave_id == DriverId::None
     {
         klog_info!("TTY_TEST: BUG - PtySlave should differ from SerialConsole/VConsole/None");
         return TestResult::Fail;
@@ -3351,6 +3353,260 @@ pub fn test_phase14_pty_slave_driver_kind() -> TestResult {
     };
     if drv.id() != DriverId::PtySlave {
         klog_info!("TTY_TEST: BUG - PtySlave TtyDriverKind should return DriverId::PtySlave");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, Word Erase
+// ===========================================================================
+
+/// Phase 15: Canonical mode read returns at most one line per call.
+pub fn test_phase15_canonical_one_line_per_read() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type two lines: "abc\n" and "def\n".
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+    ld.input_char(b'\n');
+    for &c in b"def" {
+        ld.input_char(c);
+    }
+    ld.input_char(b'\n');
+
+    // First read should return only the first line.
+    let mut buf = [0u8; 64];
+    let n1 = ld.read(&mut buf);
+    if n1 != 4 || &buf[..4] != b"abc\n" {
+        klog_info!(
+            "TTY_TEST: BUG - canonical read should return one line (got {} bytes)",
+            n1
+        );
+        return TestResult::Fail;
+    }
+
+    // Second read should return the second line.
+    let n2 = ld.read(&mut buf);
+    if n2 != 4 || &buf[..4] != b"def\n" {
+        klog_info!(
+            "TTY_TEST: BUG - canonical second read mismatch (got {} bytes)",
+            n2
+        );
+        return TestResult::Fail;
+    }
+
+    // No more data.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data should be false after reading both lines");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: has_data in canonical mode is gated by line_count.
+pub fn test_phase15_canonical_has_data_line_count() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type characters without newline — has_data should be false.
+    for &c in b"hello" {
+        ld.input_char(c);
+    }
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - canonical has_data true before newline");
+        return TestResult::Fail;
+    }
+
+    // Press newline — has_data should become true.
+    ld.input_char(b'\n');
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - canonical has_data false after newline");
+        return TestResult::Fail;
+    }
+
+    // Read the line — has_data should become false again.
+    let mut buf = [0u8; 64];
+    let _ = ld.read(&mut buf);
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - canonical has_data true after reading line");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: EOF flush (Ctrl+D) counts as a line boundary.
+pub fn test_phase15_canonical_eof_line_boundary() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "abc" then EOF (Ctrl+D = 0x04).
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+    ld.input_char(0x04); // VEOF
+
+    // has_data should be true (EOF-flushed line).
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - canonical has_data false after EOF flush");
+        return TestResult::Fail;
+    }
+
+    // Read should return "abc" (3 bytes, no trailing newline).
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    if n != 3 || &buf[..3] != b"abc" {
+        klog_info!("TTY_TEST: BUG - EOF flush read mismatch (got {} bytes)", n);
+        return TestResult::Fail;
+    }
+
+    // has_data should be false after reading the EOF-flushed chunk.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data true after reading EOF-flushed chunk");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: SIGWINCH constant has the correct value.
+pub fn test_phase15_sigwinch_constant() -> TestResult {
+    if SIGWINCH != 28 {
+        klog_info!("TTY_TEST: BUG - SIGWINCH should be 28, got {}", SIGWINCH);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: Word erase with path boundaries (slashes are non-word chars).
+pub fn test_phase15_word_erase_path_boundary() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    ld.set_termios(&t);
+
+    // Type "/usr/local/bin".
+    for &c in b"/usr/local/bin" {
+        ld.input_char(c);
+    }
+
+    // Ctrl+W should erase "bin" (word chars), stopping at "/".
+    ld.input_char(0x17);
+
+    // Press Enter and read.
+    ld.input_char(b'\n');
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    // Expect "/usr/local/" + "\n" = 12 bytes.
+    if n != 12 || &buf[..11] != b"/usr/local/" {
+        klog_info!(
+            "TTY_TEST: BUG - word erase path boundary mismatch (n={}, data={:?})",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: Word erase with mixed word/non-word boundaries.
+pub fn test_phase15_word_erase_mixed_boundary() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    ld.set_termios(&t);
+
+    // Type "hello---world".
+    for &c in b"hello---world" {
+        ld.input_char(c);
+    }
+
+    // Ctrl+W should erase "world" (word chars), stopping at "-".
+    ld.input_char(0x17);
+
+    // Press Enter and read.
+    ld.input_char(b'\n');
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    // Expect "hello---" + "\n" = 9 bytes.
+    if n != 9 || &buf[..8] != b"hello---" {
+        klog_info!(
+            "TTY_TEST: BUG - word erase mixed boundary mismatch (n={}, data={:?})",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: Word erase skips trailing non-word chars then deletes word.
+pub fn test_phase15_word_erase_trailing_spaces() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    ld.set_termios(&t);
+
+    // Type "hello   " (hello + 3 spaces).
+    for &c in b"hello   " {
+        ld.input_char(c);
+    }
+
+    // Ctrl+W: Phase 1 skips 3 spaces (non-word), Phase 2 deletes "hello".
+    ld.input_char(0x17);
+
+    // Press Enter and read.
+    ld.input_char(b'\n');
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    // Expect "\n" = 1 byte (everything erased).
+    if n != 1 || buf[0] != b'\n' {
+        klog_info!(
+            "TTY_TEST: BUG - word erase trailing spaces mismatch (n={}, data={:?})",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 15: Canonical mode small-buffer read does not lose data.
+pub fn test_phase15_canonical_small_buffer_read() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "abcdefgh\n" (9 bytes).
+    for &c in b"abcdefgh" {
+        ld.input_char(c);
+    }
+    ld.input_char(b'\n');
+
+    // Read with a 3-byte buffer.
+    let mut buf = [0u8; 3];
+    let n1 = ld.read(&mut buf);
+    if n1 != 3 || &buf[..3] != b"abc" {
+        klog_info!("TTY_TEST: BUG - small buffer first read mismatch");
+        return TestResult::Fail;
+    }
+
+    // has_data should still be true (mid-line).
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data false mid-line");
+        return TestResult::Fail;
+    }
+
+    // Read remaining bytes — should stop at newline.
+    let mut buf2 = [0u8; 64];
+    let n2 = ld.read(&mut buf2);
+    if n2 != 6 || &buf2[..6] != b"defgh\n" {
+        klog_info!(
+            "TTY_TEST: BUG - small buffer second read mismatch (got {} bytes)",
+            n2
+        );
+        return TestResult::Fail;
+    }
+
+    // Now has_data should be false.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data true after full line consumed");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -3528,5 +3784,14 @@ slopos_lib::define_test_suite!(
         test_phase14_pty_driver_id_variants,
         test_phase14_pty_master_driver_kind,
         test_phase14_pty_slave_driver_kind,
+        // Phase 15: POSIX Quick Wins
+        test_phase15_canonical_one_line_per_read,
+        test_phase15_canonical_has_data_line_count,
+        test_phase15_canonical_eof_line_boundary,
+        test_phase15_sigwinch_constant,
+        test_phase15_word_erase_path_boundary,
+        test_phase15_word_erase_mixed_boundary,
+        test_phase15_word_erase_trailing_spaces,
+        test_phase15_canonical_small_buffer_read,
     ]
 );

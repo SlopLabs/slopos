@@ -104,6 +104,50 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
     ctx.matched
 }
 
+struct SignalSessionContext {
+    sid: u32,
+    signum: u8,
+    matched: bool,
+}
+
+fn signal_session_task(task: *mut Task, context: *mut c_void) {
+    if task.is_null() || context.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &mut *context.cast::<SignalSessionContext>() };
+    if unsafe { (*task).sid } != ctx.sid {
+        return;
+    }
+
+    unsafe {
+        (*task)
+            .signal_pending
+            .fetch_or(sig_bit(ctx.signum), Ordering::AcqRel);
+    }
+    let _ = scheduler::unblock_task(task);
+    ctx.matched = true;
+}
+
+fn runtime_signal_session(sid: u32, signum: u8) -> bool {
+    if sid == 0 {
+        return false;
+    }
+
+    let mut ctx = SignalSessionContext {
+        sid,
+        signum,
+        matched: false,
+    };
+
+    task::task_iterate_active(
+        Some(signal_session_task),
+        (&mut ctx as *mut SignalSessionContext).cast(),
+    );
+
+    ctx.matched
+}
+
 // ---------------------------------------------------------------------------
 // Service table — pure forwards reference the real function directly.
 // ---------------------------------------------------------------------------
@@ -123,6 +167,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     unblock_task: runtime_unblock_task,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,
+    signal_session: runtime_signal_session,
     irq_init: irq::init,
     irq_set_route: irq::set_irq_route,
     irq_is_masked: irq::is_masked,
