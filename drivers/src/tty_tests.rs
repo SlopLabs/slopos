@@ -3311,8 +3311,12 @@ pub fn test_phase14_ldisc_kind_raw_delegation() -> TestResult {
 
 /// PtyMaster and PtySlave DriverId variants exist and are distinct.
 pub fn test_phase14_pty_driver_id_variants() -> TestResult {
-    let master_id = DriverId::PtyMaster;
-    let slave_id = DriverId::PtySlave;
+    let master_id = DriverId::PtyMaster {
+        slave_idx: TtyIndex(2),
+    };
+    let slave_id = DriverId::PtySlave {
+        master_idx: TtyIndex(3),
+    };
     if master_id == slave_id {
         klog_info!("TTY_TEST: BUG - PtyMaster and PtySlave DriverId should be distinct");
         return TestResult::Fail;
@@ -3340,7 +3344,11 @@ pub fn test_phase14_pty_master_driver_kind() -> TestResult {
     let drv = TtyDriverKind::PtyMaster {
         slave_idx: TtyIndex(2),
     };
-    if drv.id() != DriverId::PtyMaster {
+    if drv.id()
+        != (DriverId::PtyMaster {
+            slave_idx: TtyIndex(2),
+        })
+    {
         klog_info!("TTY_TEST: BUG - PtyMaster TtyDriverKind should return DriverId::PtyMaster");
         return TestResult::Fail;
     }
@@ -3352,7 +3360,11 @@ pub fn test_phase14_pty_slave_driver_kind() -> TestResult {
     let drv = TtyDriverKind::PtySlave {
         master_idx: TtyIndex(3),
     };
-    if drv.id() != DriverId::PtySlave {
+    if drv.id()
+        != (DriverId::PtySlave {
+            master_idx: TtyIndex(3),
+        })
+    {
         klog_info!("TTY_TEST: BUG - PtySlave TtyDriverKind should return DriverId::PtySlave");
         return TestResult::Fail;
     }
@@ -3790,6 +3802,199 @@ pub fn test_phase16_set_ldisc_invalid_id_rejected() -> TestResult {
     }
 }
 
+pub fn test_phase17_pty_alloc_returns_master_and_slave() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(err) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+    let slave = match tty::get_pty_number(master) {
+        Ok(idx) => TtyIndex(idx as u8),
+        Err(err) => {
+            klog_info!("TTY_TEST: BUG - get_pty_number failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+
+    let master_ok = tty::open_ref(master).is_ok();
+    let slave_ok = tty::open_ref(slave).is_ok();
+    let slave_is_pty = tty::is_pty_slave(slave);
+    let master_is_not_slave = !tty::is_pty_slave(master);
+
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    if !master_ok || !slave_ok || master == slave || !slave_is_pty || !master_is_not_slave {
+        klog_info!(
+            "TTY_TEST: BUG - PTY allocation mismatch (master_ok={}, slave_ok={}, master={}, slave={}, slave_is_pty={}, master_is_not_slave={})",
+            master_ok,
+            slave_ok,
+            master.0,
+            slave.0,
+            slave_is_pty,
+            master_is_not_slave
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase17_pty_master_to_slave_flow() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    let write_rc = tty::write(master, b"hello");
+    let mut buf = [0u8; 16];
+    let read_rc = tty::read(slave, &mut buf, true);
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    if write_rc != Ok(5) || read_rc != Ok(5) || &buf[..5] != b"hello" {
+        klog_info!(
+            "TTY_TEST: BUG - PTY master->slave flow mismatch (write={:?}, read={:?}, data={:?})",
+            write_rc,
+            read_rc,
+            &buf[..5]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase17_pty_slave_to_master_flow() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    let write_rc = tty::write(slave, b"world\n");
+    let mut buf = [0u8; 16];
+    let read_rc = tty::read(master, &mut buf, true);
+
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    if write_rc != Ok(6) || read_rc != Ok(7) || &buf[..7] != b"world\r\n" {
+        klog_info!(
+            "TTY_TEST: BUG - PTY slave->master flow mismatch (write={:?}, read={:?}, data={:?})",
+            write_rc,
+            read_rc,
+            &buf[..7]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase17_master_close_hangs_up_slave() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    let close_rc = tty::close_ref(master);
+    let is_hung = tty::is_hung_up(slave);
+    let mut buf = [0u8; 8];
+    let read_rc = tty::read(slave, &mut buf, true);
+
+    let _ = tty::close_ref(slave);
+
+    if close_rc != Ok(0) || !is_hung || read_rc != Err(TtyError::HungUp) {
+        klog_info!(
+            "TTY_TEST: BUG - master close should hang up slave (close={:?}, is_hung={}, read={:?})",
+            close_rc,
+            is_hung,
+            read_rc
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase17_slave_close_returns_master_eof() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    let close_rc = tty::close_ref(slave);
+    let mut buf = [0u8; 8];
+    let read_rc = tty::read(master, &mut buf, true);
+
+    let _ = tty::close_ref(master);
+
+    if close_rc != Ok(0) || read_rc != Ok(0) {
+        klog_info!(
+            "TTY_TEST: BUG - slave close should give master EOF (close={:?}, read={:?})",
+            close_rc,
+            read_rc
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase17_pty_canonical_editing_on_slave() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    let saved = tty::get_termios(slave).unwrap();
+    let mut no_echo = saved;
+    no_echo.c_lflag &= !slopos_abi::syscall::ECHO;
+    tty::set_termios(slave, &no_echo).unwrap();
+
+    let write_rc = tty::write(master, b"foo\nbar\n");
+    let mut buf = [0u8; 16];
+    let first_read = tty::read(slave, &mut buf, true);
+    let second_read = tty::read(slave, &mut buf, true);
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    if write_rc != Ok(8) || first_read != Ok(4) || second_read != Ok(4) {
+        klog_info!(
+            "TTY_TEST: BUG - PTY canonical reads mismatch (write={:?}, first={:?}, second={:?})",
+            write_rc,
+            first_read,
+            second_read
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -3977,5 +4182,11 @@ slopos_lib::define_test_suite!(
         test_phase16_get_ldisc_default_is_ntty,
         test_phase16_set_ldisc_round_trip_preserves_termios,
         test_phase16_set_ldisc_invalid_id_rejected,
+        test_phase17_pty_alloc_returns_master_and_slave,
+        test_phase17_pty_master_to_slave_flow,
+        test_phase17_pty_slave_to_master_flow,
+        test_phase17_master_close_hangs_up_slave,
+        test_phase17_slave_close_returns_master_eof,
+        test_phase17_pty_canonical_editing_on_slave,
     ]
 );

@@ -138,6 +138,53 @@ impl Tty {
             active: true,
             open_count: 0,
             hung_up: false,
+            peer_closed: false,
         }
     }
+
+    pub fn new_pty_master(index: TtyIndex, slave_idx: TtyIndex) -> Self {
+        Self {
+            index,
+            ldisc: LdiscKind::Raw(super::ldisc::RawDisc::new()),
+            driver: TtyDriverKind::PtyMaster { slave_idx },
+            session: TtySession::new(),
+            winsize: UserWinsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+            active: true,
+            open_count: 0,
+            hung_up: false,
+            peer_closed: false,
+        }
+    }
+
+    pub fn new_pty_slave(index: TtyIndex, master_idx: TtyIndex) -> Self {
+        Self {
+            index,
+            ldisc: LdiscKind::NTty(LineDisc::new()),
+            driver: TtyDriverKind::PtySlave { master_idx },
+            session: TtySession::new(),
+            winsize: UserWinsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+            active: true,
+            open_count: 0,
+            hung_up: false,
+            peer_closed: false,
+        }
+    }
+}
+
+pub fn find_free_slot() -> Option<usize> {
+    (2..MAX_TTYS).find(|&slot| TTY_SLOTS[slot].lock().is_none())
+}
+
+pub fn find_free_slot_excluding(excluded: usize) -> Option<usize> {
+    (2..MAX_TTYS).find(|&slot| slot != excluded && TTY_SLOTS[slot].lock().is_none())
 }

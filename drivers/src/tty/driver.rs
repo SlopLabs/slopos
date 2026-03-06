@@ -16,6 +16,7 @@ use slopos_abi::syscall::{TtyIndex, UserTermios};
 use slopos_lib::ports::COM1;
 
 use crate::serial;
+use crate::tty::pty;
 
 /// Backend driver operations for a TTY.
 ///
@@ -63,8 +64,11 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(d) => d.write_output(buf),
             Self::VConsole(d) => d.write_output(buf),
-            Self::PtyMaster { .. } | Self::PtySlave { .. } => {
-                // TODO(PTY): Route to paired TTY's input buffer.
+            Self::PtyMaster { slave_idx } => {
+                pty::master_write(*slave_idx, buf);
+            }
+            Self::PtySlave { master_idx } => {
+                pty::slave_write(*master_idx, buf);
             }
             Self::None => {}
         }
@@ -102,8 +106,12 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(_) => DriverId::SerialConsole,
             Self::VConsole(_) => DriverId::VConsole,
-            Self::PtyMaster { .. } => DriverId::PtyMaster,
-            Self::PtySlave { .. } => DriverId::PtySlave,
+            Self::PtyMaster { slave_idx } => DriverId::PtyMaster {
+                slave_idx: *slave_idx,
+            },
+            Self::PtySlave { master_idx } => DriverId::PtySlave {
+                master_idx: *master_idx,
+            },
             Self::None => DriverId::None,
         }
     }
@@ -125,9 +133,9 @@ pub enum DriverId {
     /// PS/2 + framebuffer virtual console (currently mirrors to serial).
     VConsole,
     /// PTY master (Phase 14 stub).
-    PtyMaster,
+    PtyMaster { slave_idx: TtyIndex },
     /// PTY slave (Phase 14 stub).
-    PtySlave,
+    PtySlave { master_idx: TtyIndex },
     /// Empty / uninitialised slot.
     None,
 }
@@ -152,8 +160,11 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) {
                 serial::serial_putc_com1(b);
             }
         }
-        DriverId::PtyMaster | DriverId::PtySlave => {
-            // TODO(PTY): Route output to paired TTY's input buffer.
+        DriverId::PtyMaster { slave_idx } => {
+            pty::master_write(slave_idx, data);
+        }
+        DriverId::PtySlave { master_idx } => {
+            pty::slave_write(master_idx, data);
         }
         DriverId::None => {}
     }

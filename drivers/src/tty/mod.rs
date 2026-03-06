@@ -24,6 +24,7 @@
 
 pub mod driver;
 pub mod ldisc;
+pub mod pty;
 pub mod session;
 pub mod table;
 
@@ -77,6 +78,8 @@ pub struct Tty {
     pub open_count: u32,
 
     pub hung_up: bool,
+
+    pub peer_closed: bool,
 }
 
 /// Kernel-internal error type for TTY operations.
@@ -190,6 +193,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         return;
     }
 
+    let mut route = None;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -207,18 +211,18 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         // Handle echo, reprint, and signal actions while we hold the lock.
         match action {
             InputAction::Echo { buf, len } => {
-                for i in 0..len as usize {
-                    tty.driver.write_output(&[buf[i]]);
-                }
+                let mut out = [0u8; 1025];
+                out[..len as usize].copy_from_slice(&buf[..len as usize]);
+                route = Some((tty.driver.id(), out, len as usize));
                 has_data
             }
             InputAction::ReprintLine => {
-                // Redisplay: newline + current edit buffer contents.
-                tty.driver.write_output(b"\n");
+                let mut out = [0u8; 1025];
+                out[0] = b'\n';
                 let content = tty.ldisc.edit_content();
-                for &b in content {
-                    tty.driver.write_output(&[b]);
-                }
+                let copy_len = core::cmp::min(content.len(), out.len().saturating_sub(1));
+                out[1..1 + copy_len].copy_from_slice(&content[..copy_len]);
+                route = Some((tty.driver.id(), out, copy_len + 1));
                 has_data
             }
             InputAction::Signal(sig) => {
@@ -233,6 +237,10 @@ pub fn push_input(idx: TtyIndex, c: u8) {
             InputAction::None => has_data,
         }
     };
+
+    if let Some((driver_id, out, out_len)) = route {
+        write_driver_unlocked(driver_id, &out[..out_len]);
+    }
 
     if wake {
         notify_input_ready(idx);
@@ -253,6 +261,7 @@ fn notify_input_ready(idx: TtyIndex) {
 
 /// Re-export `auto_attach_session` from `session.rs` (Phase 14 extraction).
 /// Kept module-private — only `read()` in this module calls it.
+pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc};
 use self::session::auto_attach_session;
 
 /// Read cooked data from a specific TTY.
@@ -305,6 +314,10 @@ pub fn read_with_attach(
             };
 
             // Hung-up check (before drain).
+            if tty.peer_closed && !tty.ldisc.has_data() {
+                return Ok(0);
+            }
+
             if tty.hung_up && !tty.ldisc.has_data() {
                 return if nonblock {
                     Err(TtyError::HungUp)
@@ -416,6 +429,10 @@ pub fn read_with_attach(
             }
 
             // Check hung-up after drain (data may have been flushed by hangup).
+            if tty.peer_closed && !tty.ldisc.has_data() {
+                return Ok(0);
+            }
+
             if tty.hung_up {
                 return if nonblock {
                     Err(TtyError::HungUp)
@@ -468,7 +485,7 @@ pub fn read_with_attach(
                             }
                         }
                         let sig = tty.drain_hw_input();
-                        let result = tty.hung_up || tty.ldisc.has_data();
+                        let result = tty.hung_up || tty.peer_closed || tty.ldisc.has_data();
                         (sig, result)
                     }
                     None => return true,
@@ -933,12 +950,24 @@ pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     }
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
+        let peer_to_reopen = match tty.driver {
+            TtyDriverKind::PtySlave { master_idx } => Some(master_idx),
+            _ => None,
+        };
         tty.open_count = tty
             .open_count
             .checked_add(1)
             .unwrap_or_else(|| panic!("tty open_count overflow for idx {}", idx.0));
         tty.hung_up = false;
-        return Ok(tty.open_count);
+        tty.peer_closed = false;
+        let open_count = tty.open_count;
+        drop(guard);
+
+        if let Some(peer_idx) = peer_to_reopen {
+            pty::clear_peer_closed(peer_idx);
+        }
+
+        return Ok(open_count);
     }
     Err(TtyError::NotAllocated)
 }
@@ -954,12 +983,32 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
             return Ok(0);
         }
         tty.open_count -= 1;
+        let open_count = tty.open_count;
         if tty.open_count == 0 {
-            tty.ldisc.flush_all();
-            tty.session.detach();
-            tty.hung_up = false;
+            match tty.driver {
+                TtyDriverKind::PtyMaster { slave_idx } => {
+                    drop(guard);
+                    hangup(slave_idx);
+                    pty::free_pair_if_unused(idx, slave_idx);
+                    return Ok(0);
+                }
+                TtyDriverKind::PtySlave { master_idx } => {
+                    drop(guard);
+                    pty::mark_peer_closed(master_idx);
+                    pty::free_pair_if_unused(idx, master_idx);
+                    return Ok(0);
+                }
+                TtyDriverKind::SerialConsole(_)
+                | TtyDriverKind::VConsole(_)
+                | TtyDriverKind::None => {
+                    tty.ldisc.flush_all();
+                    tty.session.detach();
+                    tty.hung_up = false;
+                    tty.peer_closed = false;
+                }
+            }
         }
-        return Ok(tty.open_count);
+        return Ok(open_count);
     }
     Err(TtyError::NotAllocated)
 }
