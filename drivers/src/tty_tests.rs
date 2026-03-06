@@ -2033,7 +2033,8 @@ pub fn test_phase9_tty_error_variants() -> TestResult {
     let e4 = TtyError::HungUp;
     let e5 = TtyError::PermissionDenied;
     let e6 = TtyError::BackgroundRead;
-    if e1 == e2 || e2 == e3 || e3 == e4 || e4 == e5 || e5 == e6 {
+    let e7 = TtyError::UnsupportedLineDiscipline;
+    if e1 == e2 || e2 == e3 || e3 == e4 || e4 == e5 || e5 == e6 || e6 == e7 {
         klog_info!("TTY_TEST: BUG - TtyError variants not distinct");
         return TestResult::Fail;
     }
@@ -3612,6 +3613,183 @@ pub fn test_phase15_canonical_small_buffer_read() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_phase16_tcsetsw_preserves_pending_input() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'a');
+
+    let mut changed = raw;
+    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    tty::set_termios_wait(TtyIndex(0), &changed).unwrap();
+
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(1) if out[0] == b'a' => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETSW should preserve pending input, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase16_tcsetsf_flushes_pending_input() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'a');
+
+    let mut changed = raw;
+    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    tty::set_termios_flush(TtyIndex(0), &changed).unwrap();
+
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Err(TtyError::WouldBlock) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETSF should flush pending input, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase16_read_with_attach_false_skips_auto_attach() -> TestResult {
+    tty::table::tty_table_init();
+    tty::detach_session(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'z');
+
+    let mut out = [0u8; 8];
+    let result = tty::read_with_attach(TtyIndex(0), &mut out, true, false);
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    if result != Ok(1) || out[0] != b'z' || sid != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - read_with_attach(false) should not auto-attach (result={:?}, sid={}, b0=0x{:02x})",
+            result,
+            sid,
+            out[0]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase16_get_ldisc_default_is_ntty() -> TestResult {
+    tty::table::tty_table_init();
+
+    match tty::get_ldisc(TtyIndex(0)) {
+        Ok(slopos_abi::syscall::N_TTY) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - default line discipline should be N_TTY, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase16_set_ldisc_round_trip_preserves_termios() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut configured = saved;
+    configured.c_lflag &= !slopos_abi::syscall::ICANON;
+    configured.c_cc[slopos_abi::syscall::VMIN] = 7;
+    configured.c_cc[slopos_abi::syscall::VTIME] = 3;
+    tty::set_termios(TtyIndex(0), &configured).unwrap();
+
+    tty::set_ldisc(TtyIndex(0), slopos_abi::syscall::N_RAW).unwrap();
+    let raw_kind = tty::get_ldisc(TtyIndex(0));
+    let raw_termios = tty::get_termios(TtyIndex(0)).unwrap();
+
+    tty::push_input(TtyIndex(0), b'q');
+    let mut out = [0u8; 8];
+    let raw_read = tty::read(TtyIndex(0), &mut out, true);
+
+    tty::set_ldisc(TtyIndex(0), slopos_abi::syscall::N_TTY).unwrap();
+    let ntty_kind = tty::get_ldisc(TtyIndex(0));
+    let ntty_termios = tty::get_termios(TtyIndex(0)).unwrap();
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    if raw_kind != Ok(slopos_abi::syscall::N_RAW)
+        || ntty_kind != Ok(slopos_abi::syscall::N_TTY)
+        || raw_termios.c_cc[slopos_abi::syscall::VMIN] != 7
+        || raw_termios.c_cc[slopos_abi::syscall::VTIME] != 3
+        || ntty_termios.c_cc[slopos_abi::syscall::VMIN] != 7
+        || ntty_termios.c_cc[slopos_abi::syscall::VTIME] != 3
+        || raw_termios.c_line != slopos_abi::syscall::N_RAW as u8
+        || ntty_termios.c_line != slopos_abi::syscall::N_TTY as u8
+        || raw_read != Ok(1)
+        || out[0] != b'q'
+    {
+        klog_info!(
+            "TTY_TEST: BUG - ldisc round-trip mismatch (raw_kind={:?}, ntty_kind={:?}, raw_read={:?}, raw_line={}, ntty_line={})",
+            raw_kind,
+            ntty_kind,
+            raw_read,
+            raw_termios.c_line,
+            ntty_termios.c_line
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase16_set_ldisc_invalid_id_rejected() -> TestResult {
+    tty::table::tty_table_init();
+
+    match tty::set_ldisc(TtyIndex(0), 99) {
+        Err(TtyError::UnsupportedLineDiscipline) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - invalid ldisc id should be rejected, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -3793,5 +3971,11 @@ slopos_lib::define_test_suite!(
         test_phase15_word_erase_mixed_boundary,
         test_phase15_word_erase_trailing_spaces,
         test_phase15_canonical_small_buffer_read,
+        test_phase16_tcsetsw_preserves_pending_input,
+        test_phase16_tcsetsf_flushes_pending_input,
+        test_phase16_read_with_attach_false_skips_auto_attach,
+        test_phase16_get_ldisc_default_is_ntty,
+        test_phase16_set_ldisc_round_trip_preserves_termios,
+        test_phase16_set_ldisc_invalid_id_rejected,
     ]
 );

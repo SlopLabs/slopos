@@ -17,16 +17,17 @@ use crate::syscall::signal::{
     syscall_rt_sigreturn,
 };
 use slopos_abi::addr::PhysAddr;
+use slopos_abi::fs::USER_FS_OPEN_READ;
 use slopos_abi::signal::{
     SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
-    FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL,
-    SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_NET_SCAN,
-    SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK,
-    SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID, SYSCALL_TABLE_SIZE,
-    TIOCSCTTY, TtyIndex,
+    F_GETFL, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY, O_NONBLOCK, POLLIN,
+    SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL,
+    SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION,
+    SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
+    SYSCALL_TABLE_SIZE, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
@@ -46,8 +47,8 @@ use crate::scheduler::task::{
 use crate::scheduler::{per_cpu, task};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_fs::fileio::{
-    file_close_fd, file_pipe_create, file_poll_fd, file_read_fd, file_write_fd,
-    fileio_clone_table_for_process, fileio_destroy_table_for_process,
+    file_close_fd, file_fcntl_fd, file_open_for_process, file_pipe_create, file_poll_fd,
+    file_read_fd, file_write_fd, fileio_clone_table_for_process, fileio_destroy_table_for_process,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 
@@ -506,6 +507,51 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
 
     task_terminate(child_id);
     task_terminate(parent_id);
+    TestResult::Pass
+}
+
+pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    let mut frame = zero_frame();
+    frame.rdi = 0;
+    frame.rsi = TIOCSCTTY;
+    frame.rdx = 0;
+    let _ = syscall_ioctl(task_ptr, &mut frame);
+    assert_eq_test!(
+        frame.rax,
+        0,
+        "TIOCSCTTY should succeed before /dev/tty open"
+    );
+
+    let pid = unsafe { (*task_ptr).process_id };
+    let path = b"/dev/tty\0";
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    let fd = file_open_for_process(
+        pid,
+        path.as_ptr() as *const c_char,
+        USER_FS_OPEN_READ | O_NOCTTY as u32,
+    );
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+    assert_test!(fd >= 0, "open(/dev/tty, O_NOCTTY) failed");
+
+    let flags = file_fcntl_fd(pid, fd, F_GETFL, 0);
+    let close_rc = file_close_fd(pid, fd);
+    task_terminate(task_id);
+
+    assert_eq_test!(close_rc, 0, "close /dev/tty fd failed");
+    assert_test!(flags >= 0, "F_GETFL failed for /dev/tty fd");
+    assert_test!(
+        (flags as u64 & O_NOCTTY) != 0,
+        "F_GETFL should preserve O_NOCTTY on /dev/tty fd"
+    );
+
     TestResult::Pass
 }
 
@@ -1989,6 +2035,7 @@ slopos_lib::define_test_suite!(
         test_kill_process_group_semantics,
         test_tiocsctty_session_leader_acquires_ctty,
         test_tiocsctty_non_leader_rejected,
+        test_open_dev_tty_with_o_noctty_preserves_flag,
         test_vm_mmap_munmap_stress_baseline,
         test_spawn_path_stale_argv_regression,
     ]
@@ -2012,6 +2059,7 @@ slopos_lib::define_test_suite!(
         test_kill_process_group_semantics,
         test_tiocsctty_session_leader_acquires_ctty,
         test_tiocsctty_non_leader_rejected,
+        test_open_dev_tty_with_o_noctty_preserves_flag,
         test_sigchld_and_wait_interaction,
         test_clone_thread_tls_isolation,
         test_futex_wait_mismatch_and_wake_no_waiters,
