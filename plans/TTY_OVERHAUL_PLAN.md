@@ -26,7 +26,7 @@
 15. [Phase 11: Non-Canonical Timing Fix](#15-phase-11-non-canonical-timing-fix)
 16. [Phase 12: Sane Defaults & Output Column Tracking ✅](#16-phase-12-sane-defaults--output-column-tracking)
 17. [Phase 13: ABI Signal Constant Unification ✅](#17-phase-13-abi-signal-constant-unification)
-18. [Phase 14: Responsibility Split — PTY Foundation](#18-phase-14-responsibility-split--pty-foundation)
+18. [Phase 14: Responsibility Split — PTY Foundation ✅](#18-phase-14-responsibility-split--pty-foundation)
 19. [Phase 15: Verify & Test](#19-phase-15-verify--test)
 20. [File Inventory](#20-file-inventory)
 21. [Future: PTY Support](#21-future-pty-support)
@@ -1574,9 +1574,9 @@ Already exported — `pub mod signal` on line 27 of `abi/src/lib.rs`. No changes
 
 ---
 
-## 18. Phase 14: Responsibility Split — PTY Foundation
+## 18. Phase 14: Responsibility Split — PTY Foundation ✅
 
-> **Priority**: P2 — Required before PTY implementation, not blocking current functionality.
+> **Priority**: P2 — ✅ **COMPLETED**. Required before PTY implementation, not blocking current functionality.
 > **Rationale**: The current `Tty` struct (919 lines in `mod.rs`) mixes core state, I/O processing, session management, idle callbacks, and signal dispatch in one module. Linux separates these into `tty_io.c`, `tty_jobctrl.c`, `tty_port.c`, and the swappable `tty_ldisc` interface. Adding PTY support to the current monolithic `Tty` would compound coupling — PTY master needs raw passthrough (no line discipline), while PTY slave uses full N_TTY processing. Without a swappable line discipline abstraction, this can't be cleanly expressed.
 
 **Goal**: Split internal responsibilities to prepare for PTY master/slave pairs without redesigning the static slot model or public API.
