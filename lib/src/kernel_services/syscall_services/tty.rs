@@ -1,9 +1,14 @@
 crate::define_service! {
     tty => TtyServices {
         read_cooked(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, max: usize, nonblock: bool) -> isize;
+        read_cooked_with_attach(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, max: usize, nonblock: bool, auto_attach: bool) -> isize;
         has_cooked_data(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         set_termios(tty_index: slopos_abi::syscall::TtyIndex, t: *const slopos_abi::syscall::UserTermios);
+        set_termios_wait(tty_index: slopos_abi::syscall::TtyIndex, t: *const slopos_abi::syscall::UserTermios) -> i32;
+        set_termios_flush(tty_index: slopos_abi::syscall::TtyIndex, t: *const slopos_abi::syscall::UserTermios) -> i32;
         get_termios(tty_index: slopos_abi::syscall::TtyIndex, t: *mut slopos_abi::syscall::UserTermios);
+        set_ldisc(tty_index: slopos_abi::syscall::TtyIndex, ldisc_id: u32) -> i32;
+        get_ldisc(tty_index: slopos_abi::syscall::TtyIndex) -> u32;
         get_winsize(tty_index: slopos_abi::syscall::TtyIndex, ws: *mut slopos_abi::syscall::UserWinsize);
         set_winsize(tty_index: slopos_abi::syscall::TtyIndex, ws: *const slopos_abi::syscall::UserWinsize);
         set_compositor_focus(target: u32) -> i32;

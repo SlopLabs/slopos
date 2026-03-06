@@ -542,6 +542,7 @@ pub const F_SETFL: u64 = 4;
 pub const FD_CLOEXEC: u64 = 1;
 
 pub const O_NONBLOCK: u64 = 0x800;
+pub const O_NOCTTY: u64 = 0x100;
 pub const O_CLOEXEC: u64 = 0x80_000;
 
 // =============================================================================
@@ -582,10 +583,15 @@ pub const TCSETSW: u64 = 0x5403;
 pub const TCSETSF: u64 = 0x5404;
 pub const TIOCGPGRP: u64 = 0x540F;
 pub const TIOCSPGRP: u64 = 0x5410;
+pub const TIOCSETD: u64 = 0x5423;
+pub const TIOCGETD: u64 = 0x5424;
 pub const TIOCGSID: u64 = 0x5429;
 pub const TIOCGWINSZ: u64 = 0x5413;
 pub const TIOCSWINSZ: u64 = 0x5414;
 pub const TIOCSCTTY: u64 = 0x540E;
+
+pub const N_TTY: u32 = 0;
+pub const N_RAW: u32 = 1;
 
 pub const NCCS: usize = 19;
 

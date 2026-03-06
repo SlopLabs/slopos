@@ -63,11 +63,21 @@ static INPUT_SERVICES: InputServices = InputServices {
 use slopos_abi::syscall::TtyIndex;
 
 fn tty_read_adapter(tty_index: TtyIndex, buf: *mut u8, max: usize, nonblock: bool) -> isize {
+    tty_read_with_attach_adapter(tty_index, buf, max, nonblock, true)
+}
+
+fn tty_read_with_attach_adapter(
+    tty_index: TtyIndex,
+    buf: *mut u8,
+    max: usize,
+    nonblock: bool,
+    auto_attach: bool,
+) -> isize {
     if buf.is_null() || max == 0 {
         return 0;
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf, max) };
-    match tty::read(tty_index, slice, nonblock) {
+    match tty::read_with_attach(tty_index, slice, nonblock, auto_attach) {
         Ok(n) => n as isize,
         Err(tty::TtyError::WouldBlock) => -11,
         Err(tty::TtyError::HungUp) => -5,
@@ -87,6 +97,34 @@ fn tty_set_termios_adapter(tty_index: TtyIndex, t: *const slopos_abi::syscall::U
     let _ = tty::set_termios(tty_index, val);
 }
 
+fn tty_set_termios_wait_adapter(
+    tty_index: TtyIndex,
+    t: *const slopos_abi::syscall::UserTermios,
+) -> i32 {
+    if t.is_null() {
+        return -1;
+    }
+    let val = unsafe { &*t };
+    match tty::set_termios_wait(tty_index, val) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn tty_set_termios_flush_adapter(
+    tty_index: TtyIndex,
+    t: *const slopos_abi::syscall::UserTermios,
+) -> i32 {
+    if t.is_null() {
+        return -1;
+    }
+    let val = unsafe { &*t };
+    match tty::set_termios_flush(tty_index, val) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 fn tty_get_termios_adapter(tty_index: TtyIndex, t: *mut slopos_abi::syscall::UserTermios) {
     if t.is_null() {
         return;
@@ -94,6 +132,17 @@ fn tty_get_termios_adapter(tty_index: TtyIndex, t: *mut slopos_abi::syscall::Use
     if let Ok(val) = tty::get_termios(tty_index) {
         unsafe { *t = val };
     }
+}
+
+fn tty_set_ldisc_adapter(tty_index: TtyIndex, ldisc_id: u32) -> i32 {
+    match tty::set_ldisc(tty_index, ldisc_id) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn tty_get_ldisc_adapter(tty_index: TtyIndex) -> u32 {
+    tty::get_ldisc(tty_index).unwrap_or(slopos_abi::syscall::N_TTY)
 }
 
 fn tty_get_winsize_adapter(tty_index: TtyIndex, ws: *mut slopos_abi::syscall::UserWinsize) {
@@ -186,9 +235,14 @@ fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> u
 
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
+    read_cooked_with_attach: tty_read_with_attach_adapter,
     has_cooked_data: tty_has_cooked_data_adapter,
     set_termios: tty_set_termios_adapter,
+    set_termios_wait: tty_set_termios_wait_adapter,
+    set_termios_flush: tty_set_termios_flush_adapter,
     get_termios: tty_get_termios_adapter,
+    set_ldisc: tty_set_ldisc_adapter,
+    get_ldisc: tty_get_ldisc_adapter,
     get_winsize: tty_get_winsize_adapter,
     set_winsize: tty_set_winsize_adapter,
     set_compositor_focus: tty_set_compositor_focus_adapter,
