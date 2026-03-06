@@ -12,7 +12,7 @@ use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
-use slopos_abi::syscall::{UserPollFd, UserTermios, UserTimeval};
+use slopos_abi::syscall::{TIOCSCTTY, UserPollFd, UserTermios, UserTimeval};
 use slopos_abi::{UserFsList, UserFsStat};
 
 // =============================================================================
@@ -261,6 +261,12 @@ pub fn tcsetpgrp(fd: RawFd, pgid: u32) -> SyscallResult<()> {
             (&mut target as *mut u32) as u64,
         )
     };
+    demux(result).map(|_| ())
+}
+
+#[inline(always)]
+pub fn tiocsctty(fd: RawFd) -> SyscallResult<()> {
+    let result = unsafe { syscall3(SYSCALL_IOCTL, fd as u64, TIOCSCTTY, 0) };
     demux(result).map(|_| ())
 }
 

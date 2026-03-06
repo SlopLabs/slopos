@@ -23,8 +23,8 @@
 
 use core::num::NonZeroU32;
 
+use super::MAX_TTYS;
 use super::table::TTY_SLOTS;
-use super::{MAX_TTYS, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Sentinel newtypes (Phase 14)
@@ -291,38 +291,6 @@ impl TtySession {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session policy functions (extracted from mod.rs in Phase 14)
-// ---------------------------------------------------------------------------
-
-/// Lazily attach a session and set focus for a task that is reading from
-/// a TTY for the first time.  If no session is attached yet, the calling
-/// task becomes the session leader with its own pgid as foreground group.
-pub fn auto_attach_session(idx: TtyIndex, task_id: u32, caller_pgid: u32, caller_sid: u32) {
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return;
-    }
-    let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        // Set compositor focus if not already set.
-        if tty.session.focused_task_id == 0 {
-            tty.session.focused_task_id = task_id;
-        }
-        // Auto-attach session if none exists (first reader becomes leader).
-        if !tty.session.has_session() && caller_sid != 0 {
-            tty.session.attach(caller_sid, caller_pgid);
-        }
-    }
-}
-
-/// Detach any TTY whose session matches `session_id`.
-///
-/// Called from `setsid()` when the session leader creates a new session —
-/// the old controlling terminal must be released.
-///
-/// Each per-TTY lock is acquired and released individually — no two locks
-/// are held simultaneously.
 pub fn detach_session_by_id(session_id: u32) {
     if session_id == 0 {
         return;

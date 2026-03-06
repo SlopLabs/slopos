@@ -3723,6 +3723,83 @@ pub fn test_phase16_read_with_attach_false_skips_auto_attach() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_phase18_read_with_attach_true_skips_durable_attach() -> TestResult {
+    tty::table::tty_table_init();
+    tty::detach_session(TtyIndex(0));
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'y');
+
+    let mut out = [0u8; 8];
+    let result = tty::read_with_attach(TtyIndex(0), &mut out, true, true);
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    if result != Ok(1) || out[0] != b'y' || sid != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - read_with_attach(true) should no longer claim ownership (result={:?}, sid={}, b0=0x{:02x})",
+            result,
+            sid,
+            out[0]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase18_acquire_and_release_controlling_terminal() -> TestResult {
+    tty::table::tty_table_init();
+    tty::detach_session(TtyIndex(0));
+
+    let acquire = tty::acquire_controlling_terminal(TtyIndex(0), 42, 77);
+    let sid_after_acquire = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+    let release = tty::release_controlling_terminal(TtyIndex(0), 42);
+    let sid_after_release = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+
+    if acquire != Ok(()) || sid_after_acquire != 42 || release != Ok(true) || sid_after_release != 0
+    {
+        klog_info!(
+            "TTY_TEST: BUG - explicit controlling-terminal transition mismatch (acquire={:?}, sid_acquire={}, release={:?}, sid_release={})",
+            acquire,
+            sid_after_acquire,
+            release,
+            sid_after_release
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_phase18_release_wrong_session_is_noop() -> TestResult {
+    tty::table::tty_table_init();
+    tty::detach_session(TtyIndex(0));
+    tty::acquire_controlling_terminal(TtyIndex(0), 88, 88).unwrap();
+
+    let release = tty::release_controlling_terminal(TtyIndex(0), 99);
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+    tty::release_controlling_terminal(TtyIndex(0), 88).unwrap();
+
+    if release != Ok(false) || sid != 88 {
+        klog_info!(
+            "TTY_TEST: BUG - wrong-session release should be ignored (release={:?}, sid={})",
+            release,
+            sid
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 pub fn test_phase16_get_ldisc_default_is_ntty() -> TestResult {
     tty::table::tty_table_init();
 
@@ -4179,6 +4256,9 @@ slopos_lib::define_test_suite!(
         test_phase16_tcsetsw_preserves_pending_input,
         test_phase16_tcsetsf_flushes_pending_input,
         test_phase16_read_with_attach_false_skips_auto_attach,
+        test_phase18_read_with_attach_true_skips_durable_attach,
+        test_phase18_acquire_and_release_controlling_terminal,
+        test_phase18_release_wrong_session_is_noop,
         test_phase16_get_ldisc_default_is_ntty,
         test_phase16_set_ldisc_round_trip_preserves_termios,
         test_phase16_set_ldisc_invalid_id_rejected,

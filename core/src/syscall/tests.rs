@@ -113,6 +113,15 @@ fn zero_frame() -> InterruptFrame {
     unsafe { core::mem::zeroed() }
 }
 
+fn pts_path_for(number: u32) -> Option<[u8; 11]> {
+    if number > 9 {
+        return None;
+    }
+    let mut path = *b"/dev/pts/0\0";
+    path[9] = b'0' + number as u8;
+    Some(path)
+}
+
 fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
     let page_dir = slopos_mm::process_vm::process_vm_get_page_dir(pid);
     if page_dir.is_null() {
@@ -552,6 +561,202 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
         "F_GETFL should preserve O_NOCTTY on /dev/tty fd"
     );
 
+    TestResult::Pass
+}
+
+pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+    let parent_ptr = task_find_by_id(parent_id);
+    assert_not_null!(parent_ptr, "parent lookup failed");
+
+    let mut ioctl_frame = zero_frame();
+    ioctl_frame.rdi = 0;
+    ioctl_frame.rsi = TIOCSCTTY;
+    ioctl_frame.rdx = 0;
+    let _ = syscall_ioctl(parent_ptr, &mut ioctl_frame);
+    assert_eq_test!(ioctl_frame.rax, 0, "parent TIOCSCTTY should succeed");
+
+    let child_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
+    task_set_state(child_id, TaskStatus::Blocked);
+
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr, "child lookup failed");
+
+    let mut setsid_frame = zero_frame();
+    let _ = syscall_setsid(child_ptr, &mut setsid_frame);
+    assert_eq_test!(
+        setsid_frame.rax as u32,
+        child_id,
+        "setsid should succeed for child"
+    );
+    assert_eq_test!(
+        unsafe { (*child_ptr).controlling_tty },
+        None,
+        "child should drop inherited ctty"
+    );
+    assert_eq_test!(
+        unsafe { (*parent_ptr).controlling_tty },
+        Some(TtyIndex(0)),
+        "parent should retain controlling tty"
+    );
+
+    let tty_sid = slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
+    assert_eq_test!(
+        tty_sid,
+        parent_id,
+        "tty session should stay attached to parent session"
+    );
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
+    TestResult::Pass
+}
+
+pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let leader_id = create_test_user_task();
+    assert_test!(leader_id != INVALID_TASK_ID, "failed to create leader task");
+    let leader_ptr = task_find_by_id(leader_id);
+    assert_not_null!(leader_ptr, "leader lookup failed");
+
+    let mut ioctl_frame = zero_frame();
+    ioctl_frame.rdi = 0;
+    ioctl_frame.rsi = TIOCSCTTY;
+    ioctl_frame.rdx = 0;
+    let _ = syscall_ioctl(leader_ptr, &mut ioctl_frame);
+    assert_eq_test!(ioctl_frame.rax, 0, "leader TIOCSCTTY should succeed");
+
+    let child_id = task_fork(leader_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
+    task_set_state(child_id, TaskStatus::Blocked);
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr, "child lookup failed");
+
+    slopos_lib::kernel_services::syscall_services::tty::hangup(TtyIndex(0));
+
+    assert_eq_test!(
+        unsafe { (*leader_ptr).controlling_tty },
+        None,
+        "leader ctty should clear on hangup"
+    );
+    assert_eq_test!(
+        unsafe { (*child_ptr).controlling_tty },
+        None,
+        "child ctty should clear on hangup"
+    );
+    assert_eq_test!(
+        slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)),
+        0,
+        "tty session should detach on hangup"
+    );
+
+    task_terminate(child_id);
+    task_terminate(leader_id);
+    TestResult::Pass
+}
+
+pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    let master_idx_raw = slopos_lib::kernel_services::syscall_services::tty::alloc_pty();
+    assert_test!(master_idx_raw >= 0, "alloc_pty failed");
+    let master_idx = TtyIndex(master_idx_raw as u8);
+    let slave_number =
+        slopos_lib::kernel_services::syscall_services::tty::get_pty_number(master_idx);
+    assert_test!(slave_number >= 0, "get_pty_number failed");
+    let slave_number = slave_number as u32;
+    let path = match pts_path_for(slave_number) {
+        Some(path) => path,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    let pid = unsafe { (*task_ptr).process_id };
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    assert_test!(fd >= 0, "open(/dev/pts/N) failed");
+    assert_eq_test!(
+        unsafe { (*task_ptr).controlling_tty },
+        Some(TtyIndex(slave_number as u8)),
+        "PTY slave open should acquire controlling tty"
+    );
+    assert_eq_test!(
+        slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(
+            slave_number as u8
+        )),
+        task_id,
+        "PTY slave session should match task session"
+    );
+
+    let _ = file_close_fd(pid, fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    let master_idx_raw = slopos_lib::kernel_services::syscall_services::tty::alloc_pty();
+    assert_test!(master_idx_raw >= 0, "alloc_pty failed");
+    let master_idx = TtyIndex(master_idx_raw as u8);
+    let slave_number =
+        slopos_lib::kernel_services::syscall_services::tty::get_pty_number(master_idx);
+    assert_test!(slave_number >= 0, "get_pty_number failed");
+    let slave_number = slave_number as u32;
+    let path = match pts_path_for(slave_number) {
+        Some(path) => path,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    let pid = unsafe { (*task_ptr).process_id };
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    let fd = file_open_for_process(
+        pid,
+        path.as_ptr() as *const c_char,
+        USER_FS_OPEN_READ | O_NOCTTY as u32,
+    );
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    assert_test!(fd >= 0, "open(/dev/pts/N, O_NOCTTY) failed");
+    assert_eq_test!(
+        unsafe { (*task_ptr).controlling_tty },
+        None,
+        "O_NOCTTY should prevent ctty acquire"
+    );
+    assert_eq_test!(
+        slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(
+            slave_number as u8
+        )),
+        0,
+        "O_NOCTTY open should leave PTY session unattached"
+    );
+
+    let _ = file_close_fd(pid, fd);
+    task_terminate(task_id);
     TestResult::Pass
 }
 
@@ -2036,6 +2241,10 @@ slopos_lib::define_test_suite!(
         test_tiocsctty_session_leader_acquires_ctty,
         test_tiocsctty_non_leader_rejected,
         test_open_dev_tty_with_o_noctty_preserves_flag,
+        test_setsid_child_preserves_parent_controlling_tty,
+        test_hangup_clears_all_session_controlling_ttys,
+        test_pts_open_acquires_controlling_tty_without_o_noctty,
+        test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
         test_vm_mmap_munmap_stress_baseline,
         test_spawn_path_stale_argv_regression,
     ]
@@ -2060,6 +2269,10 @@ slopos_lib::define_test_suite!(
         test_tiocsctty_session_leader_acquires_ctty,
         test_tiocsctty_non_leader_rejected,
         test_open_dev_tty_with_o_noctty_preserves_flag,
+        test_setsid_child_preserves_parent_controlling_tty,
+        test_hangup_clears_all_session_controlling_ttys,
+        test_pts_open_acquires_controlling_tty_without_o_noctty,
+        test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
         test_sigchld_and_wait_interaction,
         test_clone_thread_tls_isolation,
         test_futex_wait_mismatch_and_wake_no_waiters,

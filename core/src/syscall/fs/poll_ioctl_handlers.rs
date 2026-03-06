@@ -394,7 +394,9 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 return ctx.err();
             }
 
-            tty::attach_session(tty_idx, task.sid, task.pgid);
+            if tty::acquire_controlling_terminal(tty_idx, task.sid, task.pgid) != 0 {
+                return ctx.err();
+            }
             task.controlling_tty = Some(tty_idx);
             ctx.ok(0)
         }

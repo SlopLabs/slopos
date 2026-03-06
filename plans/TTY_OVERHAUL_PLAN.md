@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–17 Complete; Phases 18–22 Planned; Phase 23 is the final verification gate
+> **Status**: Phases 1–18 Complete; Phases 19–22 Planned; Phase 23 is the final verification gate
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, and compositor focus split from POSIX foreground; follow-up maturity work still remains for controlling-terminal ownership unification, strict cross-session denial, PTY pair atomicity, event-driven readiness, IXON stop enforcement, and real VConsole routing
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -74,7 +74,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 15 | POSIX quick wins (line boundaries, SIGWINCH, SIGHUP, word erase) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/signal.rs`, `core/src/scheduler/task.rs` | — | **DONE** |
 | 16 | Termios drain & open flags | `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 17 | PTY implementation | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs` | `drivers/src/tty/pty.rs` | **DONE** |
-| 18 | Controlling terminal ownership unification | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
+| 18 | Controlling terminal ownership unification | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/syscall_services_init.rs`, `fs/src/fileio.rs`, `lib/src/kernel_services/driver_runtime.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `core/src/driver_hooks.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs`, `userland/src/syscall/fs.rs`, `userland/src/apps/shell/exec.rs` | — | **DONE** |
 | 19 | Strict session gates & foreground outcomes | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
 | 20 | PTY pair atomicity & lifecycle hardening | `drivers/src/tty/pty.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
 | 21 | Event-driven readiness & IXON completion | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/waitqueue.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
@@ -2138,9 +2138,17 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 
 ## 22. Phase 18: Controlling Terminal Ownership Unification
 
-> **Status**: **PLANNED**
+> **Status**: **COMPLETED**. `cargo fmt --all`, `just build`, and `just test` pass.
 > **Priority**: P0 — Highest-value follow-up after the deep architecture review.
 > **Rationale**: The current control plane still has two sources of truth for terminal ownership. `read()` can auto-attach session state in `drivers/src/tty/session.rs`, while `TIOCSCTTY` separately sets `task.controlling_tty` in `core/src/syscall/fs/poll_ioctl_handlers.rs`. That split is convenient for bootstrap, but it is not the clean long-term POSIX model. The next phase should make controlling-terminal attachment explicit and coherent so task state, TTY session state, and ioctl semantics cannot drift apart.
+
+**Implementation summary**:
+- Removed durable read-side ownership mutation: `tty::read_with_attach()` no longer claims controlling-terminal ownership, so plain reads cannot silently mutate `tty.session`.
+- Added explicit ownership transitions in the TTY core: `acquire_controlling_terminal()` and `release_controlling_terminal()` now provide the single kernel-internal path for durable acquire/release, and `TIOCSCTTY` routes through that path.
+- Tightened detach semantics: `setsid()` now clears only the caller's cached `controlling_tty` unless the caller is the session leader that actually owns the terminal, avoiding accidental session-wide detach from inherited child tasks.
+- Kept task and TTY state coherent on hangup: `hangup()` now clears `controlling_tty` across the whole session through a runtime callback before signaling `SIGHUP`/`SIGCONT`.
+- Scoped implicit acquisition to open-time PTY bootstrap only: opening `/dev/pts/N` without `O_NOCTTY` now acquires the slave as controlling terminal for a session leader with no existing controlling TTY, while `O_NOCTTY` leaves ownership unattached.
+- Updated shell bootstrap to use the explicit control path: the shell now issues `TIOCSCTTY` during job-control initialization before calling `tcsetpgrp()`.
 
 **Goal**: Establish a single canonical ownership path for controlling terminals and session attachment.
 
@@ -2166,14 +2174,20 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 
 | File | Planned change |
 |------|----------------|
-| `drivers/src/tty/mod.rs` | Remove generic read-side ownership mutation; keep ownership transitions explicit |
-| `drivers/src/tty/session.rs` | Model canonical attach/detach rules and ownership invariants |
-| `fs/src/fileio.rs` | Keep `/dev/tty` and `O_NOCTTY` behavior aligned with the new ownership model |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Make `TIOCSCTTY` the canonical acquisition path |
-| `core/src/syscall/process_handlers.rs` | Re-check detach behavior in `setsid()` |
-| `core/src/scheduler/task.rs` | Keep exit/hangup ownership teardown coherent |
-| `drivers/src/tty_tests.rs` | Add ownership-coherence and detach-path regression tests |
-| `core/src/syscall/tests.rs` | Add syscall-level controlling-terminal transition tests |
+| `drivers/src/tty/mod.rs` | Removed durable read-side auto-attach, added explicit acquire/release ownership helpers, cleared task-side ownership caches during hangup |
+| `drivers/src/tty/session.rs` | Removed the generic read-side auto-attach helper so session ownership is no longer claimed from the read path |
+| `drivers/src/syscall_services_init.rs` | Wired explicit acquire/release adapters into `TtyServices` |
+| `fs/src/fileio.rs` | Switched TTY reads to the non-attaching path and added PTY-slave open-time acquisition that respects `O_NOCTTY` |
+| `lib/src/kernel_services/driver_runtime.rs` | Added runtime hooks for setting the current task's controlling TTY and clearing session-wide caches |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Exposed explicit acquire/release ownership calls to other kernel crates |
+| `core/src/driver_hooks.rs` | Implemented the new runtime hooks against the scheduler task table |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Made `TIOCSCTTY` use the explicit acquire path |
+| `core/src/syscall/process_handlers.rs` | Fixed `setsid()` so inherited children drop only their own cached controlling TTY instead of detaching the parent session's terminal |
+| `core/src/scheduler/task.rs` | Added session-wide task-side controlling-TTY cleanup for hangup-driven teardown |
+| `drivers/src/tty_tests.rs` | Added explicit ownership transition and no-auto-attach regression tests |
+| `core/src/syscall/tests.rs` | Added syscall-level regressions for `setsid()` coherence, hangup cleanup, and PTY `O_NOCTTY` acquisition behavior |
+| `userland/src/syscall/fs.rs` | Added a small `TIOCSCTTY` userland wrapper |
+| `userland/src/apps/shell/exec.rs` | Updated shell job-control bootstrap to explicitly acquire its controlling terminal |
 
 ---
 
@@ -2408,8 +2422,11 @@ just test           # Must pass existing test harness + all new phase tests
 | Test | Expected Result | Phase |
 |------|----------------|-------|
 | `TIOCSCTTY` acquires ownership | `task.controlling_tty` and `tty.session` reflect the same session identity | 18 |
-| `setsid()` detaches old control TTY coherently | Task loses controlling TTY and old TTY loses session ownership | 18 |
-| `/dev/tty` after `O_NOCTTY` open | Open succeeds without accidentally attaching a controlling terminal | 18 |
+| `read_with_attach(..., true)` after Phase 18 | Read succeeds without silently attaching a controlling session | 18 |
+| `setsid()` from an inherited session member | Caller loses its cached controlling TTY, parent session keeps terminal ownership | 18 |
+| `hangup()` on a controlled TTY | All tasks in the session lose cached `controlling_tty` and the TTY session detaches | 18 |
+| `/dev/pts/N` open without `O_NOCTTY` | Session leader with no controlling TTY acquires the PTY slave coherently | 18 |
+| `/dev/pts/N` open with `O_NOCTTY` | Open succeeds without attaching a controlling terminal | 18 |
 | Cross-session read attempt | Returns hard denial (`-EIO`/equivalent), never falls through permissive bootstrap path | 19 |
 | Same-session background read | Returns `SIGTTIN`, not data | 19 |
 | Same-session background write with `TOSTOP` | Returns `SIGTTOU`, not silent success | 19 |
@@ -2427,7 +2444,7 @@ just test           # Must pass existing test harness + all new phase tests
 - Mouse/pointer events still work (input_event.rs unchanged for mouse)
 - Pipe operations still work
 - File I/O still works (non-console FDs unchanged)
-- All existing 1090+ tests still pass
+- All existing 1090+ tests still pass (`just test` green after Phase 18)
 - No new compiler warnings introduced
 - `/dev/tty` still resolves to controlling terminal
 - Existing VMIN/VTIME behavior unchanged

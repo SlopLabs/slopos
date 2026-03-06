@@ -56,6 +56,24 @@ fn runtime_current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyInde
     unsafe { (*task).controlling_tty }
 }
 
+fn runtime_set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool {
+    let task = scheduler::scheduler_get_current_task();
+    if task.is_null() {
+        return false;
+    }
+    unsafe {
+        (*task).controlling_tty = tty;
+    }
+    true
+}
+
+fn runtime_clear_session_controlling_tty(
+    session_id: u32,
+    tty: slopos_abi::syscall::TtyIndex,
+) -> usize {
+    task::task_clear_controlling_tty_for_session(session_id, tty)
+}
+
 fn runtime_unblock_task(task: DriverTaskHandle) -> i32 {
     scheduler::unblock_task(handle_to_task(task))
 }
@@ -163,6 +181,8 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     current_task_pgid: runtime_current_task_pgid,
     current_task_sid: runtime_current_task_sid,
     current_task_controlling_tty: runtime_current_task_controlling_tty,
+    set_current_task_controlling_tty: runtime_set_current_task_controlling_tty,
+    clear_session_controlling_tty: runtime_clear_session_controlling_tty,
     block_current_task: scheduler::block_current_task,
     unblock_task: runtime_unblock_task,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,

@@ -3,6 +3,7 @@ use core::mem;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
+use slopos_abi::syscall::TtyIndex;
 use slopos_lib::IrqMutex;
 
 use slopos_lib::cpu;
@@ -1263,6 +1264,43 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
     for task in task_ptrs.iter().flatten() {
         cb(*task, context);
     }
+}
+
+struct ClearControllingTtyContext {
+    session_id: u32,
+    tty: TtyIndex,
+    cleared: usize,
+}
+
+fn clear_controlling_tty_for_session_task(task: *mut Task, context: *mut c_void) {
+    if task.is_null() || context.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &mut *context.cast::<ClearControllingTtyContext>() };
+    unsafe {
+        if (*task).sid == ctx.session_id && (*task).controlling_tty == Some(ctx.tty) {
+            (*task).controlling_tty = None;
+            ctx.cleared = ctx.cleared.saturating_add(1);
+        }
+    }
+}
+
+pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) -> usize {
+    if session_id == 0 {
+        return 0;
+    }
+
+    let mut ctx = ClearControllingTtyContext {
+        session_id,
+        tty,
+        cleared: 0,
+    };
+    task_iterate_active(
+        Some(clear_controlling_tty_for_session_task),
+        (&mut ctx as *mut ClearControllingTtyContext).cast(),
+    );
+    ctx.cleared
 }
 pub fn task_get_current_id() -> u32 {
     let current = scheduler::scheduler_get_current_task();

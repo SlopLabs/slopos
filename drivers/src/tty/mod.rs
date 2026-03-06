@@ -35,8 +35,8 @@ use core::sync::atomic::Ordering;
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{TOSTOP, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
-    current_task_id, current_task_pgid, current_task_sid, register_idle_wakeup_callback,
-    scheduler_is_enabled, signal_process_group, signal_session,
+    clear_session_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
+    register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, signal_session,
 };
 
 use self::driver::{TtyDriverKind, write_driver_unlocked};
@@ -259,10 +259,7 @@ fn notify_input_ready(idx: TtyIndex) {
     TTY_INPUT_WAITERS[slot].wake_one();
 }
 
-/// Re-export `auto_attach_session` from `session.rs` (Phase 14 extraction).
-/// Kept module-private — only `read()` in this module calls it.
 pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc};
-use self::session::auto_attach_session;
 
 /// Read cooked data from a specific TTY.
 ///
@@ -279,7 +276,7 @@ pub fn read_with_attach(
     idx: TtyIndex,
     buf: &mut [u8],
     nonblock: bool,
-    auto_attach: bool,
+    _auto_attach: bool,
 ) -> Result<usize, TtyError> {
     if buf.is_empty() {
         return Ok(0);
@@ -294,10 +291,6 @@ pub fn read_with_attach(
     let caller_pgid = current_task_pgid();
     let caller_sid = current_task_sid();
     let enforce_access = task_id != 0;
-
-    if enforce_access && auto_attach {
-        auto_attach_session(idx, task_id, caller_pgid, caller_sid);
-    }
 
     let mut total = 0usize;
 
@@ -925,6 +918,34 @@ pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
     }
 }
 
+pub fn acquire_controlling_terminal(
+    idx: TtyIndex,
+    session_leader: u32,
+    session_pgid: u32,
+) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let mut guard = TTY_SLOTS[slot].lock();
+    let tty = match guard.as_mut() {
+        Some(tty) => tty,
+        None => return Err(TtyError::NotAllocated),
+    };
+
+    let current_sid = tty.session.session_id_raw();
+    if current_sid != 0 && current_sid != session_leader {
+        return Err(TtyError::PermissionDenied);
+    }
+
+    if current_sid == 0 {
+        tty.session.attach(session_leader, session_pgid);
+    }
+
+    Ok(())
+}
+
 /// Detach the controlling session from a TTY.
 ///
 /// Clears session leader, session ID, and foreground pgrp.
@@ -938,6 +959,26 @@ pub fn detach_session(idx: TtyIndex) {
     if let Some(tty) = guard.as_mut() {
         tty.session.detach();
     }
+}
+
+pub fn release_controlling_terminal(idx: TtyIndex, session_id: u32) -> Result<bool, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let mut guard = TTY_SLOTS[slot].lock();
+    let tty = match guard.as_mut() {
+        Some(tty) => tty,
+        None => return Err(TtyError::NotAllocated),
+    };
+
+    if tty.session.session_id_raw() != session_id {
+        return Ok(false);
+    }
+
+    tty.session.detach();
+    Ok(true)
 }
 
 /// Re-export `detach_session_by_id` from `session.rs` (Phase 14 extraction).
@@ -1035,6 +1076,7 @@ pub fn hangup(idx: TtyIndex) {
     // Phase 15: Signal the entire session (not just fg_pgrp) so that all
     // processes in the session receive SIGHUP + SIGCONT on hangup.
     if session_id != 0 {
+        let _ = clear_session_controlling_tty(session_id, idx);
         let _ = signal_session(session_id, SIGHUP);
         let _ = signal_session(session_id, SIGCONT);
     }

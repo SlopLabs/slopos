@@ -203,6 +203,25 @@ fn tty_attach_session_adapter(tty_index: TtyIndex, leader_pid: u32, leader_pgid:
     tty::attach_session(tty_index, leader_pid, leader_pgid)
 }
 
+fn tty_acquire_controlling_terminal_adapter(
+    tty_index: TtyIndex,
+    session_leader: u32,
+    session_pgid: u32,
+) -> i32 {
+    match tty::acquire_controlling_terminal(tty_index, session_leader, session_pgid) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn tty_release_controlling_terminal_adapter(tty_index: TtyIndex, session_id: u32) -> i32 {
+    match tty::release_controlling_terminal(tty_index, session_id) {
+        Ok(true) => 0,
+        Ok(false) => -1,
+        Err(_) => -1,
+    }
+}
+
 fn tty_open_ref_adapter(tty_index: TtyIndex) -> i32 {
     match tty::open_ref(tty_index) {
         Ok(n) => n as i32,
@@ -272,6 +291,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     detach_session_by_id: tty_detach_session_by_id_adapter,
     write_bytes: tty_write_bytes_adapter,
     attach_session: tty_attach_session_adapter,
+    acquire_controlling_terminal: tty_acquire_controlling_terminal_adapter,
+    release_controlling_terminal: tty_release_controlling_terminal_adapter,
     open_ref: tty_open_ref_adapter,
     close_ref: tty_close_ref_adapter,
     hangup: tty_hangup_adapter,

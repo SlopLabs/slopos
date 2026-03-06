@@ -12,7 +12,8 @@ use slopos_abi::syscall::{
 
 use slopos_lib::kernel_services::driver_runtime::{
     DriverTaskHandle, block_current_task, current_task, current_task_controlling_tty,
-    scheduler_is_enabled, unblock_task,
+    current_task_id, current_task_pgid, current_task_sid, scheduler_is_enabled,
+    set_current_task_controlling_tty, unblock_task,
 };
 use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_lib::kernel_services::syscall_services::tty;
@@ -579,6 +580,26 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
     let _ = tty::open_ref(TtyIndex(0));
 }
 
+fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u32) {
+    if (flags & O_NOCTTY as u32) != 0 {
+        return;
+    }
+
+    let task_id = current_task_id();
+    let sid = current_task_sid();
+    let pgid = current_task_pgid();
+    if task_id == 0 || sid == 0 || sid != task_id {
+        return;
+    }
+    if current_task_controlling_tty().is_some() {
+        return;
+    }
+
+    if tty::acquire_controlling_terminal(tty_idx, sid, pgid) == 0 {
+        let _ = set_current_task_controlling_tty(Some(tty_idx));
+    }
+}
+
 pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
     if process_id == INVALID_PROCESS_ID {
         return 0;
@@ -833,6 +854,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
             }
 
             drop(guard);
+            maybe_acquire_controlling_tty_on_open(slave_idx, flags);
             slot_idx as c_int
         });
     }
@@ -963,15 +985,8 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
 
             if let Some(tty_idx) = desc.tty_index {
                 let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
-                let auto_attach = (desc.flags & O_NOCTTY as u32) == 0;
                 drop(guard);
-                return tty::read_cooked_with_attach(
-                    tty_idx,
-                    buffer as *mut u8,
-                    count,
-                    is_nonblock,
-                    auto_attach,
-                );
+                return tty::read_cooked(tty_idx, buffer as *mut u8, count, is_nonblock);
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {
