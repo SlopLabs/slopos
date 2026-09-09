@@ -10,7 +10,9 @@ use slopos_ostd::klog_info;
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 
-use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
+use super::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_STRLEN, EXEC_MAX_PATH, ExecError, INIT_PATH};
+
+static ARG_FILLER: [u8; EXEC_MAX_ARG_STRLEN] = [b'x'; EXEC_MAX_ARG_STRLEN];
 
 const MINIMAL_ELF_SIZE: usize = 64;
 
@@ -93,7 +95,7 @@ pub fn test_elf_invalid_magic() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[0] = 0x00;
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted invalid magic");
         return TestResult::Fail;
@@ -105,7 +107,7 @@ pub fn test_elf_wrong_class() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[4] = 1; // 32-bit instead of 64-bit
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted 32-bit ELF");
         return TestResult::Fail;
@@ -117,7 +119,7 @@ pub fn test_elf_wrong_endian() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[5] = 2; // Big endian
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted big-endian ELF");
         return TestResult::Fail;
@@ -129,7 +131,7 @@ pub fn test_elf_wrong_machine() -> TestResult {
     let mut elf = create_minimal_elf_header();
     elf[18..20].copy_from_slice(&0x03u16.to_le_bytes()); // i386 instead of x86_64
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted i386 ELF on x86_64");
         return TestResult::Fail;
@@ -140,7 +142,7 @@ pub fn test_elf_wrong_machine() -> TestResult {
 pub fn test_elf_truncated_header() -> TestResult {
     let elf = [0x7F, b'E', b'L', b'F', 2, 1, 1, 0];
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted truncated ELF");
         return TestResult::Fail;
@@ -151,7 +153,7 @@ pub fn test_elf_truncated_header() -> TestResult {
 pub fn test_elf_empty_file() -> TestResult {
     let elf: [u8; 0] = [];
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         klog_info!("EXEC_TEST: BUG - ElfValidator accepted empty file");
         return TestResult::Fail;
@@ -162,7 +164,7 @@ pub fn test_elf_empty_file() -> TestResult {
 pub fn test_elf_no_load_segments() -> TestResult {
     let elf = create_minimal_elf_header();
 
-    let validator = match ElfValidator::new(&elf) {
+    let validator = match ElfValidator::new(&elf, elf.len() as u64) {
         Ok(v) => v,
         Err(_) => return TestResult::Pass,
     };
@@ -187,7 +189,7 @@ pub fn test_elf_segment_overflow_vaddr() -> TestResult {
         120,
     );
 
-    let validator = match ElfValidator::new(&elf) {
+    let validator = match ElfValidator::new(&elf, elf.len() as u64) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
         Err(_) => return TestResult::Pass,
     };
@@ -207,7 +209,7 @@ pub fn test_elf_segment_filesz_greater_than_memsz() -> TestResult {
         120,
     );
 
-    let validator = match ElfValidator::new(&elf) {
+    let validator = match ElfValidator::new(&elf, elf.len() as u64) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
         Err(_) => return TestResult::Pass,
     };
@@ -227,7 +229,7 @@ pub fn test_elf_segment_offset_overflow() -> TestResult {
         u64::MAX, // offset that would overflow
     );
 
-    let validator = match ElfValidator::new(&elf) {
+    let validator = match ElfValidator::new(&elf, elf.len() as u64) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
         Err(_) => return TestResult::Pass,
     };
@@ -248,7 +250,7 @@ pub fn test_elf_kernel_address_entry() -> TestResult {
         120,         // offset (past headers)
     );
 
-    let validator = match ElfValidator::new(&elf) {
+    let validator = match ElfValidator::new(&elf, elf.len() as u64) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
         Err(_) => return TestResult::Pass,
     };
@@ -280,22 +282,20 @@ pub fn test_path_empty() -> TestResult {
     TestResult::Pass
 }
 
+/// A kernel-half `e_entry` is the one address the loader still folds, and it is
+/// the only value that reaches the translation from an untrusted header.
 pub fn test_translate_address_kernel_to_user() -> TestResult {
     use slopos_mm::process_vm::process_vm_translate_elf_address;
 
-    let kernel_addr = 0xFFFF_FFFF_8000_1000u64;
-    let min_vaddr = 0xFFFF_FFFF_8000_0000u64;
     let code_base = PROCESS_CODE_START_VA;
-
-    let translated = process_vm_translate_elf_address(kernel_addr, min_vaddr, code_base);
+    let translated = process_vm_translate_elf_address(0xFFFF_FFFF_8000_1000u64, code_base);
 
     if translated >= 0xFFFF_8000_0000_0000 {
         klog_info!("EXEC_TEST: BUG - translate_address didn't move kernel addr to user space");
         return TestResult::Fail;
     }
-
-    if translated < code_base {
-        klog_info!("EXEC_TEST: BUG - translated address below code base");
+    if translated != code_base + 0x1000 {
+        klog_info!("EXEC_TEST: BUG - kernel addr did not fold to its offset in the image");
         return TestResult::Fail;
     }
 
@@ -305,14 +305,11 @@ pub fn test_translate_address_kernel_to_user() -> TestResult {
 pub fn test_translate_address_user_passthrough() -> TestResult {
     use slopos_mm::process_vm::process_vm_translate_elf_address;
 
-    let user_addr = 0x0000_0040_0000_1000u64;
-    let min_vaddr = 0x0000_0040_0000_0000u64;
-    let code_base = PROCESS_CODE_START_VA;
+    let user_addr = PROCESS_CODE_START_VA + 0x1000;
+    let translated = process_vm_translate_elf_address(user_addr, PROCESS_CODE_START_VA);
 
-    let translated = process_vm_translate_elf_address(user_addr, min_vaddr, code_base);
-
-    if translated >= 0xFFFF_8000_0000_0000 {
-        klog_info!("EXEC_TEST: BUG - user address translated to kernel space");
+    if translated != user_addr {
+        klog_info!("EXEC_TEST: BUG - a user address was translated");
         return TestResult::Fail;
     }
 
@@ -347,7 +344,7 @@ pub fn test_elf_huge_segment_count() -> TestResult {
     // e_phnum = 0xFFFF (maximum)
     elf[56..58].copy_from_slice(&0xFFFFu16.to_le_bytes());
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if result.is_ok() {
         let validator = result.unwrap();
         if validator.validate_load_segments().is_ok() {
@@ -364,28 +361,12 @@ pub fn test_elf_phentsize_mismatch() -> TestResult {
     elf[54..56].copy_from_slice(&1u16.to_le_bytes());
     elf[56..58].copy_from_slice(&1u16.to_le_bytes()); // 1 segment
 
-    let result = ElfValidator::new(&elf);
+    let result = ElfValidator::new(&elf, elf.len() as u64);
     if let Ok(validator) = result {
         if validator.validate_load_segments().is_ok() {
             klog_info!("EXEC_TEST: BUG - Accepted ELF with invalid phentsize");
             return TestResult::Fail;
         }
-    }
-    TestResult::Pass
-}
-
-pub fn test_exec_max_size_boundary() -> TestResult {
-    let max_size = EXEC_MAX_ELF_SIZE;
-    let over_max = EXEC_MAX_ELF_SIZE + 1;
-
-    if max_size >= over_max {
-        klog_info!("EXEC_TEST: Test constant error");
-        return TestResult::Fail;
-    }
-
-    if max_size == 0 {
-        klog_info!("EXEC_TEST: BUG - EXEC_MAX_ELF_SIZE is zero");
-        return TestResult::Fail;
     }
     TestResult::Pass
 }
@@ -694,6 +675,192 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
     TestResult::Pass
 }
 
+/// The argv limit is bytes, not count: one 8-byte padding step past
+/// [`EXEC_MAX_ARG_BYTES`] is refused, and landing exactly on it is accepted.
+pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
+    const BUDGET: usize = EXEC_MAX_ARG_BYTES;
+    const LONG_LEN: usize = EXEC_MAX_ARG_STRLEN - 1;
+    const LONG_COUNT: usize = 31;
+    // What 31 maximum-length strings leave, spent to the last byte by one more:
+    // its cost is the padded `len + 1` plus its 8-byte pointer.
+    const TAIL_COST: usize =
+        BUDGET - super::EXEC_ARG_STACK_FIXED - LONG_COUNT * (EXEC_MAX_ARG_STRLEN + 8);
+    const TAIL_LEN: usize = TAIL_COST - 8 - 1;
+
+    // Heap-backed: 32 `&[u8]` slots is 512 bytes against the 2 KiB stack gate.
+    let mut args = match slopos_ostd::KVec::<&[u8]>::with_capacity(LONG_COUNT + 1) {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
+    for _ in 0..LONG_COUNT {
+        if args.push(&ARG_FILLER[..LONG_LEN]).is_err() {
+            return TestResult::Fail;
+        }
+    }
+    if args.push(&ARG_FILLER[..TAIL_LEN + 1]).is_err() {
+        return TestResult::Fail;
+    }
+
+    let _scope = KernelTestScope::enter();
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+    let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    };
+
+    let exec_info = ElfExecInfo {
+        entry: 0x401000,
+        phdr_addr: 0x402000,
+        phent_size: 56,
+        phnum: 1,
+        tls_filesz: 0,
+        tls_memsz: 0,
+        tls_align: 0,
+        tls_vaddr: 0,
+        tls_tp: 0,
+    };
+
+    match super::setup_user_stack(table, Some(args.as_slice()), None, &exec_info) {
+        Err(ExecError::TooManyArgs) => {}
+        other => {
+            klog_info!(
+                "EXEC_TEST: over-budget argv not refused: ok={}",
+                other.is_ok()
+            );
+            process_vm::destroy_process_vm(resolve_pid(pid));
+            return TestResult::Fail;
+        }
+    }
+
+    args[LONG_COUNT] = &ARG_FILLER[..TAIL_LEN];
+    let sp = match super::setup_user_stack(table, Some(args.as_slice()), None, &exec_info) {
+        Ok(v) => v,
+        Err(_) => {
+            klog_info!("EXEC_TEST: argv exactly at the byte budget was refused");
+            process_vm::destroy_process_vm(resolve_pid(pid));
+            return TestResult::Fail;
+        }
+    };
+
+    let argc = read_user_u64(pid, sp).unwrap_or(u64::MAX);
+    if argc != args.len() as u64 {
+        klog_info!(
+            "EXEC_TEST: at-budget argc is {}, expected {}",
+            argc,
+            args.len()
+        );
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    }
+
+    process_vm::destroy_process_vm(resolve_pid(pid));
+    TestResult::Pass
+}
+
+/// Argument *count* is no longer capped: 96 arguments, three times the retired
+/// limit, arrive with their strings and their order intact.
+pub fn test_setup_user_stack_high_argument_count() -> TestResult {
+    const HIGH_ARG_COUNT: usize = 96;
+
+    let mut storage = match slopos_ostd::KVec::<[u8; 2]>::with_capacity(HIGH_ARG_COUNT) {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
+    for i in 0..HIGH_ARG_COUNT {
+        if storage
+            .push([b'a' + (i / 26) as u8, b'a' + (i % 26) as u8])
+            .is_err()
+        {
+            return TestResult::Fail;
+        }
+    }
+    let mut args = match slopos_ostd::KVec::<&[u8]>::with_capacity(HIGH_ARG_COUNT) {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
+    for entry in storage.as_slice().iter() {
+        if args.push(&entry[..]).is_err() {
+            return TestResult::Fail;
+        }
+    }
+
+    let _scope = KernelTestScope::enter();
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+    let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    };
+
+    let exec_info = ElfExecInfo {
+        entry: 0x401000,
+        phdr_addr: 0x402000,
+        phent_size: 56,
+        phnum: 1,
+        tls_filesz: 0,
+        tls_memsz: 0,
+        tls_align: 0,
+        tls_vaddr: 0,
+        tls_tp: 0,
+    };
+
+    let sp = match super::setup_user_stack(table, Some(args.as_slice()), None, &exec_info) {
+        Ok(v) => v,
+        Err(_) => {
+            klog_info!(
+                "EXEC_TEST: setup_user_stack refused {} args",
+                HIGH_ARG_COUNT
+            );
+            process_vm::destroy_process_vm(resolve_pid(pid));
+            return TestResult::Fail;
+        }
+    };
+
+    let argc = read_user_u64(pid, sp).unwrap_or(u64::MAX);
+    if argc != HIGH_ARG_COUNT as u64 {
+        klog_info!("EXEC_TEST: argc is {}, expected {}", argc, HIGH_ARG_COUNT);
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    }
+
+    for (i, expected) in args.as_slice().iter().enumerate() {
+        let ptr = match read_user_u64(pid, sp + 8 * (1 + i as u64)) {
+            Some(p) if p != 0 => p,
+            _ => {
+                klog_info!("EXEC_TEST: argv[{}] pointer is null or unreadable", i);
+                process_vm::destroy_process_vm(resolve_pid(pid));
+                return TestResult::Fail;
+            }
+        };
+        match read_user_cstr(pid, ptr, 8) {
+            Some(actual) if actual.as_slice() == *expected => {}
+            _ => {
+                klog_info!("EXEC_TEST: argv[{}] content mismatch at {:#x}", i, ptr);
+                process_vm::destroy_process_vm(resolve_pid(pid));
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    let argv_null = read_user_u64(pid, sp + 8 * (1 + HIGH_ARG_COUNT as u64)).unwrap_or(u64::MAX);
+    if argv_null != 0 {
+        klog_info!(
+            "EXEC_TEST: argv null terminator missing after {} args",
+            HIGH_ARG_COUNT
+        );
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    }
+
+    process_vm::destroy_process_vm(resolve_pid(pid));
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_elf_invalid_magic, suite = exec);
 slopos_testing::stest!(name = test_elf_wrong_class, suite = exec);
 slopos_testing::stest!(name = test_elf_wrong_endian, suite = exec);
@@ -718,7 +885,6 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_elf_huge_segment_count, suite = exec);
 slopos_testing::stest!(name = test_elf_phentsize_mismatch, suite = exec);
-slopos_testing::stest!(name = test_exec_max_size_boundary, suite = exec);
 slopos_testing::stest!(name = test_init_path_is_absolute, suite = exec);
 slopos_testing::stest!(name = test_init_path_within_exec_limit, suite = exec);
 slopos_testing::stest!(name = test_setup_user_stack_contract_layout, suite = exec);
@@ -728,6 +894,14 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_setup_user_stack_argv_string_content,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_setup_user_stack_byte_budget_boundary,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_setup_user_stack_high_argument_count,
     suite = exec
 );
 

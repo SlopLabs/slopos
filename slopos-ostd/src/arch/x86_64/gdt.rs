@@ -381,8 +381,9 @@ pub enum IstSlot {
     StackFault = 2,
     /// IST3 — bound to #GP.
     GeneralProtection = 3,
-    /// IST4 — bound to #PF.
-    PageFault = 4,
+    /// IST4 — unbound. #PF has no IST: a user fault must be able to block, and
+    /// switching away from a per-CPU IST stack strands the suspended frame.
+    Reserved4 = 4,
     /// IST5 — bound to keyboard IRQ.
     KeyboardIrq = 5,
     /// IST6 — bound to mouse IRQ.
@@ -407,7 +408,7 @@ impl IstSlot {
             1 => Some(IstSlot::DoubleFault),
             2 => Some(IstSlot::StackFault),
             3 => Some(IstSlot::GeneralProtection),
-            4 => Some(IstSlot::PageFault),
+            4 => Some(IstSlot::Reserved4),
             5 => Some(IstSlot::KeyboardIrq),
             6 => Some(IstSlot::MouseIrq),
             7 => Some(IstSlot::Reserved7),
@@ -420,7 +421,7 @@ impl IstSlot {
             IstSlot::DoubleFault => "DoubleFault",
             IstSlot::StackFault => "StackFault",
             IstSlot::GeneralProtection => "GeneralProtection",
-            IstSlot::PageFault => "PageFault",
+            IstSlot::Reserved4 => "Reserved4",
             IstSlot::KeyboardIrq => "KeyboardIrq",
             IstSlot::MouseIrq => "MouseIrq",
             IstSlot::Reserved7 => "Reserved7",
@@ -452,7 +453,7 @@ mod tests {
     #[test]
     fn ist_slot_indexing() {
         assert_eq!(IstSlot::DoubleFault.as_index(), 1);
-        assert_eq!(IstSlot::PageFault.as_index(), 4);
+        assert_eq!(IstSlot::Reserved4.as_index(), 4);
         assert_eq!(IstSlot::Reserved7.as_index(), 7);
         assert_eq!(IstSlot::DoubleFault.as_tss_offset(), 0);
         assert_eq!(IstSlot::Reserved7.as_tss_offset(), 6);

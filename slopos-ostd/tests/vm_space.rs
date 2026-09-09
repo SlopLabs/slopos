@@ -1025,3 +1025,37 @@ fn prepopulate_kernel_half_links_every_top_level_entry() {
     let again = slopos_ostd::sync::run_bsp_init_for_test(|t| prepopulate_kernel_half(t).unwrap());
     assert_eq!(again, 0, "prepopulation is idempotent");
 }
+
+/// A page-table frame the ledger never gets back is a leak nothing else
+/// reports: the root's `KernelMeta` row drifts up unattributably.
+#[test]
+fn page_table_frames_are_charged_and_given_back() {
+    let _g = setup();
+    let kernelmeta = || {
+        slopos_ostd::process::quota::stats(
+            slopos_ostd::process::quota::root(),
+            slopos_abi::quota::ResourceKind::KernelMeta,
+        )
+        .map_or(0, |s| s.used)
+    };
+    let baseline = kernelmeta();
+
+    let mut space = VmSpace::new().expect("VmSpace::new");
+    assert_eq!(kernelmeta(), baseline + 1, "the PML4 is one charged frame");
+
+    let start = VirtAddr::new(0x0000_0006_0000_0000);
+    let end = VirtAddr::new(0x0000_0006_0000_1000);
+    {
+        let mut cur = space.cursor_mut(start..end).unwrap();
+        cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW)
+            .unwrap();
+    }
+    assert_eq!(
+        kernelmeta(),
+        baseline + 4,
+        "PML4 + PDPT + PD + PT, and nothing for the leaf"
+    );
+
+    drop(space);
+    assert_eq!(kernelmeta(), baseline, "every page-table charge came back");
+}

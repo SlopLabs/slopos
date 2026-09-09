@@ -35,6 +35,17 @@ pub trait FileMapOps: Sync {
     /// Complete whatever the releases queued. Blocks; the caller must hold no
     /// lock and must be in a context that may sleep.
     fn drain(&self);
+
+    /// Populate one page of the set — `page_index` absolute within the file —
+    /// and answer its frame with one extra page reference taken, which the
+    /// caller balances with [`release`](Self::release).
+    ///
+    /// Blocks, so the caller must have dropped the per-process lock.
+    fn fault_page(
+        &self,
+        map: FileMapRef,
+        page_index: u64,
+    ) -> Result<slopos_abi::addr::PhysAddr, i32>;
 }
 
 static FILEMAP_OPS: SpinLock<Option<&'static dyn FileMapOps>> =
@@ -73,5 +84,17 @@ pub fn filemap_release(map: FileMapRef, pages: u32) {
 pub fn filemap_drain() {
     if let Some(o) = ops() {
         o.drain();
+    }
+}
+
+/// Populate one page of a mapped file. Blocks, so the caller must have dropped
+/// the per-process lock. `ENODEV` when no registry is published.
+pub fn filemap_fault_page(
+    map: FileMapRef,
+    page_index: u64,
+) -> Result<slopos_abi::addr::PhysAddr, i32> {
+    match ops() {
+        Some(o) => o.fault_page(map, page_index),
+        None => Err(slopos_abi::Errno::ENODEV.raw()),
     }
 }

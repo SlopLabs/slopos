@@ -15,24 +15,29 @@ use crate::panic::set_panic_cpu_state;
 /// Retire this CPU after a fatal user-mode exception. If no context switch
 /// happens, parks in a halt loop with interrupts on so IPIs are still serviced.
 ///
+/// `on_ist` says whether the calling handler runs on a per-CPU IST stack; #PF
+/// does not, and unwinds as an ordinary task frame.
+///
 /// # Safety invariant
 /// The caller must be handling a user-mode exception (CS RPL == 3).
 /// This function never returns.
-fn retire_faulted_cpu(task_ref: TaskRef, reason: TaskFaultReason) -> ! {
+fn retire_faulted_cpu(task_ref: TaskRef, reason: TaskFaultReason, on_ist: bool) -> ! {
     let tid = task_ref.record_user_fault_exit(reason);
     task_terminate(tid);
     // Release the registry upgrade before the diverging switch tail.
     drop(task_ref);
-    // `schedule()` never returns here, so this handler's exception data-stack
-    // depth would leak and accumulate across fatal user faults. Re-prime with a
-    // naked store: an instrumented setter would resolve this slot as its own
-    // data-SP and undo the write on return.
-    let dstack_top = crate::ist_stacks::exc_dstack_top_current_cpu();
-    slopos_arch::pcr::reset_ist_unsafe_sp(dstack_top);
-    // This handler diverges into `schedule()`, so the exception-entry preempt
-    // hold from the IST dispatcher would leak, leaving the next task's preempt
-    // count stuck at >=1.
-    slopos_ostd::cpu::preempt::release_diverging_exception_hold();
+    if on_ist {
+        // `schedule()` never returns here, so this handler's exception
+        // data-stack depth would leak and accumulate across fatal user faults.
+        // Re-prime with a naked store: an instrumented setter would resolve this
+        // slot as its own data-SP and undo the write on return.
+        let dstack_top = crate::ist_stacks::exc_dstack_top_current_cpu();
+        slopos_arch::pcr::reset_ist_unsafe_sp(dstack_top);
+        // This handler diverges into `schedule()`, so the exception-entry preempt
+        // hold from the IST dispatcher would leak, leaving the next task's preempt
+        // count stuck at >=1.
+        slopos_ostd::cpu::preempt::release_diverging_exception_hold();
+    }
     schedule();
     let _ = activate_post_user_fault();
     cpu::enable_interrupts();
@@ -69,6 +74,7 @@ pub(crate) fn resolve_user_fault_task() -> Option<TaskRef> {
 pub(crate) fn terminate_user_task(
     reason: TaskFaultReason,
     frame: &InterruptFrame,
+    fault_addr: u64,
     detail: &'static CStr,
 ) {
     let Some(task_ref) = resolve_user_fault_task() else {
@@ -85,7 +91,7 @@ pub(crate) fn terminate_user_task(
     };
     let tid = task_ref.task_id;
     let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
-    let cr2 = cpu::read_cr2();
+    let cr2 = fault_addr;
     let (rip, rsp, vec, err) = (frame.rip, frame.rsp, frame.vector, frame.error_code);
     let name_raw = task_ref.name_bytes();
     let name_len = name_raw
@@ -111,7 +117,8 @@ pub(crate) fn terminate_user_task(
         flags
     );
     kdiag_dump_interrupt_frame(frame as *const _);
-    retire_faulted_cpu(task_ref, reason);
+    let on_ist = slopos_ostd::irq::vector_uses_ist((vec & 0xFF) as u8);
+    retire_faulted_cpu(task_ref, reason, on_ist);
 }
 
 pub(crate) fn panic_with_frame(message: &str, frame: *mut InterruptFrame) {

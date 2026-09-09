@@ -116,7 +116,7 @@ fn irq_entry_guard_uses_leave_quiet_for_ist_vector() {
     let _g = serial();
     install_recording();
     {
-        let _h = IrqEntryGuard::<14>::enter(); // page fault, IST vector
+        let _h = IrqEntryGuard::<13>::enter(); // #GP, an IST vector
         assert_eq!(RECORDING.enter.load(StdOrd::Relaxed), 1);
     }
     assert_eq!(RECORDING.leave.load(StdOrd::Relaxed), 0);

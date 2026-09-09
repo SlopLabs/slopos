@@ -14,8 +14,7 @@ use crate::page_fault::{
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{
-    pack_process_vm_handle, process_vm_alloc, process_vm_brk, process_vm_get_vm_space,
-    process_vm_handle,
+    pack_process_vm_handle, process_vm_alloc, process_vm_get_vm_space, process_vm_handle,
 };
 use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::user_mappings::vm_space_mut_spins_taken;
@@ -244,23 +243,28 @@ pub fn test_user_fault_dispatch_resolves_after_the_reader_drops() -> TestResult 
     pass!()
 }
 
+/// `map_user_range` is the one remaining eager multi-page mapper, and an `Err`
+/// from it must leave nothing mapped, or the rollback is a leak.
 pub fn test_map_user_range_leaves_nothing_mapped_on_would_block() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
-    let base = process_vm_brk(vm.process, 0);
-    assert_test!(base != 0, "initial brk is 0");
-    let target = base + 2 * PAGE_SIZE_4KB;
+    let start = crate::memory_layout_defs::PROCESS_MMAP_START_VA;
+    let end = start + 2 * PAGE_SIZE_4KB;
+    let flags = crate::paging_defs::PageFlags::USER_RW.bits();
 
     let Some(reader) = process_vm_get_vm_space(vm.process) else {
         return fail!("clone the address space");
     };
-    let grown = process_vm_brk(vm.process, target);
-    let first = vm.virt_to_phys(base);
-    let second = vm.virt_to_phys(base + PAGE_SIZE_4KB);
+    let mapped = crate::process_vm::process_vm_map_range_for_test(vm.process, start, end, flags);
+    let first = vm.virt_to_phys(start);
+    let second = vm.virt_to_phys(start + PAGE_SIZE_4KB);
     drop(reader);
 
-    assert_test!(grown == 0, "brk grew while a reader held the address space");
+    assert_test!(
+        mapped.is_err(),
+        "the range mapped while a reader held the address space"
+    );
     assert_test!(
         first.is_null() && second.is_null(),
         "a failed multi-page map left part of the range mapped"

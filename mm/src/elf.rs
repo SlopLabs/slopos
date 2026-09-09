@@ -53,10 +53,28 @@ pub const PF_R: u32 = 0x4;
 /// DoS bound on the number of program headers parsed.
 pub const MAX_PROGRAM_HEADERS: usize = 128;
 
-pub const MAX_LOAD_SEGMENTS: usize = 16;
+/// Bounds the validator's out-slice; not a policy about how many a program may
+/// have.
+pub const MAX_LOAD_SEGMENTS: usize = 64;
 
 /// DoS bound on the total mapped size of an image.
-pub const MAX_TOTAL_MAPPED_SIZE: u64 = 256 * 1024 * 1024;
+///
+/// The mapped *extent*. What bounds the frames the loader allocates is the
+/// file's own size plus [`MAX_TOTAL_ZERO_FILL_SIZE`].
+pub const MAX_TOTAL_MAPPED_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+
+/// DoS bound on how much of an image is `p_memsz` past `p_filesz` — its
+/// `.bss`, which the loader allocates and zeroes rather than reading.
+///
+/// Load-bearing because the loader is eager: without it a one-page ELF
+/// declaring a 2 GiB `PT_LOAD` would have an unprivileged `exec` memset half a
+/// million frames under the per-process lock. Set to what the whole-image
+/// ceiling used to permit, so that amplification is unchanged.
+pub const MAX_TOTAL_ZERO_FILL_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Bytes of the file the validator needs in hand: the ELF header plus the
+/// largest program-header table it will parse.
+pub const ELF_HEADER_WINDOW: usize = 64 + MAX_PROGRAM_HEADERS * 56;
 
 pub const MIN_ELF_SIZE: usize = 64;
 
@@ -86,6 +104,7 @@ pub enum ElfError {
     NoLoadSegments,
     NullPointer,
     DynamicNotSupported,
+    UnsupportedLoadBase,
 }
 
 impl fmt::Display for ElfError {
@@ -115,6 +134,9 @@ impl fmt::Display for ElfError {
             Self::NoLoadSegments => write!(f, "no PT_LOAD segments found"),
             Self::NullPointer => write!(f, "null pointer"),
             Self::DynamicNotSupported => write!(f, "dynamic linking (PT_INTERP) not supported"),
+            Self::UnsupportedLoadBase => {
+                write!(f, "image is not linked at the process code base")
+            }
         }
     }
 }
@@ -387,20 +409,26 @@ impl ValidatedSegment {
 
 /// Performs every security check on an ELF file before returning structures
 /// that are safe to use for loading.
+///
+/// `data` is only the header window; segment file extents are checked against
+/// `file_len`, so a toolchain-sized image is never staged to be validated.
 pub struct ElfValidator<'a> {
     data: &'a [u8],
+    file_len: u64,
     header: Elf64Header,
     load_base: u64,
 }
 
 impl<'a> ElfValidator<'a> {
-    /// Validates the ELF header immediately.
-    pub fn new(data: &'a [u8]) -> ElfResult<Self> {
+    /// Validates the ELF header immediately. `data` must cover the header and
+    /// the program-header table; `file_len` is the whole file's size.
+    pub fn new(data: &'a [u8], file_len: u64) -> ElfResult<Self> {
         let header = Elf64Header::parse(data)?;
         header.validate_phdr_table(data.len())?;
 
         Ok(Self {
             data,
+            file_len,
             header,
             load_base: 0,
         })
@@ -428,6 +456,7 @@ impl<'a> ElfValidator<'a> {
         }
         let mut count = 0usize;
         let mut total_size: u64 = 0;
+        let mut total_zero_fill: u64 = 0;
 
         for i in 0..self.header.e_phnum as usize {
             let phdr = self.get_program_header(i)?;
@@ -448,6 +477,14 @@ impl<'a> ElfValidator<'a> {
                 .ok_or(ElfError::TotalSizeExceeded)?;
 
             if total_size > MAX_TOTAL_MAPPED_SIZE {
+                return Err(ElfError::TotalSizeExceeded);
+            }
+
+            total_zero_fill = total_zero_fill
+                .checked_add(validated.mem_size.saturating_sub(validated.file_size))
+                .ok_or(ElfError::TotalSizeExceeded)?;
+
+            if total_zero_fill > MAX_TOTAL_ZERO_FILL_SIZE {
                 return Err(ElfError::TotalSizeExceeded);
             }
 
@@ -525,7 +562,7 @@ impl<'a> ElfValidator<'a> {
 
     fn validate_segment(&self, phdr: &Elf64Phdr) -> ElfResult<ValidatedSegment> {
         let file_end = phdr.file_end()?;
-        if file_end > self.data.len() as u64 {
+        if file_end > self.file_len {
             return Err(ElfError::InvalidSegmentOffset);
         }
 
@@ -575,14 +612,6 @@ impl<'a> ElfValidator<'a> {
             mem_size: phdr.p_memsz,
             flags: phdr.p_flags,
         })
-    }
-
-    /// File bytes backing `segment`; the range was bounds-checked during
-    /// validation.
-    pub fn segment_data(&self, segment: &ValidatedSegment) -> &[u8] {
-        let start = segment.file_offset as usize;
-        let end = start + segment.file_size as usize;
-        &self.data[start..end]
     }
 
     pub fn has_interpreter(&self) -> ElfResult<bool> {

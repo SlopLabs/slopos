@@ -233,7 +233,7 @@ const IST_SLOTS: [IstSlot; 7] = [
     IstSlot::DoubleFault,
     IstSlot::StackFault,
     IstSlot::GeneralProtection,
-    IstSlot::PageFault,
+    IstSlot::Reserved4,
     IstSlot::KeyboardIrq,
     IstSlot::MouseIrq,
     IstSlot::Reserved7,

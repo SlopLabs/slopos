@@ -29,7 +29,7 @@
 //! per-PT-page locking.
 
 use core::ops::Range;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
@@ -39,8 +39,8 @@ use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::page_property::PageProperty;
 use crate::mm::page_size::PageSize;
 use crate::mm::page_table::{
-    PAGE_SIZE_4KB, PageTableLevel, PteFlags, WalkMode, WalkOutcome, entry_in_table, read_leaf,
-    reclaim_leaked_frame, walk_to_leaf,
+    PAGE_SIZE_4KB, PageTableLevel, PteFlags, WalkMode, WalkOutcome, charge_page_table_frame,
+    entry_in_table, read_leaf, reclaim_leaked_frame, refund_page_table_frame, walk_to_leaf,
 };
 use crate::mm::tlb;
 use crate::mm::uframe::{AnyUFrameMeta, UFrame};
@@ -62,10 +62,21 @@ const HIGHER_HALF_START: u64 = 0xFFFF_8000_0000_0000;
 /// every address space sees it immediately.
 pub struct VmSpace {
     pml4: Frame<PageTableMeta>,
+    /// Whether the PML4 frame carries a page-table charge to give back when
+    /// this space drops. [`VmSpace::wrap_existing`] adopts a frame the
+    /// bootloader allocated, which nobody charged and nothing frees.
+    pml4_charged: bool,
     generation: AtomicU64,
     /// Opaque consumer-defined handle threaded through
     /// [`CursorUnmapHook`] callbacks. `0` ⇒ unset.
     mm_ctx_handle: AtomicU64,
+    /// User-half leaves currently present, in 4 KiB pages — the address
+    /// space's resident set.
+    ///
+    /// Counted here because the cursor is the only place a user leaf appears or
+    /// disappears; a consumer-maintained count would be a second truth that
+    /// drifts.
+    resident: AtomicU32,
 }
 
 // SAFETY: `Frame<PageTableMeta>` is `Send + Sync` (the `META_SLOTS`
@@ -267,9 +278,13 @@ impl VmSpace {
         }
         let master_phys = PhysAddr::new(master);
 
-        let pml4_phys = alloc
-            .alloc(FrameAllocOptions::single().zeroed())
-            .ok_or(MapError::IntermediateAllocFailed)?;
+        if !charge_page_table_frame() {
+            return Err(MapError::IntermediateAllocFailed);
+        }
+        let Some(pml4_phys) = alloc.alloc(FrameAllocOptions::single().zeroed()) else {
+            refund_page_table_frame();
+            return Err(MapError::IntermediateAllocFailed);
+        };
         let pml4 = Frame::<PageTableMeta>::from_unused(
             pml4_phys,
             PageTableMeta {
@@ -283,8 +298,10 @@ impl VmSpace {
 
         Ok(Self {
             pml4,
+            pml4_charged: true,
             generation: AtomicU64::new(0),
             mm_ctx_handle: AtomicU64::new(0),
+            resident: AtomicU32::new(0),
         })
     }
 
@@ -317,8 +334,10 @@ impl VmSpace {
         .map_err(|_| MapError::PathCorrupt)?;
         Ok(Self {
             pml4,
+            pml4_charged: false,
             generation: AtomicU64::new(0),
             mm_ctx_handle: AtomicU64::new(0),
+            resident: AtomicU32::new(0),
         })
     }
 
@@ -463,6 +482,27 @@ impl VmSpace {
     pub fn mm_ctx_handle(&self) -> u64 {
         self.mm_ctx_handle.load(Ordering::Acquire)
     }
+
+    /// User-half leaves currently present, in 4 KiB pages: this address
+    /// space's resident set.
+    pub fn resident_pages(&self) -> u32 {
+        self.resident.load(Ordering::Relaxed)
+    }
+
+    /// A user leaf appeared (`delta > 0`) or left. Saturating rather than
+    /// wrapping: a miscount must not read as four billion pages.
+    fn note_resident(&self, delta: i32) {
+        if delta >= 0 {
+            self.resident.fetch_add(delta as u32, Ordering::Relaxed);
+        } else {
+            let dropped = (-delta) as u32;
+            let _ = self
+                .resident
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(dropped))
+                });
+        }
+    }
 }
 
 fn check_range_alignment(range: &Range<VirtAddr>) -> Result<(), MapError> {
@@ -513,9 +553,13 @@ pub fn prepopulate_kernel_half<'brand>(_token: &BspToken<'brand>) -> Result<usiz
         if pte.is_present() {
             continue;
         }
-        let pdpt_phys = alloc
-            .alloc(FrameAllocOptions::single().zeroed())
-            .ok_or(MapError::IntermediateAllocFailed)?;
+        if !charge_page_table_frame() {
+            return Err(MapError::IntermediateAllocFailed);
+        }
+        let Some(pdpt_phys) = alloc.alloc(FrameAllocOptions::single().zeroed()) else {
+            refund_page_table_frame();
+            return Err(MapError::IntermediateAllocFailed);
+        };
         let frame = Frame::<PageTableMeta>::from_unused(
             pdpt_phys,
             PageTableMeta {
@@ -525,7 +569,7 @@ pub fn prepopulate_kernel_half<'brand>(_token: &BspToken<'brand>) -> Result<usiz
         )
         .map_err(|_| MapError::PathCorrupt)?;
         // Leak the typed handle into the entry as `step_down` would;
-        // these tables live for the lifetime of the kernel.
+        // these tables, and their charge, live for the lifetime of the kernel.
         let _slot = frame.into_raw();
         pte.set(pdpt_phys, PteFlags::PRESENT | PteFlags::WRITABLE);
         linked += 1;
@@ -756,6 +800,9 @@ impl<'a> CursorMut<'a> {
         }
         pte.set(paddr, flags);
         self.dirty = true;
+        if prop.user {
+            self.space.note_resident(S::BYTES.div_ceil(4096) as i32);
+        }
         Ok(())
     }
 
@@ -1025,6 +1072,10 @@ impl<'a> CursorMut<'a> {
             None
         };
 
+        if prop.user && displaced_paddr.is_none() {
+            self.space.note_resident(S::BYTES.div_ceil(4096) as i32);
+        }
+
         let inner = frame.into_frame();
         let paddr = inner.paddr();
         let _slot = inner.into_raw();
@@ -1120,6 +1171,7 @@ impl<'a> CursorMut<'a> {
         }
 
         if was_user {
+            self.space.note_resident(-(S::BYTES.div_ceil(4096) as i32));
             if let Some(hook) = current_cursor_unmap_hook() {
                 hook.after_unmap(
                     self.cur,
@@ -1329,6 +1381,9 @@ mod tests {
 impl Drop for VmSpace {
     fn drop(&mut self) {
         drop_user_half_tree(self.pml4.paddr());
+        if self.pml4_charged {
+            refund_page_table_frame();
+        }
     }
 }
 
@@ -1380,4 +1435,5 @@ fn recursively_reclaim_subtree(table_phys: Paddr, level: PageTableLevel) {
     // parent PTE by `step_down`, and no CPU is walking the tree
     // (VmSpace refcount is zero).
     unsafe { reclaim_leaked_frame(table_phys) };
+    refund_page_table_frame();
 }

@@ -12,10 +12,10 @@ use slopos_ostd::process::{Process, ProcessId};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{align_down, align_up, klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use crate::aslr;
-use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
+use crate::elf::{ElfError, ElfValidator, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
@@ -91,6 +91,14 @@ impl ProcessVm {
         self.stack_start = 0;
         self.stack_end = 0;
         self.flags = 0;
+    }
+
+    /// Reflect the address space's own count of present user leaves into the
+    /// `ResidentPages` ledger: one relaxed load, and a charge adjustment only
+    /// when it moved.
+    fn sync_resident_charge(&mut self) {
+        let resident = self.vm_space.as_ref().map_or(0, |vs| vs.resident_pages());
+        self.vma_map.sync_resident(resident);
     }
 }
 
@@ -310,7 +318,9 @@ pub fn process_vm_with_handle<R>(
     if guard.generation != handle.generation() {
         return Err(HandleError::Stale);
     }
-    Ok(f(&mut guard))
+    let out = f(&mut guard);
+    guard.sync_resident_charge();
+    Ok(out)
 }
 
 /// The shape every caller should reach for: a process whose slot has been
@@ -329,7 +339,9 @@ pub fn process_vm_with_process<R>(
     if guard.generation != process.generation() {
         return Err(HandleError::Stale);
     }
-    Ok(f(&mut guard))
+    let out = f(&mut guard);
+    guard.sync_resident_charge();
+    Ok(out)
 }
 
 /// The address-space handle for `process`, if its slot is still bound to it.
@@ -407,6 +419,24 @@ pub fn process_vm_with_vm_space_and_region_by_handle<R>(
         };
         let vm_space = proc.vm_space.as_mut()?;
         Some(f(vm_space, region))
+    })?
+    .ok_or(HandleError::NoEntry)
+}
+
+/// [`process_vm_with_vm_space_and_region_by_handle`] with the covering VMA's
+/// extent too, which is what turns `fault_addr` into a file page index.
+pub fn process_vm_with_vm_space_and_area_by_handle<R>(
+    handle: Handle<ProcessVm>,
+    fault_addr: u64,
+    f: impl FnOnce(&mut KArc<VmSpace>, u64, u64, &VmaRegion) -> R,
+) -> Result<R, HandleError> {
+    process_vm_with_handle(handle, |proc| {
+        let (start, end, region) = {
+            let (start, end, region_ref) = proc.vma_map.find_containing(fault_addr)?;
+            (start, end, region_ref.clone())
+        };
+        let vm_space = proc.vm_space.as_mut()?;
+        Some(f(vm_space, start, end, &region))
     })?
     .ok_or(HandleError::NoEntry)
 }
@@ -510,7 +540,9 @@ pub fn process_vm_with_vm_space<R>(
         return None;
     }
     let vm_space = guard.vm_space.as_mut()?;
-    Some(f(vm_space))
+    let out = f(vm_space);
+    guard.sync_resident_charge();
+    Some(out)
 }
 
 /// Like [`process_vm_with_vm_space`] but also resolves the covering
@@ -531,7 +563,53 @@ pub fn process_vm_with_vm_space_and_region<R>(
         region_ref.clone()
     };
     let vm_space = guard.vm_space.as_mut()?;
-    Some(f(vm_space, region))
+    let out = f(vm_space, region);
+    guard.sync_resident_charge();
+    Some(out)
+}
+
+/// [`process_vm_with_vm_space_and_region`] with the covering VMA's extent too.
+/// Test-only: the fault path resolves by handle, so the by-handle twin is the
+/// production one.
+#[cfg(feature = "test-hooks")]
+pub fn process_vm_with_vm_space_and_area<R>(
+    process: ProcessId,
+    fault_addr: u64,
+    f: impl FnOnce(&mut KArc<VmSpace>, u64, u64, &VmaRegion) -> R,
+) -> Option<R> {
+    let slot = find_slot_for_pid(process)?;
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process.id() {
+        return None;
+    }
+    let (start, end, region) = {
+        let (start, end, region_ref) = guard.vma_map.find_containing(fault_addr)?;
+        (start, end, region_ref.clone())
+    };
+    let vm_space = guard.vm_space.as_mut()?;
+    let out = f(vm_space, start, end, &region);
+    guard.sync_resident_charge();
+    Some(out)
+}
+
+/// Drive [`map_user_range`] directly. Test-only: the invariant under test — an
+/// `Err` leaves nothing mapped — is not observable from any production caller.
+#[cfg(feature = "test-hooks")]
+pub fn process_vm_map_range_for_test(
+    process: ProcessId,
+    start: u64,
+    end: u64,
+    flags: u64,
+) -> Result<u32, c_int> {
+    let Some(slot) = find_slot_for_pid(process) else {
+        return Err(-1);
+    };
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process.id() {
+        return Err(-1);
+    }
+    let vm_space = guard.vm_space.as_mut().ok_or(-1)?;
+    map_user_range(vm_space, start, end, flags)
 }
 
 /// Read the PML4 physical address for a process. `0` means "no VM", on which
@@ -652,7 +730,7 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     };
 
     // Stack and heap are re-randomised; `code_start` is **not**.
-    // `process_vm_load_elf_data` loads every image at the fixed
+    // `process_vm_map_elf_image` loads every image at the fixed
     // `PROCESS_CODE_START_VA`, so a re-randomised `code_start` would describe
     // a code VMA the loader never writes into — the mapping and the pages
     // would disagree, and the new image would fault on its first instruction
@@ -727,9 +805,9 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     rc
 }
 
-/// The three initial VMAs, the mapped stack and the null page — the single
-/// definition of what a fresh SlopOS address space looks like, so `exec` and
-/// process creation cannot drift apart.
+/// The initial VMAs, the mapped stack and the null page — the single definition
+/// of what a fresh SlopOS address space looks like, so `exec` and process
+/// creation cannot drift apart.
 fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_int {
     let code_s = inner.code_start;
     let data_s = inner.data_start;
@@ -767,6 +845,25 @@ fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_i
         || add_vma_to_inner(inner, stack_s, stack_e, stack_region) != 0
     {
         return -1;
+    }
+
+    // The stack grows by faulting, not by a handler that widens a VMA: the
+    // whole maximum extent is one lazy region below the mapped part, so a stack
+    // past the ceiling finds no VMA at all. Relative to `stack_e`, which ASLR
+    // randomises, rather than to `PROCESS_STACK_LOW_VA`.
+    let growth_low = stack_e.saturating_sub(crate::memory_layout_defs::PROCESS_STACK_MAX_BYTES);
+    if growth_low < stack_s {
+        let growth_region = VmaRegion {
+            protection: Protection::RW,
+            backing: RegionBacking::Anonymous,
+            lazy: true,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::Stack,
+        };
+        if add_vma_to_inner(inner, growth_low, stack_s, growth_region) != 0 {
+            return -1;
+        }
     }
 
     let stack_flags_bits = VmaRegion {
@@ -981,342 +1078,52 @@ fn unmap_region_range_dir(
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Elf64Ehdr {
-    ident: [u8; 16],
-    e_type: u16,
-    e_machine: u16,
-    e_version: u32,
-    e_entry: u64,
-    e_phoff: u64,
-    e_shoff: u64,
-    e_flags: u32,
-    e_ehsize: u16,
-    e_phentsize: u16,
-    e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Elf64Shdr {
-    sh_name: u32,
-    sh_type: u32,
-    sh_flags: u64,
-    sh_addr: u64,
-    sh_offset: u64,
-    sh_size: u64,
-    sh_link: u32,
-    sh_info: u32,
-    sh_addralign: u64,
-    sh_entsize: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Elf64Rela {
-    r_offset: u64,
-    r_info: u64,
-    r_addend: i64,
-}
-
-const SHT_RELA: u32 = 4;
-
-const R_X86_64_64: u32 = 1;
-const R_X86_64_PC32: u32 = 2;
-const R_X86_64_32: u32 = 10;
-const R_X86_64_32S: u32 = 11;
-
-/// Unaligned read; `None` if it would extend past the slice.
-#[inline]
-fn read_elf_pod<T: Copy>(payload: &[u8], offset: usize) -> Option<T> {
-    slopos_ostd::util::ptr_buf::read_pod_at::<T>(payload, offset)
-}
-
-fn apply_elf_relocations(
-    payload_slice: &[u8],
-    vm_space: &KArc<VmSpace>,
-    section_mappings: &[(u64, u64, u64)], // (kernel_va_start, kernel_va_end, user_va_start)
-) -> c_int {
-    if payload_slice.is_empty() {
-        return -1;
-    }
-    let payload_len = payload_slice.len();
-
-    let ehdr: Elf64Ehdr = match read_elf_pod::<Elf64Ehdr>(payload_slice, 0) {
-        Some(h) => h,
-        None => return -1,
-    };
-    if &ehdr.ident[0..4] != b"\x7fELF" || ehdr.e_shoff == 0 || ehdr.e_shnum == 0 {
-        return -1;
-    }
-
-    let sh_size = ehdr.e_shentsize as usize;
-    let sh_num = ehdr.e_shnum as usize;
-    let sh_off = ehdr.e_shoff as usize;
-    let shstrndx = ehdr.e_shstrndx as usize;
-
-    if sh_off + sh_num * sh_size > payload_len || shstrndx >= sh_num {
-        return -1;
-    }
-
-    let shstrtab_shdr = match read_elf_pod::<Elf64Shdr>(payload_slice, sh_off + shstrndx * sh_size)
-    {
-        Some(s) => s,
-        None => return -1,
-    };
-    let shstrtab_base = shstrtab_shdr.sh_offset as usize;
-    let shstrtab_size = shstrtab_shdr.sh_size as usize;
-    if shstrtab_base + shstrtab_size > payload_len {
-        return -1;
-    }
-
-    let get_section_name = |sh_name_off: u32| -> Option<&[u8]> {
-        let off = shstrtab_base + sh_name_off as usize;
-        if off >= payload_len {
-            return None;
-        }
-        let max = payload_len - off;
-        let bytes = &payload_slice[off..off + max];
-        let len = bytes.iter().position(|&b| b == 0).unwrap_or(max);
-        Some(&bytes[..len])
-    };
-
-    let map_kernel_va_to_user = |kernel_va: u64| -> Option<u64> {
-        for &(kern_start, kern_end, user_start) in section_mappings {
-            if kernel_va >= kern_start && kernel_va < kern_end {
-                return Some(user_start + (kernel_va - kern_start));
-            }
-        }
-        None
-    };
-
-    for i in 0..sh_num {
-        let shdr = match read_elf_pod::<Elf64Shdr>(payload_slice, sh_off + i * sh_size) {
-            Some(s) => s,
-            None => continue,
-        };
-        if shdr.sh_type != SHT_RELA {
-            continue;
-        }
-
-        let name_off = shdr.sh_name;
-        let Some(name) = get_section_name(name_off) else {
-            continue;
-        };
-
-        if !name.starts_with(b".rela.") {
-            continue;
-        }
-
-        let target_section_idx = shdr.sh_info as usize;
-        if target_section_idx >= sh_num {
-            continue;
-        }
-        let target_shdr =
-            match read_elf_pod::<Elf64Shdr>(payload_slice, sh_off + target_section_idx * sh_size) {
-                Some(s) => s,
-                None => continue,
-            };
-
-        let target_kern_va = target_shdr.sh_addr;
-        let Some(target_user_va_base) = map_kernel_va_to_user(target_kern_va) else {
-            continue;
-        };
-
-        let rela_base = shdr.sh_offset as usize;
-        let rela_size = shdr.sh_size as usize;
-        let rela_entsize = if shdr.sh_entsize != 0 {
-            shdr.sh_entsize as usize
-        } else {
-            core::mem::size_of::<Elf64Rela>()
-        };
-
-        if rela_base + rela_size > payload_len {
-            continue;
-        }
-
-        let num_relocs = rela_size / rela_entsize;
-        for j in 0..num_relocs {
-            let rela = match read_elf_pod::<Elf64Rela>(payload_slice, rela_base + j * rela_entsize)
-            {
-                Some(r) => r,
-                None => continue,
-            };
-
-            let reloc_type = (rela.r_info & 0xffffffff) as u32;
-
-            let reloc_kern_addr = rela.r_offset;
-            let reloc_user_addr = if reloc_kern_addr >= target_kern_va {
-                target_user_va_base + (reloc_kern_addr - target_kern_va)
-            } else {
-                target_user_va_base.wrapping_add(rela.r_offset)
-            };
-
-            // An unaligned access here can straddle a 4 KiB boundary; it
-            // resolves only because `load_segment_pages` maps sequentially
-            // allocated — hence physically contiguous — buddy frames. The
-            // page-walking alternative needs no such invariant but pushes ELF
-            // load past the NMI watchdog budget under TCG.
-            let symbol_va = match reloc_type {
-                R_X86_64_PC32 | 4 => {
-                    // 4 = R_X86_64_PLT32.
-                    let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
-                    let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
-                    let read_phys = ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(read_page_va));
-                    if read_phys.is_null() {
-                        continue;
-                    }
-                    let read_virt = read_phys.to_virt();
-                    if read_virt.is_null() {
-                        continue;
-                    }
-                    let current_offset = match slopos_ostd::mm::hhdm_bytes::read_unaligned::<i32>(
-                        read_virt,
-                        read_page_off,
-                    ) {
-                        Some(v) => v as i64,
-                        None => continue,
-                    };
-                    // S = offset + P - A, where P is the rip after the rel32.
-                    let original_kernel_rip_after = reloc_kern_addr.wrapping_add(4);
-                    (original_kernel_rip_after as i64)
-                        .wrapping_add(current_offset)
-                        .wrapping_sub(rela.r_addend) as u64
-                }
-                _ => {
-                    if rela.r_addend != 0 {
-                        rela.r_addend as u64
-                    } else {
-                        let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
-                        let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
-                        let read_phys =
-                            ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(read_page_va));
-                        if read_phys.is_null() {
-                            continue;
-                        }
-                        let read_virt = read_phys.to_virt();
-                        if read_virt.is_null() {
-                            continue;
-                        }
-                        match reloc_type {
-                            R_X86_64_64 => {
-                                match slopos_ostd::mm::hhdm_bytes::read_unaligned::<u64>(
-                                    read_virt,
-                                    read_page_off,
-                                ) {
-                                    Some(v) => v,
-                                    None => continue,
-                                }
-                            }
-                            R_X86_64_32 | R_X86_64_32S => {
-                                let val = match slopos_ostd::mm::hhdm_bytes::read_unaligned::<u32>(
-                                    read_virt,
-                                    read_page_off,
-                                ) {
-                                    Some(v) => v as u64,
-                                    None => continue,
-                                };
-                                if reloc_type == R_X86_64_32S {
-                                    (val as i32 as i64) as u64
-                                } else {
-                                    val
-                                }
-                            }
-                            _ => continue,
-                        }
-                    }
-                }
-            };
-
-            let Some(user_symbol_va) = map_kernel_va_to_user(symbol_va) else {
-                continue;
-            };
-
-            let reloc_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
-            let reloc_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
-            let reloc_phys = ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(reloc_page_va));
-            if reloc_phys.is_null() {
-                continue;
-            }
-            let reloc_virt = reloc_phys.to_virt();
-            if reloc_virt.is_null() {
-                continue;
-            }
-            match reloc_type {
-                R_X86_64_64 => {
-                    let _ = slopos_ostd::mm::hhdm_bytes::write_unaligned::<u64>(
-                        reloc_virt,
-                        reloc_page_off,
-                        user_symbol_va,
-                    );
-                }
-                R_X86_64_PC32 | 4 => {
-                    let rip_after = reloc_user_addr + 4;
-                    let offset = (user_symbol_va as i64 - rip_after as i64) as i32;
-                    let _ = slopos_ostd::mm::hhdm_bytes::write_unaligned::<i32>(
-                        reloc_virt,
-                        reloc_page_off,
-                        offset,
-                    );
-                }
-                R_X86_64_32 | R_X86_64_32S => {
-                    let _ = slopos_ostd::mm::hhdm_bytes::write_unaligned::<u32>(
-                        reloc_virt,
-                        reloc_page_off,
-                        user_symbol_va as u32,
-                    );
-                }
-                _ => continue,
-            }
-        }
-    }
-
-    0
-}
-
-pub fn process_vm_load_elf_data(
+/// Validate an ELF from its header window and map every `PT_LOAD` page, zeroed.
+///
+/// `header` needs only the ELF header and the program-header table, and
+/// segment extents are checked against `file_len`. **Nothing here reads the
+/// file**: the mapping runs under the per-process lock, where a filesystem read
+/// cannot happen. The caller streams the contents in afterwards through
+/// [`process_vm_write_user_bytes`], using the first `n` of `segments_out`.
+///
+/// Each segment's `original_vaddr` is its user address: an image whose lowest
+/// segment is not at `PROCESS_CODE_START_VA` is refused rather than shifted,
+/// since shifting an `ET_EXEC` file needs relocations.
+pub fn process_vm_map_elf_image(
     process: ProcessId,
-    data: &[u8],
+    header: &[u8],
+    file_len: u64,
+    segments_out: &mut [crate::elf::ValidatedSegment],
     entry_out: &mut u64,
-) -> Result<crate::elf::ElfExecInfo, ElfError> {
+) -> Result<(crate::elf::ElfExecInfo, usize), ElfError> {
     let code_base = crate::memory_layout_defs::PROCESS_CODE_START_VA;
 
-    let validator = ElfValidator::new(data)?.with_load_base(code_base);
+    let validator = ElfValidator::new(header, file_len)?.with_load_base(code_base);
 
     if validator.has_interpreter()? {
         return Err(ElfError::DynamicNotSupported);
     }
 
-    let mut segments_store =
-        slopos_ostd::KVec::<crate::elf::ValidatedSegment>::zeroed(crate::elf::MAX_LOAD_SEGMENTS)
-            .map_err(|_| ElfError::NullPointer)?;
-    let segment_count = validator.validate_load_segments_into(segments_store.as_mut_slice())?;
+    let segment_count = validator.validate_load_segments_into(segments_out)?;
 
     let slot = find_slot_for_pid(process).ok_or(ElfError::NullPointer)?;
 
     let info = load_segments_and_tls(
         &validator,
-        data,
         code_base,
         slot,
         process,
-        &segments_store.as_slice()[..segment_count],
+        &segments_out[..segment_count],
     )?;
     *entry_out = info.entry;
-    Ok(info)
+    Ok((info, segment_count))
 }
 
-/// Out of line so its locked slot, section-mapping table and nine-field
-/// return value stay out of the caller's frame, which is measured against the
-/// 2 KiB stack gate.
+/// Out of line so its locked slot and nine-field return value stay out of the
+/// caller's frame, measured against the 2 KiB stack gate.
 #[inline(never)]
 fn load_segments_and_tls(
     validator: &ElfValidator<'_>,
-    data: &[u8],
     code_base: u64,
     slot: usize,
     process: ProcessId,
@@ -1332,6 +1139,13 @@ fn load_segments_and_tls(
         None => (0, 0, 0, 0),
     };
 
+    let min_vaddr = lowest_segment_vaddr(segments);
+    // Shifting an `ET_EXEC` file means applying its relocations, which is a
+    // linker's job; refused rather than loaded where its code does not expect.
+    if min_vaddr != code_base {
+        return Err(ElfError::UnsupportedLoadBase);
+    }
+
     let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process.id() {
         return Err(ElfError::NullPointer);
@@ -1339,8 +1153,6 @@ fn load_segments_and_tls(
     if guard.vm_space.is_none() {
         return Err(ElfError::NullPointer);
     }
-
-    let (min_vaddr, needs_reloc) = calculate_load_offset(segments, code_base);
 
     {
         let vm_space_ref = guard
@@ -1350,49 +1162,18 @@ fn load_segments_and_tls(
         unmap_existing_code_region(vm_space_ref, code_base).map_err(|_| ElfError::NullPointer)?;
     }
 
-    let mut section_mappings = slopos_ostd::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
-        .map_err(|_| ElfError::NullPointer)?;
-    let mut mapping_count = 0usize;
-    let mut mapped_pages: u32 = 0;
-
     for segment in segments.iter() {
-        let user_start =
-            process_vm_translate_elf_address(segment.original_vaddr, min_vaddr, code_base);
-        let user_end = process_vm_translate_elf_address(
-            segment.original_vaddr + segment.mem_size,
-            min_vaddr,
-            code_base,
-        );
-
-        if mapping_count < section_mappings.len() {
-            section_mappings[mapping_count] = (
-                segment.original_vaddr,
-                segment.original_vaddr + segment.mem_size,
-                user_start,
-            );
-            mapping_count += 1;
-        }
-
         let vm_space_ref = guard
             .vm_space
             .as_mut()
             .expect("load_segments_and_tls: vm_space present per segment");
-        let pages = load_segment_pages(vm_space_ref, data, segment, user_start, user_end)?;
-        mapped_pages = mapped_pages.saturating_add(pages);
+        map_segment_pages(vm_space_ref, segment)?;
     }
 
     let tls_tp = 0u64;
 
-    if needs_reloc {
-        let vm_space_ref = guard
-            .vm_space
-            .as_ref()
-            .expect("apply_elf_relocations: vm_space present for live pid");
-        let _ = apply_elf_relocations(data, vm_space_ref, &section_mappings[..mapping_count]);
-    }
-
-    let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);
-    let phdr_user_addr = compute_phdr_user_addr(header, segments, min_vaddr, code_base);
+    let user_entry = process_vm_translate_elf_address(header.e_entry, code_base);
+    let phdr_user_addr = compute_phdr_user_addr(header, segments, code_base);
     // Zero means the linker left the phdrs out of every PT_LOAD. libc walks
     // AT_PHDR to find PT_TLS, so refuse the exec rather than ship a process
     // that faults on its first thread-local access.
@@ -1420,7 +1201,6 @@ fn load_segments_and_tls(
 fn compute_phdr_user_addr(
     header: &crate::elf::Elf64Header,
     segments: &[crate::elf::ValidatedSegment],
-    min_vaddr: u64,
     code_base: u64,
 ) -> u64 {
     let phoff = header.e_phoff;
@@ -1429,30 +1209,23 @@ fn compute_phdr_user_addr(
         let seg_file_end = seg.file_offset + seg.file_size;
         if phoff >= seg.file_offset && phdr_end <= seg_file_end {
             let offset_in_seg = phoff - seg.file_offset;
-            let seg_user =
-                process_vm_translate_elf_address(seg.original_vaddr, min_vaddr, code_base);
+            let seg_user = process_vm_translate_elf_address(seg.original_vaddr, code_base);
             return seg_user + offset_in_seg;
         }
     }
     0
 }
 
-fn calculate_load_offset(segments: &[ValidatedSegment], code_base: u64) -> (u64, bool) {
-    let min_vaddr = segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0);
-
-    let needs_reloc = min_vaddr >= KERNEL_VIRTUAL_BASE || min_vaddr != code_base;
-    (min_vaddr, needs_reloc)
+fn lowest_segment_vaddr(segments: &[ValidatedSegment]) -> u64 {
+    segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0)
 }
 
-pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
+/// The user address a validated ELF address loads at. An image's lowest segment
+/// is `code_base` or the load is refused, so only a kernel-half `e_entry` —
+/// which a crafted header can still carry — is folded into the image.
+pub fn process_vm_translate_elf_address(addr: u64, code_base: u64) -> u64 {
     if addr >= KERNEL_VIRTUAL_BASE {
-        let offset = addr.wrapping_sub(KERNEL_VIRTUAL_BASE);
-        code_base.wrapping_add(offset)
-    } else if min_vaddr >= KERNEL_VIRTUAL_BASE {
-        let offset = addr.wrapping_sub(min_vaddr);
-        code_base.wrapping_add(offset)
-    } else if min_vaddr < code_base {
-        addr.wrapping_add(code_base.wrapping_sub(min_vaddr))
+        code_base.wrapping_add(addr.wrapping_sub(KERNEL_VIRTUAL_BASE))
     } else {
         addr
     }
@@ -1542,31 +1315,27 @@ fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Res
     Ok(())
 }
 
-fn load_segment_pages(
+/// Map every page of `segment`, zeroed. The file's bytes are streamed in
+/// afterwards by the caller of [`process_vm_map_elf_image`], because a
+/// filesystem read cannot happen here, under the per-process lock.
+fn map_segment_pages(
     vm_space: &mut KArc<VmSpace>,
-    data: &[u8],
     segment: &ValidatedSegment,
-    user_start: u64,
-    user_end: u64,
-) -> Result<u32, ElfError> {
+) -> Result<(), ElfError> {
     let map_flags = if (segment.flags & PF_W) != 0 {
         PageFlags::USER_RW.bits()
     } else {
         PageFlags::USER_RO.bits()
     };
 
-    let page_start = align_down(user_start as usize, PAGE_SIZE_4KB as usize) as u64;
-    let page_end = align_up(user_end as usize, PAGE_SIZE_4KB as usize) as u64;
-
-    let mut dst = page_start;
-    let mut pages_mapped = 0u32;
-
-    while dst < page_end {
+    let mut dst = segment.vaddr_start;
+    while dst < segment.vaddr_end {
         // Two ELF segments can overlap within a page, so an existing mapping
-        // here is expected.
+        // here is expected, and must keep the earlier segment's bytes — which
+        // is why only a fresh page is zeroed.
         let existing_phys =
             crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
-        let phys = if !existing_phys.is_null() {
+        let (phys, fresh) = if !existing_phys.is_null() {
             if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
                 ostd_mark_range_user_4kb(
                     vm_space,
@@ -1576,69 +1345,36 @@ fn load_segment_pages(
                 )
                 .map_err(|_| ElfError::NullPointer)?;
             }
-            existing_phys
+            (existing_phys, false)
         } else {
-            let new_phys = match ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(dst), map_flags) {
-                Ok(pa) => pa,
+            match ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(dst), map_flags) {
+                Ok(pa) => (pa, true),
                 Err(err) => {
-                    klog_info!("load_segment_pages: OSTD map failed: {:?}", err);
+                    klog_info!("map_segment_pages: OSTD map failed: {:?}", err);
                     return Err(ElfError::NullPointer);
                 }
-            };
-            pages_mapped += 1;
-            new_phys
+            }
         };
 
         let dest_virt = phys.to_virt();
         if dest_virt.is_null() {
-            // Mapped by now either way, so the leaf owns it and the caller's
-            // rollback unmaps the range.
+            // Mapped by now either way, so the leaf owns it and the exec's
+            // address-space reset reclaims the range.
             return Err(ElfError::NullPointer);
         }
 
-        copy_segment_page_data(data, segment, dst, user_start, dest_virt);
+        // The frame allocator does not zero, so the ELF's `.bss` and every hole
+        // between segments would leak the last owner's bytes to userland.
+        if fresh {
+            let _ = hhdm_fill_bytes(dest_virt, 0, PAGE_SIZE_4KB as usize, 0);
+        }
 
         dst += PAGE_SIZE_4KB;
     }
 
-    Ok(pages_mapped)
+    Ok(())
 }
 
-fn copy_segment_page_data(
-    data: &[u8],
-    segment: &ValidatedSegment,
-    page_va: u64,
-    user_seg_start: u64,
-    dest_virt: VirtAddr,
-) {
-    let page_end_va = page_va.wrapping_add(PAGE_SIZE_4KB);
-    let seg_file_end = user_seg_start.wrapping_add(segment.file_size);
-    let seg_mem_end = user_seg_start.wrapping_add(segment.mem_size);
-
-    let copy_start = core::cmp::max(page_va, user_seg_start);
-    let copy_end = core::cmp::min(page_end_va, seg_file_end);
-
-    if copy_start < copy_end {
-        let page_off_in_seg = copy_start - user_seg_start;
-        let dest_off = (copy_start - page_va) as usize;
-        let copy_len = (copy_end - copy_start) as usize;
-        let src_off = segment.file_offset.wrapping_add(page_off_in_seg) as usize;
-
-        if src_off < data.len() && src_off.saturating_add(copy_len) <= data.len() {
-            let _ = hhdm_write_bytes(dest_virt, dest_off, &data[src_off..src_off + copy_len]);
-        }
-    }
-
-    if seg_mem_end > seg_file_end {
-        let zero_start = core::cmp::max(page_va, seg_file_end);
-        let zero_end = core::cmp::min(page_end_va, seg_mem_end);
-        if zero_start < zero_end {
-            let zero_off = (zero_start - page_va) as usize;
-            let zero_len = (zero_end - zero_start) as usize;
-            let _ = hhdm_fill_bytes(dest_virt, zero_off, zero_len, 0);
-        }
-    }
-}
 pub fn create_process_vm() -> u32 {
     create_process_vm_ref().map_or(INVALID_PROCESS_ID, |p| p.process_id)
 }
@@ -2187,28 +1923,19 @@ pub fn process_vm_brk(process: ProcessId, new_brk: u64) -> u64 {
     if new_end > proc.heap_end {
         let start_addr = proc.heap_end;
         let end_addr = new_end;
+        // Lazy: a compiler's `brk` grows in hundreds of megabytes and touches a
+        // fraction of it, and mapping the whole extent under this IRQs-off lock
+        // is both the allocation cost and the latency.
         let heap_region = VmaRegion {
             protection: Protection::RW,
             backing: RegionBacking::Anonymous,
-            lazy: false,
+            lazy: true,
             cow: false,
             user: true,
             purpose: RegionPurpose::Heap,
         };
 
-        let heap_map_flags = heap_region.to_page_flags().bits();
-
         if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
-            return 0;
-        }
-
-        let vm_space_for_brk = proc
-            .vm_space
-            .as_mut()
-            .expect("process_vm_brk: vm_space present for live pid");
-        if map_user_range(vm_space_for_brk, start_addr, end_addr, heap_map_flags).is_err() {
-            proc.vma_map
-                .remove_range(start_addr, end_addr, |_, _, _| {});
             return 0;
         }
         proc.heap_end = new_end;
@@ -2623,62 +2350,49 @@ fn process_vm_mmap_inner(
     }
 }
 
-#[inline]
-fn user_pte_flags(prot: u64) -> u64 {
-    use slopos_abi::syscall::PROT_WRITE;
-    if prot & PROT_WRITE != 0 {
-        PageFlags::USER_RW.bits()
-    } else {
-        PageFlags::USER_RO.bits()
-    }
-}
-
-/// The VMA a file mapping installs. `lazy` is false in both modes: the #PF
-/// handler cannot sleep, so a file page is never faulted in from the device.
+/// The VMA a file mapping installs. Always `lazy`: the pages arrive from the
+/// device on the fault that touches them.
 fn file_region(prot: u64, backing: RegionBacking) -> VmaRegion {
     let prot_bits = prot_to_region(prot);
     VmaRegion {
         protection: prot_bits.protection,
         backing,
-        lazy: false,
+        lazy: true,
         cow: false,
         user: true,
         purpose: RegionPurpose::General,
     }
 }
 
-fn file_mmap_extent(length: u64, pages: usize) -> Option<u64> {
-    if length == 0 || pages == 0 {
+fn file_mmap_extent(length: u64) -> Option<u64> {
+    if length == 0 {
         return None;
     }
-    let size = length.checked_add(PAGE_SIZE_4KB - 1)? & !(PAGE_SIZE_4KB - 1);
-    if (size / PAGE_SIZE_4KB) as usize != pages {
-        klog_info!(
-            "process_vm_mmap file: {} pages offered for a {}-byte mapping",
-            pages,
-            size
-        );
-        return None;
-    }
-    Some(size)
+    Some(length.checked_add(PAGE_SIZE_4KB - 1)? & !(PAGE_SIZE_4KB - 1))
 }
 
-/// Map a `MAP_SHARED` file mapping. `paddrs` names the filesystem page set's
-/// frames, one per 4 KiB page in region order; each PTE takes its own
-/// reference, so a page outlives every mapping of it. Returns the user base
-/// address, or `0` — a partial map is rolled back.
-pub fn process_vm_mmap_file_shared(
+/// Map a file lazily. `map` names the filesystem's page set for the inode and
+/// `first_page` the file page index at the mapping's start; `private` selects
+/// MAP_PRIVATE, whose faults copy the set's page into a page of their own.
+///
+/// Nothing is populated, which is what lets a mapping be larger than memory —
+/// but the whole extent is reserved against the set up front, because that
+/// reservation is what keeps it alive for the faults.
+///
+/// Returns the user base address, or `0`.
+pub fn process_vm_mmap_file(
     process: ProcessId,
     addr_hint: u64,
     length: u64,
     prot: u64,
     flags_val: u64,
     map: FileMapRef,
-    paddrs: &[u64],
+    first_page: u64,
+    private: bool,
 ) -> u64 {
     use slopos_abi::syscall::MAP_FIXED;
 
-    let Some(size) = file_mmap_extent(length, paddrs.len()) else {
+    let Some(size) = file_mmap_extent(length) else {
         return 0;
     };
 
@@ -2696,135 +2410,33 @@ pub fn process_vm_mmap_file_shared(
         return 0;
     }
     let end_addr = start_addr + size;
-
     let page_count = (size / PAGE_SIZE_4KB) as u32;
-    // Retained before the first PTE: a stale handle means the set may already
-    // be freeing these frames. Only a writable mapping arms writeback.
-    let writable = prot & slopos_abi::syscall::PROT_WRITE != 0;
+
+    // Only a shared writable mapping arms writeback: a private one never
+    // publishes its stores, and a read-only one must not cause an unmodified
+    // file to be rewritten.
+    let writable = !private && prot & slopos_abi::syscall::PROT_WRITE != 0;
     if !crate::filemap_hook::filemap_retain(map, page_count, writable, proc.vma_map.account()) {
         klog_info!("process_vm_mmap file: the page set handle is stale");
         return 0;
     }
 
     let inner = &mut *proc;
-    // Charged before a single PTE is written, so a refusal costs no rollback.
-    let Ok(reserved) = inner.vma_map.reserve_pages(start_addr, end_addr) else {
+    let region = file_region(
+        prot,
+        RegionBacking::File {
+            map,
+            first_page,
+            private,
+        },
+    );
+    if inner.vma_map.insert(start_addr, end_addr, region).is_err() {
         klog_info!("process_vm_mmap file: address space is at its page ceiling");
         crate::filemap_hook::filemap_release(map, page_count);
         return 0;
-    };
-    let vm_space = inner
-        .vm_space
-        .as_mut()
-        .expect("process_vm_mmap file: vm_space present for live pid");
-    let pte_flags = user_pte_flags(prot);
-
-    for (i, pa) in paddrs.iter().enumerate() {
-        let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
-        if let Err(err) = ostd_map_4kb_user_shared(
-            vm_space,
-            VirtAddr::new(vaddr),
-            PhysAddr::new(*pa),
-            pte_flags,
-        ) {
-            klog_info!("process_vm_mmap file: cursor map failed: {:?}", err);
-            for j in 0..i {
-                let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
-                let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(rv));
-            }
-            crate::filemap_hook::filemap_release(map, page_count);
-            return 0;
-        }
     }
-
-    let region = file_region(prot, RegionBacking::SharedFile { map });
-    inner
-        .vma_map
-        .insert_reserved(start_addr, end_addr, region, reserved);
 
     start_addr
-}
-
-/// Map a `MAP_PRIVATE` file mapping: fresh anonymous pages copied from
-/// `src_paddrs`, the filesystem page set, at map time.
-///
-/// POSIX leaves later visibility of file changes unspecified, so the region
-/// needs no file backing — from here it is ordinary anonymous memory.
-pub fn process_vm_mmap_file_private(
-    process: ProcessId,
-    addr_hint: u64,
-    length: u64,
-    prot: u64,
-    flags_val: u64,
-    src_paddrs: &[u64],
-) -> u64 {
-    use slopos_abi::syscall::MAP_FIXED;
-
-    let Some(size) = file_mmap_extent(length, src_paddrs.len()) else {
-        return 0;
-    };
-
-    let Some(slot) = find_slot_for_pid(process) else {
-        return 0;
-    };
-    let mut proc = PROCESS_VMS[slot].lock();
-    if proc.process_id != process.id() {
-        return 0;
-    }
-
-    let start_addr =
-        resolve_mmap_base(&mut proc, slot, addr_hint, size, flags_val & MAP_FIXED != 0);
-    if start_addr == 0 {
-        return 0;
-    }
-    let end_addr = start_addr + size;
-
-    let inner = &mut *proc;
-    let Ok(reserved) = inner.vma_map.reserve_pages(start_addr, end_addr) else {
-        klog_info!("process_vm_mmap private file: address space is at its page ceiling");
-        return 0;
-    };
-    let vm_space = inner
-        .vm_space
-        .as_mut()
-        .expect("process_vm_mmap private file: vm_space present for live pid");
-    // A read-only mapping can still be populated: the copy below goes through
-    // the HHDM, not through this mapping.
-    let pte_flags = user_pte_flags(prot);
-
-    for (i, src) in src_paddrs.iter().enumerate() {
-        let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
-        let mapped = ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(vaddr), pte_flags);
-        let copied = match mapped {
-            Ok(dst) => copy_page_hhdm(PhysAddr::new(*src), dst),
-            Err(err) => {
-                klog_info!("process_vm_mmap private file: cursor map failed: {:?}", err);
-                false
-            }
-        };
-        if !copied {
-            for j in 0..=i {
-                let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
-                let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(rv));
-            }
-            return 0;
-        }
-    }
-
-    let region = file_region(prot, RegionBacking::Anonymous);
-    inner
-        .vma_map
-        .insert_reserved(start_addr, end_addr, region, reserved);
-
-    start_addr
-}
-
-/// Copy one 4 KiB page between two frames the caller has pinned.
-fn copy_page_hhdm(src: PhysAddr, dst: PhysAddr) -> bool {
-    let (Some(src_virt), Some(dst_virt)) = (src.try_to_virt(), dst.try_to_virt()) else {
-        return false;
-    };
-    slopos_ostd::mm::hhdm_bytes::copy_page(src_virt, dst_virt)
 }
 
 /// The distinct file page sets `[addr, end)` maps, for `msync(2)`.
@@ -2998,27 +2610,36 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
     }
 
     let new_prot = prot_to_region(prot);
-    let old_protection;
-    let new_page_flags;
-    {
-        let (_vma_start, _vma_end, region) = match proc.vma_map.find_covering_mut(addr, end) {
-            Some(v) => v,
-            None => {
-                klog_info!("process_vm_mprotect: Range not covered by VMA");
-                return -1;
-            }
-        };
 
-        old_protection = region.protection;
-        // Widening a file mapping is write access to the file, but the
-        // descriptor that authorised it — and with it the seal and the mount's
-        // read-only flag — is not reachable from here, so it is refused.
-        if region.filemap_ref().is_some() && new_prot.protection.write && !old_protection.write {
+    // Widening a shared file mapping is write access to the file, and the
+    // descriptor that authorised it — with the seal and the mount's read-only
+    // flag — is not reachable from here. A private mapping publishes nothing.
+    let mut cursor = addr;
+    while cursor < end {
+        let Some((_, vma_end, region)) = proc.vma_map.find_containing(cursor) else {
+            klog_info!("process_vm_mprotect: Range not covered by VMA");
+            return -1;
+        };
+        if region.is_shared()
+            && region.filemap_ref().is_some()
+            && new_prot.protection.write
+            && !region.protection.write
+        {
             return slopos_abi::Errno::EACCES.raw();
         }
-        region.protection = new_prot.protection;
-        new_page_flags = region.to_page_flags();
+        cursor = vma_end;
     }
+
+    // Splits at both ends, so a sub-range no longer rewrites the protection of
+    // every page of its enclosing VMA.
+    if let Err(hole) = proc.vma_map.protect_range(addr, end, new_prot.protection) {
+        klog_info!(
+            "process_vm_mprotect: no VMA covers 0x{:x} in the requested range",
+            hole
+        );
+        return -1;
+    }
+    let new_page_flags = new_prot.to_page_flags();
 
     if let Some(vm_space) = proc.vm_space.as_mut() {
         if let Err(err) = ostd_protect_range_4kb(
@@ -3028,12 +2649,10 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
             new_page_flags,
         ) {
             klog_info!("process_vm_mprotect: OSTD protect failed: {:?}", err);
-            if let Some((_vma_start, _vma_end, region)) = proc.vma_map.find_covering_mut(addr, end)
-            {
-                region.protection = old_protection;
-            }
-            // The partial walk already narrowed some entries, so the peers
-            // must drop them even on the failure path.
+            // The partial walk already narrowed some entries, so the peers must
+            // drop them even here. The VMA records now say what was asked for
+            // rather than what landed; a half-applied `mprotect` has no correct
+            // rollback to offer, and the next fault reconciles them.
             tlb::flush_all_for_process(slot_tlb_key(slot));
             return -1;
         }
@@ -3050,13 +2669,39 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
 /// lock so the walkers never re-read the parent's PML4 with that lock dropped.
 type ClonePageSnapshot = (u64, PhysAddr, u64);
 
+/// Snapshot entries per chunk. The walk is O(resident pages), so a single
+/// `KVec` passes the slab's 1 MiB ceiling once the parent holds ~40 MiB;
+/// chunking makes that an `ENOMEM` fork rather than a kernel panic.
+const CLONE_CHUNK_PAGES: usize = 2048;
+
+/// One VMA's page snapshots.
+type ClonePageChunks = KVec<KVec<ClonePageSnapshot>>;
+
 /// Captured parent-VMA + snapshot tuple, owned so the clone body never holds
 /// the parent lock across a stack-allocated snapshot.
-type CloneVmaEntry = (u64, u64, VmaRegion, KVec<ClonePageSnapshot>);
+type CloneVmaEntry = (u64, u64, VmaRegion, ClonePageChunks);
+
+fn push_clone_snapshot(chunks: &mut ClonePageChunks, entry: ClonePageSnapshot) -> Result<(), ()> {
+    if chunks
+        .last()
+        .is_none_or(|chunk| chunk.len() >= CLONE_CHUNK_PAGES)
+    {
+        let chunk = KVec::with_capacity(CLONE_CHUNK_PAGES).map_err(|_| ())?;
+        chunks.push(chunk).map_err(|_| ())?;
+    }
+    chunks.last_mut().ok_or(())?.push(entry).map_err(|_| ())
+}
+
+fn clone_snapshot_iter(chunks: &ClonePageChunks) -> impl Iterator<Item = ClonePageSnapshot> + '_ {
+    chunks.iter().flat_map(|chunk| chunk.iter().copied())
+}
 
 /// Under the parent's per-process lock: snapshot its scalars and VMAs, and
 /// COW-mark every writable+user page of its anonymous VMAs. `None` if the
-/// parent slot has no address space. Out of line for the 2 KiB stack gate.
+/// parent slot has no address space, or if the snapshot cannot be held.
+///
+/// One hold for the whole walk: a parent whose other threads could write
+/// between the COW mark and the child's mapping is not handing over a snapshot.
 #[inline(never)]
 fn clone_cow_snapshot_parent(
     parent_slot: usize,
@@ -3069,13 +2714,9 @@ fn clone_cow_snapshot_parent(
     }
 
     let vmas_iter: KVec<(u64, u64, VmaRegion)> =
-        KVec::from_iter_fallible(guard.vma_map.iter().map(|(s, e, r)| (s, e, r.clone())))
-            .expect("clone_cow: vmas alloc");
+        KVec::from_iter_fallible(guard.vma_map.iter().map(|(s, e, r)| (s, e, r.clone()))).ok()?;
 
-    let parent_vm_space_ref = guard
-        .vm_space
-        .as_mut()
-        .expect("clone_cow: parent vm_space present for live pid");
+    let parent_vm_space_ref = guard.vm_space.as_mut()?;
 
     let mut vmas: KVec<CloneVmaEntry> = KVec::new();
     for (vma_start, vma_end, region) in vmas_iter.iter() {
@@ -3086,10 +2727,10 @@ fn clone_cow_snapshot_parent(
         // snapshot here nor the child-side walk touches one.
         if region.is_ring() {
             vmas.push((vma_start, vma_end, region.clone(), KVec::new()))
-                .expect("clone_cow: vmas alloc");
+                .ok()?;
             continue;
         }
-        let mut snapshot: KVec<ClonePageSnapshot> = KVec::new();
+        let mut snapshot: ClonePageChunks = KVec::new();
         let is_shared = region.is_shared();
         let mut addr = vma_start;
         while addr < vma_end {
@@ -3099,9 +2740,7 @@ fn clone_cow_snapshot_parent(
                 if let Some(flags) = ostd_get_pte_flags_4kb(parent_vm_space_ref, vaddr) {
                     let keep = is_shared || flags.contains(PageFlags::USER);
                     if keep {
-                        snapshot
-                            .push((addr, phys, flags.bits()))
-                            .expect("clone_cow: snapshot alloc");
+                        push_clone_snapshot(&mut snapshot, (addr, phys, flags.bits())).ok()?;
                         if !is_shared
                             && flags.contains(PageFlags::USER)
                             && flags.contains(PageFlags::WRITABLE)
@@ -3120,7 +2759,7 @@ fn clone_cow_snapshot_parent(
             addr += PAGE_SIZE_4KB;
         }
         vmas.push((vma_start, vma_end, region.clone(), snapshot))
-            .expect("clone_cow: vmas alloc");
+            .ok()?;
     }
 
     Some((
@@ -3141,10 +2780,10 @@ fn clone_cow_snapshot_parent(
 #[inline(never)]
 fn clone_cow_walk_shared_vma(
     child_vm_space: &mut KArc<VmSpace>,
-    snapshot: &[ClonePageSnapshot],
+    snapshot: &ClonePageChunks,
 ) -> Result<u32, ()> {
     let mut cow_pages: u32 = 0;
-    for &(addr, phys, flags_bits) in snapshot.iter() {
+    for (addr, phys, flags_bits) in clone_snapshot_iter(snapshot) {
         let vaddr = VirtAddr::new(addr);
         if let Err(err) = ostd_map_4kb_user_shared(child_vm_space, vaddr, phys, flags_bits) {
             klog_info!("clone_cow shared: OSTD child map failed: {:?}", err);
@@ -3161,10 +2800,10 @@ fn clone_cow_walk_shared_vma(
 #[inline(never)]
 fn clone_cow_walk_anon_vma(
     child_vm_space: &mut KArc<VmSpace>,
-    snapshot: &[ClonePageSnapshot],
+    snapshot: &ClonePageChunks,
 ) -> Result<u32, ()> {
     let mut cow_pages: u32 = 0;
-    for &(addr, phys, flags_bits) in snapshot.iter() {
+    for (addr, phys, flags_bits) in clone_snapshot_iter(snapshot) {
         let vaddr = VirtAddr::new(addr);
         let parent_flags = PageFlags::from_bits_truncate(flags_bits);
         if !parent_flags.contains(PageFlags::USER) {
@@ -3225,7 +2864,7 @@ fn report_clone_page_ceiling(start: u64, end: u64) {
 #[inline(never)]
 fn clone_cow_populate_child(
     child: &mut ProcessVm,
-    parent_vmas: &[(u64, u64, VmaRegion, KVec<(u64, PhysAddr, u64)>)],
+    parent_vmas: &[CloneVmaEntry],
 ) -> Result<u32, u32> {
     let mut cow_pages = 0u32;
     for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
@@ -3256,10 +2895,12 @@ fn clone_cow_populate_child(
             crate::memfd::memfd_inc_mapcount_by(memfd_handle, vma_page_count(vma_start, vma_end));
         }
         if let Some(map) = parent_region.filemap_ref() {
+            // `is_shared()` and not just the write bit: arming writeback for a
+            // `MAP_PRIVATE` mapping rewrites a file nothing modified.
             crate::filemap_hook::filemap_retain(
                 map,
                 vma_page_count(vma_start, vma_end),
-                parent_region.protection.write,
+                parent_region.is_shared() && parent_region.protection.write,
                 child.vma_map.account(),
             );
         }
@@ -3272,9 +2913,9 @@ fn clone_cow_populate_child(
             .expect("clone_cow: child vm_space populated above");
 
         let walked = if is_shared_vma {
-            clone_cow_walk_shared_vma(child_vm_space_for_vma, snapshot.as_slice())
+            clone_cow_walk_shared_vma(child_vm_space_for_vma, snapshot)
         } else {
-            clone_cow_walk_anon_vma(child_vm_space_for_vma, snapshot.as_slice())
+            clone_cow_walk_anon_vma(child_vm_space_for_vma, snapshot)
         };
 
         match walked {

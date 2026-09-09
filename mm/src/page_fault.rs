@@ -3,7 +3,9 @@ use slopos_ostd::handle::HandleError;
 use slopos_ostd::{klog_info, klog_warn};
 
 use crate::error::MmError;
-use crate::{cow, demand, process_vm};
+use crate::process_vm::ProcessVm;
+use crate::{cow, demand, filemap_hook, process_vm};
+use slopos_ostd::handle::Handle;
 
 /// What became of a user page fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +144,7 @@ pub fn try_resolve_user_fault(
         handle,
         fault_addr,
         |vs, region| {
-            if !demand::is_demand_fault_in_region(error_code, &region) {
+            if !demand::is_demand_fault_in_region(error_code, &region) || !region.is_anonymous() {
                 return None;
             }
             Some(demand::handle_demand_fault(
@@ -152,17 +154,99 @@ pub fn try_resolve_user_fault(
     );
 
     match demanded {
-        Ok(Some(Ok(()))) => FaultOutcome::Resolved,
-        Ok(Some(Err(MmError::Retry))) => retry(task_id, fault_addr),
+        Ok(Some(Ok(()))) => return FaultOutcome::Resolved,
+        Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
         Ok(Some(Err(MmError::NoMemory))) => {
             klog_info!(
                 "PF: demand fault for task {} at cr2=0x{:x} found no memory after reclaim",
                 task_id,
                 fault_addr
             );
+            return FaultOutcome::Fatal(TaskFaultReason::UserOom);
+        }
+        Ok(Some(Err(_))) => return FaultOutcome::Fatal(TaskFaultReason::UserPage),
+        Ok(None) => {}
+        Err(err) => {
+            report_unresolvable_address_space(err, task_id, fault_addr);
+            return FaultOutcome::Fatal(TaskFaultReason::UserPage);
+        }
+    }
+
+    resolve_file_fault(handle, fault_addr, error_code, task_id)
+}
+
+/// A file-backed page, in two holds of the per-process lock with the blocking
+/// read between them — which is the whole reason #PF has no IST.
+fn resolve_file_fault(
+    handle: Handle<ProcessVm>,
+    fault_addr: u64,
+    error_code: u64,
+    task_id: u32,
+) -> FaultOutcome {
+    let planned = process_vm::process_vm_with_vm_space_and_area_by_handle(
+        handle,
+        fault_addr,
+        |vs, start, _end, region| {
+            if !demand::is_demand_fault_in_region(error_code, region) {
+                return None;
+            }
+            Some(demand::plan_file_fault(
+                vs, start, fault_addr, error_code, region,
+            ))
+        },
+    );
+
+    let plan = match planned {
+        Ok(Some(Ok(Some(plan)))) => plan,
+        // Someone else installed it while this fault was in flight.
+        Ok(Some(Ok(None))) => return FaultOutcome::Resolved,
+        Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
+        Ok(Some(Err(_))) | Ok(None) => return FaultOutcome::Fatal(TaskFaultReason::UserPage),
+        Err(err) => {
+            report_unresolvable_address_space(err, task_id, fault_addr);
+            return FaultOutcome::Fatal(TaskFaultReason::UserPage);
+        }
+    };
+
+    let cached = match filemap_hook::filemap_fault_page(plan.map, plan.page_index) {
+        Ok(phys) => phys,
+        Err(errno) if errno == slopos_abi::Errno::EINTR.raw() => {
+            // The instruction re-executes; the signal is delivered on the way out.
+            return FaultOutcome::Retry;
+        }
+        Err(errno) => {
+            klog_info!(
+                "PF: file page {} for task {} at cr2=0x{:x} refused: errno {}",
+                plan.page_index,
+                task_id,
+                fault_addr,
+                errno
+            );
+            return FaultOutcome::Fatal(TaskFaultReason::UserPage);
+        }
+    };
+
+    let installed = process_vm::process_vm_with_vm_space_and_area_by_handle(
+        handle,
+        fault_addr,
+        |vs, start, _end, region| demand::install_file_page(vs, start, &plan, cached, region),
+    );
+
+    // Balances the reference the read took to hold the page across the install.
+    filemap_hook::filemap_release(plan.map, 1);
+
+    match installed {
+        Ok(Ok(())) => FaultOutcome::Resolved,
+        Ok(Err(MmError::Retry)) => retry(task_id, fault_addr),
+        Ok(Err(MmError::NoMemory)) => {
+            klog_info!(
+                "PF: file page install for task {} at cr2=0x{:x} found no memory",
+                task_id,
+                fault_addr
+            );
             FaultOutcome::Fatal(TaskFaultReason::UserOom)
         }
-        Ok(_) => FaultOutcome::Fatal(TaskFaultReason::UserPage),
+        Ok(Err(_)) => FaultOutcome::Fatal(TaskFaultReason::UserPage),
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
             FaultOutcome::Fatal(TaskFaultReason::UserPage)

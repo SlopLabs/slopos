@@ -9,7 +9,7 @@
 
 use slopos_abi::quota::{
     CustodyAxis, DiskBlocksAxis, FdSlot, KernelMetaAxis, ObjectRow, PagesAxis, PinnedBytesAxis,
-    ProcCount, Refund, ResourceKind, TaskCount, Unit,
+    ProcCount, Refund, ResidentPagesAxis, ResourceKind, TaskCount, Unit,
 };
 
 mod sealed {
@@ -49,16 +49,17 @@ macro_rules! impl_axis {
 }
 
 impl_axis! {
-    FdSlot          => FdSlot,      cost = 1;
-    ObjectRow       => ObjectRow,   cost = 1;
-    TaskCount       => Task,        cost = 1;
-    ProcCount       => Process,     cost = 1;
-    CustodyAxis     => Custody,     cost = 1;
+    FdSlot            => FdSlot,        cost = 1;
+    ObjectRow         => ObjectRow,     cost = 1;
+    TaskCount         => Task,          cost = 1;
+    ProcCount         => Process,       cost = 1;
+    CustodyAxis       => Custody,       cost = 1;
     // The amount is the page / byte count, so one unit costs one.
-    PagesAxis       => Pages,       cost = 1;
-    PinnedBytesAxis => PinnedBytes, cost = 1;
-    KernelMetaAxis  => KernelMeta,  cost = 1;
-    DiskBlocksAxis  => DiskBlocks,  cost = 1;
+    PagesAxis         => Pages,         cost = 1;
+    ResidentPagesAxis => ResidentPages, cost = 1;
+    PinnedBytesAxis   => PinnedBytes,   cost = 1;
+    KernelMetaAxis    => KernelMeta,    cost = 1;
+    DiskBlocksAxis    => DiskBlocks,    cost = 1;
 }
 
 #[cfg(test)]
@@ -84,5 +85,6 @@ mod tests {
         check::<CustodyAxis>(ResourceKind::Custody);
         check::<KernelMetaAxis>(ResourceKind::KernelMeta);
         check::<DiskBlocksAxis>(ResourceKind::DiskBlocks);
+        check::<ResidentPagesAxis>(ResourceKind::ResidentPages);
     }
 }

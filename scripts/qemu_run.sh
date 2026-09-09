@@ -31,7 +31,15 @@ FS_IMAGE="${3:?Usage: qemu_run.sh <mode> <iso> <fs_image>}"
 # ── Configuration with defaults ──────────────────────────────────────────────
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_SMP="${QEMU_SMP:-4}"
-QEMU_MEM="${QEMU_MEM:-512M}"
+# The suite needs more than an interactive boot: `bigprog_test` holds ~170 MiB
+# resident to cross the threshold above which `fork`'s PTE snapshot used to ask
+# the 1 MiB slab for one allocation and panic, and it runs beside a 74 MB
+# kernel and a 39 MB initramfs.
+if [ "$MODE" = "test" ]; then
+    QEMU_MEM="${QEMU_MEM:-1G}"
+else
+    QEMU_MEM="${QEMU_MEM:-512M}"
+fi
 
 # Platform-aware acceleration and CPU model defaults
 if [ "$(uname -s)" = "Darwin" ]; then

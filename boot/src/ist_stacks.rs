@@ -5,14 +5,19 @@
 //! Every region is 64 KiB apart and carries an unmapped guard page at its base,
 //! so an overflow lands in the page-fault classifier rather than in the
 //! neighbouring stack.
+//!
+//! #PF is deliberately not in this table: a user fault must be able to block,
+//! and a context switch away from a per-CPU IST stack would let the next fault
+//! on that vector overwrite the suspended frame. It runs on the faulting task's
+//! kernel stack via TSS.RSP0 instead, so a kernel #PF with no room to push
+//! lands on #DF, which `exception_double_fault` classifies.
 
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::arch::idt::{
-    EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
-    EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
+    EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
 };
 use slopos_arch::{MAX_CPUS, get_current_cpu};
 use slopos_mm::kernel_mappings::kernel_map_4kb_frame;
@@ -161,7 +166,7 @@ const IRQ_KEYBOARD_VECTOR: u8 = IRQ_BASE_VECTOR + 1;
 
 const IRQ_MOUSE_VECTOR: u8 = IRQ_BASE_VECTOR + 12;
 
-pub(crate) const IST_STACK_COUNT: usize = 6;
+pub(crate) const IST_STACK_COUNT: usize = 5;
 
 /// Order matters: the index determines virtual address placement.
 ///
@@ -192,20 +197,13 @@ static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
     ),
     IstStackConfig::new(
         3,
-        b"Page Fault\0",
-        EXCEPTION_PAGE_FAULT,
-        4,
-        IstCategory::MemoryException,
-    ),
-    IstStackConfig::new(
-        4,
         b"Keyboard IRQ\0",
         IRQ_KEYBOARD_VECTOR,
         5,
         IstCategory::HighFreqIrq,
     ),
     IstStackConfig::new(
-        5,
+        4,
         b"Mouse IRQ\0",
         IRQ_MOUSE_VECTOR,
         6,
@@ -214,7 +212,6 @@ static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
 ];
 
 static IST_METRICS: [IstStackMetrics; IST_STACK_COUNT] = [
-    IstStackMetrics::new(),
     IstStackMetrics::new(),
     IstStackMetrics::new(),
     IstStackMetrics::new(),

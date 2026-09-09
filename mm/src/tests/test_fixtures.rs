@@ -59,6 +59,34 @@ impl ProcessVmGuard {
         .unwrap_or(Err(MmError::NoAddressSpace))
     }
 
+    /// Drive a file-backed fault as the page-fault path does: plan under the
+    /// per-process lock, read with it dropped, then install.
+    pub fn handle_file_fault(&self, fault_addr: u64, error_code: u64) -> Result<(), MmError> {
+        let planned = crate::process_vm::process_vm_with_vm_space_and_area(
+            self.process,
+            fault_addr,
+            |vs, start, _end, region| {
+                crate::demand::plan_file_fault(vs, start, fault_addr, error_code, region)
+            },
+        )
+        .unwrap_or(Err(MmError::NoAddressSpace))?;
+        let Some(plan) = planned else {
+            return Ok(());
+        };
+        let cached = crate::filemap_hook::filemap_fault_page(plan.map, plan.page_index)
+            .map_err(|_| MmError::MappingFailed)?;
+        let installed = crate::process_vm::process_vm_with_vm_space_and_area(
+            self.process,
+            fault_addr,
+            |vs, start, _end, region| {
+                crate::demand::install_file_page(vs, start, &plan, cached, region)
+            },
+        )
+        .unwrap_or(Err(MmError::NoAddressSpace));
+        crate::filemap_hook::filemap_release(plan.map, 1);
+        installed
+    }
+
     /// Returns the physical address backing the new mapping.
     pub fn map_test_page(&self, vaddr: u64, flags: u64) -> Option<PhysAddr> {
         process_vm_with_vm_space(self.process, |vs| {

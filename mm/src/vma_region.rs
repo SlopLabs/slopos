@@ -7,10 +7,10 @@
 //! gaps between existing entries, and `insert` merges compatible adjacent
 //! regions automatically.
 
-use slopos_abi::quota::PagesAxis;
+use slopos_abi::quota::{PagesAxis, ResidentPagesAxis};
+use slopos_ostd::KBTreeMap;
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{ChargeSlot, Reservation, TryChargeError, try_charge};
-use slopos_ostd::{KBTreeMap, KVec};
 
 use crate::memfd::MemfdHandle;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
@@ -33,9 +33,16 @@ pub enum RegionBacking {
     /// Shared memfd — pages belong to the MemfdObject, not the process.
     /// Must not be freed on munmap; only mapcount decrement.
     SharedMemfd { handle: MemfdHandle },
-    /// Shared file mapping — pages belong to the filesystem's per-inode page
-    /// set, not the process. Must not be freed on munmap; the set is told.
-    SharedFile { map: FileMapRef },
+    /// File-backed mapping. Pages come from the filesystem's per-inode page
+    /// set; `first_page` is the file page index at the region's start, so a
+    /// fault still names the right page after a split. `private` copies the
+    /// set's page into a page of the process's own on first touch, which unmap
+    /// then frees; the reservation on the set is released either way.
+    File {
+        map: FileMapRef,
+        first_page: u64,
+        private: bool,
+    },
     /// SlopRing shared region (SLOPRING § 5.1). The kernel-side ring object
     /// owns the frames as `Frame<RingMeta>`s and the user PTE holds an
     /// independent `from_in_use` ref, so a mapping outliving the fd cannot
@@ -104,13 +111,49 @@ pub struct VmaRegion {
 }
 
 impl VmaRegion {
-    pub fn can_merge_with(&self, other: &VmaRegion) -> bool {
+    /// Mergeable ignoring file position — every attribute but `first_page`.
+    fn attributes_match(&self, other: &VmaRegion) -> bool {
         self.protection == other.protection
-            && self.backing == other.backing
             && self.lazy == other.lazy
             && self.cow == other.cow
             && self.user == other.user
             && self.purpose == other.purpose
+    }
+
+    pub fn can_merge_with(&self, other: &VmaRegion) -> bool {
+        self.attributes_match(other) && self.backing == other.backing
+    }
+
+    /// `self` spans `self_pages` and `other` begins where it ends: mergeable if
+    /// every attribute matches and, for a file backing, the halves are
+    /// consecutive in the file.
+    ///
+    /// `can_merge_with` cannot answer this — a split rebases the tail's
+    /// `first_page`, so the halves never compare equal — and without it a
+    /// `mprotect` that restored its protection would leave an entry per call.
+    pub fn can_merge_before(&self, self_pages: u64, other: &VmaRegion) -> bool {
+        if !self.attributes_match(other) {
+            return false;
+        }
+        match (&self.backing, &other.backing) {
+            (
+                RegionBacking::File {
+                    map,
+                    first_page,
+                    private,
+                },
+                RegionBacking::File {
+                    map: other_map,
+                    first_page: other_first,
+                    private: other_private,
+                },
+            ) => {
+                map == other_map
+                    && private == other_private
+                    && first_page.saturating_add(self_pages) == *other_first
+            }
+            _ => self.backing == other.backing,
+        }
     }
 
     pub fn is_demand_paged(&self) -> bool {
@@ -126,7 +169,7 @@ impl VmaRegion {
     pub fn is_shared(&self) -> bool {
         matches!(
             self.backing,
-            RegionBacking::SharedMemfd { .. } | RegionBacking::SharedFile { .. }
+            RegionBacking::SharedMemfd { .. } | RegionBacking::File { private: false, .. }
         )
     }
 
@@ -145,9 +188,32 @@ impl VmaRegion {
 
     pub fn filemap_ref(&self) -> Option<FileMapRef> {
         match &self.backing {
-            RegionBacking::SharedFile { map } => Some(*map),
+            RegionBacking::File { map, .. } => Some(*map),
             _ => None,
         }
+    }
+
+    /// The absolute file page index backing `offset_pages` pages into this
+    /// region, or `None` when the region is not file-backed.
+    pub fn file_page_at(&self, offset_pages: u64) -> Option<(FileMapRef, u64, bool)> {
+        match &self.backing {
+            RegionBacking::File {
+                map,
+                first_page,
+                private,
+            } => Some((*map, first_page.saturating_add(offset_pages), *private)),
+            _ => None,
+        }
+    }
+
+    /// The same region `offset_pages` further into the file. Splitting a
+    /// file-backed VMA must rebase the tail, or its faults read the wrong page.
+    pub fn rebased(&self, offset_pages: u64) -> Self {
+        let mut out = self.clone();
+        if let RegionBacking::File { first_page, .. } = &mut out.backing {
+            *first_page = first_page.saturating_add(offset_pages);
+        }
+        out
     }
 
     pub fn to_page_flags(&self) -> PageFlags {
@@ -195,6 +261,9 @@ pub struct VmaMap {
     /// separately because an empty slot names no account.
     account: AccountId,
     charge: ChargeSlot<PagesAxis>,
+    /// Resident pages, synced from the address space's own leaf count: the
+    /// cursor is the only place a user leaf appears, so a second count drifts.
+    resident: ChargeSlot<ResidentPagesAxis>,
 }
 
 impl VmaMap {
@@ -204,6 +273,7 @@ impl VmaMap {
             mapped_pages: 0,
             account: AccountId::NONE,
             charge: ChargeSlot::empty(),
+            resident: ChargeSlot::empty(),
         }
     }
 
@@ -216,6 +286,7 @@ impl VmaMap {
             return;
         }
         self.charge.take();
+        self.resident.take();
         self.account = account;
         if self.mapped_pages != 0
             && let Ok(reservation) = try_charge::<PagesAxis>(account, self.mapped_pages)
@@ -232,6 +303,29 @@ impl VmaMap {
     #[inline]
     pub fn mapped_pages(&self) -> u32 {
         self.mapped_pages
+    }
+
+    /// Bring the resident charge in line with the address space's own count of
+    /// present user leaves.
+    ///
+    /// Called leaving every hold of the per-process lock, so the ledger lags a
+    /// mapping change by at most one hold. The axis is unlimited by default: a
+    /// report of what is held, not a second ceiling on top of `Pages`.
+    pub fn sync_resident(&mut self, resident: u32) {
+        let held = self.resident.amount();
+        if resident > held {
+            if let Ok(reservation) = try_charge::<ResidentPagesAxis>(self.account, resident - held)
+            {
+                self.resident.grow(reservation);
+            }
+        } else if resident < held {
+            self.resident.shrink(held - resident);
+        }
+    }
+
+    #[inline]
+    pub fn resident_pages(&self) -> u32 {
+        self.resident.amount()
     }
 
     /// Pages the charge token currently holds.
@@ -324,7 +418,13 @@ impl VmaMap {
             .map
             .range(..start)
             .next_back()
-            .filter(|entry| entry.1.0 == start && entry.1.1.can_merge_with(&region))
+            .filter(|entry| {
+                entry.1.0 == start
+                    && entry
+                        .1
+                        .1
+                        .can_merge_before(range_pages(*entry.0, start) as u64, &region)
+            })
             .map(|entry| *entry.0);
         // The absorbed neighbour's pages stay charged: they are re-linked below
         // as part of the widened entry, a move rather than a removal.
@@ -337,7 +437,10 @@ impl VmaMap {
             .map
             .range(end..)
             .next()
-            .filter(|entry| *entry.0 == end && entry.1.1.can_merge_with(&region))
+            .filter(|entry| {
+                *entry.0 == end
+                    && region.can_merge_before(range_pages(start, end) as u64, &entry.1.1)
+            })
             .map(|entry| (*entry.0, entry.1.0));
         if let Some((succ_start, succ_end)) = merge_succ {
             end = succ_end;
@@ -395,24 +498,93 @@ impl VmaMap {
         }
     }
 
-    /// Find a region that fully covers [start, end), mutable.
-    pub fn find_covering_mut(
-        &mut self,
-        start: u64,
-        end: u64,
-    ) -> Option<(u64, u64, &mut VmaRegion)> {
-        let key = {
-            let entry = self.map.range(..=start).next_back()?;
-            let vma_start = *entry.0;
-            let vma_end = entry.1.0;
-            if vma_start <= start && vma_end >= end {
-                Some(vma_start)
-            } else {
-                None
-            }
-        }?;
-        let val = self.map.get_mut(&key)?;
-        Some((key, val.0, &mut val.1))
+    /// Make `addr` an entry boundary by splitting the region that contains it.
+    ///
+    /// `false` when `addr` is already a boundary, is unaligned, or lies in no
+    /// region. Page counts are additive across a page-aligned cut, so the
+    /// tree's span and its charge are unchanged.
+    pub fn split_at(&mut self, addr: u64) -> bool {
+        if addr % PAGE_SIZE_4KB != 0 {
+            return false;
+        }
+        let Some((vma_start, vma_end)) = self
+            .find_containing(addr)
+            .map(|(vma_start, vma_end, _)| (vma_start, vma_end))
+        else {
+            return false;
+        };
+        if addr == vma_start {
+            return false;
+        }
+        let Some((_, region)) = self.unlink(vma_start) else {
+            return false;
+        };
+        let shift = (addr - vma_start) / PAGE_SIZE_4KB;
+        self.link(vma_start, addr, region.clone());
+        self.link(addr, vma_end, region.rebased(shift));
+        true
+    }
+
+    /// Rewrite the protection of every page in `[start, end)`.
+    ///
+    /// Splits at both ends so a sub-range does not rewrite its whole enclosing
+    /// region, then re-merges them so repeated calls cannot grow the tree
+    /// without bound. `Err` names the first address no region covers.
+    pub fn protect_range(&mut self, start: u64, end: u64, prot: Protection) -> Result<(), u64> {
+        let mut cursor = start;
+        while cursor < end {
+            let Some((_, vma_end, _)) = self.find_containing(cursor) else {
+                return Err(cursor);
+            };
+            cursor = vma_end;
+        }
+
+        self.split_at(start);
+        self.split_at(end);
+
+        // Both ends are boundaries and the range is gap-free, so every cursor
+        // value below is a key.
+        let mut cursor = start;
+        while cursor < end {
+            let Some(entry) = self.map.get_mut(&cursor) else {
+                return Err(cursor);
+            };
+            entry.1.protection = prot;
+            cursor = entry.0;
+        }
+
+        self.coalesce_at(start);
+        self.coalesce_at(end);
+        Ok(())
+    }
+
+    /// Merge the entry ending at `addr` with the one starting there, when they
+    /// have become compatible.
+    fn coalesce_at(&mut self, addr: u64) {
+        let Some(pred_start) = self
+            .map
+            .range(..addr)
+            .next_back()
+            .filter(|entry| entry.1.0 == addr)
+            .map(|entry| *entry.0)
+        else {
+            return;
+        };
+        let pred_pages = (addr - pred_start) / PAGE_SIZE_4KB;
+        let Some((succ_end, mergeable)) = self.map.get(&addr).and_then(|succ| {
+            let pred = self.map.get(&pred_start)?;
+            Some((succ.0, pred.1.can_merge_before(pred_pages, &succ.1)))
+        }) else {
+            return;
+        };
+        if !mergeable {
+            return;
+        }
+        let Some((_, region)) = self.unlink(pred_start) else {
+            return;
+        };
+        self.unlink(addr);
+        self.link(pred_start, succ_end, region);
     }
 
     /// Find the first gap >= `size` bytes in [from, limit).
@@ -458,53 +630,28 @@ impl VmaMap {
     /// Remove all regions overlapping [start, end), splitting at boundaries.
     /// Calls `on_removed(overlap_start, overlap_end, &region)` for each
     /// removed portion.
+    ///
+    /// Allocation-free: each round re-finds the first overlap rather than
+    /// snapshotting a key list, so a wide unmap cannot fail for want of memory
+    /// — `munmap` and teardown have no failure channel.
     pub fn remove_range(
         &mut self,
         start: u64,
         end: u64,
         mut on_removed: impl FnMut(u64, u64, &VmaRegion),
     ) {
-        let affected: KVec<u64> = KVec::from_iter_fallible(
-            self.map
-                .range(..end)
-                .filter(|entry| entry.1.0 > start && *entry.0 < end)
-                .map(|entry| *entry.0),
-        )
-        .expect("remove_range: affected alloc");
+        while let Some((vma_start, vma_end)) = self.first_overlapping(start, end) {
+            let Some((_, region)) = self.unlink(vma_start) else {
+                break;
+            };
+            on_removed(vma_start.max(start), vma_end.min(end), &region);
 
-        let pred = self
-            .map
-            .range(..start)
-            .next_back()
-            .map(|entry| (*entry.0, entry.1.0));
-        if let Some((pred_start, pred_end)) = pred {
-            if pred_end > start && !affected.iter().any(|k| *k == pred_start) {
-                let (pred_end_val, region) = self.unlink(pred_start).unwrap();
-                let overlap_start = start;
-                let overlap_end = pred_end_val.min(end);
-                on_removed(overlap_start, overlap_end, &region);
-                if pred_start < start {
-                    self.link(pred_start, start, region.clone());
-                }
-                if pred_end_val > end {
-                    self.link(end, pred_end_val, region);
-                }
+            if vma_start < start {
+                self.link(vma_start, start, region.clone());
             }
-        }
-
-        for key in affected {
-            if let Some((vma_end, region)) = self.unlink(key) {
-                let vma_start = key;
-                let overlap_start = vma_start.max(start);
-                let overlap_end = vma_end.min(end);
-                on_removed(overlap_start, overlap_end, &region);
-
-                if vma_start < start {
-                    self.link(vma_start, start, region.clone());
-                }
-                if vma_end > end {
-                    self.link(end, vma_end, region);
-                }
+            if vma_end > end {
+                let shift = (end - vma_start) / PAGE_SIZE_4KB;
+                self.link(end, vma_end, region.rebased(shift));
             }
         }
         // One settle for the whole range: the remnants are re-linked before the
@@ -512,14 +659,28 @@ impl VmaMap {
         self.settle();
     }
 
+    /// The first entry overlapping `[start, end)`. Each remnant a
+    /// `remove_range` round re-links is outside the range, so iterating on this
+    /// terminates.
+    fn first_overlapping(&self, start: u64, end: u64) -> Option<(u64, u64)> {
+        if let Some(entry) = self.map.range(..start).next_back()
+            && entry.1.0 > start
+        {
+            return Some((*entry.0, entry.1.0));
+        }
+        self.map
+            .range(start..end)
+            .next()
+            .map(|entry| (*entry.0, entry.1.0))
+    }
+
     /// Drain all regions, calling `on_each(start, end, &region)` before removal.
     pub fn drain(&mut self, mut on_each: impl FnMut(u64, u64, &VmaRegion)) {
-        let keys: KVec<u64> =
-            KVec::from_iter_fallible(self.map.keys().copied()).expect("vma drain: alloc");
-        for key in keys {
-            if let Some((end, region)) = self.unlink(key) {
-                on_each(key, end, &region);
-            }
+        while let Some(key) = self.map.keys().next().copied() {
+            let Some((end, region)) = self.unlink(key) else {
+                break;
+            };
+            on_each(key, end, &region);
         }
         self.settle();
     }
@@ -529,5 +690,6 @@ impl VmaMap {
         self.map.clear();
         self.mapped_pages = 0;
         self.charge.take();
+        self.resident.take();
     }
 }

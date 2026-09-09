@@ -520,14 +520,14 @@ pub unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
 
 /// Predicate: must the given vector hold off deferred rescheduling?
 ///
-/// Deliberately wider than the IST table — every architectural exception
-/// vector (0..=31) qualifies, so a guard drop inside e.g. a page-fault
-/// handler cannot run the deferred reschedule from exception context.
-/// Hardware IRQs (32..) are the paths a reschedule is *supposed* to leave
-/// from.
+/// Every architectural exception vector except #PF qualifies: each runs on a
+/// per-CPU IST stack, where a deferred reschedule would let the next exception
+/// on that vector overwrite the suspended frame. Hardware IRQs (32..) are the
+/// paths a reschedule is *supposed* to leave from, and #PF joins them — it has
+/// no IST precisely so a user fault can block.
 #[inline]
 pub const fn vector_uses_ist(vector: u8) -> bool {
-    vector < 32
+    vector < 32 && vector != EXCEPTION_PAGE_FAULT
 }
 
 /// Const-generic RAII guard for IST-using exception entry points.
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn vector_uses_ist_predicate() {
         assert!(vector_uses_ist(0));
-        assert!(vector_uses_ist(14));
+        assert!(!vector_uses_ist(14));
         assert!(vector_uses_ist(31));
         assert!(!vector_uses_ist(32));
         assert!(!vector_uses_ist(0x80));
@@ -669,9 +669,17 @@ mod tests {
     fn irq_entry_guard_ist_vector_bumps_count() {
         isolate(|| {
             assert_eq!(p::preempt_count(), 0);
-            let _g = IrqEntryGuard::<14>::enter();
+            let _g = IrqEntryGuard::<13>::enter();
             assert_eq!(p::preempt_count(), 1);
             drop(_g);
+            assert_eq!(p::preempt_count(), 0);
+        });
+    }
+
+    #[test]
+    fn irq_entry_guard_page_fault_is_noop() {
+        isolate(|| {
+            let _g = IrqEntryGuard::<14>::enter();
             assert_eq!(p::preempt_count(), 0);
         });
     }

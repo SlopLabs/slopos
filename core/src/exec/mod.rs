@@ -12,7 +12,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
-use slopos_ostd::KVec;
+use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::{KArc, KVec};
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
@@ -20,12 +21,14 @@ use slopos_fs::fileio::{
     FileRef, file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
     fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_take_file_ref_matching,
 };
-use slopos_fs::vfs::ops::vfs_open;
-use slopos_mm::elf::{ElfError, ElfExecInfo};
+use slopos_fs::vfs::ops::{VfsHandle, vfs_open};
+use slopos_mm::elf::{
+    ELF_HEADER_WINDOW, ElfError, ElfExecInfo, MAX_LOAD_SEGMENTS, ValidatedSegment,
+};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
-    process_vm_get_stack_top, process_vm_get_vm_space, process_vm_load_elf_data,
+    process_vm_get_stack_top, process_vm_get_vm_space, process_vm_map_elf_image,
     process_vm_reset_for_exec, process_vm_reset_stack, process_vm_write_user_bytes,
 };
 use slopos_ostd::klog_info;
@@ -38,9 +41,17 @@ use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_fro
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
-pub const EXEC_MAX_ARGS: usize = 32;
-pub const EXEC_MAX_ENVS: usize = 32;
-pub const EXEC_MAX_ELF_SIZE: usize = 16 * 1024 * 1024;
+/// Total argv+envp byte budget, in pages, after Linux's `MAX_ARG_PAGES`. The
+/// same 128 KiB the retired 32-argument cap implied, now spendable as many
+/// short strings rather than a few long ones.
+pub const EXEC_MAX_ARG_PAGES: usize = 32;
+/// Pointers walked before a user array missing its NULL is given up on. A loop
+/// bound, not a policy limit: [`EXEC_MAX_ARG_PAGES`] decides what fits.
+pub const EXEC_MAX_ARG_STRINGS: usize = 4096;
+/// Ceiling on an executable's file size. Nothing is staged in kernel memory to
+/// load one; the mapped extent is bounded by
+/// [`slopos_mm::elf::MAX_TOTAL_MAPPED_SIZE`].
+pub const EXEC_MAX_ELF_SIZE: usize = 512 * 1024 * 1024;
 
 /// Bytes per `FileSystem::read` while staging an ELF.
 ///
@@ -52,6 +63,44 @@ pub const EXEC_MAX_ELF_SIZE: usize = 16 * 1024 * 1024;
 pub const EXEC_READ_CHUNK: usize = 64 * 1024;
 
 pub const INIT_PATH: &[u8] = b"/sbin/init";
+
+/// What `setup_user_stack` spends whatever the argument count: red zone, two
+/// realignments, six auxv pairs, argc and the two NULL sentinels.
+const EXEC_ARG_STACK_FIXED: usize = 128 + 16 + 16 + 6 * 16 + 3 * 8;
+
+/// [`EXEC_MAX_ARG_PAGES`] as bytes. Also what a syscall handler may stage out
+/// of user memory before the exact accounting below runs.
+pub const EXEC_MAX_ARG_BYTES: usize = EXEC_MAX_ARG_PAGES * PAGE_SIZE_4KB as usize;
+
+/// Whether `argv` + `envp` fit the budget, counting exactly what
+/// [`setup_user_stack`] will push.
+pub fn exec_arg_bytes_fit(argv: Option<&[&[u8]]>, envp: Option<&[&[u8]]>) -> bool {
+    let mut total = EXEC_ARG_STACK_FIXED;
+    for list in [argv, envp].into_iter().flatten() {
+        for s in list.iter() {
+            let Some(with_nul) = s.len().checked_add(1) else {
+                return false;
+            };
+            if with_nul > EXEC_MAX_ARG_STRLEN {
+                return false;
+            }
+            // `setup_user_stack` realigns sp to 8 after each string.
+            let padded = with_nul.next_multiple_of(8);
+            let Some(next) = total
+                .checked_add(padded)
+                .and_then(|t| t.checked_add(core::mem::size_of::<u64>()))
+            else {
+                return false;
+            };
+            if next > EXEC_MAX_ARG_BYTES {
+                return false;
+            }
+            total = next;
+        }
+    }
+
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -440,59 +489,8 @@ pub fn do_exec(
         return Err(ExecError::NameTooLong);
     }
 
-    let handle = vfs_open(path, false).map_err(|e| match e {
-        slopos_fs::VfsError::NotFound => ExecError::NoEntry,
-        slopos_fs::VfsError::IsDirectory => ExecError::NoExec,
-        slopos_fs::VfsError::PermissionDenied => ExecError::NoExec,
-        _ => ExecError::IoError,
-    })?;
-
-    let file_stat = handle
-        .fs
-        .stat(handle.inode)
-        .map_err(|_| ExecError::IoError)?;
-    if (file_stat.mode & 0o111) == 0 {
-        return Err(ExecError::NoExec);
-    }
-
-    let file_size = file_stat.size as usize;
-    if file_size == 0 || file_size > EXEC_MAX_ELF_SIZE {
-        return Err(ExecError::NoExec);
-    }
-
-    let mut elf_data: KVec<u8> = KVec::<u8>::zeroed(file_size).map_err(|_| ExecError::NoMem)?;
-
-    let mut offset = 0u64;
-    while (offset as usize) < file_size {
-        let remaining = file_size - offset as usize;
-        let chunk_size = remaining.min(EXEC_READ_CHUNK);
-        let read = handle
-            .read(
-                offset,
-                &mut elf_data[offset as usize..offset as usize + chunk_size],
-            )
-            .map_err(|_| ExecError::IoError)?;
-        if read == 0 {
-            break;
-        }
-        offset += read as u64;
-    }
-
-    if (offset as usize) < file_size {
-        elf_data.truncate(offset as usize);
-    }
-
     let vm_process = table.process().ok_or(ExecError::NoMem)?;
-
-    // The address-space boundary. Everything the old image mapped — heap,
-    // mmap arena, shared memfds, rings — is severed here, before the new
-    // image exists, so no mapping outlives the program that made it.
-    if process_vm_reset_for_exec(vm_process) != 0 {
-        return Err(ExecError::NoMem);
-    }
-
-    let exec_info = process_vm_load_elf_data(vm_process, elf_data.as_slice(), entry_out)
-        .map_err(ExecError::from)?;
+    let exec_info = load_image(path, vm_process, entry_out)?;
 
     if process_vm_reset_stack(vm_process) != 0 {
         return Err(ExecError::NoMem);
@@ -516,6 +514,107 @@ pub fn do_exec(
     Ok(())
 }
 
+/// Open `path`, validate it, and install its image in `process`'s address
+/// space. Out of line to keep its locals out of `do_exec`'s frame, which is
+/// measured against the 2 KiB stack gate.
+#[inline(never)]
+fn load_image(
+    path: &[u8],
+    process: slopos_ostd::process::ProcessId,
+    entry_out: &mut u64,
+) -> Result<ElfExecInfo, ExecError> {
+    let handle = vfs_open(path, false).map_err(|e| match e {
+        slopos_fs::VfsError::NotFound => ExecError::NoEntry,
+        slopos_fs::VfsError::IsDirectory => ExecError::NoExec,
+        slopos_fs::VfsError::PermissionDenied => ExecError::NoExec,
+        _ => ExecError::IoError,
+    })?;
+
+    let file_stat = handle
+        .fs
+        .stat(handle.inode)
+        .map_err(|_| ExecError::IoError)?;
+    if (file_stat.mode & 0o111) == 0 {
+        return Err(ExecError::NoExec);
+    }
+
+    let file_size = file_stat.size;
+    if file_size == 0 || file_size > EXEC_MAX_ELF_SIZE as u64 {
+        return Err(ExecError::NoExec);
+    }
+
+    // Only the header window is staged; the rest goes from the file straight
+    // into the mapping, so the image may exceed the 1 MiB slab ceiling.
+    let window_len = (file_size as usize).min(ELF_HEADER_WINDOW);
+    let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| ExecError::NoMem)?;
+    read_exact_at(&handle, 0, header.as_mut_slice())?;
+
+    let mut segments =
+        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| ExecError::NoMem)?;
+
+    // The address-space boundary. Everything the old image mapped — heap,
+    // mmap arena, shared memfds, rings — is severed here, before the new
+    // image exists, so no mapping outlives the program that made it.
+    if process_vm_reset_for_exec(process) != 0 {
+        return Err(ExecError::NoMem);
+    }
+
+    let (exec_info, segment_count) = process_vm_map_elf_image(
+        process,
+        header.as_slice(),
+        file_size,
+        segments.as_mut_slice(),
+        entry_out,
+    )
+    .map_err(ExecError::from)?;
+
+    let vm_space = process_vm_get_vm_space(process).ok_or(ExecError::Fault)?;
+    stream_segments(&handle, &vm_space, &segments.as_slice()[..segment_count])?;
+    Ok(exec_info)
+}
+
+/// Fill `buf` from `offset`. A short read fails the load rather than leaving
+/// the tail as whatever the buffer held.
+fn read_exact_at(handle: &VfsHandle, offset: u64, buf: &mut [u8]) -> Result<(), ExecError> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let read = handle
+            .read(offset + done as u64, &mut buf[done..])
+            .map_err(|_| ExecError::IoError)?;
+        if read == 0 {
+            return Err(ExecError::NoExec);
+        }
+        done += read;
+    }
+    Ok(())
+}
+
+/// Copy each `PT_LOAD` segment's file bytes into the already-mapped, zeroed
+/// pages, reusing one [`EXEC_READ_CHUNK`] buffer, so an `exec`'s kernel heap
+/// cost is independent of the image's size. No VM lock is held: the mount lock
+/// the read takes is a sleeping one.
+fn stream_segments(
+    handle: &VfsHandle,
+    vm_space: &KArc<VmSpace>,
+    segments: &[ValidatedSegment],
+) -> Result<(), ExecError> {
+    let mut staging: KVec<u8> =
+        KVec::<u8>::zeroed(EXEC_READ_CHUNK).map_err(|_| ExecError::NoMem)?;
+
+    for segment in segments.iter() {
+        let mut done = 0u64;
+        while done < segment.file_size {
+            let chunk = core::cmp::min(segment.file_size - done, EXEC_READ_CHUNK as u64) as usize;
+            let buf = &mut staging.as_mut_slice()[..chunk];
+            read_exact_at(handle, segment.file_offset + done, buf)?;
+            process_vm_write_user_bytes(vm_space, segment.original_vaddr + done, buf)
+                .map_err(|_| ExecError::Fault)?;
+            done += chunk as u64;
+        }
+    }
+    Ok(())
+}
+
 fn setup_user_stack(
     table: FdTable,
     argv: Option<&[&[u8]]>,
@@ -527,12 +626,14 @@ fn setup_user_stack(
     if stack_top_raw == 0 {
         return Err(ExecError::Fault);
     }
+    // Resolved once, or every string and pointer below re-takes the slot lock.
+    let vm_space = process_vm_get_vm_space(vm_process).ok_or(ExecError::Fault)?;
     let stack_top = stack_top_raw.wrapping_sub(8);
 
     let argc = argv.map(|a| a.len()).unwrap_or(0);
     let envc = envp.map(|e| e.len()).unwrap_or(0);
 
-    if argc > EXEC_MAX_ARGS || envc > EXEC_MAX_ENVS {
+    if !exec_arg_bytes_fit(argv, envp) {
         return Err(ExecError::TooManyArgs);
     }
 
@@ -548,8 +649,8 @@ fn setup_user_stack(
             let len = arg.len() + 1;
             sp = sp.wrapping_sub(len as u64);
             sp &= !0x7;
-            write_to_user_stack(table, sp, arg)?;
-            write_byte_to_user_stack(table, sp + arg.len() as u64, 0)?;
+            write_to_user_stack(&vm_space, sp, arg)?;
+            write_byte_to_user_stack(&vm_space, sp + arg.len() as u64, 0)?;
             string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
@@ -561,8 +662,8 @@ fn setup_user_stack(
             let len = env.len() + 1;
             sp = sp.wrapping_sub(len as u64);
             sp &= !0x7;
-            write_to_user_stack(table, sp, env)?;
-            write_byte_to_user_stack(table, sp + env.len() as u64, 0)?;
+            write_to_user_stack(&vm_space, sp, env)?;
+            write_byte_to_user_stack(&vm_space, sp + env.len() as u64, 0)?;
             string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
@@ -587,43 +688,49 @@ fn setup_user_stack(
     sp = sp.wrapping_sub(aux_size as u64);
     for (idx, (a_type, a_val)) in auxv.iter().enumerate() {
         let slot = sp + (idx as u64) * 16;
-        write_u64_to_user_stack(table, slot, *a_type)?;
-        write_u64_to_user_stack(table, slot + 8, *a_val)?;
+        write_u64_to_user_stack(&vm_space, slot, *a_type)?;
+        write_u64_to_user_stack(&vm_space, slot + 8, *a_val)?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(table, sp, 0)?;
+    write_u64_to_user_stack(&vm_space, sp, 0)?;
 
     for i in (argv_start..string_ptrs.len()).rev() {
         sp = sp.wrapping_sub(8);
-        write_u64_to_user_stack(table, sp, string_ptrs[i])?;
+        write_u64_to_user_stack(&vm_space, sp, string_ptrs[i])?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(table, sp, 0)?;
+    write_u64_to_user_stack(&vm_space, sp, 0)?;
 
     for i in (0..argv_start).rev() {
         sp = sp.wrapping_sub(8);
-        write_u64_to_user_stack(table, sp, string_ptrs[i])?;
+        write_u64_to_user_stack(&vm_space, sp, string_ptrs[i])?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(table, sp, argc as u64)?;
+    write_u64_to_user_stack(&vm_space, sp, argc as u64)?;
 
     Ok(sp)
 }
 
-fn write_to_user_stack(table: FdTable, addr: u64, data: &[u8]) -> Result<(), ExecError> {
-    let vm_process = table.process().ok_or(ExecError::Fault)?;
-    let vm_space = process_vm_get_vm_space(vm_process).ok_or(ExecError::Fault)?;
-    process_vm_write_user_bytes(&vm_space, addr, data).map_err(|_| ExecError::Fault)
+fn write_to_user_stack(vm_space: &KArc<VmSpace>, addr: u64, data: &[u8]) -> Result<(), ExecError> {
+    process_vm_write_user_bytes(vm_space, addr, data).map_err(|_| ExecError::Fault)
 }
 
-fn write_byte_to_user_stack(table: FdTable, addr: u64, byte: u8) -> Result<(), ExecError> {
-    write_to_user_stack(table, addr, &[byte])
+fn write_byte_to_user_stack(
+    vm_space: &KArc<VmSpace>,
+    addr: u64,
+    byte: u8,
+) -> Result<(), ExecError> {
+    write_to_user_stack(vm_space, addr, &[byte])
 }
 
-fn write_u64_to_user_stack(table: FdTable, addr: u64, value: u64) -> Result<(), ExecError> {
+fn write_u64_to_user_stack(
+    vm_space: &KArc<VmSpace>,
+    addr: u64,
+    value: u64,
+) -> Result<(), ExecError> {
     let bytes = value.to_le_bytes();
-    write_to_user_stack(table, addr, &bytes)
+    write_to_user_stack(vm_space, addr, &bytes)
 }

@@ -81,16 +81,60 @@ pub const PROCESS_TLS_BASE_VA: u64 = 0x0000_0000_00C0_0000;
 
 pub const PROCESS_HEAP_START_VA: u64 = 0x0000_0000_0100_0000;
 
-pub const PROCESS_HEAP_MAX_VA: u64 = 0x0000_0000_4000_0000;
+/// Ceiling for `brk` (16 GB). A `brk`-fed allocator serving a compiler runs out
+/// of the 1 GB this used to be.
+pub const PROCESS_HEAP_MAX_VA: u64 = 0x0000_0004_0000_0000;
+
+/// Unmapped address space between the heap ceiling and the mmap arena (4 GB),
+/// so a runaway `brk` cannot walk into a mapping and a `MAP_FIXED` at the arena
+/// base cannot land inside heap growth.
+pub const PROCESS_HEAP_MMAP_GAP: u64 = 0x0000_0001_0000_0000;
 
 pub const PROCESS_STACK_TOP_VA: u64 = 0x0000_7FFF_FF00_0000;
 
-/// Process stack size in bytes (1 MB).
+/// Stack bytes mapped at exec (1 MB). The rest is faulted in on demand, up to
+/// [`PROCESS_STACK_MAX_BYTES`].
 pub const PROCESS_STACK_SIZE_BYTES: u64 = 0x0000_0000_0010_0000;
 
-pub const PROCESS_MMAP_START_VA: u64 = 0x0000_0000_4000_0000;
+/// Ceiling on stack growth (8 MB) — the main-thread stack size a toolchain
+/// expects. Past it, a fault is a runaway recursion rather than a workload.
+pub const PROCESS_STACK_MAX_BYTES: u64 = 0x0000_0000_0080_0000;
+
+/// Floor of the stack's maximum extent in the default layout, which is what the
+/// invariants below are stated against. ASLR shifts the whole stack down with
+/// its top, so a real floor is `layout.stack_top - PROCESS_STACK_MAX_BYTES`.
+pub const PROCESS_STACK_LOW_VA: u64 = PROCESS_STACK_TOP_VA - PROCESS_STACK_MAX_BYTES;
+
+/// Unmapped page below the stack's maximum extent: growth past the ceiling
+/// takes a fault on it instead of silently extending over whatever is below.
+pub const PROCESS_STACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
+
+pub const PROCESS_MMAP_START_VA: u64 = PROCESS_HEAP_MAX_VA + PROCESS_HEAP_MMAP_GAP;
 
 pub const PROCESS_MMAP_END_VA: u64 = 0x0000_7FFF_FE00_0000;
+
+// A strict ascending chain — code, data, TLS, heap, gap, mmap arena, stack
+// guard, stack — and two of those adjacencies are what keep `brk` growth and
+// stack growth off other regions.
+const _: () = {
+    assert!(PROCESS_CODE_START_VA < PROCESS_DATA_START_VA);
+    assert!(PROCESS_DATA_START_VA < PROCESS_TLS_BASE_VA);
+    assert!(PROCESS_TLS_BASE_VA < PROCESS_HEAP_START_VA);
+    assert!(PROCESS_HEAP_START_VA < PROCESS_HEAP_MAX_VA);
+    assert!(
+        PROCESS_MMAP_START_VA == PROCESS_HEAP_MAX_VA + PROCESS_HEAP_MMAP_GAP,
+        "the mmap arena must start one stated gap above the heap ceiling",
+    );
+    assert!(PROCESS_MMAP_START_VA < PROCESS_MMAP_END_VA);
+    assert!(PROCESS_STACK_SIZE_BYTES <= PROCESS_STACK_MAX_BYTES);
+    // 8 MB of slack today, of which ASLR can consume at most 1 MB (8 entropy
+    // bits of 4 KB pages, `mm/src/aslr.rs`).
+    assert!(
+        PROCESS_MMAP_END_VA + PROCESS_STACK_GUARD_SIZE <= PROCESS_STACK_LOW_VA,
+        "the stack's maximum extent overlaps the mmap arena or its guard page",
+    );
+    assert!(PROCESS_STACK_TOP_VA < USER_SPACE_END_VA);
+};
 
 pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_C000_0000;
 

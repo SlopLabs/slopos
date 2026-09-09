@@ -14,11 +14,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use bitflags::bitflags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::quota::KernelMetaAxis;
 
 use crate::mm::frame::{Frame, FrameAllocOptions, MetaSlot, Paddr, PageTableMeta, meta_slot_for};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::page_property::PageProperty;
 use crate::mm::phys;
+use crate::process::quota::{ChargeSlot, root, try_charge};
 
 pub const PAGE_SIZE_4KB: u64 = 0x1000;
 pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
@@ -282,6 +284,31 @@ fn intermediate_alloc_should_fail() -> bool {
         .is_ok()
 }
 
+/// Every page-table frame this kernel allocates, charged to the root.
+///
+/// The root and not the faulting principal: the walker is reached from paths
+/// with no `AccountId` in hand, the same reason `mm/src/slab/page.rs` charges
+/// the heap's backing there. A `.bss` slot rather than a field because the
+/// frames are owned by parent PTEs, which have nowhere to put a token.
+static PAGE_TABLE_PAGES: ChargeSlot<KernelMetaAxis> = ChargeSlot::empty();
+
+/// Charge one page-table frame. A refusal is reported as an intermediate
+/// allocation failure, which every mapping caller already handles.
+pub(crate) fn charge_page_table_frame() -> bool {
+    match try_charge::<KernelMetaAxis>(root(), 1) {
+        Ok(reservation) => {
+            PAGE_TABLE_PAGES.grow(reservation);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Give the charge back where the frame itself returns to the allocator.
+pub(crate) fn refund_page_table_frame() {
+    PAGE_TABLE_PAGES.shrink(1);
+}
+
 pub(crate) fn walk_to_leaf(
     pml4_phys: Paddr,
     vaddr: VirtAddr,
@@ -420,9 +447,13 @@ fn step_down(
     }
 
     let alloc = current_frame_allocator().ok_or(WalkError::AllocUninitialised)?;
+    if !charge_page_table_frame() {
+        return Err(WalkError::AllocFailed);
+    }
     let new_phys = match alloc.alloc(FrameAllocOptions::single().zeroed()) {
         Some(p) => p,
         None => {
+            refund_page_table_frame();
             crate::klog_warn!(
                 "page_table: intermediate alloc returned NULL (parent_level={:?}) -> AllocFailed",
                 parent_level,
@@ -455,8 +486,8 @@ fn step_down(
                 snap.raw_ref_count,
                 snap.vtable_addr,
             );
-            // Leak `new_phys`: if its slot is still owned, that owner's Drop
-            // frees the page and deallocating here would double-free.
+            // Leak `new_phys` and its charge: a still-owned slot's Drop frees
+            // the page, so deallocating here would double-free.
             return Err(WalkError::PathCorrupt);
         }
     };
@@ -475,9 +506,13 @@ fn step_down(
 fn split_pdpt_huge(pdpt_entry: Pte) -> Result<(), WalkError> {
     debug_assert!(pdpt_entry.is_present() && pdpt_entry.is_huge());
     let alloc = current_frame_allocator().ok_or(WalkError::AllocUninitialised)?;
-    let pd_phys = alloc
-        .alloc(FrameAllocOptions::single().zeroed())
-        .ok_or(WalkError::AllocFailed)?;
+    if !charge_page_table_frame() {
+        return Err(WalkError::AllocFailed);
+    }
+    let Some(pd_phys) = alloc.alloc(FrameAllocOptions::single().zeroed()) else {
+        refund_page_table_frame();
+        return Err(WalkError::AllocFailed);
+    };
 
     let huge_phys = pdpt_entry.address();
     let huge_flags = pdpt_entry.flags();
@@ -516,9 +551,13 @@ fn split_pdpt_huge(pdpt_entry: Pte) -> Result<(), WalkError> {
 fn split_pd_huge(pd_entry: Pte) -> Result<(), WalkError> {
     debug_assert!(pd_entry.is_present() && pd_entry.is_huge());
     let alloc = current_frame_allocator().ok_or(WalkError::AllocUninitialised)?;
-    let pt_phys = alloc
-        .alloc(FrameAllocOptions::single().zeroed())
-        .ok_or(WalkError::AllocFailed)?;
+    if !charge_page_table_frame() {
+        return Err(WalkError::AllocFailed);
+    }
+    let Some(pt_phys) = alloc.alloc(FrameAllocOptions::single().zeroed()) else {
+        refund_page_table_frame();
+        return Err(WalkError::AllocFailed);
+    };
 
     let huge_phys = pd_entry.address();
     let mut huge_flags = pd_entry.flags();

@@ -14,20 +14,21 @@ appetite.
 
 **Scale, from the host, measured:** the pinned toolchain sysroot is 1.1 GB;
 `librustc_driver.so` is a single 161 MB shared object loaded through `PT_INTERP`;
-`builddir/target` holds 52 GB across 219,895 files. Against that, SlopOS today
-caps an executable at 1 MiB (`mm/src/slab/mod.rs:61` bounds the `KVec` at
-`core/src/exec/mod.rs:463`), boots a 512 MiB dev root with 32 k inodes against
-a 1 GiB kernel-side ceiling, and refuses `PT_INTERP` outright
-(`mm/src/elf.rs:591`). The gap is three orders of
-magnitude in four independent dimensions, and every constant that produces it
-was chosen correctly for an appliance.
+`builddir/target` holds 52 GB across 219,895 files. Against that, SlopOS now
+runs a 24 MiB executable with a gigabyte of anonymous address space and a
+demand-paged file mapping (see below), boots a 512 MiB dev root with 32 k
+inodes against a 1 GiB kernel-side ceiling, and refuses `PT_INTERP` outright
+(`mm/src/elf.rs`). The remaining gap is two orders of magnitude in storage and
+one in linking, and every constant that produces it was chosen correctly for an
+appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes, they
 are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
-proof*, not redesign — with four genuine exceptions (demand-paged exec, a
-sleepable page-fault path, dynamic linking, and the compiler bootstrap itself).
+proof*, not redesign — with three remaining exceptions (dynamic linking, the
+compiler bootstrap itself, and a filesystem that can hold a tree). The fourth,
+a page-fault path that can reach the device, has landed.
 
 ## Architectural constraints (do not violate)
 
@@ -41,11 +42,12 @@ sleepable page-fault path, dynamic linking, and the compiler bootstrap itself).
 - **Stack frames ≤ 2 KiB** against a 4 KiB guard page. This is why
   `MAX_PATH_LEN` is 256 (`fs/src/lib.rs:4`); widening paths means moving
   `CanonPath`/`MountPoint.path` off the stack, not raising the gate.
-- **Task ownership I1–I8** and **no `async fn` in a kernel crate**. A sleepable
-  fault path (Phase 1) must be a blocking kernel task, not an executor.
+- **Task ownership I1–I8** and **no `async fn` in a kernel crate**. The
+  sleepable fault path this rests on is a blocking task on its own kernel
+  stack, not an executor.
 - **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
   — which rules out lifting busybox-lineage utilities or Linux userland code for
-  Phase 4. Concepts, ABI numbers and struct layouts are free to take; prose and
+  Phase 3. Concepts, ABI numbers and struct layouts are free to take; prose and
   implementation are not. Anything new linked into a shipped binary needs a
   `NOTICE.md` entry. Fonts stay runtime-loaded.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
@@ -90,67 +92,112 @@ What it rests on, in case a later phase disturbs it:
 - **The persist root is 512M against a 32M shipped image, and 1 GiB is the
   ceiling.** The verity hash array is one contiguous `KVec` of 4 bytes per
   4 KiB block against a 1 MiB `MAX_ALLOC_SIZE`, so a 1 GiB image allocates
-  exactly the cap twice at mount. Workstream 3.1 is what lifts that; until it
+  exactly the cap twice at mount. Workstream 2.1 is what lifts that; until it
   does, no phase here may assume a bigger root.
 
 ---
 
-## Phase 1 — Run a large program at all
+## A large program runs
 
-**Outcome:** a 200 MB statically linked binary execs, maps its inputs lazily,
-and can address several GB. Until this lands nothing else in the plan is
-*measurable*, because no toolchain-sized process can start.
+The second thing this plan rests on, and the reason the phases below are
+*measurable*: a toolchain-sized process can start. `bigprog_test` is the
+standing proof — a 24 MiB binary that loads intact, maps a gigabyte of
+anonymous space, maps a file past a ragged EOF, recurses through three
+megabytes of stack and forks with 192 MiB resident. Every one of those was a
+hard refusal before, and the last two are sized deliberately: 3 MiB is past the
+whole of the old fixed stack, and 192 MiB is past the ~170 MiB at which `fork`'s
+single-`KVec` snapshot used to exceed the slab's 1 MiB ceiling and panic. The
+suite's guest is 1 GiB rather than 512 MiB to afford that residency.
 
-### Workstream 1.1 — Demand-paged exec (**M**)
+What it rests on, in case a later phase disturbs it:
 
-`do_exec` stages the whole file into one `KVec<u8>` (`core/src/exec/mod.rs:463`)
-under a 1 MiB slab ceiling, with a nominal `EXEC_MAX_ELF_SIZE` of 16 MiB that is
-unreachable. The largest binary the tree has ever run is 726 KB
-(`builddir/shell.elf`), so the ceiling has never been observed. Replace the
-staging buffer with a chunked read straight into the target VMA — the loader
-already copies per page in `load_segment_pages` — and raise
-`MAX_TOTAL_MAPPED_SIZE` (256 MiB) and `MAX_LOAD_SEGMENTS` (16) in
-`mm/src/elf.rs:56-59`.
+- **A user page fault can reach the device.** #PF has no IST entry
+  (`boot/src/ist_stacks.rs`), so a user-mode fault lands on the faulting task's
+  own kernel stack via `TSS.RSP0` — exactly as a timer IRQ from user mode
+  already did — and `vector_uses_ist` excludes vector 14 so no preempt hold is
+  taken. The handler re-enables interrupts, leaves interrupt-nesting context,
+  resolves, and hands off to the scheduler at trap exit. That is what makes a
+  blocking `fs.read` legal on the fault path, and it is a *blocking task*
+  rather than an executor, as the constraints above require. The cost is
+  stated: a kernel #PF taken with no room to push its frame now escalates to
+  #DF, which `exception_double_fault` classifies against the IST, exception
+  data-stack, emergency and task-stack guard pages.
+- **The per-process lock is not held across the I/O.** A file-backed fault
+  plans under `PROCESS_VMS[slot]` (`demand::plan_file_fault`), drops it, reads
+  one page through `filemap::fault_page_in_set`, then re-takes the lock and
+  re-validates that the region still names the same file page before installing
+  (`demand::install_file_page`). A mapping unmapped or replaced mid-read
+  resolves as a retry, not as a page from the wrong file.
+- **`exec` stages a header, not an image.** `do_exec` reads
+  `ELF_HEADER_WINDOW` (7232 bytes — the ELF header plus the largest
+  program-header table), validates every segment extent against the file's real
+  length, maps each `PT_LOAD` zeroed under the lock, then streams the file into
+  the mapping in `EXEC_READ_CHUNK` pieces with the lock dropped. Kernel memory
+  per `exec` is therefore independent of the binary's size; `EXEC_MAX_ELF_SIZE`
+  is 512 MiB and, unlike the 16 MiB it replaced, reachable. The *mapping* is
+  still eager, so what an image may ask the frame allocator for is bounded from
+  the other side too: `MAX_TOTAL_ZERO_FILL_SIZE` caps the `p_memsz`-past-
+  `p_filesz` part at the 256 MiB the whole-image ceiling used to permit, or a
+  one-page ELF declaring a 2 GiB `PT_LOAD` would have an unprivileged `exec`
+  memset half a million frames under the per-process lock. The relocation pass
+  that forced whole-file staging is gone: it only ever ran for an image not
+  linked at `PROCESS_CODE_START_VA`, nothing the tree builds is, and it relied
+  on the loader handing it physically contiguous frames. Such an image is now
+  refused (`ElfError::UnsupportedLoadBase`) rather than loaded unrelocated.
+- **Mappings are lazy, and the ledger says which are resident.** `brk`, `mmap`
+  and both file-mapping modes install no PTE; the fault installs one page. The
+  stack is 1 MiB mapped inside an 8 MiB lazy extent with a guard gap below it,
+  so a deeper stack is an ordinary demand fault and one past the ceiling finds
+  no VMA. `Pages` is 4 GiB of VA per process and means what it always meant —
+  `RLIMIT_AS`, not memory — and the new `ResidentPages` axis is the other
+  number: the count of present user leaves, maintained by the page-table cursor
+  because that is the only place one appears or disappears. The suite measures
+  ~113 000 resident against ~950 000 mapped — a factor of eight, which is
+  demand paging working rather than a discrepancy. Page tables are charged too,
+  so a multi-gigabyte address space is no longer free.
+- **`fork` fails rather than panicking.** The parent's PTE snapshot is chunked
+  at `CLONE_CHUNK_PAGES` and every push is fallible, so a parent with a
+  gigabyte resident gets `ENOMEM` where it used to take the kernel down on a
+  `KVec` over the 1 MiB slab ceiling. `VmaMap::remove_range` and `drain` are
+  allocation-free for the same reason: `munmap` and teardown have no failure
+  channel. Fork's cost is still O(resident) in kernel memory, and deliberately
+  so — the whole parent walk happens under one hold of its lock, because a
+  parent whose other threads could write between the COW mark and the child's
+  mapping would not be handing over a snapshot.
+- **`mprotect` splits.** `VmaMap::split_at` / `protect_range` / `coalesce_at`
+  carve the range out, rewrite only it, and re-merge the boundaries, so a
+  sub-range no longer rewrites its whole VMA's recorded protection while
+  touching only some of its PTEs. A file-backed VMA rebases its file offset on
+  every split, or a fault in the tail would read the wrong page — and
+  `can_merge_before` compares those offsets for contiguity, so restoring a
+  protection re-merges the halves instead of leaving an entry per call.
+- **`exec`'s argument surface is byte-bounded.** `EXEC_MAX_ARG_PAGES` is the
+  same 128 KiB the retired 32-argument cap implied, now spendable as many short
+  strings; `EXEC_MAX_ARG_STRINGS` is only a loop bound so a NULL-less user
+  array terminates. `setup_user_stack` resolves the address space once instead
+  of per write.
+- **The filemap caps come from the medium.** 128 inodes, and a page ceiling of
+  a quarter of usable frames with the old 1024 as the floor, because a page
+  under a live user PTE is unreclaimable by construction. A page whose *start*
+  is past EOF is refused per page; one straddling EOF is zero-filled, which is
+  what makes a mapping of a file whose size is not page-aligned legal.
 
-### Workstream 1.2 — A sleepable fault path (**L**)
-
-The page-fault handler runs on IST4 with interrupts off and cannot sleep, which
-is why file mappings are eagerly populated and capped at 16 inodes / 4 MiB
-machine-wide (`fs/src/filemap.rs:67-77`, `core/src/syscall/memory_handlers.rs:52`),
-and why `mmap` refuses any file whose size is not page-aligned. `rustc` maps
-every `.rlib` and `.rmeta` it reads. This is the single largest kernel item in
-the plan and everything about toolchain I/O depends on it.
-
-### Workstream 1.3 — Address-space arithmetic that fits a compiler (**M**)
-
-In the order they bite: `Pages` quota 65536 = 256 MiB of VA, enforced by default
-(`abi/src/quota.rs:183`); `brk` ceiling at VA 0x4000_0000 and eagerly populated
-(`mm/src/memory_layout_defs.rs:84`, `mm/src/process_vm.rs:2185-2229`); a fixed
-1 MiB user stack with no growth (`memory_layout_defs.rs:88`) against rustc's
-8 MiB main thread; `mprotect` that cannot split a VMA and rewrites the whole
-VMA's protection (`process_vm.rs:3005-3021`); `fork`'s per-page snapshot `KVec`
-that `.expect()`s and therefore panics the kernel above ~170 MiB resident in one
-VMA (`process_vm.rs:3092-3126`); page tables charged to nobody and freed only at
-`VmSpace::drop`; all user mappings 4 KiB. Add an RSS notion so a VA charge means
-something, and give OOM a disposition other than "kill the faulter" / panic.
-
-### Workstream 1.4 — Exec's argument surface (**S**)
-
-`EXEC_MAX_ARGS`/`EXEC_MAX_ENVS` are 32 each (`core/src/exec/mod.rs:41-42`);
-cargo drives rustc with 40–100+ arguments. Bound by total bytes, not count.
-
-**Phase 1 exit criteria:** a purpose-built 200 MB test binary that mmaps a
-1 GB file and touches 4 GB of anonymous memory runs to completion under
-`just boot-persist`, and `fork` of it does not panic the kernel.
+**Two clauses of this did not land, and are not hiding.** There is still no OOM
+*disposition*: a fault that cannot find a frame kills the faulter with a
+SIGBUS-coded exit, exactly as before, and choosing a victim instead is a policy
+subsystem rather than a constant — it belongs with the swap and reclaim work in
+Phase 2. And user mappings are all 4 KiB; nothing instantiates the 2 MiB leaf
+the page tables already support, which is a throughput item, not a capability
+one.
 
 ---
 
-## Phase 2 — The POSIX floor a build system stands on
+## Phase 1 — The POSIX floor a build system stands on
 
 **Outcome:** a program can find its files, learn whether they changed, spawn
 children and know how they died.
 
-### Workstream 2.1 — Path resolution (**M**)
+### Workstream 1.1 — Path resolution (**M**)
 
 Nothing in the tree dereferences a symlink during lookup
 (`fs/src/vfs/path.rs:38-63`); `canonicalise` rejects every relative path
@@ -160,7 +207,7 @@ ext2 itself allows 255. `libcore-<hash>.rlib` exceeds 32 bytes; a registry
 source path exceeds 256. Every rustup and cargo layout is symlinks. Nothing
 downstream matters while `open("src/main.rs")` returns `EINVAL`.
 
-### Workstream 2.2 — `stat` that carries time (**S**, ABI break)
+### Workstream 1.2 — `stat` that carries time (**S**, ABI break)
 
 `UserFsStat` is `{type_, _pad, size: u32}` (`abi/src/fs.rs:96-100`); slibc
 hardcodes `st_mtime = 0`. The ext2 inode *is* stamped
@@ -171,7 +218,7 @@ add `utimensat`, and take the break before more userland is written against the
 current shape. Prerequisite: `clock_settime` + a real RTC read, because
 `fs/src/ext2/time.rs` declines to stamp at all when the wall clock is unset.
 
-### Workstream 2.3 — Process results (**S**)
+### Workstream 1.3 — Process results (**S**)
 
 `waitpid` is `(target, flags)` returning a raw exit code
 (`core/src/syscall/process_handlers.rs:268-330`); slibc passes `status` into the
@@ -182,7 +229,7 @@ leaves sibling threads running), thread-group `kill` fan-out, and
 `SIGSTOP`/`SIGTSTP`/`SIGCONT` (silently dropped at
 `core/src/syscall/signal.rs:603`, so Ctrl-Z on a build does nothing).
 
-### Workstream 2.4 — Threads that behave (**M**)
+### Workstream 1.4 — Threads that behave (**M**)
 
 `futex` matches only bare ops 0 and 1, so every `FUTEX_PRIVATE_FLAG` call is
 `ENOSYS` (`process_handlers.rs:800-812`) and timeouts are relative
@@ -194,7 +241,7 @@ multithreaded process allocates in the child before `execve`
 (`slibc/std_pal/process/slopos.rs:180-205`) against a single global malloc
 spinlock — route std's spawn through the existing `spawn_path` syscall instead.
 
-### Workstream 2.5 — The syscalls cargo reaches for (**M**)
+### Workstream 1.5 — The syscalls cargo reaches for (**M**)
 
 `flock`/`fcntl(F_SETLK)` (cargo refuses to run without a package-cache lock),
 `link` (cargo hardlinks artifacts), the `*at` family, `getdents64` on an fd
@@ -205,18 +252,18 @@ std PAL to the syscalls that *already exist* first — `symlink`, `readlink`,
 simply return `unsupported` in `slibc/std_pal/fs/slopos.rs:713-723`; and
 `Command::current_dir` is stored and never applied.
 
-**Phase 2 exit criteria:** a hand-written build driver, running in-guest,
+**Phase 1 exit criteria:** a hand-written build driver, running in-guest,
 compiles a multi-file project with a stub compiler, correctly skips unchanged
 inputs on the second run, and reports a child's signal death.
 
 ---
 
-## Phase 3 — Storage and capacity for a real tree
+## Phase 2 — Storage and capacity for a real tree
 
 **Outcome:** a multi-GB working tree with hundreds of thousands of files, at a
 throughput where a build finishes.
 
-### Workstream 3.1 — Size the filesystem from the medium (**M**)
+### Workstream 2.1 — Size the filesystem from the medium (**M**)
 
 Fixed at appliance scale: the block cache is 512 entries / 2 MiB
 (`fs/src/ext2/cache.rs:26`), never derived from the volume — at 16 GiB the group
@@ -231,7 +278,7 @@ mounts at all and a 64 GiB volume would want 64 MiB of it. Directory
 lookup is a linear scan with no htree, so `target/debug/deps` with 20 k entries
 makes the build O(n²).
 
-### Workstream 3.2 — Make a write cost what it writes (**M**)
+### Workstream 2.2 — Make a write cost what it writes (**M**)
 
 User I/O is staged in 4096-byte chunks (`abi/src/io.rs:5`) and each chunk is a
 separate ext2 transaction (`fs/src/vfs_file_ops.rs:373-397`), whose data also
@@ -241,7 +288,7 @@ calls, each an inline whole-filesystem `sync()` under the mount lock. Batch the
 transaction over a multi-block range and replace the inline sync with the
 chunked `sync_step`.
 
-### Workstream 3.3 — More than one filesystem (**L**)
+### Workstream 2.3 — More than one filesystem (**L**)
 
 There is exactly one ext2 instance, bound at boot, behind one global mutex
 (`fs/src/ext2_vfs.rs:57-63`); `mount(2)` with `fstype=ext2` can only re-place
@@ -250,7 +297,7 @@ no separate `/home`, no scratch volume, and every filesystem operation on the
 machine serialises — `-j16` degenerates toward one core. Also: `/tmp` is a ramfs
 with a 16 MiB per-file cap and 4096 inodes, and there is no swap anywhere.
 
-### Workstream 3.4 — The block layer (**M**)
+### Workstream 2.4 — The block layer (**M**)
 
 `virtio_blk` takes a global `io_lock`, bounces through a fresh 4 KiB buffer and
 sleeps, one request at a time machine-wide, with a queue depth of 1 against a
@@ -259,18 +306,18 @@ maps to `InvalidBuffer`, and eight timeouts permanently quarantine the device.
 Scatter-gather into the caller's pages, allow concurrent slots, and give errors
 real variants with bounded retry.
 
-**Phase 3 exit criteria:** a 16 GiB image mounts in bounded time, holds a
+**Phase 2 exit criteria:** a 16 GiB image mounts in bounded time, holds a
 checked-out copy of this repository plus a toolchain sysroot, and sustains a
 measured sequential write rate recorded as a new ratchet.
 
 ---
 
-## Phase 4 — A workbench you can type in
+## Phase 3 — A workbench you can type in
 
 **Outcome:** you can edit a file, search a tree, run a script, and read the
 output — without a Linux host.
 
-### Workstream 4.1 — Utilities that are executables (**M**)
+### Workstream 3.1 — Utilities that are executables (**M**)
 
 `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`, `kill`, `ps` exist only
 as shell builtins (`userland/src/apps/shell/builtins/`); `/bin` holds 17 GUI and
@@ -282,14 +329,14 @@ existing builtins `main`s, then write the absent set: `grep` `find` `sed`
 takes milliseconds, `kill` sends only SIGKILL, `diff` cannot produce a patch,
 `rm`/`cp` have no `-r`, `mkdir` has no `-p`.
 
-### Workstream 4.2 — A shell that can drive a build (**L**)
+### Workstream 3.2 — A shell that can drive a build (**L**)
 
 No `if`/`while`/`for`/`case`/functions, no command substitution, no here-docs,
 no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
 64 argv words, 128-byte paths. `fg`/`bg` cannot resume a stopped job because
 there is no `Stopped` state.
 
-### Workstream 4.3 — A terminal an editor can use (**M**)
+### Workstream 3.3 — A terminal an editor can use (**M**)
 
 `encode_key` emits arrows, Home, End and Delete only
 (`terminal-core/src/input.rs:230-282`): no F1–F12 (the keycodes exist and are
@@ -297,29 +344,29 @@ dropped), no Alt-prefixing, no modified arrows, no `CSI Z`, and PageUp/PageDown
 never reach the PTY. No mouse reporting, no DA/DSR replies. The font atlas
 covers ASCII + Latin-1, so box-drawing and non-Latin source render as diamonds.
 
-### Workstream 4.4 — An editor (**M**)
+### Workstream 3.4 — An editor (**M**)
 
-Write one — not because C is foreclosed (it is not; see Workstream 5.6), but
+Write one — not because C is foreclosed (it is not; see Workstream 4.6), but
 because nothing upstream is reachable *before* a C frontend exists, and because
 an editor is where a desktop OS earns its character. Highlighting does not have
 to wait for C either: `syntect` with the pure-Rust `fancy-regex` backend is a
 Rust-only path to TextMate grammars. Start against the existing terminal; the
 GUI version needs a real multi-line text widget, which `appkit` does not have (a
 single-line `text_field`, and a byte-oriented text API). helix comes back onto
-the table once 5.6 compiles tree-sitter.
+the table once 4.6 compiles tree-sitter.
 
 **Zed is not a roadmap item.** It needs wgpu → Vulkan (no GPU driver, and the
 Vulkan loader is itself a `dlopen` ICD architecture), tree-sitter, a live C++
 dependency set, and a build performed by a toolchain that does not exist yet.
 Every one of those is a separate multi-month project whose payoff is one editor.
 
-**Phase 4 exit criteria:** a shell script in the guest checks out, greps,
+**Phase 3 exit criteria:** a shell script in the guest checks out, greps,
 edits and archives a source tree, driven from a terminal running a native
 editor.
 
 ---
 
-## Phase 5 — The toolchain
+## Phase 4 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
 
@@ -328,14 +375,14 @@ with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
 about *who compiles Rust*, not about which languages SlopOS supports: declining
 LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
 the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 5.6.
+A C toolchain written in Rust is a separate and wanted track — Workstream 4.6.
 The cost of this decision is upstream work: cranelift-only rustc bootstrap does
 not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
 
-### Workstream 5.1 — The ABI question (still open — see Open decisions)
+### Workstream 4.1 — The ABI question (still open — see Open decisions)
 
 Every gap in Phases 1–3 is a Linux-ABI-shaped hole. SlopOS's numbering is
 bespoke and append-only (`yield=0, exit=1, write=2, read=3`,
@@ -371,7 +418,7 @@ interface obliges adopting Linux's implementation, architecture or policy —
 the framekernel quarantine, the capability authority, the Verus proofs, the
 ratchets and the retractable filesystem are all things the ABI cannot touch.
 
-### Workstream 5.2 — A target that can be a host (**L**)
+### Workstream 4.2 — A target that can be a host (**L**)
 
 A JSON target can never be a rustc host. `scripts/patch_std.sh` is 715 lines of
 sed/perl that mutates the *live rustup sysroot's* std sources in place — an
@@ -381,11 +428,11 @@ std upstreamed or carried in a pinned fork. That also kills `restricted_std`,
 which currently forces `#![feature(restricted_std)]` into 59 files and makes
 every unmodified crates.io crate uncompilable.
 
-### Workstream 5.3 — A Rust codegen path for a `no_std` kernel target (**L**)
+### Workstream 4.3 — A Rust codegen path for a `no_std` kernel target (**L**)
 
 Decided pure Rust, so the C floor is out of scope and the risk moves into
 cranelift's coverage of *this* tree's kernel target. Spike this first, before
-anything else in Phase 5, because a negative answer changes the decision:
+anything else in Phase 4, because a negative answer changes the decision:
 `targets/x86_64-slos.json` requires soft-float with `-sse` and `rustc-abi:
 softfloat`, safestack, custom `link_section`s, naked functions, and
 `-Zemit-stack-sizes` — the last is what `check_stack_sizes.sh` reads, so a
@@ -401,18 +448,18 @@ LLVM rustc on a host for as long as cranelift's codegen quality matters, while
 the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
 every artifact is self-built on day one.
 
-### Workstream 5.4 — Dynamic linking is mandatory (**L**)
+### Workstream 4.4 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
 loads proc-macro crates as host **dylibs** at runtime. Building SlopOS on
 SlopOS therefore requires `PT_INTERP` + `dlopen` — today `PT_INTERP` is rejected
-(`mm/src/elf.rs:591`), the target is `relocation-model: static`, and every
+(`mm/src/elf.rs`), the target is `relocation-model: static`, and every
 binary is fixed at 0x400000. The only escapes are writing an out-of-process
 macro server (novel work) or deleting proc-macro use from the workspace. This
 also brings dynamic TLS (`__tls_get_addr`, DTV), which does not exist.
 
-### Workstream 5.5 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 4.5 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -420,10 +467,10 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 **building SlopOS on SlopOS needs no network at all** — no TLS, no crates.io, no
 `git`. Those remain wanted for a general dev machine (there is no TLS anywhere:
 `curl` rejects `https://` outright; DNS is one query at a time machine-wide; the
-TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 5+
+TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 4+
 comfort, not a blocker for the goal.
 
-### Workstream 5.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 4.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
@@ -455,16 +502,16 @@ be built in Rust here.
   a C frontend, and the reason the LLVM route was priced as it was. Nothing in
   this plan needs C++, and this workstream does not change that.
 
-Order it after Phase 5's Rust loop closes: the C frontend is much cheaper to
+Order it after Phase 4's Rust loop closes: the C frontend is much cheaper to
 write once cranelift and the linker are already known-good on this target.
 
-**Phase 5 exit criteria:** in-guest `cargo build` of this repository's kernel
+**Phase 4 exit criteria:** in-guest `cargo build` of this repository's kernel
 produces an ELF byte-identical in behaviour to the host build, verified by
 booting it.
 
 ---
 
-## Phase 6 — Install what you built
+## Phase 5 — Install what you built
 
 **Outcome:** the guest writes a bootable medium and reboots into its own kernel.
 
@@ -478,14 +525,14 @@ writable block path, FAT32 write, a bootloader installer or a direct EFI stub, a
 A/B slots with rollback. `AGENTS.md:324` currently forbids exactly this
 operation and needs a scoped exception for the guest's own ESP.
 
-**Phase 6 exit criteria:** `just boot-persist`, build a kernel in-guest, install
+**Phase 5 exit criteria:** `just boot-persist`, build a kernel in-guest, install
 it, reboot, and the boot log shows the new build — with rollback if it panics.
 
 ---
 
-## Phase 7 — Bare metal (not committed)
+## Phase 6 — Bare metal (not committed)
 
-Out of scope for the current goal, which ends at Phase 6 in QEMU. Recorded so
+Out of scope for the current goal, which ends at Phase 5 in QEMU. Recorded so
 the cost is known: no NVMe and no AHCI (virtio-blk is the only storage driver,
 so a real machine has no disk); no USB at all, so a laptop without PS/2 has
 **no keyboard** (`plans/usb-xhci.md`); PCI is ECAM-only and *panics* without
@@ -501,7 +548,7 @@ and the KTAP transport vanish exactly when bare-metal debugging starts.
 ## Open decisions
 
 - [ ] **Linux ABI: adopt the interface, or stay bespoke?** The one decision
-      still open, and the highest-leverage one here. See Workstream 5.1 for the
+      still open, and the highest-leverage one here. See Workstream 4.1 for the
       Asterinas/Redox evidence. Recommendation: **renumber once, now, onto Linux
       numbers and Linux struct layouts, as the single syscall table** — not a
       second surface. The userland is entirely first-party and rebuilt from
@@ -523,13 +570,13 @@ and the KTAP transport vanish exactly when bare-metal debugging starts.
       virtio-blk disk carrying the vendored tree, and `scripts/qemu_run.sh`
       already parameterises one; it is not buildable yet, because there is
       exactly one ext2 instance in the kernel and it is bound at boot, so a
-      second disk can be the root or nothing. Workstream 3.3 is the
+      second disk can be the root or nothing. Workstream 2.3 is the
       prerequisite, not a host-side knob.
 
 **Decided.** Rust toolchain: Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 5.6, off the critical
-path. Scope: the full in-guest loop, Phases 1–6, in QEMU; bare metal is not
+C library and a Rust-written C frontend are Workstream 4.6, off the critical
+path. Scope: the full in-guest loop, Phases 1–5, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
 scope and `stat`'s uid/gid fields exist for layout only.
@@ -538,35 +585,30 @@ scope and `stat`'s uid/gid fields exist for layout only.
 
 ## Touch list (current paths — verify before editing)
 
-- `core/src/exec/mod.rs:41-43,458-490` — argv caps, ELF staging (Phase 1).
-- `mm/src/elf.rs:56-59,591` — image caps, `PT_INTERP` (Phases 1, 5).
-- `mm/src/process_vm.rs:2185-2229,3005-3021,3092-3126` — brk, mprotect, fork
-  snapshot (Phase 1).
-- `mm/src/memory_layout_defs.rs:84-90` — heap ceiling, stack size (Phase 1).
-- `abi/src/quota.rs:178-186` — `Pages`, `KernelMeta` defaults (Phase 1).
-- `fs/src/filemap.rs:67-77` — file-mmap caps (Phase 1).
+- `mm/src/elf.rs` — `PT_INTERP` rejection, the one image cap that is still
+  policy rather than plumbing (Phase 4).
 - `fs/src/vfs/path.rs:38-63`, `fs/src/vfs/canon.rs:31-33`, `fs/src/lib.rs:4-5` —
-  symlinks, relative paths, name/path limits (Phase 2).
-- `abi/src/fs.rs:96-100` — `UserFsStat` (Phase 2, ABI break).
+  symlinks, relative paths, name/path limits (Phase 1).
+- `abi/src/fs.rs:96-100` — `UserFsStat` (Phase 1, ABI break).
 - `core/src/syscall/process_handlers.rs:268-334,800-812` — waitpid, futex
-  (Phase 2).
-- `core/src/syscall/signal.rs:603,737-739` — stop/cont, siginfo (Phase 2).
+  (Phase 1).
+- `core/src/syscall/signal.rs:603,737-739` — stop/cont, siginfo (Phase 1).
 - `slibc/std_pal/fs/slopos.rs:446-724`, `slibc/std_pal/process/slopos.rs:151-215`
-  — unwired std PAL entry points (Phase 2).
+  — unwired std PAL entry points (Phase 1).
 - `fs/src/ext2/cache.rs:26`, `fs/src/ext2/journal.rs:207-267`,
-  `fs/src/verity.rs:524-552` — fixed sizing (Phase 3).
+  `fs/src/verity.rs:524-552` — fixed sizing (Phase 2).
 - `fs/src/vfs_file_ops.rs:373-397`, `abi/src/io.rs:5` — per-4 KiB transactions
-  (Phase 3).
+  (Phase 2).
 - `core/src/syscall/fs/mount_handlers.rs:103-118`, `fs/src/ext2_vfs.rs:57-63` —
-  the single ext2 instance (Phase 3).
+  the single ext2 instance (Phase 2).
 - `drivers/src/virtio_blk.rs:42-51,441-455,800-853` — request path, error
-  variants (Phase 3).
+  variants (Phase 2).
 - `userland/src/apps/shell/`, `terminal-core/src/input.rs:230-282`,
-  `font/src/lib.rs:29-48` — shell, key encoding, glyph coverage (Phase 4).
+  `font/src/lib.rs:29-48` — shell, key encoding, glyph coverage (Phase 3).
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,
-  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 5).
-- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phase 6).
+  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 4).
+- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phase 5).
 - `fs/src/devfs/mod.rs:309-323`, `fs/src/partition.rs` — writable block nodes,
-  partition writing (Phase 6).
+  partition writing (Phase 5).
 - `AGENTS.md:324` — the QEMU-only execution boundary, which forbids exactly the
-  Phase 6 install operation and needs a scoped exception.
+  Phase 5 install operation and needs a scoped exception.

@@ -399,11 +399,11 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
 
-    // IST stacks are per-vector, per-CPU fixed addresses, and every exception
-    // (vectors 0-31) uses one. Switching away from an IST stack lets a second
-    // exception on the same vector overwrite the suspended handler's state, so
-    // no inner SpinLock drop may reach the reschedule callback.
-    let _ist_hold = IstPreemptHold::new(vector < 32);
+    // Every exception vector except #PF runs on a per-CPU IST stack, where
+    // switching away lets a second exception on the same vector overwrite the
+    // suspended state, so no inner SpinLock drop may reach the reschedule
+    // callback. #PF has no IST precisely so a user fault can block.
+    let _ist_hold = IstPreemptHold::new(slopos_ostd::irq::vector_uses_ist(vector));
 
     // NMI is answered before `IrqNestHold`: `interrupt_nesting_enter` stores
     // `in_interrupt` and bumps the depth as two instructions, and an NMI landing
@@ -493,10 +493,8 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         return;
     }
 
-    if vector == EXCEPTION_PAGE_FAULT {
-        if try_handle_page_fault(frame) {
-            return;
-        }
+    if vector == EXCEPTION_PAGE_FAULT && handle_page_fault(frame, &mut irq_nest) {
+        return;
     }
 
     if vector == EXCEPTION_GENERAL_PROTECTION && try_handle_general_protection(frame) {
@@ -545,7 +543,7 @@ fn initialize_handler_tables() {
 
     handler_tables::install_panic(EXCEPTION_DIVIDE_ERROR, exception_fatal);
     // NMI (vector 2) is answered in `common_exception_handler_impl`; no entry.
-    handler_tables::install_panic(EXCEPTION_DOUBLE_FAULT, exception_fatal);
+    handler_tables::install_panic(EXCEPTION_DOUBLE_FAULT, exception_double_fault);
     handler_tables::install_panic(EXCEPTION_INVALID_TSS, exception_fatal);
     handler_tables::install_panic(EXCEPTION_SEGMENT_NOT_PRES, exception_fatal);
     handler_tables::install_panic(EXCEPTION_STACK_FAULT, exception_fatal);
@@ -647,11 +645,20 @@ fn try_handle_general_protection(frame: *mut slopos_arch::InterruptFrame) -> boo
     false
 }
 
-fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
+/// What a #PF turned out to be, decided with interrupts still off.
+enum PageFaultPath {
+    /// A kernel-mode band with a recovery label; RIP is already rewritten.
+    Fixed,
+    /// Not serviceable here; the panic tail reports it.
+    Fatal,
+    /// A user-mode fault against a live address space.
+    User(slopos_sched::task::TaskRef),
+}
+
+fn classify_page_fault(frame: *mut slopos_arch::InterruptFrame, fault_addr: u64) -> PageFaultPath {
     let mut frame_anchor = ();
-    let fault_addr = cpu::read_cr2();
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
-        .expect("try_handle_page_fault: null frame ptr");
+        .expect("classify_page_fault: null frame ptr");
 
     // Checked before the IST guard-fault classifier: a probe deliberately reads
     // addresses it cannot prove mapped, guard pages included, and a hit there is
@@ -659,11 +666,11 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     if !in_user(frame_ref) && slopos_ostd::arch::x86_64::kernel_ptr::is_probe_read_ip(frame_ref.rip)
     {
         frame_ref.rip = slopos_ostd::arch::x86_64::kernel_ptr::probe_read_fault_ip();
-        return true;
+        return PageFaultPath::Fixed;
     }
 
     if ist_stacks::ist_guard_fault(fault_addr).is_some() {
-        return false;
+        return PageFaultPath::Fatal;
     }
 
     // Redirecting into the usercopy fault label returns a nonzero "remaining
@@ -672,35 +679,54 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     if !in_user(frame_ref) {
         if slopos_ostd::user::copy::is_ostd_usercopy_ip(frame_ref.rip) {
             frame_ref.rip = slopos_ostd::user::copy::ostd_usercopy_fault_ip();
-            return true;
+            return PageFaultPath::Fixed;
         }
-        return false;
+        return PageFaultPath::Fatal;
     }
-    let Some(task_ref) = resolve_user_fault_task() else {
-        return false;
-    };
-    let vm_handle = task_ref.process_vm_handle_raw();
-    let tid = task_ref.task_id;
 
-    match slopos_mm::page_fault::try_resolve_user_fault(
-        fault_addr,
-        frame_ref.error_code,
-        vm_handle,
-        tid,
-    ) {
-        slopos_mm::page_fault::FaultOutcome::Resolved => true,
-        // #PF is a fault, so the instruction re-executes on IRET; the flag stays
-        // pending because this IST stack refuses a trap-exit hand-off.
+    match resolve_user_fault_task() {
+        Some(task_ref) => PageFaultPath::User(task_ref),
+        None => PageFaultPath::Fatal,
+    }
+}
+
+fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut IrqNestHold) -> bool {
+    // CR2 before anything can nest: a second fault on this CPU overwrites it.
+    let fault_addr = cpu::read_cr2();
+    let frame_anchor = ();
+    let error_code = slopos_arch::InterruptFrame::from_ptr(&frame_anchor, frame)
+        .map_or(0, |frame_ref| frame_ref.error_code);
+
+    let (vm_handle, tid) = match classify_page_fault(frame, fault_addr) {
+        PageFaultPath::Fixed => return true,
+        PageFaultPath::Fatal => return false,
+        PageFaultPath::User(task_ref) => (task_ref.process_vm_handle_raw(), task_ref.task_id),
+    };
+
+    // This window runs on the faulting task's own kernel stack, so it may
+    // enable interrupts, block and be preempted. Nesting is left first so a
+    // task that blocks here is not observed in-interrupt.
+    irq_nest.leave();
+    cpu::enable_interrupts();
+    let outcome =
+        slopos_mm::page_fault::try_resolve_user_fault(fault_addr, error_code, vm_handle, tid);
+    cpu::disable_interrupts();
+    irq_nest.reenter();
+
+    match outcome {
+        slopos_mm::page_fault::FaultOutcome::Resolved => {}
+        // #PF is a fault, so the instruction re-executes on IRET.
         slopos_mm::page_fault::FaultOutcome::Retry => {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
-            true
         }
-        // Recorded rather than returned because the `bool`-shaped IST dispatcher
-        // has no channel for a reason. Read and cleared by
-        // `take_pending_fault_reason` on this CPU with interrupts off.
+        // Recorded rather than returned: the panic tail takes no argument.
         slopos_mm::page_fault::FaultOutcome::Fatal(reason) => {
-            crate::exception::record_fault_reason(reason);
-            false
+            crate::exception::record_fault(reason, fault_addr);
+            return false;
         }
     }
+
+    irq_nest.handoff(TrapExitSource::Irq);
+    slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
+    true
 }

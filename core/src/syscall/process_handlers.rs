@@ -29,7 +29,7 @@ use crate::syscall::common::{
 use crate::syscall::result::SyscallResult;
 
 fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVec<u64>, ()> {
-    let mut out = KVec::<u64>::with_capacity(max_count).map_err(|_| ())?;
+    let mut out = KVec::<u64>::new();
 
     for idx in 0..max_count {
         let slot_addr = base_ptr
@@ -72,26 +72,39 @@ fn read_user_ptr_array_count(
     Ok(out)
 }
 
-fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
-    let mut out = KVec::<KVec<u8>>::with_capacity(ptrs.len()).map_err(|_| ())?;
+fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, Errno> {
+    let mut out = KVec::<KVec<u8>>::with_capacity(ptrs.len()).map_err(|_| Errno::ENOMEM)?;
 
-    let mut buf = KVec::<u8>::zeroed(exec::EXEC_MAX_ARG_STRLEN).map_err(|_| ())?;
+    let mut buf = KVec::<u8>::zeroed(exec::EXEC_MAX_ARG_STRLEN).map_err(|_| Errno::ENOMEM)?;
+
+    // The pointer walk is bounded at `EXEC_MAX_ARG_STRINGS`, so without this
+    // running total a long array would have the kernel hold far more than one
+    // argument budget before `exec_arg_bytes_fit` ever sees it.
+    let mut staged = 0usize;
 
     for &ptr in ptrs {
         for b in buf.as_mut_slice().iter_mut() {
             *b = 0;
         }
-        syscall_copy_user_str(buf.as_mut_slice(), ptr).map_err(|_| ())?;
+        syscall_copy_user_str(buf.as_mut_slice(), ptr).map_err(|_| Errno::EFAULT)?;
         let len = buf
             .as_slice()
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(buf.len());
 
-        let mut s = KVec::<u8>::with_capacity(len).map_err(|_| ())?;
+        staged = staged
+            .checked_add(len)
+            .and_then(|t| t.checked_add(1))
+            .ok_or(Errno::E2BIG)?;
+        if staged > exec::EXEC_MAX_ARG_BYTES {
+            return Err(Errno::E2BIG);
+        }
+
+        let mut s = KVec::<u8>::with_capacity(len).map_err(|_| Errno::ENOMEM)?;
         s.extend_from_slice(&buf.as_slice()[..len])
-            .map_err(|_| ())?;
-        out.push(s).map_err(|_| ())?;
+            .map_err(|_| Errno::ENOMEM)?;
+        out.push(s).map_err(|_| Errno::ENOMEM)?;
     }
 
     Ok(out)
@@ -196,9 +209,9 @@ define_syscall!(syscall_spawn_path
     .map_err(|_| Errno::EFAULT)?;
 
     let argv_storage = if argv_ptr != 0 && argc > 0 {
-        let argv_ptrs = read_user_ptr_array_count(argv_ptr, argc, exec::EXEC_MAX_ARGS)
+        let argv_ptrs = read_user_ptr_array_count(argv_ptr, argc, exec::EXEC_MAX_ARG_STRINGS)
             .map_err(|_| Errno::EINVAL)?;
-        Some(read_user_cstr_list(argv_ptrs.as_slice()).map_err(|_| Errno::EFAULT)?)
+        Some(read_user_cstr_list(argv_ptrs.as_slice())?)
     } else {
         None
     };
@@ -216,10 +229,10 @@ define_syscall!(syscall_spawn_path
         let envp_ptrs = read_user_ptr_array_count(
             attrs.envp_ptr,
             attrs.envp_len as usize,
-            exec::EXEC_MAX_ENVS,
+            exec::EXEC_MAX_ARG_STRINGS,
         )
         .map_err(|_| Errno::EINVAL)?;
-        Some(read_user_cstr_list(envp_ptrs.as_slice()).map_err(|_| Errno::EFAULT)?)
+        Some(read_user_cstr_list(envp_ptrs.as_slice())?)
     } else {
         None
     };
@@ -232,6 +245,10 @@ define_syscall!(syscall_spawn_path
         Some(Err(_)) => return Err(Errno::ENOMEM),
         None => None,
     };
+
+    if !exec::exec_arg_bytes_fit(argv_refs.as_deref(), envp_refs.as_deref()) {
+        return Err(Errno::E2BIG);
+    }
 
     let actions = read_user_spawn_actions(&attrs)?;
 
@@ -375,10 +392,10 @@ define_syscall!(syscall_exec
     let path = &path_buf[..path_len];
 
     let argv_storage = if argv_ptr != 0 {
-        match read_user_ptr_array_terminated(argv_ptr, exec::EXEC_MAX_ARGS) {
+        match read_user_ptr_array_terminated(argv_ptr, exec::EXEC_MAX_ARG_STRINGS) {
             Ok(argv_ptrs) => match read_user_cstr_list(argv_ptrs.as_slice()) {
                 Ok(values) => Some(values),
-                Err(_) => return SyscallResult::Err(Errno::EFAULT),
+                Err(err) => return SyscallResult::Err(err),
             },
             Err(_) => return SyscallResult::Err(Errno::EINVAL),
         }
@@ -387,10 +404,10 @@ define_syscall!(syscall_exec
     };
 
     let envp_storage = if envp_ptr != 0 {
-        match read_user_ptr_array_terminated(envp_ptr, exec::EXEC_MAX_ENVS) {
+        match read_user_ptr_array_terminated(envp_ptr, exec::EXEC_MAX_ARG_STRINGS) {
             Ok(envp_ptrs) => match read_user_cstr_list(envp_ptrs.as_slice()) {
                 Ok(values) => Some(values),
-                Err(_) => return SyscallResult::Err(Errno::EFAULT),
+                Err(err) => return SyscallResult::Err(err),
             },
             Err(_) => return SyscallResult::Err(Errno::EINVAL),
         }
@@ -414,6 +431,10 @@ define_syscall!(syscall_exec
         Some(Err(_)) => return SyscallResult::Err(Errno::ENOMEM),
         None => None,
     };
+
+    if !exec::exec_arg_bytes_fit(argv_refs.as_deref(), envp_refs.as_deref()) {
+        return SyscallResult::Err(Errno::E2BIG);
+    }
 
     let mut entry_point = 0u64;
     let mut stack_ptr = 0u64;

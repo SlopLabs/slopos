@@ -15,10 +15,24 @@ use crate::user_fault::*;
 static PENDING_FAULT_REASON: [core::sync::atomic::AtomicU16; slopos_arch::pcr::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU16::new(0) }; slopos_arch::pcr::MAX_CPUS];
 
-pub(crate) fn record_fault_reason(reason: TaskFaultReason) {
+/// The CR2 that went with it, biased by one so zero means "nothing recorded".
+///
+/// A user fault resolves with interrupts on, so by the time the fatal tail runs
+/// CR2 can name another task's fault — and the tail classifies the guard pages
+/// off it, turning a task kill into a kernel panic.
+static PENDING_FAULT_ADDR: [core::sync::atomic::AtomicU64; slopos_arch::pcr::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; slopos_arch::pcr::MAX_CPUS];
+
+pub(crate) fn record_fault(reason: TaskFaultReason, fault_addr: u64) {
     let cpu = slopos_arch::pcr::get_current_cpu();
     if let Some(slot) = PENDING_FAULT_REASON.get(cpu) {
         slot.store(reason.as_u16(), core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(slot) = PENDING_FAULT_ADDR.get(cpu) {
+        slot.store(
+            fault_addr.wrapping_add(1),
+            core::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 
@@ -30,6 +44,15 @@ fn take_fault_reason() -> TaskFaultReason {
         slot.swap(0, core::sync::atomic::Ordering::Relaxed)
     });
     TaskFaultReason::from_u16(raw)
+}
+
+/// The recorded CR2, or `None` when this #PF never reached the resolver.
+fn take_fault_addr() -> Option<u64> {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let raw = PENDING_FAULT_ADDR.get(cpu).map_or(0, |slot| {
+        slot.swap(0, core::sync::atomic::Ordering::Relaxed)
+    });
+    raw.checked_sub(1)
 }
 
 pub(crate) fn exception_default_panic(frame: *mut InterruptFrame) {
@@ -51,6 +74,55 @@ pub(crate) fn exception_nonfatal(frame: *mut InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
 }
 
+/// #DF is where a stack overflow now lands: #PF has no IST, so a fault taken
+/// with no room to push its frame escalates instead of being reported.
+///
+/// Classified on the interrupted `RSP`, not on CR2: the CPU writes CR2 only for
+/// a *delivered* #PF, so a #DF from any other cause carries a stale address.
+pub(crate) fn exception_double_fault(frame: *mut InterruptFrame) {
+    let frame_anchor = ();
+    let rsp = InterruptFrame::from_ptr(&frame_anchor, frame).map_or(0, |f| f.rsp);
+
+    // Format-free: the diagnostic path builds its Argument array on the very
+    // data stack that overflowed.
+    if ist_stacks::exc_dstack_guard_fault(rsp).is_some() {
+        crate::panic::panic_abort_raw(
+            "double fault on the exception data-stack guard page: a CPU exhausted its per-CPU IST/exception SafeStack data stack",
+        );
+    }
+    if ist_stacks::emergency_stack_guard_fault(rsp).is_some() {
+        crate::panic::panic_abort_raw(
+            "double fault on the emergency stack guard page: the fatal-fault reporter exhausted its per-CPU emergency stack",
+        );
+    }
+
+    klog_info!("FATAL: Double fault");
+    klog_info!("Interrupted RSP: 0x{:x}", rsp);
+
+    if let Some(stack_name) = ist_stacks::ist_guard_fault(rsp) {
+        klog_info!(
+            "Cause: IST stack overflow on '{}'",
+            slopos_ostd::string::bytes_as_str(stack_name)
+        );
+    } else {
+        let diag = slopos_sched::task_struct::current_task_diag();
+        match diag.as_ref() {
+            Some(diag) if rsp != 0 && rsp < diag.kernel_stack_base => {
+                klog_info!(
+                    "Cause: kernel stack overflow below task {} kstack 0x{:x}..0x{:x}",
+                    diag.id,
+                    diag.kernel_stack_base,
+                    diag.kernel_stack_top
+                );
+            }
+            _ => klog_info!("Cause: not a known guard page"),
+        }
+    }
+
+    kdiag_dump_interrupt_frame(frame);
+    panic_with_frame("Double fault", frame);
+}
+
 pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
     // The frame lives for exactly this handler invocation, so a frame-local is
     // the honest lifetime anchor for a borrow of it.
@@ -69,6 +141,7 @@ pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
             terminate_user_task(
                 TaskFaultReason::UserUd,
                 f,
+                cpu::read_cr2(),
                 cstr_from_bytes(b"invalid opcode in user mode\0"),
             );
             return;
@@ -84,6 +157,7 @@ pub(crate) fn exception_device_not_available(frame: *mut InterruptFrame) {
             terminate_user_task(
                 TaskFaultReason::UserDeviceNa,
                 f,
+                cpu::read_cr2(),
                 cstr_from_bytes(b"device not available in user mode\0"),
             );
             return;
@@ -99,6 +173,7 @@ pub(crate) fn exception_general_protection(frame: *mut InterruptFrame) {
             terminate_user_task(
                 TaskFaultReason::UserGp,
                 f,
+                cpu::read_cr2(),
                 cstr_from_bytes(b"general protection from user mode\0"),
             );
             return;
@@ -109,35 +184,42 @@ pub(crate) fn exception_general_protection(frame: *mut InterruptFrame) {
 
 pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
     let frame_anchor = ();
-    let fault_addr = cpu::read_cr2();
+    // CR2 only when the resolver never saw this fault — the kernel-fault and
+    // guard-hit case, where interrupts never came back on and CR2 is still ours.
+    let recorded = take_fault_addr();
+    let fault_addr = recorded.unwrap_or_else(cpu::read_cr2);
     let Some(frame_ref) = InterruptFrame::from_ptr(&frame_anchor, frame) else {
         klog_info!("FATAL: page fault with null frame pointer");
         panic!("page fault with null frame");
     };
 
-    if let Some(stack_name) = ist_stacks::ist_guard_fault(fault_addr) {
-        klog_info!("FATAL: IST stack overflow detected via guard page");
-        klog_info!("Stack: {}", slopos_ostd::string::bytes_as_str(stack_name));
-        klog_info!("Fault address: 0x{:x}", fault_addr);
-        kdiag_dump_interrupt_frame(frame);
-        panic_with_frame("IST stack overflow", frame);
-        return;
-    }
+    // Only against an address this CPU is still the authority for: a recorded
+    // one ran preemptibly and can name no kernel stack, so blaming a guard page
+    // for it would turn a task kill into a machine kill.
+    if recorded.is_none() {
+        if let Some(stack_name) = ist_stacks::ist_guard_fault(fault_addr) {
+            klog_info!("FATAL: IST stack overflow detected via guard page");
+            klog_info!("Stack: {}", slopos_ostd::string::bytes_as_str(stack_name));
+            klog_info!("Fault address: 0x{:x}", fault_addr);
+            kdiag_dump_interrupt_frame(frame);
+            panic_with_frame("IST stack overflow", frame);
+            return;
+        }
 
-    // Must be reported without `format_args!`: the normal diagnostic path builds
-    // its Argument array on the exception data stack that just overflowed.
-    if ist_stacks::exc_dstack_guard_fault(fault_addr).is_some() {
-        crate::panic::panic_abort_raw(
-            "exception data-stack overflow: a CPU exhausted its per-CPU IST/exception SafeStack data stack",
-        );
-    }
+        // Must be reported without `format_args!`: the normal diagnostic path
+        // builds its Argument array on the exception data stack that just
+        // overflowed.
+        if ist_stacks::exc_dstack_guard_fault(fault_addr).is_some() {
+            crate::panic::panic_abort_raw(
+                "exception data-stack overflow: a CPU exhausted its per-CPU IST/exception SafeStack data stack",
+            );
+        }
 
-    // This #PF lands on a fresh IST stack, so the format-free abort still has a
-    // usable one.
-    if ist_stacks::emergency_stack_guard_fault(fault_addr).is_some() {
-        crate::panic::panic_abort_raw(
-            "emergency stack overflow: the fatal-fault reporter exhausted its per-CPU emergency stack",
-        );
+        if ist_stacks::emergency_stack_guard_fault(fault_addr).is_some() {
+            crate::panic::panic_abort_raw(
+                "emergency stack overflow: the fatal-fault reporter exhausted its per-CPU emergency stack",
+            );
+        }
     }
 
     let from_user = in_user(frame_ref);
@@ -179,7 +261,7 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
                 cstr_from_bytes(b"user page fault\0"),
             ),
         };
-        terminate_user_task(reason, frame_ref, detail);
+        terminate_user_task(reason, frame_ref, fault_addr, detail);
         return;
     }
 

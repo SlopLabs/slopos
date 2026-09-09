@@ -157,6 +157,10 @@ name = "mm_stress_test"
 path = "src/bin/tests/mm_stress_test.rs"
 
 [[bin]]
+name = "bigprog_test"
+path = "src/bin/tests/bigprog_test.rs"
+
+[[bin]]
 name = "sigwinch_default_test"
 path = "src/bin/tests/sigwinch_default_test.rs"
 

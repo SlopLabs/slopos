@@ -1504,14 +1504,22 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
         "break not persisted byte-granular"
     );
 
+    // Growth is lazy, so the page under the break exists once it is touched —
+    // and an unaligned shrink must not take back the page the break still
+    // points into.
     let tail_page = trimmed & !(PAGE_SIZE_4KB - 1);
+    assert_test!(
+        vm.handle_demand_fault(tail_page, 0).is_ok(),
+        "the page under the trimmed break could not be faulted in"
+    );
     assert_test!(
         !vm.virt_to_phys(tail_page).is_null(),
         "partial tail page below the break got unmapped"
     );
     assert_test!(
-        vm.virt_to_phys(tail_page + PAGE_SIZE_4KB).is_null(),
-        "page above the rounded break still mapped after shrink"
+        vm.handle_demand_fault(tail_page + PAGE_SIZE_4KB, 0)
+            .is_err(),
+        "a page above the rounded break is still in the heap after the shrink"
     );
 
     let regrown = base + 32 * PAGE_SIZE_4KB + 24;
@@ -1519,8 +1527,13 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
         process_vm_brk(vm.process, regrown) == regrown,
         "unaligned regrow did not return the requested break"
     );
+    let regrown_page = regrown & !(PAGE_SIZE_4KB - 1);
     assert_test!(
-        !vm.virt_to_phys(regrown & !(PAGE_SIZE_4KB - 1)).is_null(),
+        vm.handle_demand_fault(regrown_page, 0).is_ok(),
+        "the page under the regrown break could not be faulted in"
+    );
+    assert_test!(
+        !vm.virt_to_phys(regrown_page).is_null(),
         "page under the regrown break not mapped"
     );
 

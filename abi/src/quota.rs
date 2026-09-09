@@ -31,10 +31,13 @@ pub enum ResourceKind {
     /// Filesystem blocks allocated on a mounted disk. A block is 1-4 KiB, so
     /// it is neither a bare count nor a page.
     DiskBlocks = 8,
+    /// Pages a process has populated — RSS. [`ResourceKind::Pages`] counts what
+    /// is *mapped*, which under demand paging is no evidence of memory held.
+    ResidentPages = 9,
 }
 
 /// Width of every per-kind array in an account row.
-pub const KIND_COUNT: usize = 9;
+pub const KIND_COUNT: usize = 10;
 
 impl ResourceKind {
     /// Discriminant order — the iteration order of every dump and every audit.
@@ -48,6 +51,7 @@ impl ResourceKind {
         ResourceKind::Custody,
         ResourceKind::KernelMeta,
         ResourceKind::DiskBlocks,
+        ResourceKind::ResidentPages,
     ];
 
     /// Row index into an account's per-kind arrays.
@@ -70,6 +74,7 @@ impl ResourceKind {
             ResourceKind::Custody => "custody",
             ResourceKind::KernelMeta => "kernelmeta",
             ResourceKind::DiskBlocks => "diskblocks",
+            ResourceKind::ResidentPages => "residentpages",
         }
     }
 
@@ -83,9 +88,10 @@ impl ResourceKind {
             | ResourceKind::Custody => Unit::Count,
             // `PinnedBytes` charges in pages: a byte count overflows the arena's
             // `u32`, and a sub-page pin still holds a whole frame against reclaim.
-            ResourceKind::Pages | ResourceKind::KernelMeta | ResourceKind::PinnedBytes => {
-                Unit::Pages
-            }
+            ResourceKind::Pages
+            | ResourceKind::ResidentPages
+            | ResourceKind::KernelMeta
+            | ResourceKind::PinnedBytes => Unit::Pages,
             ResourceKind::DiskBlocks => Unit::Blocks,
         }
     }
@@ -110,9 +116,10 @@ impl ResourceKind {
             ResourceKind::FdSlot => Errno::EMFILE,
             ResourceKind::ObjectRow | ResourceKind::Custody => Errno::ENFILE,
             ResourceKind::Task | ResourceKind::Process => Errno::EAGAIN,
-            ResourceKind::Pages | ResourceKind::PinnedBytes | ResourceKind::KernelMeta => {
-                Errno::ENOMEM
-            }
+            ResourceKind::Pages
+            | ResourceKind::ResidentPages
+            | ResourceKind::PinnedBytes
+            | ResourceKind::KernelMeta => Errno::ENOMEM,
             ResourceKind::DiskBlocks => Errno::ENOSPC,
         }
     }
@@ -178,11 +185,14 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // 8 MiB per principal — today its task stacks, at 12 pages each. Bounds
         // the memory, not the thread count, so it binds independently of `Task`.
         ResourceKind::KernelMeta => 2048,
-        // Mapped *virtual* pages -- `RLIMIT_AS`, not RSS: a VA bound is refusable
-        // at the syscall that asks for it, the only place a refusal has an errno
-        // to travel back on, whereas an RSS bound needs a reclaim disposition for
-        // a process already over it. 256 MiB, against a measured worst of 30 998.
-        ResourceKind::Pages => 65536,
+        // 4 GiB of *virtual* pages — `RLIMIT_AS`, not RSS. A toolchain-sized
+        // process maps multiple GiB before touching a fraction of it; what
+        // bounds physical memory is the frame allocator, and what counts frames
+        // held is `ResidentPages`.
+        ResourceKind::Pages => 1_048_576,
+        // No ceiling: the honest one is a fraction of usable RAM, which `abi`
+        // cannot see. A number frozen here would refuse a workload that fits.
+        ResourceKind::ResidentPages => NO_LIMIT_SENTINEL,
         // 32 MiB of blocks at 4 KiB, against a measured worst of 3875 (the
         // tests image's disk-reserve filler). Bounds a process's *outstanding*
         // allocations, not its footprint: ext2 records no owner, so the charge
@@ -290,6 +300,7 @@ axes! {
     CustodyAxis,
     KernelMetaAxis,
     DiskBlocksAxis,
+    ResidentPagesAxis,
 }
 
 #[cfg(test)]
@@ -323,6 +334,7 @@ mod tests {
         assert_eq!(ResourceKind::Process.errno(), Errno::EAGAIN);
         assert_eq!(ResourceKind::Pages.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::KernelMeta.errno(), Errno::ENOMEM);
+        assert_eq!(ResourceKind::ResidentPages.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::DiskBlocks.errno(), Errno::ENOSPC);
     }
 
@@ -337,9 +349,14 @@ mod tests {
         );
     }
 
+    /// Every kind but `ResidentPages`, which is unbounded on purpose.
     #[test]
     fn every_kind_carries_a_ceiling() {
         for kind in ResourceKind::ALL {
+            if matches!(kind, ResourceKind::ResidentPages) {
+                assert_eq!(default_process_limit(kind), NO_LIMIT_SENTINEL);
+                continue;
+            }
             assert_ne!(
                 default_process_limit(kind),
                 NO_LIMIT_SENTINEL,

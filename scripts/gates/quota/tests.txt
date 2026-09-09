@@ -20,7 +20,11 @@
 # numbers are not comparable *by design*: demand paging means a process may
 # map far more than it ever populates. The reconciling number is the per-row
 # one -- worst single address space 30 998 pages (121 MiB) -- which is what
-# the enforced per-process ceiling of 65 536 is derived from.
+# the enforced per-process ceiling was derived from. That ceiling is now
+# 1 048 576 (4 GiB of VA) and is no longer derived from a measurement at all:
+# with lazy mappings a VA charge bounds no memory, so `Pages` is a stated
+# `RLIMIT_AS` and `residentpages` below is the number that tracks what is
+# actually held.
 #
 # The caps are the ROOT account's peaks — the sum over every principal plus
 # the kernel's own, not a per-process figure. Worst single user rows measured
@@ -97,6 +101,44 @@
 #
 # max-denials 0 is the load-bearing line under quota=enforce: a denial means a
 # legitimate workload was refused, which is a finding rather than a pass.
+#
+# 2026-09-09, Phase 1 of `plans/self-hosting.md` (a toolchain-sized process):
+#   `kernelmeta` rises because **page tables are now charged**. Every frame
+#     `VmSpace::new`, the kernel-half prepopulate and the page-table walker
+#     take from the buddy is charged to the root, and with lazy heaps, lazy
+#     file mappings and an 8 MiB stack extent a process's table footprint stops
+#     being negligible. boot 900 -> 1787 (measured 1637-1712 over three fresh
+#     runs, spread 44), post-kernel-tests 2300 -> 3172 (3106-3139, spread 33).
+#     post-userland-tests measured 4949-4972, inside its existing 6933, so that
+#     row is left alone.
+#   `pages` rises because `brk` and `mmap` are lazy and the per-process `Pages`
+#     ceiling moved to 4 GiB of VA: the new `bigprog_test` maps a gigabyte of
+#     anonymous space and touches sixteen pages of it, which is the whole point
+#     of the row being virtual. post-userland-tests 735232 -> 973334 (measured
+#     927408-950371 over three fresh runs, spread 22963). post-kernel-tests
+#     measured 43644-56309, inside its existing 65536.
+#   `process` 124 -> 126: one more utest binary (`bigprog_test`) and the child
+#     it forks. Deterministic at 126 over three runs; the cap stays exact.
+#   `diskblocks` 3875 -> 3936: the tests image is 64M rather than 32M, so
+#     `persist_test`'s space filler reaches the volume's reserve later.
+#     Deterministic at 3936 over three runs. The image is deliberately no
+#     larger than that: at 128M the filler met the 8192-block per-process
+#     `DiskBlocks` quota instead of the reserve, which is a different test.
+#   The tests guest is 1G rather than 512M (`scripts/qemu_run.sh`), because
+#     `bigprog_test` holds ~170 MiB resident to cross the threshold `fork`'s
+#     chunked snapshot exists for. That is why `residentpages` and `pages` are
+#     both measured higher than a 512M run would report.
+#   `residentpages` is new: the address space's count of present user leaves,
+#     maintained by the page-table cursor and reflected into the ledger on the
+#     way out of a hold of the per-process lock. It is the number `pages` never
+#     was — post-userland-tests measures 64603-64640 resident against 917533-
+#     950371 mapped, a factor of about eight apart, which is demand paging
+#     working rather than a discrepancy. The cap is 114452 (that maximum plus
+#     the spread of 1520); post-kernel-tests is 516, deterministic over the same
+#     three runs, so that cap is exact. Unlimited by default: it reports what
+#     is held, and the ceiling on physical memory is the frame allocator.
+#     boot charges none of it (no user address space exists yet), so the
+#     `min-kinds-for boot 1` floor still describes that phase.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -115,23 +157,25 @@ require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-boot	kernelmeta	900
+boot	kernelmeta	1756
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	2300
+post-kernel-tests	kernelmeta	3172
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
 post-kernel-tests	process	20
+post-kernel-tests	residentpages	516
 post-kernel-tests	task	8
 post-userland-tests	custody	8
-post-userland-tests	diskblocks	3875
+post-userland-tests	diskblocks	3936
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257
-post-userland-tests	pages	735232
+post-userland-tests	pages	973334
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	124
+post-userland-tests	process	126
+post-userland-tests	residentpages	114452
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

@@ -13,10 +13,11 @@ const PAGE_SIZE: u64 = 4096;
 
 /// `mmap(2)` of a regular file (G14).
 ///
-/// Both sharing modes are populated eagerly from the inode's page set: the #PF
-/// handler cannot sleep, so nothing can be faulted in from the device later. A
-/// mapping past EOF is therefore refused rather than deferring a `SIGBUS` this
-/// kernel has no path to deliver.
+/// Neither sharing mode populates anything here: the mapping reserves the
+/// inode's page-set extent and the #PF handler reads a page when it is touched,
+/// which is what lets a mapping be larger than memory. A mapping whose first
+/// page starts at or past EOF has nothing to read and is refused; one whose
+/// last page straddles EOF is zero-filled past the file's end, as Linux does.
 ///
 /// A writable shared mapping publishes through the page set that every
 /// `read(2)` is routed through, so it requires `OpenMode::WRITE` — the seal
@@ -51,7 +52,7 @@ fn mmap_regular_file(
         return Err(Errno::ENODEV);
     }
     let end = offset.checked_add(length).ok_or(Errno::EINVAL)?;
-    if end > stat.size {
+    if offset >= stat.size {
         return Err(Errno::EINVAL);
     }
 
@@ -65,38 +66,23 @@ fn mmap_regular_file(
     if owner.is_none() {
         return Err(Errno::ESRCH);
     }
-    let (map, paddrs) = filemap::acquire(fs, inode, first_page, page_count, writable, owner)
+    let map = filemap::reserve_range(fs, inode, first_page, page_count, writable, owner)
         .map_err(|e| e.to_errno())?;
 
-    let result = if shared {
-        slopos_mm::process_vm::process_vm_mmap_file_shared(
-            process,
-            addr,
-            length,
-            prot,
-            flags,
-            map,
-            paddrs.as_slice(),
-        )
-    } else {
-        // The copy is taken here, so the region needs no file backing.
-        slopos_mm::process_vm::process_vm_mmap_file_private(
-            process,
-            addr,
-            length,
-            prot,
-            flags,
-            paddrs.as_slice(),
-        )
-    };
-    // Drops `acquire`'s own reference; a failed mmap must not pin the set.
-    filemap::release(map, 1);
-
+    let result = slopos_mm::process_vm::process_vm_mmap_file(
+        process, addr, length, prot, flags, map, first_page, private,
+    );
     if result == 0 {
-        Err(Errno::ENOMEM)
-    } else {
-        Ok(result)
+        // The VMA never took the extent's references, so the reservation is
+        // this call's to give back.
+        filemap::release(map, page_count);
+        return Err(Errno::ENOMEM);
     }
+    // `reserve_range` holds the extent for the mapping, and
+    // `process_vm_mmap_file` retained it a second time for the VMA; drop this
+    // call's own hold.
+    filemap::release(map, page_count);
+    Ok(result)
 }
 
 /// `msync(2)`. `MS_INVALIDATE` is refused: there is one page set per inode,
