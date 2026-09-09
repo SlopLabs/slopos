@@ -426,9 +426,16 @@ fn task_leaves_process(task: &Task) -> bool {
 /// `TSS.RSP0` and `pcr.kernel_rsp` point at `kernel_stack_top`, so IRQ pushes
 /// land there and grow downward while `user_task_loop` holds a frame on the
 /// same stack; the supervisor's RSP sits at `kernel_stack_top -
-/// SUPERVISOR_RESERVE` so those pushes cannot reach it. 8 KiB covers the worst
-/// observed IRQ chain (~2 KiB of safe-stack frames) with margin.
-const SUPERVISOR_RESERVE: u64 = 0x2000;
+/// SUPERVISOR_RESERVE` so those pushes cannot reach it.
+///
+/// 12 KiB, not the 8 KiB an IRQ chain alone needs (~2 KiB observed): #PF has
+/// no IST, so a user fault runs here too and its chain is the deepest — the
+/// resolution walks the region tree and the page tables, and the tail hands
+/// off to the scheduler and may deliver a signal. An overrun corrupts
+/// `user_task_loop`'s own frame and surfaces as a wild kernel fault in
+/// unrelated code, so the resolution also keeps interrupts off rather than
+/// letting an IRQ chain nest under its deepest frame.
+const SUPERVISOR_RESERVE: u64 = 0x3000;
 
 const _: () = {
     // SystemV ABI: after `ret` pops the synthetic return address, RSP is

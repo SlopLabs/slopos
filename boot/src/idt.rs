@@ -703,21 +703,33 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
         PageFaultPath::User(task_ref) => (task_ref.process_vm_handle_raw(), task_ref.task_id),
     };
 
-    // This window runs on the faulting task's own kernel stack, so it may
-    // enable interrupts, block and be preempted. Nesting is left first so a
-    // task that blocks here is not observed in-interrupt.
-    irq_nest.leave();
-    cpu::enable_interrupts();
-    let outcome =
+    // Interrupts stay off across the resolution: it is the deep part of the
+    // chain, and an IRQ nesting under it stacks two worst cases on the
+    // supervisor reserve. Only the arm that reaches the device needs a window,
+    // and the plan phase has unwound by then.
+    let mut outcome =
         slopos_mm::page_fault::try_resolve_user_fault(fault_addr, error_code, vm_handle, tid);
-    cpu::disable_interrupts();
-    irq_nest.reenter();
+
+    if let slopos_mm::page_fault::FaultOutcome::NeedsIo(plan) = outcome {
+        // Nesting left first, so a task blocking here is not in-interrupt.
+        irq_nest.leave();
+        cpu::enable_interrupts();
+        outcome = slopos_mm::page_fault::complete_file_fault(vm_handle, &plan, fault_addr, tid);
+        cpu::disable_interrupts();
+        irq_nest.reenter();
+    }
 
     match outcome {
         slopos_mm::page_fault::FaultOutcome::Resolved => {}
         // #PF is a fault, so the instruction re-executes on IRET.
         slopos_mm::page_fault::FaultOutcome::Retry => {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
+        }
+        // `complete_file_fault` never answers one, and the arm above is the
+        // only producer.
+        slopos_mm::page_fault::FaultOutcome::NeedsIo(_) => {
+            crate::exception::record_fault(slopos_abi::task::TaskFaultReason::UserPage, fault_addr);
+            return false;
         }
         // Recorded rather than returned: the panic tail takes no argument.
         slopos_mm::page_fault::FaultOutcome::Fatal(reason) => {

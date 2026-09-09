@@ -133,7 +133,7 @@ pub fn handle_demand_fault(
 /// Deliberately no protection flags: an `mprotect` between the two holds
 /// rewrites the region without touching this leaf, which is absent, so the
 /// protection is re-read at install time.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileFaultPlan {
     pub map: FileMapRef,
     pub page_index: u64,

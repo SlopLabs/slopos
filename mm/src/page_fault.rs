@@ -14,6 +14,10 @@ pub enum FaultOutcome {
     Resolved,
     /// Exclusive access was unavailable; nothing changed and the instruction re-faults.
     Retry,
+    /// A file-backed page that must be read from the device. The caller opens
+    /// the blocking window and finishes through [`complete_file_fault`], by
+    /// which point the deep plan phase has unwound off the trap frame.
+    NeedsIo(demand::FileFaultPlan),
     /// Not serviceable; the task dies with this reason, which `waitpid` needs
     /// to tell an out-of-memory kill from a wild dereference.
     Fatal(TaskFaultReason),
@@ -172,12 +176,13 @@ pub fn try_resolve_user_fault(
         }
     }
 
-    resolve_file_fault(handle, fault_addr, error_code, task_id)
+    plan_file_fault(handle, fault_addr, error_code, task_id)
 }
 
-/// A file-backed page, in two holds of the per-process lock with the blocking
-/// read between them — which is the whole reason #PF has no IST.
-fn resolve_file_fault(
+/// Plan a file-backed fault under the per-process lock. Answers
+/// [`FaultOutcome::NeedsIo`] rather than reading: this runs with interrupts off
+/// on the trap's own stack, and the read must not.
+fn plan_file_fault(
     handle: Handle<ProcessVm>,
     fault_addr: u64,
     error_code: u64,
@@ -196,16 +201,30 @@ fn resolve_file_fault(
         },
     );
 
-    let plan = match planned {
-        Ok(Some(Ok(Some(plan)))) => plan,
+    match planned {
+        Ok(Some(Ok(Some(plan)))) => FaultOutcome::NeedsIo(plan),
         // Someone else installed it while this fault was in flight.
-        Ok(Some(Ok(None))) => return FaultOutcome::Resolved,
-        Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
-        Ok(Some(Err(_))) | Ok(None) => return FaultOutcome::Fatal(TaskFaultReason::UserPage),
+        Ok(Some(Ok(None))) => FaultOutcome::Resolved,
+        Ok(Some(Err(MmError::Retry))) => retry(task_id, fault_addr),
+        Ok(Some(Err(_))) | Ok(None) => FaultOutcome::Fatal(TaskFaultReason::UserPage),
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
-            return FaultOutcome::Fatal(TaskFaultReason::UserPage);
+            FaultOutcome::Fatal(TaskFaultReason::UserPage)
         }
+    }
+}
+
+/// Read the planned page and install it. **Blocks**, so the caller must have
+/// opened the window: interrupts on, interrupt-nesting left, the per-process
+/// lock not held.
+pub fn complete_file_fault(
+    process_vm_handle: u64,
+    plan: &demand::FileFaultPlan,
+    fault_addr: u64,
+    task_id: u32,
+) -> FaultOutcome {
+    let Some(handle) = process_vm::unpack_process_vm_handle(process_vm_handle) else {
+        return FaultOutcome::Fatal(TaskFaultReason::UserPage);
     };
 
     let cached = match filemap_hook::filemap_fault_page(plan.map, plan.page_index) {
@@ -229,7 +248,7 @@ fn resolve_file_fault(
     let installed = process_vm::process_vm_with_vm_space_and_area_by_handle(
         handle,
         fault_addr,
-        |vs, start, _end, region| demand::install_file_page(vs, start, &plan, cached, region),
+        |vs, start, _end, region| demand::install_file_page(vs, start, plan, cached, region),
     );
 
     // Balances the reference the read took to hold the page across the install.
