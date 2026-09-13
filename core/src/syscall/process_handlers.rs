@@ -1,28 +1,37 @@
 use core::sync::atomic::Ordering;
 use slopos_abi::Errno;
-use slopos_abi::fs::FS_TYPE_DIRECTORY;
+use slopos_abi::signal::{
+    WAIT_OPTIONS_MASK, WAIT_STATUS_CONTINUED, WCONTINUED, WNOHANG, WUNTRACED, wait_status_exited,
+    wait_status_signalled, wait_status_stopped,
+};
 use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
-use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, FUTEX_WAKE};
+use slopos_abi::syscall::{
+    ARCH_GET_FS, ARCH_SET_FS, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE,
+    FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, Timespec,
+};
 use slopos_abi::task::{
-    SPAWN_PRIVILEGED, SPAWN_RESERVED, SPAWN_USER_SETTABLE, TASK_FLAG_KERNEL_MODE, TaskPriority,
+    INVALID_TASK_ID, SPAWN_PRIVILEGED, SPAWN_RESERVED, SPAWN_USER_SETTABLE, TASK_FLAG_KERNEL_MODE,
+    TaskExitReason, TaskPriority, TaskStatus,
 };
 use slopos_fs::fileio::FdTable;
+use slopos_fs::vfs::canon::{CanonPath, canonicalise_at};
+use slopos_fs::vfs::path::RESOLVE_MUST_BE_DIR;
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
-use slopos_ostd::task::{new_group_in_session, new_session_group};
-use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
+use slopos_ostd::task::{ExitInfo, new_group_in_session, new_session_group};
+use slopos_sched::scheduler::task_apply_affinity;
 use slopos_sched::task::{
     task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
     task_peek_exit_info, task_reset_caught_handlers, task_terminate,
 };
-use slopos_sched::task_struct::Current;
+use slopos_sched::task_struct::{Current, Task};
 
 use slopos_arch::cpu;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
 use crate::exec;
-use crate::syscall::args::{Tid, UserBytes, UserCStr, UserPtr, WaitTarget};
+use crate::syscall::args::{Tid, UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{
     USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
 };
@@ -111,8 +120,7 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, Errno> {
 }
 
 /// Decode the spawn fd-action array from user memory into kernel-owned
-/// [`exec::FdAction`]s (`Open` paths copied in). Bounded by
-/// [`SPAWN_MAX_FD_ACTIONS`].
+/// [`exec::FdAction`]s. Bounded by [`SPAWN_MAX_FD_ACTIONS`].
 fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, Errno> {
     let count = attrs.actions_len as usize;
     if count == 0 {
@@ -174,12 +182,66 @@ fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
     Ok(flags & SPAWN_USER_SETTABLE)
 }
 
+/// The directory a spawned child starts in: the `SpawnAttrs` one when given,
+/// otherwise the spawner's own. Resolved in the spawner's context, because
+/// the child has none yet, and a bad cwd must fail the spawn.
+#[inline(never)]
+fn spawn_child_cwd(
+    ctx: &crate::syscall::context::SyscallContext,
+    attrs: &SpawnAttrs,
+) -> Result<CanonPath, Errno> {
+    if attrs.cwd_ptr == 0 {
+        return ctx
+            .with_cwd(|cwd| canonicalise_at(b".", cwd))
+            .map_err(VfsError::to_errno);
+    }
+    if attrs.cwd_len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    if attrs.cwd_len as usize > USER_PATH_MAX {
+        return Err(Errno::ENAMETOOLONG);
+    }
+    let mut buf = KVec::<u8>::zeroed(attrs.cwd_len as usize).map_err(|_| Errno::ENOMEM)?;
+    let copied = syscall_bounded_from_user(
+        buf.as_mut_slice(),
+        attrs.cwd_ptr,
+        attrs.cwd_len,
+        USER_PATH_MAX,
+    )
+    .map_err(|_| Errno::EFAULT)?;
+    let requested = match buf[..copied].iter().position(|&b| b == 0) {
+        Some(end) => &buf[..end],
+        None => &buf[..copied],
+    };
+    if requested.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    ctx.with_cwd(|cwd| resolve_new_cwd(requested, cwd))
+}
+
+/// Stage the program path off the caller's buffer. Length-delimited rather
+/// than [`UserPath`], because the spawn ABI passes a length, not a NUL.
+/// `#[inline(never)]`: the handler's own frame is already at the 2 KiB gate.
+#[inline(never)]
+fn spawn_program_path(path: &UserBytes) -> Result<KVec<u8>, Errno> {
+    let mut buf = KVec::<u8>::zeroed(USER_PATH_MAX).map_err(|_| Errno::ENOMEM)?;
+    let copied = syscall_bounded_from_user(
+        buf.as_mut_slice(),
+        path.base_u64(),
+        path.len() as u64,
+        USER_PATH_MAX,
+    )
+    .map_err(|_| Errno::EFAULT)?;
+    buf.truncate(copied);
+    Ok(buf)
+}
+
 define_syscall!(syscall_spawn_path
     (ctx, path: UserBytes, argv_ptr: u64, argc_raw: u32, attrs_ptr: u64)
     cap(NoneSelf)
     -> Result<u64, Errno>
 {
-    if path.base_u64() == 0 || path.len() == 0 || path.len() > exec::EXEC_MAX_PATH {
+    if path.base_u64() == 0 || path.len() == 0 || path.len() > USER_PATH_MAX {
         return Err(Errno::EINVAL);
     }
     if attrs_ptr == 0 {
@@ -199,14 +261,7 @@ define_syscall!(syscall_spawn_path
     let flags = validate_spawn_flags(attrs.flags)?;
     let argc = argc_raw as usize;
 
-    let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
-    let copied_len = syscall_bounded_from_user(
-        &mut path_buf,
-        path.base_u64(),
-        path.len() as u64,
-        exec::EXEC_MAX_PATH,
-    )
-    .map_err(|_| Errno::EFAULT)?;
+    let path_buf = spawn_program_path(&path)?;
 
     let argv_storage = if argv_ptr != 0 && argc > 0 {
         let argv_ptrs = read_user_ptr_array_count(argv_ptr, argc, exec::EXEC_MAX_ARG_STRINGS)
@@ -251,13 +306,14 @@ define_syscall!(syscall_spawn_path
     }
 
     let actions = read_user_spawn_actions(&attrs)?;
+    let child_cwd = spawn_child_cwd(ctx, &attrs)?;
 
     // The spawner's own table, so the child's fd actions clone from the process
     // that asked rather than from whoever holds its number by then.
     let parent_table = ctx.require_process().ok();
     let parent_tid = ctx.task_id();
-    match exec::spawn_program_with_attrs(
-        &path_buf[..copied_len],
+    match exec::spawn_program_with_cwd(
+        path_buf.as_slice(),
         argv_refs.as_deref(),
         envp_refs.as_deref(),
         priority,
@@ -266,6 +322,7 @@ define_syscall!(syscall_spawn_path
         attrs.sigdefault_mask,
         parent_table,
         parent_tid,
+        child_cwd.as_bytes(),
     ) {
         Ok(task_id) => Ok(task_id as u64),
         Err(err) => Ok((err as i32) as u64),
@@ -282,63 +339,187 @@ define_syscall!(syscall_sigdefault
     Ok(0)
 });
 
+/// What `finish_wait` owes the child once the status word has reached user
+/// memory. Every variant is idempotent, so a losing racer commits nothing.
+enum WaitCommit {
+    Reap,
+    ConsumeStop,
+    ConsumeContinue,
+}
+
+struct WaitReport {
+    child_id: u32,
+    status: u32,
+    commit: WaitCommit,
+}
+
+fn exit_status_word(info: &ExitInfo) -> u32 {
+    if info.exit_reason == TaskExitReason::Signalled && info.signal != 0 {
+        wait_status_signalled(info.signal)
+    } else {
+        wait_status_exited(info.exit_code as u8)
+    }
+}
+
+/// Non-destructive, like the zombie peek it sits beside: a stop or continue
+/// report is consume-once, and consuming it here would lose it outright when
+/// the status word turns out to be unwritable. `finish_wait` commits.
+fn child_report(child: &Task, wuntraced: bool, wcontinued: bool) -> Option<WaitReport> {
+    let child_id = child.task_id;
+    if child.status() == TaskStatus::Zombie
+        && let Some(info) = task_peek_exit_info(child_id)
+    {
+        return Some(WaitReport {
+            child_id,
+            status: exit_status_word(&info),
+            commit: WaitCommit::Reap,
+        });
+    }
+    // Keyed on the report rather than on `is_stopped()`: a stop posted to a
+    // member still executing parks it only at its next return-to-user
+    // boundary, and the parent must not wait for that to learn of it.
+    if wuntraced && let Some(signum) = child.stop_report() {
+        return Some(WaitReport {
+            child_id,
+            status: wait_status_stopped(signum),
+            commit: WaitCommit::ConsumeStop,
+        });
+    }
+    if wcontinued && child.has_continue_report() {
+        return Some(WaitReport {
+            child_id,
+            status: WAIT_STATUS_CONTINUED,
+            commit: WaitCommit::ConsumeContinue,
+        });
+    }
+    None
+}
+
+/// Whether `waitpid` may report `child` at all.
+///
+/// A non-leader thread is linked into its group leader's parent's children
+/// list, but `wait` reports *processes*: returning one would hand its tid back
+/// as a pid and reap a task the caller never spawned.
+fn is_waitable_child(child: &Task) -> bool {
+    child.tgid == INVALID_TASK_ID || child.tgid == child.task_id
+}
+
+/// `target` of `None` is wait-any. Every step is a peek: nothing is claimed
+/// until `finish_wait`.
+fn scan_children(
+    caller_id: u32,
+    target: Option<u32>,
+    wuntraced: bool,
+    wcontinued: bool,
+) -> Option<WaitReport> {
+    if let Some(id) = target {
+        let child = task_find_by_id(id)?;
+        if child.parent_task_id() != caller_id || !is_waitable_child(&child) {
+            return None;
+        }
+        return child_report(&child, wuntraced, wcontinued);
+    }
+
+    if let Some(id) = slopos_sched::task::task_first_exited_child(caller_id)
+        && let Some(child) = task_find_by_id(id)
+        && is_waitable_child(&child)
+        && let Some(report) = child_report(&child, false, false)
+    {
+        return Some(report);
+    }
+    let id = slopos_sched::task::task_first_reported_child(caller_id, wuntraced, wcontinued)?;
+    let child = task_find_by_id(id)?;
+    if !is_waitable_child(&child) {
+        return None;
+    }
+    child_report(&child, wuntraced, wcontinued)
+}
+
+/// The status word lands first, then the child pays. An `EFAULT` here leaves
+/// the zombie unreaped and the stop or continue report still pending, so the
+/// caller's retry sees exactly the same event. The only place the status
+/// pointer is touched, which is where Linux checks `wstatus` too.
+fn finish_wait(report: WaitReport, status: Option<UserPtr<i32>>) -> Result<u64, Errno> {
+    if let Some(out) = status {
+        copy_to_user(out.inner(), &(report.status as i32)).map_err(|_| Errno::EFAULT)?;
+    }
+    match report.commit {
+        WaitCommit::Reap => {
+            let _ = task_consume_zombie(report.child_id);
+        }
+        WaitCommit::ConsumeStop => {
+            if let Some(child) = task_find_by_id(report.child_id) {
+                let _ = child.take_stop_report();
+            }
+        }
+        WaitCommit::ConsumeContinue => {
+            if let Some(child) = task_find_by_id(report.child_id) {
+                let _ = child.take_continue_report();
+            }
+        }
+    }
+    Ok(report.child_id as u64)
+}
+
 define_syscall!(syscall_waitpid
-    (ctx, target: WaitTarget, flags: u32) cap(NoneRelation)
+    (ctx, pid: i32, status: Option<UserPtr<i32>>, options: u32) cap(NoneRelation)
     -> Result<u64, Errno>
 {
-    let wnohang = (flags & 0x1) != 0;
+    if options & !WAIT_OPTIONS_MASK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    // `0` and `< -1` name a process group, and SlopOS implements no group
+    // wait; folding them into wait-any would answer a different question.
+    if pid == 0 || pid < -1 {
+        return Err(Errno::ESRCH);
+    }
     let caller_id = ctx.task_id();
+    let target = (pid > 0).then_some(pid as u32);
+    let wnohang = options & WNOHANG != 0;
+    let wuntraced = options & WUNTRACED != 0;
+    let wcontinued = options & WCONTINUED != 0;
 
-    // Wait-any resolves to a concrete child first, so the ownership check and
-    // the reap below stay one implementation.
-    let target_id = match target {
-        WaitTarget::Child(id) => id,
-        WaitTarget::Any => match slopos_sched::task::task_first_exited_child(caller_id) {
-            Some(id) => id,
-            None => {
-                if !slopos_sched::task::task_has_children(caller_id) {
-                    return Err(Errno::ECHILD);
-                }
-                if wnohang {
-                    return Err(Errno::EAGAIN);
-                }
-                slopos_sched::task::task_wait_any_child(caller_id)?;
-                match slopos_sched::task::task_first_exited_child(caller_id) {
-                    Some(id) => id,
-                    None => return Err(Errno::ECHILD),
-                }
-            }
-        },
-    };
+    if let Some(report) = scan_children(caller_id, target, wuntraced, wcontinued) {
+        return finish_wait(report, status);
+    }
 
     // Reaping is the parent's alone: `task_consume_zombie` drops the parent's
     // owning reference, so a stranger's wait would leave the real parent with
-    // `ECHILD`.
-    match task_find_by_id(target_id) {
-        Some(t) if t.parent_task_id() == caller_id => {}
-        _ => return Err(Errno::ECHILD),
-    }
-
-    if let Some(info) = task_consume_zombie(target_id) {
-        return Ok(info.exit_code as u64);
+    // `ECHILD`. Re-looked-up here because the id could name a different task
+    // by now.
+    match target {
+        Some(id) => match task_find_by_id(id) {
+            Some(t) if t.parent_task_id() == caller_id && is_waitable_child(&t) => {}
+            _ => return Err(Errno::ECHILD),
+        },
+        None => {
+            if !slopos_sched::task::task_has_children(caller_id) {
+                return Err(Errno::ECHILD);
+            }
+        }
     }
 
     if wnohang {
-        return if task_find_by_id(target_id).is_none() {
-            Err(Errno::ECHILD)
-        } else {
-            Err(Errno::EAGAIN)
-        };
+        return Ok(0);
     }
 
-    task_wait_for(target_id);
-
-    if let Some(info) = task_consume_zombie(target_id) {
-        Ok(info.exit_code as u64)
-    } else if let Some(info) = task_peek_exit_info(target_id) {
-        Ok(info.exit_code as u64)
-    } else {
-        Err(Errno::ECHILD)
+    let event = match target {
+        Some(id) => slopos_ostd::task::ops::child_exit_event(id),
+        None => slopos_ostd::task::ops::any_child_exit_event(caller_id),
+    };
+    let mut latched: Option<WaitReport> = None;
+    let waited = slopos_ostd::sync::BUS
+        .subscribe(event)
+        .wait_event_interruptible(|| {
+            latched = scan_children(caller_id, target, wuntraced, wcontinued);
+            latched.is_some()
+        });
+    // Latch first: a predicate pass that found an event and then lost the race
+    // with a signal must still deliver it rather than answer EINTR.
+    match latched {
+        Some(report) => finish_wait(report, status),
+        None if waited.is_err() => Err(Errno::EINTR),
+        None => Err(Errno::ECHILD),
     }
 });
 
@@ -376,20 +557,18 @@ define_syscall!(syscall_exec
     requires(let process_id: process_id)
     -> SyscallResult
 {
-    if path_ptr == 0 {
-        return SyscallResult::Err(Errno::EFAULT);
-    }
-
-    let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
-    if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
-        return SyscallResult::Err(Errno::EFAULT);
-    }
-
-    let path_len = path_buf
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(path_buf.len());
-    let path = &path_buf[..path_len];
+    let path = match UserPath::from_user_addr(path_ptr) {
+        Ok(path) => path,
+        Err(err) => return SyscallResult::Err(err),
+    };
+    // Resolved against the caller's cwd here: `do_exec` cannot see the cwd,
+    // and the grant lookup below keys on the canonical name.
+    let program = match ctx.with_cwd(|cwd| exec::resolve_program(path.as_bytes(), cwd)) {
+        Ok(program) => program,
+        Err(e) => {
+            return SyscallResult::Err(Errno::from_raw(e as i32).unwrap_or(Errno::EINVAL));
+        }
+    };
 
     let argv_storage = if argv_ptr != 0 {
         match read_user_ptr_array_terminated(argv_ptr, exec::EXEC_MAX_ARG_STRINGS) {
@@ -447,7 +626,7 @@ define_syscall!(syscall_exec
 
     let exec_result = exec::do_exec(
         process_id,
-        path,
+        &program,
         argv_refs.as_deref(),
         envp_refs.as_deref(),
         &mut entry_point,
@@ -477,7 +656,7 @@ define_syscall!(syscall_exec
             // Here rather than in `do_exec`: past every fallible step, before
             // the new image's first instruction.
             {
-                let (granted_flags, _) = exec::grants::grant_for(path);
+                let (granted_flags, _) = exec::grants::grant_for(program.as_bytes());
                 let granted = slopos_ostd::authority::caps_from_task_flags(
                     granted_flags | slopos_abi::task::TASK_FLAG_USER_MODE,
                 );
@@ -590,7 +769,18 @@ define_syscall!(syscall_get_cpu_affinity
     Ok(task_ref.cpu_affinity() as u64)
 });
 
+// POSIX `getpid` is the *thread group* id: every thread of a process must see
+// one pid.
 define_syscall!(syscall_getpid (ctx)
+    cap(NoneSelf)
+    requires(let task_id: task_id)
+    -> Result<u32, Errno>
+{
+    let tgid = ctx.task().tgid;
+    Ok(if tgid == INVALID_TASK_ID { task_id } else { tgid })
+});
+
+define_syscall!(syscall_gettid (ctx)
     cap(NoneSelf)
     requires(let task_id: task_id)
     -> Result<u32, Errno>
@@ -598,10 +788,21 @@ define_syscall!(syscall_getpid (ctx)
     Ok(task_id)
 });
 
+// Per *process*, like `getpid`. The per-task parent link names the thread's
+// creator, which for a `CLONE_THREAD` sibling is a sibling thread.
 define_syscall!(syscall_getppid (ctx) cap(NoneSelf)
     -> Result<u32, Errno> {
     let task = ctx.task();
-    Ok(task.parent_task_id())
+    let tgid = task.tgid;
+    if tgid == INVALID_TASK_ID || tgid == task.task_id {
+        return Ok(task.parent_task_id());
+    }
+    // A reaped leader leaves no group to ask; the thread's own link is then
+    // the only answer left.
+    Ok(task_find_by_id(tgid).map_or_else(
+        || task.parent_task_id(),
+        |leader| leader.parent_task_id(),
+    ))
 });
 
 define_syscall!(syscall_getpgid
@@ -705,27 +906,32 @@ define_syscall!(syscall_geteuid (ctx) cap(NoneSelf)
 define_syscall!(syscall_getegid (ctx) cap(NoneSelf)
     -> u32 { 0 });
 
+/// Resolve `path` against `cwd` and require a directory, returning the
+/// canonical path the walk ended on.
+///
+/// Not `canonicalise_at`: that normaliser is lexical, folding `..` against
+/// the spelling and erasing a symlink the `..` crossed. The stored cwd is
+/// prefixed onto every later relative lookup, so a lexical answer would leave
+/// the task resolving against a directory this call never checked.
+#[inline(never)]
+fn resolve_new_cwd(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
+    slopos_fs::vfs::resolve_path_canon_at(path, cwd, RESOLVE_MUST_BE_DIR)
+        .map(|(_, canon)| canon)
+        .map_err(VfsError::to_errno)
+}
+
 define_syscall!(syscall_chdir
-    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneSelf)
+    (ctx, path: UserPath) cap(NoneSelf)
     -> Result<(), Errno>
 {
     if path.is_empty() {
         return Err(Errno::EINVAL);
     }
-    match slopos_fs::vfs::ops::vfs_stat(path.as_bytes()) {
-        Ok((file_type, _size)) => {
-            if file_type != FS_TYPE_DIRECTORY {
-                return Err(Errno::ENOTDIR);
-            }
-        }
-        Err(VfsError::NotDirectory) => return Err(Errno::ENOTDIR),
-        Err(VfsError::InvalidPath) => return Err(Errno::EINVAL),
-        Err(_) => return Err(Errno::ENOENT),
-    }
-
+    let canon = ctx.with_cwd(|cwd| resolve_new_cwd(path.as_bytes(), cwd))?;
+    // The store, unlike the read, genuinely needs the owner's witness.
     let current = Current::get().ok_or(Errno::EINVAL)?;
-    if !current.task().set_cwd(&current, path.as_bytes()) {
-        return Err(Errno::ENAMETOOLONG);
+    if !current.task().set_cwd(&current, canon.as_bytes()) {
+        return Err(Errno::ENOMEM);
     }
     Ok(())
 });
@@ -806,8 +1012,51 @@ define_syscall!(syscall_clone
     }
 });
 
+fn read_timeout(addr: u64) -> Result<Timespec, Errno> {
+    let ptr = MmUserPtr::<Timespec>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+    let ts = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
+    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+        return Err(Errno::EINVAL);
+    }
+    Ok(ts)
+}
+
+fn timespec_to_ms(ts: &Timespec) -> u64 {
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000)
+        .saturating_add((ts.tv_nsec as u64).div_ceil(1_000_000))
+}
+
+fn timespec_to_ns(ts: &Timespec) -> u64 {
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
+/// `FUTEX_WAIT`'s timeout is relative, `FUTEX_WAIT_BITSET`'s is absolute
+/// against `CLOCK_MONOTONIC` (or `CLOCK_REALTIME` under
+/// `FUTEX_CLOCK_REALTIME`). Both reduce to relative milliseconds; a null
+/// pointer blocks indefinitely.
+fn futex_timeout_ms(addr: u64, absolute: bool, realtime: bool) -> Result<Option<u64>, Errno> {
+    if addr == 0 {
+        return Ok(None);
+    }
+    let ts = read_timeout(addr)?;
+    if !absolute {
+        return Ok(Some(timespec_to_ms(&ts)));
+    }
+    let now_ns = if realtime {
+        slopos_kernel_services::clock::realtime_ns()
+            .unwrap_or_else(slopos_kernel_services::clock::monotonic_ns)
+    } else {
+        slopos_kernel_services::clock::monotonic_ns()
+    };
+    let remaining_ns = timespec_to_ns(&ts).saturating_sub(now_ns);
+    Ok(Some(remaining_ns.div_ceil(1_000_000)))
+}
+
 define_syscall!(syscall_futex
-    (ctx, uaddr: u64, op: u64, val: u32, timeout: u64) cap(NoneSelf)
+    (ctx, uaddr: u64, op: u64, val: u32, timeout: u64, uaddr2: u64, val3: u32) cap(NoneSelf)
     -> Result<u64, Errno>
 {
     if (uaddr & 0x3) != 0 {
@@ -819,14 +1068,46 @@ define_syscall!(syscall_futex
         return Err(Errno::EFAULT);
     }
 
-    let rc = match op {
-        // 0 means no timeout, per the syscall's documented contract.
+    let cmd = op & FUTEX_CMD_MASK;
+    let realtime = op & FUTEX_CLOCK_REALTIME != 0;
+    // Linux accepts the clock flag only where the timeout is absolute.
+    if realtime && cmd != FUTEX_WAIT_BITSET {
+        return Err(Errno::ENOSYS);
+    }
+
+    let rc = match cmd {
         FUTEX_WAIT => {
-            let deadline = if timeout == 0 { None } else { Some(timeout) };
-            slopos_sched::futex::futex_wait(uaddr, val, deadline)
+            let relative = futex_timeout_ms(timeout, false, false)?;
+            slopos_sched::futex::futex_wait(uaddr, val, relative)
+        }
+        FUTEX_WAIT_BITSET => {
+            if val3 == 0 {
+                return Err(Errno::EINVAL);
+            }
+            let relative = futex_timeout_ms(timeout, true, realtime)?;
+            slopos_sched::futex::futex_wait_bitset(uaddr, val, relative, val3)
         }
         FUTEX_WAKE => slopos_sched::futex::futex_wake(uaddr, val),
-        _ => ENOSYS_RETURN as i64,
+        FUTEX_WAKE_BITSET => {
+            if val3 == 0 {
+                return Err(Errno::EINVAL);
+            }
+            slopos_sched::futex::futex_wake_bitset(uaddr, val, val3)
+        }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            if (uaddr2 & 0x3) != 0 || uaddr2 == uaddr {
+                return Err(Errno::EINVAL);
+            }
+            let second = MmUserPtr::<u32>::try_new(uaddr2).map_err(|_| Errno::EFAULT)?;
+            if copy_from_user(second).is_err() {
+                return Err(Errno::EFAULT);
+            }
+            // Arg 4 is `val2`, the requeue count, not a timeout.
+            let max_requeue = timeout as u32;
+            let expected = (cmd == FUTEX_CMP_REQUEUE).then_some(val3);
+            slopos_sched::futex::futex_requeue(uaddr, uaddr2, val, max_requeue, expected)
+        }
+        _ => return Err(Errno::ENOSYS),
     };
 
     Ok(rc as u64)
@@ -844,9 +1125,6 @@ define_syscall!(syscall_vhangup (ctx)
     slopos_kernel_services::syscall_services::tty::hangup(ctty);
     Ok(())
 });
-
-#[allow(dead_code)]
-type _Unused<T> = UserPtr<T>;
 
 define_syscall!(syscall_prlimit64
     (ctx, pid: u32, resource: u32, new_ptr: u64, old_ptr: u64)

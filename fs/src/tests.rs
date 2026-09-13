@@ -3,6 +3,7 @@ pub mod filemap;
 pub mod journal;
 pub mod mount;
 pub mod partition;
+pub mod resolve;
 pub mod statfs;
 pub mod verity_rw;
 
@@ -16,8 +17,8 @@ use crate::cpio::{CpioError, for_each_cpio_entry};
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs};
 use crate::vfs::{
-    vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_rename,
-    vfs_set_mode, vfs_stat, vfs_unlink,
+    FileType, vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open,
+    vfs_rename, vfs_rmdir, vfs_set_mode, vfs_stat, vfs_unlink,
 };
 
 /// Mount an in-memory image over a stack-local [`BlockCache`]. `$device` must
@@ -65,11 +66,11 @@ pub fn test_vfs_root_stat() -> TestResult {
     if !ensure_vfs_ready() {
         return TestResult::Fail;
     }
-    let (kind, _size) = match vfs_stat(b"/") {
+    let stat = match vfs_stat(b"/") {
         Ok(stat) => stat,
         Err(_) => return TestResult::Fail,
     };
-    if kind != 1 {
+    if stat.file_type != FileType::Directory {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -114,7 +115,9 @@ pub fn test_vfs_list() -> TestResult {
         return slopos_testing::fail!("could not create the listing fixture");
     }
 
-    let mut entries = [UserFsEntry::new(); 8];
+    let Ok(mut entries) = KVec::filled(UserFsEntry::new(), 8) else {
+        return TestResult::Fail;
+    };
     let count = match vfs_list(b"/vfs_list_test", &mut entries) {
         Ok(count) => count,
         Err(_) => return TestResult::Fail,
@@ -151,7 +154,7 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
     const FIXTURE: &str = "vfs_cd_test";
     let _ = vfs_mkdir(b"/vfs_cd_test");
 
-    // 32 × 72 bytes of entries — more than the whole frame budget on its own.
+    // 32 × 272 bytes of entries — more than the whole frame budget on its own.
     let Ok(mut entries) = KVec::filled(UserFsEntry::new(), 32) else {
         return TestResult::Fail;
     };
@@ -170,7 +173,7 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
             continue;
         }
 
-        let mut path = [0u8; 256];
+        let mut path = [0u8; crate::MAX_NAME_LEN + 2];
         path[0] = b'/';
         let nb = name.as_bytes();
         if nb.len() + 1 >= path.len() {
@@ -180,7 +183,7 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
         let path = &path[..1 + nb.len()];
 
         match vfs_stat(path) {
-            Ok((kind, _)) if kind == FS_TYPE_DIRECTORY => {}
+            Ok(stat) if stat.file_type == FileType::Directory => {}
             _ => {
                 klog_info!("VFS_TEST: cd target not resolvable: {}", name);
                 return TestResult::Fail;
@@ -209,7 +212,9 @@ pub fn test_vfs_unlink() -> TestResult {
         return TestResult::Fail;
     }
 
-    let mut entries = [UserFsEntry::new(); 8];
+    let Ok(mut entries) = KVec::filled(UserFsEntry::new(), 8) else {
+        return TestResult::Fail;
+    };
     let count = match vfs_list(b"/vfs_unlink_test", &mut entries) {
         Ok(count) => count,
         Err(_) => return TestResult::Fail,
@@ -262,8 +267,15 @@ pub fn test_vfs_canonicalise_table() -> TestResult {
         }
     }
 
-    if canonicalise(b"relative/path").is_ok() {
-        return slopos_testing::fail!("a relative path must be rejected");
+    let against_root = match canonicalise(b"relative/path") {
+        Ok(c) => c,
+        Err(_) => return slopos_testing::fail!("a relative path against / was rejected"),
+    };
+    if against_root.as_bytes() != b"/relative/path" {
+        return slopos_testing::fail!("a relative path did not resolve against the root");
+    }
+    if crate::vfs::canonicalise_at(b"", b"/work").is_ok() {
+        return slopos_testing::fail!("an empty path must be ENOENT");
     }
     TestResult::Pass
 }
@@ -287,7 +299,7 @@ pub fn test_vfs_mount_reached_through_every_spelling() -> TestResult {
         b"/./tmp/canon_probe.txt".as_slice(),
         b"/tmp/../tmp/canon_probe.txt".as_slice(),
     ] {
-        let (_kind, size) = match vfs_stat(spelling) {
+        let stat = match vfs_stat(spelling) {
             Ok(s) => s,
             Err(_) => {
                 return slopos_testing::fail!(
@@ -296,7 +308,7 @@ pub fn test_vfs_mount_reached_through_every_spelling() -> TestResult {
                 );
             }
         };
-        if size != payload.len() as u32 {
+        if stat.size != payload.len() as u64 {
             return slopos_testing::fail!("a spelling of the path named a different file");
         }
     }
@@ -312,11 +324,17 @@ pub fn test_ramfs_long_name_refused() -> TestResult {
     if !ensure_vfs_ready() {
         return TestResult::Fail;
     }
-    let mut path = [b'A'; 64];
-    path[..5].copy_from_slice(b"/tmp/");
-    let long = &path[..];
+    let mut path = KVec::new();
+    if path.extend_from_slice(b"/tmp/").is_err() {
+        return TestResult::Fail;
+    }
+    for _ in 0..=crate::MAX_NAME_LEN {
+        if path.push(b'A').is_err() {
+            return TestResult::Fail;
+        }
+    }
 
-    match vfs_open(long, true) {
+    match vfs_open(path.as_slice(), true) {
         Err(crate::vfs::VfsError::NameTooLong) => TestResult::Pass,
         Err(other) => slopos_testing::fail!("want NameTooLong, got {:?}", other),
         Ok(_) => slopos_testing::fail!("an over-long name was accepted"),
@@ -329,8 +347,8 @@ pub fn test_ramfs_rename_into_descendant_refused() -> TestResult {
     if !ensure_vfs_ready() {
         return TestResult::Fail;
     }
-    let _ = vfs_unlink(b"/tmp/anc/child");
-    let _ = vfs_unlink(b"/tmp/anc");
+    let _ = vfs_rmdir(b"/tmp/anc/child");
+    let _ = vfs_rmdir(b"/tmp/anc");
     if vfs_mkdir(b"/tmp/anc").is_err() || vfs_mkdir(b"/tmp/anc/child").is_err() {
         return slopos_testing::fail!("could not build the fixture");
     }
@@ -341,8 +359,8 @@ pub fn test_ramfs_rename_into_descendant_refused() -> TestResult {
         Ok(()) => slopos_testing::fail!("a directory was spliced into its own descendant"),
     };
 
-    let _ = vfs_unlink(b"/tmp/anc/child");
-    let _ = vfs_unlink(b"/tmp/anc");
+    let _ = vfs_rmdir(b"/tmp/anc/child");
+    let _ = vfs_rmdir(b"/tmp/anc");
     outcome
 }
 
@@ -2777,7 +2795,7 @@ pub fn test_rdonly_mount_refuses_mutation() -> TestResult {
     })();
 
     let _ = unmount(MP);
-    let _ = vfs_unlink(MP);
+    let _ = vfs_rmdir(MP);
     match result {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!("{}", msg),
@@ -3671,8 +3689,8 @@ pub fn test_ext2_unlink_respects_link_count() -> TestResult {
 #[inline(never)]
 fn unlink_link_count_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.resolve_path(b"/h.txt").map_err(|_| "resolve")?;
-    // Fabricate the second link the way an `mkfs` image carries one: the
-    // count is what `unlink` consults, and this kernel has no `link(2)`.
+    // Fabricated the way an `mkfs` image carries a second link rather than
+    // through `link_entry`: on a foreign image the count is all there is.
     let mut inode = fs.read_inode(ino).map_err(|_| "read_inode")?;
     inode.links_count = 2;
     fs.write_inode_for_test(ino, &inode)

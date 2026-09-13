@@ -1,6 +1,9 @@
 use crate::errno::Errno;
 use crate::pal::Pal;
 use crate::pal::raw::*;
+use slopos_abi::fs::{UserFsStat, UserIovec};
+use slopos_abi::signal::UserSigAltStack;
+use slopos_abi::spawn::SpawnAttrs;
 use slopos_abi::syscall::*;
 
 pub struct Sys;
@@ -162,68 +165,48 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
-    /// Newline-joined names of every entry, paging the syscall's fixed-size
-    /// entry buffer until the cursor reports the end — so a directory larger
-    /// than `USER_FS_MAX_ENTRIES` lists in full rather than being cut off at
-    /// the 64th name.
+    /// Newline-joined names of every entry, with `.` and `..` dropped.
     fn list(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
-        use slopos_abi::fs::FS_LIST_CURSOR_END;
-        use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList};
+        use crate::io::dirent::DirentIter;
 
-        let mut entries = [UserFsEntry::new(); USER_FS_MAX_ENTRIES as usize];
+        let fd = Self::open(path, slopos_abi::fs::O_RDONLY as i32, 0)?;
+        let mut batch = [0u8; 4096];
         let mut pos = 0usize;
-        let mut cursor = 0u64;
 
-        loop {
-            let mut hdr = UserFsList {
-                entries: entries.as_mut_ptr(),
-                max_entries: USER_FS_MAX_ENTRIES,
-                count: 0,
-                cursor,
+        let result = loop {
+            let filled = match Self::getdents64(fd, batch.as_mut_ptr(), batch.len()) {
+                Ok(0) => break Ok(pos),
+                Ok(n) => n,
+                Err(e) => break Err(e),
             };
 
-            let ret = unsafe {
-                syscall2(
-                    SYSCALL_FS_LIST,
-                    path as u64,
-                    &mut hdr as *mut UserFsList as u64,
-                )
-            };
-            to_result(ret)?;
-
-            let count = hdr.count as usize;
-            for entry in entries.iter().take(count) {
-                let name_len = entry
-                    .name
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(entry.name.len());
-                if name_len == 0 {
+            let mut overflow = false;
+            for record in DirentIter::new(&batch[..filled]) {
+                let name = record.name;
+                if name.is_empty() || name == b"." || name == b".." {
                     continue;
                 }
-                let needed = if pos == 0 { name_len } else { name_len + 1 };
+                let needed = if pos == 0 { name.len() } else { name.len() + 1 };
                 if pos + needed > buf_len {
-                    return Err(Errno::from(crate::error::SyscallError::from_errno(34)));
+                    overflow = true;
+                    break;
                 }
                 if pos > 0 {
                     unsafe { *buf.add(pos) = b'\n' };
                     pos += 1;
                 }
                 unsafe {
-                    core::ptr::copy_nonoverlapping(entry.name.as_ptr(), buf.add(pos), name_len);
+                    core::ptr::copy_nonoverlapping(name.as_ptr(), buf.add(pos), name.len());
                 }
-                pos += name_len;
+                pos += name.len();
             }
-
-            // A cursor the kernel did not advance would loop forever; treat
-            // it as the end rather than spin.
-            if hdr.cursor == FS_LIST_CURSOR_END || hdr.cursor == cursor || count == 0 {
-                break;
+            if overflow {
+                break Err(crate::errno::ERANGE);
             }
-            cursor = hdr.cursor;
-        }
+        };
 
-        Ok(pos)
+        let _ = Self::close(fd);
+        result
     }
 
     fn rmdir(path: *const u8) -> Result<(), Errno> {
@@ -252,6 +235,235 @@ impl Pal for Sys {
 
     fn chmod(path: *const u8, mode: u32) -> Result<(), Errno> {
         let ret = unsafe { syscall2(SYSCALL_CHMOD, path as u64, mode as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> Result<i32, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_OPENAT,
+                dirfd as u64,
+                path as u64,
+                flags as u64,
+                mode as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
+    fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_MKDIRAT, dirfd as u64, path as u64, mode as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_UNLINKAT, dirfd as u64, path as u64, flags as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn renameat(olddirfd: i32, old: *const u8, newdirfd: i32, new: *const u8) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_RENAMEAT,
+                olddirfd as u64,
+                old as u64,
+                newdirfd as u64,
+                new as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn fstatat(
+        dirfd: i32,
+        path: *const u8,
+        stat_buf: *mut UserFsStat,
+        flags: u32,
+    ) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_FSTATAT,
+                dirfd as u64,
+                path as u64,
+                stat_buf as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn readlinkat(
+        dirfd: i32,
+        path: *const u8,
+        buf: *mut u8,
+        buf_len: usize,
+    ) -> Result<usize, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_READLINKAT,
+                dirfd as u64,
+                path as u64,
+                buf as u64,
+                buf_len as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn symlinkat(target: *const u8, newdirfd: i32, link: *const u8) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall3(
+                SYSCALL_SYMLINKAT,
+                target as u64,
+                newdirfd as u64,
+                link as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: u32) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_FCHMODAT,
+                dirfd as u64,
+                path as u64,
+                mode as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn faccessat(dirfd: i32, path: *const u8, mode: u32, flags: u32) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_FACCESSAT,
+                dirfd as u64,
+                path as u64,
+                mode as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn access(path: *const u8, mode: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_ACCESS, path as u64, mode as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn link(old: *const u8, new: *const u8) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_LINK, old as u64, new as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn linkat(
+        olddirfd: i32,
+        old: *const u8,
+        newdirfd: i32,
+        new: *const u8,
+        flags: u32,
+    ) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall5(
+                SYSCALL_LINKAT,
+                olddirfd as u64,
+                old as u64,
+                newdirfd as u64,
+                new as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn utimensat(
+        dirfd: i32,
+        path: *const u8,
+        times: *const [Timespec; 2],
+        flags: u32,
+    ) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_UTIMENSAT,
+                dirfd as u64,
+                path as u64,
+                times as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn getdents64(fd: i32, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_GETDENTS64, fd as u64, buf as u64, buf_len as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn pread64(fd: i32, buf: *mut u8, count: usize, offset: i64) -> Result<usize, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_PREAD64,
+                fd as u64,
+                buf as u64,
+                count as u64,
+                offset as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn pwrite64(fd: i32, buf: *const u8, count: usize, offset: i64) -> Result<usize, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_PWRITE64,
+                fd as u64,
+                buf as u64,
+                count as u64,
+                offset as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn readv(fd: i32, iov: *const UserIovec, iovcnt: i32) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_READV, fd as u64, iov as u64, iovcnt as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn writev(fd: i32, iov: *const UserIovec, iovcnt: i32) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_WRITEV, fd as u64, iov as u64, iovcnt as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn fchmod(fd: i32, mode: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_FCHMOD, fd as u64, mode as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn flock(fd: i32, operation: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_FLOCK, fd as u64, operation as u64) };
         to_result(ret)?;
         Ok(())
     }
@@ -405,14 +617,14 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
-    fn futex_wait(addr: *const u32, val: u32, timeout_ms: u64) -> Result<(), Errno> {
+    fn futex_wait(addr: *const u32, val: u32, timeout: *const Timespec) -> Result<(), Errno> {
         let ret = unsafe {
             syscall4(
                 SYSCALL_FUTEX,
                 addr as u64,
-                FUTEX_WAIT,
+                FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
                 val as u64,
-                timeout_ms,
+                timeout as u64,
             )
         };
         to_result(ret)?;
@@ -420,7 +632,14 @@ impl Pal for Sys {
     }
 
     fn futex_wake(addr: *const u32, count: u32) -> Result<i32, Errno> {
-        let ret = unsafe { syscall3(SYSCALL_FUTEX, addr as u64, FUTEX_WAKE, count as u64) };
+        let ret = unsafe {
+            syscall3(
+                SYSCALL_FUTEX,
+                addr as u64,
+                FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+                count as u64,
+            )
+        };
         let val = to_result(ret)?;
         Ok(val as i32)
     }
@@ -513,6 +732,12 @@ impl Pal for Sys {
         loop {
             core::hint::spin_loop();
         }
+    }
+
+    fn sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_SIGALTSTACK, new as u64, old as u64) };
+        to_result(ret)?;
+        Ok(())
     }
 
     fn socket(domain: i32, sock_type: i32, protocol: i32) -> Result<i32, Errno> {
@@ -713,6 +938,58 @@ impl Pal for Sys {
         unsafe {
             syscall1(SYSCALL_SLEEP_MS, ms);
         }
+    }
+
+    fn clock_settime(clk_id: u64, tp: *const Timespec) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_CLOCK_SETTIME, clk_id, tp as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn uname(out: *mut UserUtsname) -> Result<(), Errno> {
+        let ret = unsafe { syscall1(SYSCALL_UNAME, out as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn getrandom(buf: *mut u8, len: usize, flags: u32) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_GETRANDOM, buf as u64, len as u64, flags as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn gettid() -> i32 {
+        unsafe { syscall0(SYSCALL_GETTID) as i32 }
+    }
+
+    fn exit_group(code: i32) -> ! {
+        unsafe {
+            syscall1(SYSCALL_EXIT_GROUP, code as u64);
+        }
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn spawn_path(
+        path: *const u8,
+        path_len: usize,
+        argv: *const *const u8,
+        argc: u32,
+        attrs: *const SpawnAttrs,
+    ) -> Result<i32, Errno> {
+        let ret = unsafe {
+            syscall5(
+                SYSCALL_SPAWN_PATH,
+                path as u64,
+                path_len as u64,
+                argv as u64,
+                argc as u64,
+                attrs as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as i32)
     }
 
     fn yield_now() {

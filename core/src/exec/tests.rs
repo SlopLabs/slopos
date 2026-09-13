@@ -10,7 +10,7 @@ use slopos_ostd::klog_info;
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 
-use super::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_STRLEN, EXEC_MAX_PATH, ExecError, INIT_PATH};
+use super::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_STRLEN, ExecError, INIT_PATH};
 
 static ARG_FILLER: [u8; EXEC_MAX_ARG_STRLEN] = [b'x'; EXEC_MAX_ARG_STRLEN];
 
@@ -262,24 +262,72 @@ pub fn test_elf_kernel_address_entry() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_path_too_long() -> TestResult {
-    let long_path = [b'a'; EXEC_MAX_PATH + 1];
-
-    if long_path.len() <= EXEC_MAX_PATH {
-        klog_info!("EXEC_TEST: Test setup error");
+/// One byte past the ABI path limit is `NameTooLong`, never a truncation onto
+/// a shorter, existing path.
+pub fn test_program_path_over_the_limit_is_refused() -> TestResult {
+    let Ok(long) = slopos_ostd::KVec::filled(b'a', slopos_abi::fs::USER_PATH_MAX + 1) else {
         return TestResult::Fail;
+    };
+    match crate::exec::resolve_program(long.as_slice(), b"/") {
+        Err(ExecError::NameTooLong) => {}
+        other => {
+            klog_info!(
+                "EXEC_TEST: BUG - a path past the limit gave {:?}",
+                other.is_ok()
+            );
+            return TestResult::Fail;
+        }
     }
-    TestResult::Pass
+    match crate::exec::resolve_program(b"", b"/") {
+        Err(ExecError::NameTooLong) => TestResult::Pass,
+        other => {
+            klog_info!("EXEC_TEST: BUG - an empty path gave {:?}", other.is_ok());
+            TestResult::Fail
+        }
+    }
 }
 
-pub fn test_path_empty() -> TestResult {
-    let empty_path: [u8; 0] = [];
+/// A relative program path resolves against the caller's working directory,
+/// and the canonical answer is what the grant table keys on.
+pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
+    const DIR: &[u8] = b"/tmp/exec_rel";
+    const FULL: &[u8] = b"/tmp/exec_rel/prog";
 
-    if !empty_path.is_empty() {
-        klog_info!("EXEC_TEST: Test setup error");
-        return TestResult::Fail;
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return TestResult::Skipped;
     }
-    TestResult::Pass
+    let _ = slopos_fs::vfs::vfs_mkdir(DIR);
+    if slopos_fs::vfs::vfs_open(FULL, true).is_err() {
+        return TestResult::Skipped;
+    }
+
+    for spelling in [b"prog".as_slice(), b"./prog".as_slice()] {
+        match crate::exec::resolve_program(spelling, DIR) {
+            Ok(canon) if canon.as_bytes() == FULL => {}
+            Ok(canon) => {
+                klog_info!(
+                    "EXEC_TEST: BUG - a relative program resolved to {} bytes, not the cwd's",
+                    canon.len()
+                );
+                return TestResult::Fail;
+            }
+            Err(e) => {
+                klog_info!("EXEC_TEST: BUG - a relative program path failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    match crate::exec::resolve_program(b"prog", b"/") {
+        Err(ExecError::NoEntry) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "EXEC_TEST: BUG - a relative program resolved against the root: {:?}",
+                other.is_ok()
+            );
+            TestResult::Fail
+        }
+    }
 }
 
 /// A kernel-half `e_entry` is the one address the loader still folds, and it is
@@ -380,7 +428,7 @@ pub fn test_init_path_is_absolute() -> TestResult {
 }
 
 pub fn test_init_path_within_exec_limit() -> TestResult {
-    if INIT_PATH.is_empty() || INIT_PATH.len() > EXEC_MAX_PATH {
+    if INIT_PATH.is_empty() || INIT_PATH.len() > slopos_abi::fs::USER_PATH_MAX {
         klog_info!("EXEC_TEST: BUG - INIT_PATH length invalid");
         return TestResult::Fail;
     }
@@ -875,8 +923,14 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_elf_segment_offset_overflow, suite = exec);
 slopos_testing::stest!(name = test_elf_kernel_address_entry, suite = exec);
-slopos_testing::stest!(name = test_path_too_long, suite = exec);
-slopos_testing::stest!(name = test_path_empty, suite = exec);
+slopos_testing::stest!(
+    name = test_program_path_over_the_limit_is_refused,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_program_path_resolves_against_the_cwd,
+    suite = exec
+);
 slopos_testing::stest!(name = test_translate_address_kernel_to_user, suite = exec);
 slopos_testing::stest!(name = test_translate_address_user_passthrough, suite = exec);
 slopos_testing::stest!(

@@ -9,38 +9,41 @@
 use slopos_abi::Errno;
 use slopos_abi::fs::{MNT_DETACH, MOUNT_FSTYPE_MAX, MS_RDONLY};
 use slopos_fs::ext2_vfs::{EXT2_VFS_STATIC, ext2_vfs_is_initialized, ext2_vfs_is_read_only};
-use slopos_fs::vfs::canon::canonicalise;
+use slopos_fs::vfs::VfsError;
+use slopos_fs::vfs::canon::canonicalise_at;
 use slopos_fs::vfs::init::{vfs_devfs_instance, vfs_ramfs_pool_claim, vfs_ramfs_pool_release};
 use slopos_fs::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
 use slopos_fs::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
+use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
 use slopos_fs::vfs::traits::{FileSystem, FileType, same_filesystem};
-use slopos_fs::vfs::{VfsError, resolve_path};
 
-use crate::syscall::args::UserCStr;
-use crate::syscall::common::USER_PATH_MAX;
+use crate::syscall::args::{UserCStr, UserPath};
+use crate::syscall::fs::dirfd::with_cwd_base;
 
 define_syscall!(syscall_mount
     (ctx,
-     source: UserCStr<USER_PATH_MAX>,
-     target: UserCStr<USER_PATH_MAX>,
+     source: UserPath,
+     target: UserPath,
      fstype: UserCStr<MOUNT_FSTYPE_MAX>,
      flags: u32)
     cap(Mount)
     -> Result<(), Errno>
 {
-    mount_apply(source.as_bytes(), target.as_bytes(), fstype.as_bytes(), flags)
+    with_cwd_base(ctx, |cwd| {
+        mount_apply_at(source.as_bytes(), target.as_bytes(), cwd, fstype.as_bytes(), flags)
+    })
 });
 
 define_syscall!(syscall_umount2
-    (ctx, path: UserCStr<USER_PATH_MAX>, flags: u32)
+    (ctx, path: UserPath, flags: u32)
     cap(Mount)
     -> Result<(), Errno>
 {
-    umount_path(path.as_bytes(), flags)
+    with_cwd_base(ctx, |cwd| umount_path_at(path.as_bytes(), cwd, flags))
 });
 
 fn target_is_directory(path: &[u8]) -> Result<bool, Errno> {
-    let resolved = resolve_path(path).map_err(vfs_errno)?;
+    let resolved = resolve_path_at(path, b"/", RESOLVE_FOLLOW).map_err(vfs_errno)?;
     let stat = resolved.fs.stat(resolved.inode).map_err(vfs_errno)?;
     Ok(stat.file_type == FileType::Directory)
 }
@@ -50,13 +53,14 @@ fn vfs_errno(e: VfsError) -> Errno {
 }
 
 #[inline(never)]
-pub(crate) fn mount_apply(
+pub(crate) fn mount_apply_at(
     source: &[u8],
     target: &[u8],
+    cwd: &[u8],
     fstype: &[u8],
     flags: u32,
 ) -> Result<(), Errno> {
-    let canon = canonicalise(target).map_err(vfs_errno)?;
+    let canon = canonicalise_at(target, cwd).map_err(vfs_errno)?;
     let target = canon.as_bytes();
 
     // The root mount is boot's: every open descriptor and every cached
@@ -138,8 +142,8 @@ fn mounts_of(fs: &'static dyn FileSystem) -> usize {
 }
 
 #[inline(never)]
-pub(crate) fn umount_path(path: &[u8], flags: u32) -> Result<(), Errno> {
-    let canon = canonicalise(path).map_err(vfs_errno)?;
+pub(crate) fn umount_path_at(path: &[u8], cwd: &[u8], flags: u32) -> Result<(), Errno> {
+    let canon = canonicalise_at(path, cwd).map_err(vfs_errno)?;
     let target = canon.as_bytes();
 
     if target == b"/" {

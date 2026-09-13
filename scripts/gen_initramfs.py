@@ -31,7 +31,7 @@ MODE_DIR = S_IFDIR | 0o755
 EMPTY_DIRS = (b"/etc", b"/var", b"/home")
 
 # Mirror the kernel's per-component name cap (fs/src/lib.rs MAX_NAME_LEN).
-MAX_NAME_LEN = 32
+MAX_NAME_LEN = 255
 
 
 def pad4(buf: bytearray) -> None:

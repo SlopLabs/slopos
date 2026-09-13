@@ -57,6 +57,11 @@ impl SystemTime {
         SystemTime(Duration::new(tv_sec as u64, tv_nsec as u32))
     }
 
+    /// Seconds and nanoseconds since the epoch, for `utimensat`.
+    pub fn as_timespec(&self) -> (i64, i64) {
+        (self.0.as_secs() as i64, self.0.subsec_nanos() as i64)
+    }
+
     pub fn now() -> SystemTime {
         let (sec, nsec) = clock_gettime(CLOCK_REALTIME);
         SystemTime(timespec_to_duration(sec, nsec))

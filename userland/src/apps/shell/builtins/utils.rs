@@ -13,21 +13,22 @@ fn parse_u64_arg(arg: &[u8]) -> Option<u64> {
     arg_as_str(arg)?.parse().ok()
 }
 
+/// `sleep N` — N seconds, as POSIX specifies.
 pub fn cmd_sleep(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
-        shell_write_idx(b"sleep: missing operand (milliseconds)\n", COLOR_ERROR_RED);
+        shell_write_idx(b"sleep: missing operand (seconds)\n", COLOR_ERROR_RED);
         return 1;
     }
-    let Some(ms) = parse_u32_arg(argv[1]) else {
+    let Some(seconds) = parse_u32_arg(argv[1]) else {
         shell_write_idx(b"sleep: invalid number\n", COLOR_ERROR_RED);
         return 1;
     };
-    if ms == 0 {
+    if seconds == 0 {
         return 0;
     }
     // Sleep in short slices so Ctrl+C interrupts the wait promptly.
     const SLICE_MS: u64 = 50;
-    let mut remaining = ms as u64;
+    let mut remaining = seconds as u64 * 1000;
     while remaining > 0 {
         let step = remaining.min(SLICE_MS);
         thread::sleep(Duration::from_millis(step));

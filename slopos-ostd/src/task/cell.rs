@@ -423,20 +423,22 @@ mod tests {
         let outer = window(&task);
         let inner = window(&task);
 
-        let a = task.cwd.get_ptr(&outer).cast::<u8>();
-        let b = task.cwd.get_ptr(&inner).cast::<u8>();
+        // The switch context rather than `cwd`: it is plain data, so arbitrary
+        // bytes written through a raw pointer stay a valid value of its type.
+        let a = task.switch_ctx.get_ptr(&outer).cast::<u8>();
+        let b = task.switch_ctx.get_ptr(&inner).cast::<u8>();
         assert_eq!(a, b, "both witnesses address the same storage");
 
-        // SAFETY: both pointers address the task's 256-byte `cwd` array, which
+        // SAFETY: both pointers address the task's own `switch_ctx`, which
         // outlives them, and both are `SharedReadWrite` derivations of the same
         // `UnsafeCell`, so interleaved writes are defined.
         unsafe {
-            a.write(b'/');
-            b.add(1).write(b'a');
-            a.add(2).write(b'b');
-            assert_eq!(a.read(), b'/');
-            assert_eq!(b.add(1).read(), b'a');
-            assert_eq!(b.add(2).read(), b'b');
+            a.write(1);
+            b.add(1).write(2);
+            a.add(2).write(3);
+            assert_eq!(a.read(), 1);
+            assert_eq!(b.add(1).read(), 2);
+            assert_eq!(b.add(2).read(), 3);
         }
     }
 
@@ -463,12 +465,12 @@ mod tests {
         let mut task = fresh();
         {
             let unique = KArc::get_mut(&mut task).expect("sole strong reference");
-            unique.cwd.get_mut()[0] = b'/';
+            unique.switch_ctx.get_mut().rip = 0xDEAD_BEEF;
         }
         let w = window(&task);
-        let via_witness = task.cwd.get_ptr(&w).cast::<u8>();
-        // SAFETY: addresses the task's own `cwd` array, which outlives the read.
-        assert_eq!(unsafe { via_witness.read() }, b'/');
+        let via_witness = task.switch_ctx.get_ptr(&w);
+        // SAFETY: addresses the task's own `switch_ctx`, which outlives the read.
+        assert_eq!(unsafe { (*via_witness).rip }, 0xDEAD_BEEF);
     }
 
     #[test]

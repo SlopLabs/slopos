@@ -1,7 +1,7 @@
 use slopos_abi::Errno;
 use slopos_abi::KernelErrno;
 use slopos_abi::file_ops::{FileKind, FileOps};
-use slopos_abi::fs::{FS_TYPE_CHARDEV, UserFsStat};
+use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::TtyIndex;
 
@@ -151,9 +151,13 @@ impl FileOps for TtyFileOps {
         }
     }
 
-    fn stat(&self, _handle: usize, out: &mut UserFsStat) -> i32 {
-        out.type_ = FS_TYPE_CHARDEV;
-        out.size = 0;
+    fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
+        slopos_fs::fileio::fill_char_device_stat(
+            out,
+            handle,
+            slopos_fs::fileio::TTY_DEVICE_MAJOR,
+            0o620,
+        );
         0
     }
 }

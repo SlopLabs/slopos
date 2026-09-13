@@ -98,9 +98,108 @@ pub const SIG_IGN: u64 = 1;
 
 pub const SA_RESTORER: u64 = 0x04000000;
 pub const SA_SIGINFO: u64 = 0x00000004;
+pub const SA_ONSTACK: u64 = 0x08000000;
 pub const SA_NODEFER: u64 = 0x40000000;
 pub const SA_RESETHAND: u64 = 0x80000000;
 pub const SA_RESTART: u64 = 0x10000000;
+
+/// `sigaltstack` flags. `SS_ONSTACK` is output-only: a caller cannot claim it.
+pub const SS_ONSTACK: u32 = 1;
+pub const SS_DISABLE: u32 = 2;
+
+/// Smallest alternate stack the kernel will accept. Above Linux's x86-64
+/// `MINSIGSTKSZ` of 2048 deliberately: the frame this kernel pushes does not
+/// fit in 2 KiB. Equal to Linux's `SIGSTKSZ`, so a userland sizing its stack
+/// the usual way is unaffected.
+pub const MINSIGSTKSZ: usize = 8192;
+
+/// `sigaltstack(2)` descriptor. Linux `stack_t`.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserSigAltStack {
+    pub ss_sp: u64,
+    pub ss_flags: u32,
+    pub _pad: u32,
+    pub ss_size: u64,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<UserSigAltStack>() == 24,
+    "UserSigAltStack must match the Linux x86-64 stack_t"
+);
+
+/// `si_code` values this kernel produces. Linux numbering.
+pub const SI_USER: i32 = 0;
+pub const SI_KERNEL: i32 = 0x80;
+/// SIGSEGV: address not mapped to an object.
+pub const SEGV_MAPERR: i32 = 1;
+/// SIGSEGV: mapped, but the access was not permitted.
+pub const SEGV_ACCERR: i32 = 2;
+/// SIGBUS: object-specific hardware error.
+pub const BUS_OBJERR: i32 = 3;
+/// SIGILL: illegal opcode.
+pub const ILL_ILLOPC: i32 = 1;
+
+/// The `siginfo_t` an `SA_SIGINFO` handler receives. Only the leading fields
+/// Linux guarantees for a fault signal are populated; padded to Linux's 128
+/// bytes so a handler compiled against a real `siginfo_t` can index it.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserSiginfo {
+    pub si_signo: i32,
+    pub si_errno: i32,
+    pub si_code: i32,
+    pub _pad0: i32,
+    /// Sender's task id for a `kill`-originated signal, 0 otherwise.
+    pub si_pid: u32,
+    pub si_uid: u32,
+    /// Faulting address for SIGSEGV/SIGBUS, exit status for SIGCHLD.
+    pub si_addr: u64,
+    pub _pad: [u64; 12],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<UserSiginfo>() == 128,
+    "UserSiginfo must match the Linux x86-64 siginfo_t size"
+);
+
+/// The machine state an `SA_SIGINFO` handler receives as its third argument.
+/// Layout is the leading part of the Linux x86-64 `ucontext_t`: the
+/// `uc_mcontext` register block at offset 40.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserUcontext {
+    pub uc_flags: u64,
+    pub uc_link: u64,
+    pub uc_stack: UserSigAltStack,
+    pub uc_mcontext_gregs: [u64; 23],
+    pub uc_sigmask: SigSet,
+}
+
+/// Linux's `REG_*` indices into [`UserUcontext::uc_mcontext_gregs`].
+pub const REG_R8: usize = 0;
+pub const REG_R9: usize = 1;
+pub const REG_R10: usize = 2;
+pub const REG_R11: usize = 3;
+pub const REG_R12: usize = 4;
+pub const REG_R13: usize = 5;
+pub const REG_R14: usize = 6;
+pub const REG_R15: usize = 7;
+pub const REG_RDI: usize = 8;
+pub const REG_RSI: usize = 9;
+pub const REG_RBP: usize = 10;
+pub const REG_RBX: usize = 11;
+pub const REG_RDX: usize = 12;
+pub const REG_RAX: usize = 13;
+pub const REG_RCX: usize = 14;
+pub const REG_RSP: usize = 15;
+pub const REG_RIP: usize = 16;
+pub const REG_EFL: usize = 17;
+pub const REG_CSGSFS: usize = 18;
+pub const REG_ERR: usize = 19;
+pub const REG_TRAPNO: usize = 20;
+pub const REG_OLDMASK: usize = 21;
+pub const REG_CR2: usize = 22;
 
 /// User-visible sigaction passed via the `rt_sigaction` syscall. Layout matches
 /// the Linux x86-64 `struct sigaction`.
@@ -137,9 +236,9 @@ pub const SIG_SETMASK: u32 = 2;
 pub enum SigDefault {
     Terminate = 0,
     Ignore = 1,
-    /// Stop the process (not yet implemented, treated as ignore).
+    /// Stop every task in the thread group until a `SIGCONT` arrives.
     Stop = 2,
-    /// Continue the process (not yet implemented, treated as ignore).
+    /// Resume a stopped thread group.
     Continue = 3,
 }
 
@@ -160,6 +259,29 @@ pub const fn sig_default_action(signum: u8) -> SigDefault {
 pub const fn sig_default_ignores(signum: u8) -> bool {
     matches!(sig_default_action(signum), SigDefault::Ignore)
 }
+
+/// `waitpid(2)` status encoding, as every libc's `W*` macros read it.
+pub const fn wait_status_exited(code: u8) -> u32 {
+    (code as u32) << 8
+}
+
+pub const fn wait_status_signalled(signum: u8) -> u32 {
+    (signum & 0x7f) as u32
+}
+
+pub const fn wait_status_stopped(signum: u8) -> u32 {
+    (((signum & 0xff) as u32) << 8) | 0x7f
+}
+
+pub const WAIT_STATUS_CONTINUED: u32 = 0xffff;
+
+/// `waitpid(2)` `options` bits. Linux values.
+pub const WNOHANG: u32 = 1;
+/// Also report a child that stopped and has not been reported yet.
+pub const WUNTRACED: u32 = 2;
+/// Also report a child that was resumed by `SIGCONT`.
+pub const WCONTINUED: u32 = 8;
+pub const WAIT_OPTIONS_MASK: u32 = WNOHANG | WUNTRACED | WCONTINUED;
 
 /// Signal frame pushed onto the user stack when delivering a signal;
 /// `rt_sigreturn` restores from it. The restorer address is pushed as a separate

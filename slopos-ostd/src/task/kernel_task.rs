@@ -109,7 +109,37 @@ impl TaskContext {
 pub type SwitchContext = crate::task::TaskContext;
 
 /// Capacity of a task's working-directory buffer, NUL terminator included.
-pub const CWD_MAX: usize = 256;
+/// Heap-backed rather than inline: 4 KiB would not fit `Task`'s 8 KiB budget.
+pub const CWD_MAX: usize = slopos_abi::fs::USER_PATH_MAX;
+
+/// Working-directory storage, allocated on a task's first
+/// [`TaskInner::set_cwd`]. A task with none is at `/`.
+type CwdBuf = [u8; CWD_MAX];
+
+fn cwd_buf_init() -> impl Init<CwdBuf, AllocError> {
+    // SAFETY: the closure writes every byte of the slot.
+    unsafe {
+        init_from_closure(|slot: *mut CwdBuf| -> Result<(), AllocError> {
+            core::ptr::write_bytes(slot.cast::<u8>(), 0, CWD_MAX);
+            Ok(())
+        })
+    }
+}
+
+/// Forces the next lazy cwd allocation to fail, so the refusal path is
+/// reachable without exhausting the heap. Consumed by the refusal it causes.
+#[cfg(any(test, feature = "test-helpers"))]
+static CWD_ALLOC_FAILS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn fail_next_cwd_alloc_for_test() {
+    CWD_ALLOC_FAILS.store(true, Ordering::Release);
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn cwd_alloc_is_poisoned() -> bool {
+    CWD_ALLOC_FAILS.swap(false, Ordering::AcqRel)
+}
 
 /// Initialise an [`FpuState`] directly at `ptr`, avoiding the 2.6 KiB rvalue
 /// on the caller's stack that [`FpuState::new`] would materialise.
@@ -225,6 +255,58 @@ impl SignalActionCell {
     #[inline]
     pub fn reset(&self) {
         self.store(SignalAction::default());
+    }
+}
+
+/// The per-signal disposition table: one per `CLONE_SIGHAND` thread group,
+/// privately owned otherwise, hence a [`KArc`] rather than an inline array.
+#[repr(C)]
+pub struct SigHandTable {
+    actions: [SignalActionCell; NSIG],
+}
+
+// `init_default` zeroes the slot, which is the default disposition only
+// because both sentinels are zero.
+const _: () = assert!(SIG_DFL == 0 && SIG_EMPTY == 0);
+
+impl SigHandTable {
+    pub fn init_default() -> impl Init<Self, AllocError> {
+        // SAFETY: the closure writes every byte of the slot, and the all-zero
+        // pattern is exactly `[SignalActionCell::default(); NSIG]` per the
+        // assert above.
+        unsafe {
+            init_from_closure(|slot: *mut Self| -> Result<(), AllocError> {
+                core::ptr::write_bytes(slot.cast::<u8>(), 0, core::mem::size_of::<Self>());
+                Ok(())
+            })
+        }
+    }
+
+    pub fn try_new_default() -> Result<crate::KArc<Self>, AllocError> {
+        crate::KArc::try_init(Self::init_default())
+    }
+
+    #[inline]
+    pub fn get(&self, idx: usize) -> Option<&SignalActionCell> {
+        self.actions.get(idx)
+    }
+
+    #[inline]
+    pub fn iter(&self) -> core::slice::Iter<'_, SignalActionCell> {
+        self.actions.iter()
+    }
+
+    /// A private copy of this table. Reads each entry with
+    /// [`SignalActionCell::load_owner_only`], so the caller must be a task
+    /// that shares this table.
+    pub fn try_deep_copy(&self) -> Result<crate::KArc<Self>, AllocError> {
+        let fresh = Self::try_new_default()?;
+        for (idx, cell) in self.actions.iter().enumerate() {
+            if let Some(dst) = fresh.get(idx) {
+                dst.store(cell.load_owner_only());
+            }
+        }
+        Ok(fresh)
     }
 }
 
@@ -416,7 +498,7 @@ pub struct TaskInner<K, U> {
     pub controlling_tty: AtomicU16,
     /// Working-directory path, NUL-terminated. Only the owning task reads or
     /// writes it, so the cell's witness is always a `CurrentTask`.
-    pub cwd: TaskOwnCell<[u8; CWD_MAX]>,
+    pub cwd: TaskOwnCell<Option<KBox<CwdBuf>>>,
     /// Length of `cwd` up to but not including the NUL. Atomic so it can be
     /// published after the bytes.
     pub cwd_len: AtomicU16,
@@ -517,7 +599,35 @@ pub struct TaskInner<K, U> {
     /// from whichever CPU is sending while the owner writes it in
     /// `rt_sigprocmask`, `rt_sigreturn`, and on exec.
     pub signal_blocked: AtomicU64,
-    pub signal_actions: [SignalActionCell; NSIG],
+    /// Per-signal disposition table. `None` only for a slot that has never
+    /// been built (`invalid()`) and for a clone before its parent's table is
+    /// re-armed; every registered task owns or shares one.
+    ///
+    /// Written only through `&mut self`, i.e. before the task is reachable, so
+    /// the shared reads below need no synchronisation of their own.
+    pub(crate) sighand: Option<crate::KArc<SigHandTable>>,
+    /// Job-control report a parent has not consumed yet: the stop signal
+    /// number, or 0 for none. Consume-once, and carried by the group leader,
+    /// which is the task a parent waits on.
+    pub(crate) stop_report: AtomicU8,
+    /// `SIGCONT` counterpart of [`stop_report`](Self::stop_report).
+    pub(crate) continue_report: AtomicU8,
+    /// Signal whose default action killed this task, or 0 for an ordinary
+    /// exit.
+    pub(crate) exit_signal: AtomicU8,
+    /// Alternate signal stack: base and length, or 0/0 for none. Atomic only
+    /// so the accessors need no witness; the owning task is the sole writer.
+    pub(crate) sigaltstack_sp: AtomicU64,
+    pub(crate) sigaltstack_size: AtomicU64,
+    /// Consecutive signal-frame pushes that could not be written. A second
+    /// failure for the same task terminates it rather than re-pending forever.
+    pub(crate) sigframe_push_failures: AtomicU8,
+    /// `siginfo` for the fault that posted [`fault_signo`](Self::fault_signo).
+    /// Stale values are ignored: delivery only uses them when the signal being
+    /// delivered is the one recorded here.
+    pub(crate) fault_signo: AtomicU8,
+    pub(crate) fault_si_code: AtomicU32,
+    pub(crate) fault_si_addr: AtomicU64,
     pub switch_ctx: TaskOwnCell<SwitchContext>,
     /// Set while a CPU is physically executing this task.
     pub on_cpu: AtomicBool,
@@ -553,6 +663,10 @@ pub struct TaskInner<K, U> {
     pub futex_link: DLink<TaskInner<K, U>, FutexRole>,
     /// The futex word this task is parked on while `futex_link` is linked.
     pub futex_addr: AtomicU64,
+    /// Bitset a `FUTEX_WAIT_BITSET` waiter registered. Meaningful only while
+    /// `futex_link` is linked, and read under the futex bucket lock, hence
+    /// Relaxed.
+    pub futex_bitset: AtomicU32,
     /// Explicit scheduler placement owner. The cross-role gate that keeps a task
     /// out of a ready queue and a remote wake inbox at the same time.
     pub sched_placement: AtomicU8,
@@ -888,39 +1002,98 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Replace the working directory; the length is published after the bytes.
-    /// Returns false if `path` does not fit with its NUL terminator.
+    ///
+    /// Returns false if `path` does not fit with its NUL terminator, or if the
+    /// lazily-allocated buffer could not be obtained.
     #[inline]
     pub fn set_cwd(&self, witness: &impl TaskExclusive<K, U>, path: &[u8]) -> bool {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
+        // SAFETY: the witness proves exclusive access to this task's `cwd`,
+        // and the contract on `with_cwd` forbids re-entering through a second
+        // witness while this borrow is live.
+        let slot = unsafe { &mut *self.cwd.get_ptr(witness) };
+        Self::write_cwd_slot(slot, &self.cwd_len, path)
+    }
+
+    #[inline]
+    pub fn set_cwd_exclusive(&mut self, path: &[u8]) -> bool {
+        let len = &self.cwd_len;
+        Self::write_cwd_slot(self.cwd.get_mut(), len, path)
+    }
+
+    fn write_cwd_slot(slot: &mut Option<KBox<CwdBuf>>, len: &AtomicU16, path: &[u8]) -> bool {
         if path.len() + 1 > CWD_MAX {
             return false;
         }
-        let cwd = self.cwd.get_ptr(witness).cast::<u8>();
-        // SAFETY: the witness proves exclusive access to this task's `cwd`, and
-        // the bounds check above keeps the write inside the array.
-        let dst = unsafe { core::slice::from_raw_parts_mut(cwd, CWD_MAX) };
-        dst[..path.len()].copy_from_slice(path);
-        dst[path.len()] = 0;
-        self.cwd_len.store(path.len() as u16, Ordering::Release);
+        let buf = match slot {
+            Some(buf) => buf,
+            none => {
+                #[cfg(any(test, feature = "test-helpers"))]
+                if cwd_alloc_is_poisoned() {
+                    return false;
+                }
+                let Ok(fresh) = KBox::try_init::<AllocError>(cwd_buf_init()) else {
+                    return false;
+                };
+                *none = Some(fresh);
+                none.as_mut().expect("just installed")
+            }
+        };
+        buf[..path.len()].copy_from_slice(path);
+        buf[path.len()] = 0;
+        len.store(path.len() as u16, Ordering::Release);
         true
     }
 
-    /// Call `f` with the working directory including its NUL terminator.
+    /// Call `f` with the working directory including its NUL terminator; a
+    /// task that has never set one is at `/`.
+    ///
+    /// `f` must not take a second witness on this task and re-enter, or the
+    /// borrow handed out here would alias.
     #[inline]
     pub fn with_cwd<R>(&self, witness: &impl TaskExclusive<K, U>, f: impl FnOnce(&[u8]) -> R) -> R {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
-        let len = self.cwd_len.load(Ordering::Acquire) as usize;
-        let cwd = self.cwd.get_ptr(witness).cast::<u8>();
-        // SAFETY: the witness proves exclusive access; `len` was published
-        // after the bytes it describes, and `set_cwd` bounds it by the array.
-        let bytes = unsafe { core::slice::from_raw_parts(cwd, (len + 1).min(CWD_MAX)) };
-        f(bytes)
+        // SAFETY: as `set_cwd`; a shared derivation of the same cell.
+        let slot = unsafe { &*self.cwd.get_ptr(witness) };
+        match slot {
+            Some(buf) => {
+                let len = self.cwd_len.load(Ordering::Acquire) as usize;
+                f(&buf[..(len + 1).min(CWD_MAX)])
+            }
+            None => f(b"/\0"),
+        }
+    }
+
+    /// Copy `other`'s working directory into this task's own buffer.
+    pub fn clone_cwd_from(&mut self, other: &Self) -> bool {
+        let published = (other.cwd_len.load(Ordering::Acquire) as usize).min(CWD_MAX - 1);
+        // SAFETY: a shared read of a cell only the source task writes, and the
+        // source task is the caller. The borrow covers a distinct allocation
+        // from the destination written below.
+        let source = unsafe { &*other.cwd.as_ptr_racy() };
+        let Some(buf) = source.as_deref() else {
+            // An unallocated slot already means `/`, but a destination that
+            // has a buffer must be rewritten: republishing the length alone
+            // would leave its old bytes visible.
+            let len = &self.cwd_len;
+            let slot = self.cwd.get_mut();
+            if slot.is_some() {
+                return Self::write_cwd_slot(slot, len, b"/");
+            }
+            return true;
+        };
+        let path_len = buf[..published]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(published);
+        let len = &self.cwd_len;
+        Self::write_cwd_slot(self.cwd.get_mut(), len, &buf[..path_len])
     }
 
     #[inline]
@@ -1155,11 +1328,7 @@ impl<K, U> TaskInner<K, U> {
             pgid: AtomicU32::new(INVALID_TASK_ID),
             sid: AtomicU32::new(INVALID_TASK_ID),
             controlling_tty: AtomicU16::new(TTY_INDEX_NONE),
-            cwd: TaskOwnCell::new({
-                let mut c = [0u8; CWD_MAX];
-                c[0] = b'/';
-                c
-            }),
+            cwd: TaskOwnCell::new(None),
             cwd_len: AtomicU16::new(1),
             clear_child_tid: AtomicU64::new(0),
             time_slice: AtomicU64::new(0),
@@ -1183,7 +1352,16 @@ impl<K, U> TaskInner<K, U> {
             caps: AtomicU64::new(CAPS_UNSET),
             signal_pending: AtomicU64::new(0),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
-            signal_actions: [const { SignalActionCell::default() }; NSIG],
+            sighand: None,
+            stop_report: AtomicU8::new(0),
+            continue_report: AtomicU8::new(0),
+            exit_signal: AtomicU8::new(0),
+            sigaltstack_sp: AtomicU64::new(0),
+            sigaltstack_size: AtomicU64::new(0),
+            sigframe_push_failures: AtomicU8::new(0),
+            fault_signo: AtomicU8::new(0),
+            fault_si_code: AtomicU32::new(0),
+            fault_si_addr: AtomicU64::new(0),
             switch_ctx: TaskOwnCell::new(SwitchContext::zero()),
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
@@ -1192,6 +1370,7 @@ impl<K, U> TaskInner<K, U> {
             sibling_link: DLink::new(),
             futex_link: DLink::new(),
             futex_addr: AtomicU64::new(0),
+            futex_bitset: AtomicU32::new(0),
             reclaim_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::Nascent.as_u8()),
             parked_wait_queue: AtomicPtr::new(ptr::null_mut()),
@@ -1244,9 +1423,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).fpu_last_cpu).write(AtomicI32::new(FPU_CPU_NONE));
 
                 addr_of_mut!((*slot).cwd_len).write(AtomicU16::new(1));
-                // `TaskOwnCell` is `repr(transparent)`, so the cell's address
-                // is the array's.
-                (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
+                addr_of_mut!((*slot).cwd).write(TaskOwnCell::new(None));
 
                 fpu_reset_in_place(addr_of_mut!((*slot).fpu_state).cast::<FpuState>());
 
@@ -1258,10 +1435,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
                 addr_of_mut!((*slot).signal_blocked).write(AtomicU64::new(SIG_EMPTY));
-                for i in 0..NSIG {
-                    let p = (addr_of_mut!((*slot).signal_actions) as *mut SignalActionCell).add(i);
-                    p.write(SignalActionCell::default());
-                }
+                addr_of_mut!((*slot).sighand).write(None);
 
                 addr_of_mut!((*slot).switch_ctx).write(TaskOwnCell::new(SwitchContext::zero()));
 
@@ -1427,6 +1601,13 @@ impl<K, U> TaskInner<K, U> {
         self.try_transition_to(TaskStatus::Zombie)
     }
 
+    /// Park this task by job control. Refused once terminal, so a stop cannot
+    /// resurrect a corpse.
+    #[inline]
+    pub fn mark_stopped(&self) -> bool {
+        self.try_transition_to(TaskStatus::Stopped)
+    }
+
     #[inline]
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
@@ -1495,11 +1676,21 @@ impl<K, U> TaskInner<K, U> {
     ///
     /// # Safety
     /// Caller must ensure `self` and `other` do not overlap and that
-    /// `self` is not concurrently accessed by another CPU. Owned handle
-    /// fields are bitwise-duplicated then overwritten with neutral
-    /// values via `ptr::write` so their `Drop` does not free the
-    /// parent's resources.
+    /// `self` is not concurrently accessed by another CPU. Every owning
+    /// field `self` already holds is released before the copy, and the
+    /// bitwise duplicate of the parent's is then overwritten with a neutral
+    /// value via `ptr::write` so its `Drop` does not free the parent's
+    /// resources.
     pub unsafe fn clone_from_raw(&mut self, other: &Self) {
+        // The copy below overwrites `self`'s fields without running a
+        // destructor, so anything the slot already owns is released here.
+        drop(self.kernel_stack.take());
+        drop(self.unsafe_stack.take());
+        drop(self.sighand.take());
+        drop(self.process_group.replace_exclusive(None));
+        drop(self.cwd.get_mut().take());
+        drop(self.test_reports.get_mut().take());
+
         // SAFETY: Both pointers are valid, non-overlapping TaskInner
         // instances. The caller guarantees exclusive write access to
         // `self`.
@@ -1525,6 +1716,10 @@ impl<K, U> TaskInner<K, U> {
             // copied `owner` back-pointer would make the child claim membership
             // in its parent's list, and an unlink would then corrupt that list.
             core::ptr::write(&mut self.children as *mut _, IntrusiveDList::new());
+            // Both hold a heap pointer the bytewise copy duplicated: overwrite
+            // rather than drop. The clone path re-arms each explicitly.
+            core::ptr::write(&mut self.sighand as *mut _, None);
+            core::ptr::write(&mut self.cwd as *mut _, TaskOwnCell::new(None));
         }
         self.ready_link.reset();
         self.remote_inbox_link.reset();
@@ -1558,6 +1753,21 @@ impl<K, U> TaskInner<K, U> {
         // inheriting a CPU index would let it agree with a slot that names the
         // *parent* and skip a restore it genuinely needs.
         self.fpu_last_cpu = AtomicI32::new(FPU_CPU_NONE);
+        self.cwd_len = AtomicU16::new(1);
+        // Job-control reports and the exit signal belong to the exit the
+        // *parent* is waiting on, not to a task that has not run yet.
+        self.stop_report = AtomicU8::new(0);
+        self.continue_report = AtomicU8::new(0);
+        self.exit_signal = AtomicU8::new(0);
+        // POSIX: an alternate signal stack is not inherited across fork, and a
+        // thread starts off-stack.
+        self.sigaltstack_sp = AtomicU64::new(0);
+        self.sigaltstack_size = AtomicU64::new(0);
+        self.sigframe_push_failures = AtomicU8::new(0);
+        self.fault_signo = AtomicU8::new(0);
+        self.fault_si_code = AtomicU32::new(0);
+        self.fault_si_addr = AtomicU64::new(0);
+        self.futex_bitset = AtomicU32::new(0);
     }
 }
 

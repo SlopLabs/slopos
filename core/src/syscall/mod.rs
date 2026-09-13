@@ -23,6 +23,12 @@ pub mod signalfd_handlers;
 pub mod test_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
+#[cfg(feature = "test-hooks")]
+pub mod tests_phase1_fs;
+#[cfg(feature = "test-hooks")]
+pub mod tests_phase1_proc;
+#[cfg(feature = "test-hooks")]
+pub mod tests_phase1_signal;
 pub mod ui_handlers;
 pub mod user_loop;
 

@@ -139,6 +139,43 @@
 #     is held, and the ceiling on physical memory is the frame allocator.
 #     boot charges none of it (no user address space exists yet), so the
 #     `min-kinds-for boot 1` floor still describes that phase.
+#
+# 2026-09-13, Phase 1 of `plans/self-hosting.md` (the POSIX floor a build
+# system stands on):
+#   `process` 126 -> 134: one more utest binary (`buildctl_test`), the phase's
+#     exit-criterion build driver, which spawns a stub compiler per source
+#     file plus two children it kills by signal. Deterministic at 134 over
+#     three fresh runs; the cap stays exact.
+#   `pages` 973334 -> 1011657 (measured 997677-1004667 over the same three
+#     runs, spread 6990; the cap is that maximum plus the spread).
+#     `buildctl_test` is a `std` binary and each child is another address
+#     space with a lazy heap and an 8 MiB stack extent, and this row is
+#     virtual, so a child that touches a handful of pages still charges its
+#     whole mapping.
+#   post-kernel-tests `kernelmeta` 3172 -> 3328 (measured 3152-3240, spread
+#     88). The kernel phase gained 63 tests, and signal delivery now pushes a
+#     3216-byte frame — restorer, `SignalFrame`, `UserSiginfo`, `UserUcontext`
+#     and the XSAVE image — whose range is faulted in before the pushes, so a
+#     delivering task's page tables are charged where they were not before.
+#     post-userland-tests measured 4946-5054, inside its existing 6933, so
+#     that row is left alone.
+#   Nothing else moved above its cap and nothing else is re-recorded:
+#     `residentpages` measured 110944-112929 inside 114452, `diskblocks` 3927
+#     inside 3936, post-kernel-tests `pages` 53365-55170 inside 65536, and
+#     `task` 5 inside its caps.
+#
+# 2026-09-13, the review and security sweep of that same Phase 1 change:
+#   post-kernel-tests `residentpages` 516 -> 772, deterministic at 772 over
+#     three fresh runs so the cap stays exact. Two causes, both new kernel
+#     tests that hold user pages the kernel phase previously never populated:
+#     the signal-delivery cases now fault in the 3216-byte frame range before
+#     the pushes (a fault that used to livelock on a COW stack page and now
+#     resolves), and the advisory-lock cases open real descriptors against the
+#     ext2 root. Every other row measured inside its cap: post-kernel
+#     `kernelmeta` 3141-3151 inside 3328, `pages` 51152-60223 inside 65536,
+#     `process` 14 inside 20; post-userland `residentpages` 111129-112929
+#     inside 114452, `kernelmeta` 4841-4967 inside 6933, `pages`
+#     988042-1001043 inside 1011657, `process` 134 exact.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -161,20 +198,20 @@ boot	kernelmeta	1756
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	3172
+post-kernel-tests	kernelmeta	3328
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
 post-kernel-tests	process	20
-post-kernel-tests	residentpages	516
+post-kernel-tests	residentpages	772
 post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3936
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257
-post-userland-tests	pages	973334
+post-userland-tests	pages	1011657
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	126
+post-userland-tests	process	134
 post-userland-tests	residentpages	114452
 post-userland-tests	task	10
 

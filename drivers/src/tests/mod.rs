@@ -14,6 +14,7 @@ pub mod pci_binding;
 pub mod pci_cap_tests;
 pub mod platform_acpi_tests;
 pub mod platform_binding;
+pub mod rtc_tests;
 pub mod scanout_arbiter;
 pub mod touchpad_platform_tests;
 pub mod verity_artifact_tests;

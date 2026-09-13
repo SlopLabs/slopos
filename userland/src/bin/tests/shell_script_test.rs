@@ -115,7 +115,7 @@ fn run_script(script: &[u8]) -> Option<(Vec<u8>, i32)> {
 
     let pid = tid as u32;
     for _ in 0..REAP_SPINS {
-        if let Some(status) = process::waitpid_nohang(pid) {
+        if let Some(status) = process::wait_exit_code_nohang(pid) {
             return Some((output, status));
         }
         sys_core::sleep_ms(1);
@@ -297,7 +297,7 @@ fn dash_c_runs_the_string() -> bool {
         eprintln!("shell_script_test: dash_c spawn returned {tid}");
         return false;
     }
-    let status = process::waitpid(tid as u32);
+    let status = process::wait_exit_code(tid as u32);
     if status != 7 {
         eprintln!("shell_script_test: `shell -c 'exit 7'` status {status}, want 7");
         return false;

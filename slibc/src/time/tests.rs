@@ -1,5 +1,5 @@
 use super::shim;
-use super::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, Timeval};
+use super::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, Timeval, timespec_from_nanos};
 
 pub fn run_time_tests() -> (u32, u32) {
     let mut pass = 0u32;
@@ -17,6 +17,27 @@ pub fn run_time_tests() -> (u32, u32) {
 
     check!("Timespec_size", core::mem::size_of::<Timespec>() == 16);
     check!("Timeval_size", core::mem::size_of::<Timeval>() == 16);
+
+    check!("timespec_from_nanos_sub_ms", {
+        let ts = timespec_from_nanos(500_000);
+        ts.tv_sec == 0 && ts.tv_nsec == 500_000
+    });
+    check!("timespec_from_nanos_one_ns", {
+        let ts = timespec_from_nanos(1);
+        ts.tv_sec == 0 && ts.tv_nsec == 1
+    });
+    check!("timespec_from_nanos_multi_second", {
+        let ts = timespec_from_nanos(3_500_000_000);
+        ts.tv_sec == 3 && ts.tv_nsec == 500_000_000
+    });
+    check!("timespec_from_nanos_exact_second", {
+        let ts = timespec_from_nanos(1_000_000_000);
+        ts.tv_sec == 1 && ts.tv_nsec == 0
+    });
+    check!("timespec_from_nanos_zero", {
+        let ts = timespec_from_nanos(0);
+        ts.tv_sec == 0 && ts.tv_nsec == 0
+    });
 
     check!("CLOCK_MONOTONIC_eq_0", CLOCK_MONOTONIC == 0);
     check!("CLOCK_REALTIME_eq_1", CLOCK_REALTIME == 1);

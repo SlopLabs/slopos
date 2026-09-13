@@ -185,23 +185,33 @@ fn boot_step_hpet_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("HPET: Initialization complete, main counter running.");
 }
 
-/// Anchor `CLOCK_REALTIME` to the firmware RTC value Limine read at hand-off.
+/// Anchor `CLOCK_REALTIME` to the wall clock, preferring the CMOS RTC over the
+/// bootloader's one-shot hand-off value: the RTC is live hardware and can be
+/// re-read.
 ///
 /// After HPET, because the anchor pairs the epoch with a monotonic reading and
-/// a stopped counter would pair every timestamp with zero. A bootloader that
-/// answers nothing leaves the wall clock unset, which every consumer must
-/// treat as "stamp nothing" — an unset RTC that reported 1970 would put a
-/// plausible-looking lie in every inode.
+/// a stopped counter would pair every timestamp with zero. Neither source
+/// answering leaves the wall clock unset, which every consumer must treat as
+/// "stamp nothing" rather than as 1970.
 fn boot_step_wallclock_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    match crate::limine_protocol::date_at_boot_unix() {
-        Some(secs) => {
-            slopos_kernel_services::clock::set_realtime_epoch(secs);
-            klog_info!(
-                "CLOCK: wall clock set from firmware RTC ({} unix seconds)",
+    let dated = slopos_drivers::rtc::rtc_read_unix_secs()
+        .map(|secs| (secs, "CMOS RTC"))
+        .or_else(|| limine_protocol::date_at_boot_unix().map(|secs| (secs, "bootloader")));
+
+    match dated {
+        Some((secs, source)) => match slopos_kernel_services::clock::set_realtime(secs as i64, 0) {
+            Ok(()) => klog_info!(
+                "CLOCK: wall clock set from {} ({} unix seconds)",
+                source,
                 secs
-            );
-        }
-        None => klog_info!("CLOCK: no boot timestamp from the bootloader — CLOCK_REALTIME unset"),
+            ),
+            Err(()) => klog_info!(
+                "CLOCK: {} reported an unusable {} unix seconds — CLOCK_REALTIME unset",
+                source,
+                secs
+            ),
+        },
+        None => klog_info!("CLOCK: no wall-clock source answered — CLOCK_REALTIME unset"),
     }
 }
 

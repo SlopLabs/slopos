@@ -1806,8 +1806,9 @@ fn sigreturn_refuses_a_poisoned_fpu_image(
 ) -> TestResult {
     // A component XCR0 does not enable: `XRSTOR64` faults on it in ring 0, so
     // sigreturn must refuse the whole frame before committing any register.
-    let poison_addr = sigframe_addr
-        .wrapping_add(core::mem::size_of::<SignalFrame>() as u64)
+    // The offset comes from the delivery path's own arithmetic: a restated
+    // layout would silently stop poking the image at all.
+    let poison_addr = crate::syscall::signal::sigframe_fpu_addr(sigframe_addr)
         .wrapping_add(slopos_ostd::task::XSTATE_BV_OFFSET as u64 + 7);
     assert_test!(
         user_copy_out(pid, poison_addr, &0x80u8),
@@ -2040,6 +2041,10 @@ fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
 /// publish-length-after-bytes ordering surfaces as a corrupted path in
 /// userland, not as a fault.
 pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
+    static LONGEST: [u8; slopos_ostd::task::CWD_MAX - 1] = [b'a'; slopos_ostd::task::CWD_MAX - 1];
+    static TOO_LONG: [u8; slopos_ostd::task::CWD_MAX] = [b'a'; slopos_ostd::task::CWD_MAX];
+    const MAX: usize = slopos_ostd::task::CWD_MAX;
+
     let _fixture = SyscallFixture::new();
 
     let task_id = create_test_kernel_task();
@@ -2057,6 +2062,18 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
         .with_cwd(&current, |cwd| cwd == b"/\0".as_slice());
     assert_test!(initial_ok, "fresh task cwd is not \"/\"");
 
+    // The storage is lazy: the first `set_cwd` is where a task meets a
+    // failing allocator.
+    slopos_ostd::task::fail_next_cwd_alloc_for_test();
+    assert_test!(
+        !current.task().set_cwd(&current, b"/usr/share"),
+        "a failed cwd allocation must refuse the change"
+    );
+    let still_root = current
+        .task()
+        .with_cwd(&current, |cwd| cwd == b"/\0".as_slice());
+    assert_test!(still_root, "a refused allocation moved the cwd anyway");
+
     assert_test!(
         current.task().set_cwd(&current, b"/usr/share"),
         "set_cwd rejected a path that fits"
@@ -2066,16 +2083,25 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
         .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
     assert_test!(round_trip, "cwd did not round-trip through the cell");
 
-    // One byte short of the buffer is the longest path that fits with its NUL.
-    let too_long = [b'a'; 256];
+    // `CWD_MAX` bytes leave no room for the NUL; one fewer is the longest
+    // path that fits.
     assert_test!(
-        !current.task().set_cwd(&current, &too_long),
+        !current.task().set_cwd(&current, &TOO_LONG),
         "set_cwd accepted a path with no room for its NUL"
     );
     let unchanged = current
         .task()
         .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
     assert_test!(unchanged, "a rejected set_cwd still mutated the buffer");
+
+    assert_test!(
+        current.task().set_cwd(&current, &LONGEST),
+        "set_cwd rejected the longest path that fits"
+    );
+    let longest_ok = current.task().with_cwd(&current, |cwd| {
+        cwd.len() == MAX && cwd[..MAX - 1] == LONGEST[..] && cwd[MAX - 1] == 0
+    });
+    assert_test!(longest_ok, "the longest cwd did not round-trip whole");
 
     drop(current);
     task_terminate(task_id);
@@ -2152,12 +2178,20 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     assert_eq_test!(frame.rsi, 0, "RSI not zeroed");
     assert_eq_test!(frame.rdx, 0, "RDX not zeroed");
 
-    // Restorer word at RSP, the `SignalFrame` at RSP + 8, then the FPU save
-    // area, aligned so the handler enters with `rsp % 16 == 8` per SysV.
-    let total_size =
-        8 + core::mem::size_of::<SignalFrame>() as u64 + slopos_ostd::task::FPU_STATE_SIZE as u64;
-    let expected_frame_addr = (original_rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
+    // The restorer word sits at RSP and the `SignalFrame` at RSP + 8; what
+    // follows is the delivery path's own business, so the expectation comes
+    // from its arithmetic rather than a restated layout.
+    let expected_frame_addr = crate::syscall::signal::sigframe_base_for_stack_top(original_rsp);
     assert_eq_test!(frame.rsp, expected_frame_addr, "handler RSP mismatch");
+    assert_eq_test!(
+        (frame.rsp + 8) % 16,
+        0,
+        "the handler must enter with rsp % 16 == 8 per SysV"
+    );
+    assert_test!(
+        original_rsp.wrapping_sub(frame.rsp) >= crate::syscall::signal::SIGFRAME_TOTAL,
+        "the pushed frame must leave room for every record it holds"
+    );
 
     let restorer_on_stack: u64 = match user_copy_in(pid, frame.rsp) {
         Some(v) => v,
@@ -3315,6 +3349,8 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
         sigdefault_mask: 0,
         envp_ptr: 0,
         envp_len: 0,
+        cwd_ptr: 0,
+        cwd_len: 0,
     };
     let attrs_addr = user_page + 512;
     assert_test!(
@@ -3408,6 +3444,8 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
             sigdefault_mask: 0,
             envp_ptr: 0,
             envp_len: 0,
+            cwd_ptr: 0,
+            cwd_len: 0,
         };
         if !user_copy_out(pid, attrs_addr, &attrs) {
             return NO_CONTEXT;
@@ -3604,25 +3642,31 @@ pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
     let p_guard = assert_some!(task_find_by_id(t), "task lookup failed");
 
     // SIGINT caught (custom handler), SIGTSTP ignored, SIGTERM default.
-    p_guard.signal_actions[(SIGINT - 1) as usize].store(SignalAction {
-        handler: 0x4100_0000,
-        mask: 0,
-        flags: 0,
-        restorer: 0,
-    });
-    p_guard.signal_actions[(SIGTSTP - 1) as usize].store(SignalAction {
-        handler: SIG_IGN,
-        mask: 0,
-        flags: 0,
-        restorer: 0,
-    });
-    p_guard.signal_actions[(SIGTERM - 1) as usize].reset();
+    p_guard.set_signal_action(
+        (SIGINT - 1) as usize,
+        SignalAction {
+            handler: 0x4100_0000,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        },
+    );
+    p_guard.set_signal_action(
+        (SIGTSTP - 1) as usize,
+        SignalAction {
+            handler: SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        },
+    );
+    p_guard.set_signal_action((SIGTERM - 1) as usize, SignalAction::default());
 
     task::task_reset_caught_handlers(&p_guard);
 
-    let ok = p_guard.signal_actions[(SIGINT - 1) as usize].handler() == slopos_abi::signal::SIG_DFL
-        && p_guard.signal_actions[(SIGTSTP - 1) as usize].handler() == SIG_IGN
-        && p_guard.signal_actions[(SIGTERM - 1) as usize].handler() == slopos_abi::signal::SIG_DFL;
+    let ok = p_guard.signal_handler((SIGINT - 1) as usize) == Some(slopos_abi::signal::SIG_DFL)
+        && p_guard.signal_handler((SIGTSTP - 1) as usize) == Some(SIG_IGN)
+        && p_guard.signal_handler((SIGTERM - 1) as usize) == Some(slopos_abi::signal::SIG_DFL);
 
     task_terminate(t);
     if ok {
@@ -3641,24 +3685,30 @@ pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
     let p_guard = assert_some!(task_find_by_id(t), "task lookup failed");
 
-    p_guard.signal_actions[(SIGINT - 1) as usize].store(SignalAction {
-        handler: 0x4100_0000,
-        mask: 0,
-        flags: 0,
-        restorer: 0,
-    });
-    p_guard.signal_actions[(SIGTSTP - 1) as usize].store(SignalAction {
-        handler: SIG_IGN,
-        mask: 0,
-        flags: 0,
-        restorer: 0,
-    });
+    p_guard.set_signal_action(
+        (SIGINT - 1) as usize,
+        SignalAction {
+            handler: 0x4100_0000,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        },
+    );
+    p_guard.set_signal_action(
+        (SIGTSTP - 1) as usize,
+        SignalAction {
+            handler: SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        },
+    );
 
     let mask = slopos_abi::signal::sig_bit(SIGINT) | slopos_abi::signal::sig_bit(SIGTSTP);
     task::task_default_signals_in_mask(&p_guard, mask);
 
-    let ok = p_guard.signal_actions[(SIGINT - 1) as usize].handler() == slopos_abi::signal::SIG_DFL
-        && p_guard.signal_actions[(SIGTSTP - 1) as usize].handler() == slopos_abi::signal::SIG_DFL;
+    let ok = p_guard.signal_handler((SIGINT - 1) as usize) == Some(slopos_abi::signal::SIG_DFL)
+        && p_guard.signal_handler((SIGTSTP - 1) as usize) == Some(slopos_abi::signal::SIG_DFL);
 
     task_terminate(t);
     if ok {
@@ -6554,24 +6604,30 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
     task_guard.set_signal_pending(0);
     task_guard.set_signal_blocked(0);
 
-    task_guard.signal_actions[(SIGWINCH - 1) as usize].store(SignalAction {
-        handler: 0x4100_0000,
-        mask: 0,
-        flags: 0,
-        restorer: 0x4200_0000,
-    });
+    task_guard.set_signal_action(
+        (SIGWINCH - 1) as usize,
+        SignalAction {
+            handler: 0x4100_0000,
+            mask: 0,
+            flags: 0,
+            restorer: 0x4200_0000,
+        },
+    );
     assert_test!(
         task::task_signal_post(&*task_guard, SIGWINCH),
         "handled SIGWINCH must pend"
     );
     task_guard.set_signal_pending(0);
 
-    task_guard.signal_actions[(SIGTERM - 1) as usize].store(SignalAction {
-        handler: SIG_IGN,
-        mask: 0,
-        flags: 0,
-        restorer: 0,
-    });
+    task_guard.set_signal_action(
+        (SIGTERM - 1) as usize,
+        SignalAction {
+            handler: SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        },
+    );
     assert_test!(
         !task::task_signal_post(&*task_guard, SIGTERM),
         "SIG_IGN SIGTERM must be dropped at send"
@@ -7393,7 +7449,7 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
     // than blocking on a task that never exits.
     let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     frame.regs_mut().rdi = child_id as u64;
-    frame.regs_mut().rsi = 1;
+    frame.regs_mut().rdx = slopos_abi::signal::WNOHANG as u64;
     let _ = with_user_process_context(stranger_pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_waitpid, &stranger_guard, &mut *frame)
     });
@@ -7410,7 +7466,7 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
     }
     let mut parent_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     parent_frame.regs_mut().rdi = child_id as u64;
-    parent_frame.regs_mut().rsi = 1;
+    parent_frame.regs_mut().rdx = slopos_abi::signal::WNOHANG as u64;
     let _ = with_user_process_context(stranger_pid, || {
         crate::syscall::dispatch::dispatch_handler(
             syscall_waitpid,
@@ -7418,11 +7474,7 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
             &mut *parent_frame,
         )
     });
-    assert_eq_test!(
-        parent_frame.rax(),
-        slopos_abi::Errno::EAGAIN.as_u64(),
-        "the parent's own wait was refused"
-    );
+    assert_eq_test!(parent_frame.rax(), 0, "the parent's own wait was refused");
 
     drop(stranger_guard);
     task_terminate(child_id);
@@ -7839,11 +7891,12 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
         return fail!("parent has no fd table");
     };
 
-    // ECHILD versus EAGAIN matters: a supervisor loop keys on the difference.
-    let wait_any = |wnohang: u64| -> u64 {
+    // POSIX spells "nothing ready" as a zero return, not an error, and a
+    // supervisor loop keys on the difference from `ECHILD`.
+    let wait_any = |options: u64| -> u64 {
         let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
         frame.regs_mut().rdi = u32::MAX as u64;
-        frame.regs_mut().rsi = wnohang;
+        frame.regs_mut().rdx = options;
         let _ = with_user_process_context(parent_pid, || {
             crate::syscall::dispatch::dispatch_handler(syscall_waitpid, &parent_guard, &mut *frame)
         });
@@ -7851,7 +7904,7 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
     };
 
     assert_eq_test!(
-        wait_any(1),
+        wait_any(slopos_abi::signal::WNOHANG as u64),
         slopos_abi::Errno::ECHILD.as_u64(),
         "wait-any with no children must be ECHILD"
     );
@@ -7865,9 +7918,9 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
     );
 
     assert_eq_test!(
-        wait_any(1),
-        slopos_abi::Errno::EAGAIN.as_u64(),
-        "wait-any with a live child must be EAGAIN, not ECHILD"
+        wait_any(slopos_abi::signal::WNOHANG as u64),
+        0,
+        "wait-any with a live child must report nothing ready, not ECHILD"
     );
 
     task_terminate(child_id);
@@ -7877,9 +7930,9 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
         "the child did not become a Zombie"
     );
 
-    let rc = wait_any(1);
+    let rc = wait_any(slopos_abi::signal::WNOHANG as u64);
     assert_test!(
-        rc != slopos_abi::Errno::EAGAIN.as_u64() && rc != slopos_abi::Errno::ECHILD.as_u64(),
+        rc != 0 && rc != slopos_abi::Errno::ECHILD.as_u64(),
         "wait-any did not reap an exited child"
     );
     assert_test!(
@@ -8202,7 +8255,7 @@ pub fn test_mount_requires_the_mount_capability() -> TestResult {
 /// that reference lives, and the capacity check at the end pins the slot
 /// coming back once it dies.
 pub fn test_umount2_busy_unless_detached() -> TestResult {
-    use crate::syscall::fs::mount_handlers::umount_path;
+    use crate::syscall::fs::mount_handlers::umount_path_at;
     use slopos_abi::fs::MNT_DETACH;
 
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
@@ -8219,8 +8272,8 @@ pub fn test_umount2_busy_unless_detached() -> TestResult {
 
     // A mount left behind is a mount every later test sees. Plain first, so
     // the common path gives the pool slot back rather than retiring it.
-    if umount_path(MP, 0).is_err() {
-        let _ = umount_path(MP, MNT_DETACH);
+    if umount_path_at(MP, b"/", 0).is_err() {
+        let _ = umount_path_at(MP, b"/", MNT_DETACH);
     }
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 
@@ -8231,23 +8284,23 @@ pub fn test_umount2_busy_unless_detached() -> TestResult {
 }
 
 fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
-    use crate::syscall::fs::mount_handlers::{mount_apply, umount_path};
+    use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
     use slopos_abi::fs::MNT_DETACH;
     use slopos_fs::vfs::mount::mount_at;
     use slopos_fs::vfs::orphan::{close_ref, open_ref};
 
-    mount_apply(b"", mp, b"ramfs", 0).map_err(|_| "mount of a pooled ramfs failed")?;
+    mount_apply_at(b"", mp, b"/", b"ramfs", 0).map_err(|_| "mount of a pooled ramfs failed")?;
 
     let handle = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", true)
         .map_err(|_| "could not create a file through the mount")?;
     open_ref(handle.fs, handle.inode).map_err(|_| "could not take an open reference")?;
 
-    let busy = umount_path(mp, 0);
+    let busy = umount_path_at(mp, b"/", 0);
     if busy != Err(slopos_abi::Errno::EBUSY) {
         let _ = close_ref(handle.fs, handle.inode);
         return Err("umount2 of a held filesystem was not EBUSY");
     }
-    if umount_path(mp, MNT_DETACH).is_err() {
+    if umount_path_at(mp, b"/", MNT_DETACH).is_err() {
         let _ = close_ref(handle.fs, handle.inode);
         return Err("MNT_DETACH did not detach a held filesystem");
     }
@@ -8266,9 +8319,9 @@ fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     }
 
     // The instance a later mount gets is reset, whichever slot it comes from.
-    mount_apply(b"", mp, b"ramfs", 0).map_err(|_| "the pool refused a second mount")?;
+    mount_apply_at(b"", mp, b"/", b"ramfs", 0).map_err(|_| "the pool refused a second mount")?;
     let fresh = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", false);
-    umount_path(mp, 0).map_err(|_| "the re-mounted filesystem would not unmount")?;
+    umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted filesystem would not unmount")?;
     if fresh.is_ok() {
         return Err("a pooled instance served the previous mount's file");
     }
@@ -8307,26 +8360,26 @@ fn pool_is_at_full_capacity() -> Result<(), &'static str> {
 /// ramfs, creates `halt` in it, and spawns the planted binary into
 /// `TASK_FLAG_POWER`.
 pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
-    use crate::syscall::fs::mount_handlers::mount_apply;
+    use crate::syscall::fs::mount_handlers::mount_apply_at;
 
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
         return fail!("the VFS is unavailable");
     }
 
     assert_eq_test!(
-        mount_apply(b"", b"/bin", b"ramfs", 0),
+        mount_apply_at(b"", b"/bin", b"/", b"ramfs", 0),
         Err(slopos_abi::Errno::EPERM),
         "a mount over /bin was allowed"
     );
     // Non-canonical too: the target is canonicalised before the table is
     // consulted.
     assert_eq_test!(
-        mount_apply(b"", b"/bin/halt", b"ramfs", 0),
+        mount_apply_at(b"", b"/bin/halt", b"/", b"ramfs", 0),
         Err(slopos_abi::Errno::EPERM),
         "a mount over a granted program was allowed"
     );
     assert_eq_test!(
-        mount_apply(b"", b"/tmp/../bin", b"ramfs", 0),
+        mount_apply_at(b"", b"/tmp/../bin", b"/", b"ramfs", 0),
         Err(slopos_abi::Errno::EPERM),
         "a non-canonical spelling of /bin got past the grant check"
     );
@@ -8341,7 +8394,7 @@ pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
 /// conditional on the image. Either way the defect is `forget_filesystem`
 /// dropping the surviving mount's orphan records.
 pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
-    use crate::syscall::fs::mount_handlers::{mount_apply, umount_path};
+    use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
     use slopos_fs::vfs::init::vfs_devfs_instance;
     use slopos_fs::vfs::orphan::{close_ref, has_open_refs, open_ref};
     use slopos_fs::vfs::traits::FileSystem;
@@ -8365,8 +8418,8 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
     }
 
     let outcome = (|| -> Result<(), &'static str> {
-        mount_apply(b"", MP, b"devfs", 0).map_err(|_| "the second devfs mount failed")?;
-        if umount_path(MP, 0).is_err() {
+        mount_apply_at(b"", MP, b"/", b"devfs", 0).map_err(|_| "the second devfs mount failed")?;
+        if umount_path_at(MP, b"/", 0).is_err() {
             return Err("a descriptor on /dev made a second devfs mount busy");
         }
         if !has_open_refs(devfs) {
@@ -8375,7 +8428,7 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
         Ok(())
     })();
 
-    let _ = umount_path(MP, 0);
+    let _ = umount_path_at(MP, b"/", 0);
     let _ = close_ref(devfs, inode);
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 

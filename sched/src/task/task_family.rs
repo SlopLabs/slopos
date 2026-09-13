@@ -30,12 +30,14 @@ use super::{INVALID_TASK_ID, Task, TaskStatus};
 /// parent is the principal that owes the reap.
 pub const MAX_ZOMBIES_PER_PARENT: usize = 64;
 
-/// Not yet tearing down — mirrors the "parent alive" predicate teardown keys on.
+/// Not yet tearing down. A `Stopped` parent still owes its children a reap:
+/// job control is not death, and orphaning them would discard exit statuses a
+/// `fg` would collect.
 #[inline]
 fn status_can_parent(status: TaskStatus) -> bool {
     matches!(
         status,
-        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
+        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked | TaskStatus::Stopped
     )
 }
 
@@ -151,6 +153,32 @@ pub fn task_first_exited_child(parent_id: u32) -> Option<u32> {
     })
 }
 
+/// The id of `parent_id`'s first child holding an unconsumed job-control
+/// report.
+///
+/// Non-destructive: a `waitpid` predicate has to decide whether to park
+/// *before* it consumes a report, and the consuming
+/// [`take_stop_report`](slopos_ostd::task::kernel_task::TaskInner::take_stop_report)
+/// must run exactly once, in the caller.
+pub fn task_first_reported_child(parent_id: u32, stopped: bool, continued: bool) -> Option<u32> {
+    if !stopped && !continued {
+        return None;
+    }
+    let parent = task_find_by_id(parent_id)?;
+    with_task_manager(|_mgr| {
+        for child in parent.children.iter() {
+            let found = with_parked_node(child, |c| {
+                ((stopped && c.has_stop_report()) || (continued && c.has_continue_report()))
+                    .then_some(c.task_id)
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    })
+}
+
 /// Whether `parent_id` owns any child at all.
 ///
 /// `waitpid(-1)` needs this to tell "no child has exited yet" (block) from "no
@@ -171,9 +199,25 @@ pub fn task_has_children(parent_id: u32) -> bool {
 /// The predicate re-scans rather than trusting the wake, so a bucket collision
 /// on the event queue costs a re-scan and cannot report a stranger's child.
 pub fn task_wait_any_child(parent_id: u32) -> Result<(), slopos_abi::Errno> {
+    task_wait_any_child_report(parent_id, false, false)
+}
+
+/// [`task_wait_any_child`] that also returns on a `WUNTRACED`/`WCONTINUED`
+/// report.
+///
+/// Interruptible rather than killable: a `SIGCONT` posted to the *waiter* must
+/// abort the wait, and the killable tier ignores every signal but a kill.
+pub fn task_wait_any_child_report(
+    parent_id: u32,
+    stopped: bool,
+    continued: bool,
+) -> Result<(), slopos_abi::Errno> {
     let waited = slopos_ostd::sync::BUS
         .subscribe(slopos_ostd::task::ops::any_child_exit_event(parent_id))
-        .wait_event_interruptible(|| task_first_exited_child(parent_id).is_some());
+        .wait_event_interruptible(|| {
+            task_first_exited_child(parent_id).is_some()
+                || task_first_reported_child(parent_id, stopped, continued).is_some()
+        });
     if waited.is_err() {
         return Err(slopos_abi::Errno::EINTR);
     }

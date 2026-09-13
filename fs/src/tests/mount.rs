@@ -2,6 +2,7 @@
 //! mount pass.
 
 use slopos_abi::fs::{FS_TYPE_DIRECTORY, UserFsEntry};
+use slopos_ostd::KVec;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
@@ -30,7 +31,8 @@ fn ready() -> bool {
 /// so no test here depends on `/` being writable.
 fn ensure_dir(path: &[u8]) -> bool {
     let _ = vfs_mkdir(path);
-    mount_at(path).is_some() || crate::vfs::vfs_stat(path).map(|(k, _)| k) == Ok(FS_TYPE_DIRECTORY)
+    mount_at(path).is_some()
+        || crate::vfs::vfs_stat(path).map(|s| s.file_type) == Ok(FileType::Directory)
 }
 
 fn entry_name(entry: &UserFsEntry) -> &[u8] {
@@ -153,7 +155,7 @@ pub fn test_paged_listing_survives_a_mount_change() -> TestResult {
 
 /// Page one of a three-entry buffer over a freshly created directory: `.`,
 /// `..`, and the first child mount in id order.
-fn first_page(dir: &[u8], entries: &mut [UserFsEntry; 3]) -> Result<ListCursor, &'static str> {
+fn first_page(dir: &[u8], entries: &mut [UserFsEntry]) -> Result<ListCursor, &'static str> {
     let mut cursor = ListCursor::start();
     let n = vfs_list_from(dir, entries, &mut cursor).map_err(|_| "the first page failed")?;
     if n != 3 || entry_name(&entries[2]) != b"m1" {
@@ -178,7 +180,7 @@ fn listing_drop_half() -> Result<(), &'static str> {
         mount(M2, &FIXTURE_FS[1], 0).map_err(|_| "m2 mount failed")?;
         mount(M3, &FIXTURE_FS[2], 0).map_err(|_| "m3 mount failed")?;
 
-        let mut entries = [UserFsEntry::new(); 3];
+        let mut entries = KVec::filled(UserFsEntry::new(), 3).map_err(|_| "entry buffer")?;
         let mut cursor = first_page(DIR, &mut entries)?;
 
         unmount(M1).map_err(|_| "m1 unmount failed")?;
@@ -217,7 +219,7 @@ fn listing_repeat_half() -> Result<(), &'static str> {
         // Frees the slot ahead of m1's, which the next mount takes.
         unmount(M0).map_err(|_| "m0 unmount failed")?;
 
-        let mut entries = [UserFsEntry::new(); 3];
+        let mut entries = KVec::filled(UserFsEntry::new(), 3).map_err(|_| "entry buffer")?;
         let mut cursor = first_page(DIR, &mut entries)?;
 
         mount(M3, &FIXTURE_FS[3], 0).map_err(|_| "m3 mount failed")?;
@@ -254,7 +256,7 @@ pub fn test_mount_shadowed_name_lists_once() -> TestResult {
 
         // One entry per page, so the shadowed name and the mount entry cannot
         // land on the same page and be de-duplicated there.
-        let mut entries = [UserFsEntry::new(); 1];
+        let mut entries = KVec::filled(UserFsEntry::new(), 1).map_err(|_| "entry buffer")?;
         let mut cursor = ListCursor::start();
         let mut seen = 0usize;
         let mut pages = 0usize;

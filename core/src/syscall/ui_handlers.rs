@@ -58,6 +58,10 @@ define_syscall!(syscall_input_sink_acquire
     Ok(fd as u64)
 });
 
+/// Bytes drawn from the CSPRNG between releases of its IRQ mutex. The cap is
+/// on the hold, not on the request.
+const GETRANDOM_SLICE: usize = 256;
+
 define_syscall!(syscall_getrandom
     (ctx, buf: UserBytes, _flags: u32) cap(NoneSelf)
     -> Result<u64, Errno>
@@ -66,22 +70,38 @@ define_syscall!(syscall_getrandom
         return Ok(0);
     }
 
-    // Cap at 256 bytes per call to limit IRQ-mutex hold time.
-    let len = buf.len().min(256);
-    let mut scratch = [0u8; 256];
+    let total = buf.len();
+    let mut scratch = [0u8; GETRANDOM_SLICE];
+    let mut filled = 0usize;
 
-    let mut pos = 0;
-    while pos < len {
-        let val = platform::rng_next();
-        let bytes = val.to_le_bytes();
-        let chunk = (len - pos).min(8);
-        scratch[pos..pos + chunk].copy_from_slice(&bytes[..chunk]);
-        pos += chunk;
+    while filled < total {
+        let slice_len = (total - filled).min(GETRANDOM_SLICE);
+        let mut pos = 0;
+        while pos < slice_len {
+            let bytes = platform::rng_next().to_le_bytes();
+            let chunk = (slice_len - pos).min(8);
+            scratch[pos..pos + chunk].copy_from_slice(&bytes[..chunk]);
+            pos += chunk;
+        }
+        let Some(addr) = buf.base_u64().checked_add(filled as u64) else {
+            break;
+        };
+        let Ok(user_out) = MmUserBytes::try_new(addr, slice_len) else {
+            break;
+        };
+        if copy_bytes_to_user(user_out, &scratch[..slice_len]).is_err() {
+            break;
+        }
+        filled += slice_len;
     }
 
-    let user_out = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
-    copy_bytes_to_user(user_out, &scratch[..len]).map_err(|_| Errno::EFAULT)?;
-    Ok(len as u64)
+    // A fault partway through is a short return: the bytes already delivered
+    // are real randomness the caller keeps.
+    if filled == 0 {
+        return Err(Errno::EFAULT);
+    }
+
+    Ok(filled as u64)
 });
 
 define_syscall!(syscall_input_poll_batch

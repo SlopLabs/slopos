@@ -16,19 +16,20 @@ appetite.
 `librustc_driver.so` is a single 161 MB shared object loaded through `PT_INTERP`;
 `builddir/target` holds 52 GB across 219,895 files. Against that, SlopOS now
 runs a 24 MiB executable with a gigabyte of anonymous address space and a
-demand-paged file mapping (see below), boots a 512 MiB dev root with 32 k
-inodes against a 1 GiB kernel-side ceiling, and refuses `PT_INTERP` outright
-(`mm/src/elf.rs`). The remaining gap is two orders of magnitude in storage and
-one in linking, and every constant that produces it was chosen correctly for an
-appliance.
+demand-paged file mapping, resolves a 4096-byte path with symlinks in it, stats
+a file for a real mtime, boots a 512 MiB dev root with 32 k inodes against a
+1 GiB kernel-side ceiling, and refuses `PT_INTERP` outright (`mm/src/elf.rs`).
+The remaining gap is two orders of magnitude in storage and one in linking, and
+every constant that produces it was chosen correctly for an appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes, they
 are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with three remaining exceptions (dynamic linking, the
-compiler bootstrap itself, and a filesystem that can hold a tree). The fourth,
-a page-fault path that can reach the device, has landed.
+compiler bootstrap itself, and a filesystem that can hold a tree). Two more,
+a page-fault path that can reach the device and a POSIX floor a build system
+can stand on, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -39,15 +40,16 @@ a page-fault path that can reach the device, has landed.
   toolchain-sized buffer this plan touches must become a chunked or page-list
   design rather than a bigger single allocation: `MAX_ALLOC_SIZE` is 1 MiB
   (`mm/src/slab/mod.rs:61`) and raising it is not the fix.
-- **Stack frames ≤ 2 KiB** against a 4 KiB guard page. This is why
-  `MAX_PATH_LEN` is 256 (`fs/src/lib.rs:4`); widening paths means moving
-  `CanonPath`/`MountPoint.path` off the stack, not raising the gate.
+- **Stack frames ≤ 2 KiB** against a 4 KiB guard page. This is why a 4096-byte
+  path lives in a `KVec` — in `CanonPath`, in `UserPath`, and in the shell —
+  rather than in an array on a frame, and why `NameBuf` borrows from the
+  canonical path instead of copying out of it.
 - **Task ownership I1–I8** and **no `async fn` in a kernel crate**. The
   sleepable fault path this rests on is a blocking task on its own kernel
   stack, not an executor.
 - **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
   — which rules out lifting busybox-lineage utilities or Linux userland code for
-  Phase 3. Concepts, ABI numbers and struct layouts are free to take; prose and
+  Phase 2. Concepts, ABI numbers and struct layouts are free to take; prose and
   implementation are not. Anything new linked into a shipped binary needs a
   `NOTICE.md` entry. Fonts stay runtime-loaded.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
@@ -92,7 +94,7 @@ What it rests on, in case a later phase disturbs it:
 - **The persist root is 512M against a 32M shipped image, and 1 GiB is the
   ceiling.** The verity hash array is one contiguous `KVec` of 4 bytes per
   4 KiB block against a 1 MiB `MAX_ALLOC_SIZE`, so a 1 GiB image allocates
-  exactly the cap twice at mount. Workstream 2.1 is what lifts that; until it
+  exactly the cap twice at mount. Workstream 1.1 is what lifts that; until it
   does, no phase here may assume a bigger root.
 
 ---
@@ -184,86 +186,176 @@ What it rests on, in case a later phase disturbs it:
 
 **Two clauses of this did not land, and are not hiding.** There is still no OOM
 *disposition*: a fault that cannot find a frame kills the faulter with a
-SIGBUS-coded exit, exactly as before, and choosing a victim instead is a policy
-subsystem rather than a constant — it belongs with the swap and reclaim work in
-Phase 2. And user mappings are all 4 KiB; nothing instantiates the 2 MiB leaf
-the page tables already support, which is a throughput item, not a capability
-one.
+SIGBUS-coded exit, and choosing a victim instead is a policy subsystem rather
+than a constant — it belongs with the swap and reclaim work in Phase 1. And
+user mappings are all 4 KiB; nothing instantiates the 2 MiB leaf the page
+tables already support, which is a throughput item, not a capability one.
 
 ---
 
-## Phase 1 — The POSIX floor a build system stands on
+## A build system's floor is in place
 
-**Outcome:** a program can find its files, learn whether they changed, spawn
-children and know how they died.
+The third thing this plan rests on: a program can find its files, learn whether
+they changed, spawn children and know how they died. `buildctl_test` is the
+standing proof — an in-guest build driver that creates a source tree under a
+relative path with names past 32 bytes and a symlinked include directory,
+spawns a stub compiler per file with `Command::current_dir` set, fingerprints
+each input by `mtime`, skips every unchanged input on a second run, recompiles
+exactly the one input it touched, reads a child's real exit code, sees a child's
+`SIGSEGV` as a signal rather than as exit 139, and holds a `flock` a second
+attempt cannot take. Every one of those was a wrong answer before.
 
-### Workstream 1.1 — Path resolution (**M**)
+What it rests on, in case a later phase disturbs it:
 
-Nothing in the tree dereferences a symlink during lookup
-(`fs/src/vfs/path.rs:38-63`); `canonicalise` rejects every relative path
-(`fs/src/vfs/canon.rs:31-33`) and no resolver consults the cwd the task already
-stores; `MAX_NAME_LEN` is 32 and `MAX_PATH_LEN` 256 (`fs/src/lib.rs:4-5`) while
-ext2 itself allows 255. `libcore-<hash>.rlib` exceeds 32 bytes; a registry
-source path exceeds 256. Every rustup and cargo layout is symlinks. Nothing
-downstream matters while `open("src/main.rs")` returns `EINVAL`.
+- **A path is 4096 bytes and can contain a symlink.** `MAX_PATH_LEN` and
+  `USER_PATH_MAX` are `PATH_MAX`; `MAX_NAME_LEN` and `USER_NAME_MAX` are ext2's
+  own 255, which is what a `libcore-<hash>.rlib` needs. The walk
+  (`fs/src/vfs/path.rs`) stats each component, keeps a stack of the ancestors
+  it has resolved, and on a symlink splices the target and restarts — so the
+  budget is `MAX_SYMLINK_FOLLOWS` (40) for the *whole* resolution, as Linux
+  has had it since 4.2, and exhausting it is `VfsError::TooManySymlinks` →
+  `ELOOP`. `..` pops that ancestor stack rather than being folded away
+  lexically before the walk, which is the only way it can mean what POSIX says
+  it means once a component can be a symlink: `a/link/..` is the directory
+  holding the link's *target*, not the directory holding the link.
+  `RESOLVE_NOFOLLOW_FINAL` is what makes `lstat` and `AT_SYMLINK_NOFOLLOW`
+  expressible, and `RESOLVE_MUST_BE_DIR` — set by a trailing slash or
+  `O_DIRECTORY` — is what makes `open("file/")` the `ENOTDIR` POSIX requires.
+- **No path is a stack frame.** A 4096-byte array on a 2 KiB frame steps clean
+  over the 4 KiB guard page in one instruction, which no allowlist can raise.
+  `CanonPath` is a `KVec<u8>`, and the walk builds the resolved canonical path
+  incrementally into another rather than carrying a per-component offset table.
+  `UserPath` (`core/src/syscall/args.rs`) stages a path syscall's argument on
+  the heap, which is what Linux's `getname()` does for the same reason, and
+  answers `ENAMETOOLONG` rather than truncating into the name of a different
+  file. `NameBuf` borrows the final component out of the canonical path the walk
+  already allocated, so `resolve_parent` costs one allocation rather than two
+  and carries no inline 255-byte array. The shell's own 256-byte ceiling is
+  gone the same way, or `cd` into a registry path would still fail on a machine
+  that can now resolve one.
+- **Relative paths resolve against the caller's cwd.** Every path syscall goes
+  through `resolve_path_at`/`resolve_parent_at` with the cwd from
+  `SyscallContext::with_cwd`, which is the only place a handler may read one,
+  and `exec` and `spawn_path` resolve the program the same way — a `Command`
+  with a relative program and a `current_dir` is the shape a build driver
+  actually has. The task's cwd is heap-backed at 4096 bytes, and `chdir`
+  resolves against the *old* cwd and requires a directory before storing the
+  *walked* path — an unvalidated or lexical cwd is a correctness bug the moment
+  the VFS consults it. A `dirfd` likewise stores the path its walk ended on,
+  and every `*at` call re-checks that it still names the descriptor's own inode
+  before resolving against it: a base renamed underneath answers `ESTALE`
+  rather than silently redirecting into whatever holds that name now, which is
+  the race the `*at` family exists to be immune to.
+- **`stat` is the Linux `struct stat`.** 144 bytes, field-for-field, every hole
+  a named field because `copy_to_user` copies `size_of::<Self>()` raw bytes.
+  `FileStat::fill_user_stat` is the single producer and `FileType::to_s_ifmt`
+  the single type mapping, which is what closed the bug where `fstat` on a
+  regular file reported `FS_TYPE_DIRECTORY`: the enum's discriminants and the
+  ABI's constants never agreed, and two call sites each had their own table.
+- **The wall clock is real, and a timestamp can be set.** A CMOS RTC driver
+  (`drivers/src/rtc.rs`, over a safe `slopos_ostd::io::CmosRegs` window whose
+  serialisation obligation is a witness type rather than prose) is what the
+  boot step prefers, with Limine's one-shot date as the fallback; neither
+  answering still leaves `realtime_ns()` as `None`, which `fs/src/ext2/time.rs`
+  depends on to decline to stamp rather than claim 1970. `clock_settime` is
+  gated on `Capability::Clock` — not `Power`, which reaches a power primitive
+  and must keep meaning that — and `set_realtime` refuses an out-of-range value
+  instead of silently no-opping. ext2 and ramfs both implement
+  `FileSystem::set_times`, so `utimensat` works on either root, and cargo's
+  whole fingerprint model is mtime-based.
+- **`waitpid` is POSIX.** `(pid, status, options)`, returning the reaped pid and
+  writing `(code<<8)|sig`. slibc was already sending those three registers; the
+  kernel read the status pointer as flags and never wrote it, so `ExitStatus`
+  was `Some(0)` for every child and **every failed compiler reported success**.
+  `WNOHANG` with a live child now returns 0 rather than `EAGAIN`, which no
+  longer collides with a child that exited 0 — the bug that made `try_wait`
+  never complete. `ExitInfo.signal` and `TaskExitReason::Signalled` are what let
+  a signal death be told from `exit(139)`.
+- **A stop is a state, not a dropped bit.** `TaskStatus::Stopped` exists;
+  `task_group_stop`/`task_group_continue` park and resume every member of a
+  thread group; a stopped task holds no runqueue position, is not reapable, and
+  still parents its children. A member that is executing is poked and parks
+  itself at its next return-to-user boundary rather than being descheduled
+  mid-syscall from another CPU. `WUNTRACED`/`WCONTINUED` report it exactly once,
+  which is what makes the shell's `fg`/`bg` able to resume a job and Ctrl-Z able
+  to suspend one. `kill(pid)` fans out over the thread group, and `exit_group`
+  exists because `exit` is the right primitive for a thread and the wrong one
+  for a process.
+- **A fault can be caught.** A user-mode fault posts `SIGSEGV`/`SIGBUS`/`SIGILL`
+  with a `si_code` and a `si_addr` and returns to the trap exit, where the
+  existing delivery hook builds the frame; the default disposition still kills,
+  which is the same outcome as before rather than a regression. The frame is
+  `[restorer][SignalFrame][UserSiginfo][UserUcontext][FPU]` — `SignalFrame`
+  stays immediately above the restorer word, because both userland restorer
+  trampolines document and depend on RSP pointing at it once the handler's `ret`
+  pops the restorer. `sigaltstack(2)` is what makes a handler for a fault caused
+  by stack exhaustion deliverable at all, and `MINSIGSTKSZ` is pinned to the
+  real frame total by a const assert. A frame push that cannot be written
+  terminates the task — immediately for a fault signal, whose interrupted
+  instruction would re-execute and fault again, and on the second consecutive
+  failure for any other, so an ordinary `SIGTERM` whose frame cannot be pushed
+  is retried once and then fatal rather than re-pended at every boundary
+  forever. slibc maps a `PROT_NONE` guard page below every thread stack, so
+  std can tell a stack overflow from an ordinary `SIGSEGV`.
+- **Threads share what POSIX says they share.** `CLONE_SIGHAND` was validated
+  and then ignored, so every thread got a private action table while
+  `pthread_create` asked for a shared one; the table now lives behind a
+  `KArc<SigHandTable>`. The futex decodes `op & FUTEX_CMD_MASK`, so
+  `FUTEX_PRIVATE_FLAG` — which every std- and glibc-shaped caller sets, and
+  which used to make the whole call `ENOSYS` — is accepted; the timeout is a
+  real `timespec`, relative for `FUTEX_WAIT` and absolute for
+  `FUTEX_WAIT_BITSET`, and the bitset and requeue forms exist.
+- **`std` reaches the syscalls that exist.** `read_dir` runs over `getdents64`
+  on an owned directory descriptor rather than splitting `slopos_list`'s output
+  on newlines, so a filename containing a newline is just bytes; `symlink`,
+  `read_link`, `hard_link`, `set_permissions`, `File::set_times`,
+  `read_vectored`, `write_vectored` and `FileExt::read_at`/`write_at` are real
+  instead of `unsupported`; and `Command::spawn` goes through `spawn_path` with
+  a cwd in `SpawnAttrs`, so nothing allocates between fork and exec against the
+  single global malloc spinlock a multithreaded parent could hand over locked.
 
-### Workstream 1.2 — `stat` that carries time (**S**, ABI break)
+**What this deliberately did not do.** The syscall numbering is still bespoke —
+the *layouts* are Linux's now, which is the half that carries no design value
+and the half a libc port cannot work around, but the numbers are still
+append-only SlopOS ones. That is the open decision below, and Phase 1's work
+made it cheaper rather than settling it. Process-group waits (`pid == 0`,
+`pid < -1`) are still `ESRCH`, because there is no process-group wait to answer
+with. `st_uid`/`st_gid` exist for layout and read 0, which is the single-user
+decision below, not an omission.
 
-`UserFsStat` is `{type_, _pad, size: u32}` (`abi/src/fs.rs:96-100`); slibc
-hardcodes `st_mtime = 0`. The ext2 inode *is* stamped
-(`fs/src/ext2/time.rs:19-23`) and the value is discarded at the ABI. Cargo's
-entire fingerprint model is mtime-based, so today it either rebuilds everything
-or nothing. Widen to `ino`/`mode`/`nlink`/`uid`/`gid`/`u64 size`/`mtim`/`ctim`,
-add `utimensat`, and take the break before more userland is written against the
-current shape. Prerequisite: `clock_settime` + a real RTC read, because
-`fs/src/ext2/time.rs` declines to stamp at all when the wall clock is unset.
+Four smaller divergences, stated rather than hidden:
 
-### Workstream 1.3 — Process results (**S**)
-
-`waitpid` is `(target, flags)` returning a raw exit code
-(`core/src/syscall/process_handlers.rs:268-330`); slibc passes `status` into the
-flags slot and never writes it, so `std`'s `ExitStatus` is always 0 — **every
-failed rustc currently reports success**. Add the status pointer and the
-`(code<<8)|sig` encoding, then `exit_group` (today `exit` kills one task and
-leaves sibling threads running), thread-group `kill` fan-out, and
-`SIGSTOP`/`SIGTSTP`/`SIGCONT` (silently dropped at
-`core/src/syscall/signal.rs:603`, so Ctrl-Z on a build does nothing).
-
-### Workstream 1.4 — Threads that behave (**M**)
-
-`futex` matches only bare ops 0 and 1, so every `FUTEX_PRIVATE_FLAG` call is
-`ENOSYS` (`process_handlers.rs:800-812`) and timeouts are relative
-milliseconds. `CLONE_SIGHAND` is validated and then not implemented — threads
-get private handler tables. A user fault never becomes a deliverable signal
-(`slopos-ostd/src/task/borrowed.rs:141-150`), so there is no catchable SIGSEGV
-and no `sigaltstack`, and std's stack-overflow guard cannot run. `fork` in a
-multithreaded process allocates in the child before `execve`
-(`slibc/std_pal/process/slopos.rs:180-205`) against a single global malloc
-spinlock — route std's spawn through the existing `spawn_path` syscall instead.
-
-### Workstream 1.5 — The syscalls cargo reaches for (**M**)
-
-`flock`/`fcntl(F_SETLK)` (cargo refuses to run without a package-cache lock),
-`link` (cargo hardlinks artifacts), the `*at` family, `getdents64` on an fd
-(and therefore `fsync` on a directory), `pread`/`pwrite`/`readv`/`writev`,
-`fchmod`, `getrandom` above 256 B, `uname`, `CLOCK_*_CPUTIME_ID`. Wire the
-std PAL to the syscalls that *already exist* first — `symlink`, `readlink`,
-`truncate`, `chmod` are implemented in `slibc/src/pal/slopos.rs:235-256` and
-simply return `unsupported` in `slibc/std_pal/fs/slopos.rs:713-723`; and
-`Command::current_dir` is stored and never applied.
-
-**Phase 1 exit criteria:** a hand-written build driver, running in-guest,
-compiles a multi-file project with a stub compiler, correctly skips unchanged
-inputs on the second run, and reports a child's signal death.
+- **The cwd is per-thread.** `CLONE_FS` is accepted and ignored, so a `chdir`
+  is visible only to the thread that made it, where POSIX has the cwd per
+  process. The buffer is a `TaskOwnCell` whose whole contract is that only its
+  owning task reads or writes it, so sharing it means a lock, a lock class and
+  a changed signature at every reader.
+- **`getdents64`'s `d_name` sits at offset 24, not Linux's 19.** The record
+  header is naturally aligned rather than packed, which every in-tree consumer
+  and its asserts agree on, but it is a layout a libc port compiled against a
+  real `struct linux_dirent64` cannot work around — the one place the
+  layouts-are-Linux's claim above does not hold.
+- **Advisory locks are 128 rows machine-wide**, shared by `flock(2)` and
+  `fcntl(2)` record locks because they contend on the same file. A principal's
+  share is bounded and a principal holding no lock can always take one, so no
+  caller can deny locking to another; what the fixed table does bound is how
+  many ranges one process may hold at once. Deadlock detection is the trivial
+  self-conflict only: a two-process cycle parks both until a signal, where
+  Linux answers `EDEADLK`.
+- **Shared futexes are private-only.** The key is now
+  `(address space, address)`, which is what stops one process reaching
+  another's waiters; a genuinely *shared* futex needs the key to name the
+  backing page rather than the mapping, which is a further change and not a
+  flag decode.
 
 ---
 
-## Phase 2 — Storage and capacity for a real tree
+## Phase 1 — Storage and capacity for a real tree
 
 **Outcome:** a multi-GB working tree with hundreds of thousands of files, at a
 throughput where a build finishes.
 
-### Workstream 2.1 — Size the filesystem from the medium (**M**)
+### Workstream 1.1 — Size the filesystem from the medium (**M**)
 
 Fixed at appliance scale: the block cache is 512 entries / 2 MiB
 (`fs/src/ext2/cache.rs:26`), never derived from the volume — at 16 GiB the group
@@ -276,9 +368,10 @@ one contiguous `KVec`, which is not a sizing preference but the hard ceiling on
 this whole phase: `MAX_ALLOC_SIZE` is 1 MiB, so 1 GiB is the largest image that
 mounts at all and a 64 GiB volume would want 64 MiB of it. Directory
 lookup is a linear scan with no htree, so `target/debug/deps` with 20 k entries
-makes the build O(n²).
+makes the build O(n²) — and now that a 255-byte name is legal, the entries are
+longer too.
 
-### Workstream 2.2 — Make a write cost what it writes (**M**)
+### Workstream 1.2 — Make a write cost what it writes (**M**)
 
 User I/O is staged in 4096-byte chunks (`abi/src/io.rs:5`) and each chunk is a
 separate ext2 transaction (`fs/src/vfs_file_ops.rs:373-397`), whose data also
@@ -288,16 +381,16 @@ calls, each an inline whole-filesystem `sync()` under the mount lock. Batch the
 transaction over a multi-block range and replace the inline sync with the
 chunked `sync_step`.
 
-### Workstream 2.3 — More than one filesystem (**L**)
+### Workstream 1.3 — More than one filesystem (**L**)
 
 There is exactly one ext2 instance, bound at boot, behind one global mutex
 (`fs/src/ext2_vfs.rs:57-63`); `mount(2)` with `fstype=ext2` can only re-place
-that instance (`core/src/syscall/fs/mount_handlers.rs:103-118`). No second disk,
+that instance (`core/src/syscall/fs/mount_handlers.rs`). No second disk,
 no separate `/home`, no scratch volume, and every filesystem operation on the
 machine serialises — `-j16` degenerates toward one core. Also: `/tmp` is a ramfs
 with a 16 MiB per-file cap and 4096 inodes, and there is no swap anywhere.
 
-### Workstream 2.4 — The block layer (**M**)
+### Workstream 1.4 — The block layer (**M**)
 
 `virtio_blk` takes a global `io_lock`, bounces through a fresh 4 KiB buffer and
 sleeps, one request at a time machine-wide, with a queue depth of 1 against a
@@ -306,37 +399,38 @@ maps to `InvalidBuffer`, and eight timeouts permanently quarantine the device.
 Scatter-gather into the caller's pages, allow concurrent slots, and give errors
 real variants with bounded retry.
 
-**Phase 2 exit criteria:** a 16 GiB image mounts in bounded time, holds a
+**Phase 1 exit criteria:** a 16 GiB image mounts in bounded time, holds a
 checked-out copy of this repository plus a toolchain sysroot, and sustains a
 measured sequential write rate recorded as a new ratchet.
 
 ---
 
-## Phase 3 — A workbench you can type in
+## Phase 2 — A workbench you can type in
 
 **Outcome:** you can edit a file, search a tree, run a script, and read the
 output — without a Linux host.
 
-### Workstream 3.1 — Utilities that are executables (**M**)
+### Workstream 2.1 — Utilities that are executables (**M**)
 
-`ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`, `kill`, `ps` exist only
-as shell builtins (`userland/src/apps/shell/builtins/`); `/bin` holds 17 GUI and
-network binaries. Anything that spawns a tool directly gets `ENOENT`. Give the
-existing builtins `main`s, then write the absent set: `grep` `find` `sed`
-`sort` `uniq` `tr` `cut` `xargs` `which` `test`/`[` `printf` `basename`
-`dirname` `mktemp` `tar` `gzip` `patch` `cmp` `install` `sha256sum` `nproc`
-`stty` `less`. Fix the semantics that are wrong rather than missing: `sleep`
-takes milliseconds, `kill` sends only SIGKILL, `diff` cannot produce a patch,
-`rm`/`cp` have no `-r`, `mkdir` has no `-p`.
+`ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`, `ps` exist only as shell
+builtins (`userland/src/apps/shell/builtins/`); `/bin` holds 17 GUI and network
+binaries. Anything that spawns a tool directly gets `ENOENT`. Give the existing
+builtins `main`s, then write the absent set: `grep` `find` `sed` `sort` `uniq`
+`tr` `cut` `xargs` `which` `test`/`[` `printf` `basename` `dirname` `mktemp`
+`tar` `gzip` `patch` `cmp` `install` `sha256sum` `nproc` `stty` `less`. Fix the
+semantics that are wrong rather than missing: `rm`/`cp` have no `-r`, `mkdir`
+has no `-p`, `diff` cannot produce a patch. (`sleep`'s unit, `kill`'s
+signal argument and `date`'s clock were Phase 1 blockers and are done.)
 
-### Workstream 3.2 — A shell that can drive a build (**L**)
+### Workstream 2.2 — A shell that can drive a build (**L**)
 
 No `if`/`while`/`for`/`case`/functions, no command substitution, no here-docs,
 no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
-64 argv words, 128-byte paths. `fg`/`bg` cannot resume a stopped job because
-there is no `Stopped` state.
+64 argv words. Path widths and job control are no longer among them: the
+shell's buffers are `USER_PATH_MAX`-sized and heap-backed, and `fg`/`bg` can
+resume a stopped job.
 
-### Workstream 3.3 — A terminal an editor can use (**M**)
+### Workstream 2.3 — A terminal an editor can use (**M**)
 
 `encode_key` emits arrows, Home, End and Delete only
 (`terminal-core/src/input.rs:230-282`): no F1–F12 (the keycodes exist and are
@@ -344,29 +438,29 @@ dropped), no Alt-prefixing, no modified arrows, no `CSI Z`, and PageUp/PageDown
 never reach the PTY. No mouse reporting, no DA/DSR replies. The font atlas
 covers ASCII + Latin-1, so box-drawing and non-Latin source render as diamonds.
 
-### Workstream 3.4 — An editor (**M**)
+### Workstream 2.4 — An editor (**M**)
 
-Write one — not because C is foreclosed (it is not; see Workstream 4.6), but
+Write one — not because C is foreclosed (it is not; see Workstream 3.6), but
 because nothing upstream is reachable *before* a C frontend exists, and because
 an editor is where a desktop OS earns its character. Highlighting does not have
 to wait for C either: `syntect` with the pure-Rust `fancy-regex` backend is a
 Rust-only path to TextMate grammars. Start against the existing terminal; the
 GUI version needs a real multi-line text widget, which `appkit` does not have (a
 single-line `text_field`, and a byte-oriented text API). helix comes back onto
-the table once 4.6 compiles tree-sitter.
+the table once 3.6 compiles tree-sitter.
 
 **Zed is not a roadmap item.** It needs wgpu → Vulkan (no GPU driver, and the
 Vulkan loader is itself a `dlopen` ICD architecture), tree-sitter, a live C++
 dependency set, and a build performed by a toolchain that does not exist yet.
 Every one of those is a separate multi-month project whose payoff is one editor.
 
-**Phase 3 exit criteria:** a shell script in the guest checks out, greps,
+**Phase 2 exit criteria:** a shell script in the guest checks out, greps,
 edits and archives a source tree, driven from a terminal running a native
 editor.
 
 ---
 
-## Phase 4 — The toolchain
+## Phase 3 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
 
@@ -375,20 +469,22 @@ with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
 about *who compiles Rust*, not about which languages SlopOS supports: declining
 LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
 the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 4.6.
+A C toolchain written in Rust is a separate and wanted track — Workstream 3.6.
 The cost of this decision is upstream work: cranelift-only rustc bootstrap does
 not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
 
-### Workstream 4.1 — The ABI question (still open — see Open decisions)
+### Workstream 3.1 — The ABI question (still open — see Open decisions)
 
-Every gap in Phases 1–3 is a Linux-ABI-shaped hole. SlopOS's numbering is
-bespoke and append-only (`yield=0, exit=1, write=2, read=3`,
-`abi/src/syscall/numbers.rs`) while the *constants inside* the calls are already
-Linux-valued — errno, `O_*`, `PROT_*`, `MAP_*`, `CLONE_*`, termios ioctls. The
-two reference designs split on architecture, not taste:
+SlopOS's numbering is bespoke and append-only (`yield=0, exit=1, write=2,
+read=3`, `abi/src/syscall/numbers.rs`) while the *constants and layouts inside*
+the calls are Linux's — errno, `O_*`, `PROT_*`, `MAP_*`, `CLONE_*`, `AT_*`,
+`FUTEX_*`, termios ioctls, `struct stat`, `struct timespec`, `struct flock`,
+`struct iovec`, `struct dirent64`, `stack_t`, `siginfo_t`, and the wait-status
+encoding. Phase 1 paid for the layout half; what remains bespoke is the
+numbering. The two reference designs split on architecture, not taste:
 
 - **Asterinas** — the framekernel whose AD-1/AD-2 discipline this tree already
   follows — is **Linux ABI-compatible by construction**: 210+ Linux syscalls,
@@ -404,21 +500,22 @@ two reference designs split on architecture, not taste:
 
 SlopOS is a framekernel, not a microkernel: services live in the kernel, in one
 address space, behind one syscall table. That is Asterinas's shape, and it is
-the shape for which a Linux ABI is cheap. What is bespoke here is *numbering and
-a handful of struct layouts* — the two parts of an ABI that carry no design
-value. `AGENTS.md:100-105` already settles the licensing half: "ABI numbers,
+the shape for which a Linux ABI is cheap. What is bespoke here is now *numbering
+alone* — the part of an ABI that carries no design value at all.
+`AGENTS.md:100-105` already settles the licensing half: "ABI numbers,
 `errno` values, ioctl codes, struct layouts … carry no copyright, which is why
 the ABI-compatibility work is sound."
 
-The counterweight is real and must be priced: ~190 slots becomes ~350, the
+The counterweight is real and must be priced: ~215 slots becomes ~350, the
 capability classification that `core/src/syscall/handlers.rs` proves total has
-to cover all of them, and Linux's warts (32 signals, the wait-status encoding,
-`stat` padding, ioctl numbering) become permanent. Nothing about adopting the
-interface obliges adopting Linux's implementation, architecture or policy —
-the framekernel quarantine, the capability authority, the Verus proofs, the
-ratchets and the retractable filesystem are all things the ABI cannot touch.
+to cover all of them, and Linux's warts (32 signals, ioctl numbering) become
+permanent — though the wait-status encoding and `stat` padding are already here
+and already load-bearing. Nothing about adopting the interface obliges adopting
+Linux's implementation, architecture or policy — the framekernel quarantine, the
+capability authority, the Verus proofs, the ratchets and the retractable
+filesystem are all things the ABI cannot touch.
 
-### Workstream 4.2 — A target that can be a host (**L**)
+### Workstream 3.2 — A target that can be a host (**L**)
 
 A JSON target can never be a rustc host. `scripts/patch_std.sh` is 715 lines of
 sed/perl that mutates the *live rustup sysroot's* std sources in place — an
@@ -428,11 +525,11 @@ std upstreamed or carried in a pinned fork. That also kills `restricted_std`,
 which currently forces `#![feature(restricted_std)]` into 59 files and makes
 every unmodified crates.io crate uncompilable.
 
-### Workstream 4.3 — A Rust codegen path for a `no_std` kernel target (**L**)
+### Workstream 3.3 — A Rust codegen path for a `no_std` kernel target (**L**)
 
 Decided pure Rust, so the C floor is out of scope and the risk moves into
 cranelift's coverage of *this* tree's kernel target. Spike this first, before
-anything else in Phase 4, because a negative answer changes the decision:
+anything else in Phase 3, because a negative answer changes the decision:
 `targets/x86_64-slos.json` requires soft-float with `-sse` and `rustc-abi:
 softfloat`, safestack, custom `link_section`s, naked functions, and
 `-Zemit-stack-sizes` — the last is what `check_stack_sizes.sh` reads, so a
@@ -448,7 +545,7 @@ LLVM rustc on a host for as long as cranelift's codegen quality matters, while
 the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
 every artifact is self-built on day one.
 
-### Workstream 4.4 — Dynamic linking is mandatory (**L**)
+### Workstream 3.4 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
@@ -459,7 +556,7 @@ binary is fixed at 0x400000. The only escapes are writing an out-of-process
 macro server (novel work) or deleting proc-macro use from the workspace. This
 also brings dynamic TLS (`__tls_get_addr`, DTV), which does not exist.
 
-### Workstream 4.5 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 3.5 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -467,23 +564,25 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 **building SlopOS on SlopOS needs no network at all** — no TLS, no crates.io, no
 `git`. Those remain wanted for a general dev machine (there is no TLS anywhere:
 `curl` rejects `https://` outright; DNS is one query at a time machine-wide; the
-TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 4+
+TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 3+
 comfort, not a blocker for the goal.
 
-### Workstream 4.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 3.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
 be built in Rust here.
 
-- **A C library.** `slibc` already *is* a C ABI — ~200 `#[unsafe(no_mangle)]`
-  Rust functions. What is missing is linkability: `crate-type = ["staticlib"]`
-  alongside `rlib`, generated `include/*.h`, and a `crt0.o` emitted from the
-  existing `_start` + `__slibc_start` pair (`userland/src/lib.rs:20-34`,
-  `slibc/src/crt/mod.rs:97`), plus libm (wrap the `libm` crate the tree already
-  vendors for `font/`), `setjmp`/`longjmp`, `opendir`, `qsort`, `strerror` and
-  the `<time.h>` calendar. **S/M**, and it is the single gate that turns "can a
-  C program be built here" from *no* into *yes*.
+- **A C library.** `slibc` already *is* a C ABI — ~230 `#[unsafe(no_mangle)]`
+  Rust functions, now including the `*at` family, `getdents64`, `pread`/`pwrite`,
+  `readv`/`writev`, `flock`, `utimensat` and `uname`. What is missing is
+  linkability: `crate-type = ["staticlib"]` alongside `rlib`, generated
+  `include/*.h`, and a `crt0.o` emitted from the existing `_start` +
+  `__slibc_start` pair (`userland/src/lib.rs:20-34`, `slibc/src/crt/mod.rs:97`),
+  plus libm (wrap the `libm` crate the tree already vendors for `font/`),
+  `setjmp`/`longjmp`, `opendir`, `qsort`, `strerror` and the `<time.h>`
+  calendar. **S/M**, and it is the single gate that turns "can a C program be
+  built here" from *no* into *yes*.
 - **A C frontend.** A C99 compiler written in Rust emitting cranelift IR, reusing
   the *same* backend and the *same* Rust linker as the Rust toolchain — the
   marginal cost is a frontend, not a second toolchain. `saltwater` (formerly
@@ -502,63 +601,66 @@ be built in Rust here.
   a C frontend, and the reason the LLVM route was priced as it was. Nothing in
   this plan needs C++, and this workstream does not change that.
 
-Order it after Phase 4's Rust loop closes: the C frontend is much cheaper to
+Order it after Phase 3's Rust loop closes: the C frontend is much cheaper to
 write once cranelift and the linker are already known-good on this target.
 
-**Phase 4 exit criteria:** in-guest `cargo build` of this repository's kernel
+**Phase 3 exit criteria:** in-guest `cargo build` of this repository's kernel
 produces an ELF byte-identical in behaviour to the host build, verified by
 booting it.
 
 ---
 
-## Phase 5 — Install what you built
+## Phase 4 — Install what you built
 
 **Outcome:** the guest writes a bootable medium and reboots into its own kernel.
 
 Nothing here exists. `write` on a `/dev` block node returns `ReadOnly`
-(`fs/src/devfs/mod.rs:309-311`) and reading one needs `TASK_FLAG_SYSTEM`; there
+(`fs/src/devfs/mod.rs`) and reading one needs `TASK_FLAG_SYSTEM`; there
 is no FAT/vfat support anywhere, so an ESP cannot be written; partition tables
 are parse-only (`fs/src/partition.rs`); Limine is fetched and installed by host
 scripts; QEMU boots `order=d` (CD only) with throwaway OVMF vars. Needed: a
 writable block path, FAT32 write, a bootloader installer or a direct EFI stub, a
 `limine.conf` editor, `SYSCALL_REBOOT` (exists) landing on the new image, and
-A/B slots with rollback. `AGENTS.md:324` currently forbids exactly this
-operation and needs a scoped exception for the guest's own ESP.
+A/B slots with rollback. `AGENTS.md`'s QEMU-only execution boundary currently
+forbids exactly this operation and needs a scoped exception for the guest's own
+ESP.
 
-**Phase 5 exit criteria:** `just boot-persist`, build a kernel in-guest, install
+**Phase 4 exit criteria:** `just boot-persist`, build a kernel in-guest, install
 it, reboot, and the boot log shows the new build — with rollback if it panics.
 
 ---
 
-## Phase 6 — Bare metal (not committed)
+## Phase 5 — Bare metal (not committed)
 
-Out of scope for the current goal, which ends at Phase 5 in QEMU. Recorded so
+Out of scope for the current goal, which ends at Phase 4 in QEMU. Recorded so
 the cost is known: no NVMe and no AHCI (virtio-blk is the only storage driver,
 so a real machine has no disk); no USB at all, so a laptop without PS/2 has
 **no keyboard** (`plans/usb-xhci.md`); PCI is ECAM-only and *panics* without
 MCFG; x2APIC is forcibly disabled so machines with APIC IDs > 254 do not boot;
 no real NIC; no ACPI SCI/GPE runtime, so no power button, no lid, no thermal
-events during a multi-hour build; no CPU frequency management; no real RTC (the
-wall clock comes from Limine once and is never corrected); EFI runtime services
-are `ResetSystem` only; COM1 port I/O is the only serial, so the debug channel
-and the KTAP transport vanish exactly when bare-metal debugging starts.
+events during a multi-hour build; no CPU frequency management; EFI runtime
+services are `ResetSystem` only; COM1 port I/O is the only serial, so the debug
+channel and the KTAP transport vanish exactly when bare-metal debugging starts.
+The RTC is no longer on this list — there is a CMOS driver, and it is what the
+boot step reads first.
 
 ---
 
 ## Open decisions
 
-- [ ] **Linux ABI: adopt the interface, or stay bespoke?** The one decision
-      still open, and the highest-leverage one here. See Workstream 4.1 for the
-      Asterinas/Redox evidence. Recommendation: **renumber once, now, onto Linux
-      numbers and Linux struct layouts, as the single syscall table** — not a
-      second surface. The userland is entirely first-party and rebuilt from
-      source every build, so renumbering is nearly free today and compounds in
-      cost with every binary written against the current numbers. SlopOS-only
-      calls (SlopRing ops, seat, W/L, fate) go in a private high range exactly
-      as Linux does for its own extensions. What SlopOS keeps is everything that
-      actually makes it not-Linux: the framekernel quarantine, capability
-      authority per syscall, Verus proofs, KernMiri, the ratchets, the
-      retractable filesystem.
+- [ ] **Linux ABI: adopt the numbering, or stay bespoke?** The one decision
+      still open, and the highest-leverage one here. See Workstream 3.1 for the
+      Asterinas/Redox evidence. Phase 1 narrowed it: every struct layout a libc
+      port cannot work around is already Linux's, so what is left to decide is
+      the number table alone. Recommendation: **renumber once, now, onto Linux
+      numbers, as the single syscall table** — not a second surface. The
+      userland is entirely first-party and rebuilt from source every build, so
+      renumbering is nearly free today and compounds in cost with every binary
+      written against the current numbers. SlopOS-only calls (SlopRing ops,
+      seat, W/L, fate) go in a private high range exactly as Linux does for its
+      own extensions. What SlopOS keeps is everything that actually makes it
+      not-Linux: the framekernel quarantine, capability authority per syscall,
+      Verus proofs, KernMiri, the ratchets, the retractable filesystem.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
       building itself un-attests exactly the blocks it changes — and now keeps
       them un-attested across host rebuilds, so the count only ever falls.
@@ -570,13 +672,13 @@ and the KTAP transport vanish exactly when bare-metal debugging starts.
       virtio-blk disk carrying the vendored tree, and `scripts/qemu_run.sh`
       already parameterises one; it is not buildable yet, because there is
       exactly one ext2 instance in the kernel and it is bound at boot, so a
-      second disk can be the root or nothing. Workstream 2.3 is the
+      second disk can be the root or nothing. Workstream 1.3 is the
       prerequisite, not a host-side knob.
 
 **Decided.** Rust toolchain: Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 4.6, off the critical
-path. Scope: the full in-guest loop, Phases 1–5, in QEMU; bare metal is not
+C library and a Rust-written C frontend are Workstream 3.6, off the critical
+path. Scope: the full in-guest loop, Phases 1–4, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
 scope and `stat`'s uid/gid fields exist for layout only.
@@ -586,29 +688,27 @@ scope and `stat`'s uid/gid fields exist for layout only.
 ## Touch list (current paths — verify before editing)
 
 - `mm/src/elf.rs` — `PT_INTERP` rejection, the one image cap that is still
-  policy rather than plumbing (Phase 4).
-- `fs/src/vfs/path.rs:38-63`, `fs/src/vfs/canon.rs:31-33`, `fs/src/lib.rs:4-5` —
-  symlinks, relative paths, name/path limits (Phase 1).
-- `abi/src/fs.rs:96-100` — `UserFsStat` (Phase 1, ABI break).
-- `core/src/syscall/process_handlers.rs:268-334,800-812` — waitpid, futex
-  (Phase 1).
-- `core/src/syscall/signal.rs:603,737-739` — stop/cont, siginfo (Phase 1).
-- `slibc/std_pal/fs/slopos.rs:446-724`, `slibc/std_pal/process/slopos.rs:151-215`
-  — unwired std PAL entry points (Phase 1).
+  policy rather than plumbing (Phase 3).
 - `fs/src/ext2/cache.rs:26`, `fs/src/ext2/journal.rs:207-267`,
-  `fs/src/verity.rs:524-552` — fixed sizing (Phase 2).
+  `fs/src/verity.rs:524-552` — fixed sizing (Phase 1).
 - `fs/src/vfs_file_ops.rs:373-397`, `abi/src/io.rs:5` — per-4 KiB transactions
-  (Phase 2).
-- `core/src/syscall/fs/mount_handlers.rs:103-118`, `fs/src/ext2_vfs.rs:57-63` —
-  the single ext2 instance (Phase 2).
+  (Phase 1).
+- `core/src/syscall/fs/mount_handlers.rs`, `fs/src/ext2_vfs.rs:57-63` —
+  the single ext2 instance (Phase 1).
 - `drivers/src/virtio_blk.rs:42-51,441-455,800-853` — request path, error
-  variants (Phase 2).
+  variants (Phase 1).
+- `fs/src/ext2/dir.rs` — the linear directory scan, now walking 255-byte
+  names; there is no htree anywhere (Phase 1).
 - `userland/src/apps/shell/`, `terminal-core/src/input.rs:230-282`,
-  `font/src/lib.rs:29-48` — shell, key encoding, glyph coverage (Phase 3).
+  `font/src/lib.rs:29-48` — shell grammar, key encoding, glyph coverage
+  (Phase 2).
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,
-  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 4).
-- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phase 5).
-- `fs/src/devfs/mod.rs:309-323`, `fs/src/partition.rs` — writable block nodes,
-  partition writing (Phase 5).
-- `AGENTS.md:324` — the QEMU-only execution boundary, which forbids exactly the
-  Phase 5 install operation and needs a scoped exception.
+  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 3).
+- `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs` — the bespoke
+  number table and the capability histogram a renumbering would move
+  (Phase 3, and the open decision above).
+- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phase 4).
+- `fs/src/devfs/mod.rs`, `fs/src/partition.rs` — writable block nodes,
+  partition writing (Phase 4).
+- `AGENTS.md` — the QEMU-only execution boundary, which forbids exactly the
+  Phase 4 install operation and needs a scoped exception.

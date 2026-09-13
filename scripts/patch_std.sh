@@ -60,8 +60,11 @@ echo "Patching Rust std source for SlopOS target..."
 
 # 1. Copy PAL files
 mkdir -p "$STD_SYS/pal/slopos"
-cp "$STD_PAL_SRC/pal/slopos/mod.rs"   "$STD_SYS/pal/slopos/mod.rs"
-cp "$STD_PAL_SRC/pal/slopos/os.rs"    "$STD_SYS/pal/slopos/os.rs"
+cp "$STD_PAL_SRC/pal/slopos/mod.rs"            "$STD_SYS/pal/slopos/mod.rs"
+cp "$STD_PAL_SRC/pal/slopos/os.rs"             "$STD_SYS/pal/slopos/os.rs"
+# Declared by pal/slopos/mod.rs, which is copied wholesale, so it needs no
+# cfg_select! arm of its own.
+cp "$STD_PAL_SRC/pal/slopos/stack_overflow.rs" "$STD_SYS/pal/slopos/stack_overflow.rs"
 # A futex.rs from an older checkout would be dead but compiled; remove it.
 rm -f "$STD_SYS/pal/slopos/futex.rs"
 echo "  Copied pal/slopos/"
@@ -394,14 +397,23 @@ i\
     echo "  Patched net/connection/mod.rs"
 fi
 
-# Patch hostname/mod.rs — use unsupported (returns error, acceptable)
+# Patch hostname/mod.rs — `std::net::hostname` is uname(2)'s nodename.
 HOST_MOD="$STD_SYS/net/hostname/mod.rs"
+cp "$STD_PAL_SRC/net/hostname_slopos.rs" "$STD_SYS/net/hostname/slopos.rs"
+echo "  Copied net/hostname/slopos.rs"
+# Self-heal: an older revision routed slopos at the unsupported stub, and
+# cfg_select! takes the first matching arm, so it would dead-code the real one.
+if [ -f "$HOST_MOD" ]; then
+    perl_in_place \
+        's/[ \t]*target_os = "slopos" => \{\s*mod unsupported;\s*pub use unsupported::hostname;\s*\}\n//s' \
+        "$HOST_MOD"
+fi
 if [ -f "$HOST_MOD" ] && ! grep -q 'target_os = "slopos"' "$HOST_MOD" 2>/dev/null; then
     sed_in_place '/^[[:space:]]*_ => {/{
 i\
     target_os = "slopos" => {\
-        mod unsupported;\
-        pub use unsupported::hostname;\
+        mod slopos;\
+        pub use slopos::hostname;\
     }
 }' "$HOST_MOD"
     echo "  Patched net/hostname/mod.rs"
@@ -595,6 +607,7 @@ check_arm_precedes_fallback() {
 
 # Core PAL + routing surfaces
 check_patched "pal/mod.rs"                     "$STD_SYS/pal/mod.rs"                        'target_os = "slopos"'
+check_patched "pal/slopos/stack_overflow.rs"   "$STD_SYS/pal/slopos/stack_overflow.rs"      'fn fault_handler'
 check_patched "alloc/mod.rs"                   "$STD_SYS/alloc/mod.rs"                      'use slopos as imp;'
 check_patched "sync/futex/mod.rs"              "$STD_SYS/sync/futex/mod.rs"                 'target_os = "slopos"'
 check_patched "sync/futex/slopos.rs"           "$STD_SYS/sync/futex/slopos.rs"              'pub fn futex_wait'
@@ -655,7 +668,8 @@ check_patched "sync/thread_parking/mod.rs"     "$STD_SYS/sync/thread_parking/mod
 check_patched "net/connection/mod.rs"          "$STD_SYS/net/connection/mod.rs"             'target_os = "slopos"'
 check_patched "net/connection/socket/mod.rs"   "$STD_SYS/net/connection/socket/mod.rs"      'target_os = "slopos"'
 check_patched "net/connection/socket/slopos.rs" "$STD_SYS/net/connection/socket/slopos.rs"  'SlopOS platform implementation for `std::net`'
-check_patched "net/hostname/mod.rs"            "$STD_SYS/net/hostname/mod.rs"               'target_os = "slopos"'
+check_patched "net/hostname/mod.rs"            "$STD_SYS/net/hostname/mod.rs"               'pub use slopos::hostname;'
+check_patched "net/hostname/slopos.rs"         "$STD_SYS/net/hostname/slopos.rs"            'fn slopos_uname'
 
 # File descriptor surfaces
 check_patched "fd/mod.rs"                      "$STD_SYS/fd/mod.rs"                         'target_os = "slopos"'

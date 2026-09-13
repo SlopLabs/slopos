@@ -16,8 +16,8 @@ use crate::pal::{Pal, Sys};
 /// performed at all, and spinning on it would hide a kernel-side failure
 /// behind a pegged CPU.
 #[inline]
-pub(crate) fn futex_wait_or_abort(addr: *const u32, val: u32, timeout_ms: u64) {
-    match Sys::futex_wait(addr, val, timeout_ms) {
+pub(crate) fn futex_wait_or_abort(addr: *const u32, val: u32) {
+    match Sys::futex_wait(addr, val, core::ptr::null()) {
         Ok(()) => {}
         Err(e) if e == EAGAIN || e == EINTR || e == ETIMEDOUT => {}
         Err(_) => abort_unexpected(),

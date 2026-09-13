@@ -113,6 +113,10 @@ name = "cd_test"
 path = "src/bin/tests/cd_test.rs"
 
 [[bin]]
+name = "buildctl_test"
+path = "src/bin/tests/buildctl_test.rs"
+
+[[bin]]
 name = "ring_test"
 path = "src/bin/tests/ring_test.rs"
 

@@ -40,7 +40,13 @@ expect-test-registry many
 2200	*slopos_net3dns11dns_resolve*
 2200	*slopos_acpi3aml6interp*Interp4eval*
 2216	*slopos_core7syscall2fs19poll_ioctl_handlers14syscall_select*
-2072	*slopos_core7syscall16process_handlers18syscall_spawn_path*
+# Staging the child's cwd (`SpawnAttrs.cwd_ptr`) added 256 B to the
+# `syscall_spawn_path` closure's frame; the path itself is a `KVec`.
+2328	*slopos_core7syscall16process_handlers18syscall_spawn_path*
+# Sharing the signal-action table under `CLONE_SIGHAND` put a
+# `KArc<SigHandTable>` handoff in `task_clone`'s frame; a non-leader thread's
+# inherited `real_parent` added a second owning handle.
+2136	*slopos_sched4task14task_lifecycle10task_clone*
 
 # Library smallsort monomorphizations: scratch is the element size, not
 # reducible without changing the sorted element type.

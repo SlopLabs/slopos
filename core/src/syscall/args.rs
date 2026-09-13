@@ -10,6 +10,7 @@ use slopos_abi::fs::USER_PATH_MAX;
 use slopos_abi::signal::NSIG;
 use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID};
 use slopos_mm::user_ptr::{UserPtr as MmUserPtr, UserSlice as MmUserSlice};
+use slopos_ostd::mm::heap::KVec;
 
 use crate::syscall::common::syscall_copy_user_str;
 use crate::syscall::context::SyscallContext;
@@ -313,10 +314,10 @@ impl<T> SyscallArg for Option<UserSlice<T>> {
 
 pub type UserBytes = UserSlice<u8>;
 
-/// Inline NUL-terminated copy of a user-space C string: `from_raw` copies up to
-/// `N - 1` payload bytes onto the handler's stack. `N <= 1024` stays under the
-/// 2 KiB frame gate; the default `N = USER_PATH_MAX = 256` is the canonical
-/// choice.
+/// Inline NUL-terminated copy of a user-space C string: `from_raw` copies up
+/// to `N - 1` payload bytes onto the handler's stack. `N <= 1024` is the
+/// usable range — a 4 KiB array steps clean over the frame's guard page — so
+/// a path argument is [`UserPath`], not this.
 #[derive(Clone, Copy)]
 pub struct UserCStr<const N: usize> {
     buf: [u8; N],
@@ -377,6 +378,64 @@ impl<const N: usize> SyscallArg for Option<UserCStr<N>> {
     }
 }
 
-/// Re-export so handlers can spell `UserCStr<PATH_MAX>` without an
-/// extra import.
-pub const PATH_MAX: usize = USER_PATH_MAX;
+/// Heap-staged NUL-terminated copy of a user-space path.
+///
+/// A 4 KiB inline buffer would step over the handler frame's guard page, so
+/// the path lives in one `KVec<u8>` for the duration of the call. A path
+/// longer than the buffer is `ENAMETOOLONG`, not a truncation onto a
+/// different file.
+pub struct UserPath {
+    buf: KVec<u8>,
+    len: usize,
+}
+
+impl UserPath {
+    /// Bytes up to but not including the terminating NUL.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn from_user_addr(addr: u64) -> Result<Self, Errno> {
+        if addr == 0 {
+            return Err(Errno::EFAULT);
+        }
+        // One byte past the limit: `syscall_copy_user_str` forces a NUL into
+        // the last slot, so a `USER_PATH_MAX` buffer would always terminate
+        // and the refusal below would be unreachable.
+        let mut buf = KVec::<u8>::zeroed(USER_PATH_MAX + 1).map_err(|_| Errno::ENOMEM)?;
+        syscall_copy_user_str(&mut buf[..], addr).map_err(|_| Errno::EFAULT)?;
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(USER_PATH_MAX);
+        if len >= USER_PATH_MAX {
+            return Err(Errno::ENAMETOOLONG);
+        }
+        Ok(UserPath { buf, len })
+    }
+}
+
+impl SyscallArg for UserPath {
+    const ARITY: usize = 1;
+    fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
+        UserPath::from_user_addr(regs[0])
+    }
+}
+
+impl SyscallArg for Option<UserPath> {
+    const ARITY: usize = 1;
+    fn from_raw(regs: &[u64], ctx: &SyscallContext) -> Result<Self, Errno> {
+        if regs[0] == 0 {
+            return Ok(None);
+        }
+        UserPath::from_raw(regs, ctx).map(Some)
+    }
+}

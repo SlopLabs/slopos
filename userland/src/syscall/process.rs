@@ -2,7 +2,7 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
-use slopos_abi::signal::{SIG_DFL, SIG_IGN, SigSet, UserSigaction};
+use slopos_abi::signal::{SIG_DFL, SIG_IGN, SigSet, UserSigaction, WAIT_STATUS_CONTINUED, WNOHANG};
 use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::task::TaskPriority;
 
@@ -67,12 +67,14 @@ pub fn spawn_path_with_actions(
     spawn_path_with_env(path, argv, &[], priority, flags, actions, sigdefault_mask)
 }
 
+/// An empty `cwd` inherits the caller's.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_path_with_env(
+pub fn spawn_path_in(
     path: &[u8],
     argv: &[*const u8],
     envp: &[*const u8],
+    cwd: &[u8],
     priority: TaskPriority,
     flags: u16,
     actions: &[SpawnFdAction],
@@ -92,6 +94,12 @@ pub fn spawn_path_with_env(
             envp.as_ptr() as u64
         },
         envp_len: envp.len() as u64,
+        cwd_ptr: if cwd.is_empty() {
+            0
+        } else {
+            cwd.as_ptr() as u64
+        },
+        cwd_len: cwd.len() as u64,
     };
     unsafe {
         syscall5(
@@ -103,6 +111,29 @@ pub fn spawn_path_with_env(
             &attrs as *const SpawnAttrs as u64,
         ) as i32
     }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_path_with_env(
+    path: &[u8],
+    argv: &[*const u8],
+    envp: &[*const u8],
+    priority: TaskPriority,
+    flags: u16,
+    actions: &[SpawnFdAction],
+    sigdefault_mask: SigSet,
+) -> i32 {
+    spawn_path_in(
+        path,
+        argv,
+        envp,
+        &[],
+        priority,
+        flags,
+        actions,
+        sigdefault_mask,
+    )
 }
 
 /// Clones the caller's stdio (fd 0/1/2) into the child, which is what
@@ -123,9 +154,79 @@ pub fn sigdefault(mask: SigSet) -> i64 {
     unsafe { syscall1(SYSCALL_SIGDEFAULT, mask) as i64 }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WaitStatus {
+    Exited(i32),
+    Signalled(u8),
+    Stopped(u8),
+    Continued,
+}
+
+impl WaitStatus {
+    pub fn exit_code(self) -> Option<i32> {
+        match self {
+            Self::Exited(code) => Some(code),
+            Self::Signalled(signum) => Some(128 + signum as i32),
+            Self::Stopped(_) | Self::Continued => None,
+        }
+    }
+
+    pub fn terminated(self) -> bool {
+        matches!(self, Self::Exited(_) | Self::Signalled(_))
+    }
+}
+
+/// `Continued` is `0xffff`, which shares its low seven bits with a signalled
+/// status, so it must be tested first.
+pub fn wait_status(status: i32) -> WaitStatus {
+    let raw = status as u32;
+    if raw == WAIT_STATUS_CONTINUED {
+        WaitStatus::Continued
+    } else if raw & 0xff == 0x7f {
+        WaitStatus::Stopped(((raw >> 8) & 0xff) as u8)
+    } else if raw & 0x7f == 0 {
+        WaitStatus::Exited(((raw >> 8) & 0xff) as i32)
+    } else {
+        WaitStatus::Signalled((raw & 0x7f) as u8)
+    }
+}
+
 #[inline(always)]
-pub fn waitpid(task_id: u32) -> i32 {
-    unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 0) as i32 }
+pub fn waitpid_raw(pid: i32, status: &mut i32, options: u32) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_WAITPID,
+            pid as i64 as u64,
+            status as *mut i32 as u64,
+            options as u64,
+        ) as i64
+    }
+}
+
+/// `pid` is `-1` for any child; decode the status with [`wait_status`].
+#[inline(always)]
+pub fn wait_with(pid: i32, options: u32) -> Option<(u32, i32)> {
+    let mut status = 0i32;
+    let rc = waitpid_raw(pid, &mut status, options);
+    if rc <= 0 {
+        None
+    } else {
+        Some((rc as u32, status))
+    }
+}
+
+#[inline(always)]
+pub fn waitpid(tid: u32) -> Option<(u32, i32)> {
+    wait_with(tid as i32, 0)
+}
+
+/// Answers `-1` when `tid` cannot be reaped at all.
+#[inline(always)]
+pub fn wait_exit_code(tid: u32) -> i32 {
+    let Some((_, status)) = waitpid(tid) else {
+        return -1;
+    };
+    wait_status(status).exit_code().unwrap_or(-1)
 }
 
 /// Returns the master as an owned fd plus the slave pts number; open the
@@ -153,21 +254,21 @@ pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
 }
 
 #[inline(always)]
-pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
-    let rc = unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 1) as i64 };
-    if rc == ERRNO_EAGAIN as i64 {
-        None
-    } else {
-        Some(rc as i32)
-    }
+pub fn waitpid_nohang(tid: u32) -> Option<(u32, i32)> {
+    wait_with(tid as i32, WNOHANG)
+}
+
+#[inline(always)]
+pub fn wait_exit_code_nohang(tid: u32) -> Option<i32> {
+    let (_, status) = waitpid_nohang(tid)?;
+    wait_status(status).exit_code()
 }
 
 /// Reap one already-exited child, whichever it is, without blocking. `None`
 /// covers both no child having exited and the caller having none.
 #[inline(always)]
-pub fn wait_any_nohang() -> Option<i32> {
-    let rc = unsafe { syscall2(SYSCALL_WAITPID, u32::MAX as u64, 1) as i64 };
-    if rc < 0 { None } else { Some(rc as i32) }
+pub fn wait_any_nohang() -> Option<(u32, i32)> {
+    wait_with(-1, WNOHANG)
 }
 
 #[inline(always)]

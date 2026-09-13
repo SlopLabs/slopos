@@ -208,7 +208,7 @@ fn test_fork_with_a_large_resident_set() -> bool {
         return false;
     }
 
-    let status = process::waitpid(pid as u32);
+    let status = process::wait_exit_code(pid as u32);
     memory::munmap(base, LEN);
     status == 0
 }

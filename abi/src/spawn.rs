@@ -71,6 +71,10 @@ pub struct SpawnAttrs {
     pub envp_ptr: u64,
     /// Number of entries in `envp`, excluding the terminating NULL.
     pub envp_len: u64,
+    /// User pointer to the child's initial working directory, or 0 to inherit
+    /// the spawner's.
+    pub cwd_ptr: u64,
+    pub cwd_len: u64,
 }
 
 /// Upper bound on the action-array length the kernel will read.
@@ -85,7 +89,7 @@ const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_ptr) == 16)
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_len) == 24);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_flags) == 32);
 
-const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 48);
+const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 64);
 const _: () = assert!(core::mem::align_of::<SpawnAttrs>() == 8);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, priority) == 0);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, flags) == 4);
@@ -94,6 +98,8 @@ const _: () = assert!(core::mem::offset_of!(SpawnAttrs, actions_len) == 16);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, sigdefault_mask) == 24);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_ptr) == 32);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_len) == 40);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, cwd_ptr) == 48);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, cwd_len) == 56);
 
 #[cfg(test)]
 mod tests {

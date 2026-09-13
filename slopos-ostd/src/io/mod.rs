@@ -1,3 +1,4 @@
+pub mod cmos;
 mod pic;
 pub mod pit;
 pub mod port;
@@ -7,6 +8,7 @@ pub mod ps2;
 pub mod raw_port;
 pub mod uart;
 
+pub use cmos::CmosRegs;
 pub use pic::init_and_disable_legacy_8259;
 pub use pit::Pit;
 pub use port::{

@@ -9,7 +9,7 @@ use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, Ra
 use crate::path::{Path, PathBuf};
 pub use crate::sys::fs::common::Dir;
 use crate::sys::time::SystemTime;
-use crate::sys::{AsInner, FromInner, IntoInner, unsupported, unsupported_err};
+use crate::sys::{AsInner, FromInner, IntoInner};
 use crate::vec::Vec;
 
 const O_RDONLY: i32 = 0;
@@ -25,21 +25,78 @@ const SEEK_CUR: i32 = 1;
 const SEEK_END: i32 = 2;
 
 const S_IFMT: u32 = 0o170000;
+const S_IFIFO: u32 = 0o010000;
+const S_IFCHR: u32 = 0o020000;
 const S_IFDIR: u32 = 0o040000;
+const S_IFBLK: u32 = 0o060000;
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
+const S_IFSOCK: u32 = 0o140000;
+
+const AT_FDCWD: i32 = -100;
+const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+
+/// `utimensat` per-field sentinel: leave this timestamp as it is.
+const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+const LOCK_SH: u32 = 1;
+const LOCK_EX: u32 = 2;
+const LOCK_NB: u32 = 4;
+const LOCK_UN: u32 = 8;
+
+const F_OK: u32 = 0;
+
+const DT_FIFO: u8 = 1;
+const DT_CHR: u8 = 2;
+const DT_DIR: u8 = 4;
+const DT_BLK: u8 = 6;
+const DT_REG: u8 = 8;
+const DT_LNK: u8 = 10;
+const DT_SOCK: u8 = 12;
 
 const ENOENT: i32 = 2;
+const EAGAIN: i32 = 11;
+
+/// Not Linux's 19: `#[repr(C)]` tail-pads the fixed header out to 24.
+const DIRENT_NAME_OFFSET: usize = 24;
+
+const DIRENT_BUF_LEN: usize = 4096;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-struct SloposStat {
-    st_mode: u32,
-    st_size: u64,
-    st_atime: i64,
-    st_mtime: i64,
-    st_ctime: i64,
+struct Timespec {
+    tv_sec: i64,
+    tv_nsec: i64,
 }
+
+/// Mirrors `slopos_abi::fs::UserFsStat`, the Linux x86-64 `struct stat`; `std`
+/// cannot depend on the ABI crate, so the asserts below pin the layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct SloposStat {
+    st_dev: u64,
+    st_ino: u64,
+    st_nlink: u64,
+    st_mode: u32,
+    st_uid: u32,
+    st_gid: u32,
+    _pad0: u32,
+    st_rdev: u64,
+    st_size: i64,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_atim: Timespec,
+    st_mtim: Timespec,
+    st_ctim: Timespec,
+    _reserved: [i64; 3],
+}
+
+const _: () = assert!(core::mem::size_of::<SloposStat>() == 144);
+const _: () = assert!(core::mem::offset_of!(SloposStat, st_mode) == 24);
+const _: () = assert!(core::mem::offset_of!(SloposStat, st_size) == 48);
+const _: () = assert!(core::mem::offset_of!(SloposStat, st_atim) == 72);
+const _: () = assert!(core::mem::offset_of!(SloposStat, st_mtim) == 88);
+const _: () = assert!(core::mem::offset_of!(SloposStat, st_ctim) == 104);
 
 unsafe extern "C" {
     fn open(path: *const u8, flags: i32) -> i32;
@@ -48,14 +105,37 @@ unsafe extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     fn slopos_lseek(fd: i32, offset: i64, whence: i32) -> i64;
     fn slopos_fstat(fd: i32, stat_buf: *mut SloposStat) -> i32;
+    fn slopos_fstatat(
+        dirfd: i32,
+        path: *const u8,
+        stat_buf: *mut SloposStat,
+        flags: u32,
+    ) -> i32;
     fn slopos_fsync(fd: i32) -> i32;
     fn slopos_fdatasync(fd: i32) -> i32;
     fn slopos_stat(path: *const u8, stat_buf: *mut SloposStat) -> i32;
     fn slopos_mkdir(path: *const u8, mode: u32) -> i32;
     fn slopos_unlink(path: *const u8) -> i32;
+    fn slopos_rmdir(path: *const u8) -> i32;
     fn slopos_rename(old: *const u8, new: *const u8) -> i32;
     fn slopos_dup(fd: i32) -> i32;
-    fn slopos_list(path: *const u8, buf: *mut u8, buf_len: usize) -> isize;
+    fn slopos_symlink(target: *const u8, link_path: *const u8) -> i32;
+    fn slopos_readlink(path: *const u8, buf: *mut u8, buf_len: usize) -> isize;
+    fn slopos_link(old: *const u8, new: *const u8) -> i32;
+    fn slopos_truncate(path: *const u8, length: u64) -> i32;
+    fn slopos_ftruncate(fd: i32, length: u64) -> i32;
+    fn slopos_chmod(path: *const u8, mode: u32) -> i32;
+    fn slopos_fchmod(fd: i32, mode: u32) -> i32;
+    fn slopos_fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: u32) -> i32;
+    fn slopos_utimensat(
+        dirfd: i32,
+        path: *const u8,
+        times: *const Timespec,
+        flags: u32,
+    ) -> i32;
+    fn slopos_getdents64(fd: i32, buf: *mut u8, buf_len: usize) -> isize;
+    fn slopos_flock(fd: i32, operation: u32) -> i32;
+    fn slopos_access(path: *const u8, mode: u32) -> i32;
 }
 
 pub struct File(crate::sys::fd::FileDesc);
@@ -77,13 +157,17 @@ pub struct FileAttr {
 
 pub struct ReadDir {
     root: PathBuf,
-    names: Vec<OsString>,
+    dir: crate::sys::fd::FileDesc,
+    buf: Vec<u8>,
+    filled: usize,
     pos: usize,
+    exhausted: bool,
 }
 
 pub struct DirEntry {
     parent: PathBuf,
     name: OsString,
+    d_type: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +235,47 @@ fn stat_from_path(path: &Path) -> io::Result<SloposStat> {
     let rc = unsafe { slopos_stat(cpath.as_ptr(), &mut st as *mut SloposStat) };
     cvt_i32(rc)?;
     Ok(st)
+}
+
+fn lstat_from_path(path: &Path) -> io::Result<SloposStat> {
+    let cpath = path_to_cstr(path)?;
+    let mut st = SloposStat::default();
+    let rc = unsafe {
+        slopos_fstatat(
+            AT_FDCWD,
+            cpath.as_ptr(),
+            &mut st as *mut SloposStat,
+            AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    cvt_i32(rc)?;
+    Ok(st)
+}
+
+fn dt_to_mode(d_type: u8) -> Option<u32> {
+    match d_type {
+        DT_FIFO => Some(S_IFIFO),
+        DT_CHR => Some(S_IFCHR),
+        DT_DIR => Some(S_IFDIR),
+        DT_BLK => Some(S_IFBLK),
+        DT_REG => Some(S_IFREG),
+        DT_LNK => Some(S_IFLNK),
+        DT_SOCK => Some(S_IFSOCK),
+        _ => None,
+    }
+}
+
+/// `EAGAIN` means another holder, which is an answer rather than a failure.
+fn try_flock(fd: i32, operation: u32) -> Result<(), TryLockError> {
+    let rc = unsafe { slopos_flock(fd, operation) };
+    if rc >= 0 {
+        return Ok(());
+    }
+    if -rc == EAGAIN {
+        Err(TryLockError::WouldBlock)
+    } else {
+        Err(TryLockError::Error(io_err_from_neg(rc)))
+    }
 }
 
 fn normalize_absolute(path: &Path) -> PathBuf {
@@ -245,7 +370,7 @@ pub fn path_to_cstr(path: &Path) -> io::Result<Vec<u8>> {
 
 impl FileAttr {
     pub fn size(&self) -> u64 {
-        self.stat.st_size
+        self.stat.st_size as u64
     }
 
     pub fn perm(&self) -> FilePermissions {
@@ -261,15 +386,24 @@ impl FileAttr {
     }
 
     pub fn modified(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_mtime, 0))
+        Ok(SystemTime::new(
+            self.stat.st_mtim.tv_sec,
+            self.stat.st_mtim.tv_nsec as i32,
+        ))
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_atime, 0))
+        Ok(SystemTime::new(
+            self.stat.st_atim.tv_sec,
+            self.stat.st_atim.tv_nsec as i32,
+        ))
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_ctime, 0))
+        Ok(SystemTime::new(
+            self.stat.st_ctim.tv_sec,
+            self.stat.st_ctim.tv_nsec as i32,
+        ))
     }
 }
 
@@ -302,6 +436,23 @@ impl FileTimes {
 
     pub fn set_modified(&mut self, t: SystemTime) {
         self.modified = Some(t);
+    }
+
+    /// `[atime, mtime]` for `utimensat`; an unset field is `UTIME_OMIT`.
+    fn to_timespecs(self) -> [Timespec; 2] {
+        fn conv(t: Option<SystemTime>) -> Timespec {
+            match t {
+                Some(t) => {
+                    let (tv_sec, tv_nsec) = t.as_timespec();
+                    Timespec { tv_sec, tv_nsec }
+                }
+                None => Timespec {
+                    tv_sec: 0,
+                    tv_nsec: UTIME_OMIT,
+                },
+            }
+        }
+        [conv(self.accessed), conv(self.modified)]
     }
 }
 
@@ -345,20 +496,70 @@ impl fmt::Debug for ReadDir {
     }
 }
 
+impl ReadDir {
+    fn fill(&mut self) -> io::Result<usize> {
+        let n = cvt_isize(unsafe {
+            slopos_getdents64(self.dir.as_raw_fd(), self.buf.as_mut_ptr(), self.buf.len())
+        })? as usize;
+        self.filled = n;
+        self.pos = 0;
+        Ok(n)
+    }
+}
+
 impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.names.len() {
-            return None;
-        }
+        loop {
+            if self.pos >= self.filled {
+                if self.exhausted {
+                    return None;
+                }
+                match self.fill() {
+                    Ok(0) => {
+                        self.exhausted = true;
+                        return None;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.exhausted = true;
+                        return Some(Err(e));
+                    }
+                }
+            }
 
-        let name = self.names[self.pos].clone();
-        self.pos += 1;
-        Some(Ok(DirEntry {
-            parent: self.root.clone(),
-            name,
-        }))
+            let rec = &self.buf[self.pos..self.filled];
+            if rec.len() <= DIRENT_NAME_OFFSET {
+                self.exhausted = true;
+                return Some(Err(io::const_error!(
+                    ErrorKind::InvalidData,
+                    "truncated directory record"
+                )));
+            }
+            let reclen = u16::from_ne_bytes([rec[16], rec[17]]) as usize;
+            if reclen <= DIRENT_NAME_OFFSET || reclen > rec.len() {
+                self.exhausted = true;
+                return Some(Err(io::const_error!(
+                    ErrorKind::InvalidData,
+                    "malformed directory record length"
+                )));
+            }
+            let d_type = rec[18];
+            let tail = &rec[DIRENT_NAME_OFFSET..reclen];
+            let name_len = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+            let name = &tail[..name_len];
+            self.pos += reclen;
+
+            if name.is_empty() || name == b"." || name == b".." {
+                continue;
+            }
+            return Some(Ok(DirEntry {
+                parent: self.root.clone(),
+                name: os_string_from_bytes_lossy(name),
+                d_type,
+            }));
+        }
     }
 }
 
@@ -372,11 +573,16 @@ impl DirEntry {
     }
 
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        stat(&self.path())
+        Ok(FileAttr {
+            stat: lstat_from_path(&self.path())?,
+        })
     }
 
     pub fn file_type(&self) -> io::Result<FileType> {
-        Ok(self.metadata()?.file_type())
+        match dt_to_mode(self.d_type) {
+            Some(mode) => Ok(FileType { mode }),
+            None => Ok(self.metadata()?.file_type()),
+        }
     }
 }
 
@@ -444,27 +650,31 @@ impl File {
     }
 
     pub fn lock(&self) -> io::Result<()> {
-        unsupported()
+        cvt_i32(unsafe { slopos_flock(self.fd(), LOCK_EX) })?;
+        Ok(())
     }
 
     pub fn lock_shared(&self) -> io::Result<()> {
-        unsupported()
+        cvt_i32(unsafe { slopos_flock(self.fd(), LOCK_SH) })?;
+        Ok(())
     }
 
     pub fn try_lock(&self) -> Result<(), TryLockError> {
-        Err(TryLockError::Error(unsupported_err()))
+        try_flock(self.fd(), LOCK_EX | LOCK_NB)
     }
 
     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
-        Err(TryLockError::Error(unsupported_err()))
+        try_flock(self.fd(), LOCK_SH | LOCK_NB)
     }
 
     pub fn unlock(&self) -> io::Result<()> {
-        unsupported()
+        cvt_i32(unsafe { slopos_flock(self.fd(), LOCK_UN) })?;
+        Ok(())
     }
 
-    pub fn truncate(&self, _size: u64) -> io::Result<()> {
-        unsupported()
+    pub fn truncate(&self, size: u64) -> io::Result<()> {
+        cvt_i32(unsafe { slopos_ftruncate(self.fd(), size) })?;
+        Ok(())
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -476,12 +686,7 @@ impl File {
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        for buf in bufs {
-            if !buf.is_empty() {
-                return self.read(buf);
-            }
-        }
-        Ok(0)
+        self.0.read_vectored(bufs)
     }
 
     pub fn is_read_vectored(&self) -> bool {
@@ -501,12 +706,7 @@ impl File {
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        for buf in bufs {
-            if !buf.is_empty() {
-                return self.write(buf);
-            }
-        }
-        Ok(0)
+        self.0.write_vectored(bufs)
     }
 
     pub fn is_write_vectored(&self) -> bool {
@@ -550,12 +750,18 @@ impl File {
         Ok(File(unsafe { crate::sys::fd::FileDesc::from_raw_fd(fd) }))
     }
 
-    pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
-        unsupported()
+    pub fn set_permissions(&self, perm: FilePermissions) -> io::Result<()> {
+        cvt_i32(unsafe { slopos_fchmod(self.fd(), perm.mode & 0o7777) })?;
+        Ok(())
     }
 
-    pub fn set_times(&self, _times: FileTimes) -> io::Result<()> {
-        unsupported()
+    /// A NULL path names the descriptor itself — the `futimens` form.
+    pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
+        let ts = times.to_timespecs();
+        cvt_i32(unsafe {
+            slopos_utimensat(self.fd(), core::ptr::null(), ts.as_ptr(), 0)
+        })?;
+        Ok(())
     }
 }
 
@@ -621,38 +827,15 @@ impl FromRawFd for File {
 
 pub fn readdir(p: &Path) -> io::Result<ReadDir> {
     let cpath = path_to_cstr(p)?;
-    let mut cap = 4096usize;
-
-    loop {
-        let mut buf = vec![0u8; cap];
-        let rc = unsafe { slopos_list(cpath.as_ptr(), buf.as_mut_ptr(), buf.len()) };
-
-        if rc < 0 {
-            let err = (-rc) as i32;
-            if err == 34 && cap < (1 << 20) {
-                cap *= 2;
-                continue;
-            }
-            return Err(Error::from_raw_os_error(err));
-        }
-
-        let used = rc as usize;
-        buf.truncate(used);
-
-        let mut names = Vec::new();
-        for part in buf.split(|b| *b == b'\n') {
-            if part.is_empty() || part == b"." || part == b".." {
-                continue;
-            }
-            names.push(os_string_from_bytes_lossy(part));
-        }
-
-        return Ok(ReadDir {
-            root: p.to_path_buf(),
-            names,
-            pos: 0,
-        });
-    }
+    let fd = cvt_i32(unsafe { open(cpath.as_ptr(), O_RDONLY) })?;
+    Ok(ReadDir {
+        root: p.to_path_buf(),
+        dir: unsafe { crate::sys::fd::FileDesc::from_raw_fd(fd) },
+        buf: vec![0u8; DIRENT_BUF_LEN],
+        filled: 0,
+        pos: 0,
+        exhausted: false,
+    })
 }
 
 pub fn unlink(p: &Path) -> io::Result<()> {
@@ -668,24 +851,44 @@ pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
     cvt_i32(rc).map(|_| ())
 }
 
-pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
-    unsupported()
+pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {
+    let cpath = path_to_cstr(p)?;
+    cvt_i32(unsafe { slopos_chmod(cpath.as_ptr(), perm.mode & 0o7777) })?;
+    Ok(())
 }
 
-pub fn set_perm_nofollow(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
-    unsupported()
+pub fn set_perm_nofollow(p: &Path, perm: FilePermissions) -> io::Result<()> {
+    let cpath = path_to_cstr(p)?;
+    cvt_i32(unsafe {
+        slopos_fchmodat(
+            AT_FDCWD,
+            cpath.as_ptr(),
+            perm.mode & 0o7777,
+            AT_SYMLINK_NOFOLLOW,
+        )
+    })?;
+    Ok(())
 }
 
-pub fn set_times(_p: &Path, _times: FileTimes) -> io::Result<()> {
-    unsupported()
+pub fn set_times(p: &Path, times: FileTimes) -> io::Result<()> {
+    utimes_at(p, times, 0)
 }
 
-pub fn set_times_nofollow(_p: &Path, _times: FileTimes) -> io::Result<()> {
-    unsupported()
+pub fn set_times_nofollow(p: &Path, times: FileTimes) -> io::Result<()> {
+    utimes_at(p, times, AT_SYMLINK_NOFOLLOW)
+}
+
+fn utimes_at(p: &Path, times: FileTimes, flags: u32) -> io::Result<()> {
+    let cpath = path_to_cstr(p)?;
+    let ts = times.to_timespecs();
+    cvt_i32(unsafe { slopos_utimensat(AT_FDCWD, cpath.as_ptr(), ts.as_ptr(), flags) })?;
+    Ok(())
 }
 
 pub fn rmdir(p: &Path) -> io::Result<()> {
-    unlink(p)
+    let cpath = path_to_cstr(p)?;
+    cvt_i32(unsafe { slopos_rmdir(cpath.as_ptr()) })?;
+    Ok(())
 }
 
 pub fn remove_dir_all(path: &Path) -> io::Result<()> {
@@ -703,23 +906,37 @@ pub fn remove_dir_all(path: &Path) -> io::Result<()> {
 }
 
 pub fn exists(path: &Path) -> io::Result<bool> {
-    match stat(path) {
+    let cpath = path_to_cstr(path)?;
+    match cvt_i32(unsafe { slopos_access(cpath.as_ptr(), F_OK) }) {
         Ok(_) => Ok(true),
         Err(e) if e.raw_os_error() == Some(ENOENT) => Ok(false),
         Err(e) => Err(e),
     }
 }
 
-pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
-    unsupported()
+pub fn readlink(p: &Path) -> io::Result<PathBuf> {
+    let cpath = path_to_cstr(p)?;
+    // A target cannot exceed the kernel's USER_PATH_MAX, so one call suffices.
+    let mut buf = vec![0u8; 4096];
+    let n = cvt_isize(unsafe {
+        slopos_readlink(cpath.as_ptr(), buf.as_mut_ptr(), buf.len())
+    })? as usize;
+    buf.truncate(n);
+    Ok(PathBuf::from(os_string_from_bytes_lossy(&buf)))
 }
 
-pub fn symlink(_original: &Path, _link: &Path) -> io::Result<()> {
-    unsupported()
+pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
+    let ctarget = path_to_cstr(original)?;
+    let clink = path_to_cstr(link)?;
+    cvt_i32(unsafe { slopos_symlink(ctarget.as_ptr(), clink.as_ptr()) })?;
+    Ok(())
 }
 
-pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
-    unsupported()
+pub fn link(src: &Path, dst: &Path) -> io::Result<()> {
+    let csrc = path_to_cstr(src)?;
+    let cdst = path_to_cstr(dst)?;
+    cvt_i32(unsafe { slopos_link(csrc.as_ptr(), cdst.as_ptr()) })?;
+    Ok(())
 }
 
 pub fn stat(p: &Path) -> io::Result<FileAttr> {
@@ -729,7 +946,9 @@ pub fn stat(p: &Path) -> io::Result<FileAttr> {
 }
 
 pub fn lstat(p: &Path) -> io::Result<FileAttr> {
-    stat(p)
+    Ok(FileAttr {
+        stat: lstat_from_path(p)?,
+    })
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {

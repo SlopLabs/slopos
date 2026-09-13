@@ -252,10 +252,13 @@ define_syscall!(syscall_ftruncate
 {
     let (kind, handle, _mode) = slopos_fs::fileio::fileio_get_open_file_handle(process_id, fd.raw())
         .ok_or(Errno::EBADF)?;
-    if kind != slopos_abi::file_ops::FileKind::Memfd {
-        return Err(Errno::EINVAL);
-    }
-    let rc = slopos_mm::memfd::memfd_ftruncate(handle, size as usize);
+    // A memfd's length is an allocation size, rounded to a page; a regular
+    // file's is a file size, exact, and goes down `truncate(2)`'s path.
+    let rc = if kind == slopos_abi::file_ops::FileKind::Memfd {
+        slopos_mm::memfd::memfd_ftruncate(handle, size as usize)
+    } else {
+        slopos_fs::fileio::file_ftruncate_fd(process_id, fd.raw(), size)
+    };
     if rc < 0 {
         Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
     } else {

@@ -1,30 +1,27 @@
 use std::sync::Mutex;
 
 const MAX_HISTORY: usize = 64;
-const MAX_LINE_LEN: usize = 256;
 
+/// Variable-length: a fixed per-entry width would reintroduce a line ceiling
+/// the editor no longer has.
 struct HistoryInner {
-    entries: [[u8; MAX_LINE_LEN]; MAX_HISTORY],
-    lengths: [u16; MAX_HISTORY],
+    entries: Vec<Vec<u8>>,
     count: usize,
     write_pos: usize,
     cursor: usize,
     browsing: bool,
-    saved_input: [u8; MAX_LINE_LEN],
-    saved_len: usize,
+    saved_input: Vec<u8>,
 }
 
 impl HistoryInner {
     const fn new() -> Self {
         Self {
-            entries: [[0; MAX_LINE_LEN]; MAX_HISTORY],
-            lengths: [0; MAX_HISTORY],
+            entries: Vec::new(),
             count: 0,
             write_pos: 0,
             cursor: 0,
             browsing: false,
-            saved_input: [0; MAX_LINE_LEN],
-            saved_len: 0,
+            saved_input: Vec::new(),
         }
     }
 }
@@ -32,47 +29,44 @@ impl HistoryInner {
 static HISTORY: Mutex<HistoryInner> = Mutex::new(HistoryInner::new());
 
 fn with_history<R, F: FnOnce(&mut HistoryInner) -> R>(f: F) -> R {
-    f(&mut HISTORY.lock().unwrap())
+    let mut history = HISTORY.lock().unwrap();
+    if history.entries.len() != MAX_HISTORY {
+        history.entries.resize(MAX_HISTORY, Vec::new());
+    }
+    f(&mut history)
 }
 
 pub fn push(line: &[u8], len: usize) {
-    if len == 0 {
+    let line = &line[..len.min(line.len())];
+    if line.is_empty() {
         return;
     }
     with_history(|h| {
-        let store_len = len.min(MAX_LINE_LEN);
-
         if h.count > 0 {
             let last_pos = if h.write_pos == 0 {
                 MAX_HISTORY - 1
             } else {
                 h.write_pos - 1
             };
-            let last_len = h.lengths[last_pos] as usize;
-            if last_len == store_len {
-                let mut same = true;
-                for i in 0..store_len {
-                    if h.entries[last_pos][i] != line[i] {
-                        same = false;
-                        break;
-                    }
-                }
-                if same {
-                    return;
-                }
+            if h.entries[last_pos] == line {
+                return;
             }
         }
 
-        h.entries[h.write_pos][..store_len].copy_from_slice(&line[..store_len]);
-        if store_len < MAX_LINE_LEN {
-            h.entries[h.write_pos][store_len] = 0;
-        }
-        h.lengths[h.write_pos] = store_len as u16;
+        let slot = &mut h.entries[h.write_pos];
+        slot.clear();
+        slot.extend_from_slice(line);
         h.write_pos = (h.write_pos + 1) % MAX_HISTORY;
         if h.count < MAX_HISTORY {
             h.count += 1;
         }
     });
+}
+
+fn copy_out(entry: &[u8], out: &mut [u8]) -> usize {
+    let copy_len = entry.len().min(out.len());
+    out[..copy_len].copy_from_slice(&entry[..copy_len]);
+    copy_len
 }
 
 pub fn navigate_up(current_input: &[u8], current_len: usize, out: &mut [u8]) -> Option<usize> {
@@ -82,9 +76,9 @@ pub fn navigate_up(current_input: &[u8], current_len: usize, out: &mut [u8]) -> 
         }
 
         if !h.browsing {
-            let save_len = current_len.min(MAX_LINE_LEN);
-            h.saved_input[..save_len].copy_from_slice(&current_input[..save_len]);
-            h.saved_len = save_len;
+            h.saved_input.clear();
+            h.saved_input
+                .extend_from_slice(&current_input[..current_len.min(current_input.len())]);
             h.browsing = true;
             h.cursor = 0;
         } else if h.cursor + 1 >= h.count {
@@ -99,10 +93,7 @@ pub fn navigate_up(current_input: &[u8], current_len: usize, out: &mut [u8]) -> 
             MAX_HISTORY + h.write_pos - h.cursor - 1
         } % MAX_HISTORY;
 
-        let len = h.lengths[idx] as usize;
-        let copy_len = len.min(out.len());
-        out[..copy_len].copy_from_slice(&h.entries[idx][..copy_len]);
-        Some(copy_len)
+        Some(copy_out(&h.entries[idx], out))
     })
 }
 
@@ -114,10 +105,8 @@ pub fn navigate_down(out: &mut [u8]) -> Option<usize> {
 
         if h.cursor == 0 {
             h.browsing = false;
-            let len = h.saved_len;
-            let copy_len = len.min(out.len());
-            out[..copy_len].copy_from_slice(&h.saved_input[..copy_len]);
-            return Some(copy_len);
+            let copied = copy_out(&h.saved_input, out);
+            return Some(copied);
         }
 
         h.cursor -= 1;
@@ -128,10 +117,7 @@ pub fn navigate_down(out: &mut [u8]) -> Option<usize> {
             MAX_HISTORY + h.write_pos - h.cursor - 1
         } % MAX_HISTORY;
 
-        let len = h.lengths[idx] as usize;
-        let copy_len = len.min(out.len());
-        out[..copy_len].copy_from_slice(&h.entries[idx][..copy_len]);
-        Some(copy_len)
+        Some(copy_out(&h.entries[idx], out))
     })
 }
 

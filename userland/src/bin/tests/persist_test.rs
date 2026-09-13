@@ -305,7 +305,7 @@ fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
         println!("RESERVE: could not spawn the unprivileged filler ({tid})");
         return false;
     }
-    let rc = process::waitpid(tid as u32);
+    let rc = process::wait_exit_code(tid as u32);
     if rc != 0 {
         println!("RESERVE: the unprivileged filler exited {rc}");
         let _ = fs::remove_file(FILLER_PATH);

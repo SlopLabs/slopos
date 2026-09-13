@@ -12,17 +12,71 @@ use crate::{fmt, io};
 use crate::io::Read;
 
 unsafe extern "C" {
-    fn fork() -> i32;
-    fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
-    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-    fn _exit(status: i32) -> !;
+    fn slopos_waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn slopos_pipe(fds: *mut i32) -> i32;
     fn close(fd: i32) -> i32;
-    fn slopos_dup2(old: i32, new: i32) -> i32;
+    fn open(path: *const u8, flags: i32) -> i32;
     fn slopos_kill(pid: i32, sig: i32) -> i32;
+    fn slopos_spawn_path(
+        path: *const u8,
+        path_len: usize,
+        argv: *const *const u8,
+        argc: u32,
+        attrs: *const SpawnAttrs,
+    ) -> i32;
     #[link_name = "getpid"]
     fn libc_getpid() -> i32;
 }
+
+const WNOHANG: i32 = 1;
+const EINTR: i32 = 4;
+const O_RDWR: i32 = 2;
+const DEV_NULL: &[u8] = b"/dev/null\0";
+
+/// `SpawnFdActionKind::CloneFd` / `TransferFd`.
+const SPAWN_CLONE_FD: u32 = 1;
+const SPAWN_TRANSFER_FD: u32 = 2;
+
+/// `TaskPriority::Normal`.
+const TASK_PRIORITY_NORMAL: u8 = 2;
+
+/// Mirrors `slopos_abi::spawn::SpawnFdAction`; `std` cannot depend on the ABI
+/// crate, so the asserts below pin the layout.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SpawnFdAction {
+    kind: u32,
+    src_fd: i32,
+    target_fd: i32,
+    _pad: u32,
+    open_path_ptr: u64,
+    open_path_len: u64,
+    open_flags: u32,
+    _pad2: u32,
+}
+
+/// Mirrors `slopos_abi::spawn::SpawnAttrs`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SpawnAttrs {
+    priority: u8,
+    _pad: [u8; 3],
+    flags: u16,
+    _pad2: u16,
+    actions_ptr: u64,
+    actions_len: u64,
+    sigdefault_mask: u64,
+    envp_ptr: u64,
+    envp_len: u64,
+    cwd_ptr: u64,
+    cwd_len: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<SpawnFdAction>() == 40);
+const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 64);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, flags) == 4);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_ptr) == 32);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, cwd_ptr) == 48);
 
 pub fn getpid() -> u32 {
     unsafe { libc_getpid() as u32 }
@@ -148,6 +202,9 @@ impl Command {
         self.cwd.as_ref().map(Path::new)
     }
 
+    /// Everything is built in the parent because a forked child that allocated
+    /// would deadlock: slibc's malloc is one global spinlock, and `fork` can
+    /// copy it locked by a thread the child does not have.
     pub fn spawn(
         &mut self,
         default: Stdio,
@@ -171,45 +228,86 @@ impl Command {
             stderr_pipe = Some(create_pipe()?);
         }
 
-        let pid = unsafe { fork() };
-        if pid < 0 {
+        let program = osstr_to_cstring_bytes(self.program.as_os_str());
+        let argv_store: Vec<Vec<u8>> = self
+            .args
+            .iter()
+            .map(|a| osstr_to_cstring_bytes(a.as_os_str()))
+            .collect();
+        let argv: Vec<*const u8> = argv_store.iter().map(|s| s.as_ptr()).collect();
+
+        // The whole environment, never just the changes: the syscall reads a
+        // zero `envp_ptr` as "no environment", not as "inherit".
+        let mut env_store: Vec<Vec<u8>> = Vec::new();
+        for (key, value) in self.env.capture() {
+            let mut item = Vec::new();
+            item.extend_from_slice(key.as_os_str().as_encoded_bytes());
+            item.push(b'=');
+            item.extend_from_slice(value.as_encoded_bytes());
+            item.push(0);
+            env_store.push(item);
+        }
+        let envp: Vec<*const u8> = env_store.iter().map(|s| s.as_ptr()).collect();
+
+        let cwd_store = self
+            .cwd
+            .as_ref()
+            .map(|dir| osstr_to_cstring_bytes(dir.as_os_str()));
+
+        let mut actions: Vec<SpawnFdAction> = Vec::new();
+        let mut opened: Vec<i32> = Vec::new();
+        let staged = (|| -> io::Result<()> {
+            push_stdio_action(&mut actions, &mut opened, 0, stdin_cfg, stdin_pipe)?;
+            push_stdio_action(&mut actions, &mut opened, 1, stdout_cfg, stdout_pipe)?;
+            push_stdio_action(&mut actions, &mut opened, 2, stderr_cfg, stderr_pipe)?;
+            Ok(())
+        })();
+
+        let rc = match staged {
+            Ok(()) => {
+                let attrs = SpawnAttrs {
+                    priority: TASK_PRIORITY_NORMAL,
+                    _pad: [0; 3],
+                    flags: 0,
+                    _pad2: 0,
+                    actions_ptr: actions.as_ptr() as u64,
+                    actions_len: actions.len() as u64,
+                    sigdefault_mask: 0,
+                    envp_ptr: if envp.is_empty() {
+                        0
+                    } else {
+                        envp.as_ptr() as u64
+                    },
+                    envp_len: envp.len() as u64,
+                    cwd_ptr: cwd_store.as_ref().map_or(0, |c| c.as_ptr() as u64),
+                    cwd_len: cwd_store.as_ref().map_or(0, |c| (c.len() - 1) as u64),
+                };
+                unsafe {
+                    slopos_spawn_path(
+                        program.as_ptr(),
+                        program.len() - 1,
+                        argv.as_ptr(),
+                        argv.len() as u32,
+                        &attrs as *const SpawnAttrs,
+                    )
+                }
+            }
+            Err(e) => {
+                close_fds(&opened);
+                close_pipe_pair(stdin_pipe);
+                close_pipe_pair(stdout_pipe);
+                close_pipe_pair(stderr_pipe);
+                return Err(e);
+            }
+        };
+
+        if rc < 0 {
+            // Nothing was transferred, so the staged descriptors are still ours.
+            close_fds(&opened);
             close_pipe_pair(stdin_pipe);
             close_pipe_pair(stdout_pipe);
             close_pipe_pair(stderr_pipe);
-            return Err(errno_from_ret(pid));
-        }
-
-        if pid == 0 {
-            child_setup_stdio(0, stdin_cfg, stdin_pipe);
-            child_setup_stdio(1, stdout_cfg, stdout_pipe);
-            child_setup_stdio(2, stderr_cfg, stderr_pipe);
-
-            let program = osstr_to_cstring_bytes(self.program.as_os_str());
-            let argv_store: Vec<Vec<u8>> = self
-                .args
-                .iter()
-                .map(|a| osstr_to_cstring_bytes(a.as_os_str()))
-                .collect();
-            let mut argv: Vec<*const u8> = argv_store.iter().map(|s| s.as_ptr()).collect();
-            argv.push(crate::ptr::null());
-
-            let mut env_store: Vec<Vec<u8>> = Vec::new();
-            for (k, v) in self.get_envs() {
-                if let Some(v) = v {
-                    let mut item = Vec::new();
-                    item.extend_from_slice(k.as_os_str().as_encoded_bytes());
-                    item.push(b'=');
-                    item.extend_from_slice(v.as_os_str().as_encoded_bytes());
-                    item.push(0);
-                    env_store.push(item);
-                }
-            }
-            let mut envp: Vec<*const u8> = env_store.iter().map(|s| s.as_ptr()).collect();
-            envp.push(crate::ptr::null());
-
-            let rc = unsafe { execve(program.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-            let code = if rc < 0 { 127 } else { rc };
-            unsafe { _exit(code) }
+            return Err(errno_from_ret(rc));
         }
 
         let mut pipes = StdioPipes {
@@ -239,7 +337,7 @@ impl Command {
             pipes.stderr = Some(unsafe { Pipe::from_raw_fd(read_end) });
         }
 
-        Ok((Process { pid }, pipes))
+        Ok((Process { pid: rc }, pipes))
     }
 }
 
@@ -248,19 +346,6 @@ impl<'a> Iterator for CommandArgs<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(OsString::as_os_str)
-    }
-}
-
-impl Stdio {
-    fn fd_for_child(&self, target: i32) -> Option<i32> {
-        match self {
-            Stdio::Inherit => None,
-            Stdio::Null => Some(-1),
-            Stdio::MakePipe => None,
-            Stdio::ParentStdout => Some(1),
-            Stdio::ParentStderr => Some(2),
-            Stdio::InheritFile(file) => Some(file.as_raw_fd()),
-        }
     }
 }
 
@@ -338,33 +423,53 @@ impl Process {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        let mut status = 0;
-        let rc = unsafe { waitpid(self.pid, &mut status as *mut i32, 0) };
-        if rc < 0 {
-            Err(errno_from_ret(rc))
-        } else {
-            Ok(ExitStatus(status))
+        let mut status: i32 = 0;
+        loop {
+            let rc = unsafe { slopos_waitpid(self.pid, &mut status as *mut i32, 0) };
+            if rc == -EINTR {
+                continue;
+            }
+            if rc < 0 {
+                return Err(errno_from_ret(rc));
+            }
+            return Ok(ExitStatus(status));
         }
     }
 
+    /// A zero return under `WNOHANG` means no child is ready, not a child that
+    /// exited with code 0.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let mut status = 0;
-        let rc = unsafe { waitpid(self.pid, &mut status as *mut i32, 1) };
+        let mut status: i32 = 0;
+        let rc = unsafe { slopos_waitpid(self.pid, &mut status as *mut i32, WNOHANG) };
         if rc < 0 {
-            Err(errno_from_ret(rc))
-        } else if rc == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(ExitStatus(status)))
+            return Err(errno_from_ret(rc));
         }
+        if rc == 0 {
+            return Ok(None);
+        }
+        Ok(Some(ExitStatus(status)))
     }
 }
 
-pub fn output(_cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Command::output is not supported on SlopOS yet",
-    ))
+pub fn output(cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let (mut process, pipes) = cmd.spawn(Stdio::MakePipe, false)?;
+    drop(pipes.stdin);
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    match (pipes.stdout, pipes.stderr) {
+        (Some(out), Some(err)) => read_output(out, &mut stdout, err, &mut stderr)?,
+        (Some(mut out), None) => {
+            out.read_to_end(&mut stdout)?;
+        }
+        (None, Some(mut err)) => {
+            err.read_to_end(&mut stderr)?;
+        }
+        (None, None) => {}
+    }
+
+    let status = process.wait()?;
+    Ok((status, stdout, stderr))
 }
 
 pub fn read_output(
@@ -460,33 +565,51 @@ fn close_pipe_pair(pipe: Option<(i32, i32)>) {
     }
 }
 
-fn child_setup_stdio(target_fd: i32, stdio: &Stdio, pipe: Option<(i32, i32)>) {
-    match (stdio, pipe) {
-        (Stdio::MakePipe, Some((read_end, write_end))) => {
-            let chosen = if target_fd == 0 { read_end } else { write_end };
-            let other = if target_fd == 0 { write_end } else { read_end };
-            unsafe {
-                let _ = slopos_dup2(chosen, target_fd);
-                let _ = close(chosen);
-                let _ = close(other);
-            }
-        }
-        (_, Some((read_end, write_end))) => unsafe {
-            let _ = close(read_end);
-            let _ = close(write_end);
-        },
-        _ => {
-            if let Some(fd) = stdio.fd_for_child(target_fd) {
-                if fd >= 0 {
-                    unsafe {
-                        let _ = slopos_dup2(fd, target_fd);
-                    }
-                } else {
-                    unsafe {
-                        let _ = close(target_fd);
-                    }
-                }
-            }
+fn close_fds(fds: &[i32]) {
+    for &fd in fds {
+        unsafe {
+            let _ = close(fd);
         }
     }
+}
+
+/// The child's descriptor table starts empty, so even an inherited fd is an
+/// explicit `CloneFd`.
+fn push_stdio_action(
+    actions: &mut Vec<SpawnFdAction>,
+    opened: &mut Vec<i32>,
+    target_fd: i32,
+    stdio: &Stdio,
+    pipe: Option<(i32, i32)>,
+) -> io::Result<()> {
+    let (kind, src_fd) = match stdio {
+        Stdio::MakePipe => match pipe {
+            Some((read_end, write_end)) => {
+                let chosen = if target_fd == 0 { read_end } else { write_end };
+                (SPAWN_CLONE_FD, chosen)
+            }
+            None => return Ok(()),
+        },
+        Stdio::Inherit => (SPAWN_CLONE_FD, target_fd),
+        Stdio::ParentStdout => (SPAWN_CLONE_FD, 1),
+        Stdio::ParentStderr => (SPAWN_CLONE_FD, 2),
+        Stdio::InheritFile(file) => (SPAWN_CLONE_FD, file.as_raw_fd()),
+        Stdio::Null => {
+            // The `Open` action kind is retired, so the parent opens it.
+            let fd = unsafe { open(DEV_NULL.as_ptr(), O_RDWR) };
+            if fd < 0 {
+                return Err(errno_from_ret(fd));
+            }
+            opened.push(fd);
+            (SPAWN_TRANSFER_FD, fd)
+        }
+    };
+
+    actions.push(SpawnFdAction {
+        kind,
+        src_fd,
+        target_fd,
+        ..Default::default()
+    });
+    Ok(())
 }

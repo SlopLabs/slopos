@@ -205,9 +205,29 @@ require-phase post-userland-tests
 #               `STATFS_RDONLY_PROBE`. Only a site that is actually acquired
 #               registers, which is why fifteen declarations add eleven
 #               classes. Measured 199/209 on all three runs of one pinned ISO.
+#   2026-09-13  kernel 199 -> 203, userland 209 -> 212: Phase 1 of
+#               `plans/self-hosting.md`. Boot is unchanged at 72, so none of
+#               these is on the boot path. The named new declaration sites are
+#               `FILE_LOCK_ROWS` and `FILE_LOCK_WAITERS` (the advisory-lock
+#               row table and its wait queue, `fs/src/fileio/flock.rs`, which
+#               `flock(2)` and `fcntl(2)` record locks share because they
+#               contend on the same file) and the `FUTEX_TABLE` subclass-1
+#               instance that `FUTEX_REQUEUE`/`FUTEX_CMP_REQUEUE` acquire
+#               (`sched/src/futex.rs` orders the two buckets by index and
+#               declares the nesting with `lock_nested`, rather than marking
+#               the class `LO_DUPOK`, which would have discarded the order
+#               check for every futex acquire in the kernel). The kernel phase
+#               gains one more than the userland phase because a class the
+#               userland phase already registered now first registers during
+#               the kernel tests. Class counts are deterministic: 203/212 on
+#               all three runs of one pinned ISO. Both banded pools moved
+#               within their existing bands (kernel edges 172-179, chains
+#               385-394; userland edges 210-216, chains 434-442), so the bands
+#               are left as recorded rather than re-narrowed onto three runs
+#               of one machine.
 boot	classes	72
-post-kernel-tests	classes	199
-post-userland-tests	classes	209
+post-kernel-tests	classes	203
+post-userland-tests	classes	212
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

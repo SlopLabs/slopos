@@ -22,12 +22,12 @@ unsafe impl Pod for SockAddrIn {}
 // represents a valid value (`Copy` already derived).
 unsafe impl Pod for SockAddrUn {}
 
-// SAFETY: `UserFsEntry` is `#[repr(C)]` over `[u8; 64] + u8 + u32`.
-// Layout: bytes 0..64 = name, byte 64 = type_, bytes 65..68 = auto-pad,
-// bytes 68..72 = size. Padding bytes 65..68 are populated by the
-// kernel-side zeroed allocation (`KVec::<UserFsEntry>::zeroed`) so
-// observing them does not leak sensitive memory. Every byte pattern
-// otherwise represents a valid value (`Copy` already derived).
+// SAFETY: `UserFsEntry` is `#[repr(C)]` over `[u8; 256] + u8 + [u8; 7] + u64`.
+// Every hole is a named `_pad` field, so the type has no implicit padding at
+// all (272 bytes, asserted in the abi crate) and no byte of it can carry
+// uninitialized kernel memory. All field types are primitive integers / byte
+// arrays; every byte pattern represents a valid value (`Copy` already
+// derived).
 unsafe impl Pod for UserFsEntry {}
 
 // SAFETY: `DamageRect` is `#[repr(C)]` over `i32 × 4` with no padding.

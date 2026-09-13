@@ -123,20 +123,26 @@ define_errnos! {
     EFAULT          =  14, "Bad address";
     EBUSY           =  16, "Device or resource busy";
     EEXIST          =  17, "File exists";
+    EXDEV           =  18, "Invalid cross-device link";
     ENODEV          =  19, "No such device";
     ENOTDIR         =  20, "Not a directory";
     EISDIR          =  21, "Is a directory";
     EINVAL          =  22, "Invalid argument";
     ENFILE          =  23, "Too many open files in system";
     EMFILE          =  24, "Too many open files";
+    ENOTTY          =  25, "Inappropriate ioctl for device";
     ENOSPC          =  28, "No space left on device";
     ESPIPE          =  29, "Illegal seek";
     EROFS           =  30, "Read-only file system";
+    EMLINK          =  31, "Too many links";
     EPIPE           =  32, "Broken pipe";
     ERANGE          =  34, "Numerical result out of range";
+    EDEADLK         =  35, "Resource deadlock avoided";
     ENAMETOOLONG    =  36, "File name too long";
+    ENOLCK          =  37, "No locks available";
     ENOSYS          =  38, "Function not implemented";
     ENOTEMPTY       =  39, "Directory not empty";
+    ELOOP           =  40, "Too many levels of symbolic links";
     ETIME           =  62, "Timer expired";
     ENOTSOCK        =  88, "Not a socket";
     EDESTADDRREQ    =  89, "Destination address required";
@@ -156,6 +162,7 @@ define_errnos! {
     EHOSTUNREACH    = 113, "No route to host";
     EALREADY        = 114, "Operation already in progress";
     EINPROGRESS     = 115, "Operation now in progress";
+    ESTALE          = 116, "Stale file handle";
     ECANCELED       = 125, "Operation canceled";
     /// Kernel-internal: restartable syscall.  **Must never reach userland.**
     ERESTARTSYS     = 512, "Restartable system call";

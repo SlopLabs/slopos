@@ -291,6 +291,14 @@ impl<T> SpinLock<T> {
         }
     }
 
+    /// The payload, reached through an exclusive borrow of the lock itself:
+    /// `&mut self` already proves exclusivity, so acquiring would only demand
+    /// the per-CPU state a caller may not have.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut T {
+        self.data.get_mut()
+    }
+
     /// In-place [`Init`] recipe: builds the lock fields directly into the heap
     /// slot so a large `T` (e.g. a 256-slot timer wheel) never materialises on
     /// the caller's stack. Used via

@@ -477,3 +477,35 @@ pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], flags: u32) -> Syscall
 pub fn umount2(target: *const c_char, flags: u32) -> SyscallResult<()> {
     Sys::umount2(target as *const u8, flags).map_err(Into::into)
 }
+
+/// `newdirfd` is `AT_FDCWD` to resolve `link` against the working directory.
+///
+/// # Errors
+/// * `EEXIST` - `link` already exists
+/// * `ENOENT` - A component of `link`'s parent is missing
+/// * `EROFS` - The mount is read-only
+#[inline(always)]
+pub fn symlinkat(target: *const c_char, newdirfd: i32, link: *const c_char) -> SyscallResult<()> {
+    let result = unsafe {
+        syscall3(
+            SYSCALL_SYMLINKAT,
+            target as u64,
+            newdirfd as i64 as u64,
+            link as u64,
+        )
+    };
+    demux(result).map(|_| ())
+}
+
+/// Advisory whole-file lock. `operation` is `LOCK_SH`, `LOCK_EX` or
+/// `LOCK_UN`, optionally `| LOCK_NB`. The lock belongs to the open file
+/// description, so a second `open` of the same path contends with the first.
+///
+/// # Errors
+/// * `EWOULDBLOCK` - `LOCK_NB` was set and the lock is held elsewhere
+/// * `EBADF` - Invalid file descriptor
+#[inline(always)]
+pub fn flock(fd: RawFd, operation: u64) -> SyscallResult<()> {
+    let result = unsafe { syscall2(SYSCALL_FLOCK, fd as i64 as u64, operation) };
+    demux(result).map(|_| ())
+}

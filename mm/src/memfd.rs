@@ -8,7 +8,7 @@ use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::file_ops::{FileKind, FileOps};
-use slopos_abi::fs::UserFsStat;
+use slopos_abi::fs::{S_IFREG, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
 use slopos_abi::quota::ObjectRow;
@@ -317,9 +317,14 @@ impl FileOps for MemfdFileOps {
     }
 
     fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
-        let size = memfd_size(handle);
-        out.size = size as u32;
-        out.type_ = 0;
+        let size = memfd_size(handle) as u64;
+        *out = UserFsStat::default();
+        out.st_ino = handle as u64;
+        out.st_nlink = 1;
+        out.st_mode = S_IFREG | 0o600;
+        out.st_size = size as i64;
+        out.st_blksize = 4096;
+        out.st_blocks = size.div_ceil(512) as i64;
         0
     }
 

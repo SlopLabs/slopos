@@ -80,18 +80,61 @@ pub fn vfs_open_handle_flags(
     path: &[u8],
     flags: crate::vfs::ops::VfsOpenFlags,
 ) -> Result<usize, slopos_abi::Errno> {
+    vfs_open_handle_flags_at(path, b"/", flags, crate::vfs::path::RESOLVE_FOLLOW)
+}
+
+pub fn vfs_open_handle_flags_at(
+    path: &[u8],
+    cwd: &[u8],
+    flags: crate::vfs::ops::VfsOpenFlags,
+    resolve_flags: u32,
+) -> Result<usize, slopos_abi::Errno> {
     // A create may have *just* made this name, and re-resolving it is then a
     // second lookup of something this call is responsible for rather than a
     // check on something it merely found.
     let created = flags.create;
-    let opened = crate::vfs::ops::vfs_open_flags(path, flags).map_err(|e| e.to_errno())?;
+    let opened = crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags)
+        .map_err(|e| e.to_errno())?;
+    register_vnode(path, cwd, resolve_flags, opened.fs, opened.inode, created)
+}
+
+/// Open an existing directory as a vnode handle — what a `dirfd` and
+/// `getdents64` need, and what [`crate::vfs::ops::vfs_open_flags_at`] refuses
+/// by design.
+///
+/// The [`CanonPath`](crate::vfs::CanonPath) is the path the walk *ended* on,
+/// not a lexical canonicalisation: with `/tmp/link -> /real/dir`,
+/// `openat(dirfd, "../sibling")` has to name `/real/sibling`.
+pub fn vfs_open_dir_handle_at(
+    path: &[u8],
+    cwd: &[u8],
+    resolve_flags: u32,
+) -> Result<(usize, crate::vfs::CanonPath), slopos_abi::Errno> {
+    let (resolved, canon) = crate::vfs::path::resolve_path_canon_at(path, cwd, resolve_flags)
+        .map_err(|e| e.to_errno())?;
+    let stat = resolved.fs.stat(resolved.inode).map_err(|e| e.to_errno())?;
+    if stat.file_type != crate::vfs::FileType::Directory {
+        return Err(slopos_abi::Errno::ENOTDIR);
+    }
+    let handle = register_vnode(path, cwd, resolve_flags, resolved.fs, resolved.inode, false)?;
+    Ok((handle, canon))
+}
+
+fn register_vnode(
+    path: &[u8],
+    cwd: &[u8],
+    resolve_flags: u32,
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+    created: bool,
+) -> Result<usize, slopos_abi::Errno> {
     // Before the table row exists, and a failure fails the open: an untracked
     // descriptor reads to `unlink` as an unreferenced inode, which is the one
     // error that frees a file somebody is reading.
     //
     // A refusal because the inode is detached is a name that is gone, which
     // `open(2)` reports as `ENOENT`; only a full table is `ENFILE`.
-    if let Err(e) = crate::vfs::orphan::open_ref(opened.fs, opened.inode) {
+    if let Err(e) = crate::vfs::orphan::open_ref(fs, inode) {
         return Err(match e {
             crate::vfs::orphan::OpenRefError::Detached => slopos_abi::Errno::ENOENT,
             crate::vfs::orphan::OpenRefError::TableFull => slopos_abi::Errno::ENFILE,
@@ -109,35 +152,47 @@ pub fn vfs_open_handle_flags(
     // passes, which needs an inode cache and a parent lock held across the
     // walk. What it does close is the case that matters, where the name is
     // gone or now denotes something else.
-    if !created && !still_resolves(path, opened.fs, opened.inode) {
-        crate::vfs::orphan::close_ref(opened.fs, opened.inode);
+    if !created && !still_resolves(path, cwd, resolve_flags, fs, inode) {
+        crate::vfs::orphan::close_ref(fs, inode);
         return Err(slopos_abi::Errno::ENOENT);
     }
 
     let inserted = with_table(|t| {
-        t.insert(OpenVnode {
-            fs: opened.fs,
-            inode: opened.inode,
-        })
-        .map(|h| h.pack(SLOT_BITS))
-        .map_err(|_| slopos_abi::Errno::ENFILE)
+        t.insert(OpenVnode { fs, inode })
+            .map(|h| h.pack(SLOT_BITS))
+            .map_err(|_| slopos_abi::Errno::ENFILE)
     });
     if inserted.is_err() {
-        crate::vfs::orphan::close_ref(opened.fs, opened.inode);
+        crate::vfs::orphan::close_ref(fs, inode);
     }
     inserted
 }
 
 /// Whether `path` still names exactly `(fs, inode)`.
-///
-/// Its own frame: `resolve_path` stages a canonical path buffer, and the
-/// caller already holds one.
 #[inline(never)]
-fn still_resolves(path: &[u8], fs: &'static dyn FileSystem, inode: InodeId) -> bool {
-    match crate::vfs::resolve_path(path) {
+fn still_resolves(
+    path: &[u8],
+    cwd: &[u8],
+    resolve_flags: u32,
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+) -> bool {
+    match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags) {
         Ok(again) => again.inode == inode && same_filesystem(again.fs, fs),
         Err(_) => false,
     }
+}
+
+/// Whether `path` still names the directory an open vnode handle holds.
+///
+/// A `dirfd`'s resolution base is a path, and between the `openat` that stored
+/// it and a later `*at` call another process can rename that directory away
+/// and put a different one at the same name. `false` is the caller's `ESTALE`.
+pub fn vfs_dir_handle_still_names(handle: usize, path: &[u8]) -> bool {
+    let Some((fs, inode)) = resolve(handle) else {
+        return false;
+    };
+    still_resolves(path, b"/", crate::vfs::path::RESOLVE_FOLLOW, fs, inode)
 }
 
 /// Sole owner of one `OpenVnode` table entry; dropping it closes the vnode.
@@ -424,8 +479,8 @@ impl FileOps for VfsFileOps {
         };
         match fs.stat(inode) {
             Ok(stat) => {
-                out.type_ = stat.file_type as u8;
-                out.size = stat.size as u32;
+                *out = UserFsStat::default();
+                stat.fill_user_stat(out);
                 0
             }
             Err(_) => Errno::EPERM.raw(),

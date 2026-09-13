@@ -56,17 +56,37 @@ pub fn ticks_to_microseconds(ticks: u64) -> u64 {
 static REALTIME_EPOCH_NS: AtomicU64 = AtomicU64::new(0);
 static REALTIME_BASE_MONO_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Anchor `CLOCK_REALTIME` to `unix_seconds`, read from the firmware RTC at
-/// hand-off. Advances thereafter on the monotonic counter: the RTC is read
-/// once and never again, so the two cannot drift apart mid-boot and no
-/// timestamp this kernel writes can go backwards.
-pub fn set_realtime_epoch(unix_seconds: u64) {
+/// Largest anchor the `u64` nanosecond epoch can carry.
+const MAX_REALTIME_SECONDS: i64 = (u64::MAX / 1_000_000_000) as i64;
+
+/// Anchor `CLOCK_REALTIME` to `unix_seconds` + `nanos` and re-base it on the
+/// current monotonic reading, so `realtime_ns()` advances from the new anchor
+/// rather than from the old one.
+///
+/// `Err(())` — an `EINVAL` for a syscall caller — for `nanos` at or above one
+/// second, for a second outside what the `u64` nanosecond anchor can hold, and
+/// for the epoch instant itself, which the unset sentinel occupies. It never
+/// silently declines: a `clock_settime` that no-ops leaves its caller
+/// believing the clock moved.
+pub fn set_realtime(unix_seconds: i64, nanos: u32) -> Result<(), ()> {
+    if nanos >= 1_000_000_000 {
+        return Err(());
+    }
+    if !(0..=MAX_REALTIME_SECONDS).contains(&unix_seconds) {
+        return Err(());
+    }
+    let epoch = (unix_seconds as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|s| s.checked_add(u64::from(nanos)))
+        .ok_or(())?;
+    if epoch == 0 {
+        return Err(());
+    }
+
     let mono = monotonic_ns();
-    let Some(epoch) = unix_seconds.checked_mul(1_000_000_000) else {
-        return;
-    };
     REALTIME_BASE_MONO_NS.store(mono, Ordering::Relaxed);
     REALTIME_EPOCH_NS.store(epoch, Ordering::Release);
+    Ok(())
 }
 
 /// Nanoseconds since the Unix epoch, or `None` when no wall clock was
@@ -80,6 +100,12 @@ pub fn realtime_ns() -> Option<u64> {
     }
     let base = REALTIME_BASE_MONO_NS.load(Ordering::Relaxed);
     Some(epoch.saturating_add(monotonic_ns().saturating_sub(base)))
+}
+
+/// Wall clock split into whole seconds and the nanosecond remainder, the shape
+/// `Timespec` wants.
+pub fn realtime_timespec() -> Option<(i64, u32)> {
+    realtime_ns().map(|ns| ((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as u32))
 }
 
 /// Seconds since the Unix epoch, in the width every on-disk filesystem

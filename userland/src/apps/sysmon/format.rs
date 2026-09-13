@@ -44,6 +44,7 @@ pub(crate) fn task_state(state: u8) -> (&'static str, Color32) {
         TaskStatus::Running => ("Run", COLOR_STATE_RUN),
         TaskStatus::Blocked => ("Block", COLOR_STATE_BLOCK),
         TaskStatus::Ready => ("Ready", COLOR_STATE_READY),
+        TaskStatus::Stopped => ("Stop", COLOR_STATE_BLOCK),
         TaskStatus::Zombie => ("Zombie", COLOR_DIM),
         TaskStatus::Terminated => ("Dead", COLOR_DIM),
         TaskStatus::Invalid => ("--", COLOR_DIM),

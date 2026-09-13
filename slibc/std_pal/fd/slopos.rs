@@ -14,8 +14,33 @@ unsafe extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     fn close(fd: i32) -> i32;
     fn dup(oldfd: i32) -> i32;
-    fn slopos_lseek(fd: i32, offset: i64, whence: i32) -> i64;
     fn fcntl(fd: i32, cmd: i32, arg: i64) -> i32;
+    fn slopos_pread(fd: i32, buf: *mut u8, count: usize, offset: i64) -> isize;
+    fn slopos_pwrite(fd: i32, buf: *const u8, count: usize, offset: i64) -> isize;
+    fn slopos_readv(fd: i32, iov: *const Iovec, iovcnt: i32) -> isize;
+    fn slopos_writev(fd: i32, iov: *const Iovec, iovcnt: i32) -> isize;
+}
+
+/// Linux `struct iovec`. `IoSlice` is not this layout without the unix
+/// `io_slice` arm, so segments are rebuilt per call.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Iovec {
+    iov_base: u64,
+    iov_len: u64,
+}
+
+/// Stack-only segment cap. Truncating is safe: a vectored call may be short
+/// and std callers loop.
+const IOV_STACK_MAX: usize = 16;
+
+/// slibc's wrappers answer a negated errno, not `-1`, so `cvt` misreads them.
+fn cvt_count(ret: isize) -> io::Result<usize> {
+    if ret < 0 {
+        Err(io::Error::from_raw_os_error(-ret as i32))
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 const READ_LIMIT: usize = isize::MAX as usize;
@@ -27,9 +52,6 @@ const F_SETFL: i32 = 4;
 const FD_CLOEXEC: i32 = 1;
 const O_NONBLOCK: i32 = 0x800;
 
-const SEEK_SET: i32 = 0;
-const SEEK_CUR: i32 = 1;
-
 #[derive(Debug)]
 pub struct FileDesc(OwnedFd);
 
@@ -39,34 +61,33 @@ impl FileDesc {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let ret = cvt(unsafe {
+        cvt_count(unsafe {
             read(self.as_raw_fd(), buf.as_mut_ptr(), cmp::min(buf.len(), READ_LIMIT))
-        })?;
-        Ok(ret as usize)
+        })
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        let mut total = 0;
-        for buf in bufs {
-            if buf.is_empty() {
-                continue;
+        let mut iov = [Iovec { iov_base: 0, iov_len: 0 }; IOV_STACK_MAX];
+        let mut n = 0;
+        for buf in bufs.iter_mut() {
+            if n == IOV_STACK_MAX {
+                break;
             }
-            match self.read(buf) {
-                Ok(0) => break,
-                Ok(n) => total += n,
-                Err(e) if total > 0 => {
-                    let _ = e;
-                    break;
-                }
-                Err(e) => return Err(e),
-            }
+            iov[n] = Iovec {
+                iov_base: buf.as_mut_ptr() as u64,
+                iov_len: buf.len() as u64,
+            };
+            n += 1;
         }
-        Ok(total)
+        if n == 0 {
+            return Ok(0);
+        }
+        cvt_count(unsafe { slopos_readv(self.as_raw_fd(), iov.as_ptr(), n as i32) })
     }
 
     #[inline]
     pub fn is_read_vectored(&self) -> bool {
-        false
+        true
     }
 
     pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -75,16 +96,18 @@ impl FileDesc {
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        // No pread — emulated with lseek + read, so not atomic.
-        let saved = cvt(unsafe { slopos_lseek(self.as_raw_fd(), 0, SEEK_CUR) })?;
-        cvt(unsafe { slopos_lseek(self.as_raw_fd(), offset as i64, SEEK_SET) })?;
-        let result = self.read(buf);
-        let _ = unsafe { slopos_lseek(self.as_raw_fd(), saved as i64, SEEK_SET) };
-        result
+        cvt_count(unsafe {
+            slopos_pread(
+                self.as_raw_fd(),
+                buf.as_mut_ptr(),
+                cmp::min(buf.len(), READ_LIMIT),
+                offset as i64,
+            )
+        })
     }
 
     pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
-        let ret = cvt(unsafe {
+        let ret = cvt_count(unsafe {
             read(
                 self.as_raw_fd(),
                 cursor.as_mut().as_mut_ptr() as *mut u8,
@@ -92,48 +115,50 @@ impl FileDesc {
             )
         })?;
         unsafe {
-            cursor.advance(ret as usize);
+            cursor.advance(ret);
         }
         Ok(())
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        let ret = cvt(unsafe {
+        cvt_count(unsafe {
             write(self.as_raw_fd(), buf.as_ptr(), cmp::min(buf.len(), READ_LIMIT))
-        })?;
-        Ok(ret as usize)
+        })
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        let mut total = 0;
-        for buf in bufs {
-            if buf.is_empty() {
-                continue;
+        let mut iov = [Iovec { iov_base: 0, iov_len: 0 }; IOV_STACK_MAX];
+        let mut n = 0;
+        for buf in bufs.iter() {
+            if n == IOV_STACK_MAX {
+                break;
             }
-            match self.write(buf) {
-                Ok(0) => break,
-                Ok(n) => total += n,
-                Err(e) if total > 0 => {
-                    let _ = e;
-                    break;
-                }
-                Err(e) => return Err(e),
-            }
+            iov[n] = Iovec {
+                iov_base: buf.as_ptr() as u64,
+                iov_len: buf.len() as u64,
+            };
+            n += 1;
         }
-        Ok(total)
+        if n == 0 {
+            return Ok(0);
+        }
+        cvt_count(unsafe { slopos_writev(self.as_raw_fd(), iov.as_ptr(), n as i32) })
     }
 
     #[inline]
     pub fn is_write_vectored(&self) -> bool {
-        false
+        true
     }
 
     pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        let saved = cvt(unsafe { slopos_lseek(self.as_raw_fd(), 0, SEEK_CUR) })?;
-        cvt(unsafe { slopos_lseek(self.as_raw_fd(), offset as i64, SEEK_SET) })?;
-        let result = self.write(buf);
-        let _ = unsafe { slopos_lseek(self.as_raw_fd(), saved as i64, SEEK_SET) };
-        result
+        cvt_count(unsafe {
+            slopos_pwrite(
+                self.as_raw_fd(),
+                buf.as_ptr(),
+                cmp::min(buf.len(), READ_LIMIT),
+                offset as i64,
+            )
+        })
     }
 
     pub fn set_cloexec(&self) -> io::Result<()> {

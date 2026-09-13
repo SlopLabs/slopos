@@ -12,7 +12,7 @@
 use slopos_ostd::KArc;
 use slopos_ostd::task::HostStack;
 use slopos_ostd::task::kernel_task::TaskInner;
-use slopos_ostd::task::{CurrentTask, SwitchWindow};
+use slopos_ostd::task::{CWD_MAX, CurrentTask, SwitchWindow};
 
 type HostTask = TaskInner<(), ()>;
 
@@ -52,18 +52,49 @@ fn cwd_round_trips_through_a_witness() {
     });
 }
 
+/// `CWD_MAX` counts the NUL, so `CWD_MAX - 1` is the longest path that fits
+/// and an over-long one must be refused rather than silently truncated onto a
+/// shorter directory.
 #[test]
-fn an_oversized_cwd_is_refused_and_leaves_the_old_value() {
+fn the_cwd_boundary_is_the_buffer_less_its_nul() {
+    static LONGEST: [u8; CWD_MAX - 1] = [b'x'; CWD_MAX - 1];
+    static TOO_LONG: [u8; CWD_MAX] = [b'x'; CWD_MAX];
+
     let task = fresh();
     let w = window(&task);
 
     assert!(task.set_cwd(&w, b"/keep"));
-    let too_long = [b'x'; 256];
     assert!(
-        !task.set_cwd(&w, &too_long),
-        "256 bytes leaves no room for NUL"
+        !task.set_cwd(&w, &TOO_LONG),
+        "{CWD_MAX} bytes leaves no room for NUL"
     );
     task.with_cwd(&w, |bytes| assert_eq!(bytes, b"/keep\0"));
+
+    assert!(task.set_cwd(&w, &LONGEST), "{} bytes fit", CWD_MAX - 1);
+    task.with_cwd(&w, |bytes| {
+        assert_eq!(bytes.len(), CWD_MAX);
+        assert_eq!(&bytes[..CWD_MAX - 1], &LONGEST[..]);
+        assert_eq!(bytes[CWD_MAX - 1], 0, "the longest path keeps its NUL");
+    });
+}
+
+/// The buffer is allocated on first use, so a failing allocator must produce a
+/// refusal that leaves the task at the directory it had.
+#[test]
+fn a_failed_lazy_allocation_is_a_refusal() {
+    let task = fresh();
+    let w = window(&task);
+
+    slopos_ostd::task::fail_next_cwd_alloc_for_test();
+    assert!(
+        !task.set_cwd(&w, b"/usr"),
+        "a failed cwd allocation must refuse the change"
+    );
+    task.with_cwd(&w, |bytes| assert_eq!(bytes, b"/\0"));
+
+    // The poison is consumed by the refusal it caused, not sticky.
+    assert!(task.set_cwd(&w, b"/usr"));
+    task.with_cwd(&w, |bytes| assert_eq!(bytes, b"/usr\0"));
 }
 
 /// A shared buffer would make a forked child's working directory track its

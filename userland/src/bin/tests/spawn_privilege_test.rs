@@ -52,6 +52,8 @@ fn spawn_raw(path: &[u8], priority: u8, flags: u16, actions: &[SpawnFdAction]) -
         sigdefault_mask: 0,
         envp_ptr: 0,
         envp_len: 0,
+        cwd_ptr: 0,
+        cwd_len: 0,
     };
     let argv: [*const u8; 0] = [];
     unsafe {
@@ -191,7 +193,7 @@ fn ordinary_spawn_still_works() -> bool {
         eprintln!("spawn_privilege_test: ordinary spawn of /bin/nc returned {tid}");
         return false;
     }
-    process::waitpid(tid as u32);
+    let _ = process::waitpid(tid as u32);
     true
 }
 
@@ -252,7 +254,7 @@ fn launch_bounds_the_raise_site() -> bool {
         eprintln!("spawn_privilege_test: a Launch holder could not spawn a granted path: {tid}");
         return false;
     }
-    process::waitpid(tid as u32);
+    let _ = process::waitpid(tid as u32);
 
     // The refusal half is unreachable here: nothing in the tests image both
     // attempts a privileged spawn and lacks Launch. Left unasserted rather

@@ -1,13 +1,66 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are open.** Last swept 2026-09-07 (Phase 7: the ext2 metadata
-redo log, the bounded writeback pass, and the per-process disk-block quota —
-the new hostile input at replay, the new userland-reachable log file, and what
-"a ledger keyed on a principal" newly depends on). The two entries that sweep
-and the one before it left open were resolved on 2026-09-08 and removed under
-the policy below; what they taught is kept as method here.
+**No findings are open.** Last swept 2026-09-13 (Phase 1 of
+`plans/self-hosting.md`: twenty-five new syscalls, a symlink-following path
+resolver, a heap-staged path argument, hard links, a settable wall clock, a
+catchable fault signal with an alternate stack, a shared thread signal table,
+full futex op decoding, and an advisory-lock table — the whole new
+unprivileged-reachable surface, plus what the seal and verity boundaries newly
+depend on). That sweep found nine defects. All nine were fixed inside the same
+unreleased change and are therefore not ledger entries; three of them had been
+scored (two at 5.5 MEDIUM) before the fix landed, and what those three taught
+is kept as method below. The Phase 7 sweep before it left two entries open,
+resolved on 2026-09-08 and removed under the policy below.
 
-Those two closures are each a class:
+The three that were scored are each a class:
+
+- **A key that omits the namespace is not a key.** The futex hash and both of
+  its waiter selectors compared a bare virtual address, while the module doc
+  asserted the opposite — "every key here is a virtual address, so every futex
+  is private to one address space". An address-only key makes every futex
+  *global*, and that inversion is why it read as correct: the comment named the
+  property the code was missing as though naming it established it. With
+  `FUTEX_REQUEUE` newly reachable, one unprivileged process could move another
+  process's waiter to a second address and restamp it, after which the victim's
+  own `FUTEX_WAKE` could never match and its untimed `std::sync::Mutex` park
+  blocked until a signal. `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`, 5.5
+  MEDIUM. The key is now `(address space, address)`, taken from the generation-
+  checked `process_vm` handle the task already carries. **A comment asserting
+  an invariant is not the invariant; look for the term that carries it.**
+- **A capability no flag confers is a syscall nobody can call.** `clock_settime`
+  landed gated on a new `Capability::Clock` that `caps_from_task_flags` never
+  set, so the handler was `EPERM` for every caller including `TASK_FLAG_SYSTEM`
+  — fail-closed, so no attacker gain and no ledger entry, but the landed
+  syscall was dead while the plan claimed the wall clock could be set. The
+  authority module's own doc had already stated the rule ("the capabilities
+  promoted in later phases must arrive together with their grant"); prose did
+  not enforce it. A `const _: () = assert!(caps_from_task_flags(u16::MAX) ==
+  CAP_MASK_ALL)` now does. **A new capability and its grant are one change, and
+  the totality of the derivation belongs in an assert.**
+- **A budget that is shared and charged to nobody is not a bound** — the class
+  the Phase 7 sweep named, met again in new code. The advisory-lock table was
+  128 rows machine-wide with the only admission control a global free-slot
+  count, so one process taking 126 disjoint `F_SETLK` ranges denied `flock` and
+  `fcntl` locking to every other process, including init's and cargo's, for as
+  long as it lived. `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`, 5.5 MEDIUM.
+  Fixed by recording on each row the principal that asked for it, bounding a
+  principal's share, reserving a tail that only a principal holding no row may
+  take — so a newcomer's first lock is always available — and coalescing
+  abutting same-owner ranges, because a legitimate record-locking loop reached
+  saturation accidentally without it. **A fixed-size table is fine; an
+  unattributed ceiling over it is not.**
+
+Six more were found and fixed without reaching a score, and two are worth
+keeping as method. A `KArc` installed into a task slot was overwritten by
+`clone_from_raw`'s bytewise copy without its strong count ever falling, leaking
+a kilobyte per `fork` — a leak no gate sees, because it is heap, not a quota
+account, and KernMiri runs with `-Zmiri-ignore-leaks`. And a signal frame that
+grew past the page holding the interrupted `rsp` met a COW-protected stack page,
+where the user-copy primitives validate and refuse rather than fault, so
+delivery re-pended and spun: **a kernel path that chooses a user address has to
+populate it, because refusing is not the same as faulting.**
+
+The Phase 7 sweep's two closures are each a class as well:
 
 - **A refund must credit the principal that was charged, not the caller.**
   ext2's `free_block` refunded `geom.account()` — whoever ran the free — so a
@@ -296,5 +349,8 @@ Analogs worth citing when they match a finding's shape:
 
 ## Open findings at a glance
 
-No open findings. The table returns when a sweep finds one; the format is
-above, and the next ID is `SLOPOS-2026-0056`.
+No open findings. The Phase 1 sweep of 2026-09-13 found nine defects and all
+nine were fixed inside the same unreleased change, so none became an entry;
+the three that were scored before the fix landed are recorded as method at the
+top of this file. The table returns when a sweep finds one it cannot close;
+the format is above, and the next ID is `SLOPOS-2026-0056`.

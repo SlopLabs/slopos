@@ -4,17 +4,21 @@ use core::sync::atomic::Ordering;
 use super::*;
 
 use slopos_abi::Errno;
-use slopos_abi::fs::UserFsEntry;
+use slopos_abi::fs::{UserDirent64, UserFlock, UserFsEntry, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
-    SEEK_CUR, SEEK_END, SEEK_SET,
+    F_DUPFD, F_GETFD, F_GETFL, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_WRLCK, FD_CLOEXEC,
+    O_CLOEXEC, O_NOCTTY, O_NONBLOCK, SEEK_CUR, SEEK_END, SEEK_SET,
 };
 
 use crate::pipe;
 use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, pipe_backings};
-use crate::vfs::{FsStats, vfs_list, vfs_mkdir, vfs_stat, vfs_unlink};
-use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_file_statfs, vfs_open_handle_flags, vnode_backing};
+use crate::vfs::path::{RESOLVE_FOLLOW, RESOLVE_MUST_BE_DIR};
+use crate::vfs::{FileType, FsStats, InodeId, VfsError, vfs_mkdir_at, vfs_unlink_at};
+use crate::vfs_file_ops::{
+    VFS_FILE_OPS, vfs_dir_handle_still_names, vfs_file_inode, vfs_file_statfs,
+    vfs_open_dir_handle_at, vfs_open_handle_flags_at, vnode_backing,
+};
 use slopos_abi::tty_error::TtyError;
 use slopos_ostd::process::quota::FileBacking;
 
@@ -31,6 +35,7 @@ fn install_fd_entry(
     fd_flags: FdFlags,
     call_tty_policy: Option<TtyIndex>,
     backing: Option<KArc<dyn FileBacking>>,
+    dir_path: Option<KVec<u8>>,
 ) -> c_int {
     let mut position = 0u64;
     if flags.contains(OpenMode::APPEND) {
@@ -49,7 +54,8 @@ fn install_fd_entry(
     let cloexec = fd_flags.cloexec || (flags.bits() & O_CLOEXEC as u32) != 0;
     let close_on_fork = fd_flags.close_on_fork;
 
-    let Some(open_file) = new_open_file(ops, handle, flags, position, backing) else {
+    let Some(open_file) = new_open_file_with_dir(ops, handle, flags, position, backing, dir_path)
+    else {
         return Errno::ENFILE.raw();
     };
 
@@ -106,6 +112,18 @@ fn current_socket_ops() -> Option<&'static dyn FileOps> {
 }
 
 pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c_int {
+    file_open_at(table, path, b"/", posix_flags, RESOLVE_FOLLOW, None)
+}
+
+/// `openat(2)`.
+pub fn file_open_at(
+    table: FdTable,
+    path: &[u8],
+    cwd: &[u8],
+    posix_flags: u32,
+    resolve_flags: u32,
+    create_mode: Option<u16>,
+) -> c_int {
     let flags = posix_to_open_mode(posix_flags);
     if !flags.intersects(OpenMode::READ | OpenMode::WRITE) {
         return Errno::EINVAL.raw() as _;
@@ -132,6 +150,7 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
             FdFlags::NONE,
             None,
             Some(backing),
+            None,
         );
     }
 
@@ -150,6 +169,7 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
             FdFlags::NONE,
             None,
             Some(backing),
+            None,
         );
     }
 
@@ -167,6 +187,7 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
             FdFlags::NONE,
             Some(slave_idx),
             Some(backing),
+            None,
         );
     }
 
@@ -180,10 +201,43 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
         truncate,
         writable,
     };
-    let vfs_handle = match vfs_open_handle_flags(path, open_flags) {
-        Ok(h) => h,
-        Err(e) => return e.raw() as _,
+    let existed = create_mode.is_none()
+        || !create
+        || crate::vfs::vfs_stat_at(path, cwd, RESOLVE_FOLLOW).is_ok();
+    let directory_only = resolve_flags & RESOLVE_MUST_BE_DIR != 0;
+    let vfs_handle = if directory_only {
+        None
+    } else {
+        match vfs_open_handle_flags_at(path, cwd, open_flags, resolve_flags) {
+            Ok(h) => Some(h),
+            // `open(dir, O_RDONLY)` is how a `dirfd` and `getdents64` are
+            // obtained; only a writer is refused a directory.
+            Err(Errno::EISDIR) if !writable && !create => None,
+            Err(e) => return e.raw() as _,
+        }
     };
+
+    let (vfs_handle, dir_path) = match vfs_handle {
+        Some(handle) => (handle, None),
+        None => {
+            if writable || create {
+                return Errno::EISDIR.raw() as _;
+            }
+            match open_directory_handle(path, cwd, resolve_flags) {
+                Ok(pair) => pair,
+                Err(e) => return e.raw() as _,
+            }
+        }
+    };
+
+    // `create` reports the request, not the outcome, so the pre-open lookup is
+    // what separates "created by this call" from "opened something existing".
+    if let Some(mode) = create_mode.filter(|_| create && !existed)
+        && let Some((fs, inode)) = vfs_file_inode(vfs_handle)
+    {
+        let _ = fs.set_mode(inode, mode);
+    }
+
     let Some(backing) = vnode_backing(vfs_handle, table.account()) else {
         return Errno::ENFILE.raw() as _;
     };
@@ -195,7 +249,25 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
         FdFlags::NONE,
         None,
         Some(backing),
+        dir_path,
     )
+}
+
+/// A directory vnode plus the canonical path a `*at` call resolves against.
+#[inline(never)]
+fn open_directory_handle(
+    path: &[u8],
+    cwd: &[u8],
+    resolve_flags: u32,
+) -> Result<(usize, Option<KVec<u8>>), Errno> {
+    let (handle, canon) = vfs_open_dir_handle_at(path, cwd, resolve_flags)?;
+    let bytes = canon.as_bytes();
+    let mut owned = match KVec::<u8>::zeroed(bytes.len()) {
+        Ok(v) => v,
+        Err(_) => return Err(Errno::ENOMEM),
+    };
+    owned.copy_from_slice(bytes);
+    Ok((handle, Some(owned)))
 }
 
 /// A locked PTY slave reports `EIO`, following Linux devpts behaviour.
@@ -381,7 +453,11 @@ pub fn file_close_fd(table: FdTable, fd: c_int) -> c_int {
     });
     match taken {
         Some(Ok(entry)) => {
+            // POSIX: closing *any* descriptor on a file drops this process's
+            // record locks on it, whether or not other descriptors remain.
+            let key = lock_key_of_entry(&entry);
             drop(entry);
+            super::flock::release_record_locks_on_close(table.handle(), key);
             0
         }
         Some(Err(e)) => e.raw() as _,
@@ -458,65 +534,68 @@ pub fn file_get_size_fd(table: FdTable, fd: c_int) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-pub fn file_exists_path(path: &[u8]) -> c_int {
-    let rc = vfs_stat(path);
-    if let Ok((kind, _)) = rc {
-        return if kind == FS_TYPE_FILE { 1 } else { 0 };
-    }
-    0
-}
-
-pub fn file_unlink_path(path: &[u8]) -> c_int {
-    match vfs_unlink(path) {
+pub fn file_unlink_at(path: &[u8], cwd: &[u8]) -> c_int {
+    match vfs_unlink_at(path, cwd) {
         Ok(()) => 0,
-        Err(crate::vfs::VfsError::ReadOnly) => Errno::EROFS.raw() as _,
-        Err(crate::vfs::VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
+        Err(VfsError::ReadOnly) => Errno::EROFS.raw() as _,
+        Err(VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
+        Err(VfsError::IsDirectory) => Errno::EISDIR.raw() as _,
         Err(_) => Errno::ENOENT.raw() as _,
     }
 }
 
-pub fn file_rmdir_path(path: &[u8]) -> c_int {
-    errno_of(crate::vfs::vfs_rmdir(path))
+pub fn file_rmdir_at(path: &[u8], cwd: &[u8]) -> c_int {
+    errno_of(crate::vfs::vfs_rmdir_at(path, cwd))
 }
 
-pub fn file_symlink_path(target: &[u8], link_path: &[u8]) -> c_int {
-    errno_of(crate::vfs::vfs_symlink(target, link_path))
+pub fn file_symlink_at(target: &[u8], link_path: &[u8], cwd: &[u8]) -> c_int {
+    errno_of(crate::vfs::vfs_symlink_at(target, link_path, cwd))
 }
 
-pub fn file_readlink_path(path: &[u8], buf: &mut [u8]) -> isize {
-    match crate::vfs::vfs_readlink(path, buf) {
+pub fn file_readlink_at(path: &[u8], cwd: &[u8], buf: &mut [u8]) -> isize {
+    match crate::vfs::vfs_readlink_at(path, cwd, buf) {
         Ok(n) => n as isize,
         Err(e) => e.to_errno().raw() as isize,
     }
 }
 
-pub fn file_truncate_path(path: &[u8], length: u64) -> c_int {
-    let resolved = match crate::vfs::resolve_path(path) {
+pub fn file_truncate_at(path: &[u8], cwd: &[u8], length: u64) -> c_int {
+    let resolved = match crate::vfs::path::resolve_path_at(path, cwd, RESOLVE_FOLLOW) {
         Ok(r) => r,
         Err(e) => return e.to_errno().raw() as _,
     };
-    let stat = match resolved.fs.stat(resolved.inode) {
+    truncate_resolved(resolved.fs, resolved.inode, resolved.read_only(), length)
+}
+
+/// The shared tail of `truncate(2)` and `ftruncate(2)`.
+fn truncate_resolved(
+    fs: &'static dyn crate::vfs::FileSystem,
+    inode: InodeId,
+    read_only: bool,
+    length: u64,
+) -> c_int {
+    let stat = match fs.stat(inode) {
         Ok(s) => s,
         Err(e) => return e.to_errno().raw() as _,
     };
-    if stat.file_type == crate::vfs::FileType::Directory {
+    if stat.file_type == FileType::Directory {
         return Errno::EISDIR.raw() as _;
     }
     if stat.sealed {
         return Errno::EACCES.raw() as _;
     }
-    if let Err(e) = resolved.check_writable() {
-        return e.to_errno().raw() as _;
+    if read_only {
+        return Errno::EROFS.raw() as _;
     }
     // A live page set holds pre-truncate pages, and its writeback would put
     // them back over the region this call clears. Forgotten, not flushed: the
     // bytes are the ones the caller asked to discard.
-    crate::filemap::forget_inode(resolved.fs, resolved.inode);
-    errno_of(resolved.fs.truncate(resolved.inode, length))
+    crate::filemap::forget_inode(fs, inode);
+    errno_of(fs.truncate(inode, length))
 }
 
-pub fn file_chmod_path(path: &[u8], mode: u16) -> c_int {
-    errno_of(crate::vfs::vfs_set_mode(path, mode))
+pub fn file_chmod_at(path: &[u8], cwd: &[u8], mode: u16, resolve_flags: u32) -> c_int {
+    errno_of(crate::vfs::vfs_set_mode_at(path, cwd, mode, resolve_flags))
 }
 
 fn errno_of(result: crate::vfs::VfsResult<()>) -> c_int {
@@ -526,46 +605,92 @@ fn errno_of(result: crate::vfs::VfsResult<()>) -> c_int {
     }
 }
 
-pub fn file_mkdir_path(path: &[u8]) -> c_int {
-    match vfs_mkdir(path) {
+pub fn file_mkdir_at(path: &[u8], cwd: &[u8]) -> c_int {
+    match vfs_mkdir_at(path, cwd, None) {
         Ok(()) => 0,
-        Err(crate::vfs::VfsError::AlreadyExists) => Errno::EEXIST.raw() as _,
-        Err(crate::vfs::VfsError::NotFound) => Errno::ENOENT.raw() as _,
-        Err(crate::vfs::VfsError::NotDirectory) => Errno::ENOTDIR.raw() as _,
-        Err(crate::vfs::VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
-        Err(crate::vfs::VfsError::NoSpace) => Errno::ENOSPC.raw() as _,
-        Err(crate::vfs::VfsError::ReadOnly) => Errno::EROFS.raw() as _,
+        Err(VfsError::AlreadyExists) => Errno::EEXIST.raw() as _,
+        Err(VfsError::NotFound) => Errno::ENOENT.raw() as _,
+        Err(VfsError::NotDirectory) => Errno::ENOTDIR.raw() as _,
+        Err(VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
+        Err(VfsError::NoSpace) => Errno::ENOSPC.raw() as _,
+        Err(VfsError::ReadOnly) => Errno::EROFS.raw() as _,
         Err(_) => Errno::EIO.raw() as _,
     }
 }
 
-pub fn file_stat_path(path: &[u8], out_type: &mut u8, out_size: &mut u32) -> c_int {
-    if let Ok((kind, size)) = vfs_stat(path) {
-        *out_type = kind;
-        *out_size = size;
-        return 0;
-    }
-    Errno::ENOENT.raw() as _
-}
-
-pub fn file_list_path(path: &[u8], entries: &mut [UserFsEntry], out_count: &mut u32) -> c_int {
-    if entries.is_empty() {
-        return Errno::EINVAL.raw() as _;
-    }
-    match vfs_list(path, entries) {
-        Ok(count) => {
-            *out_count = count as u32;
+/// `stat`/`lstat`/`fstatat`. Zeroes `out` first: it is copied to userland by
+/// size, so a field left alone is a field of kernel memory handed over.
+pub fn file_stat_at(path: &[u8], cwd: &[u8], resolve_flags: u32, out: &mut UserFsStat) -> c_int {
+    match crate::vfs::vfs_stat_at(path, cwd, resolve_flags) {
+        Ok(stat) => {
+            *out = UserFsStat::default();
+            stat.fill_user_stat(out);
             0
         }
-        Err(_) => Errno::ENOENT.raw() as _,
+        Err(e) => e.to_errno().raw() as _,
     }
+}
+
+/// `link(2)`/`linkat(2)`.
+pub fn file_link_at(
+    old_path: &[u8],
+    old_cwd: &[u8],
+    new_path: &[u8],
+    new_cwd: &[u8],
+    follow: bool,
+) -> c_int {
+    errno_of(crate::vfs::vfs_link_at(
+        old_path, old_cwd, new_path, new_cwd, follow,
+    ))
+}
+
+/// `utimensat(2)`. `None` leaves a field alone, which is `UTIME_OMIT`.
+pub fn file_utimens_at(
+    path: &[u8],
+    cwd: &[u8],
+    atime: Option<u64>,
+    mtime: Option<u64>,
+    resolve_flags: u32,
+) -> c_int {
+    errno_of(crate::vfs::vfs_utimens(
+        path,
+        cwd,
+        atime,
+        mtime,
+        resolve_flags,
+    ))
+}
+
+/// `access(2)`/`faccessat(2)`. Identity is uid 0, so only the file's own mode
+/// bits and the mount's writability can refuse anything.
+pub fn file_access_at(path: &[u8], cwd: &[u8], mode: u32, resolve_flags: u32) -> c_int {
+    use slopos_abi::fs::{R_OK, W_OK, X_OK};
+    if mode & !(R_OK | W_OK | X_OK) != 0 {
+        return Errno::EINVAL.raw() as _;
+    }
+    let resolved = match crate::vfs::path::resolve_path_at(path, cwd, resolve_flags) {
+        Ok(r) => r,
+        Err(e) => return e.to_errno().raw() as _,
+    };
+    let stat = match resolved.fs.stat(resolved.inode) {
+        Ok(s) => s,
+        Err(e) => return e.to_errno().raw() as _,
+    };
+    if mode & W_OK != 0 && (resolved.read_only() || stat.sealed) {
+        return Errno::EACCES.raw() as _;
+    }
+    if mode & X_OK != 0 && stat.file_type != FileType::Directory && stat.mode & 0o111 == 0 {
+        return Errno::EACCES.raw() as _;
+    }
+    0
 }
 
 /// Paged listing: `cursor` is the ABI-packed resumption point, read and
 /// written in place. A caller loops until it comes back
 /// [`slopos_abi::fs::FS_LIST_CURSOR_END`].
-pub fn file_list_path_from(
+pub fn file_list_at_from(
     path: &[u8],
+    cwd: &[u8],
     entries: &mut [UserFsEntry],
     cursor: &mut u64,
     out_count: &mut u32,
@@ -574,7 +699,7 @@ pub fn file_list_path_from(
         return Errno::EINVAL.raw() as _;
     }
     let mut state = crate::vfs::ListCursor::from_abi(*cursor);
-    match crate::vfs::vfs_list_from(path, entries, &mut state) {
+    match crate::vfs::vfs_list_from_at(path, cwd, entries, &mut state) {
         Ok(count) => {
             *out_count = count as u32;
             *cursor = state.to_abi();
@@ -631,6 +756,7 @@ pub fn file_open_tty_fd(
         FdFlags::NONE,
         Some(tty_idx),
         Some(backing),
+        None,
     )
 }
 
@@ -856,7 +982,15 @@ fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3
 
     match outcome {
         Some(Ok(displaced)) => {
+            // `dup2`/`dup3` close whatever held the target number, and a close
+            // drops this process's record locks on that file.
+            let key = displaced
+                .as_ref()
+                .map(|previous| lock_key_of(previous.ops, previous.handle));
             drop(displaced);
+            if let Some(key) = key {
+                super::flock::release_record_locks_on_close(table.handle(), key);
+            }
             new_fd
         }
         Some(Err(e)) => e.raw() as _,
@@ -975,6 +1109,352 @@ pub fn file_statfs_fd(table: FdTable, fd: c_int) -> Result<FsStats, Errno> {
     }
 }
 
+fn snapshot(table: FdTable, fd: c_int) -> Result<FdSnapshot, Errno> {
+    let inner = lock_table_slot(table).ok_or(Errno::ESRCH)?;
+    snapshot_fd(&inner, fd).ok_or(Errno::EBADF)
+}
+
+/// Run `f` with the canonical path a directory descriptor was opened on — the
+/// base a `*at` syscall resolves a relative path against.
+///
+/// `ENOTDIR` for a descriptor that is not a directory. `ESTALE` once that path
+/// no longer names the descriptor's own inode: the base is a path, so without
+/// the re-check a concurrent `rename("/tmp/a", "/tmp/old"); mkdir("/tmp/a")`
+/// silently redirects every later `*at` call into the new directory.
+pub fn with_fd_dir_path<R>(
+    table: FdTable,
+    fd: c_int,
+    f: impl FnOnce(&[u8]) -> R,
+) -> Result<R, Errno> {
+    let snap = snapshot(table, fd)?;
+    let path = snap.open_file.dir_base().ok_or(Errno::ENOTDIR)?;
+    if !vfs_dir_handle_still_names(snap.handle(), path) {
+        return Err(Errno::ESTALE);
+    }
+    Ok(f(path))
+}
+
+/// `pread64(2)`. The offset is the caller's, so neither the description's
+/// position nor its lock is touched: threads sharing a descriptor can overlap.
+pub fn file_pread_fd(table: FdTable, fd: c_int, buf: &mut dyn IoBufWrite, offset: u64) -> ssize_t {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as _,
+    };
+    if !snap.status_flags().contains(OpenMode::READ) {
+        return Errno::EBADF.raw() as _;
+    }
+    if !snap.ops().seekable() {
+        return Errno::ESPIPE.raw() as _;
+    }
+    if buf.is_empty() {
+        return 0;
+    }
+    let flags = snap.status_flags().bits();
+    snap.ops().read(snap.handle(), buf, offset, flags)
+}
+
+/// `pwrite64(2)`. `O_APPEND` is stripped: POSIX has the explicit offset win,
+/// and the append path would resolve the offset from the file's size instead.
+pub fn file_pwrite_fd(table: FdTable, fd: c_int, buf: &dyn IoBufRead, offset: u64) -> ssize_t {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as _,
+    };
+    if !snap.status_flags().contains(OpenMode::WRITE) {
+        return Errno::EBADF.raw() as _;
+    }
+    if !snap.ops().seekable() {
+        return Errno::ESPIPE.raw() as _;
+    }
+    if buf.is_empty() {
+        return 0;
+    }
+    let status = snap.status_flags();
+    let flags = status.bits() & !slopos_abi::fs::O_APPEND;
+    let rc = snap.ops().write(snap.handle(), buf, offset, flags);
+    if rc > 0
+        && let Some(data_only) = open_sync_policy(status)
+    {
+        let sync_rc = snap.ops().sync(snap.handle(), data_only);
+        if sync_rc != 0 && sync_rc != Errno::EINVAL.raw() {
+            return sync_rc as ssize_t;
+        }
+    }
+    rc
+}
+
+/// The `(filesystem, inode)` behind a descriptor. `EBADF` when there is none —
+/// a pipe, a tty, a socket.
+fn fd_vnode(snap: &FdSnapshot) -> Result<(&'static dyn crate::vfs::FileSystem, InodeId), Errno> {
+    if snap.ops().kind() != FileKind::Regular {
+        return Err(Errno::EINVAL);
+    }
+    vfs_file_inode(snap.handle()).ok_or(Errno::EBADF)
+}
+
+/// Bytes a `getdents64` record occupies: the header, the name, its NUL, and
+/// padding to the 8-byte alignment the next header needs.
+fn dirent_reclen(name_len: usize) -> usize {
+    (core::mem::size_of::<UserDirent64>() + name_len + 1).next_multiple_of(8)
+}
+
+/// `getdents64(2)`: pack directory entries into `out` from the cursor this
+/// description carries in `position`, and answer `(bytes_written, next_cookie)`.
+///
+/// The cursor is deliberately **not** advanced here: the handler copies `out`
+/// to userland afterwards, and a fault there would otherwise lose a whole
+/// batch — the caller retries and skips every entry already consumed.
+/// [`file_getdents_commit_fd`] is the second half.
+///
+/// `EINVAL` when `out` cannot hold even the first record, as Linux does: a
+/// zero return means end of directory.
+pub fn file_getdents_fd(table: FdTable, fd: c_int, out: &mut [u8]) -> Result<(usize, u64), Errno> {
+    let snap = snapshot(table, fd)?;
+    let (fs, inode) = fd_vnode(&snap).map_err(|_| Errno::ENOTDIR)?;
+    match fs.stat(inode) {
+        Ok(stat) if stat.file_type == FileType::Directory => {}
+        Ok(_) => return Err(Errno::ENOTDIR),
+        Err(e) => return Err(e.to_errno()),
+    }
+
+    // Held across the cookie read and the walk, so a concurrent commit on a
+    // shared description cannot move the cursor mid-batch.
+    let Ok(_cursor_guard) = snap.open_file.position_lock.lock() else {
+        return Err(Errno::EINTR);
+    };
+    let cookie = snap.open_file.position();
+
+    let mut written = 0usize;
+    let mut resume = cookie;
+    let mut ran_out = false;
+    let walk = fs.readdir_cookie(inode, cookie, &mut |next, name, ino, file_type| {
+        let reclen = dirent_reclen(name.len());
+        if written + reclen > out.len() {
+            ran_out = true;
+            return false;
+        }
+        let record = &mut out[written..written + reclen];
+        record.fill(0);
+        record[0..8].copy_from_slice(&ino.to_le_bytes());
+        record[8..16].copy_from_slice(&(next as i64).to_le_bytes());
+        record[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
+        record[18] = file_type.to_dt();
+        let head_len = core::mem::size_of::<UserDirent64>();
+        record[head_len..head_len + name.len()].copy_from_slice(name);
+        written += reclen;
+        resume = next;
+        true
+    });
+
+    if let Err(e) = walk {
+        return Err(e.to_errno());
+    }
+    if written == 0 && ran_out {
+        return Err(Errno::EINVAL);
+    }
+    Ok((written, resume))
+}
+
+/// Commit the cookie [`file_getdents_fd`] returned, once its bytes have
+/// reached userland.
+///
+/// Advance only: two readers sharing one description start from the same
+/// cookie, and a plain store would let the slower one's commit rewind the walk
+/// and repeat entries without bound. `lseek` may still rewind — `rewinddir(3)`.
+pub fn file_getdents_commit_fd(table: FdTable, fd: c_int, cookie: u64) -> Result<(), Errno> {
+    let snap = snapshot(table, fd)?;
+    snap.open_file
+        .position
+        .fetch_max(cookie, core::sync::atomic::Ordering::AcqRel);
+    Ok(())
+}
+
+/// `fchmod(2)`.
+pub fn file_fchmod_fd(table: FdTable, fd: c_int, mode: u16) -> c_int {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as _,
+    };
+    let (fs, inode) = match fd_vnode(&snap) {
+        Ok(v) => v,
+        Err(e) => return e.raw() as _,
+    };
+    if let Err(e) = fd_writable_fs(fs) {
+        return e.raw() as _;
+    }
+    match fs.stat(inode) {
+        Ok(stat) if stat.sealed => return Errno::EACCES.raw() as _,
+        Ok(_) => {}
+        Err(e) => return e.to_errno().raw() as _,
+    }
+    errno_of(fs.set_mode(inode, mode))
+}
+
+/// The read-only check the fd-shaped mutators owe.
+///
+/// A read-only *mount* is not reachable from a descriptor — it records
+/// `(filesystem, inode)` — and an `O_RDONLY` open never checked one either, so
+/// the filesystem's own flag is what is enforced here.
+fn fd_writable_fs(fs: &'static dyn crate::vfs::FileSystem) -> Result<(), Errno> {
+    if fs.statfs().map(|s| s.read_only).unwrap_or(false) {
+        return Err(Errno::EROFS);
+    }
+    Ok(())
+}
+
+/// `ftruncate(2)` on a regular file. The memfd form lives in `slopos_mm`:
+/// there the length is an allocation size, here it is a file size.
+pub fn file_ftruncate_fd(table: FdTable, fd: c_int, length: u64) -> c_int {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as _,
+    };
+    if !snap.status_flags().contains(OpenMode::WRITE) {
+        return Errno::EINVAL.raw() as _;
+    }
+    let (fs, inode) = match fd_vnode(&snap) {
+        Ok(v) => v,
+        Err(e) => return e.raw() as _,
+    };
+    let read_only = fs.statfs().map(|s| s.read_only).unwrap_or(false);
+    truncate_resolved(fs, inode, read_only, length)
+}
+
+/// `utimensat(dirfd, NULL, ..)`: the descriptor names the file directly.
+pub fn file_set_times_fd(
+    table: FdTable,
+    fd: c_int,
+    atime: Option<u64>,
+    mtime: Option<u64>,
+) -> c_int {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as _,
+    };
+    let (fs, inode) = match fd_vnode(&snap) {
+        Ok(v) => v,
+        Err(e) => return e.raw() as _,
+    };
+    if let Err(e) = fd_writable_fs(fs) {
+        return e.raw() as _;
+    }
+    errno_of(crate::vfs::vfs_set_times(fs, inode, atime, mtime))
+}
+
+/// The lock table's key for the file behind a descriptor.
+///
+/// Must be read before a descriptor's teardown: the `(fs, inode)` half comes
+/// from the vnode the teardown releases.
+fn lock_key_of(ops: &'static dyn FileOps, handle: usize) -> LockFile {
+    if ops.kind() == FileKind::Regular
+        && let Some((fs, inode)) = vfs_file_inode(handle)
+    {
+        let addr = fs as *const dyn crate::vfs::FileSystem as *const () as usize as u64;
+        return LockFile::inode(addr, inode);
+    }
+    LockFile::handle(ops.kind() as u8, handle as u64)
+}
+
+fn lock_key(snap: &FdSnapshot) -> LockFile {
+    lock_key_of(snap.ops(), snap.handle())
+}
+
+/// [`lock_key`] for the close paths, which hold an [`FdEntry`] rather than a
+/// snapshot.
+pub(super) fn lock_key_of_entry(entry: &FdEntry) -> LockFile {
+    lock_key_of(entry.open_file.ops, entry.open_file.handle)
+}
+
+/// [`lock_key`] for a fixture that has to build the same key by hand.
+#[cfg(feature = "tests")]
+pub(super) fn lock_key_for_test(table: FdTable, fd: c_int) -> Option<LockFile> {
+    snapshot(table, fd).ok().map(|snap| lock_key(&snap))
+}
+
+/// `flock(2)`. The lock belongs to the open file description, so it survives
+/// `dup` and `fork`; the description's teardown releases it.
+pub fn file_flock_fd(table: FdTable, fd: c_int, operation: u32) -> c_int {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as _,
+    };
+    let key = lock_key(&snap);
+    let id = snap.open_file.id;
+    // Every reference to the descriptor table is released before the wait.
+    drop(snap);
+    match file_lock_flock(key, id, table, operation) {
+        Ok(()) => 0,
+        Err(e) => e.raw() as _,
+    }
+}
+
+/// `fcntl(2)`'s `F_GETLK`/`F_SETLK`/`F_SETLKW`. The caller has already copied
+/// `lock` in from userland; `F_GETLK` writes the holder back into it.
+///
+/// `F_RDLCK` needs a readable descriptor and `F_WRLCK` a writable one, or
+/// `fcntl(2)` answers `EBADF`. `F_GETLK` only reads, so it is exempt.
+pub fn file_fcntl_lock_fd(table: FdTable, fd: c_int, cmd: u64, lock: &mut UserFlock) -> i64 {
+    let snap = match snapshot(table, fd) {
+        Ok(s) => s,
+        Err(e) => return e.raw() as i64,
+    };
+    if matches!(cmd, F_SETLK | F_SETLKW) {
+        let need = match lock.l_type {
+            F_RDLCK => Some(OpenMode::READ),
+            F_WRLCK => Some(OpenMode::WRITE),
+            _ => None,
+        };
+        if let Some(need) = need
+            && !snap.status_flags().contains(need)
+        {
+            return Errno::EBADF.raw() as i64;
+        }
+    }
+    let key = lock_key(&snap);
+    let base = match lock.l_whence as u64 {
+        SEEK_SET => 0i64,
+        SEEK_CUR => snap.position() as i64,
+        SEEK_END => match snap.ops().size(snap.handle()) {
+            Some(size) => size as i64,
+            None => return Errno::EINVAL.raw() as i64,
+        },
+        _ => return Errno::EINVAL.raw() as i64,
+    };
+    drop(snap);
+
+    let Some(start) = base.checked_add(lock.l_start) else {
+        return Errno::EINVAL.raw() as i64;
+    };
+    // A negative length names the range ending at `start`, per POSIX.
+    let (start, end) = if lock.l_len == 0 {
+        (start, i64::MAX)
+    } else if lock.l_len > 0 {
+        match start.checked_add(lock.l_len) {
+            Some(end) => (start, end),
+            None => return Errno::EINVAL.raw() as i64,
+        }
+    } else {
+        match start.checked_add(lock.l_len) {
+            Some(begin) => (begin, start),
+            None => return Errno::EINVAL.raw() as i64,
+        }
+    };
+    if start < 0 || end <= start {
+        return Errno::EINVAL.raw() as i64;
+    }
+    let end = if end == i64::MAX {
+        u64::MAX
+    } else {
+        end as u64
+    };
+
+    match file_lock_record(key, table, cmd, start as u64, end, lock) {
+        Ok(()) => 0,
+        Err(e) => e.raw() as i64,
+    }
+}
+
 pub fn fileio_open_socket_fd(
     table: FdTable,
     socket_idx: u32,
@@ -991,6 +1471,7 @@ pub fn fileio_open_socket_fd(
         FdFlags::NONE,
         None,
         backing,
+        None,
     )
 }
 
@@ -1011,6 +1492,7 @@ pub fn fileio_open_fd_with_ops(
         fd_flags,
         None,
         backing,
+        None,
     )
 }
 
@@ -1116,7 +1598,12 @@ pub fn fileio_install_file_ref_at(
         ));
         displaced
     };
+    // Displacing a descriptor number is a close; see `dup_into`.
+    let key = displaced.as_ref().map(lock_key_of_entry);
     drop(displaced);
+    if let Some(key) = key {
+        super::flock::release_record_locks_on_close(table.handle(), key);
+    }
     target_fd
 }
 

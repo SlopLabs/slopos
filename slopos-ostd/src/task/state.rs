@@ -7,7 +7,7 @@
 //! # Layout (little-endian word, low bit first)
 //!
 //! ```text
-//! bits  0..4    TaskStatus    (4 bits, 5 variants)
+//! bits  0..4    TaskStatus    (4 bits, 7 variants)
 //! bits  4..12   BlockReason   (8 bits, 8 variants)
 //! bits 12..14   poll          (2 bits: armed, pending — see below)
 //! bits 14..16   poll_era      (2 bits, wrapping token generation)
@@ -531,11 +531,14 @@ const fn is_terminal(status: TaskStatus) -> bool {
 }
 
 /// A status in which a task can still be dispatched or woken.
+///
+/// `Stopped` counts: a stopped task holds no runqueue position, but a
+/// `SIGCONT` returns it to `Ready`.
 #[inline]
 const fn is_live(status: TaskStatus) -> bool {
     matches!(
         status,
-        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
+        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked | TaskStatus::Stopped
     )
 }
 

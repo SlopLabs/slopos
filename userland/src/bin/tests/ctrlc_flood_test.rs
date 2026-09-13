@@ -70,7 +70,7 @@ fn child_become_fg(slave_fd: i32) {
 
 fn reap_bounded(pid: u32) -> Option<i32> {
     for _ in 0..REAP_SPINS {
-        if let Some(code) = process::waitpid_nohang(pid) {
+        if let Some(code) = process::wait_exit_code_nohang(pid) {
             return Some(code);
         }
         sys_core::yield_now();

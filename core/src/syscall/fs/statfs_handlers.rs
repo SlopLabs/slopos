@@ -2,12 +2,12 @@ use slopos_abi::Errno;
 use slopos_abi::fs::{ST_RDONLY, UserStatfs};
 
 use slopos_fs::fileio::file_statfs_fd;
-use slopos_fs::vfs::{FsStats, MOUNT_RDONLY, vfs_statfs};
+use slopos_fs::vfs::{FsStats, MOUNT_RDONLY, vfs_statfs_at};
 
 use slopos_mm::user_copy::copy_to_user;
 
-use crate::syscall::args::{Fd, UserCStr, UserPtr};
-use crate::syscall::common::USER_PATH_MAX;
+use crate::syscall::args::{Fd, UserPath, UserPtr};
+use crate::syscall::fs::dirfd::with_cwd_base;
 
 /// Every field is written: the struct is copied out of this frame, so a field
 /// left alone is a field of kernel stack handed to userland.
@@ -32,20 +32,20 @@ fn statfs_encode(stats: &FsStats, mount_flags: u32) -> UserStatfs {
     }
 }
 
-/// Its own frame: the path walk stages a canonical path buffer, on top of the
-/// caller's `UserCStr<USER_PATH_MAX>`.
+/// Its own frame: the path walk stages a canonical path buffer on top of the
+/// caller's heap-staged `UserPath`.
 #[inline(never)]
-fn statfs_of_path(path: &[u8]) -> Result<UserStatfs, Errno> {
-    let (stats, mount_flags) = vfs_statfs(path).map_err(|e| e.to_errno())?;
+fn statfs_of_path(path: &[u8], cwd: &[u8]) -> Result<UserStatfs, Errno> {
+    let (stats, mount_flags) = vfs_statfs_at(path, cwd).map_err(|e| e.to_errno())?;
     Ok(statfs_encode(&stats, mount_flags))
 }
 
 define_syscall!(syscall_statfs
-    (ctx, path: UserCStr<USER_PATH_MAX>, out: UserPtr<UserStatfs>)
+    (ctx, path: UserPath, out: UserPtr<UserStatfs>)
     cap(NoneFd)
     -> Result<(), Errno>
 {
-    let stats = statfs_of_path(path.as_bytes())?;
+    let stats = with_cwd_base(ctx, |cwd| statfs_of_path(path.as_bytes(), cwd))?;
     copy_to_user(out.inner(), &stats).map_err(|_| Errno::EFAULT)?;
     Ok(())
 });

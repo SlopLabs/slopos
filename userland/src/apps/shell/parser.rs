@@ -106,10 +106,12 @@ pub fn normalize_path_with_cwd(input: &[u8], buffer: &mut [u8], cwd: &[u8]) -> i
     }
 
     if input[0] == b'/' {
-        let len = input.len().min(buffer.len().saturating_sub(1));
-        if len >= buffer.len() {
+        // Refusal, not truncation: a silently shortened path names a different
+        // file.
+        if input.len() >= buffer.len() {
             return -1;
         }
+        let len = input.len();
         buffer[..len].copy_from_slice(&input[..len]);
         let collapsed_len = collapse_absolute_path(buffer, len);
         buffer[collapsed_len] = 0;
@@ -117,7 +119,7 @@ pub fn normalize_path_with_cwd(input: &[u8], buffer: &mut [u8], cwd: &[u8]) -> i
     }
 
     let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(cwd.len());
-    let input_len = input.len().min(buffer.len());
+    let input_len = input.len();
 
     let needs_sep = cwd_len > 0 && cwd[cwd_len - 1] != b'/';
     let sep_len = if needs_sep { 1 } else { 0 };

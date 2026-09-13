@@ -29,22 +29,38 @@ pub fn get_time_ms() -> u64 {
     Sys::get_time_ms()
 }
 
+/// A `CLOCK_REALTIME` read fails while the kernel has no wall-clock anchor.
+#[inline(always)]
+pub fn clock_gettime_id(clock_id: u64, ts: &mut Timespec) -> i64 {
+    unsafe { syscall2(SYSCALL_CLOCK_GETTIME, clock_id, ts as *mut _ as u64) as i64 }
+}
+
 #[inline(always)]
 pub fn clock_gettime(ts: &mut Timespec) -> i64 {
-    unsafe { syscall2(SYSCALL_CLOCK_GETTIME, CLOCK_MONOTONIC, ts as *mut _ as u64) as i64 }
+    clock_gettime_id(CLOCK_MONOTONIC, ts)
+}
+
+#[inline(always)]
+pub fn realtime_secs() -> Option<i64> {
+    let mut ts = Timespec::default();
+    if clock_gettime_id(CLOCK_REALTIME, &mut ts) < 0 || ts.tv_sec <= 0 {
+        return None;
+    }
+    Some(ts.tv_sec)
+}
+
+#[inline(always)]
+pub fn uname(out: &mut UserUtsname) -> i64 {
+    unsafe { syscall1(SYSCALL_UNAME, out as *mut _ as u64) as i64 }
 }
 
 #[inline(always)]
 pub fn clock_gettime_ns() -> u64 {
-    let mut ts = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let rc = clock_gettime(&mut ts);
-    if rc < 0 {
+    let mut ts = Timespec::default();
+    if clock_gettime(&mut ts) < 0 || ts.tv_sec < 0 {
         return 0;
     }
-    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
 #[inline(always)]

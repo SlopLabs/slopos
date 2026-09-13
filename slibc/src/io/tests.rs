@@ -1,5 +1,16 @@
+use super::dirent::{DIRENT_NAME_OFFSET, DirentIter};
 use super::poll::{FdSet, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, Pollfd};
 use super::shim;
+use slopos_abi::fs::{DT_DIR, DT_REG};
+
+fn write_dirent(rec: &mut [u8], ino: u64, d_type: u8, name: &[u8]) {
+    rec.fill(0);
+    let reclen = rec.len() as u16;
+    rec[0..8].copy_from_slice(&ino.to_ne_bytes());
+    rec[16..18].copy_from_slice(&reclen.to_ne_bytes());
+    rec[18] = d_type;
+    rec[DIRENT_NAME_OFFSET..DIRENT_NAME_OFFSET + name.len()].copy_from_slice(name);
+}
 
 pub fn run_io_tests() -> (u32, u32) {
     let mut pass = 0u32;
@@ -112,9 +123,49 @@ pub fn run_io_tests() -> (u32, u32) {
     check!("umask_returns_0022", shim::umask(0) == 0o022);
 
     check!(
-        "chmod_returns_enosys",
-        shim::chmod_cstr(b"/tmp\0", 0o755) == -1
+        "chmod_nonexistent_fails",
+        shim::chmod_cstr(b"/nonexistent_path_xyz\0", 0o755) == -1
     );
+
+    check!("dirent_name_offset_24", DIRENT_NAME_OFFSET == 24);
+
+    // The newline in the first name is what a newline-joined listing could not
+    // represent.
+    check!("dirent_walker_two_padded_entries", {
+        let mut buf = [0u8; 64];
+        write_dirent(&mut buf[0..32], 11, DT_REG, b"a\nb");
+        write_dirent(&mut buf[32..64], 22, DT_DIR, b"file2");
+
+        let mut it = DirentIter::new(&buf);
+        let first = it.next();
+        let second = it.next();
+        let done = it.next();
+
+        match (first, second) {
+            (Some(a), Some(b)) => {
+                a.d_ino == 11
+                    && a.d_type == DT_REG
+                    && a.name == b"a\nb"
+                    && b.d_ino == 22
+                    && b.d_type == DT_DIR
+                    && b.name == b"file2"
+                    && done.is_none()
+            }
+            _ => false,
+        }
+    });
+
+    check!("dirent_walker_stops_on_zero_reclen", {
+        let buf = [0u8; 32];
+        DirentIter::new(&buf).next().is_none()
+    });
+
+    check!("dirent_walker_stops_on_overlong_reclen", {
+        let mut buf = [0u8; 32];
+        write_dirent(&mut buf, 1, DT_REG, b"x");
+        buf[16..18].copy_from_slice(&64u16.to_ne_bytes());
+        DirentIter::new(&buf).next().is_none()
+    });
 
     (pass, fail)
 }

@@ -239,8 +239,12 @@ fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
         Ok(u) => u,
         Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
     };
-    let mut buf = [0u8; slopos_abi::fs::USER_PATH_MAX];
-    let copied = match slopos_mm::user_copy::copy_bytes_from_user(user, &mut buf[..path_len]) {
+    // Heap, not a frame: `USER_PATH_MAX` is 4096 and the target builds with no
+    // stack probes, so an inline buffer this size steps over the guard page.
+    let Ok(mut buf) = slopos_ostd::mm::heap::KVec::<u8>::zeroed(path_len) else {
+        return Outcome::Inline(Errno::ENOMEM.raw());
+    };
+    let copied = match slopos_mm::user_copy::copy_bytes_from_user(user, &mut buf[..]) {
         Ok(n) => n,
         Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
     };

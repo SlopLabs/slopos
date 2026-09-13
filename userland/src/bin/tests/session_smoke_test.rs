@@ -53,7 +53,7 @@ fn spawns_concurrent_clients() -> bool {
             // A refused spawn would leave the population smaller than the peak
             // the gate records.
             for tid in children {
-                process::waitpid(tid as u32);
+                let _ = process::waitpid(tid as u32);
             }
             return false;
         }
@@ -63,8 +63,9 @@ fn spawns_concurrent_clients() -> bool {
     // same moment and the root's peak sees the sum.
     let mut reaped = 0usize;
     for tid in children {
-        process::waitpid(tid as u32);
-        reaped += 1;
+        if process::waitpid(tid as u32).is_some() {
+            reaped += 1;
+        }
     }
     reaped == CLIENTS
 }

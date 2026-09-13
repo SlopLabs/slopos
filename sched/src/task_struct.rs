@@ -3,9 +3,6 @@
 
 use core::mem::offset_of;
 
-use slopos_abi::signal::NSIG;
-use slopos_ostd::task::kernel_task::SignalActionCell;
-
 use crate::task_stack::{KernelStack, UnsafeStack};
 
 pub use slopos_abi::task::{
@@ -18,7 +15,8 @@ pub use slopos_abi::task::{
 pub use slopos_ostd::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 pub use slopos_ostd::task::fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT};
 pub use slopos_ostd::task::kernel_task::{
-    SignalAction, SwitchContext, TaskContext, TaskInner, fpu_reset_in_place,
+    SigHandTable, SignalAction, SignalActionCell, SwitchContext, TaskContext, TaskInner,
+    fpu_reset_in_place,
 };
 
 // Declared so `CurrentTask` and the PCR publisher agree on the monomorphisation
@@ -66,16 +64,9 @@ const _: () = {
 // budget a single-page allocation.
 const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 
-// The per-signal disposition table must have exactly one slot per signal:
-// callers bound at `NSIG` and index with `signum - 1`. Measuring the field's
-// real extent makes a resize without `NSIG` a build failure rather than an
-// out-of-range index. `signal_actions` and `switch_ctx` are adjacent and both
-// 8-aligned, so the delta is exact; if this fires after a field was inserted
-// between them, the razor needs a new neighbour, not a new tolerance.
-const _: () = {
-    let span = offset_of!(Task, switch_ctx) - offset_of!(Task, signal_actions);
-    assert!(span == NSIG * core::mem::size_of::<SignalActionCell>());
-};
+// No `signal_actions` span razor: the table is no longer a field of `Task`. It
+// lives behind a `KArc<SigHandTable>`, whose own `[SignalActionCell; NSIG]`
+// bounds the index beside the definition, where `NSIG` is in scope.
 
 // `abi: TaskAbi` must be field #0 so OSTD's `TASK_UNSAFE_STACK_SP_OFFSET`,
 // computed inside `TaskAbi`, matches the asm-readable offset of

@@ -49,12 +49,49 @@ pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;
 /// for a RAM root, whose successful `fsync` still loses the data at power-off.
 pub const BOOT_FLAG_ROOT_PERSISTENT: u32 = 1 << 5;
 
-/// POSIX-style timespec returned by `SYSCALL_CLOCK_GETTIME`.
+/// POSIX `struct timespec`. Signed, as Linux and every libc have it:
+/// `UTIME_OMIT` is a specific `tv_nsec` value and a pre-1970 `st_mtim` is
+/// legal.
 #[repr(C)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, PartialEq, Eq)]
 pub struct Timespec {
-    pub tv_sec: u64,
-    pub tv_nsec: u64,
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<Timespec>() == 16,
+    "Timespec must match the Linux x86-64 struct timespec"
+);
+
+/// `uname(2)` output. Linux x86-64 `struct utsname` field widths, minus
+/// `domainname`: there is no network identity to report.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct UserUtsname {
+    pub sysname: [u8; 65],
+    pub nodename: [u8; 65],
+    pub release: [u8; 65],
+    pub version: [u8; 65],
+    pub machine: [u8; 65],
+}
+
+impl UserUtsname {
+    pub const fn new() -> Self {
+        Self {
+            sysname: [0; 65],
+            nodename: [0; 65],
+            release: [0; 65],
+            version: [0; 65],
+            machine: [0; 65],
+        }
+    }
+}
+
+impl Default for UserUtsname {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Per-task entry returned by SYSCALL_PROCESS_LIST.

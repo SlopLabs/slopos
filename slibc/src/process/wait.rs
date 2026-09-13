@@ -10,6 +10,7 @@ pub const WAIT_STATUS_SIG_MASK: i32 = 0x7F;
 /// Options for `waitpid`.
 pub const WNOHANG: i32 = 1;
 pub const WUNTRACED: i32 = 2;
+pub const WCONTINUED: i32 = 8;
 
 /// True if the child terminated normally.
 #[inline]
@@ -46,4 +47,11 @@ pub const fn WIFSTOPPED(status: i32) -> bool {
 #[inline]
 pub const fn WSTOPSIG(status: i32) -> i32 {
     (status >> 8) & 0xFF
+}
+
+/// True if the child was resumed by `SIGCONT`. The encoding is the reserved
+/// `0xffff`, which no exit, signal or stop status can collide with.
+#[inline]
+pub const fn WIFCONTINUED(status: i32) -> bool {
+    status == 0xFFFF
 }

@@ -29,7 +29,7 @@ fn test_fork_exit_waitpid() -> bool {
     if pid <= 0 {
         return false;
     }
-    process::waitpid(pid as u32) == CHILD_EXIT_CODE
+    process::wait_exit_code(pid as u32) == CHILD_EXIT_CODE
 }
 
 fn test_pidfd_open() -> bool {

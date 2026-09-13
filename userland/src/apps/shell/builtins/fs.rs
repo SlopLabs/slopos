@@ -7,7 +7,7 @@ use core::result::Result::{Err, Ok};
 
 use std::env;
 use std::fs::{self as stdfs, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 
 use crate::syscall::fs as sys_fs;
 use crate::syscall::{POLLIN, UserPollFd};
@@ -287,7 +287,7 @@ pub fn cmd_cd(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    let mut resolved = [0u8; 256];
+    let mut resolved = buffers::path_scratch();
 
     if argc < 2 {
         resolved[0] = b'/';
@@ -331,19 +331,12 @@ pub fn cmd_cd(argc: i32, argv: &[&[u8]]) -> i32 {
     }
 
     let path_str = path_buf_to_str(&resolved);
-    let metadata = match stdfs::metadata(path_str) {
-        Ok(metadata) => metadata,
-        Err(_) => {
+    if let Err(e) = env::set_current_dir(path_str) {
+        if e.kind() == ErrorKind::NotADirectory {
+            shell_write_idx(b"cd: not a directory\n", COLOR_ERROR_RED);
+        } else {
             shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
-            return 1;
         }
-    };
-    if !metadata.is_dir() {
-        shell_write_idx(b"cd: not a directory\n", COLOR_ERROR_RED);
-        return 1;
-    }
-    if env::set_current_dir(path_str).is_err() {
-        shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -459,8 +452,8 @@ pub fn cmd_cp(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    let mut src_path = [0u8; 256];
-    let mut dst_path = [0u8; 256];
+    let mut src_path = buffers::path_scratch();
+    let mut dst_path = buffers::path_scratch();
 
     if normalize_path(argv[1], &mut src_path) != 0 {
         shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
@@ -516,8 +509,8 @@ pub fn cmd_mv(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    let mut src_path = [0u8; 256];
-    let mut dst_path = [0u8; 256];
+    let mut src_path = buffers::path_scratch();
+    let mut dst_path = buffers::path_scratch();
 
     if normalize_path(argv[1], &mut src_path) != 0 {
         shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
@@ -1013,8 +1006,8 @@ pub fn cmd_diff(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    let mut path1 = [0u8; 256];
-    let mut path2 = [0u8; 256];
+    let mut path1 = buffers::path_scratch();
+    let mut path2 = buffers::path_scratch();
 
     if normalize_path(argv[1], &mut path1) != 0 {
         shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);

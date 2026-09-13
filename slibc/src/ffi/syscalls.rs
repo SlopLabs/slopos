@@ -1,5 +1,48 @@
+use crate::errno::EFAULT;
 use crate::pal::Pal;
 use crate::pal::Sys;
+use slopos_abi::fs::{AT_FDCWD, AT_SYMLINK_NOFOLLOW, UserIovec};
+use slopos_abi::spawn::SpawnAttrs;
+use slopos_abi::syscall::{Timespec, UserUtsname};
+
+/// Pins the originals of the layout asserts in `slibc/std_pal/**`, which is
+/// compiled into `std` and so cannot depend on `slopos-abi`.
+mod std_pal_layout_pins {
+    use core::mem::{offset_of, size_of};
+    use slopos_abi::fs::{UserDirent64, UserFsStat, UserIovec};
+    use slopos_abi::signal::UserSiginfo;
+    use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
+    use slopos_abi::syscall::{Timespec, UserUtsname};
+
+    // slibc/std_pal/fs/slopos.rs: `SloposStat`, `Timespec`
+    const _: () = assert!(size_of::<Timespec>() == 16);
+    const _: () = assert!(size_of::<UserFsStat>() == 144);
+    const _: () = assert!(offset_of!(UserFsStat, st_mode) == 24);
+    const _: () = assert!(offset_of!(UserFsStat, st_size) == 48);
+    const _: () = assert!(offset_of!(UserFsStat, st_atim) == 72);
+    const _: () = assert!(offset_of!(UserFsStat, st_mtim) == 88);
+    const _: () = assert!(offset_of!(UserFsStat, st_ctim) == 104);
+
+    // slibc/std_pal/fs/slopos.rs: `DIRENT_NAME_OFFSET`
+    const _: () = assert!(size_of::<UserDirent64>() == 24);
+
+    // slibc/std_pal/fd/slopos.rs: `Iovec`
+    const _: () = assert!(size_of::<UserIovec>() == 16);
+
+    // slibc/std_pal/process/slopos.rs: `SpawnFdAction`, `SpawnAttrs`
+    const _: () = assert!(size_of::<SpawnFdAction>() == 40);
+    const _: () = assert!(size_of::<SpawnAttrs>() == 64);
+    const _: () = assert!(offset_of!(SpawnAttrs, flags) == 4);
+    const _: () = assert!(offset_of!(SpawnAttrs, envp_ptr) == 32);
+    const _: () = assert!(offset_of!(SpawnAttrs, cwd_ptr) == 48);
+
+    // slibc/std_pal/net/hostname_slopos.rs: `UTS_FIELD_LEN * UTS_FIELDS`
+    const _: () = assert!(size_of::<UserUtsname>() == 325);
+    const _: () = assert!(offset_of!(UserUtsname, nodename) == 65);
+
+    // slibc/std_pal/pal/slopos/stack_overflow.rs: `SI_ADDR_OFFSET`
+    const _: () = assert!(offset_of!(UserSiginfo, si_addr) == 24);
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
@@ -9,63 +52,47 @@ pub unsafe extern "C" fn slopos_lseek(fd: i32, offset: i64, whence: i32) -> i64 
     }
 }
 
-#[repr(C)]
-pub struct SloposStat {
-    pub st_mode: u32,
-    pub st_size: u64,
-    pub st_atime: i64,
-    pub st_mtime: i64,
-    pub st_ctime: i64,
-}
+pub use slopos_abi::fs::UserFsStat as SloposStat;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_fstat(fd: i32, stat_buf: *mut SloposStat) -> i32 {
-    let mut raw = [0u8; 256];
-    match Sys::fstat(fd, raw.as_mut_ptr()) {
-        Ok(()) => {
-            if !stat_buf.is_null() {
-                let kernel_type = raw[0];
-                let posix_mode = match kernel_type {
-                    1 => 0o040755u32,
-                    _ => 0o100644u32,
-                };
-                let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as u64;
-                unsafe {
-                    (*stat_buf).st_mode = posix_mode;
-                    (*stat_buf).st_size = size;
-                    (*stat_buf).st_atime = 0;
-                    (*stat_buf).st_mtime = 0;
-                    (*stat_buf).st_ctime = 0;
-                }
-            }
-            0
-        }
+    if stat_buf.is_null() {
+        return -EFAULT.raw();
+    }
+    match Sys::fstat(fd, stat_buf as *mut u8) {
+        Ok(()) => 0,
         Err(e) => -(e.raw()),
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_stat(path: *const u8, stat_buf: *mut SloposStat) -> i32 {
-    let mut raw = [0u8; 256];
-    match Sys::stat(path, raw.as_mut_ptr()) {
-        Ok(()) => {
-            if !stat_buf.is_null() {
-                let kernel_type = raw[0];
-                let posix_mode = match kernel_type {
-                    1 => 0o040755u32,
-                    _ => 0o100644u32,
-                };
-                let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as u64;
-                unsafe {
-                    (*stat_buf).st_mode = posix_mode;
-                    (*stat_buf).st_size = size;
-                    (*stat_buf).st_atime = 0;
-                    (*stat_buf).st_mtime = 0;
-                    (*stat_buf).st_ctime = 0;
-                }
-            }
-            0
-        }
+    if stat_buf.is_null() {
+        return -EFAULT.raw();
+    }
+    match Sys::stat(path, stat_buf as *mut u8) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_lstat(path: *const u8, stat_buf: *mut SloposStat) -> i32 {
+    unsafe { slopos_fstatat(AT_FDCWD, path, stat_buf, AT_SYMLINK_NOFOLLOW) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_fstatat(
+    dirfd: i32,
+    path: *const u8,
+    stat_buf: *mut SloposStat,
+    flags: u32,
+) -> i32 {
+    if stat_buf.is_null() {
+        return -EFAULT.raw();
+    }
+    match Sys::fstatat(dirfd, path, stat_buf, flags) {
+        Ok(()) => 0,
         Err(e) => -(e.raw()),
     }
 }
@@ -159,13 +186,21 @@ pub unsafe extern "C" fn slopos_kill(pid: i32, sig: i32) -> i32 {
     }
 }
 
+/// `timeout_ns` of `u64::MAX` blocks indefinitely.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_futex_wait(
     addr: *const u32,
     expected: u32,
-    timeout_ms: u64,
+    timeout_ns: u64,
 ) -> i32 {
-    match Sys::futex_wait(addr, expected, timeout_ms) {
+    let ts;
+    let timeout = if timeout_ns == u64::MAX {
+        core::ptr::null()
+    } else {
+        ts = crate::time::timespec_from_nanos(timeout_ns);
+        &raw const ts
+    };
+    match Sys::futex_wait(addr, expected, timeout) {
         Ok(()) => 0,
         Err(e) => -(e.raw()),
     }
@@ -432,6 +467,310 @@ pub unsafe extern "C" fn slopos_ioctl(fd: i32, request: u64, arg: u64) -> i32 {
 pub unsafe extern "C" fn slopos_fcntl(fd: i32, cmd: i32, arg: u64) -> i32 {
     match Sys::fcntl(fd, cmd, arg) {
         Ok(n) => n,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_rmdir(path: *const u8) -> i32 {
+    match Sys::rmdir(path) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_symlink(target: *const u8, link_path: *const u8) -> i32 {
+    match Sys::symlink(target, link_path) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+/// Answers the byte count and never NUL-terminates, per POSIX.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_readlink(path: *const u8, buf: *mut u8, buf_len: usize) -> isize {
+    match Sys::readlink(path, buf, buf_len) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_link(old: *const u8, new: *const u8) -> i32 {
+    match Sys::link(old, new) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_truncate(path: *const u8, length: u64) -> i32 {
+    match Sys::truncate(path, length) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_ftruncate(fd: i32, length: u64) -> i32 {
+    match Sys::ftruncate(fd, length) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_chmod(path: *const u8, mode: u32) -> i32 {
+    match Sys::chmod(path, mode) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_fchmod(fd: i32, mode: u32) -> i32 {
+    match Sys::fchmod(fd, mode) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_fchmodat(
+    dirfd: i32,
+    path: *const u8,
+    mode: u32,
+    flags: u32,
+) -> i32 {
+    match Sys::fchmodat(dirfd, path, mode, flags) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_access(path: *const u8, mode: u32) -> i32 {
+    match Sys::access(path, mode) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_flock(fd: i32, operation: u32) -> i32 {
+    match Sys::flock(fd, operation) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> i32 {
+    match Sys::openat(dirfd, path, flags, mode) {
+        Ok(fd) => fd,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_mkdirat(dirfd: i32, path: *const u8, mode: u32) -> i32 {
+    match Sys::mkdirat(dirfd, path, mode) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_unlinkat(dirfd: i32, path: *const u8, flags: u32) -> i32 {
+    match Sys::unlinkat(dirfd, path, flags) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_renameat(
+    olddirfd: i32,
+    old: *const u8,
+    newdirfd: i32,
+    new: *const u8,
+) -> i32 {
+    match Sys::renameat(olddirfd, old, newdirfd, new) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_readlinkat(
+    dirfd: i32,
+    path: *const u8,
+    buf: *mut u8,
+    buf_len: usize,
+) -> isize {
+    match Sys::readlinkat(dirfd, path, buf, buf_len) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_symlinkat(
+    target: *const u8,
+    newdirfd: i32,
+    link_path: *const u8,
+) -> i32 {
+    match Sys::symlinkat(target, newdirfd, link_path) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_linkat(
+    olddirfd: i32,
+    old: *const u8,
+    newdirfd: i32,
+    new: *const u8,
+    flags: u32,
+) -> i32 {
+    match Sys::linkat(olddirfd, old, newdirfd, new, flags) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_faccessat(
+    dirfd: i32,
+    path: *const u8,
+    mode: u32,
+    flags: u32,
+) -> i32 {
+    match Sys::faccessat(dirfd, path, mode, flags) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+/// `times` is `[atime, mtime]`; a null pointer sets both to now.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_utimensat(
+    dirfd: i32,
+    path: *const u8,
+    times: *const Timespec,
+    flags: u32,
+) -> i32 {
+    match Sys::utimensat(dirfd, path, times as *const [Timespec; 2], flags) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+/// Packed `UserDirent64` records; 0 means the directory is exhausted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_getdents64(fd: i32, buf: *mut u8, buf_len: usize) -> isize {
+    match Sys::getdents64(fd, buf, buf_len) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_pread(fd: i32, buf: *mut u8, count: usize, offset: i64) -> isize {
+    match Sys::pread64(fd, buf, count, offset) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_pwrite(
+    fd: i32,
+    buf: *const u8,
+    count: usize,
+    offset: i64,
+) -> isize {
+    match Sys::pwrite64(fd, buf, count, offset) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_readv(fd: i32, iov: *const UserIovec, iovcnt: i32) -> isize {
+    match Sys::readv(fd, iov, iovcnt) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_writev(fd: i32, iov: *const UserIovec, iovcnt: i32) -> isize {
+    match Sys::writev(fd, iov, iovcnt) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_uname(out: *mut UserUtsname) -> i32 {
+    if out.is_null() {
+        return -EFAULT.raw();
+    }
+    match Sys::uname(out) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_clock_settime(clk_id: u64, sec: i64, nsec: i64) -> i32 {
+    let ts = Timespec {
+        tv_sec: sec,
+        tv_nsec: nsec,
+    };
+    match Sys::clock_settime(clk_id, &raw const ts) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+/// A short fill is legal; a caller wanting a full buffer loops.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_getrandom(buf: *mut u8, len: usize, flags: u32) -> isize {
+    match Sys::getrandom(buf, len, flags) {
+        Ok(n) => n as isize,
+        Err(e) => -(e.raw() as isize),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn slopos_gettid() -> i32 {
+    Sys::gettid()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
+    match Sys::waitpid(pid, status, options) {
+        Ok(reaped) => reaped,
+        Err(e) => -(e.raw()),
+    }
+}
+
+/// Nothing runs in the child between fork and exec, so a lock held by a
+/// sibling of the spawning thread cannot deadlock it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_spawn_path(
+    path: *const u8,
+    path_len: usize,
+    argv: *const *const u8,
+    argc: u32,
+    attrs: *const SpawnAttrs,
+) -> i32 {
+    match Sys::spawn_path(path, path_len, argv, argc, attrs) {
+        Ok(tid) => tid,
         Err(e) => -(e.raw()),
     }
 }

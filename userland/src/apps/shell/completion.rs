@@ -1,12 +1,13 @@
 use std::fs;
 
 use crate::program_registry;
+use slopos_abi::fs::USER_NAME_MAX;
 
 use super::builtins::BUILTINS;
 use super::parser::is_space;
 
 pub struct CompletionResult {
-    pub insertion: [u8; 128],
+    pub insertion: [u8; USER_NAME_MAX + 1],
     pub insertion_len: usize,
     pub show_matches: bool,
     pub matches_buf: [u8; 512],
@@ -16,7 +17,7 @@ pub struct CompletionResult {
 impl CompletionResult {
     fn empty() -> Self {
         Self {
-            insertion: [0; 128],
+            insertion: [0; USER_NAME_MAX + 1],
             insertion_len: 0,
             show_matches: false,
             matches_buf: [0; 512],
@@ -258,7 +259,7 @@ fn complete_path(
         (prefix, prefix_len)
     };
 
-    let mut dir_buf = [0u8; 256];
+    let mut dir_buf = super::buffers::path_scratch();
     let dir_len = build_dir_path(prefix, prefix_len, last_slash, cwd, &mut dir_buf);
     if dir_len == 0 {
         return;
@@ -378,17 +379,20 @@ fn build_dir_path(
     _prefix_len: usize,
     last_slash: Option<usize>,
     cwd: &[u8],
-    dir_buf: &mut [u8; 256],
+    dir_buf: &mut [u8],
 ) -> usize {
     let cwd_len = cwd_strlen(cwd);
 
     if let Some(slash_pos) = last_slash {
         if prefix[0] == b'/' {
-            let len = (slash_pos + 1).min(255);
+            let len = slash_pos + 1;
+            if len >= dir_buf.len() {
+                return 0;
+            }
             dir_buf[..len].copy_from_slice(&prefix[..len]);
             return len;
         }
-        if cwd_len + slash_pos + 2 >= 255 {
+        if cwd_len + slash_pos + 2 >= dir_buf.len() {
             return 0;
         }
         dir_buf[..cwd_len].copy_from_slice(&cwd[..cwd_len]);
@@ -402,9 +406,11 @@ fn build_dir_path(
         return pos + path_part;
     }
 
-    let len = cwd_len.min(255);
-    dir_buf[..len].copy_from_slice(&cwd[..len]);
-    len
+    if cwd_len >= dir_buf.len() {
+        return 0;
+    }
+    dir_buf[..cwd_len].copy_from_slice(&cwd[..cwd_len]);
+    cwd_len
 }
 
 struct PathMatch {

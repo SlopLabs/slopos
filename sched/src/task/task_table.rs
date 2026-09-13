@@ -733,6 +733,15 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     };
     let value = KArc::get_mut(&mut task).expect("fresh task allocation must be unique");
     value.task_id = id;
+    // Every registered task owns a disposition table: a `None` would make a
+    // signal silently undeliverable rather than defaulted.
+    match slopos_ostd::task::SigHandTable::try_new_default() {
+        Ok(table) => value.set_sighand(table),
+        Err(_) => {
+            with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
+            return Err(TaskAllocError::NoFreeSlot);
+        }
+    }
     let _ = value.set_status(TaskStatus::Blocked);
     Ok(PendingTask {
         task: Some(task),
@@ -798,6 +807,24 @@ pub fn task_live_cap_rejects_for_test() -> bool {
         unchanged
     });
     matches!(result, Err(TaskAllocError::MaxTasks)) && unchanged
+}
+
+/// Whether `task_clone_from` releases the disposition table the slot already
+/// owns before the bytewise copy overwrites the field.
+///
+/// The leak leaves no live reference behind to observe, so the check is on the
+/// strong count of a handle held here.
+#[cfg(feature = "test-hooks")]
+pub fn task_clone_from_releases_slot_sighand_for_test(parent_id: u32) -> Option<bool> {
+    let parent = task_find_by_id(parent_id)?;
+    let mut pending = allocate_task().ok()?;
+    let child = pending.as_mut();
+    let table = child.sighand_handle()?;
+    if KArc::strong_count(&table) != 2 {
+        return Some(false);
+    }
+    super::task_ops::task_clone_from(child, &parent);
+    Some(KArc::strong_count(&table) == 1)
 }
 
 pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {

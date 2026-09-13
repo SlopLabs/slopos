@@ -5,15 +5,47 @@ use core::ptr;
 use crate::errno;
 use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
+use slopos_abi::PAGE_SIZE;
 use slopos_abi::syscall::{
     CLONE_CHILD_CLEARTID, CLONE_FILES, CLONE_FS, CLONE_PARENT_SETTID, CLONE_SETTLS, CLONE_SIGHAND,
-    CLONE_THREAD, CLONE_VM, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE,
+    CLONE_THREAD, CLONE_VM, MAP_ANONYMOUS, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
 };
 
 use super::keys::run_key_destructors;
 use super::tcb::Tcb;
 use super::tls::tls_init_new_thread;
 use super::{DEFAULT_STACK_SIZE, pthread_attr_t, pthread_t};
+
+/// Unmapped page at the low end of every thread stack. Without it a stack
+/// overflow silently writes into whatever the allocator put below.
+pub const THREAD_STACK_GUARD_SIZE: usize = PAGE_SIZE as usize;
+
+/// Answers 0 for a thread whose stack this library did not allocate — the
+/// initial thread runs on the kernel's stack.
+///
+/// # Safety
+/// `lo` and `hi` must each be null or point to a writable `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_thread_stack_guard(lo: *mut u64, hi: *mut u64) -> i32 {
+    let (guard_lo, guard_hi) = if super::tls::tls_is_initialized() {
+        let tcb = Tcb::current();
+        if tcb.is_null() || (*tcb).stack_base.is_null() {
+            (0u64, 0u64)
+        } else {
+            let base = (*tcb).stack_base as u64;
+            (base, base + THREAD_STACK_GUARD_SIZE as u64)
+        }
+    } else {
+        (0, 0)
+    };
+    if !lo.is_null() {
+        *lo = guard_lo;
+    }
+    if !hi.is_null() {
+        *hi = guard_hi;
+    }
+    if guard_hi == 0 { -1 } else { 0 }
+}
 
 const CLONE_THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_FS
@@ -35,7 +67,7 @@ unsafe extern "C" fn thread_trampoline(tcb_raw: *mut u8) -> ! {
     (*tcb).retval = ret;
 
     run_key_destructors(tcb);
-    crate::process::_exit(0)
+    Sys::exit(0)
 }
 
 /// x86_64 clone wrapper handling parent/child fork in assembly.
@@ -102,9 +134,12 @@ pub unsafe extern "C" fn pthread_create(
         (*attr).detach_state == super::PTHREAD_CREATE_DETACHED
     };
 
+    // The guard page is part of the mapping, and `stack_size` in the TCB is the
+    // whole mapping, so the teardown `munmap` still covers it.
+    let mapped_size = stack_size + THREAD_STACK_GUARD_SIZE;
     let stack_base = match Sys::mmap(
         ptr::null_mut(),
-        stack_size,
+        mapped_size,
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1,
@@ -117,24 +152,30 @@ pub unsafe extern "C" fn pthread_create(
         }
     };
 
+    if let Err(e) = Sys::mprotect(stack_base, THREAD_STACK_GUARD_SIZE, PROT_NONE) {
+        let _ = Sys::munmap(stack_base, mapped_size);
+        errno::errno_set(e.raw());
+        return e.raw();
+    }
+
     // A full block (TLS image + TCB) is what leaves the new thread's `.tbss`
     // thread-locals zero-initialized.
     let (tls_base, tcb_ptr) = super::tls::alloc_thread_tls();
     if tcb_ptr.is_null() {
-        let _ = Sys::munmap(stack_base, stack_size);
+        let _ = Sys::munmap(stack_base, mapped_size);
         return crate::errno::ENOMEM.raw();
     }
 
     // `alloc_thread_tls` already zeroed the TCB.
     (*tcb_ptr).self_ptr = tcb_ptr;
     (*tcb_ptr).stack_base = stack_base;
-    (*tcb_ptr).stack_size = stack_size;
+    (*tcb_ptr).stack_size = mapped_size;
     (*tcb_ptr).start_fn = start as usize;
     (*tcb_ptr).start_arg = arg;
     (*tcb_ptr).detached = detach;
     (*tcb_ptr).child_tid = -1;
 
-    let stack_top = stack_base.add(stack_size);
+    let stack_top = stack_base.add(mapped_size);
 
     let ret = raw_clone(
         CLONE_THREAD_FLAGS,
@@ -149,7 +190,7 @@ pub unsafe extern "C" fn pthread_create(
     if ret < 0 {
         let err = (-ret) as i32;
         malloc::dealloc(tls_base as *mut c_void);
-        let _ = Sys::munmap(stack_base, stack_size);
+        let _ = Sys::munmap(stack_base, mapped_size);
         errno::errno_set(err);
         return err;
     }

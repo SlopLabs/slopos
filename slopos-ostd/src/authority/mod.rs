@@ -86,6 +86,13 @@ pub enum Capability {
     /// Deletion condition: dies with per-namespace mounts on a descriptor for
     /// the directory covered.
     Mount,
+
+    /// Setting the wall clock. One global anchor that every filesystem
+    /// timestamp hangs off, so moving it backwards makes a build system's
+    /// mtime comparisons lie. Not `Power`: it reaches no power primitive.
+    /// Deletion condition: dies when the clock is an ioctl on a `/dev/rtc`
+    /// descriptor delegated to init.
+    Clock,
 }
 
 impl Capability {
@@ -110,6 +117,7 @@ impl Capability {
             Self::Fate => 1 << 9,
             Self::TestHarness => 1 << 10,
             Self::Mount => 1 << 11,
+            Self::Clock => 1 << 12,
         }
     }
 
@@ -140,6 +148,7 @@ impl Capability {
             Self::Fate => "Fate",
             Self::TestHarness => "TestHarness",
             Self::Mount => "Mount",
+            Self::Clock => "Clock",
         }
     }
 
@@ -162,6 +171,7 @@ impl Capability {
         Self::Fate,
         Self::TestHarness,
         Self::Mount,
+        Self::Clock,
     ];
 }
 
@@ -470,10 +480,19 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
         mask |= Capability::Mount.bit();
     }
     if flags & TASK_FLAG_SYSTEM != 0 {
-        mask |= Capability::ProcSignal.bit() | Capability::TestHarness.bit();
+        // No `TASK_FLAG_CLOCK` exists to grant on a program identity: the wall
+        // clock is one global anchor, so init is the only principal that sets
+        // it.
+        mask |=
+            Capability::ProcSignal.bit() | Capability::TestHarness.bit() | Capability::Clock.bit();
     }
     mask
 }
+
+const _: () = assert!(
+    caps_from_task_flags(u16::MAX) == CAP_MASK_ALL,
+    "a gated capability that no task flag confers is unreachable",
+);
 
 #[cfg(test)]
 mod tests {

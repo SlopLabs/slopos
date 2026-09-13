@@ -27,6 +27,53 @@ pub enum FileType {
     Socket = 7,
 }
 
+impl FileType {
+    /// The `S_IFMT` field of a POSIX `st_mode`.
+    pub const fn to_s_ifmt(self) -> u32 {
+        use slopos_abi::fs::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK};
+        match self {
+            Self::Regular => S_IFREG,
+            Self::Directory => S_IFDIR,
+            Self::CharDevice => S_IFCHR,
+            Self::BlockDevice => S_IFBLK,
+            Self::Symlink => S_IFLNK,
+            Self::Pipe => S_IFIFO,
+            Self::Socket => S_IFSOCK,
+        }
+    }
+
+    /// The listing ABI's own type byte. Not `self as u8`: the two numberings
+    /// disagree.
+    pub const fn to_fs_type(self) -> u8 {
+        use slopos_abi::fs::{
+            FS_TYPE_BLOCKDEV, FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK,
+            FS_TYPE_UNKNOWN,
+        };
+        match self {
+            Self::Regular => FS_TYPE_FILE,
+            Self::Directory => FS_TYPE_DIRECTORY,
+            Self::CharDevice => FS_TYPE_CHARDEV,
+            Self::BlockDevice => FS_TYPE_BLOCKDEV,
+            Self::Symlink => FS_TYPE_SYMLINK,
+            Self::Pipe | Self::Socket => FS_TYPE_UNKNOWN,
+        }
+    }
+
+    /// `getdents64`'s `d_type`.
+    pub const fn to_dt(self) -> u8 {
+        use slopos_abi::fs::{DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK};
+        match self {
+            Self::Regular => DT_REG,
+            Self::Directory => DT_DIR,
+            Self::CharDevice => DT_CHR,
+            Self::BlockDevice => DT_BLK,
+            Self::Symlink => DT_LNK,
+            Self::Pipe => DT_FIFO,
+            Self::Socket => DT_SOCK,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileStat {
     pub inode: InodeId,
@@ -50,6 +97,35 @@ pub struct FileStat {
 }
 
 impl FileStat {
+    /// The single producer of a [`UserFsStat`] from a [`FileStat`]: a second
+    /// mapping of the type bits once reported a regular file as a directory.
+    ///
+    /// [`UserFsStat`]: slopos_abi::fs::UserFsStat
+    pub fn fill_user_stat(&self, out: &mut slopos_abi::fs::UserFsStat) {
+        use slopos_abi::syscall::types::Timespec;
+
+        let secs = |s: u64| Timespec {
+            tv_sec: i64::try_from(s).unwrap_or(i64::MAX),
+            tv_nsec: 0,
+        };
+
+        out.st_dev = 0;
+        out.st_ino = self.inode;
+        out.st_nlink = u64::from(self.nlink);
+        out.st_mode = self.file_type.to_s_ifmt() | u32::from(self.mode & 0o7777);
+        out.st_uid = 0;
+        out.st_gid = 0;
+        out._pad0 = 0;
+        out.st_rdev = (u64::from(self.dev_major) << 8) | u64::from(self.dev_minor);
+        out.st_size = i64::try_from(self.size).unwrap_or(i64::MAX);
+        out.st_blksize = 4096;
+        out.st_blocks = i64::try_from(self.size.div_ceil(512)).unwrap_or(i64::MAX);
+        out.st_atim = secs(self.atime);
+        out.st_mtim = secs(self.mtime);
+        out.st_ctim = secs(self.ctime);
+        out._reserved = [0; 3];
+    }
+
     pub const fn new_file(inode: InodeId, size: u64) -> Self {
         Self {
             inode,
@@ -164,7 +240,11 @@ pub enum VfsError {
     NotEmpty,
     CrossDevice,
     NotSupported,
+    /// A hard-link count that cannot grow. `EMLINK`.
     TooManyLinks,
+    /// Resolution hit the symlink budget. `ELOOP`, never to be confused with
+    /// [`TooManyLinks`](Self::TooManyLinks)'s `EMLINK`.
+    TooManySymlinks,
     NameTooLong,
     InvalidArgument,
     BadFileDescriptor,
@@ -188,9 +268,10 @@ impl VfsError {
             Self::InvalidPath => Errno::EINVAL,
             Self::AlreadyExists => Errno::EEXIST,
             Self::NotEmpty => Errno::ENOTEMPTY,
-            Self::CrossDevice => Errno::EINVAL,
+            Self::CrossDevice => Errno::EXDEV,
             Self::NotSupported => Errno::EOPNOTSUPP,
-            Self::TooManyLinks => Errno::EINVAL,
+            Self::TooManyLinks => Errno::EMLINK,
+            Self::TooManySymlinks => Errno::ELOOP,
             Self::NameTooLong => Errno::ENAMETOOLONG,
             Self::InvalidArgument => Errno::EINVAL,
             Self::BadFileDescriptor => Errno::EBADF,
@@ -380,6 +461,23 @@ pub trait FileSystem: Send + Sync {
 
     fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
         let _ = (parent, name, target);
+        Err(VfsError::NotSupported)
+    }
+
+    /// A second directory entry for an existing inode. The resolver has
+    /// already refused a directory and a cross-mount pair.
+    fn link(&self, parent: InodeId, name: &[u8], target: InodeId) -> VfsResult<()> {
+        let _ = (parent, name, target);
+        Err(VfsError::NotSupported)
+    }
+
+    /// Set an inode's times in whole seconds since the epoch; `None` leaves a
+    /// field alone, which is `UTIME_OMIT`.
+    ///
+    /// Refuses rather than no-opping: a build system that cannot set an mtime
+    /// must find out.
+    fn set_times(&self, inode: InodeId, atime: Option<u64>, mtime: Option<u64>) -> VfsResult<()> {
+        let _ = (inode, atime, mtime);
         Err(VfsError::NotSupported)
     }
 

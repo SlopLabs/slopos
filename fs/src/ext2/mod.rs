@@ -1243,6 +1243,107 @@ impl<'a> Ext2Fs<'a> {
         })
     }
 
+    /// Write access and modification times through, in whole seconds. `None`
+    /// leaves a field alone, which is `UTIME_OMIT`.
+    #[inline(never)]
+    pub fn set_times(
+        &mut self,
+        ino: u32,
+        atime: Option<u64>,
+        mtime: Option<u64>,
+    ) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            if inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            if let Some(atime) = atime {
+                inode.atime = u32::try_from(atime).map_err(|_| Ext2Error::InvalidRange)?;
+            }
+            if let Some(mtime) = mtime {
+                inode.mtime = u32::try_from(mtime).map_err(|_| Ext2Error::InvalidRange)?;
+            }
+            time::stamp(&mut inode.ctime);
+            fs.write_inode_num(ino_num, &inode)
+        })
+    }
+
+    /// A second directory entry under `parent` for the existing inode
+    /// `target`. Refuses a directory: `..` cannot describe a graph.
+    #[inline(never)]
+    pub fn link_entry(&mut self, parent: u32, name: &[u8], target: u32) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            if name.is_empty() || name.len() > 255 {
+                return Err(Ext2Error::NameTooLong);
+            }
+            if name == b"." || name == b".." {
+                return Err(Ext2Error::AlreadyExists);
+            }
+            let parent_num = InodeNum(parent);
+            let target_num = InodeNum(target);
+
+            let mut target_inode = fs.read_inode_num(target_num)?;
+            if target_inode.is_directory() {
+                return Err(Ext2Error::IsDirectory);
+            }
+            if target_inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            if target_inode.links_count == u16::MAX {
+                return Err(Ext2Error::TooManyLinks);
+            }
+
+            let mut parent_inode = fs.read_inode_num(parent_num)?;
+            if !parent_inode.is_directory() {
+                return Err(Ext2Error::NotDirectory);
+            }
+            if parent_inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            if dir::lookup_child(
+                &parent_inode,
+                name,
+                &mut *fs.cache,
+                fs.device,
+                fs.ptrs_per_block,
+                fs.block_size,
+                BlockOwner::File(parent_num.raw()),
+            )
+            .is_ok()
+            {
+                return Err(Ext2Error::AlreadyExists);
+            }
+
+            let ft = dir_file_type(&target_inode);
+            dir::append_dir_entry(
+                &mut parent_inode,
+                target_num,
+                name,
+                ft,
+                &mut *fs.cache,
+                fs.device,
+                fs.ptrs_per_block,
+                fs.block_size,
+                &mut fs.superblock,
+                &fs.geom,
+                BlockOwner::File(parent_num.raw()),
+            )?;
+
+            target_inode.links_count += 1;
+            time::stamp(&mut target_inode.ctime);
+            fs.write_inode_num(target_num, &target_inode)?;
+
+            time::stamp(&mut parent_inode.mtime);
+            time::stamp(&mut parent_inode.ctime);
+            fs.write_inode_num(parent_num, &parent_inode)?;
+            fs.superblock_dirty = true;
+            Ok(())
+        })
+    }
+
     /// Seal an inode with `EXT2_IMMUTABLE_FL`. One-way, as the VFS trait
     /// requires: nothing in this implementation clears the bit.
     #[inline(never)]

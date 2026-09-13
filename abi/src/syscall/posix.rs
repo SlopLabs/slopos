@@ -1,8 +1,15 @@
 /// Monotonic clock — nanoseconds since boot, never adjusted.
 pub const CLOCK_MONOTONIC: u64 = 0;
 
-/// Realtime clock — currently aliases [`CLOCK_MONOTONIC`] (no RTC source yet).
+/// Realtime clock — the wall clock anchored at boot from the RTC, adjustable
+/// through `clock_settime`.
 pub const CLOCK_REALTIME: u64 = 1;
+
+/// CPU time consumed by the caller's whole thread group.
+pub const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+
+/// CPU time consumed by the calling task alone.
+pub const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 
 /// Socket option level: generic socket options.
 pub const SOL_SOCKET: i32 = 1;
@@ -98,7 +105,21 @@ pub const F_GETFD: u64 = 1;
 pub const F_SETFD: u64 = 2;
 pub const F_GETFL: u64 = 3;
 pub const F_SETFL: u64 = 4;
+/// Record-lock commands. `l_type` takes [`F_RDLCK`]/[`F_WRLCK`]/[`F_UNLCK`].
+pub const F_GETLK: u64 = 5;
+pub const F_SETLK: u64 = 6;
+pub const F_SETLKW: u64 = 7;
 pub const FD_CLOEXEC: u64 = 1;
+
+pub const F_RDLCK: i16 = 0;
+pub const F_WRLCK: i16 = 1;
+pub const F_UNLCK: i16 = 2;
+
+/// `flock(2)` operations.
+pub const LOCK_SH: u64 = 1;
+pub const LOCK_EX: u64 = 2;
+pub const LOCK_NB: u64 = 4;
+pub const LOCK_UN: u64 = 8;
 
 pub const O_NONBLOCK: u64 = 0x800;
 pub const O_NOCTTY: u64 = 0x100;
@@ -179,8 +200,25 @@ pub const CLONE_SUPPORTED_MASK: u64 = CLONE_VM
     | CLONE_SETTLS
     | CLONE_THREAD;
 
+// Linux futex ABI: the command is the low byte of `op`, the options above it.
 pub const FUTEX_WAIT: u64 = 0;
 pub const FUTEX_WAKE: u64 = 1;
+pub const FUTEX_REQUEUE: u64 = 3;
+pub const FUTEX_CMP_REQUEUE: u64 = 4;
+pub const FUTEX_WAIT_BITSET: u64 = 9;
+pub const FUTEX_WAKE_BITSET: u64 = 10;
+
+/// Accepted and ignored: every futex here is keyed on a virtual address, so
+/// all of them are already private. What it must not do is make the call
+/// `ENOSYS` — glibc- and std-shaped callers always set it.
+pub const FUTEX_PRIVATE_FLAG: u64 = 128;
+/// Measure an absolute timeout against `CLOCK_REALTIME` instead of
+/// `CLOCK_MONOTONIC`. Only legal with [`FUTEX_WAIT_BITSET`].
+pub const FUTEX_CLOCK_REALTIME: u64 = 256;
+pub const FUTEX_CMD_MASK: u64 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+/// The bitset that makes `FUTEX_WAIT_BITSET` behave as `FUTEX_WAIT`.
+pub const FUTEX_BITSET_MATCH_ANY: u32 = u32::MAX;
 /// arch_prctl sub-commands (Linux-compatible values)
 pub const ARCH_SET_FS: u64 = 0x1002;
 pub const ARCH_GET_FS: u64 = 0x1003;

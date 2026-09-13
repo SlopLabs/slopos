@@ -1,4 +1,6 @@
 use crate::syscall::process;
+use crate::syscall::process::WaitStatus;
+use slopos_abi::signal::{WCONTINUED, WNOHANG, WUNTRACED};
 
 use super::display::shell_write;
 use std::sync::Mutex;
@@ -9,6 +11,7 @@ const MAX_CMD: usize = 128;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
     Running,
+    Stopped,
     Done,
 }
 
@@ -86,6 +89,12 @@ pub fn add(pid: u32, pgid: u32, command: &[u8]) -> Option<u16> {
     })
 }
 
+pub fn add_stopped(pid: u32, pgid: u32, command: &[u8]) -> Option<u16> {
+    let job_id = add(pid, pgid, command)?;
+    set_state_by_pid(pid, JobState::Stopped);
+    Some(job_id)
+}
+
 pub fn remove_by_job_id(job_id: u16) -> bool {
     with_jobs(|table| {
         for job in &mut table.jobs {
@@ -110,15 +119,37 @@ pub fn remove_by_pid(pid: u32) -> bool {
     })
 }
 
-pub fn mark_done_by_pid(pid: u32) -> bool {
+pub fn set_state_by_pid(pid: u32, state: JobState) -> bool {
     with_jobs(|table| {
         for job in &mut table.jobs {
             if job.active && job.pid == pid {
-                job.state = JobState::Done;
+                job.state = state;
                 return true;
             }
         }
         false
+    })
+}
+
+pub fn find_job_id_by_pid(pid: u32) -> Option<u16> {
+    with_jobs(|table| {
+        for job in &table.jobs {
+            if job.active && job.pid == pid {
+                return Some(job.job_id);
+            }
+        }
+        None
+    })
+}
+
+pub fn state_of(job_id: u16) -> Option<JobState> {
+    with_jobs(|table| {
+        for job in &table.jobs {
+            if job.active && job.job_id == job_id {
+                return Some(job.state);
+            }
+        }
+        None
     })
 }
 
@@ -144,10 +175,30 @@ pub fn render_jobs() {
             shell_write(b"] ");
             match job.state {
                 JobState::Running => shell_write(b"Running "),
+                JobState::Stopped => shell_write(b"Stopped "),
                 JobState::Done => shell_write(b"Done "),
             };
             shell_write(&job.command[..job.command_len]);
             shell_write(b"\n");
+        }
+    });
+}
+
+/// Job bookkeeping is a message to the user, not program output.
+pub fn report_stopped(job_id: u16) {
+    if !super::is_interactive() {
+        return;
+    }
+    with_jobs(|table| {
+        for job in &table.jobs {
+            if job.active && job.job_id == job_id {
+                shell_write(b"[");
+                write_u64(job_id as u64);
+                shell_write(b"] Stopped  ");
+                shell_write(&job.command[..job.command_len]);
+                shell_write(b"\n");
+                return;
+            }
         }
     });
 }
@@ -159,13 +210,21 @@ pub fn refresh_liveness() {
                 continue;
             }
 
-            if process::waitpid_nohang(job.pid).is_some() {
-                job.state = JobState::Done;
-                continue;
-            }
-
-            if process::kill(job.pid, 0) < 0 {
-                job.state = JobState::Done;
+            match process::wait_with(job.pid as i32, WNOHANG | WUNTRACED | WCONTINUED) {
+                Some((_, status)) => {
+                    job.state = match process::wait_status(status) {
+                        WaitStatus::Stopped(_) => JobState::Stopped,
+                        WaitStatus::Continued => JobState::Running,
+                        _ => JobState::Done,
+                    };
+                }
+                // No report pending: still running or already reaped by someone
+                // else, which only `kill(0)` tells apart.
+                None => {
+                    if process::kill(job.pid, 0) < 0 {
+                        job.state = JobState::Done;
+                    }
+                }
             }
         }
     });

@@ -15,7 +15,32 @@ pub fn run_ffi_syscall_tests() -> (u32, u32) {
         };
     }
 
-    check!("SloposStat_size", core::mem::size_of::<SloposStat>() >= 32);
+    // `std`'s copy in `slibc/std_pal/fs/slopos.rs` repeats these numbers, and
+    // cargo's fingerprinting rests on `st_mtim` landing where the kernel writes it.
+    check!(
+        "SloposStat_size_144",
+        core::mem::size_of::<SloposStat>() == 144
+    );
+    check!(
+        "SloposStat_st_mode_offset",
+        core::mem::offset_of!(SloposStat, st_mode) == 24
+    );
+    check!(
+        "SloposStat_st_size_offset",
+        core::mem::offset_of!(SloposStat, st_size) == 48
+    );
+    check!(
+        "SloposStat_st_atim_offset",
+        core::mem::offset_of!(SloposStat, st_atim) == 72
+    );
+    check!(
+        "SloposStat_st_mtim_offset",
+        core::mem::offset_of!(SloposStat, st_mtim) == 88
+    );
+    check!(
+        "SloposStat_st_ctim_offset",
+        core::mem::offset_of!(SloposStat, st_ctim) == 104
+    );
 
     check!("slopos_yield_no_crash", {
         syscalls::slopos_yield();
@@ -35,13 +60,7 @@ pub fn run_ffi_syscall_tests() -> (u32, u32) {
 
     check!("slopos_stat_invalid_path", {
         let path = b"/nonexistent_path_12345\0";
-        let mut stat = SloposStat {
-            st_mode: 0,
-            st_size: 0,
-            st_atime: 0,
-            st_mtime: 0,
-            st_ctime: 0,
-        };
+        let mut stat = SloposStat::default();
         shim::slopos_stat(path, &mut stat) < 0
     });
 

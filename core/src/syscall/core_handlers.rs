@@ -3,8 +3,11 @@ use core::ops::ControlFlow;
 use core::sync::atomic::Ordering as AtomicOrdering;
 
 use slopos_abi::Errno;
-use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, UserSysInfo};
-use slopos_abi::task::{TaskExitReason, TaskFaultReason};
+use slopos_abi::syscall::{
+    CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_THREAD_CPUTIME_ID, Timespec,
+    UserSysInfo, UserUtsname,
+};
+use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
 use slopos_ostd::klog_debug;
 
@@ -19,10 +22,10 @@ use slopos_ostd::platform::power;
 use slopos_sched::scheduler::{
     get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
 };
-use slopos_sched::task::{get_task_stats, task_terminate};
+use slopos_sched::task::{get_task_stats, task_group_exit, task_terminate};
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
-use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 
 define_syscall!(syscall_yield (ctx) cap(NoneSelf)
     -> SyscallResult {
@@ -39,6 +42,38 @@ define_syscall!(syscall_get_time_ms (ctx) cap(NoneSelf)
     slopos_kernel_services::clock::uptime_ms()
 });
 
+/// Consumed CPU time in TSC ticks, the slice in progress included.
+fn task_cpu_ticks(task: &slopos_sched::task_struct::Task, now: u64) -> u64 {
+    let mut ticks = task.total_runtime();
+    let last = task.last_run_timestamp();
+    if last != 0 && now > last {
+        ticks = ticks.saturating_add(now - last);
+    }
+    ticks
+}
+
+/// `#[inline(never)]`: the group walk's closure must not land in the
+/// handler's frame.
+#[inline(never)]
+fn cpu_clock_ns(clock_id: u64, task: &slopos_sched::task_struct::Task) -> u64 {
+    let now = slopos_ostd::kdiag_timestamp();
+    let ticks = if clock_id == CLOCK_THREAD_CPUTIME_ID {
+        task_cpu_ticks(task, now)
+    } else {
+        // Summed in ticks and converted once: per-task conversion would round
+        // every thread's microsecond down separately.
+        let tgid = task.tgid;
+        let mut total = 0u64;
+        slopos_sched::task::task_for_each_active(|member| {
+            if member.tgid == tgid {
+                total = total.saturating_add(task_cpu_ticks(member, now));
+            }
+        });
+        total
+    };
+    slopos_kernel_services::clock::ticks_to_microseconds(ticks).saturating_mul(1_000)
+}
+
 define_syscall!(syscall_clock_gettime
     (ctx, clock_id: u64, ts: UserPtr<Timespec>) cap(NoneSelf)
     -> Result<(), Errno>
@@ -51,13 +86,57 @@ define_syscall!(syscall_clock_gettime
         CLOCK_MONOTONIC => slopos_kernel_services::clock::monotonic_ns(),
         CLOCK_REALTIME => slopos_kernel_services::clock::realtime_ns()
             .unwrap_or_else(slopos_kernel_services::clock::monotonic_ns),
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => cpu_clock_ns(clock_id, ctx.task()),
         _ => return Err(Errno::EINVAL),
     };
     let value = Timespec {
-        tv_sec: ns / 1_000_000_000,
-        tv_nsec: ns % 1_000_000_000,
+        tv_sec: (ns / 1_000_000_000) as i64,
+        tv_nsec: (ns % 1_000_000_000) as i64,
     };
     copy_to_user(ts.inner(), &value).map_err(|_| Errno::EFAULT)?;
+    Ok(())
+});
+
+define_syscall!(syscall_clock_settime
+    (ctx, clock_id: u64, ts: UserPtr<Timespec>) cap(Clock)
+    -> Result<(), Errno>
+{
+    // Monotonic is defined not to move, and a CPU-time clock is an accounting
+    // total rather than a coordinate.
+    if clock_id != CLOCK_REALTIME {
+        return Err(Errno::EINVAL);
+    }
+    let value = copy_from_user(ts.inner()).map_err(|_| Errno::EFAULT)?;
+    if !(0..1_000_000_000).contains(&value.tv_nsec) {
+        return Err(Errno::EINVAL);
+    }
+    slopos_kernel_services::clock::set_realtime(value.tv_sec, value.tv_nsec as u32)
+        .map_err(|_| Errno::EINVAL)
+});
+
+#[cfg(debug_assertions)]
+const KERNEL_VERSION: &str = concat!("SlopOS ", env!("CARGO_PKG_VERSION"), " debug");
+#[cfg(not(debug_assertions))]
+const KERNEL_VERSION: &str = concat!("SlopOS ", env!("CARGO_PKG_VERSION"), " release");
+
+fn set_uts_field(field: &mut [u8; 65], value: &str) {
+    let bytes = value.as_bytes();
+    let len = bytes.len().min(field.len() - 1);
+    field[..len].copy_from_slice(&bytes[..len]);
+    field[len] = 0;
+}
+
+define_syscall!(syscall_uname
+    (ctx, out: UserPtr<UserUtsname>) cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    let mut uts = UserUtsname::new();
+    set_uts_field(&mut uts.sysname, "SlopOS");
+    set_uts_field(&mut uts.nodename, "slopos");
+    set_uts_field(&mut uts.release, env!("CARGO_PKG_VERSION"));
+    set_uts_field(&mut uts.version, KERNEL_VERSION);
+    set_uts_field(&mut uts.machine, "x86_64");
+    copy_to_user(out.inner(), &uts).map_err(|_| Errno::EFAULT)?;
     Ok(())
 });
 
@@ -136,6 +215,46 @@ define_syscall!(syscall_exit (ctx, code: u32) cap(NoneSelf)
         "SYSCALL_EXIT: task {} schedule returned (should not happen)",
         task_id
     );
+    SyscallResult::NoReturn
+});
+
+/// End every thread of `tgid`'s group, then the caller. Returns how many the
+/// group fan-out matched.
+///
+/// The caller's own exit must not depend on the fan-out: `NoReturn` is a
+/// promise, and a group that resolved to nothing — a reaped leader, a tgid
+/// nobody claims — would otherwise let `exit_group` return to userland.
+/// `task_terminate` is idempotent, so the ordinary path pays one lookup.
+pub(crate) fn exit_group_terminate(task_id: u32, tgid: u32, code: u32) -> usize {
+    let group = if tgid == INVALID_TASK_ID {
+        task_id
+    } else {
+        tgid
+    };
+    let terminated = task_group_exit(group, code);
+    task_terminate(task_id);
+    terminated
+}
+
+// The caller's own exit goes last, so the marking pass runs on a live stack.
+define_syscall!(syscall_exit_group (ctx, code: u32) cap(NoneSelf)
+    -> SyscallResult {
+    let task_id = ctx.task_id();
+    {
+        let t = ctx.task();
+        t.exit_reason
+            .store(TaskExitReason::Normal.as_u16(), AtomicOrdering::Release);
+        t.fault_reason
+            .store(TaskFaultReason::None.as_u16(), AtomicOrdering::Release);
+        t.exit_code.store(code, AtomicOrdering::Release);
+    }
+    let terminated = exit_group_terminate(task_id, ctx.task().tgid, code);
+    klog_debug!(
+        "SYSCALL_EXIT_GROUP: task {} terminated {} group member(s)",
+        task_id,
+        terminated
+    );
+    schedule();
     SyscallResult::NoReturn
 });
 

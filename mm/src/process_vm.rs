@@ -805,9 +805,12 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     rc
 }
 
-/// The initial VMAs, the mapped stack and the null page — the single definition
-/// of what a fresh SlopOS address space looks like, so `exec` and process
-/// creation cannot drift apart.
+/// The initial VMAs and, with `map_stack`, the mapped stack.
+///
+/// Not the only seeder: [`create_process_vm_for`] builds the same code, data
+/// and stack VMAs but no growth extent below the stack, because a VA charge is
+/// taken for a lazy region too. Any change to the three shared regions has to
+/// be made in both.
 fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_int {
     let code_s = inner.code_start;
     let data_s = inner.data_start;
@@ -885,29 +888,6 @@ fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_i
         if map_user_range(vm_space_for_map, stack_s, stack_e, stack_flags_bits).is_err() {
             return -1;
         }
-    }
-
-    let vm_space_for_null = match inner.vm_space.as_mut() {
-        Some(v) => v,
-        None => return -1,
-    };
-    if map_user_range(
-        vm_space_for_null,
-        0,
-        PAGE_SIZE_4KB,
-        PageFlags::USER_RW.bits(),
-    )
-    .is_ok()
-    {
-        let null_region = VmaRegion {
-            protection: Protection::RW,
-            backing: RegionBacking::Anonymous,
-            lazy: false,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::General,
-        };
-        let _ = add_vma_to_inner(inner, 0, PAGE_SIZE_4KB, null_region);
     }
 
     let _ = slot;
@@ -1457,6 +1437,8 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
         let heap_s = proc.heap_start;
         let stack_s = proc.stack_start;
         let stack_e = proc.stack_end;
+        // The same three regions `seed_fresh_layout` builds, minus its growth
+        // extent; see that function's doc for why the two are not one call.
 
         let code_region = VmaRegion {
             protection: Protection::RX,
@@ -1528,33 +1510,6 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             drop(proc);
             drop(reservation);
             return None;
-        }
-
-        // Map a single zero page to tolerate benign null accesses in early userland.
-
-        let vm_space_for_null = proc
-            .vm_space
-            .as_mut()
-            .expect("create_process_vm: vm_space still present after stack map");
-        if map_user_range(
-            vm_space_for_null,
-            0,
-            PAGE_SIZE_4KB,
-            PageFlags::USER_RW.bits(),
-        )
-        .is_ok()
-        {
-            let null_region = VmaRegion {
-                protection: Protection::RW,
-                backing: RegionBacking::Anonymous,
-                lazy: false,
-                cow: false,
-                user: true,
-                purpose: RegionPurpose::General,
-            };
-            let _ = add_vma_to_inner(&mut proc, 0, PAGE_SIZE_4KB, null_region);
-        } else {
-            klog_info!("create_process_vm: Failed to map null page for user task");
         }
 
         klog_info!("Created process VM space for PID {}", process_id);

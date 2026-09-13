@@ -14,7 +14,7 @@ use crate::pal::{Pal, Sys};
 use crate::string::u_strlen;
 
 pub use rlimit::{RLIM_INFINITY, RLIMIT_ALL, RLimit, getrlimit, prlimit, setrlimit};
-pub use wait::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
+pub use wait::{WEXITSTATUS, WIFCONTINUED, WIFEXITED, WIFSIGNALED, WIFSTOPPED, WSTOPSIG, WTERMSIG};
 
 /// Returns the child PID to the parent, 0 to the child, -1 on error.
 #[unsafe(no_mangle)]
@@ -124,10 +124,12 @@ pub unsafe extern "C" fn wait(status: *mut i32) -> i32 {
     waitpid(-1, status, 0)
 }
 
-/// Immediately terminate without cleanup.
+/// Immediately terminate the whole process without cleanup.
+///
+/// `SYSCALL_EXIT` ends only the calling task, so this must be `exit_group`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _exit(status: i32) -> ! {
-    Sys::exit(status)
+    Sys::exit_group(status)
 }
 
 /// Clean exit — flushes stdio, runs atexit handlers, then terminates.

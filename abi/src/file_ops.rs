@@ -175,11 +175,6 @@ pub trait FileOps: Send + Sync {
         0
     }
 
-    fn ioctl(&self, handle: usize, cmd: u64, arg: u64) -> isize {
-        let _ = (handle, cmd, arg);
-        -1
-    }
-
     /// Commit to stable storage. `EINVAL` by default: nothing to commit.
     fn sync(&self, handle: usize, data_only: bool) -> i32 {
         let _ = (handle, data_only);

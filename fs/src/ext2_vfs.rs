@@ -422,6 +422,23 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         })
     }
 
+    fn link(&self, parent: InodeId, name: &[u8], target: InodeId) -> VfsResult<()> {
+        let parent = u32::try_from(parent).map_err(|_| VfsError::InvalidArgument)?;
+        let target = u32::try_from(target).map_err(|_| VfsError::InvalidArgument)?;
+        self.with_ext2(|fs| fs.link_entry(parent, name, target))
+            .map_err(|e| match e {
+                // `link_entry` reports a directory source this way, and POSIX
+                // spells that refusal `EPERM` rather than `EISDIR`.
+                VfsError::IsDirectory => VfsError::PermissionDenied,
+                other => other,
+            })
+    }
+
+    fn set_times(&self, inode: InodeId, atime: Option<u64>, mtime: Option<u64>) -> VfsResult<()> {
+        let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
+        self.with_ext2(|fs| fs.set_times(ino, atime, mtime))
+    }
+
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         self.with_ext2(|fs| fs.set_mode(inode as u32, mode))
     }

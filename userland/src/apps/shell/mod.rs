@@ -28,8 +28,9 @@ pub(crate) static REBOOTING: &str = "Shell requested reboot...\n";
 
 pub(crate) const SHELL_IO_MAX: usize = 512;
 
-const CWD_MAX: usize = 256;
-static CWD: Mutex<[u8; CWD_MAX]> = Mutex::new([0; CWD_MAX]);
+/// NUL-terminated; bounded only by `USER_PATH_MAX`, so the shell adds no path
+/// ceiling of its own.
+static CWD: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
@@ -59,15 +60,25 @@ pub fn exit_requested() -> Option<i32> {
         .then(|| EXIT_STATUS.load(Ordering::Relaxed))
 }
 
-pub fn cwd_bytes() -> [u8; CWD_MAX] {
-    *CWD.lock().unwrap()
+/// With its terminating NUL, and never empty: callers index `cwd[0]`.
+pub fn cwd_bytes() -> Vec<u8> {
+    let cwd = CWD.lock().unwrap();
+    if cwd.is_empty() {
+        return vec![b'/', 0];
+    }
+    cwd.clone()
 }
 
 pub fn cwd_set(path: &[u8]) {
+    let end = path
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(path.len())
+        .min(slopos_abi::fs::USER_PATH_MAX - 1);
     let cwd = &mut *CWD.lock().unwrap();
-    let len = path.len().min(CWD_MAX - 1);
-    cwd[..len].copy_from_slice(&path[..len]);
-    cwd[len] = 0;
+    cwd.clear();
+    cwd.extend_from_slice(&path[..end]);
+    cwd.push(0);
 }
 
 pub fn last_exit_code() -> i32 {

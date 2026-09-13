@@ -1,13 +1,14 @@
 use slopos_abi::Errno;
-use slopos_abi::UserFsStat;
-use slopos_abi::syscall::{O_CLOEXEC, O_NONBLOCK};
+use slopos_abi::fs::{UserFlock, UserFsStat};
+use slopos_abi::syscall::{F_GETLK, F_SETLK, F_SETLKW, O_CLOEXEC, O_NONBLOCK};
 
 use slopos_fs::fileio::{
-    file_dup_fd, file_dup2_fd, file_dup3_fd, file_fcntl_fd, file_fstat_fd, file_pipe_create,
-    file_seek_fd,
+    FdTable, file_dup_fd, file_dup2_fd, file_dup3_fd, file_fcntl_fd, file_fcntl_lock_fd,
+    file_fstat_fd, file_pipe_create, file_seek_fd,
 };
 
-use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_copy::{copy_from_user, copy_to_user};
+use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
 use crate::syscall::args::{Fd, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
@@ -42,12 +43,32 @@ define_syscall!(syscall_dup3
     if rc < 0 { Err(errno_from_neg(rc)) } else { Ok(rc as u64) }
 });
 
+/// The record-lock commands take a `struct flock` through `arg`; every other
+/// `fcntl` command takes an integer. Own frame: the 32-byte copy must not sit
+/// in the dispatch frame.
+#[inline(never)]
+fn fcntl_lock(table: FdTable, fd: i32, cmd: u64, arg: u64) -> Result<u64, Errno> {
+    let ptr = MmUserPtr::<UserFlock>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+    let mut lock = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
+    let rc = file_fcntl_lock_fd(table, fd, cmd, &mut lock);
+    if rc < 0 {
+        return Err(errno_from_neg64(rc));
+    }
+    if cmd == F_GETLK {
+        copy_to_user(ptr, &lock).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(0)
+}
+
 define_syscall!(syscall_fcntl
     (ctx, fd: Fd, cmd: u64, arg: u64)
     cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
+    if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW) {
+        return fcntl_lock(pid, fd.raw(), cmd, arg);
+    }
     let rc = file_fcntl_fd(pid, fd.raw(), cmd, arg);
     if rc < 0 { Err(errno_from_neg64(rc)) } else { Ok(rc as u64) }
 });
@@ -68,11 +89,7 @@ define_syscall!(syscall_fstat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
-    let mut stat = UserFsStat {
-        type_: 0,
-        _pad: [0; 3],
-        size: 0,
-    };
+    let mut stat = UserFsStat::default();
     let rc = file_fstat_fd(pid, fd.raw(), &mut stat);
     if rc != 0 {
         return Err(errno_from_neg(rc));

@@ -63,6 +63,7 @@ fn exit_reason_str(reason: TaskExitReason) -> &'static str {
         TaskExitReason::Normal => "Normal",
         TaskExitReason::UserFault => "UserFault",
         TaskExitReason::Kernel => "Kernel",
+        TaskExitReason::Signalled => "Signalled",
     }
 }
 

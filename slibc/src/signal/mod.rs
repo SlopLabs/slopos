@@ -6,7 +6,7 @@ use core::mem;
 
 use crate::pal::slopos::signal_restorer_addr;
 use crate::pal::{Pal, Sys};
-use slopos_abi::signal::UserSigaction;
+use slopos_abi::signal::{UserSigAltStack, UserSigaction};
 
 /// True when `handler` is a real function pointer (not `SIG_DFL`/`SIG_IGN`).
 /// The kernel rejects (`EINVAL`) such a handler with a zero `sa_restorer`, so
@@ -95,6 +95,60 @@ pub unsafe extern "C" fn sigaction(
     };
 
     match Sys::rt_sigaction(signum, act_ptr, oldact as *mut u8, SIGSET_SIZE) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// A three-argument `SA_SIGINFO` handler.
+pub type SigInfoHandler = unsafe extern "C" fn(i32, *mut u8, *mut u8);
+
+/// Installs with `SA_SIGINFO | SA_ONSTACK`: a fault caused by stack exhaustion
+/// cannot be delivered on the stack that ran out.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_sigaction_onstack(signum: i32, handler: SigInfoHandler) -> i32 {
+    let mut act: UserSigaction = mem::zeroed();
+    act.sa_handler = handler as usize as u64;
+    act.sa_flags = slopos_abi::signal::SA_SIGINFO
+        | slopos_abi::signal::SA_ONSTACK
+        | slopos_abi::signal::SA_RESTART;
+    act.sa_mask = 0;
+    act.sa_restorer = signal_restorer_addr();
+
+    match Sys::rt_sigaction(
+        signum,
+        &act as *const UserSigaction as *const u8,
+        core::ptr::null_mut(),
+        SIGSET_SIZE,
+    ) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_sigaltstack_install(sp: *mut u8, size: usize) -> i32 {
+    let ss = UserSigAltStack {
+        ss_sp: sp as u64,
+        ss_flags: 0,
+        _pad: 0,
+        ss_size: size as u64,
+    };
+    match Sys::sigaltstack(&ss as *const UserSigAltStack, core::ptr::null_mut()) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_sigaltstack_disable() -> i32 {
+    let ss = UserSigAltStack {
+        ss_sp: 0,
+        ss_flags: slopos_abi::signal::SS_DISABLE,
+        _pad: 0,
+        ss_size: 0,
+    };
+    match Sys::sigaltstack(&ss as *const UserSigAltStack, core::ptr::null_mut()) {
         Ok(()) => 0,
         Err(_) => -1,
     }

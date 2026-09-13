@@ -47,6 +47,9 @@ fi
 
 DEPS="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/deps"
 FINGERPRINT="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/.fingerprint"
+# Since cargo 1.94 the `-Zbuild-std` sysroot units land in `build/<crate>/<hash>/out/`
+# and never in `deps/`, where the old purge silently matched nothing.
+BUILD="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/build"
 
 # Build-std sysroot crates we patch into, plus the core sysroot crates whose
 # rebuild they may transitively require. Removing the output rlib/rmeta forces
@@ -54,19 +57,27 @@ FINGERPRINT="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/.fingerprint"
 # consistent so it does not later think the (now-deleted) artifact is fresh.
 STD_CRATES="std core alloc panic_abort panic_unwind"
 
-if [ -d "$DEPS" ]; then
-    for crate in $STD_CRATES; do
+for crate in $STD_CRATES; do
+    if [ -d "$DEPS" ]; then
         rm -f "$DEPS/lib${crate}-"*.rlib "$DEPS/lib${crate}-"*.rmeta \
               "$DEPS/${crate}-"*.d 2>/dev/null || true
-    done
-fi
-
-if [ -d "$FINGERPRINT" ]; then
-    for crate in $STD_CRATES; do
+    fi
+    rm -rf "${BUILD:?}/$crate"
+    if [ -d "$FINGERPRINT" ]; then
         # `find ... -exec rm -rf` tolerates the no-match case cleanly.
         find "$FINGERPRINT" -maxdepth 1 -type d -name "${crate}-*" \
             -exec rm -rf {} + 2>/dev/null || true
-    done
+    fi
+done
+
+# Layout-independent proof that the purge worked: a surviving `libstd` built
+# from pre-patch PAL sources is exactly what this guard exists to prevent.
+stale="$(find "$CARGO_TARGET_DIR/$TARGET_TRIPLE" -name 'libstd-*.rlib' -print -quit 2>/dev/null || true)"
+if [ -n "$stale" ]; then
+    echo "ERROR: std_cache_guard purged its known paths but a build-std libstd survives:" >&2
+    echo "       $stale" >&2
+    echo "       The cargo build-std output layout changed; update this script." >&2
+    exit 1
 fi
 
 mkdir -p "$CARGO_TARGET_DIR"

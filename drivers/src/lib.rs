@@ -19,6 +19,7 @@ pub mod pit;
 pub mod platform_bus;
 pub mod ps2;
 pub mod random;
+pub mod rtc;
 pub mod serial;
 pub mod syscall_services_init;
 #[cfg(feature = "test-hooks")]

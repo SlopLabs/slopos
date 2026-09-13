@@ -431,8 +431,100 @@ pub const SYSCALL_UMOUNT2: u64 = 188;
 /// queues the writeback, `MS_INVALIDATE` is refused with `EINVAL`.
 pub const SYSCALL_MSYNC: u64 = 189;
 
+/// `uname(out: *mut UserUtsname)` — kernel identification; no `domainname`.
+pub const SYSCALL_UNAME: u64 = 190;
+
+/// `clock_settime(clock_id, ts: *const Timespec)` — `CLOCK_REALTIME` only,
+/// `EINVAL` otherwise. Gated on `Capability::Clock`.
+pub const SYSCALL_CLOCK_SETTIME: u64 = 191;
+
+/// `utimensat(dirfd, path: *const u8, times: *const [Timespec; 2], flags)`.
+/// `UTIME_NOW`/`UTIME_OMIT` in `tv_nsec` select per-field behaviour; a NULL
+/// `times` means both now.
+pub const SYSCALL_UTIMENSAT: u64 = 192;
+
+/// `link(old: *const u8, new: *const u8)`. `EPERM` for a directory, `EXDEV`
+/// across mounts.
+pub const SYSCALL_LINK: u64 = 193;
+
+/// `linkat(olddirfd, old, newdirfd, new, flags)`.
+pub const SYSCALL_LINKAT: u64 = 194;
+
+/// `openat(dirfd, path: *const u8, flags, mode)`. `AT_FDCWD` selects the
+/// caller's cwd.
+pub const SYSCALL_OPENAT: u64 = 195;
+
+/// `mkdirat(dirfd, path: *const u8, mode)`.
+pub const SYSCALL_MKDIRAT: u64 = 196;
+
+/// `unlinkat(dirfd, path: *const u8, flags)` — `AT_REMOVEDIR` makes it
+/// `rmdir`.
+pub const SYSCALL_UNLINKAT: u64 = 197;
+
+/// `renameat(olddirfd, old, newdirfd, new)`.
+pub const SYSCALL_RENAMEAT: u64 = 198;
+
+/// `fstatat(dirfd, path: *const u8, out: *mut UserFsStat, flags)`. The only
+/// stat entry point that can decline a final symlink, so `AT_SYMLINK_NOFOLLOW`
+/// is what makes `lstat` expressible.
+pub const SYSCALL_FSTATAT: u64 = 199;
+
+/// `readlinkat(dirfd, path: *const u8, buf: *mut u8, len)`.
+pub const SYSCALL_READLINKAT: u64 = 200;
+
+/// `symlinkat(target: *const u8, newdirfd, link: *const u8)`.
+pub const SYSCALL_SYMLINKAT: u64 = 201;
+
+/// `fchmodat(dirfd, path: *const u8, mode, flags)`.
+pub const SYSCALL_FCHMODAT: u64 = 202;
+
+/// `faccessat(dirfd, path: *const u8, mode, flags)` — existence and the
+/// file's own mode bits. `AT_EACCESS` changes nothing: single-user uid 0.
+pub const SYSCALL_FACCESSAT: u64 = 203;
+
+/// `getdents64(fd, buf: *mut u8, len)` — packed
+/// [`UserDirent64`](crate::fs::UserDirent64) records; the cursor lives in the
+/// descriptor.
+pub const SYSCALL_GETDENTS64: u64 = 204;
+
+/// `pread64(fd, buf: *mut u8, len, offset)` — leaves the descriptor's own
+/// position alone.
+pub const SYSCALL_PREAD64: u64 = 205;
+
+/// `pwrite64(fd, buf: *const u8, len, offset)`.
+pub const SYSCALL_PWRITE64: u64 = 206;
+
+/// `readv(fd, iov: *const UserIovec, iovcnt)` — at most `UIO_MAXIOV`
+/// segments.
+pub const SYSCALL_READV: u64 = 207;
+
+/// `writev(fd, iov: *const UserIovec, iovcnt)`.
+pub const SYSCALL_WRITEV: u64 = 208;
+
+/// `fchmod(fd, mode)` — permission bits of an open descriptor.
+pub const SYSCALL_FCHMOD: u64 = 209;
+
+/// `flock(fd, operation)` — whole-file advisory lock on the open file
+/// description, so it survives `dup` and `fork`. `LOCK_NB` for the
+/// non-blocking form.
+pub const SYSCALL_FLOCK: u64 = 210;
+
+/// `exit_group(code)` — terminate every task in the caller's thread group.
+pub const SYSCALL_EXIT_GROUP: u64 = 211;
+
+/// `gettid()` — the caller's own task id; `getpid` answers the thread-group
+/// id.
+pub const SYSCALL_GETTID: u64 = 212;
+
+/// `sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack)` —
+/// nominate a stack for `SA_ONSTACK` handlers.
+pub const SYSCALL_SIGALTSTACK: u64 = 213;
+
+/// `access(path: *const u8, mode)`.
+pub const SYSCALL_ACCESS: u64 = 214;
+
 /// Size of the dispatch table; every syscall number must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 190;
+pub const SYSCALL_TABLE_SIZE: usize = 215;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -463,6 +555,31 @@ const _: () = assert!((SYSCALL_FSTATFS as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_MOUNT as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_UMOUNT2 as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_MSYNC as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_UNAME as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_CLOCK_SETTIME as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_UTIMENSAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_LINK as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_LINKAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_OPENAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_MKDIRAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_UNLINKAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_RENAMEAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FSTATAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_READLINKAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SYMLINKAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FCHMODAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FACCESSAT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_GETDENTS64 as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_PREAD64 as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_PWRITE64 as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_READV as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_WRITEV as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FCHMOD as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FLOCK as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_EXIT_GROUP as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_GETTID as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SIGALTSTACK as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_ACCESS as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

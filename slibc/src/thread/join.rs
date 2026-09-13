@@ -34,7 +34,6 @@ pub unsafe extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut u8) -
         super::futex::futex_wait_or_abort(
             &raw const (*tcb).child_tid as *const u32,
             tid_val as u32,
-            0,
         );
     }
 
@@ -82,7 +81,7 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut u8) -> ! {
         (*tcb).retval = retval;
         super::keys::run_key_destructors(tcb);
     }
-    crate::process::_exit(0)
+    Sys::exit(0)
 }
 
 #[unsafe(no_mangle)]

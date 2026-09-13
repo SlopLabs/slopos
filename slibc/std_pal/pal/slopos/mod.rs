@@ -6,6 +6,7 @@
 use crate::io;
 
 pub mod os;
+pub mod stack_overflow;
 
 pub fn unsupported<T>() -> io::Result<T> {
     Err(unsupported_err())
@@ -29,6 +30,7 @@ pub fn abort_internal() -> ! {
 pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
     unsafe {
         crate::sys::args::init(argc, argv);
+        stack_overflow::init();
     }
 }
 

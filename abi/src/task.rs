@@ -42,6 +42,9 @@ pub enum TaskStatus {
     /// from a live parent. Tier-2 slot reuse skips Zombie slots so the
     /// parent's reaper observes a stable `Task::exit_info`.
     Zombie = 5,
+    /// Job control: every task in the thread group parked on a stop signal.
+    /// Not runnable and not reapable; only a `SIGCONT` or a kill moves it.
+    Stopped = 6,
 }
 
 impl TaskStatus {
@@ -54,6 +57,7 @@ impl TaskStatus {
             3 => Self::Blocked,
             4 => Self::Terminated,
             5 => Self::Zombie,
+            6 => Self::Stopped,
             _ => Self::Invalid,
         }
     }
@@ -67,14 +71,25 @@ impl TaskStatus {
     pub const fn can_transition_to(self, target: Self) -> bool {
         match self {
             Self::Invalid => matches!(target, Self::Ready),
-            Self::Ready => matches!(target, Self::Running | Self::Terminated | Self::Zombie),
+            Self::Ready => matches!(
+                target,
+                Self::Running | Self::Stopped | Self::Terminated | Self::Zombie
+            ),
             Self::Running => matches!(
                 target,
-                Self::Ready | Self::Blocked | Self::Terminated | Self::Zombie
+                Self::Ready | Self::Blocked | Self::Stopped | Self::Terminated | Self::Zombie
             ),
-            Self::Blocked => matches!(target, Self::Ready | Self::Terminated | Self::Zombie),
+            Self::Blocked => matches!(
+                target,
+                Self::Ready | Self::Stopped | Self::Terminated | Self::Zombie
+            ),
             Self::Terminated => matches!(target, Self::Invalid | Self::Terminated),
             Self::Zombie => matches!(target, Self::Terminated | Self::Zombie),
+            // Zombie is reachable because a kill can race the stop.
+            Self::Stopped => matches!(
+                target,
+                Self::Ready | Self::Running | Self::Terminated | Self::Zombie
+            ),
         }
     }
 }
@@ -325,6 +340,10 @@ pub enum TaskExitReason {
     Normal = 1,
     UserFault = 2,
     Kernel = 3,
+    /// Killed by an uncaught signal whose default action terminates. Distinct
+    /// from [`Normal`](Self::Normal) because `waitpid` must report the signal
+    /// number, and `exit(139)` is not a segfault.
+    Signalled = 4,
 }
 
 impl TaskExitReason {
@@ -342,6 +361,7 @@ impl TaskExitReason {
             1 => Self::Normal,
             2 => Self::UserFault,
             3 => Self::Kernel,
+            4 => Self::Signalled,
             _ => Self::None,
         }
     }

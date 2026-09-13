@@ -5,8 +5,7 @@ use slopos_ostd::lock_class;
 use slopos_abi::KernelErrno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::{
-    FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_DSYNC, O_RDONLY, O_RDWR, O_SYNC,
-    O_WRONLY, UserFsStat,
+    O_ACCMODE, O_APPEND, O_CREAT, O_DSYNC, O_RDONLY, O_RDWR, O_SYNC, O_WRONLY, S_IFCHR, UserFsStat,
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
@@ -181,6 +180,13 @@ pub(super) struct OpenFile {
     /// writers sharing this description cannot resolve the same offset.
     pub(super) position_lock: Mutex<()>,
     pub(super) status_flags: AtomicU32,
+    /// Identity of this description in the advisory-lock table. A counter, not
+    /// the allocation's address, which is recycled.
+    pub(super) id: u64,
+    /// Canonical absolute path a `*at` syscall resolves relative paths
+    /// against, for a descriptor opened on a directory. `(fs, inode)` names no
+    /// path, and an inode-relative walk could not resolve `..`.
+    pub(super) dir_path: Option<KVec<u8>>,
     /// Owned lifetime token for the subsystem object behind `handle`.
     /// `None` only for backings with no teardown (e.g. pidfd).
     #[expect(dead_code, reason = "held for ownership; dropping it is the teardown")]
@@ -198,6 +204,18 @@ impl OpenFile {
 
     pub(super) fn set_status_flags(&self, flags: OpenMode) {
         self.status_flags.store(flags.bits(), Ordering::Release);
+    }
+
+    pub(super) fn dir_base(&self) -> Option<&[u8]> {
+        self.dir_path.as_deref()
+    }
+}
+
+/// `flock(2)` state belongs to the open file description, so the last close of
+/// a descriptor naming it releases the lock.
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        flock::flock_release_description(self.id);
     }
 }
 
@@ -746,16 +764,32 @@ pub(super) fn new_open_file(
     position: u64,
     backing: Option<KArc<dyn FileBacking>>,
 ) -> Option<KArc<OpenFile>> {
+    new_open_file_with_dir(ops, handle, status_flags, position, backing, None)
+}
+
+pub(super) fn new_open_file_with_dir(
+    ops: &'static dyn FileOps,
+    handle: usize,
+    status_flags: OpenMode,
+    position: u64,
+    backing: Option<KArc<dyn FileBacking>>,
+    dir_path: Option<KVec<u8>>,
+) -> Option<KArc<OpenFile>> {
     KArc::try_new(OpenFile {
         ops,
         handle,
         position: AtomicU64::new(position),
         position_lock: Mutex::new((), OPEN_FILE_POSITION_CLASS),
         status_flags: AtomicU32::new(status_flags.bits()),
+        id: NEXT_DESCRIPTION_ID.fetch_add(1, Ordering::Relaxed),
+        dir_path,
         backing,
     })
     .ok()
 }
+
+/// Never reused, so a lock row that outlives its description names nothing.
+static NEXT_DESCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn parse_pts_path(path: &[u8]) -> Option<TtyIndex> {
     let rest = path.strip_prefix(b"/dev/pts/")?;
@@ -930,11 +964,26 @@ impl FileOps for LocalTtyOps {
         }
     }
 
-    fn stat(&self, _handle: usize, out: &mut UserFsStat) -> i32 {
-        out.type_ = FS_TYPE_CHARDEV;
-        out.size = 0;
+    fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
+        fill_char_device_stat(out, handle, TTY_DEVICE_MAJOR, 0o620);
         0
     }
+}
+
+/// Linux's TTY major. The minor is the index the `FileOps` handle carries.
+pub const TTY_DEVICE_MAJOR: u32 = 4;
+
+/// The single producer of a character device's `fstat`: it has no
+/// [`FileStat`](crate::vfs::FileStat) to go through `FileStat::fill_user_stat`,
+/// and a second copy of the type-bit mapping once reported a regular file as a
+/// directory.
+pub fn fill_char_device_stat(out: &mut UserFsStat, minor: usize, major: u32, mode: u32) {
+    *out = UserFsStat::default();
+    out.st_ino = minor as u64;
+    out.st_nlink = 1;
+    out.st_mode = S_IFCHR | (mode & 0o7777);
+    out.st_blksize = 1024;
+    out.st_rdev = ((major as u64) << 8) | (minor as u64 & 0xFF);
 }
 
 pub(super) fn external_tty_ops(external_ops: &ExternalOpsState) -> Option<&'static dyn FileOps> {
@@ -955,8 +1004,12 @@ pub(super) fn kind_is_tty(kind: FileKind) -> bool {
 
 mod fdops;
 mod fdtable;
+mod flock;
 mod poll;
+#[cfg(feature = "tests")]
+mod tests_locks;
 
 pub use fdops::*;
 pub use fdtable::*;
+pub use flock::*;
 pub use poll::*;

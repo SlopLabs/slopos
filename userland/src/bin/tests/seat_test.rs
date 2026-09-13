@@ -131,6 +131,8 @@ fn seat_fd_is_not_spawn_transferable() -> bool {
             sigdefault_mask: 0,
             envp_ptr: 0,
             envp_len: 0,
+            cwd_ptr: 0,
+            cwd_len: 0,
         };
         let path = b"/bin/cd_test";
         let argv: [*const u8; 0] = [];

@@ -1,6 +1,12 @@
 //! Filesystem ABI types shared between kernel and userland.
 
-pub const USER_PATH_MAX: usize = 256;
+/// Longest path a syscall accepts, NUL included. Linux's `PATH_MAX`. Too
+/// large for a kernel frame, so the syscall layer stages paths on the heap.
+pub const USER_PATH_MAX: usize = 4096;
+
+/// Longest single path component, NUL excluded. ext2's on-disk ceiling:
+/// `name_len` is one byte.
+pub const USER_NAME_MAX: usize = 255;
 
 /// Entries one `fs_list` call may return. Not a bound on a directory: the
 /// call carries a cursor, so a larger directory is read in successive calls
@@ -41,22 +47,33 @@ pub const O_APPEND: u32 = 0x400;
 /// `O_SYNC` subsumes `O_DSYNC`, which is why the two are not disjoint bits.
 pub const O_DSYNC: u32 = 0x1000;
 pub const O_SYNC: u32 = 0x101000;
+pub const O_DIRECTORY: u32 = 0o200_000;
 
 /// Directory entry returned by the fs_list syscall.
+///
+/// Every hole is a named field: `copy_to_user` copies `size_of::<Self>()`
+/// bytes, so an implicit one would carry kernel stack to userland.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct UserFsEntry {
     /// Entry name as UTF-8 bytes (null-terminated)
-    pub name: [u8; 64],
+    pub name: [u8; USER_NAME_MAX + 1],
     pub type_: u8,
-    pub size: u32,
+    pub _pad: [u8; 7],
+    pub size: u64,
 }
+
+const _: () = assert!(
+    core::mem::size_of::<UserFsEntry>() == 272,
+    "UserFsEntry must carry no implicit padding"
+);
 
 impl UserFsEntry {
     pub const fn new() -> Self {
         Self {
-            name: [0; 64],
+            name: [0; USER_NAME_MAX + 1],
             type_: 0,
+            _pad: [0; 7],
             size: 0,
         }
     }
@@ -85,34 +102,132 @@ impl Default for UserFsEntry {
     }
 }
 
-/// Stat information returned by the fs_stat syscall.
-///
-/// `_pad` is named rather than implicit: `copy_to_user` copies
-/// `size_of::<Self>()` bytes, and a hole between `type_` and `size` would
-/// carry three uninitialized bytes of the calling task's kernel stack to
-/// userland on every call.
+/// `stat(2)` output. Field order, widths and padding are the Linux x86-64
+/// `struct stat` ones, so a libc port needs no translation table.
+/// `st_uid`/`st_gid` exist for layout and always read 0: single-user uid 0.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserFsStat {
-    pub type_: u8,
-    pub _pad: [u8; 3],
-    pub size: u32,
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_nlink: u64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub _pad0: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atim: crate::syscall::types::Timespec,
+    pub st_mtim: crate::syscall::types::Timespec,
+    pub st_ctim: crate::syscall::types::Timespec,
+    pub _reserved: [i64; 3],
 }
 
 const _: () = assert!(
-    core::mem::size_of::<UserFsStat>() == 8,
-    "UserFsStat must carry no implicit padding"
+    core::mem::size_of::<UserFsStat>() == 144,
+    "UserFsStat must match the Linux x86-64 struct stat"
 );
 
+/// `st_mode` type field and the values it takes. Linux/POSIX numbering.
+pub const S_IFMT: u32 = 0o170_000;
+pub const S_IFSOCK: u32 = 0o140_000;
+pub const S_IFLNK: u32 = 0o120_000;
+pub const S_IFREG: u32 = 0o100_000;
+pub const S_IFBLK: u32 = 0o060_000;
+pub const S_IFDIR: u32 = 0o040_000;
+pub const S_IFCHR: u32 = 0o020_000;
+pub const S_IFIFO: u32 = 0o010_000;
+
 impl UserFsStat {
+    pub fn file_kind(&self) -> u32 {
+        self.st_mode & S_IFMT
+    }
+
     pub fn is_directory(&self) -> bool {
-        self.type_ == FS_TYPE_DIRECTORY
+        self.file_kind() == S_IFDIR
     }
 
     pub fn is_file(&self) -> bool {
-        self.type_ == FS_TYPE_FILE
+        self.file_kind() == S_IFREG
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.file_kind() == S_IFLNK
     }
 }
+
+pub const AT_FDCWD: i32 = -100;
+pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+pub const AT_REMOVEDIR: u32 = 0x200;
+pub const AT_SYMLINK_FOLLOW: u32 = 0x400;
+/// An empty `path` names the descriptor itself.
+pub const AT_EMPTY_PATH: u32 = 0x1000;
+/// Accepted and ignored: single-user uid 0. Shares 0x200 with
+/// [`AT_REMOVEDIR`] exactly as Linux does; no call takes both.
+pub const AT_EACCESS: u32 = 0x200;
+
+/// `utimensat` per-field sentinels, in `tv_nsec`.
+pub const UTIME_NOW: i64 = (1 << 30) - 1;
+pub const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// `access(2)` mode bits.
+pub const F_OK: u32 = 0;
+pub const X_OK: u32 = 1;
+pub const W_OK: u32 = 2;
+pub const R_OK: u32 = 4;
+
+/// A `getdents64(2)` record header. The name follows it as
+/// `d_reclen - size_of::<UserDirent64>()` NUL-terminated bytes — tail padding
+/// puts that at 24, deliberately not Linux's 19.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserDirent64 {
+    pub d_ino: u64,
+    pub d_off: i64,
+    pub d_reclen: u16,
+    pub d_type: u8,
+}
+
+/// `d_type` values. Linux `DT_*`, which are `S_IFMT >> 12`.
+pub const DT_UNKNOWN: u8 = 0;
+pub const DT_FIFO: u8 = 1;
+pub const DT_CHR: u8 = 2;
+pub const DT_DIR: u8 = 4;
+pub const DT_BLK: u8 = 6;
+pub const DT_REG: u8 = 8;
+pub const DT_LNK: u8 = 10;
+pub const DT_SOCK: u8 = 12;
+
+/// `readv`/`writev` segment descriptor. Linux `struct iovec`.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserIovec {
+    pub iov_base: u64,
+    pub iov_len: u64,
+}
+
+/// Segments one vectored call may carry. Linux's `UIO_MAXIOV`.
+pub const UIO_MAXIOV: usize = 1024;
+
+/// `fcntl(2)` record-lock description. Linux x86-64 `struct flock`.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserFlock {
+    pub l_type: i16,
+    pub l_whence: i16,
+    pub _pad: [u8; 4],
+    pub l_start: i64,
+    pub l_len: i64,
+    pub l_pid: i32,
+    pub _pad2: [u8; 4],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<UserFlock>() == 32,
+    "UserFlock must match the Linux x86-64 struct flock"
+);
 
 /// Caller-provided entry buffer for the fs_list syscall.
 ///

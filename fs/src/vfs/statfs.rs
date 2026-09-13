@@ -1,6 +1,6 @@
 //! `statfs(2)`'s path entry point.
 
-use crate::vfs::path::resolve_path;
+use crate::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
 use crate::vfs::traits::{FsStats, VfsResult};
 
 /// The capacity of the filesystem `path` resolves through, together with the
@@ -11,7 +11,11 @@ use crate::vfs::traits::{FsStats, VfsResult};
 /// [`FsStats::read_only`], which is why the syscall layer folds both into
 /// `ST_RDONLY`.
 pub fn vfs_statfs(path: &[u8]) -> VfsResult<(FsStats, u32)> {
-    let resolved = resolve_path(path)?;
+    vfs_statfs_at(path, b"/")
+}
+
+pub fn vfs_statfs_at(path: &[u8], cwd: &[u8]) -> VfsResult<(FsStats, u32)> {
+    let resolved = resolve_path_at(path, cwd, RESOLVE_FOLLOW)?;
     let stats = resolved.fs.statfs()?;
     Ok((stats, resolved.mount_flags))
 }

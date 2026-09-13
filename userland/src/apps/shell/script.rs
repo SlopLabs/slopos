@@ -11,13 +11,13 @@ use slopos_abi::fs::O_RDONLY;
 
 use crate::syscall::{SyscallError, fs};
 
-use super::buffers::ParsedTokens;
+use super::buffers::{ParsedTokens, SHELL_LINE_MAX};
 use super::display::{shell_error, shell_error_named};
 use super::{exec, parser};
 
-/// Longest command line a script may contain; a longer one is diagnosed and
-/// skipped rather than truncated and run.
-pub const SCRIPT_LINE_MAX: usize = 8192;
+/// A line longer than this is diagnosed and skipped, not truncated and run.
+/// The same limit the interactive editor uses.
+pub const SCRIPT_LINE_MAX: usize = SHELL_LINE_MAX;
 
 /// Expansion headroom: `$VAR` substitution can grow a line past its source
 /// length.

@@ -17,28 +17,28 @@ pub type SmallPrimitive = u32;
 unsafe extern "C" {
     // Wait returns 0 on wake, -ETIMEDOUT on timeout, -errno on error;
     // wake returns the number of threads woken, or -errno.
-    fn slopos_futex_wait(addr: *const u32, expected: u32, timeout_ms: u64) -> i32;
+    fn slopos_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> i32;
     fn slopos_futex_wake(addr: *const u32, count: u32) -> i32;
 }
 
+/// `u64::MAX` nanoseconds is the no-timeout sentinel, not a duration.
+const FUTEX_NO_TIMEOUT: u64 = u64::MAX;
+
 /// Wait on a futex. Returns `true` if woken (or spurious), `false` if timed out.
 pub fn futex_wait(futex: &Atomic<u32>, expected: u32, timeout: Option<Duration>) -> bool {
-    let timeout_ms = match timeout {
+    let timeout_ns = match timeout {
         Some(dur) => {
-            let ms = dur.as_millis();
-            if ms > u64::MAX as u128 {
-                u64::MAX
-            } else if ms == 0 && !dur.is_zero() {
-                1u64
+            let ns = dur.as_nanos();
+            if ns >= FUTEX_NO_TIMEOUT as u128 {
+                FUTEX_NO_TIMEOUT - 1
             } else {
-                ms as u64
+                ns as u64
             }
         }
-        // 0 means an infinite wait in SlopOS.
-        None => 0,
+        None => FUTEX_NO_TIMEOUT,
     };
 
-    let ret = unsafe { slopos_futex_wait(futex.as_ptr(), expected, timeout_ms) };
+    let ret = unsafe { slopos_futex_wait(futex.as_ptr(), expected, timeout_ns) };
     // -110 is ETIMEDOUT; any other error counts as a spurious wake.
     ret != -110
 }

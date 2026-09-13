@@ -13,8 +13,19 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use crate::sync::LinkError;
 use crate::sync::intrusive::Link;
 use crate::task::exit_info::ExitInfo;
-use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
+use crate::task::kernel_task::{SchedPlacement, SigHandTable, SignalAction, TaskInner};
 use crate::task::link_roles::{ReclaimRole, RemoteWakeRole};
+
+/// `SIGBUS` for an out-of-memory demand fault: the mapping exists and the
+/// access is legal, but no page can be produced, which is the bus-error case.
+#[inline]
+pub const fn fault_signal_for(reason: TaskFaultReason) -> u8 {
+    match reason {
+        TaskFaultReason::UserOom => slopos_abi::signal::SIGBUS,
+        TaskFaultReason::UserUd => slopos_abi::signal::SIGILL,
+        _ => slopos_abi::signal::SIGSEGV,
+    }
+}
 
 impl<K, U> TaskInner<K, U> {
     /// Whether a CPU is physically executing this task.
@@ -141,12 +152,9 @@ impl<K, U> TaskInner<K, U> {
         self.exit_reason
             .store(TaskExitReason::UserFault.as_u16(), Ordering::Release);
         self.fault_reason.store(reason.as_u16(), Ordering::Release);
-        let signal = match reason {
-            TaskFaultReason::UserOom => slopos_abi::signal::SIGBUS,
-            TaskFaultReason::UserUd => slopos_abi::signal::SIGILL,
-            _ => slopos_abi::signal::SIGSEGV,
-        };
+        let signal = fault_signal_for(reason);
         self.exit_code.store(128 + signal as u32, Ordering::Release);
+        self.set_exit_signal(signal);
         self.task_id
     }
 
@@ -238,11 +246,30 @@ impl<K, U> TaskInner<K, U> {
             .fetch_or(bits & SIGNAL_MASK, Ordering::AcqRel)
     }
 
+    /// `None` for a task built without one — a bootstrap stub, or a clone
+    /// whose table has not been re-armed yet.
+    #[inline]
+    pub fn sighand(&self) -> Option<&SigHandTable> {
+        self.sighand.as_deref()
+    }
+
+    #[inline]
+    pub fn sighand_handle(&self) -> Option<crate::KArc<SigHandTable>> {
+        self.sighand.clone()
+    }
+
+    /// Install a table. `&mut self` because every reader below is
+    /// unsynchronised, so only a not-yet-published task can be retargeted.
+    #[inline]
+    pub fn set_sighand(&mut self, table: crate::KArc<SigHandTable>) {
+        self.sighand = Some(table);
+    }
+
     /// The handler registered for signal index `idx`, or `None` when out of
-    /// range.
+    /// range or the task holds no table.
     #[inline]
     pub fn signal_handler(&self, idx: usize) -> Option<u64> {
-        self.signal_actions.get(idx).map(|a| a.handler())
+        self.sighand()?.get(idx).map(|a| a.handler())
     }
 
     /// The whole disposition registered for signal index `idx`, or `None` when
@@ -254,7 +281,7 @@ impl<K, U> TaskInner<K, U> {
     /// [`signal_handler`](Self::signal_handler) instead.
     #[inline]
     pub fn signal_action(&self, idx: usize) -> Option<SignalAction> {
-        self.signal_actions.get(idx).map(|a| a.load_owner_only())
+        self.sighand()?.get(idx).map(|a| a.load_owner_only())
     }
 
     /// Publish a whole disposition at signal index `idx`, reporting whether
@@ -264,13 +291,147 @@ impl<K, U> TaskInner<K, U> {
     /// input must map that to an error.
     #[inline]
     pub fn set_signal_action(&self, idx: usize, action: SignalAction) -> bool {
-        match self.signal_actions.get(idx) {
+        match self.sighand().and_then(|t| t.get(idx)) {
             Some(cell) => {
                 cell.store(action);
                 true
             }
             None => false,
         }
+    }
+
+    #[inline]
+    pub fn is_stopped(&self) -> bool {
+        self.status() == slopos_abi::task::TaskStatus::Stopped
+    }
+
+    /// Take the pending job-control stop report. Consume-once, so two
+    /// `waitpid` callers cannot both report one stop.
+    #[inline]
+    pub fn take_stop_report(&self) -> Option<u8> {
+        match self.stop_report.swap(0, Ordering::AcqRel) {
+            0 => None,
+            signum => Some(signum),
+        }
+    }
+
+    /// `SIGCONT` counterpart of [`take_stop_report`](Self::take_stop_report).
+    #[inline]
+    pub fn take_continue_report(&self) -> bool {
+        self.continue_report.swap(0, Ordering::AcqRel) != 0
+    }
+
+    #[inline]
+    pub fn has_stop_report(&self) -> bool {
+        self.stop_report.load(Ordering::Acquire) != 0
+    }
+
+    #[inline]
+    pub fn stop_report(&self) -> Option<u8> {
+        match self.stop_report.load(Ordering::Acquire) {
+            0 => None,
+            signum => Some(signum),
+        }
+    }
+
+    #[inline]
+    pub fn has_continue_report(&self) -> bool {
+        self.continue_report.load(Ordering::Acquire) != 0
+    }
+
+    /// Publish a stop report, retiring any unconsumed continue report: the two
+    /// are mutually exclusive states of one process.
+    #[inline]
+    pub fn post_stop_report(&self, stop_signal: u8) {
+        self.continue_report.store(0, Ordering::Release);
+        self.stop_report.store(stop_signal, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn post_continue_report(&self) {
+        self.stop_report.store(0, Ordering::Release);
+        self.continue_report.store(1, Ordering::Release);
+    }
+
+    /// The signal whose default action killed this task, or 0.
+    #[inline]
+    pub fn exit_signal(&self) -> u8 {
+        self.exit_signal.load(Ordering::Acquire)
+    }
+
+    /// Record the killing signal. Release, so a reader that sees it also sees
+    /// the exit reason and code stamped before it.
+    #[inline]
+    pub fn set_exit_signal(&self, signum: u8) {
+        self.exit_signal.store(signum, Ordering::Release);
+    }
+
+    /// The alternate signal stack as `(sp, size)`; `(0, 0)` when none is
+    /// installed.
+    #[inline]
+    pub fn sigaltstack(&self) -> (u64, u64) {
+        (
+            self.sigaltstack_sp.load(Ordering::Acquire),
+            self.sigaltstack_size.load(Ordering::Acquire),
+        )
+    }
+
+    /// Install or, with `(0, 0)`, disable the alternate signal stack. The
+    /// caller must have refused the change while the interrupted stack
+    /// pointer was on it.
+    #[inline]
+    pub fn set_sigaltstack(&self, sp: u64, size: u64) {
+        self.sigaltstack_size.store(size, Ordering::Release);
+        self.sigaltstack_sp.store(sp, Ordering::Release);
+    }
+
+    /// Whether `rsp` lies inside this task's alternate signal stack — what
+    /// `SS_ONSTACK` reports.
+    ///
+    /// Derived from the interrupted stack pointer rather than stored: a nested
+    /// handler returning would retire a flag the outer frame still needs.
+    #[inline]
+    pub fn rsp_on_sigaltstack(&self, rsp: u64) -> bool {
+        let (sp, size) = self.sigaltstack();
+        sp != 0 && rsp >= sp && rsp < sp.wrapping_add(size)
+    }
+
+    #[inline]
+    pub fn note_sigframe_push_failure(&self) -> u8 {
+        let previous = self.sigframe_push_failures.load(Ordering::Relaxed);
+        let next = previous.saturating_add(1);
+        self.sigframe_push_failures.store(next, Ordering::Relaxed);
+        next
+    }
+
+    #[inline]
+    pub fn clear_sigframe_push_failures(&self) {
+        self.sigframe_push_failures.store(0, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn set_fault_siginfo(&self, signum: u8, si_code: i32, si_addr: u64) {
+        self.fault_si_code.store(si_code as u32, Ordering::Relaxed);
+        self.fault_si_addr.store(si_addr, Ordering::Relaxed);
+        self.fault_signo.store(signum, Ordering::Release);
+    }
+
+    /// The recorded `(si_code, si_addr)` if the last fault posted `signum`, so
+    /// a `kill`-originated signal never carries a stale faulting address.
+    #[inline]
+    pub fn fault_siginfo_for(&self, signum: u8) -> Option<(i32, u64)> {
+        if self.fault_signo.load(Ordering::Acquire) != signum {
+            return None;
+        }
+        Some((
+            self.fault_si_code.load(Ordering::Relaxed) as i32,
+            self.fault_si_addr.load(Ordering::Relaxed),
+        ))
+    }
+
+    #[inline]
+    pub fn clear_fault_siginfo(&self) {
+        self.fault_signo.store(0, Ordering::Release);
     }
 
     // Relaxed throughout: nothing is ordered against these, and `fetch_add`

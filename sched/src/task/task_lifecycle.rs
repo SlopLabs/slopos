@@ -903,11 +903,34 @@ pub fn task_terminate(task_id: u32) -> c_int {
         super::task_quota::release(resolved_id);
     }
 
+    auto_reap_exited_thread(&target, resolved_id);
+
     // Never `KArc`'s own `Drop`: this can be the final reference and the preempt
     // guard above is still live, so the destructor must not run here.
     // `task_put` parks it for the graveyard instead.
     super::task_put(target);
     0
+}
+
+#[inline]
+fn is_non_leader_thread(task: &Task) -> bool {
+    task.tgid != INVALID_TASK_ID && task.tgid != task.task_id
+}
+
+/// Retire an exited thread's registration on its own exit path.
+///
+/// No `waitpid` may return a non-leader thread, so nothing else ever reaps one:
+/// leaving it to a parent that will never call pins a registry slot, a `Task`
+/// and two stacks for the life of the system. `task_reap` declines while the
+/// thread is still dispatch-pinned, and the idle drain retries.
+fn auto_reap_exited_thread(target: &TaskRef, resolved_id: u32) {
+    if !is_non_leader_thread(target) {
+        return;
+    }
+    if let Some(parked) = super::unlink_child(target) {
+        super::task_put(parked);
+    }
+    let _ = task_reap(resolved_id);
 }
 
 /// What [`stamp_exit_state`] hands to the teardown tail: decisions the tail
@@ -943,13 +966,15 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
         exit_code: task.exit_code.load(Ordering::Acquire) as i32,
         exit_reason: TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire)),
         fault_reason: TaskFaultReason::from_u16(task.fault_reason.load(Ordering::Acquire)),
-        signal: 0,
+        signal: task.exit_signal(),
         exit_time_ms: now,
     };
     let _ = task.exit_info.try_set(info);
 
+    // A non-leader thread is nobody's reportable child, so it must not park in
+    // a Zombie state nothing would ever claim.
     let parent_alive = parent_alive_for(task.parent_task_id());
-    let final_status = if parent_alive {
+    let final_status = if parent_alive && !is_non_leader_thread(task) {
         TaskStatus::Zombie
     } else {
         TaskStatus::Terminated
@@ -1047,9 +1072,11 @@ fn parent_alive_for(parent_id: u32) -> bool {
     let Some(parent) = task_find_by_id(parent_id) else {
         return false;
     };
+    // `Stopped` counts: job control is not death, and a stopped parent still
+    // owes its children a reap.
     if !matches!(
         parent.status(),
-        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
+        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked | TaskStatus::Stopped
     ) {
         return false;
     }
@@ -1487,6 +1514,22 @@ fn flush_live_fpu_for_clone(parent: &Task) {
         .fpu_save_in_place(&current, slopos_ostd::cpu::x86_64::xsave::active_xcr0());
 }
 
+/// A parent with no table yields a default one rather than failing: the only
+/// tables that can be absent belong to tasks that never handled a signal.
+fn install_private_sighand(child: &mut Task, parent: &Task) -> bool {
+    let table = match parent.sighand() {
+        Some(parent_table) => parent_table.try_deep_copy(),
+        None => slopos_ostd::task::SigHandTable::try_new_default(),
+    };
+    match table {
+        Ok(table) => {
+            child.set_sighand(table);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn task_fork(
     parent: &Task,
     parent_user_ctx: Option<&slopos_ostd::user::context::UserContext>,
@@ -1555,6 +1598,13 @@ pub fn task_fork(
     let child = pending.as_mut();
 
     super::task_ops::task_clone_from(child, parent);
+
+    // `clone_from_raw` cleared both rather than own a duplicated heap pointer.
+    // POSIX: a forked child inherits handlers, but not a shared table.
+    if !install_private_sighand(child, parent) || !child.clone_cwd_from(parent) {
+        klog_info!("task_fork: signal table / cwd allocation failed");
+        return INVALID_TASK_ID;
+    }
 
     // The bulk copy above can carry the parent's recovery depths, saved at its
     // last switch-out and possibly stale; the child starts outside any
@@ -1638,6 +1688,17 @@ pub fn task_fork(
     }
 
     child_task_id
+}
+
+/// The task a `CLONE_THREAD` child must name as its parent: the group leader's
+/// own parent. `None` for a non-thread, and for a thread whose group leads no
+/// live parent.
+fn thread_group_real_parent(is_thread: bool, tgid: u32) -> Option<TaskRef> {
+    if !is_thread {
+        return None;
+    }
+    let leader = task_find_by_id(tgid)?;
+    task_find_by_id(leader.parent_task_id())
 }
 
 pub fn task_clone(
@@ -1726,6 +1787,24 @@ pub fn task_clone(
     let child = pending.as_mut();
 
     super::task_ops::task_clone_from(child, parent);
+
+    // `CLONE_SIGHAND` is the whole promise: one disposition table per thread
+    // group, so a `sigaction` on any thread is visible to all of them.
+    let sighand_ok = if flags & CLONE_SIGHAND != 0 {
+        match parent.sighand_handle() {
+            Some(shared) => {
+                child.set_sighand(shared);
+                true
+            }
+            None => install_private_sighand(child, parent),
+        }
+    } else {
+        install_private_sighand(child, parent)
+    };
+    if !sighand_ok || !child.clone_cwd_from(parent) {
+        klog_info!("task_clone: signal table / cwd allocation failed");
+        return Err(ERRNO_ENOMEM);
+    }
 
     child.set_recovery_depth(0);
     child.set_panic_in_flight(0);
@@ -1861,7 +1940,15 @@ pub fn task_clone(
     );
 
     if let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr()) {
-        super::link_child(parent, child_nn);
+        // A thread's real parent is its group leader's, not its creator's:
+        // otherwise `waitpid(-1)` in the creator reaps a sibling thread and
+        // hands its tid back as a pid. A group with no live parent leaves the
+        // thread orphaned, exactly as a forked child of a dying parent is.
+        match thread_group_real_parent(is_thread, child_tgid) {
+            Some(real_parent) => super::link_child(&real_parent, child_nn),
+            None if is_thread => {}
+            None => super::link_child(parent, child_nn),
+        }
     }
 
     if scheduler::publish_new_task(&registered) != 0 {
@@ -1871,4 +1958,345 @@ pub fn task_clone(
     }
 
     Ok(child_task_id)
+}
+
+/// The thread-group id containing `tid`.
+///
+/// A task whose `tgid` was never stamped leads its own group, and so does a
+/// `tid` that names no live task: a leader's registration is retired at its
+/// reap while its threads keep running.
+fn thread_group_of(tid: u32) -> u32 {
+    match task_find_by_id(tid) {
+        Some(task) => group_id_of(&task),
+        None => tid,
+    }
+}
+
+#[inline]
+fn group_id_of(task: &Task) -> u32 {
+    if task.tgid != INVALID_TASK_ID {
+        task.tgid
+    } else {
+        task.task_id
+    }
+}
+
+/// Run `f` on every live user-mode member of thread group `tgid`.
+///
+/// Per `task_for_each_active`'s contract the visitor runs after the registry
+/// lock is released, so `f` may take that lock, allocate, and wake.
+fn for_each_group_member(tgid: u32, mut f: impl FnMut(&TaskRef)) {
+    super::task_table::task_for_each_active(|task| {
+        if (task.flags & TASK_FLAG_USER_MODE) == 0 || group_id_of(task) != tgid {
+            return;
+        }
+        f(task);
+    });
+}
+
+/// Publish a job-control report against the group and wake a parent parked in
+/// `waitpid`.
+///
+/// The group leader carries the report, being the task a parent waits on; a
+/// group whose leader was already reaped carries it on `reporter` instead.
+///
+/// `ChildExit` is what a wait keyed on this child listens to, `AnyChildExit`
+/// what a `waitpid(-1)` listens to.
+fn publish_job_control_report(tgid: u32, reporter: &Task, stop_signal: Option<u8>) {
+    let leader = task_find_by_id(tgid);
+    let carrier: &Task = match leader.as_deref() {
+        Some(leader) => leader,
+        None => reporter,
+    };
+    match stop_signal {
+        Some(signum) => carrier.post_stop_report(signum),
+        None => carrier.post_continue_report(),
+    }
+    let parent = carrier.parent_task_id();
+    slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::child_exit_event(tgid));
+    if parent != INVALID_TASK_ID {
+        slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::any_child_exit_event(parent));
+    }
+}
+
+fn has_user_handler(member: &Task, signum: u8) -> bool {
+    matches!(
+        member.signal_handler((signum - 1) as usize),
+        Some(handler)
+            if handler != slopos_abi::signal::SIG_DFL
+                && handler != slopos_abi::signal::SIG_IGN
+    )
+}
+
+/// Park every member of `tid`'s thread group in [`TaskStatus::Stopped`].
+///
+/// Idempotent. Returns the number of members the stop reached.
+///
+/// Where a member is decides how it stops: a member that is executing is poked
+/// and parks itself at its next return-to-user boundary rather than being
+/// descheduled mid-syscall; anything else is parked here.
+///
+/// **Parks the calling task last, and does not return until the group is
+/// resumed**, which is what makes `kill(getpid(), SIGSTOP)` stop the caller.
+///
+/// The `WUNTRACED` report is published once per stop, by the last member the
+/// stop has to park.
+fn task_group_stop_members(tid: u32, stop_signal: u8) -> usize {
+    let bit = slopos_abi::signal::sig_bit(stop_signal);
+    if bit == 0 {
+        return 0;
+    }
+    let tgid = thread_group_of(tid);
+    let catchable = (bit & slopos_abi::signal::SIG_UNCATCHABLE) == 0;
+    let cont_bit = slopos_abi::signal::sig_bit(slopos_abi::signal::SIGCONT);
+    let current_addr = TaskAddr::current();
+    let mut acted = 0usize;
+    // Members this call moved into the stop: one that merely took the signal
+    // for its handler, or was already stopped, is no state change to report.
+    let mut transitions = 0usize;
+    // Members left running with the stop pending. The report waits for them.
+    let mut poked = 0usize;
+    let mut park_self = false;
+    let mut reporter: Option<TaskRef> = None;
+
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        // A stop retires an unconsumed continue: they are opposite states of
+        // one process, and the later one wins.
+        member.clear_signal_pending(cont_bit);
+        let _ = member.take_continue_report();
+
+        if catchable && has_user_handler(member, stop_signal) {
+            if slopos_ostd::task::ops::task_signal_post(member, stop_signal) {
+                let _ = scheduler::unblock_task(member);
+            }
+            acted += 1;
+            return;
+        }
+        if member.is_stopped() {
+            acted += 1;
+            return;
+        }
+        if current_addr == Some(TaskAddr::of(member)) {
+            member.clear_signal_pending(bit);
+            park_self = true;
+            acted += 1;
+            transitions += 1;
+            reporter = Some(member.clone());
+            return;
+        }
+        if member.on_cpu() || member.is_running() {
+            slopos_ostd::task::ops::task_signal_raise(member, bit);
+            if let Some(cpu) = scheduler::cpu_running_task(TaskAddr::of(member)) {
+                crate::lifecycle::send_reschedule_ipi(cpu);
+            }
+            acted += 1;
+            poked += 1;
+            return;
+        }
+        if member.mark_stopped() {
+            // Consumed by the park itself: leaving it pending would re-stop the
+            // member at its first delivery point after a SIGCONT.
+            member.clear_signal_pending(bit);
+            let _ = scheduler::unschedule_task(member);
+            // A kill that completed on another CPU between the filter above
+            // and this park found the target not yet stopped, so its
+            // `task_resume_if_stopped` was a no-op.
+            if member.is_killed() {
+                task_resume_if_stopped(member);
+                acted += 1;
+                return;
+            }
+            acted += 1;
+            transitions += 1;
+            reporter = Some(member.clone());
+        }
+    });
+
+    if acted == 0 {
+        return 0;
+    }
+    if transitions != 0
+        && poked == 0
+        && let Some(reporter) = reporter.as_deref()
+    {
+        publish_job_control_report(tgid, reporter, Some(stop_signal));
+    }
+    drop(reporter);
+
+    if park_self {
+        // After the snapshot above has been dropped: the switch below may not
+        // return for a long time, and a parked guard would pin every member.
+        if let Some(current) = crate::task_struct::Current::get()
+            && current.task().mark_stopped()
+        {
+            if current.task().is_killed() {
+                // Same race as the remote arm, seen from the target.
+                let _ = current.task().mark_ready();
+            } else {
+                scheduler::schedule();
+            }
+        }
+    }
+    acted
+}
+
+/// Job control. Idempotent; see [`task_group_stop_members`] for the mechanics
+/// and the caller-parks-last rule.
+pub fn task_group_stop(tid: u32, stop_signal: u8) -> bool {
+    task_group_stop_members(tid, stop_signal) != 0
+}
+
+/// Resume every stopped member of `tid`'s thread group, and retire any pending
+/// stop signal the group had not acted on yet.
+///
+/// `false` when no member was stopped, which is also when no `WCONTINUED`
+/// report is owed.
+pub fn task_group_continue(tid: u32) -> bool {
+    let tgid = thread_group_of(tid);
+    let stop_bits = slopos_abi::signal::sig_bit(slopos_abi::signal::SIGSTOP)
+        | slopos_abi::signal::sig_bit(slopos_abi::signal::SIGTSTP)
+        | slopos_abi::signal::sig_bit(slopos_abi::signal::SIGTTIN)
+        | slopos_abi::signal::sig_bit(slopos_abi::signal::SIGTTOU);
+    let mut resumed = false;
+    let mut reporter: Option<TaskRef> = None;
+
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        member.clear_signal_pending(stop_bits);
+        if !member.is_stopped() {
+            return;
+        }
+        let _ = member.take_stop_report();
+        if member.mark_ready() {
+            if scheduler::schedule_task(member) != 0 {
+                klog_info!(
+                    "task_group_continue: resume publish failed for task {}",
+                    member.task_id
+                );
+            }
+            resumed = true;
+            if reporter.is_none() {
+                reporter = Some(member.clone());
+            }
+        }
+    });
+
+    if resumed && let Some(reporter) = reporter.as_deref() {
+        publish_job_control_report(tgid, reporter, None);
+    }
+    resumed
+}
+
+/// Post `signum` to every task in the thread group containing `tid`.
+///
+/// Returns how many tasks took the signal. Job-control signals are acted on
+/// here rather than at a delivery point: a stopped task reaches no delivery
+/// point, so a `SIGCONT` that only pended could never resume it.
+pub fn task_group_signal(tid: u32, signum: u8) -> usize {
+    if slopos_abi::signal::sig_bit(signum) == 0 {
+        return 0;
+    }
+    let tgid = thread_group_of(tid);
+
+    match slopos_abi::signal::sig_default_action(signum) {
+        slopos_abi::signal::SigDefault::Stop => return task_group_stop_members(tid, signum),
+        slopos_abi::signal::SigDefault::Continue => {
+            let _ = task_group_continue(tid);
+        }
+        _ => {}
+    }
+
+    let mut signaled = 0usize;
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        if signum == slopos_abi::signal::SIGKILL {
+            // Always deliverable: `SIG_UNCATCHABLE` is stripped from every
+            // mask and refused by `rt_sigaction`.
+            let _ = slopos_ostd::task::ops::task_signal_post(member, signum);
+            slopos_ostd::task::ops::task_kill_and_wake(member);
+            // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume
+            // a stopped process, and a stopped task reaches no delivery point
+            // at which to act on the kill.
+            task_resume_if_stopped(member);
+            signaled += 1;
+            return;
+        }
+        if slopos_ostd::task::ops::task_signal_post(member, signum) {
+            let _ = scheduler::unblock_task(member);
+        }
+        // POSIX: `kill` succeeds even when the disposition discards the signal.
+        signaled += 1;
+    });
+    signaled
+}
+
+/// Put a stopped task back on a runqueue so it can reach a delivery point.
+///
+/// The wake path proper ([`scheduler::unblock_task`]) only moves
+/// `Blocked -> Ready`, so a stopped task needs this instead.
+pub fn task_resume_if_stopped(task: &TaskRef) -> bool {
+    if !task.is_stopped() || !task.mark_ready() {
+        return false;
+    }
+    if scheduler::schedule_task(task) != 0 {
+        klog_info!(
+            "task_resume_if_stopped: resume publish failed for task {}",
+            task.task_id
+        );
+    }
+    true
+}
+
+fn stamp_group_exit(task: &Task, code: u32) {
+    task.exit_reason
+        .store(TaskExitReason::Normal.as_u16(), Ordering::Release);
+    task.fault_reason
+        .store(TaskFaultReason::None.as_u16(), Ordering::Release);
+    task.exit_code.store(code, Ordering::Release);
+    task.set_exit_signal(0);
+}
+
+/// Terminate every task in `group_leader_tid`'s thread group with `code`.
+///
+/// Keyed on the group id, not on a lookup of the leader: a reaped leader's
+/// registration is gone while its threads keep running. The caller is
+/// terminated last, because its kernel stack is the one executing, and must
+/// then `schedule()` and report `NoReturn`.
+pub fn task_group_exit(group_leader_tid: u32, code: u32) -> usize {
+    let tgid = thread_group_of(group_leader_tid);
+    let current_addr = TaskAddr::current();
+    let mut self_id: Option<u32> = None;
+    let mut others = slopos_ostd::KVec::<u32>::new();
+
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        stamp_group_exit(member, code);
+        if current_addr == Some(TaskAddr::of(member)) {
+            self_id = Some(member.task_id);
+        } else {
+            let _ = others.push(member.task_id);
+        }
+    });
+
+    let mut terminated = 0usize;
+    for id in others.iter() {
+        if task_terminate(*id) == 0 {
+            terminated += 1;
+        }
+    }
+    if let Some(id) = self_id
+        && task_terminate(id) == 0
+    {
+        terminated += 1;
+    }
+    terminated
 }

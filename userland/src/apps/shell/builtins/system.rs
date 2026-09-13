@@ -1,5 +1,5 @@
 use crate::program_registry;
-use crate::syscall::{UserSysInfo, core as sys_core, process};
+use crate::syscall::{UserSysInfo, UserUtsname, core as sys_core, process};
 
 use super::super::display::{
     COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT, shell_write,
@@ -142,7 +142,7 @@ fn spawn_halt(action: &[u8]) -> i32 {
         shell_write(b"sh: cannot start /bin/halt\n");
         return 1;
     }
-    process::waitpid(tid as u32);
+    let _ = process::waitpid(tid as u32);
     // Reached only if the child failed: a successful halt never returns.
     1
 }
@@ -285,17 +285,58 @@ pub fn cmd_time(argc: i32, argv: &[&[u8]]) -> i32 {
     rc
 }
 
+/// Howard Hinnant's `civil_from_days`: era arithmetic, exact for every
+/// representable day and needing no leap table.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
 pub fn cmd_date(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    let ms = sys_core::get_time_ms();
-    let total_secs = ms / 1000;
-    let days = total_secs / 86400;
-    let hours = (total_secs % 86400) / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
+    let Some(epoch_secs) = sys_core::realtime_secs() else {
+        let total_secs = sys_core::get_time_ms() / 1000;
+        shell_write(
+            format!(
+                "Day {} {:02}:{:02}:{:02} SLT (no real-time clock; measured from boot)\n",
+                total_secs / 86400,
+                (total_secs % 86400) / 3600,
+                (total_secs % 3600) / 60,
+                total_secs % 60,
+            )
+            .as_bytes(),
+        );
+        return 0;
+    };
+
+    // Floor division, so a pre-1970 anchor still lands on the right day.
+    let days = epoch_secs.div_euclid(86_400);
+    let secs_of_day = epoch_secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    // 1970-01-01 was a Thursday, which is what orders WEEKDAYS.
+    let weekday = WEEKDAYS[days.rem_euclid(7) as usize];
+    let month_name = MONTHS[(month - 1) as usize];
 
     shell_write(
-        format!("Day {days} {hours:02}:{minutes:02}:{seconds:02} SLT (Sloptopia Local Time)\n")
-            .as_bytes(),
+        format!(
+            "{weekday} {month_name} {day:2} {:02}:{:02}:{:02} UTC {year}\n",
+            secs_of_day / 3600,
+            (secs_of_day % 3600) / 60,
+            secs_of_day % 60,
+        )
+        .as_bytes(),
     );
     0
 }
@@ -326,26 +367,32 @@ pub fn cmd_uname(argc: i32, argv: &[&[u8]]) -> i32 {
         show_all = true;
     }
 
-    let mut first = true;
+    let mut info = UserUtsname::default();
+    if sys_core::uname(&mut info) < 0 {
+        shell_write_idx(
+            b"uname: kernel refused to identify itself\n",
+            COLOR_ERROR_RED,
+        );
+        return 1;
+    }
 
+    let field = |bytes: &[u8; 65]| -> String {
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    };
+
+    let mut parts: Vec<String> = Vec::new();
     if show_all || show_sysname {
-        shell_write(b"SlopOS");
-        first = false;
+        parts.push(field(&info.sysname));
     }
     if show_all || show_release {
-        if !first {
-            shell_write(b" ");
-        }
-        shell_write(b"0.2-slop");
-        first = false;
+        parts.push(field(&info.release));
     }
     if show_all || show_machine {
-        if !first {
-            shell_write(b" ");
-        }
-        shell_write(b"x86_64");
+        parts.push(field(&info.machine));
     }
 
+    shell_write(parts.join(" ").as_bytes());
     shell_write(NL.as_bytes());
     0
 }

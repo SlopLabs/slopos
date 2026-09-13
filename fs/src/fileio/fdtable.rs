@@ -150,7 +150,7 @@ pub fn fileio_destroy_table_for_process(process: Handle<Process>) {
     let Some(slot) = slot_for_process(process) else {
         return;
     };
-    destroy_table_in_slot(slot);
+    destroy_table_in_slot(slot, process);
 }
 
 /// Generation-checked, so a handle whose slot has been rebound answers `false`
@@ -161,14 +161,15 @@ pub fn fileio_table_exists_for_process(process: Handle<Process>) -> bool {
 
 /// Release every bound descriptor table. Fixture reset only.
 pub fn fileio_reset_all_tables() {
-    for slot in PROCESS_TABLES.iter() {
+    for (index, slot) in PROCESS_TABLES.iter().enumerate() {
         if slot.process_id.load(Ordering::Acquire) != INVALID_PROCESS_ID {
-            destroy_table_in_slot(slot);
+            let owner = Handle::from_parts(index as u32, slot.generation.load(Ordering::Acquire));
+            destroy_table_in_slot(slot, owner);
         }
     }
 }
 
-fn destroy_table_in_slot(slot: &'static FileTableSlot) {
+fn destroy_table_in_slot(slot: &'static FileTableSlot, owner: Handle<Process>) {
     {
         let mut inner = slot.inner.lock();
         if !inner.in_use {
@@ -181,6 +182,9 @@ fn destroy_table_in_slot(slot: &'static FileTableSlot) {
     while let Some(entry) = take_next_descriptor(slot) {
         drop(entry);
     }
+    // POSIX record locks are owned by the process, not by a description, so
+    // nothing above releases them.
+    super::flock::file_locks_release_process(owner);
     // The array itself goes back to the heap off-lock, for the same reason it
     // was built off-lock.
     let released = core::mem::take(&mut slot.inner.lock().descriptors);
@@ -251,7 +255,7 @@ pub fn fileio_close_on_exec(table: FdTable) {
     let Some(slot) = slot_for_table(table) else {
         return;
     };
-    let closed = {
+    let mut closed = {
         let mut inner = slot.inner.lock();
         if !inner.in_use {
             return;
@@ -265,5 +269,12 @@ pub fn fileio_close_on_exec(table: FdTable) {
         }
         closed
     };
-    drop(closed);
+    // Same rule as `close(2)`: each of these drops this process's record locks
+    // on the file it named. The key is read before the teardown frees it.
+    let owner = table.handle();
+    while let Some(entry) = closed.pop() {
+        let key = super::lock_key_of_entry(&entry);
+        drop(entry);
+        super::flock::release_record_locks_on_close(owner, key);
+    }
 }

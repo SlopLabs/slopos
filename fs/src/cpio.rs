@@ -4,19 +4,18 @@
 //! `checked_add` and bounds-checked against the slice: a malformed archive
 //! yields a [`CpioError`], never a panic or an out-of-bounds read.
 
-use slopos_ostd::klog_info;
+use slopos_ostd::{KVec, klog_info};
 
-use crate::vfs::{VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode, vfs_set_sealed};
+use crate::vfs::{
+    VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode, vfs_set_sealed, vfs_symlink,
+};
 use crate::{MAX_NAME_LEN, MAX_PATH_LEN};
+use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 
 /// Fixed `newc` header size: 6-byte magic + 13 fields × 8 ASCII-hex chars.
 const HEADER_LEN: usize = 110;
 const MAGIC: &[u8] = b"070701";
 const TRAILER: &[u8] = b"TRAILER!!!";
-
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
 
 /// Field byte offsets within the header (each field is 8 ASCII-hex chars).
 const OFF_MODE: usize = 6 + 8;
@@ -187,13 +186,16 @@ pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
 
 fn unpack_entries(archive: &[u8]) -> Result<usize, CpioError> {
     let mut created = 0usize;
+    // One buffer for the whole archive: `MAX_PATH_LEN` is 4096 and a kernel
+    // frame is bounded at 2 KiB.
+    let mut buf = KVec::<u8>::zeroed(MAX_PATH_LEN).map_err(|_| CpioError::NameTooLong)?;
 
     for_each_cpio_entry(archive, |entry| {
-        let mut buf = [0u8; MAX_PATH_LEN];
-        let path = match normalize_path(entry.path, &mut buf)? {
-            Some(len) => &buf[..len],
+        let len = match normalize_path(entry.path, buf.as_mut_slice())? {
+            Some(len) => len,
             None => return Ok(()),
         };
+        let path = &buf.as_slice()[..len];
         validate_components(path)?;
 
         match entry.mode & S_IFMT {
@@ -205,6 +207,13 @@ fn unpack_entries(archive: &[u8]) -> Result<usize, CpioError> {
             S_IFREG => {
                 ensure_parents(path)?;
                 write_file(path, entry.data, entry.mode)?;
+                created += 1;
+            }
+            // `newc` stores a symlink's target in the entry body; dropping
+            // these left an initramfs with a `/lib -> /usr/lib` link unbootable.
+            S_IFLNK => {
+                ensure_parents(path)?;
+                make_symlink(path, entry.data)?;
                 created += 1;
             }
             other => {
@@ -219,7 +228,7 @@ fn unpack_entries(archive: &[u8]) -> Result<usize, CpioError> {
 /// Normalize a cpio entry name into an absolute VFS path written into `out`.
 /// Strips a leading `./` and collapses leading slashes to exactly one. Returns
 /// the byte length written, `None` for the root / `.`, or [`CpioError::NameTooLong`].
-fn normalize_path(name: &[u8], out: &mut [u8; MAX_PATH_LEN]) -> Result<Option<usize>, CpioError> {
+fn normalize_path(name: &[u8], out: &mut [u8]) -> Result<Option<usize>, CpioError> {
     let mut n = name;
     if n == b"." {
         return Ok(None);
@@ -234,12 +243,25 @@ fn normalize_path(name: &[u8], out: &mut [u8; MAX_PATH_LEN]) -> Result<Option<us
         return Ok(None);
     }
     let total = n.len().checked_add(1).ok_or(CpioError::NameTooLong)?;
-    if total > MAX_PATH_LEN {
+    if total > out.len() {
         return Err(CpioError::NameTooLong);
     }
     out[0] = b'/';
     out[1..total].copy_from_slice(n);
     Ok(Some(total))
+}
+
+/// The target is the entry body, NUL-terminated by some writers and not by
+/// others.
+fn make_symlink(path: &[u8], target: &[u8]) -> Result<(), CpioError> {
+    let target = nul_terminated(target);
+    if target.is_empty() {
+        return Err(CpioError::BadField);
+    }
+    match vfs_symlink(target, path) {
+        Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
+        Err(e) => Err(CpioError::Vfs(e)),
+    }
 }
 
 /// Verify every path component fits in [`MAX_NAME_LEN`] so the VFS does not

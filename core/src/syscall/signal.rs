@@ -2,8 +2,12 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::Errno;
 use slopos_abi::signal::{
-    NSIG, SA_NODEFER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE, SIGKILL,
-    SIGNAL_MASK, SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
+    MINSIGSTKSZ, NSIG, REG_CR2, REG_CSGSFS, REG_EFL, REG_ERR, REG_OLDMASK, REG_R8, REG_R9, REG_R10,
+    REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX, REG_RBP, REG_RBX, REG_RCX, REG_RDI,
+    REG_RDX, REG_RIP, REG_RSI, REG_RSP, REG_TRAPNO, SA_NODEFER, SA_ONSTACK, SA_RESETHAND,
+    SA_SIGINFO, SI_USER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE, SIGKILL,
+    SIGNAL_MASK, SIGSEGV, SS_DISABLE, SS_ONSTACK, SigDefault, SigSet, SignalFrame, UserSigAltStack,
+    UserSigaction, UserSiginfo, UserUcontext, sig_bit, sig_default_action,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, SPAWN_PRIVILEGED, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
@@ -22,7 +26,8 @@ use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
-    task_find_by_id, task_for_each_active, task_kill_and_wake, task_signal_post, task_terminate,
+    task_find_by_id, task_for_each_active, task_group_signal, task_group_stop, task_kill_and_wake,
+    task_resume_if_stopped, task_signal_post, task_terminate,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -258,7 +263,7 @@ define_syscall!(syscall_kill
     let caller_flags = ctx.task().flags;
 
     let mut targets = TargetSet::new();
-    let mut fanout = Fanout { denied: false };
+
     if pid > 0 {
         // Resolved and authorized in one step, holding an owning reference to
         // the target: without it the id could be recycled onto a stranger
@@ -270,8 +275,23 @@ define_syscall!(syscall_kill
             Ok(target) => target,
             Err(e) => return SyscallResult::Err(e),
         };
-        targets.push(target.id());
-    } else if pid == 0 {
+        // Deliberately after the permission check: `kill(pid, 0)` is the
+        // existence-and-permission probe.
+        if sig == 0 {
+            return SyscallResult::Ok(0);
+        }
+        let Some(signum) = parse_signum(sig) else {
+            return SyscallResult::Err(Errno::EINVAL);
+        };
+        // POSIX `kill(pid)` names a *process*: the signal reaches every thread
+        // in the group. The permission relation is answered once, on the named
+        // task — a thread-group fan-out crosses no session.
+        if task_group_signal(target.id(), signum) == 0 {
+            return SyscallResult::Err(Errno::ESRCH);
+        }
+        return SyscallResult::Ok(0);
+    }
+    let fanout = if pid == 0 {
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
@@ -282,12 +302,12 @@ define_syscall!(syscall_kill
         if caller_pgid == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        fanout = collect_targets_for_group(caller_pgid, caller_flags, &mut targets);
+        collect_targets_for_group(caller_pgid, caller_flags, &mut targets)
     } else if pid == -1 {
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        fanout = collect_targets_for_all(caller_id, caller_flags, &mut targets);
+        collect_targets_for_all(caller_id, caller_flags, &mut targets)
     } else {
         if pid == i32::MIN {
             return SyscallResult::Err(Errno::ESRCH);
@@ -296,8 +316,8 @@ define_syscall!(syscall_kill
         if group_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        fanout = collect_targets_for_group(group_id, caller_flags, &mut targets);
-    }
+        collect_targets_for_group(group_id, caller_flags, &mut targets)
+    };
 
     if targets.len() == 0 {
         // A selector that matched only unsignalable tasks is a permission
@@ -319,12 +339,27 @@ define_syscall!(syscall_kill
         return SyscallResult::Err(Errno::EINVAL);
     };
 
+    // A stop or a continue is a state change of a whole *process*, applied per
+    // thread group even when the selector named one thread. Idempotent, so a
+    // group with several matching threads still stops once.
+    let job_control = matches!(
+        sig_default_action(signum),
+        SigDefault::Stop | SigDefault::Continue
+    );
+
     let mut signaled = 0usize;
 
     for target_id in targets.iter() {
         let Some(target) = task_find_by_id(*target_id) else {
             continue;
         };
+
+        if job_control {
+            if task_group_signal(*target_id, signum) != 0 {
+                signaled += 1;
+            }
+            continue;
+        }
 
         if signum == SIGKILL {
             // SIG_UNCATCHABLE is stripped from every mask and rt_sigaction
@@ -333,6 +368,9 @@ define_syscall!(syscall_kill
             // unwinds by returning rather than being abandoned mid-stack.
             let _ = task_signal_post(&target, SIGKILL);
             task_kill_and_wake(&target);
+            // A stopped target reaches no boundary at which to act on the kill
+            // flag until something resumes it.
+            task_resume_if_stopped(&target);
             signaled += 1;
             continue;
         }
@@ -358,11 +396,50 @@ fn read_signal_frame(rsp: u64) -> Option<SignalFrame> {
     copy_from_user(ptr).ok()
 }
 
-/// The FPU/vector save area sits immediately after the `SignalFrame` on the
-/// user stack. Kernel-internal; the userland restorer never touches it.
+/// User signal-frame geometry, from the restorer word up:
+/// `[restorer u64][SignalFrame][UserSiginfo][UserUcontext][FPU]`.
+///
+/// The `SignalFrame` must stay immediately after the restorer word: the
+/// userland restorer's contract is that once the handler's `ret` pops the
+/// restorer, RSP points directly at the frame.
+const SIGINFO_SIZE: u64 = core::mem::size_of::<UserSiginfo>() as u64;
+const UCONTEXT_SIZE: u64 = core::mem::size_of::<UserUcontext>() as u64;
+const SIGFRAME_SIZE: u64 = core::mem::size_of::<SignalFrame>() as u64;
+
+pub(crate) const SIGFRAME_TOTAL: u64 =
+    8 + SIGFRAME_SIZE + SIGINFO_SIZE + UCONTEXT_SIZE + FPU_STATE_SIZE as u64;
+
+// The floor must admit one whole frame, or `sigaltstack`'s refusal defers to
+// a silent overflow below `ss_sp`.
+const _: () = assert!(MINSIGSTKSZ as u64 >= SIGFRAME_TOTAL);
+
+/// Base of the frame delivery pushes below `stack_top` — the address the
+/// handler enters with in RSP, holding the restorer word.
+///
+/// The restorer pointer doubles as the handler's return address, so SysV wants
+/// `frame_addr % 16 == 8`; aligning to 16 instead faults #GP on the first
+/// aligned vector spill the handler emits.
 #[inline]
-fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
-    sigframe_addr.wrapping_add(core::mem::size_of::<SignalFrame>() as u64)
+pub(crate) fn sigframe_base_for_stack_top(stack_top: u64) -> u64 {
+    (stack_top.wrapping_sub(SIGFRAME_TOTAL) & !0xF).wrapping_sub(8)
+}
+
+#[inline]
+fn sigframe_siginfo_addr(sigframe_addr: u64) -> u64 {
+    sigframe_addr.wrapping_add(SIGFRAME_SIZE)
+}
+
+#[inline]
+fn sigframe_ucontext_addr(sigframe_addr: u64) -> u64 {
+    sigframe_siginfo_addr(sigframe_addr).wrapping_add(SIGINFO_SIZE)
+}
+
+/// The FPU/vector save area, last in the frame. Kernel-internal; the userland
+/// restorer never touches it, but `rt_sigreturn` must compute it the same way
+/// delivery did.
+#[inline]
+pub(crate) fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
+    sigframe_ucontext_addr(sigframe_addr).wrapping_add(UCONTEXT_SIZE)
 }
 
 /// Save the interrupted task's live FPU/vector state into its user signal frame
@@ -471,6 +548,65 @@ define_syscall!(syscall_rt_sigreturn (ctx) cap(NoneSelf)
     SyscallResult::NoReturn
 });
 
+define_syscall!(syscall_sigaltstack
+    (ctx, new_ptr: Option<UserPtr<UserSigAltStack>>, old_ptr: Option<UserPtr<UserSigAltStack>>)
+    cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    let task_ref = ctx.task();
+    let (ss_sp, ss_size) = task_ref.sigaltstack();
+    // POSIX asks whether the task is *executing* on the alternate stack, which
+    // is a range test on the interrupted stack pointer: a stored flag is wrong
+    // for a nested handler, whose return would retire the outer frame's mark.
+    let on_stack = task_ref.rsp_on_sigaltstack(ctx.user_rsp());
+
+    if let Some(old) = old_ptr {
+        let reported = UserSigAltStack {
+            ss_sp,
+            ss_flags: if on_stack {
+                SS_ONSTACK
+            } else if ss_sp == 0 {
+                SS_DISABLE
+            } else {
+                0
+            },
+            _pad: 0,
+            ss_size,
+        };
+        copy_to_user(old.inner(), &reported).map_err(|_| Errno::EFAULT)?;
+    }
+
+    let Some(new) = new_ptr else {
+        return Ok(());
+    };
+
+    // A change while the task is running on the alternate stack would move the
+    // ground out from under the frame it is executing on.
+    if on_stack {
+        return Err(Errno::EPERM);
+    }
+
+    let requested = copy_from_user(new.inner()).map_err(|_| Errno::EFAULT)?;
+    if (requested.ss_flags & !(SS_DISABLE | SS_ONSTACK)) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if (requested.ss_flags & SS_DISABLE) != 0 {
+        task_ref.set_sigaltstack(0, 0);
+        return Ok(());
+    }
+    if requested.ss_size < MINSIGSTKSZ as u64 {
+        return Err(Errno::ENOMEM);
+    }
+    if requested.ss_sp == 0 || requested.ss_sp.checked_add(requested.ss_size).is_none() {
+        return Err(Errno::EINVAL);
+    }
+    // Validated here rather than at delivery: a frame push is the wrong place
+    // to discover the stack was never a user address.
+    UserBytes::try_new(requested.ss_sp, requested.ss_size as usize).map_err(|_| Errno::EFAULT)?;
+    task_ref.set_sigaltstack(requested.ss_sp, requested.ss_size);
+    Ok(())
+});
+
 /// Read/write view over the user-mode register file signal delivery mutates,
 /// shared by the syscall-exit and IRQ-exit paths so both stay in lockstep.
 trait UserRegView {
@@ -564,11 +700,15 @@ enum SignalDisposition {
     Done,
     /// Terminate; the exit fields are already stamped.
     Terminate(u32),
+    /// Job control: park this task's whole thread group.
+    Stop { signum: u8 },
     Handle {
         signum: u8,
         bit: u64,
         action: SignalAction,
         saved_mask: SigSet,
+        si_code: i32,
+        si_addr: u64,
     },
 }
 
@@ -593,24 +733,34 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     let bit = sig_bit(signum);
     task_ref.signal_pending.fetch_and(!bit, Ordering::AcqRel);
 
-    let action = task_ref.signal_actions[(signum - 1) as usize].load_owner_only();
+    let idx = (signum - 1) as usize;
+    let Some(action) = task_ref.signal_action(idx) else {
+        return SignalDisposition::Done;
+    };
     if action.handler == SIG_IGN {
         return SignalDisposition::Done;
     }
 
     if action.handler == SIG_DFL {
         return match sig_default_action(signum) {
-            SigDefault::Ignore | SigDefault::Stop | SigDefault::Continue => SignalDisposition::Done,
+            // A `SIGCONT` that only pends here could never have woken this
+            // task: a stopped task reaches no delivery point, so the resume
+            // already happened at the send site.
+            SigDefault::Ignore | SigDefault::Continue => SignalDisposition::Done,
+            SigDefault::Stop => SignalDisposition::Stop { signum },
             SigDefault::Terminate => {
                 task_ref
                     .exit_reason
-                    .store(TaskExitReason::Normal.as_u16(), Ordering::Release);
+                    .store(TaskExitReason::Signalled.as_u16(), Ordering::Release);
                 task_ref
                     .fault_reason
                     .store(TaskFaultReason::None.as_u16(), Ordering::Release);
                 task_ref
                     .exit_code
                     .store(128 + signum as u32, Ordering::Release);
+                // `exit(139)` is not a segfault, so the signal number cannot
+                // be recovered from the exit code.
+                task_ref.set_exit_signal(signum);
                 SignalDisposition::Terminate(task_ref.task_id)
             }
         };
@@ -620,12 +770,151 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
         return SignalDisposition::Done;
     }
 
+    let (si_code, si_addr) = task_ref.fault_siginfo_for(signum).unwrap_or((SI_USER, 0));
+
     SignalDisposition::Handle {
         signum,
         bit,
         action,
         saved_mask: task_ref.signal_blocked(),
+        si_code,
+        si_addr,
     }
+}
+
+/// Write the `siginfo_t` an `SA_SIGINFO` handler receives.
+///
+/// `#[inline(never)]`: 128 bytes of `siginfo` must materialise in *this*
+/// frame, not in a delivery frame already near the 2 KiB ceiling.
+#[inline(never)]
+fn push_siginfo(addr: u64, signum: u8, si_code: i32, si_addr: u64) -> bool {
+    let Ok(ptr) = MmUserPtr::<UserSiginfo>::try_new(addr) else {
+        return false;
+    };
+    let info = UserSiginfo {
+        si_signo: signum as i32,
+        si_errno: 0,
+        si_code,
+        _pad0: 0,
+        si_pid: 0,
+        si_uid: 0,
+        si_addr,
+        _pad: [0; 12],
+    };
+    copy_to_user(ptr, &info).is_ok()
+}
+
+/// Write the `ucontext_t` an `SA_SIGINFO` handler receives. Same frame-size
+/// reason for `#[inline(never)]` as [`push_siginfo`], at ~250 bytes.
+#[inline(never)]
+fn push_ucontext(
+    addr: u64,
+    regs: &UserRegs,
+    saved_mask: SigSet,
+    altstack: (u64, u64),
+    on_altstack: bool,
+    si_addr: u64,
+) -> bool {
+    let Ok(ptr) = MmUserPtr::<UserUcontext>::try_new(addr) else {
+        return false;
+    };
+    let mut uc = UserUcontext {
+        uc_flags: 0,
+        uc_link: 0,
+        uc_stack: UserSigAltStack {
+            ss_sp: altstack.0,
+            ss_flags: if on_altstack {
+                SS_ONSTACK
+            } else if altstack.0 == 0 {
+                SS_DISABLE
+            } else {
+                0
+            },
+            _pad: 0,
+            ss_size: altstack.1,
+        },
+        uc_mcontext_gregs: [0; 23],
+        uc_sigmask: saved_mask,
+    };
+    let g = &mut uc.uc_mcontext_gregs;
+    g[REG_R8] = regs.r8;
+    g[REG_R9] = regs.r9;
+    g[REG_R10] = regs.r10;
+    g[REG_R11] = regs.r11;
+    g[REG_R12] = regs.r12;
+    g[REG_R13] = regs.r13;
+    g[REG_R14] = regs.r14;
+    g[REG_R15] = regs.r15;
+    g[REG_RDI] = regs.rdi;
+    g[REG_RSI] = regs.rsi;
+    g[REG_RBP] = regs.rbp;
+    g[REG_RBX] = regs.rbx;
+    g[REG_RDX] = regs.rdx;
+    g[REG_RAX] = regs.rax;
+    g[REG_RCX] = regs.rcx;
+    g[REG_RSP] = regs.rsp;
+    g[REG_RIP] = regs.rip;
+    g[REG_EFL] = regs.rflags_user_subset;
+    g[REG_CSGSFS] = regs.cs as u64;
+    g[REG_ERR] = 0;
+    g[REG_TRAPNO] = 0;
+    g[REG_OLDMASK] = saved_mask;
+    g[REG_CR2] = si_addr;
+    copy_to_user(ptr, &uc).is_ok()
+}
+
+/// Where the frame for `action` is based.
+///
+/// A task already on the alternate stack keeps pushing downward from the
+/// interrupted stack pointer, so a nested handler does not land on the frame
+/// the outer one is using. An alternate stack too small for a frame is not
+/// used at all, so the failure is a refused delivery rather than a silent
+/// write below `ss_sp`.
+fn frame_base_for(task_ref: &Task, action: &SignalAction, rsp: u64) -> u64 {
+    if (action.flags & SA_ONSTACK) == 0 || task_ref.rsp_on_sigaltstack(rsp) {
+        return rsp;
+    }
+    let (ss_sp, ss_size) = task_ref.sigaltstack();
+    if ss_sp == 0 || ss_size < SIGFRAME_TOTAL {
+        return rsp;
+    }
+    ss_sp.wrapping_add(ss_size)
+}
+
+/// A frame push that faulted while delivering a signal the task cannot
+/// decline.
+///
+/// Re-pending is not an option: the interrupted instruction re-executes on
+/// return to user mode, so a fault signal whose frame cannot be pushed would
+/// fault forever. The task dies of `SIGSEGV` whatever the original signal was.
+fn force_death_on_frame_fault(task_ref: &Task) {
+    task_ref
+        .exit_reason
+        .store(TaskExitReason::Signalled.as_u16(), Ordering::Release);
+    task_ref
+        .fault_reason
+        .store(TaskFaultReason::None.as_u16(), Ordering::Release);
+    task_ref
+        .exit_code
+        .store(128 + SIGSEGV as u32, Ordering::Release);
+    task_ref.set_exit_signal(SIGSEGV);
+    let task_id = task_ref.task_id;
+    if task_terminate(task_id) == 0 {
+        schedule();
+    }
+}
+
+/// Resolve the frame's pages as a user write would, so the copies below meet
+/// a present, writable leaf. `#[inline(never)]` for the same frame-size
+/// reason as [`push_siginfo`].
+#[inline(never)]
+fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
+    slopos_mm::page_fault::populate_user_range_for_write(
+        task_ref.process_vm_handle_raw(),
+        frame_addr,
+        SIGFRAME_TOTAL,
+        task_ref.task_id,
+    )
 }
 
 fn deliver_pending_signal_core(
@@ -634,7 +923,7 @@ fn deliver_pending_signal_core(
 ) {
     let task_ref = current.task();
 
-    let (signum, bit, action, saved_mask) = match claim_pending_signal(task_ref) {
+    let (signum, bit, action, saved_mask, si_code, si_addr) = match claim_pending_signal(task_ref) {
         SignalDisposition::Done => {
             // A task marked for death leaves here rather than returning to
             // userland; the mark is deliberately not a signal. This frame
@@ -654,75 +943,102 @@ fn deliver_pending_signal_core(
             }
             return;
         }
+        SignalDisposition::Stop { signum } => {
+            // Parks this task's whole thread group, this task last, and does
+            // not return until a `SIGCONT` resumes it.
+            let _ = task_group_stop(task_ref.task_id, signum);
+            return;
+        }
         SignalDisposition::Handle {
             signum,
             bit,
             action,
             saved_mask,
-        } => (signum, bit, action, saved_mask),
+            si_code,
+            si_addr,
+        } => (signum, bit, action, saved_mask, si_code, si_addr),
     };
 
     let regs_snapshot = regs.snapshot();
+    let fault_signal = task_ref.fault_siginfo_for(signum).is_some();
 
-    // Frame = [restorer ptr (8)] [SignalFrame] [FPU/vector save area]. The
-    // restorer pointer doubles as the handler's return address, so SysV wants
-    // `frame_addr % 16 == 8`; aligning to 16 instead faults #GP on the first
-    // aligned vector spill the handler emits.
-    let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64 + FPU_STATE_SIZE as u64;
-    let frame_addr = (regs_snapshot.rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
+    let stack_top = frame_base_for(task_ref, &action, regs_snapshot.rsp);
+    let frame_addr = sigframe_base_for_stack_top(stack_top);
+    let sigframe_addr = frame_addr.wrapping_add(8);
+
+    // A push that faults while delivering a *fault* signal must kill rather
+    // than re-pend: the interrupted instruction re-executes and faults again.
+    // Anything else gets one deferral and then dies, as Linux's
+    // `force_sigsegv` does — a signal retried forever is never reported.
+    let refuse = |task_ref: &Task| {
+        if fault_signal || task_ref.note_sigframe_push_failure() >= 2 {
+            force_death_on_frame_fault(task_ref);
+            return;
+        }
+        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+    };
+
+    // The copies below refuse an absent or write-protected leaf rather than
+    // faulting it in, and the frame lands wherever the interrupted RSP put it:
+    // below a `fork`ed child's untouched COW stack pages as often as not.
+    if !populate_sigframe_range(task_ref, frame_addr) {
+        refuse(task_ref);
+        return;
+    }
 
     let restorer_ptr = match MmUserPtr::<u64>::try_new(frame_addr) {
         Ok(p) => p,
         Err(_) => {
-            task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+            refuse(task_ref);
             return;
         }
     };
     if copy_to_user(restorer_ptr, &action.restorer).is_err() {
-        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+        refuse(task_ref);
         return;
     }
 
-    let sigframe_addr = frame_addr.wrapping_add(8);
-    let sigframe_ptr = match MmUserPtr::<SignalFrame>::try_new(sigframe_addr) {
-        Ok(p) => p,
-        Err(_) => {
-            task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
-            return;
-        }
-    };
+    if !push_signal_frame(sigframe_addr, signum, &regs_snapshot, saved_mask) {
+        refuse(task_ref);
+        return;
+    }
 
-    let sigframe = SignalFrame {
-        signum: signum as u64,
-        rax: regs_snapshot.rax,
-        rbx: regs_snapshot.rbx,
-        rcx: regs_snapshot.rcx,
-        rdx: regs_snapshot.rdx,
-        rsi: regs_snapshot.rsi,
-        rdi: regs_snapshot.rdi,
-        rbp: regs_snapshot.rbp,
-        rsp: regs_snapshot.rsp,
-        r8: regs_snapshot.r8,
-        r9: regs_snapshot.r9,
-        r10: regs_snapshot.r10,
-        r11: regs_snapshot.r11,
-        r12: regs_snapshot.r12,
-        r13: regs_snapshot.r13,
-        r14: regs_snapshot.r14,
-        r15: regs_snapshot.r15,
-        rip: regs_snapshot.rip,
-        rflags: regs_snapshot.rflags_user_subset,
-        saved_mask,
-    };
-
-    if copy_to_user(sigframe_ptr, &sigframe).is_err() {
-        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+    if (action.flags & SA_SIGINFO) != 0
+        && (!push_siginfo(
+            sigframe_siginfo_addr(sigframe_addr),
+            signum,
+            si_code,
+            si_addr,
+        ) || !push_ucontext(
+            sigframe_ucontext_addr(sigframe_addr),
+            &regs_snapshot,
+            saved_mask,
+            task_ref.sigaltstack(),
+            task_ref.rsp_on_sigaltstack(regs_snapshot.rsp),
+            si_addr,
+        ))
+    {
+        refuse(task_ref);
         return;
     }
 
     if !save_fpu_to_sigframe(current, sigframe_addr) {
-        task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
+        refuse(task_ref);
         return;
+    }
+
+    // Everything below this point commits: no path from here refuses the
+    // delivery, which is what lets the disposition reset and the mask move
+    // together with the redirect.
+    task_ref.clear_sigframe_push_failures();
+    // Consumed, so the next delivery from a `kill` reports no stale address.
+    task_ref.clear_fault_siginfo();
+
+    // `SA_RESETHAND` reverts here rather than at the claim, so a refused
+    // frame push leaves the handler installed instead of converting a caught
+    // signal into its default action on the retry.
+    if (action.flags & SA_RESETHAND) != 0 {
+        let _ = task_ref.set_signal_action((signum - 1) as usize, SignalAction::default());
     }
 
     let mut blocked = saved_mask | action.mask;
@@ -735,9 +1051,46 @@ fn deliver_pending_signal_core(
     redirected.rsp = frame_addr;
     redirected.rip = action.handler;
     redirected.rdi = signum as u64;
-    redirected.rsi = 0;
-    redirected.rdx = 0;
+    if (action.flags & SA_SIGINFO) != 0 {
+        redirected.rsi = sigframe_siginfo_addr(sigframe_addr);
+        redirected.rdx = sigframe_ucontext_addr(sigframe_addr);
+    } else {
+        redirected.rsi = 0;
+        redirected.rdx = 0;
+    }
     regs.commit_redirect(&redirected);
+}
+
+/// Write the [`SignalFrame`] `rt_sigreturn` restores from. `#[inline(never)]`
+/// for the same frame-size reason as [`push_siginfo`].
+#[inline(never)]
+fn push_signal_frame(addr: u64, signum: u8, regs: &UserRegs, saved_mask: SigSet) -> bool {
+    let Ok(ptr) = MmUserPtr::<SignalFrame>::try_new(addr) else {
+        return false;
+    };
+    let frame = SignalFrame {
+        signum: signum as u64,
+        rax: regs.rax,
+        rbx: regs.rbx,
+        rcx: regs.rcx,
+        rdx: regs.rdx,
+        rsi: regs.rsi,
+        rdi: regs.rdi,
+        rbp: regs.rbp,
+        rsp: regs.rsp,
+        r8: regs.r8,
+        r9: regs.r9,
+        r10: regs.r10,
+        r11: regs.r11,
+        r12: regs.r12,
+        r13: regs.r13,
+        r14: regs.r14,
+        r15: regs.r15,
+        rip: regs.rip,
+        rflags: regs.rflags_user_subset,
+        saved_mask,
+    };
+    copy_to_user(ptr, &frame).is_ok()
 }
 
 pub fn deliver_pending_signal(
@@ -775,6 +1128,3 @@ pub fn deliver_pending_signal_on_irq_exit(frame: *mut InterruptFrame) {
     let mut view = InterruptFrameRegs { frame: frame_ref };
     deliver_pending_signal_core(&current, &mut view);
 }
-
-#[allow(dead_code)]
-type _Unused<T> = UserPtr<T>;

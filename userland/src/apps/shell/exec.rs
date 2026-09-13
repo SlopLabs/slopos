@@ -4,7 +4,9 @@ use core::ptr;
 use crate::program_registry;
 use crate::syscall::{UserFsStat, core as sys_core, fs, process};
 use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY};
+use slopos_abi::signal::{WNOHANG, WUNTRACED};
 
+use super::buffers;
 use super::buffers::ParsedTokens;
 use super::builtins;
 use super::display::{
@@ -394,7 +396,7 @@ fn parse_dup_operand(operand: &[u8]) -> Option<RedirectTarget> {
     Some(RedirectTarget::Fd(n))
 }
 
-fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
+fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
     use super::env;
 
     let Some((path_val, path_len)) = env::get(b"PATH") else {
@@ -427,7 +429,8 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
                 tmp[pos] = 0;
 
                 let mut stat = UserFsStat::default();
-                if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() {
+                if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() && stat.is_file()
+                {
                     return true;
                 }
             }
@@ -437,7 +440,7 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
     false
 }
 
-fn resolve_exec_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
+fn resolve_exec_path(name: &[u8], tmp: &mut [u8]) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -450,7 +453,7 @@ fn resolve_exec_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
         if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_err() {
             return false;
         }
-        return true;
+        return stat.is_file();
     }
 
     if let Ok(name_str) = core::str::from_utf8(name)
@@ -516,7 +519,7 @@ fn registry_spec_for_command(
 ) -> Option<&'static program_registry::ProgramSpec> {
     let name = command_name_bytes(cmd, tokens)?;
     if name.contains(&b'/') {
-        let mut tmp = [0u8; 256];
+        let mut tmp = buffers::path_scratch();
         if normalize_path(name, &mut tmp) != 0 {
             return None;
         }
@@ -539,7 +542,7 @@ fn command_resolves(cmd: &ParsedCommand, tokens: &ParsedTokens) -> bool {
         return true;
     }
     let name = tokens.token(cmd.argv[0]);
-    let mut tmp = [0u8; 256];
+    let mut tmp = buffers::path_scratch();
     resolve_exec_path(name, &mut tmp)
 }
 
@@ -592,13 +595,46 @@ fn build_c_envp() -> (Vec<Vec<u8>>, Vec<*const u8>) {
     (owned, ptrs)
 }
 
-fn wait_for(pid: u32) -> i32 {
+/// `WUNTRACED` is what makes Ctrl-Z observable: without it a suspended child
+/// never reports and the shell waits forever.
+fn wait_foreground(pid: u32) -> process::WaitStatus {
     loop {
-        if let Some(st) = process::waitpid_nohang(pid) {
-            return st;
+        if let Some((_, status)) = process::wait_with(pid as i32, WNOHANG | WUNTRACED) {
+            return process::wait_status(status);
         }
         sys_core::sleep_ms(5);
     }
+}
+
+/// A stop is not a termination: it becomes a job the user can `fg`.
+fn finish_foreground(pid: u32, pgid: u32, command: &[u8]) -> i32 {
+    let report = wait_foreground(pid);
+    leave_foreground();
+    if let process::WaitStatus::Stopped(signum) = report {
+        match jobs::add_stopped(pid, pgid, command) {
+            Some(job_id) => jobs::report_stopped(job_id),
+            None => {
+                shell_error(b"sh: job table full\n");
+            }
+        }
+        return 128 + signum as i32;
+    }
+    report.exit_code().unwrap_or(1)
+}
+
+/// The job already has a table entry, so a second stop updates it rather than
+/// creating another.
+pub fn wait_resumed_job(pid: u32) -> i32 {
+    let report = wait_foreground(pid);
+    leave_foreground();
+    if let process::WaitStatus::Stopped(signum) = report {
+        jobs::set_state_by_pid(pid, jobs::JobState::Stopped);
+        if let Some(job_id) = jobs::find_job_id_by_pid(pid) {
+            jobs::report_stopped(job_id);
+        }
+        return 128 + signum as i32;
+    }
+    report.exit_code().unwrap_or(1)
 }
 
 fn execute_registry_spawn(
@@ -649,15 +685,16 @@ fn execute_registry_spawn(
         return Some(1);
     }
     let pid = tid as u32;
+    let mut cmd_buf = [0u8; 128];
+    let mut cmd_len = 0usize;
+    if let Some(name) = command_name_bytes(cmd, tokens) {
+        let n = name.len().min(cmd_buf.len());
+        cmd_buf[..n].copy_from_slice(&name[..n]);
+        cmd_len = n;
+    }
+
     if background {
-        let mut cmd_buf = [0u8; 128];
-        let mut len = 0usize;
-        if let Some(name) = command_name_bytes(cmd, tokens) {
-            let n = name.len().min(cmd_buf.len());
-            cmd_buf[..n].copy_from_slice(&name[..n]);
-            len = n;
-        }
-        if let Some(job_id) = jobs::add(pid, pid, &cmd_buf[..len]) {
+        if let Some(job_id) = jobs::add(pid, pid, &cmd_buf[..cmd_len]) {
             print_background_job_started(job_id, pid);
         } else {
             shell_error(b"sh: job table full\n");
@@ -670,10 +707,7 @@ fn execute_registry_spawn(
         let _ = process::setpgid(pid, pid);
     }
     enter_foreground(pid);
-
-    let status = wait_for(pid);
-    leave_foreground();
-    Some(status)
+    Some(finish_foreground(pid, pid, &cmd_buf[..cmd_len]))
 }
 
 enum RedirectSource {
@@ -685,7 +719,7 @@ enum RedirectSource {
 fn open_redirect_target(
     redir: Redirect,
     tokens: &ParsedTokens,
-    path_buf: &mut [u8; 256],
+    path_buf: &mut [u8],
 ) -> Result<(i32, RedirectSource), ()> {
     let path_idx = match redir.target {
         RedirectTarget::Fd(src) => return Ok((redir.fd, RedirectSource::Dup(src))),
@@ -715,7 +749,7 @@ fn apply_redirects_for_builtin(
     saved: &mut [SavedFd; MAX_REDIRECTS],
     output_fd: &mut i32,
 ) -> bool {
-    let mut path_buf = [0u8; 256];
+    let mut path_buf = buffers::path_scratch();
     let mut save_count = 0usize;
 
     for redir in &cmd.redirects[..cmd.redirect_count] {
@@ -877,7 +911,7 @@ fn run_in_child(
     let cmd_name = tokens.token(cmd.argv[0]);
     if let Some(entry) = builtins::find_builtin(cmd_name) {
         let mut builtin_output_fd = 1;
-        let mut path_buf = [0u8; 256];
+        let mut path_buf = buffers::path_scratch();
         for redir in &cmd.redirects[..cmd.redirect_count] {
             let Ok((target_fd, source)) = open_redirect_target(*redir, tokens, &mut path_buf)
             else {
@@ -916,7 +950,7 @@ fn run_in_child(
         sys_core::exit_with_code(code);
     }
 
-    let mut path_buf = [0u8; 256];
+    let mut path_buf = buffers::path_scratch();
     for redir in &cmd.redirects[..cmd.redirect_count] {
         let Ok((target_fd, source)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
             let _ = shell_error(b"sh: cannot redirect\n");
@@ -1067,9 +1101,10 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
         }
     }
 
+    let mut cmd_buf = [0u8; 128];
+    let cmd_len = command_text(pipeline, tokens, &mut cmd_buf);
+
     if pipeline.background {
-        let mut cmd_buf = [0u8; 128];
-        let cmd_len = command_text(pipeline, tokens, &mut cmd_buf);
         if let Some(job_id) = jobs::add(pgid, pgid, &cmd_buf[..cmd_len]) {
             print_background_job_started(job_id, pgid);
         } else {
@@ -1081,11 +1116,23 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
     enter_foreground(pgid);
 
     // Every stage is reaped, but the pipeline's status is the last stage's.
+    // A terminal stop hits the whole group at once, so the first stage to
+    // report one suspends the pipeline as a single job.
     let mut status = 0;
     for (idx, pid) in pids.iter().take(pipeline.command_count).enumerate() {
-        let st = wait_for(*pid);
+        let report = wait_foreground(*pid);
+        if let process::WaitStatus::Stopped(signum) = report {
+            leave_foreground();
+            match jobs::add_stopped(pgid, pgid, &cmd_buf[..cmd_len]) {
+                Some(job_id) => jobs::report_stopped(job_id),
+                None => {
+                    shell_error(b"sh: job table full\n");
+                }
+            }
+            return 128 + signum as i32;
+        }
         if idx == pipeline.command_count - 1 {
-            status = st;
+            status = report.exit_code().unwrap_or(1);
         }
     }
     leave_foreground();

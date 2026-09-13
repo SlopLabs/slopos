@@ -26,6 +26,7 @@ fn apply_state_transition(task_ref: &Task, new_status: TaskStatus, reason: Block
         TaskStatus::Blocked => transition_to_c_int(task_ref.block(reason)),
         TaskStatus::Terminated => transition_to_c_int(task_ref.terminate()),
         TaskStatus::Zombie => transition_to_c_int(task_ref.mark_zombie()),
+        TaskStatus::Stopped => transition_to_c_int(task_ref.mark_stopped()),
         TaskStatus::Invalid => -1,
     }
 }

@@ -273,6 +273,87 @@ pub fn complete_file_fault(
     }
 }
 
+/// x86-64 `#PF` error-code shapes a user write takes: against an absent page
+/// (the demand-paging shape) and against a present one (the COW shape).
+const USER_WRITE_ABSENT: u64 = 0x06;
+const USER_WRITE_PRESENT: u64 = 0x07;
+
+/// `Retry` means a peer holds the address space for a bounded window, so the
+/// bound is generous; a stuck retry is a defect, not a reason to spin forever.
+const POPULATE_SPINS: u32 = 4096;
+
+#[derive(Clone, Copy)]
+enum PageWriteState {
+    Writable,
+    /// Present but refused to a user write — the COW shape, or a read-only map.
+    Present,
+    Absent,
+}
+
+fn page_write_state(handle: Handle<ProcessVm>, page: u64) -> Option<PageWriteState> {
+    use crate::paging_defs::PageFlags;
+    let va = slopos_abi::addr::VirtAddr::new(page);
+    process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
+        match crate::user_mappings::ostd_get_pte_flags_4kb(vs, va) {
+            Some(flags)
+                if flags.contains(PageFlags::USER)
+                    && flags.contains(PageFlags::WRITABLE)
+                    && !flags.contains(PageFlags::COW) =>
+            {
+                PageWriteState::Writable
+            }
+            Some(_) => PageWriteState::Present,
+            None => PageWriteState::Absent,
+        }
+    })
+    .ok()
+}
+
+/// Make every page of `[addr, addr + len)` present and user-writable in the
+/// address space `process_vm_handle` names.
+///
+/// The user-copy primitives take no page faults — they validate the leaf and
+/// refuse — so a path that *chooses* a user address rather than being handed
+/// one has to populate it first. Signal-frame delivery is that path: it writes
+/// below the interrupted RSP, where a forked child's stack pages are still COW.
+pub fn populate_user_range_for_write(
+    process_vm_handle: u64,
+    addr: u64,
+    len: u64,
+    task_id: u32,
+) -> bool {
+    let Some(handle) = process_vm::unpack_process_vm_handle(process_vm_handle) else {
+        return false;
+    };
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    let page_size = crate::paging_defs::PAGE_SIZE_4KB;
+    let mut page = addr & !(page_size - 1);
+    while page < end {
+        let mut spins = 0u32;
+        loop {
+            let error_code = match page_write_state(handle, page) {
+                Some(PageWriteState::Writable) => break,
+                Some(PageWriteState::Present) => USER_WRITE_PRESENT,
+                Some(PageWriteState::Absent) => USER_WRITE_ABSENT,
+                None => return false,
+            };
+            match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
+                FaultOutcome::Resolved | FaultOutcome::Retry => {}
+                // A file read must not run from the delivery path.
+                FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => return false,
+            }
+            spins += 1;
+            if spins == POPULATE_SPINS {
+                return false;
+            }
+        }
+        page += page_size;
+    }
+    true
+}
+
 /// `HandleError::NoEntry` is the ordinary race a dying task loses; only
 /// `Stale` is worth naming — a fault arriving for a task whose slot now
 /// belongs to another process.

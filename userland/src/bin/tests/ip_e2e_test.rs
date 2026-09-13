@@ -148,7 +148,7 @@ fn run_ip(words: &[&str]) -> i32 {
     if tid <= 0 {
         return tid;
     }
-    process::waitpid(tid as u32)
+    process::wait_exit_code(tid as u32)
 }
 
 /// Run `path` and collect what it wrote to stdout.
@@ -177,7 +177,7 @@ fn capture_prog(path: &[u8], words: &[&str]) -> Option<String> {
             }
         }
     }
-    process::waitpid(tid as u32);
+    let _ = process::waitpid(tid as u32);
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -978,7 +978,7 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
             }
         }
     }
-    let down_status = process::waitpid(down as u32);
+    let down_status = process::wait_exit_code(down as u32);
     if expired {
         eprintln!(
             "ip_e2e_test: no event for lo (ifindex {lo_ifindex}) within 2000 ms. \

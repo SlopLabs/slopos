@@ -145,13 +145,12 @@ fn unsupported_fstype_refused() -> bool {
     ok
 }
 
-/// The VFS caps a created name at `fs::MAX_NAME_LEN` (32) whatever filesystem
-/// is underneath. Runs on `/` — the disk on the tests image, which by itself
-/// would accept ext2's 255.
+/// The VFS caps a created name at `fs::MAX_NAME_LEN` (255) whatever filesystem
+/// is underneath; ext2's own ceiling on the tests image is the same 255.
 fn long_name_refused_on_the_root() -> bool {
     let dir = "/var/mount_test_names";
-    let too_long = format!("{dir}/{}", "n".repeat(33));
-    let longest = format!("{dir}/{}", "n".repeat(32));
+    let too_long = format!("{dir}/{}", "n".repeat(256));
+    let longest = format!("{dir}/{}", "n".repeat(255));
 
     // Tolerates its own leavings: the disk root persists, so a boot that was
     // cut short must not make the next one fail on a directory that exists.
@@ -164,11 +163,11 @@ fn long_name_refused_on_the_root() -> bool {
 
     let mut ok = true;
     if fs::create_dir(&too_long).is_ok() {
-        println!("mount_test: a 33-byte name was accepted");
+        println!("mount_test: a 256-byte name was accepted");
         ok = false;
     }
     if let Err(e) = fs::create_dir(&longest) {
-        println!("mount_test: the 32-byte limit itself was refused: {e}");
+        println!("mount_test: the 255-byte limit itself was refused: {e}");
         ok = false;
     }
 

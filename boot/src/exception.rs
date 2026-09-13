@@ -223,6 +223,24 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
     }
 
     let from_user = in_user(frame_ref);
+    let (reason, detail) = match take_fault_reason() {
+        TaskFaultReason::UserOom => (
+            TaskFaultReason::UserOom,
+            cstr_from_bytes(b"out of memory servicing a user page fault\0"),
+        ),
+        _ => (
+            TaskFaultReason::UserPage,
+            cstr_from_bytes(b"user page fault\0"),
+        ),
+    };
+
+    // Before any diagnostic: a fault a userland handler catches is not fatal,
+    // and a "FATAL: Page fault" banner per caught SIGSEGV would bury the log
+    // that matters. #PF is the one fault vector with no IST, which is what
+    // makes a frame push legal here.
+    if from_user && try_deliver_user_fault(reason, frame, fault_addr) {
+        return;
+    }
 
     klog_info!("FATAL: Page fault");
     klog_info!("Fault address: 0x{:x}", fault_addr);
@@ -251,16 +269,6 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
 
     if from_user {
         log_user_page_fault_diagnostics(frame_ref, fault_addr);
-        let (reason, detail) = match take_fault_reason() {
-            TaskFaultReason::UserOom => (
-                TaskFaultReason::UserOom,
-                cstr_from_bytes(b"out of memory servicing a user page fault\0"),
-            ),
-            _ => (
-                TaskFaultReason::UserPage,
-                cstr_from_bytes(b"user page fault\0"),
-            ),
-        };
         terminate_user_task(reason, frame_ref, fault_addr, detail);
         return;
     }

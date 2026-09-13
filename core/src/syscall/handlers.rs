@@ -6,18 +6,23 @@ use slopos_ostd::authority::Capability;
 
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
-    syscall_clock_gettime, syscall_cpu_info, syscall_exit, syscall_get_time_ms, syscall_halt,
-    syscall_percpu_stats, syscall_process_list, syscall_reboot, syscall_sleep_ms, syscall_sys_info,
+    syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info, syscall_exit,
+    syscall_exit_group, syscall_get_time_ms, syscall_halt, syscall_percpu_stats,
+    syscall_process_list, syscall_reboot, syscall_sleep_ms, syscall_sys_info, syscall_uname,
     syscall_user_read, syscall_user_write, syscall_yield,
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
-    syscall_chmod, syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fdatasync,
+    syscall_access, syscall_chmod, syscall_dup, syscall_dup2, syscall_dup3, syscall_faccessat,
+    syscall_fchmod, syscall_fchmodat, syscall_fcntl, syscall_fdatasync, syscall_flock,
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
-    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_fstat, syscall_fstatfs,
-    syscall_fsync, syscall_ioctl, syscall_lseek, syscall_mount, syscall_pipe, syscall_pipe2,
-    syscall_poll, syscall_readlink, syscall_rename, syscall_rmdir, syscall_select, syscall_statfs,
-    syscall_symlink, syscall_sync, syscall_truncate, syscall_umount2,
+    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_fstat, syscall_fstatat,
+    syscall_fstatfs, syscall_fsync, syscall_getdents64, syscall_ioctl, syscall_link,
+    syscall_linkat, syscall_lseek, syscall_mkdirat, syscall_mount, syscall_openat, syscall_pipe,
+    syscall_pipe2, syscall_poll, syscall_pread64, syscall_pwrite64, syscall_readlink,
+    syscall_readlinkat, syscall_readv, syscall_rename, syscall_renameat, syscall_rmdir,
+    syscall_select, syscall_statfs, syscall_symlink, syscall_symlinkat, syscall_sync,
+    syscall_truncate, syscall_umount2, syscall_unlinkat, syscall_utimensat, syscall_writev,
 };
 use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
 pub use crate::syscall::memory_handlers::{
@@ -40,15 +45,16 @@ pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
     syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
     syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getpgid, syscall_getpid,
-    syscall_getppid, syscall_getuid, syscall_prlimit64, syscall_set_cpu_affinity, syscall_setpgid,
-    syscall_setsid, syscall_sigdefault, syscall_spawn_path, syscall_terminate_task,
-    syscall_vhangup, syscall_waitpid,
+    syscall_getppid, syscall_gettid, syscall_getuid, syscall_prlimit64, syscall_set_cpu_affinity,
+    syscall_setpgid, syscall_setsid, syscall_sigdefault, syscall_spawn_path,
+    syscall_terminate_task, syscall_vhangup, syscall_waitpid,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
 };
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
+    syscall_sigaltstack,
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd;
 pub use crate::syscall::test_handlers::{
@@ -244,6 +250,32 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_PIDFD_OPEN] => syscall_pidfd_open, "pidfd_open";
 
     [SYSCALL_SIGNALFD] => syscall_signalfd, "signalfd";
+
+    [SYSCALL_UNAME] => syscall_uname, "uname";
+    [SYSCALL_CLOCK_SETTIME] => syscall_clock_settime, "clock_settime";
+    [SYSCALL_EXIT_GROUP] => syscall_exit_group, "exit_group";
+    [SYSCALL_GETTID] => syscall_gettid, "gettid";
+    [SYSCALL_SIGALTSTACK] => syscall_sigaltstack, "sigaltstack";
+    [SYSCALL_UTIMENSAT] => syscall_utimensat, "utimensat";
+    [SYSCALL_LINK] => syscall_link, "link";
+    [SYSCALL_LINKAT] => syscall_linkat, "linkat";
+    [SYSCALL_OPENAT] => syscall_openat, "openat";
+    [SYSCALL_MKDIRAT] => syscall_mkdirat, "mkdirat";
+    [SYSCALL_UNLINKAT] => syscall_unlinkat, "unlinkat";
+    [SYSCALL_RENAMEAT] => syscall_renameat, "renameat";
+    [SYSCALL_FSTATAT] => syscall_fstatat, "fstatat";
+    [SYSCALL_READLINKAT] => syscall_readlinkat, "readlinkat";
+    [SYSCALL_SYMLINKAT] => syscall_symlinkat, "symlinkat";
+    [SYSCALL_FCHMODAT] => syscall_fchmodat, "fchmodat";
+    [SYSCALL_FACCESSAT] => syscall_faccessat, "faccessat";
+    [SYSCALL_ACCESS] => syscall_access, "access";
+    [SYSCALL_GETDENTS64] => syscall_getdents64, "getdents64";
+    [SYSCALL_PREAD64] => syscall_pread64, "pread64";
+    [SYSCALL_PWRITE64] => syscall_pwrite64, "pwrite64";
+    [SYSCALL_READV] => syscall_readv, "readv";
+    [SYSCALL_WRITEV] => syscall_writev, "writev";
+    [SYSCALL_FCHMOD] => syscall_fchmod, "fchmod";
+    [SYSCALL_FLOCK] => syscall_flock, "flock";
 };
 
 pub fn syscall_lookup(sysno: u64) -> Option<&'static SyscallEntry> {
@@ -278,10 +310,10 @@ const fn count_of(cap: Capability) -> usize {
 ///
 /// Every capability appears, including the ones at zero, so adding an entry
 /// point to a capability that had none still moves a number here.
-const CAP_COUNTS: [(Capability, usize); 16] = [
+const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 59),
-    (Capability::NoneSelf, 45),
-    (Capability::NoneFd, 51),
+    (Capability::NoneSelf, 49),
+    (Capability::NoneFd, 71),
     (Capability::NoneRelation, 14),
     (Capability::Power, 2),
     (Capability::Launch, 0),
@@ -295,6 +327,7 @@ const CAP_COUNTS: [(Capability, usize); 16] = [
     (Capability::Fate, 2),
     (Capability::TestHarness, 2),
     (Capability::Mount, 2),
+    (Capability::Clock, 1),
 ];
 
 const _: () = {
@@ -349,6 +382,6 @@ const _: () = {
 };
 
 /// Per-capability entry-point counts, for the boot-time dump and the tests.
-pub fn cap_counts() -> &'static [(Capability, usize); 16] {
+pub fn cap_counts() -> &'static [(Capability, usize); 17] {
     &CAP_COUNTS
 }

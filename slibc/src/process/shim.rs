@@ -19,11 +19,22 @@ pub fn fork() -> i32 {
     unsafe { super::fork() }
 }
 
-/// Block until `pid` terminates and return the exit code the kernel recorded
-/// for it, or -1 on error.
+/// Block until `pid` terminates and return its `$?` — the exit code, or
+/// `128 + signum` for a death by signal — or -1 on error.
 pub fn wait_for_child(pid: i32) -> i32 {
-    // SAFETY: a null status pointer is the "discard the status" request.
-    unsafe { super::waitpid(pid, core::ptr::null_mut(), 0) }
+    let mut status = 0i32;
+    // SAFETY: `status` is a live, correctly aligned `i32` the callee writes once.
+    let reaped = unsafe { super::waitpid(pid, &mut status, 0) };
+    if reaped <= 0 {
+        return -1;
+    }
+    if super::WIFEXITED(status) {
+        super::WEXITSTATUS(status)
+    } else if super::WIFSIGNALED(status) {
+        128 + super::WTERMSIG(status)
+    } else {
+        -1
+    }
 }
 
 /// Register a function to run at normal process termination. Returns 0 on

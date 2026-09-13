@@ -13,20 +13,28 @@ const RAMFS_MAX_INODES: usize = 4096;
 
 const ROOT_SLOT: usize = 1;
 
-#[derive(Clone, Copy)]
+/// The name is heap-backed: at `MAX_NAME_LEN` = 255 an inline array would
+/// pad the entry to 272 bytes and cap a directory near 3800 entries against
+/// `MAX_ALLOC_SIZE`.
 struct DirEntry {
-    name: [u8; MAX_NAME_LEN],
-    name_len: usize,
+    name: KVec<u8>,
     inode: InodeId,
 }
 
 impl DirEntry {
-    const fn empty() -> Self {
-        Self {
-            name: [0; MAX_NAME_LEN],
-            name_len: 0,
-            inode: 0,
-        }
+    fn new(name: &[u8], inode: InodeId) -> VfsResult<Self> {
+        let mut stored = KVec::with_capacity(name.len()).map_err(|_| VfsError::NoSpace)?;
+        stored
+            .extend_from_slice(name)
+            .map_err(|_| VfsError::NoSpace)?;
+        Ok(Self {
+            name: stored,
+            inode,
+        })
+    }
+
+    fn matches(&self, name: &[u8]) -> bool {
+        self.name.as_slice() == name
     }
 }
 
@@ -62,6 +70,9 @@ struct RamInode {
     parent: InodeId,
     mode: u16,
     nlink: u32,
+    atime: u64,
+    mtime: u64,
+    ctime: u64,
     /// Refuses every mutation once set; never cleared while the inode lives.
     sealed: bool,
     /// Bumped on every reset, so a stale id fails to resolve.
@@ -78,6 +89,9 @@ impl RamInode {
             parent: 0,
             mode: 0o644,
             nlink: 1,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
             sealed: false,
             generation: 1,
         }
@@ -93,6 +107,9 @@ impl RamInode {
         self.parent = 0;
         self.mode = 0o644;
         self.nlink = 1;
+        self.atime = 0;
+        self.mtime = 0;
+        self.ctime = 0;
         self.sealed = false;
         self.generation = self.generation.wrapping_add(1);
     }
@@ -105,23 +122,27 @@ impl RamInode {
         self.dir_entries.len()
     }
 
+    fn touch_modified(&mut self) {
+        stamp(&mut self.mtime);
+        stamp(&mut self.ctime);
+    }
+
     fn add_dir_entry(&mut self, name: &[u8], inode: InodeId) -> VfsResult<()> {
         // Truncating instead would store a name no lookup can match, since
-        // every comparison here tests `name_len == name.len()`.
+        // every comparison here tests the whole stored name.
         if name.len() > MAX_NAME_LEN {
             return Err(VfsError::NameTooLong);
         }
+        if name.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
         for entry in self.dir_entries.iter() {
-            if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
+            if entry.matches(name) {
                 return Err(VfsError::AlreadyExists);
             }
         }
 
-        let mut entry = DirEntry::empty();
-        let len = name.len();
-        entry.name[..len].copy_from_slice(&name[..len]);
-        entry.name_len = len;
-        entry.inode = inode;
+        let entry = DirEntry::new(name, inode)?;
         self.dir_entries
             .push(entry)
             .map_err(|_| VfsError::NoSpace)?;
@@ -131,9 +152,8 @@ impl RamInode {
 
     fn remove_dir_entry(&mut self, name: &[u8]) -> VfsResult<InodeId> {
         for i in 0..self.dir_entries.len() {
-            let entry = &self.dir_entries[i];
-            if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
-                let inode = entry.inode;
+            if self.dir_entries[i].matches(name) {
+                let inode = self.dir_entries[i].inode;
                 self.dir_entries.swap_remove(i);
                 return Ok(inode);
             }
@@ -143,11 +163,19 @@ impl RamInode {
 
     fn lookup(&self, name: &[u8]) -> VfsResult<InodeId> {
         for entry in self.dir_entries.iter() {
-            if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
+            if entry.matches(name) {
                 return Ok(entry.inode);
             }
         }
         Err(VfsError::NotFound)
+    }
+}
+
+/// Stamp a timestamp only when the wall clock can answer, so a boot without
+/// one leaves the field unset rather than claiming 1970, as ext2 does.
+fn stamp(field: &mut u64) {
+    if let Some(now) = slopos_kernel_services::clock::realtime_unix_secs() {
+        *field = u64::from(now);
     }
 }
 
@@ -174,6 +202,9 @@ impl RamFsInner {
         root.mode = 0o755;
         root.nlink = 2;
         root.parent = root_id;
+        stamp(&mut root.atime);
+        stamp(&mut root.mtime);
+        stamp(&mut root.ctime);
 
         root.add_dir_entry(b".", root_id).ok();
         root.add_dir_entry(b"..", root_id).ok();
@@ -383,9 +414,9 @@ impl FileSystem for RamFs {
                 nlink: ram_inode.nlink,
                 uid: 0,
                 gid: 0,
-                atime: 0,
-                mtime: 0,
-                ctime: 0,
+                atime: ram_inode.atime,
+                mtime: ram_inode.mtime,
+                ctime: ram_inode.ctime,
                 dev_major: 0,
                 dev_minor: 0,
                 sealed: ram_inode.sealed,
@@ -439,6 +470,7 @@ impl FileSystem for RamFs {
             }
 
             ram_inode.data[offset..end].copy_from_slice(buf);
+            ram_inode.touch_modified();
 
             Ok(buf.len())
         })
@@ -481,9 +513,14 @@ impl FileSystem for RamFs {
                         new_inode.nlink = 1;
                     }
                 }
+                stamp(&mut new_inode.atime);
+                stamp(&mut new_inode.mtime);
+                stamp(&mut new_inode.ctime);
             }
 
-            inner.get_inode_mut(parent)?.add_dir_entry(name, new_id)?;
+            let parent_inode = inner.get_inode_mut(parent)?;
+            parent_inode.add_dir_entry(name, new_id)?;
+            parent_inode.touch_modified();
 
             if file_type == FileType::Directory {
                 inner.get_inode_mut(parent)?.nlink += 1;
@@ -550,7 +587,7 @@ impl FileSystem for RamFs {
                     Ok(n) => n,
                     Err(_) => continue,
                 };
-                let name = &entry.name[..entry.name_len];
+                let name = entry.name.as_slice();
                 if !callback(name, entry.inode, entry_inode.file_type) {
                     break;
                 }
@@ -585,7 +622,7 @@ impl FileSystem for RamFs {
                 let Ok(entry_inode) = inner.get_inode(entry.inode) else {
                     continue;
                 };
-                let name = &entry.name[..entry.name_len];
+                let name = entry.name.as_slice();
                 if !callback(index as u64, name, entry.inode, entry_inode.file_type) {
                     break;
                 }
@@ -610,6 +647,7 @@ impl FileSystem for RamFs {
                 .data
                 .resize(new_size, 0)
                 .map_err(|_| VfsError::NoSpace)?;
+            ram_inode.touch_modified();
 
             Ok(())
         })
@@ -693,10 +731,7 @@ impl FileSystem for RamFs {
             if is_dir {
                 let target_node = inner.get_inode_mut(target_inode)?;
                 for i in 0..target_node.dir_entries.len() {
-                    if target_node.dir_entries[i].name_len == 2
-                        && target_node.dir_entries[i].name[0] == b'.'
-                        && target_node.dir_entries[i].name[1] == b'.'
-                    {
+                    if target_node.dir_entries[i].matches(b"..") {
                         target_node.dir_entries[i].inode = new_parent;
                         break;
                     }
@@ -723,6 +758,84 @@ impl FileSystem for RamFs {
                 return Err(VfsError::PermissionDenied);
             }
             ram_inode.mode = mode & 0o7777;
+            Ok(())
+        })
+    }
+
+    fn readlink(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {
+        self.with_inner(|inner| {
+            let ram_inode = inner.get_inode(inode)?;
+            if ram_inode.file_type != FileType::Symlink {
+                return Err(VfsError::InvalidArgument);
+            }
+            let target = ram_inode.data.as_slice();
+            let n = buf.len().min(target.len());
+            buf[..n].copy_from_slice(&target[..n]);
+            Ok(n)
+        })
+    }
+
+    /// The target is the inode's data, which is what makes `stat().size` its
+    /// length — the resolver sizes its read buffer from that.
+    fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
+        if target.is_empty() || target.len() > crate::MAX_PATH_LEN {
+            return Err(VfsError::InvalidArgument);
+        }
+        self.with_inner_mut(|inner| {
+            {
+                let parent_inode = inner.get_inode(parent)?;
+                if parent_inode.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                if parent_inode.sealed {
+                    return Err(VfsError::PermissionDenied);
+                }
+                if parent_inode.lookup(name).is_ok() {
+                    return Err(VfsError::AlreadyExists);
+                }
+            }
+
+            let new_id = inner.alloc_inode()?;
+            {
+                let new_inode = &mut inner.inodes[inode_slot(new_id)];
+                new_inode.in_use = true;
+                new_inode.file_type = FileType::Symlink;
+                new_inode.dir_entries.clear();
+                new_inode.parent = parent;
+                new_inode.mode = 0o777;
+                new_inode.nlink = 1;
+                new_inode.data.clear();
+                if new_inode.data.extend_from_slice(target).is_err() {
+                    new_inode.reset();
+                    return Err(VfsError::NoSpace);
+                }
+                stamp(&mut new_inode.atime);
+                stamp(&mut new_inode.mtime);
+                stamp(&mut new_inode.ctime);
+            }
+
+            if let Err(e) = inner.get_inode_mut(parent)?.add_dir_entry(name, new_id) {
+                inner.inodes[inode_slot(new_id)].reset();
+                return Err(e);
+            }
+            inner.get_inode_mut(parent)?.touch_modified();
+            Ok(new_id)
+        })
+    }
+
+    fn set_times(&self, inode: InodeId, atime: Option<u64>, mtime: Option<u64>) -> VfsResult<()> {
+        self.with_inner_mut(|inner| {
+            let ram_inode = inner.get_inode_mut(inode)?;
+            if ram_inode.sealed {
+                return Err(VfsError::PermissionDenied);
+            }
+            if let Some(atime) = atime {
+                ram_inode.atime = atime;
+            }
+            if let Some(mtime) = mtime {
+                ram_inode.mtime = mtime;
+            }
+            stamp(&mut ram_inode.ctime);
             Ok(())
         })
     }

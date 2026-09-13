@@ -80,6 +80,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin curl_recv_repro_test \
         --bin curl_e2e_test \
         --bin cd_test \
+        --bin buildctl_test \
         --bin ring_test \
         --bin pidfd_e2e_test \
         --bin signalfd_test \
@@ -134,6 +135,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/cd_test" ]; then
         cp "$RELEASE_DIR/cd_test" "$BUILD_DIR/cd_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/buildctl_test" ]; then
+        cp "$RELEASE_DIR/buildctl_test" "$BUILD_DIR/buildctl_test.elf"
     fi
     if [ -f "$RELEASE_DIR/ring_test" ]; then
         cp "$RELEASE_DIR/ring_test" "$BUILD_DIR/ring_test.elf"

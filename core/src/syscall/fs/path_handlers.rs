@@ -1,28 +1,33 @@
 use slopos_abi::Errno;
-use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
+use slopos_abi::fs::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
 use slopos_fs::fileio::{
-    file_chmod_path, file_close_fd, file_list_path_from, file_mkdir_path, file_open_for_process,
-    file_read_fd, file_readlink_path, file_rmdir_path, file_stat_path, file_symlink_path,
-    file_sync_fd, file_truncate_path, file_unlink_path, file_write_fd,
+    file_chmod_at, file_close_fd, file_list_at_from, file_mkdir_at, file_open_at, file_read_fd,
+    file_readlink_at, file_rmdir_at, file_stat_at, file_symlink_at, file_sync_fd, file_truncate_at,
+    file_unlink_at, file_write_fd,
 };
 
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::KVec;
-use slopos_ostd::util::byte_view::pod_slice_as_bytes;
 
-use crate::syscall::args::{Fd, UserBytes, UserCStr, UserPtr};
+use crate::syscall::args::{Fd, UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
+use crate::syscall::fs::dirfd::{
+    open_resolve_flags, reject_non_directory, resolve_flags_from, with_cwd_base,
+};
 
 define_syscall!(syscall_fs_open
-    (ctx, path: UserCStr<USER_PATH_MAX>, flags: u32)
+    (ctx, path: UserPath, flags: u32)
     cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    let fd = file_open_for_process(pid, path.as_bytes(), flags);
+    let resolve = open_resolve_flags(flags, path.as_bytes());
+    let fd = with_cwd_base(ctx, |cwd| {
+        file_open_at(pid, path.as_bytes(), cwd, flags, resolve, None)
+    });
     if fd < 0 {
         Err(errno_from_neg(fd))
     } else {
@@ -116,15 +121,14 @@ define_syscall!(syscall_sync
 });
 
 define_syscall!(syscall_fs_stat
-    (ctx, path: UserCStr<USER_PATH_MAX>, out: UserPtr<UserFsStat>) cap(NoneFd)
+    (ctx, path: UserPath, out: UserPtr<UserFsStat>) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let mut stat = UserFsStat {
-        type_: 0,
-        _pad: [0; 3],
-        size: 0,
-    };
-    let rc = file_stat_path(path.as_bytes(), &mut stat.type_, &mut stat.size);
+    let mut stat = UserFsStat::default();
+    let resolve = resolve_flags_from(0, path.as_bytes());
+    let rc = with_cwd_base(ctx, |cwd| {
+        file_stat_at(path.as_bytes(), cwd, resolve, &mut stat)
+    });
     if rc != 0 {
         return Err(errno_from_neg(rc));
     }
@@ -133,79 +137,111 @@ define_syscall!(syscall_fs_stat
 });
 
 define_syscall!(syscall_fs_mkdir
-    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    (ctx, path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = file_mkdir_path(path.as_bytes());
+    let rc = with_cwd_base(ctx, |cwd| file_mkdir_at(path.as_bytes(), cwd));
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_fs_unlink
-    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    (ctx, path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = file_unlink_path(path.as_bytes());
+    let rc = with_cwd_base(ctx, |cwd| {
+        if let Err(e) = reject_non_directory(path.as_bytes(), cwd) {
+            return e.raw();
+        }
+        file_unlink_at(path.as_bytes(), cwd)
+    });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_rmdir
-    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    (ctx, path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = file_rmdir_path(path.as_bytes());
+    let rc = with_cwd_base(ctx, |cwd| file_rmdir_at(path.as_bytes(), cwd));
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_symlink
-    (ctx, target: UserCStr<USER_PATH_MAX>, link_path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    (ctx, target: UserPath, link_path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = file_symlink_path(target.as_bytes(), link_path.as_bytes());
+    let rc = with_cwd_base(ctx, |cwd| {
+        file_symlink_at(target.as_bytes(), link_path.as_bytes(), cwd)
+    });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 // Never NUL-terminates, per POSIX: the count is the answer, and a target
 // longer than the buffer is truncated rather than an error.
 define_syscall!(syscall_readlink
-    (ctx, path: UserCStr<USER_PATH_MAX>, buf: UserBytes) cap(NoneFd)
+    (ctx, path: UserPath, buf: UserBytes) cap(NoneFd)
     -> Result<u64, Errno>
 {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
     }
     let len = buf.len().min(USER_PATH_MAX);
-    let mut staging = [0u8; USER_PATH_MAX];
-    let rc = file_readlink_path(path.as_bytes(), &mut staging[..len]);
-    if rc < 0 {
-        return Err(errno_from_neg(rc as i32));
-    }
-    let n = rc as usize;
-    let user = MmUserBytes::try_new(buf.base_u64(), n).map_err(|_| Errno::EFAULT)?;
-    copy_bytes_to_user(user, &staging[..n]).map_err(|_| Errno::EFAULT)?;
+    let n = with_cwd_base(ctx, |cwd| {
+        readlink_at_into_user(path.as_bytes(), cwd, buf.base_u64(), len)
+    })?;
     Ok(n as u64)
 });
 
+/// Its own frame and its own heap buffer: a `USER_PATH_MAX` staging array next
+/// to the caller's already-heaped `UserPath` would be 4 KiB of stack.
+#[inline(never)]
+pub(crate) fn readlink_at_into_user(
+    path: &[u8],
+    cwd: &[u8],
+    user_buf: u64,
+    len: usize,
+) -> Result<usize, Errno> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let mut staging = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
+    let rc = file_readlink_at(path, cwd, &mut staging[..len]);
+    if rc < 0 {
+        return Err(errno_from_neg(rc as i32));
+    }
+    let n = (rc as usize).min(len);
+    let user = MmUserBytes::try_new(user_buf, n).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_to_user(user, &staging[..n]).map_err(|_| Errno::EFAULT)?;
+    Ok(n)
+}
+
 define_syscall!(syscall_truncate
-    (ctx, path: UserCStr<USER_PATH_MAX>, length: u64) cap(NoneFd)
+    (ctx, path: UserPath, length: u64) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = file_truncate_path(path.as_bytes(), length);
+    let rc = with_cwd_base(ctx, |cwd| {
+        if let Err(e) = reject_non_directory(path.as_bytes(), cwd) {
+            return e.raw();
+        }
+        file_truncate_at(path.as_bytes(), cwd, length)
+    });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_chmod
-    (ctx, path: UserCStr<USER_PATH_MAX>, mode: u32) cap(NoneFd)
+    (ctx, path: UserPath, mode: u32) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let rc = file_chmod_path(path.as_bytes(), (mode & 0o7777) as u16);
+    let resolve = resolve_flags_from(0, path.as_bytes());
+    let rc = with_cwd_base(ctx, |cwd| {
+        file_chmod_at(path.as_bytes(), cwd, (mode & 0o7777) as u16, resolve)
+    });
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_fs_list
-    (ctx, path: UserCStr<USER_PATH_MAX>, list: UserPtr<UserFsList>) cap(NoneFd)
+    (ctx, path: UserPath, list: UserPtr<UserFsList>) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let _ = pod_slice_as_bytes::<i8>;  // TODO(tech-debt): no-op keeping the helper symbol referenced — delete once the legacy users are gone.
     let mut list_hdr = copy_from_user(list.inner()).map_err(|_| Errno::EFAULT)?;
 
     let cap = list_hdr.max_entries;
@@ -222,7 +258,9 @@ define_syscall!(syscall_fs_list
 
     let mut count: u32 = 0;
     let mut cursor = list_hdr.cursor;
-    let rc = file_list_path_from(path.as_bytes(), tmp.as_mut_slice(), &mut cursor, &mut count);
+    let rc = with_cwd_base(ctx, |cwd| {
+        file_list_at_from(path.as_bytes(), cwd, tmp.as_mut_slice(), &mut cursor, &mut count)
+    });
     if rc != 0 {
         return Err(errno_from_neg(rc));
     }
@@ -242,13 +280,11 @@ define_syscall!(syscall_fs_list
 });
 
 define_syscall!(syscall_rename
-    (ctx, old_path: UserCStr<USER_PATH_MAX>, new_path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    (ctx, old_path: UserPath, new_path: UserPath) cap(NoneFd)
     -> Result<(), Errno>
 {
-    slopos_fs::vfs::ops::vfs_rename(old_path.as_bytes(), new_path.as_bytes()).map_err(|e| match e {
-        slopos_fs::VfsError::ReadOnly => Errno::EROFS,
-        slopos_fs::VfsError::PermissionDenied => Errno::EACCES,
-        slopos_fs::VfsError::NotFound => Errno::ENOENT,
-        _ => Errno::EINVAL,
+    with_cwd_base(ctx, |cwd| {
+        slopos_fs::vfs::vfs_rename_at(old_path.as_bytes(), cwd, new_path.as_bytes(), cwd)
+            .map_err(|e| e.to_errno())
     })
 });

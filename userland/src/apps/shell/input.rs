@@ -493,13 +493,9 @@ async fn input_loop(
                 }
 
                 KEY_UP => {
-                    let mut snapshot = [0u8; 256];
-                    buffers::with_line_buf(|buf| {
-                        snapshot[..len].copy_from_slice(&buf[..len]);
-                    });
-                    let new_len = buffers::with_line_buf(|buf| {
-                        history::navigate_up(&snapshot[..len], len, buf)
-                    });
+                    let snapshot = buffers::with_line_buf(|buf| buf[..len].to_vec());
+                    let new_len =
+                        buffers::with_line_buf(|buf| history::navigate_up(&snapshot, len, buf));
                     if let Some(nl) = new_len {
                         len = nl;
                         cursor_pos = nl;
@@ -837,7 +833,7 @@ fn is_utf8_continuation(b: u8) -> bool {
 }
 
 /// Byte offset where the character left of `pos` starts (`pos > 0`).
-fn prev_char_start(buf: &[u8; 256], pos: usize) -> usize {
+fn prev_char_start(buf: &[u8], pos: usize) -> usize {
     let mut i = pos - 1;
     while i > 0 && is_utf8_continuation(buf[i]) {
         i -= 1;
@@ -846,7 +842,7 @@ fn prev_char_start(buf: &[u8; 256], pos: usize) -> usize {
 }
 
 /// Byte offset just past the character starting at `pos` (`pos < len`).
-fn next_char_end(buf: &[u8; 256], pos: usize, len: usize) -> usize {
+fn next_char_end(buf: &[u8], pos: usize, len: usize) -> usize {
     let mut i = pos + 1;
     while i < len && is_utf8_continuation(buf[i]) {
         i += 1;

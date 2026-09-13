@@ -167,9 +167,16 @@ pub fn task_reset_fpu_state<K, U>(task: &mut TaskInner<K, U>) {
 /// `SIG_DFL` — the execve disposition reset. POSIX keeps ignored signals
 /// ignored, so `SIG_IGN` entries are left untouched; the blocked mask and
 /// pending set are preserved across exec by the caller.
+///
+/// Resets the *shared* table, so an `exec` by a thread-group leader retires
+/// the handlers of every `CLONE_SIGHAND` sibling; the leader must therefore
+/// already have reduced the group to itself.
 #[inline]
 pub fn task_reset_caught_handlers<K, U>(task: &TaskInner<K, U>) {
-    for action in task.signal_actions.iter() {
+    let Some(table) = task.sighand() else {
+        return;
+    };
+    for action in table.iter() {
         let handler = action.handler();
         if handler != SIG_DFL && handler != SIG_IGN {
             action.reset();
@@ -182,11 +189,36 @@ pub fn task_reset_caught_handlers<K, U>(task: &TaskInner<K, U>) {
 /// syscall.
 #[inline]
 pub fn task_default_signals_in_mask<K, U>(task: &TaskInner<K, U>, mask: SigSet) {
+    let Some(table) = task.sighand() else {
+        return;
+    };
     for signum in 1..=NSIG {
-        if mask & sig_bit(signum as u8) != 0 {
-            task.signal_actions[signum - 1].reset();
+        if mask & sig_bit(signum as u8) != 0
+            && let Some(cell) = table.get(signum - 1)
+        {
+            cell.reset();
         }
     }
+}
+
+/// Post a *synchronous fault* signal, which cannot be deferred: the faulting
+/// instruction re-executes on return to user mode, so a pending-but-
+/// undeliverable fault signal faults forever. The disposition is forced back
+/// far enough to be deliverable — `SIG_IGN` reverts to `SIG_DFL` and the
+/// signal is unblocked — as `force_sig_info` does.
+pub fn task_signal_force<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
+    let bit = sig_bit(signum);
+    if bit == 0 {
+        return false;
+    }
+    if let Some(cell) = task.sighand().and_then(|t| t.get((signum - 1) as usize))
+        && cell.handler() == SIG_IGN
+    {
+        cell.reset();
+    }
+    task.set_signal_blocked(task.signal_blocked() & !bit);
+    task_signal_raise(task, bit);
+    true
 }
 
 /// Write a kernel-mode trampoline return-address into the slot at

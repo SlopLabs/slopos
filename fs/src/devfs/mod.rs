@@ -1,7 +1,6 @@
 use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
 use slopos_ostd::{KArc, KVec, klog_info, lock_class};
 
-use crate::MAX_NAME_LEN;
 use crate::blockdev::BlockDevice;
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_kernel_services::driver_runtime::current_task_is_privileged;
@@ -18,11 +17,15 @@ const KMSG_INODE: InodeId = 6;
 const BLOCK_INODE_BASE: InodeId = 64;
 const MAX_BLOCK_NODES: usize = 16;
 
+/// devfs's own name ceiling, independent of the VFS's 255: every name here is
+/// kernel-registered and short, and `block_node_at` answers one by value.
+const DEV_NAME_MAX: usize = 32;
+
 /// Linux's `virtblk` major; the minor is the registration ordinal.
 const BLOCK_MAJOR: u32 = 254;
 
 struct DeviceEntry {
-    name: [u8; MAX_NAME_LEN],
+    name: [u8; DEV_NAME_MAX],
     name_len: usize,
     inode: InodeId,
     major: u32,
@@ -32,16 +35,16 @@ struct DeviceEntry {
 impl DeviceEntry {
     const fn new(name: &[u8], inode: InodeId, major: u32, minor: u32) -> Self {
         let mut entry = Self {
-            name: [0; MAX_NAME_LEN],
+            name: [0; DEV_NAME_MAX],
             name_len: 0,
             inode,
             major,
             minor,
         };
-        let len = if name.len() < MAX_NAME_LEN {
+        let len = if name.len() < DEV_NAME_MAX {
             name.len()
         } else {
-            MAX_NAME_LEN
+            DEV_NAME_MAX
         };
         let mut i = 0;
         while i < len {
@@ -64,7 +67,7 @@ static DEVICES: [DeviceEntry; 5] = [
 /// `capacity` is cached: `BlockDevice::capacity` takes the device's own lock
 /// and `stat` answers it on every call.
 struct BlockNode {
-    name: [u8; MAX_NAME_LEN],
+    name: [u8; DEV_NAME_MAX],
     name_len: usize,
     inode: InodeId,
     device: KArc<dyn BlockDevice + Send + Sync>,
@@ -84,7 +87,7 @@ pub fn devfs_register_block_device(
     name: &[u8],
     device: KArc<dyn BlockDevice + Send + Sync>,
 ) -> VfsResult<InodeId> {
-    if name.is_empty() || name.len() > MAX_NAME_LEN {
+    if name.is_empty() || name.len() > DEV_NAME_MAX {
         return Err(VfsError::InvalidArgument);
     }
     // Outside the registry lock: BLOCK_NODES must never nest over the device
@@ -102,7 +105,7 @@ pub fn devfs_register_block_device(
         return Err(VfsError::AlreadyExists);
     }
     let inode = BLOCK_INODE_BASE + table.len() as InodeId;
-    let mut stored = [0u8; MAX_NAME_LEN];
+    let mut stored = [0u8; DEV_NAME_MAX];
     stored[..name.len()].copy_from_slice(name);
     table
         .push(BlockNode {
@@ -133,7 +136,7 @@ fn block_inode_for(name: &[u8]) -> Option<InodeId> {
 
 /// Copied out so the caller can run the `readdir` callback with the registry
 /// lock released.
-fn block_node_at(index: usize) -> Option<([u8; MAX_NAME_LEN], usize, InodeId)> {
+fn block_node_at(index: usize) -> Option<([u8; DEV_NAME_MAX], usize, InodeId)> {
     let table = BLOCK_NODES.read();
     let node = table.get(index)?;
     Some((node.name, node.name_len, node.inode))

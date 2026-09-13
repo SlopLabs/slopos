@@ -5,6 +5,10 @@ pub mod syscall;
 pub use slopos::Sys;
 
 use crate::errno::Errno;
+use slopos_abi::fs::{UserFsStat, UserIovec};
+use slopos_abi::signal::UserSigAltStack;
+use slopos_abi::spawn::SpawnAttrs;
+use slopos_abi::syscall::{Timespec, UserUtsname};
 
 pub trait Pal {
     fn open(path: *const u8, flags: i32, mode: u32) -> Result<i32, Errno>;
@@ -19,7 +23,7 @@ pub trait Pal {
     fn rmdir(path: *const u8) -> Result<(), Errno>;
     fn rename(old: *const u8, new: *const u8) -> Result<(), Errno>;
     fn symlink(target: *const u8, link_path: *const u8) -> Result<(), Errno>;
-    /// Answers the byte count; never NUL-terminates, per POSIX.
+    /// Never NUL-terminates, per POSIX.
     fn readlink(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno>;
     fn truncate(path: *const u8, length: u64) -> Result<(), Errno>;
     fn chmod(path: *const u8, mode: u32) -> Result<(), Errno>;
@@ -38,6 +42,52 @@ pub trait Pal {
     ) -> Result<i32, Errno>;
     fn ioctl(fd: i32, request: u64, arg: u64) -> Result<i32, Errno>;
     fn list(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno>;
+
+    fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> Result<i32, Errno>;
+    fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> Result<(), Errno>;
+    /// `AT_REMOVEDIR` in `flags` makes this an `rmdir`.
+    fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> Result<(), Errno>;
+    fn renameat(olddirfd: i32, old: *const u8, newdirfd: i32, new: *const u8) -> Result<(), Errno>;
+    fn fstatat(
+        dirfd: i32,
+        path: *const u8,
+        stat_buf: *mut UserFsStat,
+        flags: u32,
+    ) -> Result<(), Errno>;
+    /// Never NUL-terminates, per POSIX.
+    fn readlinkat(
+        dirfd: i32,
+        path: *const u8,
+        buf: *mut u8,
+        buf_len: usize,
+    ) -> Result<usize, Errno>;
+    fn symlinkat(target: *const u8, newdirfd: i32, link: *const u8) -> Result<(), Errno>;
+    fn fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: u32) -> Result<(), Errno>;
+    fn faccessat(dirfd: i32, path: *const u8, mode: u32, flags: u32) -> Result<(), Errno>;
+    fn access(path: *const u8, mode: u32) -> Result<(), Errno>;
+    fn link(old: *const u8, new: *const u8) -> Result<(), Errno>;
+    fn linkat(
+        olddirfd: i32,
+        old: *const u8,
+        newdirfd: i32,
+        new: *const u8,
+        flags: u32,
+    ) -> Result<(), Errno>;
+    /// `times` is `[atime, mtime]`; a null pointer sets both to now.
+    fn utimensat(
+        dirfd: i32,
+        path: *const u8,
+        times: *const [Timespec; 2],
+        flags: u32,
+    ) -> Result<(), Errno>;
+    /// Packed `UserDirent64` records; 0 means the directory is exhausted.
+    fn getdents64(fd: i32, buf: *mut u8, buf_len: usize) -> Result<usize, Errno>;
+    fn pread64(fd: i32, buf: *mut u8, count: usize, offset: i64) -> Result<usize, Errno>;
+    fn pwrite64(fd: i32, buf: *const u8, count: usize, offset: i64) -> Result<usize, Errno>;
+    fn readv(fd: i32, iov: *const UserIovec, iovcnt: i32) -> Result<usize, Errno>;
+    fn writev(fd: i32, iov: *const UserIovec, iovcnt: i32) -> Result<usize, Errno>;
+    fn fchmod(fd: i32, mode: u32) -> Result<(), Errno>;
+    fn flock(fd: i32, operation: u32) -> Result<(), Errno>;
 
     fn brk(addr: *mut u8) -> Result<*mut u8, Errno>;
     fn mmap(
@@ -75,7 +125,8 @@ pub trait Pal {
         child_tid: *mut i32,
         tls: u64,
     ) -> Result<i32, Errno>;
-    fn futex_wait(addr: *const u32, val: u32, timeout_ms: u64) -> Result<(), Errno>;
+    /// A null `timeout` blocks indefinitely. Sends `FUTEX_PRIVATE_FLAG`.
+    fn futex_wait(addr: *const u32, val: u32, timeout: *const Timespec) -> Result<(), Errno>;
     fn futex_wake(addr: *const u32, count: u32) -> Result<i32, Errno>;
     fn get_cpu_count() -> Result<u32, Errno>;
     fn get_current_cpu() -> Result<u32, Errno>;
@@ -97,6 +148,7 @@ pub trait Pal {
     ) -> Result<(), Errno>;
     fn kill(pid: i32, sig: i32) -> Result<(), Errno>;
     fn rt_sigreturn() -> !;
+    fn sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack) -> Result<(), Errno>;
 
     fn socket(domain: i32, sock_type: i32, protocol: i32) -> Result<i32, Errno>;
     fn bind(fd: i32, addr: *const u8, addrlen: u32) -> Result<(), Errno>;
@@ -143,6 +195,23 @@ pub trait Pal {
     fn clock_gettime(clk_id: u64, tp: *mut u8) -> Result<(), Errno>;
     fn get_time_ms() -> u64;
     fn sleep_ms(ms: u64);
+
+    /// Only `CLOCK_REALTIME` is settable.
+    fn clock_settime(clk_id: u64, tp: *const Timespec) -> Result<(), Errno>;
+    fn uname(out: *mut UserUtsname) -> Result<(), Errno>;
+    /// A short fill is legal.
+    fn getrandom(buf: *mut u8, len: usize, flags: u32) -> Result<usize, Errno>;
+    fn gettid() -> i32;
+    fn exit_group(code: i32) -> !;
+    /// The child inherits nothing but what `attrs` names, so nothing has to run
+    /// between fork and exec.
+    fn spawn_path(
+        path: *const u8,
+        path_len: usize,
+        argv: *const *const u8,
+        argc: u32,
+        attrs: *const SpawnAttrs,
+    ) -> Result<i32, Errno>;
 
     fn yield_now();
     fn halt() -> !;

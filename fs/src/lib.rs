@@ -1,8 +1,14 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-pub const MAX_PATH_LEN: usize = 256;
-pub const MAX_NAME_LEN: usize = 32;
+/// Longest path the VFS resolves, NUL excluded. Matches
+/// [`slopos_abi::fs::USER_PATH_MAX`].
+pub const MAX_PATH_LEN: usize = slopos_abi::fs::USER_PATH_MAX;
+/// Longest single component. ext2's on-disk ceiling.
+pub const MAX_NAME_LEN: usize = slopos_abi::fs::USER_NAME_MAX;
+/// Symlink expansions one resolution may perform before `ELOOP`. Linux's
+/// post-4.2 whole-path budget, not a per-component recursion limit.
+pub const MAX_SYMLINK_FOLLOWS: u32 = 40;
 
 pub mod blockdev;
 pub mod cpio;

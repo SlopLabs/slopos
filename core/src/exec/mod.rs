@@ -16,12 +16,16 @@ use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::{KArc, KVec};
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
+use slopos_abi::fs::USER_PATH_MAX;
 use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
+use slopos_fs::VfsError;
 use slopos_fs::fileio::{
     FileRef, file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
     fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_take_file_ref_matching,
 };
+use slopos_fs::vfs::CanonPath;
 use slopos_fs::vfs::ops::{VfsHandle, vfs_open};
+use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_canon_at};
 use slopos_mm::elf::{
     ELF_HEADER_WINDOW, ElfError, ElfExecInfo, MAX_LOAD_SEGMENTS, ValidatedSegment,
 };
@@ -39,7 +43,6 @@ use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{SpawnGuard, link_child, task_build, task_find_by_id, task_terminate};
 use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_from_kernel_va};
 
-pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
 /// Total argv+envp byte budget, in pages, after Linux's `MAX_ARG_PAGES`. The
 /// same 128 KiB the retired 32-argument cap implied, now spendable as many
@@ -285,18 +288,47 @@ pub fn spawn_program_with_attrs(
     path: &[u8],
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
+    priority: TaskPriority,
+    flags: u16,
+    actions: &[FdAction],
+    sigdefault_mask: u64,
+    parent_table: Option<FdTable>,
+    parent_task_id: u32,
+) -> Result<u32, ExecError> {
+    spawn_program_with_cwd(
+        path,
+        argv,
+        envp,
+        priority,
+        flags,
+        actions,
+        sigdefault_mask,
+        parent_table,
+        parent_task_id,
+        b"/",
+    )
+}
+
+/// `cwd` must be an absolute canonical path: the child has no context of its
+/// own to resolve a relative one against.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_program_with_cwd(
+    path: &[u8],
+    argv: Option<&[&[u8]]>,
+    envp: Option<&[&[u8]]>,
     mut priority: TaskPriority,
     mut flags: u16,
     actions: &[FdAction],
     sigdefault_mask: u64,
     parent_table: Option<FdTable>,
     parent_task_id: u32,
+    cwd: &[u8],
 ) -> Result<u32, ExecError> {
     let result = (|| {
-        let normalized_path = trim_nul_bytes(path);
-        if normalized_path.is_empty() || normalized_path.len() > EXEC_MAX_PATH {
-            return Err(ExecError::NameTooLong);
-        }
+        // Resolved once, here: the grant table, the task name and the loader
+        // must all agree on which file this is.
+        let program = resolve_program(path, cwd)?;
+        let normalized_path = program.as_bytes();
 
         // Privilege enters a spawn only here — the syscall boundary already
         // refused every privileged bit the caller asked for, so flags follow
@@ -357,9 +389,19 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::NoMem);
         };
 
+        // Before the fd actions: a path-taking action resolves against it.
+        // The `_exclusive` form because `set_cwd`'s witness names the
+        // spawner, not this not-yet-published child.
+        let Some(cwd_stored) = spawn.with_child(|child| child.set_cwd_exclusive(cwd)) else {
+            return Err(ExecError::NoMem);
+        };
+        if !cwd_stored {
+            return Err(ExecError::NoMem);
+        }
+
         do_exec(
             child_table,
-            normalized_path,
+            &program,
             argv,
             envp,
             &mut entry,
@@ -476,21 +518,47 @@ pub fn spawn_program_with_attrs(
     result
 }
 
+/// Resolve a program path the way the loader will open it: against `cwd`,
+/// symlinks expanded, to the canonical path the grant table is keyed on.
+///
+/// Resolving *before* the grant comparison is what lets `./halt` from `/sbin`
+/// match the grant `/sbin/halt` carries, and cannot invent one: every grant
+/// path is sealed, so no name can be pointed at one.
+///
+/// `#[inline(never)]` keeps the walk off the frame of a caller already
+/// holding a `SpawnGuard`.
+#[inline(never)]
+pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, ExecError> {
+    let trimmed = trim_nul_bytes(path);
+    if trimmed.is_empty() || trimmed.len() > USER_PATH_MAX {
+        return Err(ExecError::NameTooLong);
+    }
+    let (_, canon) = resolve_path_canon_at(trimmed, cwd, RESOLVE_FOLLOW).map_err(|e| match e {
+        VfsError::NotFound | VfsError::NotDirectory => ExecError::NoEntry,
+        VfsError::NameTooLong => ExecError::NameTooLong,
+        VfsError::IsDirectory
+        | VfsError::PermissionDenied
+        | VfsError::TooManySymlinks
+        | VfsError::InvalidPath => ExecError::NoExec,
+        _ => ExecError::IoError,
+    })?;
+    Ok(canon)
+}
+
+/// `program` is [`resolve_program`]'s output, not a caller's spelling: the
+/// type is what stops a relative path reaching the loader, which resolves
+/// against `/`.
 pub fn do_exec(
     table: FdTable,
-    path: &[u8],
+    program: &CanonPath,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
 ) -> Result<(), ExecError> {
-    if path.is_empty() || path.len() > EXEC_MAX_PATH {
-        return Err(ExecError::NameTooLong);
-    }
-
     let vm_process = table.process().ok_or(ExecError::NoMem)?;
-    let exec_info = load_image(path, vm_process, entry_out)?;
+    let exec_info = load_image(program.as_bytes(), vm_process, entry_out)?;
 
     if process_vm_reset_stack(vm_process) != 0 {
         return Err(ExecError::NoMem);

@@ -145,8 +145,10 @@ fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
     } else {
         let signum = (deliverable.trailing_zeros() + 1) as u8;
         let idx = (signum as usize).wrapping_sub(1);
-        let action = task_ref.signal_actions[idx].load_owner_only();
-        (action.handler, action.flags)
+        match task_ref.signal_action(idx) {
+            Some(action) => (action.handler, action.flags),
+            None => (0u64, 0u64),
+        }
     };
 
     let should_restart = if deliverable == 0 {

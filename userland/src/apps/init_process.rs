@@ -87,7 +87,7 @@ pub fn init_user_main() {
     if !skip_roulette {
         let roulette_tid = spawn_service("roulette");
         if roulette_tid > 0 {
-            process::waitpid(roulette_tid as u32);
+            let _ = process::waitpid(roulette_tid as u32);
         }
     }
 
@@ -125,7 +125,7 @@ pub fn init_user_main() {
             }
             spawn_service("terminal");
             if compositor_tid > 0 {
-                process::waitpid(compositor_tid as u32);
+                let _ = process::waitpid(compositor_tid as u32);
             }
         }
     }

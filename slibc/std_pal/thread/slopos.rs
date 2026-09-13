@@ -42,6 +42,9 @@ impl Thread {
         return Ok(Thread { tid });
 
         unsafe extern "C" fn thread_start(data: *mut u8) -> *mut u8 {
+            // Held for the thread's lifetime: without an alternate signal stack,
+            // a fault on the guard page below this stack cannot be delivered.
+            let _handler = unsafe { crate::sys::stack_overflow::Handler::new() };
             let init = unsafe { Box::from_raw(data as *mut ThreadInit) };
             let rust_start = init.init();
             rust_start();
