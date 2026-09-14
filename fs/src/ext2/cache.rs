@@ -1,30 +1,77 @@
+use slopos_mm::slab::MAX_ALLOC_SIZE;
+use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::frame::{Frame, PageCacheMeta};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota;
-use slopos_ostd::{KBTreeMap, KBox, KVec};
+use slopos_ostd::{KBTreeMap, KBox, KVec, write_field};
 
 use super::Ext2Error;
 use super::blockcharge::BlockCharges;
+use super::dirindex::{DirIndexSet, DirProbe};
 use super::journal::Journal;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
 use super::types::BlockNum;
-use crate::blockdev::BlockDevice;
+use crate::blockdev::{BlockDevice, stats};
 
-const CACHE_ENTRIES: usize = 512;
+/// Frames the cache never drops below. Small enough for the appliance image,
+/// large enough that a 16 GiB volume's whole allocation working set stays
+/// resident (see [`cache_entries_for`]).
+pub const CACHE_ENTRIES_MIN: usize = 512;
+
+/// Frames the cache never grows past: 8192 blocks of at most 4 KiB is 32 MiB
+/// of page-cache frames.
+pub const CACHE_ENTRIES_MAX: usize = 8192;
+
+/// The descriptors are one contiguous allocation, so a bump to the entry count
+/// or the entry size that no longer fits fails the build, not the mount.
+const _: () = assert!(CACHE_ENTRIES_MAX * size_of::<CacheEntry>() <= MAX_ALLOC_SIZE);
+
+/// Frames a volume wants resident, from its own size.
+///
+/// Every allocation reads the group descriptor table and the block and inode
+/// bitmaps of the group it lands in, and the next allocation reads them again.
+/// A cache smaller than that working set evicts a bitmap it is about to need.
+pub fn cache_entries_for(volume_blocks: u64, blocks_per_group: u32) -> usize {
+    let per_group = blocks_per_group.max(1) as u64;
+    let groups = volume_blocks.div_ceil(per_group);
+    // 32-byte descriptors, so 32 to a 1 KiB block: the smallest block size an
+    // image may carry is the one whose table takes the most blocks.
+    let gdt = groups.div_ceil(32);
+    let want = groups.saturating_mul(2).saturating_add(gdt);
+    (want.min(CACHE_ENTRIES_MAX as u64) as usize).max(CACHE_ENTRIES_MIN)
+}
+
+/// Not a slot: the end of the LRU chain, and the link value of a slot that is
+/// not on it.
+const NIL: u32 = u32::MAX;
+
+/// Groups the allocation hints cover: one `u32` each, held at 256 KiB so a
+/// pathological group count falls back to no hints rather than to a failed
+/// mount.
+const GROUP_HINTS_MAX: usize = 256 * 1024 / size_of::<u32>();
+
+/// Blocks one writeback request may carry. The segment array is on the stack,
+/// so this is a stack cost as much as an I/O size.
+const FLUSH_RUN: usize = 32;
 
 /// Data blocks an operation may put *in* the log rather than write home and
 /// barrier behind. A log block costs a write, the barrier it replaces costs a
 /// device flush; the bound keeps a large write out of the log.
 const DATA_LOG_LIMIT: usize = 16;
 
-/// Snapshots one operation may hold. Each owns a block-sized copy, so this is
-/// the ceiling on the rollback guard's memory: at a 4 KiB block size, 2 MiB.
+/// Snapshots one operation may hold. Each owns a block-sized copy, so at a
+/// 4 KiB block size this is 2 MiB of rollback guard.
 ///
 /// Only a block that was *already dirty* when the operation first touched it
-/// costs a record. A clean acquire — which is every block of a directory
-/// scan, and every block a growing file allocates — costs one bit, so neither
-/// directory size nor write size is bounded by this number.
+/// costs a record. A clean acquire costs one bit, so neither directory size
+/// nor write size is bounded by this number.
 const MAX_UNDO: usize = 512;
+
+/// Directories one operation may name individually before a rollback stops
+/// trying. Larger than [`super::dirindex::DIR_INDEX_DIRS`], so overflowing it
+/// means dropping every index costs nothing that was going to survive.
+const OP_DIRS_MAX: usize = 8;
 
 /// Drives ordered writeback (ext2 `data=ordered`): data blocks must reach
 /// stable storage *before* the metadata that references them, so a crash cannot
@@ -59,9 +106,8 @@ pub enum BlockOwner {
 }
 
 impl BlockOwner {
-    /// The inode a block belongs to, when the owner names one — the same
-    /// question a block charge asks. `None` for allocation state and inode
-    /// tables, which are charged to no principal.
+    /// The inode a block belongs to, when the owner names one. `None` for
+    /// allocation state and inode tables, charged to no principal.
     pub fn charged_inode(self) -> Option<u32> {
         match self {
             BlockOwner::File(ino) => Some(ino),
@@ -76,7 +122,10 @@ struct CacheEntry {
     block: BlockNum,
     frame: Frame<PageCacheMeta>,
     pinned: u16,
-    lru: u64,
+    /// Neighbours on the recency chain, `lru_prev` towards the MRU end. Every
+    /// slot is on the chain exactly once.
+    lru_prev: u32,
+    lru_next: u32,
     valid: bool,
     kind: BlockKind,
     owner: BlockOwner,
@@ -88,12 +137,15 @@ struct CacheEntry {
     op_invalidated: bool,
     /// The open operation found this block clean, so its rollback is to drop
     /// the entry and let the device's copy stand. A flag rather than an undo
-    /// record: a clean block needs no snapshot, and recording one would put a
-    /// block-sized allocation on every directory scan.
+    /// record: recording one would put an allocation on every directory scan.
     op_discard: bool,
     /// Transient, set while [`BlockCache::rollback_op`] runs: this block's
     /// snapshot has been put back, so the discard pass must leave it alone.
     op_restored: bool,
+    /// This slot's index is in [`BlockCache::op_touched_slots`]. Not the same
+    /// question as `op_touched`: an eviction clears that flag, and a slot
+    /// listed twice could overrun the preallocated list.
+    op_listed: bool,
     /// The operation that last dirtied this block. A writeback pass writes
     /// nothing newer than the epoch it fixed, which is what lets it release
     /// the mount lock between chunks.
@@ -107,7 +159,8 @@ impl CacheEntry {
             block: BlockNum::ZERO,
             frame,
             pinned: 0,
-            lru: 0,
+            lru_prev: NIL,
+            lru_next: NIL,
             valid: false,
             kind: BlockKind::Metadata,
             owner: BlockOwner::Other,
@@ -115,6 +168,7 @@ impl CacheEntry {
             op_invalidated: false,
             op_discard: false,
             op_restored: false,
+            op_listed: false,
             dirty_epoch: 0,
         })
     }
@@ -122,35 +176,38 @@ impl CacheEntry {
 
 /// A block that was already dirty when the open operation first reached it.
 ///
-/// The device holds *some earlier* state, so only this snapshot — taken
-/// before the first mutation — is the committed one. The other case, a block
-/// found clean, needs no record: the device already holds its committed
-/// contents, so dropping the cache entry is the whole of the rollback, and
-/// [`CacheEntry::op_discard`] says so in one bit instead of a block-sized
-/// copy.
+/// The device holds *some earlier* state, so only this snapshot — taken before
+/// the first mutation — is the committed one. A block found clean needs no
+/// record; see [`CacheEntry::op_discard`].
 struct UndoEntry {
     block: BlockNum,
     snapshot: KVec<u8>,
 }
 
-/// LRU-ordered, fixed-capacity, **write-back** block cache. One cache lives for
-/// the lifetime of the mount, so dirty blocks accumulate across operations and
-/// are written back on eviction, on [`Self::flush_all`], or by the background
-/// flusher.
-///
-/// Never issues device flushes itself: the barriers around ordered phases are
-/// `Ext2Fs::sync`'s.
+/// LRU-ordered, fixed-capacity, **write-back** block cache. One lives for the
+/// lifetime of the mount, so dirty blocks accumulate across operations and are
+/// written back on eviction, on [`Self::flush_all`], or by the background
+/// flusher. Never issues device flushes itself: the barriers around ordered
+/// phases are `Ext2Fs::sync`'s.
+#[derive(slopos_ostd::SlotFields)]
 pub struct BlockCache {
     entries: KVec<CacheEntry>,
     index: KBTreeMap<BlockNum, usize>,
-    lru_clock: u64,
+    /// Frames this cache may hold, from the volume's size at mount. Also the
+    /// ceiling on every per-slot record below, all of which are preallocated
+    /// to it.
+    capacity: usize,
+    /// Ends of the recency chain: `lru_head` is the most recently used slot,
+    /// `lru_tail` the first victim. Invalid slots are retired to the tail, so
+    /// a miss finds an empty slot before it considers evicting anything.
+    lru_head: u32,
+    lru_tail: u32,
     block_size: u32,
     /// Blocks handed to the device since the last [`Self::note_barrier`].
     ///
-    /// A clean cache is not a durable one: eviction writes back without a
-    /// barrier by design, so `dirty_count() == 0` can hold over bytes still
-    /// sitting in a write-back device cache. This is what lets a sync tell
-    /// "nothing to do" from "nothing left to *write*".
+    /// A clean cache is not a durable one — eviction writes back without a
+    /// barrier by design — so this is what tells "nothing to do" from
+    /// "nothing left to *write*".
     unbarriered: usize,
     /// Undo record of the open operation, empty when none is open.
     undo: KVec<UndoEntry>,
@@ -183,50 +240,96 @@ pub struct BlockCache {
     /// account that paid.
     charges: BlockCharges,
     /// An eviction wrote one of the open operation's *data* blocks home, so
-    /// the commit owes a barrier whichever path it takes: publishing metadata
-    /// that names a home write still in a device cache is what
-    /// `data=ordered` forbids.
+    /// the commit owes a barrier whichever path it takes: `data=ordered`
+    /// forbids publishing metadata that names a home write still in a cache.
     op_data_evicted: bool,
+    /// Every slot carrying per-operation state — touched, invalidated, or
+    /// discardable. Preallocated to [`Self::capacity`] and appended to at
+    /// most once per slot per operation, so a commit walks what the operation
+    /// touched instead of the whole cache and allocates nothing.
+    op_touched_slots: KVec<u32>,
+    /// Inodes the open operation acquired a block *for* — what a rollback owes
+    /// the name index a retraction of.
+    ///
+    /// Recorded as the blocks are acquired rather than read back off the slots
+    /// at rollback time: [`Self::find_or_evict`] reuses a listed slot
+    /// mid-operation and overwrites its owner.
+    op_dirs: [u32; OP_DIRS_MAX],
+    op_dirs_len: u8,
+    /// More directories than `op_dirs` holds, so a rollback drops every index
+    /// rather than the ones it can still name.
+    op_dirs_overflow: bool,
+    /// One block-bitmap start hint per group, so an allocation resumes where
+    /// the last one stopped. Empty when the group count does not fit the
+    /// allocation ceiling — a missing hint only costs a scan.
+    group_hints: KVec<u32>,
+    /// Group an unhinted allocation starts from, so a full volume's sweep
+    /// does not restart at group 0 every time.
+    last_group: u32,
+    /// Per-directory name index and free-space hints, bounded and droppable.
+    /// Here because the block cache is the one long-lived, `&mut`-everywhere
+    /// piece of mount state, and because a rollback's bookkeeping is what says
+    /// which directories the index may no longer speak for.
+    dir_index: DirIndexSet,
 }
 
 impl BlockCache {
-    pub fn new(block_size: u32) -> Result<Self, Ext2Error> {
+    /// The cache, on the heap — which every caller wants, because the 2 KiB
+    /// stack gate refuses a frame carrying one alongside an `Ext2Fs`. Written
+    /// field by field, so no whole-`BlockCache` rvalue lands on a frame.
+    #[inline(never)]
+    pub fn new_boxed(block_size: u32, target_entries: usize) -> Result<KBox<Self>, Ext2Error> {
+        KBox::try_init(Self::init(block_size, target_entries)).map_err(|_| Ext2Error::OutOfMemory)
+    }
+
+    fn init(block_size: u32, target_entries: usize) -> impl Init<Self, AllocError> {
         // Callers validate this; a larger size would silently truncate
         // sub-block reads.
         debug_assert!(block_size as usize <= EXT2_MAX_BLOCK_SIZE as usize);
-
-        let mut entries = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;
-        for _ in 0..CACHE_ENTRIES {
-            entries
-                .push(CacheEntry::new()?)
-                .map_err(|_| Ext2Error::OutOfMemory)?;
-        }
-        Ok(Self {
-            entries,
-            index: KBTreeMap::new(),
-            lru_clock: 0,
-            block_size,
-            unbarriered: 0,
-            undo: KVec::new(),
-            undo_overflow: false,
-            op_depth: 0,
-            epoch: 1,
-            journal: None,
-            scratch: KVec::new(),
-            op_account: AccountId::NONE,
-            op_charged: 0,
-            op_cancelled: 0,
-            charges: BlockCharges::new()?,
-            op_data_evicted: false,
-        })
+        let capacity = target_entries.clamp(CACHE_ENTRIES_MIN, CACHE_ENTRIES_MAX);
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_field!(slot, entries, Self::build_entries(capacity)?);
+                write_field!(slot, index, KBTreeMap::new());
+                write_field!(slot, capacity, capacity);
+                write_field!(slot, lru_head, capacity as u32 - 1);
+                write_field!(slot, lru_tail, 0);
+                write_field!(slot, block_size, block_size);
+                write_field!(slot, unbarriered, 0);
+                write_field!(slot, undo, KVec::new());
+                write_field!(slot, undo_overflow, false);
+                write_field!(slot, op_depth, 0);
+                write_field!(slot, epoch, 1);
+                write_field!(slot, journal, None);
+                write_field!(slot, scratch, KVec::new());
+                write_field!(slot, op_account, AccountId::NONE);
+                write_field!(slot, op_charged, 0);
+                write_field!(slot, op_cancelled, 0);
+                write_field!(slot, charges, BlockCharges::new().map_err(|_| AllocError)?);
+                write_field!(slot, op_data_evicted, false);
+                write_field!(slot, op_touched_slots, KVec::with_capacity(capacity)?);
+                write_field!(slot, op_dirs, [0u32; OP_DIRS_MAX]);
+                write_field!(slot, op_dirs_len, 0);
+                write_field!(slot, op_dirs_overflow, false);
+                write_field!(slot, group_hints, KVec::new());
+                write_field!(slot, last_group, 0);
+                write_field!(slot, dir_index, DirIndexSet::new());
+                Ok(slot.finish())
+            },
+        )
     }
 
-    /// The cache, on the heap — which every caller wants, because the 2 KiB
-    /// stack gate refuses a frame carrying one alongside an `Ext2Fs`. Its own
-    /// frame so the temporary this moves from is not the caller's.
-    #[inline(never)]
-    pub fn new_boxed(block_size: u32) -> Result<KBox<Self>, Ext2Error> {
-        KBox::try_new(Self::new(block_size)?).map_err(|_| Ext2Error::OutOfMemory)
+    /// The frames, linked into the recency chain tail first so the initial
+    /// fill hands out slot 0 upwards.
+    fn build_entries(capacity: usize) -> Result<KVec<CacheEntry>, AllocError> {
+        let mut entries = KVec::with_capacity(capacity)?;
+        for i in 0..capacity {
+            let mut entry = CacheEntry::new().map_err(|_| AllocError)?;
+            entry.lru_prev = if i + 1 < capacity { i as u32 + 1 } else { NIL };
+            entry.lru_next = if i == 0 { NIL } else { i as u32 - 1 };
+            entries.push(entry)?;
+        }
+        Ok(entries)
     }
 
     /// Hand the mount's redo log to the cache. Once installed, an operation's
@@ -234,7 +337,7 @@ impl BlockCache {
     pub fn install_journal(&mut self, journal: KBox<Journal>) -> Result<(), Ext2Error> {
         // Sized to the cache, not to one record: an operation can dirty every
         // slot, and a commit must not allocate.
-        self.scratch = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;
+        self.scratch = KVec::with_capacity(self.capacity).map_err(|_| Ext2Error::OutOfMemory)?;
         self.journal = Some(journal);
         Ok(())
     }
@@ -253,10 +356,8 @@ impl BlockCache {
     ///
     /// Op-scoped because the transaction scope lives here: a rollback restores
     /// the bitmaps, so it owes the charge back too. `try_charge` takes no lock
-    /// and allocates nothing, so this is legal under the mount lock.
-    ///
-    /// `ino` is what makes the refund answerable — see
-    /// [`super::blockcharge`].
+    /// and allocates nothing, so this is legal under the mount lock. `ino` is
+    /// what makes the refund answerable — see [`super::blockcharge`].
     pub fn charge_blocks(
         &mut self,
         account: AccountId,
@@ -362,15 +463,11 @@ impl BlockCache {
         if self.op_depth > 1 {
             return;
         }
+        stats::note_transaction();
         self.epoch = self.epoch.wrapping_add(1);
         self.undo.clear();
         self.undo_overflow = false;
-        for entry in &mut self.entries {
-            entry.op_touched = false;
-            entry.op_invalidated = false;
-            entry.op_discard = false;
-            entry.op_restored = false;
-        }
+        self.forget_op_slots();
         if let Some(journal) = self.journal.as_mut() {
             journal.begin_op();
         }
@@ -392,36 +489,32 @@ impl BlockCache {
         self.settle_charges(true);
         self.undo.clear();
         self.undo_overflow = false;
-        for i in 0..self.entries.len() {
-            self.entries[i].op_touched = false;
-            self.entries[i].op_discard = false;
-            self.entries[i].op_restored = false;
-            if !self.entries[i].op_invalidated {
-                continue;
+        for k in 0..self.op_touched_slots.len() {
+            let i = self.op_touched_slots.as_slice()[k] as usize;
+            if self.entries[i].op_invalidated {
+                self.drop_entry(i);
             }
-            self.entries[i].op_invalidated = false;
-            self.drop_entry(i);
         }
+        self.forget_op_slots();
         Ok(())
     }
 
-    /// Put every block the scope touched back the way it was, so nothing the
-    /// failed operation wrote can reach the device.
+    /// Put every block the scope touched back the way it was.
     ///
-    /// With a log the retraction needs no snapshots: no home block was written
-    /// on the operation's behalf, so dropping every entry it touched is the
-    /// whole of it, and a later read comes back from the log or from the
-    /// block's home. Without one the scope is cache-deep — an eviction already
-    /// put a touched block on the device, which is why
-    /// [`Self::find_or_evict`] makes it the victim of last resort.
+    /// With a log no home block carries the operation's changes, so dropping
+    /// every entry it touched is the whole of it. Without one the scope is
+    /// cache-deep: an eviction may already have put a touched block on the
+    /// device, which is why [`Self::find_or_evict`] makes it the last resort.
     pub fn rollback_op(&mut self) {
         self.op_depth = self.op_depth.saturating_sub(1);
         if self.op_depth > 0 {
             return;
         }
+        self.forget_op_dir_indexes();
         if let Some(journal) = self.journal.as_mut() {
             journal.abort_op();
-            for i in 0..self.entries.len() {
+            for k in 0..self.op_touched_slots.len() {
+                let i = self.op_touched_slots.as_slice()[k] as usize;
                 if self.entries[i].op_touched {
                     self.drop_entry(i);
                 }
@@ -446,7 +539,8 @@ impl BlockCache {
             entry.dirty_epoch = epoch;
             entry.op_restored = true;
         }
-        for i in 0..self.entries.len() {
+        for k in 0..self.op_touched_slots.len() {
+            let i = self.op_touched_slots.as_slice()[k] as usize;
             if self.entries[i].op_discard && !self.entries[i].op_restored {
                 self.drop_entry(i);
             }
@@ -454,33 +548,150 @@ impl BlockCache {
         self.clear_op_flags();
     }
 
+    /// Retract the name index of every inode the failed scope touched: the
+    /// blocks are about to go back to their committed contents, and an index
+    /// is a claim about what those blocks hold — including, once complete,
+    /// the claim that a name is *not* there.
+    fn forget_op_dir_indexes(&mut self) {
+        if self.op_dirs_overflow {
+            self.dir_index.clear();
+            return;
+        }
+        for k in 0..self.op_dirs_len as usize {
+            self.dir_index.forget(self.op_dirs[k]);
+        }
+    }
+
+    /// Record that the open operation is working on `owner`'s blocks.
+    ///
+    /// On acquisition, the only moment the block and the inode it belongs to
+    /// are known together: a later eviction gives the slot to another owner.
+    fn note_op_dir(&mut self, owner: BlockOwner) {
+        if self.op_depth == 0 {
+            return;
+        }
+        let Some(ino) = owner.charged_inode() else {
+            return;
+        };
+        let len = self.op_dirs_len as usize;
+        if self.op_dirs[..len].contains(&ino) {
+            return;
+        }
+        if len == OP_DIRS_MAX {
+            self.op_dirs_overflow = true;
+            return;
+        }
+        self.op_dirs[len] = ino;
+        self.op_dirs_len += 1;
+    }
+
+    /// A candidate position for `name`'s hash, or the index's verdict on the
+    /// whole directory. `cursor` starts at zero and carries the probe across
+    /// the block read each candidate costs.
+    pub fn dir_probe(&mut self, ino: u32, hash: u32, cursor: &mut u32) -> DirProbe {
+        self.dir_index.probe(ino, hash, cursor)
+    }
+
+    /// Move the index set out for the length of a scan.
+    ///
+    /// A scan needs the cache mutably for every block it reads and the index
+    /// mutably for every record it files, and the index lives in the cache.
+    /// [`DirIndexSet::new`] allocates nothing, so the swap is a move of a
+    /// couple of hundred bytes.
+    pub fn take_dir_index(&mut self) -> DirIndexSet {
+        core::mem::take(&mut self.dir_index)
+    }
+
+    pub fn put_dir_index(&mut self, index: DirIndexSet) {
+        self.dir_index = index;
+    }
+
+    /// Where an insert into `ino` should resume, and what the passes that set
+    /// it proved about the blocks below.
+    pub fn dir_free_hint(&self, ino: u32) -> (u32, u32) {
+        self.dir_index.free_hint(ino)
+    }
+
+    pub fn set_dir_hint(&mut self, ino: u32, block: u32, proof: u32) {
+        self.dir_index.set_hint(ino, block, proof);
+    }
+
+    pub fn lower_dir_free_hint(&mut self, ino: u32, block: u32) {
+        self.dir_index.lower_free_hint(ino, block);
+    }
+
+    pub fn note_dir_insert(&mut self, ino: u32, hash: u32, pos: u32) {
+        self.dir_index.note_insert(ino, hash, pos);
+    }
+
+    pub fn note_dir_remove(&mut self, ino: u32, hash: u32, pos: u32) {
+        self.dir_index.note_remove(ino, hash, pos);
+    }
+
+    /// Drop everything the index believes about `ino` — its names and its
+    /// free-space hint. Owed whenever the inode itself stops being the
+    /// directory the index was built from.
+    pub fn forget_dir_index(&mut self, ino: u32) {
+        self.dir_index.forget(ino);
+    }
+
+    /// Whether `ino`'s index can answer a miss without a scan.
+    pub fn dir_index_complete(&self, ino: u32) -> bool {
+        self.dir_index.is_complete(ino)
+    }
+
     /// Also settles the operation's disk charges, which is why the rollback
     /// and commit paths both end here.
     fn clear_op_flags(&mut self) {
         self.settle_charges(false);
         self.undo_overflow = false;
-        for entry in &mut self.entries {
+        self.forget_op_slots();
+    }
+
+    /// Record that `slot` carries state belonging to the open operation.
+    ///
+    /// The list is preallocated to the cache's capacity and a slot joins it at
+    /// most once per operation, so this never allocates — which is what lets a
+    /// commit be allocation-free.
+    fn note_op_slot(&mut self, slot: usize) {
+        if self.entries[slot].op_listed {
+            return;
+        }
+        debug_assert!(self.op_touched_slots.len() < self.op_touched_slots.capacity());
+        if self.op_touched_slots.push(slot as u32).is_ok() {
+            self.entries[slot].op_listed = true;
+        }
+    }
+
+    /// Drop every per-operation record, walking the slots the operation
+    /// reached rather than the whole cache.
+    fn forget_op_slots(&mut self) {
+        for k in 0..self.op_touched_slots.len() {
+            let i = self.op_touched_slots.as_slice()[k] as usize;
+            let entry = &mut self.entries[i];
             entry.op_touched = false;
-            entry.op_discard = false;
-            entry.op_restored = false;
             // The invalidations the operation asked for are undone with it:
             // the blocks it was freeing are still the inode's.
             entry.op_invalidated = false;
+            entry.op_discard = false;
+            entry.op_restored = false;
+            entry.op_listed = false;
         }
+        self.op_touched_slots.clear();
+        self.op_dirs_len = 0;
+        self.op_dirs_overflow = false;
     }
 
     /// Publish the open operation through the log.
     ///
     /// A small write's data goes *into* the log with its metadata, so replay
     /// restores both or neither and no ordering is needed. A large one writes
-    /// home and buys the ordering with a barrier. Either way the barrier is
-    /// issued only if a home write happened, so a `create` or an `unlink` pays
-    /// nothing for it.
+    /// home and buys the ordering with a barrier, issued only if a home write
+    /// happened — so a `create` or an `unlink` pays nothing for it.
     fn log_transaction(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         if self.journal.is_none() {
             return Ok(());
         }
-        let bs = self.block_size as usize;
         // Staged and reserved *before* anything is published: a commit that
         // ran out of log room afterwards would retract the metadata with the
         // data already on the medium.
@@ -499,21 +710,16 @@ impl BlockCache {
         // data of its own.
         let mut wrote_data = self.op_data_evicted;
         if !log_data {
-            for i in 0..self.entries.len() {
-                let entry = &self.entries[i];
-                if !(entry.valid
-                    && entry.op_touched
-                    && entry.frame.dirty()
-                    && entry.kind == BlockKind::Data)
-                {
+            for k in 0..self.op_touched_slots.len() {
+                let i = self.op_touched_slots.as_slice()[k] as usize;
+                if !Self::goes_home(&self.entries[i]) {
                     continue;
                 }
-                let offset = entry.block.to_disk_offset(self.block_size);
-                device
-                    .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
-                    .map_err(|_| Ext2Error::DeviceError)?;
-                self.entries[i].frame.set_dirty(false);
-                self.unbarriered += 1;
+                // Only this operation's own dirty *data*, so a run can never
+                // reach a metadata block and never crosses the `data=ordered`
+                // boundary the single `device.flush()` below draws.
+                let n = self.write_run(device, i, usize::MAX, &mut |e| Self::goes_home(e))?;
+                self.unbarriered += n;
                 wrote_data = true;
             }
         }
@@ -531,19 +737,81 @@ impl BlockCache {
         result
     }
 
+    /// A dirty *data* block of the open operation: what the large-write path
+    /// writes home and barriers behind, rather than putting in the log.
+    fn goes_home(entry: &CacheEntry) -> bool {
+        entry.valid && entry.op_touched && entry.frame.dirty() && entry.kind == BlockKind::Data
+    }
+
     /// Dirty data blocks the open operation touched.
     fn count_op_data(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| e.valid && e.op_touched && e.frame.dirty() && e.kind == BlockKind::Data)
-            .count()
+        let mut count = 0usize;
+        for k in 0..self.op_touched_slots.len() {
+            if Self::goes_home(&self.entries[self.op_touched_slots.as_slice()[k] as usize]) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Write the dirty run that starts at `first` as one gathered request,
+    /// and answer how many blocks it carried. Every block in it is left
+    /// clean; a failure leaves all of them dirty for the next attempt.
+    ///
+    /// The run is the *device's*, not the cache's: consecutive block numbers,
+    /// whichever slots hold them, extended while `keep` accepts the next
+    /// block and bounded by [`FLUSH_RUN`] and `max`. Issues no barrier and
+    /// removes none — `keep` is what keeps a run inside one phase.
+    ///
+    /// `#[inline(never)]`: the segment array and the slot run are 640 bytes
+    /// of frame no caller can afford on top of its own.
+    #[inline(never)]
+    fn write_run(
+        &mut self,
+        device: &dyn BlockDevice,
+        first: usize,
+        max: usize,
+        keep: &mut dyn FnMut(&CacheEntry) -> bool,
+    ) -> Result<usize, Ext2Error> {
+        let bs = self.block_size as usize;
+        let base = self.entries[first].block;
+        let mut run = [first as u32; FLUSH_RUN];
+        let mut len = 1usize;
+        while len < FLUSH_RUN.min(max) {
+            let Some(raw) = base.raw().checked_add(len as u32) else {
+                break;
+            };
+            let Some(&peer) = self.index.get(&BlockNum(raw)) else {
+                break;
+            };
+            if !keep(&self.entries[peer]) {
+                break;
+            }
+            run[len] = peer as u32;
+            len += 1;
+        }
+        let offset = base.to_disk_offset(self.block_size).raw();
+        {
+            let mut segs: [&[u8]; FLUSH_RUN] = [&[]; FLUSH_RUN];
+            for k in 0..len {
+                segs[k] = &self.entries[run[k] as usize].frame.as_bytes()[..bs];
+            }
+            device
+                .write_vectored(offset, &segs[..len])
+                .map_err(|_| Ext2Error::DeviceError)?;
+        }
+        for k in 0..len {
+            self.entries[run[k] as usize].frame.set_dirty(false);
+        }
+        Ok(len)
     }
 
     /// Collect the blocks the commit will log, metadata always and data when
     /// the caller decided to log it too.
     fn stage_blocks(&mut self, with_data: bool) -> Result<(), Ext2Error> {
         self.scratch.clear();
-        for entry in &self.entries {
+        for k in 0..self.op_touched_slots.len() {
+            let entry = &self.entries[self.op_touched_slots.as_slice()[k] as usize];
             let logged = match entry.kind {
                 BlockKind::Metadata => true,
                 BlockKind::Data => with_data,
@@ -590,26 +858,29 @@ impl BlockCache {
         let mut done = 0usize;
         while done < self.scratch.len() {
             let take = (self.scratch.len() - done).min(per_record);
-            let first =
-                journal.begin_payloads(&self.scratch.as_slice()[done..done + take], device)?;
-            for k in 0..take {
-                let block = BlockNum(self.scratch.as_slice()[done + k]);
-                let Some(&slot) = self.index.get(&block) else {
-                    return Err(Ext2Error::DeviceError);
-                };
-                journal.write_payload(
-                    first + k as u32,
-                    &self.entries[slot].frame.as_bytes()[..bs],
-                    device,
-                )?;
-            }
+            let targets = &self.scratch.as_slice()[done..done + take];
+            let (index, entries) = (&self.index, &self.entries);
+            // The log gathers these; the commit record is still a separate
+            // write after every one of them, which is the only ordering the
+            // log itself needs.
+            journal.write_record(targets, device, &mut |k| {
+                let slot = *index.get(&BlockNum(targets[k]))?;
+                Some(&entries[slot].frame.as_bytes()[..bs])
+            })?;
             done += take;
         }
         journal.write_commit(device)
     }
 
     /// Forget a slot's contents without writing them back.
+    ///
+    /// An already-invalid slot is left alone: it keeps its old block number,
+    /// so unindexing on that number would unindex whichever live slot holds
+    /// it now.
     fn drop_entry(&mut self, slot: usize) {
+        if !self.entries[slot].valid {
+            return;
+        }
         let block = self.entries[slot].block;
         let entry = &mut self.entries[slot];
         entry.valid = false;
@@ -617,20 +888,18 @@ impl BlockCache {
         entry.frame.set_dirty(false);
         entry.frame.set_owner_key(0);
         self.index.remove(&block);
+        self.lru_retire(slot);
     }
 
     /// Record how `slot` is put back, before the caller can mutate it.
     ///
     /// Taken on *acquire* rather than on the first `data_mut`, because that
-    /// accessor cannot fail and a snapshot allocates. Reads therefore record
-    /// too, which costs one copy per distinct dirty metadata block an
-    /// operation reaches — the alternative is a fallible mutable accessor at
-    /// every call site and the same bound.
+    /// accessor cannot fail and a snapshot allocates; reads therefore record
+    /// too, which costs one copy per distinct dirty metadata block reached.
     ///
-    /// Every fallible step happens before the entry is mutated, so a failure
-    /// leaves the slot exactly as it was found. An entry that has been mutated
-    /// with no undo record behind it is a block the rollback cannot see, which
-    /// a later flush would publish over live data.
+    /// Every fallible step happens before the entry is mutated. An entry
+    /// mutated with no undo record behind it is a block the rollback cannot
+    /// see, which a later flush would publish over live data.
     fn note_op_touch(&mut self, slot: usize) -> Result<(), Ext2Error> {
         if self.op_depth == 0 || self.entries[slot].op_touched {
             return Ok(());
@@ -639,6 +908,7 @@ impl BlockCache {
             // No home block carries this operation's changes, so the rollback
             // re-reads rather than restores: one bit, whatever the state.
             self.entries[slot].op_touched = true;
+            self.note_op_slot(slot);
             return Ok(());
         }
         if !self.entries[slot].frame.dirty() {
@@ -646,14 +916,14 @@ impl BlockCache {
             // is a drop and needs no snapshot.
             self.entries[slot].op_touched = true;
             self.entries[slot].op_discard = true;
+            self.note_op_slot(slot);
             return Ok(());
         }
         if self.undo.len() >= MAX_UNDO {
-            // An eviction clears `op_touched`, so a long operation can
-            // re-acquire the same dirty bitmap and indirect blocks and record
-            // each afresh. Refusing bounds the snapshot memory and turns the
-            // excess into a failed operation the guard rolls back, rather than
-            // an allocation storm that fails somewhere less recoverable.
+            // An eviction clears `op_touched`, so a long operation can record
+            // the same dirty block afresh. Refusing bounds the snapshot memory
+            // and turns the excess into a rollback rather than an allocation
+            // storm that fails somewhere less recoverable.
             self.undo_overflow = true;
             return Err(Ext2Error::NoSpace);
         }
@@ -667,20 +937,22 @@ impl BlockCache {
             .push(UndoEntry { block, snapshot })
             .map_err(|_| Ext2Error::OutOfMemory)?;
         self.entries[slot].op_touched = true;
+        self.note_op_slot(slot);
         Ok(())
     }
 
     /// Mark a freshly acquired block for discard on rollback.
     ///
     /// Infallible, which is what lets the acquire paths set it *after* the
-    /// entry is installed: a block that was just read or zeroed has no
-    /// committed cache state to preserve, so one bit is the whole record.
+    /// entry is installed: a block just read or zeroed has no committed cache
+    /// state to preserve, so one bit is the whole record.
     fn note_op_fresh(&mut self, slot: usize) {
         if self.op_depth == 0 {
             return;
         }
         self.entries[slot].op_touched = true;
         self.entries[slot].op_discard = true;
+        self.note_op_slot(slot);
     }
 
     pub fn unbarriered_writes(&self) -> usize {
@@ -694,6 +966,57 @@ impl BlockCache {
 
     pub fn block_size(&self) -> u32 {
         self.block_size
+    }
+
+    /// Size the per-group allocation hints from the volume's group count, once
+    /// per mount. A group count whose table would outgrow [`GROUP_HINTS_MAX`]
+    /// gets none: a missing hint costs a bitmap scan, not correctness.
+    pub fn size_group_hints(&mut self, groups: u32) {
+        if self.group_hints.len() == groups as usize {
+            return;
+        }
+        self.group_hints = KVec::new();
+        self.last_group = 0;
+        if groups == 0 || groups as usize > GROUP_HINTS_MAX {
+            return;
+        }
+        let Ok(mut hints) = KVec::<u32>::with_capacity(groups as usize) else {
+            return;
+        };
+        for _ in 0..groups {
+            if hints.push(0).is_err() {
+                return;
+            }
+        }
+        self.group_hints = hints;
+    }
+
+    /// The bit a scan of `group`'s block bitmap should start from: everything
+    /// below it was allocated by an earlier search and rescanning it is what
+    /// makes a nearly-full volume quadratic.
+    pub fn group_hint(&self, group: u32) -> usize {
+        self.group_hints
+            .as_slice()
+            .get(group as usize)
+            .copied()
+            .unwrap_or(0) as usize
+    }
+
+    /// Record where `group`'s next scan should start. `0` resets it, which is
+    /// what a search that found nothing above the hint owes.
+    pub fn set_group_hint(&mut self, group: u32, bit: u32) {
+        if let Some(hint) = self.group_hints.as_mut_slice().get_mut(group as usize) {
+            *hint = bit;
+        }
+    }
+
+    /// The group an allocation with no goal of its own sweeps from.
+    pub fn alloc_group(&self) -> u32 {
+        self.last_group
+    }
+
+    pub fn set_alloc_group(&mut self, group: u32) {
+        self.last_group = group;
     }
 
     /// Get a metadata block, reading from the device on a miss.
@@ -731,10 +1054,10 @@ impl BlockCache {
         kind: BlockKind,
         owner: BlockOwner,
     ) -> Result<CachedBlock<'a>, Ext2Error> {
+        self.note_op_dir(owner);
         if let Some(&slot) = self.index.get(&block) {
             self.note_op_touch(slot)?;
-            self.lru_clock += 1;
-            self.entries[slot].lru = self.lru_clock;
+            self.lru_touch(slot);
             self.entries[slot].pinned += 1;
             self.entries[slot].owner = owner;
             // Re-reached after a deferred invalidation: this operation is
@@ -761,7 +1084,7 @@ impl BlockCache {
         self.journal = staged;
         read?;
 
-        self.lru_clock += 1;
+        self.lru_touch(slot);
         let epoch = self.epoch;
         let entry = &mut self.entries[slot];
         entry.block = block;
@@ -775,14 +1098,12 @@ impl BlockCache {
         entry.frame.set_dirty(logged.is_some());
         entry.dirty_epoch = epoch;
         entry.pinned = 1;
-        entry.lru = self.lru_clock;
         entry.valid = true;
         entry.op_touched = false;
         entry.op_invalidated = false;
         entry.op_discard = false;
         entry.op_restored = false;
         self.index.insert(block, slot);
-        // Read clean, so the rollback is a discard and needs no snapshot.
         self.note_op_fresh(slot);
 
         Ok(CachedBlock { cache: self, slot })
@@ -824,6 +1145,7 @@ impl BlockCache {
         kind: BlockKind,
         owner: BlockOwner,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
+        self.note_op_dir(owner);
         if let Some(&slot) = self.index.get(&block) {
             self.note_op_touch(slot)?;
             let bs = self.block_size as usize;
@@ -832,12 +1154,10 @@ impl BlockCache {
             self.entries[slot].dirty_epoch = self.epoch;
             self.entries[slot].kind = kind;
             self.entries[slot].owner = owner;
-            // A block re-reached after a deferred invalidation is being reused
-            // by this same operation; dropping it at commit would throw the
-            // reuse away.
+            // Reused by this same operation, so the deferred invalidation no
+            // longer applies.
             self.entries[slot].op_invalidated = false;
-            self.lru_clock += 1;
-            self.entries[slot].lru = self.lru_clock;
+            self.lru_touch(slot);
             self.entries[slot].pinned += 1;
             return Ok(CachedBlock { cache: self, slot });
         }
@@ -846,7 +1166,7 @@ impl BlockCache {
         let bs = self.block_size as usize;
         let epoch = self.epoch;
 
-        self.lru_clock += 1;
+        self.lru_touch(slot);
         let entry = &mut self.entries[slot];
         entry.frame.as_bytes_mut()[..bs].fill(0);
         entry.block = block;
@@ -856,15 +1176,14 @@ impl BlockCache {
         entry.frame.set_dirty(true);
         entry.dirty_epoch = epoch;
         entry.pinned = 1;
-        entry.lru = self.lru_clock;
         entry.valid = true;
         entry.op_touched = false;
         entry.op_invalidated = false;
         entry.op_discard = false;
         entry.op_restored = false;
         self.index.insert(block, slot);
-        // A freshly zeroed block has no committed contents to snapshot, so the
-        // rollback is a discard whether or not the slot's predecessor was dirty.
+        // A freshly zeroed block has no committed contents to snapshot,
+        // whatever the slot's predecessor was.
         self.note_op_fresh(slot);
 
         Ok(CachedBlock { cache: self, slot })
@@ -919,34 +1238,39 @@ impl BlockCache {
         budget: usize,
         mut select: impl FnMut(BlockKind, BlockOwner) -> bool,
     ) -> Result<FlushProgress, Ext2Error> {
-        let bs = self.block_size as usize;
         let mut first_err: Option<Ext2Error> = None;
         let mut written = 0usize;
         let mut more = false;
-        for entry in &mut self.entries {
+        let mut slot = 0usize;
+        while slot < self.entries.len() {
+            let entry = &self.entries[slot];
             if !(entry.valid
                 && entry.frame.dirty()
                 && entry.dirty_epoch <= epoch
                 && select(entry.kind, entry.owner))
             {
+                slot += 1;
                 continue;
             }
             if written >= budget {
                 more = true;
                 break;
             }
-            let offset = entry.block.to_disk_offset(self.block_size);
-            match device.write_at(offset.raw(), &entry.frame.as_bytes()[..bs]) {
-                Ok(()) => {
-                    entry.frame.set_dirty(false);
-                    written += 1;
-                }
+            // Bounded by the remaining budget so a caller that asked for one
+            // write still gets one.
+            let room = budget - written;
+            let outcome = self.write_run(device, slot, room, &mut |e| {
+                e.valid && e.frame.dirty() && e.dirty_epoch <= epoch && select(e.kind, e.owner)
+            });
+            match outcome {
+                Ok(len) => written += len,
                 Err(_) => {
                     if first_err.is_none() {
                         first_err = Some(Ext2Error::DeviceError);
                     }
                 }
             }
+            slot += 1;
         }
         self.unbarriered += written;
         match first_err {
@@ -999,20 +1323,35 @@ impl BlockCache {
                 break;
             }
             let block = journal.slot_block_at(slot);
-            slot += 1;
-            // Skipped only when the cache says the home matches, which a
-            // clean entry does by construction. A dirty entry may be newer,
-            // but nothing says the metadata phase has run for its epoch, so
-            // the committed copy goes home regardless — the newest slot wins,
-            // and a newer cache copy follows in a later pass.
+            // Skipped only when the cache says the home matches, which a clean
+            // entry does by construction. A dirty entry may be newer, but
+            // nothing says the metadata phase has run for its epoch, so the
+            // committed copy goes home regardless.
             if block == 0 || self.home_matches(block) {
+                slot += 1;
                 continue;
             }
-            if let Err(e) = journal.copy_to_home(slot - 1, block, device) {
+            // A run is ascending slots whose *homes* are the next block, so one
+            // request replaces several without reordering what "the last write
+            // wins" reads. A slot already home ends the run rather than being
+            // skipped inside it: an older logged copy must never overwrite a
+            // newer home. No barrier moves — the caller still barriers once
+            // behind the whole check point.
+            let room = (budget - written).min(journal.home_run_max());
+            let mut len = 1u32;
+            while (len as usize) < room && slot + len < end {
+                let next = journal.slot_block_at(slot + len);
+                if block.checked_add(len) != Some(next) || self.home_matches(next) {
+                    break;
+                }
+                len += 1;
+            }
+            if let Err(e) = journal.copy_run_to_home(slot, block, len, device) {
                 result = Err(e);
                 break;
             }
-            written += 1;
+            written += len as usize;
+            slot += len;
         }
         self.unbarriered += journal.take_writes();
         self.journal = Some(journal);
@@ -1060,10 +1399,10 @@ impl BlockCache {
     /// Declare the log check pointed. The caller must have barriered the home
     /// writes first.
     ///
-    /// Its own write is deliberately not counted as owing a barrier: losing it
-    /// costs a redundant replay of transactions already applied, which writes
-    /// the same bytes to the same places, and counting it would leave a sync
-    /// that had nothing else to do reporting itself perpetually unfinished.
+    /// Its own write deliberately does not count as owing a barrier: losing it
+    /// costs a redundant replay of transactions already applied, and counting
+    /// it would leave a sync with nothing else to do reporting itself
+    /// perpetually unfinished.
     pub fn journal_reset(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         let Some(mut journal) = self.journal.take() else {
             return Ok(());
@@ -1088,19 +1427,18 @@ impl BlockCache {
 
     /// Invalidate a cached block (evict without writing).
     ///
-    /// Inside an open operation this is *deferred* to the commit rather than
-    /// applied at once. Dropping the slot immediately would throw away the
-    /// undo snapshot that the block's own record names, so a later rollback
-    /// would silently revert it to whatever the device last held instead of to
-    /// its pre-operation contents. Deferring costs nothing: the callers
-    /// invalidate blocks they are *freeing*, and a reallocation reaches them
-    /// through `get_zero_*`, which overwrites regardless.
+    /// Inside an open operation this is *deferred* to the commit: dropping the
+    /// slot at once would throw away the undo snapshot the block's own record
+    /// names, and a later rollback would revert it to whatever the device last
+    /// held. Deferring costs nothing — callers invalidate blocks they are
+    /// *freeing*, and a reallocation reaches them through `get_zero_*`.
     pub fn invalidate(&mut self, block: BlockNum) {
         let Some(&slot) = self.index.get(&block) else {
             return;
         };
         if self.op_depth > 0 {
             self.entries[slot].op_invalidated = true;
+            self.note_op_slot(slot);
             return;
         }
         self.drop_entry(slot);
@@ -1122,6 +1460,9 @@ impl BlockCache {
         if want == 0 {
             return 0;
         }
+        // Pure accelerator, and the heap it sits on is the heap that is short.
+        // Its frames are not what this call counts.
+        self.dir_index.clear();
         let mut released = 0u32;
         // From the end, so a `swap_remove` only ever moves an entry that has
         // already been considered.
@@ -1131,15 +1472,15 @@ impl BlockCache {
             if self.entries[i].pinned != 0 || self.entries[i].frame.dirty() {
                 continue;
             }
-            // Repair the index in place: rebuilding it needs
+            // Repaired in place: rebuilding the index needs
             // `KBTreeMap::insert`, which allocates, on the path that runs
-            // *because* allocation failed.
-            // Only a valid slot owns its index entry: `drop_entry` leaves
-            // `block` set on the slot it invalidates, so removing on that
-            // stale number would unindex whichever live slot holds it now.
+            // *because* allocation failed. Only a valid slot owns its index
+            // entry — `drop_entry` leaves `block` set on the slot it
+            // invalidates.
             if self.entries[i].valid {
                 self.index.remove(&self.entries[i].block);
             }
+            self.lru_detach(i);
             let moved_from = self.entries.len() - 1;
             let moved = if moved_from != i {
                 Some(self.entries[moved_from].block)
@@ -1148,6 +1489,11 @@ impl BlockCache {
             };
             let removed_valid = self.entries[moved_from].valid;
             self.entries.swap_remove(i);
+            if moved.is_some() {
+                // The entry that moved into `i` is still linked under its old
+                // index.
+                self.lru_reindex(i);
+            }
             if let Some(block) = moved
                 && removed_valid
                 && let Some(slot) = self.index.get_mut(&block)
@@ -1156,52 +1502,164 @@ impl BlockCache {
             }
             released += 1;
         }
+        if released > 0 {
+            self.relist_op_slots();
+        }
         released
     }
 
-    fn find_or_evict(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
-        for (i, entry) in self.entries.iter().enumerate() {
-            if !entry.valid {
-                return Ok(i);
+    /// Slots the per-operation records can name. A commit stages one `u32` per
+    /// touched slot into preallocated vectors, so the cache may never hold
+    /// more entries than those have room for — that is what makes a commit
+    /// allocation-free.
+    fn entry_ceiling(&self) -> usize {
+        let mut ceiling = self.capacity.min(self.op_touched_slots.capacity());
+        if self.journal.is_some() {
+            ceiling = ceiling.min(self.scratch.capacity());
+        }
+        ceiling
+    }
+
+    fn lru_detach(&mut self, slot: usize) {
+        let prev = self.entries[slot].lru_prev;
+        let next = self.entries[slot].lru_next;
+        if prev == NIL {
+            self.lru_head = next;
+        } else {
+            self.entries[prev as usize].lru_next = next;
+        }
+        if next == NIL {
+            self.lru_tail = prev;
+        } else {
+            self.entries[next as usize].lru_prev = prev;
+        }
+        self.entries[slot].lru_prev = NIL;
+        self.entries[slot].lru_next = NIL;
+    }
+
+    fn lru_link_mru(&mut self, slot: usize) {
+        let head = self.lru_head;
+        self.entries[slot].lru_prev = NIL;
+        self.entries[slot].lru_next = head;
+        if head == NIL {
+            self.lru_tail = slot as u32;
+        } else {
+            self.entries[head as usize].lru_prev = slot as u32;
+        }
+        self.lru_head = slot as u32;
+    }
+
+    fn lru_link_lru(&mut self, slot: usize) {
+        let tail = self.lru_tail;
+        self.entries[slot].lru_next = NIL;
+        self.entries[slot].lru_prev = tail;
+        if tail == NIL {
+            self.lru_head = slot as u32;
+        } else {
+            self.entries[tail as usize].lru_next = slot as u32;
+        }
+        self.lru_tail = slot as u32;
+    }
+
+    fn lru_touch(&mut self, slot: usize) {
+        self.lru_detach(slot);
+        self.lru_link_mru(slot);
+    }
+
+    /// Put an emptied slot at the LRU end, so the next miss takes it before it
+    /// considers evicting a live block.
+    fn lru_retire(&mut self, slot: usize) {
+        self.lru_detach(slot);
+        self.lru_link_lru(slot);
+    }
+
+    /// Repair the chain around the entry that a `swap_remove` moved into
+    /// `slot`: its neighbours still name the index it came from.
+    fn lru_reindex(&mut self, slot: usize) {
+        let prev = self.entries[slot].lru_prev;
+        let next = self.entries[slot].lru_next;
+        if prev == NIL {
+            self.lru_head = slot as u32;
+        } else {
+            self.entries[prev as usize].lru_next = slot as u32;
+        }
+        if next == NIL {
+            self.lru_tail = slot as u32;
+        } else {
+            self.entries[next as usize].lru_prev = slot as u32;
+        }
+    }
+
+    /// Rebuild the per-operation slot list after a reclaim moved entries
+    /// between slots. Reuses the preallocated vector: a reclaim runs
+    /// *because* allocation is failing.
+    fn relist_op_slots(&mut self) {
+        self.op_touched_slots.clear();
+        for i in 0..self.entries.len() {
+            let carries = self.entries[i].op_touched
+                || self.entries[i].op_invalidated
+                || self.entries[i].op_discard;
+            self.entries[i].op_listed = false;
+            if carries {
+                self.note_op_slot(i);
             }
+        }
+    }
+
+    /// A slot a miss can take: `(free, victim)`.
+    ///
+    /// Walks from the LRU end, so an invalid slot — always retired there — is
+    /// found before any live block is considered. Among live blocks:
+    /// allocation state is what the *next* allocation re-reads, so it is kept
+    /// while anything else is evictable, and a block the open operation
+    /// dirtied is the last resort, its home not being allowed uncommitted
+    /// content.
+    fn pick_victim(&self) -> (Option<usize>, Option<usize>) {
+        let mut classes = [usize::MAX; 4];
+        let mut cursor = self.lru_tail;
+        while cursor != NIL {
+            let entry = &self.entries[cursor as usize];
+            if !entry.valid {
+                return (Some(cursor as usize), None);
+            }
+            if entry.pinned == 0 {
+                let class = usize::from(entry.op_touched) * 2
+                    + usize::from(matches!(entry.owner, BlockOwner::Alloc));
+                if classes[class] == usize::MAX {
+                    classes[class] = cursor as usize;
+                    if class == 0 {
+                        break;
+                    }
+                }
+            }
+            cursor = entry.lru_prev;
+        }
+        (None, classes.iter().copied().find(|&s| s != usize::MAX))
+    }
+
+    fn find_or_evict(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
+        let (free, victim) = self.pick_victim();
+        if let Some(slot) = free {
+            return Ok(slot);
         }
 
         // Re-grow after a reclaim took entries away: otherwise the cache stays
         // permanently shrunk and every later miss evicts a live block.
-        if self.entries.len() < CACHE_ENTRIES
+        if self.entries.len() < self.entry_ceiling()
             && let Ok(entry) = CacheEntry::new()
             && self.entries.push(entry).is_ok()
         {
-            return Ok(self.entries.len() - 1);
+            let slot = self.entries.len() - 1;
+            self.lru_link_lru(slot);
+            return Ok(slot);
         }
 
-        // A block the open operation dirtied is the victim of last resort.
-        // Its home must not receive uncommitted content, so with a log it
-        // goes there instead, retracted by the abort rewind; without one it is
-        // written home, the residual a log exists to close.
-        let mut slot = None;
-        for touched_ok in [false, true] {
-            let mut best_lru = u64::MAX;
-            for (i, entry) in self.entries.iter().enumerate() {
-                if entry.pinned != 0 || (entry.op_touched && !touched_ok) {
-                    continue;
-                }
-                if entry.lru < best_lru {
-                    best_lru = entry.lru;
-                    slot = Some(i);
-                }
-            }
-            if slot.is_some() {
-                break;
-            }
-        }
-
-        let slot = slot.ok_or(Ext2Error::DeviceError)?;
+        let slot = victim.ok_or(Ext2Error::DeviceError)?;
 
         // Eviction is a cache-replacement event, not a durability point, so no
-        // device barrier is issued here; the commit and FS-level `sync`
-        // provide the ordering, which is why a data block written home from
-        // here is recorded as owing one.
+        // barrier is issued here; the commit and FS-level `sync` provide the
+        // ordering, which is why a data block written home from here is
+        // recorded as owing one.
         if self.entries[slot].frame.dirty() {
             let bs = self.block_size as usize;
             let spill = self.journal.is_some()
@@ -1245,6 +1703,7 @@ impl BlockCache {
         entry.op_invalidated = false;
         entry.op_discard = false;
         entry.op_restored = false;
+        self.lru_retire(slot);
 
         Ok(slot)
     }

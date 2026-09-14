@@ -9,8 +9,10 @@ pub mod traits;
 
 pub use canon::{CanonPath, canonicalise, canonicalise_at};
 pub use init::{
-    RootBacking, vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with,
-    vfs_is_initialized,
+    EXT2_POOL_LEN, RootBacking, vfs_claim_block_device, vfs_ext2_mount_named,
+    vfs_ext2_mounted_instance, vfs_ext2_pool_claim, vfs_ext2_pool_release, vfs_ext2_unmount_named,
+    vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with, vfs_is_initialized,
+    vfs_register_block_claim,
 };
 pub use mount::{MAX_MOUNTS, MOUNT_RDONLY, Mounted, mount, mount_at, unmount, with_mount_table};
 pub use ops::{

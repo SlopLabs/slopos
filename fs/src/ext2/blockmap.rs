@@ -21,9 +21,7 @@ pub struct BlockPath {
 /// Bytes addressable by twelve direct blocks plus three levels of indirection.
 ///
 /// Saturating rather than checked: `ptrs_per_block` is `block_size / 4`, so
-/// the product cannot overflow `u64` for any block size this implementation
-/// accepts, and a saturating answer is a cap rather than a panic if one ever
-/// could.
+/// the product cannot overflow `u64` for any block size accepted here.
 pub fn max_file_size(ptrs_per_block: u32, block_size: u32) -> u64 {
     let n = ptrs_per_block as u64;
     let blocks = (DIRECT_BLOCKS as u64)
@@ -74,13 +72,9 @@ pub fn block_to_path(file_block: FileBlock, ptrs_per_block: u32) -> Result<Block
         });
     }
 
-    // Past what three levels of indirection can address. This is a *caller's*
-    // offset, not a number the image supplied: `file_block_index` only refuses
-    // above 16 TiB, so every offset between the triple-indirect reach and that
-    // ceiling arrives here. `InvalidRange` rather than `InvalidBlock` is
-    // therefore load-bearing — the latter is classified as image damage, and a
-    // one-byte `pwrite` past the reach would latch the whole mount read-only
-    // for every process on it.
+    // Past the triple-indirect reach. `InvalidRange`, not `InvalidBlock`: this
+    // is a caller's offset, and the latter is classified as image damage — a
+    // one-byte `pwrite` past the reach would latch the whole mount read-only.
     Err(Ext2Error::InvalidRange)
 }
 
@@ -99,25 +93,38 @@ fn write_ptr(data: &mut [u8], idx: u32, block: BlockNum) {
     data[off..off + 4].copy_from_slice(&block.raw().to_le_bytes());
 }
 
+/// A block pointer the *image* chose, held to the volume it claims to be in.
+///
+/// `BlockCache::get_kind` turns a block number straight into a device offset,
+/// so an unbounded pointer reads and writes outside the filesystem. A hole is
+/// not a pointer, so zero passes through for the caller to read as one.
+pub(super) fn checked_ptr(geom: &Ext2Geometry, block: BlockNum) -> Result<BlockNum, Ext2Error> {
+    if !block.is_valid() {
+        return Ok(BlockNum::ZERO);
+    }
+    geom.checked_block(block.raw())
+        .ok_or(Ext2Error::InvalidBlock)
+}
+
 /// Returns `BlockNum::ZERO` for holes (sparse file).
 pub fn map_block(
     inode: &Inode,
     file_block: FileBlock,
-    ptrs_per_block: u32,
+    geom: &Ext2Geometry,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
     owner: BlockOwner,
 ) -> Result<BlockNum, Ext2Error> {
-    let path = block_to_path(file_block, ptrs_per_block)?;
+    let path = block_to_path(file_block, geom.ptrs_per_block())?;
 
-    let mut current = inode.block[path.offsets[0] as usize];
+    let mut current = checked_ptr(geom, inode.block[path.offsets[0] as usize])?;
     if !current.is_valid() {
         return Ok(BlockNum::ZERO);
     }
 
     for level in 1..path.depth as usize {
         let block = cache.get_owned(current, device, owner)?;
-        current = read_ptr(block.data(), path.offsets[level]);
+        current = checked_ptr(geom, read_ptr(block.data(), path.offsets[level]))?;
         if !current.is_valid() {
             return Ok(BlockNum::ZERO);
         }
@@ -130,26 +137,24 @@ pub fn map_block(
 /// indirect blocks it had to create**.
 ///
 /// `i_blocks` counts every 512-byte sector the inode owns, indirect blocks
-/// among them: `e2fsck` recomputes the field from the whole tree and reports
-/// one that counts only the data. Returning a count rather than a bool is what
-/// lets the caller keep it right.
+/// among them; `e2fsck` recomputes the field from the whole tree.
 pub fn ensure_data_block(
     inode: &mut Inode,
     file_block: FileBlock,
-    ptrs_per_block: u32,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    superblock: &mut Superblock,
     geom: &Ext2Geometry,
+    superblock: &mut Superblock,
     owner: BlockOwner,
 ) -> Result<(BlockNum, u32), Ext2Error> {
-    let path = block_to_path(file_block, ptrs_per_block)?;
+    let path = block_to_path(file_block, geom.ptrs_per_block())?;
     let mut allocated = 0u32;
 
     if path.depth == 1 {
         let idx = path.offsets[0] as usize;
-        if inode.block[idx].is_valid() {
-            return Ok((inode.block[idx], 0));
+        let existing = checked_ptr(geom, inode.block[idx])?;
+        if existing.is_valid() {
+            return Ok((existing, 0));
         }
         let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
         drop(cache.get_zero_data(new_block, device, owner)?);
@@ -158,18 +163,19 @@ pub fn ensure_data_block(
     }
 
     let top_idx = path.offsets[0] as usize;
-    if !inode.block[top_idx].is_valid() {
+    let mut current_indirect = checked_ptr(geom, inode.block[top_idx])?;
+    if !current_indirect.is_valid() {
         let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
         drop(cache.get_zero_owned(new_block, device, owner)?);
         inode.block[top_idx] = new_block;
+        current_indirect = new_block;
         allocated += 1;
     }
 
-    let mut current_indirect = inode.block[top_idx];
     for level in 1..path.depth as usize - 1 {
         let child = {
             let block = cache.get_owned(current_indirect, device, owner)?;
-            read_ptr(block.data(), path.offsets[level])
+            checked_ptr(geom, read_ptr(block.data(), path.offsets[level]))?
         };
         if child.is_valid() {
             current_indirect = child;
@@ -186,7 +192,7 @@ pub fn ensure_data_block(
     let data_idx = path.offsets[path.depth as usize - 1];
     let existing = {
         let block = cache.get_owned(current_indirect, device, owner)?;
-        read_ptr(block.data(), data_idx)
+        checked_ptr(geom, read_ptr(block.data(), data_idx))?
     };
 
     if existing.is_valid() {

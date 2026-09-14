@@ -1,17 +1,18 @@
-//! `mount(2)` and `umount2(2)`.
+//! `mount(2)` and `umount2(2)`, both behind `Capability::Mount`.
 //!
-//! Both sit behind `Capability::Mount`, checked by the dispatcher.
-//!
-//! `mount(2)` cannot conjure a `&'static dyn FileSystem`, so the set of
-//! mountable types is closed: a pooled ramfs instance, the devfs singleton, or
-//! the one ext2 instance the boot step attached. Anything else is `ENODEV`.
+//! `mount(2)` cannot conjure a `&'static dyn FileSystem`, so the mountable
+//! set is closed: a pooled ramfs instance, the devfs singleton, or a pooled
+//! ext2 instance over a named block device. Anything else is `ENODEV`.
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{MNT_DETACH, MOUNT_FSTYPE_MAX, MS_RDONLY};
-use slopos_fs::ext2_vfs::{EXT2_VFS_STATIC, ext2_vfs_is_initialized, ext2_vfs_is_read_only};
+use slopos_fs::ext2_vfs::Ext2Mount;
 use slopos_fs::vfs::VfsError;
 use slopos_fs::vfs::canon::canonicalise_at;
-use slopos_fs::vfs::init::{vfs_devfs_instance, vfs_ramfs_pool_claim, vfs_ramfs_pool_release};
+use slopos_fs::vfs::init::{
+    vfs_devfs_instance, vfs_ext2_mount_named, vfs_ext2_mounted_instance, vfs_ext2_pool_release,
+    vfs_ramfs_pool_claim, vfs_ramfs_pool_release,
+};
 use slopos_fs::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
 use slopos_fs::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
@@ -68,9 +69,8 @@ pub(crate) fn mount_apply_at(
     if target == b"/" {
         return Err(Errno::EBUSY);
     }
-    // `EPERM`, not `EBUSY`: covering the path a grant is keyed on would let
-    // the caller hand itself that privilege, so the target is permanently
-    // refused rather than merely occupied.
+    // `EPERM`, not `EBUSY`: covering a path a grant is keyed on would let the
+    // caller hand itself that privilege, so the refusal is permanent.
     if crate::exec::grants::covers_grant_path(target) {
         return Err(Errno::EPERM);
     }
@@ -105,30 +105,29 @@ pub(crate) fn mount_apply_at(
         }
         b"devfs" => mount(target, vfs_devfs_instance(), mount_flags).map_err(vfs_errno),
         b"ext2" => {
-            if !ext2_vfs_is_initialized() {
-                return Err(Errno::ENODEV);
+            let read_only = mount_flags & MOUNT_RDONLY != 0;
+            // Empty `source` means the instance this boot already attached,
+            // placed at a second path. A named one gets an instance of its
+            // own over that device.
+            if source.is_empty() {
+                let fs: &'static Ext2Mount = vfs_ext2_mounted_instance().ok_or(Errno::ENODEV)?;
+                let flags = if fs.is_read_only() {
+                    mount_flags | MOUNT_RDONLY
+                } else {
+                    mount_flags
+                };
+                return mount(target, fs, flags).map_err(vfs_errno);
             }
-            // One ext2 instance exists, bound at boot to the `root=` device,
-            // so a named `source` asks for a second that cannot exist. Empty
-            // means "the attached one".
-            if !source.is_empty() {
-                return Err(Errno::EBUSY);
-            }
-            let flags = if ext2_vfs_is_read_only() {
-                mount_flags | MOUNT_RDONLY
-            } else {
-                mount_flags
-            };
-            mount(target, &EXT2_VFS_STATIC, flags).map_err(vfs_errno)
+            vfs_ext2_mount_named(source, target, read_only)
+                .map(|_| ())
+                .map_err(vfs_errno)
         }
         _ => Err(Errno::ENODEV),
     }
 }
 
-/// How many mount points name `fs`.
-///
-/// A mount-table scan under its own lock with no filesystem call, so it is
-/// safe on any path `umount2` reaches.
+/// How many mount points name `fs`. A mount-table scan under its own lock
+/// with no filesystem call, so it is safe on any path `umount2` reaches.
 fn mounts_of(fs: &'static dyn FileSystem) -> usize {
     let mut count = 0usize;
     with_mount_table(|table| {
@@ -178,8 +177,14 @@ pub(crate) fn umount_path_at(path: &[u8], cwd: &[u8], flags: u32) -> Result<(), 
     }
 
     unmount(target).map_err(vfs_errno)?;
-    if last_mount {
-        vfs_ramfs_pool_release(mounted.fs, busy);
+    // Re-derived, because `last_mount` was sampled before the removal: two
+    // tasks unmounting two paths of one instance both see two mounts, so a
+    // release gated on that stale answer never runs and the instance keeps
+    // its device and its exclusive write claim for the rest of the boot.
+    if mounts_of(mounted.fs) == 0 && !vfs_ramfs_pool_release(mounted.fs, busy) {
+        // The ext2 release is also what drops the device and gives its
+        // exclusive write claim back, so the same disk can be mounted again.
+        vfs_ext2_pool_release(mounted.fs, busy);
     }
     Ok(())
 }

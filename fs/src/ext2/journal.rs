@@ -3,9 +3,7 @@
 //! The log lives in the blocks of an ordinary preallocated file, so `e2fsck`
 //! sees a file and this kernel needs no on-disk feature bit and no jbd2
 //! format compatibility. Nothing outside those blocks is written until a
-//! transaction's commit record is on the medium: that is what lets a failed
-//! operation be retracted and an unclean image be repaired rather than
-//! refused.
+//! transaction's commit record is on the medium.
 //!
 //! # Log format
 //!
@@ -32,10 +30,13 @@
 //! check. That is what removes the barrier before the commit record — the
 //! trade ext4 makes with `async_commit`.
 
-use slopos_ostd::{KBox, KVec};
+use slopos_mm::slab::MAX_ALLOC_SIZE;
+use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
+use slopos_ostd::{KBox, KVec, write_field};
 
 use super::Ext2Error;
-use crate::blockdev::BlockDevice;
+use crate::blockdev::{BlockDevice, stats};
 use crate::verity::{CRC32_INIT, crc32_feed, crc32_finish};
 
 /// "SLJS", the log superblock in slot 0.
@@ -59,6 +60,38 @@ const SB_CRC_SPAN: usize = 24;
 /// refuses, and refusing a routine `create` would be worse than having no
 /// journal at all.
 pub const MIN_LOG_SLOTS: u32 = 32;
+
+/// Slots this kernel will index, the log superblock included. A `/.journal`
+/// longer than this is used up to the cap and no further: a log bigger than
+/// the kernel can index is the host's sizing decision, not a corrupt image.
+///
+/// The cap is what holds every per-slot array to `PER_SLOT_LIMIT`. 32 768
+/// slots covers the largest log the image builder produces (64 MiB over 4 KiB
+/// blocks is 16 384) with room to double.
+pub const MAX_LOG_SLOTS: u32 = 32 * 1024;
+
+/// What one per-slot array may take: a quarter of a single allocation's
+/// ceiling, so the log's arrays together stay well inside the heap's
+/// large-allocation tier.
+const PER_SLOT_LIMIT: usize = MAX_ALLOC_SIZE / 4;
+const _: () = assert!(MAX_LOG_SLOTS as usize * size_of::<(u32, u32)>() <= PER_SLOT_LIMIT);
+const _: () = assert!(MAX_LOG_SLOTS as usize * size_of::<u32>() <= PER_SLOT_LIMIT);
+const _: () =
+    assert!((MAX_LOG_SLOTS as usize).next_power_of_two() * size_of::<u32>() <= PER_SLOT_LIMIT);
+
+/// Chain terminator in the block index. Slot 0 holds the log superblock, so
+/// it is never a record's slot and can stand in for "no link".
+const NIL_SLOT: u32 = 0;
+
+/// Slots one record write may gather. The segment array is on the stack, so
+/// this is a stack cost as much as an I/O size: 32 segments is 512 bytes of
+/// frame.
+const RECORD_RUN: usize = 32;
+
+/// Slots one check-point step may carry home in one request. Bounds the
+/// staging buffer, which is preallocated at `RECORD_RUN`-independent size:
+/// eight 4 KiB blocks is the 32 KiB a virtio-blk chain takes whole.
+const CHECKPOINT_RUN: usize = 8;
 
 /// The volume the log belongs to, so a target block read off the medium can be
 /// refused before it becomes a write offset.
@@ -106,13 +139,27 @@ struct RecHeader {
     crc: u32,
 }
 
+#[derive(slopos_ostd::SlotFields)]
 pub struct Journal {
     /// Home block of each log slot. `slots[0]` is the log superblock.
     slots: KVec<u32>,
     /// The filesystem block whose newest content is in this slot, or zero.
-    /// Scanned backwards to look one up and forwards to check point, which is
-    /// what makes "the last write wins" fall out of the array order.
+    /// Scanned forwards to check point, which is what makes "the last write
+    /// wins" fall out of the array order.
     slot_block: KVec<u32>,
+    /// Chained hash index over `slot_block`, so serving a cache miss from the
+    /// log costs a bucket walk instead of a scan of every slot below the head.
+    ///
+    /// Each chain is newest-slot-first, so the first entry matching a block is
+    /// its newest record. Inserts must therefore arrive in ascending slot
+    /// order for any one block.
+    buckets: KVec<u32>,
+    chain_next: KVec<u32>,
+    chain_prev: KVec<u32>,
+    /// `32 - log2(buckets.len())`: the hash takes the *high* bits of a
+    /// multiplicative mix, because a mask over the low ones puts every group
+    /// bitmap of the volume in one bucket.
+    bucket_shift: u32,
     /// Blocks freed by the open operation, awaiting a `REVOKE` record.
     revokes: KVec<u32>,
     /// Mappings a `REVOKE` cleared, so an abort can put them back.
@@ -120,7 +167,9 @@ pub struct Journal {
     /// Staging buffer for record headers. Preallocated: a block does not fit
     /// the 2 KiB stack budget and a commit must not allocate.
     header: KVec<u8>,
-    /// Second staging buffer, for reading a slot back during a check point.
+    /// Second staging buffer, for reading slots back during a check point.
+    /// [`CHECKPOINT_RUN`] blocks long, so a run whose home locations are
+    /// consecutive goes home in one request without allocating.
     transfer: KVec<u8>,
     block_size: u32,
     inode: u32,
@@ -152,11 +201,12 @@ impl Journal {
     /// previous boot committed and did not check point, and leave the log
     /// empty. `slots[0]` is spent on the log superblock.
     ///
-    /// Boxed, and `#[inline(never)]`: a mount-path frame cannot carry the
-    /// struct alongside the block list and the inode under the 2 KiB gate.
+    /// `#[inline(never)]`, built field by field into the heap slot: a whole
+    /// `Journal` rvalue plus the nine fallible allocations behind it does not
+    /// fit the 2 KiB stack gate.
     #[inline(never)]
     pub fn attach(
-        slots: KVec<u32>,
+        mut slots: KVec<u32>,
         block_size: u32,
         inode: u32,
         extent: LogExtent,
@@ -165,6 +215,10 @@ impl Journal {
         if slots.len() < MIN_LOG_SLOTS as usize + 1 {
             return Err(Ext2Error::NoSpace);
         }
+        // What holds every per-slot array to `PER_SLOT_LIMIT`. The truncated
+        // count is what goes into the log superblock, so a later attach
+        // validates against the same shape.
+        slots.truncate(MAX_LOG_SLOTS as usize);
         // Refused rather than clamped: a slot outside the volume means the
         // mapping is not this file's, and past the filesystem extent is where
         // a verity trailer keeps the hashes that would have detected it.
@@ -173,26 +227,8 @@ impl Journal {
                 return Err(Ext2Error::InvalidBlock);
             }
         }
-        let count = slots.len();
-        let mut journal = Self {
-            slots,
-            slot_block: KVec::zeroed(count).map_err(|_| Ext2Error::OutOfMemory)?,
-            revokes: KVec::with_capacity(entries_per_header(block_size))
-                .map_err(|_| Ext2Error::OutOfMemory)?,
-            revoke_undo: KVec::with_capacity(count).map_err(|_| Ext2Error::OutOfMemory)?,
-            header: KVec::zeroed(block_size as usize).map_err(|_| Ext2Error::OutOfMemory)?,
-            transfer: KVec::zeroed(block_size as usize).map_err(|_| Ext2Error::OutOfMemory)?,
-            block_size,
-            inode,
-            blocks_count: extent.blocks_count,
-            first_data_block: extent.first_data_block,
-            head: 1,
-            seq: 1,
-            generation: 0,
-            op_head: 1,
-            crc: CRC32_INIT,
-            writes: 0,
-        };
+        let mut journal = KBox::try_init(Self::init(slots, block_size, inode, extent))
+            .map_err(|_| Ext2Error::OutOfMemory)?;
         // A superblock that does not describe this file on this volume is one
         // this boot must not read; the reset below overwrites it.
         let recovery = match journal.read_superblock(device)? {
@@ -203,8 +239,50 @@ impl Journal {
             None => JournalRecovery::NONE,
         };
         journal.reset(device)?;
-        let journal = KBox::try_new(journal).map_err(|_| Ext2Error::OutOfMemory)?;
         Ok((journal, recovery))
+    }
+
+    fn init(
+        slots: KVec<u32>,
+        block_size: u32,
+        inode: u32,
+        extent: LogExtent,
+    ) -> impl Init<Self, AllocError> {
+        let count = slots.len();
+        let buckets = count.next_power_of_two();
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_field!(slot, slots, slots);
+                write_field!(slot, slot_block, KVec::zeroed(count)?);
+                write_field!(slot, buckets, KVec::zeroed(buckets)?);
+                write_field!(slot, chain_next, KVec::zeroed(count)?);
+                write_field!(slot, chain_prev, KVec::zeroed(count)?);
+                write_field!(slot, bucket_shift, u32::BITS - buckets.trailing_zeros());
+                write_field!(
+                    slot,
+                    revokes,
+                    KVec::with_capacity(entries_per_header(block_size))?
+                );
+                write_field!(slot, revoke_undo, KVec::with_capacity(count)?);
+                write_field!(slot, header, KVec::zeroed(block_size as usize)?);
+                write_field!(
+                    slot,
+                    transfer,
+                    KVec::zeroed(block_size as usize * CHECKPOINT_RUN)?
+                );
+                write_field!(slot, block_size, block_size);
+                write_field!(slot, inode, inode);
+                write_field!(slot, blocks_count, extent.blocks_count);
+                write_field!(slot, first_data_block, extent.first_data_block);
+                write_field!(slot, head, 1);
+                write_field!(slot, seq, 1);
+                write_field!(slot, generation, 0);
+                write_field!(slot, op_head, 1);
+                write_field!(slot, crc, CRC32_INIT);
+                write_field!(slot, writes, 0);
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// Whether `block` is a block of this volume, and so a legal write target.
@@ -241,17 +319,23 @@ impl Journal {
     }
 
     /// The log is filling and the flusher should drain it, well before an
-    /// operation is forced to check point inline.
-    ///
-    /// Twice the low-water mark, not a hair above it: a drain is a whole check
-    /// point, so a threshold the next operation crosses again turns one pass
-    /// per burst into one pass per operation.
+    /// operation is forced to check point inline. Twice the low-water mark,
+    /// not a hair above it: a drain is a whole check point, so a threshold the
+    /// next operation crosses again turns one pass per burst into one per op.
     pub fn needs_drain(&self) -> bool {
         self.free_slots() < self.low_water().saturating_mul(2)
     }
 
+    /// What one transaction is guaranteed: a quarter of the log, floored at
+    /// [`MIN_LOG_SLOTS`].
+    ///
+    /// This is the bound on a single transaction: `Ext2Fs::transaction` check
+    /// points whenever [`Self::has_headroom`] is false, and
+    /// `BlockCache::commit_op` refuses with `NoSpace` if what it staged needs
+    /// more. A quarter of a 16 384-slot log is 4 095 slots, against the 256 a
+    /// flat cap allowed however large the log was.
     fn low_water(&self) -> u32 {
-        (self.capacity() / 2).min(256).max(MIN_LOG_SLOTS)
+        (self.capacity() / 4).max(MIN_LOG_SLOTS)
     }
 
     /// Entries one record header can list.
@@ -259,22 +343,105 @@ impl Journal {
         entries_per_header(self.block_size)
     }
 
+    /// Slots one [`Self::copy_run_to_home`] may carry, which is what the
+    /// preallocated staging buffer holds. A caller that staged a longer run
+    /// would have the tail of it silently dropped.
+    pub fn home_run_max(&self) -> usize {
+        CHECKPOINT_RUN
+    }
+
     pub fn take_writes(&mut self) -> usize {
         core::mem::take(&mut self.writes)
     }
 
+    /// Which bucket `block`'s chain hangs from.
+    fn bucket_of(&self, block: u32) -> usize {
+        (block.wrapping_mul(0x9E37_79B9) >> self.bucket_shift) as usize
+    }
+
+    /// Publish `slot` as holding `block`'s newest logged content.
+    ///
+    /// Callers must insert a given block's slots in ascending order: the
+    /// chain is front-inserted, and that is what keeps it newest-first.
+    fn index_insert(&mut self, slot: u32, block: u32) {
+        let bucket = self.bucket_of(block);
+        let head = self.buckets[bucket];
+        self.chain_next[slot as usize] = head;
+        self.chain_prev[slot as usize] = NIL_SLOT;
+        if head != NIL_SLOT {
+            self.chain_prev[head as usize] = slot;
+        }
+        self.buckets[bucket] = slot;
+        self.slot_block[slot as usize] = block;
+    }
+
+    /// Drop `slot`'s mapping. A slot that maps nothing is already unlinked.
+    fn index_remove(&mut self, slot: u32) {
+        let block = self.slot_block[slot as usize];
+        if block == 0 {
+            return;
+        }
+        let next = self.chain_next[slot as usize];
+        let prev = self.chain_prev[slot as usize];
+        if prev == NIL_SLOT {
+            let bucket = self.bucket_of(block);
+            self.buckets[bucket] = next;
+        } else {
+            self.chain_next[prev as usize] = next;
+        }
+        if next != NIL_SLOT {
+            self.chain_prev[next as usize] = prev;
+        }
+        self.chain_next[slot as usize] = NIL_SLOT;
+        self.chain_prev[slot as usize] = NIL_SLOT;
+        self.slot_block[slot as usize] = 0;
+    }
+
+    fn index_clear(&mut self) {
+        self.slot_block.as_mut_slice().fill(0);
+        self.buckets.as_mut_slice().fill(NIL_SLOT);
+        self.chain_next.as_mut_slice().fill(NIL_SLOT);
+        self.chain_prev.as_mut_slice().fill(NIL_SLOT);
+    }
+
+    /// Clear every mapping of `block`, newest first.
+    ///
+    /// With `undo`, a mapping from before the open operation is recorded so
+    /// an abort can put it back — and the records come out of the list in
+    /// descending slot order, which is what makes popping them restore the
+    /// chain's newest-first order.
+    fn clear_mappings(&mut self, block: u32, undo: bool) -> Result<(), Ext2Error> {
+        if block == 0 {
+            return Ok(());
+        }
+        let mut slot = self.buckets[self.bucket_of(block)];
+        while slot != NIL_SLOT {
+            let next = self.chain_next[slot as usize];
+            if self.slot_block[slot as usize] == block {
+                if undo && slot < self.op_head {
+                    self.revoke_undo
+                        .push((slot, block))
+                        .map_err(|_| Ext2Error::OutOfMemory)?;
+                }
+                self.index_remove(slot);
+            }
+            slot = next;
+        }
+        Ok(())
+    }
+
     /// Where a block's newest content lives, when that is the log rather than
-    /// the block's own home. Scans backwards so the newest record wins.
+    /// the block's own home.
     pub fn resident_slot(&self, block: u32) -> Option<u32> {
         if block == 0 {
             return None;
         }
-        let mut slot = self.head;
-        while slot > 1 {
-            slot -= 1;
+        let mut slot = self.buckets[self.bucket_of(block)];
+        while slot != NIL_SLOT {
             if self.slot_block[slot as usize] == block {
                 return Some(slot);
             }
+            slot = self.chain_next[slot as usize];
         }
         None
     }
@@ -306,10 +473,13 @@ impl Journal {
     /// the log or from the block's own home.
     pub fn abort_op(&mut self) {
         for slot in self.op_head..self.head {
-            self.slot_block[slot as usize] = 0;
+            self.index_remove(slot);
         }
+        // Popped, not iterated: `clear_mappings` records a block's slots
+        // newest-first, so the reverse order is the one that leaves each
+        // chain newest-first again.
         while let Some((slot, block)) = self.revoke_undo.pop() {
-            self.slot_block[slot as usize] = block;
+            self.index_insert(slot, block);
         }
         self.head = self.op_head;
         self.revokes.clear();
@@ -359,34 +529,34 @@ impl Journal {
 
         // The in-memory half of the same rule. A mapping from *before* this
         // operation is recorded before it is cleared, because an abort makes
-        // the block the inode's again and its committed content is still only
-        // in the log; one this operation made needs no record, since the
-        // rewind discards the record it names.
+        // the block the inode's again; one this operation made needs no
+        // record, since the rewind discards the record it names.
         for i in 0..self.revokes.len() {
             let block = self.revokes.as_slice()[i];
-            for s in 1..slot {
-                if self.slot_block[s as usize] != block {
-                    continue;
-                }
-                if s < self.op_head {
-                    self.revoke_undo
-                        .push((s, block))
-                        .map_err(|_| Ext2Error::OutOfMemory)?;
-                }
-                self.slot_block[s as usize] = 0;
-            }
+            self.clear_mappings(block, true)?;
         }
         self.revokes.clear();
         Ok(())
     }
 
-    /// Reserve a payload record for `targets` and return its first payload
-    /// slot. The caller writes one payload per target, in order, with
-    /// [`Self::write_payload`].
-    pub fn begin_payloads(
+    /// Append one `DATA` record for `targets` and return its first payload
+    /// slot. Payload *i* is fetched from `payload(i)`, which is where the
+    /// caller's cache frame comes from.
+    ///
+    /// The record header and its payloads occupy ascending slots, so a
+    /// consecutive run of slot blocks goes out as one `write_vectored` with
+    /// the header as its first segment — also the order a replay scan reads
+    /// them in, so the CRC is unchanged. Runs are bounded by [`RECORD_RUN`],
+    /// by the first slot whose block is not the next one, and by the first
+    /// payload shorter than a block, since nothing may follow a segment that
+    /// does not fill its slot. Issues no barrier: [`Self::write_commit`]'s
+    /// record is still a separate write after every payload of the
+    /// transaction has been handed to the device.
+    pub fn write_record<'a>(
         &mut self,
         targets: &[u32],
         device: &dyn BlockDevice,
+        payload: &mut dyn FnMut(usize) -> Option<&'a [u8]>,
     ) -> Result<u32, Ext2Error> {
         debug_assert!(targets.len() <= self.max_entries());
         self.flush_revokes(device)?;
@@ -399,27 +569,102 @@ impl Journal {
         for (i, block) in targets.iter().enumerate() {
             put_le32(self.header.as_mut_slice(), REC_ENTRIES_OFF + i * 4, *block);
         }
-        self.write_slot_from_header(header_slot, device)?;
         let first = header_slot + 1;
         for (i, block) in targets.iter().enumerate() {
-            self.slot_block[first as usize + i] = *block;
+            self.index_insert(first + i as u32, *block);
+        }
+
+        let total = 1 + targets.len();
+        let mut done = 0usize;
+        while done < total {
+            let want = (total - done).min(RECORD_RUN);
+            let room = self.contiguous_slots(header_slot + done as u32, want);
+            let took = self.write_record_chunk(
+                header_slot + done as u32,
+                done == 0,
+                done.saturating_sub(1),
+                room,
+                device,
+                payload,
+            )?;
+            if took == 0 {
+                return Err(Ext2Error::InvalidBlock);
+            }
+            done += took;
         }
         Ok(first)
     }
 
-    pub fn write_payload(
+    /// One gathered write of the slots `slot..slot + room`, whose blocks the
+    /// caller has established are consecutive: the staged header when
+    /// `with_header`, then payloads `from..`. Answers the slots it actually
+    /// took, which is fewer than `room` when a short payload ends the run.
+    ///
+    /// `#[inline(never)]`: the segment array is 512 bytes of frame that
+    /// [`Self::write_record`] cannot carry on top of its own.
+    #[inline(never)]
+    fn write_record_chunk<'a>(
         &mut self,
         slot: u32,
-        data: &[u8],
+        with_header: bool,
+        from: usize,
+        room: usize,
         device: &dyn BlockDevice,
-    ) -> Result<(), Ext2Error> {
+        payload: &mut dyn FnMut(usize) -> Option<&'a [u8]>,
+    ) -> Result<usize, Ext2Error> {
+        let bs = self.block_size as usize;
         let offset = self.slot_offset(slot)?;
-        device
-            .write_at(offset, data)
-            .map_err(|_| Ext2Error::DeviceError)?;
-        self.crc = crc32_feed(self.crc, data);
-        self.writes += 1;
-        Ok(())
+        let (crc, took) = {
+            let mut segs: [&[u8]; RECORD_RUN] = [&[]; RECORD_RUN];
+            let mut n = 0usize;
+            while n < room.min(RECORD_RUN) {
+                let seg = if with_header && n == 0 {
+                    &self.header.as_slice()[..bs]
+                } else {
+                    let index = from + n - usize::from(with_header);
+                    payload(index).ok_or(Ext2Error::DeviceError)?
+                };
+                segs[n] = seg;
+                n += 1;
+                // A slot the payload did not fill leaves a gap, so the next
+                // segment of a gathered write would land short of its slot.
+                if seg.len() != bs {
+                    break;
+                }
+            }
+            device
+                .write_vectored(offset, &segs[..n])
+                .map_err(|_| Ext2Error::DeviceError)?;
+            let mut crc = self.crc;
+            for seg in &segs[..n] {
+                crc = crc32_feed(crc, seg);
+            }
+            (crc, n)
+        };
+        self.crc = crc;
+        self.writes += took;
+        Ok(took)
+    }
+
+    /// Slots from `slot` whose blocks are one consecutive run on the device,
+    /// capped at `want`. Always at least one: a run of a single slot is what
+    /// a log whose file is fragmented falls back to.
+    fn contiguous_slots(&self, slot: u32, want: usize) -> usize {
+        let slots = self.slots.as_slice();
+        let Some(base) = slots.get(slot as usize).copied() else {
+            return 0;
+        };
+        let mut n = 1usize;
+        while n < want {
+            let Some(next) = slots.get(slot as usize + n).copied() else {
+                break;
+            };
+            if base.checked_add(n as u32) != Some(next) {
+                break;
+            }
+            n += 1;
+        }
+        n
     }
 
     /// Put one block into the log on its own, so the cache can give its slot
@@ -430,8 +675,8 @@ impl Journal {
         data: &[u8],
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
-        let first = self.begin_payloads(&[block], device)?;
-        self.write_payload(first, data, device)
+        self.write_record(&[block], device, &mut |_| Some(data))
+            .map(|_| ())
     }
 
     /// Close the transaction. Its records become replayable the moment this
@@ -451,36 +696,61 @@ impl Journal {
             .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
             .map_err(|_| Ext2Error::DeviceError)?;
         self.writes += 1;
+        stats::note_commit();
         self.seq = self.seq.wrapping_add(1);
         self.revoke_undo.clear();
         self.crc = CRC32_INIT;
         Ok(())
     }
 
-    /// Copy a logged block to its home location. The log, never the cache, is
-    /// the source: the cache may hold an operation's uncommitted changes to
-    /// the same block.
-    pub fn copy_to_home(
+    /// Copy the logged blocks in slots `slot..slot + len` to home locations
+    /// `block..block + len`. The log, never the cache, is the source: the
+    /// cache may hold an operation's uncommitted changes to the same block.
+    ///
+    /// The caller owns the claim that the *homes* are consecutive and that
+    /// none of them already holds its newest contents, so the whole run goes
+    /// home in one write; the read side is gathered the same way wherever the
+    /// log's own slots are consecutive. Bounded by [`CHECKPOINT_RUN`], which
+    /// is what the preallocated staging buffer holds, so a check point still
+    /// allocates nothing. No barrier here: the caller barriers the home writes
+    /// once before [`Self::reset`].
+    pub fn copy_run_to_home(
         &mut self,
         slot: u32,
         block: u32,
+        len: u32,
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
-        if !self.in_volume(block) {
+        let n = (len as usize).clamp(1, CHECKPOINT_RUN);
+        let last = block
+            .checked_add(n as u32 - 1)
+            .ok_or(Ext2Error::InvalidBlock)?;
+        if !self.in_volume(block) || !self.in_volume(last) {
             return Err(Ext2Error::InvalidBlock);
         }
         let bs = self.block_size as usize;
-        let from = self.slot_offset(slot)?;
-        device
-            .read_at(from, &mut self.transfer.as_mut_slice()[..bs])
-            .map_err(|_| Ext2Error::DeviceError)?;
+        let mut got = 0usize;
+        while got < n {
+            let take = self.contiguous_slots(slot + got as u32, n - got);
+            if take == 0 {
+                return Err(Ext2Error::InvalidBlock);
+            }
+            let from = self.slot_offset(slot + got as u32)?;
+            device
+                .read_at(
+                    from,
+                    &mut self.transfer.as_mut_slice()[got * bs..(got + take) * bs],
+                )
+                .map_err(|_| Ext2Error::DeviceError)?;
+            got += take;
+        }
         device
             .write_at(
                 block as u64 * self.block_size as u64,
-                &self.transfer.as_slice()[..bs],
+                &self.transfer.as_slice()[..n * bs],
             )
             .map_err(|_| Ext2Error::DeviceError)?;
-        self.writes += 1;
+        self.writes += n;
         Ok(())
     }
 
@@ -507,10 +777,7 @@ impl Journal {
     }
 
     /// Declare every logged block checked pointed: the log is empty again.
-    ///
-    /// The caller must have barriered the home-location writes first. Losing
-    /// this superblock write costs a redundant replay of transactions already
-    /// applied, which writes the same bytes to the same places.
+    /// The caller must have barriered the home-location writes first.
     pub fn reset(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         self.header.as_mut_slice().fill(0);
         put_le32(self.header.as_mut_slice(), 0, SB_MAGIC);
@@ -531,7 +798,7 @@ impl Journal {
         self.head = 1;
         self.op_head = 1;
         self.generation = self.generation.wrapping_add(1);
-        self.slot_block.as_mut_slice().fill(0);
+        self.index_clear();
         self.revokes.clear();
         self.revoke_undo.clear();
         self.crc = CRC32_INIT;
@@ -728,15 +995,15 @@ impl Journal {
         }
     }
 
-    /// Fill `slot_block` for the committed region below `end`, applying each
-    /// `REVOKE` to the records before it.
+    /// Fill `slot_block` and its index for the committed region below `end`,
+    /// applying each `REVOKE` to the records before it.
     fn build_disposition(
         &mut self,
         end: u32,
         first_seq: u32,
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
-        self.slot_block.as_mut_slice().fill(0);
+        self.index_clear();
         let mut expect = first_seq;
         let mut slot = 1u32;
         while slot < end {
@@ -755,18 +1022,18 @@ impl Journal {
                     let count = (header.count as usize).min(self.max_entries());
                     for i in 0..count {
                         let block = le32(self.header.as_slice(), REC_ENTRIES_OFF + i * 4);
-                        for s in 1..slot {
-                            if self.slot_block[s as usize] == block {
-                                self.slot_block[s as usize] = 0;
-                            }
-                        }
+                        // Every indexed slot is below this record's, so the
+                        // chain walk covers exactly the records before it.
+                        self.clear_mappings(block, false)?;
                     }
                     slot += 1;
                 }
                 REC_DATA => {
                     // Bounded here as well as in the scan: a device that
-                    // answers differently on this second read must not be able
-                    // to index out of the array.
+                    // answers differently on this second read must not index
+                    // out of the array. One local for both the indexing and
+                    // the cursor — advancing by the *claimed* count would step
+                    // past records the clamp just decided this one misses.
                     let count = (header.count as usize).min(self.max_entries());
                     for i in 0..count {
                         let target = slot as usize + 1 + i;
@@ -775,10 +1042,10 @@ impl Journal {
                         }
                         let block = le32(self.header.as_slice(), REC_ENTRIES_OFF + i * 4);
                         if self.in_volume(block) {
-                            self.slot_block[target] = block;
+                            self.index_insert(target as u32, block);
                         }
                     }
-                    slot += 1 + header.count;
+                    slot += 1 + count as u32;
                 }
                 _ => break,
             }
@@ -787,14 +1054,30 @@ impl Journal {
     }
 
     fn write_home(&mut self, end: u32, device: &dyn BlockDevice) -> Result<u32, Ext2Error> {
+        let limit = end.min(self.slot_block.len() as u32);
         let mut written = 0u32;
-        for slot in 1..end.min(self.slot_block.len() as u32) {
+        let mut slot = 1u32;
+        while slot < limit {
             let block = self.slot_block[slot as usize];
             if block == 0 || !self.in_volume(block) {
+                slot += 1;
                 continue;
             }
-            self.copy_to_home(slot, block, device)?;
-            written += 1;
+            // Ascending slot order is what makes "the last write of a block
+            // wins" hold, so a run only ever grows forwards and only over the
+            // next home block: merging changes the request count and never
+            // the order.
+            let mut len = 1u32;
+            while (len as usize) < CHECKPOINT_RUN && slot + len < limit {
+                let next = self.slot_block[(slot + len) as usize];
+                if block.checked_add(len) != Some(next) || !self.in_volume(next) {
+                    break;
+                }
+                len += 1;
+            }
+            self.copy_run_to_home(slot, block, len, device)?;
+            written += len;
+            slot += len;
         }
         Ok(written)
     }

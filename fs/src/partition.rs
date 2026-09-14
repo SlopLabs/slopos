@@ -11,7 +11,7 @@
 use slopos_ostd::klog_info;
 use slopos_ostd::{KArc, KVec};
 
-use crate::blockdev::{BlockDevice, BlockDeviceError};
+use crate::blockdev::{BlockDevice, BlockDeviceError, total_seg_len};
 use crate::verity::crc32;
 
 /// Table offsets are in units of this whatever the device's physical sector
@@ -456,6 +456,10 @@ impl BlockDevice for SharedBlockDevice {
         self.0.write_at(offset, buffer)
     }
 
+    fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
+        self.0.write_vectored(offset, segs)
+    }
+
     fn capacity(&self) -> u64 {
         self.0.capacity()
     }
@@ -523,6 +527,11 @@ impl BlockDevice for PartitionDevice {
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         let at = self.parent_offset(offset, buffer.len())?;
         self.parent.write_at(at, buffer)
+    }
+
+    fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
+        let at = self.parent_offset(offset, total_seg_len(segs)?)?;
+        self.parent.write_vectored(at, segs)
     }
 
     /// The window length, cached: the parent's `capacity()` takes its state

@@ -8,12 +8,13 @@
 //! has no sector granularity, and the parser locates every region from
 //! `capacity()` backwards.
 
-use slopos_ostd::{KArc, KBox};
+use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::{TestResult, fail};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::verity::{
-    AttestTrust, FsExtent, VerityError, VerityStatus, build_verified_trusting, crc32,
+    AttestTrust, CHUNK_BLOCKS, CRC32_INIT, FsExtent, VerityError, VerityStatus,
+    build_verified_trusting, crc32, crc32_feed, crc32_finish,
 };
 
 const BS: usize = 512;
@@ -89,16 +90,16 @@ fn fill_image(img: &mut [u8], f: &Fixture) {
         bm_off
     };
 
-    write_header(img, hdr, f.version, root, bitmap_crc);
+    write_header(img, hdr, f.version, N as u64, root, bitmap_crc);
 }
 
 #[inline(never)]
-fn write_header(img: &mut [u8], at: usize, version: u32, root: u32, bitmap_crc: u32) {
+fn write_header(img: &mut [u8], at: usize, version: u32, blocks: u64, root: u32, bitmap_crc: u32) {
     img[at..at + 4].copy_from_slice(&0x5356_5254u32.to_le_bytes());
     img[at + 4..at + 8].copy_from_slice(&version.to_le_bytes());
     img[at + 8..at + 12].copy_from_slice(&1u32.to_le_bytes());
     img[at + 12..at + 16].copy_from_slice(&(BS as u32).to_le_bytes());
-    img[at + 16..at + 24].copy_from_slice(&(N as u64).to_le_bytes());
+    img[at + 16..at + 24].copy_from_slice(&blocks.to_le_bytes());
     img[at + 24..at + 28].copy_from_slice(&root.to_le_bytes());
     img[at + 28..at + 32].copy_from_slice(&bitmap_crc.to_le_bytes());
 }
@@ -462,6 +463,358 @@ pub fn test_verity_rw_unclean_image_attests_nothing() -> TestResult {
     }
 }
 
+/// Blocks of a fixture whose hash array and bitmap both span two chunks: one
+/// past what a single chunk describes.
+const BIG_N: usize = CHUNK_BLOCKS + 1;
+/// Every block of [`BigImage`] holds this one byte, so the whole hash array
+/// is one repeated word and needs no storage either.
+const BIG_FILL: u8 = 0xA5;
+
+/// A multi-chunk image whose data and hash regions are computed on demand
+/// rather than stored: 33 MiB of blocks without a 33 MiB allocation. Only the
+/// bitmap and the header — the one region a mount writes — are real bytes.
+struct BigImage {
+    /// Flipped in the data region alone: its stored hash still describes the
+    /// uncorrupted block.
+    corrupt: Option<u64>,
+    hash_word: [u8; 4],
+    tail: KArc<MemoryBlockDevice>,
+}
+
+impl BigImage {
+    fn arr_off(&self) -> u64 {
+        (BIG_N * BS) as u64
+    }
+
+    fn bm_off(&self) -> u64 {
+        self.arr_off() + (BIG_N * 4) as u64
+    }
+
+    fn fill_data(&self, at: u64, dst: &mut [u8]) {
+        dst.fill(BIG_FILL);
+        if let Some(block) = self.corrupt {
+            let byte = block * BS as u64;
+            if byte >= at && byte - at < dst.len() as u64 {
+                dst[(byte - at) as usize] ^= 0xFF;
+            }
+        }
+    }
+
+    fn fill_hashes(&self, rel: u64, dst: &mut [u8]) {
+        for (k, slot) in dst.iter_mut().enumerate() {
+            *slot = self.hash_word[((rel + k as u64) % 4) as usize];
+        }
+    }
+}
+
+impl BlockDevice for BigImage {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        let arr_off = self.arr_off();
+        let bm_off = self.bm_off();
+        let mut done = 0usize;
+        while done < buffer.len() {
+            let at = offset + done as u64;
+            let left = buffer.len() - done;
+            if at < arr_off {
+                let n = core::cmp::min((arr_off - at) as usize, left);
+                self.fill_data(at, &mut buffer[done..done + n]);
+                done += n;
+            } else if at < bm_off {
+                let n = core::cmp::min((bm_off - at) as usize, left);
+                self.fill_hashes(at - arr_off, &mut buffer[done..done + n]);
+                done += n;
+            } else {
+                self.tail
+                    .read_at(at - bm_off, &mut buffer[done..done + left])?;
+                done += left;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        // The data and hash regions are computed, not stored, so a write there
+        // is accepted and dropped: what the un-attest path needs is the call.
+        if offset >= self.bm_off() {
+            return self.tail.write_at(offset - self.bm_off(), buffer);
+        }
+        Ok(())
+    }
+
+    fn capacity(&self) -> u64 {
+        self.bm_off() + (bitmap_len(BIG_N) + 32) as u64
+    }
+}
+
+struct SharedBig(KArc<BigImage>);
+
+impl BlockDevice for SharedBig {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        self.0.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        self.0.write_at(offset, buffer)
+    }
+
+    fn capacity(&self) -> u64 {
+        self.0.capacity()
+    }
+}
+
+#[inline(never)]
+fn big_hash_word() -> [u8; 4] {
+    let block = [BIG_FILL; BS];
+    crc32(&block).to_le_bytes()
+}
+
+/// The root over `BIG_N` copies of `word`, fed in the order the parser reads
+/// them, so a streamed load and a single-read one must agree.
+#[inline(never)]
+fn big_root(word: [u8; 4]) -> u32 {
+    let mut staging = [0u8; 512];
+    for k in 0..staging.len() / 4 {
+        staging[k * 4..k * 4 + 4].copy_from_slice(&word);
+    }
+    let total = BIG_N * 4;
+    let mut state = CRC32_INIT;
+    let mut done = 0usize;
+    while done < total {
+        let n = core::cmp::min(staging.len(), total - done);
+        state = crc32_feed(state, &staging[..n]);
+        done += n;
+    }
+    crc32_finish(state)
+}
+
+#[inline(never)]
+fn build_big(corrupt: Option<u64>, bad_root: bool) -> Option<KArc<BigImage>> {
+    let hash_word = big_hash_word();
+    let mut root = big_root(hash_word);
+    if bad_root {
+        root ^= 1;
+    }
+    let bm_len = bitmap_len(BIG_N);
+    let tail = MemoryBlockDevice::allocate(bm_len + 32)?;
+    let bitmap_crc = tail.with_buffer_mut(|buf| {
+        for i in 0..BIG_N {
+            buf[i >> 3] |= 1u8 << (i & 7);
+        }
+        for b in SB_BLOCKS {
+            buf[b >> 3] &= !(1u8 << (b & 7));
+        }
+        crc32(&buf[..bm_len])
+    });
+    tail.with_buffer_mut(|buf| write_header(buf, bm_len, 2, BIG_N as u64, root, bitmap_crc));
+    KArc::try_new(BigImage {
+        corrupt,
+        hash_word,
+        tail: KArc::try_new(tail).ok()?,
+    })
+    .ok()
+}
+
+#[inline(never)]
+fn mount_big(image: &KArc<BigImage>) -> Result<Mounted, VerityError> {
+    let boxed: KBox<dyn BlockDevice + Send + Sync> =
+        KBox::try_new(SharedBig(image.clone())).map_err(|_| VerityError::OutOfMemory)?;
+    build_verified_trusting(
+        boxed,
+        FsExtent {
+            block_size: BS as u32,
+            blocks: BIG_N as u64,
+        },
+        AttestTrust::Persisted,
+    )
+}
+
+fn big_attested(status: VerityStatus, want: u64) -> Option<TestResult> {
+    match status {
+        VerityStatus::VerifiedWritable {
+            blocks,
+            block_size,
+            attested,
+        } if blocks == BIG_N as u64 && block_size == BS as u32 && attested == want => None,
+        other => Some(fail!(
+            "want {} of {} attested, got {:?}",
+            want,
+            BIG_N,
+            other
+        )),
+    }
+}
+
+/// A hash array spanning two chunks: a block in each verifies against its own
+/// chunk, the corrupt one in the second is caught, and a read crossing the
+/// boundary reloads the cursor mid-loop.
+pub fn test_verity_rw_multi_chunk_hash_array() -> TestResult {
+    let last = BIG_N - 1;
+    let Some(image) = build_big(Some(last as u64), false) else {
+        return fail!("out of memory building the multi-chunk fixture");
+    };
+    let (device, status) = match mount_big(&image) {
+        Ok(v) => v,
+        Err(e) => return fail!("a multi-chunk trailer must mount, got {:?}", e),
+    };
+    if let Some(r) = big_attested(status, (BIG_N - SB_BLOCKS.len()) as u64) {
+        return r;
+    }
+    if let Err(e) = read_block(&*device, 0) {
+        return fail!("the first block must verify, got {:?}", e);
+    }
+    if let Err(e) = read_block(&*device, CHUNK_BLOCKS - 1) {
+        return fail!("the last block of the first chunk must verify, got {:?}", e);
+    }
+    match read_block(&*device, last) {
+        Err(BlockDeviceError::IntegrityFailure) => {}
+        other => {
+            return fail!(
+                "a corrupt block in the second chunk must fail, got {:?}",
+                other
+            );
+        }
+    }
+    let Ok(mut span) = KVec::<u8>::zeroed(2 * BS) else {
+        return fail!("out of memory staging the boundary read");
+    };
+    match device.read_at(((CHUNK_BLOCKS - 1) * BS) as u64, span.as_mut_slice()) {
+        Err(BlockDeviceError::IntegrityFailure) => TestResult::Pass,
+        other => fail!(
+            "a read across the chunk boundary must verify both blocks, got {:?}",
+            other
+        ),
+    }
+}
+
+/// The streamed load still refuses a wrong root: the CRC covers the same
+/// bytes in the same order as a single-read parse.
+pub fn test_verity_rw_streamed_bad_root_refused() -> TestResult {
+    let Some(image) = build_big(None, true) else {
+        return fail!("out of memory building the multi-chunk fixture");
+    };
+    match mount_big(&image) {
+        Err(VerityError::CorruptTrailer) => TestResult::Pass,
+        other => fail!(
+            "a trailer whose root does not match must refuse, got {:?}",
+            other.map(|(_, s)| s)
+        ),
+    }
+}
+
+/// A block whose attested bit lives in the second bitmap chunk un-attests,
+/// persists across a checkpoint, and is counted as unattested on remount.
+pub fn test_verity_rw_second_bitmap_chunk_un_attests() -> TestResult {
+    let last = BIG_N - 1;
+    let Some(image) = build_big(Some(last as u64), false) else {
+        return fail!("out of memory building the multi-chunk fixture");
+    };
+    {
+        let (device, _) = match mount_big(&image) {
+            Ok(v) => v,
+            Err(e) => return fail!("a multi-chunk trailer must mount, got {:?}", e),
+        };
+        match read_block(&*device, last) {
+            Err(BlockDeviceError::IntegrityFailure) => {}
+            other => return fail!("the last block must start attested, got {:?}", other),
+        }
+        if let Err(e) = write_block(&*device, last, 0xC3) {
+            return fail!("write failed: {:?}", e);
+        }
+        if let Err(e) = read_block(&*device, last) {
+            return fail!("an un-attested block must read unverified, got {:?}", e);
+        }
+        if let Err(e) = device.checkpoint() {
+            return fail!("checkpoint failed: {:?}", e);
+        }
+    }
+
+    let (device, status) = match mount_big(&image) {
+        Ok(v) => v,
+        Err(e) => return fail!("the checkpointed image must remount, got {:?}", e),
+    };
+    if let Some(r) = big_attested(status, (BIG_N - SB_BLOCKS.len() - 1) as u64) {
+        return r;
+    }
+    if let Err(e) = read_block(&*device, last) {
+        return fail!("a block un-attested last boot must not verify, got {:?}", e);
+    }
+    match read_block(&*device, 0) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => fail!(
+            "the first chunk's bits must survive the persist, got {:?}",
+            e
+        ),
+    }
+}
+
+/// Blocks of a trailer no machine can hold resident: 1 Ti blocks is 4 TiB of
+/// hashes, so the refusal must come from the arithmetic rather than from a
+/// failed allocation.
+const HUGE_BLOCKS: u64 = 1 << 40;
+
+/// A device with no storage at all: it answers the header read, and the mount
+/// must refuse before it asks for anything else.
+struct HugeTrailer {
+    header: [u8; 32],
+}
+
+impl HugeTrailer {
+    fn header_off(&self) -> u64 {
+        self.capacity() - 32
+    }
+}
+
+impl BlockDevice for HugeTrailer {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        let hdr_off = self.header_off();
+        for (i, slot) in buffer.iter_mut().enumerate() {
+            let at = offset + i as u64;
+            if at >= self.capacity() {
+                return Err(BlockDeviceError::OutOfBounds);
+            }
+            *slot = if at >= hdr_off {
+                self.header[(at - hdr_off) as usize]
+            } else {
+                0
+            };
+        }
+        Ok(())
+    }
+
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        Ok(())
+    }
+
+    fn capacity(&self) -> u64 {
+        HUGE_BLOCKS * BS as u64 + HUGE_BLOCKS * 4 + HUGE_BLOCKS / 8 + 32
+    }
+}
+
+/// An image whose resident hash array would exhaust the heap is refused, not
+/// attempted: the error is the ceiling's, not the allocator's.
+pub fn test_verity_rw_oversized_trailer_refused() -> TestResult {
+    let mut header = [0u8; 32];
+    write_header(&mut header, 0, 2, HUGE_BLOCKS, 0, 0);
+    let Ok(device) = KBox::try_new(HugeTrailer { header }) else {
+        return fail!("out of memory building the oversized fixture");
+    };
+    let boxed: KBox<dyn BlockDevice + Send + Sync> = device;
+    match build_verified_trusting(
+        boxed,
+        FsExtent {
+            block_size: BS as u32,
+            blocks: HUGE_BLOCKS,
+        },
+        AttestTrust::Persisted,
+    ) {
+        Err(VerityError::TooLarge) => TestResult::Pass,
+        other => fail!(
+            "an image too large to hold resident must be refused, got {:?}",
+            other.map(|(_, s)| s)
+        ),
+    }
+}
+
 slopos_testing::stest!(name = test_verity_rw_v2_mounts_writable, suite = verity_rw);
 slopos_testing::stest!(
     name = test_verity_rw_v1_stays_write_protected,
@@ -497,5 +850,21 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_verity_rw_unclean_image_attests_nothing,
+    suite = verity_rw
+);
+slopos_testing::stest!(
+    name = test_verity_rw_multi_chunk_hash_array,
+    suite = verity_rw
+);
+slopos_testing::stest!(
+    name = test_verity_rw_streamed_bad_root_refused,
+    suite = verity_rw
+);
+slopos_testing::stest!(
+    name = test_verity_rw_second_bitmap_chunk_un_attests,
+    suite = verity_rw
+);
+slopos_testing::stest!(
+    name = test_verity_rw_oversized_trailer_refused,
     suite = verity_rw
 );

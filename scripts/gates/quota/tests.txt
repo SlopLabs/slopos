@@ -176,6 +176,40 @@
 #     `process` 14 inside 20; post-userland `residentpages` 111129-112929
 #     inside 114452, `kernelmeta` 4841-4967 inside 6933, `pages`
 #     988042-1001043 inside 1011657, `process` 134 exact.
+#
+# 2026-09-14, the storage work ("Storage holds a tree" in
+# plans/self-hosting.md):
+#   post-kernel-tests `kernelmeta` 3328 -> 5680 (measured 5584/5606/5632 over
+#     three fresh runs, spread 48). post-userland-tests 6933 -> 7642
+#     (7494/7568/7568, spread 74). One cause, and it is the change working:
+#     an ext2 instance's block cache is now sized from the volume it mounted
+#     and there can be four instances at once. Each cache is a `KVec` of
+#     descriptors plus one buddy frame per entry, charged as kernel metadata,
+#     and the suite now mounts three (the boot root, the write-cost report's
+#     own mount of the same image, and the journal-headroom fixture) where it
+#     used to mount one. At the floor of 512 entries that is 512 frames per
+#     instance — the arithmetic, not a leak: the caps moved by ~2350 and
+#     ~700 pages respectively, against 512 per extra concurrent mount plus
+#     the log's per-slot arrays for a 16 383-slot log.
+#   Everything else stayed inside its existing cap on all three runs:
+#     post-kernel-tests `residentpages` 772 exact, `pages` 53k-55k inside
+#     65536, `diskblocks` 6, `process` 20; post-userland-tests
+#     `residentpages` inside 114452 and `process` 134 exact.
+#   Re-measured after the review fixes that followed: post-kernel-tests
+#     5680 -> 6065 (5953/6009/5999 over three fresh runs, spread 56),
+#     post-userland-tests 7642 -> 8128 (7780/7954/7905, spread 174). The
+#     delta is the tests the review added, not the change under review: the
+#     rollback/eviction case builds a 512-entry cache of its own and fills it,
+#     and the read-only-mount, block-pointer and umount cases each register a
+#     scratch process whose task stacks are 12 pages apiece.
+#   post-userland-tests `pages` 1011657 -> 1072000: measured
+#     986348/988238/997933/1029200 over four fresh runs, spread 42852. This
+#     row is mapped **virtual** address space, so its spread is the widest in
+#     the file and always has been — a lazily mapped `mmap` charges the whole
+#     extent whether or not a page of it is ever populated, and which utests
+#     overlap decides how many extents are live at the dump. The cap is the
+#     maximum plus that spread. `residentpages`, the row that tracks what is
+#     actually held, stayed inside 114452 on all four.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -198,7 +232,7 @@ boot	kernelmeta	1756
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	3328
+post-kernel-tests	kernelmeta	6065
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
 post-kernel-tests	process	20
@@ -207,9 +241,9 @@ post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3936
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	6933
+post-userland-tests	kernelmeta	8128
 post-userland-tests	objectrow	257
-post-userland-tests	pages	1011657
+post-userland-tests	pages	1072000
 post-userland-tests	pinnedbytes	8
 post-userland-tests	process	134
 post-userland-tests	residentpages	114452

@@ -1,8 +1,10 @@
 pub mod dquota;
 pub mod filemap;
+pub mod fsperf;
 pub mod journal;
 pub mod mount;
 pub mod partition;
+pub mod ramfs_devfs;
 pub mod resolve;
 pub mod statfs;
 pub mod verity_rw;
@@ -14,7 +16,7 @@ use slopos_testing::TestResult;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::cpio::{CpioError, for_each_cpio_entry};
-use crate::ext2::cache::BlockCache;
+use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use crate::ext2::{Ext2Error, Ext2Fs};
 use crate::vfs::{
     FileType, vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open,
@@ -29,7 +31,7 @@ macro_rules! mount_ext2 {
             Ok(v) => v,
             Err(_) => return TestResult::Fail,
         };
-        let mut $cache = match BlockCache::new_boxed(bs) {
+        let mut $cache = match BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) {
             Ok(c) => c,
             Err(_) => return TestResult::Fail,
         };
@@ -486,6 +488,7 @@ impl BlockDevice for WriteFailingDevice {
 /// the bytes that ended up there.
 struct CountingBlockDevice {
     inner: MemoryBlockDevice,
+    reads: core::sync::atomic::AtomicUsize,
     writes: core::sync::atomic::AtomicUsize,
     flushes: core::sync::atomic::AtomicUsize,
 }
@@ -494,6 +497,7 @@ impl CountingBlockDevice {
     fn new(inner: MemoryBlockDevice) -> Self {
         Self {
             inner,
+            reads: core::sync::atomic::AtomicUsize::new(0),
             writes: core::sync::atomic::AtomicUsize::new(0),
             flushes: core::sync::atomic::AtomicUsize::new(0),
         }
@@ -503,11 +507,21 @@ impl CountingBlockDevice {
         self.writes.load(core::sync::atomic::Ordering::Relaxed)
     }
 
+    fn reads(&self) -> usize {
+        self.reads.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     fn flushes(&self) -> usize {
         self.flushes.load(core::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The image behind the counter, for planting what no API would write.
+    fn inner(&self) -> &MemoryBlockDevice {
+        &self.inner
+    }
+
     fn reset(&self) {
+        self.reads.store(0, core::sync::atomic::Ordering::Relaxed);
         self.writes.store(0, core::sync::atomic::Ordering::Relaxed);
         self.flushes.store(0, core::sync::atomic::Ordering::Relaxed);
     }
@@ -515,6 +529,8 @@ impl CountingBlockDevice {
 
 impl BlockDevice for CountingBlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        self.reads
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         self.inner.read_at(offset, buffer)
     }
 
@@ -1170,7 +1186,7 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
         Ok(v) => v,
         Err(_) => return TestResult::Pass,
     };
-    let mut cache = match BlockCache::new_boxed(bs) {
+    let mut cache = match BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
     };
@@ -1214,6 +1230,88 @@ pub fn test_ext2_read_block_out_of_bounds() -> TestResult {
         Err(Ext2Error::InvalidBlock) | Err(Ext2Error::DeviceError) => TestResult::Pass,
         _ => TestResult::Fail,
     }
+}
+
+/// The device is twice the volume on purpose: the blocks the crafted pointers
+/// name are real storage, so a missing bound reads somebody else's bytes
+/// instead of running off the end of the device.
+const WILD_VOLUME_BLOCKS: u32 = 64;
+const WILD_DEVICE_BLOCKS: u32 = 128;
+/// Outside the volume, inside the device.
+const WILD_TARGET_BLOCK: u32 = 100;
+/// Inside the volume, unused: the indirect block whose one entry points out.
+const WILD_INDIRECT_BLOCK: u32 = 20;
+
+/// Its own frame: the builder plus an `Ext2ImageSpec` does not fit under the
+/// 2 KiB stack gate beside a mount.
+#[inline(never)]
+fn wild_pointer_image() -> Option<MemoryBlockDevice> {
+    let bs = FIX_BLOCK_SIZE as usize;
+    let volume = build_ext2_image(Ext2ImageSpec {
+        blocks: WILD_VOLUME_BLOCKS,
+        inodes: 32,
+        file_name: Some(b"wild.bin"),
+        file_data: Some(b"seed"),
+        file_block: FIX_FILE_BLOCK,
+    })?;
+    let device = MemoryBlockDevice::allocate(WILD_DEVICE_BLOCKS as usize * bs)?;
+    // One block at a time through the heap: holding one `MemoryBlockDevice`'s
+    // lock while taking the other's is the same-class nest lockdep refuses.
+    let mut block = KVec::<u8>::zeroed(bs).ok()?;
+    for index in 0..u64::from(WILD_VOLUME_BLOCKS) {
+        let at = index * bs as u64;
+        volume.read_at(at, block.as_mut_slice()).ok()?;
+        device.write_at(at, block.as_slice()).ok()?;
+    }
+    drop(volume);
+    device.with_buffer_mut(|buf| {
+        // Inode 3, the fixture's file: one inode size past the root's record.
+        let file_inode = FIX_INODE_TABLE as usize * bs + 2 * FIX_INODE_SIZE as usize;
+        // Twelve direct blocks plus the first indirect one, so a read can
+        // reach either kind of pointer.
+        let size = 13 * FIX_BLOCK_SIZE;
+        buf[file_inode + 4..file_inode + 8].copy_from_slice(&size.to_le_bytes());
+        buf[file_inode + 40..file_inode + 44].copy_from_slice(&WILD_TARGET_BLOCK.to_le_bytes());
+        buf[file_inode + 88..file_inode + 92].copy_from_slice(&WILD_INDIRECT_BLOCK.to_le_bytes());
+        let indirect = WILD_INDIRECT_BLOCK as usize * bs;
+        buf[indirect..indirect + 4].copy_from_slice(&WILD_TARGET_BLOCK.to_le_bytes());
+    });
+    Some(device)
+}
+
+/// An inode's block pointers are numbers the image chose and the cache turns
+/// one straight into a device offset, so an unbounded pointer reads and writes
+/// outside the volume — including over a verity trailer.
+pub fn test_ext2_block_pointer_past_volume_refused() -> TestResult {
+    let Some(device) = wild_pointer_image() else {
+        return TestResult::Skipped;
+    };
+    mount_ext2!(device, _cache, fs);
+    let Ok(ino) = fs.resolve_path(b"/wild.bin") else {
+        return slopos_testing::fail!("the fixture's file did not resolve");
+    };
+
+    let mut tiny = [0u8; 4];
+    match fs.read_file(ino, 0, &mut tiny) {
+        Err(Ext2Error::InvalidBlock) => {}
+        Err(other) => return slopos_testing::fail!("direct: want InvalidBlock, got {:?}", other),
+        Ok(_) => return slopos_testing::fail!("a direct pointer past the volume was read"),
+    }
+    match fs.read_file(ino, 12 * FIX_BLOCK_SIZE as u64, &mut tiny) {
+        Err(Ext2Error::InvalidBlock) => {}
+        Err(other) => return slopos_testing::fail!("indirect: want InvalidBlock, got {:?}", other),
+        Ok(_) => return slopos_testing::fail!("an indirect entry past the volume was read"),
+    }
+
+    // A number the image supplied is damage, so `errors=remount-ro` has to
+    // latch the mount rather than answer the caller and carry on.
+    if fs.write_file(ino, 0, b"x").is_ok() {
+        return slopos_testing::fail!("a write through a pointer past the volume was accepted");
+    }
+    if !fs.corruption_seen() {
+        return slopos_testing::fail!("a pointer past the volume did not latch the mount");
+    }
+    TestResult::Pass
 }
 
 pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
@@ -1595,7 +1693,7 @@ fn narrow_image() -> Option<MemoryBlockDevice> {
 #[inline(never)]
 fn count_sync_inode(device: &CountingBlockDevice, bystanders: u32) -> Option<usize> {
     let (sb, bs, is) = Ext2Fs::mount_params(device).ok()?;
-    let mut cache = BlockCache::new_boxed(bs).ok()?;
+    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).ok()?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).ok()?;
     count_sync_inode_inner(&mut fs, device, bystanders)
 }
@@ -2160,6 +2258,7 @@ slopos_testing::stest!(name = test_ext2_read_file_not_regular);
 slopos_testing::stest!(name = test_ext2_device_read_error);
 slopos_testing::stest!(name = test_ext2_device_write_error_on_metadata);
 slopos_testing::stest!(name = test_ext2_read_block_out_of_bounds);
+slopos_testing::stest!(name = test_ext2_block_pointer_past_volume_refused);
 slopos_testing::stest!(name = test_ext2_read_file_data_roundtrip);
 slopos_testing::stest!(name = test_ext2_write_persists_across_handles);
 slopos_testing::stest!(name = test_ext2_writeback_is_deferred_until_sync);
@@ -2942,7 +3041,6 @@ slopos_testing::stest!(name = test_quota_objectrow_cross_process_isolation);
 /// read through the VFS would silently re-fault the block and report success.
 pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
     use crate::blockdev::MemoryBlockDevice;
-    use crate::ext2::cache::BlockCache;
     use crate::ext2::types::BlockNum;
 
     const BLOCK_SIZE: u32 = 1024;
@@ -2952,7 +3050,7 @@ pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
     else {
         return TestResult::Skipped;
     };
-    let Ok(mut cache) = BlockCache::new_boxed(BLOCK_SIZE) else {
+    let Ok(mut cache) = BlockCache::new_boxed(BLOCK_SIZE, CACHE_ENTRIES_MIN) else {
         return TestResult::Fail;
     };
 
@@ -3007,19 +3105,323 @@ slopos_testing::stest!(
     suite = fs
 );
 
-/// Mount `device` and hand the handle to `body`.
-///
-/// Its own frame on purpose: the superblock, the cache and the `Ext2Fs` are
-/// live across the whole call, and a debug build gives every `?` temporary in
-/// the body its own slot on top of them. Splitting the two is what puts both
-/// under the 2 KiB stack gate.
+/// The cache is sized from the volume: a cache that cannot hold every group's
+/// two bitmaps evicts, on every allocation, a bitmap the next one needs.
+pub fn test_block_cache_capacity_covers_every_group_bitmap() -> TestResult {
+    use crate::ext2::cache::{CACHE_ENTRIES_MAX, cache_entries_for};
+
+    // 16 GiB of 4 KiB blocks at `mke2fs`'s 32768 blocks per group.
+    const BLOCKS_16G: u64 = 16 * 1024 * 1024 * 1024 / 4096;
+    let groups = BLOCKS_16G.div_ceil(32768);
+    let entries = cache_entries_for(BLOCKS_16G, 32768);
+    slopos_testing::assert_test!(
+        entries as u64 >= groups * 2 + 1,
+        "a 16 GiB volume asked for {} frames, short of {} group bitmaps plus a descriptor table",
+        entries,
+        groups * 2
+    );
+
+    // 2048 groups: a real request that must still fit under the ceiling.
+    let dense = cache_entries_for(16 * 1024 * 1024, 8192);
+    slopos_testing::assert_test!(
+        dense as u64 >= 2048 * 2 && dense <= CACHE_ENTRIES_MAX,
+        "2048 groups asked for {} frames, outside [4096, {}]",
+        dense,
+        CACHE_ENTRIES_MAX
+    );
+
+    // A small volume keeps the floor; the spare frames are what file data gets.
+    slopos_testing::assert_test!(
+        cache_entries_for(128, 1024) == CACHE_ENTRIES_MIN,
+        "a 128-block image asked for {} frames instead of the floor",
+        cache_entries_for(128, 1024)
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_block_cache_capacity_covers_every_group_bitmap,
+    suite = fs
+);
+
+pub fn test_block_cache_evicts_the_least_recently_used_block() -> TestResult {
+    use crate::ext2::types::BlockNum;
+
+    const BS: u32 = 512;
+    let cap = CACHE_ENTRIES_MIN as u32;
+    let Some(image) = MemoryBlockDevice::allocate((cap as usize + 4) * BS as usize) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let Ok(mut cache) = BlockCache::new_boxed(BS, CACHE_ENTRIES_MIN) else {
+        return TestResult::Fail;
+    };
+    for b in 1..=cap {
+        if cache.get(BlockNum(b), &device).is_err() {
+            return TestResult::Fail;
+        }
+    }
+    // Block 1 was the oldest until this; block 2 is now the next victim.
+    if cache.get(BlockNum(1), &device).is_err() {
+        return TestResult::Fail;
+    }
+
+    device.reset();
+    if cache.get(BlockNum(cap + 1), &device).is_err() {
+        return TestResult::Fail;
+    }
+    slopos_testing::assert_test!(
+        device.reads() == 1,
+        "one miss against a full cache read {} blocks",
+        device.reads()
+    );
+    if cache.get(BlockNum(1), &device).is_err() {
+        return TestResult::Fail;
+    }
+    slopos_testing::assert_test!(
+        device.reads() == 1,
+        "the most recently used block was the victim -- the chain is walked from the wrong end"
+    );
+    if cache.get(BlockNum(2), &device).is_err() {
+        return TestResult::Fail;
+    }
+    slopos_testing::assert_test!(
+        device.reads() == 2,
+        "the least recently used block survived a miss against a full cache"
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_block_cache_evicts_the_least_recently_used_block,
+    suite = fs
+);
+
+/// Allocation state is what the *next* allocation re-reads, so a full cache
+/// spends a data block first even when the allocation block is the older one.
+pub fn test_block_cache_keeps_allocation_state_over_data() -> TestResult {
+    use crate::ext2::cache::BlockOwner;
+    use crate::ext2::types::BlockNum;
+
+    const BS: u32 = 512;
+    let cap = CACHE_ENTRIES_MIN as u32;
+    let Some(image) = MemoryBlockDevice::allocate((cap as usize + 4) * BS as usize) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let Ok(mut cache) = BlockCache::new_boxed(BS, CACHE_ENTRIES_MIN) else {
+        return TestResult::Fail;
+    };
+    if cache
+        .get_owned(BlockNum(1), &device, BlockOwner::Alloc)
+        .is_err()
+    {
+        return TestResult::Fail;
+    }
+    for b in 2..=cap {
+        if cache
+            .get_data(BlockNum(b), &device, BlockOwner::File(1))
+            .is_err()
+        {
+            return TestResult::Fail;
+        }
+    }
+
+    device.reset();
+    if cache.get(BlockNum(cap + 1), &device).is_err() {
+        return TestResult::Fail;
+    }
+    if cache
+        .get_owned(BlockNum(1), &device, BlockOwner::Alloc)
+        .is_err()
+    {
+        return TestResult::Fail;
+    }
+    slopos_testing::assert_test!(
+        device.reads() == 1,
+        "the bitmap was evicted ahead of every data block in the cache"
+    );
+    if cache
+        .get_data(BlockNum(2), &device, BlockOwner::File(1))
+        .is_err()
+    {
+        return TestResult::Fail;
+    }
+    slopos_testing::assert_test!(
+        device.reads() == 2,
+        "a data block survived a miss that had allocation state to spend"
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_block_cache_keeps_allocation_state_over_data,
+    suite = fs
+);
+
+/// A rollback must retract the name index of every directory it touched, even
+/// one its own cache pressure evicted: a complete index that has lost a
+/// restored name answers "absent" without ever reading the medium.
+pub fn test_rollback_forgets_a_directory_its_own_eviction_displaced() -> TestResult {
+    use crate::ext2::cache::BlockOwner;
+    use crate::ext2::dirindex::DirProbe;
+    use crate::ext2::types::BlockNum;
+
+    const BS: u32 = 512;
+    /// Whose record the failed operation removes.
+    const DIR: u32 = 11;
+    /// Whose blocks take the evicted slots over.
+    const OTHER: u32 = 12;
+    const HASH: u32 = 0x5157_2f01;
+
+    let cap = CACHE_ENTRIES_MIN as u32;
+    let Some(image) = MemoryBlockDevice::allocate((cap as usize + 8) * BS as usize) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let Ok(mut cache) = BlockCache::new_boxed(BS, CACHE_ENTRIES_MIN) else {
+        return TestResult::Fail;
+    };
+
+    let mut index = cache.take_dir_index();
+    for ino in [DIR, OTHER] {
+        if !index.begin_build(ino) || !index.add(ino, HASH, 0) {
+            return slopos_testing::fail!("the fixture index would not build");
+        }
+        index.finish_build(ino);
+    }
+    cache.put_dir_index(index);
+
+    cache.begin_op();
+    // Dirtied, so its eviction is a device write this test can count.
+    match cache.get_data(BlockNum(1), &device, BlockOwner::File(DIR)) {
+        Ok(mut block) => {
+            block.data_mut()[0] = 0xA5;
+        }
+        Err(_) => return slopos_testing::fail!("the directory's block would not cache"),
+    }
+    cache.note_dir_remove(DIR, HASH, 0);
+    cache.note_dir_remove(OTHER, HASH, 0);
+    if cache.dir_probe(DIR, HASH, &mut 0) != DirProbe::Absent {
+        return slopos_testing::fail!("the fixture index does not claim the removed name is gone");
+    }
+
+    device.reset();
+    // Four past the cache, with every resident entry owned by this operation,
+    // so the victim search falls through to the oldest op-touched block.
+    for b in 2..=cap + 4 {
+        if cache
+            .get_data(BlockNum(b), &device, BlockOwner::File(OTHER))
+            .is_err()
+        {
+            return slopos_testing::fail!("block {} would not cache", b);
+        }
+    }
+    if device.writes() == 0 {
+        return slopos_testing::fail!(
+            "the fill evicted nothing -- the operation's own blocks were never victims"
+        );
+    }
+
+    cache.rollback_op();
+
+    if cache.dir_probe(DIR, HASH, &mut 0) == DirProbe::Absent {
+        return slopos_testing::fail!(
+            "a rolled-back removal still reads as absent -- the index of the displaced directory \
+             survived"
+        );
+    }
+    if cache.dir_probe(OTHER, HASH, &mut 0) == DirProbe::Absent {
+        return slopos_testing::fail!("a rolled-back removal still reads as absent");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_rollback_forgets_a_directory_its_own_eviction_displaced,
+    suite = fs
+);
+
+/// The group's allocation hint resumes above the last block taken instead of
+/// rescanning an allocated prefix, and costs no space: once the tail of the
+/// group runs out, the search comes back for the blocks it skipped.
+pub fn test_ext2_allocation_hint_skips_the_scanned_prefix() -> TestResult {
+    use crate::ext2::cache::BlockOwner;
+    use crate::ext2::ext2_alloc::{allocate_block, free_block};
+    use crate::ext2::geometry::Ext2Geometry;
+
+    let Some(device) = build_ext2_image(Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: None,
+        file_data: None,
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let Ok((mut sb, bs, _is)) = Ext2Fs::mount_params(&device) else {
+        return TestResult::Fail;
+    };
+    let Ok(geom) = Ext2Geometry::derive(&sb) else {
+        return TestResult::Fail;
+    };
+    let Ok(mut cache) = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) else {
+        return TestResult::Fail;
+    };
+    let owner = BlockOwner::File(11);
+
+    let (Ok(first), Ok(second)) = (
+        allocate_block(&geom, &mut sb, &mut cache, &device, owner),
+        allocate_block(&geom, &mut sb, &mut cache, &device, owner),
+    ) else {
+        return slopos_testing::fail!("the fixture had no free blocks to allocate");
+    };
+    if free_block(first, &geom, &mut sb, &mut cache, &device, owner).is_err() {
+        return slopos_testing::fail!("freeing a just-allocated block failed");
+    }
+
+    let Ok(third) = allocate_block(&geom, &mut sb, &mut cache, &device, owner) else {
+        return slopos_testing::fail!("allocation after a free failed");
+    };
+    slopos_testing::assert_test!(
+        third.raw() == second.raw() + 1,
+        "the third allocation returned {} rather than resuming above {}",
+        third.raw(),
+        second.raw()
+    );
+
+    // The hint is a start point, not a reservation: once nothing above it is
+    // free, the search rescans from bit 0 and the freed block comes back.
+    let mut reused = false;
+    for _ in 0..geom.blocks_per_group() {
+        match allocate_block(&geom, &mut sb, &mut cache, &device, owner) {
+            Ok(block) => reused |= block.raw() == first.raw(),
+            Err(_) => break,
+        }
+    }
+    slopos_testing::assert_test!(
+        reused,
+        "block {} stayed free after the group filled -- the hint lost it",
+        first.raw()
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_ext2_allocation_hint_skips_the_scanned_prefix,
+    suite = fs
+);
+
+/// Mount `device` and hand the handle to `body`, in its own frame: the
+/// superblock, cache and `Ext2Fs` are live across the call, and a debug build
+/// stacks the body's temporaries on top of them past the 2 KiB gate.
 #[inline(never)]
 fn with_mounted(
     device: &MemoryBlockDevice,
     body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     let (sb, bs, is) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
-    let mut cache = BlockCache::new_boxed(bs).map_err(|_| "cache")?;
+    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).map_err(|_| "mount")?;
     body(&mut fs)
 }
@@ -3953,7 +4355,7 @@ fn crash_workload_write_count() -> Option<usize> {
 #[inline(never)]
 fn crash_workload(device: &FaultyBlockDevice) -> Result<(), Ext2Error> {
     let (sb, bs, is) = Ext2Fs::mount_params(device)?;
-    let mut cache = BlockCache::new_boxed(bs)?;
+    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN)?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is)?;
     fs.mark_dirty_on_disk()?;
     let ino = fs.create_file(2, b"crash.txt")?;
@@ -4467,3 +4869,718 @@ pub fn test_vfs_unlink_defers_while_open() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_vfs_unlink_defers_while_open, suite = fs);
+
+/// Mount `device` and hand the handle to `body`, in its own frame and behind a
+/// `dyn` callback for [`with_mounted`]'s reason: the live superblock, cache and
+/// `Ext2Fs` leave the body no room under the 2 KiB stack gate.
+#[inline(never)]
+fn with_counted(
+    device: &CountingBlockDevice,
+    body: &mut dyn FnMut(&mut Ext2Fs<'_>) -> TestResult,
+) -> TestResult {
+    let (sb, bs, is) = match Ext2Fs::mount_params(device) {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
+    let Ok(mut cache) = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) else {
+        return TestResult::Skipped;
+    };
+    match Ext2Fs::new(device, &mut cache, sb, bs, is) {
+        Ok(mut fs) => body(&mut fs),
+        Err(_) => TestResult::Fail,
+    }
+}
+
+/// One frame for the failure message, so the assertion sites cost no stack.
+#[inline(never)]
+fn dir_index_fail(msg: &str) -> TestResult {
+    slopos_testing::fail!("{}", msg)
+}
+
+/// Reads a phase was allowed, against the linear scan it replaces: the claim
+/// is the ratio between the two and not either number alone.
+#[inline(never)]
+fn read_budget(phase: &str, reads: usize, budget: usize, scan_visits: u32) -> Option<TestResult> {
+    if reads <= budget {
+        return None;
+    }
+    Some(slopos_testing::fail!(
+        "{}: {} block reads against a budget of {}; the linear scan this replaces visits {} \
+         directory blocks",
+        phase,
+        reads,
+        budget,
+        scan_visits
+    ))
+}
+
+/// Names the large-directory test creates: 264-byte records three to a 1 KiB
+/// block is 534 directory blocks against a 512-frame cache. Outgrowing the
+/// cache is the point — only then does a scan cost reads a device can count.
+const BIGDIR_NAMES: u32 = 1600;
+const BIGDIR_PER_BLOCK: u32 = FIX_BLOCK_SIZE / 264;
+const BIGDIR_IMAGE_BLOCKS: u32 = 640;
+
+/// Directory-block visits the first-fit insert this replaces would make: every
+/// create scanned the whole directory for the name and again for a gap.
+const BIGDIR_QUADRATIC_VISITS: u32 = BIGDIR_NAMES * BIGDIR_NAMES / BIGDIR_PER_BLOCK;
+
+/// Linear in the directory, with room for the indirect blocks and bitmaps a
+/// growing directory re-reads.
+const BIGDIR_CREATE_BUDGET: usize = 2_000;
+
+/// A lookup's budget once the index is warm: the record's own block plus the
+/// indirect blocks that map it.
+const BIGDIR_LOOKUP_BUDGET: usize = 8;
+
+fn bigdir_name(i: u32) -> [u8; 255] {
+    let mut name = [b'q'; 255];
+    name[0] = b'0' + (i / 1000 % 10) as u8;
+    name[1] = b'0' + (i / 100 % 10) as u8;
+    name[2] = b'0' + (i / 10 % 10) as u8;
+    name[3] = b'0' + (i % 10) as u8;
+    name
+}
+
+/// The reference every index answer is checked against.
+#[inline(never)]
+fn scan_lookup(fs: &mut Ext2Fs<'_>, dir: u32, name: &[u8]) -> Option<u32> {
+    let mut found = None;
+    let _ = fs.for_each_dir_entry(dir, |entry| {
+        if entry.name == name {
+            found = Some(entry.inode.raw());
+            false
+        } else {
+            true
+        }
+    });
+    found
+}
+
+#[inline(never)]
+fn count_dir_entries(fs: &mut Ext2Fs<'_>, dir: u32) -> u32 {
+    let mut count = 0u32;
+    let _ = fs.for_each_dir_entry(dir, |_| {
+        count += 1;
+        true
+    });
+    count
+}
+
+/// Filling a directory must cost work proportional to its size, and a lookup
+/// in the result a bounded handful of reads — including the miss every create
+/// pays for.
+pub fn test_ext2_dir_index_bounds_a_large_directory() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        blocks: BIGDIR_IMAGE_BLOCKS,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    with_counted(&device, &mut |fs| bigdir_body(fs, &device))
+}
+
+#[inline(never)]
+fn bigdir_body(fs: &mut Ext2Fs<'_>, device: &CountingBlockDevice) -> TestResult {
+    // Hard links, so 1600 names cost the fixture's 32 inodes only one.
+    let Ok(target) = fs.lookup_child(2, b"seed.txt") else {
+        return dir_index_fail("the fixture has no seed.txt");
+    };
+
+    device.reset();
+    if let Some(failure) = bigdir_fill(fs, target.raw()) {
+        return failure;
+    }
+    if let Some(f) = read_budget(
+        "creating 1600 names",
+        device.reads(),
+        BIGDIR_CREATE_BUDGET,
+        BIGDIR_QUADRATIC_VISITS,
+    ) {
+        return f;
+    }
+    if !fs.dir_index_complete(2) {
+        return dir_index_fail("the index did not complete over a directory it fits");
+    }
+
+    device.reset();
+    if let Err(e) = bigdir_probe(fs, BIGDIR_NAMES - 1, true) {
+        return dir_index_fail(e);
+    }
+    if let Some(f) = read_budget(
+        "a warm lookup of the last name",
+        device.reads(),
+        BIGDIR_LOOKUP_BUDGET,
+        BIGDIR_NAMES / BIGDIR_PER_BLOCK,
+    ) {
+        return f;
+    }
+
+    device.reset();
+    if let Err(e) = bigdir_probe(fs, 0, false) {
+        return dir_index_fail(e);
+    }
+    if let Some(f) = read_budget(
+        "a lookup of a name that does not exist",
+        device.reads(),
+        BIGDIR_LOOKUP_BUDGET,
+        BIGDIR_NAMES / BIGDIR_PER_BLOCK,
+    ) {
+        return f;
+    }
+
+    for present in [true, false] {
+        if let Err(e) = bigdir_agrees_with_scan(fs, present) {
+            return dir_index_fail(e);
+        }
+    }
+    if let Some(f) = index_sees_every_name(fs, BIGDIR_NAMES, &mut |i, buf| {
+        *buf = bigdir_name(i);
+        buf.len()
+    }) {
+        return f;
+    }
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn bigdir_fill(fs: &mut Ext2Fs<'_>, target: u32) -> Option<TestResult> {
+    for i in 0..BIGDIR_NAMES {
+        let name = bigdir_name(i);
+        if fs.link_entry(2, &name, target).is_err() {
+            return Some(slopos_testing::fail!("link {} of {}", i, BIGDIR_NAMES));
+        }
+    }
+    None
+}
+
+/// Look up name `i`, or — with `present` clear — the name that differs from it
+/// only in its last byte and was therefore never created.
+#[inline(never)]
+fn bigdir_probe(fs: &mut Ext2Fs<'_>, i: u32, present: bool) -> Result<(), &'static str> {
+    let mut name = bigdir_name(i);
+    if !present {
+        name[254] = b'Z';
+    }
+    match (present, fs.lookup_child(2, &name)) {
+        (true, Ok(_)) => Ok(()),
+        (true, Err(_)) => Err("a created name did not resolve"),
+        (false, Err(Ext2Error::PathNotFound)) => Ok(()),
+        (false, _) => Err("a name that was never created resolved"),
+    }
+}
+
+/// The index must not change an answer: the lookup path against the walker,
+/// over both answers a lookup has.
+#[inline(never)]
+fn bigdir_agrees_with_scan(fs: &mut Ext2Fs<'_>, present: bool) -> Result<(), &'static str> {
+    let mut name = bigdir_name(0);
+    if !present {
+        name[254] = b'Z';
+    }
+    let indexed = fs.lookup_child(2, &name).ok().map(|i| i.raw());
+    let scanned = scan_lookup(fs, 2, &name);
+    if indexed != scanned {
+        return Err("the index and a scan disagree about a name");
+    }
+    Ok(())
+}
+
+/// Every name the directory holds, through the index, against a walk of it.
+/// The invariant is completeness: a complete index answers a miss out of
+/// memory, so one lost interior name is a file that silently stopped existing.
+#[inline(never)]
+fn index_sees_every_name(
+    fs: &mut Ext2Fs<'_>,
+    count: u32,
+    name: &mut dyn FnMut(u32, &mut [u8; 255]) -> usize,
+) -> Option<TestResult> {
+    let mut buf = [0u8; 255];
+    let mut resolved = 0u32;
+    for i in 0..count {
+        let len = name(i, &mut buf);
+        if fs.lookup_child(2, &buf[..len]).is_ok() {
+            resolved += 1;
+        }
+    }
+    // `.`, `..` and the seed file every name is a link to.
+    let walked = count_dir_entries(fs, 2).saturating_sub(3);
+    if resolved == count && walked == count {
+        return None;
+    }
+    Some(slopos_testing::fail!(
+        "the index resolves {} of {} names; a walk of the directory finds {}",
+        resolved,
+        count,
+        walked
+    ))
+}
+
+slopos_testing::stest!(
+    name = test_ext2_dir_index_bounds_a_large_directory,
+    suite = fs
+);
+
+/// `l` plus seven digits: eight bytes, so sixty-four records to a 1 KiB block.
+fn capped_name(i: u32) -> [u8; 8] {
+    let mut name = *b"l0000000";
+    let mut v = i;
+    for slot in name[1..].iter_mut().rev() {
+        *slot = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    name
+}
+
+/// Past the index's own ceiling a directory must keep working — by scanning,
+/// the way it always did.
+pub fn test_ext2_dir_index_falls_back_past_its_cap() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        // 24592 sixteen-byte records is 385 blocks, plus their indirect blocks.
+        blocks: 512,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    with_counted(&device, &mut oversize_body)
+}
+
+#[inline(never)]
+fn oversize_body(fs: &mut Ext2Fs<'_>) -> TestResult {
+    let Ok(target) = fs.lookup_child(2, b"seed.txt") else {
+        return dir_index_fail("the fixture has no seed.txt");
+    };
+    let over = crate::ext2::dirindex::DIR_INDEX_MAX_NAMES as u32 + 16;
+    // Well inside the cap first, because a test that only ever saw a directory
+    // with no index would pass whether or not one was ever built.
+    if let Some(failure) = fill_links(fs, target.raw(), 0, 1024) {
+        return failure;
+    }
+    if !fs.dir_index_complete(2) {
+        return dir_index_fail("no complete index at 1024 names");
+    }
+    if let Some(failure) = index_sees_every_name(fs, 1024, &mut |i, buf| {
+        buf[..8].copy_from_slice(&capped_name(i));
+        8
+    }) {
+        return failure;
+    }
+    if let Some(failure) = fill_links(fs, target.raw(), 1024, over) {
+        return failure;
+    }
+    if fs.dir_index_complete(2) {
+        return dir_index_fail("a directory past the index cap still claims a complete index");
+    }
+    for i in [0u32, over / 2, over - 1] {
+        let name = capped_name(i);
+        if fs.lookup_child(2, &name).is_err() {
+            return dir_index_fail("a name stopped resolving once the index was given up");
+        }
+    }
+    if !matches!(
+        fs.lookup_child(2, b"l9999999"),
+        Err(Ext2Error::PathNotFound)
+    ) {
+        return dir_index_fail("an absent name resolved without an index");
+    }
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn fill_links(fs: &mut Ext2Fs<'_>, target: u32, from: u32, to: u32) -> Option<TestResult> {
+    for i in from..to {
+        let name = capped_name(i);
+        if fs.link_entry(2, &name, target).is_err() {
+            return Some(slopos_testing::fail!("link {} of {}", i, to));
+        }
+    }
+    None
+}
+
+slopos_testing::stest!(
+    name = test_ext2_dir_index_falls_back_past_its_cap,
+    suite = fs
+);
+
+/// A failed transaction must take the index with it. Verifying a hit catches
+/// half of it; the other half is a complete index that has forgotten a name
+/// the rollback restored, and so answers "not there" without reading a block.
+pub fn test_ext2_dir_index_drops_a_rolled_back_directory() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        blocks: 128,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let mut dst = 0u32;
+    let setup = with_counted(&device, &mut |fs| {
+        rollback_index_setup(fs, &device, &mut dst)
+    });
+    if setup != TestResult::Pass {
+        return setup;
+    }
+    with_counted(&device, &mut |fs| rollback_index_check(fs, dst))
+}
+
+#[inline(never)]
+fn rollback_index_setup(
+    fs: &mut Ext2Fs<'_>,
+    device: &CountingBlockDevice,
+    dst: &mut u32,
+) -> TestResult {
+    let Ok(dst_ino) = fs.create_directory(2, b"dst") else {
+        return dir_index_fail("mkdir dst");
+    };
+    let Ok(src) = fs.create_directory(2, b"src") else {
+        return dir_index_fail("mkdir src");
+    };
+    let Ok(inode) = fs.read_inode(src) else {
+        return dir_index_fail("read src");
+    };
+    let block = inode.block[0].raw();
+    if fs.sync().is_err() {
+        return dir_index_fail("sync");
+    }
+    break_dotdot(device, block);
+    *dst = dst_ino;
+    TestResult::Pass
+}
+
+/// No API writes a directory without `..`, so the medium is where it comes from.
+#[inline(never)]
+fn break_dotdot(device: &CountingBlockDevice, block: u32) {
+    device.inner().with_buffer_mut(|buf| {
+        let base = block as usize * FIX_BLOCK_SIZE as usize;
+        let mut cursor = 0usize;
+        while cursor + 8 <= FIX_BLOCK_SIZE as usize {
+            let rec_len = u16::from_le_bytes([buf[base + cursor + 4], buf[base + cursor + 5]]);
+            if rec_len < 8 {
+                break;
+            }
+            if buf[base + cursor + 6] == 2 && &buf[base + cursor + 8..base + cursor + 10] == b".." {
+                buf[base + cursor + 8..base + cursor + 10].copy_from_slice(b"zz");
+                break;
+            }
+            cursor += rec_len as usize;
+        }
+    });
+}
+
+#[inline(never)]
+fn rollback_index_check(fs: &mut Ext2Fs<'_>, dst: u32) -> TestResult {
+    // A miss is what completes an index, and only a complete one can answer a
+    // later miss out of memory.
+    let _ = fs.lookup_child(2, b"absent");
+    let _ = fs.lookup_child(dst, b"absent");
+    if !fs.dir_index_complete(2) || !fs.dir_index_complete(dst) {
+        return dir_index_fail("the fixture's indexes are not complete");
+    }
+    let before = count_dir_entries(fs, dst);
+
+    if fs.rename_entry(2, b"src", dst, b"src").is_ok() {
+        return dir_index_fail("a rename whose last step must fail was accepted");
+    }
+    if fs.lookup_child(dst, b"src").is_ok() {
+        return dir_index_fail("a rolled-back insert is still resolvable");
+    }
+    if fs.lookup_child(2, b"src").is_err() {
+        return dir_index_fail("a rolled-back removal lost the name");
+    }
+    let after = count_dir_entries(fs, dst);
+    if after != before {
+        return slopos_testing::fail!(
+            "the rolled-back directory holds {} entries, not {}",
+            after,
+            before
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_ext2_dir_index_drops_a_rolled_back_directory,
+    suite = fs
+);
+
+/// A live record claiming a two-byte name in an eight-byte slot at the end of
+/// the block: `update_dotdot`'s hand-rolled parse accepted what the validated
+/// `parse_record` refuses, and compared the two bytes *after* the block. Its
+/// one caller is a reparenting rename, which must answer `DirectoryFormat`.
+pub fn test_ext2_dotdot_record_past_block_end_refused() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        blocks: 128,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let mut dst = 0u32;
+    let setup = with_counted(&device, &mut |fs| {
+        dotdot_overread_setup(fs, &device, &mut dst)
+    });
+    if setup != TestResult::Pass {
+        return setup;
+    }
+    with_counted(&device, &mut |fs| dotdot_overread_check(fs, dst))
+}
+
+#[inline(never)]
+fn dotdot_overread_setup(
+    fs: &mut Ext2Fs<'_>,
+    device: &CountingBlockDevice,
+    dst: &mut u32,
+) -> TestResult {
+    let Ok(dst_ino) = fs.create_directory(2, b"dst") else {
+        return dir_index_fail("mkdir dst");
+    };
+    let Ok(src) = fs.create_directory(2, b"src") else {
+        return dir_index_fail("mkdir src");
+    };
+    let Ok(inode) = fs.read_inode(src) else {
+        return dir_index_fail("read src");
+    };
+    let block = inode.block[0].raw();
+    if fs.sync().is_err() {
+        return dir_index_fail("sync");
+    }
+    plant_overreading_record(device, block);
+    *dst = dst_ino;
+    TestResult::Pass
+}
+
+/// Re-chain a directory's block 0 to end on a record eight bytes from the
+/// block's end claiming a two-byte name. `..` is renamed rather than removed
+/// because the walk has to pass it to reach the crafted record, and no API
+/// writes a directory in this shape.
+#[inline(never)]
+fn plant_overreading_record(device: &CountingBlockDevice, block: u32) {
+    let bs = FIX_BLOCK_SIZE as usize;
+    let last = bs - 8;
+    device.inner().with_buffer_mut(|buf| {
+        let base = block as usize * bs;
+        let dir = &mut buf[base..base + bs];
+        write_dir_entry(dir, 12, 2, 12, b"zz", 2);
+        write_dir_entry(dir, 24, 0, (last - 24) as u16, b"", 0);
+        write_dir_entry(dir, last, 2, 8, b"", 2);
+        // The name the record has no room for.
+        dir[last + 6] = 2;
+    });
+}
+
+#[inline(never)]
+fn dotdot_overread_check(fs: &mut Ext2Fs<'_>, dst: u32) -> TestResult {
+    match fs.rename_entry(2, b"src", dst, b"src") {
+        Err(Ext2Error::DirectoryFormat) => TestResult::Pass,
+        Err(other) => slopos_testing::fail!("want DirectoryFormat, got {:?}", other),
+        Ok(()) => slopos_testing::fail!("a record whose name lies past the block was parsed"),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_ext2_dotdot_record_past_block_end_refused,
+    suite = fs
+);
+
+/// An htree directory hides its index inside records the linear format reads
+/// as free space, which is exactly where an insert places an entry. The first
+/// mutation must therefore stop claiming the index before it writes anything.
+pub fn test_ext2_indexed_directory_is_deindexed_on_first_insert() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        blocks: 128,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    let mut dir = 0u32;
+    let setup = with_counted(&device, &mut |fs| htree_fixture(fs, &device, &mut dir));
+    if setup != TestResult::Pass {
+        return setup;
+    }
+    with_counted(&device, &mut |fs| htree_check(fs, dir))
+}
+
+/// Enough sixteen-byte records to spill into block 1, so the survivor this
+/// test checks lives where a real htree keeps its leaves.
+const HTREE_NAMES: u32 = 100;
+
+#[inline(never)]
+fn htree_fixture(fs: &mut Ext2Fs<'_>, device: &CountingBlockDevice, out: &mut u32) -> TestResult {
+    let Ok(dir) = fs.create_directory(2, b"idx") else {
+        return dir_index_fail("mkdir idx");
+    };
+    let Ok(target) = fs.lookup_child(2, b"seed.txt") else {
+        return dir_index_fail("the fixture has no seed.txt");
+    };
+    if let Some(failure) = htree_fill(fs, dir, target.raw()) {
+        return failure;
+    }
+    let Ok(inode) = fs.read_inode(dir) else {
+        return dir_index_fail("read idx");
+    };
+    if inode.size < 2 * FIX_BLOCK_SIZE as u64 {
+        return dir_index_fail("the fixture directory did not reach a second block");
+    }
+    let block = inode.block[0].raw();
+    if fs.sync().is_err() {
+        return dir_index_fail("sync");
+    }
+    plant_htree_root(device, dir, block);
+    *out = dir;
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn htree_fill(fs: &mut Ext2Fs<'_>, dir: u32, target: u32) -> Option<TestResult> {
+    for i in 0..HTREE_NAMES {
+        let name = capped_name(i);
+        if fs.link_entry(dir, &name, target).is_err() {
+            return Some(slopos_testing::fail!("link {} of {}", i, HTREE_NAMES));
+        }
+    }
+    None
+}
+
+/// Turn a plain directory into what `mke2fs -O dir_index` leaves behind: the
+/// inode claims an index, and a `..` whose `rec_len` swallows the block hides
+/// a `dx_root` in what the linear format therefore reads as free space.
+#[inline(never)]
+fn plant_htree_root(device: &CountingBlockDevice, dir: u32, block: u32) {
+    device.inner().with_buffer_mut(|buf| {
+        let rec = FIX_INODE_TABLE as usize * FIX_BLOCK_SIZE as usize
+            + (dir as usize - 1) * FIX_INODE_SIZE as usize;
+        let flags =
+            u32::from_le_bytes([buf[rec + 32], buf[rec + 33], buf[rec + 34], buf[rec + 35]]);
+        buf[rec + 32..rec + 36]
+            .copy_from_slice(&(flags | crate::ext2::ondisk::EXT2_INDEX_FL).to_le_bytes());
+
+        let base = block as usize * FIX_BLOCK_SIZE as usize;
+        let bs = FIX_BLOCK_SIZE as usize;
+        write_dir_entry(&mut buf[base..base + bs], 0, dir, 12, b".", 2);
+        write_dir_entry(&mut buf[base..base + bs], 12, 2, (bs - 12) as u16, b"..", 2);
+        // dx_root: zero reserved, half-MD4 hash, 8-byte info, no interior
+        // levels, one entry.
+        buf[base + 24..base + 28].copy_from_slice(&0u32.to_le_bytes());
+        buf[base + 28] = 1;
+        buf[base + 29] = 8;
+        buf[base + 30] = 0;
+        buf[base + 31] = 0;
+        buf[base + 32..base + 34].copy_from_slice(&30u16.to_le_bytes());
+        buf[base + 34..base + 36].copy_from_slice(&1u16.to_le_bytes());
+        buf[base + 36..base + 40].copy_from_slice(&1u32.to_le_bytes());
+    });
+}
+
+#[inline(never)]
+fn htree_check(fs: &mut Ext2Fs<'_>, dir: u32) -> TestResult {
+    match fs.read_inode(dir) {
+        Ok(inode) if inode.is_indexed() => {}
+        Ok(_) => return dir_index_fail("the fixture's index flag did not take"),
+        Err(_) => return dir_index_fail("read idx"),
+    }
+    let survivor = capped_name(HTREE_NAMES - 1);
+    if fs.lookup_child(dir, &survivor).is_err() {
+        return dir_index_fail("a leaf-block name did not resolve before the insert");
+    }
+    if fs.create_file(dir, b"fresh").is_err() {
+        return dir_index_fail("the first insert into an indexed directory failed");
+    }
+    match fs.read_inode(dir) {
+        Ok(inode) if inode.is_indexed() => {
+            return dir_index_fail(
+                "the entry went in over the index node with EXT2_INDEX_FL still set",
+            );
+        }
+        Ok(_) => {}
+        Err(_) => return dir_index_fail("read idx"),
+    }
+    if fs.lookup_child(dir, &survivor).is_err() {
+        return dir_index_fail("de-indexing lost a pre-existing name");
+    }
+    if fs.lookup_child(dir, b"fresh").is_err() {
+        return dir_index_fail("the new name did not resolve");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_ext2_indexed_directory_is_deindexed_on_first_insert,
+    suite = fs
+);
+
+/// The free-space hint must never turn an insert that would have fitted into a
+/// new block. A removal early in a directory the hint has already walked past
+/// is exactly that case: the next insert has to come back for the gap.
+pub fn test_ext2_dir_hint_reuses_a_freed_record() -> TestResult {
+    let Some(image) = build_ext2_image(Ext2ImageSpec {
+        blocks: 128,
+        inodes: 32,
+        file_name: Some(b"seed.txt"),
+        file_data: Some(b"x"),
+        file_block: FIX_FILE_BLOCK,
+    }) else {
+        return TestResult::Skipped;
+    };
+    let device = CountingBlockDevice::new(image);
+    with_counted(&device, &mut hint_reuse_body)
+}
+
+#[inline(never)]
+fn hint_reuse_body(fs: &mut Ext2Fs<'_>) -> TestResult {
+    let Ok(target) = fs.lookup_child(2, b"seed.txt") else {
+        return dir_index_fail("the fixture has no seed.txt");
+    };
+    // Three 1 KiB blocks' worth, so the hint is well past the first one.
+    if let Some(failure) = fill_links(fs, target.raw(), 0, 192) {
+        return failure;
+    }
+    let Ok(before) = fs.read_inode(2).map(|i| i.size) else {
+        return dir_index_fail("read root");
+    };
+    if fs.unlink_entry(2, &capped_name(3)).is_err() {
+        return dir_index_fail("unlink");
+    }
+    if fs.lookup_child(2, &capped_name(3)).is_ok() {
+        return dir_index_fail("an unlinked name still resolves");
+    }
+    if fs.link_entry(2, b"reused00", target.raw()).is_err() {
+        return dir_index_fail("the replacement link failed");
+    }
+    let Ok(after) = fs.read_inode(2).map(|i| i.size) else {
+        return dir_index_fail("read root");
+    };
+    if after != before {
+        return slopos_testing::fail!(
+            "the directory grew from {} to {} bytes instead of reusing a freed record",
+            before,
+            after
+        );
+    }
+    if fs.lookup_child(2, b"reused00").is_err() {
+        return dir_index_fail("the replacement name does not resolve");
+    }
+    if fs.lookup_child(2, &capped_name(191)).is_err() {
+        return dir_index_fail("an untouched name stopped resolving");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_ext2_dir_hint_reuses_a_freed_record, suite = fs);

@@ -403,6 +403,7 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     slopos_sched::quota_console::quota_report("post-kernel-tests");
     slopos_sched::per_cpu::ap_pause_report("post-kernel-tests");
     slopos_sched::lifecycle::sched_cpu_report("post-kernel-tests");
+    slopos_fs::fsreport::fs_cost_report("post-kernel-tests");
 
     // Shutdown is always deferred to `SYSCALL_RUN_USERLAND_TESTS`, which merges
     // these counters, so that both phases run before QEMU exits.

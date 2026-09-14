@@ -1,6 +1,7 @@
 use super::Ext2Error;
 use super::blockmap;
 use super::cache::{BlockCache, BlockOwner};
+use super::geometry::Ext2Geometry;
 use super::ondisk::{FAST_SYMLINK_MAX, Inode, MODE_SYMLINK};
 use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
@@ -58,7 +59,6 @@ pub fn create_symlink_inode(
             let block_bytes =
                 slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(&mut inode.block[..]);
             block_bytes[..target.len()].copy_from_slice(target);
-            // blocks stays 0 for fast symlinks
         }
         Some(data_block) => {
             let mut blk = cache.get_zero_data(data_block, device, owner)?;
@@ -77,8 +77,7 @@ pub fn read_symlink(
     buf: &mut [u8],
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    ptrs_per_block: u32,
-    _block_size: u32,
+    geom: &Ext2Geometry,
     owner: BlockOwner,
 ) -> Result<usize, Ext2Error> {
     if !inode.is_symlink() {
@@ -98,14 +97,13 @@ pub fn read_symlink(
         return Ok(copy_len);
     }
 
-    let phys = blockmap::map_block(inode, FileBlock(0), ptrs_per_block, cache, device, owner)?;
+    let phys = blockmap::map_block(inode, FileBlock(0), geom, cache, device, owner)?;
     if !phys.is_valid() {
         return Err(Ext2Error::DeviceError);
     }
     let blk = cache.get_data(phys, device, owner)?;
     let data = blk.data();
-    // Same clamp on the slow path: `i_size` is the image's claim, `data` is
-    // what the block actually holds.
+    // Same clamp on the slow path: `i_size` is the image's claim.
     let copy_len = core::cmp::min(copy_len, data.len());
     buf[..copy_len].copy_from_slice(&data[..copy_len]);
     Ok(copy_len)

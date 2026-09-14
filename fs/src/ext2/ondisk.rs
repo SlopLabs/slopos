@@ -32,6 +32,14 @@ pub const FAST_SYMLINK_MAX: usize = 60;
 /// sealed binary reads as sealed to every other ext2 implementation.
 pub const EXT2_IMMUTABLE_FL: u32 = 0x0000_0010;
 
+/// `i_flags`: the directory's blocks carry an htree index inside records that
+/// read as free — block 0's `..` has a `rec_len` covering a `dx_root`, and an
+/// interior node is one free record spanning its whole block. That apparent
+/// slack is exactly where the linear inserter places an entry, so the first
+/// mutation of such a directory clears the flag instead; see
+/// `Ext2Fs::deindex_directory`.
+pub const EXT2_INDEX_FL: u32 = 0x0000_1000;
+
 /// Permission and set-id bits of `i_mode`; the type nibble above them is not
 /// a caller's to change.
 pub const MODE_PERM_MASK: u16 = 0o7777;
@@ -42,8 +50,7 @@ pub const EXT2_VALID_FS: u16 = 1;
 pub const EXT2_ERROR_FS: u16 = 2;
 
 /// `s_errors`: what a driver should do when it detects an inconsistency.
-/// SlopOS behaves as this value whatever the field says — a filesystem already
-/// known to be damaged must not be written into further — so the constant is
+/// SlopOS behaves as this value whatever the field says, so the constant is
 /// what a fixture writes and what `dumpe2fs` reports, never a selector.
 pub const EXT2_ERRORS_RO: u16 = 2;
 
@@ -54,11 +61,10 @@ pub const S_LAST_ORPHAN_OFF: usize = 232;
 
 /// The bookkeeping fields `e2fsck` reads and reports on.
 ///
-/// Deliberately **not** part of [`Superblock`]. Every one of them is touched
-/// only at mount or in the sub-block superblock write, whereas a `Superblock`
-/// is copied onto the stack of every operation and again into every
-/// transaction snapshot — the stack gate is what says so. `s_last_orphan` is
-/// the one new field that stayed, because an operation genuinely moves it.
+/// Deliberately **not** part of [`Superblock`]: these move only at mount and
+/// in the sub-block superblock write, whereas a `Superblock` is copied onto
+/// every operation's stack frame and into every transaction snapshot.
+/// `s_last_orphan` stayed, because an operation genuinely moves it.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct SuperblockBookkeeping {
     /// Unix time of the last mount.
@@ -69,9 +75,8 @@ pub struct SuperblockBookkeeping {
     pub mnt_count: u16,
     /// Mounts `e2fsck` allows between checks; 0 disables the rule.
     pub max_mnt_count: u16,
-    /// What a driver should do on an inconsistency. Read and reported; this
-    /// implementation behaves as `EXT2_ERRORS_RO` whatever it says, because a
-    /// filesystem already known to be damaged must not be written into.
+    /// What a driver should do on an inconsistency. Read and reported only;
+    /// see [`EXT2_ERRORS_RO`].
     pub errors: u16,
     /// Unix time of the last full check.
     pub lastcheck: u32,
@@ -93,9 +98,8 @@ impl SuperblockBookkeeping {
     }
 
     /// Whether the image is due a full check, by either of the two rules
-    /// `e2fsck` itself applies. `false` when the image disables a rule (`0`),
-    /// when no check has ever been recorded, or when `now` is `None` because
-    /// the boot established no wall clock.
+    /// `e2fsck` applies. `false` when a rule is disabled (`0`), when no check
+    /// was ever recorded, or when the boot established no wall clock.
     pub fn check_overdue(&self, now: Option<u32>) -> bool {
         if self.max_mnt_count > 0 && self.mnt_count >= self.max_mnt_count {
             return true;
@@ -111,8 +115,7 @@ impl SuperblockBookkeeping {
     /// Record a mount into a raw superblock block.
     ///
     /// `s_lastcheck` is deliberately not written: it says when a *full check*
-    /// last ran, and this kernel runs none. Stamping it would tell the next
-    /// `e2fsck` that a check it never performed had happened.
+    /// last ran, and this kernel runs none.
     pub fn stamp_mount(data: &mut [u8; 1024], now: Option<u32>) {
         let mnt_count = le16(data, 52).saturating_add(1);
         put_le16(data, 52, mnt_count);
@@ -144,6 +147,28 @@ pub const SUPPORTED_RO_COMPAT: u32 = RO_COMPAT_SPARSE_SUPER | RO_COMPAT_LARGE_FI
 pub const RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 pub const RO_COMPAT_LARGE_FILE: u32 = 0x0002;
 
+pub const COMPAT_DIR_PREALLOC: u32 = 0x0001;
+pub const COMPAT_IMAGIC_INODES: u32 = 0x0002;
+/// An ext3-style journal inode. This kernel logs through its own preallocated
+/// file instead, so the image's journal is neither replayed nor written.
+pub const COMPAT_HAS_JOURNAL: u32 = 0x0004;
+pub const COMPAT_EXT_ATTR: u32 = 0x0008;
+pub const COMPAT_RESIZE_INODE: u32 = 0x0010;
+/// Directories may carry an htree index; see [`EXT2_INDEX_FL`], which is the
+/// per-inode statement that one actually does.
+pub const COMPAT_DIR_INDEX: u32 = 0x0020;
+
+/// `s_feature_compat` bits whose presence this implementation accounts for.
+///
+/// Ignoring an unknown COMPAT bit is correct ext2 semantics; ignoring one
+/// without knowing you did is not. Naming the known set is what lets the
+/// mount report which bits it passed over.
+pub const SUPPORTED_COMPAT: u32 = COMPAT_DIR_PREALLOC
+    | COMPAT_IMAGIC_INODES
+    | COMPAT_EXT_ATTR
+    | COMPAT_RESIZE_INODE
+    | COMPAT_DIR_INDEX;
+
 #[derive(Debug, Copy, Clone)]
 pub struct Superblock {
     pub inodes_count: u32,
@@ -168,16 +193,11 @@ pub struct Superblock {
 
 /// `s_r_blocks_count`: blocks only a privileged writer may consume.
 ///
-/// ext2's own answer to "one writer must not be able to deny the disk to the
-/// rest of the system", carried on the image so `mke2fs -m`, `tune2fs -m` and
-/// `dumpe2fs` all agree with the kernel about the size of the reserve.
-///
-/// Deliberately **not** a [`Superblock`] field, for the reason
-/// [`SuperblockBookkeeping`] is not one either: a `Superblock` is copied onto
-/// every operation's stack frame and again into every transaction snapshot,
-/// and the stack gate is what says so. This value moves only when `tune2fs`
-/// moves it, so [`Ext2Geometry`](super::geometry::Ext2Geometry) reads it once
-/// at mount and holds it.
+/// Carried on the image so `mke2fs -m`, `tune2fs -m` and `dumpe2fs` all agree
+/// with the kernel about the size of the reserve. Not a [`Superblock`] field,
+/// for the reason [`SuperblockBookkeeping`] is not one either; it moves only
+/// when `tune2fs` moves it, so
+/// [`Ext2Geometry`](super::geometry::Ext2Geometry) reads it once at mount.
 pub fn reserved_blocks_of(data: &[u8]) -> u32 {
     le32(data, 8)
 }
@@ -232,6 +252,15 @@ impl Superblock {
         Ok(sb)
     }
 
+    /// `s_feature_compat` bits set on the image that this implementation does
+    /// not account for. Ignoring them is correct; not saying so is not.
+    pub fn unsupported_compat(&self) -> u32 {
+        if self.rev_level < 1 {
+            return 0;
+        }
+        self.feature_compat & !SUPPORTED_COMPAT
+    }
+
     /// Whether the image must be mounted read-only: it carries a
     /// read-only-compatible feature this implementation does not write.
     pub fn requires_readonly(&self) -> bool {
@@ -239,12 +268,11 @@ impl Superblock {
     }
 
     /// The superblock fields an operation may legitimately move. Everything
-    /// else in the 1024-byte block is left as read, so a field this
-    /// implementation does not model survives a write-back untouched.
+    /// else in the 1024-byte block is left as read.
     ///
     /// `s_state` is deliberately absent: the dirty stamp and the clean stamp
-    /// are barriered sub-block writes of their own, so a whole-superblock
-    /// write-back must not carry a stale copy of the field back over one.
+    /// are barriered sub-block writes of their own, and a whole-superblock
+    /// write-back must not carry a stale copy back over one.
     pub fn encode_mutable_fields(&self, data: &mut [u8]) {
         put_le32(data, 12, self.free_blocks_count);
         put_le32(data, 16, self.free_inodes_count);
@@ -314,9 +342,8 @@ const I_SIZE_HIGH_OFF: usize = 108;
 pub struct Inode {
     pub mode: u16,
     pub uid: u16,
-    /// Held as 64 bits because a regular file's is 64 bits on disk
-    /// (`i_size` plus `i_size_high`); every other type's high half is
-    /// `i_dir_acl` and is neither read nor written.
+    /// Held as 64 bits because a regular file's is 64 bits on disk (`i_size`
+    /// plus `i_size_high`); every other type's high half is `i_dir_acl`.
     pub size: u64,
     pub atime: u32,
     pub ctime: u32,
@@ -416,6 +443,11 @@ impl Inode {
     pub fn is_fast_symlink(&self) -> bool {
         self.is_symlink() && self.blocks == 0 && (self.size as usize) <= FAST_SYMLINK_MAX
     }
+
+    /// The directory's blocks hide an htree index (`EXT2_INDEX_FL`).
+    pub fn is_indexed(&self) -> bool {
+        self.flags & EXT2_INDEX_FL != 0
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -423,6 +455,10 @@ pub struct DirEntry<'a> {
     pub inode: InodeNum,
     pub file_type: u8,
     pub name: &'a [u8],
+    /// This record's own byte offset from the start of the directory's data.
+    /// Stable under an unrelated insert or unlink, which is what makes it a
+    /// key the name index can hold.
+    pub offset: u64,
 }
 
 /// Minimum size of a directory entry record (header only, no name).

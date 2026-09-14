@@ -8,7 +8,7 @@
 //! device reports — which is exactly how SLOPOS-2026-0053 stayed invisible.
 
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
-use slopos_fs::ext2::cache::BlockCache;
+use slopos_fs::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use slopos_fs::ext2::{Ext2Error, Ext2Fs};
 use slopos_fs::verity::{FsExtent, VerityStatus, build_verified};
 use slopos_ostd::KBox;
@@ -98,7 +98,7 @@ fn mount_and_probe(device: &(dyn BlockDevice + Send + Sync)) -> TestResult {
         Ok(v) => v,
         Err(e) => return fail!("mount_params: {:?}", e),
     };
-    let mut cache = match BlockCache::new_boxed(bs) {
+    let mut cache = match BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN) {
         Ok(c) => c,
         Err(e) => return fail!("BlockCache::new: {:?}", e),
     };

@@ -1,4 +1,8 @@
 #![no_std]
+// `AllocError` is `KBox::try_init`'s error carrier: the block cache is built
+// field by field into its heap slot so no whole-struct rvalue lands on a
+// caller's frame.
+#![feature(allocator_api)]
 #![forbid(unsafe_code)]
 
 /// Longest path the VFS resolves, NUL excluded. Matches
@@ -17,6 +21,7 @@ pub mod ext2;
 pub mod ext2_vfs;
 pub mod fileio;
 pub mod filemap;
+pub mod fsreport;
 pub mod partition;
 pub mod pipe;
 pub mod pipe_file_ops;
@@ -35,13 +40,12 @@ pub use blockdev::*;
 pub use cpio::{CpioError, unpack_cpio_into_root};
 pub use devfs::DevFs;
 pub use ext2::*;
-pub use ext2_vfs::{
-    Ext2MountInfo, ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
-    ext2_vfs_shutdown_sync, ext2_vfs_sync,
-};
+pub use ext2_vfs::{Ext2Mount, Ext2MountInfo, ext2_vfs_shutdown_sync};
 pub use fileio::*;
 pub use ramfs::RamFs;
 pub use vfs::{
     FileStat, FileSystem, FileType, InodeId, RootBacking, VfsError, VfsResult, mount,
+    vfs_claim_block_device, vfs_ext2_mount_named, vfs_ext2_unmount_named,
     vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with, vfs_is_initialized,
+    vfs_register_block_claim,
 };

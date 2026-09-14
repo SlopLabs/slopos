@@ -1,7 +1,7 @@
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
-use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
+use slopos_abi::io::{IO_FILE_BATCH_SIZE, IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::{POLLIN, POLLOUT};
 use slopos_ostd::KArc;
@@ -89,9 +89,8 @@ pub fn vfs_open_handle_flags_at(
     flags: crate::vfs::ops::VfsOpenFlags,
     resolve_flags: u32,
 ) -> Result<usize, slopos_abi::Errno> {
-    // A create may have *just* made this name, and re-resolving it is then a
-    // second lookup of something this call is responsible for rather than a
-    // check on something it merely found.
+    // A create may have *just* made this name: re-resolving it would be a
+    // second lookup of something this call itself is responsible for.
     let created = flags.create;
     let opened = crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags)
         .map_err(|e| e.to_errno())?;
@@ -130,10 +129,9 @@ fn register_vnode(
 ) -> Result<usize, slopos_abi::Errno> {
     // Before the table row exists, and a failure fails the open: an untracked
     // descriptor reads to `unlink` as an unreferenced inode, which is the one
-    // error that frees a file somebody is reading.
-    //
-    // A refusal because the inode is detached is a name that is gone, which
-    // `open(2)` reports as `ENOENT`; only a full table is `ENFILE`.
+    // error that frees a file somebody is reading. A refusal because the inode
+    // is detached is a name that is gone — `ENOENT`; only a full table is
+    // `ENFILE`.
     if let Err(e) = crate::vfs::orphan::open_ref(fs, inode) {
         return Err(match e {
             crate::vfs::orphan::OpenRefError::Detached => slopos_abi::Errno::ENOENT,
@@ -142,16 +140,10 @@ fn register_vnode(
     }
     // Between the walk above and `open_ref` nothing held the inode: an
     // `unlink` landing in that window frees it, and ext2's `InodeId` is a bare
-    // inode number with no generation, so the number is reallocated and this
-    // descriptor would name whatever file got it. Ramfs is immune — its ids
-    // carry a generation — but the rule has to hold for the filesystem that
-    // does not.
-    //
-    // The re-check is what makes the window harmless rather than closed: an
-    // inode reallocated *and* re-bound to this same path in between still
-    // passes, which needs an inode cache and a parent lock held across the
-    // walk. What it does close is the case that matters, where the name is
-    // gone or now denotes something else.
+    // inode number with no generation, so this descriptor would name whatever
+    // file got the number next. The re-check does not close the window — an
+    // inode reallocated *and* re-bound to this same path still passes — but it
+    // does close the case that matters, where the name is gone.
     if !created && !still_resolves(path, cwd, resolve_flags, fs, inode) {
         crate::vfs::orphan::close_ref(fs, inode);
         return Err(slopos_abi::Errno::ENOENT);
@@ -218,12 +210,10 @@ impl Drop for VnodeBacking {
 /// every step is a table removal, a bounded scan, a relaxed atomic, or a
 /// filesystem's own non-blocking reclaim.
 ///
-/// Where the deferred free runs is the filesystem's answer, not this
-/// function's. A blocking one is handed to that filesystem's writeback thread,
+/// A blocking deferred free belongs to the filesystem's writeback thread,
 /// because this can be a descriptor dropping on the task-exit path under a
 /// preempt guard, where a sleeping mutex and a park on block I/O are not
-/// available. A non-blocking one runs inline, because for an in-memory
-/// filesystem nothing else would ever run it.
+/// available; a non-blocking one runs inline, since nothing else would.
 fn release_vnode(handle: usize) {
     let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
     let removed = with_table(|t| t.remove(h).ok().map(|v| (v.fs, v.inode)));
@@ -276,12 +266,11 @@ pub(crate) fn drop_vnode_for_tests(handle: usize) {
 /// One chunk of a `read(2)`, taken from the inode's page set when it covers
 /// `offset` and from the filesystem otherwise.
 ///
-/// Both clips are load-bearing. The length stays the filesystem's answer,
-/// because the set holds whole pages and the tail of its last one is zero-fill
-/// past EOF; and a chunk that *starts* below the set is cut where coverage
-/// begins, or the rest would be read from the filesystem while the set holds
-/// newer bytes. A short answer is a coverage boundary, not EOF: only `Ok(0)`
-/// ends a read.
+/// Both clips are load-bearing: the length stays the filesystem's answer
+/// because the set holds whole pages zero-filled past EOF, and a chunk that
+/// *starts* below the set is cut where coverage begins, or the rest would come
+/// from the filesystem while the set holds newer bytes. A short answer is a
+/// coverage boundary, not EOF: only `Ok(0)` ends a read.
 pub(crate) fn read_chunk(
     fs: &'static dyn FileSystem,
     inode: InodeId,
@@ -353,6 +342,17 @@ fn clip(len: usize, limit: u64) -> usize {
     usize::try_from(limit).unwrap_or(usize::MAX).min(len)
 }
 
+/// Staging for one file I/O call: sized to the request so a one-byte write
+/// costs a one-byte allocation, capped at the batch bound, and falling back to
+/// the stream bound so memory pressure costs throughput rather than progress.
+fn stage_batch(want: usize) -> Option<slopos_ostd::KVec<u8>> {
+    let batch = want.min(IO_FILE_BATCH_SIZE);
+    if let Ok(v) = slopos_ostd::KVec::<u8>::zeroed(batch) {
+        return Some(v);
+    }
+    slopos_ostd::KVec::<u8>::zeroed(batch.min(IO_STAGING_SIZE)).ok()
+}
+
 impl FileOps for VfsFileOps {
     fn kind(&self) -> FileKind {
         FileKind::Regular
@@ -366,11 +366,9 @@ impl FileOps for VfsFileOps {
         if buf.is_empty() {
             return 0;
         }
-        // Sized to the request, capped at the staging bound: a one-byte read
-        // must not cost a 4 KiB kernel allocation.
-        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
-            Ok(v) => v,
-            Err(_) => return Errno::ENOMEM.as_isize(),
+        let mut staging = match stage_batch(buf.len()) {
+            Some(v) => v,
+            None => return Errno::ENOMEM.as_isize(),
         };
         let mut total = 0usize;
         let want = buf.len();
@@ -425,9 +423,9 @@ impl FileOps for VfsFileOps {
         } else {
             offset
         };
-        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
-            Ok(v) => v,
-            Err(_) => return Errno::ENOMEM.as_isize(),
+        let mut staging = match stage_batch(buf.len()) {
+            Some(v) => v,
+            None => return Errno::ENOMEM.as_isize(),
         };
         let mut total = 0usize;
         let want = buf.len();

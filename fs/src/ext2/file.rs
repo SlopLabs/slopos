@@ -13,7 +13,7 @@ pub fn read_file(
     buffer: &mut [u8],
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    ptrs_per_block: u32,
+    geom: &Ext2Geometry,
     block_size: u32,
     owner: BlockOwner,
 ) -> Result<usize, Ext2Error> {
@@ -33,7 +33,7 @@ pub fn read_file(
         let block_off = (file_offset % block_size as u64) as usize;
         let to_copy = cmp::min(max_len - read_total, block_size as usize - block_off);
 
-        let phys = blockmap::map_block(inode, fb, ptrs_per_block, cache, device, owner)?;
+        let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
         if phys.is_valid() {
             let blk = cache.get_data(phys, device, owner)?;
             buffer[read_total..read_total + to_copy]
@@ -54,10 +54,9 @@ pub fn write_file(
     buffer: &[u8],
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    ptrs_per_block: u32,
+    geom: &Ext2Geometry,
     block_size: u32,
     superblock: &mut Superblock,
-    geom: &Ext2Geometry,
     owner: BlockOwner,
 ) -> Result<usize, Ext2Error> {
     if !inode.is_regular_file() {
@@ -81,22 +80,14 @@ pub fn write_file(
         let block_off = (file_offset % block_size as u64) as usize;
         let to_copy = cmp::min(buffer.len() - written, block_size as usize - block_off);
 
-        let (phys, allocated) = match blockmap::ensure_data_block(
-            inode,
-            fb,
-            ptrs_per_block,
-            cache,
-            device,
-            superblock,
-            geom,
-            owner,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
-        };
+        let (phys, allocated) =
+            match blockmap::ensure_data_block(inode, fb, cache, device, geom, superblock, owner) {
+                Ok(v) => v,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            };
         // Counted before the copy: the blocks are the inode's the moment
         // `ensure_data_block` linked them in, whether or not this iteration
         // goes on to fill them.
@@ -140,18 +131,16 @@ fn file_block_index(offset: u64, block_size: u32) -> Result<u32, Ext2Error> {
 
 /// Shrink or extend a file to `new_size`.
 ///
-/// An extension is sparse: no block is allocated, and `read_file` answers zero
-/// for the hole. A shrink frees every block past the new end, including the
-/// partial tails of the indirect trees, and zeroes the remainder of the last
-/// surviving block — a later extension must read zeros there, not the bytes
-/// the truncate logically removed.
+/// An extension is sparse: no block is allocated and the hole reads as zero.
+/// A shrink frees every block past the new end, including the partial tails
+/// of the indirect trees.
 #[allow(clippy::too_many_arguments)]
 pub fn truncate(
     inode: &mut Inode,
     new_size: u64,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    ptrs_per_block: u32,
+    geom: &Ext2Geometry,
     block_size: u32,
     owner: BlockOwner,
     free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext2Error>,
@@ -174,7 +163,7 @@ pub fn truncate(
         if i < first_free {
             continue;
         }
-        let blk = inode.block[i as usize];
+        let blk = blockmap::checked_ptr(geom, inode.block[i as usize])?;
         if blk.is_valid() {
             count_free(blk)?;
             cache.invalidate(blk);
@@ -182,11 +171,11 @@ pub fn truncate(
         }
     }
 
-    let ppb = ptrs_per_block as u64;
+    let ppb = geom.ptrs_per_block() as u64;
     let mut subtree_start = 12u64;
     for (slot, depth) in [(12usize, 1u32), (13, 2), (14, 3)] {
         let span = ppb.checked_pow(depth).ok_or(Ext2Error::InvalidBlock)?;
-        let root = inode.block[slot];
+        let root = blockmap::checked_ptr(geom, inode.block[slot])?;
         if root.is_valid() {
             let from = first_free.saturating_sub(subtree_start);
             if from < span {
@@ -196,7 +185,7 @@ pub fn truncate(
                     from,
                     cache,
                     device,
-                    ptrs_per_block,
+                    geom,
                     owner,
                     &mut count_free,
                 )?;
@@ -215,7 +204,7 @@ pub fn truncate(
     let tail = (new_size % bs) as usize;
     if tail != 0 {
         let fb = FileBlock(file_block_index(new_size, block_size)?);
-        let phys = blockmap::map_block(inode, fb, ptrs_per_block, cache, device, owner)?;
+        let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
         if phys.is_valid() {
             let mut blk = cache.get_data(phys, device, owner)?;
             blk.data_mut()[tail..].fill(0);
@@ -242,20 +231,21 @@ fn truncate_indirect(
     from: u64,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    ptrs_per_block: u32,
+    geom: &Ext2Geometry,
     owner: BlockOwner,
     free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext2Error>,
 ) -> Result<bool, Ext2Error> {
+    let block = blockmap::checked_ptr(geom, block)?;
     if depth == 0 || !block.is_valid() {
         return Ok(false);
     }
+    let ptrs_per_block = geom.ptrs_per_block();
     let count = cmp::min(ptrs_per_block as usize, 1024);
     let child_span = (ptrs_per_block as u64)
         .checked_pow(depth - 1)
         .ok_or(Ext2Error::InvalidBlock)?;
 
-    // Heap-held, as in `free_indirect`: an inline pointer array per recursion
-    // level puts 12 KiB on the stack at depth 3.
+    // Heap-held, for the reason given on `free_indirect`.
     let mut ptrs =
         slopos_ostd::KVec::<BlockNum>::zeroed(count).map_err(|_| Ext2Error::OutOfMemory)?;
     {
@@ -274,7 +264,7 @@ fn truncate_indirect(
 
     let mut cleared = false;
     for i in 0..count {
-        let child = ptrs[i];
+        let child = blockmap::checked_ptr(geom, ptrs[i])?;
         if !child.is_valid() {
             continue;
         }
@@ -290,7 +280,7 @@ fn truncate_indirect(
                 child_from,
                 cache,
                 device,
-                ptrs_per_block,
+                geom,
                 owner,
                 free_fn,
             )?
@@ -328,15 +318,16 @@ pub(crate) fn free_indirect(
     depth: u32,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    ptrs_per_block: u32,
+    geom: &Ext2Geometry,
     owner: BlockOwner,
     free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext2Error>,
 ) -> Result<(), Ext2Error> {
+    let block = blockmap::checked_ptr(geom, block)?;
     if depth == 0 || !block.is_valid() {
         return Ok(());
     }
 
-    let count = cmp::min(ptrs_per_block as usize, 1024);
+    let count = cmp::min(geom.ptrs_per_block() as usize, 1024);
     let mut ptrs =
         slopos_ostd::KVec::<BlockNum>::zeroed(count).map_err(|_| Ext2Error::OutOfMemory)?;
     {
@@ -354,20 +345,13 @@ pub(crate) fn free_indirect(
     }
 
     for i in 0..count {
-        if ptrs[i].is_valid() {
+        let child = blockmap::checked_ptr(geom, ptrs[i])?;
+        if child.is_valid() {
             if depth > 1 {
-                free_indirect(
-                    ptrs[i],
-                    depth - 1,
-                    cache,
-                    device,
-                    ptrs_per_block,
-                    owner,
-                    free_fn,
-                )?;
+                free_indirect(child, depth - 1, cache, device, geom, owner, free_fn)?;
             }
-            free_fn(ptrs[i])?;
-            cache.invalidate(ptrs[i]);
+            free_fn(child)?;
+            cache.invalidate(child);
         }
     }
 

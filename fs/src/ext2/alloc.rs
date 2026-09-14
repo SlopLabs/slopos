@@ -6,10 +6,9 @@ use super::types::{BlockNum, GroupIdx, InodeNum};
 use crate::blockdev::BlockDevice;
 use slopos_ostd::bitmap_slice;
 
-/// ext2's own denial-of-service answer: `s_r_blocks_count` blocks are spendable
-/// only by a writer entitled to them, so a process that fills the disk still
-/// leaves the reserve for `/sbin/init` and the kernel's own writes. A handle
-/// whose caller is entitled carries a reserve of zero.
+/// ext2's denial-of-service answer: `s_r_blocks_count` blocks are spendable
+/// only by an entitled writer, so a process that fills the disk still leaves
+/// the reserve for `/sbin/init`. An entitled handle carries a reserve of zero.
 fn reserve_permits_allocation(geom: &Ext2Geometry, superblock: &Superblock) -> bool {
     superblock.free_blocks_count > geom.reserved_blocks()
 }
@@ -25,9 +24,9 @@ pub fn allocate_block_near(
     if !reserve_permits_allocation(geom, superblock) {
         return Err(Ext2Error::NoSpace);
     }
-    // Charged before the search, so a caller over its ceiling costs no bitmap
-    // work, and given back below if the search finds nothing. The reserve
-    // above is a system floor; this is the per-principal ceiling.
+    // The reserve above is a system floor; this is the per-principal ceiling.
+    // Charged before the search so a caller over it costs no bitmap work, and
+    // given back below if the search finds nothing.
     cache.charge_blocks(geom.account(), owner.charged_inode(), 1)?;
     let allocated = allocate_searching(goal, geom, superblock, cache, device);
     if allocated.is_err() {
@@ -36,6 +35,11 @@ pub fn allocate_block_near(
     allocated
 }
 
+/// Sweeps the volume for a free block, hinted.
+///
+/// Three hints keep a nearly-full volume from rescanning what it knows is
+/// allocated: the goal group first, then the group the last allocation
+/// succeeded in, and within a group the bit above the last one taken.
 fn allocate_searching(
     goal: BlockNum,
     geom: &Ext2Geometry,
@@ -43,24 +47,31 @@ fn allocate_searching(
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
 ) -> Result<BlockNum, Ext2Error> {
-    let first_group = geom.group(0).ok_or(Ext2Error::NoSpace)?;
-    let goal_group = geom
-        .locate_block(goal)
-        .map(|(g, _)| g)
-        .unwrap_or(first_group);
+    let groups_count = geom.groups_count();
+    if groups_count == 0 {
+        return Err(Ext2Error::NoSpace);
+    }
+    cache.size_group_hints(groups_count);
 
-    if let Some(block) = try_alloc_block_in_group(goal_group, geom, superblock, cache, device)? {
+    let goal_group = geom.locate_block(goal).map(|(g, _)| g);
+    if let Some(group) = goal_group
+        && let Some(block) = try_alloc_block_in_group(group, geom, superblock, cache, device)?
+    {
+        cache.set_alloc_group(group.raw());
         return Ok(block);
     }
 
-    for g in 0..geom.groups_count() {
-        let Some(group) = geom.group(g) else {
+    let start = cache.alloc_group() % groups_count;
+    for k in 0..groups_count {
+        let raw = (start + k) % groups_count;
+        let Some(group) = geom.group(raw) else {
             continue;
         };
-        if group == goal_group {
+        if goal_group == Some(group) {
             continue;
         }
         if let Some(block) = try_alloc_block_in_group(group, geom, superblock, cache, device)? {
+            cache.set_alloc_group(raw);
             return Ok(block);
         }
     }
@@ -181,10 +192,24 @@ fn try_alloc_block_in_group(
     let bitmap_block = desc.block_bitmap;
     let bits_in_group = geom.blocks_per_group();
 
-    let bit = {
+    let hint = cache.group_hint(group.raw());
+    // `rescanned` is the hint's own correctness condition: a search that
+    // found nothing above the hint must still see the blocks below it, and
+    // the hint it skipped them on is stale.
+    let (bit, rescanned) = {
         let bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
-        bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, 0)
+        match bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, hint) {
+            Some(bit) => (Some(bit), false),
+            None if hint > 0 => (
+                bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, 0),
+                true,
+            ),
+            None => (None, false),
+        }
     };
+    if rescanned {
+        cache.set_group_hint(group.raw(), 0);
+    }
 
     let Some(bit) = bit else {
         return Ok(None);
@@ -194,6 +219,7 @@ fn try_alloc_block_in_group(
         let mut bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         bitmap_slice::set_bit(bmap.data_mut(), bit);
     }
+    cache.set_group_hint(group.raw(), bit as u32 + 1);
 
     let Some(block_num) = geom.block_of(group, bit as u32) else {
         return Err(Ext2Error::InvalidBlock);

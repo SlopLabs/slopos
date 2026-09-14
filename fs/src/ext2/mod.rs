@@ -2,6 +2,7 @@ pub(crate) mod blockcharge;
 pub mod blockmap;
 pub mod cache;
 pub mod dir;
+pub mod dirindex;
 #[path = "alloc.rs"]
 pub mod ext2_alloc;
 pub mod file;
@@ -17,13 +18,13 @@ use cache::{BlockCache, BlockOwner};
 use geometry::Ext2Geometry;
 use ondisk::{
     DIR_FT_DIR, DIR_FT_REG_FILE, DIR_FT_SYMLINK, DirEntry, EXT2_ERROR_FS, EXT2_IMMUTABLE_FL,
-    EXT2_VALID_FS, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK,
+    EXT2_INDEX_FL, EXT2_VALID_FS, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK,
     RO_COMPAT_LARGE_FILE, S_LAST_ORPHAN_OFF, Superblock,
 };
 use types::{BlockNum, FileBlock, GroupIdx, InodeNum};
 
 use crate::blockdev::BlockDevice;
-use slopos_ostd::KVec;
+use slopos_ostd::{KVec, klog_info};
 
 pub use ondisk::EXT2_MAX_BLOCK_SIZE;
 
@@ -47,13 +48,9 @@ pub enum Ext2Error {
     /// [`Ext2Error::is_corruption`] latches the mount on it.
     InvalidBlock,
     /// A *caller-supplied* offset, cursor or argument does not address
-    /// anything valid.
-    ///
-    /// Split from [`Self::InvalidBlock`] precisely because that variant is
-    /// evidence of a damaged image and this one is not: `readdir_cookie`'s
-    /// cursor comes from userland through `fs_list`, so an argument error that
-    /// latched the mount would let any process take the filesystem read-only
-    /// for everybody with one bad `u64`.
+    /// anything valid. Split from [`Self::InvalidBlock`], which latches the
+    /// mount: a `readdir` cursor comes from userland, so an argument error
+    /// that latched would let any process take the filesystem read-only.
     InvalidRange,
     UnsupportedIndirection,
     DeviceError,
@@ -79,15 +76,12 @@ impl Ext2Error {
     /// Whether this error means the *image or the device* is wrong, rather
     /// than the caller.
     ///
-    /// This is what `errors=remount-ro` keys on, so the classification has to
-    /// be conservative in one specific direction: an error a caller can
-    /// produce on demand must never appear here, or an unprivileged
-    /// `stat`/`unlink` of a nonexistent thing would flip the whole mount
-    /// read-only. `InvalidInode` is the sharp case — it covers both "that
-    /// inode number is out of range", which any caller can ask for, and a
-    /// genuinely damaged group descriptor — so it stays out. The four below
-    /// are only ever produced by a structure that failed its own validity
-    /// check, or by the device refusing I/O.
+    /// What `errors=remount-ro` keys on, so the classification is conservative
+    /// in one direction: an error a caller can produce on demand must never
+    /// appear here, or an unprivileged `stat` of a nonexistent thing would
+    /// flip the whole mount read-only. `InvalidInode` is the sharp case — it
+    /// also covers an out-of-range number any caller can ask for — so it
+    /// stays out.
     pub fn is_corruption(self) -> bool {
         matches!(
             self,
@@ -104,6 +98,10 @@ impl Ext2Error {
 /// unexplained property of the disk.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReadOnlyReason {
+    /// The mount was asked for read-only. Listed first because it is the
+    /// caller's intent rather than a property of the image, and it outranks
+    /// every reason derived from the medium.
+    Requested,
     /// A verity trailer makes the device refuse writes.
     DeviceWriteProtected,
     /// The image declares a read-only-compatible feature this implementation
@@ -195,8 +193,7 @@ enum SyncPhase {
 /// Carrying the epoch, the log head and the log generation it opened on is
 /// what bounds the pass: an operation that runs between two steps is entirely
 /// outside it, so the resumed pass can neither publish that operation's
-/// metadata ahead of its data nor empty a log that has grown — or been emptied
-/// and refilled — behind it.
+/// metadata ahead of its data nor empty a log that has grown behind it.
 #[derive(Debug, Clone, Copy)]
 pub struct SyncPass {
     epoch: u64,
@@ -218,9 +215,9 @@ impl SyncPass {
 /// RAII scope for one all-or-nothing ext2 operation.
 ///
 /// Rolls back on drop unless [`Self::commit`] ran, which covers the `?` exits
-/// that make up most of the failure paths below as well as an explicit
-/// `return Err`. The `Drop` is panic-free by construction: every step it takes
-/// is a field assignment or a `BlockCache` method that cannot fail.
+/// as well as an explicit `return Err`. The `Drop` is panic-free by
+/// construction: every step it takes is a field assignment or an infallible
+/// `BlockCache` method.
 struct Ext2Txn<'t, 'a> {
     fs: &'t mut Ext2Fs<'a>,
     superblock: Superblock,
@@ -234,10 +231,8 @@ struct Ext2Txn<'t, 'a> {
 impl<'t, 'a> Ext2Txn<'t, 'a> {
     fn begin(fs: &'t mut Ext2Fs<'a>) -> Self {
         // Only the outermost scope owns the superblock snapshot, matching
-        // `BlockCache::begin_op`'s own depth rule. An inner scope that
-        // restored its own snapshot while the outer one went on to commit
-        // would leave the free counts disagreeing with the bitmaps the cache
-        // still holds.
+        // `BlockCache::begin_op`'s depth rule. An inner scope restoring its own
+        // snapshot would leave the free counts disagreeing with the bitmaps.
         let outermost = !fs.in_transaction;
         let superblock = fs.superblock;
         let superblock_dirty = fs.superblock_dirty;
@@ -282,18 +277,13 @@ impl Drop for Ext2Txn<'_, '_> {
         self.fs.cache.rollback_op();
         if self.outermost {
             // The orphan-list head is the one field an operation publishes
-            // straight to the device, so the cache rollback above cannot
-            // retract it. Put the committed value back before the in-memory
-            // superblock is restored, or the two disagree: on disk the head
-            // names an inode whose zeroing has just been rolled back, and a
-            // crash before the next `sync` gives the next mount's drain a head
-            // it refuses — which then discards the genuine chain behind it.
-            //
-            // Best-effort by necessity: this is a destructor, so a device
-            // error has nowhere to go. Failing leaves exactly the state that
-            // not trying would have, and `e2fsck` reclaims it.
-            // Under a log the head write was deferred past a commit that
-            // never happened, so there is nothing on the device to retract.
+            // straight to the device, so the cache rollback cannot retract it.
+            // Restore it before the in-memory superblock, or a crash leaves a
+            // head naming an inode whose zeroing was rolled back — which the
+            // next mount's drain refuses, discarding the chain behind it.
+            // Best-effort: a destructor has nowhere to put a device error.
+            // Under a log the head write was deferred past a commit that never
+            // happened, so there is nothing on the device to retract.
             let deferred = self.fs.take_pending_orphan_head().is_some();
             if !deferred && self.fs.superblock.last_orphan != self.superblock.last_orphan {
                 let published = self.fs.superblock.last_orphan;
@@ -318,7 +308,6 @@ pub struct Ext2Fs<'a> {
     cache: &'a mut BlockCache,
     block_size: u32,
     inode_size: u16,
-    ptrs_per_block: u32,
     /// Set when an op changed the in-memory free-counts, leaving the on-disk
     /// superblock stale; persisted only by [`Self::sync`], never mid-operation.
     superblock_dirty: bool,
@@ -347,9 +336,8 @@ impl<'a> Ext2Fs<'a> {
     /// the [`BlockCache`] before it exists. Returns
     /// `(superblock, block_size, inode_size)`.
     ///
-    /// `#[inline(never)]`, as with the other two superblock-I/O helpers: each
-    /// stages the full 1024-byte block on its own frame, and three of those
-    /// inlined into one caller is 3 KiB of the 2 KiB budget.
+    /// `#[inline(never)]`, like the other superblock-I/O helpers: each stages
+    /// the full 1024-byte block on its own frame.
     #[inline(never)]
     pub fn mount_params(device: &dyn BlockDevice) -> Result<(Superblock, u32, u16), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
@@ -359,6 +347,15 @@ impl<'a> Ext2Fs<'a> {
         let superblock = Superblock::parse(&sb_buf)?;
         let block_size = superblock.block_size()?;
         let inode_size = superblock.effective_inode_size();
+        // Ignoring a COMPAT bit is correct — that is what makes it compatible
+        // — but this is the one place that can still say which.
+        let ignored = superblock.unsupported_compat();
+        if ignored != 0 {
+            klog_info!(
+                "ext2: ignoring unknown compat features {:#x}; the image stays readable and writable",
+                ignored
+            );
+        }
         Ok((superblock, block_size, inode_size))
     }
 
@@ -366,7 +363,6 @@ impl<'a> Ext2Fs<'a> {
     ///
     /// Its own read rather than a fourth element on [`Self::mount_params`]'s
     /// tuple, which every other caller would have to name and discard.
-    /// `#[inline(never)]` for the same 1 KiB-buffer reason.
     #[inline(never)]
     pub fn read_block_reserve(device: &dyn BlockDevice) -> Result<u32, Ext2Error> {
         let mut sb_buf = [0u8; 1024];
@@ -394,7 +390,6 @@ impl<'a> Ext2Fs<'a> {
             cache,
             block_size,
             inode_size,
-            ptrs_per_block: block_size / 4,
             superblock_dirty: false,
             read_only,
             corruption_seen: false,
@@ -417,10 +412,9 @@ impl<'a> Ext2Fs<'a> {
         self.geom = self.geom.with_reserve(reserved);
     }
 
-    /// Charge block allocations through this handle to `account`.
-    ///
-    /// Per call, for the same reason the reserve is: the mount is shared and
-    /// the allocation is the caller's.
+    /// Charge block allocations through this handle to `account`. Per call,
+    /// like the reserve: the mount is shared and the allocation is the
+    /// caller's.
     pub fn set_account(&mut self, account: slopos_ostd::process::AccountId) {
         self.geom = self.geom.with_account(account);
     }
@@ -430,8 +424,7 @@ impl<'a> Ext2Fs<'a> {
         self.journal_inode
     }
 
-    /// Refuse readers of the log's file on this handle. Per call, like the
-    /// reserve and the account: the value belongs to the mount.
+    /// Refuse readers of the log's file on this handle.
     pub fn set_journal_inode(&mut self, ino: Option<u32>) {
         self.journal_inode = ino;
     }
@@ -443,10 +436,8 @@ impl<'a> Ext2Fs<'a> {
     /// The one rule for whether a handle over `device` may mutate.
     ///
     /// Deliberately does **not** consult `s_state`: a mounted image carries
-    /// `EXT2_ERROR_FS` by design, so a per-call handle built after
-    /// [`Self::mark_dirty_on_disk`] would read its own mount stamp as damage
-    /// and refuse every write. The not-cleanly-unmounted question is asked
-    /// once, at mount, against the superblock as it came off the disk — see
+    /// `EXT2_ERROR_FS` by design, so a per-call handle would read its own
+    /// mount stamp as damage. That question is asked once, at mount — see
     /// [`Self::mount_read_only_reason`].
     pub fn read_only_for(superblock: &Superblock, device: &dyn BlockDevice) -> bool {
         superblock.requires_readonly() || device.write_protected()
@@ -465,12 +456,9 @@ impl<'a> Ext2Fs<'a> {
         if superblock.requires_readonly() {
             return Some(ReadOnlyReason::UnsupportedFeature);
         }
-        // The image was never marked clean, so a previous mount either is
-        // still running or died mid-write. Either way the free counts, the
-        // bitmaps and the inode table may disagree with each other, and
-        // writing into that turns a repairable image into a lost one. There
-        // is no in-kernel fsck and there should not be one: read-only plus a
-        // loud log line is the honest behaviour, and `e2fsck` is the repair.
+        // Never marked clean: a previous mount is either still running or died
+        // mid-write, so the free counts, the bitmaps and the inode table may
+        // disagree. Writing into that turns a repairable image into a lost one.
         if superblock.state != EXT2_VALID_FS {
             return Some(ReadOnlyReason::NotCleanlyUnmounted);
         }
@@ -493,10 +481,9 @@ impl<'a> Ext2Fs<'a> {
     /// Record a corruption verdict on the way out of an operation.
     ///
     /// Called once, by whoever owns the mount, around the whole operation —
-    /// rather than at each entry point, which is a list that the next entry
-    /// point added can be left off. `transaction` classifies too, because a
-    /// rollback needs the verdict before the error leaves the scope, and
-    /// setting the same flag twice is idempotent.
+    /// rather than at each entry point, a list the next one added can be left
+    /// off. `transaction` classifies too, because a rollback needs the verdict
+    /// before the error leaves the scope.
     pub fn note_result<R>(&mut self, result: Result<R, Ext2Error>) -> Result<R, Ext2Error> {
         if let Err(e) = &result
             && e.is_corruption()
@@ -520,9 +507,7 @@ impl<'a> Ext2Fs<'a> {
     ///
     /// With a redo log the retraction is exact, because no home block carries
     /// the operation's changes until its commit record is on the medium.
-    /// Without one the scope is cache-deep: a block evicted mid-operation
-    /// reached its home before the failure, and
-    /// [`BlockCache::find_or_evict`] only makes that the case of last resort.
+    /// Without one the scope is cache-deep — see [`BlockCache::rollback_op`].
     fn transaction<R>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<R, Ext2Error>,
@@ -530,9 +515,11 @@ impl<'a> Ext2Fs<'a> {
         // An idle window may have marked the image clean; the dirty stamp must
         // reach the medium before anything this scope publishes.
         self.restamp_dirty()?;
-        // The only point at which the log can be emptied: a check point
-        // publishes committed content, and mid-operation the same blocks hold
-        // uncommitted content.
+        // Last resort only: the VFS wrapper drives the same drain in chunks
+        // with the mount lock released between them, and this arm is for the
+        // callers that never see it. Also the only point at which the log can
+        // be emptied — a check point publishes committed content, and
+        // mid-operation the same blocks hold uncommitted content.
         if !self.in_transaction && !self.cache.journal_has_headroom() {
             self.checkpoint_journal()?;
         }
@@ -588,9 +575,7 @@ impl<'a> Ext2Fs<'a> {
 
     /// The bookkeeping fields as they stand on the device.
     ///
-    /// Read back rather than held: they move only at mount and in the
-    /// superblock write, and carrying them on this handle would put them in
-    /// every operation's frame and every transaction snapshot.
+    /// Read back rather than held; see [`ondisk::SuperblockBookkeeping`].
     #[inline(never)]
     pub fn read_bookkeeping(&self) -> Result<ondisk::SuperblockBookkeeping, Ext2Error> {
         let mut sb_buf = [0u8; 1024];
@@ -668,24 +653,21 @@ impl<'a> Ext2Fs<'a> {
     /// Commit one inode: its data blocks, the allocation state that makes them
     /// reachable, and its on-disk record.
     ///
-    /// Two things are deliberately outside the scope. The directory entry
-    /// naming the inode is not committed: POSIX says an `fsync` on the parent
-    /// directory does that, and a crash before the entry lands leaves an
-    /// orphan inode, not a corrupt file. Nor is the superblock's free-count
-    /// drift, which `e2fsck` recomputes and which a crash already mandates a
-    /// check for (the mount stamped `EXT2_ERROR_FS`).
+    /// The directory entry naming the inode is deliberately outside the scope
+    /// — POSIX puts that on an `fsync` of the parent, and a crash before it
+    /// leaves an orphan inode, not a corrupt file — as is the superblock's
+    /// free-count drift, which `e2fsck` recomputes.
     ///
     /// Ordering follows `data=ordered` narrowed to one inode: data and
     /// allocation blocks, a barrier, then the inode-table block. A crash
     /// between the two leaves a record whose size predates the data, never one
     /// whose blocks hold a previous file's contents. Allocation state goes in
     /// the *first* phase because an inode published while the bitmap still
-    /// calls its blocks free is an invitation to hand them to a second file.
+    /// calls its blocks free invites handing them to a second file.
     ///
-    /// `data_only` currently selects nothing: an ext2 record carries the block
-    /// pointers, the size and the timestamps in one 128-byte struct, so no
-    /// write commits the first two without the third. It divides only once a
-    /// timestamp alone can dirty a record, which needs the wall clock.
+    /// `data_only` selects nothing: an ext2 record carries block pointers,
+    /// size and timestamps in one struct, so no write commits some without the
+    /// rest.
     pub fn sync_inode(&mut self, ino: u32, data_only: bool) -> Result<(), Ext2Error> {
         let _ = data_only;
         let ino_num = InodeNum(ino);
@@ -722,8 +704,7 @@ impl<'a> Ext2Fs<'a> {
     /// Inclusive range of inode numbers whose records share `table_block`.
     ///
     /// Widened by one record on each side when `inode_size` does not divide
-    /// the block size, because then a record straddles the boundary. Erring
-    /// wide costs a few extra data blocks in the pre-flush; erring narrow
+    /// the block size. Erring wide costs a larger pre-flush; erring narrow
     /// would publish a neighbour's record ahead of its data.
     fn inode_table_span(
         &mut self,
@@ -771,9 +752,8 @@ impl<'a> Ext2Fs<'a> {
 
     /// Whether a writeback pass would do anything at all.
     ///
-    /// A barrier over nothing orders nothing, and this is asked on every
-    /// flusher tick and every `sync(2)`. The log counts as work even with a
-    /// clean cache: a rollback can leave a block whose only copy is a record.
+    /// A barrier over nothing orders nothing. The log counts as work even with
+    /// a clean cache: a rollback can leave a block whose only copy is a record.
     pub fn sync_pending(&self) -> bool {
         self.cache.dirty_count() > 0
             || self.cache.unbarriered_writes() > 0
@@ -881,9 +861,8 @@ impl<'a> Ext2Fs<'a> {
     /// Attach the image's metadata log, replaying whatever a previous boot
     /// committed and never check pointed.
     ///
-    /// `Ok(None)` for an image with no usable log: a journal is an ext2
-    /// image's optional property, and without one operations fall back to
-    /// undo-scoped. A read-only mount attaches none — replay is a write.
+    /// `Ok(None)` for an image with no usable log; operations then fall back
+    /// to undo-scoped. A read-only mount attaches none — replay is a write.
     #[inline(never)]
     pub fn attach_journal(&mut self) -> Result<Option<journal::JournalRecovery>, Ext2Error> {
         let ino = match self.resolve_path(JOURNAL_PATH) {
@@ -903,11 +882,22 @@ impl<'a> Ext2Fs<'a> {
         if blocks < journal::MIN_LOG_SLOTS + 1 {
             return Ok(None);
         }
+        // Clamped rather than refused, and clamped here so the mapped list is
+        // the one the log keeps — `log_blocks_unchanged` compares against it.
+        let blocks = if blocks > journal::MAX_LOG_SLOTS {
+            slopos_ostd::klog_info!(
+                "ext2: /.journal has {} slots; using the first {}",
+                blocks,
+                journal::MAX_LOG_SLOTS
+            );
+            journal::MAX_LOG_SLOTS
+        } else {
+            blocks
+        };
         // Recorded once the shape says it really is a log, and before the
         // read-only bail: a mount that cannot replay still owes readers the
-        // refusal. Earlier would reserve the name against an ordinary file,
-        // which *can* be deleted — and the refusal would then follow its inode
-        // number to whatever reused it.
+        // refusal. Earlier would reserve the number against a deletable file,
+        // and the refusal would follow it to whatever reused the number.
         self.journal_inode = Some(ino);
         if self.read_only {
             return Ok(None);
@@ -957,7 +947,7 @@ impl<'a> Ext2Fs<'a> {
             let block = blockmap::map_block(
                 &inode,
                 FileBlock(index),
-                self.ptrs_per_block,
+                &self.geom,
                 &mut *self.cache,
                 self.device,
                 BlockOwner::File(ino),
@@ -1041,9 +1031,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     /// Classify an inode-table block by the records it carries, so a per-inode
-    /// sync can tell it apart from a directory block. A span that fails to
-    /// close degrades to [`BlockOwner::Other`], which is the conservative
-    /// answer: `sync_inode` then declines to publish it early.
+    /// sync can tell it apart from a directory block.
     fn inode_block_owner(
         &mut self,
         ino: InodeNum,
@@ -1086,7 +1074,7 @@ impl<'a> Ext2Fs<'a> {
             buffer,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(ino),
         )
@@ -1111,10 +1099,9 @@ impl<'a> Ext2Fs<'a> {
                 buffer,
                 &mut *fs.cache,
                 fs.device,
-                fs.ptrs_per_block,
+                &fs.geom,
                 fs.block_size,
                 &mut fs.superblock,
-                &fs.geom,
                 BlockOwner::File(ino),
             );
             let written = result?;
@@ -1147,10 +1134,9 @@ impl<'a> Ext2Fs<'a> {
                 return Err(Ext2Error::NotFile);
             }
             // A size past what the block map can address would leave `i_size`
-            // naming a block no read could ever reach, and every later read of
-            // the hole would fail. Refused here rather than at that read: the
-            // size is the caller's, and this is the only place it is set.
-            if new_size > blockmap::max_file_size(fs.ptrs_per_block, fs.block_size) {
+            // naming a block no read could reach. Refused here rather than at
+            // that read: this is the only place the size is set.
+            if new_size > blockmap::max_file_size(fs.geom.ptrs_per_block(), fs.block_size) {
                 return Err(Ext2Error::InvalidRange);
             }
             let free_before = fs.superblock.free_blocks_count;
@@ -1167,10 +1153,8 @@ impl<'a> Ext2Fs<'a> {
         })
     }
 
-    /// A file above 4 GiB is only correctly read by an implementation that
-    /// knows to consult `i_size_high`, and ext2 spells that as a
-    /// read-only-compatible feature bit. Writing one without setting the bit
-    /// hands every other reader a truncated size.
+    /// Set `RO_COMPAT_LARGE_FILE` once a record needs it: see
+    /// [`Inode::needs_large_file_feature`].
     fn note_large_file(&mut self, inode: &Inode) {
         if inode.needs_large_file_feature()
             && self.superblock.feature_ro_compat & RO_COMPAT_LARGE_FILE == 0
@@ -1200,7 +1184,7 @@ impl<'a> Ext2Fs<'a> {
             new_size,
             cache,
             device,
-            self.ptrs_per_block,
+            &geom,
             self.block_size,
             owner,
             &mut |b| freed.push(b).map_err(|_| Ext2Error::OutOfMemory),
@@ -1220,8 +1204,7 @@ impl<'a> Ext2Fs<'a> {
             buffer,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
-            self.block_size,
+            &self.geom,
             BlockOwner::File(ino),
         )
     }
@@ -1308,7 +1291,7 @@ impl<'a> Ext2Fs<'a> {
                 name,
                 &mut *fs.cache,
                 fs.device,
-                fs.ptrs_per_block,
+                &fs.geom,
                 fs.block_size,
                 BlockOwner::File(parent_num.raw()),
             )
@@ -1316,6 +1299,7 @@ impl<'a> Ext2Fs<'a> {
             {
                 return Err(Ext2Error::AlreadyExists);
             }
+            fs.deindex_directory(parent_num, &mut parent_inode)?;
 
             let ft = dir_file_type(&target_inode);
             dir::append_dir_entry(
@@ -1325,10 +1309,9 @@ impl<'a> Ext2Fs<'a> {
                 ft,
                 &mut *fs.cache,
                 fs.device,
-                fs.ptrs_per_block,
+                &fs.geom,
                 fs.block_size,
                 &mut fs.superblock,
-                &fs.geom,
                 BlockOwner::File(parent_num.raw()),
             )?;
 
@@ -1374,7 +1357,7 @@ impl<'a> Ext2Fs<'a> {
             &inode,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(ino),
             &mut f,
@@ -1399,11 +1382,59 @@ impl<'a> Ext2Fs<'a> {
             start,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(ino),
             &mut f,
         )
+    }
+
+    /// One name under one directory — the only directory lookup the kernel
+    /// has, and so the single place the name index hooks; see
+    /// [`dir::lookup_child`].
+    #[inline(never)]
+    pub fn lookup_child(&mut self, parent: u32, name: &[u8]) -> Result<InodeNum, Ext2Error> {
+        let parent_inode = self.read_inode_num(InodeNum(parent))?;
+        if !parent_inode.is_directory() {
+            return Err(Ext2Error::NotDirectory);
+        }
+        dir::lookup_child(
+            &parent_inode,
+            name,
+            &mut *self.cache,
+            self.device,
+            &self.geom,
+            self.block_size,
+            BlockOwner::File(parent),
+        )
+    }
+
+    /// Whether the name index can answer a miss in `ino` without scanning it.
+    /// The index is an accelerator with no observable behaviour of its own, so
+    /// this is the only way to tell that a directory fell back to scanning.
+    pub fn dir_index_complete(&self, ino: u32) -> bool {
+        self.cache.dir_index_complete(ino)
+    }
+
+    /// Clear `EXT2_INDEX_FL` before the first mutation of a directory that
+    /// carries it, and publish the inode before any block is touched.
+    ///
+    /// Nothing here builds an htree, and the linear inserter places entries in
+    /// exactly the slack an index node hides (see [`ondisk::EXT2_INDEX_FL`]) —
+    /// leaving an image Linux still reads as indexed over a tree this kernel
+    /// destroyed. De-indexing is the honest resolution: the linear view of an
+    /// indexed directory is already correct, which is what the compatibility
+    /// htree was designed around.
+    ///
+    /// The superblock's `dir_index` COMPAT bit is left alone: it says indexes
+    /// may exist on the volume, not that this directory has one.
+    fn deindex_directory(&mut self, ino: InodeNum, inode: &mut Inode) -> Result<(), Ext2Error> {
+        if !inode.is_indexed() {
+            return Ok(());
+        }
+        inode.flags &= !EXT2_INDEX_FL;
+        time::stamp(&mut inode.ctime);
+        self.write_inode_num(ino, inode)
     }
 
     pub fn resolve_path(&mut self, path: &[u8]) -> Result<u32, Ext2Error> {
@@ -1420,31 +1451,23 @@ impl<'a> Ext2Fs<'a> {
                 return Err(Ext2Error::NotDirectory);
             }
             if component == b".." {
-                let mut parent = None;
-                dir::for_each_entry(
+                current = dir::lookup_child(
                     &inode,
+                    b"..",
                     &mut *self.cache,
                     self.device,
-                    self.ptrs_per_block,
+                    &self.geom,
                     self.block_size,
                     BlockOwner::File(current.raw()),
-                    &mut |e| {
-                        if e.name == b".." {
-                            parent = Some(e.inode);
-                            false
-                        } else {
-                            true
-                        }
-                    },
-                )?;
-                current = parent.unwrap_or(current);
+                )
+                .unwrap_or(current);
             } else {
                 current = dir::lookup_child(
                     &inode,
                     component,
                     &mut *self.cache,
                     self.device,
-                    self.ptrs_per_block,
+                    &self.geom,
                     self.block_size,
                     BlockOwner::File(current.raw()),
                 )?;
@@ -1510,14 +1533,13 @@ impl<'a> Ext2Fs<'a> {
 
         // Without this a second create writes a second record under the same
         // name: lookup answers whichever comes first and the other inode is
-        // unreachable, leaving the image inconsistent for every other ext2
-        // implementation.
+        // unreachable to every ext2 implementation.
         if dir::lookup_child(
             &parent,
             name,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(parent_num.raw()),
         )
@@ -1525,6 +1547,7 @@ impl<'a> Ext2Fs<'a> {
         {
             return Err(Ext2Error::AlreadyExists);
         }
+        self.deindex_directory(parent_num, &mut parent)?;
 
         let parent_group = self
             .geom
@@ -1558,10 +1581,9 @@ impl<'a> Ext2Fs<'a> {
             ft,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             &mut self.superblock,
-            &self.geom,
             BlockOwner::File(parent_num.raw()),
         )?;
 
@@ -1753,7 +1775,7 @@ impl<'a> Ext2Fs<'a> {
             name,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(parent_num.raw()),
         )?;
@@ -1773,12 +1795,18 @@ impl<'a> Ext2Fs<'a> {
                 &target,
                 &mut *self.cache,
                 self.device,
-                self.ptrs_per_block,
+                &self.geom,
                 self.block_size,
                 BlockOwner::File(target_num.raw()),
             )?
         {
             return Err(Ext2Error::NotEmpty);
+        }
+        self.deindex_directory(parent_num, &mut parent_inode)?;
+        if is_dir {
+            // The inode number is about to become free, and the next
+            // directory allocated it must not inherit this one's names.
+            self.cache.forget_dir_index(target_num.raw());
         }
 
         dir::remove_dir_entry(
@@ -1786,16 +1814,15 @@ impl<'a> Ext2Fs<'a> {
             name,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(parent_num.raw()),
         )?;
 
-        // A name is not the inode. An image `mkfs` or any other kernel wrote
-        // may carry several names for one inode, and freeing its blocks while
-        // another name still points at them hands a live file's contents to
-        // the next allocation. A directory is exempt: its two links are `.`
-        // and its parent's entry, both of which this removal takes with it.
+        // A name is not the inode: an image any other writer produced may
+        // carry several names for one, and freeing its blocks while another
+        // still points at them hands a live file to the next allocation. A
+        // directory is exempt — its two links both go with this removal.
         let was_last = is_dir || target.links_count <= 1;
         let mut orphaned = None;
         if !was_last {
@@ -1803,11 +1830,10 @@ impl<'a> Ext2Fs<'a> {
             time::stamp(&mut target.ctime);
             self.write_inode_num(target_num, &target)?;
         } else if last_link == LastLink::Orphan {
-            // POSIX: the name is gone but the file is not, because a
-            // descriptor still refers to it. `links_count` drops to zero so no
-            // other reader treats the inode as reachable, and the orphan list
-            // is what tells the next `e2fsck` to finish the free if this boot
-            // never gets to.
+            // POSIX: the name is gone but the file is not. `links_count` drops
+            // to zero so no other reader treats the inode as reachable, and
+            // the orphan list tells the next `e2fsck` to finish the free if
+            // this boot never gets to.
             target.links_count = 0;
             time::stamp(&mut target.ctime);
             self.write_inode_num(target_num, &target)?;
@@ -1870,8 +1896,7 @@ impl<'a> Ext2Fs<'a> {
     /// Complete the deferred free of an orphaned inode: unthread it from the
     /// list and release its blocks.
     ///
-    /// Idempotent against an inode that is not on the list — a second call, or
-    /// a call for an inode a crashing boot's `e2fsck` already drained, does
+    /// Idempotent against an inode that is not on the list: a second call does
     /// nothing rather than freeing a live file.
     #[inline(never)]
     pub fn release_orphan(&mut self, ino: u32) -> Result<(), Ext2Error> {
@@ -1897,11 +1922,11 @@ impl<'a> Ext2Fs<'a> {
     /// Push `ino` onto the head of the on-disk orphan list.
     ///
     /// The inode's own record carries the next member's number in `i_dtime`,
-    /// which is ext2's own mechanism: a freed inode's `i_dtime` is a deletion
-    /// timestamp, and an orphan's is a link, told apart by `links_count == 0`
-    /// with a nonzero `i_mode`. The head is written last, so a crash between
-    /// the two leaves a list that is shorter than the truth — leaked blocks
-    /// `e2fsck` reclaims — rather than one naming an inode that never joined.
+    /// ext2's own mechanism: a freed inode's `i_dtime` is a deletion timestamp
+    /// and an orphan's is a link, told apart by `links_count == 0` with a
+    /// nonzero `i_mode`. The head is written last, so a crash leaves a list
+    /// shorter than the truth rather than one naming an inode that never
+    /// joined.
     fn orphan_push(&mut self, ino: InodeNum) -> Result<(), Ext2Error> {
         let head = self.superblock.last_orphan;
         if head == ino.raw() {
@@ -1911,15 +1936,11 @@ impl<'a> Ext2Fs<'a> {
         inode.dtime = head;
         self.write_inode_num(ino, &inode)?;
         // The member's next-pointer must be *on the device* before the head
-        // names it. `write_inode_num` only dirties a cached block, whereas
-        // `write_orphan_head` writes through and barriers, so without this the
-        // real on-disk order is the inverse: a crash would leave the head
-        // naming an inode whose `i_dtime` is still its pre-push value — zero
-        // on a freshly created one — truncating the whole chain behind it and
-        // leaking every orphan already on the list.
-        // A home write of an uncommitted record is what the log forbids;
-        // under one the ordering comes from the commit, because
-        // `write_orphan_head` defers past it.
+        // names it: `write_inode_num` only dirties a cached block, whereas
+        // `write_orphan_head` writes through and barriers. Without this a
+        // crash leaves the head naming an inode whose `i_dtime` is still its
+        // pre-push value, truncating the chain behind it. Under a log the
+        // ordering comes from the commit, which the head write defers past.
         if self.cache.journal().is_none() {
             self.flush_inode_record(ino)?;
         }
@@ -1931,8 +1952,7 @@ impl<'a> Ext2Fs<'a> {
     /// Put one inode's table block on the device and barrier behind it.
     ///
     /// Narrower than [`Self::sync_inode`] on purpose: this orders one record
-    /// against a superblock field, and pulling the inode's data blocks along
-    /// would make an `unlink` pay for a writeback it does not need.
+    /// against a superblock field, nothing more.
     fn flush_inode_record(&mut self, ino: InodeNum) -> Result<(), Ext2Error> {
         let (table_block, _) = self.inode_disk_offset(ino)?;
         if self.cache.flush_block(table_block, self.device)? {
@@ -1954,8 +1974,7 @@ impl<'a> Ext2Fs<'a> {
             // Immediate, where a push defers: removal shares a transaction
             // with the free that overwrites this member's `i_dtime`, so a head
             // published after the commit would name an inode whose chain link
-            // is already gone, and the next mount's drain would stop there and
-            // discard everything behind it.
+            // is already gone — and the next drain would stop there.
             self.write_orphan_head_now()?;
             return Ok(true);
         }
@@ -1983,13 +2002,11 @@ impl<'a> Ext2Fs<'a> {
     /// waiting for a `sync`.
     ///
     /// This is the field that makes an unreachable inode recoverable, and the
-    /// window it covers is exactly the one in which the kernel might not get
-    /// to write anything again. It is a sub-block write, invisible to the
-    /// cache, so it costs nothing an ordinary operation was going to pay.
+    /// window it covers is the one in which the kernel may not write again.
     ///
-    /// Under a log it is *deferred to the commit*: the ordering the list needs
-    /// is then the log's, and writing the head from inside the operation would
-    /// publish a field of a transaction that may still roll back.
+    /// Under a log it is *deferred to the commit*: writing the head from
+    /// inside the operation would publish a field of a transaction that may
+    /// still roll back.
     fn write_orphan_head(&mut self) -> Result<(), Ext2Error> {
         if self.in_transaction && self.cache.journal().is_some() {
             self.pending_orphan_head = Some(self.superblock.last_orphan);
@@ -2020,11 +2037,11 @@ impl<'a> Ext2Fs<'a> {
     /// Free every inode the orphan list names, at mount, on an image this
     /// implementation may write. Answers how many were reclaimed.
     ///
-    /// This is the crash-recovery half: a boot that died with an unlinked file
-    /// still open left its blocks allocated and reachable from nowhere but
-    /// this list. Draining is bounded by the inode count and stops at the
-    /// first member that no longer looks like an orphan, so a damaged list
-    /// leaks space rather than freeing a live file.
+    /// The crash-recovery half: a boot that died with an unlinked file still
+    /// open left its blocks reachable from nowhere but this list. Bounded by
+    /// the inode count, stopping at the first member that no longer looks like
+    /// an orphan, so a damaged list leaks space rather than freeing a live
+    /// file.
     #[inline(never)]
     pub fn drain_orphans(&mut self) -> Result<u32, Ext2Error> {
         if self.read_only || self.superblock.last_orphan == 0 {
@@ -2062,10 +2079,8 @@ impl<'a> Ext2Fs<'a> {
 
     /// Move `old_name` under `old_parent` to `new_name` under `new_parent`.
     ///
-    /// The new entry is written before the old is removed, so a crash between
-    /// the two leaves two names for one inode — recoverable by `e2fsck` —
-    /// rather than none. That is the whole of the atomicity ext2 without a
-    /// journal can offer.
+    /// The new entry is written before the old is removed; see
+    /// `rename_link_new`.
     pub fn rename_entry(
         &mut self,
         old_parent: u32,
@@ -2081,9 +2096,8 @@ impl<'a> Ext2Fs<'a> {
     /// destination name was the last link of. Answers that inode when it was
     /// orphaned rather than freed.
     ///
-    /// A rename over an open file is the same hazard as an `unlink` of one:
-    /// POSIX says the displaced inode's contents survive until its last
-    /// descriptor closes.
+    /// A rename over an open file is the `unlink` hazard: POSIX keeps the
+    /// displaced inode's contents until its last descriptor closes.
     pub fn rename_entry_with(
         &mut self,
         old_parent: u32,
@@ -2135,9 +2149,8 @@ impl<'a> Ext2Fs<'a> {
         let mut orphaned = None;
         if let Some(kind) = plan.displaced {
             // POSIX: a directory may only be renamed over an *empty* one, and
-            // that check lives in `remove_entry`, ahead of the removal. A
-            // directory is never orphaned — `open` refuses one, so no
-            // descriptor can be holding it.
+            // that check lives in `remove_entry`. A directory is never
+            // orphaned.
             let policy = match kind {
                 RemoveKind::Directory => LastLink::Free,
                 RemoveKind::NonDirectory => displaced_policy,
@@ -2220,8 +2233,7 @@ impl<'a> Ext2Fs<'a> {
 
     /// Look a name up in a directory that must be one, and must not be sealed
     /// — the two checks every mutation through a parent needs, kept in one
-    /// frame so the caller does not hold the parent `Inode` live across the
-    /// rest of its work.
+    /// frame so the caller holds no parent `Inode` across the rest of its work.
     #[inline(never)]
     fn lookup_in_dir(
         &mut self,
@@ -2240,7 +2252,7 @@ impl<'a> Ext2Fs<'a> {
             name,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(parent.raw()),
         )
@@ -2261,6 +2273,7 @@ impl<'a> Ext2Fs<'a> {
         if plan.source_is_dir && plan.reparenting && target_parent.links_count == u16::MAX {
             return Err(Ext2Error::TooManyLinks);
         }
+        self.deindex_directory(new_parent, &mut target_parent)?;
         dir::append_dir_entry(
             &mut target_parent,
             plan.source,
@@ -2268,10 +2281,9 @@ impl<'a> Ext2Fs<'a> {
             plan.file_type,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             &mut self.superblock,
-            &self.geom,
             BlockOwner::File(new_parent.raw()),
         )?;
         if plan.source_is_dir && plan.reparenting {
@@ -2291,13 +2303,14 @@ impl<'a> Ext2Fs<'a> {
     ) -> Result<(), Ext2Error> {
         // Re-read: `append_dir_entry` may have grown the shared parent when
         // both ends name one directory.
-        let source_parent = self.read_inode_num(old_parent)?;
+        let mut source_parent = self.read_inode_num(old_parent)?;
+        self.deindex_directory(old_parent, &mut source_parent)?;
         dir::remove_dir_entry(
             &source_parent,
             old_name,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(old_parent.raw()),
         )?;
@@ -2322,7 +2335,7 @@ impl<'a> Ext2Fs<'a> {
             new_parent,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
+            &self.geom,
             self.block_size,
             BlockOwner::File(moved.raw()),
         )
@@ -2348,7 +2361,7 @@ impl<'a> Ext2Fs<'a> {
                 b"..",
                 &mut *self.cache,
                 self.device,
-                self.ptrs_per_block,
+                &self.geom,
                 self.block_size,
                 BlockOwner::File(current.raw()),
             )?;
@@ -2386,9 +2399,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     /// Free every block an inode owns: the twelve direct ones and all three
-    /// indirect trees. Missing depths 2 and 3 leaks every block past the
-    /// single-indirect reach on each delete, with no way to recover the space
-    /// short of reformatting.
+    /// indirect trees.
     fn release_file_blocks(&mut self, inode: &Inode, owner: BlockOwner) -> Result<(), Ext2Error> {
         for blk in inode.block.iter().take(12) {
             if blk.is_valid() {
@@ -2417,7 +2428,7 @@ impl<'a> Ext2Fs<'a> {
                 depth,
                 &mut self.cache,
                 self.device,
-                self.ptrs_per_block,
+                &self.geom,
                 owner,
                 &mut |b| {
                     freed.push(b).map_err(|_| Ext2Error::OutOfMemory)?;

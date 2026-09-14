@@ -21,6 +21,9 @@ const MAX_BLOCK_NODES: usize = 16;
 /// kernel-registered and short, and `block_node_at` answers one by value.
 const DEV_NAME_MAX: usize = 32;
 
+/// What a `mount` source argument spells a device with.
+const DEV_PATH_PREFIX: &[u8] = b"/dev/";
+
 /// Linux's `virtblk` major; the minor is the registration ordinal.
 const BLOCK_MAJOR: u32 = 254;
 
@@ -74,6 +77,12 @@ struct BlockNode {
     capacity: u64,
 }
 
+impl BlockNode {
+    fn matches(&self, name: &[u8]) -> bool {
+        self.name_len == name.len() && self.name[..self.name_len] == *name
+    }
+}
+
 /// Append-only for the lifetime of the kernel, which is what lets `readdir`
 /// walk these after [`DEVICES`] under the trait-default `readdir_cookie`.
 static BLOCK_NODES: IrqRwLock<KVec<BlockNode>> = IrqRwLock::new(
@@ -98,10 +107,7 @@ pub fn devfs_register_block_device(
     if table.len() >= MAX_BLOCK_NODES {
         return Err(VfsError::NoSpace);
     }
-    if table
-        .iter()
-        .any(|n| n.name_len == name.len() && &n.name[..n.name_len] == name)
-    {
+    if table.iter().any(|n| n.matches(name)) {
         return Err(VfsError::AlreadyExists);
     }
     let inode = BLOCK_INODE_BASE + table.len() as InodeId;
@@ -126,12 +132,26 @@ pub fn devfs_register_block_device(
     Ok(inode)
 }
 
+/// The device published as `name`, either bare (`vdb`) or the path spelling
+/// (`/dev/vdb1`) a `mount` source argument carries.
+///
+/// The handle is cloned out and the registry lock released before returning:
+/// [`BLOCK_NODES`] must never be held across device I/O.
+pub fn devfs_block_device_by_name(name: &str) -> Option<KArc<dyn BlockDevice + Send + Sync>> {
+    let bytes = name.as_bytes();
+    let bare = bytes.strip_prefix(DEV_PATH_PREFIX).unwrap_or(bytes);
+    let table = BLOCK_NODES.read();
+    let device = table
+        .iter()
+        .find(|n| n.matches(bare))
+        .map(|n| KArc::clone(&n.device));
+    drop(table);
+    device
+}
+
 fn block_inode_for(name: &[u8]) -> Option<InodeId> {
     let table = BLOCK_NODES.read();
-    table
-        .iter()
-        .find(|n| n.name_len == name.len() && &n.name[..n.name_len] == name)
-        .map(|n| n.inode)
+    table.iter().find(|n| n.matches(name)).map(|n| n.inode)
 }
 
 /// Copied out so the caller can run the `readdir` callback with the registry
@@ -157,16 +177,13 @@ fn block_device_of(inode: InodeId) -> Option<(KArc<dyn BlockDevice + Send + Sync
         .map(|n| (KArc::clone(&n.device), n.capacity))
 }
 
-/// Serve bytes from a registered block device.
+/// Serve bytes from a registered block device. A short read is EOF to the
+/// VFS, so this shortens only at the end of the device.
 ///
 /// Requires the entitlement the ext2 block reserve asks for (a kernel thread
-/// or `TASK_FLAG_SYSTEM`), else [`VfsError::PermissionDenied`]: a raw read
-/// bypasses every filesystem permission check above it, and ext2 does not zero
-/// a block it frees, so an unprivileged reader could recover the contents of
-/// any unlinked file.
-///
-/// A short read is EOF to the VFS, so this shortens only at the end of the
-/// device.
+/// or `TASK_FLAG_SYSTEM`): a raw read bypasses every filesystem permission
+/// check above it, and ext2 does not zero a block it frees, so an
+/// unprivileged reader could recover any unlinked file's contents.
 fn block_read(inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
     block_read_entitled(inode, offset, buf, current_task_is_privileged())
 }

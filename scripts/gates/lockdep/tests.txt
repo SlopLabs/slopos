@@ -225,9 +225,27 @@ require-phase post-userland-tests
 #               385-394; userland edges 210-216, chains 434-442), so the bands
 #               are left as recorded rather than re-narrowed onto three runs
 #               of one machine.
+#   2026-09-14  kernel 203 -> 206, userland 212 -> 214: the storage work in
+#               `plans/self-hosting.md` ("Storage holds a tree"). Boot is
+#               unchanged at 71 measured against its cap of 72, so none of
+#               these is on the boot path. The new declaration sites are
+#               `EXT2_POOL_1`, `EXT2_POOL_2` and `EXT2_POOL_3` — the three
+#               pooled `Ext2Mount` instances `mount(2)` hands out beyond the
+#               one boot attaches. Each needs its own class for the same
+#               reason `RAMFS_POOL_0..3` do: a path walk crossing a mount
+#               holds one mount's lock while taking the next one's, and one
+#               class over four instances would make that legal nesting look
+#               like an unordered self-nest. Slot 0 keeps the name
+#               `CACHED_EXT2`, which is why this is +3 and not +4. The
+#               userland phase gains two rather than three because one of
+#               them first registers during the kernel tests. Deterministic:
+#               206/214 on all three runs of one pinned ISO. Both banded
+#               pools moved within their existing bands (kernel edges
+#               172-173, chains 388-392; userland edges 204-205, chains
+#               429-433), so the bands are left as recorded.
 boot	classes	72
-post-kernel-tests	classes	203
-post-userland-tests	classes	212
+post-kernel-tests	classes	206
+post-userland-tests	classes	214
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

@@ -3,15 +3,27 @@ set -euo pipefail
 
 # Build an ext2 filesystem image populated with userland binaries.
 #
-# Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...
+# Usage: build_fs_image.sh <image_path> <build_dir> [bin1] [bin2] ...
 #
 # Each binary is placed in /bin/<name> except 'init' which goes to /sbin/init.
+# A run with no binaries builds an empty volume, which is what a scratch or
+# capacity image wants.
 #
 # Environment:
 #   FS_IMAGE_SIZE - image size (default: 32M)
-#   FS_JOURNAL_SIZE - size of the metadata log at /.journal (default: 4M);
-#                   `0` builds no log, which makes the kernel fall back to
-#                   undo-scoped operations and refuse an unclean mount.
+#   FS_INODE_RATIO - bytes of volume per inode, passed to mkfs.ext2 -i. Unset
+#                   uses the host mke2fs default (16384), i.e. ~65k inodes per
+#                   GiB — enough for a checked-out tree plus a toolchain
+#                   sysroot on a multi-GB volume.
+#   FS_JOURNAL_SIZE - size of the metadata log at /.journal; default is 1/64 of
+#                   the image, floored at 4M and capped at 64M. `0` builds no
+#                   log, which makes the kernel fall back to undo-scoped
+#                   operations and refuse an unclean mount.
+#   FS_POPULATE_DIR - a host directory whose tree becomes the volume's root, via
+#                   `mkfs.ext2 -d`. Only honoured on a fresh mkfs: a preserved
+#                   image holds whatever the guest wrote and is never
+#                   repopulated. The directories and files this script installs
+#                   afterwards are created over that tree.
 #   VERITY        - `on` (default) appends a v1 integrity trailer, which makes
 #                   the kernel mount the image read-only; `rw` appends a v2
 #                   trailer, which leaves the image writable (a write
@@ -34,7 +46,19 @@ shift 2
 BINS=("$@")
 
 FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-32M}"
-FS_JOURNAL_SIZE="${FS_JOURNAL_SIZE:-4M}"
+# Derived from the volume, not frozen: a log is sized by how much metadata one
+# writeback window may hold, which scales with the filesystem it protects. 1/64
+# of the image, floored at the 4M a 32M appliance root used and capped at the
+# 64M past which the kernel's per-slot arrays stop paying for themselves.
+default_journal_size() {
+    local image_bytes want
+    image_bytes="$(numfmt --from=iec "$FS_IMAGE_SIZE")"
+    want=$(( image_bytes / 64 ))
+    [ "$want" -ge $(( 4 * 1024 * 1024 )) ] || want=$(( 4 * 1024 * 1024 ))
+    [ "$want" -le $(( 64 * 1024 * 1024 )) ] || want=$(( 64 * 1024 * 1024 ))
+    echo "$(( want / 1024 / 1024 ))M"
+}
+FS_JOURNAL_SIZE="${FS_JOURNAL_SIZE:-$(default_journal_size)}"
 VERITY="${VERITY:-on}"
 case "$VERITY" in
     on|off|rw) ;;
@@ -72,7 +96,7 @@ STAMP_PATH="${IMAGE_PATH}.stamp"
 # What the image's content is a function of: an equal stamp means a preserved
 # image already carries these binaries and assets, so it needs no work.
 build_stamp() {
-    echo "size=$FS_IMAGE_SIZE verity=$VERITY"
+    echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE"
     for bin in "${BINS[@]}"; do
         printf '%s ' "$bin"
         sha256sum "${BUILD_DIR}/${bin}.elf" 2>/dev/null | cut -d' ' -f1 || echo missing
@@ -225,7 +249,17 @@ else
     echo "Rebuilding ext2 image at $IMAGE_PATH ($FS_IMAGE_SIZE)"
     rm -f "$IMAGE_PATH" "$STAMP_PATH"
     truncate -s "$FS_IMAGE_SIZE" "$IMAGE_PATH"
-    mkfs.ext2 -F -b 4096 "$IMAGE_PATH" >/dev/null
+    MKFS_ARGS=(-F -b 4096)
+    [ -z "${FS_INODE_RATIO:-}" ] || MKFS_ARGS+=(-i "$FS_INODE_RATIO")
+    if [ -n "${FS_POPULATE_DIR:-}" ]; then
+        if [ ! -d "$FS_POPULATE_DIR" ]; then
+            echo "build_fs_image: FS_POPULATE_DIR='$FS_POPULATE_DIR' is not a directory" >&2
+            exit 2
+        fi
+        echo "Populating the root from $FS_POPULATE_DIR ($(du -sh "$FS_POPULATE_DIR" | cut -f1))"
+        MKFS_ARGS+=(-d "$FS_POPULATE_DIR")
+    fi
+    mkfs.ext2 "${MKFS_ARGS[@]}" "$IMAGE_PATH" >/dev/null
 fi
 
 mkdir_p /bin

@@ -16,7 +16,7 @@ use slopos_testing::TestResult;
 
 use super::ScratchProcess;
 use crate::blockdev::MemoryBlockDevice;
-use crate::ext2::cache::BlockCache;
+use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock};
 use crate::filemap::{self, FileMapError, MAX_INODES_PER_ACCOUNT, MAX_MAPPED_INODES};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
@@ -195,7 +195,7 @@ fn install_mount(device: MemoryBlockDevice) -> bool {
     let Ok(boxed) = KBox::try_new(superblock) else {
         return false;
     };
-    let Ok(cache) = BlockCache::new_boxed(block_size) else {
+    let Ok(cache) = BlockCache::new_boxed(block_size, CACHE_ENTRIES_MIN) else {
         return false;
     };
     let Ok(mut guard) = TEST_MOUNT.lock() else {
@@ -330,7 +330,7 @@ fn read_fresh(
     offset: u64,
     buf: &mut [u8],
 ) -> bool {
-    let Ok(mut cache) = BlockCache::new_boxed(block_size) else {
+    let Ok(mut cache) = BlockCache::new_boxed(block_size, CACHE_ENTRIES_MIN) else {
         return false;
     };
     let Ok(mut fs) = Ext2Fs::new(device, &mut cache, *superblock, block_size, inode_size) else {

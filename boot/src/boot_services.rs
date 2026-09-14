@@ -10,18 +10,17 @@ use slopos_sched::scheduler::{
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use slopos_drivers::virtio_blk;
+use slopos_drivers::virtio_blk::{BlkClaimError, BlkOpenError};
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
 use slopos_fs::devfs::devfs_register_block_device;
-use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
-use slopos_fs::partition::{
-    PartitionDevice, PartitionScheme, PartitionTable, SharedBlockDevice, probe,
-};
+use slopos_fs::ext2_vfs::Ext2Mount;
+use slopos_fs::partition::{PartitionDevice, PartitionScheme, PartitionTable, probe};
 use slopos_fs::verity::VerityStatus;
-use slopos_fs::vfs::{MOUNT_RDONLY, mount, unmount};
-use slopos_fs::{
-    RootBacking, ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
-    vfs_init_builtin_filesystems_with,
+use slopos_fs::vfs::{
+    MOUNT_RDONLY, VfsError, VfsResult, mount, unmount, vfs_ext2_pool_claim, vfs_ext2_pool_release,
+    vfs_register_block_claim,
 };
+use slopos_fs::{RootBacking, vfs_init_builtin_filesystems_with};
 use slopos_ostd::sync::{InitFlag, OnceLock};
 use slopos_ostd::{KArc, KBox};
 
@@ -92,6 +91,39 @@ fn register_fs_hooks() {
     slopos_fs::fileio_register_tty_ops(&slopos_drivers::tty_file_ops::TTY_FILE_OPS);
     slopos_fs::fileio_register_socket_ops(&slopos_net::socket_file_ops::SOCKET_FILE_OPS);
     slopos_mm::filemap_hook::filemap_register_ops(slopos_fs::filemap::filemap_ops());
+}
+
+/// The claim resolver goes in during the *drivers* phase, not with the other
+/// FS hooks: the kernel test step runs there, and a test that mounts a named
+/// block device needs the resolver before it.
+fn boot_step_block_claim_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    vfs_register_block_claim(claim_block_device);
+}
+
+crate::boot_init!(
+    BOOT_STEP_BLOCK_CLAIM,
+    drivers,
+    b"block device claim\0",
+    boot_step_block_claim_fn,
+    flags = boot_init_priority(88)
+);
+
+/// `mount(2)`'s writable device resolver. `slopos-fs` cannot name a driver, so
+/// this is the only place the two meet.
+fn claim_block_device(name: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Send + Sync>> {
+    match virtio_blk::claim_writer_by_name(name) {
+        Ok(claimed) => Ok(claimed.window),
+        Err(e) => Err(match e {
+            BlkOpenError::BadName => VfsError::InvalidArgument,
+            // A partition the table does not hold is as absent as the device.
+            BlkOpenError::NoDevice | BlkOpenError::NoSuchPartition => VfsError::NotFound,
+            BlkOpenError::Claim(BlkClaimError::AlreadyClaimed) => VfsError::Busy,
+            BlkOpenError::Claim(BlkClaimError::Stale)
+            | BlkOpenError::NotReady
+            | BlkOpenError::PartitionTable => VfsError::IoError,
+            BlkOpenError::NoMemory => VfsError::NoSpace,
+        }),
+    }
 }
 
 /// Bring up the RAM-resident root from a Limine-loaded initramfs (cpio) module.
@@ -169,12 +201,8 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
 /// Mount flags for the ext2 disk: read-only when the filesystem or its device
 /// refuses writes, so the refusal reaches userland as `EROFS` at the VFS.
-fn ext2_mount_flags() -> u32 {
-    if ext2_vfs_is_read_only() {
-        MOUNT_RDONLY
-    } else {
-        0
-    }
+fn ext2_mount_flags(fs: &'static Ext2Mount) -> u32 {
+    if fs.is_read_only() { MOUNT_RDONLY } else { 0 }
 }
 
 /// Why disk0 did not come up verified. Under `verity=require` every arm is a
@@ -206,108 +234,87 @@ fn attach_disk0_once() -> DiskAttachOutcome {
 /// taken once, so the mount and the `/dev` node both delegate to this.
 static ROOT_BLOCK_DEVICE: OnceLock<KArc<dyn BlockDevice + Send + Sync>> = OnceLock::new();
 
+/// The pooled ext2 instance the root disk is attached to. Named here because
+/// two boot steps mount it and `mount(2)` must not be able to claim it.
+static ROOT_EXT2: OnceLock<&'static Ext2Mount> = OnceLock::new();
+
+/// The instance `/` (or `/mnt`) is backed by, once [`attach_disk0`] has run.
+fn root_ext2() -> Option<&'static Ext2Mount> {
+    ROOT_EXT2.get().copied()
+}
+
 fn attach_disk0() -> DiskAttachOutcome {
     let spec = root_block_spec();
-    let Some(handle) = virtio_blk::blk_device_by_index(spec.index) else {
-        if spec.explicit {
-            klog_info!(
-                "FS: root= named block device {} but no such virtio-blk device is present — \
-                 degrading as though there were no disk",
-                spec.index.0
-            );
-        }
-        return DiskAttachOutcome::NoDisk;
+    let claimed = match virtio_blk::claim_writer_at(spec.index, spec.partition) {
+        Ok(claimed) => claimed,
+        Err(e) => return report_claim_failure(spec, e),
     };
-    if !virtio_blk::blk_is_ready(handle) {
-        return DiskAttachOutcome::NotReady;
+    ROOT_BLOCK_DEVICE.call_once(|| claimed.whole.clone());
+    if spec.partition != 0 {
+        klog_info!(
+            "FS: root is partition {} of disk{} ({} bytes)",
+            spec.partition,
+            spec.index.0,
+            claimed.window.capacity()
+        );
     }
-    let token = match virtio_blk::open_writer(handle) {
-        Ok(t) => t,
-        Err(e) => {
-            klog_info!(
-                "FS: could not claim disk{} write capability: {:?}",
-                spec.index.0,
-                e
-            );
-            return DiskAttachOutcome::Unclaimable;
-        }
-    };
-    let Ok(owned) = KArc::try_new(token) else {
+
+    let Some(fs) = vfs_ext2_pool_claim() else {
+        klog_info!("FS: no ext2 instance left for the root disk");
         return DiskAttachOutcome::NoMemory;
     };
-    let shared: KArc<dyn BlockDevice + Send + Sync> = owned;
-    ROOT_BLOCK_DEVICE.call_once(|| shared.clone());
-
-    let device = match root_mount_device(&shared, spec) {
-        Ok(d) => d,
-        Err(outcome) => return outcome,
-    };
-    match ext2_vfs_init_with_device(device) {
-        Ok(info) => DiskAttachOutcome::Mounted(info),
+    match fs.attach(claimed.window, false) {
+        Ok(info) => {
+            ROOT_EXT2.call_once(|| fs);
+            DiskAttachOutcome::Mounted(info)
+        }
         Err(e) => {
             klog_info!(
                 "FS: virtio-blk disk{} found but ext2 init failed: {:?}",
                 spec.index.0,
                 e
             );
+            vfs_ext2_pool_release(fs, false);
             DiskAttachOutcome::MountFailed
         }
     }
 }
 
-/// The window ext2 mounts: the whole device unless `root=` named a partition.
-fn root_mount_device(
-    shared: &KArc<dyn BlockDevice + Send + Sync>,
-    spec: RootBlockSpec,
-) -> Result<KBox<dyn BlockDevice + Send + Sync>, DiskAttachOutcome> {
-    if spec.partition == 0 {
-        let Ok(boxed) = KBox::try_new(SharedBlockDevice(shared.clone())) else {
-            return Err(DiskAttachOutcome::NoMemory);
-        };
-        return Ok(boxed);
-    }
-
-    let table = match probe(shared.as_ref()) {
-        Ok(t) => t,
-        Err(e) => {
+/// The `root=` diagnostics: an absent device or partition degrades as though
+/// there were no disk, and says so only when the boot named one.
+fn report_claim_failure(spec: RootBlockSpec, e: BlkOpenError) -> DiskAttachOutcome {
+    match e {
+        BlkOpenError::NotReady => DiskAttachOutcome::NotReady,
+        BlkOpenError::NoMemory => DiskAttachOutcome::NoMemory,
+        BlkOpenError::Claim(reason) => {
             klog_info!(
-                "FS: root= named partition {} of disk{} but its partition table is unusable \
-                 ({:?}) — degrading as though there were no disk",
+                "FS: could not claim disk{} write capability: {:?}",
+                spec.index.0,
+                reason
+            );
+            DiskAttachOutcome::Unclaimable
+        }
+        BlkOpenError::NoSuchPartition | BlkOpenError::PartitionTable => {
+            klog_info!(
+                "FS: root= named partition {} of disk{} but it is unusable ({:?}) — \
+                 degrading as though there were no disk",
                 spec.partition,
                 spec.index.0,
                 e
             );
-            return Err(DiskAttachOutcome::NoDisk);
+            DiskAttachOutcome::NoDisk
         }
-    };
-    let Some(entry) = table.find(spec.partition) else {
-        klog_info!(
-            "FS: root= named partition {} of disk{} but the {:?} table has no such partition — \
-             degrading as though there were no disk",
-            spec.partition,
-            spec.index.0,
-            table.scheme
-        );
-        return Err(DiskAttachOutcome::NoDisk);
-    };
-    let window = match PartitionDevice::try_new(shared.clone(), entry.start, entry.len) {
-        Ok(w) => w,
-        Err(e) => {
-            klog_info!("FS: partition {} is unusable: {:?}", spec.partition, e);
-            return Err(DiskAttachOutcome::NoDisk);
+        BlkOpenError::BadName | BlkOpenError::NoDevice => {
+            if spec.explicit {
+                klog_info!(
+                    "FS: root= named block device {} but no such virtio-blk device is present \
+                     — degrading as though there were no disk",
+                    spec.index.0
+                );
+            }
+            DiskAttachOutcome::NoDisk
         }
-    };
-    let Ok(boxed) = KBox::try_new(window) else {
-        return Err(DiskAttachOutcome::NoMemory);
-    };
-    klog_info!(
-        "FS: root is partition {} of disk{} ({} bytes at offset {})",
-        spec.partition,
-        spec.index.0,
-        entry.len,
-        entry.start
-    );
-    Ok(boxed)
+    }
 }
 
 /// Publish `/dev/vd<letter>` for every probed virtio-blk device and
@@ -464,9 +471,9 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     }
 
     if ROOTFS_IS_RAMFS.load(Ordering::Relaxed) {
-        if ext2_vfs_is_initialized() {
-            let flags = ext2_mount_flags();
-            match mount(b"/mnt", &EXT2_VFS_STATIC, flags) {
+        if let Some(fs) = root_ext2() {
+            let flags = ext2_mount_flags(fs);
+            match mount(b"/mnt", fs, flags) {
                 Ok(_) => klog_info!(
                     "VFS: mounted ext2 at /mnt (secondary, {})",
                     if flags & MOUNT_RDONLY != 0 {
@@ -481,14 +488,15 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         return 0;
     }
 
-    if vfs_init_builtin_filesystems_with(RootBacking::Ext2).is_ok() {
-        if ext2_vfs_is_initialized() {
+    let root = root_ext2().map_or(RootBacking::Ramfs, RootBacking::Ext2);
+    if vfs_init_builtin_filesystems_with(root).is_ok() {
+        if let Some(fs) = root_ext2() {
             // The kernel-test phase may already have mounted RamFs at `/` and
             // tripped the one-shot init flag, so the call above returned without
             // mounting ext2.
             let _ = unmount(b"/");
-            let flags = ext2_mount_flags();
-            match mount(b"/", &EXT2_VFS_STATIC, flags) {
+            let flags = ext2_mount_flags(fs);
+            match mount(b"/", fs, flags) {
                 Ok(_) => {
                     if flags & MOUNT_RDONLY == 0 {
                         slopos_ostd::boot_flags::set_flag(

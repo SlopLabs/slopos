@@ -10,6 +10,14 @@ pub enum BlockDeviceError {
     /// The device refuses every write: its contents are attested and a
     /// write would make them unverifiable (see [`crate::verity`]).
     WriteProtected,
+    /// Every request slot or descriptor the device has is taken. Transient:
+    /// the same request is expected to succeed once an in-flight one retires.
+    Busy,
+    Timeout,
+    /// The device completed the request but reported a failure.
+    DeviceFault,
+    Unsupported,
+    OutOfMemory,
 }
 
 /// Stable, enumeration-order identity for a block device, assigned at probe
@@ -18,10 +26,32 @@ pub enum BlockDeviceError {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockDeviceIndex(pub u16);
 
+pub(crate) fn total_seg_len(segs: &[&[u8]]) -> Result<usize, BlockDeviceError> {
+    let mut total = 0usize;
+    for seg in segs {
+        total = total
+            .checked_add(seg.len())
+            .ok_or(BlockDeviceError::OutOfBounds)?;
+    }
+    Ok(total)
+}
+
 pub trait BlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
     fn capacity(&self) -> u64;
+
+    /// Write `segs` back to back starting at `offset`.
+    fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
+        let mut at = offset;
+        for seg in segs {
+            self.write_at(at, seg)?;
+            at = at
+                .checked_add(seg.len() as u64)
+                .ok_or(BlockDeviceError::OutOfBounds)?;
+        }
+        Ok(())
+    }
 
     /// `true` when every `write_at` will fail with
     /// [`BlockDeviceError::WriteProtected`]. A filesystem consults this at
@@ -93,6 +123,7 @@ impl BlockDevice for MemoryBlockDevice {
         if buffer.is_empty() {
             return Ok(());
         }
+        stats::note_read(buffer.len());
         let guard = self.buffer.lock();
         let Some(end) = offset.checked_add(buffer.len() as u64) else {
             return Err(BlockDeviceError::OutOfBounds);
@@ -109,6 +140,7 @@ impl BlockDevice for MemoryBlockDevice {
         if buffer.is_empty() {
             return Ok(());
         }
+        stats::note_write(buffer.len());
         let mut guard = self.buffer.lock();
         let Some(end) = offset.checked_add(buffer.len() as u64) else {
             return Err(BlockDeviceError::OutOfBounds);
@@ -121,7 +153,112 @@ impl BlockDevice for MemoryBlockDevice {
         Ok(())
     }
 
+    /// One lock hold, one counted request, so a fixture measures a coalesced
+    /// write the way [`stats`] sees it on hardware.
+    fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
+        let total = total_seg_len(segs)?;
+        if total == 0 {
+            return Ok(());
+        }
+        stats::note_write(total);
+        let mut guard = self.buffer.lock();
+        let Some(end) = offset.checked_add(total as u64) else {
+            return Err(BlockDeviceError::OutOfBounds);
+        };
+        if end > guard.len() as u64 {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
+        let mut at = offset as usize;
+        for seg in segs {
+            guard[at..at + seg.len()].copy_from_slice(seg);
+            at += seg.len();
+        }
+        Ok(())
+    }
+
     fn capacity(&self) -> u64 {
         self.buffer.lock().len() as u64
+    }
+}
+
+/// Storage cost, counted at the device.
+///
+/// A request is one trip to the device; the block count beside it is what that
+/// trip carried, and the gap between the two is what coalescing buys. Every
+/// counter is one relaxed add, so nothing here reads a counter or allocates.
+pub mod stats {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Unit the block counts are in: the logical sector every block device
+    /// addresses in, so one number covers any filesystem block size.
+    pub const SECTOR_BYTES: usize = 512;
+
+    static READ_REQUESTS: AtomicU64 = AtomicU64::new(0);
+    static BLOCKS_READ: AtomicU64 = AtomicU64::new(0);
+    static WRITE_REQUESTS: AtomicU64 = AtomicU64::new(0);
+    static BLOCKS_WRITTEN: AtomicU64 = AtomicU64::new(0);
+    static FLUSHES: AtomicU64 = AtomicU64::new(0);
+    static TRANSACTIONS: AtomicU64 = AtomicU64::new(0);
+    static COMMITS: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+    pub struct Counters {
+        pub read_requests: u64,
+        pub blocks_read: u64,
+        pub write_requests: u64,
+        pub blocks_written: u64,
+        pub flushes: u64,
+        /// Outermost rollback scopes only; one per commit record.
+        pub transactions: u64,
+        pub commits: u64,
+    }
+
+    #[inline]
+    pub fn note_read(bytes: usize) {
+        READ_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        BLOCKS_READ.fetch_add(bytes.div_ceil(SECTOR_BYTES) as u64, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn note_write(bytes: usize) {
+        WRITE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        BLOCKS_WRITTEN.fetch_add(bytes.div_ceil(SECTOR_BYTES) as u64, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn note_flush() {
+        FLUSHES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn note_transaction() {
+        TRANSACTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn note_commit() {
+        COMMITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot() -> Counters {
+        Counters {
+            read_requests: READ_REQUESTS.load(Ordering::Relaxed),
+            blocks_read: BLOCKS_READ.load(Ordering::Relaxed),
+            write_requests: WRITE_REQUESTS.load(Ordering::Relaxed),
+            blocks_written: BLOCKS_WRITTEN.load(Ordering::Relaxed),
+            flushes: FLUSHES.load(Ordering::Relaxed),
+            transactions: TRANSACTIONS.load(Ordering::Relaxed),
+            commits: COMMITS.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn reset() {
+        READ_REQUESTS.store(0, Ordering::Relaxed);
+        BLOCKS_READ.store(0, Ordering::Relaxed);
+        WRITE_REQUESTS.store(0, Ordering::Relaxed);
+        BLOCKS_WRITTEN.store(0, Ordering::Relaxed);
+        FLUSHES.store(0, Ordering::Relaxed);
+        TRANSACTIONS.store(0, Ordering::Relaxed);
+        COMMITS.store(0, Ordering::Relaxed);
     }
 }

@@ -223,6 +223,13 @@ ADD_SCRATCH_DISK=0
 # VERITY=off so the suite can write; without this no `just test` run would
 # exercise fs/src/verity.rs against a trailer a real device reports.
 ADD_VERIFIED_DISK=0
+# A large writable volume (virtio-disk3), attached only when CAPACITY_IMG names
+# an existing file. This is the medium the capacity ratchet measures: a 16 GiB
+# image is far too slow to build on every run, so it is opt-in and preserved.
+ADD_CAPACITY_DISK=0
+if [ -n "${CAPACITY_IMG:-}" ] && [ -f "$CAPACITY_IMG" ]; then
+    ADD_CAPACITY_DISK=1
+fi
 
 case "$MODE" in
     test)
@@ -469,6 +476,12 @@ if [ "$ADD_VERIFIED_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$VERIFIED_IMG,if=none,id=virtio-disk2,format=raw,snapshot=on"
         -device "virtio-blk-pci,drive=virtio-disk2,disable-legacy=on"
+    )
+fi
+if [ "$ADD_CAPACITY_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -drive "file=$CAPACITY_IMG,if=none,id=virtio-disk3,format=raw,cache=writeback"
+        -device "virtio-blk-pci,drive=virtio-disk3,disable-legacy=on"
     )
 fi
 QEMU_ARGS+=(

@@ -1,0 +1,85 @@
+# check_fs_throughput gate data — variant: tests
+#
+#     scripts/check_fs_throughput.sh --variant tests --emit-allowlist
+#
+# Counts per MiB are deterministic for one ISO and carry caps. The
+# filesystem-over-raw write-rate ratio is the only quantity here that is
+# invariant under a change of accelerator, so it is the only rate graded.
+# Floors exist so a measurement that stopped happening cannot read as free.
+#
+# A cap matching nothing is a dead entry and fails the gate — except the
+# capacity rows, which a run without `CAPACITY_IMG` attached legitimately does
+# not report. `--require-capacity` (what `just test-capacity` passes) turns
+# that skip back into a failure.
+#
+# Provenance: the FSPERF rows are from a full `builddir/run_tests --raw`
+# capture; the FSCAP rows are from a `just test-capacity` boot with the 16 GiB
+# volume attached, since no other run has one. Both were measured on the same
+# tree.
+#
+# Measured 2026-09-14, the change that made storage hold a tree:
+#   2 MiB through the real write(2) path costs 10 transactions, 10 commit
+#   records, 44 block-layer write requests carrying 4624 sectors, and 10
+#   barriers. Before the batching and the coalescing the same 2 MiB was 512
+#   transactions and 578 requests; `max-txns-per-mib 8` is what stops a
+#   per-4-KiB transaction coming back, since that shape reports 256.
+#   The write rate is 8–16% of the same run's raw device rate over six runs of
+#   one pinned ISO. That gap is request count and barriers, not bytes: 4624
+#   sectors for 4096 of data is 1.13x amplification, and the reference write
+#   issues no barriers at all.
+#   max-devblocks-per-mib grades that amplification, because the request cap
+#   cannot: batching a payload into the log instead of writing it home costs
+#   about one extra request per transaction — 27 per MiB against a cap of 29 —
+#   while the sectors roughly double.
+#
+#   The 16 GiB volume mounts in **26–27 device reads** — a mount's cost is
+#   geometry plus the journal's block map, not a sweep of the volume — and a
+#   lookup of the last of 4000 names in one directory costs 0 block reads once
+#   the directory index is warm.
+#
+#   It also *holds* something: a checked-out copy of this repository plus the
+#   pinned toolchain sysroot, which the guest walks back off the volume as
+#   **5445 regular files totalling 1105385677 bytes** in 1207 directories.
+#   min-files and min-treebytes are that observation padded a quarter down,
+#   because a volume that stopped being populated looks exactly like a tree
+#   that got cheap to walk. Both halves are always staged for anyone who can
+#   build the kernel at all: the sysroot is the toolchain rust-toolchain.toml
+#   pins, and `_fs-image-capacity` fails naming it rather than staging the
+#   repository alone, so this floor describes the only tree it builds.
+#
+# max-lookup-reads is 8 rather than the 1 the observation pads to, and it
+# grades the *second* lookup of the name. A hit in the name index is a
+# *candidate*: the record at that position is read and its name compared
+# before it is trusted, so a lookup legitimately costs a block read whenever
+# that block is not already cached — 0 is what a warm cache measures, not what
+# the algorithm guarantees, and 8 is the same budget the directory-index test
+# asserts against a 533-block scan. The first lookup is not graded because an
+# allocation scope that rolls back retracts the directory's index, which a fill
+# into nearly-full groups hits on a volume that also holds a tree; the lookup
+# after that rebuilds the index by scanning, which for 4000 names is one pass
+# over its 32 data blocks. That is the rebuild's cost, not an indexed lookup's.
+
+# min-fs-over-raw-pct is 6, a quarter below the lowest of six observations,
+# and it is worth being exact about what that buys. Both halves of the
+# quotient are single timings on a shared machine: the 2 MiB write measured
+# 63–87 ms and the raw reference 7.5–10.9 ms, so the ratio itself ranges 8–16%
+# and a floor that admits every honest run cannot be tight. It catches a
+# collapse — a return to a transaction per 4 KiB is roughly an order of
+# magnitude, i.e. ~1.5% — and it does not catch a 2x regression. The rows that
+# do catch a 2x are the per-MiB counts above, which is why they carry the
+# narrow caps and this one does not.
+
+max-txns-per-mib	post-kernel-tests	8
+max-commits-per-mib	post-kernel-tests	8
+max-devwrites-per-mib	post-kernel-tests	29
+max-devblocks-per-mib	post-kernel-tests	2891
+max-barriers-per-mib	post-kernel-tests	8
+min-fs-over-raw-pct	post-kernel-tests	6
+min-bytes	post-kernel-tests	1572864
+
+max-mount-reads-per-gib	post-kernel-tests	3
+max-lookup-reads	post-kernel-tests	8
+min-volume-gib	post-kernel-tests	16
+min-dirents	post-kernel-tests	3000
+min-files	post-kernel-tests	4083
+min-treebytes	post-kernel-tests	829039257

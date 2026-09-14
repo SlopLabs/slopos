@@ -8438,6 +8438,116 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
     }
 }
 
+/// A `source` naming a device that is not there answers "no such device", not
+/// "busy": `EBUSY` was the old answer to every named `source`, since one ext2
+/// instance existed and was already bound.
+pub fn test_mount_ext2_unknown_source_is_not_busy() -> TestResult {
+    use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+
+    const MP: &[u8] = b"/tmp/ext2_absent";
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+    if slopos_fs::vfs::vfs_mkdir(MP).is_err() {
+        return fail!("could not create the mount point");
+    }
+
+    // `vdz` is past every letter the harness attaches.
+    let absent = mount_apply_at(b"vdz", MP, b"/", b"ext2", 0);
+    let garbage = mount_apply_at(b"not-a-device", MP, b"/", b"ext2", 0);
+
+    let _ = umount_path_at(MP, b"/", 0);
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+
+    if absent != Err(slopos_abi::Errno::ENOENT) {
+        return fail!("mount of an absent ext2 device answered {:?}", absent);
+    }
+    if garbage != Err(slopos_abi::Errno::EINVAL) {
+        return fail!("mount of an unparseable device name answered {:?}", garbage);
+    }
+    pass!()
+}
+
+/// `umount2` of an ext2 mount an open file still names is `EBUSY` without
+/// `MNT_DETACH`, and the detach path gives the instance, its device and its
+/// write claim back once the last reference dies.
+pub fn test_umount2_of_ext2_is_busy_unless_detached() -> TestResult {
+    use crate::syscall::fs::mount_handlers::umount_path_at;
+    use slopos_abi::fs::MNT_DETACH;
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+    if !slopos_fs::tests::mount::write_scratch_ext2(b"vdb") {
+        return TestResult::Skipped;
+    }
+
+    const MP: &[u8] = b"/tmp/ext2_busy_mp";
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+    if slopos_fs::vfs::vfs_mkdir(MP).is_err() {
+        return fail!("could not create the mount point");
+    }
+
+    let outcome = ext2_umount_busy_body(MP);
+
+    if umount_path_at(MP, b"/", 0).is_err() {
+        let _ = umount_path_at(MP, b"/", MNT_DETACH);
+    }
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+
+    match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
+    use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
+    use slopos_abi::fs::MNT_DETACH;
+    use slopos_fs::vfs::mount::mount_at;
+    use slopos_fs::vfs::orphan::{close_ref, open_ref};
+
+    mount_apply_at(b"vdb", mp, b"/", b"ext2", 0)
+        .map_err(|_| "mount of the scratch device failed")?;
+
+    let handle = slopos_fs::vfs::vfs_open(b"/tmp/ext2_busy_mp/held", true)
+        .map_err(|_| "could not create a file through the mount")?;
+    open_ref(handle.fs, handle.inode).map_err(|_| "could not take an open reference")?;
+
+    let busy = umount_path_at(mp, b"/", 0);
+    if busy != Err(slopos_abi::Errno::EBUSY) {
+        let _ = close_ref(handle.fs, handle.inode);
+        return Err("umount2 of a held ext2 mount was not EBUSY");
+    }
+    if umount_path_at(mp, b"/", MNT_DETACH).is_err() {
+        let _ = close_ref(handle.fs, handle.inode);
+        return Err("MNT_DETACH did not detach a held ext2 mount");
+    }
+    if mount_at(mp).is_some() {
+        let _ = close_ref(handle.fs, handle.inode);
+        return Err("a detached mount is still in the table");
+    }
+
+    // Still readable through the surviving reference: the retired instance
+    // keeps its device until the last reference dies, which is what makes a
+    // lazy unmount safe rather than merely cheap.
+    let mut buf = [0u8; 4];
+    let readable = handle.read(0, &mut buf).is_ok();
+    let _ = close_ref(handle.fs, handle.inode);
+    if !readable {
+        return Err("a descriptor lost its inode to a lazy unmount");
+    }
+
+    // Mounting the same disk again is what proves the retired instance gave
+    // the exclusive claim back: a leaked one answers `AlreadyClaimed` for the
+    // rest of the boot.
+    mount_apply_at(b"vdb", mp, b"/", b"ext2", 0)
+        .map_err(|_| "the scratch device would not mount again after a lazy unmount")?;
+    umount_path_at(mp, b"/", 0).map_err(|_| "the re-mounted ext2 would not unmount")
+}
+
 slopos_testing::stest!(
     name = test_mount_requires_the_mount_capability,
     suite = syscall_core
@@ -8452,5 +8562,341 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_umount2_of_a_second_mount_spares_the_first,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_mount_ext2_unknown_source_is_not_busy,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_umount2_of_ext2_is_busy_unless_detached,
+    suite = syscall_core
+);
+
+const RACE_MP_A: &[u8] = b"/tmp/ext2_race_a";
+const RACE_MP_B: &[u8] = b"/tmp/ext2_race_b";
+const RACE_FILE_B: &[u8] = b"/tmp/ext2_race_b/held";
+const DYING_MP: &[u8] = b"/tmp/ext2_dying";
+
+/// Blocks in the fixture images, at the builder's 1 KiB block size.
+const RACE_IMAGE_BLOCKS: u32 = 512;
+
+static RACE_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static RACE_FIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A device that mounts its own filesystem a second time, once, on the first
+/// I/O it is armed for: `umount_path_at` counts the instance's mounts, then
+/// syncs, then removes the entry, so the sync's device traffic stands exactly
+/// where a second task's `mount` can land.
+struct MountsOnWrite {
+    inner: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
+    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+}
+
+impl MountsOnWrite {
+    fn fire(&self) {
+        use core::sync::atomic::Ordering;
+        if !RACE_ARMED.load(Ordering::Acquire) || RACE_FIRED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _ = slopos_fs::vfs::mount::mount(RACE_MP_B, self.fs, 0);
+    }
+}
+
+impl slopos_fs::blockdev::BlockDevice for MountsOnWrite {
+    fn read_at(
+        &self,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
+        self.fire();
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(
+        &self,
+        offset: u64,
+        buffer: &[u8],
+    ) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
+        self.fire();
+        self.inner.write_at(offset, buffer)
+    }
+
+    fn capacity(&self) -> u64 {
+        self.inner.capacity()
+    }
+
+    fn flush(&self) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
+        self.fire();
+        self.inner.flush()
+    }
+}
+
+/// The pool release must follow the mount table the removal leaves, not the
+/// one sampled before it. The count up front decides `EBUSY` and stays;
+/// deciding the release on it too loses the filesystem of a mount that appears
+/// inside the window, and in the mirror case leaks the device's write claim.
+pub fn test_umount2_releases_on_the_table_the_removal_leaves() -> TestResult {
+    use core::sync::atomic::Ordering;
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+    for mp in [RACE_MP_A, RACE_MP_B] {
+        let _ = slopos_fs::vfs::vfs_rmdir(mp);
+        if slopos_fs::vfs::vfs_mkdir(mp).is_err() {
+            return fail!("could not create a mount point");
+        }
+    }
+    let Some(image) = slopos_fs::tests::mount::fixture_image_device(RACE_IMAGE_BLOCKS) else {
+        return TestResult::Skipped;
+    };
+    let Some(fs) = slopos_fs::vfs::init::vfs_ext2_pool_claim() else {
+        return fail!("the ext2 pool handed out no instance");
+    };
+    RACE_ARMED.store(false, Ordering::Release);
+    RACE_FIRED.store(false, Ordering::Release);
+    let outcome = match KBox::try_new(MountsOnWrite { inner: image, fs }) {
+        Ok(device) => umount_release_body(fs, device),
+        Err(_) => Err("the fixture device would not allocate"),
+    };
+
+    RACE_ARMED.store(false, Ordering::Release);
+    let _ = slopos_fs::vfs::mount::unmount(RACE_MP_A);
+    let _ = slopos_fs::vfs::mount::unmount(RACE_MP_B);
+    slopos_fs::vfs::init::vfs_ext2_pool_release(fs, false);
+    for mp in [RACE_MP_A, RACE_MP_B] {
+        let _ = slopos_fs::vfs::vfs_rmdir(mp);
+    }
+    match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn umount_release_body(
+    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+    device: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
+) -> Result<(), &'static str> {
+    use crate::syscall::fs::mount_handlers::umount_path_at;
+    use core::sync::atomic::Ordering;
+
+    fs.attach(device, false)
+        .map_err(|_| "the fixture image would not mount")?;
+    slopos_fs::vfs::mount::mount(RACE_MP_A, fs, 0).map_err(|_| "the fixture would not mount")?;
+    // Dirty, so the sync inside the unmount's window reaches the device.
+    slopos_fs::vfs::vfs_open(b"/tmp/ext2_race_a/held", true)
+        .map_err(|_| "could not create a file through the mount")?;
+
+    RACE_ARMED.store(true, Ordering::Release);
+    if slopos_fs::vfs::mount::mount_at(RACE_MP_B).is_some() {
+        return Err("the fixture mounted before the window it exists for");
+    }
+    let removed = umount_path_at(RACE_MP_A, b"/", 0);
+    RACE_ARMED.store(false, Ordering::Release);
+    removed.map_err(|_| "umount2 of the fixture failed")?;
+
+    if !RACE_FIRED.load(Ordering::Acquire) {
+        return Err("the fixture never reached the device inside the window");
+    }
+    if slopos_fs::vfs::mount::mount_at(RACE_MP_B).is_none() {
+        return Err("the second mount did not reach the table");
+    }
+    if !fs.is_initialized() {
+        return Err("a mount still in the table lost its filesystem");
+    }
+    if slopos_fs::vfs::vfs_stat(RACE_FILE_B).is_err() {
+        return Err("a file under the surviving mount stopped resolving");
+    }
+    Ok(())
+}
+
+static DYING_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static DYING_RELEASED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static DYING_DEVICE_DROPPED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Set or clear the current task's kill flag, answering whether it took.
+/// [`SIGNAL_KILLED`](slopos_abi::signal::SIGNAL_KILLED) is outside
+/// `SIGNAL_MASK`, so the raw field is the only way back out of the state.
+fn mark_current_killed(on: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    let Some(current) = Current::get() else {
+        return false;
+    };
+    let task = current.task();
+    if on {
+        task.signal_pending
+            .fetch_or(slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
+    } else {
+        task.signal_pending
+            .fetch_and(!slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
+    }
+    task.is_killed() == on
+}
+
+/// A device that, once, runs the pool release from a task marked for death
+/// while the mount lock is held over its own I/O — the state `Mutex::lock`
+/// answers an abort in. Only a fixture can stand there: the abort needs the
+/// lock contended, and the kill flag is read off the contending task.
+struct ReleasesWhileDying {
+    inner: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
+    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+}
+
+impl ReleasesWhileDying {
+    fn fire(&self) {
+        use core::sync::atomic::Ordering;
+        if !DYING_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        if !mark_current_killed(true) {
+            return;
+        }
+        slopos_fs::vfs::init::vfs_ext2_pool_release(self.fs, false);
+        mark_current_killed(false);
+        DYING_RELEASED.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for ReleasesWhileDying {
+    fn drop(&mut self) {
+        DYING_DEVICE_DROPPED.store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+impl slopos_fs::blockdev::BlockDevice for ReleasesWhileDying {
+    fn read_at(
+        &self,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
+        self.fire();
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(
+        &self,
+        offset: u64,
+        buffer: &[u8],
+    ) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
+        self.fire();
+        self.inner.write_at(offset, buffer)
+    }
+
+    fn capacity(&self) -> u64 {
+        self.inner.capacity()
+    }
+
+    fn flush(&self) -> Result<(), slopos_fs::blockdev::BlockDeviceError> {
+        self.fire();
+        self.inner.flush()
+    }
+}
+
+/// A teardown that could not take the mount lock must leave the instance bound
+/// and the slot retired, so a later claim runs it again. Publishing the slot
+/// free strands it both ways: it reports uninitialised, so the bound-instance
+/// sweep skips it, and nothing ever drops the device or its write claim.
+pub fn test_ext2_release_retries_a_teardown_that_could_not_run() -> TestResult {
+    use core::sync::atomic::Ordering;
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+    let _ = slopos_fs::vfs::vfs_rmdir(DYING_MP);
+    if slopos_fs::vfs::vfs_mkdir(DYING_MP).is_err() {
+        return fail!("could not create a mount point");
+    }
+    let Some(image) = slopos_fs::tests::mount::fixture_image_device(RACE_IMAGE_BLOCKS) else {
+        return TestResult::Skipped;
+    };
+    let Some(fs) = slopos_fs::vfs::init::vfs_ext2_pool_claim() else {
+        return fail!("the ext2 pool handed out no instance");
+    };
+    DYING_ARMED.store(false, Ordering::Release);
+    DYING_RELEASED.store(false, Ordering::Release);
+    DYING_DEVICE_DROPPED.store(false, Ordering::Release);
+    let outcome = match KBox::try_new(ReleasesWhileDying { inner: image, fs }) {
+        Ok(device) => dying_teardown_body(fs, device),
+        Err(_) => Err("the fixture device would not allocate"),
+    };
+
+    DYING_ARMED.store(false, Ordering::Release);
+    let _ = slopos_fs::vfs::mount::unmount(DYING_MP);
+    slopos_fs::vfs::init::vfs_ext2_pool_release(fs, false);
+    let _ = slopos_fs::vfs::vfs_rmdir(DYING_MP);
+    match outcome {
+        Ok(true) => pass!(),
+        // No current task to mark for death, so the abort the fix is about
+        // never happened and nothing was proved.
+        Ok(false) => TestResult::Skipped,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn dying_teardown_body(
+    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+    device: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
+) -> Result<bool, &'static str> {
+    use core::sync::atomic::Ordering;
+
+    fs.attach(device, false)
+        .map_err(|_| "the fixture image would not mount")?;
+    slopos_fs::vfs::mount::mount(DYING_MP, fs, 0).map_err(|_| "the fixture would not mount")?;
+    // Dirty, so the sync below reaches the device while holding the lock.
+    slopos_fs::vfs::vfs_open(b"/tmp/ext2_dying/held", true)
+        .map_err(|_| "could not create a file through the mount")?;
+    slopos_fs::vfs::mount::unmount(DYING_MP).map_err(|_| "the fixture would not unmount")?;
+
+    // The kill flag is read off the *current* task, and the harness runs with
+    // none dispatched.
+    let task_id = create_test_kernel_task();
+    if task_id == INVALID_TASK_ID {
+        return Err("could not create the task the teardown runs on");
+    }
+    make_task_current(task_id);
+    DYING_ARMED.store(true, Ordering::Release);
+    let _ = fs.sync_fs();
+    let armed = DYING_ARMED.swap(false, Ordering::AcqRel);
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    if armed {
+        return Err("the sync never reached the device, so no teardown was attempted");
+    }
+    if !DYING_RELEASED.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+
+    if !fs.is_initialized() {
+        return Err("a teardown that took nothing still published the instance as torn down");
+    }
+    if DYING_DEVICE_DROPPED.load(Ordering::Acquire) {
+        return Err("the device went while the mount lock said it could not be taken");
+    }
+
+    // The retry: the sweep a claim runs is what finishes the teardown.
+    let swept = slopos_fs::vfs::init::vfs_ext2_pool_claim();
+    let dropped = DYING_DEVICE_DROPPED.load(Ordering::Acquire);
+    if let Some(claimed) = swept {
+        slopos_fs::vfs::init::vfs_ext2_pool_release(claimed, false);
+    }
+    if !dropped {
+        return Err("no later claim ever finished the teardown -- the device is stranded");
+    }
+    if fs.is_initialized() {
+        return Err("the sweep left the instance bound");
+    }
+    Ok(true)
+}
+
+slopos_testing::stest!(
+    name = test_umount2_releases_on_the_table_the_removal_leaves,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_ext2_release_retries_a_teardown_that_could_not_run,
     suite = syscall_core
 );

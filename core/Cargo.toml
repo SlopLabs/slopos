@@ -21,6 +21,8 @@ test-hooks = [
     "slopos-sched/test-hooks",
     "slopos-ring/test-hooks",
     "slopos-ostd/test-helpers",
+    # `syscall::tests` mounts an ext2 image its fixture builder lives in.
+    "slopos-fs/tests",
 ]
 
 [dependencies]

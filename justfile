@@ -25,10 +25,23 @@ fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "64M")
 # costs ~25 MB of guest RAM on every test boot as well (~39 MB of cpio against
 # `qemu_mem`'s 512M). `boot-ramonly` is unaffected: it builds `_iso-notests`,
 # whose initramfs carries `userland_bins` only.
-# Sized on its own: this disk holds work, not the shipped appliance root. The
-# ceiling is 1 GiB — the verity hash array is one contiguous KVec of 4 bytes
-# per 4 KiB block against a 1 MiB `MAX_ALLOC_SIZE`.
+# Sized on its own: this disk holds work, not the shipped appliance root. No
+# longer capped at 1 GiB — the verity hash array is chunked, so what bounds it
+# is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
+# which the mount refuses past rather than discovering.
 persist_image_size := env("PERSIST_IMAGE_SIZE", "512M")
+# The capacity volume `just test-capacity` measures. 16 GiB is the plan's
+# target: two orders of magnitude past the appliance root, which is what puts
+# every mount-time allocation and every metadata cache decision past the size
+# they were chosen at. 1 GiB is no longer the ceiling — the verity hash array
+# is chunked — and this image carries no trailer at all.
+fs_image_capacity     := fs_image_dir / "ext2-capacity.img"
+capacity_image_size   := env("CAPACITY_IMAGE_SIZE", "16G")
+capacity_inode_ratio  := env("CAPACITY_INODE_RATIO", "16384")
+capacity_qemu_mem     := env("CAPACITY_QEMU_MEM", "2G")
+# The tree the volume is populated from, under build_dir so it is not tracked
+# and so `git clean` reclaims it.
+capacity_stage        := build_dir / "capacity-stage"
 persist_qemu_mem   := env("PERSIST_QEMU_MEM", "2G")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
@@ -116,6 +129,50 @@ _fs-image-tests: _build-userland-tests
 _fs-image-persist: _build-userland
     FS_IMAGE_SIZE={{persist_image_size}} VERITY=rw PRESERVE_FS_IMAGE=1 \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}" {{userland_bins}}
+
+# The capacity volume: a filesystem two orders of magnitude past the appliance
+# root, which is the medium `just test-capacity` measures a mount, a search, a
+# write and a tree walk against. Preserved and opt-in — an mkfs of this size
+# writes ~256 MiB of inode tables, so building it on every run would dominate
+# the suite.
+#
+# It comes up holding residency, not geometry alone: a checked-out copy of this
+# repository plus the pinned toolchain sysroot, which is what "holds a
+# checked-out copy of this repository plus a toolchain sysroot" asks for.
+_fs-image-capacity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    populate=""
+    # Staged only for a fresh mkfs: with the image already there the build
+    # below preserves it and never repopulates, so staging would copy a
+    # gigabyte for nothing.
+    if [ ! -f "{{fs_image_capacity}}" ]; then
+        # Checked before any staging work: the repository alone is ~1500 files
+        # and 17 MB, which the kernel's walk budgets accept and
+        # `min-files`/`min-treebytes` in scripts/gates/fsperf/tests.txt do not.
+        # An image built without the sysroot passes the test and fails the gate,
+        # so the floor only describes a tree this recipe can actually build if a
+        # missing sysroot stops it here.
+        sysroot="${RUSTUP_HOME:-$HOME/.rustup}/toolchains/{{rust_channel}}-x86_64-unknown-linux-gnu"
+        if [ ! -d "$sysroot" ]; then
+            echo "capacity: no toolchain sysroot at $sysroot" >&2
+            echo "  The capacity volume holds this repository plus the {{rust_channel}}" >&2
+            echo "  sysroot, and the residency floors the gate grades are measured off" >&2
+            echo "  both halves. Install it with: scripts/ensure_toolchain.sh" >&2
+            echo "  (or set RUSTUP_HOME to the rustup that already has it)." >&2
+            exit 1
+        fi
+        rm -rf "{{capacity_stage}}"
+        mkdir -p "{{capacity_stage}}/repo" "{{capacity_stage}}/sysroot"
+        # `git archive`, not a copy of the worktree: exactly what is committed,
+        # with no builddir/ and no tens of GB of cargo output.
+        git archive HEAD | tar -x -C "{{capacity_stage}}/repo"
+        cp -a "$sysroot/." "{{capacity_stage}}/sysroot/"
+        populate="{{capacity_stage}}"
+    fi
+    FS_IMAGE_SIZE={{capacity_image_size}} FS_INODE_RATIO={{capacity_inode_ratio}} \
+        VERITY=off PRESERVE_FS_IMAGE=1 FS_POPULATE_DIR="$populate" \
+        scripts/build_fs_image.sh "{{fs_image_capacity}}" "{{build_dir}}"
 
 _initramfs: _build-userland
     scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
@@ -372,6 +429,29 @@ test-persist: _build-run-tests
         exit 1
     fi
 
+# The capacity check: one boot with a 16 GiB volume attached as virtio-disk3,
+# which the suite mounts, measures and grades. Separate from `just test`
+# because the image takes minutes to build once and is then preserved; the
+# per-run ratchet that CI does grade lives in `check_fs_throughput.sh`.
+[doc("Capacity check: mount and write a 16 GiB volume, then grade the mount and write cost")]
+test-capacity: _build-run-tests _fs-image-capacity
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*capacity*" just _iso-tests
+    # The silence guard is the wrong instrument here: the capacity fill is one
+    # test that legitimately runs for minutes emitting nothing, and a host
+    # still flushing 1.35 GB of freshly written image makes the guest's
+    # fsync-per-create workload queue behind it. Silence is not a hang.
+    rc=0
+    CAPACITY_IMG="$PWD/{{fs_image_capacity}}" QEMU_MEM="${QEMU_MEM:-{{capacity_qemu_mem}}}" \
+        {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
+        --silence-secs 900 --timeout-secs 1800 \
+        --raw --no-color > {{build_dir}}/capacity.log 2>&1 || rc=$?
+    tail -n 30 {{build_dir}}/capacity.log
+    [ "$rc" -eq 0 ] || { echo "FAIL: the capacity boot exited $rc — full log in {{build_dir}}/capacity.log" >&2; exit 1; }
+    scripts/check_fs_throughput.sh --log {{build_dir}}/capacity.log --require-capacity
+    scripts/check_fs_image.sh "{{fs_image_capacity}}"
+
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, net-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
     {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-net-core -p slopos-chrome-core -p slopos-ostd
@@ -399,6 +479,10 @@ check-lockdep-headroom: _build-run-tests
 [doc("Quota ratchet: assert every account's peak stays under its measured cap and nothing was denied")]
 check-quota-headroom: _build-run-tests
     scripts/check_quota_headroom.sh
+
+[doc("Filesystem cost ratchet: assert a write still costs a bounded number of transactions and device requests per MiB")]
+check-fs-throughput: _build-run-tests
+    scripts/check_fs_throughput.sh
 
 # Two passes: `TaskOwnCell::get_ptr` hands out `*mut T` rather than `&mut T` so
 # two witnesses for one task may hold live pointers into the same field, and
@@ -459,6 +543,7 @@ check-framekernel-gates:
     scripts/check_quota_headroom.sh --self-test
     scripts/check_sched_spread.sh --self-test
     scripts/check_fs_image.sh --self-test
+    scripts/check_fs_throughput.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh

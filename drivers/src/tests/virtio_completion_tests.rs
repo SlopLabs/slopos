@@ -7,7 +7,7 @@ use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 
-use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
+use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex, stats};
 use slopos_ostd::mm::heap::KVec;
 use slopos_ostd::sync::Mutex;
 
@@ -17,9 +17,8 @@ use crate::virtio::{EdgeWait, IrqEdgeEvent};
 use crate::virtio_blk;
 use crate::virtio_blk::BlkClaimError;
 
-/// The disposable scratch block device (virtio-disk1), attached only for the
-/// test harness. Destructive block tests target THIS index, never disk0 (the
-/// live root-fs image).
+/// The disposable scratch device (virtio-disk1). Destructive block tests
+/// target THIS index, never disk0 — the live root-fs image.
 const SCRATCH: BlockDeviceIndex = BlockDeviceIndex(1);
 
 pub fn test_edge_event_new_not_signaled() -> TestResult {
@@ -219,7 +218,7 @@ pub fn test_virtio_blk_read_interrupt_driven() -> TestResult {
     assert_test!(virtio_blk::blk_is_ready(disk0), "virtio-blk must be ready");
 
     let mut buf = [0u8; 512];
-    let ok = virtio_blk::blk_read(disk0, 1024, &mut buf);
+    let ok = virtio_blk::blk_read(disk0, 1024, &mut buf).is_ok();
     assert_test!(ok, "superblock read should succeed via IRQ-driven I/O");
     let magic = u16::from_le_bytes([buf[0x38], buf[0x39]]);
     assert_eq_test!(magic, 0xEF53, "ext2 superblock magic mismatch");
@@ -234,18 +233,16 @@ pub fn test_virtio_blk_consecutive_reads() -> TestResult {
 
     let mut buf1 = [0u8; 512];
     let mut buf2 = [0u8; 512];
-    let ok1 = virtio_blk::blk_read(disk0, 0, &mut buf1);
-    let ok2 = virtio_blk::blk_read(disk0, 512, &mut buf2);
+    let ok1 = virtio_blk::blk_read(disk0, 0, &mut buf1).is_ok();
+    let ok2 = virtio_blk::blk_read(disk0, 512, &mut buf2).is_ok();
     assert_test!(ok1, "first consecutive read should succeed");
     assert_test!(ok2, "second consecutive read should succeed");
     pass!()
 }
 
 pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
-    // Destructive round-trip against the disposable scratch device (disk1),
-    // never the live root-fs image (disk0): the scratch disk is recreated blank
-    // each run and the write capability is exclusive, so no save/restore is
-    // needed.
+    // The scratch disk is blank each run and the claim is exclusive, so
+    // nothing needs saving or restoring.
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
     };
@@ -279,10 +276,8 @@ pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
     pass!()
 }
 
-/// Multi-sector batching: a sector-aligned span larger than one sector must
-/// round-trip through the chained-descriptor path (single request per
-/// bounce-page chunk instead of one request per sector), and unaligned
-/// sub-spans must read back correctly through the head/middle/tail split.
+/// A sector-aligned span wider than one sector goes out as a single
+/// scatter-gather chain; an unaligned sub-span exercises the head/tail split.
 pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -292,10 +287,8 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
         Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
     };
 
-    // Sector-aligned offset clear of the single-sector test's region and
-    // inside the 8 MiB scratch image.
-    // Heap buffers: 3772 bytes in one frame would step past the 4 KiB guard
-    // page, which `stack-probes: none` gives no chance to catch.
+    // Heap buffers: the three together are 3772 bytes, which on one stack
+    // frame steps past the 4 KiB guard page `stack-probes: none` cannot catch.
     const SPAN: usize = 3 * 512;
     let offset = 2048u64 * 512;
     let mut pattern = assert_ok!(KVec::<u8>::zeroed(SPAN), "pattern buffer");
@@ -318,8 +311,7 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
         "multi-sector readback should match the written pattern"
     );
 
-    // Unaligned sub-span crossing two sector boundaries: exercises the
-    // partial-head + aligned-middle + partial-tail split.
+    // Unaligned sub-span: partial head, aligned middle, partial tail.
     let mut sub = assert_ok!(KVec::<u8>::zeroed(700), "sub-span buffer");
     assert_test!(
         token.read_at(offset + 100, &mut sub).is_ok(),
@@ -332,8 +324,6 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
     pass!()
 }
 
-/// The durability barrier must complete promptly through the scheduler-backed
-/// wait.
 pub fn test_virtio_blk_flush_completes() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -343,7 +333,6 @@ pub fn test_virtio_blk_flush_completes() -> TestResult {
         Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
     };
 
-    // Sector 4000: inside the scratch image, disjoint from the other tests.
     let pattern = [0xA5u8; 512];
     assert_test!(
         token.write_at(4000 * 512, &pattern).is_ok(),
@@ -356,8 +345,6 @@ pub fn test_virtio_blk_flush_completes() -> TestResult {
     pass!()
 }
 
-/// The exclusive-write capability FSM: a device admits at most one live
-/// [`BlockWriteToken`]; dropping it releases the claim.
 pub fn test_block_device_exclusive_write_claim() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -384,7 +371,6 @@ pub fn test_block_device_exclusive_write_claim() -> TestResult {
     pass!()
 }
 
-/// Device lookup by stable probe-order index, and registry bounds.
 pub fn test_block_device_lookup_bounds() -> TestResult {
     assert_test!(
         virtio_blk::blk_device_by_index(BlockDeviceIndex(0)).is_some(),
@@ -401,6 +387,297 @@ pub fn test_block_device_lookup_bounds() -> TestResult {
     assert_test!(
         virtio_blk::blk_device_count() >= 2,
         "at least the root-fs and scratch devices must be claimed"
+    );
+    pass!()
+}
+
+/// 8 KiB is two data descriptors in one chain — one request where the
+/// pre-scatter-gather driver needed two.
+pub fn test_virtio_blk_single_request_over_one_page() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+
+    const SPAN: usize = 8192;
+    let offset = 3072u64 * 512;
+    let mut pattern = assert_ok!(KVec::<u8>::zeroed(SPAN), "pattern buffer");
+    for (i, b) in pattern.iter_mut().enumerate() {
+        *b = (i.wrapping_mul(31) ^ (i >> 5)) as u8;
+    }
+
+    assert_test!(
+        token.write_at(offset, &pattern).is_ok(),
+        "an 8 KiB write must succeed as one scatter-gather chain"
+    );
+
+    let mut readback = assert_ok!(KVec::<u8>::zeroed(SPAN), "readback buffer");
+    assert_test!(
+        token.read_at(offset, &mut readback).is_ok(),
+        "an 8 KiB read must succeed as one scatter-gather chain"
+    );
+    assert_test!(
+        readback[..] == pattern[..],
+        "a span larger than one bounce page must round-trip byte for byte"
+    );
+    pass!()
+}
+
+/// `write_vectored` gathers non-adjacent kernel buffers into one contiguous
+/// device extent, each segment at its own offset in the run.
+pub fn test_virtio_blk_write_vectored_gathers_one_extent() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+
+    const A: usize = 1024;
+    const B: usize = 2048;
+    const C: usize = 1536;
+    let offset = 4608u64 * 512;
+
+    let mut a = assert_ok!(KVec::<u8>::zeroed(A), "segment a");
+    let mut b = assert_ok!(KVec::<u8>::zeroed(B), "segment b");
+    let mut c = assert_ok!(KVec::<u8>::zeroed(C), "segment c");
+    for (i, v) in a.iter_mut().enumerate() {
+        *v = 0xA0u8.wrapping_add(i as u8);
+    }
+    for (i, v) in b.iter_mut().enumerate() {
+        *v = 0xB0u8.wrapping_sub(i as u8);
+    }
+    for (i, v) in c.iter_mut().enumerate() {
+        *v = (i as u8) ^ 0x5A;
+    }
+
+    // Three separate allocations: nothing about the run is contiguous in memory.
+    let segs: [&[u8]; 3] = [&a, &b, &c];
+    assert_test!(
+        token.write_vectored(offset, &segs).is_ok(),
+        "a vectored write of three segments must succeed"
+    );
+
+    let mut back_a = assert_ok!(KVec::<u8>::zeroed(A), "readback a");
+    let mut back_b = assert_ok!(KVec::<u8>::zeroed(B), "readback b");
+    let mut back_c = assert_ok!(KVec::<u8>::zeroed(C), "readback c");
+    assert_test!(
+        token.read_at(offset, &mut back_a).is_ok()
+            && token.read_at(offset + A as u64, &mut back_b).is_ok()
+            && token.read_at(offset + (A + B) as u64, &mut back_c).is_ok(),
+        "per-segment readback must succeed"
+    );
+    assert_test!(
+        back_a[..] == a[..],
+        "segment 0 must land at the start of the extent"
+    );
+    assert_test!(
+        back_b[..] == b[..],
+        "segment 1 must land directly after segment 0"
+    );
+    assert_test!(
+        back_c[..] == c[..],
+        "segment 2 must land directly after segment 1"
+    );
+    pass!()
+}
+
+/// Two chains in flight at once, each completing with its own data:
+/// `blk_submit_read` returns without parking, which the old global `io_lock`
+/// made impossible.
+pub fn test_virtio_blk_concurrent_requests_complete() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+
+    const SPAN: usize = 4096;
+    const SECTOR_ONE: u64 = 5120;
+    const SECTOR_TWO: u64 = 5632;
+
+    let mut first = assert_ok!(KVec::<u8>::zeroed(SPAN), "first pattern");
+    let mut second = assert_ok!(KVec::<u8>::zeroed(SPAN), "second pattern");
+    for (i, v) in first.iter_mut().enumerate() {
+        *v = (i as u8) ^ 0x11;
+    }
+    for (i, v) in second.iter_mut().enumerate() {
+        *v = (i as u8).wrapping_mul(3) ^ 0xEE;
+    }
+    assert_test!(
+        token.write_at(SECTOR_ONE * 512, &first).is_ok()
+            && token.write_at(SECTOR_TWO * 512, &second).is_ok(),
+        "seeding both regions must succeed"
+    );
+
+    let in_flight_one = match virtio_blk::blk_submit_read(handle, SECTOR_ONE, SPAN) {
+        Ok(r) => r,
+        Err(e) => return fail!("first submission failed: {:?}", e),
+    };
+    let in_flight_two = match virtio_blk::blk_submit_read(handle, SECTOR_TWO, SPAN) {
+        Ok(r) => r,
+        Err(e) => return fail!("second submission while the first is in flight: {:?}", e),
+    };
+
+    let mut got_one = assert_ok!(KVec::<u8>::zeroed(SPAN), "first readback");
+    let mut got_two = assert_ok!(KVec::<u8>::zeroed(SPAN), "second readback");
+    if let Err(e) = in_flight_one.complete(&mut got_one) {
+        return fail!("first concurrent request did not complete: {:?}", e);
+    }
+    if let Err(e) = in_flight_two.complete(&mut got_two) {
+        return fail!("second concurrent request did not complete: {:?}", e);
+    }
+
+    assert_test!(
+        got_one[..] == first[..],
+        "the first concurrent request must return its own extent"
+    );
+    assert_test!(
+        got_two[..] == second[..],
+        "the second concurrent request must return its own extent"
+    );
+    pass!()
+}
+
+/// A span that runs past the end of the medium is a bounds error, not the
+/// catch-all `InvalidBuffer` every failure used to collapse into.
+pub fn test_virtio_blk_read_past_capacity_is_out_of_bounds() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let capacity = virtio_blk::blk_capacity(handle);
+    assert_test!(capacity >= 512, "scratch device must report a capacity");
+
+    let mut buf = [0u8; 512];
+    match virtio_blk::blk_read(handle, capacity - 256, &mut buf) {
+        Err(BlockDeviceError::OutOfBounds) => {}
+        other => return fail!("want OutOfBounds for a span past capacity, got {:?}", other),
+    }
+    match virtio_blk::blk_read(handle, u64::MAX - 16, &mut buf) {
+        Err(BlockDeviceError::OutOfBounds) => pass!(),
+        other => fail!("want OutOfBounds for an overflowing span, got {:?}", other),
+    }
+}
+
+/// A completion landing while the timeout epilogue allocates the slot's
+/// replacement page set used to leave the slot in a state nothing reclaims:
+/// one of four gone per event, then `Busy` forever.
+///
+/// A device that answers in microseconds cannot be made to complete inside a
+/// real five-second window, so the hook enters the epilogue where the race
+/// leaves it. The rounds run past `NUM_REQUEST_SLOTS` so a per-event leak
+/// wedges the device inside the test rather than after it.
+pub fn test_virtio_blk_late_completion_keeps_slot() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+
+    const SPAN: usize = 1024;
+    const SECTOR: u64 = 6144;
+
+    let mut pattern = assert_ok!(KVec::<u8>::zeroed(SPAN), "pattern buffer");
+    for (i, v) in pattern.iter_mut().enumerate() {
+        *v = (i as u8).wrapping_mul(7) ^ 0x3C;
+    }
+    assert_test!(
+        token.write_at(SECTOR * 512, &pattern).is_ok(),
+        "seeding the region must succeed"
+    );
+
+    let slots = virtio_blk::blk_available_slots(handle);
+    assert_test!(slots > 0, "the device must start with a free request slot");
+
+    for round in 0..slots + 2 {
+        let mut got = assert_ok!(KVec::<u8>::zeroed(SPAN), "readback buffer");
+        if let Err(e) =
+            virtio_blk::blk_read_completing_in_replacement_window(handle, SECTOR, &mut got)
+        {
+            return fail!(
+                "round {}: a completion inside the replacement window must be handed to the \
+                 caller, got {:?}",
+                round,
+                e
+            );
+        }
+        assert_test!(
+            got[..] == pattern[..],
+            "the late completion must carry the chain's own payload"
+        );
+        assert_eq_test!(
+            virtio_blk::blk_available_slots(handle),
+            slots,
+            "the slot must return to service after the epilogue"
+        );
+    }
+
+    let mut after = assert_ok!(KVec::<u8>::zeroed(SPAN), "post-round readback");
+    assert_test!(
+        token.read_at(SECTOR * 512, &mut after).is_ok() && after[..] == pattern[..],
+        "the device must still answer ordinary requests afterwards"
+    );
+    pass!()
+}
+
+/// One count is one device request: the counters live inside the chain loop,
+/// so a span wider than 32 KiB costs more than one write and a sub-sector
+/// write pays for its read-modify-write pair. Counted at the `BlockDevice`
+/// boundary instead, both cost exactly one — which is what made the graded
+/// request count blind to a block-layer regression.
+pub fn test_virtio_blk_counters_are_per_device_request() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+
+    // Sector-aligned, so the chain split is the only thing the counter sees.
+    const WIDE: usize = 64 * 1024;
+    const SECTOR: u64 = 6144;
+    let wide = assert_ok!(KVec::<u8>::zeroed(WIDE), "wide payload");
+
+    // Deltas rather than absolutes, and lower bounds rather than equalities:
+    // the counters are process-global and the ext2 flusher writes to another
+    // device while this runs.
+    let before = stats::snapshot();
+    assert_test!(
+        token.write_at(SECTOR * 512, &wide).is_ok(),
+        "the two-chain write must succeed"
+    );
+    let after = stats::snapshot();
+    assert_test!(
+        after.write_requests - before.write_requests >= 2,
+        "a {}-byte span is more than one 32 KiB chain, so it must count more \
+         than one device write",
+        WIDE
+    );
+    assert_test!(
+        after.blocks_written - before.blocks_written >= (WIDE / 512) as u64,
+        "the sector total must still be the bytes the request carried"
+    );
+
+    let before = stats::snapshot();
+    assert_test!(
+        token.write_at(SECTOR * 512 + 3, &wide[..8]).is_ok(),
+        "the sub-sector write must succeed"
+    );
+    let after = stats::snapshot();
+    assert_test!(
+        after.read_requests - before.read_requests >= 1
+            && after.write_requests - before.write_requests >= 1,
+        "a write inside one sector is a read-modify-write pair at the device, \
+         and both halves must be counted"
     );
     pass!()
 }
@@ -487,5 +764,29 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_block_device_lookup_bounds,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_single_request_over_one_page,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_write_vectored_gathers_one_extent,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_concurrent_requests_complete,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_read_past_capacity_is_out_of_bounds,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_late_completion_keeps_slot,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_counters_are_per_device_request,
     suite = virtio_completion
 );

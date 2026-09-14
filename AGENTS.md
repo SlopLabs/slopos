@@ -15,6 +15,20 @@ Boot targets rebuild a secondary `builddir/slop-notests.iso` with `tests=off`; o
 
 **The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the shipped verified `ext2.img`, so `just boot` still runs `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot-persist` is the developer's persistent machine: it boots `fs/assets/ext2-persist.img`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`, binaries only) so what the guest wrote survives. `VERITY=on` builds the shipped v1 trailer, which write-protects the device and is what `just boot`'s `verity=require` asserts; `VERITY=off` builds no trailer. The shipped and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
+**The root is not the only filesystem.** `mount(2)` with `fstype=ext2` takes a
+`source` naming a block device — `mount("/dev/vdb1", "/home", "ext2", …)` —
+claims that device's exclusive writer (or mounts read-only with `MS_RDONLY`,
+which needs no claim), and binds it to one of four pooled `Ext2Mount`
+instances, each with **its own lock**. A path walk crossing a mount therefore
+holds one mount's lock while taking the next one's, which is why the four
+instances carry four separate `lock_class!` sites rather than one shared class;
+slot 0's is still named `CACHED_EXT2`, so the class boot registers is the class
+it always was. `umount` of the last mount of an instance flushes it, marks the
+image clean, drops the device and returns the slot, so the write claim is
+released and the same disk can be mounted again — a leaked claim answers
+`AlreadyClaimed` forever, and that is the failure the remount test exists to
+catch.
+
 **A rude exit is survivable.** The flusher marks the image clean *on the
 medium* whenever a pass leaves nothing dirty, nothing unbarriered, no
 superblock drift and an empty log — the state ext4 reaches for `fsfreeze`,
@@ -29,13 +43,15 @@ naming the command that repairs it; `just boot-persist-reset` is the only
 thing that discards one; a larger `PERSIST_IMAGE_SIZE` grows the image with
 `resize2fs` rather than rebuilding it; and `gen_verity.py` AND-s the old
 attested bitmap into the new one, so a block the guest rewrote stays
-un-attested across rebuilds. The persist default is 512M and 1 GiB is the
-ceiling: the verity hash array is one contiguous `KVec` of 4 bytes per 4 KiB
-block against a 1 MiB `MAX_ALLOC_SIZE`.
+un-attested across rebuilds. The persist default is 512M; the ceiling is now
+what the machine's RAM allows rather than what one allocation allows, because
+the verity hash array is chunked (4 bytes per 4 KiB block, in 256 KiB pieces,
+refused past a stated share of usable memory) instead of one contiguous `KVec`.
 
 **A write is logged before it lands.** A writable ext2 image carries a metadata
 redo log in a preallocated sealed file at `/.journal` (`FS_JOURNAL_SIZE`,
-default 4M; `0` builds none), located at mount by path lookup and used as a
+default 1/64 of the image floored at 4M and capped at 64M; `0` builds none),
+located at mount by path lookup and used as a
 physical redo log: an operation's metadata — and its data too, when the write
 is small enough to be cheaper logged than barriered — goes into the log with a
 CRC-covered commit record before any of it reaches a home location. That is
@@ -211,6 +227,8 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just check-test-count` — count-regression CI guard; fails if total planned tests across phases drops below `TEST_COUNT_BASELINE`. The default lives in `scripts/check_test_count.sh` and is written down only there — read it from the script rather than restating it here, and bump it there when the suite grows. Measure the new value with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`; never guess it.
 - `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and a clean superblock. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
+- `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
+- `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
 - `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and stays inside the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and an entry matching nothing fails as a dead entry. The three pools are not graded alike. Class counts are deterministic — a class registers on the first acquire of a declaration site, and three runs of one pinned ISO measured boot at 71 every time — so they carry **exact caps**. Boot's edge and chain counts carry caps rather than bands for the same reason, though the recorded values still hold the old convention's slack until they are re-measured onto the observed 43/110. The two test phases' edge and chain counts measure which orderings a run *happened to observe* and move between runs of identical code, so they carry **bands** (`band <phase> <pool> <lo> <hi>`) instead: leaving one prints `DRIFT` on stderr and the run still passes. Be clear about what that gives up — a banded pool has no upper failure of its own, so growth up to `max-fill-pct` (~3.5x observed) reaches you only as that DRIFT line; an *inverted* order is caught by the cycle detector and still fails. `min-classes` / `min-edges` / `min-chains` are the floors that stop a validator which quietly stopped recording from reading as maximally healthy. `--emit-allowlist` writes a fresh baseline (and accepts several `--log`s to merge), a single `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives its crafted logs through the parser — proving both that the gate rejects and that it stays silent on the forms it deliberately accepts.
 
@@ -315,7 +333,7 @@ just test-host                        # CI: Host-side unit tests
 just build                            # CI: Build kernel
 just check-framekernel-gates          # CI: Framekernel gates (self-tests + all source/ELF scans)
 
-# CI: Run tests — one raw capture, which the three ratchets then parse.
+# CI: Run tests — one raw capture, which the ratchets then parse.
 just _build-run-tests
 set -o pipefail
 builddir/run_tests --raw --no-color 2>&1 | tee builddir/ci-test.log
@@ -325,11 +343,17 @@ scripts/check_test_count.sh        --log builddir/ci-test.log
 scripts/check_lockdep_headroom.sh  --log builddir/ci-test.log
 scripts/check_quota_headroom.sh    --log builddir/ci-test.log   # not yet a CI step; run it anyway
 scripts/check_sched_spread.sh      --log builddir/ci-test.log
+scripts/check_fs_throughput.sh     --log builddir/ci-test.log   # not yet a CI step; run it anyway
 ```
 
-The capture is reused deliberately: booting QEMU once per ratchet is three boots for three questions, and a second boot could disagree with the one that was graded.
+The capture is reused deliberately: booting QEMU once per ratchet is a boot per
+question, and a second boot could disagree with the one that was graded.
 
-A changed lock order, a new lock, a new test, or a new quota account will move a ratchet. That is the gate working — re-measure with the gate's `--emit-allowlist` and explain the delta in the commit message. Never hand-edit `scripts/gates/**` to silence a run.
+A changed lock order, a new lock, a new test, a new quota account, or a write
+path that issues more device requests per MiB will move a ratchet. That is the
+gate working — re-measure with the gate's `--emit-allowlist` and explain the
+delta in the commit message. Never hand-edit `scripts/gates/**` to silence a
+run.
 
 Two CI jobs are *not* in the sequence above because they are slow and run as separate jobs: `just check-miri` (KernMiri) and `just verify` (Verus). Run them when touching `slopos-ostd/` or `verification/`; `just check-framekernel` is the recipe that runs the gates plus both.
 

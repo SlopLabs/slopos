@@ -19,7 +19,7 @@ use super::{Ext2ImageSpec, FIX_FILE_BLOCK, ScratchProcess, build_ext2_image};
 use crate::blockdev::{BlockDevice, MemoryBlockDevice};
 use crate::ext2::Ext2Fs;
 use crate::ext2::blockcharge::{BlockCharges, MAX_ROWS};
-use crate::ext2::cache::BlockCache;
+use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 
 /// Small enough that the first handful of files reaches it.
 const CEILING: u32 = 6;
@@ -55,7 +55,7 @@ fn with_mount(
     body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     let (sb, bs, is) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
-    let mut cache = BlockCache::new_boxed(bs).map_err(|_| "cache")?;
+    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).map_err(|_| "mount")?;
     fs.set_account(account());
     body(&mut fs)

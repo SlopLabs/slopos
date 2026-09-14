@@ -17,19 +17,20 @@ appetite.
 `builddir/target` holds 52 GB across 219,895 files. Against that, SlopOS now
 runs a 24 MiB executable with a gigabyte of anonymous address space and a
 demand-paged file mapping, resolves a 4096-byte path with symlinks in it, stats
-a file for a real mtime, boots a 512 MiB dev root with 32 k inodes against a
-1 GiB kernel-side ceiling, and refuses `PT_INTERP` outright (`mm/src/elf.rs`).
-The remaining gap is two orders of magnitude in storage and one in linking, and
-every constant that produces it was chosen correctly for an appliance.
+a file for a real mtime, mounts a 16 GiB volume holding a million inodes — this
+repository and that sysroot among them — and refuses `PT_INTERP` outright
+(`mm/src/elf.rs`). The remaining gap is one order of magnitude in linking, and
+every constant that produced the storage gap was chosen correctly for an
+appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes, they
 are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
-proof*, not redesign — with three remaining exceptions (dynamic linking, the
-compiler bootstrap itself, and a filesystem that can hold a tree). Two more,
-a page-fault path that can reach the device and a POSIX floor a build system
-can stand on, have landed.
+proof*, not redesign — with two remaining exceptions (dynamic linking and the
+compiler bootstrap itself). Three more, a page-fault path that can reach the
+device, a POSIX floor a build system can stand on, and a filesystem that can
+hold a tree, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -39,22 +40,26 @@ can stand on, have landed.
 - **Allocation discipline.** `KBox`/`KVec`/`KArc`/`KBTreeMap` only. Every
   toolchain-sized buffer this plan touches must become a chunked or page-list
   design rather than a bigger single allocation: `MAX_ALLOC_SIZE` is 1 MiB
-  (`mm/src/slab/mod.rs:61`) and raising it is not the fix.
+  (`mm/src/slab/mod.rs:61`) and raising it is not the fix. The verity hash
+  array, the attest bitmap and a ramfs file's body are all chunked for exactly
+  this reason and are the pattern to copy.
 - **Stack frames ≤ 2 KiB** against a 4 KiB guard page. This is why a 4096-byte
   path lives in a `KVec` — in `CanonPath`, in `UserPath`, and in the shell —
-  rather than in an array on a frame, and why `NameBuf` borrows from the
-  canonical path instead of copying out of it.
+  rather than in an array on a frame, why `NameBuf` borrows from the canonical
+  path instead of copying out of it, and why `BlockCache` and `Journal` are
+  built with `KBox::try_init` instead of by value.
 - **Task ownership I1–I8** and **no `async fn` in a kernel crate**. The
   sleepable fault path this rests on is a blocking task on its own kernel
   stack, not an executor.
 - **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
   — which rules out lifting busybox-lineage utilities or Linux userland code for
-  Phase 2. Concepts, ABI numbers and struct layouts are free to take; prose and
-  implementation are not. Anything new linked into a shipped binary needs a
-  `NOTICE.md` entry. Fonts stay runtime-loaded.
+  Phase 1's utilities. Concepts, ABI numbers and struct layouts are free to
+  take; prose and implementation are not. Anything new linked into a shipped
+  binary needs a `NOTICE.md` entry. Fonts stay runtime-loaded.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
-  quota, lockdep and test-count pools. Re-measure with each gate's
-  `--emit-allowlist` in the same commit and say which change added the delta.
+  quota, lockdep, test-count and filesystem-cost pools. Re-measure with each
+  gate's `--emit-allowlist` in the same commit and say which change added the
+  delta.
 - **`just boot`'s `verity=require` keeps meaning what it says.** The shipped
   image stays v1-verified and read-only. Everything this plan makes writable is
   a different medium.
@@ -89,13 +94,13 @@ What it rests on, in case a later phase disturbs it:
   trailer kept aside, so a failed resize leaves it byte-identical.
 - **A rebuild no longer re-blesses guest writes.** `gen_verity.py` AND-s the
   old attested bitmap into the new one, so a block a boot rewrote stays
-  un-attested across rebuilds — what `fs/src/verity.rs:166-167` already said
-  the bitmap meant.
-- **The persist root is 512M against a 32M shipped image, and 1 GiB is the
-  ceiling.** The verity hash array is one contiguous `KVec` of 4 bytes per
-  4 KiB block against a 1 MiB `MAX_ALLOC_SIZE`, so a 1 GiB image allocates
-  exactly the cap twice at mount. Workstream 1.1 is what lifts that; until it
-  does, no phase here may assume a bigger root.
+  un-attested across rebuilds — what `fs/src/verity.rs` already said the bitmap
+  meant.
+- **The persist root is 512M against a 32M shipped image, and 1 GiB is no
+  longer the ceiling.** The verity hash array is chunked at 4 bytes per 4 KiB
+  block in 256 KiB pieces, so what bounds an image is the resident hash a
+  machine's RAM can hold — which the mount computes and *refuses* past
+  (`VerityError::TooLarge`) rather than discovering as an allocation failure.
 
 ---
 
@@ -187,9 +192,10 @@ What it rests on, in case a later phase disturbs it:
 **Two clauses of this did not land, and are not hiding.** There is still no OOM
 *disposition*: a fault that cannot find a frame kills the faulter with a
 SIGBUS-coded exit, and choosing a victim instead is a policy subsystem rather
-than a constant — it belongs with the swap and reclaim work in Phase 1. And
-user mappings are all 4 KiB; nothing instantiates the 2 MiB leaf the page
-tables already support, which is a throughput item, not a capability one.
+than a constant. It belongs with swap, which also did not land — see the
+storage section below, which is where both were expected to arrive. And user
+mappings are all 4 KiB; nothing instantiates the 2 MiB leaf the page tables
+already support, which is a throughput item, not a capability one.
 
 ---
 
@@ -317,10 +323,10 @@ What it rests on, in case a later phase disturbs it:
 **What this deliberately did not do.** The syscall numbering is still bespoke —
 the *layouts* are Linux's now, which is the half that carries no design value
 and the half a libc port cannot work around, but the numbers are still
-append-only SlopOS ones. That is the open decision below, and Phase 1's work
-made it cheaper rather than settling it. Process-group waits (`pid == 0`,
-`pid < -1`) are still `ESRCH`, because there is no process-group wait to answer
-with. `st_uid`/`st_gid` exist for layout and read 0, which is the single-user
+append-only SlopOS ones. That is the open decision below, and this work made it
+cheaper rather than settling it. Process-group waits (`pid == 0`, `pid < -1`)
+are still `ESRCH`, because there is no process-group wait to answer with.
+`st_uid`/`st_gid` exist for layout and read 0, which is the single-user
 decision below, not an omission.
 
 Four smaller divergences, stated rather than hidden:
@@ -350,67 +356,182 @@ Four smaller divergences, stated rather than hidden:
 
 ---
 
-## Phase 1 — Storage and capacity for a real tree
+## Storage holds a tree, and a write costs what it writes
 
-**Outcome:** a multi-GB working tree with hundreds of thousands of files, at a
-throughput where a build finishes.
+The fourth thing this plan rests on: a volume two orders of magnitude past the
+appliance root mounts, holds a working tree, and takes a write at a cost
+proportional to the bytes it moves. `just test-capacity` is the standing proof
+— a 16 GiB ext2 volume (4 194 304 blocks of 4 KiB across 128 groups, a million
+inodes) carrying a checked-out copy of this repository *and* the pinned
+toolchain sysroot, which the guest mounts, walks, searches and writes, and
+which `e2fsck -fn` then accepts with a clean superblock. The numbers are on the
+wire as `FSPERF[<phase>]` and `FSCAP[<phase>]`, and
+`scripts/check_fs_throughput.sh` is the ratchet that keeps them there.
 
-### Workstream 1.1 — Size the filesystem from the medium (**M**)
+Measured on that volume: it holds **5 445 files and 1 105 385 677 bytes in
+1 207 directories** — the host's staged tree to the byte — which the guest walks
+in 1 634 device reads and reads back out of, not merely enumerates. The mount
+costs **26–27 device reads** — geometry plus the journal's block map, not a
+sweep — and a lookup of the last of 4 000 names in one directory costs
+**0 block reads** once the directory index is warm. Measured on the appliance
+root: 2 MiB written through the real `write(2)` path costs **10 transactions,
+10 commit records, 44 block-layer write requests carrying 4 624 sectors, and 10
+barriers**, identical across six runs of one ISO. Before this work the same
+2 MiB was 512 transactions and 578 requests.
 
-Fixed at appliance scale: the block cache is 512 entries / 2 MiB
-(`fs/src/ext2/cache.rs:26`), never derived from the volume — at 16 GiB the group
-bitmaps alone need 257 of those 512 slots, and every allocation then evicts a
-bitmap it is about to need. The journal is 4 MiB regardless of image size, with
-`resident_slot` a linear backward scan (`fs/src/ext2/journal.rs:255-267`), so
-simply growing it makes every miss quadratic. `allocate_searching` restarts at
-bit 0 of each group with no hint. Verity's hash array is 4 bytes per block in
-one contiguous `KVec`, which is not a sizing preference but the hard ceiling on
-this whole phase: `MAX_ALLOC_SIZE` is 1 MiB, so 1 GiB is the largest image that
-mounts at all and a 64 GiB volume would want 64 MiB of it. Directory
-lookup is a linear scan with no htree, so `target/debug/deps` with 20 k entries
-makes the build O(n²) — and now that a 255-byte name is legal, the entries are
-longer too.
+What it rests on, in case a later phase disturbs it:
 
-### Workstream 1.2 — Make a write cost what it writes (**M**)
+- **Every appliance-sized constant is derived from the medium now.** The block
+  cache's capacity comes from the volume's group count at mount
+  (`cache_entries_for`, clamped to `[512, 8192]`), because a group's block and
+  inode bitmaps plus the group-descriptor table are what every allocation
+  re-reads — at 16 GiB that is 257 blocks against a floor of 512 slots, where
+  the old fixed 512 would have spent half its capacity on them and evicted a
+  bitmap it was about to need. The log is 1/64 of the image floored at 4M and
+  capped at 64M (`scripts/build_fs_image.sh`), so the 16 GiB volume ships 16 383
+  slots against the appliance root's 1 023. The verity hash array and attest
+  bitmap are chunked at 256 KiB and streamed in against a running CRC, so no
+  two full-size allocations are ever live and the trailer's bytes are unchanged.
+  The ramfs derives its per-file ceiling and inode count from usable memory with
+  the old 16 MiB / 4096 as *floors*, and its file bodies are page-chunked —
+  without which the derived ceiling was a lie, since a single `KVec` body made
+  the real limit `MAX_ALLOC_SIZE` and `/tmp` refused a 1 MiB object file.
+- **A miss is O(1) and an insert is not O(n²).** The block cache evicts through
+  an intrusive LRU rather than three linear scans of every entry, prefers a
+  victim that is not a bitmap or a group descriptor, and drives its
+  per-transaction bookkeeping from a preallocated list of the slots the
+  operation touched instead of walking the whole cache. The journal answers
+  "where does this block's newest copy live" from a chained hash index over its
+  slot arrays — preallocated at attach, because **a commit must not allocate** —
+  instead of scanning backwards from the head, which is what made a bigger log
+  quadratic; `flush_revokes` and replay's revoke disposition go through the same
+  index. Directory lookup and insert go through a bounded in-memory name index
+  and a free-space hint: 1 600 names of 255 bytes into one directory used to
+  visit 853 333 directory blocks and now costs **2 device reads**. The hint
+  alone was not enough and the measurement said so — a growing directory still
+  re-scanned its whole prefix every time a block filled — so each hint carries a
+  *proof*, the size no block below it has slack for, and skipping the prefix
+  requires the request to be at least that big. That is what makes the skip
+  safe: it can never turn an insert that would have fitted into a new block.
+- **The directory index is a cache, and its correctness rests on two rules.** A
+  hit is a *candidate*: the record at that position is read and its name
+  compared before it is trusted, so a stale entry resolves to nothing. The
+  dangerous direction is the other one — a complete index missing a name — so
+  `complete` is granted only by a walk that reached the directory's end with
+  every record filed, every mutation must keep it, and anything that cannot
+  drops the table. A failed transaction drops the index of every directory
+  inode it touched, wired through the same op-touched bookkeeping the cache
+  already keeps, because `Ext2Txn::drop` restores block contents the index would
+  otherwise still be describing.
+- **A write is one transaction per 256 KiB, and one request per run of
+  blocks.** `IO_FILE_BATCH_SIZE` is the regular-file staging bound (`abi/src/io.rs`)
+  and is deliberately not `IO_STAGING_SIZE`, which stays 4 KiB because for a tty,
+  a pipe or a datagram that number is a latency decision. 256 KiB is 64 blocks
+  per transaction, above the point where a transaction's data is written home
+  and barriered once instead of going into the log, and well under the block
+  cache so a batch cannot evict its own blocks. The user copy stays *outside*
+  the mount lock, and must: `copy_bytes_from_user` takes the `PROCESS_VMS` slot
+  lock, the file-fault path already runs PROCESS_VMS → drop → filemap →
+  `CACHED_EXT2`, and copying under the mount lock would close that cycle. Then
+  three write paths gather runs of consecutive blocks into one
+  `BlockDevice::write_vectored`: the transaction's data write-home loop, the
+  journal's record header plus its payload slots, and the log checkpoint's
+  copy home. Ordered writeback survives because a run may only ever contain
+  this operation's dirty data blocks, the commit record is still a separate
+  write issued after every payload, and each phase still barriers once.
+- **The check point is the lock owner's, not the operation's.**
+  `Ext2Fs::transaction` used to notice the log was short of headroom and run an
+  unbounded whole-filesystem `sync()` *inside* a hold of the mount lock, so
+  every path walk on the machine queued behind it. The decision moved up to
+  `Ext2Mount::with_fs`, which drives the chunked `sync_step` pass with the lock
+  given back between steps and only then takes it for the operation; the
+  in-transaction checkpoint survives as the last resort for callers that reach
+  `transaction` without the VFS wrapper. The log's low-water mark scales with
+  its capacity instead of being capped at 256 slots, or a batched transaction
+  would fail with `NoSpace` on exactly the log size that was supposed to help
+  it.
+- **The block layer is four requests deep and 32 KiB wide.** `virtio_blk` built
+  a fixed three-descriptor chain, bounced through two freshly allocated frames
+  per request, and serialised every logical request machine-wide behind a
+  `Mutex<()>`; a 1 MiB write was 256 round trips and 512 buddy allocations. Now
+  a request is a `1 + N + 1` chain of up to eight data pages, each slot's pages
+  are allocated once at probe so the steady state allocates nothing, and four
+  slots are in flight at once — the arithmetic is stated and asserted, because
+  `DEFAULT_QUEUE_SIZE` is 64 and shared with virtio-net and virtio-gpu:
+  4 slots × 10 descriptors plus 2 quarantine chains is 60. Completion wakes one
+  slot's waiter rather than broadcasting to all of them. Errors have variants —
+  `Busy`, `Timeout`, `DeviceFault`, `Unsupported`, `OutOfMemory` beside the
+  original four — with a bounded three-attempt retry on the retryable ones only,
+  and a timed-out chain's pages move to a quarantine list while the slot gets a
+  fresh page set, so a stall costs memory and a log line instead of permanently
+  costing one of eight slots.
+- **There is more than one filesystem.** The seven module statics that *were*
+  the one ext2 instance are fields of an `Ext2Mount` value, and four of them
+  live in a pool with **four separate `lock_class!` sites** — one class per
+  instance, because `lock_class!` keys on its expansion site, a path walk
+  crossing a mount holds one mount's lock while taking the next one's, and a
+  shared class would make that legal nesting look like an unordered self-nest.
+  Slot 0's class is still named `CACHED_EXT2`, so the class boot registers is
+  the class it always was. `mount(2)` with `fstype=ext2` takes a `source`
+  naming a block device, resolving it to devfs's read-only view for `MS_RDONLY`
+  or to the device's exclusive write claim otherwise; `umount` of an instance's
+  last mount flushes it, marks the image clean, drops the device and returns the
+  slot, which is what gives the write claim back — a leaked claim answers
+  `AlreadyClaimed` forever, and that is what the remount test exists to catch.
+  One flusher serves the pool, taking one instance's lock at a time, and the
+  reclaim hook stays `try_lock` per slot because waiting there would block on
+  the I/O that needs the memory.
+- **The cost is measured, and the measurement is a gate.**
+  `slopos_fs::blockdev::stats` counts read and write requests, the sectors they
+  carry, barriers, transactions and commit records at one relaxed atomic add
+  each; `fs/src/fsreport.rs` puts them on the wire at the post-kernel-tests
+  phase boundary, not from inside the measuring test, because a passing test's
+  klog is not on the wire at the default verbosity — which is exactly the
+  capture CI grades. The gate holds the per-MiB counts to caps, because they are
+  deterministic for one ISO, and holds throughput to the quotient of the
+  filesystem's write rate and the *same run's* raw block-device rate, because
+  that is the only rate invariant under a change of accelerator; its self-test
+  asserts that a uniformly three-times-slower machine still passes. A mount is
+  graded in device reads per GiB rather than in seconds for the same reason.
 
-User I/O is staged in 4096-byte chunks (`abi/src/io.rs:5`) and each chunk is a
-separate ext2 transaction (`fs/src/vfs_file_ops.rs:373-397`), whose data also
-goes into the log when it is small. Linking a 60 MB object is ~15,000
-transactions against a 1023-slot log, forcing hundreds of `checkpoint_journal()`
-calls, each an inline whole-filesystem `sync()` under the mount lock. Batch the
-transaction over a multi-block range and replace the inline sync with the
-chunked `sync_step`.
+**What this deliberately did not do.**
 
-### Workstream 1.3 — More than one filesystem (**L**)
-
-There is exactly one ext2 instance, bound at boot, behind one global mutex
-(`fs/src/ext2_vfs.rs:57-63`); `mount(2)` with `fstype=ext2` can only re-place
-that instance (`core/src/syscall/fs/mount_handlers.rs`). No second disk,
-no separate `/home`, no scratch volume, and every filesystem operation on the
-machine serialises — `-j16` degenerates toward one core. Also: `/tmp` is a ramfs
-with a 16 MiB per-file cap and 4096 inodes, and there is no swap anywhere.
-
-### Workstream 1.4 — The block layer (**M**)
-
-`virtio_blk` takes a global `io_lock`, bounces through a fresh 4 KiB buffer and
-sleeps, one request at a time machine-wide, with a queue depth of 1 against a
-128-entry virtqueue (`drivers/src/virtio_blk.rs:42-51,441-455`). Every failure
-maps to `InvalidBuffer`, and eight timeouts permanently quarantine the device.
-Scatter-gather into the caller's pages, allow concurrent slots, and give errors
-real variants with bounded retry.
-
-**Phase 1 exit criteria:** a 16 GiB image mounts in bounded time, holds a
-checked-out copy of this repository plus a toolchain sysroot, and sustains a
-measured sequential write rate recorded as a new ratchet.
+- **No swap, and still no OOM disposition.** Anonymous memory is never evicted;
+  a fault that cannot find a frame kills the faulter. Both were expected here
+  and neither landed: swap is a subsystem (a backing store, a PTE encoding, a
+  reclaim policy and a victim choice), not a constant, and it belongs with
+  whichever phase first needs a build to survive overcommit rather than being
+  smuggled into a storage-sizing change.
+- **No on-disk htree.** Directory scaling is the in-memory index above, so the
+  on-disk format stays plain linear ext2 and `e2fsck` stays the oracle. The
+  costs are stated: a lookup after a mount or a reclaim pays one scan to build
+  the index, only four directories are indexed at a time, and a directory past
+  the index's name cap falls back to scanning (with a test that proves it still
+  works). The one thing that *had* to be handled is: an inode carrying
+  `EXT2_INDEX_FL` hides its index inside records that look free, and
+  `append_dir_entry` would have written an entry on top of an index node while
+  `Inode::encode` faithfully kept the flag — so a directory a Linux host
+  indexed is now **de-indexed** on its first mutation rather than corrupted.
+  `Superblock::parse` also stopped ignoring `s_feature_compat` in silence: the
+  bits the kernel understands are named, and a mount says which it is ignoring.
+- **Mutations serialise per mount, not per inode.** Two mounts now proceed
+  independently, and that is what `-j16` across `/` and `/home` buys; two
+  writers to one filesystem still queue on that mount's lock. The waits are
+  bounded rather than unbounded — that was the check-point work — but a
+  per-inode design is a further change.
+- **A write is still ~15% of the raw device's rate**, and the gap is request
+  count and barriers rather than bytes: 4 624 sectors for 4 096 of data is
+  1.13x amplification, while the reference write issues no barriers at all.
+  22 block-layer requests per MiB is what the ratchet records.
 
 ---
 
-## Phase 2 — A workbench you can type in
+## Phase 1 — A workbench you can type in
 
 **Outcome:** you can edit a file, search a tree, run a script, and read the
 output — without a Linux host.
 
-### Workstream 2.1 — Utilities that are executables (**M**)
+### Workstream 1.1 — Utilities that are executables (**M**)
 
 `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`, `ps` exist only as shell
 builtins (`userland/src/apps/shell/builtins/`); `/bin` holds 17 GUI and network
@@ -420,9 +541,10 @@ builtins `main`s, then write the absent set: `grep` `find` `sed` `sort` `uniq`
 `tar` `gzip` `patch` `cmp` `install` `sha256sum` `nproc` `stty` `less`. Fix the
 semantics that are wrong rather than missing: `rm`/`cp` have no `-r`, `mkdir`
 has no `-p`, `diff` cannot produce a patch. (`sleep`'s unit, `kill`'s
-signal argument and `date`'s clock were Phase 1 blockers and are done.)
+signal argument and `date`'s clock were blockers for the POSIX floor above and
+are done.)
 
-### Workstream 2.2 — A shell that can drive a build (**L**)
+### Workstream 1.2 — A shell that can drive a build (**L**)
 
 No `if`/`while`/`for`/`case`/functions, no command substitution, no here-docs,
 no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
@@ -430,7 +552,7 @@ no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
 shell's buffers are `USER_PATH_MAX`-sized and heap-backed, and `fg`/`bg` can
 resume a stopped job.
 
-### Workstream 2.3 — A terminal an editor can use (**M**)
+### Workstream 1.3 — A terminal an editor can use (**M**)
 
 `encode_key` emits arrows, Home, End and Delete only
 (`terminal-core/src/input.rs:230-282`): no F1–F12 (the keycodes exist and are
@@ -438,29 +560,29 @@ dropped), no Alt-prefixing, no modified arrows, no `CSI Z`, and PageUp/PageDown
 never reach the PTY. No mouse reporting, no DA/DSR replies. The font atlas
 covers ASCII + Latin-1, so box-drawing and non-Latin source render as diamonds.
 
-### Workstream 2.4 — An editor (**M**)
+### Workstream 1.4 — An editor (**M**)
 
-Write one — not because C is foreclosed (it is not; see Workstream 3.6), but
+Write one — not because C is foreclosed (it is not; see Workstream 2.6), but
 because nothing upstream is reachable *before* a C frontend exists, and because
 an editor is where a desktop OS earns its character. Highlighting does not have
 to wait for C either: `syntect` with the pure-Rust `fancy-regex` backend is a
 Rust-only path to TextMate grammars. Start against the existing terminal; the
 GUI version needs a real multi-line text widget, which `appkit` does not have (a
 single-line `text_field`, and a byte-oriented text API). helix comes back onto
-the table once 3.6 compiles tree-sitter.
+the table once 2.6 compiles tree-sitter.
 
 **Zed is not a roadmap item.** It needs wgpu → Vulkan (no GPU driver, and the
 Vulkan loader is itself a `dlopen` ICD architecture), tree-sitter, a live C++
 dependency set, and a build performed by a toolchain that does not exist yet.
 Every one of those is a separate multi-month project whose payoff is one editor.
 
-**Phase 2 exit criteria:** a shell script in the guest checks out, greps,
+**Phase 1 exit criteria:** a shell script in the guest checks out, greps,
 edits and archives a source tree, driven from a terminal running a native
 editor.
 
 ---
 
-## Phase 3 — The toolchain
+## Phase 2 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
 
@@ -469,22 +591,22 @@ with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
 about *who compiles Rust*, not about which languages SlopOS supports: declining
 LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
 the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 3.6.
+A C toolchain written in Rust is a separate and wanted track — Workstream 2.6.
 The cost of this decision is upstream work: cranelift-only rustc bootstrap does
 not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
 
-### Workstream 3.1 — The ABI question (still open — see Open decisions)
+### Workstream 2.1 — The ABI question (still open — see Open decisions)
 
 SlopOS's numbering is bespoke and append-only (`yield=0, exit=1, write=2,
 read=3`, `abi/src/syscall/numbers.rs`) while the *constants and layouts inside*
 the calls are Linux's — errno, `O_*`, `PROT_*`, `MAP_*`, `CLONE_*`, `AT_*`,
 `FUTEX_*`, termios ioctls, `struct stat`, `struct timespec`, `struct flock`,
 `struct iovec`, `struct dirent64`, `stack_t`, `siginfo_t`, and the wait-status
-encoding. Phase 1 paid for the layout half; what remains bespoke is the
-numbering. The two reference designs split on architecture, not taste:
+encoding. The POSIX-floor work paid for the layout half; what remains bespoke is
+the numbering. The two reference designs split on architecture, not taste:
 
 - **Asterinas** — the framekernel whose AD-1/AD-2 discipline this tree already
   follows — is **Linux ABI-compatible by construction**: 210+ Linux syscalls,
@@ -502,7 +624,7 @@ SlopOS is a framekernel, not a microkernel: services live in the kernel, in one
 address space, behind one syscall table. That is Asterinas's shape, and it is
 the shape for which a Linux ABI is cheap. What is bespoke here is now *numbering
 alone* — the part of an ABI that carries no design value at all.
-`AGENTS.md:100-105` already settles the licensing half: "ABI numbers,
+`AGENTS.md` already settles the licensing half: "ABI numbers,
 `errno` values, ioctl codes, struct layouts … carry no copyright, which is why
 the ABI-compatibility work is sound."
 
@@ -515,7 +637,7 @@ Linux's implementation, architecture or policy — the framekernel quarantine, t
 capability authority, the Verus proofs, the ratchets and the retractable
 filesystem are all things the ABI cannot touch.
 
-### Workstream 3.2 — A target that can be a host (**L**)
+### Workstream 2.2 — A target that can be a host (**L**)
 
 A JSON target can never be a rustc host. `scripts/patch_std.sh` is 715 lines of
 sed/perl that mutates the *live rustup sysroot's* std sources in place — an
@@ -525,11 +647,11 @@ std upstreamed or carried in a pinned fork. That also kills `restricted_std`,
 which currently forces `#![feature(restricted_std)]` into 59 files and makes
 every unmodified crates.io crate uncompilable.
 
-### Workstream 3.3 — A Rust codegen path for a `no_std` kernel target (**L**)
+### Workstream 2.3 — A Rust codegen path for a `no_std` kernel target (**L**)
 
 Decided pure Rust, so the C floor is out of scope and the risk moves into
 cranelift's coverage of *this* tree's kernel target. Spike this first, before
-anything else in Phase 3, because a negative answer changes the decision:
+anything else in Phase 2, because a negative answer changes the decision:
 `targets/x86_64-slos.json` requires soft-float with `-sse` and `rustc-abi:
 softfloat`, safestack, custom `link_section`s, naked functions, and
 `-Zemit-stack-sizes` — the last is what `check_stack_sizes.sh` reads, so a
@@ -545,7 +667,7 @@ LLVM rustc on a host for as long as cranelift's codegen quality matters, while
 the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
 every artifact is self-built on day one.
 
-### Workstream 3.4 — Dynamic linking is mandatory (**L**)
+### Workstream 2.4 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
@@ -556,7 +678,7 @@ binary is fixed at 0x400000. The only escapes are writing an out-of-process
 macro server (novel work) or deleting proc-macro use from the workspace. This
 also brings dynamic TLS (`__tls_get_addr`, DTV), which does not exist.
 
-### Workstream 3.5 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 2.5 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -564,10 +686,10 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 **building SlopOS on SlopOS needs no network at all** — no TLS, no crates.io, no
 `git`. Those remain wanted for a general dev machine (there is no TLS anywhere:
 `curl` rejects `https://` outright; DNS is one query at a time machine-wide; the
-TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 3+
+TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 2+
 comfort, not a blocker for the goal.
 
-### Workstream 3.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 2.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
@@ -601,16 +723,16 @@ be built in Rust here.
   a C frontend, and the reason the LLVM route was priced as it was. Nothing in
   this plan needs C++, and this workstream does not change that.
 
-Order it after Phase 3's Rust loop closes: the C frontend is much cheaper to
+Order it after Phase 2's Rust loop closes: the C frontend is much cheaper to
 write once cranelift and the linker are already known-good on this target.
 
-**Phase 3 exit criteria:** in-guest `cargo build` of this repository's kernel
+**Phase 2 exit criteria:** in-guest `cargo build` of this repository's kernel
 produces an ELF byte-identical in behaviour to the host build, verified by
 booting it.
 
 ---
 
-## Phase 4 — Install what you built
+## Phase 3 — Install what you built
 
 **Outcome:** the guest writes a bootable medium and reboots into its own kernel.
 
@@ -621,18 +743,19 @@ are parse-only (`fs/src/partition.rs`); Limine is fetched and installed by host
 scripts; QEMU boots `order=d` (CD only) with throwaway OVMF vars. Needed: a
 writable block path, FAT32 write, a bootloader installer or a direct EFI stub, a
 `limine.conf` editor, `SYSCALL_REBOOT` (exists) landing on the new image, and
-A/B slots with rollback. `AGENTS.md`'s QEMU-only execution boundary currently
-forbids exactly this operation and needs a scoped exception for the guest's own
-ESP.
+A/B slots with rollback. One prerequisite is already in place: a second disk can
+be mounted at an arbitrary path, so the installer has somewhere to read from and
+write to. `AGENTS.md`'s QEMU-only execution boundary currently forbids exactly
+this operation and needs a scoped exception for the guest's own ESP.
 
-**Phase 4 exit criteria:** `just boot-persist`, build a kernel in-guest, install
+**Phase 3 exit criteria:** `just boot-persist`, build a kernel in-guest, install
 it, reboot, and the boot log shows the new build — with rollback if it panics.
 
 ---
 
-## Phase 5 — Bare metal (not committed)
+## Phase 4 — Bare metal (not committed)
 
-Out of scope for the current goal, which ends at Phase 4 in QEMU. Recorded so
+Out of scope for the current goal, which ends at Phase 3 in QEMU. Recorded so
 the cost is known: no NVMe and no AHCI (virtio-blk is the only storage driver,
 so a real machine has no disk); no USB at all, so a laptop without PS/2 has
 **no keyboard** (`plans/usb-xhci.md`); PCI is ECAM-only and *panics* without
@@ -649,16 +772,16 @@ boot step reads first.
 ## Open decisions
 
 - [ ] **Linux ABI: adopt the numbering, or stay bespoke?** The one decision
-      still open, and the highest-leverage one here. See Workstream 3.1 for the
-      Asterinas/Redox evidence. Phase 1 narrowed it: every struct layout a libc
-      port cannot work around is already Linux's, so what is left to decide is
-      the number table alone. Recommendation: **renumber once, now, onto Linux
-      numbers, as the single syscall table** — not a second surface. The
-      userland is entirely first-party and rebuilt from source every build, so
-      renumbering is nearly free today and compounds in cost with every binary
-      written against the current numbers. SlopOS-only calls (SlopRing ops,
-      seat, W/L, fate) go in a private high range exactly as Linux does for its
-      own extensions. What SlopOS keeps is everything that actually makes it
+      still open, and the highest-leverage one here. See Workstream 2.1 for the
+      Asterinas/Redox evidence. The POSIX-floor work narrowed it: every struct
+      layout a libc port cannot work around is already Linux's, so what is left
+      to decide is the number table alone. Recommendation: **renumber once, now,
+      onto Linux numbers, as the single syscall table** — not a second surface.
+      The userland is entirely first-party and rebuilt from source every build,
+      so renumbering is nearly free today and compounds in cost with every
+      binary written against the current numbers. SlopOS-only calls (SlopRing
+      ops, seat, W/L, fate) go in a private high range exactly as Linux does for
+      its own extensions. What SlopOS keeps is everything that actually makes it
       not-Linux: the framekernel quarantine, capability authority per syscall,
       Verus proofs, KernMiri, the ratchets, the retractable filesystem.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
@@ -666,49 +789,51 @@ boot step reads first.
       them un-attested across host rebuilds, so the count only ever falls.
       Decide which paths stay verified and what `verity=require` asserts for a
       workbench.
-- [ ] **How does source get in before the guest can fetch it?** A host-built
-      disk image, a 9p/virtiofs mount, or a plain TCP transfer — each is a
-      different amount of throwaway work. The cheapest answer *was* a second
-      virtio-blk disk carrying the vendored tree, and `scripts/qemu_run.sh`
-      already parameterises one; it is not buildable yet, because there is
-      exactly one ext2 instance in the kernel and it is bound at boot, so a
-      second disk can be the root or nothing. Workstream 1.3 is the
-      prerequisite, not a host-side knob.
+- [ ] **How does source get in, now that a second disk can hold it?** The
+      cheapest answer was always a second virtio-blk disk carrying the vendored
+      tree, and its prerequisite is done: `mount(2)` takes a named device, and
+      `just test-capacity` already builds a 16 GiB volume populated from the
+      host with this repository and the pinned sysroot. What is left to decide
+      is the *workflow*, not the capability — a host-built image refreshed per
+      session, a 9p/virtiofs mount, or a plain TCP transfer once there is one.
+- [ ] **When does swap arrive, and what chooses the victim?** Not in the
+      storage work, deliberately (see above). A build that overcommits currently
+      dies at the faulting task with a SIGBUS-coded exit. Decide whether the
+      answer is swap plus a reclaim policy, or a per-build memory budget that
+      makes overcommit not happen.
 
 **Decided.** Rust toolchain: Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 3.6, off the critical
-path. Scope: the full in-guest loop, Phases 1–4, in QEMU; bare metal is not
+C library and a Rust-written C frontend are Workstream 2.6, off the critical
+path. Scope: the full in-guest loop, Phases 1–3, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
-scope and `stat`'s uid/gid fields exist for layout only.
+scope and `stat`'s uid/gid fields exist for layout only. Directory scaling: an
+in-memory name index, not an on-disk htree, so `e2fsck` stays the oracle for
+every image this kernel writes.
 
 ---
 
 ## Touch list (current paths — verify before editing)
 
 - `mm/src/elf.rs` — `PT_INTERP` rejection, the one image cap that is still
-  policy rather than plumbing (Phase 3).
-- `fs/src/ext2/cache.rs:26`, `fs/src/ext2/journal.rs:207-267`,
-  `fs/src/verity.rs:524-552` — fixed sizing (Phase 1).
-- `fs/src/vfs_file_ops.rs:373-397`, `abi/src/io.rs:5` — per-4 KiB transactions
-  (Phase 1).
-- `core/src/syscall/fs/mount_handlers.rs`, `fs/src/ext2_vfs.rs:57-63` —
-  the single ext2 instance (Phase 1).
-- `drivers/src/virtio_blk.rs:42-51,441-455,800-853` — request path, error
-  variants (Phase 1).
-- `fs/src/ext2/dir.rs` — the linear directory scan, now walking 255-byte
-  names; there is no htree anywhere (Phase 1).
+  policy rather than plumbing (Phase 2).
 - `userland/src/apps/shell/`, `terminal-core/src/input.rs:230-282`,
   `font/src/lib.rs:29-48` — shell grammar, key encoding, glyph coverage
-  (Phase 2).
+  (Phase 1).
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,
-  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 3).
+  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 2).
 - `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs` — the bespoke
   number table and the capability histogram a renumbering would move
-  (Phase 3, and the open decision above).
-- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phase 4).
+  (Phase 2, and the open decision above).
+- `scripts/qemu_run.sh` — disk attachment, boot order (Phase 3).
 - `fs/src/devfs/mod.rs`, `fs/src/partition.rs` — writable block nodes,
-  partition writing (Phase 4).
+  partition writing (Phase 3).
 - `AGENTS.md` — the QEMU-only execution boundary, which forbids exactly the
-  Phase 4 install operation and needs a scoped exception.
+  Phase 3 install operation and needs a scoped exception.
+- `fs/src/ext2/dirindex.rs`, `fs/src/ext2/journal.rs`, `fs/src/verity.rs`,
+  `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` — the storage work above.
+  Listed not as work but as what a later phase must not quietly undo: each one
+  carries an invariant (index completeness, no allocation on the commit path,
+  the trailer's byte layout, the descriptor-ring arithmetic, the report's wire
+  form) that a change nearby can break without failing to compile.

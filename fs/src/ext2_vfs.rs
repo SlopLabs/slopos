@@ -1,9 +1,9 @@
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::lock_tracking::{LOCK_LEVEL_RESOURCE, LockClassKey};
 
 use crate::blockdev::BlockDevice;
-use crate::ext2::cache::BlockCache;
+use crate::ext2::cache::{BlockCache, cache_entries_for};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason};
 use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult, orphan};
@@ -33,12 +33,10 @@ struct CachedExt2 {
     /// The log's own file, resolved at mount whether or not a log was
     /// attached. Readers of it are refused either way.
     journal_inode: Option<u32>,
-    /// Every handle built over this mount refuses mutation.
-    ///
-    /// Not derivable from the superblock on the per-call handle: two of the
-    /// three reasons are invisible there. `NotCleanlyUnmounted` is decided
-    /// against the state as it came off the disk, which the mount stamp then
-    /// overwrites, and `ErrorsRemountRo` is a runtime verdict.
+    /// Every handle built over this mount refuses mutation. Not derivable
+    /// from the per-call handle's superblock: `NotCleanlyUnmounted` is decided
+    /// against the disk state the mount stamp then overwrites, and
+    /// `ErrorsRemountRo` is a runtime verdict.
     read_only: bool,
 }
 
@@ -57,25 +55,29 @@ pub struct Ext2MountInfo {
     pub check_overdue: bool,
 }
 
-/// A *sleeping* mutex: ext2 block-device I/O waits are scheduler-backed, so
-/// the holder may legitimately deschedule mid-operation.
-static CACHED_EXT2: Mutex<Option<CachedExt2>> =
-    Mutex::new(None, lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE));
-static EXT2_VFS_INIT: InitFlag = InitFlag::new();
-/// Every `Ext2Fs` built over the mounted device refuses mutation. Outside the
-/// lock so a query never waits on in-flight block I/O.
-static EXT2_READ_ONLY: AtomicBool = AtomicBool::new(false);
-/// Set when an operation flipped the mount read-only, as distinct from a mount
-/// that came up read-only. Outside the lock, for the same reason
-/// [`EXT2_READ_ONLY`] is.
-static REMOUNT_RO_PENDING: AtomicBool = AtomicBool::new(false);
-/// One-shot, so `errors=remount-ro` logs its cause once rather than on every
-/// subsequent operation.
-static REMOUNT_RO_REPORTED: InitFlag = InitFlag::new();
-
-/// Best-effort dirty-block count: the flusher's wait predicate reads only this
-/// and the stop flag, so it takes no lock.
-static DIRTY_PENDING: AtomicUsize = AtomicUsize::new(0);
+/// One mounted ext2 filesystem: the device, its cache and its state.
+///
+/// Identity is the instance's address — `vfs::traits::same_filesystem`
+/// compares data pointers — so N instances are N filesystems to the VFS, each
+/// with a lock of its own rather than one global mutex.
+pub struct Ext2Mount {
+    /// A *sleeping* mutex: ext2 block-device I/O waits are scheduler-backed,
+    /// so the holder may legitimately deschedule mid-operation.
+    cached: Mutex<Option<CachedExt2>>,
+    init: InitFlag,
+    /// Every `Ext2Fs` built over the mounted device refuses mutation. Outside
+    /// the lock so a query never waits on in-flight block I/O.
+    read_only: AtomicBool,
+    /// Set when an operation flipped the mount read-only, as distinct from one
+    /// that came up that way. Outside the lock, like [`Ext2Mount::read_only`].
+    remount_ro_pending: AtomicBool,
+    /// One-shot, so `errors=remount-ro` logs its cause once rather than on
+    /// every subsequent operation.
+    remount_ro_reported: InitFlag,
+    /// Best-effort dirty-block count: the flusher's wait predicate reads only
+    /// this and the stop flag, so it takes no lock.
+    dirty_pending: AtomicUsize,
+}
 
 static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
     "ext2-flush",
@@ -94,159 +96,235 @@ const FLUSH_BACKOFF_MIN_MS: u64 = 50;
 /// than the periodic flush cadence.
 const FLUSH_BACKOFF_MAX_MS: u64 = FLUSH_INTERVAL_MS;
 
-/// Not a ZST deliberately: filesystem identity is the address of the `static`
-/// (`vfs::traits::same_filesystem`), and two zero-sized statics are not
-/// promised distinct addresses.
-pub struct StaticExt2Vfs(
-    #[expect(dead_code, reason = "gives the static an address of its own")] u8,
-);
+impl Ext2Mount {
+    pub const fn new_const(class: &'static LockClassKey) -> Self {
+        Self {
+            cached: Mutex::new(None, class),
+            init: InitFlag::new(),
+            read_only: AtomicBool::new(false),
+            remount_ro_pending: AtomicBool::new(false),
+            remount_ro_reported: InitFlag::new(),
+            dirty_pending: AtomicUsize::new(0),
+        }
+    }
 
-impl StaticExt2Vfs {
+    pub fn is_initialized(&self) -> bool {
+        self.init.is_set()
+    }
+
+    /// Whether this mount refuses every mutation. `false` when nothing is
+    /// mounted on it.
+    pub fn is_read_only(&self) -> bool {
+        self.init.is_set() && self.read_only.load(Ordering::Acquire)
+    }
+
     fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
-        if !EXT2_VFS_INIT.is_set() {
+        if !self.init.is_set() {
             return Err(VfsError::IoError);
         }
-        let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        // The check point is the lock owner's, not the operation's:
+        // `Ext2Fs::transaction` would sync the whole filesystem inside this
+        // one hold, while the chunked drain here gives the lock back every
+        // [`WRITEBACK_CHUNK`] writes.
+        let short = match guard.as_ref() {
+            Some(cached) => !cached.cache.journal_has_headroom(),
+            None => return Err(VfsError::IoError),
+        };
+        if short {
+            drop(guard);
+            // Best-effort: a failure here leaves `transaction`'s own fallback
+            // to try again and report it.
+            let _ = self.sync_fs();
+            guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        }
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
-        let result = with_cached_fs(cached, f);
+        let result = self.with_cached_fs(cached, f);
         // The log filling is its own reason to wake the flusher: draining it
-        // there is a bounded pass, whereas letting it reach its low-water mark
-        // makes the next operation — whoever's it is — pay an unbounded one
-        // under the lock.
+        // there is a bounded pass, whereas at its low-water mark the next
+        // operation pays an unbounded one under the lock.
         let drain = cached.cache.journal_needs_drain();
-        note_dirty(cached.cache.dirty_count());
+        self.note_dirty(cached.cache.dirty_count());
         if drain {
             FLUSH_STOP.wake_one_for_work();
         }
         drop(guard);
-        // Off-lock: the log line is the point of `errors=remount-ro` and must
-        // not be emitted while every path walk on this mount is queued behind
-        // the lock it would hold.
-        report_remount_ro_if_pending();
+        // Off-lock: the log line must not be emitted while every path walk on
+        // this mount is queued behind the lock it would hold.
+        self.report_remount_ro_if_pending();
         result
     }
-}
 
-/// Run one ext2 operation over `cached`, publishing everything it moved.
-///
-/// The `Ext2Fs` handle is per-call and the mount state is not, so this is the
-/// one place that copies between them. Three things travel back: the
-/// superblock (its free counts and the fields `e2fsck` reads), the dirty flag,
-/// and the corruption verdict — which is what latches the mount read-only.
-fn with_cached_fs<R>(
-    cached: &mut CachedExt2,
-    f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>,
-) -> VfsResult<R> {
-    let (superblock, block_size, inode_size) =
-        (cached.superblock, cached.block_size, cached.inode_size);
-    let mut fs = Ext2Fs::new(
-        &*cached.device,
-        &mut cached.cache,
-        superblock,
-        block_size,
-        inode_size,
-    )
-    .map_err(ext2_error_to_vfs)?;
-    fs.set_superblock_dirty(cached.superblock_dirty);
-    if cached.read_only {
-        fs.force_read_only();
-    }
-    // Per call, because the mount is shared and the entitlement is the
-    // caller's.
-    if !current_task_is_privileged() {
-        fs.set_block_reserve(cached.reserved_blocks);
-    }
-    // Charged whatever the entitlement: spending the system reserve says
-    // nothing about how much of the volume one principal may hold.
-    fs.set_account(current_task_account());
-    fs.set_journal_inode(cached.journal_inode);
-    // Classified here rather than only inside the mutating entry points,
-    // because a *read* that finds a group descriptor pointing outside the
-    // volume is the same evidence of damage as a write that does, and a mount
-    // that keeps writing after one is what `errors=remount-ro` exists to stop.
-    let raw = f(&mut fs);
-    let result = fs.note_result(raw).map_err(ext2_error_to_vfs);
-    // Every mutating `Ext2Fs` entry point rolls its own dirtied blocks and
-    // free counts back on failure, so the post-state is the committed one
-    // either way and is published unconditionally. Reading it back only on
-    // success would strand a rollback the guard had already performed.
-    let new_superblock = fs.superblock();
-    let new_superblock_dirty = fs.superblock_dirty();
-    let corrupted = fs.corruption_seen();
-    drop(fs);
+    /// Run one ext2 operation over `cached`, publishing everything it moved.
+    ///
+    /// The `Ext2Fs` handle is per-call and the mount state is not, so this is
+    /// the one place that copies between them: the superblock, the dirty flag,
+    /// and the corruption verdict that latches the mount read-only.
+    fn with_cached_fs<R>(
+        &self,
+        cached: &mut CachedExt2,
+        f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>,
+    ) -> VfsResult<R> {
+        let (superblock, block_size, inode_size) =
+            (cached.superblock, cached.block_size, cached.inode_size);
+        let mut fs = Ext2Fs::new(
+            &*cached.device,
+            &mut cached.cache,
+            superblock,
+            block_size,
+            inode_size,
+        )
+        .map_err(ext2_error_to_vfs)?;
+        fs.set_superblock_dirty(cached.superblock_dirty);
+        if cached.read_only {
+            fs.force_read_only();
+        }
+        // Per call, because the mount is shared and the entitlement is the
+        // caller's.
+        if !current_task_is_privileged() {
+            fs.set_block_reserve(cached.reserved_blocks);
+        }
+        // Charged whatever the entitlement: spending the system reserve says
+        // nothing about how much of the volume one principal may hold.
+        fs.set_account(current_task_account());
+        fs.set_journal_inode(cached.journal_inode);
+        // Classified on reads too, not only in the mutating entry points: a
+        // read that finds a group descriptor pointing outside the volume is
+        // the same evidence of damage, and a mount that keeps writing after
+        // one is what `errors=remount-ro` exists to stop.
+        let raw = f(&mut fs);
+        let result = fs.note_result(raw).map_err(ext2_error_to_vfs);
+        // Published unconditionally: every mutating entry point rolls its own
+        // dirtied blocks and free counts back on failure, so the post-state is
+        // the committed one either way.
+        let new_superblock = fs.superblock();
+        let new_superblock_dirty = fs.superblock_dirty();
+        let corrupted = fs.corruption_seen();
+        drop(fs);
 
-    // Deliberately no per-op flush: dirty blocks stay in the persistent cache
-    // until eviction, the background flusher, `sync`, or shutdown.
-    cached.superblock = new_superblock;
-    cached.superblock_dirty = new_superblock_dirty;
-    if corrupted && !cached.read_only {
-        // `errors=remount-ro`. Continuing to write into a filesystem already
-        // known to be damaged turns a repairable image into a lost one, and
-        // the damage is on the disk rather than in this operation, so it is
-        // the *mount* that must stop writing rather than this call.
-        cached.read_only = true;
-        EXT2_READ_ONLY.store(true, Ordering::Release);
-        REMOUNT_RO_PENDING.store(true, Ordering::Release);
+        // Deliberately no per-op flush: dirty blocks stay in the persistent
+        // cache until eviction, the background flusher, `sync`, or shutdown.
+        cached.superblock = new_superblock;
+        cached.superblock_dirty = new_superblock_dirty;
+        if corrupted && !cached.read_only {
+            // `errors=remount-ro`. The damage is on the disk rather than in
+            // this operation, and writing on into a filesystem known to be
+            // damaged turns a repairable image into a lost one, so it is the
+            // *mount* that stops writing.
+            cached.read_only = true;
+            self.read_only.store(true, Ordering::Release);
+            self.remount_ro_pending.store(true, Ordering::Release);
+        }
+        result
     }
-    result
-}
 
-/// The one-shot `errors=remount-ro` log line, emitted off the mount lock.
-fn report_remount_ro_if_pending() {
-    if !REMOUNT_RO_PENDING.load(Ordering::Acquire) || !REMOUNT_RO_REPORTED.init_once() {
-        return;
+    /// The one-shot `errors=remount-ro` log line, emitted off the mount lock.
+    fn report_remount_ro_if_pending(&self) {
+        if !self.remount_ro_pending.load(Ordering::Acquire) || !self.remount_ro_reported.init_once()
+        {
+            return;
+        }
+        klog_info!(
+            "ext2: filesystem error — remounting read-only. Repair with e2fsck on the host."
+        );
     }
-    klog_info!("ext2: filesystem error — remounting read-only. Repair with e2fsck on the host.");
-}
 
-/// Never holds the FS lock.
-fn note_dirty(dirty: usize) {
-    DIRTY_PENDING.store(dirty, Ordering::Relaxed);
-    if dirty >= FLUSH_EAGER_THRESHOLD {
-        FLUSH_STOP.wake_one_for_work();
+    /// Never holds the FS lock.
+    fn note_dirty(&self, dirty: usize) {
+        self.dirty_pending.store(dirty, Ordering::Relaxed);
+        if dirty >= FLUSH_EAGER_THRESHOLD {
+            FLUSH_STOP.wake_one_for_work();
+        }
     }
-}
 
-/// Wake the flusher to complete a deferred inode free.
-///
-/// The last close of an unlinked file cannot do the free itself: it runs from
-/// a `Drop` that the task-exit path reaches under a preempt guard, and the
-/// free takes a sleeping mutex and parks on block I/O. So the close only marks
-/// the record releasable and pokes the thread that may block.
-pub(crate) fn ext2_vfs_wake_for_detached() {
-    if EXT2_VFS_INIT.is_set() {
-        FLUSH_STOP.wake_one_for_work();
+    /// What the flusher's park predicate reads for this slot.
+    pub(crate) fn dirty_pending(&self) -> usize {
+        self.dirty_pending.load(Ordering::Relaxed)
+    }
+
+    /// Wake the flusher to complete a deferred inode free.
+    ///
+    /// The last close of an unlinked file cannot do the free itself: it runs
+    /// from a `Drop` the task-exit path reaches under a preempt guard, and the
+    /// free takes a sleeping mutex and parks on block I/O.
+    fn wake_for_detached(&self) {
+        if self.init.is_set() {
+            FLUSH_STOP.wake_one_for_work();
+        }
+    }
+
+    /// Commit one inode. Takes the same lock every other ext2 operation does,
+    /// but writes only that inode's blocks — so a descriptor-granular `fsync`
+    /// no longer drags every other file's dirty state to the device with it.
+    fn sync_one_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
+        if !self.init.is_set() {
+            return Ok(());
+        }
+        let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
+        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let Some(cached) = guard.as_mut() else {
+            return Ok(());
+        };
+        let result = self.with_cached_fs(cached, |fs| fs.sync_inode(ino, data_only));
+        // Not a `CLEAN_THROUGH` publication: this committed one inode, so a
+        // later whole-filesystem `sync` still owes the device everything else.
+        self.dirty_pending
+            .store(cached.cache.dirty_count(), Ordering::Relaxed);
+        drop(guard);
+        self.report_remount_ro_if_pending();
+        result
+    }
+
+    /// The pages this mount's block cache would give back under pressure.
+    /// `try_lock` only: the mount lock is a sleeping mutex held across block
+    /// I/O, so waiting here blocks on the I/O that needs the memory.
+    fn reclaimable_pages(&self) -> u32 {
+        let Some(guard) = self.cached.try_lock() else {
+            return 0;
+        };
+        guard
+            .as_ref()
+            .map_or(0, |cached| cached.cache.reclaimable())
+    }
+
+    fn reclaim_clean(&self, want: u32) -> u32 {
+        let Some(mut guard) = self.cached.try_lock() else {
+            return 0;
+        };
+        guard
+            .as_mut()
+            .map_or(0, |cached| cached.cache.shrink_clean(want))
     }
 }
 
 trait Ext2VfsBackend {
     fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R>;
+    /// The flusher kthread is what drains a filesystem's deferred frees.
+    fn ext2_wake_for_detached(&self);
+    fn ext2_sync(&self) -> VfsResult<()>;
+    fn ext2_statfs(&self) -> VfsResult<FsStats>;
+    fn ext2_sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()>;
 }
 
-/// Commit one inode. Takes the same lock every other ext2 operation does, but
-/// writes only that inode's blocks — so a descriptor-granular `fsync` no
-/// longer drags every other file's dirty state to the device with it.
-fn ext2_vfs_sync_inode(inode: InodeId, data_only: bool) -> VfsResult<()> {
-    if !EXT2_VFS_INIT.is_set() {
-        return Ok(());
-    }
-    let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
-    let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
-    let Some(cached) = guard.as_mut() else {
-        return Ok(());
-    };
-    let result = with_cached_fs(cached, |fs| fs.sync_inode(ino, data_only));
-    // Not a `CLEAN_THROUGH` publication: this committed one inode, so a later
-    // whole-filesystem `sync` still owes the device everything else.
-    DIRTY_PENDING.store(cached.cache.dirty_count(), Ordering::Relaxed);
-    drop(guard);
-    report_remount_ro_if_pending();
-    result
-}
-
-impl Ext2VfsBackend for StaticExt2Vfs {
+impl Ext2VfsBackend for Ext2Mount {
     fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
         self.with_fs(f)
+    }
+
+    fn ext2_wake_for_detached(&self) {
+        self.wake_for_detached();
+    }
+
+    fn ext2_sync(&self) -> VfsResult<()> {
+        self.sync_fs()
+    }
+
+    fn ext2_statfs(&self) -> VfsResult<FsStats> {
+        self.statfs()
+    }
+
+    fn ext2_sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
+        self.sync_one_inode(inode, data_only)
     }
 }
 
@@ -261,20 +339,8 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
         self.with_ext2(|fs| {
-            let parent_inode = fs.read_inode(parent as u32)?;
-            if !parent_inode.is_directory() {
-                return Err(Ext2Error::NotDirectory);
-            }
-            let mut found: Option<u32> = None;
-            fs.for_each_dir_entry(parent as u32, |entry| {
-                if entry.name == name {
-                    found = Some(entry.inode.raw());
-                    false
-                } else {
-                    true
-                }
-            })?;
-            found.map(|i| i as InodeId).ok_or(Ext2Error::PathNotFound)
+            fs.lookup_child(parent as u32, name)
+                .map(|ino| ino.raw() as InodeId)
         })
     }
 
@@ -334,9 +400,8 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         self.with_ext2(|fs| fs.release_orphan(ino))
     }
 
-    /// The flusher kthread is what drains this filesystem's deferred frees.
     fn wake_for_detached(&self) -> bool {
-        ext2_vfs_wake_for_detached();
+        self.ext2_wake_for_detached();
         true
     }
 
@@ -448,193 +513,247 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
     }
 
     fn sync(&self) -> VfsResult<()> {
-        ext2_vfs_sync()
+        self.ext2_sync()
     }
 
     fn statfs(&self) -> VfsResult<FsStats> {
-        ext2_vfs_statfs()
+        self.ext2_statfs()
     }
 
     fn sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
-        ext2_vfs_sync_inode(inode, data_only)
+        self.ext2_sync_inode(inode, data_only)
     }
 }
 
-pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs(0);
-
-/// Mount the ext2 image on `device`. A verity trailer, when present, makes
-/// the mount read-only; a trailer that is present but unusable refuses the
-/// mount, so an image claiming attestation is never read unverified.
-pub fn ext2_vfs_init_with_device(
-    device: KBox<dyn BlockDevice + Send + Sync>,
-) -> VfsResult<Ext2MountInfo> {
-    // A second call must error rather than silently drop the caller's
-    // capability token, which would release the exclusive write claim.
-    if !EXT2_VFS_INIT.init_once() {
-        return Err(VfsError::AlreadyExists);
-    }
-    match mount_device(device) {
-        Ok(info) => Ok(info),
-        Err(e) => {
-            EXT2_VFS_INIT.reset();
-            Err(e)
+impl Ext2Mount {
+    /// Mount the ext2 image on `device` into this instance. A verity trailer
+    /// makes the mount read-only; one that is present but unusable refuses the
+    /// mount, so an image claiming attestation is never read unverified.
+    ///
+    /// `read_only` is the mounter's intent, not an observation of the device:
+    /// a device that would accept writes must still yield an instance that
+    /// refuses them.
+    pub fn attach(
+        &self,
+        device: KBox<dyn BlockDevice + Send + Sync>,
+        read_only: bool,
+    ) -> VfsResult<Ext2MountInfo> {
+        // A second call must error rather than silently drop the caller's
+        // capability token, which would release the exclusive write claim.
+        if !self.init.init_once() {
+            return Err(VfsError::AlreadyExists);
+        }
+        match self.mount_device(device, read_only) {
+            Ok(info) => Ok(info),
+            Err(e) => {
+                // `init` stays set when the device could not be taken back:
+                // an instance that reports uninitialised while still holding
+                // one is invisible to every sweep that would free it.
+                if self.clear_cached() {
+                    self.init.reset();
+                }
+                Err(e)
+            }
         }
     }
-}
 
-fn mount_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<Ext2MountInfo> {
-    // The superblock is read off the raw device: a trailer can only be
-    // recognised relative to the extent the filesystem claims, and the
-    // sub-block read is one verity would not check anyway.
-    let (superblock, block_size, inode_size) =
-        Ext2Fs::mount_params(&*device).map_err(ext2_error_to_vfs)?;
-    let extent = FsExtent {
-        block_size,
-        blocks: superblock.blocks_count as u64,
-    };
-    // An image the last boot never marked clean may have blocks rewritten
-    // after its bitmap was persisted, so its attestation is stale this boot.
-    let trust = if superblock.state == crate::ext2::ondisk::EXT2_VALID_FS {
-        AttestTrust::Persisted
-    } else {
-        AttestTrust::NoneThisBoot
-    };
-    let (device, verity) =
-        crate::verity::build_verified_trusting(device, extent, trust).map_err(|e| {
-            klog_info!("verity: refusing to mount — {:?}", e);
-            verity_error_to_vfs(e)
-        })?;
-    log_verity_status(verity);
-    // Asked against the superblock as it came off the disk: `install_cached`
-    // stamps `EXT2_ERROR_FS` into it, and asking afterwards would read this
-    // mount's own stamp as the previous mount's crash.
-    let read_only_reason = Ext2Fs::mount_read_only_reason(&superblock, &*device);
-    let read_only = read_only_reason.is_some();
-    EXT2_READ_ONLY.store(read_only, Ordering::Release);
-    install_cached(device, superblock, block_size, inode_size, read_only)?;
-
-    // The log is attached before the read-only verdict is logged, because a
-    // replay can retract the only reason there was one.
-    let read_only_reason = attach_journal(read_only_reason);
-    let read_only = read_only_reason.is_some();
-    EXT2_READ_ONLY.store(read_only, Ordering::Release);
-    log_read_only_reason(read_only_reason);
-
-    let (orphans_drained, check_overdue) = post_mount_recovery();
-
-    if !read_only {
-        start_flusher();
-    }
-    Ok(Ext2MountInfo {
-        verity,
-        read_only,
-        read_only_reason,
-        orphans_drained,
-        check_overdue,
-    })
-}
-
-/// Attach the metadata log and answer the read-only reason that survives it.
-///
-/// An unclean image refuses writes because nothing could say what the last
-/// boot left half-done. A replayed log is that evidence, so the refusal is
-/// lifted — the one case in which this kernel repairs rather than deferring to
-/// `e2fsck`.
-#[inline(never)]
-fn attach_journal(reason: Option<ReadOnlyReason>) -> Option<ReadOnlyReason> {
-    let Ok(mut guard) = CACHED_EXT2.lock() else {
-        return reason;
-    };
-    let Some(cached) = guard.as_mut() else {
-        return reason;
-    };
-    // A log is attachable only on a handle that may write, so the unclean
-    // latch is lifted for the attempt and restored if it finds nothing.
-    let recoverable = reason == Some(ReadOnlyReason::NotCleanlyUnmounted);
-    if recoverable {
-        cached.read_only = false;
-    }
-    let mut journal_inode = None;
-    let recovery = with_cached_fs(cached, |fs| {
-        let outcome = fs.attach_journal();
-        journal_inode = fs.journal_inode();
-        outcome
-    });
-    let outcome = match recovery {
-        Ok(Some(recovery)) => recovery,
-        Ok(None) => crate::ext2::journal::JournalRecovery::NONE,
-        Err(e) => {
-            klog_info!("ext2: journal attach failed: {:?}", e);
-            crate::ext2::journal::JournalRecovery::NONE
+    /// Tear this instance down: what is dirty reaches the device, the image is
+    /// declared clean, and the [`CachedExt2`] goes — with it the device and
+    /// its exclusive write claim, so the same disk can be mounted again.
+    ///
+    /// `false` when the device is still attached, which leaves the instance
+    /// initialised: the caller owes it another attempt.
+    pub fn detach(&self) -> bool {
+        if !self.init.is_set() {
+            return true;
         }
-    };
-    match cached.cache.journal() {
-        // Loud in both directions: whether an operation is retractable and
-        // whether a crash is recoverable both follow from this line.
-        Some(journal) => klog_info!(
-            "ext2: metadata log attached — {} slots at inode {}, replayed {} transactions ({} blocks)",
-            journal.capacity(),
-            journal.inode(),
-            outcome.transactions,
-            outcome.blocks,
-        ),
-        None if cached.read_only => {
-            klog_info!("ext2: no metadata log — the mount refuses writes, and a replay is a write")
+        let _ = self.sync_fs();
+        self.mark_filesystem_clean();
+        if !self.clear_cached() {
+            return false;
         }
-        None => klog_info!(
-            "ext2: no metadata log ({} absent or not preallocated) — operations \
-             are undo-scoped and an unclean image stays read-only",
-            core::str::from_utf8(crate::ext2::JOURNAL_PATH).unwrap_or("/.journal"),
-        ),
+        self.init.reset();
+        self.read_only.store(false, Ordering::Release);
+        self.remount_ro_pending.store(false, Ordering::Release);
+        self.remount_ro_reported.reset();
+        self.dirty_pending.store(0, Ordering::Relaxed);
+        true
     }
-    cached.journal_inode = journal_inode;
-    let keep = if recoverable && outcome.replayed() {
-        klog_info!("ext2: the replay is what makes this mount writable again");
-        None
-    } else {
-        reason
-    };
-    // Never *clears* a latch: `with_cached_fs` raises one of its own when the
-    // attach itself finds the image or the device damaged, and a mount that
-    // came up writable over a device that just failed I/O is exactly what
-    // `errors=remount-ro` exists to stop.
-    cached.read_only = keep.is_some() || cached.read_only;
-    if recoverable && keep.is_none() && !cached.read_only {
-        // The mount skipped its own not-clean stamp while it was refusing
-        // writes; the log is what makes writing safe again, so it owes it now.
-        stamp_not_clean(cached);
-    }
-    if cached.read_only {
-        keep.or(Some(ReadOnlyReason::ErrorsRemountRo))
-    } else {
-        keep
-    }
-}
 
-/// Reclaim what the previous boot left unlinked-but-open, and ask whether the
-/// image is due a check. Both need the mount published, so neither can happen
-/// inside [`install_cached`].
-#[inline(never)]
-fn post_mount_recovery() -> (u32, bool) {
-    let Ok(mut guard) = CACHED_EXT2.lock() else {
-        return (0, false);
-    };
-    let Some(cached) = guard.as_mut() else {
-        return (0, false);
-    };
-    let drained = with_cached_fs(cached, |fs| {
-        let drained = fs.drain_orphans()?;
-        let overdue = fs
-            .read_bookkeeping()?
-            .check_overdue(slopos_kernel_services::clock::realtime_unix_secs());
-        Ok((drained, overdue))
-    });
-    drop(guard);
-    match drained {
-        Ok((n, overdue)) => (n, overdue),
-        Err(e) => {
-            klog_info!("ext2: orphan drain failed: {:?}", e);
-            (0, false)
+    /// Drop the device outside the mount lock: the write token's `Drop` takes
+    /// the block registry, and nothing needs those two held at once. `false`
+    /// when the lock could not be taken at all — `Mutex::lock` aborts for a
+    /// task marked for death — leaving the instance still owning its device.
+    fn clear_cached(&self) -> bool {
+        let Ok(mut guard) = self.cached.lock() else {
+            return false;
+        };
+        let stale = guard.take();
+        drop(guard);
+        drop(stale);
+        true
+    }
+
+    fn mount_device(
+        &self,
+        device: KBox<dyn BlockDevice + Send + Sync>,
+        requested_read_only: bool,
+    ) -> VfsResult<Ext2MountInfo> {
+        // The superblock is read off the raw device: a trailer can only be
+        // recognised relative to the extent the filesystem claims, and the
+        // sub-block read is one verity would not check anyway.
+        let (superblock, block_size, inode_size) =
+            Ext2Fs::mount_params(&*device).map_err(ext2_error_to_vfs)?;
+        let extent = FsExtent {
+            block_size,
+            blocks: superblock.blocks_count as u64,
+        };
+        // An image the last boot never marked clean may have blocks rewritten
+        // after its bitmap was persisted, so its attestation is stale this
+        // boot.
+        let trust = if superblock.state == crate::ext2::ondisk::EXT2_VALID_FS {
+            AttestTrust::Persisted
+        } else {
+            AttestTrust::NoneThisBoot
+        };
+        let (device, verity) = crate::verity::build_verified_trusting(device, extent, trust)
+            .map_err(|e| {
+                klog_info!("verity: refusing to mount — {:?}", e);
+                verity_error_to_vfs(e)
+            })?;
+        log_verity_status(verity);
+        // Asked against the superblock as it came off the disk:
+        // `install_cached` stamps `EXT2_ERROR_FS` into it, and asking after
+        // would read this mount's own stamp as the previous mount's crash.
+        let read_only_reason = if requested_read_only {
+            Some(ReadOnlyReason::Requested)
+        } else {
+            Ext2Fs::mount_read_only_reason(&superblock, &*device)
+        };
+        let read_only = read_only_reason.is_some();
+        self.read_only.store(read_only, Ordering::Release);
+        self.install_cached(device, superblock, block_size, inode_size, read_only)?;
+
+        // The log is attached before the read-only verdict is logged, because
+        // a replay can retract the only reason there was one.
+        let read_only_reason = self.attach_journal(read_only_reason);
+        let read_only = read_only_reason.is_some();
+        self.read_only.store(read_only, Ordering::Release);
+        log_read_only_reason(read_only_reason);
+
+        let (orphans_drained, check_overdue) = self.post_mount_recovery();
+
+        if !read_only {
+            start_flusher();
+        }
+        Ok(Ext2MountInfo {
+            verity,
+            read_only,
+            read_only_reason,
+            orphans_drained,
+            check_overdue,
+        })
+    }
+
+    /// Attach the metadata log and answer the read-only reason that survives
+    /// it. An unclean image refuses writes because nothing could say what the
+    /// last boot left half-done; a replayed log is that evidence, so the
+    /// refusal is lifted.
+    #[inline(never)]
+    fn attach_journal(&self, reason: Option<ReadOnlyReason>) -> Option<ReadOnlyReason> {
+        let Ok(mut guard) = self.cached.lock() else {
+            return reason;
+        };
+        let Some(cached) = guard.as_mut() else {
+            return reason;
+        };
+        // A log is attachable only on a handle that may write, so the unclean
+        // latch is lifted for the attempt and restored if it finds nothing.
+        let recoverable = reason == Some(ReadOnlyReason::NotCleanlyUnmounted);
+        if recoverable {
+            cached.read_only = false;
+        }
+        let mut journal_inode = None;
+        let recovery = self.with_cached_fs(cached, |fs| {
+            let outcome = fs.attach_journal();
+            journal_inode = fs.journal_inode();
+            outcome
+        });
+        let outcome = match recovery {
+            Ok(Some(recovery)) => recovery,
+            Ok(None) => crate::ext2::journal::JournalRecovery::NONE,
+            Err(e) => {
+                klog_info!("ext2: journal attach failed: {:?}", e);
+                crate::ext2::journal::JournalRecovery::NONE
+            }
+        };
+        match cached.cache.journal() {
+            Some(journal) => klog_info!(
+                "ext2: metadata log attached — {} slots at inode {}, replayed {} transactions ({} blocks)",
+                journal.capacity(),
+                journal.inode(),
+                outcome.transactions,
+                outcome.blocks,
+            ),
+            None if cached.read_only => {
+                klog_info!(
+                    "ext2: no metadata log — the mount refuses writes, and a replay is a write"
+                )
+            }
+            None => klog_info!(
+                "ext2: no metadata log ({} absent or not preallocated) — operations \
+                 are undo-scoped and an unclean image stays read-only",
+                core::str::from_utf8(crate::ext2::JOURNAL_PATH).unwrap_or("/.journal"),
+            ),
+        }
+        cached.journal_inode = journal_inode;
+        let keep = if recoverable && outcome.replayed() {
+            klog_info!("ext2: the replay is what makes this mount writable again");
+            None
+        } else {
+            reason
+        };
+        // Never *clears* a latch: `with_cached_fs` raises one of its own when
+        // the attach finds the image or the device damaged.
+        cached.read_only = keep.is_some() || cached.read_only;
+        if recoverable && keep.is_none() && !cached.read_only {
+            // The mount skipped its own not-clean stamp while it was refusing
+            // writes; the log is what makes writing safe again, so it owes it
+            // now.
+            stamp_not_clean(cached);
+        }
+        if cached.read_only {
+            keep.or(Some(ReadOnlyReason::ErrorsRemountRo))
+        } else {
+            keep
+        }
+    }
+
+    /// Reclaim what the previous boot left unlinked-but-open, and ask whether
+    /// the image is due a check. Both need the mount published, so neither can
+    /// happen inside [`Ext2Mount::install_cached`].
+    #[inline(never)]
+    fn post_mount_recovery(&self) -> (u32, bool) {
+        let Ok(mut guard) = self.cached.lock() else {
+            return (0, false);
+        };
+        let Some(cached) = guard.as_mut() else {
+            return (0, false);
+        };
+        let drained = self.with_cached_fs(cached, |fs| {
+            let drained = fs.drain_orphans()?;
+            let overdue = fs
+                .read_bookkeeping()?
+                .check_overdue(slopos_kernel_services::clock::realtime_unix_secs());
+            Ok((drained, overdue))
+        });
+        drop(guard);
+        match drained {
+            Ok((n, overdue)) => (n, overdue),
+            Err(e) => {
+                klog_info!("ext2: orphan drain failed: {:?}", e);
+                (0, false)
+            }
         }
     }
 }
@@ -645,16 +764,17 @@ fn log_read_only_reason(reason: Option<ReadOnlyReason>) {
         return;
     };
     match reason {
+        ReadOnlyReason::Requested => {
+            klog_info!("ext2: mounting read-only — the mount asked for it")
+        }
         ReadOnlyReason::DeviceWriteProtected => {
             klog_info!("ext2: mounting read-only — the device is verity-attested")
         }
         ReadOnlyReason::UnsupportedFeature => klog_info!(
             "ext2: mounting read-only — the image declares a feature this kernel does not write"
         ),
-        // Loud on purpose. The image is safe to read and unsafe to write, and
-        // the repair tool is on the host: there is no in-kernel fsck and a
-        // silent read-only root is the failure mode this line exists to
-        // prevent someone debugging for an hour.
+        // Loud on purpose: the image is safe to read and unsafe to write, and
+        // a silently read-only root is the failure mode this line prevents.
         ReadOnlyReason::NotCleanlyUnmounted => klog_info!(
             "ext2: MOUNTING READ-ONLY — the image was never marked clean, so the last \
              boot crashed or is still running. Repair it on the host with \
@@ -688,42 +808,63 @@ fn log_verity_status(verity: VerityStatus) {
     }
 }
 
-/// Build the cache, publish `CACHED_EXT2` and stamp the not-clean bit. Its
-/// own frame so the cache temporaries do not share one with the verity parse.
-#[inline(never)]
-fn install_cached(
-    device: KBox<dyn BlockDevice + Send + Sync>,
-    superblock: Ext2Superblock,
-    block_size: u32,
-    inode_size: u16,
-    read_only: bool,
-) -> VfsResult<()> {
-    // Zero on a device that cannot answer: a reserve of zero refuses nothing,
-    // rather than failing a mount that would otherwise succeed.
-    let reserved_blocks = Ext2Fs::read_block_reserve(&*device).unwrap_or(0);
-    let cache = BlockCache::new_boxed(block_size).map_err(ext2_error_to_vfs)?;
-    let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
-    *guard = Some(CachedExt2 {
-        device,
-        superblock,
-        block_size,
-        inode_size: if inode_size == 0 { 128 } else { inode_size },
-        reserved_blocks,
-        cache,
-        superblock_dirty: false,
-        journal_inode: None,
-        read_only,
-    });
-    if let Some(cached) = guard.as_mut() {
-        stamp_not_clean(cached);
+impl Ext2Mount {
+    /// Build the cache, publish `cached` and stamp the not-clean bit. Its own
+    /// frame so the cache temporaries do not share one with the verity parse.
+    #[inline(never)]
+    fn install_cached(
+        &self,
+        device: KBox<dyn BlockDevice + Send + Sync>,
+        superblock: Ext2Superblock,
+        block_size: u32,
+        inode_size: u16,
+        read_only: bool,
+    ) -> VfsResult<()> {
+        // Zero on a device that cannot answer: a reserve of zero refuses
+        // nothing, rather than failing a mount that would otherwise succeed.
+        let reserved_blocks = Ext2Fs::read_block_reserve(&*device).unwrap_or(0);
+        let target_entries =
+            cache_entries_for(superblock.blocks_count as u64, superblock.blocks_per_group);
+        let cache = BlockCache::new_boxed(block_size, target_entries).map_err(ext2_error_to_vfs)?;
+        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        *guard = Some(CachedExt2 {
+            device,
+            superblock,
+            block_size,
+            inode_size: if inode_size == 0 { 128 } else { inode_size },
+            reserved_blocks,
+            cache,
+            superblock_dirty: false,
+            journal_inode: None,
+            read_only,
+        });
+        if let Some(cached) = guard.as_mut() {
+            stamp_not_clean(cached);
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Capacity of this filesystem, off the in-memory superblock. Takes the
+    /// mount lock, so a `statfs` racing a write sees one side of it or the
+    /// other, but issues no block I/O.
+    fn statfs(&self) -> VfsResult<FsStats> {
+        if !self.init.is_set() {
+            return Err(VfsError::IoError);
+        }
+        let guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let cached = guard.as_ref().ok_or(VfsError::IoError)?;
+        Ok(ext2_stats_of(
+            &cached.superblock,
+            cached.block_size,
+            cached.reserved_blocks,
+            cached.read_only,
+        ))
+    }
 }
 
 /// The not-clean bit is what tells a later fsck it must run; without it a
-/// crash or an unflushed reboot leaves an image that still claims to be
-/// clean. A no-op on a read-only handle, so a write-protected device is never
-/// touched.
+/// crash leaves an image that still claims to be clean. A no-op on a
+/// read-only handle, so a write-protected device is never touched.
 #[inline(never)]
 fn stamp_not_clean(cached: &mut CachedExt2) {
     if cached.read_only {
@@ -736,30 +877,6 @@ fn stamp_not_clean(cached: &mut CachedExt2) {
     if fs.mark_dirty_on_disk().is_ok() {
         cached.superblock = fs.superblock();
     }
-}
-
-/// Whether the mounted ext2 filesystem refuses every mutation. `false` when
-/// nothing is mounted.
-pub fn ext2_vfs_is_read_only() -> bool {
-    EXT2_VFS_INIT.is_set() && EXT2_READ_ONLY.load(Ordering::Acquire)
-}
-
-/// Capacity of the mounted ext2 filesystem, off the in-memory superblock.
-///
-/// Takes the mount lock, so a `statfs` racing a write sees one side of it or
-/// the other, but issues no block I/O: every count is already in `CachedExt2`.
-fn ext2_vfs_statfs() -> VfsResult<FsStats> {
-    if !EXT2_VFS_INIT.is_set() {
-        return Err(VfsError::IoError);
-    }
-    let guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
-    let cached = guard.as_ref().ok_or(VfsError::IoError)?;
-    Ok(ext2_stats_of(
-        &cached.superblock,
-        cached.block_size,
-        cached.reserved_blocks,
-        cached.read_only,
-    ))
 }
 
 /// The superblock's counts as `statfs(2)` wants them. Split from the mount
@@ -790,7 +907,7 @@ pub(crate) fn ext2_stats_of(
 
 fn verity_error_to_vfs(e: VerityError) -> VfsError {
     match e {
-        VerityError::UnsupportedTrailer => VfsError::NotSupported,
+        VerityError::UnsupportedTrailer | VerityError::TooLarge => VfsError::NotSupported,
         VerityError::CorruptTrailer
         | VerityError::Geometry
         | VerityError::Device
@@ -801,127 +918,166 @@ fn verity_error_to_vfs(e: VerityError) -> VfsError {
 /// Device writes one holder of the mount lock may issue before giving it back.
 /// Small enough that a path walk behind a pass waits for a bounded number of
 /// round trips, large enough that the extra acquisitions are noise.
-const WRITEBACK_CHUNK: usize = 32;
+pub(crate) const WRITEBACK_CHUNK: usize = 32;
 
 /// Steps one pass may take before it gives up. A pass advances a phase or
 /// writes a block on every step, so this bounds a livelock rather than the
 /// work: reaching it means the device is failing every write.
 const WRITEBACK_MAX_STEPS: usize = 4096;
 
-/// Takes the FS lock, so the caller must hold none. A no-op if no ext2
-/// filesystem is mounted.
-///
-/// A `sync(2)` storm costs the device one pass rather than one per caller:
-/// the second caller in finds nothing dirty and nothing unbarriered. The
-/// **wait** is bounded too — the pass releases the mount lock every
-/// [`WRITEBACK_CHUNK`] writes, and the epoch it fixed keeps the ordered phases
-/// ordered across those gaps.
-pub fn ext2_vfs_sync() -> VfsResult<()> {
-    if !EXT2_VFS_INIT.is_set() {
-        return Ok(());
+impl Ext2Mount {
+    /// Takes the FS lock, so the caller must hold none.
+    ///
+    /// A `sync(2)` storm costs the device one pass rather than one per caller,
+    /// and the wait is bounded: the pass releases the mount lock every
+    /// [`WRITEBACK_CHUNK`] writes, and the epoch it fixed keeps the ordered
+    /// phases ordered across those gaps.
+    pub fn sync_fs(&self) -> VfsResult<()> {
+        self.sync_pass().0
     }
-    let mut pass = {
-        let Ok(mut guard) = CACHED_EXT2.lock() else {
-            return Err(VfsError::Interrupted);
-        };
-        let Some(cached) = guard.as_mut() else {
-            return Ok(());
-        };
-        // Skip the device barriers rather than issue no-op flushes every tick.
-        // Read state, not a completion epoch: an op that *failed* leaves its
-        // dirtied blocks cached, so "a sync already ran" is not evidence that
-        // there is nothing left to write.
-        let pending = with_cached_fs(cached, |fs| Ok((fs.sync_pending(), fs.begin_sync())))?;
-        if !pending.0 {
-            DIRTY_PENDING.store(0, Ordering::Relaxed);
-            return Ok(());
-        }
-        pending.1
-    };
 
-    let mut result = Ok(());
-    for _ in 0..WRITEBACK_MAX_STEPS {
-        let Ok(mut guard) = CACHED_EXT2.lock() else {
-            return Err(VfsError::Interrupted);
+    /// [`Self::sync_fs`], plus how many [`Ext2Fs::sync_step`] calls it took —
+    /// the count that bounds the wait behind a pass, since every step gave the
+    /// mount lock back.
+    pub(crate) fn sync_pass(&self) -> (VfsResult<()>, usize) {
+        if !self.init.is_set() {
+            return (Ok(()), 0);
+        }
+        let mut pass = {
+            let Ok(mut guard) = self.cached.lock() else {
+                return (Err(VfsError::Interrupted), 0);
+            };
+            let Some(cached) = guard.as_mut() else {
+                return (Ok(()), 0);
+            };
+            // Skip the device barriers rather than issue no-op flushes every
+            // tick. Read state, not a completion epoch: an op that *failed*
+            // leaves its dirtied blocks cached, so "a sync already ran" is not
+            // evidence that there is nothing left to write.
+            let pending =
+                match self.with_cached_fs(cached, |fs| Ok((fs.sync_pending(), fs.begin_sync()))) {
+                    Ok(pending) => pending,
+                    Err(e) => return (Err(e), 0),
+                };
+            if !pending.0 {
+                self.dirty_pending.store(0, Ordering::Relaxed);
+                return (Ok(()), 0);
+            }
+            pending.1
+        };
+
+        let mut result = Ok(());
+        let mut steps = 0usize;
+        for _ in 0..WRITEBACK_MAX_STEPS {
+            let Ok(mut guard) = self.cached.lock() else {
+                return (Err(VfsError::Interrupted), steps);
+            };
+            let Some(cached) = guard.as_mut() else {
+                return (Ok(()), steps);
+            };
+            result = self.with_cached_fs(cached, |fs| fs.sync_step(&mut pass, WRITEBACK_CHUNK));
+            steps += 1;
+            self.dirty_pending
+                .store(cached.cache.dirty_count(), Ordering::Relaxed);
+            drop(guard);
+            self.report_remount_ro_if_pending();
+            if result.is_err() || pass.is_done() {
+                break;
+            }
+        }
+        (result, steps)
+    }
+
+    /// Whether the log has room for an ordinary operation without a check
+    /// point first. `true` with no log: there is nothing to run out of.
+    #[cfg(feature = "tests")]
+    pub(crate) fn journal_has_headroom(&self) -> bool {
+        let Ok(guard) = self.cached.lock() else {
+            return true;
+        };
+        guard
+            .as_ref()
+            .is_none_or(|cached| cached.cache.journal_has_headroom())
+    }
+
+    /// Whether the log holds transactions a mount would have to replay.
+    #[cfg(feature = "tests")]
+    pub(crate) fn journal_is_empty(&self) -> bool {
+        let Ok(guard) = self.cached.lock() else {
+            return true;
+        };
+        guard
+            .as_ref()
+            .is_none_or(|cached| cached.cache.journal_is_empty())
+    }
+
+    /// Declare the image clean on the medium whenever it genuinely is: nothing
+    /// dirty, nothing unbarriered, no superblock drift, an empty log. Runs at
+    /// shutdown and from every idle flusher pass, so a rude power-off leaves
+    /// an image that still mounts writable. The thaw is
+    /// [`Ext2Fs::transaction`]'s re-stamp, which reaches the medium before any
+    /// write it covers.
+    fn mark_filesystem_clean(&self) {
+        if !self.init.is_set() {
+            return;
+        }
+        let Ok(mut guard) = self.cached.lock() else {
+            return;
         };
         let Some(cached) = guard.as_mut() else {
-            return Ok(());
+            return;
         };
-        result = with_cached_fs(cached, |fs| fs.sync_step(&mut pass, WRITEBACK_CHUNK));
-        DIRTY_PENDING.store(cached.cache.dirty_count(), Ordering::Relaxed);
-        drop(guard);
-        report_remount_ro_if_pending();
-        if result.is_err() || pass.is_done() {
-            break;
+        if cached.read_only || cached.superblock.state == crate::ext2::ondisk::EXT2_VALID_FS {
+            return;
+        }
+        // A non-empty log counts as unflushed state: stamping clean over one
+        // tells the next mount there is nothing to replay while the homes
+        // still lack it.
+        if cached.cache.dirty_count() > 0
+            || cached.cache.unbarriered_writes() > 0
+            || cached.superblock_dirty
+            || !cached.cache.journal_is_empty()
+        {
+            return;
+        }
+        // The verity attested bitmap goes down, and is flushed, BEFORE the
+        // clean stamp: a crash in between leaves the image not clean, so the
+        // next mount trusts no attestation rather than verifying a block this
+        // boot rewrote against a stale bitmap.
+        if let Err(e) = cached.device.checkpoint() {
+            klog_info!("verity: could not persist the attested bitmap: {:?}", e);
+            return;
+        }
+        if let Err(e) = cached.device.flush() {
+            klog_info!("ext2: device flush before the clean stamp failed: {:?}", e);
+            return;
+        }
+        let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
+        let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+            return;
+        };
+        if fs.mark_clean().is_ok() {
+            cached.superblock = fs.superblock();
+            cached.superblock_dirty = fs.superblock_dirty();
         }
     }
-    result
 }
 
 /// Must be called with interrupts still enabled — the virtio-blk completion
-/// path needs them. Best-effort.
+/// path needs them. Best-effort, and over every bound instance: a second
+/// filesystem's dirty blocks are as lost as the root's if nobody writes them.
 pub fn ext2_vfs_shutdown_sync() {
     FLUSH_STOP.request();
-    // An orphan whose last descriptor closed during shutdown teardown is one
-    // this boot can still free, and a free left to the next mount's drain is
-    // one that costs a mount-time pass over the list.
-    orphan::drain_releasable(&EXT2_VFS_STATIC);
-    // Writeback goes before the sync below, or a mapped page's bytes are lost
+    // Writeback goes before the syncs below, or a mapped page's bytes are lost
     // and the sync reports a clean image.
     crate::filemap::flush_all();
-    let _ = ext2_vfs_sync();
-    mark_filesystem_clean();
-}
-
-/// Declare the image clean on the medium whenever it genuinely is: nothing
-/// dirty, nothing unbarriered, no superblock drift, an empty log.
-///
-/// Runs at shutdown and from every idle flusher pass, so a rude power-off
-/// leaves an image that still mounts writable rather than one `root=auto`
-/// demotes to `/mnt`. The thaw is [`Ext2Fs::transaction`]'s re-stamp, which
-/// reaches the medium before any write it covers.
-fn mark_filesystem_clean() {
-    if !EXT2_VFS_INIT.is_set() {
-        return;
-    }
-    let Ok(mut guard) = CACHED_EXT2.lock() else {
-        return;
-    };
-    let Some(cached) = guard.as_mut() else {
-        return;
-    };
-    if cached.read_only || cached.superblock.state == crate::ext2::ondisk::EXT2_VALID_FS {
-        return;
-    }
-    // A non-empty log counts as unflushed state: stamping clean over one tells
-    // the next mount there is nothing to replay while the homes still lack it.
-    if cached.cache.dirty_count() > 0
-        || cached.cache.unbarriered_writes() > 0
-        || cached.superblock_dirty
-        || !cached.cache.journal_is_empty()
-    {
-        return;
-    }
-    // The verity attested bitmap goes down, and is flushed, BEFORE the clean
-    // stamp: a crash in between leaves the image not clean, so the next mount
-    // trusts no attestation rather than verifying a block this boot rewrote
-    // against a stale bitmap.
-    if let Err(e) = cached.device.checkpoint() {
-        klog_info!("verity: could not persist the attested bitmap: {:?}", e);
-        return;
-    }
-    if let Err(e) = cached.device.flush() {
-        klog_info!("ext2: device flush before the clean stamp failed: {:?}", e);
-        return;
-    }
-    let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-    let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
-        return;
-    };
-    if fs.mark_clean().is_ok() {
-        cached.superblock = fs.superblock();
-        cached.superblock_dirty = fs.superblock_dirty();
-    }
+    crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+        // An orphan whose last descriptor closed during teardown is one this
+        // boot can still free, rather than one the next mount's drain pays for.
+        orphan::drain_releasable(mount);
+        let _ = mount.sync_fs();
+        mount.mark_filesystem_clean();
+    });
 }
 
 fn start_flusher() {
@@ -937,9 +1093,11 @@ fn start_flusher() {
 
 /// Background writeback kthread (analog of Linux per-bdi flusher).
 ///
-/// A failed sync leaves blocks dirty, which would satisfy the wait predicate
-/// immediately and retry back-to-back forever, so persistent failures back off
-/// exponentially and ignore dirty-counter wakes until the backoff elapses.
+/// One thread for the whole pool: a pass takes one instance's lock at a time,
+/// never two, so nothing here can order two mounts' locks against each other.
+/// Persistent sync failures back off exponentially, because failed writes
+/// leave blocks dirty and would otherwise satisfy the wait predicate
+/// back-to-back.
 fn ext2_flusher_entry(token: KernelIoToken<'static>) {
     let mut backoff_ms: u64 = 0;
     loop {
@@ -949,7 +1107,7 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
             token.park_timeout(
                 &FLUSH_STOP,
                 || {
-                    DIRTY_PENDING.load(Ordering::Relaxed) > 0
+                    crate::vfs::init::ext2_pool_has_dirty()
                         || orphan::releasable_count() > 0
                         || crate::filemap::pending_count() > 0
                 },
@@ -957,23 +1115,27 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
             )
         };
 
-        // Before the sync, so the frees it performs go out in the same pass
-        // rather than waiting a further tick. Takes the mount lock itself, so
-        // it must not run under one.
-        orphan::drain_releasable(&EXT2_VFS_STATIC);
-
         // A file mapping's writeback goes through the filesystem, so it cannot
         // run from the `release` that queued it.
         crate::filemap::drain_pending();
 
         // Sync on the stop path too: dirty blocks that never reach the device
         // are lost.
-        let result = ext2_vfs_sync();
-        backoff_ms = if result.is_err() {
+        let mut failed = false;
+        crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+            // Before the sync, so the frees it performs go out in the same
+            // pass rather than waiting a further tick. Takes the mount lock
+            // itself, so it must not run under one.
+            orphan::drain_releasable(mount);
+            if mount.sync_fs().is_err() {
+                failed = true;
+            } else {
+                mount.mark_filesystem_clean();
+            }
+        });
+        backoff_ms = if failed {
             (backoff_ms * 2).clamp(FLUSH_BACKOFF_MIN_MS, FLUSH_BACKOFF_MAX_MS)
         } else {
-            // Nothing left to write, so say so on the medium.
-            mark_filesystem_clean();
             0
         };
         if waited == KthreadWait::Stop {
@@ -981,10 +1143,6 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         }
     }
     FLUSH_STOP.note_exited();
-}
-
-pub fn ext2_vfs_is_initialized() -> bool {
-    EXT2_VFS_INIT.is_set()
 }
 
 fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
@@ -1050,23 +1208,22 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
     }
 
     fn reclaimable_pages(&self) -> u32 {
-        // `try_lock` only: the FS lock is a sleeping mutex held across block
-        // I/O, so waiting here blocks on the I/O that needs the memory.
-        let Some(guard) = CACHED_EXT2.try_lock() else {
-            return 0;
-        };
-        guard
-            .as_ref()
-            .map_or(0, |cached| cached.cache.reclaimable())
+        let mut total = 0u32;
+        crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+            total = total.saturating_add(mount.reclaimable_pages());
+        });
+        total
     }
 
     fn reclaim(&self, want: u32) -> u32 {
-        let Some(mut guard) = CACHED_EXT2.try_lock() else {
-            return 0;
-        };
-        guard
-            .as_mut()
-            .map_or(0, |cached| cached.cache.shrink_clean(want))
+        let mut freed = 0u32;
+        crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+            let left = want.saturating_sub(freed);
+            if left > 0 {
+                freed = freed.saturating_add(mount.reclaim_clean(left));
+            }
+        });
+        freed
     }
 }
 
