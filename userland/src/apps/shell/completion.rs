@@ -153,6 +153,13 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
         }
     }
 
+    for tool in crate::apps::coreutils::tools() {
+        let name = tool.name.as_bytes();
+        if name.len() >= prefix_len && &name[..prefix_len] == prefix {
+            push_command_match(name, &mut matches, &mut match_count);
+        }
+    }
+
     if match_count == 0 {
         return;
     }

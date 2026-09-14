@@ -210,6 +210,33 @@
 #     overlap decides how many extents are live at the dump. The cap is the
 #     maximum plus that spread. `residentpages`, the row that tracks what is
 #     actually held, stayed inside 114452 on all four.
+#
+# 2026-09-14, the utilities becoming executables ("The utilities are
+# executables" in plans/self-hosting.md). One cause for every row that moved:
+# `coreutils_test` spawns a utility per assertion, so the userland phase now
+# creates ~37 more short-lived address spaces than it did.
+#   post-userland-tests `process` 134 -> 173. Deterministic at 173 over seven
+#     fresh runs (171 before the utest gained the two-stage shell pipeline case,
+#     which is two more), so the cap is exact. The charge is released at the reap, and
+#     most of those children are still referenced at the dump point.
+#   post-userland-tests `pages` 1072000 -> 1309452: measured
+#     1269829/1288157/1266862/1283955 over the same four runs, spread 21295;
+#     the cap is the maximum plus that spread. Each spawned utility is another
+#     address space with a lazy heap and an 8 MiB stack extent, and this row is
+#     virtual, so a tool that touches a handful of pages still charges its
+#     whole mapping.
+#   post-userland-tests `residentpages` 114452 -> 119949 (116387/116798/117153/
+#     118168, spread 1781) and `kernelmeta` 8128 -> 8503 (8293/8240/8359/8215,
+#     spread 144). Both are the same children: ~2 000 resident pages and the
+#     page tables plus 12-page task stacks behind them.
+#   post-userland-tests `diskblocks` 3936 -> 2911, a *fall*, deterministic over
+#     all four runs: the tests image carries the multicall binary and the new
+#     test binary, so `persist_test`'s space filler reaches the volume's
+#     reserve after fewer blocks of its own.
+#   Everything else stayed inside its existing cap on all four runs: boot
+#     `kernelmeta` 1644-1719 inside 1756, post-kernel-tests `kernelmeta`
+#     5976-6057 inside 6065, `pages` 52977-55483 inside 65536, `process` 14,
+#     `residentpages` 772 exact, `task` 6, and post-userland `pinnedbytes` 4.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -239,14 +266,14 @@ post-kernel-tests	process	20
 post-kernel-tests	residentpages	772
 post-kernel-tests	task	8
 post-userland-tests	custody	8
-post-userland-tests	diskblocks	3936
+post-userland-tests	diskblocks	2911
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	8128
+post-userland-tests	kernelmeta	8503
 post-userland-tests	objectrow	257
-post-userland-tests	pages	1072000
+post-userland-tests	pages	1309452
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	134
-post-userland-tests	residentpages	114452
+post-userland-tests	process	173
+post-userland-tests	residentpages	119949
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

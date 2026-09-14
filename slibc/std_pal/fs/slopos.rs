@@ -952,10 +952,13 @@ pub fn lstat(p: &Path) -> io::Result<FileAttr> {
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
+    // Against the working directory, not the root: joining a relative path
+    // onto `/` answers the canonical path of a different file, and answers it
+    // without failing.
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        Path::new("/").join(p)
+        crate::sys::pal::os::getcwd()?.join(p)
     };
     let normalized = normalize_absolute(&abs);
     stat(&normalized)?;

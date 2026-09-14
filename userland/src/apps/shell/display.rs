@@ -232,6 +232,19 @@ pub fn shell_clear_output_fd() {
     OUTPUT_FD.store(-1, Ordering::Relaxed);
 }
 
+/// Where a builtin's output goes, and whether colour is welcome there: the
+/// redirect fd when `>` is in force, otherwise fd 1. A utility implemented in
+/// `apps::coreutils` takes this rather than assuming fd 1, which is what lets
+/// `echo hi > f` keep working while the shell keeps its own fd 1.
+pub fn shell_output_target() -> (i32, bool) {
+    let fd = OUTPUT_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        return (fd, false);
+    }
+    let plain = PLAIN.load(Ordering::Relaxed);
+    (STDOUT_FD, !plain && fs::isatty(STDOUT_FD))
+}
+
 /// Echo a single character to fd 1 (line-editor local echo).
 pub fn shell_echo_char(c: u8) {
     let buf = [c];

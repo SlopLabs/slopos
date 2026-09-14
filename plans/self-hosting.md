@@ -28,9 +28,10 @@ are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with two remaining exceptions (dynamic linking and the
-compiler bootstrap itself). Three more, a page-fault path that can reach the
-device, a POSIX floor a build system can stand on, and a filesystem that can
-hold a tree, have landed.
+compiler bootstrap itself). Four more, a page-fault path that can reach the
+device, a POSIX floor a build system can stand on, a filesystem that can hold a
+tree, and a utility set that is executables rather than shell builtins, have
+landed.
 
 ## Architectural constraints (do not violate)
 
@@ -52,8 +53,9 @@ hold a tree, have landed.
   sleepable fault path this rests on is a blocking task on its own kernel
   stack, not an executor.
 - **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
-  — which rules out lifting busybox-lineage utilities or Linux userland code for
-  Phase 1's utilities. Concepts, ABI numbers and struct layouts are free to
+  — which ruled out lifting busybox-lineage utilities or Linux userland code
+  for Phase 1's utilities, so the multicall *shape* was taken and every line
+  written here. Concepts, ABI numbers and struct layouts are free to
   take; prose and implementation are not. Anything new linked into a shipped
   binary needs a `NOTICE.md` entry. Fonts stay runtime-loaded.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
@@ -526,25 +528,129 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## The utilities are executables
+
+The fifth thing this plan rests on: a program that is not the shell can run a
+utility. `coreutils_test` is the standing proof — a test binary that spawns
+`/bin/<tool>` by path, reads back what it produced, and checks the status it
+exited with. Before this, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`
+and `ps` existed only as functions inside the shell
+(`userland/src/apps/shell/builtins/`), so anything that spawned one got
+`ENOENT`; `/bin` held GUI and network binaries and nothing a build could use.
+
+**54 names in `/bin`, one 939 KB binary.** `/bin/coreutils` is a multicall
+binary and each name is a symlink to it, so `argv[0]` selects the utility
+(`userland/src/apps/coreutils/`, 13.5 kLoC). That is busybox's, toybox's and
+uutils's shape, and the shape Asterinas ships in its own initramfs; Redox takes
+uutils, which offers both a multicall binary and one binary per tool. The
+alternative was measured rather than assumed: the smallest SlopOS binary in the
+tree is 158 KB of std, slibc and unwinder before a line of its own code, so 54
+of them would be ~8 MiB of a 32 MiB root for no behaviour at all. Each name
+instead costs one inode and no block — `debugfs symlink` writes a *fast*
+symlink, target inside `i_block` — and the initramfs carries the same set as
+`newc` `S_IFLNK` records, which is why the utest passes unchanged under
+`root=initramfs`. The installed set comes from the justfile's
+`coreutils_tools`; the implemented set is the binary's own table; and
+`coreutils --list` plus `coreutils_test` is what stops the two from drifting.
+
+What it rests on, in case a later phase disturbs it:
+
+- **There is one implementation of each utility, not two.** The shell's builtin
+  table lost every file and text utility; what remains is what changes the
+  shell itself (`cd`, `write`, `export`/`unset`/`set`/`env`, `jobs`/`fg`/`bg`,
+  `kill`, `wait`, `exec`, `exit`, `time`, `help`, the SlopOS-specific
+  `info`/`free`/`uptime`/`cpuinfo`/`random`/`roulette`/`wl`/`resolve`) plus the
+  six POSIX resolves without a fork — `echo`, `printf`, `test`, `[`, `true`,
+  `false` — which *delegate into the same functions* the `/bin` names run
+  (`builtins/utility.rs`). Everything else the shell reaches through `PATH`
+  like any other program, which is also what gives it correct job control: a
+  Ctrl-C reaches a forked `yes` and could never reach an in-process one.
+- **A utility writes to a `Sink`, never to fd 1.** That is the mechanism that
+  makes one implementation serve both callers: the multicall binary points the
+  sink at fd 1, and the shell points it at whatever `>` redirected the builtin
+  to, so `echo hi > f` keeps working while the shell keeps its own fd 1. The
+  sink also carries whether its destination is a terminal, which is why `ls`
+  can lay out columns and colour on a tty and emit bare newline-separated names
+  into a pipe — the old builtin printed `name (size)` and `(empty)`, which no
+  pipeline could parse.
+- **The semantics that were wrong are fixed, not merely present.** `cat` no
+  longer stops at 512 bytes; `cp -r` and `rm -r` recurse (through one shared
+  `Walk`, post-order for removal); `mkdir -p` creates parents; `diff -u`
+  produces a unified patch and `patch` applies it — that round trip is a test
+  case, not a claim. `grep` exits 0/1/2 and `test` 0/1/2, because a build
+  driver reads a status rather than a message.
+- **`execve` resets the thread pointer.** Making the utilities executables put
+  a *fork-and-exec* on the path of every pipeline stage, and that path was
+  broken: `execve` installed the new image's `FS_BASE` only when the image
+  carried a `PT_TLS`, so an image without one kept the *old* image's thread
+  pointer, and slibc's startup adopts a non-zero `FS_BASE` as an
+  already-installed TCB (`slibc/src/thread/tls.rs`). `echo x | tee f` therefore
+  faulted at `cr2=0x500000060` in `tls_init_main_thread` — a dangling pointer
+  read, not a missing tool. The reset is now unconditional
+  (`core/src/syscall/process_handlers.rs`), as Linux has it. Nothing before
+  this change exercised the combination, which is why a builtins-only shell
+  never saw it.
+- **`canonicalize` resolves against the working directory.** The std port
+  joined a relative path onto `/` (`slibc/std_pal/fs/slopos.rs`), so it
+  answered the canonical path of a *different* file — and answered it
+  successfully whenever that other file happened to exist. `cp`'s
+  copy-into-itself refusal is what found it: the guard passed by accident for
+  `.` and not at all for anything else. Fixed at the port, with the case in
+  `cd_test`; `cp` still folds `..` lexically of its own accord, because a
+  destination that does not exist yet cannot be canonicalised at all.
+- **The set is the POSIX floor a build needs**: `ls cat cp mv rm mkdir rmdir ln
+  touch stat install mktemp basename dirname which grep sed find xargs sort
+  uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes
+  seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat
+  sha256sum stty less`. Three engines are written here rather than depended on,
+  because the vendoring rule is nine third-party crates and a utility set is
+  not a reason to change it: a POSIX regex engine (BRE and ERE, with a step
+  budget, because the pattern is user input), RFC 1951 DEFLATE plus RFC 1952
+  framing with the CRC verified on read, and FIPS 180-4 SHA-256.
+- **The privilege story is unchanged.** `/bin` and `/sbin` stay sealed, so a
+  name inside them cannot be replaced, and a symlink's content cannot be
+  rewritten in place. The grant table is keyed on the path `exec` *resolves*
+  to, which for all 54 names is `/bin/coreutils` — an entry with no grant. The
+  visible cost is that a spawned utility's task name is `coreutils`, because
+  `task_name_from_path` names the canonical path: `ps` shows the binary, not
+  the name that was typed.
+
+**Five divergences and costs, stated rather than hidden.**
+
+- **A non-UTF-8 operand is refused.** `std::path::Path` is UTF-8-backed on this
+  target — `OsStrExt` is not among the wired extensions — so a path that is not
+  UTF-8 is diagnosed instead of being mangled into the name of a different
+  file. Byte-clean paths would mean bypassing `std::fs` entirely.
+- **`ls -l` cannot report a mode, an owner or a link count.** `Metadata` on
+  this target carries length, type, mtime and a read-only bit and nothing else,
+  so the permission string is derived from the type and the link count prints
+  as 1. `test -r/-w/-x` answer from existence for the same reason, which is
+  also the single-user decision below: everything runs as uid 0 and the loader
+  does not consult the mode bits.
+- **`sed` has no branching** (`b`, `t`, `:label`), and `cp -p` preserves a
+  file's mtime but not a directory's — there is no path-taking `utimensat` in
+  the userland wrappers, only `File::set_times`.
+- **`gzip` encodes with fixed Huffman blocks**, falling back to stored blocks
+  when a block would not shrink, so its output is correct and reads everywhere
+  but is larger than GNU gzip's. `inflate` handles all three block types, so
+  what a host produced is readable here.
+- **The shell links the utilities it does not run.** `shell.elf` went from
+  640 KB to 1.37 MB, because `help` and completion walk the tool table and a
+  table entry holds its `run` pointer, so referencing any of it keeps all of it
+  alive. The alternative is a second, metadata-only table — the drift this
+  design exists to prevent — so the ~730 KB is paid deliberately. A `/bin`-
+  scanning completion would cost nothing and cover programs the table does not
+  know, and is the right fix once Phase 2 makes new binaries a thing that
+  happens in-guest.
+
+---
+
 ## Phase 1 — A workbench you can type in
 
 **Outcome:** you can edit a file, search a tree, run a script, and read the
 output — without a Linux host.
 
-### Workstream 1.1 — Utilities that are executables (**M**)
-
-`ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`, `ps` exist only as shell
-builtins (`userland/src/apps/shell/builtins/`); `/bin` holds 17 GUI and network
-binaries. Anything that spawns a tool directly gets `ENOENT`. Give the existing
-builtins `main`s, then write the absent set: `grep` `find` `sed` `sort` `uniq`
-`tr` `cut` `xargs` `which` `test`/`[` `printf` `basename` `dirname` `mktemp`
-`tar` `gzip` `patch` `cmp` `install` `sha256sum` `nproc` `stty` `less`. Fix the
-semantics that are wrong rather than missing: `rm`/`cp` have no `-r`, `mkdir`
-has no `-p`, `diff` cannot produce a patch. (`sleep`'s unit, `kill`'s
-signal argument and `date`'s clock were blockers for the POSIX floor above and
-are done.)
-
-### Workstream 1.2 — A shell that can drive a build (**L**)
+### Workstream 1.1 — A shell that can drive a build (**L**)
 
 No `if`/`while`/`for`/`case`/functions, no command substitution, no here-docs,
 no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
@@ -552,7 +658,7 @@ no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
 shell's buffers are `USER_PATH_MAX`-sized and heap-backed, and `fg`/`bg` can
 resume a stopped job.
 
-### Workstream 1.3 — A terminal an editor can use (**M**)
+### Workstream 1.2 — A terminal an editor can use (**M**)
 
 `encode_key` emits arrows, Home, End and Delete only
 (`terminal-core/src/input.rs:230-282`): no F1–F12 (the keycodes exist and are
@@ -560,7 +666,7 @@ dropped), no Alt-prefixing, no modified arrows, no `CSI Z`, and PageUp/PageDown
 never reach the PTY. No mouse reporting, no DA/DSR replies. The font atlas
 covers ASCII + Latin-1, so box-drawing and non-Latin source render as diamonds.
 
-### Workstream 1.4 — An editor (**M**)
+### Workstream 1.3 — An editor (**M**)
 
 Write one — not because C is foreclosed (it is not; see Workstream 2.6), but
 because nothing upstream is reachable *before* a C frontend exists, and because
@@ -578,7 +684,8 @@ Every one of those is a separate multi-month project whose payoff is one editor.
 
 **Phase 1 exit criteria:** a shell script in the guest checks out, greps,
 edits and archives a source tree, driven from a terminal running a native
-editor.
+editor. The utilities that script calls are in place; what it still cannot do
+is loop, branch or glob, which is Workstream 1.1.
 
 ---
 
@@ -821,6 +928,13 @@ every image this kernel writes.
 - `userland/src/apps/shell/`, `terminal-core/src/input.rs:230-282`,
   `font/src/lib.rs:29-48` — shell grammar, key encoding, glyph coverage
   (Phase 1).
+- `userland/src/apps/coreutils/`, `userland/src/bin/coreutils.rs`, the
+  justfile's `coreutils_tools`, `scripts/build_fs_image.sh`'s symlink loop and
+  `scripts/gen_initramfs.py`'s `MODE_LINK` records — the utility set above.
+  Listed not as work but as what a later phase must not quietly undo: the
+  installed names, the implemented table and `coreutils_test`'s check that they
+  agree are three places one utility appears, and `mod.rs`'s `TOOL_SETS` is
+  what keeps a new tool to one file.
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,
   `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 2).
 - `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs` — the bespoke

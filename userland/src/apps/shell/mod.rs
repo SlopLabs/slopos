@@ -20,7 +20,6 @@ pub(crate) static NL: &str = "\n";
 pub(crate) static PATH_TOO_LONG: &str = "path too long\n";
 pub(crate) static ERR_NO_SUCH: &str = "No such file or directory\n";
 pub(crate) static ERR_TOO_MANY_ARGS: &str = "too many arguments\n";
-pub(crate) static ERR_MISSING_OPERAND: &str = "missing operand\n";
 pub(crate) static ERR_MISSING_FILE: &str = "missing file operand\n";
 pub(crate) static ERR_MISSING_TEXT: &str = "missing text operand\n";
 pub(crate) static HALTED: &str = "Shell requested shutdown...\n";

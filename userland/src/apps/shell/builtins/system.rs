@@ -1,5 +1,6 @@
+use crate::apps::coreutils;
 use crate::program_registry;
-use crate::syscall::{UserSysInfo, UserUtsname, core as sys_core, process};
+use crate::syscall::{UserSysInfo, core as sys_core, process};
 
 use super::super::display::{
     COLOR_COMMENT_GRAY, COLOR_ERROR_RED, COLOR_EXEC_GREEN, COLOR_PROMPT_ACCENT, shell_write,
@@ -52,6 +53,18 @@ pub fn cmd_help(argc: i32, argv: &[&[u8]]) -> i32 {
     }
     shell_write(NL.as_bytes());
 
+    // Not builtins, so `help` would otherwise omit most of the commands that
+    // exist.
+    shell_write_idx(b"Utilities", COLOR_PROMPT_ACCENT);
+    shell_write(b" (/bin):\n");
+    for tool in coreutils::tools() {
+        shell_write(b"  ");
+        write_padded_colored(tool.name, COLOR_EXEC_GREEN);
+        shell_write(tool.desc.as_bytes());
+        shell_write(NL.as_bytes());
+    }
+    shell_write(NL.as_bytes());
+
     0
 }
 
@@ -85,31 +98,22 @@ fn cmd_help_single(name: &[u8]) -> i32 {
         return 0;
     }
 
+    if let Some(tool) = coreutils::find_tool(name) {
+        shell_write_idx(tool.name.as_bytes(), COLOR_EXEC_GREEN);
+        shell_write(b" - ");
+        shell_write(tool.desc.as_bytes());
+        shell_write(b"\n\n");
+        shell_write_idx(b"Usage: ", COLOR_COMMENT_GRAY);
+        shell_write(tool.usage.as_bytes());
+        shell_write(b"\n\n");
+        shell_write(b"An executable in /bin, not a builtin.\n");
+        return 0;
+    }
+
     shell_write_idx(b"help: unknown command '", COLOR_ERROR_RED);
     shell_write_idx(name, COLOR_ERROR_RED);
     shell_write_idx(b"'\n", COLOR_ERROR_RED);
     1
-}
-
-pub fn cmd_echo(argc: i32, argv: &[&[u8]]) -> i32 {
-    let mut first = true;
-    for i in 1..argc {
-        let idx = i as usize;
-        if idx >= argv.len() {
-            break;
-        }
-        let arg = argv[idx];
-        if arg.is_empty() {
-            continue;
-        }
-        if !first {
-            shell_write(b" ");
-        }
-        shell_write(arg);
-        first = false;
-    }
-    shell_write(NL.as_bytes());
-    0
 }
 
 pub fn cmd_clear(_argc: i32, _argv: &[&[u8]]) -> i32 {
@@ -283,128 +287,6 @@ pub fn cmd_time(argc: i32, argv: &[&[u8]]) -> i32 {
     shell_write(format!("\nreal\t{secs}.{sub_us:06}s\n").as_bytes());
 
     rc
-}
-
-/// Howard Hinnant's `civil_from_days`: era arithmetic, exact for every
-/// representable day and needing no leap table.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-pub fn cmd_date(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    let Some(epoch_secs) = sys_core::realtime_secs() else {
-        let total_secs = sys_core::get_time_ms() / 1000;
-        shell_write(
-            format!(
-                "Day {} {:02}:{:02}:{:02} SLT (no real-time clock; measured from boot)\n",
-                total_secs / 86400,
-                (total_secs % 86400) / 3600,
-                (total_secs % 3600) / 60,
-                total_secs % 60,
-            )
-            .as_bytes(),
-        );
-        return 0;
-    };
-
-    // Floor division, so a pre-1970 anchor still lands on the right day.
-    let days = epoch_secs.div_euclid(86_400);
-    let secs_of_day = epoch_secs.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    // 1970-01-01 was a Thursday, which is what orders WEEKDAYS.
-    let weekday = WEEKDAYS[days.rem_euclid(7) as usize];
-    let month_name = MONTHS[(month - 1) as usize];
-
-    shell_write(
-        format!(
-            "{weekday} {month_name} {day:2} {:02}:{:02}:{:02} UTC {year}\n",
-            secs_of_day / 3600,
-            (secs_of_day % 3600) / 60,
-            secs_of_day % 60,
-        )
-        .as_bytes(),
-    );
-    0
-}
-
-pub fn cmd_uname(argc: i32, argv: &[&[u8]]) -> i32 {
-    let mut show_all = argc < 2;
-    let mut show_sysname = false;
-    let mut show_release = false;
-    let mut show_machine = false;
-
-    for i in 1..argc {
-        let idx = i as usize;
-        if idx >= argv.len() || argv[idx].is_empty() {
-            continue;
-        }
-        if argv[idx] == b"-a" {
-            show_all = true;
-        } else if argv[idx] == b"-s" {
-            show_sysname = true;
-        } else if argv[idx] == b"-r" {
-            show_release = true;
-        } else if argv[idx] == b"-m" {
-            show_machine = true;
-        }
-    }
-
-    if !show_sysname && !show_release && !show_machine {
-        show_all = true;
-    }
-
-    let mut info = UserUtsname::default();
-    if sys_core::uname(&mut info) < 0 {
-        shell_write_idx(
-            b"uname: kernel refused to identify itself\n",
-            COLOR_ERROR_RED,
-        );
-        return 1;
-    }
-
-    let field = |bytes: &[u8; 65]| -> String {
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).into_owned()
-    };
-
-    let mut parts: Vec<String> = Vec::new();
-    if show_all || show_sysname {
-        parts.push(field(&info.sysname));
-    }
-    if show_all || show_release {
-        parts.push(field(&info.release));
-    }
-    if show_all || show_machine {
-        parts.push(field(&info.machine));
-    }
-
-    shell_write(parts.join(" ").as_bytes());
-    shell_write(NL.as_bytes());
-    0
-}
-
-pub fn cmd_whoami(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    let uid = process::getuid();
-    if uid == 0 {
-        shell_write(b"root\n");
-    } else {
-        shell_write(format!("uid={uid}\n").as_bytes());
-    }
-    0
 }
 
 pub fn cmd_resolve(argc: i32, argv: &[&[u8]]) -> i32 {

@@ -1,9 +1,15 @@
 //! Builtin command dispatch table and helpers.
+//!
+//! A builtin here is a command that changes the shell itself, or one POSIX
+//! resolves without a fork. Every file and text utility is an executable in
+//! `apps::coreutils`, reached through `PATH` — see [`utility`] for the six
+//! that are both.
 
 pub mod env;
 pub mod fs;
 pub mod process;
 pub mod system;
+pub mod utility;
 pub mod utils;
 
 pub type BuiltinFn = fn(argc: i32, argv: &[&[u8]]) -> i32;
@@ -66,7 +72,7 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         usage: "echo [args...]",
         detail: "Write each argument to standard output separated by\nspaces, followed by a newline.",
         category: System,
-        func: system::cmd_echo,
+        func: utility::cmd_echo,
     },
     BuiltinEntry {
         name: "clear",
@@ -133,68 +139,12 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         func: system::cmd_time,
     },
     BuiltinEntry {
-        name: "date",
-        desc: "Show the current date and time",
-        usage: "date",
-        detail: "Print the wall clock in UTC, read from the\nreal-time clock. A machine whose clock was never\nset falls back to time since boot, and says so.",
-        category: System,
-        func: system::cmd_date,
-    },
-    BuiltinEntry {
-        name: "uname",
-        desc: "System identification",
-        usage: "uname [-a] [-s] [-r] [-m]",
-        detail: "Print system information, as the kernel reports\nit. Flags:\n  -s  System name\n  -r  Release\n  -m  Machine\n  -a  All of the above (default)",
-        category: System,
-        func: system::cmd_uname,
-    },
-    BuiltinEntry {
-        name: "whoami",
-        desc: "Print current user",
-        usage: "whoami",
-        detail: "Print the effective user name. SlopOS always runs\nas root (uid 0).",
-        category: System,
-        func: system::cmd_whoami,
-    },
-    BuiltinEntry {
-        name: "ls",
-        desc: "List directory contents",
-        usage: "ls [path]",
-        detail: "List files and directories at the given path.\nDirectories are marked with /, files show name (size).\nEntries are sorted alphabetically. Defaults to cwd.",
-        category: Filesystem,
-        func: fs::cmd_ls,
-    },
-    BuiltinEntry {
-        name: "cat",
-        desc: "Display file contents",
-        usage: "cat [file...]",
-        detail: "Print the contents of one or more files to the\nterminal. Without arguments, reads from stdin.\nEach file is truncated at 512 bytes.",
-        category: Filesystem,
-        func: fs::cmd_cat,
-    },
-    BuiltinEntry {
         name: "write",
         desc: "Write text to a file",
         usage: "write <file> <text>",
         detail: "Create or overwrite a file with the given text.\nThe previous contents are replaced entirely.",
         category: Filesystem,
         func: fs::cmd_write,
-    },
-    BuiltinEntry {
-        name: "mkdir",
-        desc: "Create a directory",
-        usage: "mkdir <dir>",
-        detail: "Create a new directory at the given path.",
-        category: Filesystem,
-        func: fs::cmd_mkdir,
-    },
-    BuiltinEntry {
-        name: "rm",
-        desc: "Remove a file",
-        usage: "rm <file>",
-        detail: "Delete a file. Does not remove directories.",
-        category: Filesystem,
-        func: fs::cmd_rm,
     },
     BuiltinEntry {
         name: "cd",
@@ -211,86 +161,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         detail: "Print the absolute path of the current working\ndirectory.",
         category: Filesystem,
         func: fs::cmd_pwd,
-    },
-    BuiltinEntry {
-        name: "stat",
-        desc: "Show file information",
-        usage: "stat <path>",
-        detail: "Display file type and size for the given path.",
-        category: Filesystem,
-        func: fs::cmd_stat,
-    },
-    BuiltinEntry {
-        name: "touch",
-        desc: "Create empty file",
-        usage: "touch <path...>",
-        detail: "Create an empty file at each given path. If the\nfile already exists, it is left unchanged.",
-        category: Filesystem,
-        func: fs::cmd_touch,
-    },
-    BuiltinEntry {
-        name: "cp",
-        desc: "Copy a file",
-        usage: "cp <src> <dst>",
-        detail: "Copy the contents of src to dst. Overwrites dst\nif it exists. Does not copy directories.",
-        category: Filesystem,
-        func: fs::cmd_cp,
-    },
-    BuiltinEntry {
-        name: "mv",
-        desc: "Move a file",
-        usage: "mv <src> <dst>",
-        detail: "Move src to dst (copy then remove). Overwrites\ndst if it exists. Does not move directories.",
-        category: Filesystem,
-        func: fs::cmd_mv,
-    },
-    BuiltinEntry {
-        name: "head",
-        desc: "Show first lines of file",
-        usage: "head <file> [n]",
-        detail: "Print the first N lines of a file (default 10).",
-        category: Filesystem,
-        func: fs::cmd_head,
-    },
-    BuiltinEntry {
-        name: "tail",
-        desc: "Show last lines of file",
-        usage: "tail <file> [n]",
-        detail: "Print the last N lines of a file (default 10).\nBuffers up to 4096 bytes from the file.",
-        category: Filesystem,
-        func: fs::cmd_tail,
-    },
-    BuiltinEntry {
-        name: "wc",
-        desc: "Count lines, words, chars",
-        usage: "wc [file...]",
-        detail: "Count lines, words, and characters in each file.\nWithout arguments, reads from standard input.\nWith multiple files, prints a total line.",
-        category: Filesystem,
-        func: fs::cmd_wc,
-    },
-    BuiltinEntry {
-        name: "hexdump",
-        desc: "Hex and ASCII dump",
-        usage: "hexdump <file> [n]",
-        detail: "Display the first N bytes of a file in hexadecimal\nand ASCII (default 256, max 512).",
-        category: Filesystem,
-        func: fs::cmd_hexdump,
-    },
-    BuiltinEntry {
-        name: "diff",
-        desc: "Compare two files",
-        usage: "diff <file1> <file2>",
-        detail: "Compare two files line by line. Show differing\nlines with < and > markers. Returns 0 if files\nare identical, 1 if they differ.",
-        category: Filesystem,
-        func: fs::cmd_diff,
-    },
-    BuiltinEntry {
-        name: "tee",
-        desc: "Copy stdin to stdout and file",
-        usage: "tee [-a] [file]",
-        detail: "Read from standard input and write to both stdout\nand a file. Use -a to append instead of overwrite.\nWithout a file argument, passes stdin through.",
-        category: Filesystem,
-        func: fs::cmd_tee,
     },
     BuiltinEntry {
         name: "jobs",
@@ -323,14 +193,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         detail: "Send a signal to a process by PID or to a job\ngroup by %N notation. SIGTERM by default;\nname another as -9, -KILL or -s STOP.",
         category: Process,
         func: process::cmd_kill,
-    },
-    BuiltinEntry {
-        name: "ps",
-        desc: "Show running processes",
-        usage: "ps",
-        detail: "Display task counts (total, active, ready) and\nlist windowed processes with their PID, state,\nand title.",
-        category: Process,
-        func: process::cmd_ps,
     },
     BuiltinEntry {
         name: "wait",
@@ -389,20 +251,12 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         func: env::cmd_set,
     },
     BuiltinEntry {
-        name: "sleep",
-        desc: "Sleep for N seconds",
-        usage: "sleep <seconds>",
-        detail: "Pause execution for the specified number of\nseconds.",
-        category: Utility,
-        func: utils::cmd_sleep,
-    },
-    BuiltinEntry {
         name: "true",
         desc: "Return success",
         usage: "true",
         detail: "Do nothing and return exit code 0.",
         category: Utility,
-        func: utils::cmd_true,
+        func: utility::cmd_true,
     },
     BuiltinEntry {
         name: "false",
@@ -410,23 +264,31 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         usage: "false",
         detail: "Do nothing and return exit code 1.",
         category: Utility,
-        func: utils::cmd_false,
+        func: utility::cmd_false,
     },
     BuiltinEntry {
-        name: "seq",
-        desc: "Print number sequence",
-        usage: "seq [start] <end>",
-        detail: "Print integers from start to end, one per line.\nIf only one argument is given, start defaults to 1.",
+        name: "printf",
+        desc: "Format and print arguments",
+        usage: "printf format [args...]",
+        detail: "Write the arguments under the control of format.\nThe format is reused until the arguments are\nconsumed, so one format can print many records.",
         category: Utility,
-        func: utils::cmd_seq,
+        func: utility::cmd_printf,
     },
     BuiltinEntry {
-        name: "yes",
-        desc: "Repeat a string",
-        usage: "yes [string]",
-        detail: "Repeatedly print a string (default 'y') followed\nby a newline, until interrupted with Ctrl+C.\nUseful in pipelines (yes | head -5).",
+        name: "test",
+        desc: "Evaluate a conditional expression",
+        usage: "test expression",
+        detail: "Exit 0 when the expression is true, 1 when false.\nFile tests (-e -f -d -s), string tests (-n -z, =,\n!=) and integer tests (-eq -lt -gt ...) combine\nwith ! -a -o and parentheses.",
         category: Utility,
-        func: utils::cmd_yes,
+        func: utility::cmd_test,
+    },
+    BuiltinEntry {
+        name: "[",
+        desc: "Evaluate a conditional expression",
+        usage: "[ expression ]",
+        detail: "As test, but the final argument must be ].",
+        category: Utility,
+        func: utility::cmd_bracket,
     },
     BuiltinEntry {
         name: "random",

@@ -22,7 +22,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell terminal compositor roulette halt file_manager image_viewer sysmon nmap ip keymap ss nc curl ping widget_gallery oops_smoke"
+BINS="init shell coreutils terminal compositor roulette halt file_manager image_viewer sysmon nmap ip keymap ss nc curl ping widget_gallery oops_smoke"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied
@@ -81,6 +81,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin curl_e2e_test \
         --bin cd_test \
         --bin buildctl_test \
+        --bin coreutils_test \
         --bin ring_test \
         --bin pidfd_e2e_test \
         --bin signalfd_test \
@@ -138,6 +139,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/buildctl_test" ]; then
         cp "$RELEASE_DIR/buildctl_test" "$BUILD_DIR/buildctl_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/coreutils_test" ]; then
+        cp "$RELEASE_DIR/coreutils_test" "$BUILD_DIR/coreutils_test.elf"
     fi
     if [ -f "$RELEASE_DIR/ring_test" ]; then
         cp "$RELEASE_DIR/ring_test" "$BUILD_DIR/ring_test.elf"

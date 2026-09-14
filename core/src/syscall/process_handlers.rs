@@ -681,13 +681,14 @@ define_syscall!(syscall_exec
                 task_reset_caught_handlers(task);
             }
 
-            if tls_tp != 0 {
-                {
-        let t = ctx.task();
-                    t.set_fs_base(tls_tp);
-                }
-                slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
+            // Unconditionally, `tls_tp == 0` included: slibc's startup adopts
+            // a non-zero FS base as an installed TCB, and the old image's
+            // thread pointer names memory the new image does not have.
+            {
+                let t = ctx.task();
+                t.set_fs_base(tls_tp);
             }
+            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
             let uc = ctx.user_ctx();
             let mut regs = uc.regs();
             regs.rip = entry_point;

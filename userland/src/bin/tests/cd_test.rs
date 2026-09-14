@@ -65,6 +65,25 @@ fn std_temp_dir_is_tmp() -> bool {
     env::temp_dir().to_str() == Some("/tmp")
 }
 
+/// `canonicalize` joined a relative path onto `/` rather than onto the working
+/// directory, so it answered the canonical path of a different file — and
+/// answered it successfully whenever that other file happened to exist.
+fn std_canonicalize_resolves_against_the_cwd() -> bool {
+    if env::set_current_dir("/bin").is_err() {
+        eprintln!("cd_test: cd /bin failed");
+        return false;
+    }
+    let resolved = fs::canonicalize("ls");
+    let _ = env::set_current_dir("/");
+    match resolved {
+        Ok(path) => path.to_str() == Some("/bin/ls"),
+        Err(e) => {
+            eprintln!("cd_test: canonicalize(\"ls\") from /bin failed: {e:?}");
+            false
+        }
+    }
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("std_cd_into_every_listed_dir", std_cd_into_every_listed_dir),
@@ -73,5 +92,9 @@ fn main() {
             std_set_then_current_dir_roundtrip,
         ),
         ("std_temp_dir_is_tmp", std_temp_dir_is_tmp),
+        (
+            "std_canonicalize_resolves_against_the_cwd",
+            std_canonicalize_resolves_against_the_cwd,
+        ),
     ]);
 }

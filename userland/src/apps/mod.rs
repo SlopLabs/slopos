@@ -1,4 +1,5 @@
 pub mod compositor;
+pub mod coreutils;
 pub mod curl;
 pub mod file_manager;
 pub mod halt;

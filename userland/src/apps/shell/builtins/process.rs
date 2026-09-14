@@ -4,9 +4,9 @@ use slopos_abi::signal::{
     SIGUSR2, SIGWINCH,
 };
 
-use crate::syscall::{UserSysInfo, core as sys_core, process};
+use crate::syscall::process;
 
-use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write, shell_write_idx};
+use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write_idx};
 use super::super::exec;
 use super::super::jobs;
 
@@ -304,20 +304,4 @@ pub fn cmd_exec(argc: i32, argv: &[&[u8]]) -> i32 {
     } else {
         0
     }
-}
-
-pub fn cmd_ps(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    let mut info = UserSysInfo::default();
-    if sys_core::sys_info(&mut info) != 0 {
-        shell_write_idx(b"ps: failed\n", COLOR_ERROR_RED);
-        return 1;
-    }
-    shell_write(b"tasks total: ");
-    jobs::write_u64(info.total_tasks as u64);
-    shell_write(b"\nactive: ");
-    jobs::write_u64(info.active_tasks as u64);
-    shell_write(b"\nready: ");
-    jobs::write_u64(info.ready_tasks as u64);
-    shell_write(b"\n");
-    0
 }

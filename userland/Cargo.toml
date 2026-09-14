@@ -30,6 +30,10 @@ name = "shell"
 path = "src/bin/shell.rs"
 
 [[bin]]
+name = "coreutils"
+path = "src/bin/coreutils.rs"
+
+[[bin]]
 name = "terminal"
 path = "src/bin/terminal.rs"
 
@@ -115,6 +119,10 @@ path = "src/bin/tests/cd_test.rs"
 [[bin]]
 name = "buildctl_test"
 path = "src/bin/tests/buildctl_test.rs"
+
+[[bin]]
+name = "coreutils_test"
+path = "src/bin/tests/coreutils_test.rs"
 
 [[bin]]
 name = "ring_test"

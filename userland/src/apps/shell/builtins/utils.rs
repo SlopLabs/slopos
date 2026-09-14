@@ -1,4 +1,7 @@
-//! Utility builtins: sleep, true, false, seq, yes, random, roulette, wl.
+//! SlopOS-specific utility builtins: random, roulette, wl.
+//!
+//! `sleep`, `seq` and `yes` left for `apps::coreutils` — a utility a spawned
+//! build tool cannot reach is not a utility.
 
 use crate::syscall::{UserSysInfo, core as sys_core, roulette};
 use std::thread;
@@ -6,118 +9,7 @@ use std::time::Duration;
 
 use super::super::NL;
 use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
-use super::super::interrupt;
-use super::super::jobs::{arg_as_str, parse_u32_arg, write_u64};
-
-fn parse_u64_arg(arg: &[u8]) -> Option<u64> {
-    arg_as_str(arg)?.parse().ok()
-}
-
-/// `sleep N` — N seconds, as POSIX specifies.
-pub fn cmd_sleep(argc: i32, argv: &[&[u8]]) -> i32 {
-    if argc < 2 {
-        shell_write_idx(b"sleep: missing operand (seconds)\n", COLOR_ERROR_RED);
-        return 1;
-    }
-    let Some(seconds) = parse_u32_arg(argv[1]) else {
-        shell_write_idx(b"sleep: invalid number\n", COLOR_ERROR_RED);
-        return 1;
-    };
-    if seconds == 0 {
-        return 0;
-    }
-    // Sleep in short slices so Ctrl+C interrupts the wait promptly.
-    const SLICE_MS: u64 = 50;
-    let mut remaining = seconds as u64 * 1000;
-    while remaining > 0 {
-        let step = remaining.min(SLICE_MS);
-        thread::sleep(Duration::from_millis(step));
-        if interrupt::take_pending() {
-            return interrupt::EXIT_INTERRUPTED;
-        }
-        remaining -= step;
-    }
-    0
-}
-
-pub fn cmd_true(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    0
-}
-
-pub fn cmd_false(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    1
-}
-
-pub fn cmd_seq(argc: i32, argv: &[&[u8]]) -> i32 {
-    if argc < 2 {
-        shell_write_idx(b"seq: missing operand\n", COLOR_ERROR_RED);
-        return 1;
-    }
-
-    let (start, end) = if argc >= 3 {
-        let Some(s) = parse_u64_arg(argv[1]) else {
-            shell_write_idx(b"seq: invalid start\n", COLOR_ERROR_RED);
-            return 1;
-        };
-        let Some(e) = parse_u64_arg(argv[2]) else {
-            shell_write_idx(b"seq: invalid end\n", COLOR_ERROR_RED);
-            return 1;
-        };
-        (s, e)
-    } else {
-        let Some(e) = parse_u64_arg(argv[1]) else {
-            shell_write_idx(b"seq: invalid number\n", COLOR_ERROR_RED);
-            return 1;
-        };
-        (1u64, e)
-    };
-
-    if start > end {
-        return 0;
-    }
-
-    let mut i = start;
-    loop {
-        write_u64(i);
-        if !shell_write(NL.as_bytes()) {
-            // A SIGINT interrupting the blocking TTY write surfaces as a failed
-            // write (EINTR), so classify before assuming a real I/O error.
-            if interrupt::take_pending() {
-                return interrupt::EXIT_INTERRUPTED;
-            }
-            return 1;
-        }
-        if interrupt::take_pending() {
-            return interrupt::EXIT_INTERRUPTED;
-        }
-        if i == end {
-            break;
-        }
-        i += 1;
-    }
-    0
-}
-
-pub fn cmd_yes(argc: i32, argv: &[&[u8]]) -> i32 {
-    let text: &[u8] = if argc >= 2 && !argv[1].is_empty() {
-        argv[1]
-    } else {
-        b"y"
-    };
-
-    loop {
-        if !shell_write(text) || !shell_write(NL.as_bytes()) {
-            if interrupt::take_pending() {
-                return interrupt::EXIT_INTERRUPTED;
-            }
-            return 1;
-        }
-        if interrupt::take_pending() {
-            return interrupt::EXIT_INTERRUPTED;
-        }
-        sys_core::yield_now();
-    }
-}
+use super::super::jobs::{parse_u32_arg, write_u64};
 
 pub fn cmd_random(argc: i32, argv: &[&[u8]]) -> i32 {
     let raw = sys_core::random_next();

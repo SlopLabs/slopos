@@ -21,9 +21,11 @@ import sys
 # st_mode values: type bits | permission bits.
 S_IFREG = 0o100000
 S_IFDIR = 0o040000
+S_IFLNK = 0o120000
 MODE_EXEC = S_IFREG | 0o755  # binaries
 MODE_DATA = S_IFREG | 0o644  # fonts, wallpaper
 MODE_DIR = S_IFDIR | 0o755
+MODE_LINK = S_IFLNK | 0o777  # utility names -> the multicall binary
 
 # Directories nothing writes into at build time, so they need their own record.
 # Mirrors build_fs_image.sh: the ext2 root does not auto-create parents the way
@@ -95,6 +97,12 @@ def main() -> None:
             sys.exit(f"Missing userland binary: {src}")
         dest = b"/sbin/init" if name == "init" else b"/bin/" + name.encode()
         entries.append((dest, MODE_EXEC, read_file(src)))
+
+    # The utility names, as symlinks to the multicall binary, so a RAM-only
+    # boot has the `/bin` build_fs_image.sh gives the disk root. `newc` stores
+    # a symlink's target as the record's body.
+    for tool in os.environ.get("COREUTILS_LINKS", "").split():
+        entries.append((b"/bin/" + tool.encode(), MODE_LINK, b"coreutils"))
 
     fonts_dir = os.path.join(repo_root, "assets", "fonts")
     if os.path.isdir(fonts_dir):

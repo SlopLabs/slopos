@@ -96,7 +96,7 @@ STAMP_PATH="${IMAGE_PATH}.stamp"
 # What the image's content is a function of: an equal stamp means a preserved
 # image already carries these binaries and assets, so it needs no work.
 build_stamp() {
-    echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE"
+    echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE links=${COREUTILS_LINKS:-}"
     for bin in "${BINS[@]}"; do
         printf '%s ' "$bin"
         sha256sum "${BUILD_DIR}/${bin}.elf" 2>/dev/null | cut -d' ' -f1 || echo missing
@@ -354,6 +354,33 @@ for bin in "${BINS[@]}"; do
 
     install_binary "$src" "$dst"
 done
+
+# The multicall binary's names. A symlink, not a copy: fifty-odd copies of std
+# would be ~8 MiB of a 32 MiB root, and `argv[0]` selects the tool anyway.
+# `debugfs symlink` writes a fast symlink, so a name costs an inode and no block.
+if [ -n "${COREUTILS_LINKS:-}" ]; then
+    if [ ! -f "${BUILD_DIR}/coreutils.elf" ]; then
+        echo "COREUTILS_LINKS is set but ${BUILD_DIR}/coreutils.elf is missing" >&2
+        exit 1
+    fi
+    # Word splitting is wanted here; pathname expansion is not, and a name
+    # holding `*` would otherwise glob against the build directory.
+    set -f
+    for tool in $COREUTILS_LINKS; do
+        # This runs after the binaries are installed, so a name in both lists
+        # would replace a program -- and inherit its grant.
+        for bin in "${BINS[@]}"; do
+            if [ "$tool" = "$bin" ]; then
+                echo "COREUTILS_LINKS name '$tool' collides with an installed binary" >&2
+                exit 1
+            fi
+        done
+        debugfs -w -R "rm /bin/${tool}" "$IMAGE_PATH" >/dev/null 2>&1 || true
+        debugfs -w -R "symlink /bin/${tool} coreutils" "$IMAGE_PATH" >/dev/null
+    done
+    set +f
+    echo "Installed $(set -f; set -- $COREUTILS_LINKS; echo $#) utility names in /bin -> coreutils"
+fi
 
 # The directories too, on a root userland can write: a sealed binary cannot be
 # overwritten, but until now its *directory* could be renamed aside and a
