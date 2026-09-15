@@ -4,7 +4,7 @@
 //! parent terminal emulator provides, and it is the terminal that interprets
 //! the SGR runs this module wraps interactive output in.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::draw::Color32;
 
@@ -44,14 +44,8 @@ pub static PALETTE: [Color32; PALETTE_SIZE] = [
     SHELL_FG_COLOR,
 ];
 
-/// When `>= 0`, output is redirected to this fd (pipe/file): raw bytes only,
-/// no SGR color.  When `-1`, output is interactive on fd 1 with color.
-static OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
-
-/// When set, no SGR escape is ever emitted.
-///
-/// Separate from [`OUTPUT_FD`], which the redirect machinery clears after every
-/// builtin `>`: a shell running a script must stay plain for its whole life.
+/// When set, no SGR escape is ever emitted: a shell running a script stays
+/// plain for its whole life, whatever fd 1 happens to be at the time.
 static PLAIN: AtomicBool = AtomicBool::new(false);
 
 /// Standard-output file descriptor (the PTY slave when interactive).
@@ -113,7 +107,7 @@ fn emit_stdout(bytes: &[u8]) -> bool {
 
 /// Write a diagnostic to fd 2.
 ///
-/// Deliberately blind to [`OUTPUT_FD`]: a builtin's `>` redirects its *output*,
+/// Always fd 2, never the `>` target: a builtin's `>` redirects its *output*,
 /// not its complaints, so `ls nosuch > out` leaves the error on the terminal.
 pub fn shell_error(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
@@ -177,7 +171,7 @@ fn write_u8_decimal(buf: &mut [u8], value: u8) -> usize {
 /// reset. `COLOR_DEFAULT` emits no SGR. A broken fd 1 falls back to the serial
 /// console carrying the payload — never the SGR escapes.
 fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
-    if color_idx == COLOR_DEFAULT || PLAIN.load(Ordering::Relaxed) {
+    if color_idx == COLOR_DEFAULT || PLAIN.load(Ordering::Relaxed) || !fs::isatty(STDOUT_FD) {
         return emit_stdout(bytes);
     }
     let mut sgr = [0u8; 24];
@@ -193,54 +187,28 @@ fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
     ok
 }
 
-/// Write text to the current output destination (redirect fd or fd 1).
+/// Write to standard output; `false` on failure, e.g. a broken pipe.
 ///
-/// When redirected, raw bytes are written with no color. Returns `false` when
-/// the write fails, e.g. a broken pipe.
+/// A redirected builtin needs nothing special: the executor `dup2`s the target
+/// onto fd 1 around the call, so `echo hi > f` is the same path as `echo hi`.
 pub fn shell_write(buf: &[u8]) -> bool {
-    let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
-    if redirected_fd >= 0 {
-        return write_all(redirected_fd, buf);
-    }
     emit_stdout(buf)
 }
 
-/// Write colored text to the current output destination. When redirected to a
-/// pipe or file, color is stripped.
+/// Write colored text to standard output. Colour is dropped when fd 1 is not
+/// a terminal.
 pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
-    let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
-    if redirected_fd >= 0 {
-        return write_all(redirected_fd, buf);
-    }
     emit_colored(buf, palette_index_for(fg))
 }
 
-/// Write text with a palette color index to the current output destination.
+/// Write text with a palette color index to standard output.
 pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
-    let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
-    if redirected_fd >= 0 {
-        return write_all(redirected_fd, buf);
-    }
     emit_colored(buf, color_idx)
 }
 
-pub fn shell_set_output_fd(fd: i32) {
-    OUTPUT_FD.store(fd, Ordering::Relaxed);
-}
-
-pub fn shell_clear_output_fd() {
-    OUTPUT_FD.store(-1, Ordering::Relaxed);
-}
-
-/// Where a builtin's output goes, and whether colour is welcome there: the
-/// redirect fd when `>` is in force, otherwise fd 1. A utility implemented in
-/// `apps::coreutils` takes this rather than assuming fd 1, which is what lets
-/// `echo hi > f` keep working while the shell keeps its own fd 1.
+/// Where a builtin's output goes, and whether colour is welcome there — which
+/// is what lets `ls` lay out columns on a tty and bare names into a pipe.
 pub fn shell_output_target() -> (i32, bool) {
-    let fd = OUTPUT_FD.load(Ordering::Relaxed);
-    if fd >= 0 {
-        return (fd, false);
-    }
     let plain = PLAIN.load(Ordering::Relaxed);
     (STDOUT_FD, !plain && fs::isatty(STDOUT_FD))
 }

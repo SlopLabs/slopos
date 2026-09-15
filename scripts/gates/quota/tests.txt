@@ -238,6 +238,37 @@
 #     5976-6057 inside 6065, `pages` 52977-55483 inside 65536, `process` 14,
 #     `residentpages` 772 exact, `task` 6, and post-userland `pinnedbytes` 4.
 
+#
+# 2026-09-15, the shell learning the POSIX grammar ("A script can loop, branch
+# and substitute" in plans/self-hosting.md). One cause for every row that
+# moved: `shell_script_test` went from 14 cases to 33, and each case's script
+# now runs several external commands plus the things the old shell could not
+# express at all — a command substitution, a `( )` subshell, a here-document's
+# writer, a pipeline stage that is a compound command — so the userland phase
+# creates ~70 more short-lived address spaces than it did.
+#   post-userland-tests `process` 173 -> 243. Deterministic at 243 over three
+#     fresh runs, so the cap is exact. The charge is released at the reap and
+#     most of those children are still referenced at the dump point.
+#     `MAX_PROCESSES` is 256 and a run reaches ~170 before this utest starts,
+#     which is why its cases are grouped rather than one shell per assertion:
+#     a spawn per property measured 251 and the next dozen hit `ENOMEM`.
+#   post-userland-tests `pages` 1309452 -> 1887717: measured
+#     1843330/1827672/1798943 over the same three runs, spread 44387; the cap
+#     is that maximum plus the spread. This row is mapped **virtual** address
+#     space, so every forked shell charges its whole lazy heap and 8 MiB stack
+#     extent whether or not it touches a page of either, and which utests
+#     overlap at the dump decides how many extents are live.
+#   post-userland-tests `residentpages` 119949 -> 153268 (148019/147756/150512,
+#     spread 2756) and `kernelmeta` 8503 -> 9293 (9171/9111/9202, spread 91).
+#     Same children: what a forked shell actually holds, and the page tables
+#     plus 12-page task stacks behind them.
+#   Everything else stayed inside its existing cap on all three runs: boot
+#     `kernelmeta` 1628 inside 1756, post-kernel-tests `kernelmeta` 5973-5983
+#     inside 6065, `pages` 48623-55482 inside 65536, `process` 14,
+#     `residentpages` 772 exact, `task` 6, `diskblocks` 6; post-userland
+#     `diskblocks` 2434 inside 2911, `fdslot` 256, `objectrow` 257, `task` 6
+#     and `pinnedbytes` 4.
+
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
@@ -268,12 +299,12 @@ post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	2911
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	8503
+post-userland-tests	kernelmeta	9293
 post-userland-tests	objectrow	257
-post-userland-tests	pages	1309452
+post-userland-tests	pages	1887717
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	173
-post-userland-tests	residentpages	119949
+post-userland-tests	process	243
+post-userland-tests	residentpages	153268
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

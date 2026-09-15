@@ -13,11 +13,9 @@ use slopos_abi::signal::{SIGWINCH, sig_bit};
 use slopos_abi::syscall::{LocalFlags, POLLIN};
 
 use super::buffers;
-use super::buffers::ParsedTokens;
 use super::completion;
 use super::display::shell_write;
 use super::history;
-use super::parser::shell_parse_line;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -75,8 +73,8 @@ static RING_FAILURES: AtomicUsize = AtomicUsize::new(0);
 const RING_FAILURE_LIMIT: usize = 3;
 
 pub enum LineOutcome {
-    /// A parsed command line holding this many tokens.
-    Ready(usize),
+    /// A line was entered; the caller's buffer holds it.
+    Ready,
     /// Nothing to run: a blank line, or an editing action that consumed it.
     Empty,
     /// The line outgrew the editor's buffer. Refused rather than truncated: a
@@ -88,11 +86,10 @@ pub enum LineOutcome {
     Interrupted,
 }
 
-pub fn read_command_line(
-    tokens: &mut ParsedTokens,
-    prompt: &[u8],
-    prompt_colors: &[u8],
-) -> LineOutcome {
+/// Read one line into `out`, as text rather than as tokens: whether it is a
+/// whole command is the parser's question, and the caller prompts again for
+/// the rest of one that is not.
+pub fn read_command_line(out: &mut Vec<u8>, prompt: &[u8], prompt_colors: &[u8]) -> LineOutcome {
     {
         let mut colors = PROMPT_COLORS.lock().unwrap();
         let copy_len = prompt_colors.len().min(super::PROMPT_BUF_MAX);
@@ -123,7 +120,7 @@ pub fn read_command_line(
     let _ = fs::write_slice(1, b"\x1b[?2004h");
 
     let result = match Ring::setup(16) {
-        Ok(ring) => slopfut::block_on(ring, input_loop(tokens, prompt, cols, winch.as_ref())),
+        Ok(ring) => slopfut::block_on(ring, input_loop(out, prompt, cols, winch.as_ref())),
         Err(_) => {
             crate::syscall::core::yield_now();
             if RING_FAILURES.fetch_add(1, Ordering::Relaxed) + 1 >= RING_FAILURE_LIMIT {
@@ -134,7 +131,7 @@ pub fn read_command_line(
             }
         }
     };
-    if matches!(result, LineOutcome::Ready(_) | LineOutcome::Empty) {
+    if matches!(result, LineOutcome::Ready | LineOutcome::Empty) {
         RING_FAILURES.store(0, Ordering::Relaxed);
     }
 
@@ -391,7 +388,7 @@ fn decode_escape(p: &[u8]) -> EscMatch {
 type WinchFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = u32> + 'a>>;
 
 async fn input_loop(
-    tokens: &mut ParsedTokens,
+    out: &mut Vec<u8>,
     prompt: &[u8],
     cols: usize,
     winch: Option<&SignalListener>,
@@ -691,27 +688,13 @@ async fn input_loop(
 
         buffers::with_line_buf(|buf| {
             let capped = cmp::min(len, buf.len() - 1);
-            buf[capped] = 0;
+            out.clear();
+            out.extend_from_slice(&buf[..capped]);
         });
-
-        let expanded_len = buffers::with_line_buf(|line_buf| {
-            let line_len = line_buf
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(line_buf.len());
-            let text = super::parser::strip_comment(&line_buf[..line_len]);
-            buffers::with_expand_buf(|expand_buf| {
-                super::parser::expand_variables(text, text.len(), expand_buf)
-            })
-        });
-
-        tokens.clear();
-        buffers::with_expand_buf(|expand_buf| {
-            shell_parse_line(&expand_buf[..expanded_len], tokens)
-        });
-        return match tokens.count() {
-            0 => LineOutcome::Empty,
-            n => LineOutcome::Ready(n),
+        return if out.iter().all(|b| b.is_ascii_whitespace()) {
+            LineOutcome::Empty
+        } else {
+            LineOutcome::Ready
         };
     }
 }

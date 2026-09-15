@@ -28,10 +28,10 @@ are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with two remaining exceptions (dynamic linking and the
-compiler bootstrap itself). Four more, a page-fault path that can reach the
+compiler bootstrap itself). Five more, a page-fault path that can reach the
 device, a POSIX floor a build system can stand on, a filesystem that can hold a
-tree, and a utility set that is executables rather than shell builtins, have
-landed.
+tree, a utility set that is executables rather than shell builtins, and a shell
+a build script can be written in, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -55,7 +55,12 @@ landed.
 - **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
   — which ruled out lifting busybox-lineage utilities or Linux userland code
   for Phase 1's utilities, so the multicall *shape* was taken and every line
-  written here. Concepts, ABI numbers and struct layouts are free to
+  written here. The same rule ruled busybox `ash` out of the shell: the
+  grammar below is written from the POSIX Shell Command Language (IEEE Std
+  1003.1 §2.3–2.14), which is a specification rather than an implementation,
+  and the architectural references consulted for it — dash (BSD-3), toybox
+  `sh` (0BSD), mrsh (MIT) — are compatible and were read for shape, not text.
+  Concepts, ABI numbers and struct layouts are free to
   take; prose and implementation are not. Anything new linked into a shipped
   binary needs a `NOTICE.md` entry. Fonts stay runtime-loaded.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
@@ -558,7 +563,9 @@ What it rests on, in case a later phase disturbs it:
 - **There is one implementation of each utility, not two.** The shell's builtin
   table lost every file and text utility; what remains is what changes the
   shell itself (`cd`, `write`, `export`/`unset`/`set`/`env`, `jobs`/`fg`/`bg`,
-  `kill`, `wait`, `exec`, `exit`, `time`, `help`, the SlopOS-specific
+  `kill`, `wait`, `exec`, `exit`, `time`, `help`, the control builtins POSIX
+  requires of a shell — `:`, `.`/`source`, `eval`, `read`, `shift`, `return`,
+  `break`, `continue`, `command`, `type` — and the SlopOS-specific
   `info`/`free`/`uptime`/`cpuinfo`/`random`/`roulette`/`wl`/`resolve`) plus the
   six POSIX resolves without a fork — `echo`, `printf`, `test`, `[`, `true`,
   `false` — which *delegate into the same functions* the `/bin` names run
@@ -567,8 +574,9 @@ What it rests on, in case a later phase disturbs it:
   Ctrl-C reaches a forked `yes` and could never reach an in-process one.
 - **A utility writes to a `Sink`, never to fd 1.** That is the mechanism that
   makes one implementation serve both callers: the multicall binary points the
-  sink at fd 1, and the shell points it at whatever `>` redirected the builtin
-  to, so `echo hi > f` keeps working while the shell keeps its own fd 1. The
+  sink at fd 1, and so does the shell, because the executor `dup2`s a `>`
+  target onto fd 1 around a builtin and puts the shell's own back afterwards —
+  so `echo hi > f` keeps working and is the same code path as `echo hi`. The
   sink also carries whether its destination is a terminal, which is why `ls`
   can lay out columns and colour on a tty and emit bare newline-separated names
   into a pipe — the old builtin printed `name (size)` and `(empty)`, which no
@@ -645,20 +653,156 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## A script can loop, branch and substitute
+
+The sixth thing this plan rests on: what a build system writes is a *script*,
+and a shell that cannot loop, branch or substitute is not a workbench however
+many utilities it can reach. `shell_script_test` is the standing proof — 33
+cases against the real `/bin/shell`, 32 of them feeding it a script down a pipe
+and asserting on the exact bytes it produces, and one driving it on a PTY
+because the continuation prompt exists only on the interactive path. Between
+them they run `if`/`elif`/`else`, `while`, `until`, `for` with and without
+`in`, `case` with alternation, functions with their own positional parameters,
+`break n`/`continue n`, `$(...)` and backticks, here-documents in all four
+forms, `* ? [...]` globbing, the parameter-expansion operators, `$(( ))`
+arithmetic, `"$@"` against `$*`, a twelve-stage pipeline, a hundred-word
+command and a thousand-byte variable. Every one of those was a syntax error, a
+wrong answer or a refusal before. Related properties share one shell
+invocation deliberately: `MAX_PROCESSES` is 256, a run reaches ~170 before
+this utest starts, and a spawn per assertion measured 243 processes held at
+the phase boundary with the next dozen answering `ENOMEM`.
+
+Everything pure about the grammar is `shell-core`, host-tested by `just
+test-host`: token recognition, the syntax tree and the recursive-descent parser
+over it, POSIX pattern matching, IFS field splitting, the `${...}` operator
+split and the arithmetic evaluator — 77 tests that run in milliseconds with no
+QEMU. What stayed in `userland/src/apps/shell/` is the part that has to talk to
+the kernel: expansion's variable lookup and command substitution, pathname
+expansion's directory walk, and execution.
+
+What it rests on, in case a later phase disturbs it:
+
+- **`Incomplete` is a third answer, and it is the whole mechanism.** The lexer
+  and the parser distinguish *wrong* input from *unfinished* input, so one
+  reader serves a multi-line script file and a PS2 continuation prompt alike:
+  append a line, re-parse, run when the parse stops asking for more. The
+  failure mode that shape has is precise, and a test found it — `for; do`
+  answered `Incomplete` because "no word token here" and "no token at all"
+  shared a branch, so the reader waited for the rest of a command that could
+  never arrive and swallowed the remainder of the script with it. A malformed
+  construct must be a syntax error.
+- **Quoting is recorded per byte, not in band.** `QBuf` carries a flag vector
+  beside the bytes: quoted (neither splits nor globs), and came-from-an-
+  unquoted-expansion (splits). A sentinel byte answers the same question and is
+  what several C shells use, but a sentinel collides with the arbitrary bytes a
+  filename may hold. The flags are what make `IFS=:` split `$x` and not the
+  literal `a:b` beside it, and `case '*' in "*")` compare an asterisk with an
+  asterisk.
+- **Field splitting only ever touches an expansion's output**, and `"$@"` puts
+  a hard field boundary between parameters that survives it. The one case the
+  bytes cannot answer is an empty result — `cmd $x` with `x` empty passes no
+  argument and `cmd "$x"` passes one — so the splitter is told whether the word
+  held a quoted byte at all. `"$@"` over an empty parameter list is the
+  exception to that exception and contributes no field.
+- **A command substitution's output is data.** `$(...)` forks, pipes, reads to
+  EOF and strips every trailing newline; the bytes are then subject to
+  splitting and globbing but never re-tokenized, so a `;` or a `>` among them
+  is a byte the command receives. The inner text is lexed and parsed at
+  expansion time, which is what makes `$( ... $( ... ) ... )` nest by
+  construction rather than by a counter.
+- **An unmatched pattern is left exactly as written, and a generated pathname
+  has to exist.** There is no `nullglob`, a wildcard matches neither a leading
+  `.` nor a `/`, and a field with no unquoted `*`, `?` or `[` is not globbed at
+  all — so `rm *.o` in a directory with no object files runs `rm` with a
+  literal argument rather than with none. A literal component *after* a
+  wildcard is checked too, or `echo */nope` would hand the command one
+  nonexistent path per directory instead of the word it was given. The matcher
+  has a single backtrack point rather than a recursion per `*`: nine stars
+  against forty bytes took eleven seconds the other way, and both a `case`
+  subject and a `${x##pattern}` value are script-controlled. The walk goes
+  through `std::fs::read_dir`, so a glob inherits the utilities' UTF-8-path
+  divergence.
+- **A here-document's writer is a separate process.** The body goes on a pipe,
+  and one larger than the pipe's 4 KiB capacity would otherwise block the shell
+  on its own read end before anything has read it. The writer is reaped *after*
+  the descriptors are put back and never before, or a command that read only
+  part of a long body would deadlock the reap.
+- **Where a command runs is decided per command.** A builtin, a function and a
+  compound command run in this shell, so `cd`, an assignment and a loop counter
+  survive; an external program, a `( )` subshell and every stage of a
+  multi-stage pipeline run in a fork. Redirections follow from that: applied
+  around an in-shell command and undone afterwards, applied *in* the child
+  otherwise, so a path that cannot be opened is the child's status and the
+  shell's own descriptors are never at risk. The cost is stated: a subshell and
+  a substitution are each a process, which is what `(cd x; make)` costs here
+  and everywhere else.
+- **A redirected builtin has one output mechanism, not two.** The executor
+  `dup2`s the target onto fd 1 and restores the shell's own, which is what a
+  compound command and an external child need anyway; the global "write here
+  instead" descriptor the shell used to consult is gone, and with it the
+  question of which of the two was in force.
+- **Only exported variables reach a child.** A bare `FOO=bar` is a shell
+  variable; `export FOO`, `export FOO=bar` and a `FOO=bar cmd` prefix are what
+  put one in a child's environment. The table exported everything before, which
+  is how a stray assignment changes what a configure script decides. It is also
+  heap-backed and unbounded in both directions now: 64 entries of 256 bytes
+  silently truncated a `CFLAGS` or a `PATH` with a dozen entries in it.
+- **`set -e` does not fire inside a condition.** `if grep -q x f; then`,
+  `a && b`, `a || b` and `! p` are tests, and a condition-depth counter is what
+  keeps errexit from ending the script on one. `break`, `continue` and `return`
+  reach the construct that can honour them through a requested control flow
+  rather than a return value, because a builtin's signature is a status — which
+  is also what makes `eval break` break the enclosing loop with no second
+  mechanism.
+- **The pre-expanded word list is still an entry point, and no longer
+  double-expands.** `exec::execute_tokens` takes words that are already final —
+  `time`, and the in-tree tests that drive a pipeline without writing one — so
+  `time echo '$HOME'` passes the four characters it was given. A caller that
+  wants `|` or `2>` says so with `push_operator`; deciding by *lexing* the
+  bytes instead made `command echo '>'` a redirection with no operand.
+- **Two things must see past a name's first meaning.** `command NAME` resolves
+  blind to the function table, or the canonical wrapper
+  `ls() { command ls -F "$@"; }` calls itself until the stack runs out; and
+  `unset NAME` names a *variable*, touching a function of that name only when
+  no such variable exists.
+- **A redirection's backup is taken before its target is opened.** The kernel
+  hands out the lowest free descriptor, so `3>out` in a shell holding only
+  0/1/2 opens exactly fd 3 — a backup taken afterwards captures the file
+  itself, the `dup2` is a no-op and the close that follows drops the only copy,
+  leaving the command with fd 3 shut and the shell with the file leaked onto
+  it. The open landing on the descriptor being redirected is then a no-op
+  success rather than a copy-and-close.
+
+**What this deliberately did not do.**
+
+- **No `trap`.** A build script's `trap ... EXIT` cleanup is a real want and it
+  needs a disposition table the shell consults at every exit path, not a
+  constant. It belongs with whichever phase first needs a failed build to clean
+  up after itself.
+- **No `local`, no `getopts`, no aliases.** None is POSIX-required of a shell
+  (`local` is not in the standard at all), and each is a scoping or parsing
+  mechanism rather than a widening. A function's variables are the shell's.
+  `set -o` exists, and names the same four options the letters do — `errexit`,
+  `nounset`, `xtrace`, `noglob` — and nothing else.
+- **None of the non-POSIX conveniences**: no `$'...'`, no brace expansion
+  `{a,b}`, no `[[ ]]`, no arrays, no `select`, no `case` `;&` fallthrough.
+  `>|` parses and behaves as `>`, because `set -C` does not exist to
+  distinguish them.
+- **Arithmetic is signed 64-bit and wraps.** An overflowing `$(( ))` gives what
+  C gives rather than ending the script.
+- **`time` is a builtin over pre-expanded words**, not the reserved word POSIX
+  makes it, so `time a | b` times `a` rather than the pipeline.
+- **`set NAME=VALUE`** is kept beside POSIX `set --`, because the shell
+  accepted it before this and something in the tree may use it.
+
+---
+
 ## Phase 1 — A workbench you can type in
 
 **Outcome:** you can edit a file, search a tree, run a script, and read the
 output — without a Linux host.
 
-### Workstream 1.1 — A shell that can drive a build (**L**)
-
-No `if`/`while`/`for`/`case`/functions, no command substitution, no here-docs,
-no globbing (`userland/src/apps/shell/`). Structural caps: 8 pipeline stages,
-64 argv words. Path widths and job control are no longer among them: the
-shell's buffers are `USER_PATH_MAX`-sized and heap-backed, and `fg`/`bg` can
-resume a stopped job.
-
-### Workstream 1.2 — A terminal an editor can use (**M**)
+### Workstream 1.1 — A terminal an editor can use (**M**)
 
 `encode_key` emits arrows, Home, End and Delete only
 (`terminal-core/src/input.rs:230-282`): no F1–F12 (the keycodes exist and are
@@ -666,7 +810,7 @@ dropped), no Alt-prefixing, no modified arrows, no `CSI Z`, and PageUp/PageDown
 never reach the PTY. No mouse reporting, no DA/DSR replies. The font atlas
 covers ASCII + Latin-1, so box-drawing and non-Latin source render as diamonds.
 
-### Workstream 1.3 — An editor (**M**)
+### Workstream 1.2 — An editor (**M**)
 
 Write one — not because C is foreclosed (it is not; see Workstream 2.6), but
 because nothing upstream is reachable *before* a C frontend exists, and because
@@ -684,8 +828,8 @@ Every one of those is a separate multi-month project whose payoff is one editor.
 
 **Phase 1 exit criteria:** a shell script in the guest checks out, greps,
 edits and archives a source tree, driven from a terminal running a native
-editor. The utilities that script calls are in place; what it still cannot do
-is loop, branch or glob, which is Workstream 1.1.
+editor. The utilities that script calls and the shell that runs it are both in
+place; what is left is the terminal's key coverage and the editor itself.
 
 ---
 
@@ -925,9 +1069,14 @@ every image this kernel writes.
 
 - `mm/src/elf.rs` — `PT_INTERP` rejection, the one image cap that is still
   policy rather than plumbing (Phase 2).
-- `userland/src/apps/shell/`, `terminal-core/src/input.rs:230-282`,
-  `font/src/lib.rs:29-48` — shell grammar, key encoding, glyph coverage
-  (Phase 1).
+- `terminal-core/src/input.rs:230-282`, `font/src/lib.rs:29-48` — key encoding
+  and glyph coverage (Phase 1).
+- `shell-core/src/{lexer,syntax,pattern,fields,arith,param,qbuf}.rs`,
+  `userland/src/apps/shell/{expand,glob,exec,funcs}.rs` — the shell above.
+  Listed not as work but as what a later phase must not quietly undo: the
+  lexer's `Incomplete`, `QBuf`'s per-byte quoting, "an unmatched pattern is
+  left literal" and "a substitution's output is never re-tokenized" are each
+  an invariant a change nearby can break without failing to compile.
 - `userland/src/apps/coreutils/`, `userland/src/bin/coreutils.rs`, the
   justfile's `coreutils_tools`, `scripts/build_fs_image.sh`'s symlink loop and
   `scripts/gen_initramfs.py`'s `MODE_LINK` records — the utility set above.

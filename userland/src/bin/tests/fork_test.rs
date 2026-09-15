@@ -18,7 +18,7 @@ fn test_fork_pipe_echo_tee() -> bool {
     let mut tokens = shell::buffers::ParsedTokens::new();
     tokens.push_token(b"echo");
     tokens.push_token(b"piped text");
-    tokens.push_token(b"|");
+    tokens.push_operator(b"|");
     tokens.push_token(b"tee");
     tokens.push_token(b"/tmp/tee.txt");
 

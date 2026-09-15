@@ -4,6 +4,10 @@
 //! `{ read x; cat; } < file` depends on the shell consuming nothing past the
 //! line it executes; the framing lives in [`slopos_shell_core::ScriptReader`],
 //! which reads a byte at a time.
+//!
+//! A command may span lines, so the reader appends them until the parser stops
+//! answering [`ParseFailure::Incomplete`] — never past the last line of the
+//! command it is about to run.
 
 use slopos_shell_core::{ByteSource, Line, ScriptReader, SourceError};
 
@@ -11,17 +15,13 @@ use slopos_abi::fs::O_RDONLY;
 
 use crate::syscall::{SyscallError, fs};
 
-use super::buffers::{ParsedTokens, SHELL_LINE_MAX};
+use super::buffers::SHELL_LINE_MAX;
 use super::display::{shell_error, shell_error_named};
-use super::{exec, parser};
+use super::exec::{self, ParseFailure};
 
 /// A line longer than this is diagnosed and skipped, not truncated and run.
 /// The same limit the interactive editor uses.
 pub const SCRIPT_LINE_MAX: usize = SHELL_LINE_MAX;
-
-/// Expansion headroom: `$VAR` substitution can grow a line past its source
-/// length.
-const SCRIPT_EXPAND_MAX: usize = SCRIPT_LINE_MAX * 2;
 
 /// A [`ByteSource`] over a file descriptor.
 pub struct FdSource {
@@ -74,21 +74,40 @@ pub fn run_command_string(text: &[u8]) -> i32 {
 
 /// `sh FILE` — run a script file.
 pub fn run_script_file(path: &[u8]) -> i32 {
-    let mut path_z = Vec::with_capacity(path.len() + 1);
-    path_z.extend_from_slice(path);
-    path_z.push(0);
-
-    match fs::open_path(path_z.as_ptr() as *const core::ffi::c_char, O_RDONLY) {
-        Ok(file) => {
+    match open_script(path) {
+        Some(file) => {
             let status = run_script(&mut FdSource::new(file.raw()));
             drop(file);
             status
         }
-        Err(_) => {
+        None => {
             shell_error_named(path, b"cannot open");
-            super::exec::STATUS_CANNOT_EXECUTE
+            exec::STATUS_CANNOT_EXECUTE
         }
     }
+}
+
+/// `. FILE` — run a file's commands in this shell, where `return` ends the
+/// file rather than the shell.
+pub fn source_file(path: &[u8]) -> i32 {
+    match open_script(path) {
+        Some(file) => {
+            let status = run_script(&mut FdSource::new(file.raw()));
+            drop(file);
+            status
+        }
+        None => {
+            shell_error_named(path, b"cannot open");
+            1
+        }
+    }
+}
+
+fn open_script(path: &[u8]) -> Option<crate::syscall::OwnedFd> {
+    let mut path_z = Vec::with_capacity(path.len() + 1);
+    path_z.extend_from_slice(path);
+    path_z.push(0);
+    fs::open_path(path_z.as_ptr() as *const core::ffi::c_char, O_RDONLY).ok()
 }
 
 /// Read commands from `src` until end of input; the last command's status is
@@ -96,30 +115,60 @@ pub fn run_script_file(path: &[u8]) -> i32 {
 pub fn run_script<S: ByteSource>(src: &mut S) -> i32 {
     let mut reader = ScriptReader::new();
     let mut line = vec![0u8; SCRIPT_LINE_MAX];
-    let mut expanded = vec![0u8; SCRIPT_EXPAND_MAX];
     let mut status = 0i32;
     let mut lineno = 0u32;
+
+    let mut pending: Vec<u8> = Vec::new();
+    let mut pending_start = 0u32;
 
     loop {
         lineno += 1;
         match reader.next_line(src, &mut line) {
             Line::Line(text) => {
-                let text = parser::strip_comment(text);
-                let expanded_len = parser::expand_variables(text, text.len(), &mut expanded);
-                let mut tokens = ParsedTokens::new();
-                let count = parser::shell_parse_line(&expanded[..expanded_len], &mut tokens);
-                if count <= 0 {
-                    continue;
+                if pending.is_empty() {
+                    pending_start = lineno;
+                } else {
+                    pending.push(b'\n');
                 }
-                status = exec::execute_tokens(&tokens);
-                super::set_last_exit_code(status);
-                if let Some(requested) = super::exit_requested() {
-                    return requested;
+                pending.extend_from_slice(text);
+
+                match exec::parse_text(&pending) {
+                    // Unfinished, not wrong: keep reading.
+                    Err(ParseFailure::Incomplete) => continue,
+                    Err(ParseFailure::Syntax(msg)) => {
+                        report_line_error(pending_start, msg.as_bytes());
+                        pending.clear();
+                        status = exec::STATUS_SYNTAX_ERROR;
+                        super::set_last_exit_code(status);
+                    }
+                    Ok(list) => {
+                        pending.clear();
+                        if list.is_empty() {
+                            continue;
+                        }
+                        let outcome = exec::execute_list_flow(&list);
+                        status = outcome.status;
+                        super::set_last_exit_code(status);
+                        if let Some(requested) = super::exit_requested() {
+                            return requested;
+                        }
+                        // `return` ends a sourced file, not just this line.
+                        if outcome.flow == exec::Flow::Return {
+                            return status;
+                        }
+                    }
                 }
             }
-            Line::Eof => return status,
+            Line::Eof => {
+                if !pending.is_empty() {
+                    report_line_error(pending_start, b"unexpected end of input");
+                    return exec::STATUS_SYNTAX_ERROR;
+                }
+                return status;
+            }
             Line::TooLong => {
                 report_line_error(lineno, b"line too long");
+                pending.clear();
                 status = 2;
                 super::set_last_exit_code(status);
             }

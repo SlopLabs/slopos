@@ -9,6 +9,9 @@ pub mod completion;
 pub mod display;
 pub mod env;
 pub mod exec;
+pub mod expand;
+pub mod funcs;
+pub mod glob;
 pub mod history;
 pub mod input;
 pub mod interrupt;
@@ -231,9 +234,8 @@ fn build_prompt(
     text_buf: &mut [u8; PROMPT_BUF_MAX],
     color_buf: &mut [u8; PROMPT_BUF_MAX],
 ) -> usize {
-    let ps1 = env::get(b"PS1");
-    match ps1 {
-        Some((val, len)) => expand_ps1(&val[..len], text_buf, color_buf),
+    match env::get(b"PS1") {
+        Some(ps1) => expand_ps1(&ps1, text_buf, color_buf),
         None => expand_ps1(DEFAULT_PS1, text_buf, color_buf),
     }
 }
@@ -311,37 +313,86 @@ fn shell_interactive_main() -> i32 {
         prompt_len: 0,
     };
 
-    loop {
-        jobs::notify_completed_jobs();
-        state.prompt_len = build_prompt(&mut state.prompt_buf, &mut state.prompt_colors);
-        let prompt = &state.prompt_buf[..state.prompt_len];
+    let mut pending: Vec<u8> = Vec::new();
 
+    loop {
+        if pending.is_empty() {
+            jobs::notify_completed_jobs();
+            state.prompt_len = build_prompt(&mut state.prompt_buf, &mut state.prompt_colors);
+        } else {
+            state.prompt_len = continuation_prompt(&mut state.prompt_buf, &mut state.prompt_colors);
+        }
+        let prompt = &state.prompt_buf[..state.prompt_len];
         write_colored_prompt(prompt, &state.prompt_colors[..state.prompt_len]);
 
-        let mut tokens = buffers::ParsedTokens::new();
+        let mut line: Vec<u8> = Vec::new();
         let prompt_colors = &state.prompt_colors[..state.prompt_len];
 
-        match input::read_command_line(&mut tokens, prompt, prompt_colors) {
-            input::LineOutcome::Ready(_) => {}
-            input::LineOutcome::Empty => continue,
+        match input::read_command_line(&mut line, prompt, prompt_colors) {
+            input::LineOutcome::Ready => {}
+            input::LineOutcome::Empty => {
+                if pending.is_empty() {
+                    continue;
+                }
+            }
             input::LineOutcome::Interrupted => {
+                pending.clear();
                 set_last_exit_code(interrupt::EXIT_INTERRUPTED);
                 continue;
             }
             input::LineOutcome::TooLong => {
+                pending.clear();
                 display::shell_error(b"sh: line too long\n");
                 set_last_exit_code(exec::STATUS_SYNTAX_ERROR);
                 continue;
             }
             // POSIX: EOF ends an interactive shell with the last command's
-            // status.
-            input::LineOutcome::Eof => return last_exit_code(),
+            // status. An unfinished command is abandoned, not guessed at.
+            input::LineOutcome::Eof => {
+                if !pending.is_empty() {
+                    display::shell_error(b"sh: syntax error: unexpected end of input\n");
+                    return exec::STATUS_SYNTAX_ERROR;
+                }
+                return last_exit_code();
+            }
         }
 
-        let rc = exec::execute_tokens(&tokens);
+        if !pending.is_empty() {
+            pending.push(b'\n');
+        }
+        pending.extend_from_slice(&line);
+
+        let rc = match exec::parse_text(&pending) {
+            // Unfinished, not wrong: keep the text and prompt again.
+            Err(exec::ParseFailure::Incomplete) => continue,
+            Err(failure) => {
+                pending.clear();
+                exec::report_parse_failure(failure);
+                exec::STATUS_SYNTAX_ERROR
+            }
+            Ok(list) => {
+                pending.clear();
+                if list.is_empty() {
+                    continue;
+                }
+                exec::execute_list(&list)
+            }
+        };
         set_last_exit_code(rc);
         if let Some(status) = exit_requested() {
             return status;
         }
     }
+}
+
+/// PS2, the prompt for the rest of an unfinished command.
+fn continuation_prompt(
+    text_buf: &mut [u8; PROMPT_BUF_MAX],
+    color_buf: &mut [u8; PROMPT_BUF_MAX],
+) -> usize {
+    let ps2 = env::get(b"PS2").unwrap_or_else(|| b"> ".to_vec());
+    let len = ps2.len().min(PROMPT_BUF_MAX);
+    text_buf[..len].copy_from_slice(&ps2[..len]);
+    fill_color(color_buf, 0, len, display::COLOR_COMMENT_GRAY);
+    len
 }

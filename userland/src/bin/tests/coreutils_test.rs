@@ -402,18 +402,15 @@ fn the_shell_pipes_one_utility_into_another() -> bool {
     shell::exec::initialize_job_control();
 
     let mut tokens = shell::buffers::ParsedTokens::new();
-    for token in [
-        b"sort".as_slice(),
-        b"-n",
-        b"nums",
-        b"|",
-        b"uniq",
-        b"-c",
-        b">",
-        b"counted",
-    ] {
+    for token in [b"sort".as_slice(), b"-n", b"nums"] {
         tokens.push_token(token);
     }
+    tokens.push_operator(b"|");
+    for token in [b"uniq".as_slice(), b"-c"] {
+        tokens.push_token(token);
+    }
+    tokens.push_operator(b">");
+    tokens.push_token(b"counted");
     let rc = shell::exec::execute_tokens(&tokens);
     if rc != 0 {
         eprintln!("coreutils_test: the pipeline exited {rc}");

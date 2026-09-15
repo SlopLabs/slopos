@@ -20,10 +20,16 @@ fn shell_ready() {
     shell::exec::initialize_job_control();
 }
 
+/// A token whose bytes are `>` or `|` is meant as that operator here; the
+/// rest are words.
 fn run(tokens: &[&[u8]]) -> i32 {
     let mut parsed = shell::buffers::ParsedTokens::new();
     for token in tokens {
-        parsed.push_token(token);
+        if matches!(*token, b">" | b">>" | b"|" | b"<") {
+            parsed.push_operator(token);
+        } else {
+            parsed.push_token(token);
+        }
     }
     shell::exec::execute_tokens(&parsed)
 }

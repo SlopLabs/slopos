@@ -109,3 +109,44 @@ pub fn positional(idx: usize) -> Option<Vec<u8>> {
 pub fn positional_count() -> usize {
     POSITIONAL.lock().unwrap().len().saturating_sub(1)
 }
+
+/// `$1`..`$#` in order — what `$@` and `$*` expand over.
+pub fn positional_args() -> Vec<Vec<u8>> {
+    POSITIONAL.lock().unwrap().iter().skip(1).cloned().collect()
+}
+
+/// `set -- a b c`: replace `$1`.. and leave `$0` alone.
+pub fn replace_args(args: Vec<Vec<u8>>) {
+    let mut slot = POSITIONAL.lock().unwrap();
+    let name = slot.first().cloned().unwrap_or_else(|| b"sh".to_vec());
+    slot.clear();
+    slot.push(name);
+    slot.extend(args);
+}
+
+/// Shadow `$1`.. for a function call, returning what [`restore_args`] needs.
+/// `$0` is untouched: POSIX keeps it naming the shell, not the function.
+pub fn shadow_args(args: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut slot = POSITIONAL.lock().unwrap();
+    let saved = slot.clone();
+    let name = slot.first().cloned().unwrap_or_else(|| b"sh".to_vec());
+    slot.clear();
+    slot.push(name);
+    slot.extend(args);
+    saved
+}
+
+pub fn restore_args(saved: Vec<Vec<u8>>) {
+    *POSITIONAL.lock().unwrap() = saved;
+}
+
+/// `shift [n]`. `false` with fewer than `n` positionals — POSIX specifies an
+/// error there rather than a clamp.
+pub fn shift(n: usize) -> bool {
+    let mut slot = POSITIONAL.lock().unwrap();
+    if slot.len().saturating_sub(1) < n {
+        return false;
+    }
+    slot.drain(1..=n);
+    true
+}

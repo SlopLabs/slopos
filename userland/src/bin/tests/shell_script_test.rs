@@ -1,11 +1,15 @@
 #![feature(restricted_std)]
 
-//! Non-interactive shell regression tests.
+//! Shell regression tests.
 //!
-//! Each case feeds `/bin/shell` a script down a pipe and asserts on the exact
+//! Most cases feed `/bin/shell` a script down a pipe and assert on the exact
 //! bytes it produces.  Two properties do the work: the output must be the
 //! script's output and nothing else — no banner, no prompt, no SGR — and every
 //! line must run exactly once, which a reader that over-reads cannot manage.
+//!
+//! One case instead drives the shell on a PTY, because the continuation prompt
+//! only exists on the interactive path and the shape of that path (raw mode,
+//! echo, a banner) makes exact-output matching impossible there.
 
 // Links the lib crate's `_start` ELF entry point into the binary; without it
 // the linker emits entry 0x0 and `do_exec` rejects the ELF.
@@ -305,6 +309,391 @@ fn dash_c_runs_the_string() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// The POSIX grammar
+// ---------------------------------------------------------------------------
+//
+// Related properties share one shell invocation: `MAX_PROCESSES` is 256 and a
+// run reaches ~170 before this test starts, so a spawn per assertion is a
+// budget this test does not have.
+
+fn branches() -> bool {
+    expect_output(
+        "branches",
+        b"if true; then echo yes; else echo no; fi\n\
+          if false; then echo yes; else echo no; fi\n\
+          if false; then echo a; elif true; then echo b; else echo c; fi\n\
+          if true\nthen\n  echo spanned\nfi\n\
+          while\nfalse\ndo\n  echo never\ndone\n\
+          if\ntrue\nthen\n  echo keyword-alone\nfi\n",
+        b"yes\nno\nb\nspanned\nkeyword-alone\n",
+    )
+}
+
+fn loops() -> bool {
+    expect_output(
+        "loops",
+        b"i=0\nwhile [ $i -lt 3 ]; do echo w$i; i=$((i+1)); done\n\
+          i=0\nuntil [ $i -ge 2 ]; do echo u$i; i=$((i+1)); done\n\
+          for f in one two; do echo $f; done\n\
+          set -- a b\nfor x; do echo p$x; done\n\
+          for a in 1 2 3; do if [ $a = 2 ]; then continue; fi; echo c$a; done\n\
+          for a in 1 2; do for b in x y; do echo b$a$b; break 2; done; done\n",
+        b"w0\nw1\nw2\nu0\nu1\none\ntwo\npa\npb\nc1\nc3\nb1x\n",
+    )
+}
+
+/// A `case` pattern in quotes is a literal, which is the whole reason the
+/// expander tracks quoting per byte.
+fn case_patterns() -> bool {
+    expect_output(
+        "case_patterns",
+        b"for v in apple banana kiwi; do\n\
+           case $v in\n\
+             a*|b*) echo early ;;\n\
+             *) echo late ;;\n\
+           esac\n\
+          done\n\
+          case abc in \"*\") echo glob ;; *) echo other ;; esac\n\
+          case '*' in \"*\") echo glob ;; *) echo other ;; esac\n\
+          case x in (a) echo a ;; (x) echo paren ;; esac\n",
+        b"early\nearly\nlate\nother\nglob\nparen\n",
+    )
+}
+
+/// Functions, their positional parameters, and the `command` builtin that has
+/// to see past them — the canonical wrapper otherwise calls itself until the
+/// stack runs out.
+fn functions_and_command() -> bool {
+    expect_output(
+        "functions_and_command",
+        b"greet() { echo hi $1; return 3; }\ngreet world\necho $?\n\
+          set -- outer\nf() { echo in:$1:$#; }\nf inner extra\necho out:$1:$#\n\
+          cat() { command cat \"$@\"; }\necho body | cat\n\
+          command echo '>'\n\
+          command -v cd\ncommand -v ls\n",
+        b"hi world\n3\nin:inner:2\nout:outer:1\nbody\n>\ncd\n/bin/ls\n",
+    )
+}
+
+/// A subshell's `cd` and assignments do not reach the shell; a brace group's
+/// do. That difference is the only thing distinguishing them.
+fn subshells_groups_and_negation() -> bool {
+    expect_output(
+        "subshells_groups_and_negation",
+        b"x=1\n(x=2)\necho $x\n{ x=3; }\necho $x\n! false\necho $?\n! true\necho $?\n",
+        b"1\n3\n0\n1\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Expansion
+// ---------------------------------------------------------------------------
+
+/// The captured bytes are data: a `;` in them is a semicolon, not an
+/// operator. And POSIX gives an assignment-only command the status of its last
+/// substitution, which is what makes `x=$(cmd) || ...` mean anything.
+fn command_substitution() -> bool {
+    expect_output(
+        "command_substitution",
+        b"x=$(echo 'a;b')\necho \"$x\"\necho `echo back`\n\
+          echo \"[$(printf 'x\\n\\n')]\"\n\
+          y=$(false)\necho $?\ny=$(true)\necho $?\nz=plain\necho $?\n",
+        b"a;b\nback\n[x]\n1\n0\n0\n",
+    )
+}
+
+fn parameter_and_arithmetic_expansion() -> bool {
+    expect_output(
+        "parameter_and_arithmetic_expansion",
+        b"unset u\nset=v\n\
+          echo ${u:-fallback} ${set:-fallback}\n\
+          echo ${u:+alt} ${set:+alt}\n\
+          echo ${#set}\n\
+          p=a/b/c.tar.gz\n\
+          echo ${p##*/} ${p#*/} ${p%%.*} ${p%.*}\n\
+          echo $((2 + 3 * 4)) $(((2 + 3) * 4)) $((7 / 2)) $((1 << 5))\n\
+          n=6\necho $((n % 4)) $((n > 2)) $((n == 6 ? 10 : 20)) $((0 && 1/0 + 2))\n",
+        b"fallback v\nalt\n1\nc.tar.gz b/c.tar.gz a/b/c a/b/c.tar\n14 20 3 32\n2 1 10 0\n",
+    )
+}
+
+/// Quoting decides field splitting; `"$@"` keeps one field per parameter where
+/// `"$*"` is one field; an empty expansion is a field only when quoted; and a
+/// split that *produces* an empty field keeps it.
+fn field_splitting() -> bool {
+    expect_output(
+        "field_splitting",
+        b"count() { echo $#; }\n\
+          set -- 'a b' c\ncount \"$@\"\ncount $@\ncount \"$*\"\n\
+          v='x y'\ncount $v\ncount \"$v\"\n\
+          e=\ncount $e\ncount \"$e\"\n\
+          set -- ''\ncount \"$@\"\nset --\ncount \"$@\"\n\
+          unset u\ncount ${u:-a b}\ncount \"${u:-a b}\"\n\
+          IFS=:\nr=:\ncount $r\nr=a::b\ncount $r\n",
+        b"2\n3\n1\n2\n1\n0\n1\n1\n0\n2\n1\n1\n3\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Here-documents and globbing
+// ---------------------------------------------------------------------------
+
+/// A quoted delimiter suppresses expansion; `<<-` strips leading tabs; two on
+/// one line take their bodies in operator order; and a backslash is special
+/// only before `$`, `` ` `` and `\`, exactly as inside double quotes.
+fn heredocs() -> bool {
+    expect_output(
+        "heredocs",
+        b"v=VAL\ncat <<END\nsaw $v\nEND\ncat <<'END'\nsaw $v\nEND\n\
+          cat <<-END\n\tindented\n\tEND\n\
+          cat <<A; cat <<B\nfirst\nA\nsecond\nB\n\
+          cat <<END\na\\b \\$v \\\\ $v\nEND\n",
+        b"saw VAL\nsaw $v\nindented\nfirst\nsecond\na\\b $v \\ VAL\n",
+    )
+}
+
+/// An unmatched pattern is left exactly as written — there is no nullglob —
+/// a quoted pattern never globs, a wildcard does not match a leading dot, and
+/// a generated pathname is emitted only if it names an existing file.
+fn globbing() -> bool {
+    expect_output(
+        "globbing",
+        b"rm -rf /tmp/gt\nmkdir -p /tmp/gt/d1 /tmp/gt/d2\ncd /tmp/gt\n\
+          : > a.txt\n: > b.txt\n: > c.log\n: > .hidden\n: > d2/there\n\
+          echo *.txt\necho *.none\necho \"*.txt\"\necho ?.log\n\
+          echo .h*\necho */there\necho */nowhere\n",
+        b"a.txt b.txt\n*.none\n*.txt\nc.log\n.hidden\nd2/there\n*/nowhere\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The structural caps that used to exist
+// ---------------------------------------------------------------------------
+
+/// Twelve stages where eight was the ceiling, and a thousand-byte variable
+/// where 256 was — a `CFLAGS` or a long `PATH` would have hit the latter.
+fn structural_caps() -> bool {
+    let mut script =
+        b"echo deep | cat | cat | cat | cat | cat | cat | cat | cat | cat | cat | cat\nv=".to_vec();
+    script.extend(core::iter::repeat_n(b'x', 1000));
+    script.extend_from_slice(b"\necho ${#v}\n");
+    expect_output("structural_caps", &script, b"deep\n1000\n")
+}
+
+/// A hundred arguments, where sixty-four was the ceiling. `cargo rustc` lines
+/// routinely pass more.
+fn a_command_takes_past_sixty_four_words() -> bool {
+    let mut script = b"echo".to_vec();
+    let mut want = Vec::new();
+    for i in 0u32..100 {
+        script.extend_from_slice(b" w");
+        script.extend_from_slice(alloc_decimal(i).as_slice());
+        if i > 0 {
+            want.push(b' ');
+        }
+        want.extend_from_slice(b"w");
+        want.extend_from_slice(alloc_decimal(i).as_slice());
+    }
+    script.push(b'\n');
+    want.push(b'\n');
+    expect_output("a_command_takes_past_sixty_four_words", &script, &want)
+}
+
+fn alloc_decimal(value: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut n = value;
+    let mut digits = Vec::new();
+    loop {
+        digits.push(b'0' + (n % 10) as u8);
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend(digits.iter().rev());
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Scripting builtins and descriptors
+// ---------------------------------------------------------------------------
+
+/// `read` must consume its line and not one byte more, or a loop reading a
+/// file would lose every other line. `.` runs a file in this shell, so what it
+/// defines survives.
+fn scripting_builtins() -> bool {
+    expect_output(
+        "scripting_builtins",
+        b"set -- a b c\nshift\necho $1 $#\nshift 2\necho $#\n\
+          cmd='echo evaluated'\neval $cmd\n\
+          while read a b; do echo \"[$a][$b]\"; done <<END\n1 2 3\nx y\nEND\n\
+          cat > /tmp/sourced.sh <<'END'\nSOURCED=yes\nhelper() { echo helped; }\nEND\n\
+          . /tmp/sourced.sh\necho $SOURCED\nhelper\n",
+        b"b 2\n0\nevaluated\n[1][2 3]\n[x][y]\nyes\nhelped\n",
+    )
+}
+
+/// The kernel hands out the lowest free descriptor, so the open for `3>` lands
+/// on fd 3 itself — a `dup2(3, 3)` followed by a close leaves the command with
+/// fd 3 shut rather than redirected. And closing a descriptor that is not open
+/// is not an error, in the forked path as in the in-shell one.
+fn redirection_descriptors() -> bool {
+    expect_output(
+        "redirection_descriptors",
+        b"rm -f /tmp/fd3.txt\n{ echo viaThree >&3; } 3>/tmp/fd3.txt\ncat /tmp/fd3.txt\n\
+          /bin/echo external 3>&-\necho builtin 3>&-\n",
+        b"viaThree\nexternal\nbuiltin\n",
+    )
+}
+
+/// An exported variable reaches a child; a plain shell variable does not. And
+/// `unset NAME` names a variable, so a function of that name survives until no
+/// such variable exists.
+fn variables_and_unset() -> bool {
+    expect_output(
+        "variables_and_unset",
+        b"PLAIN=p\nexport SHIPPED=s\nenv | grep -c '^PLAIN='\nenv | grep -c '^SHIPPED='\n\
+          helper() { echo helper; }\nhelper=v\nunset helper\necho ${helper:-gone}\nhelper\n\
+          unset helper\nhelper 2>/dev/null || echo really-gone\n",
+        b"0\n1\ngone\nhelper\nreally-gone\n",
+    )
+}
+
+/// `set -e` ends the script at the first failure, and does not fire on a
+/// command whose status is being tested.
+fn errexit_stops_at_the_first_failure() -> bool {
+    expect_output(
+        "errexit_stops_at_the_first_failure",
+        b"set -e\nif false; then echo no; fi\nfalse || echo tolerated\nfalse\necho unreachable\n",
+        b"tolerated\n",
+    )
+}
+
+/// `set -o NAME` is how a script both sets and clears an option.
+fn set_o_names_the_same_options_as_the_letters() -> bool {
+    expect_output(
+        "set_o_names_the_same_options_as_the_letters",
+        b"set -o noglob\necho *\nset +o noglob\nset -o errexit\nfalse\necho unreachable\n",
+        b"*\n",
+    )
+}
+
+/// A syntax error is diagnosed and the script goes on to the next command,
+/// rather than the shell running a truncated reading of it.
+fn a_syntax_error_does_not_run_anything() -> bool {
+    expect_output(
+        "a_syntax_error_does_not_run_anything",
+        b"for; do echo no; done\necho after\n",
+        b"after\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The interactive path
+// ---------------------------------------------------------------------------
+
+/// Zero-progress reads on the master that mean the shell stopped producing.
+/// Bounded so a regressed shell fails rather than wedging the harness.
+const PTY_IDLE_READS: usize = 20_000;
+
+/// Type an unfinished `if` at an interactive shell and finish it on the next
+/// lines. `spanned` in the output is the proof — `if true` alone would have
+/// failed and `then echo spanned` alone is a syntax error — and the PS2 prompt
+/// is checked beside it because that is what tells the user it is waiting.
+fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
+    let Ok((master, _slave_num)) = process::openpty() else {
+        eprintln!("shell_script_test: openpty failed");
+        return false;
+    };
+    let master = master.into_raw();
+    let Ok(slave) = fs::ioctl_tiocgptpeer(master) else {
+        eprintln!("shell_script_test: tiocgptpeer failed");
+        let _ = fs::close_fd_raw(master);
+        return false;
+    };
+    let slave = slave.into_raw();
+
+    // fd 0/1/2 all on the slave is what makes the shell decide it is
+    // interactive, which is the path under test.
+    let actions = [
+        process::clone_fd(slave, 0),
+        process::clone_fd(slave, 1),
+        process::clone_fd(slave, 2),
+    ];
+    let tid = process::spawn_path_with_actions(
+        b"/bin/shell",
+        &[],
+        TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+    );
+    let _ = fs::close_fd_raw(slave);
+    if tid <= 0 {
+        eprintln!("shell_script_test: interactive spawn returned {tid}");
+        let _ = fs::close_fd_raw(master);
+        return false;
+    }
+
+    let _ = fs::set_fd_nonblocking(master);
+    let script: &[u8] = b"if true\nthen echo spanned\nfi\nexit\n";
+    let mut fed = 0usize;
+    let mut seen = Vec::new();
+    let mut idle = 0usize;
+    let mut chunk = [0u8; 256];
+
+    while idle < PTY_IDLE_READS {
+        let mut progress = false;
+        if fed < script.len() {
+            match fs::write_slice(master, &script[fed..]) {
+                Ok(n) if n > 0 => {
+                    fed += n;
+                    progress = true;
+                }
+                _ => {}
+            }
+        }
+        match fs::read_slice(master, &mut chunk) {
+            Ok(n) if n > 0 => {
+                seen.extend_from_slice(&chunk[..n]);
+                progress = true;
+            }
+            Err(SyscallError::EAGAIN) | Ok(_) => {}
+            Err(_) => break,
+        }
+        if contains(&seen, b"spanned") && process::wait_exit_code_nohang(tid as u32).is_some() {
+            break;
+        }
+        if progress {
+            idle = 0;
+        } else {
+            idle += 1;
+            sys_core::yield_now();
+        }
+    }
+
+    let _ = process::kill(tid as u32, slopos_abi::signal::SIGKILL);
+    let _ = fs::close_fd_raw(master);
+
+    if !contains(&seen, b"spanned") {
+        eprintln!(
+            "shell_script_test: the continuation never ran; saw {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+        return false;
+    }
+    if !contains(&seen, b"> ") {
+        eprintln!("shell_script_test: no PS2 prompt in the interactive output");
+        return false;
+    }
+    true
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("script_output_is_exact", script_output_is_exact),
     (
@@ -332,6 +721,46 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("stderr_redirection", stderr_redirection),
     ("assignments_scope_correctly", assignments_scope_correctly),
     ("dash_c_runs_the_string", dash_c_runs_the_string),
+    ("branches", branches),
+    ("loops", loops),
+    ("case_patterns", case_patterns),
+    ("functions_and_command", functions_and_command),
+    (
+        "subshells_groups_and_negation",
+        subshells_groups_and_negation,
+    ),
+    ("command_substitution", command_substitution),
+    (
+        "parameter_and_arithmetic_expansion",
+        parameter_and_arithmetic_expansion,
+    ),
+    ("field_splitting", field_splitting),
+    ("heredocs", heredocs),
+    ("globbing", globbing),
+    ("structural_caps", structural_caps),
+    (
+        "a_command_takes_past_sixty_four_words",
+        a_command_takes_past_sixty_four_words,
+    ),
+    ("scripting_builtins", scripting_builtins),
+    ("redirection_descriptors", redirection_descriptors),
+    ("variables_and_unset", variables_and_unset),
+    (
+        "errexit_stops_at_the_first_failure",
+        errexit_stops_at_the_first_failure,
+    ),
+    (
+        "set_o_names_the_same_options_as_the_letters",
+        set_o_names_the_same_options_as_the_letters,
+    ),
+    (
+        "a_syntax_error_does_not_run_anything",
+        a_syntax_error_does_not_run_anything,
+    ),
+    (
+        "the_interactive_prompt_continues_an_unfinished_command",
+        the_interactive_prompt_continues_an_unfinished_command,
+    ),
 ];
 
 fn main() {

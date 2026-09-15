@@ -5,6 +5,7 @@
 //! `apps::coreutils`, reached through `PATH` — see [`utility`] for the six
 //! that are both.
 
+pub mod control;
 pub mod env;
 pub mod fs;
 pub mod process;
@@ -321,6 +322,94 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         detail: "Resolve a hostname to its IPv4 address using the\nin-kernel DNS client. Uses the DHCP-provided DNS\nserver (typically 10.0.2.3 on QEMU user-net).",
         category: Network,
         func: system::cmd_resolve,
+    },
+    BuiltinEntry {
+        name: ":",
+        desc: "Do nothing, successfully",
+        usage: ":",
+        detail: "Expand the arguments and return 0. A script uses it\nas an empty loop or branch body.",
+        category: Utility,
+        func: control::cmd_colon,
+    },
+    BuiltinEntry {
+        name: "break",
+        desc: "Leave an enclosing loop",
+        usage: "break [n]",
+        detail: "Exit the innermost enclosing for, while or until\nloop, or the nth enclosing one.",
+        category: Process,
+        func: control::cmd_break,
+    },
+    BuiltinEntry {
+        name: "continue",
+        desc: "Restart an enclosing loop",
+        usage: "continue [n]",
+        detail: "Begin the next iteration of the innermost enclosing\nloop, or of the nth enclosing one.",
+        category: Process,
+        func: control::cmd_continue,
+    },
+    BuiltinEntry {
+        name: "return",
+        desc: "Return from a function",
+        usage: "return [n]",
+        detail: "End the running function or sourced file with status\nn, or with the last command's status.",
+        category: Process,
+        func: control::cmd_return,
+    },
+    BuiltinEntry {
+        name: "shift",
+        desc: "Discard positional parameters",
+        usage: "shift [n]",
+        detail: "Drop the first n positional parameters, default 1,\nrenumbering the rest from $1.",
+        category: Process,
+        func: control::cmd_shift,
+    },
+    BuiltinEntry {
+        name: "eval",
+        desc: "Run arguments as a command",
+        usage: "eval word...",
+        detail: "Join the arguments with spaces and run the result as\nshell input in this shell.",
+        category: Process,
+        func: control::cmd_eval,
+    },
+    BuiltinEntry {
+        name: ".",
+        desc: "Run a file in this shell",
+        usage: ". file",
+        detail: "Read and run a file's commands in the current shell,\nso its variables and functions persist.",
+        category: Process,
+        func: control::cmd_dot,
+    },
+    BuiltinEntry {
+        name: "source",
+        desc: "Run a file in this shell",
+        usage: "source file",
+        detail: "As the . builtin.",
+        category: Process,
+        func: control::cmd_dot,
+    },
+    BuiltinEntry {
+        name: "read",
+        desc: "Read a line into variables",
+        usage: "read [-r] [-p prompt] [name...]",
+        detail: "Read one line from standard input and split it into\nthe named variables on IFS; the last name takes the\nremainder. Without a name, sets REPLY. -r keeps\nbackslashes literal.",
+        category: Environment,
+        func: control::cmd_read,
+    },
+    BuiltinEntry {
+        name: "command",
+        desc: "Run a command, ignoring functions",
+        usage: "command [-v] name [arg...]",
+        detail: "Run name without consulting the function table, or\nwith -v print what it resolves to.",
+        category: Process,
+        func: control::cmd_command,
+    },
+    BuiltinEntry {
+        name: "type",
+        desc: "Say what a name resolves to",
+        usage: "type name...",
+        detail: "Report each name as a function, a shell builtin, or\nthe path a command search finds.",
+        category: System,
+        func: control::cmd_type,
     },
 ];
 

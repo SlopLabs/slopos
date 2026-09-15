@@ -2,6 +2,8 @@
 
 use std::sync::Mutex;
 
+use slopos_shell_core::lexer::{self, Tok};
+
 use crate::syscall::UserFsEntry;
 use slopos_abi::fs::USER_PATH_MAX;
 
@@ -9,12 +11,7 @@ use slopos_abi::fs::USER_PATH_MAX;
 /// must agree, and neither may be shorter than a path the kernel accepts.
 pub const SHELL_LINE_MAX: usize = 2 * USER_PATH_MAX;
 
-/// Headroom: `$VAR` substitution can grow a line past its source length.
-pub const EXPAND_BUF_SIZE: usize = 2 * SHELL_LINE_MAX;
-
 static LINE_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-
-static EXPAND_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 /// Heap-backed: `USER_PATH_MAX` bytes need not be resident before a path is
 /// ever built.
@@ -22,11 +19,14 @@ static PATH_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 static LIST_ENTRIES: Mutex<[UserFsEntry; 32]> = Mutex::new([UserFsEntry::new(); 32]);
 
-/// Parsed token storage: one byte arena plus a span per token, so neither the
-/// number of words on a line nor the length of any one of them is capped.
+/// Pre-expanded command words, for a caller that has words rather than a line
+/// of text. The bytes are final — no expansion, splitting or globbing — which
+/// is what makes `time echo '$HOME'` pass the four characters it was given.
 pub struct ParsedTokens {
     bytes: Vec<u8>,
     spans: Vec<(usize, usize)>,
+    /// Whether each entry was pushed as an operator rather than as a word.
+    operators: Vec<bool>,
 }
 
 impl ParsedTokens {
@@ -34,6 +34,7 @@ impl ParsedTokens {
         Self {
             bytes: Vec::new(),
             spans: Vec::new(),
+            operators: Vec::new(),
         }
     }
 
@@ -42,11 +43,23 @@ impl ParsedTokens {
         &self.bytes[start..end]
     }
 
-    /// Append a token. Returns its index.
+    /// Append a word, whose bytes are data whatever they are: `push_token(b">")`
+    /// passes a one-character argument. Returns its index.
     pub fn push_token(&mut self, content: &[u8]) -> usize {
+        self.push(content, false)
+    }
+
+    /// Append an operator — `|`, `&&`, `2>` — for a caller building a
+    /// pipeline or a redirection out of parts. Returns its index.
+    pub fn push_operator(&mut self, content: &[u8]) -> usize {
+        self.push(content, true)
+    }
+
+    fn push(&mut self, content: &[u8], operator: bool) -> usize {
         let start = self.bytes.len();
         self.bytes.extend_from_slice(content);
         self.spans.push((start, self.bytes.len()));
+        self.operators.push(operator);
         self.spans.len() - 1
     }
 
@@ -57,6 +70,29 @@ impl ParsedTokens {
     pub fn clear(&mut self) {
         self.bytes.clear();
         self.spans.clear();
+        self.operators.clear();
+    }
+
+    /// Re-present these entries as a token stream the parser accepts.
+    ///
+    /// Only what was pushed through [`ParsedTokens::push_operator`] is lexed;
+    /// deciding by lexing every entry made `command echo '>'` a redirection
+    /// with no operand.
+    pub fn to_syntax_tokens(&self) -> Vec<Tok> {
+        (0..self.count())
+            .map(|i| {
+                let bytes = self.token(i);
+                if !self.operators[i] {
+                    return Tok::Literal(bytes.to_vec());
+                }
+                match lexer::lex(bytes) {
+                    Ok(lexed) if lexed.len() == 1 && !matches!(lexed[0], Tok::Word(_)) => {
+                        lexed.into_iter().next().expect("one token")
+                    }
+                    _ => Tok::Literal(bytes.to_vec()),
+                }
+            })
+            .collect()
     }
 }
 
@@ -65,15 +101,6 @@ pub fn with_line_buf<R, F: FnOnce(&mut [u8]) -> R>(f: F) -> R {
     if buf.len() != SHELL_LINE_MAX {
         buf.clear();
         buf.resize(SHELL_LINE_MAX, 0);
-    }
-    f(&mut buf)
-}
-
-pub fn with_expand_buf<R, F: FnOnce(&mut [u8]) -> R>(f: F) -> R {
-    let mut buf = EXPAND_BUF.lock().unwrap();
-    if buf.len() != EXPAND_BUF_SIZE {
-        buf.clear();
-        buf.resize(EXPAND_BUF_SIZE, 0);
     }
     f(&mut buf)
 }

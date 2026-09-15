@@ -22,8 +22,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 gate_parse_args check_alloc_dep "$@"
 
 # Crate names allowed to own an `alloc` dep line. Userland runs on big
-# stacks; slopos-ostd is the sanctioned allocation surface.
-USERLAND_RE='^(userland|terminal-core|slibc|slop-protocol|image|slopos-ostd)$'
+# stacks; slopos-ostd is the sanctioned allocation surface. `terminal-core`
+# and `shell-core` are userland-only host-testable cores — the kernel links
+# neither — so the framekernel allocation discipline does not reach them.
+USERLAND_RE='^(userland|terminal-core|shell-core|slibc|slop-protocol|image|slopos-ostd)$'
 
 # Findings carry a `<tag>\t` prefix so the self-test can count each pass
 # independently; the reports strip it back off.
@@ -110,7 +112,7 @@ SOURCE_WHITELIST="kernel/src/main.rs"
 # Only the named TCB annexes are skipped; any other vendored Rust source
 # that directly names alloc is a gate failure.
 filter_files() {
-    grep -Ev '^(userland|terminal-core|slibc|slop-protocol|image|slopos-ostd)/' \
+    grep -Ev '^(userland|terminal-core|shell-core|slibc|slop-protocol|image|slopos-ostd)/' \
       | grep -Ev '^vendor/(unwinding|gimli)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       || true
