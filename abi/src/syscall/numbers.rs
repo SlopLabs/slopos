@@ -208,8 +208,8 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 ///
 /// Bitmap format (0): 1bpp MSB-first, one byte per row per glyph,
 /// `glyph_count × height` bytes; width must be 8. Coverage format (1): 8-bit
-/// alpha for glyphs 0x20–0x7E plus one replacement, `96 × width × height`
-/// bytes.
+/// alpha, one `width × height` cell per `slopos_font::GLYPH_RANGES` slot then
+/// one replacement cell; `glyph_count` must equal `slopos_font::GLYPH_COUNT`.
 pub const SYSCALL_FONT_SET: u64 = 144;
 
 pub const FONT_FORMAT_BITMAP: u64 = 0;

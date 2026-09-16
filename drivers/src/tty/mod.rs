@@ -18,7 +18,7 @@ pub mod vconsole;
 /// VT100/ANSI escape-sequence parser, re-exported from `slopos-vt` so the kernel
 /// virtual console and the userland terminal emulator share one state machine.
 pub mod vtparser {
-    pub use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+    pub use slopos_vt::{Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser};
 }
 
 pub(crate) mod io;

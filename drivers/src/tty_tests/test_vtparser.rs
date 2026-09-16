@@ -369,6 +369,51 @@ pub fn test_vconsole_scroll_up() -> TestResult {
     TestResult::Pass
 }
 
+/// The `>` must not abort the sequence and leave the `c` to print as text.
+pub fn test_secondary_da_query_is_recognized() -> TestResult {
+    let mut parser = VtParser::new();
+    let mut action = VtAction::Nop;
+    for &b in b"\x1b[>c" {
+        action = parser.advance(b);
+    }
+    if action != (VtAction::DeviceAttributes { secondary: true }) {
+        klog_info!(
+            "TTY_TEST: BUG - expected secondary DeviceAttributes, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    let action = parser.advance(b'X');
+    if action != VtAction::Print(b'X' as u32) {
+        klog_info!("TTY_TEST: BUG - parser not in ground, got {:?}", action);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_mouse_tracking_modes() -> TestResult {
+    let mut parser = VtParser::new();
+    if parser.mouse_tracking != MouseTracking::Off || parser.mouse_sgr {
+        klog_info!("TTY_TEST: BUG - mouse tracking not off at reset");
+        return TestResult::Fail;
+    }
+    for &b in b"\x1b[?1003h\x1b[?1006h" {
+        let _ = parser.advance(b);
+    }
+    if parser.mouse_tracking != MouseTracking::AnyEvent || !parser.mouse_sgr {
+        klog_info!("TTY_TEST: BUG - DECSET 1003/1006 not tracked");
+        return TestResult::Fail;
+    }
+    for &b in b"\x1b[?1003l" {
+        let _ = parser.advance(b);
+    }
+    if parser.mouse_tracking != MouseTracking::Off {
+        klog_info!("TTY_TEST: BUG - DECRST 1003 left tracking on");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_parser_print_ascii, suite = tty_test_vtparser);
 slopos_testing::stest!(
     name = test_parser_execute_control,
@@ -399,3 +444,8 @@ slopos_testing::stest!(
     suite = tty_test_vtparser
 );
 slopos_testing::stest!(name = test_vconsole_scroll_up, suite = tty_test_vtparser);
+slopos_testing::stest!(
+    name = test_secondary_da_query_is_recognized,
+    suite = tty_test_vtparser
+);
+slopos_testing::stest!(name = test_mouse_tracking_modes, suite = tty_test_vtparser);

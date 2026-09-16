@@ -16,6 +16,7 @@
 
 pub mod atlas;
 pub mod bitmap;
+pub mod boxdraw;
 pub mod cache;
 pub mod metrics;
 pub mod outline;
@@ -29,48 +30,67 @@ use slopos_abi::draw::{Canvas, Color32};
 pub const ASCII_FIRST: u32 = 0x20;
 /// Last printable ASCII codepoint (tilde).
 pub const ASCII_LAST: u32 = 0x7E;
-/// Number of printable ASCII characters (0x20..=0x7E → 95).
-pub const ASCII_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
 
-/// First Latin-1 supplement printable (no-break space).
-pub const LATIN1_FIRST: u32 = 0xA0;
-/// Last Latin-1 supplement codepoint (ÿ).
-pub const LATIN1_LAST: u32 = 0xFF;
-/// Number of Latin-1 supplement glyphs (0xA0..=0xFF → 96).
-pub const LATIN1_COUNT: usize = (LATIN1_LAST - LATIN1_FIRST + 1) as usize;
-
-/// Extra glyphs outside the two dense blocks: € plus the spacing accents a
-/// keyboard layout's `ring`/`caron` dead keys can flush.
-pub const EXTRA_GLYPHS: [u32; 3] = [0x20AC, 0x02DA, 0x02C7];
+/// The glyph set, in slot order: inclusive codepoint ranges whose slots are
+/// contiguous. Ascending and non-overlapping — [`glyph_slot`] relies on both
+/// to stop at the first range starting above the codepoint.
+pub const GLYPH_RANGES: [(u32, u32); 12] = [
+    (0x0020, 0x007E), // printable ASCII
+    (0x00A0, 0x00FF), // Latin-1 Supplement
+    (0x0100, 0x017F), // Latin Extended-A
+    (0x02C6, 0x02DD), // spacing modifier letters (dead-key accents)
+    (0x0370, 0x03FF), // Greek and Coptic
+    (0x0400, 0x04FF), // Cyrillic
+    (0x2010, 0x203E), // General Punctuation
+    (0x20A0, 0x20BF), // Currency Symbols
+    (0x2190, 0x21FF), // Arrows
+    (0x2500, 0x257F), // Box Drawing
+    (0x2580, 0x259F), // Block Elements
+    (0x25A0, 0x25FF), // Geometric Shapes
+];
 
 /// Total glyph slots in an atlas; also the `glyph_count` of the
 /// `SYSCALL_FONT_SET` coverage wire format — both sides compile against it.
-pub const GLYPH_COUNT: usize = ASCII_COUNT + LATIN1_COUNT + EXTRA_GLYPHS.len();
+pub const GLYPH_COUNT: usize = {
+    let mut total = 0usize;
+    let mut i = 0;
+    while i < GLYPH_RANGES.len() {
+        let (lo, hi) = GLYPH_RANGES[i];
+        total += (hi - lo + 1) as usize;
+        i += 1;
+    }
+    total
+};
 
 /// Atlas slot for a codepoint, or `None` for codepoints outside the glyph set
 /// (those render as the replacement glyph).
 #[inline]
 pub fn glyph_slot(cp: u32) -> Option<usize> {
-    match cp {
-        ASCII_FIRST..=ASCII_LAST => Some((cp - ASCII_FIRST) as usize),
-        LATIN1_FIRST..=LATIN1_LAST => Some(ASCII_COUNT + (cp - LATIN1_FIRST) as usize),
-        _ => EXTRA_GLYPHS
-            .iter()
-            .position(|&e| e == cp)
-            .map(|i| ASCII_COUNT + LATIN1_COUNT + i),
+    let mut base = 0usize;
+    for (lo, hi) in GLYPH_RANGES {
+        if cp < lo {
+            return None;
+        }
+        if cp <= hi {
+            return Some(base + (cp - lo) as usize);
+        }
+        base += (hi - lo + 1) as usize;
     }
+    None
 }
 
 /// Inverse of [`glyph_slot`]: the codepoint a slot holds.
 #[inline]
 pub fn slot_codepoint(slot: usize) -> Option<u32> {
-    if slot < ASCII_COUNT {
-        Some(ASCII_FIRST + slot as u32)
-    } else if slot < ASCII_COUNT + LATIN1_COUNT {
-        Some(LATIN1_FIRST + (slot - ASCII_COUNT) as u32)
-    } else {
-        EXTRA_GLYPHS.get(slot - ASCII_COUNT - LATIN1_COUNT).copied()
+    let mut rest = slot;
+    for (lo, hi) in GLYPH_RANGES {
+        let count = (hi - lo + 1) as usize;
+        if rest < count {
+            return Some(lo + rest as u32);
+        }
+        rest -= count;
     }
+    None
 }
 
 use cache::GlyphCache;

@@ -25,6 +25,19 @@ pub enum EraseMode {
     All,
 }
 
+/// Mouse-tracking protocol selected by DECSET 1000 / 1002 / 1003. The three
+/// are mutually exclusive, so resetting any turns tracking off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTracking {
+    Off,
+    /// 1000: press and release only.
+    Normal,
+    /// 1002: press, release, and motion while a button is held.
+    ButtonEvent,
+    /// 1003: press, release, and every motion.
+    AnyEvent,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SgrAttr {
     Reset,
@@ -86,6 +99,11 @@ pub enum VtAction {
     SetMode(u16),
     /// DEC private reset mode (CSI ? N l).
     ResetMode(u16),
+    /// Device attributes request: `CSI c` (primary) or `CSI > c` (secondary).
+    DeviceAttributes { secondary: bool },
+    /// Device status report request: `CSI Ps n`, or `CSI ? Ps n` for the DEC
+    /// private form.
+    DeviceStatus { request: u16, private: bool },
     /// Unrecognized or malformed sequence, silently discarded.
     Nop,
 }
@@ -111,7 +129,8 @@ pub struct VtParser {
     param_count: usize,
     current_param: u16,
     has_digit: bool,
-    private_mode: bool,
+    /// The CSI private-marker byte (`?`, `>`, `<`, `=`), or 0 for none.
+    private_marker: u8,
     pending: [VtAction; MAX_PARAMS],
     pending_count: usize,
     pending_idx: usize,
@@ -122,6 +141,9 @@ pub struct VtParser {
     pub cursor_key_mode: bool,
     pub origin_mode: bool,
     pub auto_wrap: bool,
+    pub mouse_tracking: MouseTracking,
+    /// 1006: SGR-form reports (`CSI < b ; x ; y M`) rather than X10's.
+    pub mouse_sgr: bool,
 }
 
 impl Default for VtParser {
@@ -138,7 +160,7 @@ impl VtParser {
             param_count: 0,
             current_param: 0,
             has_digit: false,
-            private_mode: false,
+            private_marker: 0,
             pending: [VtAction::Nop; MAX_PARAMS],
             pending_count: 0,
             pending_idx: 0,
@@ -149,6 +171,8 @@ impl VtParser {
             cursor_key_mode: false,
             origin_mode: false,
             auto_wrap: true,
+            mouse_tracking: MouseTracking::Off,
+            mouse_sgr: false,
         }
     }
 
@@ -328,8 +352,8 @@ impl VtParser {
 
     fn csi_entry(&mut self, byte: u8) -> VtAction {
         match byte {
-            b'?' => {
-                self.private_mode = true;
+            0x3C..=0x3F => {
+                self.private_marker = byte;
                 self.state = State::CsiParam;
                 VtAction::Nop
             }
@@ -435,7 +459,7 @@ impl VtParser {
         self.param_count = 0;
         self.current_param = 0;
         self.has_digit = false;
-        self.private_mode = false;
+        self.private_marker = 0;
     }
 
     fn push_param(&mut self) {
@@ -462,10 +486,6 @@ impl VtParser {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "API completeness — used by future CSI dispatch extensions"
-    )]
     fn param_raw(&self, idx: usize) -> u16 {
         if idx < self.param_count {
             self.params[idx]
@@ -475,6 +495,15 @@ impl VtParser {
     }
 
     fn dispatch_csi(&mut self, final_byte: u8) -> VtAction {
+        match self.private_marker {
+            0 => self.dispatch_ansi(final_byte),
+            b'?' => self.dispatch_dec_private(final_byte),
+            b'>' => Self::dispatch_secondary(final_byte),
+            _ => VtAction::Nop,
+        }
+    }
+
+    fn dispatch_ansi(&mut self, final_byte: u8) -> VtAction {
         match final_byte {
             b'A' => VtAction::MoveCursor {
                 direction: Direction::Up,
@@ -526,24 +555,38 @@ impl VtParser {
                 let bottom = self.param(1, 0);
                 VtAction::SetScrollRegion { top, bottom }
             }
+            b'c' => VtAction::DeviceAttributes { secondary: false },
+            b'n' => VtAction::DeviceStatus {
+                request: self.param_raw(0),
+                private: false,
+            },
+            _ => VtAction::Nop,
+        }
+    }
+
+    fn dispatch_dec_private(&mut self, final_byte: u8) -> VtAction {
+        match final_byte {
             b'h' => {
-                if self.private_mode {
-                    let mode = self.param(0, 0);
-                    self.handle_set_mode(mode);
-                    VtAction::SetMode(mode)
-                } else {
-                    VtAction::Nop
-                }
+                let mode = self.param(0, 0);
+                self.handle_set_mode(mode);
+                VtAction::SetMode(mode)
             }
             b'l' => {
-                if self.private_mode {
-                    let mode = self.param(0, 0);
-                    self.handle_reset_mode(mode);
-                    VtAction::ResetMode(mode)
-                } else {
-                    VtAction::Nop
-                }
+                let mode = self.param(0, 0);
+                self.handle_reset_mode(mode);
+                VtAction::ResetMode(mode)
             }
+            b'n' => VtAction::DeviceStatus {
+                request: self.param_raw(0),
+                private: true,
+            },
+            _ => VtAction::Nop,
+        }
+    }
+
+    fn dispatch_secondary(final_byte: u8) -> VtAction {
+        match final_byte {
+            b'c' => VtAction::DeviceAttributes { secondary: true },
             _ => VtAction::Nop,
         }
     }
@@ -553,6 +596,10 @@ impl VtParser {
             1 => self.cursor_key_mode = true,
             6 => self.origin_mode = true,
             7 => self.auto_wrap = true,
+            1000 => self.mouse_tracking = MouseTracking::Normal,
+            1002 => self.mouse_tracking = MouseTracking::ButtonEvent,
+            1003 => self.mouse_tracking = MouseTracking::AnyEvent,
+            1006 => self.mouse_sgr = true,
             2004 => self.bracketed_paste = true,
             _ => {}
         }
@@ -563,6 +610,8 @@ impl VtParser {
             1 => self.cursor_key_mode = false,
             6 => self.origin_mode = false,
             7 => self.auto_wrap = false,
+            1000 | 1002 | 1003 => self.mouse_tracking = MouseTracking::Off,
+            1006 => self.mouse_sgr = false,
             2004 => self.bracketed_paste = false,
             _ => {}
         }

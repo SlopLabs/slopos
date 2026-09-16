@@ -5,12 +5,43 @@
 
 use slopos_userland as _;
 
+use slopos_abi::input::keycode;
 use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
 use slopos_userland::apps::terminal::grid::TerminalGrid;
 use slopos_userland::apps::terminal::input::{
-    KeyAction, PointerState, Selection, collect_selection, encode_key, sanitize_paste,
-    update_selection,
+    KeyAction, KeyPress, MouseEventKind, PointerState, Selection, collect_selection, encode_key,
+    encode_mouse, sanitize_paste, update_selection,
 };
+use slopos_vt::MouseTracking;
+
+fn key(ascii: u8, code: u16, mods: u8) -> KeyPress {
+    KeyPress {
+        ascii,
+        keycode: code,
+        codepoint: ascii as u32,
+        mods,
+    }
+}
+
+fn key_bytes(k: KeyPress, app_cursor: bool) -> Option<[u8; 16]> {
+    match encode_key(k, app_cursor) {
+        KeyAction::ToMaster(b) => {
+            let mut out = [0u8; 16];
+            let src = b.as_bytes();
+            out[..src.len()].copy_from_slice(src);
+            out[15] = src.len() as u8;
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn key_is(k: KeyPress, app_cursor: bool, want: &[u8]) -> bool {
+    match key_bytes(k, app_cursor) {
+        Some(buf) => buf[15] as usize == want.len() && &buf[..want.len()] == want,
+        None => false,
+    }
+}
 
 fn feed(g: &mut TerminalGrid, bytes: &[u8]) {
     for &b in bytes {
@@ -117,29 +148,124 @@ fn test_bracketed_paste_tracks_decset_2004() -> bool {
 /// line discipline.
 fn test_ctrl_shift_c_copies_not_sigint() -> bool {
     if !matches!(
-        encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL | MODIFIER_SHIFT),
+        encode_key(key(0x03, 0, MODIFIER_CTRL | MODIFIER_SHIFT), false),
         KeyAction::CopySelection
     ) {
         return false;
     }
-    match encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL) {
-        KeyAction::ToMaster(b) => b.as_bytes() == [0x03],
-        _ => false,
-    }
+    key_is(key(0x03, 0, MODIFIER_CTRL), false, &[0x03])
 }
 
 /// Ctrl+Shift+V requests a compositor paste; plain Ctrl+V passes through.
 fn test_ctrl_shift_v_requests_paste() -> bool {
     if !matches!(
-        encode_key(0x16, 0x2F, 0x16, MODIFIER_CTRL | MODIFIER_SHIFT),
+        encode_key(key(0x16, 0, MODIFIER_CTRL | MODIFIER_SHIFT), false),
         KeyAction::RequestPaste
     ) {
         return false;
     }
-    match encode_key(0x16, 0x2F, 0x16, MODIFIER_CTRL) {
-        KeyAction::ToMaster(b) => b.as_bytes() == [0x16],
-        _ => false,
+    key_is(key(0x16, 0, MODIFIER_CTRL), false, &[0x16])
+}
+
+/// F-keys carry no legacy byte; the whole set was dropped before this.
+fn test_function_keys_reach_the_pty() -> bool {
+    key_is(key(0, keycode::KEY_F1, 0), false, b"\x1bOP")
+        && key_is(key(0, keycode::KEY_F5, 0), false, b"\x1b[15~")
+        && key_is(key(0, keycode::KEY_F12, 0), false, b"\x1b[24~")
+        && key_is(key(0, keycode::KEY_INSERT, 0), false, b"\x1b[2~")
+}
+
+/// Modified navigation and DECCKM's SS3 form, both of which an editor's key
+/// table is written against.
+fn test_modified_and_application_cursor_keys() -> bool {
+    // 0x84 is the driver's baked pseudo-code for Left.
+    key_is(
+        key(0x84, keycode::KEY_LEFT, MODIFIER_CTRL),
+        false,
+        b"\x1b[1;5D",
+    ) && key_is(key(0x82, keycode::KEY_UP, 0), true, b"\x1bOA")
+        && key_is(
+            key(0x82, keycode::KEY_UP, MODIFIER_CTRL),
+            true,
+            b"\x1b[1;5A",
+        )
+        && key_is(
+            key(b'\t', keycode::KEY_TAB, MODIFIER_SHIFT),
+            false,
+            b"\x1b[Z",
+        )
+}
+
+/// PgUp/PgDn belongs to the application now, so the local scrollback moved to
+/// a chord the keyboard driver must let through.
+fn test_page_keys_reach_the_pty_and_the_chord_scrolls() -> bool {
+    key_is(key(0x80, keycode::KEY_PAGEUP, 0), false, b"\x1b[5~")
+        && key_is(key(0x81, keycode::KEY_PAGEDOWN, 0), false, b"\x1b[6~")
+        && matches!(
+            encode_key(
+                key(0x80, keycode::KEY_PAGEUP, MODIFIER_CTRL | MODIFIER_SHIFT),
+                false
+            ),
+            KeyAction::ScrollUp(_)
+        )
+}
+
+/// The mode and the encoding both come off the wire.
+fn test_mouse_reports_follow_the_selected_mode() -> bool {
+    let mut g = TerminalGrid::new(24, 80);
+    if g.mouse_tracking() != MouseTracking::Off {
+        return false;
     }
+    feed(&mut g, b"\x1b[?1002h\x1b[?1006h");
+    if g.mouse_tracking() != MouseTracking::ButtonEvent || !g.mouse_sgr() {
+        return false;
+    }
+    let press = match encode_mouse(
+        g.mouse_tracking(),
+        g.mouse_sgr(),
+        MouseEventKind::Press,
+        0x01,
+        0x01,
+        9,
+        4,
+        0,
+    ) {
+        Some(b) => b,
+        None => return false,
+    };
+    if press.as_bytes() != b"\x1b[<0;10;5M" {
+        return false;
+    }
+    // Button-event tracking reports a drag but not a bare move.
+    encode_mouse(
+        g.mouse_tracking(),
+        g.mouse_sgr(),
+        MouseEventKind::Motion,
+        0,
+        0,
+        9,
+        4,
+        0,
+    )
+    .is_none()
+}
+
+/// Before this the `>` aborted the parse and printed a stray `c`.
+fn test_device_queries_are_answered() -> bool {
+    let mut g = TerminalGrid::new(10, 20);
+    feed(&mut g, b"\x1b[c");
+    if g.take_replies() != b"\x1b[?1;2c" {
+        return false;
+    }
+    feed(&mut g, b"\x1b[>c");
+    if g.take_replies() != b"\x1b[>0;1;0c" {
+        return false;
+    }
+    if glyph(&g, 0, 0) != ' ' || g.cursor_col != 0 {
+        return false;
+    }
+    feed(&mut g, b"\x1b[5;7H\x1b[6n");
+    g.take_replies() == b"\x1b[5;7R"
 }
 
 /// A payload closing the paste bracket to inject keystrokes (the xterm
@@ -257,5 +383,25 @@ fn main() {
             test_paste_cannot_inject_bracket_end_marker,
         ),
         ("paste_types_like_keys", test_paste_types_like_keys),
+        (
+            "function_keys_reach_the_pty",
+            test_function_keys_reach_the_pty,
+        ),
+        (
+            "modified_and_application_cursor_keys",
+            test_modified_and_application_cursor_keys,
+        ),
+        (
+            "page_keys_reach_the_pty_and_the_chord_scrolls",
+            test_page_keys_reach_the_pty_and_the_chord_scrolls,
+        ),
+        (
+            "mouse_reports_follow_the_selected_mode",
+            test_mouse_reports_follow_the_selected_mode,
+        ),
+        (
+            "device_queries_are_answered",
+            test_device_queries_are_answered,
+        ),
     ]);
 }

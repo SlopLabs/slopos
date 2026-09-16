@@ -269,6 +269,35 @@
 #     `diskblocks` 2434 inside 2911, `fdslot` 256, `objectrow` 257, `task` 6
 #     and `pinnedbytes` 4.
 
+#
+# 2026-09-16, the terminal gaining the coverage an editor needs ("The terminal
+# is one an editor can be written against" in plans/self-hosting.md). Two rows
+# moved, and only one of them because of that work.
+#   post-kernel-tests `kernelmeta` 6065 -> 6120. Measured 6083/6049/6046 over
+#     three fresh runs of one ISO, spread 37; the cap is that maximum plus the
+#     spread. The cause is the glyph atlas: the set went from 194 slots to
+#     1190, so `init`'s `upgrade_console_font` now stages a 261 800-byte upload
+#     payload and holds a 261 800-byte atlas of its own before handing the
+#     coverage to `SYS_FONT_SET`. That is ~128 more userland pages in one
+#     process, and this row is the page tables behind them plus the kernel-side
+#     chunks. The atlas itself is chunked at 256 KiB, so none of it is one
+#     allocation.
+#   post-userland-tests `process` 243 -> 245, and **not** because of this
+#     change: an unmodified tree at the parent commit measures 245 on this
+#     machine too, as do all three runs with the change. The recorded 243 was
+#     taken where fewer of the userland phase's short-lived children happened
+#     to still be referenced at the dump point — the same overlap sensitivity
+#     the 2026-09-15 note describes for `pages`. Deterministic at 245 across
+#     four runs (three with, one without), so the cap is exact. `MAX_PROCESSES`
+#     is still 256, so the headroom this consumes is real and the grouping rule
+#     for utest cases still holds.
+#   Everything else stayed inside its existing cap on all three runs: boot
+#     `kernelmeta` 1750 inside 1756, post-kernel-tests `pages` 47528 inside
+#     65536, `process` 14, `residentpages` 772 exact, `task` 6, `diskblocks` 6;
+#     post-userland `pages` 1874007 inside 1887717, `residentpages` 151164
+#     inside 153268, `kernelmeta` 9216 inside 9293, `diskblocks` 2383 inside
+#     2911, `fdslot` 256, `objectrow` 257, `task` 6 and `pinnedbytes` 4.
+
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
@@ -290,7 +319,7 @@ boot	kernelmeta	1756
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	6065
+post-kernel-tests	kernelmeta	6120
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
 post-kernel-tests	process	20
@@ -303,7 +332,7 @@ post-userland-tests	kernelmeta	9293
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1887717
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	243
+post-userland-tests	process	245
 post-userland-tests	residentpages	153268
 post-userland-tests	task	10
 

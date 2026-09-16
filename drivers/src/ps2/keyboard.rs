@@ -160,8 +160,13 @@ pub fn handle_scancode(byte: u8) {
     };
     drop(state);
 
-    // Consumed here, so scrollback paging never reaches an application.
-    if pressed && mods.shift && matches!(usage, keycode::KEY_PAGEUP | keycode::KEY_PAGEDOWN) {
+    // Consumed here, so paging never reaches an application. The Ctrl variant
+    // is deliberately not: that is the GUI terminal's own scrollback chord.
+    if pressed
+        && mods.shift
+        && !mods.ctrl
+        && matches!(usage, keycode::KEY_PAGEUP | keycode::KEY_PAGEDOWN)
+    {
         if usage == keycode::KEY_PAGEUP {
             vconsole::scroll_view_up(12);
         } else {

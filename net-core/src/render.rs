@@ -222,11 +222,25 @@ pub fn write_if_flags<W: Write + ?Sized>(out: &mut W, flags: u32) -> core::fmt::
 
 /// Whether the console font has a glyph for `cp`.
 ///
-/// Mirrors the coverage in `font/src/lib.rs`; a codepoint outside it draws as
-/// the replacement glyph. Encoded here rather than taken as a dependency on
-/// `slopos-font`, a kernel-side crate this one has no other reason to link.
+/// Mirrors `slopos_font::GLYPH_RANGES`, range for range. Encoded here rather
+/// than taken as a dependency on `slopos-font`, a kernel-side crate this one
+/// has no other reason to link.
 pub const fn is_renderable(cp: u32) -> bool {
-    matches!(cp, 0x20..=0x7E | 0xA0..=0xFF | 0x20AC | 0x02DA | 0x02C7)
+    matches!(
+        cp,
+        0x0020..=0x007E
+            | 0x00A0..=0x00FF
+            | 0x0100..=0x017F
+            | 0x02C6..=0x02DD
+            | 0x0370..=0x03FF
+            | 0x0400..=0x04FF
+            | 0x2010..=0x203E
+            | 0x20A0..=0x20BF
+            | 0x2190..=0x21FF
+            | 0x2500..=0x257F
+            | 0x2580..=0x259F
+            | 0x25A0..=0x25FF
+    )
 }
 
 #[cfg(test)]
@@ -424,21 +438,41 @@ mod tests {
         assert!(checked > 2000);
     }
 
+    /// Written out again so a one-sided edit inside this file disagrees with
+    /// itself; an edit to the font crate's table is caught by the slot count.
+    const RANGES: [(u32, u32); 12] = [
+        (0x0020, 0x007E),
+        (0x00A0, 0x00FF),
+        (0x0100, 0x017F),
+        (0x02C6, 0x02DD),
+        (0x0370, 0x03FF),
+        (0x0400, 0x04FF),
+        (0x2010, 0x203E),
+        (0x20A0, 0x20BF),
+        (0x2190, 0x21FF),
+        (0x2500, 0x257F),
+        (0x2580, 0x259F),
+        (0x25A0, 0x25FF),
+    ];
+
     #[test]
-    fn renderable_range_matches_the_font() {
-        assert!(is_renderable(0x20));
-        assert!(is_renderable(0x7E));
-        assert!(!is_renderable(0x1F));
-        assert!(!is_renderable(0x7F));
-        assert!(!is_renderable(0x9F));
-        assert!(is_renderable(0xA0));
-        assert!(is_renderable(0xB7)); // middot
-        assert!(is_renderable(0xFF));
-        assert!(is_renderable(0x20AC)); // euro
-        assert!(is_renderable(0x02DA)); // ring above
-        assert!(is_renderable(0x02C7)); // caron
-        assert!(!is_renderable(0x2013)); // en dash
-        assert!(!is_renderable(0x2014)); // em dash
-        assert!(!is_renderable(0x2026)); // horizontal ellipsis
+    fn is_renderable_matches_this_file_s_range_table() {
+        let in_table = |cp: u32| RANGES.iter().any(|&(lo, hi)| cp >= lo && cp <= hi);
+        for (lo, hi) in RANGES {
+            assert!(is_renderable(lo), "U+{lo:04X} must be renderable");
+            assert!(is_renderable(hi), "U+{hi:04X} must be renderable");
+            // Three of the ranges abut, so the neighbour decides the answer.
+            for edge in [lo - 1, hi + 1] {
+                assert_eq!(
+                    is_renderable(edge),
+                    in_table(edge),
+                    "U+{edge:04X} disagrees with the range table"
+                );
+            }
+        }
+        assert_eq!(
+            RANGES.iter().map(|&(lo, hi)| hi - lo + 1).sum::<u32>(),
+            1190
+        );
     }
 }

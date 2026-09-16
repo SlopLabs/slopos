@@ -28,10 +28,11 @@ are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with two remaining exceptions (dynamic linking and the
-compiler bootstrap itself). Five more, a page-fault path that can reach the
+compiler bootstrap itself). Six more, a page-fault path that can reach the
 device, a POSIX floor a build system can stand on, a filesystem that can hold a
-tree, a utility set that is executables rather than shell builtins, and a shell
-a build script can be written in, have landed.
+tree, a utility set that is executables rather than shell builtins, a shell
+a build script can be written in, and a terminal an editor can be written
+against, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -42,8 +43,8 @@ a build script can be written in, have landed.
   toolchain-sized buffer this plan touches must become a chunked or page-list
   design rather than a bigger single allocation: `MAX_ALLOC_SIZE` is 1 MiB
   (`mm/src/slab/mod.rs:61`) and raising it is not the fix. The verity hash
-  array, the attest bitmap and a ramfs file's body are all chunked for exactly
-  this reason and are the pattern to copy.
+  array, the attest bitmap, a ramfs file's body and the glyph atlas are all
+  chunked for exactly this reason and are the pattern to copy.
 - **Stack frames ≤ 2 KiB** against a 4 KiB guard page. This is why a 4096-byte
   path lives in a `KVec` — in `CanonPath`, in `UserPath`, and in the shell —
   rather than in an array on a frame, why `NameBuf` borrows from the canonical
@@ -797,29 +798,185 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## The terminal is one an editor can be written against
+
+The seventh thing this plan rests on: a full-screen program can read the
+keyboard, read the mouse, ask the terminal what it is, and draw a frame around
+what it shows. `terminal_grid_test` is the standing proof — an in-guest test
+that drives the real encoder and the real emulator and checks the exact bytes:
+F1 as `SS3 P`, F12 as `CSI 24~`, Ctrl+Left as `CSI 1;5D`, Up as `SS3 A` once
+DECCKM is on, Shift+Tab as `CSI Z`, PageUp as `CSI 5~`, a left click as
+`CSI <0;10;5M` and its release as the same with `m`, a bare move refused under
+button-event tracking and reported under any-event, `CSI c` answered
+`CSI ?1;2c` and `CSI >c` answered `CSI >0;1;0c` with nothing printed, and
+`CSI 6n` answered with the cursor's 1-based position. Every one of those was a
+dropped key, a wrong answer, a stray glyph or a refusal before.
+
+What it rests on, in case a later phase disturbs it:
+
+- **A key is identified by its canonical keycode, not by a pseudo-byte.** The
+  keyboard driver bakes a legacy `ascii` code for nine navigation keys
+  (`named_to_legacy_ascii`, `drivers/src/ps2/keyboard.rs`) and 0 for everything
+  else, so F1–F12, Insert and Menu left the kernel already anonymous — and
+  `classify` then discarded the canonical HID `keycode` and the per-event
+  modifier byte the compositor had faithfully carried the whole way. Both were
+  drops, not absences: `encode_key` now takes a `KeyPress`
+  (`terminal-core/src/input.rs`) holding ascii, keycode, codepoint and mods. A
+  baked navigation byte still resolves first, because it is the one thing that
+  survives a keypad key whose layout meaning is navigation; everything the
+  driver left anonymous — every F-key, Insert, KP-0-as-Insert — resolves from
+  the canonical keycode, which is also a second source for the navigation block
+  so a nav key no longer *depends* on a pseudo-code the rest of the system has
+  to agree on. The unreachable scancode table that used to sit at the end of
+  the encoder is gone: `legacy_scancode = byte & 0x7F`, so no arm above 0x7F
+  could ever have matched.
+- **The encoding is xterm's PC-style one, and the modifier is a parameter.**
+  `1 + shift + 2*alt + 4*ctrl` in the second CSI parameter, so Ctrl+Left is
+  `CSI 1;5D` and Shift+F5 is `CSI 15;2~`; F1–F4 are `SS3 P`–`SS3 S` unmodified
+  and `CSI 1;mod P`–`S` modified; the editing keypad is `CSI n ~` with the
+  modifier as its second parameter. DECCKM is honoured — the parser had tracked
+  `cursor_key_mode` since it was written and nothing had ever read it — and only
+  for an *unmodified* cursor key, because a modified one needs the parameter
+  slot that `SS3` does not have. AltGr is excluded from the Alt bit: the kernel
+  reports it with `MODIFIER_ALT` set as well, and counting it would turn the
+  `@` an AltGr level resolved into a modified keypress.
+- **Alt is a prefix, Shift+Tab is a sequence.** Alt+x is `ESC x` and Alt+ä is
+  `ESC` plus the UTF-8, which is what every terminal does and what a line
+  editor's meta bindings are written against. Shift+Tab is `CSI Z`, and the
+  modifier snapshot is the only thing that can produce it: the keymap folds Tab
+  and Shift+Tab to the same 0x09.
+- **PgUp/PgDn belong to the application.** They were consumed locally for
+  scrollback, so a full-screen program could not page. The local scrollback
+  chord is now Ctrl+Shift+PgUp/PgDn, beside the Ctrl+Shift+C/V clipboard chords
+  that were already terminal commands — and the kernel's own Shift+PgUp
+  interception for the vconsole had to learn to require Shift *without* Ctrl, or
+  the chord would never have reached a client at all.
+- **Mouse reporting is the application's, and Shift is the way out.** DECSET
+  1000/1002/1003 select press-only, drag and any-motion; 1006 selects the SGR
+  encoding. The three tracking modes are one selector, as xterm has them, so
+  resetting any of them stops reporting. While reporting is on, a pointer event
+  drives the PTY instead of the local selection — unless Shift is held, which is
+  xterm's override and the only reason a selection stays possible under a
+  full-screen program. Motion emits one report per *cell crossed*, not per
+  pixel, and the X10 encoding refuses a coordinate past 223 rather than
+  truncating it into the wrong cell: it has one byte per field, and 1006 is the
+  encoding with no such limit.
+- **A query is answered on the turn it was asked.** `VtAction` gained
+  `DeviceAttributes` and `DeviceStatus`, the grid gained a bounded reply queue,
+  and the event loop drains it into the existing `MasterWriteQueue` immediately
+  after `drain_master` rather than at the next wake — a program blocked reading
+  a CPR would otherwise wait for a keystroke or a blink. The queue is 256 bytes
+  and drops a whole answer rather than truncating one, because a half-written
+  `CSI ?1;2c` is worse than silence. A reply is also not a cursor movement, so
+  it must not cancel a deferred autowrap the way every other non-printing action
+  does.
+- **A CSI private marker is tracked rather than aborted on.** `?` was the only
+  marker the parser knew; `>` dropped it back to Ground, so `CSI > c` printed a
+  literal `c` into the grid the moment an editor probed for a secondary DA. The
+  marker is now a byte, and dispatch is split by it — which also closed the
+  quieter half of the same bug: the old dispatch consulted the marker for
+  `h`/`l` and for nothing else, so `CSI ? 5 m` reached the SGR handler and
+  turned a mode query into a blink attribute.
+- **The shell's own decoder understands what the terminal now sends.** It
+  matched `CSI A`/`CSI 3~` and a handful of literal forms, and answered
+  `Partial` for anything parameterised until the buffer passed eight bytes — so
+  one Ctrl+Left swallowed the next characters typed. It recognizes the whole
+  CSI/SS3 shape now (parameters, intermediates, one final byte), and a
+  well-formed sequence it has no use for is consumed *whole*: that is what keeps
+  an F-key's tail from arriving as text. Ctrl or Alt on a horizontal arrow is
+  word motion, sharing the boundary rule `CTRL_W` already deleted to. `ESC`
+  plus a byte that cannot begin a sequence is the one form it re-emits instead
+  of consuming: nothing here binds a meta chord, and dropping the pair would
+  make Alt+x type nothing where it used to type `x` — and would swallow the
+  lead byte of Alt+ä outright.
+- **The glyph set is the blocks a TUI draws with.** 194 slots became 1190 over
+  twelve ranges (`GLYPH_RANGES`, `font/src/lib.rs`): ASCII, Latin-1, Latin
+  Extended-A, the spacing accents a dead key can flush, Greek, Cyrillic, General
+  Punctuation, Currency, Arrows, Box Drawing, Block Elements and Geometric
+  Shapes — which is what the shipped JetBrains Mono actually covers, so "non-
+  Latin renders" means the scripts the font has rather than a promise it cannot
+  keep.
+- **Box drawing and block elements are drawn, not rasterized.** The atlas cell
+  is derived from ASCII metrics and a glyph is centred on its advance and
+  clipped, and JetBrains Mono's box glyphs do not span the em box — rasterizing
+  them leaves a seam at every cell boundary, which is a framed TUI that looks
+  broken. `font/src/boxdraw.rs` draws U+2500..U+259F procedurally instead, as
+  kitty and wezterm do: one `Geom` derives the midlines and the light/heavy/
+  double thicknesses from the cell once, every stroke goes through it, so a
+  weight lands on identical rows in every glyph that carries it. The line block
+  is a 128-entry weight table (four legs × none/light/heavy/double) plus one
+  renderer rather than 128 hand-written cases; the eighths are
+  `round(n * extent / 8)` so `█` equals `▀ | ▄` byte for byte; the shades are a
+  4×4 Bayer dither, not a flat grey, so a shaded region reads as texture at any
+  cell size. The boot console gets the same coverage, which the VGA 8×16 ROM
+  font has none of.
+- **The atlas is chunked, and a missing glyph is the notdef.** One
+  `KVec::zeroed(GLYPH_COUNT * stride)` at 1190 slots and the ABI's largest
+  32×32 cell is 1.2 MB, past `MAX_ALLOC_SIZE`; storage is now `KVec<KVec<u8>>`
+  in 256 KiB pieces behind an `AtlasBuilder`, and the `SYS_FONT_SET` handler
+  copies the user buffer into each chunk in turn instead of materialising the
+  upload. `get_coverage` is two divisions and a slice index, still the per-cell
+  hot path. A set codepoint the loaded font lacks now reads back the replacement
+  diamond rather than a blank cell — without which growing the set by a thousand
+  slots would have turned a visible notdef into an invisible one. The keying is
+  `glyph_index(cp)` answering a *non-zero* glyph id: it answers `Some(0)`, never
+  `None`, for a codepoint its cmap does not cover.
+- **The measured cost.** At JetBrains Mono 16 px the cell is 10×22, so the
+  atlas is 261 800 bytes in one chunk; at the ABI's 32×32 maximum it is
+  1 218 560 bytes in five. The upload ceiling is `(GLYPH_COUNT + 1) * 32 * 32`
+  and bounds *user* memory only. `net-core`'s hand-copied `is_renderable`
+  mirror moved in lockstep, and its test asserts both ends of all twelve ranges
+  rather than a sample.
+
+**What this deliberately did not do.**
+
+- **The kernel vconsole answers no query.** Its reply would have to reach the
+  line discipline of the very TTY whose write lock it runs under, so a DA or DSR
+  on `/dev/tty0` is ignored rather than answered wrongly; a program that queries
+  there sees a timeout. Routing a reply through the deferred `PostLockWork` the
+  echo flush already uses is the shape of the fix, and it is a TTY-layer change
+  rather than a terminal one.
+- **No `modifyOtherKeys`, no CSI-u, no Kitty keyboard protocol.** Ctrl folding
+  happens in the kernel keymap, so `Ctrl+A` arrives as 0x01 and the terminal
+  cannot report `Ctrl+;` at all — the kernel's `ctrl_transform` covers letters
+  only. That is a keymap gap with a terminal-visible symptom, and the protocols
+  that would expose it need the unfolded key, not a different encoder.
+- **No focus reporting (1004), no 1005/1015 mouse encodings, no SGR-pixel
+  (1016).** Focus needs a keyboard-focus event the compositor does not send a
+  client; the other two are encodings nothing modern asks for once 1006 exists.
+- **Bold is still a brighter colour and underline is still invisible.** A cell
+  holds `{codepoint, fg, bg}` and the attributes are flattened into the colours
+  at print time, so `SGR 4` is parsed, tracked on the cursor, and then dropped.
+  Fixing it means an attribute byte per cell — `Cell` is 12 bytes across a
+  100×240 grid plus two 1000-row rings — and `Cell::is_blank`'s definition,
+  which the whole reflow trim rests on. Stated rather than hidden: an editor
+  drawing with colour is served, one drawing with underline is not.
+- **No astral-plane glyphs and no CJK.** The TTF parser reads cmap format 4
+  only, so anything past U+FFFF resolves to nothing, and the shipped mono font
+  has no CJK to cover even if it did.
+
+---
+
 ## Phase 1 — A workbench you can type in
 
 **Outcome:** you can edit a file, search a tree, run a script, and read the
 output — without a Linux host.
 
-### Workstream 1.1 — A terminal an editor can use (**M**)
+### Workstream 1.1 — An editor (**M**)
 
-`encode_key` emits arrows, Home, End and Delete only
-(`terminal-core/src/input.rs:230-282`): no F1–F12 (the keycodes exist and are
-dropped), no Alt-prefixing, no modified arrows, no `CSI Z`, and PageUp/PageDown
-never reach the PTY. No mouse reporting, no DA/DSR replies. The font atlas
-covers ASCII + Latin-1, so box-drawing and non-Latin source render as diamonds.
+The only thing left in this phase. Write one — not because C is foreclosed (it
+is not; see Workstream 2.6), but because nothing upstream is reachable *before*
+a C frontend exists, and because an editor is where a desktop OS earns its
+character. Highlighting does not have to wait for C either: `syntect` with the
+pure-Rust `fancy-regex` backend is a Rust-only path to TextMate grammars.
 
-### Workstream 1.2 — An editor (**M**)
-
-Write one — not because C is foreclosed (it is not; see Workstream 2.6), but
-because nothing upstream is reachable *before* a C frontend exists, and because
-an editor is where a desktop OS earns its character. Highlighting does not have
-to wait for C either: `syntect` with the pure-Rust `fancy-regex` backend is a
-Rust-only path to TextMate grammars. Start against the existing terminal; the
-GUI version needs a real multi-line text widget, which `appkit` does not have (a
-single-line `text_field`, and a byte-oriented text API). helix comes back onto
-the table once 2.6 compiles tree-sitter.
+The terminal is no longer the constraint it was: the key coverage, the mouse
+protocol, the device queries and the box-drawing glyphs a full-screen editor
+needs are all in place (see above), and what an editor will still find missing
+is a per-cell underline and the unfolded Ctrl chords — both named there. Start
+against that terminal; the GUI version needs a real multi-line text widget,
+which `appkit` does not have (a single-line `text_field`, and a byte-oriented
+text API). helix comes back onto the table once 2.6 compiles tree-sitter.
 
 **Zed is not a roadmap item.** It needs wgpu → Vulkan (no GPU driver, and the
 Vulkan loader is itself a `dlopen` ICD architecture), tree-sitter, a live C++
@@ -828,8 +985,8 @@ Every one of those is a separate multi-month project whose payoff is one editor.
 
 **Phase 1 exit criteria:** a shell script in the guest checks out, greps,
 edits and archives a source tree, driven from a terminal running a native
-editor. The utilities that script calls and the shell that runs it are both in
-place; what is left is the terminal's key coverage and the editor itself.
+editor. The utilities that script calls, the shell that runs it and the
+terminal it runs in are all in place; what is left is the editor itself.
 
 ---
 
@@ -1069,8 +1226,19 @@ every image this kernel writes.
 
 - `mm/src/elf.rs` — `PT_INTERP` rejection, the one image cap that is still
   policy rather than plumbing (Phase 2).
-- `terminal-core/src/input.rs:230-282`, `font/src/lib.rs:29-48` — key encoding
-  and glyph coverage (Phase 1).
+- `vt/src/lib.rs`, `terminal-core/src/{input,grid}.rs`,
+  `userland/src/apps/terminal/{input,mod}.rs`,
+  `userland/src/apps/shell/input.rs`, `font/src/{lib,atlas,boxdraw,bitmap}.rs`,
+  `core/src/syscall/font_handlers.rs`, `net-core/src/render.rs` — the terminal
+  above. Listed not as work but as what a later phase must not quietly undo:
+  the parser's private-marker byte (`>` must not reach the SGR handler), the
+  reply queue's drop-whole-answers rule and its drain landing on the same loop
+  turn, "a reply is not a cursor movement" (it must not cancel a pending
+  autowrap), Shift as the mouse-reporting override, the kernel's Shift+PgUp
+  interception requiring Shift *without* Ctrl, `boxdraw`'s single `Geom` (every
+  stroke must come from it or cells stop joining), the atlas chunk arithmetic,
+  and `is_renderable` mirroring `GLYPH_RANGES` — each is an invariant a change
+  nearby can break without failing to compile.
 - `shell-core/src/{lexer,syntax,pattern,fields,arith,param,qbuf}.rs`,
   `userland/src/apps/shell/{expand,glob,exec,funcs}.rs` — the shell above.
   Listed not as work but as what a later phase must not quietly undo: the

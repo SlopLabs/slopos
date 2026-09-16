@@ -1,8 +1,9 @@
 //! Font management syscall handlers (inspired by Linux KDFONTOP).
 
 use slopos_abi::Errno;
+use slopos_abi::io::IoBufRead;
 use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
-use slopos_mm::user_io_buf::memdup_user;
+use slopos_mm::user_io_buf::{UserReadBuf, memdup_user};
 use slopos_ostd::klog_info;
 
 static FONT_WRITER_LOCK: slopos_ostd::sync::SpinLock<()> = slopos_ostd::sync::SpinLock::new(
@@ -38,35 +39,39 @@ define_syscall!(syscall_font_set
             return Err(Errno::EINVAL);
         }
 
-        // (GLYPH_COUNT + 1) cells of at most 32×32 px is ~200 KiB.
-        const MAX_COVERAGE_UPLOAD: usize = 256 * 1024;
+        // Bounds the *user* buffer only; the atlas reads it in chunks. It is
+        // also what bounds `width`, which the ABI leaves a full `u16`.
+        const MAX_COVERAGE_UPLOAD: usize = (slopos_font::GLYPH_COUNT + 1) * 32 * 32;
         let stride = (width as usize).checked_mul(height as usize).ok_or(Errno::EINVAL)?;
-        let coverage_size = slopos_font::GLYPH_COUNT.checked_mul(stride).ok_or(Errno::EINVAL)?;
         let data_size = (slopos_font::GLYPH_COUNT + 1)
             .checked_mul(stride)
             .filter(|&size| size <= MAX_COVERAGE_UPLOAD)
             .ok_or(Errno::EINVAL)?;
 
-        let mut font_data = memdup_user(data_ptr, data_size, MAX_COVERAGE_UPLOAD)
-            .map_err(|e| Errno::from_raw(e.raw()).unwrap_or(Errno::EINVAL))?;
+        let src = UserReadBuf::new(data_ptr, data_size).ok_or(Errno::EFAULT)?;
+        let mut builder = slopos_font::atlas::AtlasBuilder::new(width, height).ok_or(Errno::ENOMEM)?;
 
-        let replacement = font_data.split_off(coverage_size);
-        let coverage = font_data;
-        match slopos_font::atlas::GlyphAtlas::from_raw_coverage(
-            width, height, coverage, replacement, slopos_font::FontSource::Syscall,
-        ) {
-            Some(atlas) => {
-                replace_and_schedule_free(atlas);
-                klog_info!(
-                    "FONT_SET: applied {}x{} coverage font ({} glyphs + replacement)",
-                    width,
-                    height,
-                    glyph_count,
-                );
-                Ok(())
+        let mut at = 0usize;
+        for index in 0..builder.chunk_count() {
+            let chunk = builder.chunk_mut(index).ok_or(Errno::EINVAL)?;
+            if src.copy_out(at, chunk)? != chunk.len() {
+                return Err(Errno::EFAULT);
             }
-            None => Err(Errno::ENOMEM),
+            at += chunk.len();
         }
+        let replacement = builder.replacement_mut();
+        if src.copy_out(at, replacement)? != replacement.len() {
+            return Err(Errno::EFAULT);
+        }
+
+        replace_and_schedule_free(builder.finish(slopos_font::FontSource::Syscall));
+        klog_info!(
+            "FONT_SET: applied {}x{} coverage font ({} glyphs + replacement)",
+            width,
+            height,
+            glyph_count,
+        );
+        Ok(())
     } else if format == FONT_FORMAT_BITMAP {
         if width != 8 {
             return Err(Errno::EINVAL);
@@ -87,26 +92,15 @@ define_syscall!(syscall_font_set
             .map_err(|e| Errno::from_raw(e.raw()).unwrap_or(Errno::EINVAL))?;
 
         match slopos_font::bitmap::bitmap_to_coverage(&font_data, width, height, glyph_count) {
-            Some((coverage, replacement)) => {
-                match slopos_font::atlas::GlyphAtlas::from_raw_coverage(
+            Some(builder) => {
+                replace_and_schedule_free(builder.finish(slopos_font::FontSource::Syscall));
+                klog_info!(
+                    "FONT_SET: applied {}x{} bitmap font ({} glyphs)",
                     width,
                     height,
-                    coverage,
-                    replacement,
-                    slopos_font::FontSource::Syscall,
-                ) {
-                    Some(atlas) => {
-                        replace_and_schedule_free(atlas);
-                        klog_info!(
-                            "FONT_SET: applied {}x{} bitmap font ({} glyphs)",
-                            width,
-                            height,
-                            glyph_count,
-                        );
-                        Ok(())
-                    }
-                    None => Err(Errno::ENOMEM),
-                }
+                    glyph_count,
+                );
+                Ok(())
             }
             None => Err(Errno::EINVAL),
         }

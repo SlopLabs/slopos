@@ -1,14 +1,13 @@
 //! Classic VGA 8×16 bitmap font (public domain), the fallback used whenever
 //! TrueType fonts cannot be loaded — including on panic screens.
 
-use slopos_ostd::KVec;
-
 pub const BITMAP_FONT_WIDTH: u16 = 8;
 pub const BITMAP_FONT_HEIGHT: u16 = 16;
 pub const BITMAP_FONT_GLYPH_COUNT: usize = 256;
 pub const BITMAP_FONT_BYTES_PER_GLYPH: usize = 16;
 
-use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT};
+use crate::atlas::AtlasBuilder;
+use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, boxdraw, slot_codepoint};
 
 /// One glyph's 16 rows, one byte per row (MSB = leftmost pixel).
 pub fn glyph_bitmap(codepoint: u8) -> &'static [u8] {
@@ -34,12 +33,15 @@ pub fn render_bitmap_glyph(codepoint: u8, out: &mut [u8]) -> (u16, u16) {
     (BITMAP_FONT_WIDTH, BITMAP_FONT_HEIGHT)
 }
 
+/// Expand 1bpp `data` into a coverage atlas over the whole glyph set: ASCII
+/// from the bitmap, box drawing and block elements procedurally, and a `?`
+/// notdef everywhere else.
 pub fn bitmap_to_coverage(
     data: &[u8],
     width: u16,
     height: u16,
     glyph_count: usize,
-) -> Option<(KVec<u8>, KVec<u8>)> {
+) -> Option<AtlasBuilder> {
     if width != 8 || height == 0 || glyph_count == 0 {
         return None;
     }
@@ -50,12 +52,6 @@ pub fn bitmap_to_coverage(
     if data.len() < required_len {
         return None;
     }
-
-    // Sized to the full glyph set; the bitmap fallback is ASCII-only, so the
-    // extended slots stay blank.
-    let stride = cell_w.checked_mul(cell_h)?;
-    let coverage_len = GLYPH_COUNT.checked_mul(stride)?;
-    let mut coverage = KVec::<u8>::zeroed(coverage_len).ok()?;
 
     let expand_glyph = |glyph_index: usize, out: &mut [u8]| {
         let glyph_offset = glyph_index * cell_h;
@@ -68,23 +64,26 @@ pub fn bitmap_to_coverage(
         }
     };
 
-    for cp in ASCII_FIRST..=ASCII_LAST {
-        let glyph_slot = (cp - ASCII_FIRST) as usize;
-        let cell = &mut coverage[glyph_slot * stride..(glyph_slot + 1) * stride];
-        if (cp as usize) < glyph_count {
-            expand_glyph(cp as usize, cell);
-        }
-    }
-
-    let mut replacement = KVec::<u8>::zeroed(stride).ok()?;
-    let replacement_glyph = if (b'?' as usize) < glyph_count {
+    let notdef = if (b'?' as usize) < glyph_count {
         b'?' as usize
     } else {
         0
     };
-    expand_glyph(replacement_glyph, &mut replacement);
 
-    Some((coverage, replacement))
+    let mut builder = AtlasBuilder::new(width, height)?;
+    expand_glyph(notdef, builder.replacement_mut());
+
+    for slot in 0..GLYPH_COUNT {
+        let cp = slot_codepoint(slot)?;
+        let cell = builder.slot_mut(slot)?;
+        if (ASCII_FIRST..=ASCII_LAST).contains(&cp) && (cp as usize) < glyph_count {
+            expand_glyph(cp as usize, cell);
+        } else if !boxdraw::draw(cp, cell, cell_w, cell_h) {
+            expand_glyph(notdef, cell);
+        }
+    }
+
+    Some(builder)
 }
 
 #[cfg(test)]
@@ -99,9 +98,6 @@ mod tests {
         let mut data =
             slopos_ostd::KVec::<u8>::zeroed(glyph_count * height as usize).expect("test alloc");
 
-        let glyph0 = 0usize;
-        data[glyph0 * 16] = 0b1111_0000;
-
         let glyph_space = 32usize;
         data[glyph_space * 16] = 0b1000_0001;
         data[glyph_space * 16 + 1] = 0b0100_0010;
@@ -112,17 +108,23 @@ mod tests {
         let glyph_q = 63usize;
         data[glyph_q * 16] = 0b1111_0000;
 
-        let (coverage, replacement) =
-            bitmap_to_coverage(&data, width, height, glyph_count).expect("must convert");
+        let atlas = bitmap_to_coverage(&data, width, height, glyph_count)
+            .expect("must convert")
+            .finish(crate::FontSource::BitmapFallback);
 
         let stride = width as usize * height as usize;
-        assert_eq!(coverage.len(), crate::GLYPH_COUNT * stride);
-        assert_eq!(replacement.len(), stride);
+        assert_eq!(atlas.coverage_len(), crate::GLYPH_COUNT * stride);
+        assert_eq!(atlas.replacement().len(), stride);
 
-        assert_eq!(&coverage[0..8], &[255, 0, 0, 0, 0, 0, 0, 255]);
-        assert_eq!(&coverage[8..16], &[0, 255, 0, 0, 0, 0, 255, 0]);
-        assert_eq!(&coverage[stride..stride + 8], &[255; 8]);
-        assert_eq!(&replacement[0..8], &[255, 255, 255, 255, 0, 0, 0, 0]);
+        let space = atlas.get_coverage(0x20);
+        assert_eq!(&space[0..8], &[255, 0, 0, 0, 0, 0, 0, 255]);
+        assert_eq!(&space[8..16], &[0, 255, 0, 0, 0, 0, 255, 0]);
+        assert_eq!(&atlas.get_coverage(0x21)[0..8], &[255; 8]);
+        assert_eq!(
+            &atlas.replacement()[0..8],
+            &[255, 255, 255, 255, 0, 0, 0, 0]
+        );
+        assert_eq!(atlas.get_coverage(0xA0), atlas.replacement());
     }
 
     #[test]

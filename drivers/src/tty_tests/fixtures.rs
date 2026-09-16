@@ -28,7 +28,9 @@ pub(super) use crate::tty::vconsole::{
     Cell, CellAttributes, CellGrid, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
     VConsoleState,
 };
-pub(super) use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+pub(super) use crate::tty::vtparser::{
+    Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser,
+};
 pub(super) use crate::tty::{PacketEvents, TtyFlags};
 pub(super) use slopos_ostd::process::quota::FileBacking;
 pub(super) use slopos_ostd::task::{ProcessGroup, Session};

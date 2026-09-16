@@ -11,14 +11,20 @@ use slopos_protocol::types::Event as ProtocolEvent;
 pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
     match evt {
         ProtocolEvent::Key {
-            scancode,
             ascii,
+            keycode,
             codepoint,
+            modifiers,
             pressed,
             ..
         } => {
             if *pressed {
-                CompositorEvent::Key(*ascii as u8, *scancode as u8, *codepoint)
+                CompositorEvent::Key(KeyPress {
+                    ascii: *ascii as u8,
+                    keycode: *keycode as u16,
+                    codepoint: *codepoint,
+                    mods: *modifiers as u8,
+                })
             } else {
                 CompositorEvent::Ignored
             }

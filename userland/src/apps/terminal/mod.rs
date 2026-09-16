@@ -19,7 +19,7 @@ use crate::ring::{Ring, slopfut};
 use crate::syscall::{ShmBuffer, fs, process, tty};
 
 use grid::TerminalGrid;
-use input::{CompositorEvent, KeyAction, PointerState, Selection};
+use input::{CompositorEvent, KeyAction, KeyBytes, MouseEventKind, PointerState, Selection};
 use slopos_terminal_core::damage::{CellDamage, DamageHistory};
 
 const WINDOW_WIDTH: i32 = 640;
@@ -174,6 +174,14 @@ fn spawn_shell_on_slave(slave_fd: i32) {
     }
 }
 
+fn enqueue_mouse(queue: &mut MasterWriteQueue, report: Option<KeyBytes>) {
+    if let Some(bytes) = report {
+        if !queue.enqueue_action_back(bytes.as_bytes().to_vec()) {
+            // Drop the whole report rather than truncating it.
+        }
+    }
+}
+
 /// The `block_on` root: selects over compositor readiness, master readiness and
 /// the cursor-blink timer.
 async fn event_loop(
@@ -198,6 +206,8 @@ async fn event_loop(
     // Destination memfd handed to the compositor between a PasteReady and its
     // PasteResult: the receiver provides the buffer.
     let mut pending_paste: Option<ShmBuffer> = None;
+    // One motion report per cell crossed rather than one per pixel.
+    let mut last_mouse_cell: Option<(usize, usize)> = None;
 
     // The first frame has no buffer contents to build on.
     let _ = grid.take_damage();
@@ -220,8 +230,8 @@ async fn event_loop(
                 continue;
             }
             match input::classify(&evt) {
-                CompositorEvent::Key(ascii, scancode, codepoint) => {
-                    match input::encode_key(ascii, scancode, codepoint, mods) {
+                CompositorEvent::Key(key) => {
+                    match input::encode_key(key, grid.application_cursor_keys()) {
                         KeyAction::ToMaster(bytes) => {
                             let action = bytes.as_bytes().to_vec();
                             if is_priority_keyboard_control(bytes.as_bytes()) {
@@ -280,6 +290,8 @@ async fn event_loop(
                             }
                         }
                         push_winsize(master_fd, rows, cols);
+                        // A cell coordinate means something else now.
+                        last_mouse_cell = None;
                         // New buffers: nothing recorded describes them.
                         history.clear();
                         pending.set_rows(grid.rows as usize);
@@ -300,19 +312,65 @@ async fn event_loop(
                     ptr.last_y = y;
                     ptr.has_focus = true;
                     let (cw, ch) = cell_metrics();
-                    if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
+                    if input::mouse_reporting(grid, mods) {
+                        let cell = input::pixel_to_cell(x, y, cw, ch, grid);
+                        if last_mouse_cell != Some(cell) {
+                            last_mouse_cell = Some(cell);
+                            enqueue_mouse(
+                                &mut pending_writes,
+                                input::mouse_report_at(
+                                    grid,
+                                    MouseEventKind::Motion,
+                                    0,
+                                    ptr.button_state,
+                                    x,
+                                    y,
+                                    cw,
+                                    ch,
+                                    mods,
+                                ),
+                            );
+                        }
+                    } else if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
                         repaint_all = true;
                     }
                 }
                 CompositorEvent::PointerLeave => {
                     ptr.has_focus = false;
+                    last_mouse_cell = None;
                 }
                 CompositorEvent::Scroll(value_v120) => {
-                    let lines = input::wheel_scroll_lines(value_v120);
-                    if lines < 0 {
-                        grid.scroll_view_up((-lines) as usize);
-                    } else if lines > 0 {
-                        grid.scroll_view_down(lines as usize);
+                    if input::mouse_reporting(grid, mods) {
+                        let notches = value_v120 / 120;
+                        let kind = if notches < 0 {
+                            MouseEventKind::WheelUp
+                        } else {
+                            MouseEventKind::WheelDown
+                        };
+                        let (cw, ch) = cell_metrics();
+                        for _ in 0..notches.unsigned_abs() {
+                            enqueue_mouse(
+                                &mut pending_writes,
+                                input::mouse_report_at(
+                                    grid,
+                                    kind,
+                                    0,
+                                    ptr.button_state,
+                                    ptr.last_x,
+                                    ptr.last_y,
+                                    cw,
+                                    ch,
+                                    mods,
+                                ),
+                            );
+                        }
+                    } else {
+                        let lines = input::wheel_scroll_lines(value_v120);
+                        if lines < 0 {
+                            grid.scroll_view_up((-lines) as usize);
+                        } else if lines > 0 {
+                            grid.scroll_view_down(lines as usize);
+                        }
                     }
                 }
                 CompositorEvent::PointerButton { pressed, code } => {
@@ -322,13 +380,36 @@ async fn event_loop(
                         ptr.button_state &= !code;
                     }
                     let (cw, ch) = cell_metrics();
-                    if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
-                        repaint_all = true;
-                    }
-                    // A bare click leaves the selection inactive, so only a
-                    // real drag reaches the clipboard here.
-                    if !pressed && selection.is_active() {
-                        copy_selection(handle, grid, &selection);
+                    if input::mouse_reporting(grid, mods) {
+                        last_mouse_cell =
+                            Some(input::pixel_to_cell(ptr.last_x, ptr.last_y, cw, ch, grid));
+                        enqueue_mouse(
+                            &mut pending_writes,
+                            input::mouse_report_at(
+                                grid,
+                                if pressed {
+                                    MouseEventKind::Press
+                                } else {
+                                    MouseEventKind::Release
+                                },
+                                code,
+                                ptr.button_state,
+                                ptr.last_x,
+                                ptr.last_y,
+                                cw,
+                                ch,
+                                mods,
+                            ),
+                        );
+                    } else {
+                        if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
+                            repaint_all = true;
+                        }
+                        // A bare click leaves the selection inactive, so only
+                        // a real drag reaches the clipboard here.
+                        if !pressed && selection.is_active() {
+                            copy_selection(handle, grid, &selection);
+                        }
                     }
                 }
                 CompositorEvent::PasteReady(len) => {
@@ -358,10 +439,19 @@ async fn event_loop(
             }
         }
 
+        // Output damages the cells it writes, so nothing extra is needed here.
+        let drained = drain_master(master_fd, grid);
+
+        // On the turn the query arrived: a program blocked reading a CPR would
+        // otherwise wait for the next compositor or timer wake.
+        let replies = grid.take_replies();
+        if !replies.is_empty() && !pending_writes.enqueue_action_back(replies) {
+            // Drop the whole answer rather than truncating it.
+        }
+
         pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 
-        // Output damages the cells it writes, so nothing extra is needed here.
-        match drain_master(master_fd, grid) {
+        match drained {
             MasterDrain::Eof => return ExitReason::ShellGone,
             MasterDrain::Data | MasterDrain::Idle => {}
         }

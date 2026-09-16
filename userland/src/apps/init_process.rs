@@ -15,10 +15,11 @@ fn upgrade_console_font() {
         Some(a) => a,
         None => return,
     };
-    let (coverage, replacement) = atlas.coverage_and_replacement();
-    let mut payload = Vec::with_capacity(coverage.len() + replacement.len());
-    payload.extend_from_slice(coverage);
-    payload.extend_from_slice(replacement);
+    let mut payload = Vec::with_capacity(atlas.coverage_len() + atlas.replacement().len());
+    for chunk in atlas.coverage_chunks() {
+        payload.extend_from_slice(chunk);
+    }
+    payload.extend_from_slice(atlas.replacement());
     tty::font_set_coverage(
         &payload,
         atlas.cell_width() as u16,

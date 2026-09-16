@@ -1,6 +1,6 @@
-//! Host-side unit tests for the VT100/ANSI parser.
+//! Host-side unit tests for the VT parser.
 
-use super::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+use super::{Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser};
 
 #[test]
 fn print_ascii() {
@@ -275,6 +275,140 @@ fn decom_toggle() {
         parser.advance(b);
     }
     assert!(!parser.origin_mode);
+}
+
+/// The `>` used to abort the sequence, printing a literal `c` into the grid.
+#[test]
+fn device_attributes_primary_and_secondary() {
+    let mut parser = VtParser::new();
+    let mut last = VtAction::Nop;
+    for &b in b"\x1b[c" {
+        last = parser.advance(b);
+    }
+    assert_eq!(last, VtAction::DeviceAttributes { secondary: false });
+
+    for &b in b"\x1b[>c" {
+        last = parser.advance(b);
+    }
+    assert_eq!(last, VtAction::DeviceAttributes { secondary: true });
+
+    for &b in b"\x1b[>0c" {
+        last = parser.advance(b);
+    }
+    assert_eq!(last, VtAction::DeviceAttributes { secondary: true });
+}
+
+#[test]
+fn device_status_carries_the_raw_request() {
+    let mut parser = VtParser::new();
+    let mut last = VtAction::Nop;
+    for &b in b"\x1b[6n" {
+        last = parser.advance(b);
+    }
+    assert_eq!(
+        last,
+        VtAction::DeviceStatus {
+            request: 6,
+            private: false,
+        }
+    );
+
+    for &b in b"\x1b[?6n" {
+        last = parser.advance(b);
+    }
+    assert_eq!(
+        last,
+        VtAction::DeviceStatus {
+            request: 6,
+            private: true,
+        }
+    );
+}
+
+/// `param` folds 0 into the caller's default, so a DSR request of 0 must come
+/// from `param_raw` or `CSI 0 n` would be indistinguishable from `CSI 6 n`.
+#[test]
+fn a_zero_status_request_is_not_a_default() {
+    let mut parser = VtParser::new();
+    let mut last = VtAction::Nop;
+    for &b in b"\x1b[0n" {
+        last = parser.advance(b);
+    }
+    assert_eq!(
+        last,
+        VtAction::DeviceStatus {
+            request: 0,
+            private: false,
+        }
+    );
+}
+
+#[test]
+fn a_private_marker_does_not_leak_into_sgr() {
+    let mut parser = VtParser::new();
+    let mut last = VtAction::Nop;
+    for &b in b"\x1b[>4;2m" {
+        last = parser.advance(b);
+    }
+    assert_eq!(last, VtAction::Nop);
+    assert!(parser.take_pending().is_none());
+}
+
+/// The old dispatch consulted the marker for `h`/`l` and nothing else, so
+/// `CSI ? 5 m` reached the SGR handler.
+#[test]
+fn a_dec_private_marker_does_not_leak_into_sgr() {
+    let mut parser = VtParser::new();
+    let mut last = VtAction::Nop;
+    for &b in b"\x1b[?5m" {
+        last = parser.advance(b);
+    }
+    assert_eq!(last, VtAction::Nop);
+    assert!(parser.take_pending().is_none());
+}
+
+#[test]
+fn mouse_tracking_modes_are_mutually_exclusive() {
+    let mut parser = VtParser::new();
+    assert_eq!(parser.mouse_tracking, MouseTracking::Off);
+    for &b in b"\x1b[?1000h" {
+        parser.advance(b);
+    }
+    assert_eq!(parser.mouse_tracking, MouseTracking::Normal);
+    for &b in b"\x1b[?1002h" {
+        parser.advance(b);
+    }
+    assert_eq!(parser.mouse_tracking, MouseTracking::ButtonEvent);
+    for &b in b"\x1b[?1003h" {
+        parser.advance(b);
+    }
+    assert_eq!(parser.mouse_tracking, MouseTracking::AnyEvent);
+    // xterm treats the three as one selector, so resetting any of them stops
+    // reporting outright.
+    for &b in b"\x1b[?1000l" {
+        parser.advance(b);
+    }
+    assert_eq!(parser.mouse_tracking, MouseTracking::Off);
+}
+
+#[test]
+fn sgr_mouse_encoding_toggles_independently() {
+    let mut parser = VtParser::new();
+    assert!(!parser.mouse_sgr);
+    for &b in b"\x1b[?1006h" {
+        parser.advance(b);
+    }
+    assert!(parser.mouse_sgr);
+    assert_eq!(parser.mouse_tracking, MouseTracking::Off);
+    for &b in b"\x1b[?1002h" {
+        parser.advance(b);
+    }
+    assert!(parser.mouse_sgr);
+    for &b in b"\x1b[?1006l" {
+        parser.advance(b);
+    }
+    assert!(!parser.mouse_sgr);
+    assert_eq!(parser.mouse_tracking, MouseTracking::ButtonEvent);
 }
 
 #[test]

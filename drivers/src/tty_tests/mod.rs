@@ -672,6 +672,8 @@ slopos_testing::stest!(name = test_parser_fuzz_no_panic, suite = tty);
 slopos_testing::stest!(name = test_vconsole_erase_line, suite = tty);
 slopos_testing::stest!(name = test_cursor_movement_clamping, suite = tty);
 slopos_testing::stest!(name = test_vconsole_scroll_up, suite = tty);
+slopos_testing::stest!(name = test_secondary_da_query_is_recognized, suite = tty);
+slopos_testing::stest!(name = test_mouse_tracking_modes, suite = tty);
 slopos_testing::stest!(name = test_extproc_flag_value, suite = tty);
 slopos_testing::stest!(name = test_extproc_no_echo, suite = tty);
 slopos_testing::stest!(name = test_extproc_no_canonical_editing, suite = tty);

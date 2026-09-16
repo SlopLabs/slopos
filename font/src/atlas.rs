@@ -7,18 +7,113 @@ use slopos_abi::draw::{Canvas, Color32};
 
 use crate::{FontRenderer, FontSource};
 
-use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, glyph_slot, slot_codepoint};
+use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, boxdraw, glyph_slot, slot_codepoint};
+
+/// Bytes one coverage chunk aims for: the whole set is past the 1 MiB a single
+/// kernel allocation may be once the cell reaches 32x32.
+pub const CHUNK_TARGET_BYTES: usize = 256 * 1024;
 
 /// Pre-rasterized fixed-width glyph atlas: every glyph-set codepoint (see
 /// [`crate::glyph_slot`]) gets a uniform cell, one coverage byte per pixel.
 pub struct GlyphAtlas {
     cell_w: u16,
     cell_h: u16,
-    /// Flat coverage data: [`GLYPH_COUNT`] glyphs × cell_w × cell_h bytes.
-    data: KVec<u8>,
-    /// Rendered for codepoints outside the glyph set.
+    slots_per_chunk: usize,
+    /// [`GLYPH_COUNT`] cells of `cell_w × cell_h` bytes, in chunks of
+    /// `slots_per_chunk` cells.
+    chunks: KVec<KVec<u8>>,
+    /// Rendered for codepoints outside the glyph set, and for set codepoints
+    /// the font itself has no glyph for.
     replacement: KVec<u8>,
     source: FontSource,
+}
+
+/// Writes the synthesized notdef — a filled diamond — over the whole cell.
+fn fill_replacement(cell: &mut [u8], cell_w: usize, cell_h: usize) {
+    let mx = cell_w / 2;
+    let my = cell_h / 2;
+    let rx = (cell_w / 3).max(2);
+    let ry = (cell_h / 3).max(2);
+    for y in 0..cell_h {
+        for x in 0..cell_w {
+            let dx = if x >= mx { x - mx } else { mx - x };
+            let dy = if y >= my { y - my } else { my - y };
+            cell[y * cell_w + x] = if dx * ry + dy * rx <= rx * ry { 200 } else { 0 };
+        }
+    }
+}
+
+/// Builds a [`GlyphAtlas`] one chunk at a time, so no caller — least of all
+/// the `font_set` syscall — materialises the whole coverage set at once.
+pub struct AtlasBuilder {
+    cell_w: u16,
+    cell_h: u16,
+    slots_per_chunk: usize,
+    chunks: KVec<KVec<u8>>,
+    replacement: KVec<u8>,
+}
+
+impl AtlasBuilder {
+    pub fn new(cell_w: u16, cell_h: u16) -> Option<Self> {
+        if cell_w == 0 || cell_h == 0 {
+            return None;
+        }
+        let stride = (cell_w as usize).checked_mul(cell_h as usize)?;
+        let slots_per_chunk = (CHUNK_TARGET_BYTES / stride).max(1);
+        let mut chunks = KVec::with_capacity(GLYPH_COUNT.div_ceil(slots_per_chunk)).ok()?;
+        let mut placed = 0usize;
+        while placed < GLYPH_COUNT {
+            let slots = slots_per_chunk.min(GLYPH_COUNT - placed);
+            let chunk = KVec::<u8>::zeroed(slots.checked_mul(stride)?).ok()?;
+            chunks.push(chunk).ok()?;
+            placed += slots;
+        }
+        let replacement = KVec::<u8>::zeroed(stride).ok()?;
+        Some(Self {
+            cell_w,
+            cell_h,
+            slots_per_chunk,
+            chunks,
+            replacement,
+        })
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn chunk_mut(&mut self, index: usize) -> Option<&mut [u8]> {
+        self.chunks
+            .as_mut_slice()
+            .get_mut(index)
+            .map(|chunk| chunk.as_mut_slice())
+    }
+
+    pub fn replacement_mut(&mut self) -> &mut [u8] {
+        self.replacement.as_mut_slice()
+    }
+
+    /// One glyph slot's cell, `cell_w × cell_h` bytes.
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut [u8]> {
+        let stride = self.cell_w as usize * self.cell_h as usize;
+        let at = (slot % self.slots_per_chunk) * stride;
+        let chunk = self
+            .chunks
+            .as_mut_slice()
+            .get_mut(slot / self.slots_per_chunk)?;
+        chunk.as_mut_slice().get_mut(at..at + stride)
+    }
+
+    pub fn finish(self, source: FontSource) -> GlyphAtlas {
+        GlyphAtlas {
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            slots_per_chunk: self.slots_per_chunk,
+            chunks: self.chunks,
+            replacement: self.replacement,
+            source,
+        }
+    }
 }
 
 impl GlyphAtlas {
@@ -54,14 +149,26 @@ impl GlyphAtlas {
         }
         let cell_w = max_advance;
 
-        let stride = cell_w as usize * cell_h as usize;
-        let mut data = KVec::<u8>::zeroed(GLYPH_COUNT * stride).ok()?;
+        let cw = cell_w as usize;
+        let ch = cell_h as usize;
+        let mut builder = AtlasBuilder::new(cell_w, cell_h)?;
+        fill_replacement(builder.replacement_mut(), cw, ch);
 
         for idx in 0..GLYPH_COUNT {
             let Some(cp) = slot_codepoint(idx) else {
                 continue;
             };
-            let cell = &mut data[idx * stride..(idx + 1) * stride];
+            let cell = builder.slot_mut(idx)?;
+
+            if boxdraw::draw(cp, cell, cw, ch) {
+                continue;
+            }
+            // Keyed on the cmap, not on empty coverage: a space legitimately
+            // rasterizes to nothing. An uncovered codepoint answers glyph 0.
+            if !matches!(renderer.font.glyph_index(cp), Some(gid) if gid != 0) {
+                fill_replacement(cell, cw, ch);
+                continue;
+            }
 
             if let Some(rg) = renderer.rasterize_glyph(cp, size_px, scale, ascender) {
                 let glyph_advance = rg.advance as i32;
@@ -73,13 +180,9 @@ impl GlyphAtlas {
                     for gx in 0..rg.width as usize {
                         let dx = gx_start + gx as i32;
                         let dy = gy_start + gy as i32;
-                        if dx >= 0
-                            && (dx as usize) < cell_w as usize
-                            && dy >= 0
-                            && (dy as usize) < cell_h as usize
-                        {
+                        if dx >= 0 && (dx as usize) < cw && dy >= 0 && (dy as usize) < ch {
                             let src = gy * rg.width as usize + gx;
-                            let dst = dy as usize * cell_w as usize + dx as usize;
+                            let dst = dy as usize * cw + dx as usize;
                             if src < rg.coverage.len() {
                                 cell[dst] = rg.coverage[src];
                             }
@@ -89,61 +192,13 @@ impl GlyphAtlas {
             }
         }
 
-        // Replacement glyph: filled diamond.
-        let mut replacement = KVec::<u8>::zeroed(stride).ok()?;
-        let mx = cell_w as usize / 2;
-        let my = cell_h as usize / 2;
-        let rx = (cell_w as usize / 3).max(2);
-        let ry = (cell_h as usize / 3).max(2);
-        for y in 0..cell_h as usize {
-            for x in 0..cell_w as usize {
-                let dx = if x >= mx { x - mx } else { mx - x };
-                let dy = if y >= my { y - my } else { my - y };
-                if dx * ry + dy * rx <= rx * ry {
-                    replacement[y * cell_w as usize + x] = 200;
-                }
-            }
-        }
-
-        Some(Self {
-            cell_w,
-            cell_h,
-            data,
-            replacement,
-            source: FontSource::Embedded,
-        })
+        Some(builder.finish(FontSource::Embedded))
     }
 
     pub fn new_with_source(font_data: &[u8], size_px: u16, source: FontSource) -> Option<Self> {
         let mut atlas = Self::new(font_data, size_px)?;
         atlas.source = source;
         Some(atlas)
-    }
-
-    pub fn from_raw_coverage(
-        cell_w: u16,
-        cell_h: u16,
-        coverage: KVec<u8>,
-        replacement: KVec<u8>,
-        source: FontSource,
-    ) -> Option<Self> {
-        if cell_w == 0 || cell_h == 0 {
-            return None;
-        }
-
-        let stride = (cell_w as usize).checked_mul(cell_h as usize)?;
-        let expected_coverage = GLYPH_COUNT.checked_mul(stride)?;
-        if coverage.len() != expected_coverage || replacement.len() != stride {
-            return None;
-        }
-
-        Some(Self {
-            cell_w,
-            cell_h,
-            data: coverage,
-            replacement,
-            source,
-        })
     }
 
     pub fn source(&self) -> FontSource {
@@ -160,21 +215,33 @@ impl GlyphAtlas {
         self.cell_h as i32
     }
 
+    /// Coverage bytes for the whole glyph set: what the chunks concatenated
+    /// add up to, and the coverage half of the `font_set` wire format.
     #[inline]
-    pub fn coverage_and_replacement(&self) -> (&[u8], &[u8]) {
-        (&self.data, &self.replacement)
+    pub fn coverage_len(&self) -> usize {
+        GLYPH_COUNT * self.cell_w as usize * self.cell_h as usize
+    }
+
+    /// The coverage pieces in slot order.
+    pub fn coverage_chunks(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.chunks.as_slice().iter().map(|chunk| chunk.as_slice())
+    }
+
+    #[inline]
+    pub fn replacement(&self) -> &[u8] {
+        self.replacement.as_slice()
     }
 
     /// Coverage for a codepoint (cell_w × cell_h bytes); the replacement glyph
     /// when the codepoint is outside the glyph set.
     #[inline]
     pub fn get_coverage(&self, codepoint: u32) -> &[u8] {
-        if let Some(idx) = glyph_slot(codepoint) {
-            let stride = self.cell_w as usize * self.cell_h as usize;
-            &self.data[idx * stride..(idx + 1) * stride]
-        } else {
-            &self.replacement
-        }
+        let Some(idx) = glyph_slot(codepoint) else {
+            return self.replacement.as_slice();
+        };
+        let stride = self.cell_w as usize * self.cell_h as usize;
+        let at = (idx % self.slots_per_chunk) * stride;
+        &self.chunks.as_slice()[idx / self.slots_per_chunk].as_slice()[at..at + stride]
     }
 
     /// Draw a single character at (x, y). Never reads back from the target, so
@@ -573,21 +640,7 @@ mod global_atlas {
             bitmap::BITMAP_FONT_HEIGHT,
             bitmap::BITMAP_FONT_GLYPH_COUNT,
         ) {
-            Some((coverage, replacement)) => {
-                match GlyphAtlas::from_raw_coverage(
-                    bitmap::BITMAP_FONT_WIDTH,
-                    bitmap::BITMAP_FONT_HEIGHT,
-                    coverage,
-                    replacement,
-                    FontSource::BitmapFallback,
-                ) {
-                    Some(atlas) => {
-                        replace_global(atlas);
-                        true
-                    }
-                    None => false,
-                }
-            }
+            Some(builder) => replace_global(builder.finish(FontSource::BitmapFallback)),
             None => false,
         }
     }
@@ -649,49 +702,92 @@ mod tests {
     }
 
     #[test]
-    fn from_raw_coverage_accepts_valid_buffers() {
-        let cell_w = 8u16;
-        let cell_h = 16u16;
+    fn builder_refuses_an_out_of_range_chunk() {
+        let mut builder = super::AtlasBuilder::new(8, 16).expect("builder must build");
+        let count = builder.chunk_count();
+        assert!(count >= 1);
+        assert!(builder.chunk_mut(count - 1).is_some());
+        assert!(builder.chunk_mut(count).is_none());
+    }
+
+    /// The last chunk is the short one, so an off-by-one in either the chunk
+    /// index or the within-chunk offset shows up here and nowhere else.
+    #[test]
+    fn a_slot_written_through_the_last_chunk_reads_back() {
+        let cell_w = 32u16;
+        let cell_h = 32u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage =
-            slopos_ostd::KVec::<u8>::filled(7u8, crate::GLYPH_COUNT * stride).expect("test alloc");
-        let replacement = slopos_ostd::KVec::<u8>::filled(9u8, stride).expect("test alloc");
+        let mut builder = super::AtlasBuilder::new(cell_w, cell_h).expect("builder must build");
+        let last = builder.chunk_count() - 1;
+        let chunk = builder.chunk_mut(last).expect("last chunk");
+        let cells_in_last = chunk.len() / stride;
+        chunk[(cells_in_last - 1) * stride] = 0xA5;
+        builder.replacement_mut()[0] = 0x5A;
 
-        let atlas = GlyphAtlas::from_raw_coverage(
-            cell_w,
-            cell_h,
-            coverage,
-            replacement,
-            FontSource::Syscall,
-        )
-        .expect("atlas must build");
-
+        let atlas = builder.finish(FontSource::Syscall);
         assert_eq!(atlas.source(), FontSource::Syscall);
-        assert_eq!(atlas.cell_width(), 8);
-        assert_eq!(atlas.cell_height(), 16);
-        assert_eq!(atlas.get_coverage(32)[0], 7);
-        assert_eq!(atlas.get_coverage(31)[0], 9);
+        assert_eq!(atlas.cell_width(), 32);
+        assert_eq!(atlas.cell_height(), 32);
+
+        let last_cp = crate::slot_codepoint(crate::GLYPH_COUNT - 1).expect("last slot");
+        assert_eq!(atlas.get_coverage(last_cp)[0], 0xA5);
+        assert_eq!(atlas.get_coverage(0x1F)[0], 0x5A);
+    }
+
+    /// A cell large enough that the set needs several chunks, so the two slots
+    /// either side of a chunk edge exercise the chunk arithmetic.
+    #[test]
+    fn slots_across_a_chunk_boundary_read_back() {
+        let cell_w = 32u16;
+        let cell_h = 32u16;
+        let stride = cell_w as usize * cell_h as usize;
+        let slots_per_chunk = super::CHUNK_TARGET_BYTES / stride;
+        let mut builder = super::AtlasBuilder::new(cell_w, cell_h).expect("builder must build");
+        assert!(
+            builder.chunk_count() > 1,
+            "a {cell_w}x{cell_h} cell must need more than one chunk"
+        );
+
+        builder
+            .slot_mut(slots_per_chunk - 1)
+            .expect("last slot of the first chunk")
+            .fill(0x11);
+        builder
+            .slot_mut(slots_per_chunk)
+            .expect("first slot of the second chunk")
+            .fill(0x22);
+
+        let atlas = builder.finish(FontSource::Syscall);
+        let before = crate::slot_codepoint(slots_per_chunk - 1).expect("slot exists");
+        let after = crate::slot_codepoint(slots_per_chunk).expect("slot exists");
+        assert!(atlas.get_coverage(before).iter().all(|&b| b == 0x11));
+        assert!(atlas.get_coverage(after).iter().all(|&b| b == 0x22));
     }
 
     #[test]
-    fn from_raw_coverage_rejects_wrong_coverage_size() {
-        let cell_w = 8u16;
-        let cell_h = 16u16;
-        let stride = cell_w as usize * cell_h as usize;
-        let coverage =
-            slopos_ostd::KVec::<u8>::zeroed(crate::GLYPH_COUNT * stride - 1).expect("test alloc");
-        let replacement = slopos_ostd::KVec::<u8>::zeroed(stride).expect("test alloc");
+    fn no_chunk_exceeds_the_target_size() {
+        for (cell_w, cell_h) in [(8u16, 16u16), (32, 32), (11, 23)] {
+            let atlas = super::AtlasBuilder::new(cell_w, cell_h)
+                .expect("builder must build")
+                .finish(FontSource::Syscall);
+            for chunk in atlas.coverage_chunks() {
+                assert!(
+                    chunk.len() <= super::CHUNK_TARGET_BYTES,
+                    "{cell_w}x{cell_h} produced a {}-byte chunk",
+                    chunk.len()
+                );
+            }
+        }
+    }
 
-        assert!(
-            GlyphAtlas::from_raw_coverage(
-                cell_w,
-                cell_h,
-                coverage,
-                replacement,
-                FontSource::Syscall
-            )
-            .is_none()
-        );
+    #[test]
+    fn coverage_chunks_cover_exactly_the_coverage_length() {
+        let atlas = super::AtlasBuilder::new(8, 16)
+            .expect("builder must build")
+            .finish(FontSource::Syscall);
+        let total: usize = atlas.coverage_chunks().map(|chunk| chunk.len()).sum();
+        assert_eq!(total, atlas.coverage_len());
+        assert_eq!(atlas.coverage_len(), crate::GLYPH_COUNT * 8 * 16);
     }
 
     #[cfg(feature = "kernel")]
@@ -706,27 +802,41 @@ mod tests {
 
     #[test]
     fn glyph_slot_mapping_round_trips() {
-        use crate::{GLYPH_COUNT, glyph_slot, slot_codepoint};
+        use crate::{GLYPH_COUNT, GLYPH_RANGES, glyph_slot, slot_codepoint};
         for slot in 0..GLYPH_COUNT {
             let cp = slot_codepoint(slot).expect("every slot names a codepoint");
             assert_eq!(glyph_slot(cp), Some(slot));
         }
-        assert_eq!(glyph_slot(0x1F), None);
-        assert_eq!(glyph_slot(0x7F), None);
-        assert_eq!(glyph_slot(0x9F), None);
-        assert_eq!(glyph_slot(0x4E2D), None); // 中
+        assert_eq!(slot_codepoint(GLYPH_COUNT), None);
+
+        for (lo, hi) in GLYPH_RANGES {
+            assert!(glyph_slot(lo).is_some(), "U+{lo:04X} must be in the set");
+            assert!(glyph_slot(hi).is_some(), "U+{hi:04X} must be in the set");
+        }
+
+        for gap in [
+            0x1F, 0x7F, 0x9F, 0x180, 0x2C5, 0x2DE, 0x36F, 0x500, 0x200F, 0x203F, 0x209F, 0x20C0,
+            0x218F, 0x2200, 0x24FF, 0x2600, 0x4E2D,
+        ] {
+            assert_eq!(glyph_slot(gap), None, "U+{gap:04X} must be outside the set");
+        }
+        // Box Drawing runs straight into Block Elements: no gap there.
+        assert!(glyph_slot(0x257F).is_some());
+        assert!(glyph_slot(0x259F).is_some());
+
         // The keymap-relevant glyphs are all in the set.
         for c in "äöüÄÖÜéèà§°ç£¦¬¢´¨€".chars() {
             assert!(glyph_slot(c as u32).is_some(), "missing {c}");
         }
     }
 
+    const INTER_TTF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/fonts/Inter-Regular.ttf"
+    ));
+
     #[test]
     fn atlas_rasterizes_latin1_glyphs() {
-        const INTER_TTF: &[u8] = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../assets/fonts/Inter-Regular.ttf"
-        ));
         let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
         for c in ['ä', 'é', 'à', '€'] {
             let cov = atlas.get_coverage(c as u32);
@@ -740,5 +850,40 @@ mod tests {
                 "{c} must not be the replacement"
             );
         }
+    }
+
+    /// Inter's cmap covers neither U+0149 nor U+0370, yet the set holds a slot
+    /// for both: they must read back as the notdef, not as a blank cell.
+    #[test]
+    fn a_set_codepoint_the_font_lacks_reads_back_as_the_notdef() {
+        let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
+        let notdef = atlas.get_coverage(0x4E2D);
+        assert!(notdef.iter().any(|&b| b != 0));
+        for cp in [0x0149u32, 0x0370] {
+            assert_eq!(
+                atlas.get_coverage(cp),
+                notdef,
+                "U+{cp:04X} must read back as the notdef"
+            );
+        }
+        assert!(
+            atlas.get_coverage(0x20).iter().all(|&b| b == 0),
+            "a space has an empty outline on purpose and must stay blank"
+        );
+    }
+
+    /// Inter maps every box-drawing codepoint to `.notdef`, so coverage there
+    /// can only be procedural.
+    #[test]
+    fn box_drawing_comes_from_the_procedural_path() {
+        assert!(crate::glyph_slot(0x2500).is_some());
+        let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
+        let cov = atlas.get_coverage(0x2500);
+        assert!(cov.iter().any(|&b| b != 0), "U+2500 must have coverage");
+        assert_ne!(
+            cov,
+            atlas.get_coverage(0x4E2D),
+            "U+2500 must be drawn, not replaced"
+        );
     }
 }

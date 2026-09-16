@@ -32,6 +32,8 @@ const KEY_RIGHT: u8 = 0x85;
 const KEY_HOME: u8 = 0x86;
 const KEY_END: u8 = 0x87;
 const KEY_DELETE: u8 = 0x88;
+const KEY_WORD_LEFT: u8 = 0x89;
+const KEY_WORD_RIGHT: u8 = 0x8A;
 
 const CTRL_A: u8 = 0x01;
 const CTRL_C: u8 = 0x03;
@@ -322,6 +324,15 @@ impl EscParser {
             EscMatch::Invalid => {
                 self.pending.clear();
             }
+            // Nothing here binds a meta chord, and dropping the pair would
+            // swallow the keystroke — a multi-byte character's lead included.
+            EscMatch::Meta => {
+                let drained = core::mem::take(&mut self.pending);
+                out.push(Decoded::Key(ESC));
+                for &b in &drained[1..] {
+                    self.feed_byte(b, out);
+                }
+            }
         }
     }
 }
@@ -330,6 +341,8 @@ enum EscMatch {
     Complete(u8),
     Partial,
     Invalid,
+    /// `ESC` followed by a byte that cannot begin a CSI or SS3 sequence.
+    Meta,
 }
 
 fn could_be_paste_end(s: &[u8]) -> bool {
@@ -341,45 +354,88 @@ fn is_paste_end(s: &[u8]) -> bool {
     s == b"\x1b[201~"
 }
 
-/// Decode a buffered escape sequence into an internal key code: CSI arrows /
-/// Home / End, the `~`-terminated editing keys, and SS3 arrows (`\x1bO…`).
+/// Maximum bytes an escape sequence may occupy before it is abandoned: room
+/// for the widest the terminal emits and no more, or a sequence left open
+/// would swallow typed input while it waited.
+const MAX_ESC_LEN: usize = 12;
+
+/// Decode a buffered escape sequence into an internal key code.
+///
+/// Recognizes the full CSI/SS3 shape — parameters, intermediates, one final
+/// byte. A well-formed sequence the editor has no use for is still consumed
+/// whole; that is what keeps its tail from arriving as text.
 fn decode_escape(p: &[u8]) -> EscMatch {
     if p.len() == 1 {
         return EscMatch::Partial;
     }
     match p[1] {
         b'[' | b'O' => {}
-        _ => return EscMatch::Invalid,
+        _ => return EscMatch::Meta,
     }
-    if p.len() == 2 {
-        return EscMatch::Partial;
+    let body = &p[2..];
+    let mut i = 0;
+    while i < body.len() && matches!(body[i], 0x30..=0x3F) {
+        i += 1;
     }
-    match p[2] {
-        b'A' => return EscMatch::Complete(KEY_UP),
-        b'B' => return EscMatch::Complete(KEY_DOWN),
-        b'C' => return EscMatch::Complete(KEY_RIGHT),
-        b'D' => return EscMatch::Complete(KEY_LEFT),
-        b'H' => return EscMatch::Complete(KEY_HOME),
-        b'F' => return EscMatch::Complete(KEY_END),
-        b'0'..=b'9' => {} // parameterised: needs a trailing '~'
-        _ => return EscMatch::Invalid,
+    let params = &body[..i];
+    while i < body.len() && matches!(body[i], 0x20..=0x2F) {
+        i += 1;
     }
-    if *p.last().unwrap() == b'~' {
-        return match &p[2..p.len() - 1] {
-            b"3" => EscMatch::Complete(KEY_DELETE),
-            b"5" => EscMatch::Complete(KEY_PAGE_UP),
-            b"6" => EscMatch::Complete(KEY_PAGE_DOWN),
-            b"1" => EscMatch::Complete(KEY_HOME),
-            b"4" => EscMatch::Complete(KEY_END),
-            _ => EscMatch::Invalid,
+    if i == body.len() {
+        return if p.len() >= MAX_ESC_LEN {
+            EscMatch::Invalid
+        } else {
+            EscMatch::Partial
         };
     }
-    // Still accumulating digits before the '~'.
-    if p.len() < 8 {
-        EscMatch::Partial
-    } else {
-        EscMatch::Invalid
+    if i + 1 != body.len() || !matches!(body[i], 0x40..=0x7E) {
+        return EscMatch::Invalid;
     }
+    match key_for_sequence(params, body[i]) {
+        Some(code) => EscMatch::Complete(code),
+        None => EscMatch::Invalid,
+    }
+}
+
+/// The `idx`-th semicolon-separated parameter, or `None` when absent or empty.
+fn csi_param(params: &[u8], idx: usize) -> Option<u16> {
+    let field = params.split(|&b| b == b';').nth(idx)?;
+    if field.is_empty() || field.iter().any(|b| !b.is_ascii_digit()) {
+        return None;
+    }
+    let mut value: u16 = 0;
+    for &b in field {
+        value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
+    }
+    Some(value)
+}
+
+fn key_for_sequence(params: &[u8], final_byte: u8) -> Option<u8> {
+    let base = match final_byte {
+        b'A' => KEY_UP,
+        b'B' => KEY_DOWN,
+        b'C' => KEY_RIGHT,
+        b'D' => KEY_LEFT,
+        b'H' => KEY_HOME,
+        b'F' => KEY_END,
+        b'~' => match csi_param(params, 0)? {
+            1 | 7 => KEY_HOME,
+            3 => KEY_DELETE,
+            4 | 8 => KEY_END,
+            5 => KEY_PAGE_UP,
+            6 => KEY_PAGE_DOWN,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // `m - 1` bits 1 and 2 are Alt and Ctrl, which on a horizontal arrow mean
+    // word motion in every line editor.
+    let word = csi_param(params, 1).is_some_and(|m| m.saturating_sub(1) & 0b110 != 0);
+    Some(match base {
+        KEY_LEFT if word => KEY_WORD_LEFT,
+        KEY_RIGHT if word => KEY_WORD_RIGHT,
+        other => other,
+    })
 }
 
 /// A long-lived `SignalListener::recv` future, re-armed only after it resolves:
@@ -520,6 +576,22 @@ async fn input_loop(
                     if cursor_pos < len {
                         cursor_pos =
                             buffers::with_line_buf(|buf| next_char_end(buf, cursor_pos, len));
+                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                    }
+                }
+
+                KEY_WORD_LEFT => {
+                    let new_pos = buffers::with_line_buf(|buf| word_start(buf, cursor_pos));
+                    if new_pos != cursor_pos {
+                        cursor_pos = new_pos;
+                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                    }
+                }
+
+                KEY_WORD_RIGHT => {
+                    let new_pos = buffers::with_line_buf(|buf| word_end(buf, cursor_pos, len));
+                    if new_pos != cursor_pos {
+                        cursor_pos = new_pos;
                         redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     }
                 }
@@ -828,6 +900,30 @@ fn prev_char_start(buf: &[u8], pos: usize) -> usize {
 fn next_char_end(buf: &[u8], pos: usize, len: usize) -> usize {
     let mut i = pos + 1;
     while i < len && is_utf8_continuation(buf[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// Start of the word at or before `pos` — the boundary `CTRL_W` deletes to.
+fn word_start(buf: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i > 0 && buf[i - 1] == b' ' {
+        i -= 1;
+    }
+    while i > 0 && buf[i - 1] != b' ' {
+        i -= 1;
+    }
+    i
+}
+
+/// End of the word at or after `pos`, mirroring [`word_start`].
+fn word_end(buf: &[u8], pos: usize, len: usize) -> usize {
+    let mut i = pos;
+    while i < len && buf[i] == b' ' {
+        i += 1;
+    }
+    while i < len && buf[i] != b' ' {
         i += 1;
     }
     i

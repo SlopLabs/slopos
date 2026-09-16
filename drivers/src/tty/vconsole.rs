@@ -487,6 +487,9 @@ impl VConsoleState {
             VtAction::EraseChars(n) => self.erase_chars(n),
             VtAction::SetMode(mode) => self.set_dec_mode(mode),
             VtAction::ResetMode(mode) => self.reset_dec_mode(mode),
+            // A reply would have to reach the line discipline of the very TTY
+            // whose write lock this runs under; a querier sees a timeout.
+            VtAction::DeviceAttributes { .. } | VtAction::DeviceStatus { .. } => {}
             VtAction::Nop => {}
         }
     }

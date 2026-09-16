@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use slopos_abi::unicode::is_double_width;
 
-use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+use slopos_vt::{Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser};
 
 use crate::damage::CellDamage;
 
@@ -20,6 +20,26 @@ pub const FG_COLOR: u32 = 0x00E6_E6E6;
 /// Default background (the shell's classic dark grey, not ANSI black —
 /// explicit SGR 40 still renders pure black).
 pub const BG_COLOR: u32 = 0x001E_1E1E;
+
+/// Ceiling on undrained reply bytes; every answer here is under 24 bytes.
+const MAX_REPLY_BYTES: usize = 256;
+
+/// Primary device attributes: a VT100 with the Advanced Video Option, which is
+/// what xterm answers by default and what every consumer recognizes.
+const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
+
+/// Secondary device attributes: `CSI > Pp ; Pv ; Pc c` with Pp = 0 ("VT100")
+/// and a firmware version of 1. A low version is what keeps a client from
+/// assuming xterm patch-level features this emulator does not have.
+const DA2_REPLY: &[u8] = b"\x1b[>0;1;0c";
+
+/// DSR 5: operating status, no malfunction.
+const DSR_OK_REPLY: &[u8] = b"\x1b[0n";
+
+fn push_decimal(out: &mut Vec<u8>, n: u16) {
+    let (digits, count) = crate::decimal(n);
+    out.extend_from_slice(&digits[..count]);
+}
 
 const SCROLLBACK_LINES: usize = 1000;
 
@@ -643,8 +663,6 @@ pub struct TerminalGrid {
     alt_screen_cursor_row: u16,
     alt_screen_cursor_col: u16,
     in_alt_screen: bool,
-    /// DECSET/DECRST 2004: the slave-side app asked for paste bracketing.
-    bracketed_paste: bool,
     scroll_top: u16,
     scroll_bottom: u16,
     scrollback: ScrollbackBuf,
@@ -666,6 +684,9 @@ pub struct TerminalGrid {
     ///
     /// [`take_damage`]: TerminalGrid::take_damage
     damage: CellDamage,
+    /// Bytes the emulator owes the application. Bounded, and an answer that
+    /// does not fit whole is dropped whole: a truncated one is worse.
+    replies: Vec<u8>,
 }
 
 impl TerminalGrid {
@@ -693,7 +714,6 @@ impl TerminalGrid {
             alt_screen_cursor_row: 0,
             alt_screen_cursor_col: 0,
             in_alt_screen: false,
-            bracketed_paste: false,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             scrollback: ScrollbackBuf::new(cols as usize),
@@ -706,6 +726,7 @@ impl TerminalGrid {
                 d.add_all(cols);
                 d
             },
+            replies: Vec::new(),
         }
     }
 
@@ -850,7 +871,63 @@ impl TerminalGrid {
     /// True when the slave-side app enabled bracketed paste (DECSET 2004).
     #[inline]
     pub fn bracketed_paste(&self) -> bool {
-        self.bracketed_paste
+        self.parser.bracketed_paste
+    }
+
+    /// True when the slave-side app enabled DECCKM (DECSET 1), i.e. expects
+    /// cursor keys as `SS3 A` rather than `CSI A`.
+    #[inline]
+    pub fn application_cursor_keys(&self) -> bool {
+        self.parser.cursor_key_mode
+    }
+
+    /// The mouse-tracking mode the slave-side app selected.
+    #[inline]
+    pub fn mouse_tracking(&self) -> MouseTracking {
+        self.parser.mouse_tracking
+    }
+
+    /// True when the app asked for SGR-encoded mouse reports (DECSET 1006).
+    #[inline]
+    pub fn mouse_sgr(&self) -> bool {
+        self.parser.mouse_sgr
+    }
+
+    /// Take the bytes the emulator owes the application, leaving the queue
+    /// empty.
+    #[must_use]
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.replies)
+    }
+
+    fn reply(&mut self, bytes: &[u8]) {
+        if self.replies.len() + bytes.len() > MAX_REPLY_BYTES {
+            return;
+        }
+        self.replies.extend_from_slice(bytes);
+    }
+
+    fn reply_cursor_position(&mut self, private: bool) {
+        /// A CPR is at most `ESC [ ? 100 ; 240 ; 1 R`; budgeting it whole is
+        /// what stops the ceiling truncating an answer mid-sequence.
+        const CPR_BUDGET: usize = 24;
+        if self.replies.len() + CPR_BUDGET > MAX_REPLY_BYTES {
+            return;
+        }
+        let row = self.cursor_row.saturating_add(1);
+        let col = self.cursor_col.saturating_add(1);
+        self.replies.extend_from_slice(b"\x1b[");
+        if private {
+            self.replies.push(b'?');
+        }
+        push_decimal(&mut self.replies, row);
+        self.replies.push(b';');
+        push_decimal(&mut self.replies, col);
+        if private {
+            // DECXCPR carries a page number; this emulator has one page.
+            self.replies.extend_from_slice(b";1");
+        }
+        self.replies.push(b'R');
     }
 
     pub fn scroll_view_up(&mut self, lines: usize) {
@@ -1171,7 +1248,11 @@ impl TerminalGrid {
         // and the one it lands on change even when no content did.
         let cursor_before = self.cursor_cell();
         match action {
-            VtAction::Print(_) | VtAction::SetAttribute(_) | VtAction::Nop => {}
+            VtAction::Print(_)
+            | VtAction::SetAttribute(_)
+            | VtAction::DeviceAttributes { .. }
+            | VtAction::DeviceStatus { .. }
+            | VtAction::Nop => {}
             _ => self.wrap_pending = false,
         }
         match action {
@@ -1194,6 +1275,15 @@ impl TerminalGrid {
             VtAction::EraseChars(n) => self.erase_chars(n),
             VtAction::SetMode(mode) => self.set_dec_mode(mode),
             VtAction::ResetMode(mode) => self.reset_dec_mode(mode),
+            VtAction::DeviceAttributes { secondary } => {
+                let answer = if secondary { DA2_REPLY } else { DA1_REPLY };
+                self.reply(answer);
+            }
+            VtAction::DeviceStatus { request, private } => match (request, private) {
+                (5, false) => self.reply(DSR_OK_REPLY),
+                (6, _) => self.reply_cursor_position(private),
+                _ => {}
+            },
             VtAction::Nop => {}
         }
         if self.cursor_cell() != cursor_before {
@@ -1538,7 +1628,6 @@ impl TerminalGrid {
                 self.damage_cursor();
             }
             1049 => self.enter_alt_screen(),
-            2004 => self.bracketed_paste = true,
             _ => {}
         }
     }
@@ -1550,7 +1639,6 @@ impl TerminalGrid {
                 self.damage_cursor();
             }
             1049 => self.leave_alt_screen(),
-            2004 => self.bracketed_paste = false,
             _ => {}
         }
     }
@@ -2180,6 +2268,76 @@ mod tests {
         assert!(g.bracketed_paste());
         feed(&mut g, b"\x1b[?2004l");
         assert!(!g.bracketed_paste());
+    }
+
+    #[test]
+    fn mouse_and_cursor_key_modes_track_their_decsets() {
+        let mut g = TerminalGrid::new(3, 10);
+        assert!(!g.application_cursor_keys());
+        assert_eq!(g.mouse_tracking(), MouseTracking::Off);
+        assert!(!g.mouse_sgr());
+        feed(&mut g, b"\x1b[?1h\x1b[?1002h\x1b[?1006h");
+        assert!(g.application_cursor_keys());
+        assert_eq!(g.mouse_tracking(), MouseTracking::ButtonEvent);
+        assert!(g.mouse_sgr());
+        feed(&mut g, b"\x1b[?1l\x1b[?1002l\x1b[?1006l");
+        assert!(!g.application_cursor_keys());
+        assert_eq!(g.mouse_tracking(), MouseTracking::Off);
+        assert!(!g.mouse_sgr());
+    }
+
+    #[test]
+    fn device_attribute_queries_are_answered() {
+        let mut g = TerminalGrid::new(3, 10);
+        feed(&mut g, b"\x1b[c");
+        assert_eq!(g.take_replies(), DA1_REPLY);
+        feed(&mut g, b"\x1b[>c");
+        assert_eq!(g.take_replies(), DA2_REPLY);
+        assert!(g.take_replies().is_empty());
+    }
+
+    /// Before the private marker was tracked the `>` aborted the sequence and
+    /// the `c` landed in the grid as text.
+    #[test]
+    fn a_secondary_da_query_prints_nothing() {
+        let mut g = TerminalGrid::new(3, 10);
+        feed(&mut g, b"\x1b[>c");
+        assert_eq!(glyph_at(&g, 0, 0), ' ');
+        assert_eq!(g.cursor_col, 0);
+    }
+
+    #[test]
+    fn cursor_position_report_is_one_based() {
+        let mut g = TerminalGrid::new(10, 20);
+        feed(&mut g, b"\x1b[5;7H\x1b[6n");
+        assert_eq!(g.take_replies(), b"\x1b[5;7R");
+        feed(&mut g, b"\x1b[?6n");
+        assert_eq!(g.take_replies(), b"\x1b[?5;7;1R");
+        feed(&mut g, b"\x1b[5n");
+        assert_eq!(g.take_replies(), DSR_OK_REPLY);
+    }
+
+    /// A program can query faster than the event loop drains, and a half-
+    /// written answer is worse than a missing one.
+    #[test]
+    fn an_undrained_reply_queue_drops_whole_answers() {
+        let mut g = TerminalGrid::new(3, 10);
+        for _ in 0..200 {
+            feed(&mut g, b"\x1b[c");
+        }
+        let replies = g.take_replies();
+        assert!(replies.len() <= MAX_REPLY_BYTES);
+        assert_eq!(replies.len() % DA1_REPLY.len(), 0);
+        assert!(replies.starts_with(DA1_REPLY));
+    }
+
+    /// A reply is not a cursor movement, so it must not cancel a deferred
+    /// autowrap the way every other non-printing action does.
+    #[test]
+    fn a_query_preserves_pending_wrap() {
+        let mut g = TerminalGrid::new(5, 3);
+        feed(&mut g, b"abc\x1b[cd");
+        assert_eq!(glyph_at(&g, 1, 0), 'd');
     }
 
     fn damaged_cells(d: &crate::damage::CellDamage) -> usize {

@@ -7,7 +7,11 @@
 //! as plain `i32` arguments, and the userland app owns the actual IO and the
 //! `classify(ProtocolEvent)` bridge.
 
-use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
+use slopos_abi::input::keycode;
+use slopos_abi::input::{
+    MODIFIER_ALT, MODIFIER_ALTGR, MODIFIER_CTRL, MODIFIER_NUM_LOCK, MODIFIER_SHIFT,
+};
+use slopos_vt::MouseTracking;
 
 use super::grid::TerminalGrid;
 
@@ -24,8 +28,10 @@ const KEY_END: u8 = 0x87;
 const KEY_DELETE: u8 = 0x88;
 
 const MOUSE_LEFT: u8 = 0x01;
+const MOUSE_RIGHT: u8 = 0x02;
+const MOUSE_MIDDLE: u8 = 0x04;
 
-/// Number of scrollback lines a single Shift+PgUp / Shift+PgDn moves.
+/// Scrollback lines a single Ctrl+Shift+PgUp / PgDn moves.
 const SCROLLBACK_PAGE_LINES: usize = 10;
 
 /// Scrollback lines moved per mouse-wheel / touchpad notch (a value120 axis
@@ -36,7 +42,7 @@ const SCROLLBACK_WHEEL_LINES: i32 = 3;
 pub enum KeyAction {
     /// Write these bytes to the PTY master.
     ToMaster(KeyBytes),
-    /// Scroll the local scrollback view (Shift+PgUp/PgDn).
+    /// Scroll the local scrollback view (Ctrl+Shift+PgUp/PgDn).
     ScrollUp(usize),
     ScrollDown(usize),
     /// Ctrl+Shift+C: copy the pointer selection to the compositor clipboard.
@@ -47,30 +53,65 @@ pub enum KeyAction {
     None,
 }
 
-/// A short, owned byte sequence for a single key (avoids heap churn per key).
+/// A short, owned byte sequence for one key or mouse report. Sized for the
+/// longest either produces: an SGR report at the grid's maximum coordinates.
 pub struct KeyBytes {
-    buf: [u8; 8],
+    buf: [u8; 16],
     len: usize,
 }
 
 impl KeyBytes {
     fn one(b: u8) -> Self {
-        let mut buf = [0u8; 8];
-        buf[0] = b;
-        Self { buf, len: 1 }
+        let mut out = Self::empty();
+        out.push(b);
+        out
     }
 
     fn seq(s: &[u8]) -> Self {
-        let mut buf = [0u8; 8];
-        let len = s.len().min(8);
-        buf[..len].copy_from_slice(&s[..len]);
-        Self { buf, len }
+        let mut out = Self::empty();
+        for &b in s {
+            out.push(b);
+        }
+        out
+    }
+
+    const fn empty() -> Self {
+        Self {
+            buf: [0u8; 16],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, b: u8) {
+        if self.len < self.buf.len() {
+            self.buf[self.len] = b;
+            self.len += 1;
+        }
+    }
+
+    fn push_num(&mut self, n: u16) {
+        let (digits, count) = crate::decimal(n);
+        for &d in &digits[..count] {
+            self.push(d);
+        }
     }
 
     fn utf8(c: char) -> Self {
-        let mut buf = [0u8; 8];
-        let len = c.encode_utf8(&mut buf).len();
-        Self { buf, len }
+        let mut out = Self::empty();
+        let mut scratch = [0u8; 4];
+        for &b in c.encode_utf8(&mut scratch).as_bytes() {
+            out.push(b);
+        }
+        out
+    }
+
+    fn prefixed_esc(self) -> Self {
+        let mut out = Self::empty();
+        out.push(0x1B);
+        for &b in self.as_bytes() {
+            out.push(b);
+        }
+        out
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -191,7 +232,8 @@ impl PointerState {
 
 /// Convert a pixel coordinate to a clamped `(screen_row, col)` cell. `cell_w`/
 /// `cell_h` are the caller's font metrics; the core stays font-agnostic.
-fn pixel_to_cell(
+/// Clamping is what lets a drag past the window edge still name a cell.
+pub fn pixel_to_cell(
     px: i32,
     py: i32,
     cell_w: i32,
@@ -215,73 +257,225 @@ fn pixel_to_anchor(px: i32, py: i32, cell_w: i32, cell_h: i32, grid: &TerminalGr
     }
 }
 
-/// Encode a compositor key event into a master action.
+/// One compositor key press, as the terminal receives it.
+#[derive(Clone, Copy)]
+pub struct KeyPress {
+    /// Legacy single-byte code: ASCII text, or one of the kernel's baked
+    /// navigation pseudo-codes (0x80..=0x88).
+    pub ascii: u8,
+    /// Canonical HID usage; 0 for an event that carries none (a dead-key
+    /// accent flush).
+    pub keycode: u16,
+    /// Layout-resolved text codepoint; 0 for a key that produces no text.
+    pub codepoint: u32,
+    /// `MODIFIER_*` snapshot at the time of the press.
+    pub mods: u8,
+}
+
+/// The escape-sequence family a non-text key belongs to, in xterm's PC-style
+/// encoding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Special {
+    /// `CSI <final>`, `SS3 <final>` under DECCKM, `CSI 1 ; <mod> <final>` when
+    /// modified. Home and End ride it too.
+    Cursor(u8),
+    /// `CSI <n> ~`, `CSI <n> ; <mod> ~` when modified.
+    Tilde(u16),
+    /// F1–F4: `SS3 <final>` unmodified regardless of DECCKM,
+    /// `CSI 1 ; <mod> <final>` when modified.
+    Pf(u8),
+}
+
+/// xterm's modifier parameter: `1 + shift + 2*alt + 4*ctrl`.
 ///
-/// PageUp/PageDown drive the terminal's own scrollback view; the kernel
-/// keyboard driver intercepts the Shift+ variants for the in-kernel vconsole,
-/// so only the plain codes ever reach a compositor client.
+/// AltGr is reported with `MODIFIER_ALT` set too, but it selects a layout
+/// level rather than a chord — counting it would turn `AltGr+2` into a
+/// modified key instead of the `@` the layout resolved.
+fn modifier_param(mods: u8) -> u16 {
+    let mut m = 1u16;
+    if mods & MODIFIER_SHIFT != 0 {
+        m += 1;
+    }
+    if mods & MODIFIER_ALT != 0 && mods & MODIFIER_ALTGR == 0 {
+        m += 2;
+    }
+    if mods & MODIFIER_CTRL != 0 {
+        m += 4;
+    }
+    m
+}
+
+fn alt_chord(mods: u8) -> bool {
+    mods & MODIFIER_ALT != 0 && mods & MODIFIER_ALTGR == 0
+}
+
+fn encode_special(special: Special, mods: u8, app_cursor: bool) -> KeyBytes {
+    let param = modifier_param(mods);
+    let mut out = KeyBytes::empty();
+    out.push(0x1B);
+    match special {
+        Special::Cursor(final_byte) => {
+            if param == 1 {
+                out.push(if app_cursor { b'O' } else { b'[' });
+                out.push(final_byte);
+            } else {
+                out.push(b'[');
+                out.push(b'1');
+                out.push(b';');
+                out.push_num(param);
+                out.push(final_byte);
+            }
+        }
+        Special::Tilde(n) => {
+            out.push(b'[');
+            out.push_num(n);
+            if param != 1 {
+                out.push(b';');
+                out.push_num(param);
+            }
+            out.push(b'~');
+        }
+        Special::Pf(final_byte) => {
+            if param == 1 {
+                out.push(b'O');
+                out.push(final_byte);
+            } else {
+                out.push(b'[');
+                out.push(b'1');
+                out.push(b';');
+                out.push_num(param);
+                out.push(final_byte);
+            }
+        }
+    }
+    out
+}
+
+/// The family a baked navigation pseudo-code belongs to. Also how keypad
+/// navigation arrives.
+fn special_for_ascii(ascii: u8) -> Option<Special> {
+    Some(match ascii {
+        KEY_UP => Special::Cursor(b'A'),
+        KEY_DOWN => Special::Cursor(b'B'),
+        KEY_RIGHT => Special::Cursor(b'C'),
+        KEY_LEFT => Special::Cursor(b'D'),
+        KEY_HOME => Special::Cursor(b'H'),
+        KEY_END => Special::Cursor(b'F'),
+        KEY_DELETE => Special::Tilde(3),
+        KEY_PAGE_UP => Special::Tilde(5),
+        KEY_PAGE_DOWN => Special::Tilde(6),
+        _ => return None,
+    })
+}
+
+/// The family a canonical HID usage belongs to. The driver bakes no legacy
+/// byte for F1–F12 or Insert, so this is their only source.
+fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
+    // The keymap resolves a keypad key to text when `numlock ^ shift`; the
+    // complement is its navigation meaning.
+    let keypad_nav = (mods & MODIFIER_NUM_LOCK != 0) == (mods & MODIFIER_SHIFT != 0);
+    Some(match code {
+        keycode::KEY_UP => Special::Cursor(b'A'),
+        keycode::KEY_DOWN => Special::Cursor(b'B'),
+        keycode::KEY_RIGHT => Special::Cursor(b'C'),
+        keycode::KEY_LEFT => Special::Cursor(b'D'),
+        keycode::KEY_HOME => Special::Cursor(b'H'),
+        keycode::KEY_END => Special::Cursor(b'F'),
+        keycode::KEY_INSERT => Special::Tilde(2),
+        keycode::KEY_DELETE => Special::Tilde(3),
+        keycode::KEY_PAGEUP => Special::Tilde(5),
+        keycode::KEY_PAGEDOWN => Special::Tilde(6),
+        keycode::KEY_F1 => Special::Pf(b'P'),
+        keycode::KEY_F2 => Special::Pf(b'Q'),
+        keycode::KEY_F3 => Special::Pf(b'R'),
+        keycode::KEY_F4 => Special::Pf(b'S'),
+        keycode::KEY_F5 => Special::Tilde(15),
+        keycode::KEY_F6 => Special::Tilde(17),
+        keycode::KEY_F7 => Special::Tilde(18),
+        keycode::KEY_F8 => Special::Tilde(19),
+        keycode::KEY_F9 => Special::Tilde(20),
+        keycode::KEY_F10 => Special::Tilde(21),
+        keycode::KEY_F11 => Special::Tilde(23),
+        keycode::KEY_F12 => Special::Tilde(24),
+        keycode::KEY_KP_7 if keypad_nav => Special::Cursor(b'H'),
+        keycode::KEY_KP_8 if keypad_nav => Special::Cursor(b'A'),
+        keycode::KEY_KP_9 if keypad_nav => Special::Tilde(5),
+        keycode::KEY_KP_4 if keypad_nav => Special::Cursor(b'D'),
+        keycode::KEY_KP_6 if keypad_nav => Special::Cursor(b'C'),
+        keycode::KEY_KP_1 if keypad_nav => Special::Cursor(b'F'),
+        keycode::KEY_KP_2 if keypad_nav => Special::Cursor(b'B'),
+        keycode::KEY_KP_3 if keypad_nav => Special::Tilde(6),
+        keycode::KEY_KP_0 if keypad_nav => Special::Tilde(2),
+        keycode::KEY_KP_DOT if keypad_nav => Special::Tilde(3),
+        _ => return None,
+    })
+}
+
+/// Encode a compositor key press into a master action.
 ///
-/// Ctrl+Shift chords are terminal commands (the xterm/GNOME clipboard
-/// convention), never PTY input: the kernel bakes the same control byte for
-/// Ctrl+C and Ctrl+Shift+C, so `mods` is the only way to tell them apart.
+/// `app_cursor` is DECCKM: an application that set it expects `SS3 A` rather
+/// than `CSI A`.
 ///
-/// ASCII text rides the legacy `ascii` byte; non-ASCII text has no legacy byte
-/// and is written to the PTY as UTF-8 from the layout-resolved `codepoint`.
-pub fn encode_key(ascii: u8, scancode: u8, codepoint: u32, mods: u8) -> KeyAction {
+/// Ctrl+Shift chords are terminal commands, never PTY input: the kernel bakes
+/// the same control byte for Ctrl+C and Ctrl+Shift+C, so `mods` is the only
+/// way to tell them apart. Ctrl+Shift+PgUp/PgDn pages the local scrollback for
+/// the same reason — plain PgUp/PgDn belongs to the application.
+pub fn encode_key(key: KeyPress, app_cursor: bool) -> KeyAction {
     const CHORD: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
-    if mods & CHORD == CHORD {
-        match ascii {
+    let chorded = key.mods & CHORD == CHORD;
+    if chorded {
+        match key.ascii {
             0x03 => return KeyAction::CopySelection, // Ctrl+Shift+C
             0x16 => return KeyAction::RequestPaste,  // Ctrl+Shift+V
             _ => {}
         }
-    }
-
-    if ascii != 0 {
-        match ascii {
-            KEY_PAGE_UP => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
-            KEY_PAGE_DOWN => return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES),
-            KEY_UP => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[A")),
-            KEY_DOWN => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[B")),
-            KEY_LEFT => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[D")),
-            KEY_RIGHT => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[C")),
-            KEY_HOME => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[H")),
-            KEY_END => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[F")),
-            KEY_DELETE => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[3~")),
-            _ => return KeyAction::ToMaster(KeyBytes::one(ascii)),
+        if key.ascii == KEY_PAGE_UP || key.keycode == keycode::KEY_PAGEUP {
+            return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES);
+        }
+        if key.ascii == KEY_PAGE_DOWN || key.keycode == keycode::KEY_PAGEDOWN {
+            return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES);
         }
     }
 
-    if codepoint > 0x7F {
-        if let Some(c) = char::from_u32(codepoint) {
-            return KeyAction::ToMaster(KeyBytes::utf8(c));
+    if let Some(special) = special_for_ascii(key.ascii) {
+        return KeyAction::ToMaster(encode_special(special, key.mods, app_cursor));
+    }
+
+    if key.ascii != 0 {
+        // Shift+Tab is CBT, not a tab: the keymap folds both to 0x09, so the
+        // modifier snapshot is the only thing that distinguishes them.
+        if key.ascii == b'\t' && modifier_param(key.mods) == 2 {
+            return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[Z"));
+        }
+        let bytes = KeyBytes::one(key.ascii);
+        return KeyAction::ToMaster(if alt_chord(key.mods) {
+            bytes.prefixed_esc()
+        } else {
+            bytes
+        });
+    }
+
+    if key.codepoint > 0x7F {
+        if let Some(c) = char::from_u32(key.codepoint) {
+            let bytes = KeyBytes::utf8(c);
+            return KeyAction::ToMaster(if alt_chord(key.mods) {
+                bytes.prefixed_esc()
+            } else {
+                bytes
+            });
         }
     }
 
-    // Keys arriving without a baked ascii code: translate the raw scancode.
-    let seq: &[u8] = match scancode {
-        0x82 => b"\x1b[A",
-        0x83 => b"\x1b[B",
-        0x84 => b"\x1b[D",
-        0x85 => b"\x1b[C",
-        0x86 => b"\x1b[H",
-        0x87 => b"\x1b[F",
-        0x88 => b"\x1b[3~",
-        0x80 => b"\x1b[5~",
-        0x81 => b"\x1b[6~",
-        _ => &[],
-    };
-    if seq.is_empty() {
-        KeyAction::None
-    } else {
-        KeyAction::ToMaster(KeyBytes::seq(seq))
+    match special_for_keycode(key.keycode, key.mods) {
+        Some(special) => KeyAction::ToMaster(encode_special(special, key.mods, app_cursor)),
+        None => KeyAction::None,
     }
 }
 
 /// What a (non-key) compositor event resolved to.
 pub enum CompositorEvent {
-    /// Key press: (legacy ascii byte, scancode, kernel-resolved codepoint).
-    Key(u8, u8, u32),
+    /// Key press, with everything the encoder needs to resolve it.
+    Key(KeyPress),
     /// Keyboard modifier state changed (bitfield of `MODIFIER_*`).
     Modifiers(u8),
     /// Configure: new pixel dimensions.
@@ -311,6 +505,146 @@ pub enum CompositorEvent {
 /// the system's axis convention. Sub-notch deltas round toward zero.
 pub fn wheel_scroll_lines(value_v120: i32) -> i32 {
     (value_v120 / 120) * SCROLLBACK_WHEEL_LINES
+}
+
+/// What a pointer event means to a mouse-tracking application.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MouseEventKind {
+    Press,
+    Release,
+    /// The pointer moved into a different cell.
+    Motion,
+    WheelUp,
+    WheelDown,
+}
+
+/// xterm's button number. The wire value is a bitmask, so a multi-button state
+/// resolves to its lowest set bit.
+fn mouse_button_number(code: u8) -> Option<u16> {
+    if code & MOUSE_LEFT != 0 {
+        Some(0)
+    } else if code & MOUSE_MIDDLE != 0 {
+        Some(1)
+    } else if code & MOUSE_RIGHT != 0 {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Encode a pointer event as a mouse report, or `None` when the tracking mode
+/// does not ask for this event.
+///
+/// `col`/`row` are 0-based; the wire form is 1-based. `buttons_held` is what
+/// distinguishes a drag from a bare move under button-event tracking.
+pub fn encode_mouse(
+    tracking: MouseTracking,
+    sgr: bool,
+    kind: MouseEventKind,
+    code: u8,
+    buttons_held: u8,
+    col: usize,
+    row: usize,
+    mods: u8,
+) -> Option<KeyBytes> {
+    if tracking == MouseTracking::Off {
+        return None;
+    }
+
+    let mut cb = match kind {
+        MouseEventKind::WheelUp => 64,
+        MouseEventKind::WheelDown => 65,
+        MouseEventKind::Press | MouseEventKind::Release => mouse_button_number(code)?,
+        MouseEventKind::Motion => {
+            match tracking {
+                MouseTracking::Normal => return None,
+                MouseTracking::ButtonEvent if buttons_held == 0 => return None,
+                _ => {}
+            }
+            // A drag reports the held button; a bare move under any-event
+            // tracking reports 3, xterm's "no button" value.
+            32 + mouse_button_number(buttons_held).unwrap_or(3)
+        }
+    };
+
+    if mods & MODIFIER_SHIFT != 0 {
+        cb += 4;
+    }
+    if mods & MODIFIER_ALT != 0 && mods & MODIFIER_ALTGR == 0 {
+        cb += 8;
+    }
+    if mods & MODIFIER_CTRL != 0 {
+        cb += 16;
+    }
+
+    let cx = u16::try_from(col.saturating_add(1)).ok()?;
+    let cy = u16::try_from(row.saturating_add(1)).ok()?;
+
+    let mut out = KeyBytes::empty();
+    out.push(0x1B);
+    out.push(b'[');
+    if sgr {
+        out.push(b'<');
+        out.push_num(cb);
+        out.push(b';');
+        out.push_num(cx);
+        out.push(b';');
+        out.push_num(cy);
+        out.push(if kind == MouseEventKind::Release {
+            b'm'
+        } else {
+            b'M'
+        });
+    } else {
+        // One byte per field, so a coordinate past 223 has no representation
+        // at all; 1006 is the encoding without the limit.
+        if cb > 223 || cx > 223 || cy > 223 {
+            return None;
+        }
+        if kind == MouseEventKind::Release {
+            // X10 names no button on release, but keeps the press's modifiers.
+            cb = (cb & !3) | 3;
+        }
+        out.push(b'M');
+        out.push(32 + cb as u8);
+        out.push(32 + cx as u8);
+        out.push(32 + cy as u8);
+    }
+    Some(out)
+}
+
+/// True when the application asked for mouse reports and Shift is not held.
+/// Shift is xterm's override back to a local selection.
+pub fn mouse_reporting(grid: &TerminalGrid, mods: u8) -> bool {
+    grid.mouse_tracking() != MouseTracking::Off && mods & MODIFIER_SHIFT == 0
+}
+
+/// Encode a pointer event at a pixel position. The single place pixel-to-cell
+/// and [`encode_mouse`]'s `(col, row)` order meet: both are `usize`, so a
+/// transposed call site compiles.
+#[allow(clippy::too_many_arguments)]
+pub fn mouse_report_at(
+    grid: &TerminalGrid,
+    kind: MouseEventKind,
+    code: u8,
+    buttons_held: u8,
+    px: i32,
+    py: i32,
+    cell_w: i32,
+    cell_h: i32,
+    mods: u8,
+) -> Option<KeyBytes> {
+    let (row, col) = pixel_to_cell(px, py, cell_w, cell_h, grid);
+    encode_mouse(
+        grid.mouse_tracking(),
+        grid.mouse_sgr(),
+        kind,
+        code,
+        buttons_held,
+        col,
+        row,
+        mods,
+    )
 }
 
 /// Update pointer-driven selection from a button/motion change. Returns true
@@ -490,10 +824,41 @@ mod tests {
         }
     }
 
+    fn text(ascii: u8, mods: u8) -> KeyPress {
+        KeyPress {
+            ascii,
+            keycode: 0,
+            codepoint: ascii as u32,
+            mods,
+        }
+    }
+
+    fn baked(ascii: u8, mods: u8) -> KeyPress {
+        KeyPress {
+            ascii,
+            keycode: 0,
+            codepoint: 0,
+            mods,
+        }
+    }
+
+    fn named(code: u16, mods: u8) -> KeyPress {
+        KeyPress {
+            ascii: 0,
+            keycode: code,
+            codepoint: 0,
+            mods,
+        }
+    }
+
+    fn bytes_of(key: KeyPress) -> Vec<u8> {
+        master_bytes(encode_key(key, false))
+    }
+
     #[test]
     fn ctrl_shift_c_copies_instead_of_sigint() {
         assert!(matches!(
-            encode_key(0x03, 0x2E, 0x03, CTRL_SHIFT),
+            encode_key(text(0x03, CTRL_SHIFT), false),
             KeyAction::CopySelection
         ));
     }
@@ -502,65 +867,147 @@ mod tests {
     /// raise SIGINT.
     #[test]
     fn ctrl_only_c_reaches_master_as_sigint_byte() {
-        assert_eq!(
-            master_bytes(encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL)),
-            alloc::vec![0x03]
-        );
+        assert_eq!(bytes_of(text(0x03, MODIFIER_CTRL)), alloc::vec![0x03]);
     }
 
     #[test]
     fn ctrl_shift_v_requests_paste() {
         assert!(matches!(
-            encode_key(0x16, 0x2F, 0x16, CTRL_SHIFT),
+            encode_key(text(0x16, CTRL_SHIFT), false),
             KeyAction::RequestPaste
         ));
     }
 
     #[test]
-    fn plain_ctrl_c_passes_through_to_ldisc() {
-        assert_eq!(
-            master_bytes(encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL)),
-            [0x03]
-        );
-    }
-
-    #[test]
     fn shift_only_c_is_plain_text() {
-        assert_eq!(
-            master_bytes(encode_key(b'C', 0x2E, b'C' as u32, MODIFIER_SHIFT)),
-            [b'C']
-        );
+        assert_eq!(bytes_of(text(b'C', MODIFIER_SHIFT)), [b'C']);
     }
 
     #[test]
     fn ctrl_shift_other_keys_still_reach_master() {
         // Ctrl+Shift+A (0x01) is not a clipboard chord; the ldisc gets it.
-        assert_eq!(
-            master_bytes(encode_key(0x01, 0x1E, 0x01, CTRL_SHIFT)),
-            [0x01]
-        );
+        assert_eq!(bytes_of(text(0x01, CTRL_SHIFT)), [0x01]);
     }
 
     #[test]
     fn baked_navigation_codes_map_to_csi() {
-        assert_eq!(master_bytes(encode_key(KEY_UP, 0, 0, 0)), b"\x1b[A");
-        assert_eq!(master_bytes(encode_key(KEY_DOWN, 0, 0, 0)), b"\x1b[B");
-        assert_eq!(master_bytes(encode_key(KEY_LEFT, 0, 0, 0)), b"\x1b[D");
-        assert_eq!(master_bytes(encode_key(KEY_RIGHT, 0, 0, 0)), b"\x1b[C");
-        assert_eq!(master_bytes(encode_key(KEY_HOME, 0, 0, 0)), b"\x1b[H");
-        assert_eq!(master_bytes(encode_key(KEY_END, 0, 0, 0)), b"\x1b[F");
-        assert_eq!(master_bytes(encode_key(KEY_DELETE, 0, 0, 0)), b"\x1b[3~");
+        assert_eq!(bytes_of(baked(KEY_UP, 0)), b"\x1b[A");
+        assert_eq!(bytes_of(baked(KEY_DOWN, 0)), b"\x1b[B");
+        assert_eq!(bytes_of(baked(KEY_LEFT, 0)), b"\x1b[D");
+        assert_eq!(bytes_of(baked(KEY_RIGHT, 0)), b"\x1b[C");
+        assert_eq!(bytes_of(baked(KEY_HOME, 0)), b"\x1b[H");
+        assert_eq!(bytes_of(baked(KEY_END, 0)), b"\x1b[F");
+        assert_eq!(bytes_of(baked(KEY_DELETE, 0)), b"\x1b[3~");
+    }
+
+    /// The editing keys the driver bakes no legacy byte for, so the canonical
+    /// keycode is their only source.
+    #[test]
+    fn function_keys_use_the_pc_style_encoding() {
+        assert_eq!(bytes_of(named(keycode::KEY_F1, 0)), b"\x1bOP");
+        assert_eq!(bytes_of(named(keycode::KEY_F4, 0)), b"\x1bOS");
+        assert_eq!(bytes_of(named(keycode::KEY_F5, 0)), b"\x1b[15~");
+        assert_eq!(bytes_of(named(keycode::KEY_F6, 0)), b"\x1b[17~");
+        assert_eq!(bytes_of(named(keycode::KEY_F10, 0)), b"\x1b[21~");
+        assert_eq!(bytes_of(named(keycode::KEY_F11, 0)), b"\x1b[23~");
+        assert_eq!(bytes_of(named(keycode::KEY_F12, 0)), b"\x1b[24~");
+        assert_eq!(bytes_of(named(keycode::KEY_INSERT, 0)), b"\x1b[2~");
     }
 
     #[test]
-    fn page_keys_drive_local_scrollback() {
+    fn modifiers_ride_the_second_csi_parameter() {
+        assert_eq!(bytes_of(baked(KEY_LEFT, MODIFIER_CTRL)), b"\x1b[1;5D");
+        assert_eq!(bytes_of(baked(KEY_RIGHT, MODIFIER_SHIFT)), b"\x1b[1;2C");
+        assert_eq!(bytes_of(baked(KEY_HOME, MODIFIER_ALT)), b"\x1b[1;3H");
+        assert_eq!(bytes_of(baked(KEY_DELETE, MODIFIER_CTRL)), b"\x1b[3;5~");
+        assert_eq!(
+            bytes_of(named(keycode::KEY_F5, MODIFIER_SHIFT)),
+            b"\x1b[15;2~"
+        );
+        // F1–F4 leave SS3 for CSI the moment they are modified.
+        assert_eq!(
+            bytes_of(named(keycode::KEY_F1, MODIFIER_CTRL)),
+            b"\x1b[1;5P"
+        );
+        // Every modifier at once is the widest sequence the encoder produces.
+        assert_eq!(
+            bytes_of(named(
+                keycode::KEY_F12,
+                MODIFIER_CTRL | MODIFIER_SHIFT | MODIFIER_ALT
+            )),
+            b"\x1b[24;8~"
+        );
+    }
+
+    /// AltGr sets Alt too, but it selected a layout level — the codepoint it
+    /// produced must not come back as a modified key.
+    #[test]
+    fn altgr_is_not_an_alt_chord() {
+        let mut key = text(b'@', MODIFIER_ALT | MODIFIER_ALTGR);
+        key.codepoint = b'@' as u32;
+        assert_eq!(bytes_of(key), [b'@']);
+        assert_eq!(
+            bytes_of(baked(KEY_LEFT, MODIFIER_ALT | MODIFIER_ALTGR)),
+            b"\x1b[D"
+        );
+    }
+
+    #[test]
+    fn alt_prefixes_text_with_escape() {
+        assert_eq!(bytes_of(text(b'x', MODIFIER_ALT)), b"\x1bx");
+        let mut key = named(0, MODIFIER_ALT);
+        key.codepoint = 0x00E4;
+        assert_eq!(bytes_of(key), b"\x1b\xc3\xa4");
+    }
+
+    #[test]
+    fn application_cursor_keys_use_ss3() {
+        assert_eq!(master_bytes(encode_key(baked(KEY_UP, 0), true)), b"\x1bOA");
+        assert_eq!(
+            master_bytes(encode_key(baked(KEY_HOME, 0), true)),
+            b"\x1bOH"
+        );
+        // A modified cursor key is CSI even under DECCKM, as xterm has it.
+        assert_eq!(
+            master_bytes(encode_key(baked(KEY_UP, MODIFIER_CTRL), true)),
+            b"\x1b[1;5A"
+        );
+    }
+
+    #[test]
+    fn shift_tab_is_cbt() {
+        assert_eq!(bytes_of(text(b'\t', MODIFIER_SHIFT)), b"\x1b[Z");
+        assert_eq!(bytes_of(text(b'\t', 0)), b"\t");
+    }
+
+    /// An editor needs PgUp/PgDn, so the local scrollback moved to the chord
+    /// that already means "terminal command" here.
+    #[test]
+    fn page_keys_reach_the_application_and_the_chord_scrolls() {
+        assert_eq!(bytes_of(baked(KEY_PAGE_UP, 0)), b"\x1b[5~");
+        assert_eq!(bytes_of(baked(KEY_PAGE_DOWN, 0)), b"\x1b[6~");
+        assert_eq!(bytes_of(baked(KEY_PAGE_UP, MODIFIER_SHIFT)), b"\x1b[5;2~");
         assert!(matches!(
-            encode_key(KEY_PAGE_UP, 0, 0, 0),
+            encode_key(baked(KEY_PAGE_UP, CTRL_SHIFT), false),
             KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES)
         ));
         assert!(matches!(
-            encode_key(KEY_PAGE_DOWN, 0, 0, 0),
+            encode_key(baked(KEY_PAGE_DOWN, CTRL_SHIFT), false),
             KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES)
+        ));
+    }
+
+    /// Keypad navigation arrives as a baked byte for every key but KP-0, whose
+    /// Insert meaning has no legacy code.
+    #[test]
+    fn keypad_navigation_resolves_without_a_baked_byte() {
+        assert_eq!(bytes_of(named(keycode::KEY_KP_0, 0)), b"\x1b[2~");
+        assert_eq!(bytes_of(named(keycode::KEY_KP_DOT, 0)), b"\x1b[3~");
+        // NumLock on means the keypad is digits; the keymap resolved text, so
+        // the nav mapping must stand down.
+        assert!(matches!(
+            encode_key(named(keycode::KEY_KP_0, MODIFIER_NUM_LOCK), false),
+            KeyAction::None
         ));
     }
 
@@ -574,20 +1021,221 @@ mod tests {
     }
 
     #[test]
-    fn zero_ascii_falls_back_to_scancode_table() {
-        assert_eq!(master_bytes(encode_key(0, 0x82, 0, 0)), b"\x1b[A");
-        assert_eq!(master_bytes(encode_key(0, 0x80, 0, 0)), b"\x1b[5~");
-        assert!(matches!(encode_key(0, 0x42, 0, 0), KeyAction::None));
+    fn an_unmapped_key_produces_nothing() {
+        assert!(matches!(
+            encode_key(named(keycode::KEY_PRINTSCREEN, 0), false),
+            KeyAction::None
+        ));
     }
 
     #[test]
     fn non_ascii_codepoint_encodes_as_utf8() {
-        assert_eq!(master_bytes(encode_key(0, 0x1A, 0x00E4, 0)), "ä".as_bytes());
-        assert_eq!(master_bytes(encode_key(0, 0x12, 0x20AC, 0)), "€".as_bytes());
-        // The dead-key accent flush (keycode 0, bare codepoint) too.
-        assert_eq!(master_bytes(encode_key(0, 0, 0x00B4, 0)), "´".as_bytes());
+        let mut key = named(0, 0);
+        key.codepoint = 0x00E4;
+        assert_eq!(bytes_of(key), "ä".as_bytes());
+        key.codepoint = 0x20AC;
+        assert_eq!(bytes_of(key), "€".as_bytes());
+        // The dead-key accent flush carries no keycode at all.
+        key.codepoint = 0x00B4;
+        assert_eq!(bytes_of(key), "´".as_bytes());
         // ASCII still rides the legacy byte, not double-encoded.
-        assert_eq!(master_bytes(encode_key(b'a', 0x1E, b'a' as u32, 0)), [b'a']);
+        assert_eq!(bytes_of(text(b'a', 0)), [b'a']);
+    }
+
+    #[test]
+    fn sgr_mouse_reports_are_one_based_with_a_release_marker() {
+        let press = encode_mouse(
+            MouseTracking::Normal,
+            true,
+            MouseEventKind::Press,
+            MOUSE_LEFT,
+            MOUSE_LEFT,
+            9,
+            4,
+            0,
+        )
+        .expect("press reported");
+        assert_eq!(press.as_bytes(), b"\x1b[<0;10;5M");
+
+        let release = encode_mouse(
+            MouseTracking::Normal,
+            true,
+            MouseEventKind::Release,
+            MOUSE_LEFT,
+            0,
+            9,
+            4,
+            0,
+        )
+        .expect("release reported");
+        assert_eq!(release.as_bytes(), b"\x1b[<0;10;5m");
+
+        let ctrl_right = encode_mouse(
+            MouseTracking::Normal,
+            true,
+            MouseEventKind::Press,
+            MOUSE_RIGHT,
+            MOUSE_RIGHT,
+            299,
+            99,
+            MODIFIER_CTRL,
+        )
+        .expect("modified press reported");
+        assert_eq!(ctrl_right.as_bytes(), b"\x1b[<18;300;100M");
+    }
+
+    #[test]
+    fn x10_mouse_reports_bias_by_32_and_refuse_what_they_cannot_encode() {
+        let press = encode_mouse(
+            MouseTracking::Normal,
+            false,
+            MouseEventKind::Press,
+            MOUSE_MIDDLE,
+            MOUSE_MIDDLE,
+            0,
+            0,
+            0,
+        )
+        .expect("press reported");
+        assert_eq!(press.as_bytes(), &[0x1B, b'[', b'M', 33, 33, 33]);
+
+        // X10 has one byte per field, so past column 223 there is nothing to
+        // send; 1006 is the encoding that has no such limit.
+        assert!(
+            encode_mouse(
+                MouseTracking::Normal,
+                false,
+                MouseEventKind::Press,
+                MOUSE_LEFT,
+                MOUSE_LEFT,
+                230,
+                0,
+                0,
+            )
+            .is_none()
+        );
+
+        // X10 names no button on release, but the press's modifier bits are
+        // the only way an application can pair the two.
+        let release = encode_mouse(
+            MouseTracking::Normal,
+            false,
+            MouseEventKind::Release,
+            MOUSE_MIDDLE,
+            0,
+            0,
+            0,
+            MODIFIER_CTRL,
+        )
+        .expect("release reported");
+        assert_eq!(release.as_bytes(), &[0x1B, b'[', b'M', 32 + 3 + 16, 33, 33]);
+    }
+
+    #[test]
+    fn motion_reporting_follows_the_tracking_mode() {
+        let motion =
+            |tracking, held| encode_mouse(tracking, true, MouseEventKind::Motion, 0, held, 1, 1, 0);
+        assert!(motion(MouseTracking::Off, MOUSE_LEFT).is_none());
+        assert!(motion(MouseTracking::Normal, MOUSE_LEFT).is_none());
+        assert!(motion(MouseTracking::ButtonEvent, 0).is_none());
+        assert_eq!(
+            motion(MouseTracking::ButtonEvent, MOUSE_LEFT)
+                .expect("drag reported")
+                .as_bytes(),
+            b"\x1b[<32;2;2M"
+        );
+        // Any-event tracking reports a bare move as button 3, xterm's "none".
+        assert_eq!(
+            motion(MouseTracking::AnyEvent, 0)
+                .expect("move reported")
+                .as_bytes(),
+            b"\x1b[<35;2;2M"
+        );
+    }
+
+    #[test]
+    fn wheel_reports_use_buttons_64_and_65() {
+        let up = encode_mouse(
+            MouseTracking::Normal,
+            true,
+            MouseEventKind::WheelUp,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .expect("wheel reported");
+        assert_eq!(up.as_bytes(), b"\x1b[<64;1;1M");
+        let down = encode_mouse(
+            MouseTracking::Normal,
+            true,
+            MouseEventKind::WheelDown,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .expect("wheel reported");
+        assert_eq!(down.as_bytes(), b"\x1b[<65;1;1M");
+    }
+
+    /// Both coordinates are `usize`, so a transposition in `mouse_report_at`
+    /// compiles and reports the wrong cell.
+    #[test]
+    fn a_report_names_the_cell_under_the_pointer() {
+        let mut grid = TerminalGrid::new(24, 80);
+        for &b in b"\x1b[?1000h\x1b[?1006h" {
+            grid.process_byte(b);
+        }
+        // 8x16 cells: x=24 is column 3, y=64 is row 4, so the wire form is
+        // column 4 and row 5 — and they are not interchangeable.
+        let report = mouse_report_at(
+            &grid,
+            MouseEventKind::Press,
+            MOUSE_LEFT,
+            MOUSE_LEFT,
+            24,
+            64,
+            8,
+            16,
+            0,
+        )
+        .expect("press reported");
+        assert_eq!(report.as_bytes(), b"\x1b[<0;4;5M");
+    }
+
+    #[test]
+    fn shift_is_the_way_out_of_mouse_reporting() {
+        let mut grid = TerminalGrid::new(24, 80);
+        assert!(!mouse_reporting(&grid, 0));
+        for &b in b"\x1b[?1000h" {
+            grid.process_byte(b);
+        }
+        assert!(mouse_reporting(&grid, 0));
+        assert!(!mouse_reporting(&grid, MODIFIER_SHIFT));
+        for &b in b"\x1b[?1000l" {
+            grid.process_byte(b);
+        }
+        assert!(!mouse_reporting(&grid, 0));
+    }
+
+    #[test]
+    fn tracking_off_reports_nothing() {
+        assert!(
+            encode_mouse(
+                MouseTracking::Off,
+                true,
+                MouseEventKind::Press,
+                MOUSE_LEFT,
+                MOUSE_LEFT,
+                0,
+                0,
+                0,
+            )
+            .is_none()
+        );
     }
 
     #[test]
