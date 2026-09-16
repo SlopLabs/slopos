@@ -597,10 +597,20 @@ fn a_syntax_error_does_not_run_anything() -> bool {
 /// Bounded so a regressed shell fails rather than wedging the harness.
 const PTY_IDLE_READS: usize = 20_000;
 
-/// Type an unfinished `if` at an interactive shell and finish it on the next
-/// lines. `spanned` in the output is the proof — `if true` alone would have
-/// failed and `then echo spanned` alone is a syntax error — and the PS2 prompt
-/// is checked beside it because that is what tells the user it is waiting.
+/// Type an unfinished `if` at an interactive shell, finish it on the next
+/// lines, then run an external command.
+///
+/// `spanned` proves the continuation — `if true` alone would have failed and
+/// `then echo spanned` alone is a syntax error — and the PS2 prompt is checked
+/// beside it because that is what tells the user it is waiting. The absence of
+/// a stop report proves the forked child could claim the terminal.
+///
+/// The shell is spawned from a child that first makes itself the slave's
+/// session and foreground group, exactly as `/bin/terminal` does. That
+/// topology is the test: a shell that takes the controlling terminal for
+/// itself rather than joining the session that already owns it leaves every
+/// forked command in a background group, where it stops on `SIGTTOU` before
+/// printing anything.
 fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
     let Ok((master, _slave_num)) = process::openpty() else {
         eprintln!("shell_script_test: openpty failed");
@@ -614,30 +624,47 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
     };
     let slave = slave.into_raw();
 
-    // fd 0/1/2 all on the slave is what makes the shell decide it is
-    // interactive, which is the path under test.
-    let actions = [
-        process::clone_fd(slave, 0),
-        process::clone_fd(slave, 1),
-        process::clone_fd(slave, 2),
-    ];
-    let tid = process::spawn_path_with_actions(
-        b"/bin/shell",
-        &[],
-        TaskPriority::Normal,
-        TASK_FLAG_USER_MODE,
-        &actions,
-        0,
-    );
-    let _ = fs::close_fd_raw(slave);
-    if tid <= 0 {
-        eprintln!("shell_script_test: interactive spawn returned {tid}");
+    let tid = process::fork();
+    if tid < 0 {
+        eprintln!("shell_script_test: fork for the tty owner failed");
         let _ = fs::close_fd_raw(master);
+        let _ = fs::close_fd_raw(slave);
         return false;
     }
+    if tid == 0 {
+        let _ = fs::close_fd_raw(master);
+        process::ignore_signal(slopos_abi::signal::SIGTTOU);
+        let _ = process::setsid();
+        let _ = fs::tiocsctty(slave);
+        let _ = process::setpgid(0, 0);
+        let pgid = process::getpgid(0);
+        if pgid > 0 {
+            let _ = fs::tcsetpgrp(slave, pgid as u32);
+        }
+        // fd 0/1/2 all on the slave is what makes the shell decide it is
+        // interactive, which is the path under test.
+        let actions = [
+            process::clone_fd(slave, 0),
+            process::clone_fd(slave, 1),
+            process::clone_fd(slave, 2),
+        ];
+        let shell = process::spawn_path_with_actions(
+            b"/bin/shell",
+            &[],
+            TaskPriority::Normal,
+            TASK_FLAG_USER_MODE,
+            &actions,
+            0,
+        );
+        if shell <= 0 {
+            sys_core::exit_with_code(1);
+        }
+        sys_core::exit_with_code(process::wait_exit_code(shell as u32));
+    }
+    let _ = fs::close_fd_raw(slave);
 
     let _ = fs::set_fd_nonblocking(master);
-    let script: &[u8] = b"if true\nthen echo spanned\nfi\nexit\n";
+    let script: &[u8] = b"if true\nthen echo spanned\nfi\n/bin/echo external\nexit\n";
     let mut fed = 0usize;
     let mut seen = Vec::new();
     let mut idle = 0usize;
@@ -662,7 +689,7 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
             Err(SyscallError::EAGAIN) | Ok(_) => {}
             Err(_) => break,
         }
-        if contains(&seen, b"spanned") && process::wait_exit_code_nohang(tid as u32).is_some() {
+        if contains(&seen, b"external") && process::wait_exit_code_nohang(tid as u32).is_some() {
             break;
         }
         if progress {
@@ -676,9 +703,22 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
     let _ = process::kill(tid as u32, slopos_abi::signal::SIGKILL);
     let _ = fs::close_fd_raw(master);
 
-    if !contains(&seen, b"spanned") {
+    for marker in [b"spanned".as_slice(), b"external"] {
+        if !contains(&seen, marker) {
+            eprintln!(
+                "shell_script_test: no {:?} in the interactive output; saw {:?}",
+                String::from_utf8_lossy(marker),
+                String::from_utf8_lossy(&seen)
+            );
+            return false;
+        }
+    }
+    // The decisive half: the echo of the command and the job-table line the
+    // shell prints for a stopped one both contain `external`, so absence of
+    // the stop report is what says the child actually ran.
+    if contains(&seen, b"Stopped") {
         eprintln!(
-            "shell_script_test: the continuation never ran; saw {:?}",
+            "shell_script_test: a foreground child was stopped; saw {:?}",
             String::from_utf8_lossy(&seen)
         );
         return false;

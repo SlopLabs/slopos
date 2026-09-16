@@ -146,15 +146,26 @@ pub fn initialize_job_control() {
     if !super::is_interactive() {
         return;
     }
-    let pid = process::getpid() as u32;
-    if process::setsid() < 0 {
-        // Already a session leader, or the call is refused: either way the
-        // existing session is the one to work in.
-        let _ = process::setpgid(0, 0);
+
+    // A successful TIOCGSID means another session already owns this terminal;
+    // detaching it would leave them unable to read their own input.
+    if fs::tcgetsid(0).is_err() {
+        let _ = process::setsid();
+        let _ = fs::tiocsctty(0);
     }
-    let _ = fs::tiocsctty(0);
-    SHELL_PGID.store(pid, Ordering::Relaxed);
-    let _ = fs::tcsetpgrp(0, pid);
+
+    // The shell's own immunity, and what a forked child inherits as
+    // *ignored* for long enough to claim the terminal before it resets them.
+    process::ignore_signal(slopos_abi::signal::SIGTTOU);
+    process::ignore_signal(slopos_abi::signal::SIGTTIN);
+    process::ignore_signal(slopos_abi::signal::SIGTSTP);
+
+    let _ = process::setpgid(0, 0);
+    let shell_pgid = process::getpgid(0);
+    if shell_pgid > 0 {
+        SHELL_PGID.store(shell_pgid as u32, Ordering::Relaxed);
+        let _ = fs::tcsetpgrp(0, shell_pgid as u32);
+    }
 }
 
 fn shell_pgid() -> u32 {
@@ -162,7 +173,7 @@ fn shell_pgid() -> u32 {
 }
 
 pub fn enter_foreground(pgid: u32) {
-    if !super::is_interactive() || pgid == 0 {
+    if pgid == 0 || !super::is_interactive() {
         return;
     }
     set_foreground_pgid(pgid);
@@ -170,7 +181,6 @@ pub fn enter_foreground(pgid: u32) {
 }
 
 pub fn leave_foreground() {
-    clear_foreground_pgid();
     if !super::is_interactive() {
         return;
     }
@@ -178,6 +188,7 @@ pub fn leave_foreground() {
     if pgid != 0 {
         let _ = fs::tcsetpgrp(0, pgid);
     }
+    clear_foreground_pgid();
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,7 +1030,8 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
             continue;
         }
         let mut stat = UserFsStat::default();
-        if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() {
+        // A directory on `PATH` is not a command.
+        if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok() && stat.is_file() {
             return true;
         }
     }
@@ -1027,15 +1039,34 @@ fn resolve_via_path(name: &[u8], tmp: &mut [u8]) -> bool {
 }
 
 /// Resolve a command name to a path the loader will accept. A name holding a
-/// `/` is a path; anything else is looked up in `PATH`.
+/// `/` is a path; anything else is a registry program or a `PATH` lookup.
 fn resolve_exec_path(name: &[u8], tmp: &mut [u8]) -> bool {
+    if name.is_empty() {
+        return false;
+    }
     if name.contains(&b'/') {
         if normalize_path(name, tmp) != 0 {
             return false;
         }
         let mut stat = UserFsStat::default();
-        return fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_ok();
+        if fs::stat_path(tmp.as_ptr() as *const c_char, &mut stat).is_err() {
+            return false;
+        }
+        return stat.is_file();
     }
+
+    // A registry name resolves even where the spawn path is not taken — a
+    // pipeline stage execs it like any other program.
+    if let Ok(name_str) = core::str::from_utf8(name)
+        && let Some(spec) = program_registry::resolve_program(name_str)
+    {
+        let path_bytes = spec.path.as_bytes();
+        let path_len = path_bytes.len().min(tmp.len() - 1);
+        tmp[..path_len].copy_from_slice(&path_bytes[..path_len]);
+        tmp[path_len] = 0;
+        return true;
+    }
+
     resolve_via_path(name, tmp)
 }
 
