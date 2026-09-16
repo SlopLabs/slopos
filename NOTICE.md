@@ -132,16 +132,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### Fonts
 
-Both fonts are shipped unmodified as `.ttf` files in `/usr/share/fonts/`,
+Both families are shipped unmodified as `.ttf` files in `/usr/share/fonts/`,
 bundled alongside SlopOS rather than merged into it. Neither declares a Reserved
-Font Name. Each font's full SIL Open Font License 1.1 text travels with it, in
-[`assets/fonts/`](assets/fonts/) and on the installed images.
+Font Name. Each family's full SIL Open Font License 1.1 text travels with it, in
+[`assets/fonts/`](assets/fonts/) and on the installed images, and covers every
+weight of that family shipped beside it.
 
-- **Inter** — `Copyright (c) 2016 The Inter Project Authors
+- **Inter** (Regular, SemiBold) — `Copyright (c) 2016 The Inter Project Authors
   (https://github.com/rsms/inter)` — SIL OFL 1.1, full text in
   [`assets/fonts/Inter-OFL.txt`](assets/fonts/Inter-OFL.txt)
-- **JetBrains Mono** — `Copyright 2020 The JetBrains Mono Project Authors
-  (https://github.com/JetBrains/JetBrainsMono)` — SIL OFL 1.1, full text in
+- **JetBrains Mono** (Regular, Bold) — `Copyright 2020 The JetBrains Mono
+  Project Authors (https://github.com/JetBrains/JetBrainsMono)` — SIL OFL 1.1,
+  full text in
   [`assets/fonts/JetBrainsMono-OFL.txt`](assets/fonts/JetBrainsMono-OFL.txt)
 
 ## Host tooling — not distributed with SlopOS

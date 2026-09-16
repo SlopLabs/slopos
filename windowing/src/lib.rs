@@ -22,6 +22,7 @@
 #![allow(dead_code)]
 
 pub mod app;
+pub mod clipboard;
 pub mod connection;
 pub mod event;
 pub(crate) mod memfd_buf;
@@ -31,6 +32,7 @@ pub(crate) mod sys;
 pub mod window;
 
 pub use app::{ControlFlow, WindowedApp, run};
+pub use clipboard::Clipboard;
 pub use connection::{Protocol, ProtocolHandle, UiSender, connect};
 pub use event::Event;
 pub use slopos_abi::handle::{

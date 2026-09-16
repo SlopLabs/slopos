@@ -395,7 +395,7 @@ impl Widget for TableWidget {
         }
 
         match event {
-            WidgetEvent::PointerDown { x, y, button } => {
+            WidgetEvent::PointerDown { x, y, button, .. } => {
                 let rect = self.layout_rect();
                 if !rect.contains(*x, *y) {
                     return EventResponse::Ignored;

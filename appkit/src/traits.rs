@@ -20,6 +20,19 @@ pub struct MeasureCtx<'a> {
     pub style: &'a StyleSheet,
 }
 
+impl MeasureCtx<'_> {
+    /// Advance of `text` as [`PaintContext::draw_text`](super::paint::PaintContext::draw_text)
+    /// will lay it out — measure and paint must agree or a label is clipped by
+    /// its own box.
+    pub fn text_width(&self, text: &str) -> i32 {
+        super::text::ui::width(text, self.style.font_size as u16)
+    }
+
+    pub fn text_height(&self) -> i32 {
+        super::text::ui::line_height(self.style.font_size as u16)
+    }
+}
+
 /// Identity and geometry every widget carries, owned by the framework.
 ///
 /// `measured` is written only by [`measure_widget`], `rect` only by

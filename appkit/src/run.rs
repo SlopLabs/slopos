@@ -33,6 +33,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
     if !id.is_empty() {
         win.set_app_id(id);
     }
+    super::clipboard::install(handle.clone());
     let style = StyleSheet::dark();
     let mut focus = FocusManager::new();
     let mut overlays = OverlayManager::new();
@@ -52,6 +53,9 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             timestamp_ms: 0,
         });
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
+    // The compositor reports modifiers only with key events; a pointer press
+    // takes the most recent snapshot, which is what shift-click is.
+    let mut modifiers = super::event::Modifiers::default();
 
     loop {
         handle.flush_pending_destroys();
@@ -70,12 +74,33 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
             match &ev {
                 Event::CloseRequest => std::process::exit(0),
+                Event::ClipboardOffer { len } => {
+                    if !super::clipboard::accept_offer(*len) {
+                        // An empty offer, or one we could not take delivery of,
+                        // is still an answer: without it a paste with nothing
+                        // on the selection would leave the application waiting
+                        // for a `ClipboardData` that never comes, and its own
+                        // fallback unreachable.
+                        let action = app.on_paste(String::new());
+                        process_action(action, &mut needs_rebuild, &mut needs_repaint);
+                    }
+                    continue;
+                }
+                Event::ClipboardData { len } => {
+                    if let Some(text) = super::clipboard::take(*len) {
+                        let action = app.on_paste(text);
+                        process_action(action, &mut needs_rebuild, &mut needs_repaint);
+                    }
+                    continue;
+                }
                 Event::Configure {
                     width: w,
                     height: h,
                 } => {
                     let _ = win.resize(*w, *h);
                     window_size = super::constraints::Size::new(*w as i32, *h as i32);
+                    let action = app.on_resize(*w, *h);
+                    process_action(action, &mut needs_rebuild, &mut needs_repaint);
                     needs_rebuild = true;
                     continue;
                 }
@@ -87,8 +112,16 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 None => continue,
             };
 
+            match &widget_event {
+                WidgetEvent::KeyDown { modifiers: m, .. }
+                | WidgetEvent::KeyUp { modifiers: m, .. } => {
+                    modifiers = *m;
+                }
+                _ => {}
+            }
+
             let (px, py) = win.pointer();
-            let widget_event = fill_pointer_pos(widget_event, px, py);
+            let widget_event = fill_pointer_state(widget_event, px, py, modifiers);
 
             match &widget_event {
                 WidgetEvent::PointerDown { .. } => focus.note_pointer_input(),
@@ -96,21 +129,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                     focus.note_keyboard_input()
                 }
                 _ => {}
-            }
-
-            if let WidgetEvent::KeyDown {
-                key: super::event::Key::Named(super::event::NamedKey::Tab),
-                modifiers: mods,
-                ..
-            } = &widget_event
-            {
-                if mods.shift {
-                    focus.move_focus_prev();
-                } else {
-                    focus.move_focus_next();
-                }
-                needs_repaint = true;
-                continue;
             }
 
             let (px, py) = win.pointer();
@@ -135,11 +153,21 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
             if resp.is_consumed() {
                 needs_repaint = true;
-            } else {
-                if let WidgetEvent::KeyDown {
-                    key, modifiers: m, ..
-                } = &widget_event
-                {
+            } else if let WidgetEvent::KeyDown {
+                key, modifiers: m, ..
+            } = &widget_event
+            {
+                // Tab moves focus only where nothing claimed it: an editor
+                // indents with Tab, and stealing it before dispatch would make
+                // that impossible to express.
+                if matches!(key, super::event::Key::Named(super::event::NamedKey::Tab)) {
+                    if m.shift {
+                        focus.move_focus_prev();
+                    } else {
+                        focus.move_focus_next();
+                    }
+                    needs_repaint = true;
+                } else {
                     unhandled_key = Some((*key, *m));
                 }
             }
@@ -240,9 +268,21 @@ fn process_action(action: Action, needs_rebuild: &mut bool, _needs_repaint: &mut
     }
 }
 
-fn fill_pointer_pos(mut event: WidgetEvent, px: i32, py: i32) -> WidgetEvent {
+fn fill_pointer_state(
+    mut event: WidgetEvent,
+    px: i32,
+    py: i32,
+    mods: super::event::Modifiers,
+) -> WidgetEvent {
     match &mut event {
-        WidgetEvent::PointerDown { x, y, .. } | WidgetEvent::PointerUp { x, y, .. } => {
+        WidgetEvent::PointerDown {
+            x, y, modifiers, ..
+        } => {
+            *x = px;
+            *y = py;
+            *modifiers = mods;
+        }
+        WidgetEvent::PointerUp { x, y, .. } => {
             *x = px;
             *y = py;
         }

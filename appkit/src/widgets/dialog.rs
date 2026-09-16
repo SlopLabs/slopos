@@ -18,6 +18,10 @@ pub struct DialogWidget {
     actions: Vec<Box<dyn Widget>>,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     card_rect: Rect,
+    /// Title-row height from the last measure; `layout` and `paint` run without
+    /// a style, and a card whose title band disagreed with paint's would place
+    /// its content over the title.
+    title_height: i32,
     /// `None` until Tab or an arrow key names one, so a stray Enter cannot fire
     /// a confirm dialog's typically-destructive first action.
     focused_action: Option<usize>,
@@ -37,6 +41,7 @@ impl DialogWidget {
             actions,
             on_dismiss,
             card_rect: Rect::ZERO,
+            title_height: 0,
             focused_action: None,
         }
     }
@@ -86,7 +91,7 @@ impl DialogWidget {
     }
 
     fn card_height(&self) -> i32 {
-        let title_h = crate::text::cell_height() + CARD_PADDING;
+        let title_h = self.title_height + CARD_PADDING;
         let content_h = self.content.measured_size().height;
         let actions_h = self.actions_height();
         let mut h = title_h + content_h + CARD_PADDING;
@@ -110,6 +115,7 @@ impl Widget for DialogWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
+        self.title_height = crate::text::ui::line_height(ctx.style.font_size_heading as u16);
         let inner_w = self.inner_width(constraints.max_width);
 
         // Content height is unbounded: `card_height` reads the measured value
@@ -140,7 +146,7 @@ impl Widget for DialogWidget {
         let card_y = rect.y + (rect.height - card_h) / 2;
         self.card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
-        let title_h = crate::text::cell_height() + CARD_PADDING;
+        let title_h = self.title_height + CARD_PADDING;
         let content_h = self.content.measured_size().height;
         place_widget(
             self.content.as_mut(),
@@ -186,10 +192,18 @@ impl Widget for DialogWidget {
             style.border_default,
         );
 
-        let text_h = ctx.text_height();
+        let heading = style.font_size_heading;
+        let text_h = crate::text::ui::line_height(heading as u16);
         let title_x = self.card_rect.x + CARD_PADDING;
-        let title_y = self.card_rect.y + (CARD_PADDING + crate::text::cell_height() - text_h) / 2;
-        ctx.draw_text_transparent(title_x, title_y, &self.title, style.text_primary);
+        let title_y = self.card_rect.y + (CARD_PADDING + self.title_height - text_h) / 2;
+        ctx.draw_text_styled(
+            title_x,
+            title_y,
+            &self.title,
+            heading,
+            crate::text::ui::Weight::Semibold,
+            style.text_primary,
+        );
 
         let selected = self.focused_action;
         ctx.with_clip(self.card_rect, |ctx| {
@@ -232,7 +246,8 @@ impl Widget for DialogWidget {
                 EventResponse::Consumed
             }
 
-            WidgetEvent::PointerDown { x, y, button } | WidgetEvent::PointerUp { x, y, button } => {
+            WidgetEvent::PointerDown { x, y, button, .. }
+            | WidgetEvent::PointerUp { x, y, button } => {
                 if *button == PointerButton::Left
                     && matches!(event, WidgetEvent::PointerDown { .. })
                     && !self.card_rect.contains(*x, *y)

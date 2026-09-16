@@ -51,8 +51,8 @@ impl Widget for CheckboxWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let cb_size = ctx.style.checkbox_size;
         let gap = ctx.style.checkbox_gap;
-        let text_w = crate::text::string_width(&self.label);
-        let text_h = crate::text::cell_height();
+        let text_w = ctx.text_width(&self.label);
+        let text_h = ctx.text_height();
 
         let width = cb_size + gap + text_w;
         let height = cb_size.max(text_h);
@@ -127,6 +127,7 @@ impl Widget for CheckboxWidget {
                 x,
                 y,
                 button: PointerButton::Left,
+                ..
             } => {
                 if !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;

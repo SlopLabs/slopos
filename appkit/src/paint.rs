@@ -81,27 +81,82 @@ impl<'a> PaintContext<'a> {
         slopos_gfx::canvas_ops::rounded_rect(self.buffer, x, y, w, h, radius, color);
     }
 
+    /// UI text at the style sheet's body size, with its line box's top-left at
+    /// `(x, y)`.
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
-        let dr = slopos_abi::damage::DamageRect {
-            x0: self.clip.x,
-            y0: self.clip.y,
-            x1: self.clip.x + self.clip.width - 1,
-            y1: self.clip.y + self.clip.height - 1,
-        };
-        crate::text::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
+        let dr = self.clip.to_damage_rect();
+        let size = self.style.font_size as u16;
+        crate::text::ui::draw_clipped(
+            self.buffer,
+            x,
+            y,
+            text,
+            size,
+            crate::text::ui::Weight::Regular,
+            fg,
+            bg,
+            &dr,
+        );
     }
 
     pub fn draw_text_transparent(&mut self, x: i32, y: i32, text: &str, fg: Color32) {
+        self.draw_text(x, y, text, fg, Color32::TRANSPARENT);
+    }
+
+    /// UI text at an explicit size and weight, composited over what is there.
+    pub fn draw_text_styled(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        size_px: i32,
+        weight: crate::text::ui::Weight,
+        fg: Color32,
+    ) {
         let dr = self.clip.to_damage_rect();
-        crate::text::draw_str_clipped(self.buffer, x, y, text, fg, Color32::TRANSPARENT, &dr);
+        crate::text::ui::draw_clipped(
+            self.buffer,
+            x,
+            y,
+            text,
+            size_px.max(1) as u16,
+            weight,
+            fg,
+            Color32::TRANSPARENT,
+            &dr,
+        );
+    }
+
+    /// Fixed-cell text, for content whose columns must line up (code, hex,
+    /// tabular numbers).
+    pub fn draw_mono_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
+        let dr = self.clip.to_damage_rect();
+        crate::text::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
     }
 
     pub fn text_width(&self, text: &str) -> i32 {
-        crate::text::string_width(text)
+        crate::text::ui::width(text, self.style.font_size as u16)
     }
 
-    /// Cell height for the current font.
+    pub fn text_width_styled(
+        &self,
+        text: &str,
+        size_px: i32,
+        weight: crate::text::ui::Weight,
+    ) -> i32 {
+        crate::text::ui::width_weighted(text, size_px.max(1) as u16, weight)
+    }
+
+    /// Line height of UI text at the style sheet's body size.
     pub fn text_height(&self) -> i32 {
+        crate::text::ui::line_height(self.style.font_size as u16)
+    }
+
+    pub fn mono_cell_width(&self) -> i32 {
+        crate::text::cell_width()
+    }
+
+    pub fn mono_cell_height(&self) -> i32 {
         crate::text::cell_height()
     }
 

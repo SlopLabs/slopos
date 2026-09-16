@@ -5,8 +5,8 @@ Usage: gen_initramfs.py <out.cpio> <build_dir> <bin1> [bin2] ...
 
 Mirrors scripts/build_fs_image.sh's argv and layout so the RAM root and the
 ext2 disk image never drift: each binary lands at /bin/<name> except `init`
-which goes to /sbin/init; fonts go to /usr/share/fonts; the wallpaper to
-/usr/share/slopos/wallpapers/default.png.
+which goes to /sbin/init; fonts go to /usr/share/fonts; documentation to
+/usr/share/slopos/doc; the wallpaper to /usr/share/slopos/wallpapers/default.png.
 
 Parent directories of a file are auto-created by the kernel's cpio loader, so
 only a directory nothing writes into needs its own record (see EMPTY_DIRS).
@@ -113,6 +113,14 @@ def main() -> None:
                 continue
             dest = b"/usr/share/fonts/" + fname.encode()
             entries.append((dest, MODE_DATA, read_file(os.path.join(fonts_dir, fname))))
+
+    docs_dir = os.path.join(repo_root, "assets", "docs")
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            dest = b"/usr/share/slopos/doc/" + fname.encode()
+            entries.append((dest, MODE_DATA, read_file(os.path.join(docs_dir, fname))))
 
     logo = os.path.join(repo_root, "assets", "logo.png")
     if os.path.isfile(logo):

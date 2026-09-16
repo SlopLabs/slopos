@@ -110,8 +110,15 @@ impl Widget for PopupWidget {
                 self.child.event(event, EventPhase::Target, sink)
             }
 
-            // Modal: swallow what the child ignores so the tree underneath
-            // cannot act while the popup is open.
+            // Tab is the framework's, not the tree's: swallowing it would
+            // freeze focus wherever it was when the popup opened.
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Tab),
+                ..
+            } => self.child.event(event, EventPhase::Target, sink),
+
+            // Modal otherwise: swallow what the child ignores so the tree
+            // underneath cannot act while the popup is open.
             _ => {
                 let resp = self.child.event(event, phase, sink);
                 if resp.is_consumed() {

@@ -52,6 +52,11 @@ pub enum WidgetEvent {
         x: i32,
         y: i32,
         button: PointerButton,
+        /// Modifier state at the press, as the last key event reported it.
+        /// The compositor sends no modifiers with a pointer event — Wayland
+        /// does not either — so this is the keyboard's most recent snapshot,
+        /// which is what a shift-click needs and all it needs.
+        modifiers: Modifiers,
     },
     PointerUp {
         x: i32,

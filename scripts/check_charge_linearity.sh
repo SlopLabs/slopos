@@ -57,7 +57,7 @@ escape:slopos-ostd/src/process/quota/token.rs
 escape:fs/src/fileio/mod.rs
 '
 
-OUT_OF_SCOPE_RE='^(userland|terminal-core|slibc|slop-protocol|appkit|image|slopos-rt|vendor/)'
+OUT_OF_SCOPE_RE='^(userland|terminal-core|editor-core|slibc|slop-protocol|appkit|image|slopos-rt|vendor/)'
 
 # A binding is charge-bearing if its name or its type mentions a charge or a
 # reservation. Deliberately name-based as well as type-based: the field that

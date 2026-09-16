@@ -46,11 +46,13 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
         Event::PointerMotion { x, y } => Some(WidgetEvent::PointerMove { x: *x, y: *y }),
         Event::PointerPress { button } => {
             let btn = pointer_button(*button);
-            // Position will be filled in by the framework from tracked pointer state.
+            // Position and modifiers are filled in by the framework from the
+            // pointer and keyboard state it tracks.
             Some(WidgetEvent::PointerDown {
                 x: 0,
                 y: 0,
                 button: btn,
+                modifiers: Modifiers::default(),
             })
         }
         Event::PointerRelease { button } => {
@@ -106,7 +108,8 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             width: *width,
             height: *height,
         }),
-        Event::CloseRequest => None, // Handled at the appkit level.
+        // Handled at the appkit level, before translation.
+        Event::CloseRequest | Event::ClipboardOffer { .. } | Event::ClipboardData { .. } => None,
         Event::Other => None,
     }
 }

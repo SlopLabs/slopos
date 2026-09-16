@@ -19,6 +19,10 @@ pub struct TextFieldWidget {
     scroll_offset: i32,
     focused: bool,
     blink_on: bool,
+    /// Font size and padding from the last measure. Pixel-to-character mapping
+    /// must use what paint used, or a click lands on the wrong character.
+    font_size: i32,
+    padding_h: i32,
 }
 
 impl TextFieldWidget {
@@ -41,6 +45,8 @@ impl TextFieldWidget {
             scroll_offset: 0,
             focused: false,
             blink_on: false,
+            font_size: 14,
+            padding_h: 8,
         }
     }
 
@@ -83,13 +89,11 @@ impl TextFieldWidget {
     /// Pixel x-offset of the cursor at char index `idx` relative to text start.
     fn char_x_offset(&self, idx: usize) -> i32 {
         let prefix: String = self.text.chars().take(idx).collect();
-        crate::text::string_width(&prefix)
+        crate::text::ui::width(&prefix, self.font_size.max(1) as u16)
     }
 
     fn ensure_cursor_visible(&mut self) {
-        // TODO(tech-debt): hardcoded copy of StyleSheet::field_padding_h — thread
-        // the style through to this path instead.
-        let padding_h = 8;
+        let padding_h = self.padding_h;
         let content_width = self.rect().width - padding_h * 2;
         if content_width <= 0 {
             return;
@@ -106,7 +110,7 @@ impl TextFieldWidget {
 
     /// Map a pixel x coordinate (window-space) to the nearest char index.
     fn x_to_char_index(&self, x: i32) -> usize {
-        let padding_h = 8;
+        let padding_h = self.padding_h;
         let local_x = x - self.rect().x - padding_h + self.scroll_offset;
         let len = self.char_len();
         if local_x <= 0 {
@@ -209,8 +213,10 @@ impl Widget for TextFieldWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_h = crate::text::cell_height();
-        let natural = crate::text::string_width(&self.text) + ctx.style.field_padding_h * 2;
+        self.font_size = ctx.style.font_size;
+        self.padding_h = ctx.style.field_padding_h;
+        let text_h = ctx.text_height();
+        let natural = ctx.text_width(&self.text) + ctx.style.field_padding_h * 2;
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
@@ -330,7 +336,9 @@ impl Widget for TextFieldWidget {
                 resp
             }
 
-            WidgetEvent::PointerDown { x, y: _, button } => {
+            WidgetEvent::PointerDown {
+                x, y: _, button, ..
+            } => {
                 if *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
@@ -394,6 +402,16 @@ impl TextFieldWidget {
                 self.cursor = self.char_len();
                 self.blink_on = true;
                 self.ensure_cursor_visible();
+                EventResponse::Consumed
+            }
+
+            // Space reaches a toolkit as a named key so a focused button can be
+            // activated with it; inside a text field it is a character.
+            Key::Named(NamedKey::Space) if !modifiers.ctrl && !modifiers.plain_alt() => {
+                if self.read_only {
+                    return EventResponse::Consumed;
+                }
+                self.insert_text(" ");
                 EventResponse::Consumed
             }
 
@@ -473,7 +491,9 @@ impl TextFieldWidget {
     fn is_text_modifying_key(&self, key: &Key, _modifiers: &Modifiers) -> bool {
         matches!(
             key,
-            Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete)
+            Key::Named(NamedKey::Backspace)
+                | Key::Named(NamedKey::Delete)
+                | Key::Named(NamedKey::Space)
         )
     }
 }

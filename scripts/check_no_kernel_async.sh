@@ -28,7 +28,7 @@ gate_parse_args check_no_kernel_async "$@"
 # Userland-side crates are exempt (their whole job is to host async).
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt.
-USERLAND_RE='^(userland|slibc|slop-protocol|appkit|image|slopos-rt|verification)/'
+USERLAND_RE='^(userland|slibc|slop-protocol|appkit|editor-core|image|slopos-rt|verification)/'
 TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
 filter_files() {

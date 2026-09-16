@@ -59,12 +59,16 @@ impl Rect {
         }
     }
 
+    /// `DamageRect`'s bounds are **inclusive** — the compositor builds its own
+    /// the same way, and every `*_clipped` primitive reads them that way — so a
+    /// rect of zero extent correctly yields an invalid (empty) region rather
+    /// than a one-pixel one.
     pub fn to_damage_rect(&self) -> DamageRect {
         DamageRect {
             x0: self.x,
             y0: self.y,
-            x1: self.x + self.width,
-            y1: self.y + self.height,
+            x1: self.x + self.width - 1,
+            y1: self.y + self.height - 1,
         }
     }
 }

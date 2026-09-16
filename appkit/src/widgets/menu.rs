@@ -110,10 +110,10 @@ impl Widget for MenuWidget {
         for item in &self.items {
             match &item.kind {
                 MenuItemKind::Action | MenuItemKind::Submenu(_) => {
-                    let lw = crate::text::string_width(item.label);
+                    let lw = ctx.text_width(item.label);
                     max_label_w = max_label_w.max(lw);
                     if let Some(sc) = item.shortcut {
-                        let sw = crate::text::string_width(sc);
+                        let sw = ctx.text_width(sc);
                         max_shortcut_w = max_shortcut_w.max(sw);
                     }
                 }
@@ -139,13 +139,14 @@ impl Widget for MenuWidget {
         let padding_h = ctx.style.spacing_md;
         let radius = ctx.style.corner_radius;
 
+        super::card::draw_shadow(ctx, rect);
         ctx.fill_rounded_rect(
             rect.x,
             rect.y,
             rect.width,
             rect.height,
             radius,
-            ctx.style.bg_primary,
+            ctx.style.bg_elevated,
         );
         ctx.draw_rounded_rect(
             rect.x,

@@ -28,11 +28,11 @@ are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with two remaining exceptions (dynamic linking and the
-compiler bootstrap itself). Six more, a page-fault path that can reach the
+compiler bootstrap itself). Seven more, a page-fault path that can reach the
 device, a POSIX floor a build system can stand on, a filesystem that can hold a
 tree, a utility set that is executables rather than shell builtins, a shell
-a build script can be written in, and a terminal an editor can be written
-against, have landed.
+a build script can be written in, a terminal an editor can be written
+against, and an editor written against the machine itself, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -55,7 +55,7 @@ against, have landed.
   stack, not an executor.
 - **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
   — which ruled out lifting busybox-lineage utilities or Linux userland code
-  for Phase 1's utilities, so the multicall *shape* was taken and every line
+  for the utilities, so the multicall *shape* was taken and every line
   written here. The same rule ruled busybox `ash` out of the shell: the
   grammar below is written from the POSIX Shell Command Language (IEEE Std
   1003.1 §2.3–2.14), which is a specification rather than an implementation,
@@ -649,7 +649,7 @@ What it rests on, in case a later phase disturbs it:
   alive. The alternative is a second, metadata-only table — the drift this
   design exists to prevent — so the ~730 KB is paid deliberately. A `/bin`-
   scanning completion would cost nothing and cover programs the table does not
-  know, and is the right fix once Phase 2 makes new binaries a thing that
+  know, and is the right fix once Phase 1 makes new binaries a thing that
   happens in-guest.
 
 ---
@@ -957,40 +957,136 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
-## Phase 1 — A workbench you can type in
+## An editor you can work in
 
-**Outcome:** you can edit a file, search a tree, run a script, and read the
-output — without a Linux host.
+The eighth thing this plan rests on, and the last of the workbench: a file can
+be opened, changed and written back without a Linux host in the path.
+`/bin/editor` — Sloped — is a native GUI application: a file tree beside a
+column of tabs, a code surface with syntax highlighting, find and replace, a
+command palette, a file finder and an undo history, over `appkit` and the
+compositor. `editor_test` is the standing proof — an in-guest run of every
+`editor-core` case against the target's allocator, plus the application's own
+state machine driven through the messages its widgets emit: open a file, type,
+Save As, find and walk the matches, filter the palette and run what it lands on,
+close a modified tab and be asked first, expand a directory in the tree, and
+refuse a binary file.
 
-### Workstream 1.1 — An editor (**M**)
+It was written rather than ported, for the reason the plan gave: nothing
+upstream is reachable before a C frontend exists, and an editor is where a
+desktop OS earns its character. What that bought, beyond the editor, is a
+toolkit that can express one.
 
-The only thing left in this phase. Write one — not because C is foreclosed (it
-is not; see Workstream 2.6), but because nothing upstream is reachable *before*
-a C frontend exists, and because an editor is where a desktop OS earns its
-character. Highlighting does not have to wait for C either: `syntect` with the
-pure-Rust `fancy-regex` backend is a Rust-only path to TextMate grammars.
+What it rests on, in case a later phase disturbs it:
 
-The terminal is no longer the constraint it was: the key coverage, the mouse
-protocol, the device queries and the box-drawing glyphs a full-screen editor
-needs are all in place (see above), and what an editor will still find missing
-is a per-cell underline and the unfolded Ctrl chords — both named there. Start
-against that terminal; the GUI version needs a real multi-line text widget,
-which `appkit` does not have (a single-line `text_field`, and a byte-oriented
-text API). helix comes back onto the table once 2.6 compiles tree-sitter.
+- **The logic is a crate, and the crate is host-testable.** `editor-core` holds
+  the buffer, the cursor and its motions, the edit operations with their undo
+  history, literal search, the fuzzy matcher and the syntax lexer, and it
+  touches no syscall — the same split `terminal-core` and `shell-core` already
+  draw, and the reason 82 cases run under `just test-host` in milliseconds and
+  again in the guest under `just test`. The application above it owns the
+  filesystem, the clipboard, the keymap and the window.
+- **A line vector, not a rope, and the trade is stated.** What this edits is
+  source code on a machine whose root filesystem is tens of megabytes: the cost
+  that matters is per-keystroke work inside one line, which is O(line), and a
+  line insert, which is a `Vec` move of `line_count` pointers. `MAX_LINES` is a
+  million and a file past it is refused at load; `EDITOR_MAX_FILE_BYTES` is
+  8 MiB. A rope buys a logarithm back at a complexity the whole crate would have
+  to be tested against.
+- **Positions are characters, never bytes.** The cursor, the selection, the
+  renderer's column arithmetic and the search all count cells; one conversion
+  (`TextBuffer::byte_of`) exists for the places `String` needs an offset. Tabs
+  are the one place a *display* column diverges from a character column, which
+  is why the code surface carries both and why a click inside a tab resolves to
+  the side of it the pointer is nearer.
+- **Undo is a transaction, not a keystroke.** Typing coalesces while it stays a
+  run of single characters advancing from the last one; a motion, a paste, a
+  save or a compound edit seals the group. Replacing a selection, splitting a
+  brace pair, moving a line, commenting a block and the electric dedent a
+  closing brace triggers are each *one* Ctrl+Z, because each opens a transaction
+  around the several primitive changes it makes.
+- **Highlighting is a line at a time, against the state the line above left.**
+  A block comment or an unterminated raw string *is* that state, so a viewport
+  costs the lines above it once and the viewport each frame — never the file.
+  The cache lives behind a `RefCell` because drawing is a read that happens to
+  memoize, and a view that had to borrow the document mutably would not be a
+  view. Rust, C, TOML, JSON, Markdown, shell and Python are lexed; the lexer
+  resolves what a *character run* is and never what a name means, which is why a
+  keyword list and a delimiter table are enough.
+- **The toolkit grew what the editor needed, and every application got it.**
+  `appkit` had one font, fixed-cell, which is why every SlopOS application used
+  to read as a terminal wearing a window. It now has two roles: proportional UI
+  text (Inter, through `FontRenderer`) for every label, button, menu and header,
+  and the fixed-cell atlas for content whose columns must line up. The new
+  widgets are a virtualized code surface, a virtualized tree, editor tabs with a
+  modified marker, an in-window menu bar, a focus-explicit line input, a
+  draggable splitter, a card with a real shadow and a procedurally drawn icon
+  set. The palette is One Dark.
+- **Transient interaction state belongs to the application.** The widget tree is
+  rebuilt on every message, so anything a widget remembered between a press and
+  the move that follows it was already gone: a drag, a click run, a resize.
+  Those now live in the application and are *given* to the widget, which is the
+  same discipline the rest of the toolkit follows — and the reason a drag
+  selection, a double click and a sidebar resize work at all.
+- **A drag that leaves the thing it started on is still a drag.** State the
+  application holds has to be *ended*, and a release is only an ending if it
+  arrives. Two layers had to say so. A `StackWidget` now tells a release to the
+  children whose rect it missed, because a widget that latched on a press is
+  the one waiting for it and every other widget guards on containment or on its
+  own latch. Under that, the compositor holds the `wl_pointer` implicit grab: a
+  press on a client's content pins pointer delivery to that client until every
+  button is up, so dragging past the window edge no longer hands the pointer —
+  and the release — to whatever is underneath. Without either, a selection goes
+  on following a pointer with no button held, and the next keystroke replaces
+  text the user never selected.
+- **A space is a character.** The keymap reports Space as a *named* key so a
+  focused button can be pressed with it, which meant no `appkit` text input
+  could type one. Text-entering widgets translate it; buttons still get their
+  chord.
+- **The clipboard is the compositor's.** `windowing` gained the fd-based
+  transfer both ways — a copy hands over a memfd, a paste is ask, be told the
+  size, hand back a destination of exactly that size — and `appkit` exposes it
+  as `clipboard::copy` and a `request_paste` whose answer arrives at
+  `App::on_paste`. Control bytes other than tab and newline are dropped on the
+  way in: a clipboard is untrusted input.
+- **What the file had, the file keeps.** Line endings are detected and restored,
+  a missing final newline stays missing, and indentation is read from the file
+  rather than assumed — a tab-indented file indents with tabs, and a file
+  indented two spaces stays that way. What is histogrammed is the *step into* a
+  block, not the absolute indent a line carries, because every indent a file
+  shows is a multiple of its unit and a four-space file with enough nesting
+  shows as many eights as fours. A binary file is refused rather than opened as
+  replacement characters that saving would then write back.
+- **A save cannot destroy what it fails to replace.** `File::create` truncates
+  before the first new byte lands, so a write that fails part way — a full
+  image, a device error — would leave the user's file gone while the editor
+  held the only copy. A save writes a sibling, `fsync`s it and renames over the
+  target, which the journal makes one atomic metadata operation: what is on the
+  medium is the old file or the whole new one, never a prefix of either.
 
-**Zed is not a roadmap item.** It needs wgpu → Vulkan (no GPU driver, and the
-Vulkan loader is itself a `dlopen` ICD architecture), tree-sitter, a live C++
-dependency set, and a build performed by a toolchain that does not exist yet.
-Every one of those is a separate multi-month project whose payoff is one editor.
+**What this deliberately did not do.**
 
-**Phase 1 exit criteria:** a shell script in the guest checks out, greps,
-edits and archives a source tree, driven from a terminal running a native
-editor. The utilities that script calls, the shell that runs it and the
-terminal it runs in are all in place; what is left is the editor itself.
+- **No syntax tree, and no `syntect`.** The lexer is a hand-written one over a
+  language table, because TextMate grammars want a regex engine and tree-sitter
+  wants a C toolchain that does not exist yet. What that costs is precision a
+  parser would have: a capitalized identifier is typed as a type, and a lowercase
+  one before `(` as a call, because that is what a lexer can know.
+- **No LSP, no multi-cursor, no split panes, no file watching.** Each is a
+  separate feature with its own state; none of them is what "you can edit a
+  file" needs, and a file changed underneath the editor is not noticed.
+- **The terminal editor was not written.** The plan offered either; the GUI one
+  is what landed, because the toolkit gap it closed (a real text widget, a
+  proportional font, a tree) is what every other SlopOS application needed too,
+  and a TUI editor would have closed none of it. The terminal's own gaps named
+  above — a per-cell underline, the unfolded Ctrl chords — are therefore still
+  open, and still exactly what a full-screen program would find missing.
+- **No shift-click without a keyboard focus.** The compositor sends no modifier
+  state with a pointer event, as Wayland does not; `appkit` stamps a press with
+  the keyboard's most recent snapshot, which is right while the window has focus
+  and stale if the modifier was pressed before it got any.
 
 ---
 
-## Phase 2 — The toolchain
+## Phase 1 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
 
@@ -999,14 +1095,14 @@ with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
 about *who compiles Rust*, not about which languages SlopOS supports: declining
 LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
 the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 2.6.
+A C toolchain written in Rust is a separate and wanted track — Workstream 1.6.
 The cost of this decision is upstream work: cranelift-only rustc bootstrap does
 not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
 
-### Workstream 2.1 — The ABI question (still open — see Open decisions)
+### Workstream 1.1 — The ABI question (still open — see Open decisions)
 
 SlopOS's numbering is bespoke and append-only (`yield=0, exit=1, write=2,
 read=3`, `abi/src/syscall/numbers.rs`) while the *constants and layouts inside*
@@ -1045,7 +1141,7 @@ Linux's implementation, architecture or policy — the framekernel quarantine, t
 capability authority, the Verus proofs, the ratchets and the retractable
 filesystem are all things the ABI cannot touch.
 
-### Workstream 2.2 — A target that can be a host (**L**)
+### Workstream 1.2 — A target that can be a host (**L**)
 
 A JSON target can never be a rustc host. `scripts/patch_std.sh` is 715 lines of
 sed/perl that mutates the *live rustup sysroot's* std sources in place — an
@@ -1055,11 +1151,11 @@ std upstreamed or carried in a pinned fork. That also kills `restricted_std`,
 which currently forces `#![feature(restricted_std)]` into 59 files and makes
 every unmodified crates.io crate uncompilable.
 
-### Workstream 2.3 — A Rust codegen path for a `no_std` kernel target (**L**)
+### Workstream 1.3 — A Rust codegen path for a `no_std` kernel target (**L**)
 
 Decided pure Rust, so the C floor is out of scope and the risk moves into
 cranelift's coverage of *this* tree's kernel target. Spike this first, before
-anything else in Phase 2, because a negative answer changes the decision:
+anything else in this phase, because a negative answer changes the decision:
 `targets/x86_64-slos.json` requires soft-float with `-sse` and `rustc-abi:
 softfloat`, safestack, custom `link_section`s, naked functions, and
 `-Zemit-stack-sizes` — the last is what `check_stack_sizes.sh` reads, so a
@@ -1075,7 +1171,7 @@ LLVM rustc on a host for as long as cranelift's codegen quality matters, while
 the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
 every artifact is self-built on day one.
 
-### Workstream 2.4 — Dynamic linking is mandatory (**L**)
+### Workstream 1.4 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
@@ -1086,7 +1182,7 @@ binary is fixed at 0x400000. The only escapes are writing an out-of-process
 macro server (novel work) or deleting proc-macro use from the workspace. This
 also brings dynamic TLS (`__tls_get_addr`, DTV), which does not exist.
 
-### Workstream 2.5 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.5 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -1094,10 +1190,10 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 **building SlopOS on SlopOS needs no network at all** — no TLS, no crates.io, no
 `git`. Those remain wanted for a general dev machine (there is no TLS anywhere:
 `curl` rejects `https://` outright; DNS is one query at a time machine-wide; the
-TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 2+
+TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 1+
 comfort, not a blocker for the goal.
 
-### Workstream 2.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 1.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
@@ -1131,16 +1227,16 @@ be built in Rust here.
   a C frontend, and the reason the LLVM route was priced as it was. Nothing in
   this plan needs C++, and this workstream does not change that.
 
-Order it after Phase 2's Rust loop closes: the C frontend is much cheaper to
+Order it after Phase 1's Rust loop closes: the C frontend is much cheaper to
 write once cranelift and the linker are already known-good on this target.
 
-**Phase 2 exit criteria:** in-guest `cargo build` of this repository's kernel
+**Phase 1 exit criteria:** in-guest `cargo build` of this repository's kernel
 produces an ELF byte-identical in behaviour to the host build, verified by
 booting it.
 
 ---
 
-## Phase 3 — Install what you built
+## Phase 2 — Install what you built
 
 **Outcome:** the guest writes a bootable medium and reboots into its own kernel.
 
@@ -1156,14 +1252,14 @@ be mounted at an arbitrary path, so the installer has somewhere to read from and
 write to. `AGENTS.md`'s QEMU-only execution boundary currently forbids exactly
 this operation and needs a scoped exception for the guest's own ESP.
 
-**Phase 3 exit criteria:** `just boot-persist`, build a kernel in-guest, install
+**Phase 2 exit criteria:** `just boot-persist`, build a kernel in-guest, install
 it, reboot, and the boot log shows the new build — with rollback if it panics.
 
 ---
 
-## Phase 4 — Bare metal (not committed)
+## Phase 3 — Bare metal (not committed)
 
-Out of scope for the current goal, which ends at Phase 3 in QEMU. Recorded so
+Out of scope for the current goal, which ends at Phase 2 in QEMU. Recorded so
 the cost is known: no NVMe and no AHCI (virtio-blk is the only storage driver,
 so a real machine has no disk); no USB at all, so a laptop without PS/2 has
 **no keyboard** (`plans/usb-xhci.md`); PCI is ECAM-only and *panics* without
@@ -1180,7 +1276,7 @@ boot step reads first.
 ## Open decisions
 
 - [ ] **Linux ABI: adopt the numbering, or stay bespoke?** The one decision
-      still open, and the highest-leverage one here. See Workstream 2.1 for the
+      still open, and the highest-leverage one here. See Workstream 1.1 for the
       Asterinas/Redox evidence. The POSIX-floor work narrowed it: every struct
       layout a libc port cannot work around is already Linux's, so what is left
       to decide is the number table alone. Recommendation: **renumber once, now,
@@ -1212,7 +1308,7 @@ boot step reads first.
 
 **Decided.** Rust toolchain: Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 2.6, off the critical
+C library and a Rust-written C frontend are Workstream 1.6, off the critical
 path. Scope: the full in-guest loop, Phases 1–3, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
@@ -1225,7 +1321,7 @@ every image this kernel writes.
 ## Touch list (current paths — verify before editing)
 
 - `mm/src/elf.rs` — `PT_INTERP` rejection, the one image cap that is still
-  policy rather than plumbing (Phase 2).
+  policy rather than plumbing (Phase 1).
 - `vt/src/lib.rs`, `terminal-core/src/{input,grid}.rs`,
   `userland/src/apps/terminal/{input,mod}.rs`,
   `userland/src/apps/shell/input.rs`, `font/src/{lib,atlas,boxdraw,bitmap}.rs`,
@@ -1252,16 +1348,34 @@ every image this kernel writes.
   installed names, the implemented table and `coreutils_test`'s check that they
   agree are three places one utility appears, and `mod.rs`'s `TOOL_SETS` is
   what keeps a new tool to one file.
+- `editor-core/src/`, `userland/src/apps/editor/`,
+  `appkit/src/{text,paint,run,node,tree,style}.rs`,
+  `appkit/src/widgets/{code_view,tree_view,editor_tabs,menu_bar,line_edit,drag_handle,card,icon}.rs`,
+  `appkit/src/layout.rs`'s release pass, `windowing/src/clipboard.rs` and
+  `userland/src/apps/compositor/mod.rs`'s `protocol_pointer_grab` — the editor
+  above. Listed not as work but as
+  what a later phase must not quietly undo: positions are characters and only
+  `byte_of` converts, a display column is not a character column wherever a tab
+  can appear (`Viewport::first_col` is a display column, and `buffer.rs`'s
+  `display_col` and `code_view.rs`'s copy of it must agree), a compound edit
+  opens one history transaction, the highlight cache
+  is invalidated at the *first* edited line and nowhere later, transient
+  interaction state (a drag, a click run, a resize) belongs to the application
+  because the widget holding it is rebuilt between events, a release reaches
+  the widget that latched on the press whether or not it lands inside it and
+  whether or not it lands inside the window, `Rect::to_damage_rect`'s bounds
+  are inclusive like every other `DamageRect`, and `measure` and
+  `paint` must agree on a font size or a click lands on the wrong character.
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,
-  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 2).
+  `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 1).
 - `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs` — the bespoke
   number table and the capability histogram a renumbering would move
-  (Phase 2, and the open decision above).
-- `scripts/qemu_run.sh` — disk attachment, boot order (Phase 3).
+  (Phase 1, and the open decision above).
+- `scripts/qemu_run.sh` — disk attachment, boot order (Phase 2).
 - `fs/src/devfs/mod.rs`, `fs/src/partition.rs` — writable block nodes,
-  partition writing (Phase 3).
+  partition writing (Phase 2).
 - `AGENTS.md` — the QEMU-only execution boundary, which forbids exactly the
-  Phase 3 install operation and needs a scoped exception.
+  Phase 2 install operation and needs a scoped exception.
 - `fs/src/ext2/dirindex.rs`, `fs/src/ext2/journal.rs`, `fs/src/verity.rs`,
   `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` — the storage work above.
   Listed not as work but as what a later phase must not quietly undo: each one

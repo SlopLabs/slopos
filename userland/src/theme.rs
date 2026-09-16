@@ -149,6 +149,9 @@ pub const ICON_MONITOR_ALPHA: u8 = 0xFF;
 pub const ICON_IMAGES: Color32 = Color32::rgb(0x4C, 0x8E, 0x8A);
 pub const ICON_IMAGES_ALPHA: u8 = 0xFF;
 
+pub const ICON_EDITOR: Color32 = Color32::rgb(0x74, 0xad, 0xe8);
+pub const ICON_EDITOR_ALPHA: u8 = 0xFF;
+
 pub const ICON_DEFAULT: Color32 = Color32::rgb(0x6B, 0x5A, 0x8E);
 pub const ICON_DEFAULT_ALPHA: u8 = 0xFF;
 

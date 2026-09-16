@@ -64,6 +64,16 @@ struct WindowManager {
 
     protocol_serial: u32,
     protocol_pointer_focus: u32,
+    /// The surface holding the implicit pointer grab, or 0.
+    ///
+    /// A press on a client's content pins pointer delivery to that client
+    /// until every button is up again — the `wl_pointer` rule. Without it a
+    /// drag that leaves the window takes the pointer's focus with it, the
+    /// release is delivered to whatever is underneath instead, and the client
+    /// is left holding a drag it was never told had ended.
+    protocol_pointer_grab: u32,
+    /// Buttons currently held on the grabbing surface, by button number.
+    protocol_pointer_buttons: u32,
 
     first_frame: bool,
     /// This frame's accumulated, disjoint damage region.
@@ -121,6 +131,8 @@ impl WindowManager {
             protocol,
             protocol_serial: 0,
             protocol_pointer_focus: 0,
+            protocol_pointer_grab: 0,
+            protocol_pointer_buttons: 0,
             first_frame: true,
             output_damage: Region::new(),
             force_full_redraw: false,
@@ -388,10 +400,11 @@ impl WindowManager {
                     self.input.apply_motion(&event);
                     self.input.apply_grab_motion(proto_box.as_deref_mut());
                     self.sync_pointer_focus(proto_box.as_deref_mut());
-                    if self.protocol_pointer_focus != 0 {
+                    let target = self.pointer_target();
+                    if target != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             p.send_pointer_motion_for_task(
-                                self.protocol_pointer_focus,
+                                target,
                                 time,
                                 self.input.mouse_x,
                                 self.input.mouse_y,
@@ -417,10 +430,14 @@ impl WindowManager {
                         proto_box.as_deref_mut(),
                     );
                     if should_forward && self.protocol_pointer_focus != 0 {
+                        if self.protocol_pointer_grab == 0 {
+                            self.protocol_pointer_grab = self.protocol_pointer_focus;
+                        }
+                        self.protocol_pointer_buttons |= 1u32 << (button & 31);
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
                             p.send_pointer_button_for_task(
-                                self.protocol_pointer_focus,
+                                self.protocol_pointer_grab,
                                 self.protocol_serial,
                                 time,
                                 event.data.data0,
@@ -434,11 +451,22 @@ impl WindowManager {
                     let should_forward = self
                         .input
                         .on_button_release(button, proto_box.as_deref_mut());
-                    if should_forward && self.protocol_pointer_focus != 0 {
+                    self.protocol_pointer_buttons &= !(1u32 << (button & 31));
+                    // A grab only exists because the press was forwarded, so
+                    // its release is owed to the same surface whatever is under
+                    // the pointer now.
+                    let target = if self.protocol_pointer_grab != 0 {
+                        self.protocol_pointer_grab
+                    } else if should_forward {
+                        self.protocol_pointer_focus
+                    } else {
+                        0
+                    };
+                    if target != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
                             p.send_pointer_button_for_task(
-                                self.protocol_pointer_focus,
+                                target,
                                 self.protocol_serial,
                                 time,
                                 event.data.data0,
@@ -446,12 +474,19 @@ impl WindowManager {
                             );
                         }
                     }
+                    if self.protocol_pointer_buttons == 0 && self.protocol_pointer_grab != 0 {
+                        self.protocol_pointer_grab = 0;
+                        // Enter/leave catches up with wherever the pointer
+                        // actually ended.
+                        self.sync_pointer_focus(proto_box.as_deref_mut());
+                    }
                 }
                 InputEventType::PointerAxis => {
-                    if self.protocol_pointer_focus != 0 {
+                    let target = self.pointer_target();
+                    if target != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             p.send_pointer_axis_for_task(
-                                self.protocol_pointer_focus,
+                                target,
                                 time,
                                 event.axis_id(),
                                 event.axis_value_v120(),
@@ -488,7 +523,23 @@ impl WindowManager {
     /// Recompute pointer focus and emit protocol enter/leave events on
     /// transitions. Decorations and the desktop belong to the compositor, so a
     /// non-`Content` hit drops focus to none.
+    /// Where a pointer event goes: the grab holder while one is held, the
+    /// surface under the pointer otherwise.
+    fn pointer_target(&self) -> u32 {
+        if self.protocol_pointer_grab != 0 {
+            self.protocol_pointer_grab
+        } else {
+            self.protocol_pointer_focus
+        }
+    }
+
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
+        // Focus does not move under a grab: leaving the window mid-drag is the
+        // ordinary way to drag, not a reason to hand the pointer to the window
+        // underneath.
+        if self.protocol_pointer_grab != 0 {
+            return;
+        }
         let hit = self.input.resolve_cursor_hit(
             &self.windows,
             self.window_count,

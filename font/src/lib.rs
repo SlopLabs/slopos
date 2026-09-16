@@ -155,6 +155,41 @@ impl<'a> FontRenderer<'a> {
         color: Color32,
         bg: Color32,
     ) -> Option<DamageRect> {
+        self.draw_text_inner(target, x, y, text, size_px, color, bg, None)
+    }
+
+    /// [`Self::draw_text`] confined to `clip`; pixels outside it are untouched.
+    ///
+    /// The advance is unaffected, so a clipped run lands on the same pixels as
+    /// the unclipped one — which is what lets a caller scroll text under a
+    /// viewport instead of re-laying it out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_clipped<T: Canvas>(
+        &mut self,
+        target: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        size_px: u16,
+        color: Color32,
+        bg: Color32,
+        clip: &DamageRect,
+    ) -> Option<DamageRect> {
+        self.draw_text_inner(target, x, y, text, size_px, color, bg, Some(*clip))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_inner<T: Canvas>(
+        &mut self,
+        target: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        size_px: u16,
+        color: Color32,
+        bg: Color32,
+        clip: Option<DamageRect>,
+    ) -> Option<DamageRect> {
         let upem = self.font.units_per_em() as f32;
         if upem == 0.0 {
             return None;
@@ -177,43 +212,36 @@ impl<'a> FontRenderer<'a> {
             }
 
             // Full float precision; the cached glyph's advance is pixel-rounded.
-            let true_advance = self
-                .font
-                .glyph_index(codepoint)
-                .and_then(|gid| self.font.h_metrics(gid))
-                .map(|hm| hm.advance_width as f32 * scale)
-                .unwrap_or(size_px as f32 * 0.5);
+            let true_advance = advance_px(&self.font, codepoint, scale, size_px);
 
-            // Copied out of the cache to avoid overlapping borrows.
-            let glyph_info = self.cache.get(codepoint, size_px).map(|g| {
-                (
-                    g.bearing_x,
-                    g.bearing_y,
-                    g.width,
-                    g.height,
-                    g.coverage.clone(),
-                )
-            });
+            let gx_base = libm::roundf(cursor_x) as i32;
+            // The cache borrow is held across the blit rather than cloning the
+            // coverage: a clone here is one heap allocation per glyph per frame.
+            let glyph_damage = match self.cache.get(codepoint, size_px) {
+                Some(g) => Self::draw_glyph_coverage_clipped(
+                    target,
+                    gx_base + g.bearing_x as i32,
+                    y + ascender - g.bearing_y as i32,
+                    g.width as i32,
+                    g.height as i32,
+                    g.coverage.as_slice(),
+                    color,
+                    bg,
+                    clip.as_ref(),
+                ),
+                None => None,
+            };
 
-            if let Some((bearing_x, bearing_y, gw, gh, cov)) = glyph_info {
-                let gx = libm::roundf(cursor_x) as i32 + bearing_x as i32;
-                let gy = y + ascender - bearing_y as i32;
-
-                let glyph_damage = Self::draw_glyph_coverage_static(
-                    target, gx, gy, gw as i32, gh as i32, &cov, color, bg,
-                );
-
-                damage = match (damage, glyph_damage) {
-                    (Some(d), Some(g)) => Some(DamageRect {
-                        x0: d.x0.min(g.x0),
-                        y0: d.y0.min(g.y0),
-                        x1: d.x1.max(g.x1),
-                        y1: d.y1.max(g.y1),
-                    }),
-                    (None, g) => g,
-                    (d, None) => d,
-                };
-            }
+            damage = match (damage, glyph_damage) {
+                (Some(d), Some(g)) => Some(DamageRect {
+                    x0: d.x0.min(g.x0),
+                    y0: d.y0.min(g.y0),
+                    x1: d.x1.max(g.x1),
+                    y1: d.y1.max(g.y1),
+                }),
+                (None, g) => g,
+                (d, None) => d,
+            };
 
             cursor_x += true_advance;
         }
@@ -227,6 +255,42 @@ impl<'a> FontRenderer<'a> {
     /// Measure the width and height of a text string at the given size.
     pub fn measure_text(&self, text: &str, size_px: u16) -> (i32, i32) {
         metrics::measure_text(&self.font, text, size_px)
+    }
+
+    /// Advance width of `text` at `size_px`, in pixels.
+    pub fn text_width(&self, text: &str, size_px: u16) -> i32 {
+        metrics::measure_text(&self.font, text, size_px).0
+    }
+
+    /// Baseline offset from the top of a line box at `size_px`.
+    pub fn ascent(&self, size_px: u16) -> i32 {
+        let upem = self.font.units_per_em() as f32;
+        if upem == 0.0 {
+            return size_px as i32;
+        }
+        libm::roundf(self.font.hhea().ascender as f32 * (size_px as f32 / upem)) as i32
+    }
+
+    /// Ascender-to-descender height of one line at `size_px`.
+    pub fn line_height(&self, size_px: u16) -> i32 {
+        metrics::measure_text(&self.font, "", size_px).1
+    }
+
+    /// Longest prefix of `text` whose advance fits in `budget` pixels, in bytes.
+    pub fn prefix_fitting(&self, text: &str, size_px: u16, budget: i32) -> usize {
+        let upem = self.font.units_per_em() as f32;
+        if upem == 0.0 || budget <= 0 {
+            return 0;
+        }
+        let scale = size_px as f32 / upem;
+        let mut width = 0.0f32;
+        for (offset, ch) in text.char_indices() {
+            width += advance_px(&self.font, ch as u32, scale, size_px);
+            if libm::ceilf(width) as i32 > budget {
+                return offset;
+            }
+        }
+        text.len()
     }
 
     /// Rasterize a single glyph at the given size.
@@ -311,7 +375,14 @@ impl<'a> FontRenderer<'a> {
     /// An opaque `bg` blends fg/bg directly, with no framebuffer read-back, so
     /// it is safe over MMIO; a transparent `bg` composites onto the existing
     /// pixel and requires a readable surface like `DrawBuffer`.
-    fn draw_glyph_coverage_static<T: Canvas>(
+    /// Confined to `clip` when one is given, and to the buffer bounds always.
+    ///
+    /// A transparent `bg` composites each partial-coverage pixel onto what the
+    /// surface already holds, so anti-aliased ink over a coloured panel is the
+    /// panel's colour rather than a dark fringe. A write-only surface reads back
+    /// 0 and so still blends towards black, which is what it did before.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_glyph_coverage_clipped<T: Canvas>(
         target: &mut T,
         x: i32,
         y: i32,
@@ -320,6 +391,7 @@ impl<'a> FontRenderer<'a> {
         coverage: &[u8],
         color: Color32,
         bg: Color32,
+        clip: Option<&DamageRect>,
     ) -> Option<DamageRect> {
         if w <= 0 || h <= 0 || coverage.is_empty() {
             return None;
@@ -328,17 +400,22 @@ impl<'a> FontRenderer<'a> {
         let buf_w = target.width() as i32;
         let buf_h = target.height() as i32;
 
-        let x0 = x.max(0);
-        let y0 = y.max(0);
-        let x1 = (x + w - 1).min(buf_w - 1);
-        let y1 = (y + h - 1).min(buf_h - 1);
+        let mut x0 = x.max(0);
+        let mut y0 = y.max(0);
+        let mut x1 = (x + w - 1).min(buf_w - 1);
+        let mut y1 = (y + h - 1).min(buf_h - 1);
+        if let Some(c) = clip {
+            x0 = x0.max(c.x0);
+            y0 = y0.max(c.y0);
+            x1 = x1.min(c.x1);
+            y1 = y1.min(c.y1);
+        }
 
         if x0 > x1 || y0 > y1 {
             return None;
         }
 
         let has_bg = bg.0 != 0;
-        let blend_bg = if has_bg { bg } else { Color32::BLACK };
         let fmt = target.pixel_format();
 
         for row in y0..=y1 {
@@ -355,7 +432,12 @@ impl<'a> FontRenderer<'a> {
                     if cov == 255 {
                         target.put_pixel(col, row, fmt.encode(color));
                     } else {
-                        let blended = atlas::blend_color32(cov, color, blend_bg);
+                        let under = if has_bg {
+                            bg
+                        } else {
+                            fmt.decode(target.read_pixel(col, row))
+                        };
+                        let blended = atlas::blend_color32(cov, color, under);
                         target.put_pixel(col, row, fmt.encode(blended));
                     }
                 }
@@ -364,6 +446,17 @@ impl<'a> FontRenderer<'a> {
 
         Some(DamageRect { x0, y0, x1, y1 })
     }
+}
+
+/// Advance of one codepoint in pixels, with the same half-em fallback for a
+/// codepoint the font has no glyph for that the draw path uses — so a measured
+/// width and a drawn run agree even on missing glyphs.
+#[inline]
+pub(crate) fn advance_px(font: &TtfFont<'_>, codepoint: u32, scale: f32, size_px: u16) -> f32 {
+    font.glyph_index(codepoint)
+        .and_then(|gid| font.h_metrics(gid))
+        .map(|hm| hm.advance_width as f32 * scale)
+        .unwrap_or(size_px as f32 * 0.5)
 }
 
 #[cfg(test)]

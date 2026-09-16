@@ -68,6 +68,13 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Halt or reboot the machine",
     },
     ProgramSpec {
+        name: "editor",
+        path: "/bin/editor",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Edit text and source files",
+    },
+    ProgramSpec {
         name: "file_manager",
         path: "/bin/file_manager",
         priority: TaskPriority::Normal,

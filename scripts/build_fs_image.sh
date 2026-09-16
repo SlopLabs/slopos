@@ -412,7 +412,18 @@ if [ -d "$FONTS_DIR" ]; then
 fi
 
 mkdir_p /usr/share/slopos
+mkdir_p /usr/share/slopos/doc
 mkdir_p /usr/share/slopos/wallpapers
+
+# Documentation the shipped programs open from their own Help menus.
+DOCS_DIR="${REPO_ROOT}/assets/docs"
+if [ -d "$DOCS_DIR" ]; then
+    for doc in "$DOCS_DIR"/*.md; do
+        [ -f "$doc" ] || continue
+        install_file "$doc" "/usr/share/slopos/doc/$(basename "$doc")"
+        echo "Installed doc: /usr/share/slopos/doc/$(basename "$doc")"
+    done
+fi
 
 if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
     install_file "${REPO_ROOT}/assets/logo.png" /usr/share/slopos/wallpapers/default.png

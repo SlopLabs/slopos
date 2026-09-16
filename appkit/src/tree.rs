@@ -292,6 +292,22 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             let child_widget = build_widget_tree(child);
             Box::new(super::layout::BackgroundWidget::new(*color, child_widget))
         }
+        Node::Card {
+            color,
+            border,
+            radius,
+            shadow,
+            child,
+        } => {
+            let child_widget = build_widget_tree(child);
+            Box::new(widgets::card::CardWidget::new(
+                *color,
+                *border,
+                *radius,
+                *shadow,
+                child_widget,
+            ))
+        }
         Node::SizedBox {
             width,
             height,
@@ -302,6 +318,142 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 *width,
                 *height,
                 child_widget,
+            ))
+        }
+        Node::CodeView {
+            lines,
+            first_line,
+            total_lines,
+            first_col,
+            tab_width,
+            cursor,
+            selection,
+            show_line_numbers,
+            focused,
+            selecting,
+            on_input,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::code_view::CodeInput) -> Box<dyn Any>>> =
+                on_input.map(|f| {
+                    Box::new(move |i: widgets::code_view::CodeInput| Box::new(f(i)) as Box<dyn Any>)
+                        as Box<dyn Fn(widgets::code_view::CodeInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::code_view::CodeViewWidget::new(
+                lines.clone(),
+                *first_line,
+                *total_lines,
+                *first_col,
+                *tab_width,
+                *cursor,
+                *selection,
+                *show_line_numbers,
+                *focused,
+                *selecting,
+                erased,
+            ))
+        }
+        Node::TreeView {
+            rows,
+            first_row,
+            total_rows,
+            selected,
+            focused,
+            on_input,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::tree_view::TreeInput) -> Box<dyn Any>>> =
+                on_input.map(|f| {
+                    Box::new(move |i: widgets::tree_view::TreeInput| Box::new(f(i)) as Box<dyn Any>)
+                        as Box<dyn Fn(widgets::tree_view::TreeInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::tree_view::TreeViewWidget::new(
+                rows.clone(),
+                *first_row,
+                *total_rows,
+                *selected,
+                *focused,
+                erased,
+            ))
+        }
+        Node::EditorTabs {
+            tabs,
+            active,
+            on_input,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::editor_tabs::TabInput) -> Box<dyn Any>>> =
+                on_input.map(|f| {
+                    Box::new(move |i: widgets::editor_tabs::TabInput| {
+                        Box::new(f(i)) as Box<dyn Any>
+                    })
+                        as Box<dyn Fn(widgets::editor_tabs::TabInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::editor_tabs::EditorTabsWidget::new(
+                tabs.clone(),
+                *active,
+                erased,
+            ))
+        }
+        Node::MenuBar {
+            titles,
+            open,
+            on_input,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::menu_bar::MenuBarInput) -> Box<dyn Any>>> =
+                on_input.map(|f| {
+                    Box::new(move |i: widgets::menu_bar::MenuBarInput| {
+                        Box::new(f(i)) as Box<dyn Any>
+                    })
+                        as Box<dyn Fn(widgets::menu_bar::MenuBarInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::menu_bar::MenuBarWidget::new(
+                titles.clone(),
+                *open,
+                erased,
+            ))
+        }
+        Node::LineEdit {
+            text,
+            placeholder,
+            caret,
+            focused,
+            icon,
+            suffix,
+            invalid,
+            on_input,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::line_edit::LineEditInput) -> Box<dyn Any>>> =
+                on_input.map(|f| {
+                    Box::new(move |i: widgets::line_edit::LineEditInput| {
+                        Box::new(f(i)) as Box<dyn Any>
+                    })
+                        as Box<dyn Fn(widgets::line_edit::LineEditInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::line_edit::LineEditWidget::new(
+                text.clone(),
+                placeholder.clone(),
+                *caret,
+                *focused,
+                *icon,
+                suffix.clone(),
+                *invalid,
+                erased,
+            ))
+        }
+        Node::DragHandle {
+            orientation,
+            active,
+            on_drag,
+        } => {
+            let erased: Option<Box<dyn Fn(widgets::drag_handle::DragInput) -> Box<dyn Any>>> =
+                on_drag.map(|f| {
+                    Box::new(move |v: widgets::drag_handle::DragInput| {
+                        Box::new(f(v)) as Box<dyn Any>
+                    })
+                        as Box<dyn Fn(widgets::drag_handle::DragInput) -> Box<dyn Any>>
+                });
+            Box::new(widgets::drag_handle::DragHandleWidget::new(
+                *orientation,
+                *active,
+                erased,
             ))
         }
         Node::Canvas {

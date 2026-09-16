@@ -752,15 +752,18 @@ impl ProtocolBridge {
     /// `ClipboardRead` carrying a destination memfd, since the server event path
     /// cannot itself carry an fd.
     fn handle_clipboard_paste(&mut self, client_idx: usize, serial: u32) {
-        if !self.client_holds_keyboard_serial(client_idx, serial) {
-            return;
-        }
-        let _ = self.server.queue_event(
-            client_idx,
-            &Event::PasteReady {
-                len: self.clipboard.len,
-            },
-        );
+        // A refusal is still an answer. A client that asked and heard nothing
+        // waits for a reply that will never come, and its own fallback — a
+        // process-local clipboard, say — is unreachable from there; a zero
+        // length is what "nothing for you" looks like on this path already.
+        let len = if self.client_holds_keyboard_serial(client_idx, serial) {
+            self.clipboard.len
+        } else {
+            0
+        };
+        let _ = self
+            .server
+            .queue_event(client_idx, &Event::PasteReady { len });
     }
 
     /// Copy the clipboard into the client-provided destination memfd and report

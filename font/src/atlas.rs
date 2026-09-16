@@ -263,9 +263,6 @@ impl GlyphAtlas {
         let fmt = target.pixel_format();
         let fg_px = fmt.encode(fg);
         let bg_px = fmt.encode(bg);
-        // Opaque black, not transparent black: blending edges against alpha=0
-        // leaves a dark fringe.
-        let blend_bg = if has_bg { bg } else { Color32::BLACK };
 
         let buf_w = target.width() as i32;
         let buf_h = target.height() as i32;
@@ -288,7 +285,16 @@ impl GlyphAtlas {
                 } else if cov == 255 {
                     target.put_pixel(px, py, fg_px);
                 } else {
-                    let blended = blend_color32(cov, fg, blend_bg);
+                    // Transparent text composites against what is already
+                    // there, not against black: over a selection band or the
+                    // current-line highlight, blending to black would ring
+                    // every antialiased edge in the one place text is densest.
+                    let under = if has_bg {
+                        bg
+                    } else {
+                        fmt.decode(target.read_pixel(px, py))
+                    };
+                    let blended = blend_color32(cov, fg, under);
                     target.put_pixel(px, py, fmt.encode(blended));
                 }
             }
@@ -436,7 +442,6 @@ impl GlyphAtlas {
         let fmt = target.pixel_format();
         let fg_px = fmt.encode(fg);
         let bg_px = fmt.encode(bg);
-        let blend_bg = if has_bg { bg } else { Color32::BLACK };
 
         for row in 0..ch {
             let py = y + row;
@@ -456,7 +461,12 @@ impl GlyphAtlas {
                 } else if cov == 255 {
                     target.put_pixel(px, py, fg_px);
                 } else {
-                    let blended = blend_color32(cov, fg, blend_bg);
+                    let under = if has_bg {
+                        bg
+                    } else {
+                        fmt.decode(target.read_pixel(px, py))
+                    };
+                    let blended = blend_color32(cov, fg, under);
                     target.put_pixel(px, py, fmt.encode(blended));
                 }
             }

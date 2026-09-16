@@ -1,11 +1,23 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are open.** Last swept 2026-09-14 (the utilities becoming
-executables: a multicall binary whose archive extractor, patch applier, regex
-engine, inflater and digest all read attacker-supplied input, plus the `/bin`
-symlink install and the `execve` thread-pointer reset). Three guaranteed
-defects and six below the confidence bar; all fixed inside the same unreleased
-change, so none is an entry.
+**No findings are open.** Last swept 2026-09-16 (the editor: `editor-core`'s
+buffer, lexer, search and tree model, the new `appkit` surfaces, the fd-based
+clipboard transfer in `windowing`, and the editor's own filesystem boundary —
+every one of which reads input the user did not write). Nothing reached the
+confidence bar: the editor holds the user's own authority, so a file it opens or
+writes crosses no boundary, and what the sweep found instead were robustness
+and data-integrity gaps, all closed inside this change — a size check that
+trusted `metadata` across the syscall gap that follows it, a directory read with
+no entry bound, a nesting counter that could wrap on a pathological line, a save
+that truncated the target before writing a byte of its replacement, and a
+pointer release that a drag leaving the window never delivered, which left the
+editor extending a selection under a pointer with no button held.
+Swept before that on 2026-09-14 (the utilities becoming executables: a multicall
+binary whose archive extractor, patch applier, regex engine, inflater and digest
+all read attacker-supplied input, plus the `/bin` symlink install and the
+`execve` thread-pointer reset). Three guaranteed defects and six below the
+confidence bar; all fixed inside the same unreleased change, so none is an
+entry.
 
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no
 > backwards-compatibility or audit-trail obligations, so this file tracks **open

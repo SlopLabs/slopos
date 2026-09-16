@@ -2,11 +2,19 @@ use slopos_abi::draw::Color32;
 use slopos_gfx::image::ImageSampling;
 use std::sync::Arc;
 
+use super::constraints::Orientation;
 use super::constraints::{
     CrossAxisAlignment, EdgeInsets, ImageScale, Length, ScrollDirection, ScrollbarVisibility,
     TextAlignment,
 };
 use super::event::{Key, Modifiers};
+use super::widgets::code_view::{CodeInput, CodeLine};
+use super::widgets::drag_handle::DragInput;
+use super::widgets::editor_tabs::{EditorTab, TabInput};
+use super::widgets::icon::IconKind;
+use super::widgets::line_edit::LineEditInput;
+use super::widgets::menu_bar::MenuBarInput;
+use super::widgets::tree_view::{TreeInput, TreeRow};
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ButtonStyle {
@@ -210,6 +218,14 @@ pub enum Node<M> {
         color: Color32,
         child: Box<Node<M>>,
     },
+    /// A floating surface: filled, rounded, optionally bordered, with a shadow.
+    Card {
+        color: Color32,
+        border: Option<Color32>,
+        radius: i32,
+        shadow: bool,
+        child: Box<Node<M>>,
+    },
     SizedBox {
         width: Option<Length>,
         height: Option<Length>,
@@ -219,6 +235,69 @@ pub enum Node<M> {
     Canvas {
         width: i32,
         height: i32,
+    },
+
+    /// A viewport of code: the lines given are the lines drawn, and every
+    /// gesture comes back in document coordinates.
+    CodeView {
+        lines: Vec<CodeLine>,
+        /// Document index of `lines[0]`.
+        first_line: usize,
+        total_lines: usize,
+        /// Leftmost visible display column.
+        first_col: usize,
+        tab_width: usize,
+        /// `(line, col)` of the caret, in document coordinates.
+        cursor: Option<(usize, usize)>,
+        selection: Option<((usize, usize), (usize, usize))>,
+        show_line_numbers: bool,
+        focused: bool,
+        /// A selection drag is live; the application sets this between the press
+        /// and the release.
+        selecting: bool,
+        on_input: Option<fn(CodeInput) -> M>,
+    },
+    /// A virtualized tree of rows, as a file sidebar shows them.
+    TreeView {
+        rows: Vec<TreeRow>,
+        /// Index of `rows[0]` in the application's full row list.
+        first_row: usize,
+        total_rows: usize,
+        selected: Option<usize>,
+        focused: bool,
+        on_input: Option<fn(TreeInput) -> M>,
+    },
+    /// Open-document tabs, with a modified marker and a close affordance.
+    EditorTabs {
+        tabs: Vec<EditorTab>,
+        active: usize,
+        on_input: Option<fn(TabInput) -> M>,
+    },
+    /// Menu titles; the application opens the dropdown as a [`Node::Popup`].
+    MenuBar {
+        titles: Vec<String>,
+        open: Option<usize>,
+        on_input: Option<fn(MenuBarInput) -> M>,
+    },
+    /// A single-line input whose text and caret the application owns.
+    LineEdit {
+        text: String,
+        placeholder: String,
+        /// Caret position, in characters.
+        caret: usize,
+        focused: bool,
+        icon: Option<IconKind>,
+        /// Drawn right-aligned inside the field: a match count, a hint.
+        suffix: String,
+        invalid: bool,
+        on_input: Option<fn(LineEditInput) -> M>,
+    },
+    /// A draggable divider; reports the start, the pointer's absolute position
+    /// and the end of a drag.
+    DragHandle {
+        orientation: Orientation,
+        active: bool,
+        on_drag: Option<fn(DragInput) -> M>,
     },
 
     Empty,
@@ -242,6 +321,21 @@ pub trait App {
 
     /// Called when a key event is not consumed by any widget.
     fn on_key(&mut self, _key: Key, _modifiers: Modifiers) -> Action {
+        Action::None
+    }
+
+    /// Called with the selection some time after
+    /// [`crate::clipboard::request_paste`].
+    fn on_paste(&mut self, _text: String) -> Action {
+        Action::None
+    }
+
+    /// Called when the compositor resizes the window, before the tree rebuilds.
+    ///
+    /// An app that sizes its own content in rows — an editor's viewport, a
+    /// list's page — needs the window's size, and the size it was launched with
+    /// is only the first one it has.
+    fn on_resize(&mut self, _width: u32, _height: u32) -> Action {
         Action::None
     }
 

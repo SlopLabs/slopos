@@ -87,11 +87,19 @@ writers_of() {
             if (comment !~ ("<" sym "(\\+0x0)?>")) next
 
             insn = substr($0, 1, ci - 1)
+            # The mnemonic is the first token after the address, isolated by
+            # substitution rather than by a word-boundary escape: \y is GNU
+            # awk only, and under mawk the match silently never fires, which
+            # makes the whole scan vacuous.
+            mnemonic = insn
+            sub(/^[ \t]*[0-9a-f]+:[ \t]*/, "", mnemonic)
+            sub(/[ \t].*$/, "", mnemonic)
+
             # Destination side only: a store leaves the rip-relative term as
             # the final operand, whereas a load or `lea` reads it.
-            if (insn ~ /\ylea\y/) next
+            if (mnemonic == "lea") next
             if (insn ~ /,[ \t]*%[a-z0-9]+[ \t]*$/) next
-            if (insn ~ /\ymov[a-z]*\y/ && insn ~ /\(%rip\)[ \t]*$/) print fn
+            if (mnemonic ~ /^mov[a-z]*$/ && insn ~ /\(%rip\)[ \t]*$/) print fn
         }
     ' | sort -u
 }

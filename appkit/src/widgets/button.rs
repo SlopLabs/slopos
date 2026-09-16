@@ -130,6 +130,18 @@ impl Widget for ButtonWidget {
             ctx.style.corner_radius,
             bg,
         );
+        // A secondary button's fill is barely off its surround, so the edge is
+        // what says it is a control rather than a label.
+        if matches!(self.style, ButtonStyle::Secondary) {
+            ctx.draw_rounded_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                ctx.style.corner_radius,
+                ctx.style.border_default,
+            );
+        }
 
         let text_w = ctx.text_width(&self.label);
         let text_h = ctx.text_height();
@@ -172,6 +184,7 @@ impl Widget for ButtonWidget {
                 x,
                 y,
                 button: PointerButton::Left,
+                ..
             } => {
                 // No prior PointerEnter is required: the framework may not
                 // synthesise enter/leave from pointer motion.

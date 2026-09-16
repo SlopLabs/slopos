@@ -32,7 +32,7 @@
 #                                   `alloc` directly; same exemption
 #                                   pattern as check_alloc_dep.sh).
 #
-# Userland-side crates (userland, slibc, slop-protocol, appkit) are out of
+# Userland-side crates (userland, slibc, slop-protocol, appkit, editor-core) are out of
 # scope. `ktesting` is not one of them: it is an unconditional dependency of
 # nine kernel crates and ships in kernel.elf, so it is scanned like any other.
 #
@@ -55,7 +55,7 @@ gate_parse_args check_unsafe_outside_ostd "$@"
 # other vendor crate is scanned, including untracked vendor/**/*.rs.
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt and already carry unsafe.
-USERLAND_RE='^(userland|slibc|slop-protocol|appkit|image|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
+USERLAND_RE='^(userland|slibc|slop-protocol|appkit|editor-core|image|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
 TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
 # Explicit file-level allowlist. Each entry is a repo-relative path.

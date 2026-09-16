@@ -38,6 +38,10 @@ name = "terminal"
 path = "src/bin/terminal.rs"
 
 [[bin]]
+name = "editor"
+path = "src/bin/editor.rs"
+
+[[bin]]
 name = "file_manager"
 path = "src/bin/file_manager.rs"
 
@@ -197,6 +201,10 @@ name = "keymap_test"
 path = "src/bin/tests/keymap_test.rs"
 
 [[bin]]
+name = "editor_test"
+path = "src/bin/tests/editor_test.rs"
+
+[[bin]]
 name = "appkit_test"
 path = "src/bin/tests/appkit_test.rs"
 
@@ -251,6 +259,7 @@ testbins = []
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }
+slopos-editor-core = { workspace = true }
 slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-keymap-core = { workspace = true }

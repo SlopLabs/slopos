@@ -231,6 +231,7 @@ impl StackWidget {
             _ => None,
         };
 
+        let mut response = EventResponse::Ignored;
         for child in self.children.iter_mut().rev() {
             if let Some((px, py)) = pointer_pos {
                 let r = child.layout_rect();
@@ -240,10 +241,28 @@ impl StackWidget {
             }
             let resp = child.event(event, phase, sink);
             if resp.is_consumed() {
-                return resp;
+                response = resp;
+                break;
             }
         }
-        EventResponse::Ignored
+
+        // A release is also told to the children it missed. A widget that
+        // latched on a press — a drag selection, a splitter, a scrollbar thumb
+        // — is holding state the press gave it, and a drag that ends outside
+        // its rect is the ordinary way to end one; without this the latch
+        // never clears and the widget then tracks a pointer with no button
+        // held. Every widget either guards on containment or on its own latch,
+        // so this pass reaches only the one that was waiting for it.
+        if let (WidgetEvent::PointerUp { .. }, Some((px, py))) = (event, pointer_pos) {
+            for child in self.children.iter_mut().rev() {
+                if child.layout_rect().contains(px, py) {
+                    continue;
+                }
+                child.event(event, phase, sink);
+            }
+        }
+
+        response
     }
 }
 

@@ -33,7 +33,7 @@ impl Widget for StyledLabelWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_w = crate::text::string_width(&self.text);
+        let text_w = ctx.text_width(&self.text);
         let line_height = ctx.style.line_height;
         constraints.constrain(Size::new(text_w, line_height))
     }
