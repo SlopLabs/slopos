@@ -1160,6 +1160,11 @@ impl TerminalGrid {
         }
         let action = self.parser.advance(b);
         self.execute_action(action);
+        // A sequence may carry more than one action; the byte is already
+        // consumed, so the rest have to be drained here.
+        while let Some(queued) = self.parser.take_pending() {
+            self.execute_action(queued);
+        }
     }
 
     fn execute_action(&mut self, action: VtAction) {
@@ -1887,6 +1892,21 @@ mod tests {
         feed(&mut g, b"\x1b[31mR");
         let cell = g.cells.get(0, 0);
         assert_eq!(cell.attrs.fg, ANSI_COLORS[1]);
+    }
+
+    /// A multi-parameter SGR must not eat the text that follows it. `ls`
+    /// colours a directory with `ESC[1;34m`, and one byte lost per extra
+    /// action is what turned every name in a listing into its own tail.
+    #[test]
+    fn a_multi_param_sgr_consumes_no_text() {
+        let mut g = TerminalGrid::new(3, 10);
+        feed(&mut g, b"\x1b[1;34mbin\x1b[0m/");
+        assert_eq!(glyph_at(&g, 0, 0), 'b');
+        assert_eq!(glyph_at(&g, 0, 1), 'i');
+        assert_eq!(glyph_at(&g, 0, 2), 'n');
+        assert_eq!(glyph_at(&g, 0, 3), '/');
+        // The second parameter took effect too, not just the first.
+        assert_ne!(g.cells.get(0, 0).attrs.fg, g.cells.get(0, 3).attrs.fg);
     }
 
     #[test]

@@ -460,6 +460,11 @@ impl VConsoleState {
     pub(crate) fn process_byte(&mut self, b: u8) {
         let action = self.parser.advance(b);
         self.execute_action(action);
+        // A sequence may carry more than one action; the byte is already
+        // consumed, so the rest have to be drained here.
+        while let Some(queued) = self.parser.take_pending() {
+            self.execute_action(queued);
+        }
     }
 
     fn execute_action(&mut self, action: VtAction) {

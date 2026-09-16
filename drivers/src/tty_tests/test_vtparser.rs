@@ -146,19 +146,23 @@ pub fn test_sgr_multi_param() -> TestResult {
         klog_info!("TTY_TEST: BUG - expected Bold, got {:?}", first);
         return TestResult::Fail;
     }
-    // A queued second SGR action drains on the next advance, ahead of the byte
-    // just fed.
-    let second = parser.advance(b'A');
-    if second != VtAction::SetAttribute(SgrAttr::ForegroundColor(1)) {
+    // The queued second action drains without a byte, so the text that follows
+    // the sequence survives it: `ls` colours a name with `ESC[1;34m`.
+    let second = parser.take_pending();
+    if second != Some(VtAction::SetAttribute(SgrAttr::ForegroundColor(1))) {
         klog_info!(
             "TTY_TEST: BUG - expected ForegroundColor(1), got {:?}",
             second
         );
         return TestResult::Fail;
     }
-    let third = parser.advance(b'B');
-    if third != VtAction::Print(b'B' as u32) {
-        klog_info!("TTY_TEST: BUG - expected Print('B'), got {:?}", third);
+    if parser.take_pending().is_some() {
+        klog_info!("TTY_TEST: BUG - the SGR queue outlived its sequence");
+        return TestResult::Fail;
+    }
+    let third = parser.advance(b'A');
+    if third != VtAction::Print(b'A' as u32) {
+        klog_info!("TTY_TEST: BUG - expected Print('A'), got {:?}", third);
         return TestResult::Fail;
     }
     TestResult::Pass

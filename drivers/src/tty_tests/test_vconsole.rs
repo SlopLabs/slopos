@@ -66,8 +66,8 @@ pub fn test_utf8_truncated_sequence_emits_replacement() -> TestResult {
         klog_info!("TTY_TEST: expected replacement, got {:?}", a2);
         return TestResult::Fail;
     }
-    let a3 = parser.advance(0); // Dummy byte to drain the pending queue.
-    if a3 != VtAction::Print(b'A' as u32) {
+    let a3 = parser.take_pending();
+    if a3 != Some(VtAction::Print(b'A' as u32)) {
         klog_info!("TTY_TEST: expected re-processed 'A', got {:?}", a3);
         return TestResult::Fail;
     }
