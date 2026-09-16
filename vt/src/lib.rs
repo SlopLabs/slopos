@@ -154,10 +154,9 @@ impl VtParser {
 
     /// Feed one byte into the parser. Returns that byte's first `VtAction`.
     ///
-    /// A sequence may yield more than one action — `ESC[1;34m` is two — and
-    /// the caller MUST drain [`VtParser::take_pending`] before feeding the
-    /// next byte. Draining from `advance` instead would discard the byte it
-    /// was handed, which is one lost character per extra action.
+    /// A sequence may yield more than one action — `ESC[1;34m` is two — so the
+    /// caller MUST drain [`VtParser::take_pending`] before the next byte.
+    /// Draining from `advance` would discard the byte it was handed.
     pub fn advance(&mut self, byte: u8) -> VtAction {
         match self.state {
             State::Ground => self.ground(byte),
@@ -172,8 +171,7 @@ impl VtParser {
         }
     }
 
-    /// The next queued action of the sequence [`VtParser::advance`] just
-    /// reported, or `None` when it is exhausted.
+    /// The next queued action of the sequence just reported, or `None`.
     pub fn take_pending(&mut self) -> Option<VtAction> {
         if self.pending_idx >= self.pending_count {
             return None;

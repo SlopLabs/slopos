@@ -78,9 +78,7 @@ fn malformed_sequence_resilience() {
     assert_eq!(parser.advance(b'X'), VtAction::Print(b'X' as u32));
 }
 
-/// A sequence's extra actions are drained without feeding a byte, so no
-/// character is lost: `ls` colours a name with `ESC[1;34m` and every byte of
-/// the name has to survive it.
+/// Extra actions drain without a byte, so no character is lost.
 #[test]
 fn sgr_multi_param() {
     let mut parser = VtParser::new();
@@ -134,7 +132,7 @@ fn utf8_invalid_byte_emits_replacement() {
 fn utf8_truncated_sequence_emits_replacement() {
     let mut parser = VtParser::new();
     assert_eq!(parser.advance(0xC3), VtAction::Nop);
-    // ASCII 'A' instead of a continuation byte → replacement, and the 'A' is
+    // ASCII 'A' instead of a continuation byte: replacement, and the 'A' is
     // queued rather than dropped.
     assert_eq!(parser.advance(b'A'), VtAction::Print(0xFFFD));
     assert_eq!(parser.take_pending(), Some(VtAction::Print(b'A' as u32)));

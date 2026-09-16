@@ -154,8 +154,8 @@ pub fn initialize_job_control() {
         let _ = fs::tiocsctty(0);
     }
 
-    // The shell's own immunity, and what a forked child inherits as
-    // *ignored* for long enough to claim the terminal before it resets them.
+    // Also what a forked child inherits as *ignored*, for long enough to
+    // claim the terminal before it resets them.
     process::ignore_signal(slopos_abi::signal::SIGTTOU);
     process::ignore_signal(slopos_abi::signal::SIGTTIN);
     process::ignore_signal(slopos_abi::signal::SIGTSTP);
@@ -1055,8 +1055,7 @@ fn resolve_exec_path(name: &[u8], tmp: &mut [u8]) -> bool {
         return stat.is_file();
     }
 
-    // A registry name resolves even where the spawn path is not taken — a
-    // pipeline stage execs it like any other program.
+    // A pipeline stage execs a registry program like any other.
     if let Ok(name_str) = core::str::from_utf8(name)
         && let Some(spec) = program_registry::resolve_program(name_str)
     {

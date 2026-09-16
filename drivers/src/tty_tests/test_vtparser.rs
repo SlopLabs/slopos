@@ -146,8 +146,7 @@ pub fn test_sgr_multi_param() -> TestResult {
         klog_info!("TTY_TEST: BUG - expected Bold, got {:?}", first);
         return TestResult::Fail;
     }
-    // The queued second action drains without a byte, so the text that follows
-    // the sequence survives it: `ls` colours a name with `ESC[1;34m`.
+    // Draining takes no byte, so the text after the sequence survives it.
     let second = parser.take_pending();
     if second != Some(VtAction::SetAttribute(SgrAttr::ForegroundColor(1))) {
         klog_info!(

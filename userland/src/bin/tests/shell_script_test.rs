@@ -601,16 +601,14 @@ const PTY_IDLE_READS: usize = 20_000;
 /// lines, then run an external command.
 ///
 /// `spanned` proves the continuation — `if true` alone would have failed and
-/// `then echo spanned` alone is a syntax error — and the PS2 prompt is checked
-/// beside it because that is what tells the user it is waiting. The absence of
-/// a stop report proves the forked child could claim the terminal.
+/// `then echo spanned` alone is a syntax error — the PS2 prompt is what tells
+/// the user it is waiting, and the absence of a stop report proves the forked
+/// child could claim the terminal.
 ///
-/// The shell is spawned from a child that first makes itself the slave's
-/// session and foreground group, exactly as `/bin/terminal` does. That
-/// topology is the test: a shell that takes the controlling terminal for
-/// itself rather than joining the session that already owns it leaves every
-/// forked command in a background group, where it stops on `SIGTTOU` before
-/// printing anything.
+/// The shell is spawned from a child that first becomes the slave's session
+/// and foreground group, as `/bin/terminal` does. That topology *is* the test:
+/// a shell taking the terminal for itself instead of joining the session that
+/// owns it leaves every command it forks in a background group.
 fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
     let Ok((master, _slave_num)) = process::openpty() else {
         eprintln!("shell_script_test: openpty failed");
@@ -713,9 +711,8 @@ fn the_interactive_prompt_continues_an_unfinished_command() -> bool {
             return false;
         }
     }
-    // The decisive half: the echo of the command and the job-table line the
-    // shell prints for a stopped one both contain `external`, so absence of
-    // the stop report is what says the child actually ran.
+    // Decisive: the command's echo and the job-table line for a stopped one
+    // both contain `external`, so only the missing stop report says it ran.
     if contains(&seen, b"Stopped") {
         eprintln!(
             "shell_script_test: a foreground child was stopped; saw {:?}",
