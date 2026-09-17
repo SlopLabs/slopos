@@ -32,7 +32,7 @@ use slopos_appkit::{Action, App, Key, Modifiers, NamedKey, Node};
 
 use slopos_editor_core::buffer::Position;
 use slopos_editor_core::cursor::Motion;
-use slopos_editor_core::document::{Document, file_name, parent_dir};
+use slopos_editor_core::document::{Document, parent_dir};
 use slopos_editor_core::filetree::FileTree;
 use slopos_editor_core::search::{self, SearchOptions};
 
@@ -2026,15 +2026,5 @@ fn normalize_chord(key: Key) -> Key {
     match key {
         Key::Char(c) => Key::Char(c.to_ascii_lowercase()),
         other => other,
-    }
-}
-
-/// The window title an editor shows: the file, its state, and the application.
-pub fn window_title(path: Option<&str>, modified: bool) -> String {
-    let name = path.map(file_name).unwrap_or("untitled");
-    if modified {
-        format!("● {name} — Sloped")
-    } else {
-        format!("{name} — Sloped")
     }
 }

@@ -32,7 +32,6 @@ pub const MENU_BAR_HEIGHT: i32 = 30;
 pub const TAB_BAR_HEIGHT: i32 = 34;
 pub const STATUS_BAR_HEIGHT: i32 = 24;
 pub const PROMPT_BAR_HEIGHT: i32 = 36;
-pub const SIDEBAR_HEADER_HEIGHT: i32 = 30;
 pub const SPLITTER_WIDTH: i32 = 6;
 /// Narrowest the code surface may become when the sidebar is dragged wide.
 pub const MIN_CODE_WIDTH: i32 = 320;
@@ -73,7 +72,7 @@ pub fn tree_rows_visible(window_height: i32) -> usize {
     // Read from the style sheet rather than restated here: the tree widget
     // measures its rows with the same value, and a copy would drift.
     let row_h = slopos_appkit::StyleSheet::dark().row_height.max(1);
-    let height = window_height - MENU_BAR_HEIGHT - SIDEBAR_HEADER_HEIGHT - STATUS_BAR_HEIGHT;
+    let height = window_height - MENU_BAR_HEIGHT - STATUS_BAR_HEIGHT;
     (height.max(0) / row_h) as usize
 }
 
@@ -105,8 +104,6 @@ fn main_column(app: &EditorApp) -> Node<EditorMsg> {
 
 fn menu_bar(app: &EditorApp) -> Node<EditorMsg> {
     let titles: Vec<String> = MENUS.iter().map(|m| m.title.to_string()).collect();
-    let doc = app.doc();
-    let title = super::window_title(doc.path(), doc.is_modified());
 
     Node::SizedBox {
         width: None,
@@ -124,11 +121,7 @@ fn menu_bar(app: &EditorApp) -> Node<EditorMsg> {
                     },
                     Node::Expand {
                         weight: 1,
-                        child: Box::new(Node::StyledLabel {
-                            text: title,
-                            color: Color32::rgb(0xa9, 0xaf, 0xbc),
-                            alignment: TextAlignment::Center,
-                        }),
+                        child: Box::new(Node::Empty),
                     },
                 ],
             }),
@@ -165,61 +158,21 @@ fn body(app: &EditorApp) -> Node<EditorMsg> {
     }
 }
 
+/// The tree, and nothing above it: its first row *is* the open folder, and
+/// Open Folder is on the File menu and in the palette.
 fn sidebar(app: &EditorApp) -> Node<EditorMsg> {
-    let root = app.tree.root_path().to_string();
-    let label = file_name(&root).to_uppercase();
-
-    let header = Node::SizedBox {
-        width: None,
-        height: Some(Length::Px(SIDEBAR_HEADER_HEIGHT)),
-        child: Box::new(Node::Padding {
-            padding: EdgeInsets::new(0, 10, 0, 10),
-            child: Box::new(Node::HStack {
-                spacing: 6,
-                align: CrossAxisAlignment::Center,
-                children: vec![
-                    Node::StyledLabel {
-                        text: label,
-                        color: Color32::rgb(0xa9, 0xaf, 0xbc),
-                        alignment: TextAlignment::Start,
-                    },
-                    Node::Expand {
-                        weight: 1,
-                        child: Box::new(Node::Empty),
-                    },
-                    Node::Button {
-                        label: String::from("Open…"),
-                        on_press: Some(EditorMsg::Run(Command::OpenFolder)),
-                        style: ButtonStyle::Secondary,
-                        enabled: true,
-                    },
-                ],
-            }),
-        }),
-    };
-
     let visible = tree_rows_visible(app.window_height);
     let rows = visible_tree_rows(app, visible);
 
     Node::Background {
         color: bg_sidebar(),
-        child: Box::new(Node::VStack {
-            spacing: 0,
-            align: CrossAxisAlignment::Stretch,
-            children: vec![
-                header,
-                Node::Expand {
-                    weight: 1,
-                    child: Box::new(Node::TreeView {
-                        rows,
-                        first_row: app.tree_scroll,
-                        total_rows: app.tree_row_count(),
-                        selected: app.tree_selected,
-                        focused: app.focus == Focus::Tree,
-                        on_input: Some(EditorMsg::Tree),
-                    }),
-                },
-            ],
+        child: Box::new(Node::TreeView {
+            rows,
+            first_row: app.tree_scroll,
+            total_rows: app.tree_row_count(),
+            selected: app.tree_selected,
+            focused: app.focus == Focus::Tree,
+            on_input: Some(EditorMsg::Tree),
         }),
     }
 }
