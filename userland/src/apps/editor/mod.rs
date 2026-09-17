@@ -283,6 +283,15 @@ impl EditorApp {
             .unwrap_or_default()
     }
 
+    /// The file finder's current result paths, for a test that has to see what
+    /// the tree actually offered.
+    pub fn finder_results(&self) -> Vec<String> {
+        match &self.prompt {
+            Prompt::FileFinder { results, .. } => results.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether the open prompt is one of the two overlays (the palette, the
     /// file finder) rather than the one-line bar.
     pub fn prompt_is_overlay(&self) -> bool {
@@ -514,6 +523,44 @@ impl EditorApp {
                         self.status = message;
                         self.tree.populate(index, Vec::new());
                     }
+                }
+            }
+        }
+    }
+
+    /// Reads every directory under the root, so the file finder can offer what
+    /// is *in* the tree rather than only what the sidebar happens to have
+    /// expanded.
+    ///
+    /// Bounded, and deliberately not on the open path: opening a folder must
+    /// stay the cost of reading one directory. The finder is the one place
+    /// that needs the whole set, so it pays for it, once, when it is asked
+    /// for — and says so when the tree is larger than the budget instead of
+    /// quietly offering a subset.
+    fn index_tree(&mut self) {
+        const MAX_DIRS: usize = 4_000;
+        let mut read = 0usize;
+        loop {
+            let unread = self.tree.unread_dirs();
+            if unread.is_empty() {
+                return;
+            }
+            for index in unread {
+                if read >= MAX_DIRS {
+                    self.status =
+                        format!("Indexed {MAX_DIRS} directories; the finder is offering what fits");
+                    return;
+                }
+                let Some(path) = self.tree.node(index).map(|n| n.path.clone()) else {
+                    continue;
+                };
+                read += 1;
+                match files::read_dir(&path) {
+                    Ok(entries) => self.tree.populate(index, entries),
+                    // A directory that cannot be read is an empty one here, as
+                    // in `sync_tree`; marking it loaded is what stops the walk
+                    // from retrying it forever.
+                    Err(_) => self.tree.populate(index, Vec::new()),
                 }
             }
         }
@@ -1069,6 +1116,7 @@ impl EditorApp {
                 input: LineInput::new(),
             }),
             Command::FileFinder => {
+                self.index_tree();
                 self.open_prompt(Prompt::FileFinder {
                     input: LineInput::new(),
                     results: Vec::new(),

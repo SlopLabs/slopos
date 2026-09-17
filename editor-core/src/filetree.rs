@@ -100,6 +100,21 @@ impl FileTree {
         self.len() == 0
     }
 
+    /// Every directory whose children have not been read, expanded or not.
+    ///
+    /// [`FileTree::pending`] is what the *sidebar* owes; this is what a walk of
+    /// the whole tree owes, which is not the same set: a collapsed directory is
+    /// not pending but is still unread, and a file finder that only saw the
+    /// expanded ones would offer nothing in a folder just opened.
+    pub fn unread_dirs(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.alive && n.is_dir && !n.loaded)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Directories whose children the app still has to read, in row order.
     pub fn pending(&self) -> Vec<usize> {
         self.nodes

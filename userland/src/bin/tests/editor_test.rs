@@ -175,6 +175,26 @@ fn tree_expands_a_directory() -> bool {
     after.len() > before && after.iter().any(|r| r.0 == "inner.txt") && app.documents().len() == 1
 }
 
+/// The finder offers files from directories the sidebar never expanded.
+fn finder_reaches_unexpanded_directories() -> bool {
+    let deep = format!("{DIR}/deep/deeper");
+    let _ = std::fs::create_dir(format!("{DIR}/deep"));
+    let _ = std::fs::create_dir(&deep);
+    if std::fs::write(format!("{deep}/buried.rs"), "fn buried() {}\n").is_err() {
+        return false;
+    }
+    let mut app = app_with(DIR);
+    // Nothing has expanded `deep`, so the sidebar cannot see `buried.rs`.
+    if app.tree_rows(0, 64).iter().any(|r| r.0 == "buried.rs") {
+        return false;
+    }
+    app.update(EditorMsg::Run(Command::FileFinder));
+    app.type_in_prompt("buried");
+    app.finder_results()
+        .iter()
+        .any(|p| p.ends_with("buried.rs"))
+}
+
 /// A binary file is refused rather than opened as replacement characters.
 fn refuses_a_binary_file() -> bool {
     // A fixture rather than a real binary: `/bin/editor` would also be refused,
@@ -372,6 +392,10 @@ fn main() {
         ("close_asks_before_discarding", close_asks_before_discarding),
         ("tree_expands_a_directory", tree_expands_a_directory),
         ("refuses_a_binary_file", refuses_a_binary_file),
+        (
+            "finder_reaches_unexpanded_directories",
+            finder_reaches_unexpanded_directories,
+        ),
         ("builds_a_view", builds_a_view),
         ("find_field_accepts_a_space", find_field_accepts_a_space),
         (

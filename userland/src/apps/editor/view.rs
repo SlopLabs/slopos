@@ -671,7 +671,13 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
         Color32::rgb(0xa9, 0xaf, 0xbc)
     };
     let root = app.tree.root_path();
+    let name = file_name(path);
     let relative = slopos_editor_core::filetree::relative_to(root, path).unwrap_or(path);
+    // The directory the name sits in, not the whole relative path: a file at
+    // the root of the tree would otherwise have its name printed twice, once
+    // in each column.
+    let context = relative.strip_suffix(name).unwrap_or(relative);
+    let context = context.trim_end_matches('/');
     Node::Padding {
         padding: EdgeInsets::new(0, 8, 0, 8),
         child: Box::new(Node::HStack {
@@ -679,14 +685,14 @@ fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
             align: CrossAxisAlignment::Center,
             children: vec![
                 Node::StyledLabel {
-                    text: file_name(path).to_string(),
+                    text: name.to_string(),
                     color,
                     alignment: TextAlignment::Start,
                 },
                 Node::Expand {
                     weight: 1,
                     child: Box::new(Node::StyledLabel {
-                        text: relative.to_string(),
+                        text: context.to_string(),
                         color: Color32::rgb(0x6b, 0x71, 0x7d),
                         alignment: TextAlignment::Start,
                     }),
