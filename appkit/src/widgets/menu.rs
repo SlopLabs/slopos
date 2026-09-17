@@ -245,9 +245,8 @@ impl Widget for MenuWidget {
                 EventResponse::Consumed
             }
 
-            // Only a focused menu answers keys. The popup forwards them
-            // whatever the pointer is doing, so an unguarded Enter here runs
-            // whichever row the pointer happens to be level with.
+            // The popup forwards keys whatever the pointer is doing, so an
+            // unguarded Enter runs whichever row it is level with.
             WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Up) => {
                     self.hovered_index = self.next_actionable(self.hovered_index, false);
@@ -266,15 +265,12 @@ impl Widget for MenuWidget {
                     }
                     EventResponse::Consumed
                 }
-                // Ignored so the enclosing Popup sees Escape and dismisses.
                 Key::Named(NamedKey::Escape) => EventResponse::Ignored,
                 _ => EventResponse::Ignored,
             },
 
-            // Gaining focus does not move the highlight. A press on a separator
-            // focuses this menu without emitting anything, and pre-selecting
-            // the first item there lights up a row the pointer is nowhere near
-            // — which a following Enter would then run.
+            // Focus does not move the highlight: a press on a separator would
+            // otherwise light a row the pointer is nowhere near.
             WidgetEvent::FocusGained => {
                 self.focused = true;
                 EventResponse::Ignored

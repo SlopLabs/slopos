@@ -34,37 +34,31 @@ pub fn read_file(path: &str) -> Result<String, String> {
         _ => {}
     }
     let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    // The metadata above is a separate syscall, so it describes the file as it
-    // was, not as it is; the read is what decides.
+    // The metadata above is a separate syscall; the read is what decides.
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(format!(
             "{path} is larger than the {} MiB the editor opens",
             MAX_FILE_BYTES / (1024 * 1024)
         ));
     }
-    // A NUL byte means this is not text. Opening it would produce a buffer of
-    // replacement characters that saving would then write back over the file,
-    // so refusing is the only answer that cannot destroy anything.
+    // Opening it would produce replacement characters that a save then writes
+    // back over the file.
     if bytes[..bytes.len().min(SNIFF_BYTES)].contains(&0) {
         return Err(format!("{path} is a binary file"));
     }
-    // Lossy rather than refusing: a text file with one stray byte is still
-    // worth opening, and the replacement character says where it was.
+    // Lossy: a text file with one stray byte is still worth opening.
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Writes `text` to `path` through a sibling temporary file.
 ///
-/// `File::create` truncates before the first byte of the new content is
-/// written, so a write that fails part way — a full image, a device error, a
-/// quota denial — would leave the user's file destroyed while the editor still
-/// held the only copy. Writing a sibling, `fsync`-ing it and renaming over the
-/// target means the file on the medium is either the old one or the whole new
-/// one, and never a prefix of either; the rename is itself one journalled
-/// metadata operation, so a rude exit cannot catch it half done.
+/// `File::create` truncates first, so a partial write would destroy the file
+/// while the editor held the only copy. Writing a sibling, `fsync`-ing it and
+/// renaming leaves the old file or the whole new one, never a prefix: the
+/// rename is one journalled metadata operation.
 pub fn write_file(path: &str, text: &str) -> Result<(), String> {
-    // The replacement is a new inode, so it does not inherit the old one's
-    // mode: an executable script saved here would come back un-executable.
+    // A new inode does not inherit the old one's mode, so an executable script
+    // would come back un-executable.
     let mode = crate::apps::coreutils::fsutil::mode_of(path)
         .ok()
         .map(|mode| mode & 0o7777);
@@ -100,10 +94,8 @@ fn temp_path(path: &str) -> String {
         None => ("", path),
     };
     let suffix = format!(".sloped-{}", std::process::id());
-    // A name is bounded; the decoration must not be what pushes a file that
-    // saved yesterday over the limit, so the *original* name is what gets
-    // shortened. It only has to be unique within one directory for the moment
-    // between the write and the rename.
+    // The original name is what gets shortened, so the decoration cannot be
+    // what pushes a file that saved yesterday over the name limit.
     let room = slopos_abi::fs::USER_NAME_MAX.saturating_sub(suffix.len() + 1);
     let mut stem = String::new();
     for (index, ch) in name.char_indices() {
@@ -166,11 +158,8 @@ pub fn is_dir(path: &str) -> bool {
 /// The directory the editor starts in: its argument if it is one, else the
 /// working directory, else the root.
 pub fn start_directory(arg: Option<&str>) -> String {
-    // Always absolute. `absolutize` treats its base as absolute — it has to,
-    // since it is textual — so a relative one silently re-roots everything at
-    // `/`: `editor .` in a home directory would propose saving `untitled-1` to
-    // the filesystem root, and an argument like `sub/foo.rs` would open under
-    // one path while the sidebar listed it under another.
+    // Always absolute: `absolutize` is textual, so it treats its base as
+    // absolute and a relative one re-roots everything at `/`.
     let working = working_directory();
     if let Some(path) = arg {
         if is_dir(path) {

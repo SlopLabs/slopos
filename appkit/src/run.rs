@@ -62,8 +62,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         handle.drain_ui_queue();
 
         let count = win.poll_protocol_events(&mut proto_events);
-        // Every unconsumed key, not just the last: a poll can return a batch,
-        // and an `Option` here silently dropped all but one of them.
+        // A poll returns a batch, so this is a vector and not an `Option`.
         let mut unhandled_keys: Vec<(super::event::Key, super::event::Modifiers)> = Vec::new();
         let mut sink = MessageSink::new();
 
@@ -85,11 +84,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 }
                 Event::ClipboardOffer { len } => {
                     if !super::clipboard::accept_offer(*len) {
-                        // An empty offer, or one we could not take delivery of,
-                        // is still an answer: without it a paste with nothing
-                        // on the selection would leave the application waiting
-                        // for a `ClipboardData` that never comes, and its own
-                        // fallback unreachable.
+                        // An empty offer is still an answer; without it the
+                        // application waits for data that never comes.
                         let action = app.on_paste(String::new());
                         process_action(action, &mut needs_rebuild, &mut needs_repaint);
                     }
@@ -168,9 +164,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 key, modifiers: m, ..
             } = &widget_event
             {
-                // Tab moves focus only where nothing claimed it: an editor
-                // indents with Tab, and stealing it before dispatch would make
-                // that impossible to express.
+                // An editor indents with Tab, so focus only gets what nothing
+                // claimed.
                 if matches!(key, super::event::Key::Named(super::event::NamedKey::Tab)) {
                     let previous = focus.focused();
                     if m.shift {
@@ -209,18 +204,10 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let node = app.view();
             root = tree::build_widget_tree(&node);
             tree::layout_tree(root.as_mut(), window_size, &style);
-            // A rebuild replaces every widget, so the one that held the focus
-            // has to be told again — otherwise the focus gate every widget now
-            // consults is false for the rest of the session and Enter, Space
-            // and the arrows reach nothing.
-            //
-            // The application's own answer comes first. A widget it built as
-            // focused *is* the focused widget; only when it names none does the
-            // framework's remembered chain position apply. Without that
-            // precedence the two disagree, and since keys are offered to every
-            // widget until one consumes, the framework's stale answer wins: a
-            // button clicked once keeps eating the Enter and Space meant for
-            // the field the application focused.
+            // A rebuild replaces every widget, so whoever holds focus has to
+            // be told again. The application's answer comes first: a widget it
+            // built focused *is* the focused one, and only when it names none
+            // does the remembered chain position apply.
             let declared = find_declared_focus(root.as_ref());
             let restored = focus.rebuild_tab_chain(root.as_ref());
             let target = match declared {
@@ -231,9 +218,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 None => restored,
             };
             if let Some(id) = target {
-                // Its own sink: gaining focus is a notification, not a message
-                // source, and anything emitted here would be applied after the
-                // rebuild it caused.
+                // Its own sink: anything emitted here would be applied after
+                // the rebuild that caused it.
                 let mut focus_sink = MessageSink::new();
                 send_to_id(
                     root.as_mut(),
@@ -265,11 +251,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
             0
         } else if count == proto_events.len() {
-            // The batch filled the buffer, so the connection may still hold
-            // decoded events — and it will, because one `recvmsg` can carry
-            // hundreds. Blocking on the socket here sleeps with those events in
-            // hand: a fast drag's release sits unread until the *next* event
-            // arrives, and the selection goes on following the pointer.
+            // The batch filled the buffer, so the connection still holds
+            // decoded events; blocking now would sleep with them in hand.
             0
         } else if let Some(interval) = app.tick_interval_ms() {
             let now = slopos_windowing::get_time_ms();
@@ -294,8 +277,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 slopfut::Either2::B(_) => handle.drain_wakeup(),
             }
         } else if timeout_ms > 0 {
-            // `sleep_ms` is an `async fn` and so not `Unpin`; the by-reference
-            // `select3` needs it pinned.
+            // `sleep_ms` is not `Unpin`, and `select3` takes it by reference.
             let timer: core::pin::Pin<Box<dyn core::future::Future<Output = ()>>> =
                 Box::pin(slopfut::time::sleep_ms(timeout_ms as u64));
             match slopfut::select3(
@@ -348,11 +330,8 @@ fn fill_pointer_state(
 
 /// Tells the widget losing focus and the one gaining it.
 ///
-/// Nothing sent these before, so every widget's `focused` flag was permanently
-/// false — which is why `ButtonWidget` and `ListViewWidget` acted on Enter,
-/// Space and the arrow keys without ever asking whether the key was theirs.
-/// Keyboard events are offered to every child until one consumes, so a widget
-/// that answers a key it was not given takes it from whoever was.
+/// Without them every widget's `focused` flag stays false, and the gate each
+/// one puts on its keys never opens.
 fn move_focus_events(
     root: &mut dyn Widget,
     previous: Option<super::traits::WidgetId>,

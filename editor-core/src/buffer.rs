@@ -144,11 +144,9 @@ impl TextBuffer {
 
 /// Display column of character column `col` on `text`, expanding tabs.
 ///
-/// A character column and a display column differ wherever a tab can appear,
-/// and the two must not be mixed: the renderer positions a caret and a
-/// selection in display columns, while the cursor and every search result are
-/// in character columns. This is the one conversion, and
-/// [`char_col_from_display`] is its inverse.
+/// The renderer works in display columns, the cursor and every search result
+/// in character ones. This is the conversion; [`char_col_from_display`] is its
+/// inverse.
 pub fn display_col(text: &str, col: usize, tab_width: usize) -> usize {
     let tab = tab_width.max(1);
     let mut display = 0usize;
@@ -162,8 +160,8 @@ pub fn display_col(text: &str, col: usize, tab_width: usize) -> usize {
             display += 1;
         }
     }
-    // A column past the end of the line keeps counting, so a caret parked past
-    // a short line still lands where the goal column says.
+    // Past the end of the line it keeps counting, so a caret parked past a
+    // short line still lands on its goal column.
     display + col.saturating_sub(text.chars().count())
 }
 
@@ -245,14 +243,10 @@ impl TextBuffer {
             if lines.len() >= MAX_LINES {
                 return Err(LoadError::TooManyLines);
             }
-            // Only a carriage return that *terminates* a line is an ending, and
-            // only in a file whose endings are CRLF. Stripping unconditionally
-            // deleted a lone `\r` — the whole content of a one-byte file — and
-            // silently rewrote the endings of a mixed file on the next save.
+            // Only a carriage return that terminates a line, and only in a
+            // CRLF file: a lone `\r` is content.
             //
-            // The last piece is followed by no newline, so whatever `\r` it ends
-            // with is content: the file's own terminator, if it had one, was
-            // already taken off above.
+            // No newline follows the last piece, so its `\r` is content.
             let last = pieces.peek().is_none();
             let line = match line_ending {
                 LineEnding::Crlf if !last => line.strip_suffix('\r').unwrap_or(line),
@@ -337,31 +331,25 @@ impl TextBuffer {
     /// Whether inserting `text` after dropping `removing` lines would pass
     /// [`MAX_LINES`].
     ///
-    /// Asked *before* an edit begins, so an operation that would be refused
-    /// destroys nothing on the way to finding out — which is also why the
-    /// pending delete has to be given here rather than observed: replacing a
-    /// thousand selected lines with a thousand others is a net change of zero,
-    /// and a check that only counted the insert refused it.
+    /// Asked before the edit begins, so a refusal destroys nothing — which is
+    /// why the pending delete is given rather than observed: replacing a
+    /// thousand lines with a thousand others is a net change of zero.
     pub fn would_exceed_line_limit(&self, text: &str, removing: usize) -> bool {
         !text.is_empty()
             && self.lines.len().saturating_sub(removing) + text.matches('\n').count() > MAX_LINES
     }
 
-    /// Inserts `text` at `pos`, returning the position just past it — or the
-    /// unchanged position when nothing was inserted, which the caller must
-    /// distinguish, because a refused insert that is recorded in the undo
-    /// history is a step that takes back text the buffer never held.
+    /// Inserts `text` at `pos`, returning the position just past it, or `pos`
+    /// unchanged when nothing was inserted — which the caller must tell apart,
+    /// or the undo history gains a step taking back text never held.
     ///
-    /// Embedded newlines split lines; `\r\n` in the inserted text is normalized
-    /// to `\n` so a paste from a CRLF source does not leave bare carriage
-    /// returns inside a line.
+    /// Embedded newlines split lines, and `\r\n` is normalized to `\n`.
     pub fn insert(&mut self, pos: Position, text: &str) -> Position {
         let pos = self.clamp(pos);
         if text.is_empty() {
             return pos;
         }
-        // The ceiling `from_str` enforces holds for a paste too, or a buffer
-        // could be taken past it one insert at a time.
+        // Or a buffer is taken past `from_str`'s ceiling one insert at a time.
         let added = text.matches('\n').count();
         if self.lines.len() + added > MAX_LINES {
             return pos;
@@ -494,11 +482,8 @@ impl TextBuffer {
     /// Infers the file's indentation from the first line that is indented, so
     /// Tab in a tab-indented file inserts a tab.
     pub fn detect_indent(&self, default: IndentStyle) -> IndentStyle {
-        // Histogram the *step into* a block, not the absolute indent a line
-        // carries. The indents a file shows are multiples of its unit, so in
-        // anything with nesting the most common absolute width is not the unit
-        // — a four-space file with enough two-deep blocks looks like an
-        // eight-space one.
+        // The step into a block, not the absolute indent: every indent is a
+        // multiple of the unit, so a nested four-space file shows as eight.
         let mut steps: [usize; 9] = [0; 9];
         let mut tabs = 0usize;
         let mut spaces = 0usize;
@@ -511,13 +496,10 @@ impl TextBuffer {
                     continue;
                 }
                 Some(' ') => spaces += 1,
-                // A blank line is inside whatever block it sits in, so it does
-                // not break the chain.
                 None => continue,
                 _ => {}
             }
-            // Nor does one that is only whitespace: its trailing spaces are not
-            // an indent level and would record a step nothing took.
+            // A whitespace-only line's trailing spaces are not an indent level.
             if line.trim().is_empty() {
                 continue;
             }
@@ -534,9 +516,8 @@ impl TextBuffer {
         if tabs > spaces {
             return IndentStyle::Tabs(default.width());
         }
-        // Ties go to the narrower width: two is a plausible reading of a file
-        // that also shows fours, and four is not a plausible reading of one
-        // that only shows twos.
+        // Ties go narrower: two reads a file that also shows fours, four does
+        // not read one that only shows twos.
         let best = steps
             .iter()
             .enumerate()

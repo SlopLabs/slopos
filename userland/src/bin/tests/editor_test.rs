@@ -251,9 +251,8 @@ fn finder_reaches_unexpanded_directories() -> bool {
 
 /// A binary file is refused rather than opened as replacement characters.
 fn refuses_a_binary_file() -> bool {
-    // A fixture rather than a real binary: `/bin/editor` would also be refused,
-    // but for its size once it outgrows `MAX_FILE_BYTES`, and the assertion
-    // would go on passing for the wrong reason.
+    // A fixture, not `/bin/editor`: that would be refused for its size once it
+    // outgrows `MAX_FILE_BYTES`, and pass for the wrong reason.
     let path = format!("{DIR}/blob.bin");
     if std::fs::write(&path, [0x7f, b'E', b'L', b'F', 0x00, 0x01, 0x02, 0x00]).is_err() {
         return false;
@@ -268,9 +267,8 @@ fn refuses_a_binary_file() -> bool {
 fn builds_a_view() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     let mut panes = 0;
-    // Each chord with what it is supposed to leave on screen. Counting loop
-    // turns proves nothing on its own: a chord that silently did not open its
-    // prompt lays out the same window as the turn before it.
+    // Counting loop turns proves nothing: a chord that did not open its prompt
+    // lays out the same window as the turn before it.
     for (open, prompt_expected) in [
         (None, false),
         (Some((Key::Char('f'), ctrl())), true),
@@ -403,9 +401,8 @@ fn a_changed_file_is_not_silently_overwritten() -> bool {
 /// Driving the real widget tree, not `App::on_key`.
 ///
 /// `run_app` offers a key to the widget tree first and only calls `on_key`
-/// with what nothing consumed, so a case that calls `on_key` directly tests
-/// the fallback and can never see a widget stealing the key on the way. Every
-/// bug this module exists to catch lives on the path it skips.
+/// with what nothing consumed, so a case calling `on_key` directly tests the
+/// fallback and never sees a widget steal the key on the way.
 mod dispatch {
     use slopos_appkit::event::{EventPhase, Key, MessageSink, Modifiers, WidgetEvent};
     use slopos_appkit::traits::Widget;

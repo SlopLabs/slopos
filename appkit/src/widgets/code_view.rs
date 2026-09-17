@@ -94,9 +94,7 @@ pub fn visible_line_count(height: i32, line_height: i32) -> usize {
 /// gutter and the overview scrollbar on the right edge.
 ///
 /// Exported because the application sizes the document's viewport itself and
-/// has to subtract exactly what the widget does; the constant it carried
-/// instead was two pixels out, so the buffer was scrolled horizontally a
-/// column before the text reached the edge.
+/// has to subtract exactly what the widget does.
 pub fn text_area_reserved() -> i32 {
     TEXT_PAD + SCROLLBAR_WIDTH
 }

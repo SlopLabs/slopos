@@ -119,17 +119,12 @@ impl History {
     /// Closes the transaction, recording `cursor_after` as where the whole
     /// operation leaves the caret.
     ///
-    /// Taken here rather than left to each caller because every compound
-    /// operation restores the cursor *after* its last primitive change, and a
-    /// group that kept that change's own end position redoes to the wrong
-    /// place — which is not cosmetic, because the next keystroke reads it: a
-    /// redone "move line up" followed by another one moves a different line.
+    /// Taken here because a group that kept its last primitive change's end
+    /// position redoes to the wrong place, and the next keystroke reads it.
     pub fn end(&mut self, cursor_after: Cursor) {
         self.transaction = self.transaction.saturating_sub(1);
         if self.transaction == 0 {
-            // Only the group this transaction actually created. A transaction
-            // that recorded nothing must not restate some earlier group's
-            // cursor.
+            // One that recorded nothing must not restate an earlier group's.
             if let Some(group) = self
                 .transaction_group
                 .and_then(|index| self.undo.get_mut(index))
@@ -138,10 +133,8 @@ impl History {
             }
             self.transaction_group = None;
             self.seal();
-            // `record` cannot trim mid-transaction, so a transactional edit is
-            // never bounded by it — and `insert_newline` is transactional, so
-            // ordinary typing grew the history without limit. The end of the
-            // transaction is where the cap applies.
+            // `record` cannot trim mid-transaction, and `insert_newline` is
+            // transactional, so this is where the cap applies.
             self.trim();
         }
     }
@@ -255,9 +248,8 @@ impl History {
 
     /// Reverses the newest group; returns the cursor to restore.
     pub fn undo(&mut self, buffer: &mut TextBuffer) -> Option<Cursor> {
-        // Half of a compound edit is not an undo step. Nothing reaches here
-        // mid-transaction today; enforcing it means a future compound
-        // operation cannot make it so by accident.
+        // Half a compound edit is not an undo step. Nothing reaches here
+        // mid-transaction today; this keeps it that way.
         if self.transaction > 0 {
             return None;
         }

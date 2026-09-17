@@ -312,9 +312,6 @@ impl Widget for TextFieldWidget {
         }
 
         match event {
-            // Only when this widget holds the keyboard focus: a key is offered
-            // to every widget in turn until one consumes, so answering one
-            // unfocused takes it from whatever the user was actually aiming at.
             WidgetEvent::TextInput { character } if self.focused => {
                 if self.read_only {
                     return EventResponse::Consumed;
@@ -340,10 +337,8 @@ impl Widget for TextFieldWidget {
             }
 
             WidgetEvent::PointerDown { x, y, button, .. } => {
-                // Containment, like every other widget: a `ZStack`, a `Card`
-                // and a `Padding` all forward a press without filtering, so a
-                // field under one would swallow a click aimed at the layer
-                // beneath and move its own caret.
+                // `ZStack`, `Card` and `Padding` forward a press without
+                // filtering, so containment is this widget's to check.
                 if *button != PointerButton::Left || !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
@@ -355,16 +350,11 @@ impl Widget for TextFieldWidget {
                 EventResponse::CapturePointer
             }
 
-            // Containment, because there is no pointer capture: `CapturePointer`
-            // is returned here and read nowhere, and a container hands a missed
-            // move to every child that did not contain it — so without this the
-            // caret walked and a selection grew from a pointer crossing the
-            // window with no button held.
+            // There is no pointer capture — `CapturePointer` is returned and
+            // read nowhere — and containers hand on the moves they missed.
             WidgetEvent::PointerMove { x, y }
                 if self.focused && self.layout_rect().contains(*x, *y) =>
             {
-                // Drag-select: a move only reaches here while the pointer is
-                // captured from PointerDown.
                 let idx = self.x_to_char_index(*x);
                 if self.selection_anchor.is_none() {
                     self.selection_anchor = Some(self.cursor);
@@ -417,8 +407,8 @@ impl TextFieldWidget {
                 EventResponse::Consumed
             }
 
-            // Space reaches a toolkit as a named key so a focused button can be
-            // activated with it; inside a text field it is a character.
+            // Space is a named key so a focused button can be pressed with it;
+            // in a text field it is a character.
             Key::Named(NamedKey::Space) if !modifiers.ctrl && !modifiers.plain_alt() => {
                 if self.read_only {
                     return EventResponse::Consumed;

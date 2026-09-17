@@ -284,7 +284,6 @@ impl Widget for ScrollViewWidget {
             WidgetEvent::Scroll {
                 delta_x, delta_y, ..
             } => {
-                // Deltas arrive in pixels; input.rs has already converted from v120.
                 let can_scroll_v = matches!(
                     self.direction,
                     ScrollDirection::Vertical | ScrollDirection::Both
@@ -372,9 +371,6 @@ impl Widget for ScrollViewWidget {
                 EventResponse::Ignored
             }
 
-            // Only when this widget holds the keyboard focus: a key is offered
-            // to every widget in turn until one consumes, so answering one
-            // unfocused takes it from whatever the user was actually aiming at.
             WidgetEvent::KeyDown { key, .. } if self.focused => {
                 let can_v = matches!(
                     self.direction,
@@ -435,11 +431,8 @@ impl Widget for ScrollViewWidget {
                 EventResponse::Ignored
             }
 
-            // Anything this view does not handle itself belongs to what it is
-            // scrolling. Without this a control placed inside one received no
-            // events at all, while `children()` still offered it to the hit
-            // test and to the tab chain — so the framework could focus a widget
-            // nothing could reach.
+            // The rest belongs to what is being scrolled: `children()` offers
+            // it to the hit test and the tab chain either way.
             _ => self.child.event(event, phase, sink),
         }
     }

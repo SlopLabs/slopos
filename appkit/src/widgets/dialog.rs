@@ -59,11 +59,9 @@ impl DialogWidget {
             None => len - 1,
         };
         self.focused_action = Some(next);
-        // The dialog runs its own focus ring, so the framework never tells
-        // these buttons anything — and a button that was never told it has
-        // focus answers no key, which left Tab moving a ring that Enter could
-        // not act on. The caller's sink, not a local one: a message emitted
-        // here would otherwise be dropped on the floor.
+        // The framework never tells these buttons anything, and one never
+        // told it has focus answers no key. The caller's sink, or a message
+        // emitted here is dropped.
         if let Some(action) = previous.and_then(|i| self.actions.get_mut(i)) {
             action.event(&WidgetEvent::FocusLost, EventPhase::Target, sink);
         }
@@ -131,8 +129,6 @@ impl Widget for DialogWidget {
         self.title_height = crate::text::ui::line_height(ctx.style.font_size_heading as u16);
         let inner_w = self.inner_width(constraints.max_width);
 
-        // Content height is unbounded: `card_height` reads the measured value
-        // back rather than assuming a line count.
         let content_constraints = BoxConstraints {
             min_width: inner_w,
             max_width: inner_w,
@@ -146,7 +142,6 @@ impl Widget for DialogWidget {
             measure_widget(action.as_mut(), action_constraints, ctx);
         }
 
-        // The dialog itself covers the parent so the backdrop dims everything.
         constraints.constrain(constraints.max_size())
     }
 
@@ -271,8 +266,7 @@ impl Widget for DialogWidget {
                     return EventResponse::Consumed;
                 }
 
-                // Only the action under the pointer gets the event; offering it
-                // to each in turn would let "Cancel" fire "Kill".
+                // Offering it to each in turn would let "Cancel" fire "Kill".
                 for action in &mut self.actions {
                     if action.layout_rect().contains(*x, *y) {
                         let resp = action.event(event, EventPhase::Target, sink);
@@ -281,9 +275,8 @@ impl Widget for DialogWidget {
                         }
                     }
                 }
-                // A release the actions all missed still has to reach them, or
-                // the one pressed stays drawn as pressed. A button ignores a
-                // release outside its own rect, so this cannot fire one.
+                // Or the one pressed stays drawn pressed. A button ignores a
+                // release outside its rect, so this cannot fire one.
                 if matches!(event, WidgetEvent::PointerUp { .. }) {
                     for action in &mut self.actions {
                         if !action.layout_rect().contains(*x, *y) {
@@ -332,9 +325,8 @@ impl Widget for DialogWidget {
                 }
             }
 
-            // The dialog owns its own focus ring, so a focus event aimed at
-            // the dialog stops here: forwarding it to the catch-all below
-            // marked *every* action focused, and each then drew a ring.
+            // Stops here: the catch-all below would mark every action focused
+            // and each would draw a ring.
             WidgetEvent::FocusGained | WidgetEvent::FocusLost => EventResponse::Ignored,
 
             _ => {
@@ -358,7 +350,6 @@ impl Widget for DialogWidget {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        // Content is painted and hit-tested directly; only actions join the tab chain.
         &self.actions
     }
 

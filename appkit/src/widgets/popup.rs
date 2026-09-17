@@ -107,19 +107,14 @@ impl Widget for PopupWidget {
                 if !self.child.layout_rect().contains(*x, *y) {
                     return self.dismiss(sink);
                 }
-                // Consumed whatever the child said. A press *inside* the popup
-                // that the child ignored — a menu separator, the padding round
-                // a palette's list — is still the popup's: letting it fall
-                // through opens a file in the tree behind the open menu.
+                // A press inside the popup that the child ignored — a
+                // separator, the padding round a list — is still the popup's.
                 self.child.event(event, EventPhase::Target, sink);
                 EventResponse::Consumed
             }
 
-            // Tab goes to the child and no further. Letting it fall through
-            // was right while nothing focused a popup; now that one holds the
-            // keyboard while it is open, passing Tab down to the layer beneath
-            // means the document behind an open menu gets indented by a key
-            // press the UI presents as modal.
+            // A popup holds the keyboard while it is open, so Tab must not
+            // reach the document behind it.
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Tab),
                 ..
@@ -128,14 +123,11 @@ impl Widget for PopupWidget {
                 EventResponse::Consumed
             }
 
-            // Motion passes through. A popup is modal against *acting*, not
-            // against knowing where the pointer is: the menu bar underneath
-            // needs the move to switch menus as the pointer slides across it,
-            // and a widget that latched on a press needs it to keep tracking.
+            // Modal against acting, not against knowing where the pointer is:
+            // the menu bar underneath still switches menus as it slides.
             WidgetEvent::PointerMove { .. } => {
-                // The child's answer goes back up: a menu's highlight changing
-                // is a repaint, and a response thrown away here leaves an open
-                // menu's highlight frozen because nothing else redraws.
+                // A menu's highlight changing is a repaint, and nothing else
+                // redraws it.
                 let resp = self.child.event(event, EventPhase::Target, sink);
                 if resp.is_consumed() {
                     EventResponse::Consumed
@@ -167,11 +159,9 @@ impl Widget for PopupWidget {
 
     /// A popup is modal, so while it is open it holds the keyboard.
     ///
-    /// Without this nothing ever focuses a menu — it opens by mouse, and the
-    /// widget that opened it is not focusable — so its arrow keys and its Enter
-    /// were unreachable code. A declarer *inside* the popup still wins, because
-    /// the search takes the last one in depth-first order: an overlay's own
-    /// text field outranks the popup framing it.
+    /// A menu opens by mouse and the widget that opened it is not focusable,
+    /// so nothing else would. A declarer inside the popup still wins: the
+    /// search takes the last in depth-first order.
     fn declares_focus(&self) -> bool {
         true
     }

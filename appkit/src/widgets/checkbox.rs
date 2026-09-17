@@ -110,11 +110,9 @@ impl Widget for CheckboxWidget {
         };
         ctx.draw_text_transparent(text_x, text_y, &self.label, fg);
 
-        // Ring the box, not the label.
         let box_rect = Rect::new(box_x, box_y, cb_size, cb_size);
-        // Only the focused one. `focus_visible` is just "the user is using the
-        // keyboard", so drawing unconditionally rings every checkbox in the
-        // window at the first keystroke.
+        // `focus_visible` only means the keyboard is in use, so it rings every
+        // checkbox in the window on its own.
         if self.focused {
             ctx.draw_focus_ring(box_rect);
         }
@@ -161,9 +159,6 @@ impl Widget for CheckboxWidget {
                 self.focused = false;
                 EventResponse::Ignored
             }
-            // Only when focused. A key is offered to every widget until one
-            // consumes, so an unguarded Space here toggles a checkbox instead
-            // of typing a space into whatever field the user is in.
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Space),
                 ..

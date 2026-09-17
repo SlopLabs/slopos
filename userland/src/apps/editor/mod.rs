@@ -105,14 +105,9 @@ pub struct EditorApp {
     /// The last thing searched for, which outlives the find bar; see
     /// `find_query`.
     last_query: String,
-    /// The last query and replacement *as a pair*, for the same reason:
-    /// accepting a palette entry clears the prompt before running the command
-    /// it names, so Replace All from the palette could never see one.
-    ///
-    /// A pair, because the two are not interchangeable. Remembering them
-    /// separately let a Replace All reached from the palette pair the query
-    /// from one search with the replacement typed for another — or with no
-    /// replacement at all, which deletes every occurrence.
+    /// The last query and replacement, as a pair. Kept apart, a Replace All
+    /// reached from the palette pairs one search's query with another's
+    /// replacement — or with none, which deletes every occurrence.
     last_replace: Option<(String, String)>,
     /// Every file in the tree, snapshotted when the finder opens and scored in
     /// place from then on.
@@ -143,12 +138,9 @@ pub struct EditorApp {
     selecting: bool,
     /// The sidebar splitter is being dragged, for the same reason.
     sidebar_dragging: bool,
-    /// Where the last click landed and how many have landed there, so the
-    /// second and third select a word and a line.
-    /// `(document id, line, column, clicks)` — the document too, because a
-    /// click run is a run on *one* place in *one* file. Its **id**, not its tab
-    /// position: opening a file over the scratch buffer puts a different
-    /// document at the same index.
+    /// `(document id, line, column, clicks)`, so the second and third click
+    /// select a word and a line. The id rather than the tab position, because
+    /// opening a file over the scratch buffer reuses the index.
     click_run: Option<(u64, usize, usize, u8)>,
 }
 
@@ -189,10 +181,8 @@ impl EditorApp {
         };
         app.sync_tree();
 
-        // Every argument, not just the first: `sloped a.rs b.rs` opens two
-        // tabs, which is what a shell glob means by it. The *first* is what
-        // chose the root above, so the rest may well sit outside the tree —
-        // that is fine, a tab is not a tree node.
+        // Only the first argument chose the root, so the rest may sit outside
+        // the tree; a tab is not a tree node.
         for path in args {
             if files::is_dir(path) {
                 continue;
@@ -200,7 +190,6 @@ impl EditorApp {
             let absolute = files::absolutize(&base, path);
             app.open_path(&absolute);
         }
-        // Left on the one the user named first.
         app.active = 0;
         if app.docs.is_empty() {
             app.new_document();
@@ -208,8 +197,6 @@ impl EditorApp {
         app.sync_viewport();
         app
     }
-
-    // ── accessors the view reads ────────────────────────────────────────────
 
     pub fn documents(&self) -> &[Document] {
         &self.docs
@@ -230,10 +217,8 @@ impl EditorApp {
     /// The find query, when the find bar is open and non-empty — what the code
     /// surface highlights.
     pub(super) fn active_search_query(&self) -> Option<String> {
-        // The live bar only. `find_query` falls back to the last query so F3
-        // works with the bar closed, and highlighting on that would leave every
-        // occurrence lit in every tab for the rest of the session with no way
-        // to turn it off.
+        // The live bar only: `find_query`'s fallback would leave every
+        // occurrence lit in every tab with no way to turn it off.
         match &self.prompt {
             Prompt::Find { query, .. } if !query.text.is_empty() => Some(query.text.clone()),
             _ => None,
@@ -416,8 +401,6 @@ impl EditorApp {
             .collect()
     }
 
-    // ── documents ───────────────────────────────────────────────────────────
-
     /// The active document. `EditorApp` keeps at least one at all times —
     /// `close_tab` opens a scratch buffer rather than leaving none — and the
     /// one path that can transiently hold zero is a refused open during
@@ -456,17 +439,14 @@ impl EditorApp {
             Ok(text) => match Document::from_text(Some(path.to_string()), &text) {
                 Ok(doc) => {
                     // An untouched, unnamed, empty buffer is scaffolding, not
-                    // work: opening a file replaces it rather than stacking a
-                    // tab nobody asked for.
+                    // work.
                     let replace_scratch = self.docs.len() == 1
                         && self.docs[0].path().is_none()
                         && !self.docs[0].is_modified()
                         && self.docs[0].buffer.is_empty();
                     if replace_scratch {
-                        // The scratch buffer is gone, so a Save As that named
-                        // it now names whatever lands at its index — and would
-                        // write this file's bytes to the scratch buffer's path
-                        // and re-point the tab at it.
+                        // The prompt names an index, and the buffer it named
+                        // is about to be replaced by this file.
                         if matches!(self.prompt, Prompt::SaveAs { .. }) {
                             self.prompt = Prompt::None;
                             self.focus = Focus::Editor;
@@ -509,9 +489,8 @@ impl EditorApp {
                 return;
             }
         };
-        // One tab per path, the rule `open_path` already keeps: without it Save
-        // As can point a second tab at a file another tab is holding, and the
-        // next Ctrl+S in whichever is stale writes over the other's work.
+        // One tab per path, the rule `open_path` already keeps: two tabs on
+        // one file means whichever saves last wins.
         if self
             .docs
             .iter()
@@ -521,8 +500,8 @@ impl EditorApp {
             self.status = format!("{target} is already open in another tab");
             return;
         }
-        // What is on the medium is not what this tab read, so writing would
-        // take somebody's work with it. Asked once per save, never assumed.
+        // Writing over what this tab did not read takes somebody's work with
+        // it.
         let on_disk = files::disk_stamp(&target);
         let detail = if doc.path() == Some(target.as_str()) {
             match (doc.disk_stamp(), on_disk) {
@@ -571,9 +550,8 @@ impl EditorApp {
     /// Where `index`'s Save As prompt starts: the document's own directory
     /// when it has one, else the tree's root, and that document's title.
     ///
-    /// Its own directory, because proposing the tree root turns Ctrl+Shift+S on
-    /// a file from elsewhere into "write a copy next to the tree and re-point
-    /// the tab at it", leaving the original behind.
+    /// Its own directory: proposing the tree root turns Ctrl+Shift+S on a file
+    /// from elsewhere into a copy beside the tree, original left behind.
     fn default_save_path(&self, index: usize) -> String {
         let own = self
             .docs
@@ -646,8 +624,6 @@ impl EditorApp {
         self.docs.iter().any(Document::is_modified)
     }
 
-    // ── tree ────────────────────────────────────────────────────────────────
-
     /// Reads whatever directories the tree is waiting on.
     fn sync_tree(&mut self) {
         self.sync_tree_inner();
@@ -668,9 +644,8 @@ impl EditorApp {
                 let complete = match files::read_dir(&path) {
                     Ok(entries) => self.tree.populate(index, entries),
                     Err(message) => {
-                        // A directory that cannot be read is an empty one here,
-                        // with the reason on the status bar; the alternative is
-                        // a sidebar that refuses to draw.
+                        // An unreadable directory is an empty one, so the
+                        // sidebar still draws.
                         self.status = message;
                         self.tree.populate(index, Vec::new())
                     }
@@ -682,15 +657,11 @@ impl EditorApp {
         }
     }
 
-    /// Reads every directory under the root, so the file finder can offer what
-    /// is *in* the tree rather than only what the sidebar happens to have
-    /// expanded.
+    /// Reads every directory under the root, bounded, so the finder offers
+    /// what is in the tree rather than what the sidebar happens to have open.
     ///
-    /// Bounded, and deliberately not on the open path: opening a folder must
-    /// stay the cost of reading one directory. The finder is the one place
-    /// that needs the whole set, so it pays for it, once, when it is asked
-    /// for — and says so when the tree is larger than the budget instead of
-    /// quietly offering a subset.
+    /// Not on the open path: opening a folder stays the cost of one directory,
+    /// and the finder is the only caller that needs the whole set.
     fn index_tree(&mut self) {
         const MAX_DIRS: usize = 4_000;
         let mut read = 0usize;
@@ -711,9 +682,7 @@ impl EditorApp {
                 read += 1;
                 let complete = match files::read_dir(&path) {
                     Ok(entries) => self.tree.populate(index, entries),
-                    // A directory that cannot be read is an empty one here, as
-                    // in `sync_tree`; marking it loaded is what stops the walk
-                    // from retrying it forever.
+                    // Marking it loaded is what stops the walk retrying it.
                     Err(_) => self.tree.populate(index, Vec::new()),
                 };
                 if !complete {
@@ -739,8 +708,8 @@ impl EditorApp {
         else {
             return;
         };
-        // Expand each ancestor in turn, reading it as we go: a path deeper than
-        // what has been read is not in the tree yet.
+        // Read each ancestor as we go: a path deeper than what has been read
+        // is not in the tree yet.
         let mut current = root;
         for part in relative.split('/') {
             if part.is_empty() {
@@ -789,8 +758,6 @@ impl EditorApp {
         }
     }
 
-    // ── viewport ────────────────────────────────────────────────────────────
-
     /// Recomputes how much of a document is on screen, then keeps the caret in
     /// it. Called after anything that can move the caret or resize the window.
     fn sync_viewport(&mut self) {
@@ -805,11 +772,8 @@ impl EditorApp {
         );
         self.visible_lines = lines;
         self.visible_cols = cols;
-        // There may be no document yet: a refused open — a missing file, a
-        // binary one, one past the size cap — leaves `docs` empty on the way
-        // through `EditorApp::new`, and indexing it there kills the process
-        // before the window exists, so the refusal the user should have read
-        // is never drawn.
+        // A refused open leaves `docs` empty inside `EditorApp::new`, and
+        // indexing it there kills the process before the window exists.
         if self.docs.is_empty() {
             return;
         }
@@ -823,8 +787,6 @@ impl EditorApp {
         self.prompt.is_open() && !self.prompt.is_overlay()
     }
 
-    // ── clipboard ───────────────────────────────────────────────────────────
-
     /// Copies the selection, and with `cut` removes it.
     ///
     /// Syncs the viewport itself: cutting shortens the buffer, and a viewport
@@ -836,28 +798,15 @@ impl EditorApp {
         self.local_clipboard = text.clone();
         slopos_appkit::clipboard::copy(&text);
         if cut {
-            self.doc_mut().insert_text("");
-            // `insert_text("")` deletes the selection and inserts nothing, which
-            // is exactly a cut; the empty insert is skipped by the buffer.
-        }
-        self.status = if cut {
-            String::from("Cut")
-        } else {
-            String::from("Copied")
-        };
-        if cut {
-            // A cut shortens the buffer, and a viewport left pointing past the
-            // new end draws nothing at all; the match count describes a buffer
-            // that just changed.
-            self.refresh_find();
+            self.doc_mut().delete_selection();
             self.sync_viewport();
         }
+        self.status = String::from(if cut { "Cut" } else { "Copied" });
     }
 
     fn paste(&mut self) {
-        // Ask the compositor; its answer arrives at `on_paste`, empty when
-        // nothing owns the selection — which is when this editor's own last
-        // copy is the best answer available.
+        // The answer arrives at `on_paste`, empty when nothing owns the
+        // selection.
         if !slopos_appkit::clipboard::request_paste() {
             self.paste_local();
         }
@@ -876,21 +825,15 @@ impl EditorApp {
         if !self.doc_mut().insert_text(text) && !text.is_empty() {
             self.status = String::from("Refused: that would take the file past its line limit");
         }
-        // The match count describes the buffer, and the buffer just changed.
-        self.refresh_find();
         self.sync_viewport();
     }
-
-    // ── search ──────────────────────────────────────────────────────────────
 
     /// What to search for: the open find bar's field, or — when it is closed —
     /// the last thing that was searched for.
     ///
-    /// The fallback is what makes F3 work at all. Closing the bar replaces the
-    /// prompt with `Prompt::None`, and reading the query only out of the live
-    /// prompt meant "find next with the bar closed" could never find anything,
-    /// and the palette's own Find Next was dead by construction: accepting a
-    /// palette entry clears the prompt before running the command.
+    /// The fallback is what makes F3 work with the bar closed, and the
+    /// palette's Find Next work at all: accepting an entry clears the prompt
+    /// before running the command it names.
     fn find_query(&self) -> Option<String> {
         match &self.prompt {
             Prompt::Find { query, .. } if !query.text.is_empty() => Some(query.text.clone()),
@@ -928,10 +871,8 @@ impl EditorApp {
             return;
         };
         let options = self.search_options;
-        // The *selection's* start, because that is where a walk left the
-        // caret: `find_step` selects a match and parks the caret at its end, so
-        // reading the caret would always name the match after the one the user
-        // is looking at.
+        // The selection's start: `find_step` parks the caret at a match's
+        // end, so the caret alone names the match after it.
         let doc = &self.docs[self.active];
         let anchor = doc
             .cursor
@@ -972,9 +913,8 @@ impl EditorApp {
             return;
         }
         let doc = &self.docs[self.active];
-        // Both directions start from the current match's *start*: forward one
-        // past it so Enter advances, backward at it so the search does not find
-        // the match it is standing on again.
+        // Both directions start from the current match's start: forward one
+        // past it so Enter advances, backward at it so it does not re-find.
         let anchor = doc
             .cursor
             .selection()
@@ -1033,10 +973,8 @@ impl EditorApp {
         if matches_selection {
             if let Some(range) = self.doc().cursor.selection() {
                 self.doc_mut().replace_range(range, &replacement);
-                // From exactly the end of the replacement, not one past it: the
-                // replacement is not a match, so `find_step`'s "advance past
-                // the match you are standing on" would skip whatever begins
-                // immediately after it.
+                // Exactly the end, not one past: the replacement is not a
+                // match, so advancing would skip what follows it.
                 let from = self.doc().cursor.position;
                 self.find_from(true, from);
                 return;
@@ -1089,11 +1027,8 @@ impl EditorApp {
         }
     }
 
-    // ── prompts ─────────────────────────────────────────────────────────────
-
     fn open_prompt(&mut self, prompt: Prompt) {
-        // A new `Prompt::Find` carries a zeroed readout, so the count has to be
-        // taken again even when nothing about the document changed.
+        // A new `Prompt::Find` carries a zeroed readout.
         self.find_stamp = None;
         self.prompt = prompt;
         self.overlay_scroll = 0;
@@ -1129,10 +1064,8 @@ impl EditorApp {
     }
 
     fn refresh_finder(&mut self) {
-        // Scored against the snapshot taken when the finder opened, by
-        // reference, and cloned only where it survives: the tree holds up to
-        // `MAX_NODES` paths and this runs on every keystroke, so a `String` per
-        // candidate per key is twenty thousand allocations the user waits for.
+        // By reference, cloned only where it survives: this runs on every
+        // keystroke over up to `MAX_NODES` paths.
         let paths = &self.finder_paths;
         if let Prompt::FileFinder {
             input,
@@ -1239,13 +1172,10 @@ impl EditorApp {
         self.sync_overlay_scroll();
     }
 
-    // ── commands ────────────────────────────────────────────────────────────
-
     fn run(&mut self, command: Command) {
         self.menu_open = None;
-        // A modal prompt is a question, and running another command abandons
-        // it; the find bar is not one — it coexists with editing, the way
-        // every editor's does — so it stays.
+        // Running another command abandons a question; the find bar is not
+        // one, so it stays.
         if !command.reads_prompt() && !matches!(self.prompt, Prompt::None | Prompt::Find { .. }) {
             self.close_prompt();
         }
@@ -1326,8 +1256,7 @@ impl EditorApp {
             Command::ToggleComment => {
                 let language = self.doc().language();
                 if language.line_comment().is_none() {
-                    // Otherwise the key reads as broken rather than as
-                    // inapplicable.
+                    // Otherwise the key reads as broken, not inapplicable.
                     self.status = format!("{} has no line comment", language.label());
                     return;
                 }
@@ -1350,8 +1279,6 @@ impl EditorApp {
                     .filter(|s| !s.contains('\n'))
                     .unwrap_or_else(|| match &self.prompt {
                         Prompt::Find { query, .. } => query.text.clone(),
-                        // Re-opening the bar brings back what was last searched
-                        // for, rather than an empty field.
                         _ => self.last_query.clone(),
                     });
                 let replace = if command == Command::Replace {
@@ -1367,8 +1294,8 @@ impl EditorApp {
                         _ => None,
                     }
                 };
-                // Both Find and Replace land in the query field: what you
-                // reach for first is what you are searching for.
+                // Both land in the query field: what you reach for first is
+                // what you are searching for.
                 self.open_prompt(Prompt::Find {
                     query: LineInput::with_text(seed),
                     replace,
@@ -1452,13 +1379,10 @@ impl EditorApp {
         }
     }
 
-    // ── keyboard ────────────────────────────────────────────────────────────
-
     /// Chords that work wherever the focus is.
     fn global_command(&self, key: Key, mods: Modifiers) -> Option<Command> {
-        // Shift folds a control chord's letter to upper case on the way through
-        // the keymap, so a chord table written in lower case would miss every
-        // shifted one.
+        // Shift upper-cases a chord's letter in the keymap, so a lower-case
+        // table would miss every shifted chord.
         let key = normalize_chord(key);
         if !mods.ctrl {
             return match key {
@@ -1547,8 +1471,8 @@ impl EditorApp {
         }
 
         match key {
-            // Space arrives as a named key, so a focused button can be pressed
-            // with it; in the code surface it is a character.
+            // Space is a named key so a focused button can be pressed with
+            // it; in the code surface it is a character.
             Key::Named(NamedKey::Space) if !mods.ctrl && !mods.plain_alt() => {
                 self.insert_text(" ");
             }
@@ -1575,11 +1499,8 @@ impl EditorApp {
             Key::Named(NamedKey::Tab) if mods.shift => self.run(Command::Outdent),
             Key::Named(NamedKey::Tab) => self.run(Command::Indent),
             Key::Named(NamedKey::Escape) => {
-                // "Close whatever is open" means the bar too. Clicking into the
-                // code moves focus out of a find or Save As bar without closing
-                // it, and Escape then reached only the selection — leaving the
-                // one key documented to dismiss things unable to dismiss the
-                // thing that was open.
+                // Clicking into the code leaves a bar open without focus, and
+                // Escape is the key documented to dismiss it.
                 if self.prompt.is_open() {
                     self.close_prompt();
                 } else {
@@ -1633,8 +1554,7 @@ impl EditorApp {
                 self.activate_tree_row(selected)
             }
             Key::Named(NamedKey::Escape) => {
-                // The same rule as the code surface: Escape closes what is open
-                // before it moves focus.
+                // As in the code surface: Escape closes before it moves focus.
                 if self.prompt.is_open() {
                     self.close_prompt();
                 } else {
@@ -1709,8 +1629,7 @@ impl EditorApp {
                 if mods.ctrl && matches!(self.prompt, Prompt::Find { .. }) {
                     self.replace_all();
                 } else if on_replace {
-                    // Enter in the replacement field replaces this match and
-                    // moves to the next, which is what makes a replace walk.
+                    // What makes a replace walk.
                     self.replace_current();
                 } else {
                     self.accept_prompt();
@@ -1746,9 +1665,7 @@ impl EditorApp {
             Key::Named(NamedKey::Enter) => {
                 match dialog {
                     Dialog::About => self.dialog = None,
-                    // Enter takes the safe answer on a destructive question:
-                    // the whole point of asking is that the user has to say
-                    // "overwrite" deliberately.
+                    // The safe answer: overwriting is said deliberately.
                     Dialog::ConfirmOverwrite { .. } => self.dialog_action(1),
                     Dialog::ConfirmClose { .. } | Dialog::ConfirmQuit => self.dialog_action(0),
                 }
@@ -1767,9 +1684,7 @@ impl EditorApp {
             Dialog::ConfirmClose { index: tab } => match index {
                 0 => {
                     self.save_document(tab, None);
-                    // Saving can open a Save As prompt instead of writing, and
-                    // the tab may have gone in the meantime; only a tab that is
-                    // there and clean gets closed.
+                    // Saving can open a Save As prompt instead of writing.
                     if self.docs.get(tab).is_some_and(|d| !d.is_modified()) {
                         self.close_tab(tab, true);
                     }
@@ -1801,13 +1716,9 @@ impl EditorApp {
         }
     }
 
-    // ── widget input ────────────────────────────────────────────────────────
-
     fn handle_code_input(&mut self, input: CodeInput) {
-        // Any interaction with the text supersedes whatever the status bar was
-        // reporting, which is what keeps "Saved …" from outliving the save.
-        // A release is not one: it reaches every widget, so the release of the
-        // very click that produced a message would wipe the message.
+        // Any interaction supersedes the status bar — but a release reaches
+        // every widget, so it would wipe the message its own press produced.
         if !matches!(input, CodeInput::Scroll { .. } | CodeInput::Release) {
             self.status.clear();
         }
@@ -1816,10 +1727,8 @@ impl EditorApp {
                 self.focus = Focus::Editor;
                 self.menu_open = None;
                 self.selecting = true;
-                // A click on the cell the last one landed on continues the run.
-                // No timer: a slow double click is still two clicks on one cell,
-                // and the cost of reading it that way is a word selected rather
-                // than a caret placed.
+                // No timer: a slow double click is still two clicks on one
+                // cell, and reading it that way costs a word selected.
                 let id = self.doc().id();
                 let clicks = match self.click_run {
                     Some((d, l, c, n)) if d == id && l == line && c == col => (n % 3) + 1,
@@ -1835,9 +1744,8 @@ impl EditorApp {
                 self.sync_viewport();
             }
             CodeInput::Drag { line, col } => {
-                // A drag moves the caret and leaves the anchor where the press
-                // put it, which is what makes the click run above collapse to a
-                // single click the moment the pointer moves.
+                // Moving the caret with the anchor held is what collapses the
+                // click run above.
                 self.click_run = None;
                 self.doc_mut().place_cursor(Position::new(line, col), true);
                 self.sync_viewport();
@@ -1878,9 +1786,8 @@ impl EditorApp {
                 self.focus = Focus::Tree;
                 self.menu_open = None;
                 self.tree_selected = Some(row);
-                // A directory toggles on a single click, as a sidebar does; a
-                // file opens on the first click too, because a tree is a list of
-                // things to open.
+                // A file opens on the first click: a tree is a list of things
+                // to open.
                 self.activate_tree_row(row);
             }
             TreeInput::Toggle { row } => {
@@ -1951,10 +1858,8 @@ impl App for EditorApp {
 
     fn update(&mut self, msg: EditorMsg) -> Action {
         let action = self.dispatch(msg);
-        // The readout counts matches in a document any message may have
-        // edited, closed or switched away from; leaving it to the individual
-        // handlers meant it was right after a typed character and stale after
-        // everything else.
+        // Any message may have edited, closed or switched away from the
+        // document the readout counts.
         self.refresh_find();
         action
     }
@@ -1972,9 +1877,8 @@ impl App for EditorApp {
     }
 
     fn on_close_request(&mut self) -> (bool, Action) {
-        // The window's close button is Ctrl+Q by another name, and it has to
-        // ask the same question: without this it discarded every modified
-        // buffer with no prompt and no chance to write.
+        // The close button is Ctrl+Q by another name and asks the same
+        // question.
         if self.any_modified() {
             self.dialog = Some(Dialog::ConfirmQuit);
             return (false, Action::Rebuild);
@@ -2012,8 +1916,6 @@ impl EditorApp {
                 if index < self.docs.len() {
                     self.active = index;
                     self.focus = Focus::Editor;
-                    // The find readout counts matches in the *active* document.
-                    self.refresh_find();
                     self.sync_viewport();
                 }
             }
@@ -2055,8 +1957,7 @@ impl EditorApp {
     }
 
     fn dispatch_key(&mut self, key: Key, mods: Modifiers) -> Action {
-        // Reached only when no widget claimed the key: the dialog, the open
-        // menu and whichever pane has focus are all here.
+        // Reached only when no widget claimed the key.
         if self.handle_dialog_key(key) {
             return Action::Rebuild;
         }

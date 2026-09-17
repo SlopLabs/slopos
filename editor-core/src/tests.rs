@@ -28,8 +28,6 @@ fn pos(line: usize, col: usize) -> Position {
     Position::new(line, col)
 }
 
-// ── buffer ──────────────────────────────────────────────────────────────────
-
 fn test_buffer_splits_lines() -> bool {
     let b = TextBuffer::from_str("one\ntwo\nthree\n").expect("load");
     assert_eq!(b.line_count(), 3);
@@ -131,8 +129,6 @@ fn test_detect_indent_prefers_the_common_width() -> bool {
     true
 }
 
-// ── motion ──────────────────────────────────────────────────────────────────
-
 fn test_word_motion_stops_between_classes() -> bool {
     let b = TextBuffer::from_str("foo::bar baz").expect("load");
     assert_eq!(word_right(&b, pos(0, 0)), pos(0, 3));
@@ -193,8 +189,6 @@ fn test_page_motion_is_clamped_to_the_buffer() -> bool {
     assert_eq!(d.cursor.position.line, 0);
     true
 }
-
-// ── editing ─────────────────────────────────────────────────────────────────
 
 fn test_typing_then_undo_restores_the_line() -> bool {
     let mut d = doc("fn main() {}\n");
@@ -386,12 +380,9 @@ fn test_toggle_comment_carries_the_caret() -> bool {
     true
 }
 
-/// A range that is *nothing but* blank lines is commented rather than skipped:
-/// skipping it means the key does nothing at all, and — since uncommenting a
-/// bare `//` leaves an empty line — that the toggle does not round-trip.
-///
-/// The edits afterwards are the second half: a toggle must not leave a
-/// transaction open, or every later edit merges into one undo group.
+/// A range of nothing but blank lines is commented, or the key does nothing
+/// and a bare `//` cannot round-trip. The edits afterwards check that the
+/// toggle closed its transaction.
 fn test_toggle_comment_on_blank_lines_leaves_undo_alone() -> bool {
     let mut d = doc("\nfoo\nbar\n");
     d.place_cursor(pos(0, 0), false);
@@ -469,9 +460,8 @@ fn test_move_lines_at_the_edges_does_nothing() -> bool {
 }
 
 fn test_move_lines_leaves_the_cursor_inside_the_buffer() -> bool {
-    // A whole-line selection ends at the start of the line *below* the block,
-    // which a move down shifts one line past the end. An out-of-range caret
-    // paints a selection wider than the next edit deletes.
+    // A whole-line selection ends on the line below the block, which a move
+    // down shifts past the end.
     let mut d = plain_doc("a\nb\nc\nd\n");
     d.place_cursor(pos(1, 0), false);
     d.place_cursor(pos(3, 0), true);
@@ -504,8 +494,7 @@ fn test_display_columns_round_trip_through_tabs() -> bool {
 
 fn test_horizontal_scroll_counts_display_columns() -> bool {
     // The renderer subtracts `first_col` from an already-expanded column, so a
-    // character column here would scroll a tab-indented line by three cells too
-    // few per tab and put the caret outside the viewport.
+    // character column scrolls a tab-indented line too few cells per tab.
     let mut d = plain_doc("\t\tx\n");
     d.viewport.visible_lines = 10;
     d.viewport.visible_cols = 4;
@@ -584,10 +573,8 @@ fn test_detect_indent_ignores_a_whitespace_only_line() -> bool {
 }
 
 fn test_a_closing_brace_replaces_a_backwards_selection() -> bool {
-    // Shift+Home, or a right-to-left drag, parks the caret where everything
-    // before it on the line is whitespace — which is exactly where the electric
-    // dedent fires. Computing the dedent first cleared the anchor, so the
-    // selection was never deleted and the brace landed in front of it.
+    // Shift+Home parks the caret where everything before it is whitespace,
+    // which is exactly where the electric dedent fires.
     let mut d = plain_doc("fn f() {\n    foo\n");
     d.place_cursor(pos(1, 7), false);
     d.move_cursor(Motion::LineStart, true);
@@ -643,9 +630,8 @@ fn test_a_lone_carriage_return_is_content_not_an_ending() -> bool {
 }
 
 fn test_a_crlf_file_keeps_a_carriage_return_on_its_last_line() -> bool {
-    // The body trim already took the file's own terminator off, so whatever
-    // `\r` the last piece still ends with is content. Stripping it again made
-    // open-then-save shorten the file by a byte with no edit at all.
+    // The body trim already took the terminator off, so the last piece's `\r`
+    // is content: stripping it shortens the file on an edit-free save.
     for text in [
         "a\r\r\n",
         "a\r\nb\r\r\n",
@@ -671,9 +657,8 @@ fn test_the_undo_cap_bounds_transactional_edits_too() -> bool {
 }
 
 fn test_a_refused_insert_destroys_nothing() -> bool {
-    // The selection is deleted first so the dedent reads the right line, which
-    // means the ceiling has to be checked before any of it — so the refusal
-    // has to be driven for real, over a live selection.
+    // The ceiling is checked before the selection is deleted, so the refusal
+    // has to be driven for real, over a live one.
     let mut d = plain_doc("keep me\n");
     d.place_cursor(pos(0, 0), false);
     d.place_cursor(pos(0, 4), true);
@@ -812,8 +797,6 @@ fn test_undo_after_reload_of_states_rehighlights() -> bool {
     true
 }
 
-// ── search ──────────────────────────────────────────────────────────────────
-
 fn test_find_all_is_case_insensitive_by_default() -> bool {
     let b = TextBuffer::from_str("Foo foo FOO\n").expect("load");
     let hits = find_all(&b, "foo", SearchOptions::default());
@@ -889,8 +872,6 @@ fn test_fuzzy_filter_drops_non_subsequences() -> bool {
     assert!(fuzzy_filter(&candidates, "zzz").is_empty());
     true
 }
-
-// ── syntax ──────────────────────────────────────────────────────────────────
 
 fn kinds(text: &str, lang: Language) -> Vec<(String, TokenKind)> {
     let h = Highlighter::new(lang);
@@ -1032,8 +1013,6 @@ fn test_spans_never_exceed_the_line() -> bool {
     }
     true
 }
-
-// ── file tree ───────────────────────────────────────────────────────────────
 
 fn entries(names: &[(&str, bool)]) -> Vec<DirEntry> {
     names

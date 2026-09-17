@@ -51,11 +51,9 @@ pub enum Command {
 impl Command {
     /// Whether this command reads or reopens the prompt that is showing.
     ///
-    /// Everything else closes a *modal* prompt first. A command reached from a
-    /// menu, a shortcut or the palette moves the focus to wherever it acts, and
-    /// the question left open behind it is an overlay covering the document
-    /// with a caret nobody is driving — Ctrl+Shift+S then Ctrl+N left the Save
-    /// As field on screen over a new, unrelated buffer.
+    /// Everything else closes a modal prompt first: a command acts wherever it
+    /// acts, and the question left open behind it is an overlay with a caret
+    /// nobody is driving.
     pub fn reads_prompt(&self) -> bool {
         matches!(
             self,

@@ -71,9 +71,8 @@ impl EditorTabsWidget {
             self.widths.push(width);
             total += width;
         }
-        // Tabs shrink together rather than scrolling: an editor with more tabs
-        // than fit still shows every one of them, which is what the keyboard
-        // switcher needs to stay predictable.
+        // Tabs shrink together rather than scrolling, so every tab the
+        // keyboard switcher can reach is on screen.
         if total > ctx_width && ctx_width > 0 {
             let scale = ctx_width as f32 / total as f32;
             for width in self.widths.iter_mut() {
@@ -144,9 +143,8 @@ impl Widget for EditorTabsWidget {
 
         let text_h = ctx.text_height();
         let mut x = rect.x;
-        // Derived from the live pointer, not from a field the last rebuild
-        // cleared: the close glyph has to be drawn exactly where a click on it
-        // will close the tab.
+        // From the live pointer, not a field the last rebuild cleared: the
+        // glyph must be drawn exactly where clicking it closes the tab.
         let (px, py) = ctx.pointer;
         let pointer_tab = rect.contains(px, py).then(|| self.tab_at(px)).flatten();
 
@@ -157,7 +155,6 @@ impl Widget for EditorTabsWidget {
 
             if active {
                 ctx.fill_rect(x, rect.y, width, rect.height, style.code_bg);
-                // The accent strip is how an active tab reads at a glance.
                 ctx.fill_rect(x, rect.y, width, 2, style.text_accent);
             } else if hovered {
                 ctx.fill_rect(x, rect.y, width, rect.height, style.bg_hover);
@@ -182,9 +179,7 @@ impl Widget for EditorTabsWidget {
 
             let icon_x = x + width - TAB_PAD_H - CLOSE_SIZE;
             let icon_y = rect.y + (rect.height - CLOSE_SIZE) / 2;
-            // A modified tab shows a dot until the pointer is on it, then the
-            // close affordance — the same trade every editor makes for the one
-            // slot a tab has.
+            // One slot: the dot gives way to the close affordance on hover.
             if tab.modified && !hovered {
                 draw_icon(
                     ctx,
@@ -244,19 +239,15 @@ impl Widget for EditorTabsWidget {
                 let Some(index) = self.tab_at(*x) else {
                     return EventResponse::Ignored;
                 };
-                // Middle click closes, as it does in every browser and editor.
                 if *button == PointerButton::Middle {
                     return self.emit(TabInput::Close(index), sink);
                 }
                 if *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
-                // `index` came from the press's own x, so the pointer is on
-                // this tab by construction and the glyph is drawn — which is
-                // what makes reading it off the press right where a remembered
-                // hover, wiped by the last rebuild, was wrong. The glyph is a
-                // box: bounding only x closes a tab from its topmost and
-                // bottommost pixels.
+                // `index` came from the press's own x, so the glyph is drawn.
+                // It is a box: bounding only x closes from the tab's top and
+                // bottom pixels.
                 if let Some(close_x) = self.close_rect_x(index) {
                     let strip = self.layout_rect();
                     let close_y = strip.y + (strip.height - CLOSE_SIZE) / 2;

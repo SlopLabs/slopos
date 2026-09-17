@@ -103,8 +103,6 @@ impl Widget for ListViewWidget {
             .constrain(Size::new(w, self.total_content_height()))
             .height;
 
-        // Rows are uniform, so measuring here keeps the measure pass the only
-        // place a child is sized.
         let item_constraints = BoxConstraints::tight(Size::new(w, self.item_height));
         for item in &mut self.items {
             crate::traits::measure_widget(item.as_mut(), item_constraints, ctx);
@@ -129,9 +127,8 @@ impl Widget for ListViewWidget {
                 let item_rect = Rect::new(rect.x, y, rect.width, self.item_height);
 
                 if self.selected == Some(i) {
-                    // A tinted row with an accent edge, rather than a solid
-                    // accent bar: a selected row has to stay readable, and the
-                    // label under it is drawn in the ordinary text colour.
+                    // Tinted with an accent edge, not a solid bar: the label
+                    // stays in the ordinary text colour.
                     ctx.fill_rect(
                         item_rect.x,
                         item_rect.y,
@@ -180,9 +177,7 @@ impl Widget for ListViewWidget {
                 if *delta_y == 0 {
                     return EventResponse::Ignored;
                 }
-                // `delta_y` is already pixels — `translate_event` converts the
-                // wire's v120 units — so the old `/120` was always zero and
-                // every notch moved exactly three rows whatever its size.
+                // Already pixels: `translate_event` converts the wire's v120.
                 let old = self.scroll_offset;
                 self.scroll_offset =
                     (self.scroll_offset + delta_y).clamp(0, self.max_scroll_offset());
@@ -232,11 +227,8 @@ impl Widget for ListViewWidget {
                 }
             }
 
-            // Only when this list holds the keyboard focus. Its selection is
-            // usually the application's — an overlay list is a *display* of
-            // app state — and a list that answered the arrows unconditionally
-            // moved a selection its owner did not know had moved, and emitted
-            // `on_select`, which for a palette means running the command.
+            // `on_select` on a palette runs a command, so an unfocused list
+            // answering the arrows runs one nobody asked for.
             WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Up) => {
                     if let Some(sel) = self.selected {

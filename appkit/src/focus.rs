@@ -16,11 +16,9 @@ pub struct FocusManager {
     focused: Option<WidgetId>,
     /// Where `focused` sits in the tab chain.
     ///
-    /// A `WidgetId` comes from a global counter and the whole tree is rebuilt
-    /// on every message, so an id does not survive a rebuild — remembering only
-    /// the id means focus is lost the moment anything happens. The position in
-    /// the chain does survive, because the chain is built by walking the same
-    /// view in the same order, so it is what focus is re-derived from.
+    /// Ids come from a global counter and the tree is rebuilt on every
+    /// message, so an id does not survive one. A position does: the chain is
+    /// built by walking the same view in the same order.
     focused_index: Option<usize>,
     /// How long the chain was when `focused_index` was taken, so a view that
     /// changed shape is not silently re-focused on a different control.
@@ -85,18 +83,13 @@ impl FocusManager {
         self.tab_chain.clear();
         Self::collect_focusable(root, &mut self.tab_chain);
         let Some(index) = self.focused_index else {
-            // Nothing to restore, and what `focused` names was destroyed by the
-            // rebuild — leaving it makes `move_focus_next` fail its lookup and
-            // jump back to the first control instead of advancing.
+            // `focused` names a widget the rebuild destroyed; leaving it makes
+            // `move_focus_next` jump back to the first control.
             self.focused = None;
             return None;
         };
-        // Only when the view kept its shape. A position is a stand-in for
-        // identity and nothing more: if the chain gained or lost a control the
-        // same index is a *different* widget, and restoring focus onto it puts
-        // the keyboard somewhere the user never put it — the find bar growing a
-        // "Replace All" button is enough to turn the next Space into one.
-        // Dropping focus is the only answer that cannot be wrong.
+        // A position stands in for identity, so a chain that gained or lost a
+        // control indexes a different widget; dropping focus cannot be wrong.
         let same_shape = self.chain_len_at_focus == Some(self.active_chain().len());
         let restored = same_shape
             .then(|| self.active_chain().get(index).copied())

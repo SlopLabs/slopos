@@ -161,10 +161,7 @@ impl FileTree {
     /// each group by case-insensitive name — the order a file manager uses.
     ///
     /// Returns `false` when [`MAX_NODES`] cut the list short. The directory is
-    /// still marked read — the alternative is a walk that retries it forever —
-    /// so the truncation is invisible from the tree afterwards, and a caller
-    /// that drops this answer leaves the user a sidebar and a finder silently
-    /// missing files.
+    /// marked read either way, so nothing afterwards can see the truncation.
     #[must_use]
     pub fn populate(&mut self, index: usize, mut entries: Vec<DirEntry>) -> bool {
         let Some(node) = self.nodes.get(index).filter(|n| n.alive) else {

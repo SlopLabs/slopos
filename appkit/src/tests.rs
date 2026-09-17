@@ -849,8 +849,6 @@ fn test_zstack_layers_share_the_full_rect() {
     }
 }
 
-// ── editor surfaces ─────────────────────────────────────────────────────────
-
 fn test_display_col_expands_tabs() {
     use super::widgets::code_view::display_col;
     // "\tab": the tab advances to the next multiple of four, so 'a' is at 4.
@@ -888,9 +886,8 @@ fn test_click_inside_a_tab_snaps_to_one_side() {
 
 fn test_click_past_a_glyphs_midpoint_lands_after_it() {
     use super::widgets::code_view::char_col_at_half;
-    // Whole-cell resolution could never express this: the click and the
-    // character share a display column, so the caret could only ever land on a
-    // glyph's left edge.
+    // Whole-cell resolution cannot express this: the click and the character
+    // share a display column.
     assert_eq!(char_col_at_half("abc", 0, 4), 0);
     assert_eq!(char_col_at_half("abc", 1, 4), 1);
     assert_eq!(char_col_at_half("abc", 2, 4), 1);
@@ -1237,9 +1234,8 @@ fn test_drag_handle_reports_begin_move_end() {
 
 fn test_a_release_outside_a_widget_still_reaches_it() {
     use super::widgets::drag_handle::{DragHandleWidget, DragInput};
-    // A drag that ends outside the handle's own 6 px is the ordinary way to end
-    // one. Without the release the handle stays latched and then resizes with
-    // no button held.
+    // Ending outside the handle's 6 px is the ordinary way to end a drag;
+    // without the release it stays latched.
     let handle = DragHandleWidget::new(
         super::constraints::Orientation::Vertical,
         true,
@@ -1281,10 +1277,8 @@ fn test_a_release_outside_a_widget_still_reaches_it() {
 }
 
 fn test_scroll_goes_to_what_is_under_the_pointer() {
-    // A wheel turn has a position like any other pointer event. Without one it
-    // can only be offered to every child until one consumes, which hands it to
-    // whichever the container visits first — and a code surface consumes every
-    // scroll, so nothing else in the window could ever be scrolled.
+    // A wheel turn carries a position; without one it goes to whichever child
+    // the container visits first, and a code surface consumes every scroll.
     struct Counter {
         core: WidgetCore,
         seen: std::rc::Rc<std::cell::Cell<u32>>,
@@ -1368,9 +1362,8 @@ fn test_scroll_goes_to_what_is_under_the_pointer() {
 
 fn test_only_the_visible_tab_panel_is_reachable() {
     use super::widgets::tab_bar::TabBarWidget;
-    // Every panel is laid out at the same rect, so exposing them all means a
-    // hit test — which walks children in reverse — can only ever resolve into
-    // the last one, and focus follows the hit.
+    // Every panel shares one rect, so exposing them all sends the hit test —
+    // and the focus that follows it — to the last.
     let panels: Vec<Box<dyn Widget>> = vec![
         Box::new(FixedSizeWidget::focusable(100, 40)),
         Box::new(FixedSizeWidget::new(100, 40)),
@@ -1411,9 +1404,8 @@ fn test_only_the_visible_tab_panel_is_reachable() {
 }
 
 fn test_a_popup_swallows_a_press_its_child_ignored() {
-    // A press inside the popup that the child did not want — a menu separator,
-    // the padding round a palette's list — is still the popup's. Letting it
-    // fall through opens a file in the tree behind the open menu.
+    // A press inside the popup that the child did not want is still the
+    // popup's; falling through reaches the tree behind the open menu.
     let mut popup = popup_at(30, 40, 60, 50);
     let mut sink = MessageSink::new();
     let resp = popup.event(

@@ -126,11 +126,8 @@ impl Widget for DragHandleWidget {
                 EventResponse::Ignored
             }
             WidgetEvent::PointerUp { .. } => {
-                // Only a drag this handle is in. The release reaches every
-                // widget the pointer missed, so an unconditional `End` made a
-                // click anywhere in the window emit one — and every emitted
-                // message costs a whole rebuild. `active` is what the last
-                // rebuild was told, which is exactly the drag that needs ending.
+                // A release reaches every widget the pointer missed, and every
+                // message costs a rebuild.
                 if !self.active {
                     return EventResponse::Ignored;
                 }

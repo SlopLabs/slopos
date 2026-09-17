@@ -184,9 +184,8 @@ impl Document {
             self.title = file_name(&path).to_string();
             self.language = detect_language(&path);
             self.highlighter.set_language(self.language);
-            // Only on a rename. Re-reading it on every plain Ctrl+S lets a
-            // pasted block flip the Tab key of a file whose own convention has
-            // not changed.
+            // Only on a rename: re-reading on every Ctrl+S lets a pasted block
+            // flip the Tab key of a file whose convention has not changed.
             if self.path.as_deref() != Some(path.as_str()) {
                 self.indent = self.buffer.detect_indent(self.indent);
             }
@@ -201,8 +200,6 @@ impl Document {
     pub fn text(&self) -> String {
         self.buffer.to_text()
     }
-
-    // ── highlighting ────────────────────────────────────────────────────────
 
     fn invalidate_from(&self, line: usize) {
         let mut cache = self.states.borrow_mut();
@@ -235,8 +232,6 @@ impl Document {
         spans
     }
 
-    // ── editing ─────────────────────────────────────────────────────────────
-
     /// Applies an insert as one undoable step, moving the cursor past it.
     fn apply_insert(&mut self, at: Position, text: &str, coalesce: bool) -> bool {
         if text.is_empty() {
@@ -247,8 +242,8 @@ impl Document {
         let revision = self.buffer.revision();
         let end = self.buffer.insert(at, text);
         if self.buffer.revision() == revision {
-            // Refused — the line ceiling. Recording it would leave an undo step
-            // that deletes a range the buffer does not have.
+            // Refused by the line ceiling; recording it would leave an undo
+            // step deleting a range the buffer does not have.
             return false;
         }
         self.cursor.set_position(end, false);
@@ -288,7 +283,7 @@ impl Document {
     }
 
     /// Deletes the selection if there is one; true when something went.
-    fn delete_selection(&mut self) -> bool {
+    pub fn delete_selection(&mut self) -> bool {
         match self.cursor.selection() {
             Some(range) => {
                 self.apply_delete(range);
@@ -302,21 +297,16 @@ impl Document {
     /// past its line ceiling is refused, and the caller is the only place that
     /// can say so.
     pub fn insert_text(&mut self, text: &str) -> bool {
-        // Replacing a selection is a delete and an insert, and one Ctrl+Z has
-        // to take back both — and so is the re-indent a closing brace triggers.
+        // A replaced selection and a brace's re-indent are each several
+        // changes that one Ctrl+Z has to take back together.
         let had_any_selection = self.cursor.has_selection();
         let transactional = had_any_selection || self.closing_brace_dedent(text) > 0;
         if transactional {
             self.history.begin();
         }
-        // The selection goes first. `apply_delete` parks the caret at the
-        // range's start and clears the anchor, so a dedent computed before this
-        // would delete the indent, lose the selection with it, and leave the
-        // brace welded to the text the user meant to replace.
-        // Refuse before anything is destroyed. The selection goes first (so the
-        // dedent below reads the line the text will land on), which means a
-        // ceiling check afterwards would report "refused" over a buffer that
-        // had already lost the selection.
+        // Refuse before anything is destroyed: the selection is deleted below
+        // so the dedent reads the line the text lands on, and a check after
+        // that would report a refusal over a buffer already changed.
         let removing = self
             .cursor
             .selection()
@@ -336,10 +326,8 @@ impl Document {
                 Position::new(pos.line, 0),
                 Position::new(pos.line, dedent),
             ));
-            // A delete leaves the caret at the range's start, which here is
-            // column 0; the brace belongs one indent level in from where the
-            // caret was, not at the margin with the rest of the indent trailing
-            // behind it.
+            // The delete left the caret at column 0; the brace belongs one
+            // level in from where it was.
             self.cursor
                 .set_position(Position::new(pos.line, pos.col - dedent), false);
         }
@@ -587,10 +575,8 @@ impl Document {
         self.apply_insert(span_start, &joined, false);
 
         let delta = if down { 1isize } else { -1 };
-        // A shifted position must land inside the buffer: a whole-line
-        // selection ending at the start of the line below the block shifts to
-        // one line past the end, and an out-of-range anchor would paint a
-        // selection wider than the one the next edit deletes.
+        // A whole-line selection ends on the line below the block, which
+        // shifts past the end; an out-of-range anchor paints too wide.
         let shift = |buffer: &TextBuffer, pos: Position| -> Position {
             let line = (pos.line as isize + delta).max(0) as usize;
             if line >= buffer.line_count() {
@@ -648,8 +634,7 @@ impl Document {
                     last_delta = delta;
                 }
             } else {
-                // A leading tab goes whole whichever style the file is in: a
-                // tab-indented line in a spaces file is still one level.
+                // A tab-indented line in a spaces file is still one level.
                 let removable = if text.starts_with('\t') {
                     1
                 } else {
@@ -671,8 +656,7 @@ impl Document {
             }
         }
 
-        // Keep the same text selected: only the columns on the first and last
-        // lines moved, and only by what was added or removed there.
+        // Only the first and last lines' columns moved.
         let adjust = |pos: Position| -> Position {
             let delta = if pos.line == first {
                 first_delta
@@ -701,18 +685,16 @@ impl Document {
         let non_blank: Vec<usize> = (first..=last)
             .filter(|l| !self.buffer.line(*l).trim().is_empty())
             .collect();
-        // Blank lines are skipped so commenting a block does not litter them
-        // with tokens — unless there is nothing *but* blank lines, in which
-        // case skipping them means the key does nothing at all. That is also
-        // what makes the toggle round-trip: uncommenting a bare `//` leaves an
-        // empty line, which must be commentable again.
+        // Skipped so commenting a block does not litter them — unless there is
+        // nothing but blank lines, where skipping means the key does nothing
+        // and a bare `//` cannot round-trip.
         let lines: Vec<usize> = if non_blank.is_empty() {
             (first..=last).collect()
         } else {
             non_blank
         };
-        // Opened only once there is something to do: a `begin` without its
-        // `end` would leave every later edit merging into one undo group.
+        // Only once there is something to do: a `begin` without its `end`
+        // merges every later edit into one undo group.
         self.history.begin();
         let all_commented = lines
             .iter()
@@ -825,8 +807,6 @@ impl Document {
             None => false,
         }
     }
-
-    // ── motion and selection ────────────────────────────────────────────────
 
     pub fn move_cursor(&mut self, motion: Motion, extend: bool) {
         self.cursor.apply(&self.buffer, motion, extend);

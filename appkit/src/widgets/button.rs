@@ -110,10 +110,7 @@ impl Widget for ButtonWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        // The proportional metrics, because `paint` draws with them: measuring
-        // with the fixed-cell atlas over-pads every button and, where the UI
-        // font's line box is the taller of the two, makes the label overflow
-        // the box that was sized for it.
+        // The proportional metrics, because `paint` draws with them.
         let text_w = ctx.text_width(&self.label);
         let text_h = ctx.text_height();
         let w = (text_w + ctx.style.button_padding_h * 2).max(ctx.style.button_min_width);
@@ -123,10 +120,8 @@ impl Widget for ButtonWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        // Hover from the live pointer. `PointerEnter`/`PointerLeave` are
-        // declared and never constructed, so the only thing that ever set
-        // `Hovered` was a release on this button — and the rebuild that
-        // followed reset it. Every hover colour in this file was unreachable.
+        // From the live pointer: `PointerEnter`/`PointerLeave` are declared
+        // and never constructed.
         let state = match self.state {
             ButtonState::Idle if self.enabled && rect.contains(ctx.pointer.0, ctx.pointer.1) => {
                 ButtonState::Hovered
@@ -199,8 +194,6 @@ impl Widget for ButtonWidget {
                 button: PointerButton::Left,
                 ..
             } => {
-                // No prior PointerEnter is required: the framework may not
-                // synthesise enter/leave from pointer motion.
                 if !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
@@ -238,10 +231,6 @@ impl Widget for ButtonWidget {
                 }
                 EventResponse::Ignored
             }
-            // Only when this button holds the keyboard focus. A key is offered
-            // to every widget in turn until one consumes it, so a button that
-            // answered Enter or Space unconditionally took them from whatever
-            // the user was actually typing into.
             WidgetEvent::KeyDown { key, .. } if self.focused => {
                 if matches!(
                     key,

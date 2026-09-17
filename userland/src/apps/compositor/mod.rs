@@ -426,11 +426,9 @@ impl WindowManager {
                         &self.system_bar,
                         proto_box.as_deref_mut(),
                     );
-                    // A press with nothing else held ends a grab left over
-                    // from a release the kernel queue dropped under a motion
-                    // flood — the same self-heal the input layer's own drag and
-                    // resize grabs carry, and without which one lost release
-                    // pins every pointer event to one surface for good.
+                    // Self-heals a grab left over from a release the kernel
+                    // queue dropped under a motion flood, as the input layer's
+                    // own drag and resize grabs do.
                     if self.input.mouse_buttons & !button == 0 {
                         self.protocol_pointer_grab = 0;
                         self.sync_pointer_focus(proto_box.as_deref_mut());
@@ -456,9 +454,8 @@ impl WindowManager {
                     let should_forward = self
                         .input
                         .on_button_release(button, proto_box.as_deref_mut());
-                    // A grab only exists because the press was forwarded, so
-                    // its release is owed to the same surface whatever is under
-                    // the pointer now.
+                    // The press was forwarded, so the release is owed to the
+                    // same surface.
                     let target = if self.protocol_pointer_grab != 0 {
                         self.protocol_pointer_grab
                     } else if should_forward {
@@ -478,13 +475,10 @@ impl WindowManager {
                             );
                         }
                     }
-                    // `mouse_buttons` is the one authoritative mask, already
-                    // updated by `on_button_release`; a second copy here is a
-                    // second thing that can fall out of step with it.
+                    // The one authoritative mask, already updated by
+                    // `on_button_release`.
                     if self.input.mouse_buttons == 0 && self.protocol_pointer_grab != 0 {
                         self.protocol_pointer_grab = 0;
-                        // Enter/leave catches up with wherever the pointer
-                        // actually ended.
                         self.sync_pointer_focus(proto_box.as_deref_mut());
                     }
                 }
@@ -541,9 +535,8 @@ impl WindowManager {
     }
 
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
-        // Focus does not move under a grab: leaving the window mid-drag is the
-        // ordinary way to drag, not a reason to hand the pointer to the window
-        // underneath.
+        // Leaving the window mid-drag is the ordinary way to drag, not a
+        // reason to hand the pointer to the window underneath.
         if self.protocol_pointer_grab != 0 {
             return;
         }

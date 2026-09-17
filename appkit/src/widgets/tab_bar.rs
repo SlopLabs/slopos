@@ -213,9 +213,6 @@ impl Widget for TabBarWidget {
                 EventResponse::Ignored
             }
 
-            // Only when this widget holds the keyboard focus: a key is offered
-            // to every widget in turn until one consumes, so answering one
-            // unfocused takes it from whatever the user was actually aiming at.
             WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Left) => {
                     if !self.tabs.is_empty() && self.active > 0 {
@@ -275,15 +272,8 @@ impl Widget for TabBarWidget {
         FocusPolicy::StrongFocus
     }
 
-    /// Only the visible panel.
-    ///
-    /// Every panel is laid out at the same rect, so exposing them all means a
-    /// hit test — which walks children in reverse — can only ever resolve into
-    /// the *last* one. Events were routed correctly anyway, but focus is
-    /// derived from the hit, so it landed on a control in an invisible tab and
-    /// the visible one never received `FocusGained`. With widgets now gated on
-    /// focus that is the difference between a text field you can type into and
-    /// one you cannot.
+    /// Only the visible panel: every panel shares one rect, so exposing them
+    /// all sends a hit test — and the focus derived from it — to the last.
     fn children(&self) -> &[Box<dyn Widget>] {
         self.content
             .get(self.active)
