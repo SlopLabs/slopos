@@ -5,7 +5,6 @@
 //! matcher is case-folded per ASCII rather than per Unicode, which is what the
 //! rest of the tree does and what a source file needs.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::buffer::{Position, Range, TextBuffer};
@@ -117,11 +116,6 @@ pub fn find_prev(
         .or_else(|| matches.last().copied())
 }
 
-/// Index of `target` among `matches`, for the "3 of 12" readout.
-pub fn match_index(matches: &[Range], target: Range) -> Option<usize> {
-    matches.iter().position(|m| *m == target)
-}
-
 /// Fuzzy subsequence score of `needle` against `text`, or `None` for no match.
 ///
 /// Used by the file finder: characters must appear in order, and a run that
@@ -131,41 +125,50 @@ pub fn fuzzy_score(text: &str, needle: &str) -> Option<i32> {
     if needle.is_empty() {
         return Some(0);
     }
-    let hay: Vec<char> = text.chars().collect();
-    let pat: Vec<char> = needle.chars().collect();
-
+    // One forward pass over `text`, allocating nothing: the file finder scores
+    // every path in the tree on every keystroke, so two `Vec<char>` per
+    // candidate is the whole cost of the feature.
     let mut score = 0i32;
-    let mut hi = 0usize;
     let mut last_hit: Option<usize> = None;
+    let mut hay = text.chars().enumerate();
+    let mut before: Option<char> = None;
+    let mut length = 0usize;
 
-    for &want in pat.iter() {
+    for want in needle.chars() {
         let mut found = None;
-        while hi < hay.len() {
-            let c = hay[hi];
+        for (at, c) in hay.by_ref() {
+            length = at + 1;
+            let prev = before;
+            before = Some(c);
             if c.eq_ignore_ascii_case(&want) {
-                found = Some(hi);
+                found = Some((at, c, prev));
                 break;
             }
-            hi += 1;
         }
-        let at = found?;
-        let boundary = at == 0
-            || matches!(hay[at - 1], '/' | '_' | '-' | '.' | ' ')
-            || (hay[at].is_uppercase() && !hay[at - 1].is_uppercase());
+        let (at, c, prev) = found?;
+        let boundary = match prev {
+            None => true,
+            Some(prev) => {
+                matches!(prev, '/' | '_' | '-' | '.' | ' ')
+                    || (c.is_uppercase() && !prev.is_uppercase())
+            }
+        };
         score += if boundary { 8 } else { 2 };
         if last_hit == Some(at.wrapping_sub(1)) {
             score += 4;
         }
-        if hay[at] == want {
+        if c == want {
             score += 1;
         }
         last_hit = Some(at);
-        hi = at + 1;
     }
 
     // Shorter candidates win ties, so an exact file name beats a long path that
     // merely contains the same letters.
-    score -= (hay.len() as i32) / 16;
+    for (at, _) in hay {
+        length = at + 1;
+    }
+    score -= (length as i32) / 16;
     Some(score)
 }
 
@@ -178,9 +181,4 @@ pub fn fuzzy_filter<'a>(candidates: &[&'a str], needle: &str) -> Vec<(&'a str, i
     // Stable so equal scores keep the caller's order.
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored
-}
-
-/// A one-line preview of `range`, for a results list.
-pub fn preview_line(buffer: &TextBuffer, range: Range) -> String {
-    String::from(buffer.line(range.start.line).trim())
 }

@@ -159,12 +159,19 @@ impl FileTree {
 
     /// Installs `entries` as `index`'s children: directories first, then files,
     /// each group by case-insensitive name — the order a file manager uses.
-    pub fn populate(&mut self, index: usize, mut entries: Vec<DirEntry>) {
+    ///
+    /// Returns `false` when [`MAX_NODES`] cut the list short. The directory is
+    /// still marked read — the alternative is a walk that retries it forever —
+    /// so the truncation is invisible from the tree afterwards, and a caller
+    /// that drops this answer leaves the user a sidebar and a finder silently
+    /// missing files.
+    #[must_use]
+    pub fn populate(&mut self, index: usize, mut entries: Vec<DirEntry>) -> bool {
         let Some(node) = self.nodes.get(index).filter(|n| n.alive) else {
-            return;
+            return true;
         };
         if !node.is_dir {
-            return;
+            return true;
         }
         let depth = node.depth + 1;
         let base = node.path.clone();
@@ -191,7 +198,8 @@ impl FileTree {
             self.release(child);
         }
 
-        let mut children = Vec::with_capacity(entries.len());
+        let wanted = entries.len();
+        let mut children = Vec::with_capacity(wanted);
         for entry in entries {
             if self.len() >= MAX_NODES {
                 break;
@@ -212,9 +220,11 @@ impl FileTree {
             children.push(child);
         }
 
+        let complete = children.len() == wanted;
         self.nodes[index].children = children;
         self.nodes[index].loaded = true;
         self.rebuild_rows();
+        complete
     }
 
     /// Marks a directory as needing to be read again.

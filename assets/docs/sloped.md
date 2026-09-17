@@ -6,9 +6,10 @@ a command palette, and every edit undoable.
 Start it from the dock, or from a shell:
 
 ```
-editor            # the working directory, in an empty buffer
-editor file.rs    # one file, with its folder in the sidebar
-editor /src       # a folder
+editor              # the working directory, in an empty buffer
+editor file.rs      # one file, with its folder in the sidebar
+editor a.rs b.rs    # a tab each; the sidebar follows the first
+editor /src         # a folder
 ```
 
 ## Keys
@@ -71,12 +72,17 @@ Indentation is read from the file rather than assumed: a tab-indented file
 indents with tabs, and a file indented two spaces stays that way.
 
 Line endings survive a round trip — a file that arrived with CRLF is saved with
-CRLF — and so does a missing final newline. A file with *mixed* endings and a
-CRLF majority is normalised to CRLF; one with an LF majority is left exactly as
-it is, carriage returns and all. A carriage return that is not a line ending is
-content either way.
+CRLF — and so does a missing final newline. A file with *mixed* endings counts
+as CRLF from a third of its lines upward, deliberately below a majority: a file
+that is mostly CRLF came from a CRLF tool, and a handful of bare LFs in it is
+the damage, not the intent. Below that it is left exactly as it is, carriage
+returns and all. A carriage return that is not a line ending is content either
+way.
 
 A save writes a sibling file, flushes it to the disk and renames it over the
 target, so a save that fails part way leaves the old file intact rather than a
-truncated one. A file with a NUL byte in its first 8 KiB is refused rather than
+truncated one. It also asks first when the file it is about to land on is not
+the one this tab read — changed underneath it, gone, or a Save As target that
+already exists — because a save is not supposed to be how somebody else's work
+disappears. A file with a NUL byte in its first 8 KiB is refused rather than
 opened as replacement characters that saving would then write back.

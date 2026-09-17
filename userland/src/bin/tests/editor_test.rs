@@ -268,28 +268,136 @@ fn refuses_a_binary_file() -> bool {
 fn builds_a_view() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     let mut panes = 0;
-    for open in [
-        None,
-        Some((Key::Char('f'), ctrl())),
-        Some((Key::Char('p'), ctrl_shift())),
-        Some((Key::Char('p'), ctrl())),
-        Some((Key::Char('g'), ctrl())),
-        Some((Key::Char('w'), ctrl())),
+    // Each chord with what it is supposed to leave on screen. Counting loop
+    // turns proves nothing on its own: a chord that silently did not open its
+    // prompt lays out the same window as the turn before it.
+    for (open, prompt_expected) in [
+        (None, false),
+        (Some((Key::Char('f'), ctrl())), true),
+        (Some((Key::Char('h'), ctrl())), true),
+        (Some((Key::Char('p'), ctrl_shift())), true),
+        (Some((Key::Char('p'), ctrl())), true),
+        (Some((Key::Char('g'), ctrl())), true),
+        // Not a prompt: the window as it lays out after a tab closes.
+        (Some((Key::Char('w'), ctrl())), false),
     ] {
         if let Some((k, mods)) = open {
             key(&mut app, k, mods);
         }
+        if app.prompt_is_open() != prompt_expected {
+            return false;
+        }
         // A pane that cannot be laid out panics rather than returning, so
-        // reaching here at all is the assertion; the count is what proves each
-        // one was actually opened rather than silently refused.
+        // reaching here at all is the assertion.
         let tree = dispatch::layout(&app);
         if tree.layout_rect().width <= 0 {
             return false;
         }
         panes += 1;
         key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
+        // And Escape has to have closed it again, or the next turn measures a
+        // prompt this one left behind.
+        if app.prompt_is_open() {
+            return false;
+        }
     }
-    panes == 6
+    panes == 7
+}
+
+/// A command that acts somewhere else closes the prompt it was reached past.
+///
+/// Save As then Ctrl+N used to leave the Save As field on screen over a new,
+/// unrelated buffer, with a caret nobody was driving.
+fn a_command_closes_the_prompt_it_leaves() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    key(&mut app, Key::Char('s'), ctrl_shift());
+    if !app.prompt_is_open() {
+        return false;
+    }
+    let tabs_before = app.documents().len();
+    key(&mut app, Key::Char('n'), ctrl());
+    !app.prompt_is_open() && app.documents().len() == tabs_before + 1
+}
+
+/// The find readout counts the document that is showing, not the one that was.
+fn the_find_readout_follows_the_tab() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    app.open(&format!("{DIR}/notes.md"));
+    key(&mut app, Key::Char('f'), ctrl());
+    app.type_in_prompt("answer");
+    // notes.md has none of it; sample.rs has two.
+    if app.find_progress() != Some((0, 0)) {
+        return false;
+    }
+    let sample = app
+        .documents()
+        .iter()
+        .position(|d| d.title() == "sample.rs")
+        .unwrap_or(0);
+    app.update(EditorMsg::Tab(TabInput::Select(sample)));
+    app.find_progress().map(|(total, _)| total) == Some(2)
+}
+
+/// An edit that is not a typed character moves the readout too.
+fn the_find_readout_follows_an_undo() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    key(&mut app, Key::Char('f'), ctrl());
+    app.type_in_prompt("answer");
+    if app.find_progress().map(|(total, _)| total) != Some(2) {
+        return false;
+    }
+    app.update(EditorMsg::Run(Command::SelectAll));
+    app.update(EditorMsg::Run(Command::Cut));
+    if app.find_progress().map(|(total, _)| total) != Some(0) {
+        return false;
+    }
+    app.update(EditorMsg::Run(Command::Undo));
+    app.find_progress().map(|(total, _)| total) == Some(2)
+}
+
+/// Every file argument opens, not just the first.
+fn opens_every_file_argument() -> bool {
+    let app = EditorApp::new(&[format!("{DIR}/sample.rs"), format!("{DIR}/notes.md")]);
+    let titles: Vec<&str> = app.documents().iter().map(|d| d.title()).collect();
+    titles == ["sample.rs", "notes.md"] && app.active_index() == 0
+}
+
+/// A save whose target changed under it asks before writing.
+fn a_changed_file_is_not_silently_overwritten() -> bool {
+    let path = format!("{DIR}/contended.txt");
+    if std::fs::write(
+        &path,
+        "original
+",
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut app = app_with(&path);
+    type_text(&mut app, "X");
+    // Somebody else writes it, with a length this editor's buffer does not
+    // have, so the stamp differs whatever the clock says.
+    if std::fs::write(
+        &path,
+        "somebody else was here
+",
+    )
+    .is_err()
+    {
+        return false;
+    }
+    key(&mut app, Key::Char('s'), ctrl());
+    if app.dialog().is_none() {
+        return false;
+    }
+    // Cancel: the file on disk is untouched and the buffer is still dirty.
+    key(&mut app, Key::Named(NamedKey::Enter), Modifiers::default());
+    let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+    on_disk
+        == "somebody else was here
+" && app.documents()[app.active_index()].is_modified()
+        && app.dialog().is_none()
 }
 
 /// Driving the real widget tree, not `App::on_key`.
@@ -472,6 +580,23 @@ fn main() {
         (
             "palette_window_follows_rather_than_pins",
             palette_window_follows_rather_than_pins,
+        ),
+        (
+            "a_command_closes_the_prompt_it_leaves",
+            a_command_closes_the_prompt_it_leaves,
+        ),
+        (
+            "the_find_readout_follows_the_tab",
+            the_find_readout_follows_the_tab,
+        ),
+        (
+            "the_find_readout_follows_an_undo",
+            the_find_readout_follows_an_undo,
+        ),
+        ("opens_every_file_argument", opens_every_file_argument),
+        (
+            "a_changed_file_is_not_silently_overwritten",
+            a_changed_file_is_not_silently_overwritten,
         ),
     ]);
 

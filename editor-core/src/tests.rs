@@ -358,24 +358,47 @@ fn test_tab_without_a_selection_inserts_one_level() -> bool {
 }
 
 fn test_toggle_comment_round_trips() -> bool {
-    let mut d = doc("    let x = 1;\n    let y = 2;\n");
+    let mut d = doc("    let x = 1;\n\n    let y = 2;\n");
     d.place_cursor(pos(0, 0), false);
-    d.place_cursor(pos(1, 3), true);
+    d.place_cursor(pos(2, 3), true);
     d.toggle_comment();
     assert_eq!(d.buffer.line(0), "    // let x = 1;");
-    assert_eq!(d.buffer.line(1), "    // let y = 2;");
+    // A blank line inside a range that has code in it stays blank.
+    assert_eq!(d.buffer.line(1), "");
+    assert_eq!(d.buffer.line(2), "    // let y = 2;");
     d.toggle_comment();
     assert_eq!(d.buffer.line(0), "    let x = 1;");
-    assert_eq!(d.buffer.line(1), "    let y = 2;");
+    assert_eq!(d.buffer.line(1), "");
+    assert_eq!(d.buffer.line(2), "    let y = 2;");
     true
 }
 
-/// A toggle with nothing to comment must not leave a transaction open, or
-/// every later edit merges into one undo group.
+/// The caret rides its text rather than staying at a column the comment token
+/// now occupies.
+fn test_toggle_comment_carries_the_caret() -> bool {
+    let mut d = doc("    let x = 1;\n");
+    d.place_cursor(pos(0, 8), false);
+    d.toggle_comment();
+    assert_eq!(d.buffer.line(0), "    // let x = 1;");
+    assert_eq!(d.cursor.position, pos(0, 11));
+    d.toggle_comment();
+    assert_eq!(d.cursor.position, pos(0, 8));
+    true
+}
+
+/// A range that is *nothing but* blank lines is commented rather than skipped:
+/// skipping it means the key does nothing at all, and — since uncommenting a
+/// bare `//` leaves an empty line — that the toggle does not round-trip.
+///
+/// The edits afterwards are the second half: a toggle must not leave a
+/// transaction open, or every later edit merges into one undo group.
 fn test_toggle_comment_on_blank_lines_leaves_undo_alone() -> bool {
     let mut d = doc("\nfoo\nbar\n");
     d.place_cursor(pos(0, 0), false);
     d.toggle_comment();
+    assert_eq!(d.buffer.line(0), "// ");
+    d.toggle_comment();
+    assert_eq!(d.buffer.line(0), "");
     d.place_cursor(pos(1, 0), false);
     d.insert_text("X");
     d.place_cursor(pos(2, 0), false);
@@ -649,12 +672,19 @@ fn test_the_undo_cap_bounds_transactional_edits_too() -> bool {
 
 fn test_a_refused_insert_destroys_nothing() -> bool {
     // The selection is deleted first so the dedent reads the right line, which
-    // means the ceiling has to be checked before any of it.
+    // means the ceiling has to be checked before any of it — so the refusal
+    // has to be driven for real, over a live selection.
     let mut d = plain_doc("keep me\n");
     d.place_cursor(pos(0, 0), false);
     d.place_cursor(pos(0, 4), true);
-    // A buffer nowhere near the limit accepts it, so use the check directly.
-    assert!(!d.buffer.would_exceed_line_limit("x"));
+    let over: String = core::iter::repeat_n('\n', crate::buffer::MAX_LINES).collect();
+    assert!(d.buffer.would_exceed_line_limit(&over, 0));
+    assert!(!d.insert_text(&over));
+    assert_eq!(d.buffer.line(0), "keep me");
+    assert_eq!(d.cursor.selection(), Some(Range::new(pos(0, 0), pos(0, 4))));
+    assert!(!d.can_undo());
+    // And a replacement that is a net wash is not refused: the lines the
+    // selection takes away pay for the ones the text brings.
     assert!(d.insert_text("x"));
     assert_eq!(d.buffer.line(0), "x me");
     true
@@ -761,7 +791,21 @@ fn test_scroll_by_is_clamped() -> bool {
 }
 
 fn test_undo_after_reload_of_states_rehighlights() -> bool {
-    let d = doc("/* comment\nstill comment */ let x = 1;\n");
+    let mut d = doc("/* comment\nstill comment */ let x = 1;\n");
+    // Fills the per-line state cache at exactly the state the undo below has
+    // to bring back.
+    let spans = d.line_spans(1);
+    assert!(spans.iter().any(|s| s.kind == TokenKind::Comment));
+    assert!(spans.iter().any(|s| s.kind == TokenKind::Keyword));
+
+    // Closing the comment on line 0 makes line 1 ordinary code.
+    d.place_cursor(pos(0, 2), false);
+    assert!(d.insert_text("*/"));
+    assert_eq!(d.buffer.line(0), "/**/ comment");
+    assert!(!d.line_spans(1).iter().any(|s| s.kind == TokenKind::Comment));
+
+    // And back. A cache the undo did not invalidate still answers "code" here.
+    assert!(d.undo());
     let spans = d.line_spans(1);
     assert!(spans.iter().any(|s| s.kind == TokenKind::Comment));
     assert!(spans.iter().any(|s| s.kind == TokenKind::Keyword));
@@ -1003,10 +1047,10 @@ fn entries(names: &[(&str, bool)]) -> Vec<DirEntry> {
 
 fn test_tree_sorts_dirs_first_then_by_name() -> bool {
     let mut tree = FileTree::new("/repo");
-    tree.populate(
+    assert!(tree.populate(
         0,
         entries(&[("zeta.rs", false), ("Alpha", true), ("beta", true)]),
-    );
+    ));
     let rows: Vec<usize> = tree.rows().iter().map(|r| r.node).collect();
     let names: Vec<&str> = rows
         .iter()
@@ -1019,10 +1063,10 @@ fn test_tree_sorts_dirs_first_then_by_name() -> bool {
 
 fn test_collapsed_directory_hides_its_children() -> bool {
     let mut tree = FileTree::new("/repo");
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     let src = tree.find_path("/repo/src").expect("child");
     tree.set_expanded(src, true);
-    tree.populate(src, entries(&[("lib.rs", false)]));
+    assert!(tree.populate(src, entries(&[("lib.rs", false)])));
     assert_eq!(tree.rows().len(), 3);
     tree.set_expanded(src, false);
     assert_eq!(tree.rows().len(), 2);
@@ -1031,10 +1075,10 @@ fn test_collapsed_directory_hides_its_children() -> bool {
 
 fn test_repopulate_keeps_expansion() -> bool {
     let mut tree = FileTree::new("/repo");
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     let src = tree.find_path("/repo/src").expect("child");
     tree.set_expanded(src, true);
-    tree.populate(0, entries(&[("src", true), ("README", false)]));
+    assert!(tree.populate(0, entries(&[("src", true), ("README", false)])));
     let src = tree.find_path("/repo/src").expect("child again");
     assert!(tree.node(src).expect("node").expanded);
     true
@@ -1043,10 +1087,10 @@ fn test_repopulate_keeps_expansion() -> bool {
 fn test_refresh_does_not_leak_stale_nodes() -> bool {
     let mut tree = FileTree::new("/repo");
     let listing = entries(&[("src", true), ("README.md", false)]);
-    tree.populate(0, listing.clone());
+    assert!(tree.populate(0, listing.clone()));
     let after_first = tree.len();
     for _ in 0..4 {
-        tree.populate(0, listing.clone());
+        assert!(tree.populate(0, listing.clone()));
     }
     assert_eq!(tree.len(), after_first);
 
@@ -1061,9 +1105,9 @@ fn test_refresh_does_not_leak_stale_nodes() -> bool {
 
 fn test_find_path_returns_a_live_node_after_refresh() -> bool {
     let mut tree = FileTree::new("/repo");
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     let stale = tree.find_path("/repo/src").expect("child");
-    tree.populate(0, entries(&[("src", true), ("docs", true)]));
+    assert!(tree.populate(0, entries(&[("src", true), ("docs", true)])));
 
     let src = tree.find_path("/repo/src").expect("child again");
     assert!(tree.node(src).is_some());
@@ -1078,14 +1122,14 @@ fn test_find_path_returns_a_live_node_after_refresh() -> bool {
 
 fn test_reveal_survives_a_refresh() -> bool {
     let mut tree = FileTree::new("/repo");
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     let src = tree.find_path("/repo/src").expect("src");
-    tree.populate(src, entries(&[("lib.rs", false)]));
+    assert!(tree.populate(src, entries(&[("lib.rs", false)])));
     tree.set_expanded(src, false);
 
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     let src = tree.find_path("/repo/src").expect("src again");
-    tree.populate(src, entries(&[("lib.rs", false)]));
+    assert!(tree.populate(src, entries(&[("lib.rs", false)])));
     let lib = tree.find_path("/repo/src/lib.rs").expect("lib.rs");
     tree.reveal(lib);
     assert!(tree.row_of(lib).is_some());
@@ -1096,7 +1140,7 @@ fn test_reveal_survives_a_refresh() -> bool {
 fn test_pending_lists_expanded_unloaded_dirs() -> bool {
     let mut tree = FileTree::new("/repo");
     assert_eq!(tree.pending(), alloc::vec![0]);
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     assert!(tree.pending().is_empty());
     let src = tree.find_path("/repo/src").expect("child");
     tree.set_expanded(src, true);
@@ -1106,9 +1150,9 @@ fn test_pending_lists_expanded_unloaded_dirs() -> bool {
 
 fn test_reveal_expands_ancestors() -> bool {
     let mut tree = FileTree::new("/repo");
-    tree.populate(0, entries(&[("src", true)]));
+    assert!(tree.populate(0, entries(&[("src", true)])));
     let src = tree.find_path("/repo/src").expect("child");
-    tree.populate(src, entries(&[("lib.rs", false)]));
+    assert!(tree.populate(src, entries(&[("lib.rs", false)])));
     let file = tree.find_path("/repo/src/lib.rs").expect("file");
     tree.reveal(file);
     assert!(tree.row_of(file).is_some());
@@ -1239,6 +1283,10 @@ pub fn cases() -> &'static [(&'static str, fn() -> bool)] {
         (
             "tab_without_a_selection_inserts_one_level",
             test_tab_without_a_selection_inserts_one_level,
+        ),
+        (
+            "toggle_comment_carries_the_caret",
+            test_toggle_comment_carries_the_caret,
         ),
         (
             "toggle_comment_round_trips",

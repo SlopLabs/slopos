@@ -48,7 +48,9 @@ pub use node::{
     SortIndicator, TableColumn, TableColumnWidth,
 };
 pub use run::run_app;
-pub use widgets::code_view::{CodeInput, CodeLine, StyledSpan, gutter_width, visible_line_count};
+pub use widgets::code_view::{
+    CodeInput, CodeLine, StyledSpan, gutter_width, text_area_reserved, visible_line_count,
+};
 pub use widgets::drag_handle::DragInput;
 pub use widgets::editor_tabs::{EditorTab, TabInput};
 pub use widgets::icon::IconKind;

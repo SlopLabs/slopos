@@ -90,6 +90,17 @@ pub fn visible_line_count(height: i32, line_height: i32) -> usize {
     (height / line_height).max(0) as usize
 }
 
+/// Pixels of a code surface's width that are not text: the gap after the
+/// gutter and the overview scrollbar on the right edge.
+///
+/// Exported because the application sizes the document's viewport itself and
+/// has to subtract exactly what the widget does; the constant it carried
+/// instead was two pixels out, so the buffer was scrolled horizontally a
+/// column before the text reached the edge.
+pub fn text_area_reserved() -> i32 {
+    TEXT_PAD + SCROLLBAR_WIDTH
+}
+
 /// Width of the gutter for a file of `total_lines`, at `cell_width`.
 pub fn gutter_width(total_lines: usize, cell_width: i32, show_line_numbers: bool) -> i32 {
     if !show_line_numbers {

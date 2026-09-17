@@ -42,6 +42,8 @@ use prompt::{LineInput, Prompt};
 
 /// Rows of context kept between the caret and the edge of the viewport.
 const SCROLL_MARGIN: usize = 3;
+/// Finder rows kept after scoring. Beyond this nobody scrolls; they retype.
+const FINDER_RESULTS: usize = 200;
 const MIN_SIDEBAR_WIDTH: i32 = 140;
 const MAX_SIDEBAR_WIDTH: i32 = 520;
 const DEFAULT_SIDEBAR_WIDTH: i32 = 240;
@@ -61,6 +63,12 @@ pub enum Dialog {
     },
     /// The application is being closed with unsaved changes somewhere.
     ConfirmQuit,
+    /// The file a save is about to land on is not the one this tab read.
+    ConfirmOverwrite {
+        index: usize,
+        path: String,
+        detail: String,
+    },
     About,
 }
 
@@ -97,10 +105,22 @@ pub struct EditorApp {
     /// The last thing searched for, which outlives the find bar; see
     /// `find_query`.
     last_query: String,
-    /// The last replacement, for the same reason: accepting a palette entry
-    /// clears the prompt *before* running the command it names, so Replace All
-    /// from the palette could never see one.
-    last_replacement: String,
+    /// The last query and replacement *as a pair*, for the same reason:
+    /// accepting a palette entry clears the prompt before running the command
+    /// it names, so Replace All from the palette could never see one.
+    ///
+    /// A pair, because the two are not interchangeable. Remembering them
+    /// separately let a Replace All reached from the palette pair the query
+    /// from one search with the replacement typed for another — or with no
+    /// replacement at all, which deletes every occurrence.
+    last_replace: Option<(String, String)>,
+    /// Every file in the tree, snapshotted when the finder opens and scored in
+    /// place from then on.
+    finder_paths: Vec<String>,
+    /// What the find readout was last counted against. Every message ends with
+    /// a `refresh_find`, and a full scan per pointer move during a selection
+    /// drag is not free on a large file; this is what makes the repeat cheap.
+    find_stamp: Option<FindStamp>,
     /// `(menu index, anchor x, anchor y)` while a menu is open.
     menu_open: Option<(usize, i32, i32)>,
     dialog: Option<Dialog>,
@@ -147,7 +167,9 @@ impl EditorApp {
             prompt: Prompt::None,
             overlay_scroll: 0,
             last_query: String::new(),
-            last_replacement: String::new(),
+            last_replace: None,
+            finder_paths: Vec::new(),
+            find_stamp: None,
             menu_open: None,
             dialog: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -167,13 +189,19 @@ impl EditorApp {
         };
         app.sync_tree();
 
-        match arg {
-            Some(path) if !files::is_dir(path) => {
-                let absolute = files::absolutize(&base, path);
-                app.open_path(&absolute);
+        // Every argument, not just the first: `sloped a.rs b.rs` opens two
+        // tabs, which is what a shell glob means by it. The *first* is what
+        // chose the root above, so the rest may well sit outside the tree —
+        // that is fine, a tab is not a tree node.
+        for path in args {
+            if files::is_dir(path) {
+                continue;
             }
-            _ => {}
+            let absolute = files::absolutize(&base, path);
+            app.open_path(&absolute);
         }
+        // Left on the one the user named first.
+        app.active = 0;
         if app.docs.is_empty() {
             app.new_document();
         }
@@ -445,6 +473,8 @@ impl EditorApp {
                         }
                         self.docs.clear();
                     }
+                    let mut doc = doc;
+                    doc.set_disk_stamp(files::disk_stamp(path));
                     self.docs.push(doc);
                     self.active = self.docs.len() - 1;
                     self.focus = Focus::Editor;
@@ -491,11 +521,43 @@ impl EditorApp {
             self.status = format!("{target} is already open in another tab");
             return;
         }
+        // What is on the medium is not what this tab read, so writing would
+        // take somebody's work with it. Asked once per save, never assumed.
+        let on_disk = files::disk_stamp(&target);
+        let detail = if doc.path() == Some(target.as_str()) {
+            match (doc.disk_stamp(), on_disk) {
+                (Some(known), Some(now)) if known != now => {
+                    Some(format!("{target} has changed on disk since it was opened."))
+                }
+                (Some(_), None) => Some(format!("{target} is no longer there.")),
+                _ => None,
+            }
+        } else {
+            on_disk.map(|_| format!("{target} already exists."))
+        };
+        if let Some(detail) = detail {
+            self.dialog = Some(Dialog::ConfirmOverwrite {
+                index,
+                path: target,
+                detail,
+            });
+            return;
+        }
+        self.write_document(index, target);
+    }
+
+    /// The write itself, past every question `save_document` asks.
+    fn write_document(&mut self, index: usize, target: String) {
+        let Some(doc) = self.docs.get(index) else {
+            self.status = String::from("Nothing to save: that tab is gone");
+            return;
+        };
         let text = doc.text();
         match files::write_file(&target, &text) {
             Ok(()) => {
                 let named = self.docs[index].path() != Some(target.as_str());
                 self.docs[index].mark_saved(Some(target.clone()));
+                self.docs[index].set_disk_stamp(files::disk_stamp(&target));
                 self.status = format!("Saved {target}");
                 if named {
                     self.refresh_tree_dir(parent_dir(&target));
@@ -603,15 +665,18 @@ impl EditorApp {
                     continue;
                 };
                 let path = node.path.clone();
-                match files::read_dir(&path) {
+                let complete = match files::read_dir(&path) {
                     Ok(entries) => self.tree.populate(index, entries),
                     Err(message) => {
                         // A directory that cannot be read is an empty one here,
                         // with the reason on the status bar; the alternative is
                         // a sidebar that refuses to draw.
                         self.status = message;
-                        self.tree.populate(index, Vec::new());
+                        self.tree.populate(index, Vec::new())
                     }
+                };
+                if !complete {
+                    self.status = tree_full_message();
                 }
             }
         }
@@ -644,12 +709,16 @@ impl EditorApp {
                     continue;
                 };
                 read += 1;
-                match files::read_dir(&path) {
+                let complete = match files::read_dir(&path) {
                     Ok(entries) => self.tree.populate(index, entries),
                     // A directory that cannot be read is an empty one here, as
                     // in `sync_tree`; marking it loaded is what stops the walk
                     // from retrying it forever.
                     Err(_) => self.tree.populate(index, Vec::new()),
+                };
+                if !complete {
+                    self.status = tree_full_message();
+                    return;
                 }
             }
         }
@@ -776,6 +845,13 @@ impl EditorApp {
         } else {
             String::from("Copied")
         };
+        if cut {
+            // A cut shortens the buffer, and a viewport left pointing past the
+            // new end draws nothing at all; the match count describes a buffer
+            // that just changed.
+            self.refresh_find();
+            self.sync_viewport();
+        }
     }
 
     fn paste(&mut self) {
@@ -832,9 +908,18 @@ impl EditorApp {
         }
     }
 
+    /// Re-counts the find bar's matches against the active document.
+    ///
+    /// Cheap with the bar closed, which is what lets every message end with a
+    /// call to it: the readout it maintains lives in `Prompt::Find`, so with no
+    /// bar open there is nothing to count and nothing to scan for.
     fn refresh_find(&mut self) {
         self.remember_query();
         self.remember_replacement();
+        if !matches!(self.prompt, Prompt::Find { .. }) {
+            self.find_stamp = None;
+            return;
+        }
         let Some(query) = self.find_query() else {
             if let Prompt::Find { total, current, .. } = &mut self.prompt {
                 *total = 0;
@@ -843,7 +928,6 @@ impl EditorApp {
             return;
         };
         let options = self.search_options;
-        let matches = search::find_all(&self.docs[self.active].buffer, &query, options);
         // The *selection's* start, because that is where a walk left the
         // caret: `find_step` selects a match and parks the caret at its end, so
         // reading the caret would always name the match after the one the user
@@ -854,6 +938,18 @@ impl EditorApp {
             .selection()
             .map(|s| s.start)
             .unwrap_or(doc.cursor.position);
+        let stamp = FindStamp {
+            document: doc.id(),
+            revision: doc.buffer.revision(),
+            anchor,
+            query: query.clone(),
+            options,
+        };
+        if self.find_stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.find_stamp = Some(stamp);
+        let matches = search::find_all(&self.docs[self.active].buffer, &query, options);
         let current = matches
             .iter()
             .position(|m| m.start >= anchor)
@@ -919,7 +1015,10 @@ impl EditorApp {
     }
 
     fn replace_current(&mut self) {
-        let (Some(query), Some(replacement)) = (self.find_query(), self.replace_text()) else {
+        let Some(query) = self.find_query() else {
+            return;
+        };
+        let Some(replacement) = self.replace_text(&query) else {
             return;
         };
         let options = self.search_options;
@@ -947,7 +1046,11 @@ impl EditorApp {
     }
 
     fn replace_all(&mut self) {
-        let (Some(query), Some(replacement)) = (self.find_query(), self.replace_text()) else {
+        let Some(query) = self.find_query() else {
+            self.status = String::from("Open Replace first (Ctrl+H)");
+            return;
+        };
+        let Some(replacement) = self.replace_text(&query) else {
             self.status = String::from("Open Replace first (Ctrl+H)");
             return;
         };
@@ -958,29 +1061,40 @@ impl EditorApp {
         self.sync_viewport();
     }
 
-    fn replace_text(&self) -> Option<String> {
+    /// The replacement to use for `query`, or `None` when the user has not
+    /// given one *for that query*.
+    fn replace_text(&self, query: &str) -> Option<String> {
         match &self.prompt {
             Prompt::Find { replace, .. } => replace.as_ref().map(|r| r.text.clone()),
-            _ if !self.last_query.is_empty() => Some(self.last_replacement.clone()),
-            _ => None,
+            _ => self
+                .last_replace
+                .as_ref()
+                .filter(|(q, _)| q == query)
+                .map(|(_, r)| r.clone()),
         }
     }
 
-    /// Remembers the replace field, so a Replace All reached from the palette
-    /// still has one.
+    /// Remembers the replace bar's query and replacement together, so a Replace
+    /// All reached from the palette has both or neither.
     fn remember_replacement(&mut self) {
         if let Prompt::Find {
+            query,
             replace: Some(replace),
             ..
         } = &self.prompt
         {
-            self.last_replacement = replace.text.clone();
+            if !query.text.is_empty() {
+                self.last_replace = Some((query.text.clone(), replace.text.clone()));
+            }
         }
     }
 
     // ── prompts ─────────────────────────────────────────────────────────────
 
     fn open_prompt(&mut self, prompt: Prompt) {
+        // A new `Prompt::Find` carries a zeroed readout, so the count has to be
+        // taken again even when nothing about the document changed.
+        self.find_stamp = None;
         self.prompt = prompt;
         self.overlay_scroll = 0;
         self.focus = Focus::Prompt;
@@ -989,6 +1103,7 @@ impl EditorApp {
     }
 
     fn close_prompt(&mut self) {
+        self.find_stamp = None;
         self.prompt = Prompt::None;
         self.focus = Focus::Editor;
         self.sync_viewport();
@@ -1014,26 +1129,25 @@ impl EditorApp {
     }
 
     fn refresh_finder(&mut self) {
-        let paths: Vec<String> = self
-            .tree
-            .file_paths()
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        // Scored against the snapshot taken when the finder opened, by
+        // reference, and cloned only where it survives: the tree holds up to
+        // `MAX_NODES` paths and this runs on every keystroke, so a `String` per
+        // candidate per key is twenty thousand allocations the user waits for.
+        let paths = &self.finder_paths;
         if let Prompt::FileFinder {
             input,
             results,
             selected,
         } = &mut self.prompt
         {
-            let needle = input.text.clone();
-            let mut scored: Vec<(String, i32)> = paths
-                .into_iter()
-                .filter_map(|p| search::fuzzy_score(&p, &needle).map(|s| (p, s)))
+            let needle = input.text.as_str();
+            let mut scored: Vec<(&str, i32)> = paths
+                .iter()
+                .filter_map(|p| search::fuzzy_score(p, needle).map(|s| (p.as_str(), s)))
                 .collect();
             scored.sort_by(|a, b| b.1.cmp(&a.1));
-            scored.truncate(200);
-            *results = scored.into_iter().map(|(p, _)| p).collect();
+            scored.truncate(FINDER_RESULTS);
+            *results = scored.into_iter().map(|(p, _)| p.to_string()).collect();
             *selected = (*selected).min(results.len().saturating_sub(1));
         }
         self.sync_overlay_scroll();
@@ -1129,6 +1243,12 @@ impl EditorApp {
 
     fn run(&mut self, command: Command) {
         self.menu_open = None;
+        // A modal prompt is a question, and running another command abandons
+        // it; the find bar is not one — it coexists with editing, the way
+        // every editor's does — so it stays.
+        if !command.reads_prompt() && !matches!(self.prompt, Prompt::None | Prompt::Find { .. }) {
+            self.close_prompt();
+        }
         match command {
             Command::NewFile => {
                 self.new_document();
@@ -1178,10 +1298,14 @@ impl EditorApp {
             Command::Cut => self.copy_selection(true),
             Command::Copy => self.copy_selection(false),
             Command::Paste => self.paste(),
-            Command::SelectAll => self.doc_mut().select_all(),
+            Command::SelectAll => {
+                self.doc_mut().select_all();
+                self.sync_viewport();
+            }
             Command::SelectLine => {
                 let line = self.doc().cursor.position.line;
                 self.doc_mut().select_line_at(line);
+                self.sync_viewport();
             }
             Command::DuplicateLine => {
                 self.doc_mut().duplicate_line();
@@ -1262,6 +1386,12 @@ impl EditorApp {
             }),
             Command::FileFinder => {
                 self.index_tree();
+                self.finder_paths = self
+                    .tree
+                    .file_paths()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
                 self.open_prompt(Prompt::FileFinder {
                     input: LineInput::new(),
                     results: Vec::new(),
@@ -1502,7 +1632,15 @@ impl EditorApp {
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 self.activate_tree_row(selected)
             }
-            Key::Named(NamedKey::Escape) => self.focus = Focus::Editor,
+            Key::Named(NamedKey::Escape) => {
+                // The same rule as the code surface: Escape closes what is open
+                // before it moves focus.
+                if self.prompt.is_open() {
+                    self.close_prompt();
+                } else {
+                    self.focus = Focus::Editor;
+                }
+            }
             Key::Named(NamedKey::Tab) if !mods.ctrl => self.focus = Focus::Editor,
             _ => {}
         }
@@ -1608,6 +1746,10 @@ impl EditorApp {
             Key::Named(NamedKey::Enter) => {
                 match dialog {
                     Dialog::About => self.dialog = None,
+                    // Enter takes the safe answer on a destructive question:
+                    // the whole point of asking is that the user has to say
+                    // "overwrite" deliberately.
+                    Dialog::ConfirmOverwrite { .. } => self.dialog_action(1),
                     Dialog::ConfirmClose { .. } | Dialog::ConfirmQuit => self.dialog_action(0),
                 }
                 true
@@ -1634,6 +1776,12 @@ impl EditorApp {
                 }
                 1 => self.close_tab(tab, true),
                 _ => {}
+            },
+            Dialog::ConfirmOverwrite {
+                index: tab, path, ..
+            } => match index {
+                0 => self.write_document(tab, path),
+                _ => self.status = String::from("Save cancelled"),
             },
             Dialog::ConfirmQuit => match index {
                 0 => {
@@ -1802,6 +1950,61 @@ impl App for EditorApp {
     }
 
     fn update(&mut self, msg: EditorMsg) -> Action {
+        let action = self.dispatch(msg);
+        // The readout counts matches in a document any message may have
+        // edited, closed or switched away from; leaving it to the individual
+        // handlers meant it was right after a typed character and stale after
+        // everything else.
+        self.refresh_find();
+        action
+    }
+
+    fn on_key(&mut self, key: Key, mods: Modifiers) -> Action {
+        let action = self.dispatch_key(key, mods);
+        self.refresh_find();
+        action
+    }
+
+    fn on_paste(&mut self, text: String) -> Action {
+        let action = self.dispatch_paste(text);
+        self.refresh_find();
+        action
+    }
+
+    fn on_close_request(&mut self) -> (bool, Action) {
+        // The window's close button is Ctrl+Q by another name, and it has to
+        // ask the same question: without this it discarded every modified
+        // buffer with no prompt and no chance to write.
+        if self.any_modified() {
+            self.dialog = Some(Dialog::ConfirmQuit);
+            return (false, Action::Rebuild);
+        }
+        (true, Action::None)
+    }
+
+    fn on_resize(&mut self, width: u32, height: u32) -> Action {
+        self.window_width = width as i32;
+        self.window_height = height as i32;
+        self.sidebar_width = self
+            .sidebar_width
+            .min((self.window_width - view::MIN_CODE_WIDTH).max(MIN_SIDEBAR_WIDTH));
+        self.sync_viewport();
+        Action::Rebuild
+    }
+
+    fn title(&self) -> &str {
+        "Sloped"
+    }
+
+    fn app_id(&self) -> &str {
+        "org.slopos.editor"
+    }
+}
+
+/// The bodies the three `App` entry points above wrap, so the refresh they all
+/// owe is written once instead of at every `return` inside them.
+impl EditorApp {
+    fn dispatch(&mut self, msg: EditorMsg) -> Action {
         match msg {
             EditorMsg::Code(input) => self.handle_code_input(input),
             EditorMsg::Tree(input) => self.handle_tree_input(input),
@@ -1851,7 +2054,7 @@ impl App for EditorApp {
         Action::Rebuild
     }
 
-    fn on_key(&mut self, key: Key, mods: Modifiers) -> Action {
+    fn dispatch_key(&mut self, key: Key, mods: Modifiers) -> Action {
         // Reached only when no widget claimed the key: the dialog, the open
         // menu and whichever pane has focus are all here.
         if self.handle_dialog_key(key) {
@@ -1876,7 +2079,7 @@ impl App for EditorApp {
         Action::Rebuild
     }
 
-    fn on_paste(&mut self, text: String) -> Action {
+    fn dispatch_paste(&mut self, text: String) -> Action {
         if text.is_empty() {
             self.paste_local();
             return Action::Rebuild;
@@ -1891,41 +2094,30 @@ impl App for EditorApp {
         }
         Action::Rebuild
     }
-
-    fn on_close_request(&mut self) -> (bool, Action) {
-        // The window's close button is Ctrl+Q by another name, and it has to
-        // ask the same question: without this it discarded every modified
-        // buffer with no prompt and no chance to write.
-        if self.any_modified() {
-            self.dialog = Some(Dialog::ConfirmQuit);
-            return (false, Action::Rebuild);
-        }
-        (true, Action::None)
-    }
-
-    fn on_resize(&mut self, width: u32, height: u32) -> Action {
-        self.window_width = width as i32;
-        self.window_height = height as i32;
-        self.sidebar_width = self
-            .sidebar_width
-            .min((self.window_width - view::MIN_CODE_WIDTH).max(MIN_SIDEBAR_WIDTH));
-        self.sync_viewport();
-        Action::Rebuild
-    }
-
-    fn title(&self) -> &str {
-        "Sloped"
-    }
-
-    fn app_id(&self) -> &str {
-        "org.slopos.editor"
-    }
 }
 
 pub fn editor_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let app = EditorApp::new(&args);
     slopos_appkit::run_app(app, view::DEFAULT_WIDTH as u32, view::DEFAULT_HEIGHT as u32)
+}
+
+/// What a find readout was counted against; see `EditorApp::find_stamp`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FindStamp {
+    document: u64,
+    revision: u64,
+    anchor: slopos_editor_core::buffer::Position,
+    query: String,
+    options: SearchOptions,
+}
+
+/// Said when a directory read stopped at [`filetree::MAX_NODES`].
+fn tree_full_message() -> String {
+    format!(
+        "Folder has more than {} entries; the tree is showing what fits",
+        slopos_editor_core::filetree::MAX_NODES
+    )
 }
 
 /// A chord's key with its letter folded to lower case.

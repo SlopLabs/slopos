@@ -7,6 +7,7 @@
 use std::fs;
 use std::io::Write;
 
+use slopos_editor_core::document::DiskStamp;
 use slopos_editor_core::filetree::DirEntry;
 
 /// Largest file the editor opens. Past it the buffer's per-line `String` vector
@@ -136,6 +137,22 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, String> {
         out.push(DirEntry { name, is_dir });
     }
     Ok(out)
+}
+
+/// What `path` looks like on the medium right now, or `None` when it is not
+/// there (or the filesystem will not say).
+pub fn disk_stamp(path: &str) -> Option<DiskStamp> {
+    let meta = fs::metadata(path).ok()?;
+    let modified_secs = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(DiskStamp {
+        modified_secs,
+        len: meta.len(),
+    })
 }
 
 pub fn is_file(path: &str) -> bool {

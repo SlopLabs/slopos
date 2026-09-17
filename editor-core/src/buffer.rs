@@ -293,11 +293,6 @@ impl TextBuffer {
         self.line_ending
     }
 
-    pub fn set_line_ending(&mut self, ending: LineEnding) {
-        self.line_ending = ending;
-        self.revision += 1;
-    }
-
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
@@ -316,12 +311,6 @@ impl TextBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.lines.len() == 1 && self.lines[0].is_empty()
-    }
-
-    /// Total characters, counting one line terminator between lines.
-    pub fn char_count(&self) -> usize {
-        let newlines = self.lines.len().saturating_sub(1);
-        self.lines.iter().map(|l| l.chars().count()).sum::<usize>() + newlines
     }
 
     pub fn end_position(&self) -> Position {
@@ -345,12 +334,17 @@ impl TextBuffer {
         Position::new(line, pos.col.min(self.line_len(line)))
     }
 
-    /// Whether inserting `text` anywhere would pass [`MAX_LINES`].
+    /// Whether inserting `text` after dropping `removing` lines would pass
+    /// [`MAX_LINES`].
     ///
     /// Asked *before* an edit begins, so an operation that would be refused
-    /// destroys nothing on the way to finding out.
-    pub fn would_exceed_line_limit(&self, text: &str) -> bool {
-        !text.is_empty() && self.lines.len() + text.matches('\n').count() > MAX_LINES
+    /// destroys nothing on the way to finding out — which is also why the
+    /// pending delete has to be given here rather than observed: replacing a
+    /// thousand selected lines with a thousand others is a net change of zero,
+    /// and a check that only counted the insert refused it.
+    pub fn would_exceed_line_limit(&self, text: &str, removing: usize) -> bool {
+        !text.is_empty()
+            && self.lines.len().saturating_sub(removing) + text.matches('\n').count() > MAX_LINES
     }
 
     /// Inserts `text` at `pos`, returning the position just past it — or the
@@ -455,19 +449,6 @@ impl TextBuffer {
         let last = self.line(end.line);
         out.push_str(&last[..self.byte_of(end.line, end.col)]);
         out
-    }
-
-    /// Replaces line `index` wholesale; used by indent operations, which rewrite
-    /// a line's leading whitespace without disturbing the rest of it.
-    pub fn replace_line(&mut self, index: usize, text: String) {
-        if index < self.lines.len() {
-            self.revision += 1;
-            self.lines[index] = text;
-        }
-    }
-
-    pub fn char_at(&self, pos: Position) -> Option<char> {
-        self.line(pos.line).chars().nth(pos.col)
     }
 
     /// Characters of leading whitespace on `line`.

@@ -982,7 +982,7 @@ What it rests on, in case a later phase disturbs it:
   the buffer, the cursor and its motions, the edit operations with their undo
   history, literal search, the fuzzy matcher and the syntax lexer, and it
   touches no syscall — the same split `terminal-core` and `shell-core` already
-  draw, and the reason 82 cases run under `just test-host` in milliseconds and
+  draw, and the reason 91 cases run under `just test-host` in milliseconds and
   again in the guest under `just test`. The application above it owns the
   filesystem, the clipboard, the keymap and the window.
 - **A line vector, not a rope, and the trade is stated.** What this edits is
@@ -1073,7 +1073,11 @@ What it rests on, in case a later phase disturbs it:
   image, a device error — would leave the user's file gone while the editor
   held the only copy. A save writes a sibling, `fsync`s it and renames over the
   target, which the journal makes one atomic metadata operation: what is on the
-  medium is the old file or the whole new one, never a prefix of either.
+  medium is the old file or the whole new one, never a prefix of either. It
+  also asks before writing at all when the file it is about to land on is not
+  the one the tab read — changed underneath it, gone, or a Save As target that
+  already exists — compared by modification time and length, recorded at open
+  and re-taken at every save.
 
 **What this deliberately did not do.**
 
@@ -1084,7 +1088,10 @@ What it rests on, in case a later phase disturbs it:
   one before `(` as a call, because that is what a lexer can know.
 - **No LSP, no multi-cursor, no split panes, no file watching.** Each is a
   separate feature with its own state; none of them is what "you can edit a
-  file" needs, and a file changed underneath the editor is not noticed.
+  file" needs. A file changed underneath the editor is therefore not noticed
+  *while it is open* — the buffer does not reload and nothing marks it stale —
+  only at the moment a save would overwrite it, which is where the damage
+  would be.
 - **The terminal editor was not written.** The plan offered either; the GUI one
   is what landed, because the toolkit gap it closed (a real text widget, a
   proportional font, a tree) is what every other SlopOS application needed too,

@@ -65,7 +65,7 @@ pub fn code_viewport(
         width -= sidebar_width + SPLITTER_WIDTH;
     }
     let gutter = slopos_appkit::gutter_width(line_count.unwrap_or(1), cell_w, show_line_numbers);
-    let cols = ((width - gutter - 16).max(0) / cell_w) as usize;
+    let cols = ((width - gutter - slopos_appkit::text_area_reserved()).max(0) / cell_w) as usize;
     (lines, cols.max(1))
 }
 
@@ -761,6 +761,30 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                 on_dismiss: Some(EditorMsg::Dialog(2)),
             }
         }
+        Dialog::ConfirmOverwrite { detail, .. } => Node::Dialog {
+            title: String::from("Overwrite?"),
+            content: Box::new(Node::Label {
+                text: format!("{detail}\n\nSaving replaces it with this tab's contents."),
+                alignment: TextAlignment::Start,
+                wrap: true,
+                max_lines: None,
+            }),
+            actions: vec![
+                Node::Button {
+                    label: String::from("Overwrite"),
+                    on_press: Some(EditorMsg::Dialog(0)),
+                    style: ButtonStyle::Destructive,
+                    enabled: true,
+                },
+                Node::Button {
+                    label: String::from("Cancel"),
+                    on_press: Some(EditorMsg::Dialog(1)),
+                    style: ButtonStyle::Secondary,
+                    enabled: true,
+                },
+            ],
+            on_dismiss: Some(EditorMsg::Dialog(1)),
+        },
         Dialog::ConfirmQuit => Node::Dialog {
             title: String::from("Unsaved changes"),
             content: Box::new(Node::Label {

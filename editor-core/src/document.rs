@@ -13,6 +13,18 @@ use crate::cursor::{Cursor, Motion, line_range, word_at};
 use crate::history::{Change, History};
 use crate::syntax::{Highlighter, Language, LineState, Span, detect_language};
 
+/// A file on disk as it was when a document last agreed with it.
+///
+/// Opaque to the core — the application's filesystem layer mints it — but held
+/// here, because what it describes is a tab. Second granularity and a length:
+/// a write inside the same second that keeps the length is invisible to it,
+/// which is the same blind spot every editor that does this has.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DiskStamp {
+    pub modified_secs: u64,
+    pub len: u64,
+}
+
 /// Where the viewport starts, in lines and columns. The view sets the extent;
 /// the document owns the origin so a tab remembers where it was scrolled to.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -49,6 +61,9 @@ pub struct Document {
     title: String,
     language: Language,
     indent: IndentStyle,
+    /// What the file looked like when this document last agreed with it; see
+    /// [`DiskStamp`]. `None` for a buffer with no file yet.
+    disk_stamp: Option<DiskStamp>,
     /// Buffer revision the file on disk holds; `modified` is a comparison, not
     /// a flag that has to be cleared everywhere.
     saved_revision: u64,
@@ -100,6 +115,7 @@ impl Document {
             language,
             indent,
             saved_revision,
+            disk_stamp: None,
             highlighter: Highlighter::new(language),
             states: RefCell::new(StateCache {
                 states: alloc::vec![LineState::Normal],
@@ -119,6 +135,14 @@ impl Document {
     /// Undo steps held. The cap is a memory bound, so it is worth asserting.
     pub fn undo_depth(&self) -> usize {
         self.history.undo_depth()
+    }
+
+    pub fn disk_stamp(&self) -> Option<DiskStamp> {
+        self.disk_stamp
+    }
+
+    pub fn set_disk_stamp(&mut self, stamp: Option<DiskStamp>) {
+        self.disk_stamp = stamp;
     }
 
     /// This document's stable identity, which its tab position is not.
@@ -293,7 +317,12 @@ impl Document {
         // dedent below reads the line the text will land on), which means a
         // ceiling check afterwards would report "refused" over a buffer that
         // had already lost the selection.
-        if self.buffer.would_exceed_line_limit(text) {
+        let removing = self
+            .cursor
+            .selection()
+            .map(|range| range.end.line - range.start.line)
+            .unwrap_or(0);
+        if self.buffer.would_exceed_line_limit(text, removing) {
             if transactional {
                 self.history.end(self.cursor);
             }
@@ -619,21 +648,12 @@ impl Document {
                     last_delta = delta;
                 }
             } else {
-                let removable = match self.indent {
-                    IndentStyle::Tabs(_) => {
-                        if text.starts_with('\t') {
-                            1
-                        } else {
-                            text.chars().take(width).take_while(|c| *c == ' ').count()
-                        }
-                    }
-                    IndentStyle::Spaces(_) => {
-                        if text.starts_with('\t') {
-                            1
-                        } else {
-                            text.chars().take(width).take_while(|c| *c == ' ').count()
-                        }
-                    }
+                // A leading tab goes whole whichever style the file is in: a
+                // tab-indented line in a spaces file is still one level.
+                let removable = if text.starts_with('\t') {
+                    1
+                } else {
+                    text.chars().take(width).take_while(|c| *c == ' ').count()
                 };
                 if removable == 0 {
                     continue;
@@ -681,21 +701,32 @@ impl Document {
         let non_blank: Vec<usize> = (first..=last)
             .filter(|l| !self.buffer.line(*l).trim().is_empty())
             .collect();
-        if non_blank.is_empty() {
-            return;
-        }
+        // Blank lines are skipped so commenting a block does not litter them
+        // with tokens — unless there is nothing *but* blank lines, in which
+        // case skipping them means the key does nothing at all. That is also
+        // what makes the toggle round-trip: uncommenting a bare `//` leaves an
+        // empty line, which must be commentable again.
+        let lines: Vec<usize> = if non_blank.is_empty() {
+            (first..=last).collect()
+        } else {
+            non_blank
+        };
         // Opened only once there is something to do: a `begin` without its
         // `end` would leave every later edit merging into one undo group.
         self.history.begin();
-        let all_commented = non_blank
+        let all_commented = lines
             .iter()
             .all(|l| self.buffer.line(*l).trim_start().starts_with(token));
 
         let cursor_before = self.cursor;
-        for line in non_blank {
+        // The caret rides the text it was sitting in rather than staying at a
+        // column that now holds the comment token.
+        let mut shift_position = 0isize;
+        let mut shift_anchor = 0isize;
+        for line in lines {
             let text = self.buffer.line(line);
             let indent = self.buffer.indent_len(line);
-            if all_commented {
+            let delta = if all_commented {
                 let rest: String = text.chars().skip(indent).collect();
                 let stripped = rest.strip_prefix(token).unwrap_or(&rest);
                 let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
@@ -704,15 +735,31 @@ impl Document {
                     Position::new(line, indent),
                     Position::new(line, indent + removed),
                 ));
+                -(removed as isize)
             } else {
                 let mut insert = String::from(token);
                 insert.push(' ');
                 self.apply_insert(Position::new(line, indent), &insert, false);
+                insert.chars().count() as isize
+            };
+            if cursor_before.position.line == line && cursor_before.position.col >= indent {
+                shift_position = delta;
+            }
+            if let Some(anchor) = cursor_before.anchor {
+                if anchor.line == line && anchor.col >= indent {
+                    shift_anchor = delta;
+                }
             }
         }
+        let shift =
+            |pos: Position, by: isize| Position::new(pos.line, pos.col.saturating_add_signed(by));
         self.cursor = Cursor {
-            position: self.buffer.clamp(cursor_before.position),
-            anchor: cursor_before.anchor.map(|a| self.buffer.clamp(a)),
+            position: self
+                .buffer
+                .clamp(shift(cursor_before.position, shift_position)),
+            anchor: cursor_before
+                .anchor
+                .map(|a| self.buffer.clamp(shift(a, shift_anchor))),
             goal_col: None,
         };
         self.history.end(self.cursor);
