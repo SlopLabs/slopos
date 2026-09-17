@@ -275,11 +275,27 @@ impl Widget for TabBarWidget {
         FocusPolicy::StrongFocus
     }
 
+    /// Only the visible panel.
+    ///
+    /// Every panel is laid out at the same rect, so exposing them all means a
+    /// hit test — which walks children in reverse — can only ever resolve into
+    /// the *last* one. Events were routed correctly anyway, but focus is
+    /// derived from the hit, so it landed on a control in an invisible tab and
+    /// the visible one never received `FocusGained`. With widgets now gated on
+    /// focus that is the difference between a text field you can type into and
+    /// one you cannot.
     fn children(&self) -> &[Box<dyn Widget>] {
-        &self.content
+        self.content
+            .get(self.active)
+            .map(core::slice::from_ref)
+            .unwrap_or(&[])
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut self.content
+        let active = self.active;
+        self.content
+            .get_mut(active)
+            .map(core::slice::from_mut)
+            .unwrap_or(&mut [])
     }
 }

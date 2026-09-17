@@ -399,7 +399,12 @@ impl<'a> TtfFont<'a> {
         let mut start = 0usize;
         for &end in &end_pts {
             let end = end as usize;
-            if end >= num_points {
+            // `endPtsOfContours` comes from the file and is not checked to be
+            // monotonic, so a malformed font can put `end` behind `start` —
+            // which underflows the capacity below and, with overflow checks on,
+            // aborts a process whose every other path degrades to a fallback
+            // font.
+            if end >= num_points || end < start {
                 break;
             }
             let mut points: KVec<OutlinePoint> = KVec::with_capacity(end - start + 1).ok()?;

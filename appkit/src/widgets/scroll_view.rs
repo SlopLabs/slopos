@@ -435,7 +435,12 @@ impl Widget for ScrollViewWidget {
                 EventResponse::Ignored
             }
 
-            _ => EventResponse::Ignored,
+            // Anything this view does not handle itself belongs to what it is
+            // scrolling. Without this a control placed inside one received no
+            // events at all, while `children()` still offered it to the hit
+            // test and to the tab chain — so the framework could focus a widget
+            // nothing could reach.
+            _ => self.child.event(event, phase, sink),
         }
     }
 

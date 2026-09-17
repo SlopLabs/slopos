@@ -46,7 +46,7 @@ impl DialogWidget {
         }
     }
 
-    fn cycle_action(&mut self, forward: bool) {
+    fn cycle_action(&mut self, forward: bool, sink: &mut MessageSink) {
         let len = self.actions.len();
         if len == 0 {
             return;
@@ -62,13 +62,13 @@ impl DialogWidget {
         // The dialog runs its own focus ring, so the framework never tells
         // these buttons anything — and a button that was never told it has
         // focus answers no key, which left Tab moving a ring that Enter could
-        // not act on.
-        let mut sink = MessageSink::new();
+        // not act on. The caller's sink, not a local one: a message emitted
+        // here would otherwise be dropped on the floor.
         if let Some(action) = previous.and_then(|i| self.actions.get_mut(i)) {
-            action.event(&WidgetEvent::FocusLost, EventPhase::Target, &mut sink);
+            action.event(&WidgetEvent::FocusLost, EventPhase::Target, sink);
         }
         if let Some(action) = self.actions.get_mut(next) {
-            action.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
+            action.event(&WidgetEvent::FocusGained, EventPhase::Target, sink);
         }
     }
 
@@ -303,15 +303,15 @@ impl Widget for DialogWidget {
             WidgetEvent::KeyDown { key, modifiers, .. } => {
                 match key {
                     Key::Named(NamedKey::Tab) => {
-                        self.cycle_action(!modifiers.shift);
+                        self.cycle_action(!modifiers.shift, sink);
                         return EventResponse::Consumed;
                     }
                     Key::Named(NamedKey::Right) | Key::Named(NamedKey::Down) => {
-                        self.cycle_action(true);
+                        self.cycle_action(true, sink);
                         return EventResponse::Consumed;
                     }
                     Key::Named(NamedKey::Left) | Key::Named(NamedKey::Up) => {
-                        self.cycle_action(false);
+                        self.cycle_action(false, sink);
                         return EventResponse::Consumed;
                     }
                     _ => {}
@@ -331,6 +331,11 @@ impl Widget for DialogWidget {
                     EventResponse::Consumed
                 }
             }
+
+            // The dialog owns its own focus ring, so a focus event aimed at
+            // the dialog stops here: forwarding it to the catch-all below
+            // marked *every* action focused, and each then drew a ring.
+            WidgetEvent::FocusGained | WidgetEvent::FocusLost => EventResponse::Ignored,
 
             _ => {
                 for action in &mut self.actions {

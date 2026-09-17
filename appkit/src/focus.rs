@@ -84,7 +84,13 @@ impl FocusManager {
     pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) -> Option<WidgetId> {
         self.tab_chain.clear();
         Self::collect_focusable(root, &mut self.tab_chain);
-        let index = self.focused_index?;
+        let Some(index) = self.focused_index else {
+            // Nothing to restore, and what `focused` names was destroyed by the
+            // rebuild — leaving it makes `move_focus_next` fail its lookup and
+            // jump back to the first control instead of advancing.
+            self.focused = None;
+            return None;
+        };
         // Only when the view kept its shape. A position is a stand-in for
         // identity and nothing more: if the chain gained or lost a control the
         // same index is a *different* widget, and restoring focus onto it puts

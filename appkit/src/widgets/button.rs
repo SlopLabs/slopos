@@ -123,7 +123,17 @@ impl Widget for ButtonWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let (bg, fg) = button_colors(ctx.style, self.style, self.state);
+        // Hover from the live pointer. `PointerEnter`/`PointerLeave` are
+        // declared and never constructed, so the only thing that ever set
+        // `Hovered` was a release on this button — and the rebuild that
+        // followed reset it. Every hover colour in this file was unreachable.
+        let state = match self.state {
+            ButtonState::Idle if self.enabled && rect.contains(ctx.pointer.0, ctx.pointer.1) => {
+                ButtonState::Hovered
+            }
+            other => other,
+        };
+        let (bg, fg) = button_colors(ctx.style, self.style, state);
 
         ctx.fill_rounded_rect(
             rect.x,
@@ -256,7 +266,13 @@ impl Widget for ButtonWidget {
         Some(&self.label)
     }
 
+    /// A disabled control is not a tab stop: it answers nothing, draws no ring,
+    /// and leaving it in the chain makes Tab appear to skip two.
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+        if self.enabled {
+            FocusPolicy::StrongFocus
+        } else {
+            FocusPolicy::None
+        }
     }
 }

@@ -126,9 +126,14 @@ impl Widget for DragHandleWidget {
                 EventResponse::Ignored
             }
             WidgetEvent::PointerUp { .. } => {
-                // Unconditional, for the same reason the code surface's release
-                // is: `active` is what the last rebuild was told, and a click
-                // that never moved never had one.
+                // Only a drag this handle is in. The release reaches every
+                // widget the pointer missed, so an unconditional `End` made a
+                // click anywhere in the window emit one — and every emitted
+                // message costs a whole rebuild. `active` is what the last
+                // rebuild was told, which is exactly the drag that needs ending.
+                if !self.active {
+                    return EventResponse::Ignored;
+                }
                 self.emit(DragInput::End, sink);
                 EventResponse::ReleasePointer
             }

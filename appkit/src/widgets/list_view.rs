@@ -180,15 +180,12 @@ impl Widget for ListViewWidget {
                 if *delta_y == 0 {
                     return EventResponse::Ignored;
                 }
-                let line_height = self.item_height;
-                let scroll_lines = if *delta_y > 0 {
-                    (delta_y / 120).max(1) * 3
-                } else {
-                    (delta_y / 120).min(-1) * 3
-                };
+                // `delta_y` is already pixels — `translate_event` converts the
+                // wire's v120 units — so the old `/120` was always zero and
+                // every notch moved exactly three rows whatever its size.
                 let old = self.scroll_offset;
-                self.scroll_offset = (self.scroll_offset + scroll_lines * line_height)
-                    .clamp(0, self.max_scroll_offset());
+                self.scroll_offset =
+                    (self.scroll_offset + delta_y).clamp(0, self.max_scroll_offset());
 
                 if self.scroll_offset != old {
                     self.place_items();

@@ -345,7 +345,7 @@ impl<'a> FontRenderer<'a> {
                     .expect("shifted_edges: alloc");
 
                 let coverage =
-                    rasterize(&shifted_edges, glyph_width as usize, glyph_height as usize);
+                    rasterize(&shifted_edges, glyph_width as usize, glyph_height as usize)?;
 
                 Some(RasterizedGlyph {
                     width: glyph_width as u16,

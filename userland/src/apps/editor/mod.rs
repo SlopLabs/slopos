@@ -1892,6 +1892,17 @@ impl App for EditorApp {
         Action::Rebuild
     }
 
+    fn on_close_request(&mut self) -> (bool, Action) {
+        // The window's close button is Ctrl+Q by another name, and it has to
+        // ask the same question: without this it discarded every modified
+        // buffer with no prompt and no chance to write.
+        if self.any_modified() {
+            self.dialog = Some(Dialog::ConfirmQuit);
+            return (false, Action::Rebuild);
+        }
+        (true, Action::None)
+    }
+
     fn on_resize(&mut self, width: u32, height: u32) -> Action {
         self.window_width = width as i32;
         self.window_height = height as i32;

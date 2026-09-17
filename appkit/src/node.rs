@@ -330,6 +330,16 @@ pub trait App {
         Action::None
     }
 
+    /// Called when the window's close button is pressed.
+    ///
+    /// Returning `false` refuses the close, which is what lets an application
+    /// ask before discarding unsaved work; the default accepts it. An
+    /// application that refuses is responsible for offering the user a way out
+    /// — a confirmation dialog — and for exiting itself once they choose.
+    fn on_close_request(&mut self) -> (bool, Action) {
+        (true, Action::None)
+    }
+
     /// Called when the compositor resizes the window, before the tree rebuilds.
     ///
     /// An app that sizes its own content in rows — an editor's viewport, a

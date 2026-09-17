@@ -1366,6 +1366,50 @@ fn test_scroll_goes_to_what_is_under_the_pointer() {
     assert_eq!((left.get(), right.get()), (1, 1), "right half");
 }
 
+fn test_only_the_visible_tab_panel_is_reachable() {
+    use super::widgets::tab_bar::TabBarWidget;
+    // Every panel is laid out at the same rect, so exposing them all means a
+    // hit test — which walks children in reverse — can only ever resolve into
+    // the last one, and focus follows the hit.
+    let panels: Vec<Box<dyn Widget>> = vec![
+        Box::new(FixedSizeWidget::focusable(100, 40)),
+        Box::new(FixedSizeWidget::new(100, 40)),
+    ];
+    let mut bar = TabBarWidget::new(
+        vec![String::from("one"), String::from("two")],
+        0,
+        None,
+        panels,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut bar,
+        BoxConstraints::tight(Size::new(200, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut bar, Rect::new(0, 0, 200, 200));
+    assert_eq!(bar.children().len(), 1);
+    // Tab 0 is active, so its panel — the focusable one — is what a hit finds.
+    let hit = hit_test(&bar, 50, 150).expect("a hit inside the panel");
+    let policy = {
+        fn find(w: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {
+            if w.id() == id {
+                return w.focus_policy();
+            }
+            for child in w.children() {
+                let p = find(child.as_ref(), id);
+                if p.is_focusable() {
+                    return p;
+                }
+            }
+            FocusPolicy::None
+        }
+        find(&bar, hit.target)
+    };
+    assert!(policy.is_focusable());
+}
+
 fn test_a_popup_swallows_a_press_its_child_ignored() {
     // A press inside the popup that the child did not want — a menu separator,
     // the padding round a palette's list — is still the popup's. Letting it
@@ -1579,6 +1623,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "a_popup_swallows_a_press_its_child_ignored",
             test_a_popup_swallows_a_press_its_child_ignored,
+        ),
+        (
+            "only_the_visible_tab_panel_is_reachable",
+            test_only_the_visible_tab_panel_is_reachable,
         ),
         (
             "line_edit_reports_keys_only_when_focused",

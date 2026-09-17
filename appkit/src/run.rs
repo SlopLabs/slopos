@@ -75,7 +75,14 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             win.track_pointer(&ev);
 
             match &ev {
-                Event::CloseRequest => std::process::exit(0),
+                Event::CloseRequest => {
+                    let (accept, action) = app.on_close_request();
+                    if accept {
+                        std::process::exit(0);
+                    }
+                    process_action(action, &mut needs_rebuild, &mut needs_repaint);
+                    continue;
+                }
                 Event::ClipboardOffer { len } => {
                     if !super::clipboard::accept_offer(*len) {
                         // An empty offer, or one we could not take delivery of,
@@ -256,6 +263,13 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         }
 
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
+            0
+        } else if count == proto_events.len() {
+            // The batch filled the buffer, so the connection may still hold
+            // decoded events — and it will, because one `recvmsg` can carry
+            // hundreds. Blocking on the socket here sleeps with those events in
+            // hand: a fast drag's release sits unread until the *next* event
+            // arrives, and the selection goes on following the pointer.
             0
         } else if let Some(interval) = app.tick_interval_ms() {
             let now = slopos_windowing::get_time_ms();

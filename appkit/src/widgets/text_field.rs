@@ -339,10 +339,12 @@ impl Widget for TextFieldWidget {
                 resp
             }
 
-            WidgetEvent::PointerDown {
-                x, y: _, button, ..
-            } => {
-                if *button != PointerButton::Left {
+            WidgetEvent::PointerDown { x, y, button, .. } => {
+                // Containment, like every other widget: a `ZStack`, a `Card`
+                // and a `Padding` all forward a press without filtering, so a
+                // field under one would swallow a click aimed at the layer
+                // beneath and move its own caret.
+                if *button != PointerButton::Left || !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
                 let idx = self.x_to_char_index(*x);

@@ -186,8 +186,14 @@ impl Widget for CheckboxWidget {
         Some(&self.label)
     }
 
+    /// A disabled control is not a tab stop: it answers nothing, draws no ring,
+    /// and leaving it in the chain makes Tab appear to skip two.
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+        if self.enabled {
+            FocusPolicy::StrongFocus
+        } else {
+            FocusPolicy::None
+        }
     }
 }
 

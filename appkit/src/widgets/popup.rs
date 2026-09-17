@@ -115,12 +115,18 @@ impl Widget for PopupWidget {
                 EventResponse::Consumed
             }
 
-            // Tab is the framework's, not the tree's: swallowing it would
-            // freeze focus wherever it was when the popup opened.
+            // Tab goes to the child and no further. Letting it fall through
+            // was right while nothing focused a popup; now that one holds the
+            // keyboard while it is open, passing Tab down to the layer beneath
+            // means the document behind an open menu gets indented by a key
+            // press the UI presents as modal.
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Tab),
                 ..
-            } => self.child.event(event, EventPhase::Target, sink),
+            } => {
+                self.child.event(event, EventPhase::Target, sink);
+                EventResponse::Consumed
+            }
 
             // Motion passes through. A popup is modal against *acting*, not
             // against knowing where the pointer is: the menu bar underneath
