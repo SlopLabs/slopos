@@ -16,7 +16,6 @@
 #         --emit-allowlist builddir/kernel-release.elf
 
 # Classified `Power`.
-syscall_halt
 syscall_reboot
 
 # NOT `Power`: `Fate`, and its loss arm reaches the reboot primitive two calls

@@ -22,7 +22,7 @@ use slopos_ostd::task::{ExitInfo, new_group_in_session, new_session_group};
 use slopos_sched::scheduler::task_apply_affinity;
 use slopos_sched::task::{
     task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
-    task_peek_exit_info, task_reset_caught_handlers, task_terminate,
+    task_peek_exit_info, task_reset_caught_handlers,
 };
 use slopos_sched::task_struct::{Current, Task};
 
@@ -31,7 +31,7 @@ use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
 use crate::exec;
-use crate::syscall::args::{Tid, UserBytes, UserPath, UserPtr};
+use crate::syscall::args::{UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{
     USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
 };
@@ -395,7 +395,7 @@ fn child_report(child: &Task, wuntraced: bool, wcontinued: bool) -> Option<WaitR
     None
 }
 
-/// Whether `waitpid` may report `child` at all.
+/// Whether `wait4` may report `child` at all.
 ///
 /// A non-leader thread is linked into its group leader's parent's children
 /// list, but `wait` reports *processes*: returning one would hand its tid back
@@ -461,11 +461,17 @@ fn finish_wait(report: WaitReport, status: Option<UserPtr<i32>>) -> Result<u64, 
     Ok(report.child_id as u64)
 }
 
-define_syscall!(syscall_waitpid
-    (ctx, pid: i32, status: Option<UserPtr<i32>>, options: u32) cap(NoneRelation)
+define_syscall!(syscall_wait4
+    (ctx, pid: i32, status: Option<UserPtr<i32>>, options: u32, rusage: u64)
+    cap(NoneRelation)
     -> Result<u64, Errno>
 {
     if options & !WAIT_OPTIONS_MASK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    // There is no per-task resource accounting to report, and a zeroed
+    // `struct rusage` would be a lie the caller cannot detect.
+    if rusage != 0 {
         return Err(Errno::EINVAL);
     }
     // `0` and `< -1` name a process group, and SlopOS implements no group
@@ -523,35 +529,7 @@ define_syscall!(syscall_waitpid
     }
 });
 
-define_syscall!(syscall_terminate_task
-    (ctx, target: Tid)
-    cap(NoneRelation)
-    -> Result<(), Errno>
-{
-    let target_id = target.raw();
-    if target_id == 0 {
-        return Err(Errno::EINVAL);
-    }
-    let caller_id = ctx.task_id();
-    if target_id == caller_id {
-        return Err(Errno::EINVAL);
-    }
-    // Resolved and authorized in one step, and the authorization *carries the
-    // target*. This handler used to carry `requires(compositor)` and then
-    // terminate `target_id` with only a self-exclusion, which is the shape a
-    // bare witness cannot fix: the variable that is checked must be the
-    // variable subsequently used.
-    let target = crate::syscall::signalable::resolve_signal_target(
-        ctx.task().flags,
-        target_id,
-    )?;
-    if task_terminate(target.id()) != 0 {
-        return Err(Errno::EINVAL);
-    }
-    Ok(())
-});
-
-define_syscall!(syscall_exec
+define_syscall!(syscall_execve
     (ctx, path_ptr: u64, argv_ptr: u64, envp_ptr: u64)
     cap(NoneSelf)
     requires(let process_id: process_id)
@@ -721,53 +699,107 @@ define_syscall!(syscall_exec
     }
 });
 
-define_syscall!(syscall_get_cpu_count (ctx) cap(NoneSelf)
-    -> Result<u64, Errno> {
-    Ok(slopos_arch::pcr::get_cpu_count() as u64)
+/// The kernel's own affinity mask is a `u32`, so that is the widest cpu set a
+/// `sched_*affinity` call can carry. A caller naming a wider `cpusetsize` —
+/// glibc's `cpu_set_t` is 128 bytes — has the excess zero-filled on `get` and
+/// ignored on `set`, which is what Linux does past `cpumask_size()`.
+const AFFINITY_MASK_BYTES: usize = core::mem::size_of::<u32>();
+
+/// One bit per online CPU. `Task::cpu_affinity` stores 0 for "any CPU", and
+/// this is the set that means.
+fn online_cpu_mask() -> u32 {
+    let count = slopos_arch::pcr::get_cpu_count();
+    if count >= u32::BITS as usize {
+        u32::MAX
+    } else {
+        (1u32 << count) - 1
+    }
+}
+
+/// Resolve a `sched_*affinity` `pid` (0 is the caller) inside the caller's own
+/// address space.
+///
+/// Unchecked, any task could pin a `NO_PREEMPT` spinner per CPU and wedge
+/// every core, so pinning is confined to a shared address space. Compared as
+/// tables, not numbers — a recycled id would let a *later* process pass.
+fn affinity_target(
+    pid: u32,
+    task_id: u32,
+    process_id: FdTable,
+) -> Result<slopos_sched::task::TaskRef, Errno> {
+    let resolved = if pid == 0 { task_id } else { pid };
+    let task_ref = task_find_by_id(resolved).ok_or(Errno::ESRCH)?;
+    if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
+        return Err(Errno::EPERM);
+    }
+    Ok(task_ref)
+}
+
+define_syscall!(syscall_getcpu
+    (ctx, cpu: Option<UserPtr<u32>>, node: Option<UserPtr<u32>>, _unused: u64)
+    cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    if let Some(out) = cpu {
+        let id = slopos_arch::pcr::get_current_cpu() as u32;
+        copy_to_user(out.inner(), &id).map_err(|_| Errno::EFAULT)?;
+    }
+    // No NUMA topology is discovered, so every CPU sits on node 0.
+    if let Some(out) = node {
+        copy_to_user(out.inner(), &0u32).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(())
 });
 
-define_syscall!(syscall_get_current_cpu (ctx) cap(NoneSelf)
-    -> Result<u64, Errno> {
-    Ok(slopos_arch::pcr::get_current_cpu() as u64)
-});
-
-define_syscall!(syscall_set_cpu_affinity
-    (ctx, target: u32, new_affinity: u32)
+define_syscall!(syscall_sched_setaffinity
+    (ctx, pid: u32, cpusetsize: u64, mask: u64)
     cap(NoneRelation)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<(), Errno>
 {
-    let resolved = if target == 0 { task_id } else { target };
-    let Some(task_ref) = task_find_by_id(resolved) else {
-        return Err(Errno::ESRCH);
-    };
-    // Unchecked, any task could pin a `NO_PREEMPT` spinner per CPU and wedge
-    // every core, so pinning is confined to a shared address space. Compared as
-    // tables, not numbers — a recycled id would let a *later* process pass.
-    if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
-        return Err(Errno::EPERM);
+    // A short mask zero-extends and a long one truncates, as Linux's
+    // `get_user_cpu_mask` does.
+    let mut bytes = [0u8; AFFINITY_MASK_BYTES];
+    let want = cpusetsize.min(AFFINITY_MASK_BYTES as u64);
+    if want != 0 {
+        syscall_bounded_from_user(&mut bytes, mask, want, AFFINITY_MASK_BYTES)
+            .map_err(|_| Errno::EFAULT)?;
     }
-    task_ref.set_cpu_affinity(new_affinity);
+    let task_ref = affinity_target(pid, task_id, process_id)?;
+    // An empty intersection with the online set names no CPU the task could
+    // ever run on. It cannot be stored either: 0 is this kernel's "any CPU".
+    let requested = u32::from_le_bytes(bytes) & online_cpu_mask();
+    if requested == 0 {
+        return Err(Errno::EINVAL);
+    }
+    task_ref.set_cpu_affinity(requested);
     // Stamping the mask is not enough — re-place the task so the new mask
     // actually governs where it runs.
-    task_apply_affinity(&task_ref, new_affinity);
+    task_apply_affinity(&task_ref, requested);
     Ok(())
 });
 
-define_syscall!(syscall_get_cpu_affinity
-    (ctx, target: u32)
+define_syscall!(syscall_sched_getaffinity
+    (ctx, pid: u32, cpusetsize: u64, mask: u64)
     cap(NoneRelation)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let resolved = if target == 0 { task_id } else { target };
-    let Some(task_ref) = task_find_by_id(resolved) else {
-        return Err(Errno::ESRCH);
-    };
-    if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
-        return Err(Errno::EPERM);
+    // A buffer that cannot name every online CPU is refused rather than
+    // answered with a truncated set the caller would read as complete.
+    if cpusetsize.saturating_mul(8) < slopos_arch::pcr::get_cpu_count() as u64 {
+        return Err(Errno::EINVAL);
     }
-    Ok(task_ref.cpu_affinity() as u64)
+    let task_ref = affinity_target(pid, task_id, process_id)?;
+    // A stored 0 is "any CPU", reported as the online set — what it means, and
+    // what Linux answers for a task that was never pinned.
+    let stored = task_ref.cpu_affinity();
+    let online = online_cpu_mask();
+    let effective = if stored == 0 { online } else { stored & online };
+    let write_len = (cpusetsize as usize).min(AFFINITY_MASK_BYTES);
+    syscall_copy_to_user_bounded(mask, &effective.to_le_bytes()[..write_len])
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(write_len as u64)
 });
 
 // POSIX `getpid` is the *thread group* id: every thread of a process must see

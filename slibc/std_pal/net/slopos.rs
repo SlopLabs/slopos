@@ -169,7 +169,6 @@ pub mod netc {
     pub const SHUT_WR: c_int = 1;
     pub const SHUT_RDWR: c_int = 2;
 
-    pub const MSG_PEEK: c_int = 0x2;
     pub const MSG_NOSIGNAL: c_int = 0x4000;
 
     pub const POLLIN: i16 = 0x0001;
@@ -182,6 +181,7 @@ pub mod netc {
     // Values follow the Linux numbering; keep them in lock-step with
     // `slopos-abi::syscall::errno_defs`.
     pub const EINTR: c_int = 4;
+    pub const EOPNOTSUPP: c_int = 95;
     pub const EMSGSIZE: c_int = 90;
     pub const EISCONN: c_int = 106;
     pub const EINPROGRESS: c_int = 115;
@@ -486,10 +486,11 @@ impl Socket {
         Ok(buf.len())
     }
 
-    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut buf = BorrowedBuf::from(buf);
-        self.recv_with_flags(buf.unfilled(), c::MSG_PEEK)?;
-        Ok(buf.len())
+    /// The kernel takes no `recv` flags, so there is no way to read bytes
+    /// without consuming them. Reported rather than issued: a `MSG_PEEK` this
+    /// layer sent would either be refused or, worse, silently consume.
+    pub fn peek(&self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::from_raw_os_error(c::EOPNOTSUPP))
     }
 
     pub fn read_buf(&self, buf: BorrowedCursor<'_, u8>) -> io::Result<()> {
@@ -532,8 +533,9 @@ impl Socket {
         self.recv_from_with_flags(buf, 0)
     }
 
-    pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        self.recv_from_with_flags(buf, c::MSG_PEEK)
+    /// Unsupported, for the reason [`Socket::peek`] gives.
+    pub fn peek_from(&self, _buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        Err(io::Error::from_raw_os_error(c::EOPNOTSUPP))
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {

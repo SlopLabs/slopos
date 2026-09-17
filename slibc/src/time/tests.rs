@@ -39,8 +39,8 @@ pub fn run_time_tests() -> (u32, u32) {
         ts.tv_sec == 0 && ts.tv_nsec == 0
     });
 
-    check!("CLOCK_MONOTONIC_eq_0", CLOCK_MONOTONIC == 0);
-    check!("CLOCK_REALTIME_eq_1", CLOCK_REALTIME == 1);
+    check!("CLOCK_REALTIME_eq_0", CLOCK_REALTIME == 0);
+    check!("CLOCK_MONOTONIC_eq_1", CLOCK_MONOTONIC == 1);
 
     check!("clock_gettime_monotonic", {
         let mut ts = Timespec {

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 
 use slopos_abi::ring::{OP_CANCEL, OP_POLL_ADD, SLOPRING_CQE_F_MORE, SLOPRING_SQE_MULTISHOT, Sqe};
-use slopos_abi::syscall::{O_NONBLOCK, POLLIN, SYSCALL_FS_CLOSE, SYSCALL_FS_READ, SYSCALL_PIPE2};
+use slopos_abi::syscall::{O_NONBLOCK, POLLIN, SYSCALL_CLOSE, SYSCALL_PIPE2, SYSCALL_READ};
 use slopos_slibc::pal::raw::{syscall1, syscall2, syscall3};
 
 use crate::ring::{Ring, RingError};
@@ -47,8 +47,8 @@ impl Drop for Wakeup {
     fn drop(&mut self) {
         // The armed poll row is retired by the kernel when its read_fd closes.
         unsafe {
-            syscall1(SYSCALL_FS_CLOSE, self.read_fd as u64);
-            syscall1(SYSCALL_FS_CLOSE, self.write_fd as u64);
+            syscall1(SYSCALL_CLOSE, self.read_fd as u64);
+            syscall1(SYSCALL_CLOSE, self.write_fd as u64);
         }
     }
 }
@@ -262,8 +262,8 @@ impl Reactor {
                 Ok(c) => c,
                 Err(_) => {
                     unsafe {
-                        syscall1(SYSCALL_FS_CLOSE, read_fd as u64);
-                        syscall1(SYSCALL_FS_CLOSE, write_fd as u64);
+                        syscall1(SYSCALL_CLOSE, read_fd as u64);
+                        syscall1(SYSCALL_CLOSE, write_fd as u64);
                     }
                     return None;
                 }
@@ -301,7 +301,7 @@ impl Reactor {
         loop {
             let n = unsafe {
                 syscall3(
-                    SYSCALL_FS_READ,
+                    SYSCALL_READ,
                     read_fd as u64,
                     scratch.as_mut_ptr() as u64,
                     scratch.len() as u64,

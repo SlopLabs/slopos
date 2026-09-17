@@ -1457,7 +1457,7 @@ pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
     frame.regs_mut().rdx = slopos_abi::signal::WNOHANG as u64;
     let _ = with_user_process_context(leader_table, || {
         crate::syscall::dispatch::dispatch_handler(
-            crate::syscall::process_handlers::syscall_waitpid,
+            crate::syscall::process_handlers::syscall_wait4,
             &leader,
             &mut frame,
         )

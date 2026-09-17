@@ -1,9 +1,9 @@
-/// Monotonic clock — nanoseconds since boot, never adjusted.
-pub const CLOCK_MONOTONIC: u64 = 0;
-
 /// Realtime clock — the wall clock anchored at boot from the RTC, adjustable
 /// through `clock_settime`.
-pub const CLOCK_REALTIME: u64 = 1;
+pub const CLOCK_REALTIME: u64 = 0;
+
+/// Monotonic clock — nanoseconds since boot, never adjusted.
+pub const CLOCK_MONOTONIC: u64 = 1;
 
 /// CPU time consumed by the caller's whole thread group.
 pub const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;

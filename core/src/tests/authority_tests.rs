@@ -6,7 +6,8 @@
 //! dispatcher's behaviour is a total function of those two.
 
 use slopos_abi::syscall::{
-    SYSCALL_HALT, SYSCALL_REBOOT, SYSCALL_ROULETTE_RESULT, SYSCALL_TABLE_SIZE,
+    SYSCALL_PRIVATE_BASE, SYSCALL_PRIVATE_END, SYSCALL_REBOOT, SYSCALL_ROULETTE_RESULT,
+    SYSCALL_TABLE_SIZE,
 };
 use slopos_abi::task::{
     TASK_FLAG_COMPOSITOR, TASK_FLAG_POWER, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
@@ -76,13 +77,11 @@ fn power_is_granted_by_program_identity() -> TestResult {
 /// slot a caller invokes and the capability the dispatcher tests are one
 /// artifact. If these drift, every other claim in the model is void.
 fn the_table_classifies_power() -> TestResult {
-    for (sysno, name) in [(SYSCALL_HALT, "halt"), (SYSCALL_REBOOT, "reboot")] {
-        let Some(entry) = syscall_lookup(sysno) else {
-            return fail!("{} is not registered", name);
-        };
-        if entry.cap != Capability::Power {
-            return fail!("{} is classified {}, want Power", name, entry.cap.name());
-        }
+    let Some(entry) = syscall_lookup(SYSCALL_REBOOT) else {
+        return fail!("reboot is not registered");
+    };
+    if entry.cap != Capability::Power {
+        return fail!("reboot is classified {}, want Power", entry.cap.name());
     }
 
     // The reachability case: `roulette_result` reaches the reboot primitive on
@@ -104,7 +103,8 @@ fn the_table_classifies_power() -> TestResult {
 /// carries a classification, and a registered slot is never `Unimplemented`.
 fn every_slot_is_classified() -> TestResult {
     let mut registered = 0usize;
-    for sysno in 0..SYSCALL_TABLE_SIZE as u64 {
+    let all = (0..SYSCALL_TABLE_SIZE as u64).chain(SYSCALL_PRIVATE_BASE..SYSCALL_PRIVATE_END);
+    for sysno in all {
         if let Some(entry) = syscall_lookup(sysno) {
             registered += 1;
             if entry.cap == Capability::Unimplemented {
@@ -116,14 +116,15 @@ fn every_slot_is_classified() -> TestResult {
         return fail!("no syscall resolved -- the lookup is broken, not the table");
     }
 
-    // The histogram sums to the table size; a drift here means the const
-    // assert and the live table disagree, which should be impossible.
+    // The histogram counts registered entry points, so it sums to what the
+    // walk just found. A drift here means the const assert and the live table
+    // disagree, which should be impossible.
     let total: usize = cap_counts().iter().map(|(_, n)| *n).sum();
-    if total != SYSCALL_TABLE_SIZE {
+    if total != registered {
         return fail!(
             "the recorded distribution sums to {}, want {}",
             total,
-            SYSCALL_TABLE_SIZE
+            registered
         );
     }
     pass!()
@@ -207,7 +208,7 @@ fn the_universal_capabilities_are_the_recorded_set() -> TestResult {
 /// carries the object.
 ///
 /// There must be no way to hold an authorization for one task and act on
-/// another. `syscall_terminate_task` used to check the compositor bit and then
+/// another. The retired `terminate_task` call used to check the compositor bit and then
 /// terminate an arbitrary target; a bare capability witness would have left
 /// that byte-identical, which is why the witness carries the target rather
 /// than merely attesting that a check ran.

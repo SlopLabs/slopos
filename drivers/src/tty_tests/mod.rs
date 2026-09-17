@@ -682,7 +682,6 @@ slopos_testing::stest!(name = test_extproc_cleared_resumes_normal, suite = tty);
 slopos_testing::stest!(name = test_extproc_bypasses_iexten_editing, suite = tty);
 slopos_testing::stest!(name = test_extproc_flow_control_works, suite = tty);
 slopos_testing::stest!(name = test_extproc_imaxbel, suite = tty);
-slopos_testing::stest!(name = test_vhangup_syscall_constant, suite = tty);
 slopos_testing::stest!(name = test_vhangup_triggers_hangup, suite = tty);
 slopos_testing::stest!(name = test_extproc_raw_mode_same_behavior, suite = tty);
 slopos_testing::stest!(name = test_echoprt_erase_format, suite = tty);

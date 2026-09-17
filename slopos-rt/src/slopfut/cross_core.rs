@@ -16,7 +16,7 @@ use core::task::{Context, Poll};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use slopos_abi::syscall::SYSCALL_FS_WRITE;
+use slopos_abi::syscall::SYSCALL_WRITE;
 use slopos_slibc::pal::raw::syscall3;
 
 use super::reactor;
@@ -76,7 +76,7 @@ impl<T> Sender<T> {
             let byte = [1u8];
             unsafe {
                 syscall3(
-                    SYSCALL_FS_WRITE,
+                    SYSCALL_WRITE,
                     self.shared.wakeup_fd as u64,
                     byte.as_ptr() as u64,
                     1,

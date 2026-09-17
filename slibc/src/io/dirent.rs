@@ -6,13 +6,17 @@ use slopos_abi::fs::UserDirent64;
 /// out to 24 — deliberately not Linux's 19.
 pub const DIRENT_NAME_OFFSET: usize = core::mem::size_of::<UserDirent64>();
 
+const D_OFF_OFFSET: usize = 8;
 const D_RECLEN_OFFSET: usize = 16;
 const D_TYPE_OFFSET: usize = 18;
 
 /// `name` borrows the buffer and excludes the NUL and the trailing padding.
+/// `d_off` is the opaque position a later `lseek` resumes the directory at,
+/// immediately after this record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirentRecord<'a> {
     pub d_ino: u64,
+    pub d_off: i64,
     pub d_type: u8,
     pub name: &'a [u8],
 }
@@ -47,6 +51,16 @@ impl<'a> Iterator for DirentIter<'a> {
         let d_ino = u64::from_ne_bytes([
             rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], rec[6], rec[7],
         ]);
+        let d_off = i64::from_ne_bytes([
+            rec[D_OFF_OFFSET],
+            rec[D_OFF_OFFSET + 1],
+            rec[D_OFF_OFFSET + 2],
+            rec[D_OFF_OFFSET + 3],
+            rec[D_OFF_OFFSET + 4],
+            rec[D_OFF_OFFSET + 5],
+            rec[D_OFF_OFFSET + 6],
+            rec[D_OFF_OFFSET + 7],
+        ]);
         let d_type = rec[D_TYPE_OFFSET];
         let tail = &rec[DIRENT_NAME_OFFSET..reclen];
         let name_len = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
@@ -54,6 +68,7 @@ impl<'a> Iterator for DirentIter<'a> {
         self.pos += reclen;
         Some(DirentRecord {
             d_ino,
+            d_off,
             d_type,
             name: &tail[..name_len],
         })

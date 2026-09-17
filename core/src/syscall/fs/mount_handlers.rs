@@ -2,7 +2,9 @@
 //!
 //! `mount(2)` cannot conjure a `&'static dyn FileSystem`, so the mountable
 //! set is closed: a pooled ramfs instance, the devfs singleton, or a pooled
-//! ext2 instance over a named block device. Anything else is `ENODEV`.
+//! ext2 instance over a named block device. Anything else is `ENODEV`, and
+//! since no member of that set reads mount options, a non-null `data` is
+//! `EINVAL`.
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{MNT_DETACH, MOUNT_FSTYPE_MAX, MS_RDONLY};
@@ -26,10 +28,14 @@ define_syscall!(syscall_mount
      source: UserPath,
      target: UserPath,
      fstype: UserCStr<MOUNT_FSTYPE_MAX>,
-     flags: u32)
+     flags: u32,
+     data: u64)
     cap(Mount)
     -> Result<(), Errno>
 {
+    if data != 0 {
+        return Err(Errno::EINVAL);
+    }
     with_cwd_base(ctx, |cwd| {
         mount_apply_at(source.as_bytes(), target.as_bytes(), cwd, fstype.as_bytes(), flags)
     })

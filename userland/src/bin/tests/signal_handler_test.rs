@@ -149,9 +149,9 @@ fn test_signal_preserves_vector_regs() -> bool {
     let mut result: [u32; 16] = [0; 16];
 
     // SAFETY: one asm block so the vector regs stay live across delivery:
-    // load xmm0..3 from `pattern`, run kill(pid, SIGUSR1) inline (rax=104),
-    // then store xmm0..3 into `result`. rcx/r11 are syscall-clobbered;
-    // xmm0..3 are listed as outputs so the compiler reloads from `result`.
+    // load xmm0..3 from `pattern`, run kill(pid, SIGUSR1) inline, then store
+    // xmm0..3 into `result`. rcx/r11 are syscall-clobbered; xmm0..3 are
+    // listed as outputs so the compiler reloads from `result`.
     unsafe {
         core::arch::asm!(
             "movups xmm0, [{pat}]",
@@ -165,7 +165,7 @@ fn test_signal_preserves_vector_regs() -> bool {
             "movups [{res} + 48], xmm3",
             pat = in(reg) pattern.as_ptr(),
             res = in(reg) result.as_mut_ptr(),
-            inout("rax") 104u64 => _,
+            inout("rax") slopos_abi::syscall::SYSCALL_KILL => _,
             in("rdi") pid,
             in("rsi") SIGUSR1 as u64,
             out("rcx") _,
@@ -281,8 +281,8 @@ fn test_signal_preserves_mxcsr() -> bool {
     let mut readback: u32 = 0;
 
     // SAFETY: one asm block so MXCSR stays live across delivery — set it, run
-    // kill(pid, SIGUSR1) inline (rax=104), read it back, then put the
-    // caller's value back before returning to compiled code.
+    // kill(pid, SIGUSR1) inline, read it back, then put the caller's value
+    // back before returning to compiled code.
     unsafe {
         core::arch::asm!(
             "stmxcsr [{saved}]",
@@ -293,7 +293,7 @@ fn test_signal_preserves_mxcsr() -> bool {
             saved = in(reg) &mut saved,
             want = in(reg) &want,
             res = in(reg) &mut readback,
-            inout("rax") 104u64 => _,
+            inout("rax") slopos_abi::syscall::SYSCALL_KILL => _,
             in("rdi") pid,
             in("rsi") SIGUSR1 as u64,
             out("rcx") _,

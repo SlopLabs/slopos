@@ -1,4 +1,5 @@
-//! The `*at(2)` family, plus the two plain forms defined in terms of it.
+//! The `*at(2)` family, plus the plain and flagless forms defined in terms of
+//! it.
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{
@@ -14,6 +15,7 @@ use slopos_fs::fileio::{
 };
 
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
+use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
 use crate::syscall::args::{UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
@@ -32,22 +34,93 @@ fn reject_unknown(flags: u32, allowed: u32) -> Result<(), Errno> {
     }
 }
 
+#[inline(never)]
+pub(crate) fn open_at(
+    table: FdTable,
+    path: &[u8],
+    cwd: &[u8],
+    flags: u32,
+    mode: u32,
+) -> Result<u64, Errno> {
+    let resolve = open_resolve_flags(flags, path);
+    let fd = file_open_at(
+        table,
+        path,
+        cwd,
+        flags,
+        resolve,
+        Some((mode & 0o7777) as u16),
+    );
+    if fd < 0 {
+        Err(errno_from_neg(fd))
+    } else {
+        Ok(fd as u64)
+    }
+}
+
+/// The mode goes on the inode `create` returned: re-resolving the name to
+/// chmod it can land on a replacement, or on a symlink's target.
+pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
+    slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some((mode & 0o7777) as u16)).map_err(|e| e.to_errno())
+}
+
+/// Own frame: [`UserFsStat`] is 144 bytes.
+#[inline(never)]
+pub(crate) fn stat_at_into_user(
+    path: &[u8],
+    cwd: &[u8],
+    at_flags: u32,
+    out: MmUserPtr<UserFsStat>,
+) -> Result<(), Errno> {
+    let mut stat = UserFsStat::default();
+    let resolve = resolve_flags_from(at_flags, path);
+    let rc = file_stat_at(path, cwd, resolve, &mut stat);
+    if rc != 0 {
+        return Err(errno_from_neg(rc));
+    }
+    copy_to_user(out, &stat).map_err(|_| Errno::EFAULT)
+}
+
+/// Own frame, as [`stat_at_into_user`].
+#[inline(never)]
+fn fstat_fd_into_user(table: FdTable, fd: i32, out: MmUserPtr<UserFsStat>) -> Result<(), Errno> {
+    let mut stat = UserFsStat::default();
+    let rc = file_fstat_fd(table, fd, &mut stat);
+    if rc != 0 {
+        return Err(errno_from_neg(rc));
+    }
+    copy_to_user(out, &stat).map_err(|_| Errno::EFAULT)
+}
+
+pub(crate) fn chmod_at(path: &[u8], cwd: &[u8], mode: u32, at_flags: u32) -> Result<(), Errno> {
+    let resolve = resolve_flags_from(at_flags, path);
+    let rc = file_chmod_at(path, cwd, (mode & 0o7777) as u16, resolve);
+    if rc != 0 {
+        Err(errno_from_neg(rc))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn access_at(path: &[u8], cwd: &[u8], mode: u32, at_flags: u32) -> Result<(), Errno> {
+    let resolve = resolve_flags_from(at_flags, path);
+    let rc = file_access_at(path, cwd, mode, resolve);
+    if rc != 0 {
+        Err(errno_from_neg(rc))
+    } else {
+        Ok(())
+    }
+}
+
 define_syscall!(syscall_openat
     (ctx, dirfd: i32, path: UserPath, flags: u32, mode: u32)
     cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    let create_mode = (mode & 0o7777) as u16;
-    let resolve = open_resolve_flags(flags, path.as_bytes());
-    let fd = with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        file_open_at(pid, path.as_bytes(), cwd, flags, resolve, Some(create_mode))
-    })?;
-    if fd < 0 {
-        Err(errno_from_neg(fd))
-    } else {
-        Ok(fd as u64)
-    }
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        open_at(pid, path.as_bytes(), cwd, flags, mode)
+    })?
 });
 
 define_syscall!(syscall_mkdirat
@@ -56,13 +129,9 @@ define_syscall!(syscall_mkdirat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
-    // The mode goes on the inode `create` returned: re-resolving the name to
-    // chmod it can land on a replacement, or on a symlink's target.
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        slopos_fs::vfs::vfs_mkdir_at(path.as_bytes(), cwd, Some((mode & 0o7777) as u16))
-            .map_err(|e| e.to_errno())
-    })??;
-    Ok(())
+        mkdir_at(path.as_bytes(), cwd, mode)
+    })?
 });
 
 define_syscall!(syscall_unlinkat
@@ -102,33 +171,22 @@ define_syscall!(syscall_renameat
     })??
 });
 
-define_syscall!(syscall_fstatat
+define_syscall!(syscall_newfstatat
     (ctx, dirfd: i32, path: UserPath, out: UserPtr<UserFsStat>, flags: u32)
     cap(NoneFd)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)?;
-    let mut stat = UserFsStat::default();
     if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
             return Err(Errno::ENOENT);
         }
-        let rc = file_fstat_fd(pid, dirfd, &mut stat);
-        if rc != 0 {
-            return Err(errno_from_neg(rc));
-        }
-    } else {
-        let resolve = resolve_flags_from(flags, path.as_bytes());
-        let rc = with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-            file_stat_at(path.as_bytes(), cwd, resolve, &mut stat)
-        })?;
-        if rc != 0 {
-            return Err(errno_from_neg(rc));
-        }
+        return fstat_fd_into_user(pid, dirfd, out.inner());
     }
-    copy_to_user(out.inner(), &stat).map_err(|_| Errno::EFAULT)?;
-    Ok(())
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        stat_at_into_user(path.as_bytes(), cwd, flags, out.inner())
+    })?
 });
 
 define_syscall!(syscall_readlinkat
@@ -160,34 +218,52 @@ define_syscall!(syscall_symlinkat
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
-define_syscall!(syscall_fchmodat
+define_syscall!(syscall_fchmodat2
     (ctx, dirfd: i32, path: UserPath, mode: u32, flags: u32)
     cap(NoneFd)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW)?;
-    let resolve = resolve_flags_from(flags, path.as_bytes());
-    let rc = with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        file_chmod_at(path.as_bytes(), cwd, (mode & 0o7777) as u16, resolve)
-    })?;
-    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        chmod_at(path.as_bytes(), cwd, mode, flags)
+    })?
+});
+
+define_syscall!(syscall_fchmodat
+    (ctx, dirfd: i32, path: UserPath, mode: u32)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        chmod_at(path.as_bytes(), cwd, mode, 0)
+    })?
 });
 
 // `AT_EACCESS` is accepted and ignored: the machine is single-user uid 0, so
 // the effective and real identities are the same one.
-define_syscall!(syscall_faccessat
+define_syscall!(syscall_faccessat2
     (ctx, dirfd: i32, path: UserPath, mode: u32, flags: u32)
     cap(NoneFd)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
     reject_unknown(flags, AT_SYMLINK_NOFOLLOW | slopos_abi::fs::AT_EACCESS)?;
-    let resolve = resolve_flags_from(flags, path.as_bytes());
-    let rc = with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
-        file_access_at(path.as_bytes(), cwd, mode, resolve)
-    })?;
-    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        access_at(path.as_bytes(), cwd, mode, flags)
+    })?
+});
+
+define_syscall!(syscall_faccessat
+    (ctx, dirfd: i32, path: UserPath, mode: u32)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        access_at(path.as_bytes(), cwd, mode, 0)
+    })?
 });
 
 define_syscall!(syscall_access
@@ -195,9 +271,7 @@ define_syscall!(syscall_access
     cap(NoneFd)
     -> Result<(), Errno>
 {
-    let resolve = resolve_flags_from(0, path.as_bytes());
-    let rc = with_cwd_base(ctx, |cwd| file_access_at(path.as_bytes(), cwd, mode, resolve));
-    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+    with_cwd_base(ctx, |cwd| access_at(path.as_bytes(), cwd, mode, 0))
 });
 
 define_syscall!(syscall_linkat

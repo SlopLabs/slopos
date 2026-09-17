@@ -1,0 +1,13 @@
+# Private syscall constants whose lowercased name is also a Linux x86-64
+# syscall name. Data for scripts/check_syscall_abi.sh.
+#
+# Normally that is a failure: a call Linux already names belongs on Linux's
+# number, because the number is what promises the signature. An entry here is
+# the opposite claim — the call is Linux's *idea* but not yet Linux's *shape*,
+# so taking the number would promise a layout this kernel does not implement.
+# Each line is `<name> <reason>`, and an entry that exempts nothing fails as a
+# dead entry: when the shape is adopted, the constant moves to its Linux
+# number and the line goes with it.
+
+sendmsg MsgHdr/CmsgHdr are not Linux's layouts yet; number 46 waits on that
+recvmsg same layout gap as sendmsg; number 47 waits on it

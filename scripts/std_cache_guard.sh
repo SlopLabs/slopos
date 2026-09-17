@@ -45,29 +45,39 @@ if [ "$want" = "$have" ]; then
     exit 0
 fi
 
-DEPS="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/deps"
-FINGERPRINT="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/.fingerprint"
-# Since cargo 1.94 the `-Zbuild-std` sysroot units land in `build/<crate>/<hash>/out/`
-# and never in `deps/`, where the old purge silently matched nothing.
-BUILD="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/build"
-
-# Build-std sysroot crates we patch into, plus the core sysroot crates whose
-# rebuild they may transitively require. Removing the output rlib/rmeta forces
-# a rebuild; removing the matching fingerprint dir keeps cargo's bookkeeping
-# consistent so it does not later think the (now-deleted) artifact is fresh.
+# Both profiles: a userland build is `--release`, but a `debug` build-std tree
+# survives from any non-release invocation, and the proof below searches the
+# whole target dir. Purging one profile while checking two is how this guard
+# came to fail on an unmodified tree.
 STD_CRATES="std core alloc panic_abort panic_unwind"
 
-for crate in $STD_CRATES; do
-    if [ -d "$DEPS" ]; then
-        rm -f "$DEPS/lib${crate}-"*.rlib "$DEPS/lib${crate}-"*.rmeta \
-              "$DEPS/${crate}-"*.d 2>/dev/null || true
-    fi
-    rm -rf "${BUILD:?}/$crate"
-    if [ -d "$FINGERPRINT" ]; then
-        # `find ... -exec rm -rf` tolerates the no-match case cleanly.
-        find "$FINGERPRINT" -maxdepth 1 -type d -name "${crate}-*" \
-            -exec rm -rf {} + 2>/dev/null || true
-    fi
+for profile in release debug; do
+    ROOT="$CARGO_TARGET_DIR/$TARGET_TRIPLE/$profile"
+    [ -d "$ROOT" ] || continue
+    DEPS="$ROOT/deps"
+    FINGERPRINT="$ROOT/.fingerprint"
+    # Since cargo 1.94 the `-Zbuild-std` sysroot units land in
+    # `build/<crate>/<hash>/out/` and never in `deps/`, where the old purge
+    # silently matched nothing.
+    BUILD="$ROOT/build"
+
+    # Build-std sysroot crates we patch into, plus the core sysroot crates
+    # whose rebuild they may transitively require. Removing the output
+    # rlib/rmeta forces a rebuild; removing the matching fingerprint dir keeps
+    # cargo's bookkeeping consistent so it does not later think the
+    # (now-deleted) artifact is fresh.
+    for crate in $STD_CRATES; do
+        if [ -d "$DEPS" ]; then
+            rm -f "$DEPS/lib${crate}-"*.rlib "$DEPS/lib${crate}-"*.rmeta \
+                  "$DEPS/${crate}-"*.d 2>/dev/null || true
+        fi
+        rm -rf "${BUILD:?}/$crate"
+        if [ -d "$FINGERPRINT" ]; then
+            # `find ... -exec rm -rf` tolerates the no-match case cleanly.
+            find "$FINGERPRINT" -maxdepth 1 -type d -name "${crate}-*" \
+                -exec rm -rf {} + 2>/dev/null || true
+        fi
+    done
 done
 
 # Layout-independent proof that the purge worked: a surviving `libstd` built

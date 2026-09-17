@@ -3,9 +3,9 @@
 use crate::ffi::OsString;
 use crate::io::{Error, Result};
 
-/// `slopos_abi::syscall::UserUtsname` — five NUL-terminated 65-byte fields.
+/// `slopos_abi::syscall::UserUtsname` — six NUL-terminated 65-byte fields.
 const UTS_FIELD_LEN: usize = 65;
-const UTS_FIELDS: usize = 5;
+const UTS_FIELDS: usize = 6;
 const UTS_NODENAME: usize = 1;
 
 unsafe extern "C" {

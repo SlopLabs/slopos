@@ -64,8 +64,8 @@ const _: () = assert!(
     "Timespec must match the Linux x86-64 struct timespec"
 );
 
-/// `uname(2)` output. Linux x86-64 `struct utsname` field widths, minus
-/// `domainname`: there is no network identity to report.
+/// `uname(2)` output — Linux x86-64 `struct new_utsname` exactly: six
+/// NUL-terminated 65-byte fields, 390 bytes.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct UserUtsname {
@@ -74,6 +74,7 @@ pub struct UserUtsname {
     pub release: [u8; 65],
     pub version: [u8; 65],
     pub machine: [u8; 65],
+    pub domainname: [u8; 65],
 }
 
 impl UserUtsname {
@@ -84,6 +85,7 @@ impl UserUtsname {
             release: [0; 65],
             version: [0; 65],
             machine: [0; 65],
+            domainname: [0; 65],
         }
     }
 }
@@ -93,6 +95,11 @@ impl Default for UserUtsname {
         Self::new()
     }
 }
+
+const _: () = assert!(
+    core::mem::size_of::<UserUtsname>() == 390,
+    "UserUtsname must match the Linux x86-64 struct new_utsname"
+);
 
 /// Per-task entry returned by SYSCALL_PROCESS_LIST.
 #[repr(C)]

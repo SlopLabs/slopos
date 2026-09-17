@@ -5,12 +5,18 @@ use core::ffi::{CStr, c_char};
 use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::*;
-use super::raw::{syscall1, syscall2, syscall3};
+use super::raw::{syscall2, syscall3};
+use slopos_abi::fs::{
+    AT_FDCWD, DT_BLK, DT_CHR, DT_DIR, DT_LNK, DT_REG, FS_LIST_CURSOR_END, FS_TYPE_BLOCKDEV,
+    FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK, FS_TYPE_UNKNOWN,
+    O_DIRECTORY, O_RDONLY, USER_NAME_MAX, UserFsEntry,
+};
 use slopos_abi::syscall::{
-    TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios, UserTimeval,
-    UserWinsize,
+    SEEK_SET, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios,
+    UserTimeval, UserWinsize,
 };
 use slopos_abi::{UserFsList, UserFsStat, UserStatfs};
+use slopos_slibc::io::dirent::DirentIter;
 use slopos_slibc::pal::{Pal, Sys};
 
 /// Open a file by path.
@@ -106,7 +112,7 @@ pub fn write_slice(fd: RawFd, buf: &[u8]) -> SyscallResult<usize> {
 /// * `ENOENT` - File not found
 #[inline(always)]
 pub fn stat_path(path: *const c_char, out_stat: &mut UserFsStat) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64) };
+    let result = unsafe { syscall2(SYSCALL_STAT, path as u64, out_stat as *mut _ as u64) };
     demux(result).map(|_| ())
 }
 
@@ -123,7 +129,8 @@ pub fn truncate_path(path: *const c_char, length: u64) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
-/// Create a directory.
+/// Create a directory with the usual `0o755` permissions; the wrapper takes no
+/// mode of its own.
 ///
 /// # Errors
 /// * `EEXIST` - Directory already exists
@@ -131,7 +138,7 @@ pub fn truncate_path(path: *const c_char, length: u64) -> SyscallResult<()> {
 /// * `ENOSPC` - No space left on device
 #[inline(always)]
 pub fn mkdir_path(path: *const c_char) -> SyscallResult<()> {
-    let result = unsafe { syscall1(SYSCALL_FS_MKDIR, path as u64) };
+    let result = unsafe { syscall2(SYSCALL_MKDIR, path as u64, 0o755) };
     demux(result).map(|_| ())
 }
 
@@ -157,15 +164,87 @@ pub fn rename(old_path: *const c_char, new_path: *const c_char) -> SyscallResult
     Sys::rename(old_path as *const u8, new_path as *const u8).map_err(Into::into)
 }
 
-/// List directory contents.
+/// List directory contents into `list.entries`, resuming from `list.cursor`
+/// and updating it: zero it for the first call, carry it back verbatim, and
+/// stop once it reads [`FS_LIST_CURSOR_END`].
+///
+/// A directory larger than `max_entries` therefore takes several calls rather
+/// than being cut off. Names are raw bytes, NUL-terminated inside the entry.
 ///
 /// # Errors
 /// * `ENOENT` - Directory not found
 /// * `ENOTDIR` - Path is not a directory
-#[inline(always)]
 pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64) };
-    demux(result).map(|_| ())
+    let fd = Sys::openat(
+        AT_FDCWD,
+        path as *const u8,
+        (O_RDONLY | O_DIRECTORY) as i32,
+        0,
+    )?;
+    let result = read_entries(fd, list);
+    let _ = Sys::close(fd);
+    result
+}
+
+/// Drains one `list.max_entries`-sized batch from an open directory fd. The
+/// cursor is a `getdents64` `d_off`, which is what `lseek` resumes a directory
+/// at, so a truncated batch loses nothing.
+fn read_entries(fd: RawFd, list: &mut UserFsList) -> SyscallResult<()> {
+    list.count = 0;
+    if list.cursor == FS_LIST_CURSOR_END || list.entries.is_null() || list.max_entries == 0 {
+        return Ok(());
+    }
+    if list.cursor != 0 {
+        Sys::lseek(fd, list.cursor as i64, SEEK_SET as i32)?;
+    }
+
+    let mut batch = [0u8; 4096];
+    while list.count < list.max_entries {
+        let filled = Sys::getdents64(fd, batch.as_mut_ptr(), batch.len())?;
+        if filled == 0 {
+            list.cursor = FS_LIST_CURSOR_END;
+            return Ok(());
+        }
+        for record in DirentIter::new(&batch[..filled]) {
+            if record.name.is_empty() || record.name.len() > USER_NAME_MAX {
+                continue;
+            }
+            // SAFETY: `count < max_entries` bounds the index, and the caller
+            // owns `max_entries` entries at `entries`.
+            let entry = unsafe { &mut *list.entries.add(list.count as usize) };
+            *entry = UserFsEntry::new();
+            entry.name[..record.name.len()].copy_from_slice(record.name);
+            entry.type_ = fs_type_of(record.d_type);
+            entry.size = entry_size(fd, entry.name.as_ptr());
+            list.count += 1;
+            list.cursor = record.d_off as u64;
+            if list.count == list.max_entries {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fs_type_of(d_type: u8) -> u8 {
+    match d_type {
+        DT_REG => FS_TYPE_FILE,
+        DT_DIR => FS_TYPE_DIRECTORY,
+        DT_CHR => FS_TYPE_CHARDEV,
+        DT_BLK => FS_TYPE_BLOCKDEV,
+        DT_LNK => FS_TYPE_SYMLINK,
+        _ => FS_TYPE_UNKNOWN,
+    }
+}
+
+/// 0 for an entry that cannot be stat'ed — a listing is not the place to fail
+/// over one unreadable name.
+fn entry_size(dirfd: RawFd, name: *const u8) -> u64 {
+    let mut st = UserFsStat::default();
+    match Sys::fstatat(dirfd, name, &mut st, 0) {
+        Ok(()) => st.st_size.max(0) as u64,
+        Err(_) => 0,
+    }
 }
 
 #[inline(always)]
@@ -232,13 +311,15 @@ pub fn poll(fds: &mut [UserPollFd], timeout_ms: i64) -> SyscallResult<usize> {
     demux(result).map(|v| v as usize)
 }
 
+/// The kernel writes the time left back into `timeout`, so it must be
+/// writable and is not reusable across calls unmodified.
 #[inline(always)]
 pub fn select(
     nfds: usize,
     readfds: *mut u8,
     writefds: *mut u8,
     exceptfds: *mut u8,
-    timeout: *const UserTimeval,
+    timeout: *mut UserTimeval,
 ) -> SyscallResult<usize> {
     let result = unsafe {
         super::raw::syscall5(

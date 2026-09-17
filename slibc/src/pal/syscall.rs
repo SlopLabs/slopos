@@ -1,26 +1,34 @@
 use core::ffi::{c_char, c_int, c_void};
 
-use super::raw::{syscall0, syscall1, syscall2, syscall3};
+use super::raw::{syscall0, syscall1, syscall3};
+use slopos_abi::fs::O_CREAT;
 use slopos_abi::syscall::*;
 
 #[inline]
 pub fn sys_read(fd: c_int, buf: *mut c_void, count: usize) -> isize {
-    unsafe { syscall3(SYSCALL_FS_READ, fd as u64, buf as u64, count as u64) as isize }
+    unsafe { syscall3(SYSCALL_READ, fd as u64, buf as u64, count as u64) as isize }
 }
 
 #[inline]
 pub fn sys_write(fd: c_int, buf: *const c_void, count: usize) -> isize {
-    unsafe { syscall3(SYSCALL_FS_WRITE, fd as u64, buf as u64, count as u64) as isize }
+    unsafe { syscall3(SYSCALL_WRITE, fd as u64, buf as u64, count as u64) as isize }
 }
 
+/// `open(2)` without the variadic third argument: a creating call gets the
+/// 0o666 POSIX default, which the process umask would trim if SlopOS had one.
 #[inline]
 pub fn sys_open(path: *const c_char, flags: c_int) -> c_int {
-    unsafe { syscall2(SYSCALL_FS_OPEN, path as u64, flags as u64) as c_int }
+    let mode = if flags as u32 & O_CREAT != 0 {
+        0o666
+    } else {
+        0
+    };
+    unsafe { syscall3(SYSCALL_OPEN, path as u64, flags as u64, mode) as c_int }
 }
 
 #[inline]
 pub fn sys_close(fd: c_int) -> c_int {
-    unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) as c_int }
+    unsafe { syscall1(SYSCALL_CLOSE, fd as u64) as c_int }
 }
 
 #[inline]
@@ -62,6 +70,6 @@ pub fn sys_sbrk(increment: isize) -> *mut c_void {
 #[inline]
 pub fn sys_yield() {
     unsafe {
-        syscall0(SYSCALL_YIELD);
+        syscall0(SYSCALL_SCHED_YIELD);
     }
 }

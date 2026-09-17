@@ -63,14 +63,16 @@ pub fn clock_gettime_ns() -> u64 {
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
+/// The CPUs this task may run on; 1 when the mask cannot be read, since a
+/// task always runs somewhere.
 #[inline(always)]
 pub fn get_cpu_count() -> u32 {
-    unsafe { syscall0(SYSCALL_GET_CPU_COUNT) as u32 }
+    Sys::get_cpu_count().unwrap_or(1)
 }
 
 #[inline(always)]
 pub fn get_current_cpu() -> u32 {
-    unsafe { syscall0(SYSCALL_GET_CURRENT_CPU) as u32 }
+    Sys::get_current_cpu().unwrap_or(0)
 }
 
 /// Pin `target` (0 = the calling task) to the CPUs in `affinity`, a bitmask
@@ -78,7 +80,10 @@ pub fn get_current_cpu() -> u32 {
 /// reschedule; returns 0 on success or a negative errno.
 #[inline(always)]
 pub fn set_cpu_affinity(target: u32, affinity: u32) -> i64 {
-    unsafe { syscall2(SYSCALL_SET_CPU_AFFINITY, target as u64, affinity as u64) as i64 }
+    match Sys::set_cpu_affinity(target, affinity) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw() as i64),
+    }
 }
 
 /// Fills `buf` with cryptographically secure random bytes; returns the count.

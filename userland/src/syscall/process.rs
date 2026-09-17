@@ -2,7 +2,9 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
-use slopos_abi::signal::{SIG_DFL, SIG_IGN, SigSet, UserSigaction, WAIT_STATUS_CONTINUED, WNOHANG};
+use slopos_abi::signal::{
+    SIG_DFL, SIG_IGN, SIGKILL, SigSet, UserSigaction, WAIT_STATUS_CONTINUED, WNOHANG,
+};
 use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::task::TaskPriority;
 
@@ -13,7 +15,12 @@ use slopos_abi::task::TaskPriority;
 /// `rt_sigreturn` needs no stack adjustment.
 #[unsafe(naked)]
 extern "C" fn signal_restorer() {
-    core::arch::naked_asm!("mov eax, 105", "syscall", "ud2");
+    core::arch::naked_asm!(
+        "mov eax, {sigreturn}",
+        "syscall",
+        "ud2",
+        sigreturn = const SYSCALL_RT_SIGRETURN,
+    );
 }
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -191,14 +198,16 @@ pub fn wait_status(status: i32) -> WaitStatus {
     }
 }
 
+/// `rusage` is null: the kernel keeps no per-task accounting to report.
 #[inline(always)]
 pub fn waitpid_raw(pid: i32, status: &mut i32, options: u32) -> i64 {
     unsafe {
-        syscall3(
-            SYSCALL_WAITPID,
+        syscall4(
+            SYSCALL_WAIT4,
             pid as i64 as u64,
             status as *mut i32 as u64,
             options as u64,
+            0,
         ) as i64
     }
 }
@@ -229,28 +238,30 @@ pub fn wait_exit_code(tid: u32) -> i32 {
     wait_status(status).exit_code().unwrap_or(-1)
 }
 
+/// Path the PTY multiplexor lives at; opening it allocates a master.
+const PTMX_PATH: &[u8] = b"/dev/ptmx\0";
+
 /// Returns the master as an owned fd plus the slave pts number; open the
-/// slave via `/dev/pts/N` or `TIOCGPTPEER`.
-#[inline(always)]
+/// slave via `/dev/pts/N` or `TIOCGPTPEER`. `Err` carries a negated errno.
+///
+/// A freshly allocated slave is locked and answers `EIO` until `TIOCSPTLCK`
+/// clears it — Linux's `grantpt`, which the retired `openpty` syscall used to
+/// do on the caller's behalf.
 pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
-    let mut master_fd: u32 = 0;
-    let mut slave_num: u32 = 0;
-    let ret = unsafe {
-        syscall2(
-            SYSCALL_OPENPTY,
-            (&mut master_fd as *mut u32) as u64,
-            (&mut slave_num as *mut u32) as u64,
-        )
-    } as i64;
-    if ret < 0 {
-        Err(ret)
-    } else {
-        // SAFETY: master_fd is a valid fd just installed by the kernel.
-        Ok((
-            unsafe { super::OwnedFd::from_raw(master_fd as i32) },
-            slave_num,
-        ))
+    let master = Sys::open(PTMX_PATH.as_ptr(), slopos_abi::fs::O_RDWR as i32, 0)
+        .map_err(|e| -(e.raw() as i64))?;
+    let mut unlock: i32 = 0;
+    if let Err(e) = Sys::ioctl(master, TIOCSPTLCK, (&mut unlock as *mut i32) as u64) {
+        let _ = Sys::close(master);
+        return Err(-(e.raw() as i64));
     }
+    let mut slave_num: u32 = 0;
+    if let Err(e) = Sys::ioctl(master, TIOCGPTN, (&mut slave_num as *mut u32) as u64) {
+        let _ = Sys::close(master);
+        return Err(-(e.raw() as i64));
+    }
+    // SAFETY: master is a valid fd just installed by the kernel.
+    Ok((unsafe { super::OwnedFd::from_raw(master) }, slave_num))
 }
 
 #[inline(always)]
@@ -280,24 +291,27 @@ pub fn reap_exited_children() -> usize {
     reaped
 }
 
+/// Kill `task_id` outright: `SIGKILL` is the only disposition a task cannot
+/// catch, block or ignore.
 #[inline(always)]
 pub fn terminate_task(task_id: u32) -> i32 {
-    unsafe { syscall1(SYSCALL_TERMINATE_TASK, task_id as u64) as i32 }
+    kill_pid(task_id as i32, SIGKILL)
 }
 
+/// Replaces the current image, passing neither argv nor envp.
 #[inline(always)]
 pub fn exec(path: &[u8]) -> i64 {
-    unsafe { syscall1(SYSCALL_EXEC, path.as_ptr() as u64) as i64 }
+    exec_ptr(path.as_ptr())
 }
 
 #[inline(always)]
 pub fn exec_ptr(path: *const u8) -> i64 {
-    unsafe { syscall1(SYSCALL_EXEC, path as u64) as i64 }
+    execve(path, core::ptr::null(), core::ptr::null())
 }
 
 #[inline(always)]
 pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i64 {
-    unsafe { syscall3(SYSCALL_EXEC, path as u64, argv as u64, envp as u64) as i64 }
+    unsafe { syscall3(SYSCALL_EXECVE, path as u64, argv as u64, envp as u64) as i64 }
 }
 
 #[inline(always)]

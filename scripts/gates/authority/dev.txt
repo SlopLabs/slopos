@@ -17,8 +17,6 @@
 
 # Classified `Power`. The witness `slopos_ostd::platform::power` demands is
 # minted from the caller's own mask, so these cannot be reached unchecked.
-syscall_halt
-syscall_halt0
 syscall_reboot
 syscall_reboot0
 

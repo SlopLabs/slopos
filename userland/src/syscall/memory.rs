@@ -4,6 +4,7 @@ use core::ffi::c_void;
 
 use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
+use slopos_slibc::pal::{Pal, Sys};
 
 #[inline(always)]
 pub fn brk(addr: *mut c_void) -> *mut c_void {
@@ -33,9 +34,13 @@ pub fn sbrk(increment: isize) -> *mut c_void {
 
 use super::raw::syscall6;
 
+/// `flags` accepts `MFD_CLOEXEC` only; anything else is `-EINVAL`.
 #[inline(always)]
 pub fn memfd_create(flags: u32) -> i32 {
-    unsafe { syscall1(SYSCALL_MEMFD_CREATE, flags as u64) as i32 }
+    match Sys::memfd_create(flags) {
+        Ok(fd) => fd,
+        Err(e) => -e.raw(),
+    }
 }
 
 #[inline(always)]
@@ -65,5 +70,5 @@ pub fn msync(addr: u64, length: u64, flags: u64) -> i32 {
 
 #[inline(always)]
 pub fn close(fd: i32) -> i32 {
-    unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) as i32 }
+    unsafe { syscall1(SYSCALL_CLOSE, fd as u64) as i32 }
 }

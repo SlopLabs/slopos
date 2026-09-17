@@ -41,7 +41,7 @@ use crate::syscall::core_handlers::{
 };
 use crate::syscall::dispatch::dispatch_handler;
 use crate::syscall::process_handlers::{
-    syscall_chdir, syscall_futex, syscall_getpid, syscall_getppid, syscall_gettid, syscall_waitpid,
+    syscall_chdir, syscall_futex, syscall_getpid, syscall_getppid, syscall_gettid, syscall_wait4,
 };
 use crate::tests::helpers::dummy_task_entry;
 
@@ -213,7 +213,7 @@ fn build_wait_fixture() -> Option<WaitFixture> {
 impl WaitFixture {
     fn wait(&self, pid: i64, status: u64, options: u64) -> u64 {
         invoke(
-            syscall_waitpid,
+            syscall_wait4,
             &self.parent,
             self.table,
             [pid as u64, status, options, 0, 0, 0],
@@ -323,7 +323,7 @@ pub fn test_waitpid_without_children_is_echild() -> TestResult {
     };
 
     let any = invoke(
-        syscall_waitpid,
+        syscall_wait4,
         &parent,
         table,
         [u64::MAX, 0, WNOHANG as u64, 0, 0, 0],
@@ -331,7 +331,7 @@ pub fn test_waitpid_without_children_is_echild() -> TestResult {
     // A process-group wait is not implemented and says so rather than
     // answering a different question.
     let group = invoke(
-        syscall_waitpid,
+        syscall_wait4,
         &parent,
         table,
         [0, 0, WNOHANG as u64, 0, 0, 0],

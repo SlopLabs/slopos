@@ -43,7 +43,7 @@ fn test_independent_across_threads() -> bool {
     child_before != MAIN_VALUE && child_after == CHILD_VALUE && SLOT.with(|c| c.get()) == MAIN_VALUE
 }
 
-/// Confirms the `SYSCALL_GET_CPU_COUNT` wrapper is wired into std's thread PAL.
+/// Confirms the CPU-count wrapper is wired into std's thread PAL.
 fn test_available_parallelism() -> bool {
     match std::thread::available_parallelism() {
         Ok(n) => {

@@ -262,6 +262,29 @@ fn poll_park(waiter: Option<&slopos_ostd::sync::PollWaiter>, registered: bool, s
     }
 }
 
+/// Hand `select`'s remaining time back, as POSIX and Linux both do: a caller
+/// retrying around a wake must not restart the full timeout each pass.
+#[inline(never)]
+fn write_timeout_remaining(
+    timeout: Option<UserPtr<UserTimeval>>,
+    timeout_ms: i64,
+    start_ms: u64,
+) -> Result<(), Errno> {
+    let Some(ptr) = timeout else {
+        return Ok(());
+    };
+    if timeout_ms < 0 {
+        return Ok(());
+    }
+    let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64;
+    let remaining = (timeout_ms - elapsed).max(0);
+    let tv = UserTimeval {
+        tv_sec: remaining / 1000,
+        tv_usec: (remaining % 1000) * 1000,
+    };
+    copy_to_user(ptr.inner(), &tv).map_err(|_| Errno::EFAULT)
+}
+
 define_syscall!(syscall_poll
     (ctx, base_ptr: u64, nfds: u64, timeout_ms_raw: i64)
     cap(NoneFd)
@@ -382,7 +405,8 @@ define_syscall!(syscall_poll
 });
 
 define_syscall!(syscall_select
-    (ctx, nfds_raw: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64, tv_ptr: u64)
+    (ctx, nfds_raw: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64,
+     timeout: Option<UserPtr<UserTimeval>>)
     cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
@@ -442,17 +466,17 @@ define_syscall!(syscall_select
         registered_ofis,
     } = scratch;
 
-    let timeout_ms = if tv_ptr == 0 {
-        -1i64
-    } else {
-        let tv_ptr_obj = MmUserPtr::<UserTimeval>::try_new(tv_ptr).map_err(|_| Errno::EFAULT)?;
-        let tv = copy_from_user(tv_ptr_obj).map_err(|_| Errno::EFAULT)?;
-        if tv.tv_sec < 0 || tv.tv_usec < 0 {
-            return Err(Errno::EINVAL);
+    let timeout_ms = match timeout {
+        None => -1i64,
+        Some(ptr) => {
+            let tv = copy_from_user(ptr.inner()).map_err(|_| Errno::EFAULT)?;
+            if tv.tv_sec < 0 || tv.tv_usec < 0 {
+                return Err(Errno::EINVAL);
+            }
+            tv.tv_sec
+                .saturating_mul(1000)
+                .saturating_add(tv.tv_usec / 1000)
         }
-        tv.tv_sec
-            .saturating_mul(1000)
-            .saturating_add(tv.tv_usec / 1000)
     };
 
     let start_ms = slopos_kernel_services::platform::get_time_ms();
@@ -460,32 +484,45 @@ define_syscall!(syscall_select
     // See `syscall_poll` for why the token spans the whole call.
     let waiter = slopos_ostd::sync::PollWaiter::new();
 
+    // One call site each for the copy-out and the timeout writeback: four
+    // duplicated exit sequences spilled enough live state to put this frame
+    // over the 2 KiB stack gate.
+    struct SelectOut {
+        rd_ptr: u64,
+        wr_ptr: u64,
+        ex_ptr: u64,
+        bytes_len: usize,
+    }
+
     #[inline(never)]
     fn copy_out_select_results(
-        read_ptr: u64,
-        write_ptr: u64,
-        except_ptr: u64,
+        out: &SelectOut,
         read_out: &[u8],
         write_out: &[u8],
         except_out: &[u8],
-        bytes_len: usize,
     ) -> Result<(), Errno> {
-        if read_ptr != 0 {
-            let out = MmUserBytes::try_new(read_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
-            copy_bytes_to_user(out, &read_out[..bytes_len]).map_err(|_| Errno::EFAULT)?;
-        }
-        if write_ptr != 0 {
-            let out = MmUserBytes::try_new(write_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
-            copy_bytes_to_user(out, &write_out[..bytes_len]).map_err(|_| Errno::EFAULT)?;
-        }
-        if except_ptr != 0 {
-            let out = MmUserBytes::try_new(except_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
-            copy_bytes_to_user(out, &except_out[..bytes_len]).map_err(|_| Errno::EFAULT)?;
+        let len = out.bytes_len;
+        for (ptr, bits) in [
+            (out.rd_ptr, read_out),
+            (out.wr_ptr, write_out),
+            (out.ex_ptr, except_out),
+        ] {
+            if ptr != 0 {
+                let dst = MmUserBytes::try_new(ptr, len).map_err(|_| Errno::EFAULT)?;
+                copy_bytes_to_user(dst, &bits[..len]).map_err(|_| Errno::EFAULT)?;
+            }
         }
         Ok(())
     }
 
-    loop {
+    let out = SelectOut {
+        rd_ptr,
+        wr_ptr,
+        ex_ptr,
+        bytes_len,
+    };
+
+    let outcome = loop {
         read_out[..bytes_len].fill(0);
         write_out[..bytes_len].fill(0);
         except_out[..bytes_len].fill(0);
@@ -541,21 +578,18 @@ define_syscall!(syscall_select
 
         if ready > 0 {
             cleanup(reg_count, registered_ofis);
-            copy_out_select_results(rd_ptr, wr_ptr, ex_ptr, read_out, write_out, except_out, bytes_len)?;
-            return Ok(ready);
+            break Ok(ready);
         }
 
         if timeout_ms == 0 {
             cleanup(reg_count, registered_ofis);
-            copy_out_select_results(rd_ptr, wr_ptr, ex_ptr, read_out, write_out, except_out, bytes_len)?;
-            return Ok(0);
+            break Ok(0);
         }
         if timeout_ms > 0 {
             let now = slopos_kernel_services::platform::get_time_ms();
             if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
                 cleanup(reg_count, registered_ofis);
-                copy_out_select_results(rd_ptr, wr_ptr, ex_ptr, read_out, write_out, except_out, bytes_len)?;
-                return Ok(0);
+                break Ok(0);
             }
         }
 
@@ -563,8 +597,7 @@ define_syscall!(syscall_select
             500u32
         } else {
             let remaining = timeout_ms
-                - (slopos_kernel_services::platform::get_time_ms()
-                    .wrapping_sub(start_ms) as i64);
+                - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
             (remaining.max(0) as u32).min(500)
         };
 
@@ -573,9 +606,15 @@ define_syscall!(syscall_select
         cleanup(reg_count, registered_ofis);
 
         if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
-            return Err(Errno::EINTR);
+            break Err(Errno::EINTR);
         }
+    };
+
+    if outcome.is_ok() {
+        copy_out_select_results(&out, read_out, write_out, except_out)?;
     }
+    write_timeout_remaining(timeout, timeout_ms, start_ms)?;
+    outcome
 });
 
 define_syscall!(syscall_ioctl
@@ -584,7 +623,7 @@ define_syscall!(syscall_ioctl
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
-    let tty_idx = file_get_tty_index(pid, fd.raw()).ok_or(Errno::EINVAL)?;
+    let tty_idx = file_get_tty_index(pid, fd.raw()).ok_or(Errno::ENOTTY)?;
 
     let hangup_safe = matches!(cmd, TIOCGPGRP | TIOCSPGRP | TIOCGSID | TIOCNOTTY);
     if !hangup_safe && tty::is_hung_up(tty_idx) {
@@ -703,6 +742,3 @@ define_syscall!(syscall_ioctl
         _ => Err(Errno::EINVAL),
     }
 });
-
-#[allow(dead_code)]
-type _Unused<T> = UserPtr<T>;

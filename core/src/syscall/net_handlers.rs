@@ -59,6 +59,17 @@ fn socket_fd_for(table: FdTable, fd: i32) -> Result<SocketFd, Errno> {
     }
 }
 
+/// Reject every `flags` bit: `slopos-abi` defines no `MSG_*` constant, so there
+/// is nothing a caller can legitimately ask for, and a dropped bit is worse
+/// than a refusal — a silently ignored `MSG_PEEK` consumes the datagram.
+fn check_msg_flags(flags: u32) -> Result<(), Errno> {
+    if flags == 0 {
+        Ok(())
+    } else {
+        Err(Errno::EINVAL)
+    }
+}
+
 define_syscall!(syscall_socket
     (ctx, domain: u32, sock_type: u32, protocol: u32)
     cap(NoneSelf)
@@ -177,13 +188,16 @@ define_syscall!(syscall_listen
 });
 
 define_syscall!(syscall_accept
-    (ctx, fd: Fd, peer_ptr: u64, peer_len: u64)
+    (ctx, fd: Fd, peer_ptr: u64, addrlen_ptr: u64)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
-    let peer_len = peer_len as usize;
+    // `addrlen` is in/out: the caller's buffer size in, the peer address's real
+    // length out. A null on either side declines the peer.
+    let want_peer = peer_ptr != 0 && addrlen_ptr != 0;
+    let caller_len = if want_peer { read_socklen(addrlen_ptr)? } else { 0 };
 
     match sock_fd {
         SocketFd::Unix(sh) => {
@@ -204,15 +218,14 @@ define_syscall!(syscall_accept
             if new_fd < 0 {
                 return Err(Errno::ENOMEM);
             }
+            if want_peer {
+                accept_peer_unix(accepted_handle, caller_len, peer_ptr, addrlen_ptr)?;
+            }
             Ok(new_fd as u64)
         }
         SocketFd::Inet(sock_idx) => {
             let mut peer_ip = [0u8; 4];
             let mut peer_port = 0u16;
-            let want_peer = peer_ptr != 0;
-            if want_peer && peer_len < core::mem::size_of::<SockAddrIn>() {
-                return Err(Errno::EINVAL);
-            }
 
             let accepted_idx = socket::socket_accept(
                 sock_idx,
@@ -241,9 +254,12 @@ define_syscall!(syscall_accept
                     addr: peer_ip,
                     _pad: [0; 8],
                 };
-                let user_peer = MmUserPtr::<SockAddrIn>::try_new(peer_ptr)
-                    .map_err(|_| Errno::EFAULT)?;
-                copy_to_user(user_peer, &peer).map_err(|_| Errno::EFAULT)?;
+                write_sockaddr(
+                    slopos_ostd::util::byte_view::pod_as_bytes(&peer),
+                    caller_len,
+                    peer_ptr,
+                    addrlen_ptr,
+                )?;
             }
 
             Ok(new_fd as u64)
@@ -293,111 +309,20 @@ define_syscall!(syscall_connect
     }
 });
 
-define_syscall!(syscall_send
-    (ctx, fd: Fd, buf: UserBytes, _flags: u32)
-    cap(NoneFd)
-    requires(let process_id: process_id)
-    -> Result<u64, Errno>
-{
-    let sock_fd = socket_fd_for(process_id, fd.raw())?;
-
-    if buf.base_u64() == 0 && buf.len() != 0 {
-        return Err(Errno::EFAULT);
-    }
-
-    let len = buf.len().min(4096);
-    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
-
-    match sock_fd {
-        SocketFd::Unix(sh) => {
-            if len > 0 {
-                let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
-                let copied = copy_bytes_from_user(user_data, &mut scratch[..len])
-                    .map_err(|_| Errno::EFAULT)?;
-                return rc_i32_to_u64(unix_socket::unix_send(sh, &scratch[..copied]));
-            }
-            Ok(0)
-        }
-        SocketFd::Inet(sock_idx) => {
-            if len > 0 {
-                let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
-                let copied = copy_bytes_from_user(user_data, &mut scratch[..len])
-                    .map_err(|_| Errno::EFAULT)?;
-                return rc_i64_to_u64(socket::socket_send(sock_idx, &scratch[..copied]));
-            }
-            rc_i64_to_u64(socket::socket_send(sock_idx, &[]))
-        }
-    }
-});
-
-define_syscall!(syscall_recv
-    (ctx, fd: Fd, buf: UserBytes, _flags: u32)
-    cap(NoneFd)
-    requires(let process_id: process_id)
-    -> Result<u64, Errno>
-{
-    let sock_fd = socket_fd_for(process_id, fd.raw())?;
-
-    if buf.base_u64() == 0 && buf.len() != 0 {
-        return Err(Errno::EFAULT);
-    }
-
-    let len = buf.len().min(4096);
-    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
-
-    match sock_fd {
-        SocketFd::Unix(sh) => {
-            let rc = unix_socket::unix_recv(sh, &mut scratch[..len]);
-            if rc < 0 {
-                return Err(errno_from_neg(rc));
-            }
-            let copied = rc as usize;
-            if copied > 0 {
-                let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
-                copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
-            }
-            Ok(copied as u64)
-        }
-        SocketFd::Inet(sock_idx) => {
-            let rc = socket::socket_recv(sock_idx, &mut scratch[..len]);
-            if rc < 0 {
-                return Err(errno_from_neg64(rc));
-            }
-            let copied = rc as usize;
-            if copied > 0 {
-                let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
-                copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
-            }
-            Ok(copied as u64)
-        }
-    }
-});
-
+// A null `addr` is `send(2)`: with the `send` slot retired that is the only
+// spelling left for it, so AF_UNIX takes it too. At most 4096 payload bytes
+// move per call; the short count is the caller's to loop on.
 define_syscall!(syscall_sendto
-    (ctx, fd: Fd, buf: UserBytes, _flags: u32, addr_ptr: u64, addr_len: u64)
+    (ctx, fd: Fd, buf: UserBytes, flags: u32, addr_ptr: u64, addr_len: u64)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
-        SocketFd::Inet(idx) => idx,
-        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
-    };
+    check_msg_flags(flags)?;
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
     if buf.base_u64() == 0 && buf.len() != 0 {
         return Err(Errno::EFAULT);
-    }
-    if addr_ptr == 0 {
-        return Err(Errno::EDESTADDRREQ);
-    }
-    if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {
-        return Err(Errno::EINVAL);
-    }
-
-    let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
-    let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
-    if sock_addr.family != AF_INET {
-        return Err(Errno::EAFNOSUPPORT);
     }
 
     let len = buf.len().min(4096);
@@ -409,61 +334,111 @@ define_syscall!(syscall_sendto
         0
     };
 
-    rc_i64_to_u64(socket::socket_sendto(
-        sock_idx,
-        &scratch[..copied],
-        sock_addr.addr,
-        u16::from_be(sock_addr.port),
-    ))
+    match sock_fd {
+        SocketFd::Unix(sh) => {
+            if addr_ptr != 0 {
+                return Err(Errno::EOPNOTSUPP);
+            }
+            rc_i32_to_u64(unix_socket::unix_send(sh, &scratch[..copied]))
+        }
+        SocketFd::Inet(sock_idx) => {
+            if addr_ptr == 0 {
+                return rc_i64_to_u64(socket::socket_send(sock_idx, &scratch[..copied]));
+            }
+            if (addr_len as usize) < core::mem::size_of::<SockAddrIn>() {
+                return Err(Errno::EINVAL);
+            }
+            let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
+            if sock_addr.family != AF_INET {
+                return Err(Errno::EAFNOSUPPORT);
+            }
+            rc_i64_to_u64(socket::socket_sendto(
+                sock_idx,
+                &scratch[..copied],
+                sock_addr.addr,
+                u16::from_be(sock_addr.port),
+            ))
+        }
+    }
 });
 
+// A null `src` is `recv(2)`, the only spelling left for it. At most 4096
+// payload bytes move per call; the short count is the caller's to loop on.
 define_syscall!(syscall_recvfrom
-    (ctx, fd: Fd, buf: UserBytes, _flags: u32, src_ptr: u64, src_len: u64)
+    (ctx, fd: Fd, buf: UserBytes, flags: u32, src_ptr: u64, srclen_ptr: u64)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let sock_idx = match socket_fd_for(process_id, fd.raw())? {
-        SocketFd::Inet(idx) => idx,
-        SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
-    };
+    check_msg_flags(flags)?;
+    let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
     if buf.base_u64() == 0 && buf.len() != 0 {
         return Err(Errno::EFAULT);
     }
-    let want_src = src_ptr != 0;
-    if want_src && (src_len as usize) < core::mem::size_of::<SockAddrIn>() {
-        return Err(Errno::EINVAL);
-    }
+    // `srclen` is in/out, as in `accept`. A null `src` or `srclen` declines the
+    // sender's address.
+    let want_src = src_ptr != 0 && srclen_ptr != 0;
+    let caller_len = if want_src { read_socklen(srclen_ptr)? } else { 0 };
 
     let len = buf.len().min(4096);
     let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
-    let mut src = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
 
-    let rc = socket::socket_recvfrom(
-        sock_idx,
-        &mut scratch[..len],
-        want_src.then_some(&mut src),
-    );
-    if rc < 0 {
-        return Err(errno_from_neg64(rc));
-    }
+    let (copied, src) = match sock_fd {
+        SocketFd::Unix(sh) => {
+            let rc = unix_socket::unix_recv(sh, &mut scratch[..len]);
+            if rc < 0 {
+                return Err(errno_from_neg(rc));
+            }
+            (rc as usize, None)
+        }
+        SocketFd::Inet(sock_idx) => {
+            // `socket_recvfrom` is the datagram path and refuses a stream
+            // socket, so a caller that does not want the sender's address gets
+            // the connection-oriented receive — which is what `recv(2)` is.
+            if !want_src {
+                let rc = socket::socket_recv(sock_idx, &mut scratch[..len]);
+                if rc < 0 {
+                    return Err(errno_from_neg64(rc));
+                }
+                (rc as usize, None)
+            } else {
+                let mut from = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
+                let rc =
+                    socket::socket_recvfrom(sock_idx, &mut scratch[..len], Some(&mut from));
+                if rc < 0 {
+                    return Err(errno_from_neg64(rc));
+                }
+                (rc as usize, Some(from))
+            }
+        }
+    };
 
-    let copied = rc as usize;
     if copied > 0 {
         let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
     }
 
     if want_src {
-        let peer = SockAddrIn {
-            family: AF_INET,
-            port: src.port.0.to_be(),
-            addr: src.ip.0,
-            _pad: [0; 8],
-        };
-        let user_peer = MmUserPtr::<SockAddrIn>::try_new(src_ptr).map_err(|_| Errno::EFAULT)?;
-        copy_to_user(user_peer, &peer).map_err(|_| Errno::EFAULT)?;
+        match src {
+            Some(from) => {
+                let peer = SockAddrIn {
+                    family: AF_INET,
+                    port: from.port.0.to_be(),
+                    addr: from.ip.0,
+                    _pad: [0; 8],
+                };
+                write_sockaddr(
+                    slopos_ostd::util::byte_view::pod_as_bytes(&peer),
+                    caller_len,
+                    src_ptr,
+                    srclen_ptr,
+                )?;
+            }
+            // A connected AF_UNIX peer carries no address: report length 0.
+            None => write_sockaddr(&[], caller_len, src_ptr, srclen_ptr)?,
+        }
     }
 
     Ok(copied as u64)
@@ -584,13 +559,17 @@ define_syscall!(syscall_resolve
     Ok(())
 });
 
+// Private-numbered: `MsgHdr` and `CmsgHdr` are not Linux's layouts yet, so this
+// keeps a `SYSCALL_PRIVATE_BASE` slot until they are.
 define_syscall!(syscall_sendmsg
-    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
+    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, flags: u32)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
     use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
+
+    check_msg_flags(flags)?;
 
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
     let sh = match sock_fd {
@@ -781,18 +760,53 @@ fn recvmsg_impl(
     Ok(copied as u64)
 }
 
+// Private-numbered for the reason `syscall_sendmsg` gives: `MsgHdr` and
+// `CmsgHdr` are not Linux's layouts yet.
 define_syscall!(syscall_recvmsg
-    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
+    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, flags: u32)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
+    check_msg_flags(flags)?;
     recvmsg_impl(process_id, fd, msg_ptr)
 });
 
-// `getsockname` / `getpeername` materialise a 110-byte `SockAddrUn` on the unix
-// branch; the `#[inline(never)]` split keeps the dispatch frame out of the union
-// of both branches' locals, which together blow the 2 KiB stack gate.
+// `accept` and `getsockname` / `getpeername` materialise a 110-byte
+// `SockAddrUn` on the unix branch; the `#[inline(never)]` split keeps the
+// dispatch frame out of the union of both branches' locals, which together blow
+// the 2 KiB stack gate.
+
+/// Read an in/out `socklen_t*`. A negative length is `EINVAL`, as in Linux's
+/// `move_addr_to_user`.
+fn read_socklen(addrlen_ptr: u64) -> Result<usize, Errno> {
+    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let caller_len = copy_from_user(user_len_ptr).map_err(|_| Errno::EFAULT)?;
+    if (caller_len as i32) < 0 {
+        return Err(Errno::EINVAL);
+    }
+    Ok(caller_len as usize)
+}
+
+/// Copy `addr` out truncated to the caller's buffer, then report the address's
+/// real length through `addrlen_ptr`.
+fn write_sockaddr(
+    addr: &[u8],
+    caller_len: usize,
+    addr_buf: u64,
+    addrlen_ptr: u64,
+) -> Result<(), Errno> {
+    let copy_len = caller_len.min(addr.len());
+    if copy_len > 0 {
+        let user_buf = MmUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
+        copy_bytes_to_user(user_buf, &addr[..copy_len]).map_err(|_| Errno::EFAULT)?;
+    }
+    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let actual = addr.len() as u32;
+    copy_to_user(user_len_ptr, &actual).map_err(|_| Errno::EFAULT)?;
+    Ok(())
+}
+
 #[inline(never)]
 fn write_unix_sockaddr(
     addr_un: &SockAddrUn,
@@ -800,19 +814,14 @@ fn write_unix_sockaddr(
     addr_buf: u64,
     addrlen_ptr: u64,
 ) -> Result<(), Errno> {
-    let struct_len = 2 + path_len;
-    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
-    let caller_len = copy_from_user(user_len_ptr).map_err(|_| Errno::EFAULT)? as usize;
-    let copy_len = caller_len.min(struct_len);
-
-    if copy_len > 0 {
-        let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(addr_un);
-        let user_buf = MmUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
-        copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]).map_err(|_| Errno::EFAULT)?;
-    }
-    let actual = struct_len as u32;
-    copy_to_user(user_len_ptr, &actual).map_err(|_| Errno::EFAULT)?;
-    Ok(())
+    let caller_len = read_socklen(addrlen_ptr)?;
+    let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(addr_un);
+    write_sockaddr(
+        &addr_bytes[..2 + path_len],
+        caller_len,
+        addr_buf,
+        addrlen_ptr,
+    )
 }
 
 #[inline(never)]
@@ -821,19 +830,34 @@ fn write_inet_sockaddr(
     addr_buf: u64,
     addrlen_ptr: u64,
 ) -> Result<(), Errno> {
-    let struct_len = core::mem::size_of::<SockAddrIn>();
-    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
-    let caller_len = copy_from_user(user_len_ptr).map_err(|_| Errno::EFAULT)? as usize;
-    let copy_len = caller_len.min(struct_len);
+    let caller_len = read_socklen(addrlen_ptr)?;
+    let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(sock_addr_in);
+    write_sockaddr(addr_bytes, caller_len, addr_buf, addrlen_ptr)
+}
 
-    if copy_len > 0 {
-        let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(sock_addr_in);
-        let user_buf = MmUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
-        copy_bytes_to_user(user_buf, &addr_bytes[..copy_len]).map_err(|_| Errno::EFAULT)?;
-    }
-    let actual = struct_len as u32;
-    copy_to_user(user_len_ptr, &actual).map_err(|_| Errno::EFAULT)?;
-    Ok(())
+#[inline(never)]
+fn accept_peer_unix(
+    handle: SocketHandle,
+    caller_len: usize,
+    addr_buf: u64,
+    addrlen_ptr: u64,
+) -> Result<(), Errno> {
+    let mut addr_un = SockAddrUn::default();
+    addr_un.family = AF_UNIX;
+    let path_len = match unix_socket::unix_get_peer_path(handle) {
+        Some((path, len)) => {
+            addr_un.path[..len].copy_from_slice(&path[..len]);
+            len
+        }
+        None => 0,
+    };
+    let addr_bytes = slopos_ostd::util::byte_view::pod_as_bytes(&addr_un);
+    write_sockaddr(
+        &addr_bytes[..2 + path_len],
+        caller_len,
+        addr_buf,
+        addrlen_ptr,
+    )
 }
 
 #[inline(never)]

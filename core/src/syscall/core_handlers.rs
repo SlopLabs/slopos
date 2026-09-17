@@ -4,8 +4,9 @@ use core::sync::atomic::Ordering as AtomicOrdering;
 
 use slopos_abi::Errno;
 use slopos_abi::syscall::{
-    CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_THREAD_CPUTIME_ID, Timespec,
-    UserSysInfo, UserUtsname,
+    CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_THREAD_CPUTIME_ID,
+    LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART,
+    LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, Timespec, UserSysInfo, UserUtsname,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
@@ -27,7 +28,7 @@ use slopos_sched::task::{get_task_stats, task_group_exit, task_terminate};
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 
-define_syscall!(syscall_yield (ctx) cap(NoneSelf)
+define_syscall!(syscall_sched_yield (ctx) cap(NoneSelf)
     -> SyscallResult {
     // rax is written before yielding and the handler returns `NoReturn`:
     // `yield_()` suspends, and the dispatcher's own `write_ok` on resume would
@@ -35,11 +36,6 @@ define_syscall!(syscall_yield (ctx) cap(NoneSelf)
     ctx.write_ok(0);
     yield_();
     SyscallResult::NoReturn
-});
-
-define_syscall!(syscall_get_time_ms (ctx) cap(NoneSelf)
-    -> u64 {
-    slopos_kernel_services::clock::uptime_ms()
 });
 
 /// Consumed CPU time in TSC ticks, the slice in progress included.
@@ -136,12 +132,20 @@ define_syscall!(syscall_uname
     set_uts_field(&mut uts.release, env!("CARGO_PKG_VERSION"));
     set_uts_field(&mut uts.version, KERNEL_VERSION);
     set_uts_field(&mut uts.machine, "x86_64");
+    set_uts_field(&mut uts.domainname, "(none)");
     copy_to_user(out.inner(), &uts).map_err(|_| Errno::EFAULT)?;
     Ok(())
 });
 
-define_syscall!(syscall_halt (ctx) cap(Power)
+// Linux's `reboot(2)`: the magics are what separate a deliberate call from a
+// stray one, and `cmd` picks the action. `POWER_OFF` and `HALT` both stop the
+// machine — the platform layer draws no further distinction.
+define_syscall!(syscall_reboot
+    (ctx, magic1: u64, magic2: u64, cmd: u64, _arg: u64) cap(Power)
     -> SyscallResult {
+    if magic1 != LINUX_REBOOT_MAGIC1 || magic2 != LINUX_REBOOT_MAGIC2 {
+        return SyscallResult::Err(Errno::EINVAL);
+    }
     // The dispatcher already refused a caller lacking `Power`. The witness is
     // what the primitive itself demands, so a path reaching it without one
     // does not compile -- which is the whole point of moving the primitive
@@ -149,29 +153,47 @@ define_syscall!(syscall_halt (ctx) cap(Power)
     let Ok(cap) = ctx.require_cap::<slopos_ostd::authority::Power>() else {
         return SyscallResult::Err(Errno::EPERM);
     };
-    power::shutdown(&cap, b"user halt\0".as_ptr() as *const c_char);
+    match cmd {
+        LINUX_REBOOT_CMD_RESTART => {
+            power::reboot(&cap, b"user reboot\0".as_ptr() as *const c_char)
+        }
+        LINUX_REBOOT_CMD_POWER_OFF | LINUX_REBOOT_CMD_HALT => {
+            power::shutdown(&cap, b"user halt\0".as_ptr() as *const c_char)
+        }
+        _ => return SyscallResult::Err(Errno::EINVAL),
+    }
     #[allow(unreachable_code)]
     SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_reboot (ctx) cap(Power)
-    -> SyscallResult {
-    let Ok(cap) = ctx.require_cap::<slopos_ostd::authority::Power>() else {
-        return SyscallResult::Err(Errno::EPERM);
-    };
-    power::reboot(&cap, b"user reboot\0".as_ptr() as *const c_char);
-    #[allow(unreachable_code)]
-    SyscallResult::NoReturn
-});
-
-define_syscall!(syscall_sleep_ms (ctx, ms: u64) cap(NoneSelf)
+// The sleep is driven by the scheduler's millisecond timer, so the request is
+// rounded *up* to the next millisecond — POSIX asks for at least the interval
+// named, never less — and the remainder reported on `EINTR` carries the same
+// granularity. No upper bound: a deadline is re-derived each pass, so a long
+// sleep is many bounded waits rather than one truncated one.
+define_syscall!(syscall_nanosleep
+    (ctx, req: Option<UserPtr<Timespec>>, rem: Option<UserPtr<Timespec>>) cap(NoneSelf)
     -> Result<(), Errno> {
-    let ms = ms.min(60000);
+    let req = req.ok_or(Errno::EFAULT)?;
+    let want = copy_from_user(req.inner()).map_err(|_| Errno::EFAULT)?;
+    if want.tv_sec < 0 || !(0..1_000_000_000).contains(&want.tv_nsec) {
+        return Err(Errno::EINVAL);
+    }
+    let ms = (want.tv_sec as u64)
+        .saturating_mul(1_000)
+        .saturating_add((want.tv_nsec as u64).div_ceil(1_000_000));
     if ms == 0 {
         return Ok(());
     }
     if scheduler_is_preemption_enabled() == 0 {
-        slopos_kernel_services::platform::timer_poll_delay_ms(ms as u32);
+        // Nothing to park on and no signal that could arrive, so the interval
+        // is burned in polls bounded by what the timer call accepts.
+        let mut left = ms;
+        while left != 0 {
+            let chunk = left.min(u32::MAX as u64);
+            slopos_kernel_services::platform::timer_poll_delay_ms(chunk as u32);
+            left -= chunk;
+        }
         return Ok(());
     }
 
@@ -186,9 +208,17 @@ define_syscall!(syscall_sleep_ms (ctx, ms: u64) cap(NoneSelf)
         }
         let task = ctx.task();
         if task.is_killed() || slopos_sched::task::task_has_deliverable_signal(task) {
+            if let Some(out) = rem {
+                let left_ms = deadline_ms - now_ms;
+                let value = Timespec {
+                    tv_sec: (left_ms / 1_000) as i64,
+                    tv_nsec: ((left_ms % 1_000) * 1_000_000) as i64,
+                };
+                copy_to_user(out.inner(), &value).map_err(|_| Errno::EFAULT)?;
+            }
             return Err(Errno::EINTR);
         }
-        let remaining = deadline_ms.saturating_sub(now_ms).min(u32::MAX as u64) as u32;
+        let remaining = (deadline_ms - now_ms).min(u32::MAX as u64) as u32;
         if sleep_current_task_ms(remaining) != 0 {
             return Err(Errno::EINVAL);
         }
@@ -258,12 +288,13 @@ define_syscall!(syscall_exit_group (ctx, code: u32) cap(NoneSelf)
     SyscallResult::NoReturn
 });
 
-// Not the `write(2)` a C program reaches through libc — that is
-// `SYSCALL_FS_WRITE`, via the caller's fd table. This one exists for output
-// that must survive a broken or absent fd 1. Deliberately unprivileged, like
-// Linux's `/dev/kmsg`, and it reaches the same serialised writer klog uses, so
-// a caller cannot interleave into a klog line or the harness's KTAP framing.
-define_syscall!(syscall_user_write (ctx, buf: UserBytes) cap(ConsoleIo)
+// `klog_write`, not `write(2)`: there is no descriptor, and the destination is
+// the kernel log rather than anything in the caller's fd table. It exists for
+// output that must survive a broken or absent fd 1. Deliberately
+// unprivileged, like Linux's `/dev/kmsg`, and it reaches the same serialised
+// writer klog uses, so a caller cannot interleave into a klog line or the
+// harness's KTAP framing.
+define_syscall!(syscall_klog_write (ctx, buf: UserBytes) cap(ConsoleIo)
     -> Result<u64, Errno> {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
@@ -283,7 +314,7 @@ define_syscall!(syscall_user_write (ctx, buf: UserBytes) cap(ConsoleIo)
 // `/dev/tty` semantics: the terminal resolves per process, so a task in a PTY
 // session reads its own PTY and one with no controlling terminal reads nothing
 // rather than the operator's console — `ENXIO`, as opening `/dev/tty` answers.
-define_syscall!(syscall_user_read (ctx, buf: UserBytes) cap(NoneSelf)
+define_syscall!(syscall_ctty_read (ctx, buf: UserBytes) cap(NoneSelf)
     -> Result<u64, Errno> {
     if buf.base_u64() == 0 || buf.len() == 0 {
         return Err(Errno::EFAULT);

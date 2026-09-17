@@ -2,7 +2,7 @@
 //! step.
 //!
 //! A bare witness proves only that *a* check ran, not that it named this
-//! target. `syscall_terminate_task` was the in-tree counterexample: it checked
+//! target. The retired `terminate_task` call was the counterexample: it checked
 //! the compositor bit and then terminated any id, and a `&Cap<ProcSignal>`
 //! would have left it byte-identical. So the witness carries the object —
 //! acting is a method on the target, and there is no other way to name one.

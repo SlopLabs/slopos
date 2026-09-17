@@ -1839,17 +1839,6 @@ pub fn test_extproc_imaxbel() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_vhangup_syscall_constant() -> TestResult {
-    if slopos_abi::syscall::SYSCALL_VHANGUP != 139 {
-        klog_info!(
-            "TTY_TEST: BUG - SYSCALL_VHANGUP is {}, expected 139",
-            slopos_abi::syscall::SYSCALL_VHANGUP
-        );
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
 pub fn test_vhangup_triggers_hangup() -> TestResult {
     tty::table::tty_table_init();
 
@@ -2202,10 +2191,6 @@ slopos_testing::stest!(
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(name = test_extproc_imaxbel, suite = tty_test_session_fg);
-slopos_testing::stest!(
-    name = test_vhangup_syscall_constant,
-    suite = tty_test_session_fg
-);
 slopos_testing::stest!(
     name = test_vhangup_triggers_hangup,
     suite = tty_test_session_fg

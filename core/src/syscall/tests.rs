@@ -7,8 +7,8 @@ use slopos_fs::fileio::FdTable;
 
 use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
-    syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
-    syscall_user_read, syscall_waitpid,
+    syscall_arch_prctl, syscall_ctty_read, syscall_futex, syscall_getpgid, syscall_setpgid,
+    syscall_setsid, syscall_wait4,
 };
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
@@ -24,10 +24,11 @@ use slopos_abi::signal::{
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
     F_GETFL, F_SETFD, FD_CLOEXEC, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY,
-    O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID,
-    SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION,
+    O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_EXIT, SYSCALL_FUTEX,
+    SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_OPENAT, SYSCALL_PIPE, SYSCALL_PIPE2,
+    SYSCALL_POLL, SYSCALL_PRIVATE_BASE, SYSCALL_PRIVATE_END, SYSCALL_READ, SYSCALL_RT_SIGACTION,
     SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
-    SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
+    SYSCALL_SYS_INFO, SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, SYSCALL_WRITE, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_KERNEL_MODE,
@@ -210,42 +211,58 @@ fn map_user_rw_page(table: FdTable) -> Option<u64> {
 
 pub fn test_syscall_lookup_invalid_number() -> TestResult {
     assert_test!(
-        syscall_lookup(0xFFFF).is_none(),
-        "should reject out-of-bounds"
+        syscall_lookup(SYSCALL_TABLE_SIZE as u64).is_none(),
+        "should reject the slot past the Linux table"
     );
     assert_test!(
-        syscall_lookup(SYSCALL_TABLE_SIZE as u64).is_none(),
-        "should reject boundary"
+        syscall_lookup(SYSCALL_PRIVATE_BASE - 1).is_none(),
+        "the gap below the private base holds nothing"
+    );
+    assert_test!(
+        syscall_lookup(SYSCALL_PRIVATE_END).is_none(),
+        "should reject the slot past the private table"
     );
     assert_test!(syscall_lookup(u64::MAX).is_none(), "should reject u64::MAX");
     TestResult::Pass
 }
 
+/// A Linux number this kernel does not answer resolves to nothing rather than
+/// to whatever happens to sit nearby. 183 is `afs_syscall`, which Linux itself
+/// never implemented, so it can never become a false negative here.
 pub fn test_syscall_lookup_empty_slot() -> TestResult {
-    let entry = syscall_lookup(9);
-    assert_test!(entry.is_none(), "unimplemented slot should return null");
+    for number in [183u64, 300, 470] {
+        assert_test!(
+            syscall_lookup(number).is_none(),
+            "an unimplemented Linux number must answer nothing"
+        );
+    }
     TestResult::Pass
 }
 
-pub fn test_index_tty_io_syscalls_retired() -> TestResult {
-    // TTY access is fd-only.
-    assert_test!(
-        syscall_lookup(146).is_none(),
-        "146 (tty_read) must be retired"
-    );
-    assert_test!(
-        syscall_lookup(147).is_none(),
-        "147 (tty_write) must be retired"
-    );
-    assert_test!(
-        syscall_lookup(148).is_none(),
-        "148 (open_tty_fd) must be retired"
-    );
+/// The decision Workstream 1.1 settled: a number below the private base *is*
+/// Linux's number for the call of that name, and the call is registered there.
+/// `check_syscall_abi.sh` holds the whole table to `syscall_64.tbl`; this holds
+/// the dispatcher to the same claim from inside the kernel.
+pub fn test_adopted_numbers_are_linux_numbers() -> TestResult {
+    for (sysno, linux_number) in [
+        (SYSCALL_READ, 0u64),
+        (SYSCALL_WRITE, 1),
+        (SYSCALL_EXIT, 60),
+        (SYSCALL_FUTEX, 202),
+        (SYSCALL_OPENAT, 257),
+    ] {
+        assert_eq_test!(sysno, linux_number);
+        let Some(entry) = syscall_lookup(sysno) else {
+            klog_info!("nothing registered at Linux number {}", linux_number);
+            return TestResult::Fail;
+        };
+        assert_test!(entry.handler.is_some(), "registered slot has no handler");
+    }
     TestResult::Pass
 }
 
 pub fn test_syscall_lookup_valid() -> TestResult {
-    let entry = syscall_lookup(1);
+    let entry = syscall_lookup(SYSCALL_EXIT);
     let Some(entry_ref) = entry else {
         klog_info!("SYSCALL_EXIT lookup returned None");
         return TestResult::Fail;
@@ -302,17 +319,24 @@ pub fn test_io_syscall_lookup_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// 120 and 123 are retired: reusing either hands a binary built against them a
-/// different call under a number it already knows. Literals — constants are gone.
-pub fn test_retired_net_syscalls_stay_unhandled() -> TestResult {
-    for number in [120u64, 123] {
-        if let Some(entry) = syscall_lookup(number)
-            && entry.handler.is_some()
-        {
-            klog_info!("retired syscall {} has a handler again", number);
-            return TestResult::Fail;
-        }
-    }
+/// The two ranges are two tables, and a private call is reachable only at its
+/// private number. Indexing one table with the other's offset is the mistake
+/// this catches: `SYSCALL_SYS_INFO` is `SYSCALL_PRIVATE_BASE + 2`, and 2 in
+/// Linux's space is `open`, which must not answer `sys_info`.
+pub fn test_private_range_does_not_alias_linux() -> TestResult {
+    let Some(private_entry) = syscall_lookup(SYSCALL_SYS_INFO) else {
+        klog_info!("sys_info is not registered in the private range");
+        return TestResult::Fail;
+    };
+    let offset = SYSCALL_SYS_INFO - SYSCALL_PRIVATE_BASE;
+    let Some(linux_entry) = syscall_lookup(offset) else {
+        klog_info!("Linux number {} is unexpectedly empty", offset);
+        return TestResult::Fail;
+    };
+    assert_test!(
+        private_entry.name.into_inner() != linux_entry.name.into_inner(),
+        "a private call answered its bare offset in Linux's space"
+    );
     TestResult::Pass
 }
 
@@ -732,7 +756,7 @@ pub fn test_console_read_without_a_controlling_tty_is_refused() -> TestResult {
     frame.regs_mut().rdi = user_buf;
     frame.regs_mut().rsi = 16;
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_user_read, &task_guard, &mut *frame)
+        crate::syscall::dispatch::dispatch_handler(syscall_ctty_read, &task_guard, &mut *frame)
     });
     assert_eq_test!(
         frame.rax(),
@@ -3571,7 +3595,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
 /// pinned per CPU wedges the machine. Sharing an address space is the boundary
 /// — a sibling can already run code inside the target.
 pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
-    use crate::syscall::handlers::{syscall_get_cpu_affinity, syscall_set_cpu_affinity};
+    use crate::syscall::handlers::{syscall_sched_getaffinity, syscall_sched_setaffinity};
 
     let _fixture = SyscallFixture::new();
 
@@ -3587,39 +3611,58 @@ pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
         "the two fixture tasks must be in different processes"
     );
 
+    let Some(caller_table) = caller.process().as_deref().and_then(FdTable::of) else {
+        return TestResult::Fail;
+    };
+    let Some(mask_addr) = map_user_rw_page(caller_table) else {
+        return TestResult::Fail;
+    };
+    let wrote =
+        with_user_process_context(caller_table, || match UserPtr::<u32>::try_new(mask_addr) {
+            Ok(ptr) => copy_to_user(ptr, &0x2u32).is_ok(),
+            Err(_) => false,
+        });
+    if wrote != Some(true) {
+        return TestResult::Fail;
+    }
+
     let before = target.cpu_affinity();
     let eperm = slopos_abi::Errno::EPERM.as_u64();
+    let mask_len = size_of::<u32>() as u64;
 
     // One frame, reused: a frame per case would put four live at once and push
     // this past the 2 KiB stack-frame ceiling.
     let mut frame = zero_frame();
-    let mut call = |handler: crate::syscall::common::SyscallHandler, rdi: u64, rsi: u64| -> u64 {
+    let mut call = |handler: crate::syscall::common::SyscallHandler, pid: u64| -> u64 {
         frame = zero_frame();
-        frame.regs_mut().rdi = rdi;
-        frame.regs_mut().rsi = rsi;
-        crate::syscall::dispatch::dispatch_handler(handler, &caller, &mut frame);
+        frame.regs_mut().rdi = pid;
+        frame.regs_mut().rsi = mask_len;
+        frame.regs_mut().rdx = mask_addr;
+        with_user_process_context(caller_table, || {
+            crate::syscall::dispatch::dispatch_handler(handler, &caller, &mut frame);
+        });
         frame.rax()
     };
 
     assert_eq_test!(
-        call(syscall_set_cpu_affinity, target_id as u64, 0x2),
+        call(syscall_sched_setaffinity, target_id as u64),
         eperm,
         "pinning another process's task must be EPERM"
     );
     assert_eq_test!(
         target.cpu_affinity(),
         before,
-        "a refused set_cpu_affinity must not have stamped the mask"
+        "a refused sched_setaffinity must not have stamped the mask"
     );
     assert_eq_test!(
-        call(syscall_get_cpu_affinity, target_id as u64, 0),
+        call(syscall_sched_getaffinity, target_id as u64),
         eperm,
         "reading another process's affinity must be EPERM"
     );
 
     // Self still works, so this is a relation check and not a blanket refusal.
     assert_eq_test!(
-        call(syscall_set_cpu_affinity, 0, 0x2),
+        call(syscall_sched_setaffinity, 0),
         0,
         "pinning the caller's own task must work"
     );
@@ -4409,7 +4452,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_syscall_lookup_empty_slot, suite = syscall_valid);
 slopos_testing::stest!(
-    name = test_index_tty_io_syscalls_retired,
+    name = test_adopted_numbers_are_linux_numbers,
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_syscall_lookup_valid, suite = syscall_valid);
@@ -4419,7 +4462,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_io_syscall_lookup_valid, suite = syscall_valid);
 slopos_testing::stest!(
-    name = test_retired_net_syscalls_stay_unhandled,
+    name = test_private_range_does_not_alias_linux,
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_fork_kernel_task, suite = syscall_valid);
@@ -4644,7 +4687,7 @@ slopos_testing::stest!(
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
-    name = test_retired_net_syscalls_stay_unhandled,
+    name = test_private_range_does_not_alias_linux,
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
@@ -7451,7 +7494,7 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
     frame.regs_mut().rdi = child_id as u64;
     frame.regs_mut().rdx = slopos_abi::signal::WNOHANG as u64;
     let _ = with_user_process_context(stranger_pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_waitpid, &stranger_guard, &mut *frame)
+        crate::syscall::dispatch::dispatch_handler(syscall_wait4, &stranger_guard, &mut *frame)
     });
     assert_eq_test!(
         frame.rax(),
@@ -7469,7 +7512,7 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
     parent_frame.regs_mut().rdx = slopos_abi::signal::WNOHANG as u64;
     let _ = with_user_process_context(stranger_pid, || {
         crate::syscall::dispatch::dispatch_handler(
-            syscall_waitpid,
+            syscall_wait4,
             &stranger_guard,
             &mut *parent_frame,
         )
@@ -7898,7 +7941,7 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
         frame.regs_mut().rdi = u32::MAX as u64;
         frame.regs_mut().rdx = options;
         let _ = with_user_process_context(parent_pid, || {
-            crate::syscall::dispatch::dispatch_handler(syscall_waitpid, &parent_guard, &mut *frame)
+            crate::syscall::dispatch::dispatch_handler(syscall_wait4, &parent_guard, &mut *frame)
         });
         frame.rax()
     };

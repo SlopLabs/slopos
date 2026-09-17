@@ -1,12 +1,11 @@
 use slopos_abi::Errno;
-use slopos_abi::KernelErrno;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
+use slopos_abi::syscall::{GRND_NONBLOCK, GRND_RANDOM};
 use slopos_abi::{DisplayInfo, InputEvent};
 
-use slopos_fs::fileio::file_open_tty_fd;
 use slopos_kernel_services::platform;
-use slopos_kernel_services::syscall_services::{input, tty, video};
+use slopos_kernel_services::syscall_services::{input, video};
 use slopos_sched::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
@@ -63,14 +62,22 @@ define_syscall!(syscall_input_sink_acquire
 const GETRANDOM_SLICE: usize = 256;
 
 define_syscall!(syscall_getrandom
-    (ctx, buf: UserBytes, _flags: u32) cap(NoneSelf)
+    (ctx, buf: u64, len: u64, flags: u32) cap(NoneSelf)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 || buf.len() == 0 {
+    // Both flags are accepted and change nothing: the pool is seeded before
+    // userland runs, so there is no blocking wait to decline and no second
+    // source to prefer. An undefined bit is refused rather than ignored.
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
         return Ok(0);
     }
-
-    let total = buf.len();
+    let total = len as usize;
+    // The whole span is validated once, so an unusable pointer is one
+    // `EFAULT` rather than a zero-length success.
+    MmUserBytes::try_new(buf, total).map_err(|_| Errno::EFAULT)?;
     let mut scratch = [0u8; GETRANDOM_SLICE];
     let mut filled = 0usize;
 
@@ -83,7 +90,7 @@ define_syscall!(syscall_getrandom
             scratch[pos..pos + chunk].copy_from_slice(&bytes[..chunk]);
             pos += chunk;
         }
-        let Some(addr) = buf.base_u64().checked_add(filled as u64) else {
+        let Some(addr) = buf.checked_add(filled as u64) else {
             break;
         };
         let Ok(user_out) = MmUserBytes::try_new(addr, slice_len) else {
@@ -206,42 +213,6 @@ define_syscall!(syscall_clipboard_paste
     let user_ptr = MmUserBytes::try_new(dst.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
     copy_bytes_to_user(user_ptr, &buf[..write_len]).map_err(|_| Errno::EFAULT)?;
     Ok(write_len as u64)
-});
-
-define_syscall!(syscall_openpty
-    (ctx, master_out: UserPtr<u32>, slave_out: UserPtr<u32>)
-    cap(NoneSelf)
-    requires(let pid: process_id)
-    -> Result<(), Errno>
-{
-    // The master fd owns the pair: dropping `backing` on any error arm below
-    // tears the freshly-made pair down.
-    let (master_idx, backing) = match tty::alloc_pty(pid.account()) {
-        Ok(v) => v,
-        Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
-    };
-
-    let slave_num = match tty::get_pty_number(master_idx) {
-        Ok(n) => n,
-        Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
-    };
-
-    if let Err(e) = tty::grantpt(master_idx) {
-        return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL));
-    }
-
-    let master_fd = file_open_tty_fd(pid, master_idx, slopos_abi::syscall::O_NOCTTY as u32, backing);
-    if master_fd < 0 {
-        return Err(Errno::from_raw(master_fd).unwrap_or(Errno::EINVAL));
-    }
-
-    if copy_to_user(master_out.inner(), &(master_fd as u32)).is_err()
-        || copy_to_user(slave_out.inner(), &slave_num).is_err()
-    {
-        let _ = slopos_fs::file_close_fd(pid, master_fd);
-        return Err(Errno::EFAULT);
-    }
-    Ok(())
 });
 
 define_syscall!(syscall_fb_flip

@@ -33,6 +33,8 @@ pub trait Pal {
     fn pipe(fds: *mut [i32; 2]) -> Result<(), Errno>;
     fn pipe2(fds: *mut [i32; 2], flags: u32) -> Result<(), Errno>;
     fn poll(fds: *mut u8, nfds: u32, timeout: i32) -> Result<i32, Errno>;
+    /// `timeout` is in/out: the kernel writes the time left back into it, so
+    /// it is not reusable across calls unmodified.
     fn select(
         nfds: i32,
         readfds: *mut u8,

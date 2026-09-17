@@ -1,15 +1,22 @@
 use slopos_abi::Errno;
 use slopos_abi::file_ops::FileKind;
-use slopos_abi::syscall::{MAP_PRIVATE, MAP_SHARED, MS_ASYNC, MS_INVALIDATE, MS_SYNC, PROT_WRITE};
+use slopos_abi::syscall::{
+    MAP_PRIVATE, MAP_SHARED, MFD_CLOEXEC, MS_ASYNC, MS_INVALIDATE, MS_SYNC, PROT_WRITE,
+};
 use slopos_fs::fileio::OpenMode;
 use slopos_fs::filemap;
 use slopos_fs::vfs::FileType;
 use slopos_ostd::process::ProcessId;
 
-use crate::syscall::args::{Fd, RawFd};
+use crate::syscall::args::{Fd, RawFd, UserCStr};
 use crate::syscall::result::SyscallResult;
 
 const PAGE_SIZE: u64 = 4096;
+
+/// Linux bounds a memfd name at `NAME_MAX` less the `memfd:` prefix it
+/// prepends; the extra byte is the NUL [`UserCStr`] reserves, so a name that
+/// fills the buffer is one that never terminated inside the bound.
+const MEMFD_NAME_MAX: usize = 250;
 
 /// `mmap(2)` of a regular file (G14).
 ///
@@ -223,11 +230,14 @@ define_syscall!(syscall_mprotect
 });
 
 define_syscall!(syscall_memfd_create
-    (ctx, flags: u32)
+    (ctx, name: UserCStr<{ MEMFD_NAME_MAX + 1 }>, flags: u32)
     cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
+    if name.len() >= MEMFD_NAME_MAX || flags & !MFD_CLOEXEC != 0 {
+        return Err(Errno::EINVAL);
+    }
     let (handle, ops, backing) =
         slopos_mm::memfd::memfd_create(flags, process_id.account()).ok_or(Errno::ENFILE)?;
     let fd = slopos_fs::fileio::fileio_open_fd_with_ops(
@@ -235,7 +245,10 @@ define_syscall!(syscall_memfd_create
         ops,
         handle,
         Some(backing),
-        slopos_fs::fileio::FdFlags::NONE,
+        slopos_fs::fileio::FdFlags {
+            cloexec: flags & MFD_CLOEXEC != 0,
+            close_on_fork: false,
+        },
     );
     if fd < 0 {
         // A failed install drops the backing, which runs the memfd teardown.

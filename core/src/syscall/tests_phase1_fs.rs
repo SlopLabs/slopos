@@ -960,7 +960,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
         call_syscall(
             table,
             &task,
-            crate::syscall::fs::path_handlers::syscall_fs_stat,
+            crate::syscall::fs::path_handlers::syscall_stat,
             [base, base + 2048, 0, 0, 0, 0]
         ),
         notdir,
@@ -970,7 +970,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
         call_syscall(
             table,
             &task,
-            crate::syscall::fs::path_handlers::syscall_fs_open,
+            crate::syscall::fs::path_handlers::syscall_open,
             [base, O_RDONLY as u64, 0, 0, 0, 0]
         ),
         notdir,
@@ -980,7 +980,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
         call_syscall(
             table,
             &task,
-            crate::syscall::fs::path_handlers::syscall_fs_unlink,
+            crate::syscall::fs::path_handlers::syscall_unlink,
             [base, 0, 0, 0, 0, 0]
         ),
         notdir,
@@ -998,7 +998,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
         call_syscall(
             table,
             &task,
-            crate::syscall::fs::path_handlers::syscall_fs_open,
+            crate::syscall::fs::path_handlers::syscall_open,
             [base, (O_RDONLY | O_DIRECTORY) as u64, 0, 0, 0, 0]
         ),
         notdir,
@@ -1010,7 +1010,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
     let dirfd = call_syscall(
         table,
         &task,
-        crate::syscall::fs::path_handlers::syscall_fs_open,
+        crate::syscall::fs::path_handlers::syscall_open,
         [base, (O_RDONLY | O_DIRECTORY) as u64, 0, 0, 0, 0],
     );
     assert_test!(

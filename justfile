@@ -550,6 +550,7 @@ check-framekernel-gates:
     scripts/check_sched_spread.sh --self-test
     scripts/check_fs_image.sh --self-test
     scripts/check_fs_throughput.sh --self-test
+    scripts/check_syscall_abi.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
@@ -568,6 +569,7 @@ check-framekernel-gates:
     scripts/check_frame_ownership.sh
     scripts/check_safe_contract_surface.sh
     scripts/check_charge_linearity.sh
+    scripts/check_syscall_abi.sh
     scripts/tcb_ratio.sh --max 1.0
 
 # TODO(tech-debt): no `cargo clippy -- -D warnings` gate here — there is no

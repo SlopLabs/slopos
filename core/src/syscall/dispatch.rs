@@ -119,7 +119,7 @@ const SYSCALL_INSN_SIZE: u64 = 2;
 /// A restart re-arms the *original* timeout, so under signal pressure each
 /// delivery starts a fresh full-length wait. These must report `EINTR`.
 const TIMEOUT_BEARING: &[u64] = &[
-    slopos_abi::syscall::SYSCALL_SLEEP_MS,
+    slopos_abi::syscall::SYSCALL_NANOSLEEP,
     slopos_abi::syscall::SYSCALL_POLL,
     slopos_abi::syscall::SYSCALL_SELECT,
     slopos_abi::syscall::SYSCALL_FUTEX,

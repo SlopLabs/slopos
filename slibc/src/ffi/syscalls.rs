@@ -12,7 +12,7 @@ mod std_pal_layout_pins {
     use slopos_abi::fs::{UserDirent64, UserFsStat, UserIovec};
     use slopos_abi::signal::UserSiginfo;
     use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
-    use slopos_abi::syscall::{Timespec, UserUtsname};
+    use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, UserUtsname};
 
     // slibc/std_pal/fs/slopos.rs: `SloposStat`, `Timespec`
     const _: () = assert!(size_of::<Timespec>() == 16);
@@ -37,8 +37,12 @@ mod std_pal_layout_pins {
     const _: () = assert!(offset_of!(SpawnAttrs, cwd_ptr) == 48);
 
     // slibc/std_pal/net/hostname_slopos.rs: `UTS_FIELD_LEN * UTS_FIELDS`
-    const _: () = assert!(size_of::<UserUtsname>() == 325);
+    const _: () = assert!(size_of::<UserUtsname>() == 390);
     const _: () = assert!(offset_of!(UserUtsname, nodename) == 65);
+
+    // slibc/std_pal/time/slopos.rs: `CLOCK_REALTIME`, `CLOCK_MONOTONIC`
+    const _: () = assert!(CLOCK_REALTIME == 0);
+    const _: () = assert!(CLOCK_MONOTONIC == 1);
 
     // slibc/std_pal/pal/slopos/stack_overflow.rs: `SI_ADDR_OFFSET`
     const _: () = assert!(offset_of!(UserSiginfo, si_addr) == 24);

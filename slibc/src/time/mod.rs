@@ -7,8 +7,9 @@ pub mod tests;
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};
 
-pub const CLOCK_REALTIME: i32 = 1;
-pub const CLOCK_MONOTONIC: i32 = 0;
+/// Linux's clock ids, taken from the ABI rather than restated here.
+pub const CLOCK_REALTIME: i32 = slopos_abi::syscall::CLOCK_REALTIME as i32;
+pub const CLOCK_MONOTONIC: i32 = slopos_abi::syscall::CLOCK_MONOTONIC as i32;
 
 pub use slopos_abi::syscall::Timespec;
 

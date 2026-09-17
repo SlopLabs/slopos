@@ -1,22 +1,24 @@
 //! `waitpid` shim the async `Child::wait` needs.
 
-use slopos_abi::syscall::SYSCALL_WAITPID;
-use slopos_slibc::pal::raw::syscall3;
+use slopos_abi::syscall::SYSCALL_WAIT4;
+use slopos_slibc::pal::raw::syscall4;
 
 /// Reap `task_id` and report its `$?`: the exit code it passed to `exit`, or
 /// `128 + signum` for a death by signal. A negated errno when it cannot be
 /// reaped, which is what `Child::wait` propagates.
 ///
-/// `waitpid(2)` answers the reaped pid and writes the status word, so the
-/// code has to be decoded here rather than read off the return value.
+/// `wait4(2)` answers the reaped pid and writes the status word, so the
+/// code has to be decoded here rather than read off the return value. The
+/// `rusage` pointer is null: the kernel keeps no per-task accounting.
 #[inline(always)]
 pub fn waitpid(task_id: u32) -> i32 {
     let mut status = 0i32;
     let reaped = unsafe {
-        syscall3(
-            SYSCALL_WAITPID,
+        syscall4(
+            SYSCALL_WAIT4,
             task_id as u64,
             &mut status as *mut i32 as u64,
+            0,
             0,
         ) as i64
     };

@@ -94,7 +94,7 @@ unsafe extern "C" fn raw_clone(
         "mov [rsi], rax",
         "mov [rsi + 8], r9",
         "mov r10, rcx",
-        "mov eax, 101",
+        "mov eax, {clone}",
         "syscall",
         "test rax, rax",
         "jz 2f",
@@ -106,9 +106,11 @@ unsafe extern "C" fn raw_clone(
         "and rsp, -16",
         "call rax",
         "xor edi, edi",
-        "mov eax, 1",
+        "mov eax, {exit}",
         "syscall",
         "ud2",
+        clone = const slopos_abi::syscall::SYSCALL_CLONE,
+        exit = const slopos_abi::syscall::SYSCALL_EXIT,
     )
 }
 
