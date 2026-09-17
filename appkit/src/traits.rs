@@ -136,6 +136,19 @@ pub trait Widget {
         FocusPolicy::None
     }
 
+    /// Whether the *application* says this widget holds the keyboard focus.
+    ///
+    /// Two things can believe they have focus: a widget told so by the node it
+    /// was built from, and a widget the `FocusManager` last pointed at. Keys
+    /// are offered to every widget until one consumes, so when those two
+    /// disagree the wrong one answers — a button clicked once goes on eating
+    /// every Enter and Space aimed at the field the application actually
+    /// focused. The application's answer wins, and this is how the framework
+    /// asks for it.
+    fn declares_focus(&self) -> bool {
+        false
+    }
+
     fn id(&self) -> WidgetId {
         self.core().id()
     }

@@ -62,7 +62,9 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         handle.drain_ui_queue();
 
         let count = win.poll_protocol_events(&mut proto_events);
-        let mut unhandled_key: Option<(super::event::Key, super::event::Modifiers)> = None;
+        // Every unconsumed key, not just the last: a poll can return a batch,
+        // and an `Option` here silently dropped all but one of them.
+        let mut unhandled_keys: Vec<(super::event::Key, super::event::Modifiers)> = Vec::new();
         let mut sink = MessageSink::new();
 
         for i in 0..count {
@@ -172,7 +174,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                     move_focus_events(root.as_mut(), previous, focus.focused(), &mut sink);
                     needs_repaint = true;
                 } else {
-                    unhandled_key = Some((*key, *m));
+                    unhandled_keys.push((*key, *m));
                 }
             }
         }
@@ -182,7 +184,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
 
-        if let Some((key, mods)) = unhandled_key {
+        for (key, mods) in unhandled_keys {
             let action = app.on_key(key, mods);
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
@@ -204,8 +206,34 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             // has to be told again — otherwise the focus gate every widget now
             // consults is false for the rest of the session and Enter, Space
             // and the arrows reach nothing.
-            if let Some(id) = focus.rebuild_tab_chain(root.as_ref()) {
-                send_to_id(root.as_mut(), id, &WidgetEvent::FocusGained, &mut sink);
+            //
+            // The application's own answer comes first. A widget it built as
+            // focused *is* the focused widget; only when it names none does the
+            // framework's remembered chain position apply. Without that
+            // precedence the two disagree, and since keys are offered to every
+            // widget until one consumes, the framework's stale answer wins: a
+            // button clicked once keeps eating the Enter and Space meant for
+            // the field the application focused.
+            let declared = find_declared_focus(root.as_ref());
+            let restored = focus.rebuild_tab_chain(root.as_ref());
+            let target = match declared {
+                Some(id) => {
+                    focus.set_focused(Some(id));
+                    Some(id)
+                }
+                None => restored,
+            };
+            if let Some(id) = target {
+                // Its own sink: gaining focus is a notification, not a message
+                // source, and anything emitted here would be applied after the
+                // rebuild it caused.
+                let mut focus_sink = MessageSink::new();
+                send_to_id(
+                    root.as_mut(),
+                    id,
+                    &WidgetEvent::FocusGained,
+                    &mut focus_sink,
+                );
             }
             needs_rebuild = false;
             needs_repaint = true;
@@ -326,6 +354,20 @@ fn move_focus_events(
     if let Some(id) = next {
         send_to_id(root, id, &WidgetEvent::FocusGained, sink);
     }
+}
+
+/// The last widget in depth-first order that the application built as focused.
+///
+/// Last rather than first: a popup is appended over the layer beneath it, so
+/// an open menu's own claim outranks the field it is covering.
+fn find_declared_focus(widget: &dyn Widget) -> Option<super::traits::WidgetId> {
+    let mut found = widget.declares_focus().then(|| widget.id());
+    for child in widget.children() {
+        if let Some(id) = find_declared_focus(child.as_ref()) {
+            found = Some(id);
+        }
+    }
+    found
 }
 
 fn send_to_id(

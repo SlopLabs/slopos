@@ -127,8 +127,15 @@ impl Widget for PopupWidget {
             // needs the move to switch menus as the pointer slides across it,
             // and a widget that latched on a press needs it to keep tracking.
             WidgetEvent::PointerMove { .. } => {
-                self.child.event(event, EventPhase::Target, sink);
-                EventResponse::Ignored
+                // The child's answer goes back up: a menu's highlight changing
+                // is a repaint, and a response thrown away here leaves an open
+                // menu's highlight frozen because nothing else redraws.
+                let resp = self.child.event(event, EventPhase::Target, sink);
+                if resp.is_consumed() {
+                    EventResponse::Consumed
+                } else {
+                    EventResponse::Ignored
+                }
             }
 
             // Modal otherwise: swallow what the child ignores so the tree
@@ -150,6 +157,17 @@ impl Widget for PopupWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
+    }
+
+    /// A popup is modal, so while it is open it holds the keyboard.
+    ///
+    /// Without this nothing ever focuses a menu — it opens by mouse, and the
+    /// widget that opened it is not focusable — so its arrow keys and its Enter
+    /// were unreachable code. A declarer *inside* the popup still wins, because
+    /// the search takes the last one in depth-first order: an overlay's own
+    /// text field outranks the popup framing it.
+    fn declares_focus(&self) -> bool {
+        true
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

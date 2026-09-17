@@ -47,6 +47,7 @@ editor /src       # a folder
 | `Ctrl+F` | Find |
 | `Ctrl+H` | Find and replace |
 | `Enter` / `Shift+Enter` | Next match, previous match |
+| `Enter` in the replace field | Replace this match and go to the next |
 | `Ctrl+Enter` | Replace every match |
 | `F3` / `Shift+F3` | Next, previous — with the bar closed |
 | `Ctrl+G` | Go to a line number |
@@ -70,9 +71,10 @@ Indentation is read from the file rather than assumed: a tab-indented file
 indents with tabs, and a file indented two spaces stays that way.
 
 Line endings survive a round trip — a file that arrived with CRLF is saved with
-CRLF — and so does a missing final newline. A file with *mixed* endings is
-normalised to whichever it mostly uses; a carriage return that is not an ending
-is content and is left alone.
+CRLF — and so does a missing final newline. A file with *mixed* endings and a
+CRLF majority is normalised to CRLF; one with an LF majority is left exactly as
+it is, carriage returns and all. A carriage return that is not a line ending is
+content either way.
 
 A save writes a sibling file, flushes it to the disk and renames it over the
 target, so a save that fails part way leaves the old file intact rather than a

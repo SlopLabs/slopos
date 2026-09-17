@@ -591,4 +591,8 @@ impl Widget for CodeViewWidget {
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::ClickFocus
     }
+
+    fn declares_focus(&self) -> bool {
+        self.focused
+    }
 }

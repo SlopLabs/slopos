@@ -312,7 +312,10 @@ impl Widget for TextFieldWidget {
         }
 
         match event {
-            WidgetEvent::TextInput { character } => {
+            // Only when this widget holds the keyboard focus: a key is offered
+            // to every widget in turn until one consumes, so answering one
+            // unfocused takes it from whatever the user was actually aiming at.
+            WidgetEvent::TextInput { character } if self.focused => {
                 if self.read_only {
                     return EventResponse::Consumed;
                 }
@@ -326,7 +329,7 @@ impl Widget for TextFieldWidget {
                 EventResponse::Consumed
             }
 
-            WidgetEvent::KeyDown { key, modifiers, .. } => {
+            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused => {
                 let resp = self.handle_key_down(key, modifiers);
                 if resp.is_consumed() && self.is_text_modifying_key(key, modifiers) {
                     if let Some(cb) = &self.on_change {
@@ -350,7 +353,14 @@ impl Widget for TextFieldWidget {
                 EventResponse::CapturePointer
             }
 
-            WidgetEvent::PointerMove { x, .. } => {
+            // Containment, because there is no pointer capture: `CapturePointer`
+            // is returned here and read nowhere, and a container hands a missed
+            // move to every child that did not contain it — so without this the
+            // caret walked and a selection grew from a pointer crossing the
+            // window with no button held.
+            WidgetEvent::PointerMove { x, y }
+                if self.focused && self.layout_rect().contains(*x, *y) =>
+            {
                 // Drag-select: a move only reaches here while the pointer is
                 // captured from PointerDown.
                 let idx = self.x_to_char_index(*x);

@@ -22,6 +22,9 @@ pub struct FocusManager {
     /// the chain does survive, because the chain is built by walking the same
     /// view in the same order, so it is what focus is re-derived from.
     focused_index: Option<usize>,
+    /// How long the chain was when `focused_index` was taken, so a view that
+    /// changed shape is not silently re-focused on a different control.
+    chain_len_at_focus: Option<usize>,
     /// Every focusable widget, in depth-first order.
     tab_chain: Vec<WidgetId>,
     /// Empty means the global chain is active.
@@ -36,6 +39,7 @@ impl FocusManager {
         Self {
             focused: None,
             focused_index: None,
+            chain_len_at_focus: None,
             tab_chain: Vec::new(),
             scope_stack: Vec::new(),
             keyboard_active: false,
@@ -57,8 +61,10 @@ impl FocusManager {
 
     pub fn set_focused(&mut self, id: Option<WidgetId>) {
         let index = id.and_then(|id| self.active_chain().iter().position(|&c| c == id));
+        let len = self.active_chain().len();
         self.focused = id;
         self.focused_index = index;
+        self.chain_len_at_focus = index.map(|_| len);
     }
 
     /// Record a non-modifier key press.
@@ -79,12 +85,20 @@ impl FocusManager {
         self.tab_chain.clear();
         Self::collect_focusable(root, &mut self.tab_chain);
         let index = self.focused_index?;
-        let restored = self.active_chain().get(index).copied();
-        // A view that lost controls can leave the index past the end; dropping
-        // focus is better than moving it somewhere the user did not put it.
+        // Only when the view kept its shape. A position is a stand-in for
+        // identity and nothing more: if the chain gained or lost a control the
+        // same index is a *different* widget, and restoring focus onto it puts
+        // the keyboard somewhere the user never put it — the find bar growing a
+        // "Replace All" button is enough to turn the next Space into one.
+        // Dropping focus is the only answer that cannot be wrong.
+        let same_shape = self.chain_len_at_focus == Some(self.active_chain().len());
+        let restored = same_shape
+            .then(|| self.active_chain().get(index).copied())
+            .flatten();
         self.focused = restored;
         if restored.is_none() {
             self.focused_index = None;
+            self.chain_len_at_focus = None;
         }
         restored
     }
@@ -120,8 +134,10 @@ impl FocusManager {
             None => 0,
         };
         let next = chain[index];
+        let len = chain.len();
         self.focused = Some(next);
         self.focused_index = Some(index);
+        self.chain_len_at_focus = Some(len);
     }
 
     pub fn move_focus_prev(&mut self) {
@@ -138,8 +154,10 @@ impl FocusManager {
             Some(pos) => pos - 1,
         };
         let prev = chain[index];
+        let len = chain.len();
         self.focused = Some(prev);
         self.focused_index = Some(index);
+        self.chain_len_at_focus = Some(len);
     }
 
     pub fn push_scope(&mut self, focusable_ids: Vec<WidgetId>) -> FocusScopeId {

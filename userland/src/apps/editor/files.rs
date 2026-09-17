@@ -149,19 +149,32 @@ pub fn is_dir(path: &str) -> bool {
 /// The directory the editor starts in: its argument if it is one, else the
 /// working directory, else the root.
 pub fn start_directory(arg: Option<&str>) -> String {
+    // Always absolute. `absolutize` treats its base as absolute — it has to,
+    // since it is textual — so a relative one silently re-roots everything at
+    // `/`: `editor .` in a home directory would propose saving `untitled-1` to
+    // the filesystem root, and an argument like `sub/foo.rs` would open under
+    // one path while the sidebar listed it under another.
+    let working = working_directory();
     if let Some(path) = arg {
         if is_dir(path) {
-            return path.to_string();
+            return absolutize(&working, path);
         }
         let parent = slopos_editor_core::document::parent_dir(path);
-        if !parent.is_empty() && is_dir(parent) {
-            return parent.to_string();
+        if !parent.is_empty() {
+            let parent = absolutize(&working, parent);
+            if is_dir(&parent) {
+                return parent;
+            }
         }
     }
+    working
+}
+
+fn working_directory() -> String {
     std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(str::to_string))
-        .filter(|p| is_dir(p))
+        .filter(|p| p.starts_with('/') && is_dir(p))
         .unwrap_or_else(|| String::from("/"))
 }
 

@@ -97,6 +97,10 @@ pub struct EditorApp {
     /// The last thing searched for, which outlives the find bar; see
     /// `find_query`.
     last_query: String,
+    /// The last replacement, for the same reason: accepting a palette entry
+    /// clears the prompt *before* running the command it names, so Replace All
+    /// from the palette could never see one.
+    last_replacement: String,
     /// `(menu index, anchor x, anchor y)` while a menu is open.
     menu_open: Option<(usize, i32, i32)>,
     dialog: Option<Dialog>,
@@ -121,16 +125,18 @@ pub struct EditorApp {
     sidebar_dragging: bool,
     /// Where the last click landed and how many have landed there, so the
     /// second and third select a word and a line.
-    /// `(document, line, column, clicks)` — the document too, because a click
-    /// run is a run on *one* place in *one* file, and without it switching tabs
-    /// and clicking the same cell reads as a double click.
-    click_run: Option<(usize, usize, usize, u8)>,
+    /// `(document id, line, column, clicks)` — the document too, because a
+    /// click run is a run on *one* place in *one* file. Its **id**, not its tab
+    /// position: opening a file over the scratch buffer puts a different
+    /// document at the same index.
+    click_run: Option<(u64, usize, usize, u8)>,
 }
 
 impl EditorApp {
     pub fn new(args: &[String]) -> Self {
         let arg = args.first().map(String::as_str);
         let root = files::start_directory(arg);
+        let base = files::start_directory(None);
         let mut app = Self {
             docs: Vec::new(),
             active: 0,
@@ -141,6 +147,7 @@ impl EditorApp {
             prompt: Prompt::None,
             overlay_scroll: 0,
             last_query: String::new(),
+            last_replacement: String::new(),
             menu_open: None,
             dialog: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -162,7 +169,7 @@ impl EditorApp {
 
         match arg {
             Some(path) if !files::is_dir(path) => {
-                let absolute = files::absolutize(&files::start_directory(None), path);
+                let absolute = files::absolutize(&base, path);
                 app.open_path(&absolute);
             }
             _ => {}
@@ -195,7 +202,14 @@ impl EditorApp {
     /// The find query, when the find bar is open and non-empty — what the code
     /// surface highlights.
     pub(super) fn active_search_query(&self) -> Option<String> {
-        self.find_query()
+        // The live bar only. `find_query` falls back to the last query so F3
+        // works with the bar closed, and highlighting on that would leave every
+        // occurrence lit in every tab for the rest of the session with no way
+        // to turn it off.
+        match &self.prompt {
+            Prompt::Find { query, .. } if !query.text.is_empty() => Some(query.text.clone()),
+            _ => None,
+        }
     }
 
     /// First result row the overlay list shows.
@@ -465,6 +479,18 @@ impl EditorApp {
                 return;
             }
         };
+        // One tab per path, the rule `open_path` already keeps: without it Save
+        // As can point a second tab at a file another tab is holding, and the
+        // next Ctrl+S in whichever is stale writes over the other's work.
+        if self
+            .docs
+            .iter()
+            .enumerate()
+            .any(|(i, d)| i != index && d.path().is_some_and(|p| p == target))
+        {
+            self.status = format!("{target} is already open in another tab");
+            return;
+        }
         let text = doc.text();
         match files::write_file(&target, &text) {
             Ok(()) => {
@@ -480,10 +506,23 @@ impl EditorApp {
         }
     }
 
-    /// Where `index`'s Save As prompt starts: the tree's root and that
-    /// document's own title.
+    /// Where `index`'s Save As prompt starts: the document's own directory
+    /// when it has one, else the tree's root, and that document's title.
+    ///
+    /// Its own directory, because proposing the tree root turns Ctrl+Shift+S on
+    /// a file from elsewhere into "write a copy next to the tree and re-point
+    /// the tab at it", leaving the original behind.
     fn default_save_path(&self, index: usize) -> String {
-        let mut path = String::from(self.tree.root_path().trim_end_matches('/'));
+        let own = self
+            .docs
+            .get(index)
+            .and_then(Document::path)
+            .map(parent_dir)
+            .filter(|d| !d.is_empty());
+        let mut path = String::from(
+            own.unwrap_or_else(|| self.tree.root_path())
+                .trim_end_matches('/'),
+        );
         path.push('/');
         path.push_str(
             self.docs
@@ -717,6 +756,10 @@ impl EditorApp {
 
     // ── clipboard ───────────────────────────────────────────────────────────
 
+    /// Copies the selection, and with `cut` removes it.
+    ///
+    /// Syncs the viewport itself: cutting shortens the buffer, and a viewport
+    /// left pointing past the new end draws nothing at all.
     fn copy_selection(&mut self, cut: bool) {
         let Some(text) = self.doc().selected_text() else {
             return;
@@ -757,6 +800,8 @@ impl EditorApp {
         if !self.doc_mut().insert_text(text) && !text.is_empty() {
             self.status = String::from("Refused: that would take the file past its line limit");
         }
+        // The match count describes the buffer, and the buffer just changed.
+        self.refresh_find();
         self.sync_viewport();
     }
 
@@ -789,6 +834,7 @@ impl EditorApp {
 
     fn refresh_find(&mut self) {
         self.remember_query();
+        self.remember_replacement();
         let Some(query) = self.find_query() else {
             if let Prompt::Find { total, current, .. } = &mut self.prompt {
                 *total = 0;
@@ -915,7 +961,20 @@ impl EditorApp {
     fn replace_text(&self) -> Option<String> {
         match &self.prompt {
             Prompt::Find { replace, .. } => replace.as_ref().map(|r| r.text.clone()),
+            _ if !self.last_query.is_empty() => Some(self.last_replacement.clone()),
             _ => None,
+        }
+    }
+
+    /// Remembers the replace field, so a Replace All reached from the palette
+    /// still has one.
+    fn remember_replacement(&mut self) {
+        if let Prompt::Find {
+            replace: Some(replace),
+            ..
+        } = &self.prompt
+        {
+            self.last_replacement = replace.text.clone();
         }
     }
 
@@ -1613,11 +1672,12 @@ impl EditorApp {
                 // No timer: a slow double click is still two clicks on one cell,
                 // and the cost of reading it that way is a word selected rather
                 // than a caret placed.
+                let id = self.doc().id();
                 let clicks = match self.click_run {
-                    Some((d, l, c, n)) if d == self.active && l == line && c == col => (n % 3) + 1,
+                    Some((d, l, c, n)) if d == id && l == line && c == col => (n % 3) + 1,
                     _ => 1,
                 };
-                self.click_run = Some((self.active, line, col, clicks));
+                self.click_run = Some((id, line, col, clicks));
                 let position = Position::new(line, col);
                 match clicks {
                     2 => self.doc_mut().select_word_at(position),

@@ -271,11 +271,12 @@ impl Widget for MenuWidget {
                 _ => EventResponse::Ignored,
             },
 
+            // Gaining focus does not move the highlight. A press on a separator
+            // focuses this menu without emitting anything, and pre-selecting
+            // the first item there lights up a row the pointer is nowhere near
+            // — which a following Enter would then run.
             WidgetEvent::FocusGained => {
                 self.focused = true;
-                if self.hovered_index.is_none() {
-                    self.hovered_index = self.next_actionable(None, true);
-                }
                 EventResponse::Ignored
             }
             WidgetEvent::FocusLost => {

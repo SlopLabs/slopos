@@ -251,17 +251,21 @@ impl Widget for EditorTabsWidget {
                 if *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
-                // Only where the glyph is drawn: an inactive tab the pointer
-                // is not over shows nothing there, and a click that closed it
-                // would be a click on nothing. The press itself says where the
-                // pointer is, which is the same thing `paint` reads — a
-                // remembered hover would have been wiped by the last rebuild.
-                let shows_close = index == self.active || self.tab_at(*x) == Some(index);
-                if shows_close {
-                    if let Some(close_x) = self.close_rect_x(index) {
-                        if *x >= close_x && *x < close_x + CLOSE_SIZE {
-                            return self.emit(TabInput::Close(index), sink);
-                        }
+                // `index` came from the press's own x, so the pointer is on
+                // this tab by construction and the glyph is drawn — which is
+                // what makes reading it off the press right where a remembered
+                // hover, wiped by the last rebuild, was wrong. The glyph is a
+                // box: bounding only x closes a tab from its topmost and
+                // bottommost pixels.
+                if let Some(close_x) = self.close_rect_x(index) {
+                    let strip = self.layout_rect();
+                    let close_y = strip.y + (strip.height - CLOSE_SIZE) / 2;
+                    if *x >= close_x
+                        && *x < close_x + CLOSE_SIZE
+                        && *y >= close_y
+                        && *y < close_y + CLOSE_SIZE
+                    {
+                        return self.emit(TabInput::Close(index), sink);
                     }
                 }
                 self.emit(TabInput::Select(index), sink)

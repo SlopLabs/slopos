@@ -482,7 +482,10 @@ impl Widget for TableWidget {
                 }
             }
 
-            WidgetEvent::KeyDown { key, modifiers, .. } => {
+            // Only when this widget holds the keyboard focus: a key is offered
+            // to every widget in turn until one consumes, so answering one
+            // unfocused takes it from whatever the user was actually aiming at.
+            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused => {
                 let rc = self.row_count();
                 if rc == 0 {
                     return EventResponse::Ignored;

@@ -90,6 +90,11 @@ impl History {
         Self::default()
     }
 
+    /// Undo steps held, for the cap's own test.
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -133,6 +138,11 @@ impl History {
             }
             self.transaction_group = None;
             self.seal();
+            // `record` cannot trim mid-transaction, so a transactional edit is
+            // never bounded by it — and `insert_newline` is transactional, so
+            // ordinary typing grew the history without limit. The end of the
+            // transaction is where the cap applies.
+            self.trim();
         }
     }
 

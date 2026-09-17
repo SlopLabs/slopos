@@ -26,7 +26,18 @@ pub struct Viewport {
     pub visible_cols: usize,
 }
 
+/// Hands out a fresh [`Document::id`]. Monotonic and never reused, so a stale
+/// id designates nothing rather than designating a stranger.
+fn next_document_id() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct Document {
+    /// Stable for this document's whole life, unlike its position among the
+    /// open tabs. What an application keys per-document state on.
+    id: u64,
     pub buffer: TextBuffer,
     pub cursor: Cursor,
     pub viewport: Viewport,
@@ -79,6 +90,7 @@ impl Document {
         let indent = buffer.detect_indent(IndentStyle::default());
         let saved_revision = buffer.revision();
         Self {
+            id: next_document_id(),
             buffer,
             cursor: Cursor::default(),
             viewport: Viewport::default(),
@@ -102,6 +114,16 @@ impl Document {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Undo steps held. The cap is a memory bound, so it is worth asserting.
+    pub fn undo_depth(&self) -> usize {
+        self.history.undo_depth()
+    }
+
+    /// This document's stable identity, which its tab position is not.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn language(&self) -> Language {
@@ -138,10 +160,12 @@ impl Document {
             self.title = file_name(&path).to_string();
             self.language = detect_language(&path);
             self.highlighter.set_language(self.language);
-            // The indent is read from the content, and by now there is content:
-            // an untitled buffer took the default, and saving it as a `.py`
-            // should indent it the way it is actually indented.
-            self.indent = self.buffer.detect_indent(self.indent);
+            // Only on a rename. Re-reading it on every plain Ctrl+S lets a
+            // pasted block flip the Tab key of a file whose own convention has
+            // not changed.
+            if self.path.as_deref() != Some(path.as_str()) {
+                self.indent = self.buffer.detect_indent(self.indent);
+            }
             self.invalidate_from(0);
             self.path = Some(path);
         }
@@ -194,6 +218,7 @@ impl Document {
         if text.is_empty() {
             return false;
         }
+        let at = self.buffer.clamp(at);
         let before = self.cursor;
         let revision = self.buffer.revision();
         let end = self.buffer.insert(at, text);
@@ -264,6 +289,16 @@ impl Document {
         // range's start and clears the anchor, so a dedent computed before this
         // would delete the indent, lose the selection with it, and leave the
         // brace welded to the text the user meant to replace.
+        // Refuse before anything is destroyed. The selection goes first (so the
+        // dedent below reads the line the text will land on), which means a
+        // ceiling check afterwards would report "refused" over a buffer that
+        // had already lost the selection.
+        if self.buffer.would_exceed_line_limit(text) {
+            if transactional {
+                self.history.end(self.cursor);
+            }
+            return false;
+        }
         let had_selection = self.delete_selection();
         let dedent = self.closing_brace_dedent(text);
         if dedent > 0 {

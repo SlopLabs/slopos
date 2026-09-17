@@ -222,6 +222,10 @@ impl Widget for TreeViewWidget {
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::ClickFocus
     }
+
+    fn declares_focus(&self) -> bool {
+        self.focused
+    }
 }
 
 /// `text` shortened with a leading ellipsis until it fits `budget` pixels,

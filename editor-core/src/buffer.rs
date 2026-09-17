@@ -239,8 +239,9 @@ impl TextBuffer {
             text
         };
 
+        let mut pieces = body.split('\n').peekable();
         let mut lines: Vec<String> = Vec::new();
-        for line in body.split('\n') {
+        while let Some(line) = pieces.next() {
             if lines.len() >= MAX_LINES {
                 return Err(LoadError::TooManyLines);
             }
@@ -248,9 +249,14 @@ impl TextBuffer {
             // only in a file whose endings are CRLF. Stripping unconditionally
             // deleted a lone `\r` — the whole content of a one-byte file — and
             // silently rewrote the endings of a mixed file on the next save.
+            //
+            // The last piece is followed by no newline, so whatever `\r` it ends
+            // with is content: the file's own terminator, if it had one, was
+            // already taken off above.
+            let last = pieces.peek().is_none();
             let line = match line_ending {
-                LineEnding::Crlf => line.strip_suffix('\r').unwrap_or(line),
-                LineEnding::Lf => line,
+                LineEnding::Crlf if !last => line.strip_suffix('\r').unwrap_or(line),
+                _ => line,
             };
             lines.push(String::from(line));
         }
@@ -337,6 +343,14 @@ impl TextBuffer {
     pub fn clamp(&self, pos: Position) -> Position {
         let line = pos.line.min(self.lines.len() - 1);
         Position::new(line, pos.col.min(self.line_len(line)))
+    }
+
+    /// Whether inserting `text` anywhere would pass [`MAX_LINES`].
+    ///
+    /// Asked *before* an edit begins, so an operation that would be refused
+    /// destroys nothing on the way to finding out.
+    pub fn would_exceed_line_limit(&self, text: &str) -> bool {
+        !text.is_empty() && self.lines.len() + text.matches('\n').count() > MAX_LINES
     }
 
     /// Inserts `text` at `pos`, returning the position just past it — or the

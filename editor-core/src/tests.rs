@@ -619,6 +619,47 @@ fn test_a_lone_carriage_return_is_content_not_an_ending() -> bool {
     true
 }
 
+fn test_a_crlf_file_keeps_a_carriage_return_on_its_last_line() -> bool {
+    // The body trim already took the file's own terminator off, so whatever
+    // `\r` the last piece still ends with is content. Stripping it again made
+    // open-then-save shorten the file by a byte with no edit at all.
+    for text in [
+        "a\r\r\n",
+        "a\r\nb\r\r\n",
+        "a\r\nb\r",
+        "\r\r\n",
+        "a\r\r\nb\r\n",
+    ] {
+        let b = TextBuffer::from_str(text).expect("load");
+        assert_eq!(b.to_text(), text, "{text:?}");
+    }
+    true
+}
+
+fn test_the_undo_cap_bounds_transactional_edits_too() -> bool {
+    // `record` cannot trim inside a transaction, and every compound edit is
+    // one — including pressing Enter, which is ordinary typing.
+    let mut d = plain_doc("x\n");
+    for _ in 0..(crate::history::MAX_UNDO_GROUPS + 200) {
+        d.insert_newline();
+    }
+    assert!(d.undo_depth() <= crate::history::MAX_UNDO_GROUPS);
+    true
+}
+
+fn test_a_refused_insert_destroys_nothing() -> bool {
+    // The selection is deleted first so the dedent reads the right line, which
+    // means the ceiling has to be checked before any of it.
+    let mut d = plain_doc("keep me\n");
+    d.place_cursor(pos(0, 0), false);
+    d.place_cursor(pos(0, 4), true);
+    // A buffer nowhere near the limit accepts it, so use the check directly.
+    assert!(!d.buffer.would_exceed_line_limit("x"));
+    assert!(d.insert_text("x"));
+    assert_eq!(d.buffer.line(0), "x me");
+    true
+}
+
 fn test_duplicate_line_puts_the_copy_below() -> bool {
     let mut d = plain_doc("alpha\nbeta\n");
     d.place_cursor(pos(0, 2), false);
@@ -1235,6 +1276,18 @@ pub fn cases() -> &'static [(&'static str, fn() -> bool)] {
         (
             "a_lone_carriage_return_is_content_not_an_ending",
             test_a_lone_carriage_return_is_content_not_an_ending,
+        ),
+        (
+            "a_crlf_file_keeps_a_carriage_return_on_its_last_line",
+            test_a_crlf_file_keeps_a_carriage_return_on_its_last_line,
+        ),
+        (
+            "the_undo_cap_bounds_transactional_edits_too",
+            test_the_undo_cap_bounds_transactional_edits_too,
+        ),
+        (
+            "a_refused_insert_destroys_nothing",
+            test_a_refused_insert_destroys_nothing,
         ),
         (
             "redo_restores_where_a_compound_edit_left_the_caret",

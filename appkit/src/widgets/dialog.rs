@@ -51,12 +51,25 @@ impl DialogWidget {
         if len == 0 {
             return;
         }
-        self.focused_action = Some(match self.focused_action {
+        let previous = self.focused_action;
+        let next = match self.focused_action {
             Some(i) if forward => (i + 1) % len,
             Some(i) => (i + len - 1) % len,
             None if forward => 0,
             None => len - 1,
-        });
+        };
+        self.focused_action = Some(next);
+        // The dialog runs its own focus ring, so the framework never tells
+        // these buttons anything — and a button that was never told it has
+        // focus answers no key, which left Tab moving a ring that Enter could
+        // not act on.
+        let mut sink = MessageSink::new();
+        if let Some(action) = previous.and_then(|i| self.actions.get_mut(i)) {
+            action.event(&WidgetEvent::FocusLost, EventPhase::Target, &mut sink);
+        }
+        if let Some(action) = self.actions.get_mut(next) {
+            action.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
+        }
     }
 
     pub fn card_rect(&self) -> Rect {

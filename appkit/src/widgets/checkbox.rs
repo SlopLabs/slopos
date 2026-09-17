@@ -14,6 +14,7 @@ pub struct CheckboxWidget {
     on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     enabled: bool,
     hovered: bool,
+    focused: bool,
 }
 
 impl CheckboxWidget {
@@ -30,6 +31,7 @@ impl CheckboxWidget {
             on_toggle,
             enabled,
             hovered: false,
+            focused: false,
         }
     }
 
@@ -110,7 +112,12 @@ impl Widget for CheckboxWidget {
 
         // Ring the box, not the label.
         let box_rect = Rect::new(box_x, box_y, cb_size, cb_size);
-        ctx.draw_focus_ring(box_rect);
+        // Only the focused one. `focus_visible` is just "the user is using the
+        // keyboard", so drawing unconditionally rings every checkbox in the
+        // window at the first keystroke.
+        if self.focused {
+            ctx.draw_focus_ring(box_rect);
+        }
     }
 
     fn event(
@@ -146,10 +153,21 @@ impl Widget for CheckboxWidget {
                 self.hovered = false;
                 EventResponse::Ignored
             }
+            WidgetEvent::FocusGained => {
+                self.focused = true;
+                EventResponse::Ignored
+            }
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResponse::Ignored
+            }
+            // Only when focused. A key is offered to every widget until one
+            // consumes, so an unguarded Space here toggles a checkbox instead
+            // of typing a space into whatever field the user is in.
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Space),
                 ..
-            } => {
+            } if self.focused => {
                 self.toggle();
                 if let Some(f) = &self.on_toggle {
                     sink.emit_raw(f());

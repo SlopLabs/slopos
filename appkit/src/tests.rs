@@ -426,6 +426,10 @@ fn context_table(selected: Option<usize>) -> TableWidget {
         &mut ctx,
     );
     place_widget(&mut table, Rect::new(0, 0, 200, 200));
+    // A table answers keys only when it holds the focus, which is what stops it
+    // taking the arrows from whatever else is on screen.
+    let mut sink = MessageSink::new();
+    table.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
     table
 }
 
@@ -1450,6 +1454,9 @@ fn test_text_field_types_a_space() {
     );
     place_widget(&mut field, Rect::new(0, 0, 200, 28));
     let mut sink = MessageSink::new();
+    // A field answers keys only when it holds the focus, which is what stops it
+    // taking them from whatever else is on screen.
+    field.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
     field.event(
         &WidgetEvent::KeyDown {
             key: super::event::Key::Named(super::event::NamedKey::End),

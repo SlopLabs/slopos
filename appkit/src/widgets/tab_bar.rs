@@ -213,7 +213,10 @@ impl Widget for TabBarWidget {
                 EventResponse::Ignored
             }
 
-            WidgetEvent::KeyDown { key, .. } => match key {
+            // Only when this widget holds the keyboard focus: a key is offered
+            // to every widget in turn until one consumes, so answering one
+            // unfocused takes it from whatever the user was actually aiming at.
+            WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Left) => {
                     if !self.tabs.is_empty() && self.active > 0 {
                         self.active -= 1;
