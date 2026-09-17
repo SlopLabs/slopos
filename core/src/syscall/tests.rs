@@ -228,32 +228,30 @@ pub fn test_syscall_lookup_invalid_number() -> TestResult {
 
 /// A Linux number this kernel does not answer resolves to nothing rather than
 /// to whatever happens to sit nearby. 183 is `afs_syscall`, which Linux itself
-/// never implemented, so it can never become a false negative here.
+/// never implemented, so this can never fail for a correct implementation that
+/// merely grew a syscall.
 pub fn test_syscall_lookup_empty_slot() -> TestResult {
-    for number in [183u64, 300, 470] {
-        assert_test!(
-            syscall_lookup(number).is_none(),
-            "an unimplemented Linux number must answer nothing"
-        );
-    }
+    assert_test!(
+        syscall_lookup(183).is_none(),
+        "an unimplemented Linux number must answer nothing"
+    );
     TestResult::Pass
 }
 
-/// The decision Workstream 1.1 settled: a number below the private base *is*
-/// Linux's number for the call of that name, and the call is registered there.
-/// `check_syscall_abi.sh` holds the whole table to `syscall_64.tbl`; this holds
-/// the dispatcher to the same claim from inside the kernel.
+/// Each name a Linux number carries resolves to a registered handler. The
+/// number-to-name agreement itself is `check_syscall_abi.sh`'s, over the whole
+/// table against `syscall_64.tbl`; what no script can see is the dispatcher,
+/// which is this.
 pub fn test_adopted_numbers_are_linux_numbers() -> TestResult {
-    for (sysno, linux_number) in [
-        (SYSCALL_READ, 0u64),
-        (SYSCALL_WRITE, 1),
-        (SYSCALL_EXIT, 60),
-        (SYSCALL_FUTEX, 202),
-        (SYSCALL_OPENAT, 257),
+    for sysno in [
+        SYSCALL_READ,
+        SYSCALL_WRITE,
+        SYSCALL_EXIT,
+        SYSCALL_FUTEX,
+        SYSCALL_OPENAT,
     ] {
-        assert_eq_test!(sysno, linux_number);
         let Some(entry) = syscall_lookup(sysno) else {
-            klog_info!("nothing registered at Linux number {}", linux_number);
+            klog_info!("nothing registered at Linux number {}", sysno);
             return TestResult::Fail;
         };
         assert_test!(entry.handler.is_some(), "registered slot has no handler");

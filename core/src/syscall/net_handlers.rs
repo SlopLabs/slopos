@@ -195,8 +195,12 @@ define_syscall!(syscall_accept
 {
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
     // `addrlen` is in/out: the caller's buffer size in, the peer address's real
-    // length out. A null on either side declines the peer.
-    let want_peer = peer_ptr != 0 && addrlen_ptr != 0;
+    // length out. A null address pointer declines the peer; a non-null one with
+    // no length to read is the malformed pair Linux faults on.
+    if peer_ptr != 0 && addrlen_ptr == 0 {
+        return Err(Errno::EFAULT);
+    }
+    let want_peer = peer_ptr != 0;
     let caller_len = if want_peer { read_socklen(addrlen_ptr)? } else { 0 };
 
     match sock_fd {
@@ -218,8 +222,15 @@ define_syscall!(syscall_accept
             if new_fd < 0 {
                 return Err(Errno::ENOMEM);
             }
-            if want_peer {
-                accept_peer_unix(accepted_handle, caller_len, peer_ptr, addrlen_ptr)?;
+            // The descriptor is already installed, so a faulting copy-out must
+            // not leave the caller holding a connection it was never told the
+            // number of.
+            if want_peer
+                && let Err(e) =
+                    accept_peer_unix(accepted_handle, caller_len, peer_ptr, addrlen_ptr)
+            {
+                let _ = slopos_fs::file_close_fd(process_id, new_fd);
+                return Err(e);
             }
             Ok(new_fd as u64)
         }
@@ -254,12 +265,15 @@ define_syscall!(syscall_accept
                     addr: peer_ip,
                     _pad: [0; 8],
                 };
-                write_sockaddr(
+                if let Err(e) = write_sockaddr(
                     slopos_ostd::util::byte_view::pod_as_bytes(&peer),
                     caller_len,
                     peer_ptr,
                     addrlen_ptr,
-                )?;
+                ) {
+                    let _ = slopos_fs::file_close_fd(process_id, new_fd);
+                    return Err(e);
+                }
             }
 
             Ok(new_fd as u64)
@@ -377,9 +391,12 @@ define_syscall!(syscall_recvfrom
     if buf.base_u64() == 0 && buf.len() != 0 {
         return Err(Errno::EFAULT);
     }
-    // `srclen` is in/out, as in `accept`. A null `src` or `srclen` declines the
-    // sender's address.
-    let want_src = src_ptr != 0 && srclen_ptr != 0;
+    // `srclen` is in/out, as in `accept`: a null `src` declines the sender's
+    // address, a non-null one with no length to read is a fault.
+    if src_ptr != 0 && srclen_ptr == 0 {
+        return Err(Errno::EFAULT);
+    }
+    let want_src = src_ptr != 0;
     let caller_len = if want_src { read_socklen(srclen_ptr)? } else { 0 };
 
     let len = buf.len().min(4096);
@@ -395,9 +412,9 @@ define_syscall!(syscall_recvfrom
         }
         SocketFd::Inet(sock_idx) => {
             // `socket_recvfrom` is the datagram path and refuses a stream
-            // socket, so a caller that does not want the sender's address gets
-            // the connection-oriented receive — which is what `recv(2)` is.
-            if !want_src {
+            // socket, so a stream receive takes the connection-oriented call
+            // and reports no sender address, exactly as Linux does.
+            if !want_src || socket::socket_is_tcp(sock_idx) {
                 let rc = socket::socket_recv(sock_idx, &mut scratch[..len]);
                 if rc < 0 {
                     return Err(errno_from_neg64(rc));
@@ -436,7 +453,7 @@ define_syscall!(syscall_recvfrom
                     srclen_ptr,
                 )?;
             }
-            // A connected AF_UNIX peer carries no address: report length 0.
+            // A stream receive carries no sender address: report length 0.
             None => write_sockaddr(&[], caller_len, src_ptr, srclen_ptr)?,
         }
     }

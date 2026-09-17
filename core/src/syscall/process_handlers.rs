@@ -701,8 +701,9 @@ define_syscall!(syscall_execve
 
 /// The kernel's own affinity mask is a `u32`, so that is the widest cpu set a
 /// `sched_*affinity` call can carry. A caller naming a wider `cpusetsize` —
-/// glibc's `cpu_set_t` is 128 bytes — has the excess zero-filled on `get` and
-/// ignored on `set`, which is what Linux does past `cpumask_size()`.
+/// glibc's `cpu_set_t` is 128 bytes — has the excess ignored on `set`, and on
+/// `get` receives this many bytes and the count as the return value; clearing
+/// the remainder is the caller's, as it is on Linux past `cpumask_size()`.
 const AFFINITY_MASK_BYTES: usize = core::mem::size_of::<u32>();
 
 /// One bit per online CPU. `Task::cpu_affinity` stores 0 for "any CPU", and

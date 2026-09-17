@@ -4,7 +4,7 @@ use core::sync::atomic::Ordering;
 use super::*;
 
 use slopos_abi::Errno;
-use slopos_abi::fs::{UserDirent64, UserFlock, UserFsEntry, UserFsStat};
+use slopos_abi::fs::{UserDirent64, UserFlock, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{
     F_DUPFD, F_GETFD, F_GETFL, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_WRLCK, FD_CLOEXEC,
@@ -683,30 +683,6 @@ pub fn file_access_at(path: &[u8], cwd: &[u8], mode: u32, resolve_flags: u32) ->
         return Errno::EACCES.raw() as _;
     }
     0
-}
-
-/// Paged listing: `cursor` is the ABI-packed resumption point, read and
-/// written in place. A caller loops until it comes back
-/// [`slopos_abi::fs::FS_LIST_CURSOR_END`].
-pub fn file_list_at_from(
-    path: &[u8],
-    cwd: &[u8],
-    entries: &mut [UserFsEntry],
-    cursor: &mut u64,
-    out_count: &mut u32,
-) -> c_int {
-    if entries.is_empty() {
-        return Errno::EINVAL.raw() as _;
-    }
-    let mut state = crate::vfs::ListCursor::from_abi(*cursor);
-    match crate::vfs::vfs_list_from_at(path, cwd, entries, &mut state) {
-        Ok(count) => {
-            *out_count = count as u32;
-            *cursor = state.to_abi();
-            0
-        }
-        Err(e) => e.to_errno().raw() as _,
-    }
 }
 
 pub fn file_is_console_fd(table: FdTable, fd: c_int) -> bool {

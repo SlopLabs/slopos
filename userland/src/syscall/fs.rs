@@ -171,6 +171,11 @@ pub fn rename(old_path: *const c_char, new_path: *const c_char) -> SyscallResult
 /// A directory larger than `max_entries` therefore takes several calls rather
 /// than being cut off. Names are raw bytes, NUL-terminated inside the entry.
 ///
+/// This runs over `getdents64` on a descriptor, which reports what the mount
+/// under it holds: a child mount point with no backing entry — `/dev` and
+/// `/tmp` on the shipped image — does not appear, where the retired
+/// path-addressed listing synthesised one.
+///
 /// # Errors
 /// * `ENOENT` - Directory not found
 /// * `ENOTDIR` - Path is not a directory

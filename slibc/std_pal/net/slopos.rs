@@ -169,8 +169,6 @@ pub mod netc {
     pub const SHUT_WR: c_int = 1;
     pub const SHUT_RDWR: c_int = 2;
 
-    pub const MSG_NOSIGNAL: c_int = 0x4000;
-
     pub const POLLIN: i16 = 0x0001;
     pub const POLLOUT: i16 = 0x0004;
     pub const POLLERR: i16 = 0x0008;

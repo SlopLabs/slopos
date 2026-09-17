@@ -679,12 +679,26 @@ pub const GRND_RANDOM: u32 = 0x0002;
 /// `memfd_create` flags.
 pub const MFD_CLOEXEC: u32 = 0x0001;
 
-/// `reboot` magics and commands, as Linux defines them.
+/// `reboot` magics and commands, as Linux defines them. Linux accepts any of
+/// the four second magics, so a caller written against any of them works.
 pub const LINUX_REBOOT_MAGIC1: u64 = 0xfee1_dead;
 pub const LINUX_REBOOT_MAGIC2: u64 = 672_274_793;
+pub const LINUX_REBOOT_MAGIC2A: u64 = 85_072_278;
+pub const LINUX_REBOOT_MAGIC2B: u64 = 369_367_448;
+pub const LINUX_REBOOT_MAGIC2C: u64 = 537_993_216;
 pub const LINUX_REBOOT_CMD_RESTART: u64 = 0x0123_4567;
 pub const LINUX_REBOOT_CMD_HALT: u64 = 0xcdef_0123;
 pub const LINUX_REBOOT_CMD_POWER_OFF: u64 = 0x4321_fedc;
+pub const LINUX_REBOOT_CMD_CAD_ON: u64 = 0x89ab_cdef;
+pub const LINUX_REBOOT_CMD_CAD_OFF: u64 = 0;
+
+/// Whether `magic2` is one of the four values Linux's `reboot(2)` accepts.
+pub const fn linux_reboot_magic2(magic2: u64) -> bool {
+    matches!(
+        magic2,
+        LINUX_REBOOT_MAGIC2 | LINUX_REBOOT_MAGIC2A | LINUX_REBOOT_MAGIC2B | LINUX_REBOOT_MAGIC2C
+    )
+}
 
 pub const FONT_FORMAT_BITMAP: u64 = 0;
 pub const FONT_FORMAT_COVERAGE: u64 = 1;

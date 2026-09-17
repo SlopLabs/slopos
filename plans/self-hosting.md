@@ -327,28 +327,54 @@ What it rests on, in case a later phase disturbs it:
   instead of `unsupported`; and `Command::spawn` goes through `spawn_path` with
   a cwd in `SpawnAttrs`, so nothing allocates between fork and exec against the
   single global malloc spinlock a multithreaded parent could hand over locked.
+- **The ABI is Linux's, numbers included.** A syscall number below
+  `SYSCALL_PRIVATE_BASE` is Linux x86-64's number for the call of that name and
+  carries that call's Linux signature: 112 of them, in a dense table sized to
+  the 472 numbers Linux has allocated. The 39 operations Linux has no name for
+  — the seat and screen acquisition, SlopRing, the compositor and cursor calls,
+  the keymap and font uploads, the net-config surface that replaces netlink,
+  `spawn_path`, the fate calls, the KTAP hooks, the fd-less console write and
+  controlling-terminal read, and `sys_info` — live in a private range based at
+  1024, which is the discipline ARM takes with `__ARM_NR_BASE` and is clear of
+  both the allocated space and `__X32_SYSCALL_BIT`. Nothing borrows a Linux
+  number for a shape it does not implement: `sendmsg`/`recvmsg` are private
+  because `MsgHdr`/`CmsgHdr` are not Linux's layouts, and SlopRing declines
+  io_uring's 425-427 because its SQE is its own.
+  `scripts/check_syscall_abi.sh` holds every non-private constant to Linux's
+  own `syscall_64.tbl`, requires the private range contiguous, and fails a
+  private name that collides with a Linux syscall unless the allowlist states
+  why — so a number cannot drift from the call it claims.
 
-**What this deliberately did not do.** The syscall numbering was still bespoke
-when this landed — the *layouts* were Linux's, which is the half that carries
-no design value and the half a libc port cannot work around. Workstream 1.1
-has since settled the numbering too, and found that the layout claim was ~95%
-true rather than whole; its ledger names the fifteen exceptions. Process-group
-waits (`pid == 0`, `pid < -1`) are still `ESRCH`, because there is no
-process-group wait to answer with. `st_uid`/`st_gid` exist for layout and read
-0, which is the single-user decision below, not an omission.
+**What this deliberately did not do.** The layouts are Linux's in all but the
+places listed below, and those are what stand between source compatibility —
+which this is — and *binary* compatibility with prebuilt Linux userland, which
+is the open decision further down. Process-group waits (`pid == 0`,
+`pid < -1`) are still `ESRCH`, because there is no process-group wait to answer
+with. `st_uid`/`st_gid` exist for layout and read 0, which is the single-user
+decision below, not an omission. `wait4` takes Linux's `rusage` argument and
+refuses a non-null one, because there is no per-task resource accounting to
+report.
 
-Four smaller divergences, stated rather than hidden:
+Five divergences, stated rather than hidden:
 
 - **The cwd is per-thread.** `CLONE_FS` is accepted and ignored, so a `chdir`
   is visible only to the thread that made it, where POSIX has the cwd per
   process. The buffer is a `TaskOwnCell` whose whole contract is that only its
   owning task reads or writes it, so sharing it means a lock, a lock class and
   a changed signature at every reader.
-- **`getdents64`'s `d_name` sits at offset 24, not Linux's 19.** The record
-  header is naturally aligned rather than packed, which every in-tree consumer
-  and its asserts agree on, but it is a layout a libc port compiled against a
-  real `struct linux_dirent64` cannot work around — the one place the
-  layouts-are-Linux's claim above does not hold.
+- **Seven layouts are not Linux's**, and they are exactly the ones a binary
+  compiled against Linux headers could not work around: `getdents64`'s `d_name`
+  sits at offset 24 rather than 19 (the record header is naturally aligned
+  rather than packed, which every in-tree consumer and its asserts agree on);
+  `siginfo_t.si_addr` is at 24 rather than 16, so a fault handler reads 0 for
+  the fault address; `ucontext_t` is truncated (no `fpstate` pointer,
+  `uc_sigmask` at 224 rather than 296) and `rt_sigreturn` restores from
+  `SignalFrame` and ignores the ucontext, so a handler cannot redirect
+  execution by editing `uc_mcontext`; `msghdr` is 32 bytes with one inlined
+  iovec and `cmsghdr` is 12 with `CMSG_DATA` at +12; `NSIG` is 32, so there are
+  no realtime signals and therefore no glibc thread cancellation; `struct
+  termios` is `termios2`-shaped behind `TCGETS`, which overruns a Linux-header
+  `tcgetattr`; and `signalfd_siginfo` is 16 bytes rather than 128.
 - **Advisory locks are 128 rows machine-wide**, shared by `flock(2)` and
   `fcntl(2)` record locks because they contend on the same file. A principal's
   share is bounded and a principal holding no lock can always take one, so no
@@ -1114,141 +1140,14 @@ with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
 about *who compiles Rust*, not about which languages SlopOS supports: declining
 LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
 the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 1.6.
+A C toolchain written in Rust is a separate and wanted track — Workstream 1.5.
 The cost of this decision is upstream work: cranelift-only rustc bootstrap does
 not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
 
-### Workstream 1.1 — The ABI question (**resolved**)
-
-**Decided: the numbering is Linux x86-64's, as one table, with a private range
-at 1024 for what Linux has no name for.** The rule that makes it coherent, and
-the reason this was a flag day rather than a `sed`: **a Linux number carries
-that call's Linux signature and semantics.** A slot holding number 202 while
-answering `fchmodat`-with-flags would be worse than a bespoke table — it is an
-ABI that lies, and it fails silently. So the renumber came with nine
-retirements and thirteen signature fixes, and where a shape is not Linux's yet
-the call sits in the private range instead of taking the number it has not
-earned.
-
-What the tree actually had, measured rather than estimated: **156 live calls**
-— 85 semantically identical to a Linux call, 38 near it, 33 with no analogue —
-and **not one of the 123 with an analogue was on Linux's number for it**. What
-it has now: **151 live calls, 112 Linux-numbered and 39 private.** The earlier
-estimate in this section was wrong in both directions: the live count was 156
-rather than 215 (59 slots were holes), and Linux's allocated space reaches
-**472** (`open_tree_attr` at 467, 468-472 reserved), not ~350. The dispatch is
-therefore two dense tables — 473 Linux slots and 48 private ones — and the
-capability histogram now counts *registered* entry points, because at that
-density a hole count moves on every unrelated addition and a ratchet nobody
-reads is not a ratchet.
-
-The private base is 1024. Linux x86-64 has no vendor range at all — it appends,
-which is why this needed a decision rather than a lookup; the precedent is
-**ARM's `__ARM_NR_BASE`**, which sits outside `NR_syscalls` for exactly this
-purpose. 1024 clears both the allocated space (472 after three decades, about
-five a year) and `__X32_SYSCALL_BIT`, so a private number cannot be mistaken
-for an x32 call either. The tenants are the operations that *are* SlopOS: the
-seat and screen acquisition, SlopRing, the compositor and cursor calls, the
-keymap and font uploads, the net-config surface that replaces netlink, the
-fate/roulette calls, the KTAP harness hooks, `spawn_path`, the fd-less console
-write and controlling-terminal read, and `sys_info` — which deliberately does
-**not** take Linux's 99, because Linux's `sysinfo` reports something else.
-`SlopRing` deliberately does not take io_uring's 425-427 for the same reason:
-the SQE, the params and the register ops are all SlopOS's own shapes.
-
-**Retired in the same commit**, because a renumbering is the only cheap moment
-for it: `fs_open` (now `open`, with the `mode` it never had), `fs_list` (⊂
-`getdents64`), `get_time_ms` (⊂ `clock_gettime`), `send` and `recv` (Linux has
-neither — they are `sendto`/`recvfrom` with a null address), `terminate_task`
-(= `kill(tid, SIGKILL)`), `openpty` (`/dev/ptmx` already works), `halt` (folded
-into `reboot`'s `cmd`, with Linux's magics), and `get_cpu_count` /
-`get_cpu_affinity` / `set_cpu_affinity` (now `sched_getaffinity` /
-`sched_setaffinity` over a byte mask). Every userland wrapper kept its name and
-signature and was reimplemented over the replacement, so no application
-changed.
-
-**`scripts/check_syscall_abi.sh` is what keeps the claim true.** It holds every
-constant below the private base to Linux's own `syscall_64.tbl` (vendored as
-gate data in `scripts/gates/syscall/` — ABI numbers are interface facts, so
-this is the licensing rule working as written), requires the private range to
-be contiguous, and fails a private constant whose name collides with a Linux
-syscall unless `private-allowlist.txt` states why. `sendmsg` and `recvmsg` are
-the only two entries in it, and their stated reason is the ledger below. The
-gate self-tests, and a dead allowlist entry fails as a dead entry.
-
-**Why the numbering was never the leverage.** There is no binary compiled
-against the old numbers anywhere: userland is rebuilt from source on every
-image build, the images are gitignored, and the number appeared in exactly one
-file plus six hand-edit sites. The renumber cost a day and bought *option
-value*, not capability. The leverage is the **tier**, which is the decision
-this workstream really settled:
-
-- **T1 — source compatibility, Linux numbers and signatures.** Landed. The
-  `libc`-crate port in Workstream 1.2 becomes mostly mechanical, and every new
-  syscall now gets its signature checked against Linux's for free.
-- **T3 — run prebuilt glibc-linked Linux binaries, including the upstream
-  `rustc`.** *Declared as the target*, not built. Its prerequisites are
-  overwhelmingly Workstream 1.4's: `PT_INTERP`, `dlopen` and dynamic TLS are
-  already mandatory there, because rustc loads proc-macro crates as host
-  dylibs and a statically-linked musl rustc therefore cannot host them. The
-  marginal cost over 1.4 is arbitrary-base `ET_DYN` loading (today
-  `mm/src/elf.rs` refuses any base but `PROCESS_CODE_START_VA`, so ld.so and
-  the executable cannot both load), `NSIG` 32 → 64 (glibc reserves signals 32
-  and 33 for `SIGCANCEL`/`SIGSETXID`, which is why `SIGRTMIN` is 34), the
-  layout ledger below, and ~70-90 thin entry points. The reference class is
-  encouraging: Asterinas — the same framekernel class, all-safe-Rust — runs an
-  unmodified NixOS userland on 240+ syscalls with *no* private calls at all,
-  and gVisor runs unmodified binaries with 277 of 351 implemented, because a
-  runtime that meets `ENOSYS` probes for a fallback. **If T3 lands, Workstreams
-  1.2 and 1.3 become optional rather than critical-path** — which is the
-  cheapest available answer to "cranelift-only rustc bootstrap does not
-  currently work".
-
-**The layout ledger — what T3 still needs, stated rather than hidden.** The
-claim this plan used to make, that "the constants and layouts inside the calls
-are Linux's", was ~95% true and wrong in fifteen places. One of them was a
-plain bug and is fixed here: **`CLOCK_REALTIME` and `CLOCK_MONOTONIC` were
-swapped** (`abi/src/syscall/posix.rs`), so a Linux-compiled
-`clock_gettime(CLOCK_REALTIME)` silently got uptime — both ids are valid, so
-nothing ever errored. `uname` also gained the `domainname` field it was
-missing, and `select` now writes its timeout back. What remains, each a T3
-prerequisite and none of them a constant:
-
-- **`siginfo_t.si_addr` is at offset 24, Linux's at 16**, so a Linux-compiled
-  SIGSEGV handler reads 0 for the fault address — which breaks every
-  guard-page, JIT and GC write-barrier trick.
-- **`ucontext_t` is truncated** (no `fpstate` pointer, `uc_sigmask` at 224 vs
-  296) **and `rt_sigreturn` restores from `SignalFrame`, ignoring the
-  ucontext**, so a handler cannot redirect execution by editing
-  `uc_mcontext`.
-- **`msghdr` is 32 bytes with one inlined iovec and `cmsghdr` is 12 with
-  `CMSG_DATA` at +12**, against Linux's 56 and 16. This is why `sendmsg` and
-  `recvmsg` are private.
-- **`NSIG` is 32**: no realtime signals, so no glibc thread cancellation.
-- **`struct termios` is `termios2`-shaped (44 bytes) behind `TCGETS`**, which
-  overruns a Linux-header `tcgetattr` by eight bytes. The fix is to split
-  `TCGETS`/`TCGETS2`, not to keep the number.
-- **`getdents64`'s `d_name` is at 24, not 19** — the one divergence this plan
-  already admitted.
-- **`signalfd_siginfo` is 16 bytes, not 128**; `CRTSCTS` is at the wrong bit;
-  `RLIMIT_STACK` answers `EINVAL` where glibc's pthread reads it
-  unconditionally.
-
-The two reference designs still split on architecture, not taste, and the
-choice above is Asterinas's: **Asterinas** is Linux-ABI by construction, 240+
-syscalls of safe Rust on OSTD with a 14% memory-safety TCB and a documented
-per-syscall flag-coverage ledger — the same architecture class as SlopOS, and
-the shape for which a Linux ABI is cheap. **Redox** is a microkernel and
-deliberately not Linux-ABI: its kernel interface is intentionally unstable and
-POSIX lives in userspace in relibc, which buys source compatibility and makes
-every port a source port — which is precisely why its rustc took years.
-`AGENTS.md` settles the licensing half: ABI numbers, errno values, ioctl codes
-and struct layouts carry no copyright.
-
-### Workstream 1.2 — A target that can be a host (**L**)
+### Workstream 1.1 — A target that can be a host (**L**)
 
 A JSON target can never be a rustc host. `scripts/patch_std.sh` is 715 lines of
 sed/perl that mutates the *live rustup sysroot's* std sources in place — an
@@ -1256,9 +1155,11 @@ excellent bootstrap hack and a non-self-hostable one. A native rustc needs
 `x86_64-unknown-slopos` compiled into `rustc_target`, a `libc` crate port, and
 std upstreamed or carried in a pinned fork. That also kills `restricted_std`,
 which currently forces `#![feature(restricted_std)]` into 59 files and makes
-every unmodified crates.io crate uncompilable.
+every unmodified crates.io crate uncompilable. The `libc` port is the cheap
+half: the numbers, the constants and most of the layouts are already Linux's,
+so it is mostly a re-export rather than a design.
 
-### Workstream 1.3 — A Rust codegen path for a `no_std` kernel target (**L**)
+### Workstream 1.2 — A Rust codegen path for a `no_std` kernel target (**L**)
 
 Decided pure Rust, so the C floor is out of scope and the risk moves into
 cranelift's coverage of *this* tree's kernel target. Spike this first, before
@@ -1278,7 +1179,7 @@ LLVM rustc on a host for as long as cranelift's codegen quality matters, while
 the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
 every artifact is self-built on day one.
 
-### Workstream 1.4 — Dynamic linking is mandatory (**L**)
+### Workstream 1.3 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
@@ -1287,9 +1188,14 @@ SlopOS therefore requires `PT_INTERP` + `dlopen` — today `PT_INTERP` is reject
 (`mm/src/elf.rs`), the target is `relocation-model: static`, and every
 binary is fixed at 0x400000. The only escapes are writing an out-of-process
 macro server (novel work) or deleting proc-macro use from the workspace. This
-also brings dynamic TLS (`__tls_get_addr`, DTV), which does not exist.
+also brings dynamic TLS (`__tls_get_addr`, DTV), which does not exist, and an
+arbitrary load base: `ET_DYN` is accepted only at `PROCESS_CODE_START_VA`
+(`ElfError::UnsupportedLoadBase`), so an interpreter and its executable cannot
+both be loaded. That trio — `PT_INTERP`, `dlopen`, a movable base — is also
+most of what binary compatibility with prebuilt Linux userland would need, so
+the decision below wants settling here rather than separately.
 
-### Workstream 1.5 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.4 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -1300,7 +1206,7 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 1+
 comfort, not a blocker for the goal.
 
-### Workstream 1.6 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 1.5 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
@@ -1382,17 +1288,21 @@ boot step reads first.
 
 ## Open decisions
 
-- [ ] **When does the layout ledger get paid, and does T3 land?** What replaced
-      the numbering question. Workstream 1.1 settled T1 and *declared* T3 —
-      running prebuilt glibc-linked Linux binaries, the upstream `rustc` among
-      them — without building it. The ledger is the seven items at the end of
-      1.1 (`si_addr`, the ucontext and `rt_sigreturn`, `msghdr`/`cmsghdr`,
-      `NSIG` 32 → 64, `termios` behind `TCGETS`, the dirent offset, the
-      `signalfd_siginfo` trim), plus arbitrary-base `ET_DYN` loading and
-      ~70-90 thin entry points. Decide it *with* Workstream 1.4, not before:
-      1.4 already owes `PT_INTERP`, `dlopen` and dynamic TLS, which is most of
-      T3's cost, and a T3 that works retires 1.2 and 1.3 from the critical
-      path.
+- [ ] **Does the ABI become binary-compatible, and does the toolchain then stop
+      being a port?** SlopOS is Linux-ABI at the numbers, the constants and
+      most of the layouts, which buys *source* compatibility. Running prebuilt
+      glibc-linked binaries — the upstream `rustc` among them — needs the seven
+      layouts named in the POSIX-floor section above (chiefly `si_addr`, the
+      ucontext and `rt_sigreturn`, `msghdr`/`cmsghdr`, and `NSIG` 32 → 64, for
+      which glibc reserves signals 32 and 33), plus ~70-90 thin entry points
+      and the dynamic-linking trio Workstream 1.3 already owes. The reference
+      class says it is reachable: Asterinas runs an unmodified NixOS userland
+      on 240+ syscalls of safe Rust with no private calls at all, and gVisor
+      runs unmodified binaries with 277 of 351 implemented, because a runtime
+      that meets `ENOSYS` probes for a fallback. Decide it *with* Workstream
+      1.3, because an answer of yes would retire Workstreams 1.1 and 1.2 from
+      the critical path — the cheapest available answer to "cranelift-only
+      rustc bootstrap does not currently work".
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
       building itself un-attests exactly the blocks it changes — and now keeps
       them un-attested across host rebuilds, so the count only ever falls.
@@ -1412,11 +1322,10 @@ boot step reads first.
       makes overcommit not happen.
 
 **Decided.** Syscall ABI: **Linux x86-64 numbering, one table, a private range
-at 1024, and a Linux number obliges the Linux signature** — tier T1 now, T3
-declared as the target (Workstream 1.1, and the ledger above). Rust toolchain:
+at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 1.6, off the critical
+C library and a Rust-written C frontend are Workstream 1.5, off the critical
 path. Scope: the full in-guest loop, Phases 1–2, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of

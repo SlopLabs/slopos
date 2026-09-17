@@ -14,6 +14,7 @@ use slopos_abi::syscall::{
 
 use slopos_fs::fileio::{
     file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused_by_token,
+    fileio_get_open_file_handle,
 };
 
 use slopos_kernel_services::driver_runtime::{
@@ -262,6 +263,18 @@ fn poll_park(waiter: Option<&slopos_ostd::sync::PollWaiter>, registered: bool, s
     }
 }
 
+/// How long `select` may park before it must re-derive its own deadline. Its
+/// own function because the arithmetic's locals otherwise land on the
+/// handler's frame, which sits against the 2 KiB gate.
+#[inline(never)]
+fn select_sleep_slice(timeout_ms: i64, start_ms: u64) -> u32 {
+    if timeout_ms < 0 {
+        return 500;
+    }
+    let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64;
+    (timeout_ms.saturating_sub(elapsed.max(0)).max(0) as u32).min(500)
+}
+
 /// Hand `select`'s remaining time back, as POSIX and Linux both do: a caller
 /// retrying around a wake must not restart the full timeout each pass.
 #[inline(never)]
@@ -273,11 +286,11 @@ fn write_timeout_remaining(
     let Some(ptr) = timeout else {
         return Ok(());
     };
-    if timeout_ms < 0 {
-        return Ok(());
-    }
+    // `timeout_ms` is caller-supplied and saturates at `i64::MAX`, so a clock
+    // that ever reads backwards between the two samples must give "no time
+    // left" rather than overflow the subtraction.
     let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64;
-    let remaining = (timeout_ms - elapsed).max(0);
+    let remaining = timeout_ms.saturating_sub(elapsed.max(0)).max(0);
     let tv = UserTimeval {
         tv_sec: remaining / 1000,
         tv_usec: (remaining % 1000) * 1000,
@@ -593,13 +606,7 @@ define_syscall!(syscall_select
             }
         }
 
-        let sleep_ms = if timeout_ms < 0 {
-            500u32
-        } else {
-            let remaining = timeout_ms
-                - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
-            (remaining.max(0) as u32).min(500)
-        };
+        let sleep_ms = select_sleep_slice(timeout_ms, start_ms);
 
         poll_park(waiter.as_ref(), reg_count > 0, sleep_ms);
 
@@ -613,8 +620,15 @@ define_syscall!(syscall_select
     if outcome.is_ok() {
         copy_out_select_results(&out, read_out, write_out, except_out)?;
     }
-    write_timeout_remaining(timeout, timeout_ms, start_ms)?;
-    outcome
+    let writeback = write_timeout_remaining(timeout, timeout_ms, start_ms);
+    if outcome.is_ok() {
+        // A timeval in read-only memory must not undo a select that already
+        // reported readiness and mutated the caller's fd sets — Linux swallows
+        // exactly this failure in `poll_select_finish`.
+        outcome
+    } else {
+        writeback.and(outcome)
+    }
 });
 
 define_syscall!(syscall_ioctl
@@ -623,7 +637,16 @@ define_syscall!(syscall_ioctl
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
-    let tty_idx = file_get_tty_index(pid, fd.raw()).ok_or(Errno::ENOTTY)?;
+    // `file_get_tty_index` cannot tell a non-TTY from a descriptor that does
+    // not exist, and the two answer differently: `isatty` keys on `EBADF` to
+    // report a bad descriptor rather than "not a terminal".
+    let tty_idx = match file_get_tty_index(pid, fd.raw()) {
+        Some(idx) => idx,
+        None if fileio_get_open_file_handle(pid, fd.raw()).is_none() => {
+            return Err(Errno::EBADF);
+        }
+        None => return Err(Errno::ENOTTY),
+    };
 
     let hangup_safe = matches!(cmd, TIOCGPGRP | TIOCSPGRP | TIOCGSID | TIOCNOTTY);
     if !hangup_safe && tty::is_hung_up(tty_idx) {
@@ -739,6 +762,8 @@ define_syscall!(syscall_ioctl
             let _ = tty::detach_controlling_terminal(tty_idx, caller_sid, is_session_leader);
             Ok(0)
         }
-        _ => Err(Errno::EINVAL),
+        // A request this kernel does not implement, which is what a feature
+        // probe tests for.
+        _ => Err(Errno::ENOTTY),
     }
 });

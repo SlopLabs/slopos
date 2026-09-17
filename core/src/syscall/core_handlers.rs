@@ -5,8 +5,9 @@ use core::sync::atomic::Ordering as AtomicOrdering;
 use slopos_abi::Errno;
 use slopos_abi::syscall::{
     CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_THREAD_CPUTIME_ID,
-    LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART,
-    LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, Timespec, UserSysInfo, UserUtsname,
+    LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_HALT,
+    LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_MAGIC1, Timespec,
+    UserSysInfo, UserUtsname, linux_reboot_magic2,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
@@ -143,7 +144,7 @@ define_syscall!(syscall_uname
 define_syscall!(syscall_reboot
     (ctx, magic1: u64, magic2: u64, cmd: u64, _arg: u64) cap(Power)
     -> SyscallResult {
-    if magic1 != LINUX_REBOOT_MAGIC1 || magic2 != LINUX_REBOOT_MAGIC2 {
+    if magic1 != LINUX_REBOOT_MAGIC1 || !linux_reboot_magic2(magic2) {
         return SyscallResult::Err(Errno::EINVAL);
     }
     // The dispatcher already refused a caller lacking `Power`. The witness is
@@ -159,6 +160,11 @@ define_syscall!(syscall_reboot
         }
         LINUX_REBOOT_CMD_POWER_OFF | LINUX_REBOOT_CMD_HALT => {
             power::shutdown(&cap, b"user halt\0".as_ptr() as *const c_char)
+        }
+        // No Ctrl-Alt-Del handler to toggle, so the toggle succeeds and
+        // changes nothing; an init program calls it early and expects 0.
+        LINUX_REBOOT_CMD_CAD_ON | LINUX_REBOOT_CMD_CAD_OFF => {
+            return SyscallResult::Ok(0);
         }
         _ => return SyscallResult::Err(Errno::EINVAL),
     }
