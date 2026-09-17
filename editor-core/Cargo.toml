@@ -1,0 +1,17 @@
+[package]
+name = "slopos-editor-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Editor core: text buffer, motions, edits, undo, search and syntax spans, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]

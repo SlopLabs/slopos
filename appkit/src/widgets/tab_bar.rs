@@ -213,7 +213,7 @@ impl Widget for TabBarWidget {
                 EventResponse::Ignored
             }
 
-            WidgetEvent::KeyDown { key, .. } => match key {
+            WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Left) => {
                     if !self.tabs.is_empty() && self.active > 0 {
                         self.active -= 1;
@@ -272,11 +272,20 @@ impl Widget for TabBarWidget {
         FocusPolicy::StrongFocus
     }
 
+    /// Only the visible panel: every panel shares one rect, so exposing them
+    /// all sends a hit test — and the focus derived from it — to the last.
     fn children(&self) -> &[Box<dyn Widget>] {
-        &self.content
+        self.content
+            .get(self.active)
+            .map(core::slice::from_ref)
+            .unwrap_or(&[])
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
-        &mut self.content
+        let active = self.active;
+        self.content
+            .get_mut(active)
+            .map(core::slice::from_mut)
+            .unwrap_or(&mut [])
     }
 }

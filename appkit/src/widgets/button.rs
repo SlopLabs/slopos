@@ -9,7 +9,6 @@ use crate::event::{
 use crate::node::ButtonStyle;
 use crate::paint::PaintContext;
 use crate::style::StyleSheet;
-use crate::text as font;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -111,8 +110,9 @@ impl Widget for ButtonWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_w = font::string_width(&self.label);
-        let text_h = font::cell_height();
+        // The proportional metrics, because `paint` draws with them.
+        let text_w = ctx.text_width(&self.label);
+        let text_h = ctx.text_height();
         let w = (text_w + ctx.style.button_padding_h * 2).max(ctx.style.button_min_width);
         let h = text_h + ctx.style.button_padding_v * 2;
         constraints.constrain(Size::new(w, h))
@@ -120,7 +120,15 @@ impl Widget for ButtonWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let (bg, fg) = button_colors(ctx.style, self.style, self.state);
+        // From the live pointer: `PointerEnter`/`PointerLeave` are declared
+        // and never constructed.
+        let state = match self.state {
+            ButtonState::Idle if self.enabled && rect.contains(ctx.pointer.0, ctx.pointer.1) => {
+                ButtonState::Hovered
+            }
+            other => other,
+        };
+        let (bg, fg) = button_colors(ctx.style, self.style, state);
 
         ctx.fill_rounded_rect(
             rect.x,
@@ -130,6 +138,18 @@ impl Widget for ButtonWidget {
             ctx.style.corner_radius,
             bg,
         );
+        // A secondary button's fill is barely off its surround, so the edge is
+        // what says it is a control rather than a label.
+        if matches!(self.style, ButtonStyle::Secondary) {
+            ctx.draw_rounded_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                ctx.style.corner_radius,
+                ctx.style.border_default,
+            );
+        }
 
         let text_w = ctx.text_width(&self.label);
         let text_h = ctx.text_height();
@@ -172,9 +192,8 @@ impl Widget for ButtonWidget {
                 x,
                 y,
                 button: PointerButton::Left,
+                ..
             } => {
-                // No prior PointerEnter is required: the framework may not
-                // synthesise enter/leave from pointer motion.
                 if !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
@@ -212,7 +231,7 @@ impl Widget for ButtonWidget {
                 }
                 EventResponse::Ignored
             }
-            WidgetEvent::KeyDown { key, .. } => {
+            WidgetEvent::KeyDown { key, .. } if self.focused => {
                 if matches!(
                     key,
                     Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space)
@@ -236,7 +255,13 @@ impl Widget for ButtonWidget {
         Some(&self.label)
     }
 
+    /// A disabled control is not a tab stop: it answers nothing, draws no ring,
+    /// and leaving it in the chain makes Tab appear to skip two.
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+        if self.enabled {
+            FocusPolicy::StrongFocus
+        } else {
+            FocusPolicy::None
+        }
     }
 }

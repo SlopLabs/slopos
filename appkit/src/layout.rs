@@ -147,7 +147,6 @@ impl StackWidget {
         let avail_main = if v { rect.height } else { rect.width };
         let avail_cross = cross_axis(Size::new(rect.width, rect.height), v);
 
-        // Recompute flex shares for layout (rect may differ from measure).
         let mut total_fixed: i32 = 0;
         let mut total_flex_weight: u32 = 0;
         let n = self.child_sizes.len();
@@ -222,15 +221,15 @@ impl StackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
-        // Pointer events reach only the child whose rect contains them, so a
-        // sibling cannot steal a click.
         let pointer_pos = match event {
             WidgetEvent::PointerDown { x, y, .. }
             | WidgetEvent::PointerUp { x, y, .. }
-            | WidgetEvent::PointerMove { x, y } => Some((*x, *y)),
+            | WidgetEvent::PointerMove { x, y }
+            | WidgetEvent::Scroll { x, y, .. } => Some((*x, *y)),
             _ => None,
         };
 
+        let mut response = EventResponse::Ignored;
         for child in self.children.iter_mut().rev() {
             if let Some((px, py)) = pointer_pos {
                 let r = child.layout_rect();
@@ -240,10 +239,32 @@ impl StackWidget {
             }
             let resp = child.event(event, phase, sink);
             if resp.is_consumed() {
-                return resp;
+                response = resp;
+                break;
             }
         }
-        EventResponse::Ignored
+
+        // A drag leaving its widget's rect is the ordinary way to drag, so
+        // moves and releases also reach the children they missed. Each guards
+        // on containment or on its own latch, so only the waiting one acts.
+        let is_drag_event = matches!(
+            event,
+            WidgetEvent::PointerUp { .. } | WidgetEvent::PointerMove { .. }
+        );
+        if let (true, Some((px, py))) = (is_drag_event, pointer_pos) {
+            for child in self.children.iter_mut().rev() {
+                if child.layout_rect().contains(px, py) {
+                    continue;
+                }
+                // A child clearing its own hover is a repaint; dropping the
+                // response leaves the highlight lit.
+                if child.event(event, phase, sink).is_consumed() {
+                    response = EventResponse::Consumed;
+                }
+            }
+        }
+
+        response
     }
 }
 
@@ -359,8 +380,6 @@ impl Widget for ZStackWidget {
         constraints.constrain(Size::new(max_w, max_h))
     }
     fn layout(&mut self, rect: Rect) {
-        // Every layer gets the full area: overlays cover siblings, never
-        // displace them.
         for child in &mut self.children {
             place_widget(child.as_mut(), rect);
         }
@@ -376,8 +395,7 @@ impl Widget for ZStackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
-        // Topmost layer first, and it may swallow: that is how a modal surface
-        // is expressed.
+        // Topmost first, and it may swallow: that is a modal surface.
         for child in self.children.iter_mut().rev() {
             let resp = child.event(event, phase, sink);
             if resp.is_consumed() {

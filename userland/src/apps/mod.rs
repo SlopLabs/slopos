@@ -1,6 +1,7 @@
 pub mod compositor;
 pub mod coreutils;
 pub mod curl;
+pub mod editor;
 pub mod file_manager;
 pub mod halt;
 pub mod image_viewer;

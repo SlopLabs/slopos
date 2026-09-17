@@ -33,6 +33,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
     if !id.is_empty() {
         win.set_app_id(id);
     }
+    super::clipboard::install(handle.clone());
     let style = StyleSheet::dark();
     let mut focus = FocusManager::new();
     let mut overlays = OverlayManager::new();
@@ -42,7 +43,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
     let mut window_size = super::constraints::Size::new(width as i32, height as i32);
     tree::layout_tree(root.as_mut(), window_size, &style);
-    focus.rebuild_tab_chain(root.as_ref());
+    let _ = focus.rebuild_tab_chain(root.as_ref());
 
     let mut needs_rebuild = false;
     let mut needs_repaint = true;
@@ -52,13 +53,17 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             timestamp_ms: 0,
         });
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
+    // The compositor reports modifiers only with key events; a pointer press
+    // takes the most recent snapshot, which is what shift-click is.
+    let mut modifiers = super::event::Modifiers::default();
 
     loop {
         handle.flush_pending_destroys();
         handle.drain_ui_queue();
 
         let count = win.poll_protocol_events(&mut proto_events);
-        let mut unhandled_key: Option<(super::event::Key, super::event::Modifiers)> = None;
+        // A poll returns a batch, so this is a vector and not an `Option`.
+        let mut unhandled_keys: Vec<(super::event::Key, super::event::Modifiers)> = Vec::new();
         let mut sink = MessageSink::new();
 
         for i in 0..count {
@@ -69,13 +74,38 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             win.track_pointer(&ev);
 
             match &ev {
-                Event::CloseRequest => std::process::exit(0),
+                Event::CloseRequest => {
+                    let (accept, action) = app.on_close_request();
+                    if accept {
+                        std::process::exit(0);
+                    }
+                    process_action(action, &mut needs_rebuild, &mut needs_repaint);
+                    continue;
+                }
+                Event::ClipboardOffer { len } => {
+                    if !super::clipboard::accept_offer(*len) {
+                        // An empty offer is still an answer; without it the
+                        // application waits for data that never comes.
+                        let action = app.on_paste(String::new());
+                        process_action(action, &mut needs_rebuild, &mut needs_repaint);
+                    }
+                    continue;
+                }
+                Event::ClipboardData { len } => {
+                    if let Some(text) = super::clipboard::take(*len) {
+                        let action = app.on_paste(text);
+                        process_action(action, &mut needs_rebuild, &mut needs_repaint);
+                    }
+                    continue;
+                }
                 Event::Configure {
                     width: w,
                     height: h,
                 } => {
                     let _ = win.resize(*w, *h);
                     window_size = super::constraints::Size::new(*w as i32, *h as i32);
+                    let action = app.on_resize(*w, *h);
+                    process_action(action, &mut needs_rebuild, &mut needs_repaint);
                     needs_rebuild = true;
                     continue;
                 }
@@ -87,8 +117,16 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 None => continue,
             };
 
+            match &widget_event {
+                WidgetEvent::KeyDown { modifiers: m, .. }
+                | WidgetEvent::KeyUp { modifiers: m, .. } => {
+                    modifiers = *m;
+                }
+                _ => {}
+            }
+
             let (px, py) = win.pointer();
-            let widget_event = fill_pointer_pos(widget_event, px, py);
+            let widget_event = fill_pointer_state(widget_event, px, py, modifiers);
 
             match &widget_event {
                 WidgetEvent::PointerDown { .. } => focus.note_pointer_input(),
@@ -98,27 +136,14 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 _ => {}
             }
 
-            if let WidgetEvent::KeyDown {
-                key: super::event::Key::Named(super::event::NamedKey::Tab),
-                modifiers: mods,
-                ..
-            } = &widget_event
-            {
-                if mods.shift {
-                    focus.move_focus_prev();
-                } else {
-                    focus.move_focus_next();
-                }
-                needs_repaint = true;
-                continue;
-            }
-
             let (px, py) = win.pointer();
             let resp = if let Some(hit) = event::hit_test(root.as_ref(), px, py) {
                 if matches!(widget_event, WidgetEvent::PointerDown { .. }) {
                     let target_policy = find_focus_policy(root.as_ref(), hit.target);
                     if target_policy.is_focusable() {
+                        let previous = focus.focused();
                         focus.set_focused(Some(hit.target));
+                        move_focus_events(root.as_mut(), previous, Some(hit.target), &mut sink);
                     }
                     if overlays.hit_test(px, py).is_none() && !overlays.is_empty() {
                         overlays.dismiss_light(&mut focus);
@@ -135,12 +160,23 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
             if resp.is_consumed() {
                 needs_repaint = true;
-            } else {
-                if let WidgetEvent::KeyDown {
-                    key, modifiers: m, ..
-                } = &widget_event
-                {
-                    unhandled_key = Some((*key, *m));
+            } else if let WidgetEvent::KeyDown {
+                key, modifiers: m, ..
+            } = &widget_event
+            {
+                // An editor indents with Tab, so focus only gets what nothing
+                // claimed.
+                if matches!(key, super::event::Key::Named(super::event::NamedKey::Tab)) {
+                    let previous = focus.focused();
+                    if m.shift {
+                        focus.move_focus_prev();
+                    } else {
+                        focus.move_focus_next();
+                    }
+                    move_focus_events(root.as_mut(), previous, focus.focused(), &mut sink);
+                    needs_repaint = true;
+                } else {
+                    unhandled_keys.push((*key, *m));
                 }
             }
         }
@@ -150,7 +186,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
 
-        if let Some((key, mods)) = unhandled_key {
+        for (key, mods) in unhandled_keys {
             let action = app.on_key(key, mods);
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
@@ -168,17 +204,43 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let node = app.view();
             root = tree::build_widget_tree(&node);
             tree::layout_tree(root.as_mut(), window_size, &style);
-            focus.rebuild_tab_chain(root.as_ref());
+            // A rebuild replaces every widget, so whoever holds focus has to
+            // be told again. The application's answer comes first: a widget it
+            // built focused *is* the focused one, and only when it names none
+            // does the remembered chain position apply.
+            let declared = find_declared_focus(root.as_ref());
+            let restored = focus.rebuild_tab_chain(root.as_ref());
+            let target = match declared {
+                Some(id) => {
+                    focus.set_focused(Some(id));
+                    Some(id)
+                }
+                None => restored,
+            };
+            if let Some(id) = target {
+                // Its own sink: anything emitted here would be applied after
+                // the rebuild that caused it.
+                let mut focus_sink = MessageSink::new();
+                send_to_id(
+                    root.as_mut(),
+                    id,
+                    &WidgetEvent::FocusGained,
+                    &mut focus_sink,
+                );
+            }
             needs_rebuild = false;
             needs_repaint = true;
         }
 
         if needs_repaint {
+            // Read before the renderer is borrowed mutably for the frame.
+            let pointer = win.pointer();
             if let Some(mut fb) = win.renderer_mut().frame() {
                 let fmt = fb.pixel_format();
                 fb.clear_canvas(fmt.encode(style.bg_primary));
                 let mut ctx = PaintContext::new(&mut fb, &style);
                 ctx.focus_visible = focus.is_focus_visible();
+                ctx.pointer = pointer;
                 tree::paint_tree(root.as_ref(), &mut ctx);
                 overlays.paint(&mut ctx);
             }
@@ -187,6 +249,10 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         }
 
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
+            0
+        } else if count == proto_events.len() {
+            // The batch filled the buffer, so the connection still holds
+            // decoded events; blocking now would sleep with them in hand.
             0
         } else if let Some(interval) = app.tick_interval_ms() {
             let now = slopos_windowing::get_time_ms();
@@ -211,8 +277,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 slopfut::Either2::B(_) => handle.drain_wakeup(),
             }
         } else if timeout_ms > 0 {
-            // `sleep_ms` is an `async fn` and so not `Unpin`; the by-reference
-            // `select3` needs it pinned.
+            // `sleep_ms` is not `Unpin`, and `select3` takes it by reference.
             let timer: core::pin::Pin<Box<dyn core::future::Future<Output = ()>>> =
                 Box::pin(slopfut::time::sleep_ms(timeout_ms as u64));
             match slopfut::select3(
@@ -240,15 +305,80 @@ fn process_action(action: Action, needs_rebuild: &mut bool, _needs_repaint: &mut
     }
 }
 
-fn fill_pointer_pos(mut event: WidgetEvent, px: i32, py: i32) -> WidgetEvent {
+fn fill_pointer_state(
+    mut event: WidgetEvent,
+    px: i32,
+    py: i32,
+    mods: super::event::Modifiers,
+) -> WidgetEvent {
     match &mut event {
-        WidgetEvent::PointerDown { x, y, .. } | WidgetEvent::PointerUp { x, y, .. } => {
+        WidgetEvent::PointerDown {
+            x, y, modifiers, ..
+        } => {
+            *x = px;
+            *y = py;
+            *modifiers = mods;
+        }
+        WidgetEvent::PointerUp { x, y, .. } | WidgetEvent::Scroll { x, y, .. } => {
             *x = px;
             *y = py;
         }
         _ => {}
     }
     event
+}
+
+/// Tells the widget losing focus and the one gaining it.
+///
+/// Without them every widget's `focused` flag stays false, and the gate each
+/// one puts on its keys never opens.
+fn move_focus_events(
+    root: &mut dyn Widget,
+    previous: Option<super::traits::WidgetId>,
+    next: Option<super::traits::WidgetId>,
+    sink: &mut MessageSink,
+) {
+    if previous == next {
+        return;
+    }
+    if let Some(id) = previous {
+        send_to_id(root, id, &WidgetEvent::FocusLost, sink);
+    }
+    if let Some(id) = next {
+        send_to_id(root, id, &WidgetEvent::FocusGained, sink);
+    }
+}
+
+/// The last widget in depth-first order that the application built as focused.
+///
+/// Last rather than first: a popup is appended over the layer beneath it, so
+/// an open menu's own claim outranks the field it is covering.
+fn find_declared_focus(widget: &dyn Widget) -> Option<super::traits::WidgetId> {
+    let mut found = widget.declares_focus().then(|| widget.id());
+    for child in widget.children() {
+        if let Some(id) = find_declared_focus(child.as_ref()) {
+            found = Some(id);
+        }
+    }
+    found
+}
+
+fn send_to_id(
+    widget: &mut dyn Widget,
+    id: super::traits::WidgetId,
+    event: &WidgetEvent,
+    sink: &mut MessageSink,
+) -> bool {
+    if widget.id() == id {
+        widget.event(event, super::event::EventPhase::Target, sink);
+        return true;
+    }
+    for child in widget.children_mut() {
+        if send_to_id(child.as_mut(), id, event, sink) {
+            return true;
+        }
+    }
+    false
 }
 
 fn find_focus_policy(widget: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {

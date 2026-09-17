@@ -1,7 +1,7 @@
 use super::constraints::{
     BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, MAX_EXTENT, Rect, Size,
 };
-use super::event::{EventPhase, EventResponse, MessageSink, WidgetEvent, hit_test};
+use super::event::{EventPhase, EventResponse, MessageSink, Modifiers, WidgetEvent, hit_test};
 use super::focus::FocusManager;
 use super::layout::{HStackWidget, PaddingWidget, SpacerWidget, VStackWidget};
 use super::paint::PaintContext;
@@ -335,6 +335,39 @@ fn test_focus_scope() {
     assert_eq!(fm.focused(), Some(id_a));
 }
 
+/// A scope outlives the tree it was opened over, and the id it was opened on
+/// with it: every message rebuilds every widget. Focus has to come back to the
+/// same *place*, since the widget that held it no longer exists.
+fn test_focus_scope_restores_across_a_rebuild() {
+    fn tree() -> (VStackWidget, Vec<crate::traits::WidgetId>) {
+        let a = FixedSizeWidget::focusable(10, 10);
+        let b = FixedSizeWidget::focusable(10, 10);
+        let c = FixedSizeWidget::focusable(10, 10);
+        let ids = vec![a.id(), b.id(), c.id()];
+        let children: Vec<Box<dyn Widget>> = vec![Box::new(a), Box::new(b), Box::new(c)];
+        (
+            VStackWidget::new(children, 0, CrossAxisAlignment::Start),
+            ids,
+        )
+    }
+
+    let (first, first_ids) = tree();
+    let mut fm = FocusManager::new();
+    fm.rebuild_tab_chain(&first);
+    fm.set_focused(Some(first_ids[1]));
+
+    fm.push_scope(Vec::new());
+    // The overlay is open and the application keeps producing messages, so the
+    // tree underneath it is replaced — new widgets, new ids.
+    let (second, second_ids) = tree();
+    fm.rebuild_tab_chain(&second);
+    fm.pop_scope();
+
+    // The middle control of the *current* tree, not the id the scope captured.
+    assert_eq!(fm.focused(), Some(second_ids[1]));
+    assert_ne!(first_ids[1], second_ids[1]);
+}
+
 fn test_hit_test_leaf() {
     let mut w = FixedSizeWidget::new(100, 50);
     place_widget(&mut w, Rect::new(10, 20, 100, 50));
@@ -426,11 +459,20 @@ fn context_table(selected: Option<usize>) -> TableWidget {
         &mut ctx,
     );
     place_widget(&mut table, Rect::new(0, 0, 200, 200));
+    // A table answers keys only when it holds the focus, which is what stops it
+    // taking the arrows from whatever else is on screen.
+    let mut sink = MessageSink::new();
+    table.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
     table
 }
 
 fn press(x: i32, y: i32, button: super::event::PointerButton) -> WidgetEvent {
-    WidgetEvent::PointerDown { x, y, button }
+    WidgetEvent::PointerDown {
+        x,
+        y,
+        button,
+        modifiers: Modifiers::default(),
+    }
 }
 
 fn test_table_right_click_emits_context_menu() {
@@ -613,6 +655,8 @@ fn test_popup_swallows_unhandled_events() {
     let mut sink = MessageSink::new();
     let resp = popup.event(
         &WidgetEvent::Scroll {
+            x: 40,
+            y: 50,
             delta_x: 0,
             delta_y: 10,
         },
@@ -838,10 +882,883 @@ fn test_zstack_layers_share_the_full_rect() {
     }
 }
 
+fn test_display_col_expands_tabs() {
+    use super::widgets::code_view::display_col;
+    // "\tab": the tab advances to the next multiple of four, so 'a' is at 4.
+    assert_eq!(display_col("\tab", 0, 4), 0);
+    assert_eq!(display_col("\tab", 1, 4), 4);
+    assert_eq!(display_col("\tab", 2, 4), 5);
+    // Two spaces then a tab: the tab fills the rest of the stop, not four more.
+    assert_eq!(display_col("  \tx", 3, 4), 4);
+    // A column past the end of the line keeps counting.
+    assert_eq!(display_col("ab", 5, 4), 5);
+}
+
+fn test_char_col_from_display_inverts_display_col() {
+    use super::widgets::code_view::{char_col_from_display, display_col};
+    for text in ["plain", "\tab", "  \tx", "a\tb\tc"] {
+        let len = text.chars().count();
+        for col in 0..=len {
+            let display = display_col(text, col, 4);
+            assert_eq!(
+                char_col_from_display(text, display, 4),
+                col,
+                "{text:?} col {col}"
+            );
+        }
+    }
+}
+
+fn test_click_inside_a_tab_snaps_to_one_side() {
+    use super::widgets::code_view::char_col_at_half;
+    // A tab spans display columns 0..4, i.e. half cells 0..8; its left half
+    // belongs to the tab and its right half to what follows.
+    assert_eq!(char_col_at_half("\tx", 2, 4), 0);
+    assert_eq!(char_col_at_half("\tx", 6, 4), 1);
+}
+
+fn test_click_past_a_glyphs_midpoint_lands_after_it() {
+    use super::widgets::code_view::char_col_at_half;
+    // Whole-cell resolution cannot express this: the click and the character
+    // share a display column.
+    assert_eq!(char_col_at_half("abc", 0, 4), 0);
+    assert_eq!(char_col_at_half("abc", 1, 4), 1);
+    assert_eq!(char_col_at_half("abc", 2, 4), 1);
+    assert_eq!(char_col_at_half("abc", 5, 4), 3);
+    // Past the end of the line the caret parks at the end.
+    assert_eq!(char_col_at_half("abc", 20, 4), 3 + 7);
+}
+
+fn test_gutter_width_grows_with_the_line_count() {
+    use super::widgets::code_view::gutter_width;
+    let one = gutter_width(9, 10, true);
+    let three = gutter_width(999, 10, true);
+    assert!(three > one);
+    assert_eq!(three - one, 20);
+    // Numbers off means no gutter to speak of, whatever the file's length.
+    assert_eq!(gutter_width(9, 10, false), gutter_width(999_999, 10, false));
+}
+
+fn test_visible_line_count_floors() {
+    use super::widgets::code_view::visible_line_count;
+    assert_eq!(visible_line_count(100, 22), 4);
+    assert_eq!(visible_line_count(0, 22), 0);
+    assert_eq!(visible_line_count(100, 0), 0);
+}
+
+fn code_view(
+    lines: Vec<super::widgets::code_view::CodeLine>,
+    selecting: bool,
+) -> super::widgets::code_view::CodeViewWidget {
+    code_view_dragging(lines, selecting, false)
+}
+
+fn code_view_dragging(
+    lines: Vec<super::widgets::code_view::CodeLine>,
+    selecting: bool,
+    scroll_dragging: bool,
+) -> super::widgets::code_view::CodeViewWidget {
+    let total = lines.len();
+    let mut view = super::widgets::code_view::CodeViewWidget::new(
+        lines,
+        0,
+        total,
+        0,
+        4,
+        Some((0, 0)),
+        None,
+        true,
+        true,
+        selecting,
+        scroll_dragging,
+        Some(Box::new(|i: super::widgets::code_view::CodeInput| {
+            Box::new(i) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut view,
+        BoxConstraints::tight(Size::new(400, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut view, Rect::new(0, 0, 400, 200));
+    view
+}
+
+fn code_lines(count: usize) -> Vec<super::widgets::code_view::CodeLine> {
+    (0..count)
+        .map(|number| super::widgets::code_view::CodeLine {
+            number,
+            text: String::from("some text on a line"),
+            spans: Vec::new(),
+            highlights: Vec::new(),
+        })
+        .collect()
+}
+
+fn test_code_view_click_reports_a_document_position() {
+    use super::widgets::code_view::CodeInput;
+    let mut view = code_view(code_lines(5), false);
+    let mut sink = MessageSink::new();
+    let line_h = super::text::cell_height();
+    let resp = view.event(
+        &press(200, line_h * 2 + 2, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    let inputs = sink.drain_typed::<CodeInput>();
+    assert_eq!(inputs.len(), 1);
+    match inputs[0] {
+        CodeInput::Click { line, extend, .. } => {
+            assert_eq!(line, 2);
+            assert!(!extend);
+        }
+        other => panic!("expected a click, got {other:?}"),
+    }
+}
+
+fn test_code_view_drags_only_while_selecting() {
+    use super::widgets::code_view::CodeInput;
+    let mut idle = code_view(code_lines(5), false);
+    let mut sink = MessageSink::new();
+    let resp = idle.event(
+        &WidgetEvent::PointerMove { x: 100, y: 40 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(!resp.is_consumed());
+    assert!(sink.drain_typed::<CodeInput>().is_empty());
+
+    // The application says a drag is live, because the widget that saw the
+    // press was replaced by the rebuild that press caused.
+    let mut dragging = code_view(code_lines(5), true);
+    let resp = dragging.event(
+        &WidgetEvent::PointerMove { x: 100, y: 40 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    assert!(matches!(
+        sink.drain_typed::<CodeInput>().first(),
+        Some(CodeInput::Drag { .. })
+    ));
+}
+
+fn test_code_view_shift_click_extends() {
+    use super::widgets::code_view::CodeInput;
+    let mut view = code_view(code_lines(5), false);
+    let mut sink = MessageSink::new();
+    let mods = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    view.event(
+        &WidgetEvent::PointerDown {
+            x: 120,
+            y: 10,
+            button: super::event::PointerButton::Left,
+            modifiers: mods,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<CodeInput>().first(),
+        Some(CodeInput::Click { extend: true, .. })
+    ));
+}
+
+fn tree_view(rows: usize, selecting_focused: bool) -> super::widgets::tree_view::TreeViewWidget {
+    tree_view_dragging(rows, selecting_focused, false)
+}
+
+fn tree_view_dragging(
+    rows: usize,
+    selecting_focused: bool,
+    scroll_dragging: bool,
+) -> super::widgets::tree_view::TreeViewWidget {
+    let rows: Vec<super::widgets::tree_view::TreeRow> = (0..rows)
+        .map(|i| super::widgets::tree_view::TreeRow {
+            label: format!("entry{i}"),
+            depth: if i == 0 { 0 } else { 1 },
+            is_dir: i % 2 == 0,
+            expanded: false,
+            active: false,
+            modified: false,
+        })
+        .collect();
+    let total = rows.len();
+    let mut view = super::widgets::tree_view::TreeViewWidget::new(
+        rows,
+        0,
+        total,
+        None,
+        selecting_focused,
+        scroll_dragging,
+        Some(Box::new(|i: super::widgets::tree_view::TreeInput| {
+            Box::new(i) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut view,
+        BoxConstraints::tight(Size::new(220, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut view, Rect::new(0, 0, 220, 200));
+    view
+}
+
+/// The scrollbar is draggable, not just scrollable: a press on its column
+/// scrolls instead of placing the caret, and a move continues it.
+fn test_code_scrollbar_drags_rather_than_placing_the_caret() {
+    use super::widgets::code_view::CodeInput;
+    // Far more lines than fit, so there is a thumb to grab.
+    let mut view = code_view(code_lines(400), false);
+    let mut sink = MessageSink::new();
+    // The rightmost column of the 400px-wide surface.
+    view.event(
+        &press(396, 150, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    let first = sink.drain_typed::<CodeInput>();
+    match first.first() {
+        Some(CodeInput::ScrollTo { first_line }) => assert!(*first_line > 0),
+        other => panic!("scrollbar press gave {other:?}"),
+    }
+
+    // A move continues the drag only while the application says one is live.
+    let mut idle = code_view_dragging(code_lines(400), false, false);
+    let mut sink = MessageSink::new();
+    idle.event(
+        &WidgetEvent::PointerMove { x: 396, y: 20 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<CodeInput>().is_empty());
+
+    let mut dragging = code_view_dragging(code_lines(400), false, true);
+    let mut sink = MessageSink::new();
+    dragging.event(
+        &WidgetEvent::PointerMove { x: 396, y: 20 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<CodeInput>().first(),
+        Some(CodeInput::ScrollTo { .. })
+    ));
+}
+
+/// And the same for the tree, which has its own scrollbar.
+fn test_tree_scrollbar_drags_rather_than_opening_a_row() {
+    use super::widgets::tree_view::TreeInput;
+    let mut view = tree_view(200, true);
+    let mut sink = MessageSink::new();
+    view.event(
+        &press(216, 150, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    match sink.drain_typed::<TreeInput>().first() {
+        Some(TreeInput::ScrollTo { first_row }) => assert!(*first_row > 0),
+        other => panic!("scrollbar press gave {other:?}"),
+    }
+
+    let mut dragging = tree_view_dragging(200, true, true);
+    let mut sink = MessageSink::new();
+    dragging.event(
+        &WidgetEvent::PointerMove { x: 216, y: 10 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<TreeInput>().first(),
+        Some(TreeInput::ScrollTo { first_row: 0 })
+    ));
+}
+
+fn test_tree_click_on_the_twisty_toggles_rather_than_opens() {
+    use super::widgets::tree_view::TreeInput;
+    let mut view = tree_view(4, true);
+    let mut sink = MessageSink::new();
+    // Row 0 is a directory at depth 0: its twisty sits at the left padding.
+    view.event(
+        &press(10, 4, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<TreeInput>().first(),
+        Some(TreeInput::Toggle { row: 0 })
+    ));
+
+    // Further right on the same row is the label, which opens it.
+    view.event(
+        &press(150, 4, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<TreeInput>().first(),
+        Some(TreeInput::Activate { row: 0 })
+    ));
+}
+
+fn test_tree_keys_only_reach_a_focused_tree() {
+    use super::widgets::tree_view::TreeInput;
+    let mut blurred = tree_view(4, false);
+    let mut sink = MessageSink::new();
+    let key = WidgetEvent::KeyDown {
+        key: super::event::Key::Named(super::event::NamedKey::Down),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    assert!(
+        !blurred
+            .event(&key, EventPhase::Target, &mut sink)
+            .is_consumed()
+    );
+    assert!(sink.drain_typed::<TreeInput>().is_empty());
+
+    let mut focused = tree_view(4, true);
+    assert!(
+        focused
+            .event(&key, EventPhase::Target, &mut sink)
+            .is_consumed()
+    );
+    assert!(matches!(
+        sink.drain_typed::<TreeInput>().first(),
+        Some(TreeInput::Key { .. })
+    ));
+}
+
+fn test_editor_tabs_close_box_is_distinct_from_the_tab() {
+    use super::widgets::editor_tabs::{EditorTab, EditorTabsWidget, TabInput};
+    let tabs = vec![
+        EditorTab {
+            title: String::from("one.rs"),
+            modified: false,
+        },
+        EditorTab {
+            title: String::from("two.rs"),
+            modified: true,
+        },
+    ];
+    let mut widget = EditorTabsWidget::new(
+        tabs,
+        0,
+        Some(Box::new(|i: TabInput| {
+            Box::new(i) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut widget,
+        BoxConstraints::tight(Size::new(400, 34)),
+        &mut ctx,
+    );
+    place_widget(&mut widget, Rect::new(0, 0, 400, 34));
+
+    let mut sink = MessageSink::new();
+    widget.event(
+        &press(20, 17, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<TabInput>().first(),
+        Some(TabInput::Select(0))
+    ));
+
+    // Middle click closes wherever it lands on the tab.
+    widget.event(
+        &press(20, 17, super::event::PointerButton::Middle),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<TabInput>().first(),
+        Some(TabInput::Close(0))
+    ));
+}
+
+fn test_drag_handle_reports_begin_move_end() {
+    use super::widgets::drag_handle::{DragHandleWidget, DragInput};
+    let make = |active: bool| {
+        let mut handle = DragHandleWidget::new(
+            super::constraints::Orientation::Vertical,
+            active,
+            Some(Box::new(|i: DragInput| {
+                Box::new(i) as Box<dyn std::any::Any>
+            })),
+        );
+        let style = StyleSheet::dark();
+        let mut ctx = MeasureCtx { style: &style };
+        measure_widget(
+            &mut handle,
+            BoxConstraints::tight(Size::new(6, 200)),
+            &mut ctx,
+        );
+        place_widget(&mut handle, Rect::new(200, 0, 6, 200));
+        handle
+    };
+
+    let mut idle = make(false);
+    let mut sink = MessageSink::new();
+    idle.event(
+        &press(202, 50, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<DragInput>().first(),
+        Some(DragInput::Begin)
+    ));
+    // A move with no drag live is hover, not a resize.
+    idle.event(
+        &WidgetEvent::PointerMove { x: 260, y: 50 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<DragInput>().is_empty());
+
+    let mut active = make(true);
+    active.event(
+        &WidgetEvent::PointerMove { x: 260, y: 50 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<DragInput>().first(),
+        Some(DragInput::Move(260))
+    ));
+    active.event(
+        &WidgetEvent::PointerUp {
+            x: 260,
+            y: 50,
+            button: super::event::PointerButton::Left,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<DragInput>().first(),
+        Some(DragInput::End)
+    ));
+}
+
+fn test_a_release_outside_a_widget_still_reaches_it() {
+    use super::widgets::drag_handle::{DragHandleWidget, DragInput};
+    // Ending outside the handle's 6 px is the ordinary way to end a drag;
+    // without the release it stays latched.
+    let handle = DragHandleWidget::new(
+        super::constraints::Orientation::Vertical,
+        true,
+        Some(Box::new(|i: DragInput| {
+            Box::new(i) as Box<dyn std::any::Any>
+        })),
+    );
+    let mut stack = HStackWidget::new(
+        vec![
+            Box::new(handle) as Box<dyn Widget>,
+            Box::new(FixedSizeWidget::new(394, 200)) as Box<dyn Widget>,
+        ],
+        0,
+        CrossAxisAlignment::Stretch,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut stack,
+        BoxConstraints::tight(Size::new(400, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut stack, Rect::new(0, 0, 400, 200));
+
+    let mut sink = MessageSink::new();
+    stack.event(
+        &WidgetEvent::PointerUp {
+            x: 380,
+            y: 50,
+            button: super::event::PointerButton::Left,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<DragInput>().first(),
+        Some(DragInput::End)
+    ));
+}
+
+fn test_scroll_goes_to_what_is_under_the_pointer() {
+    // A wheel turn carries a position; without one it goes to whichever child
+    // the container visits first, and a code surface consumes every scroll.
+    struct Counter {
+        core: WidgetCore,
+        seen: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    impl Widget for Counter {
+        fn core(&self) -> &WidgetCore {
+            &self.core
+        }
+        fn core_mut(&mut self) -> &mut WidgetCore {
+            &mut self.core
+        }
+        fn measure(&mut self, c: BoxConstraints, _: &mut MeasureCtx) -> Size {
+            // Half the row each, so the two rects are distinguishable.
+            c.constrain(Size::new(200, 200))
+        }
+        fn paint(&self, _: &mut PaintContext) {}
+        fn event(
+            &mut self,
+            event: &WidgetEvent,
+            _: EventPhase,
+            _: &mut MessageSink,
+        ) -> EventResponse {
+            if matches!(event, WidgetEvent::Scroll { .. }) {
+                self.seen.set(self.seen.get() + 1);
+                return EventResponse::Consumed;
+            }
+            EventResponse::Ignored
+        }
+    }
+
+    let left = std::rc::Rc::new(std::cell::Cell::new(0));
+    let right = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut stack = HStackWidget::new(
+        vec![
+            Box::new(Counter {
+                core: WidgetCore::new(),
+                seen: left.clone(),
+            }) as Box<dyn Widget>,
+            Box::new(Counter {
+                core: WidgetCore::new(),
+                seen: right.clone(),
+            }) as Box<dyn Widget>,
+        ],
+        0,
+        CrossAxisAlignment::Stretch,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut stack,
+        BoxConstraints::tight(Size::new(400, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut stack, Rect::new(0, 0, 400, 200));
+
+    let mut sink = MessageSink::new();
+    stack.event(
+        &WidgetEvent::Scroll {
+            x: 40,
+            y: 100,
+            delta_x: 0,
+            delta_y: -3,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!((left.get(), right.get()), (1, 0), "left half");
+
+    stack.event(
+        &WidgetEvent::Scroll {
+            x: 360,
+            y: 100,
+            delta_x: 0,
+            delta_y: -3,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!((left.get(), right.get()), (1, 1), "right half");
+}
+
+fn test_only_the_visible_tab_panel_is_reachable() {
+    use super::widgets::tab_bar::TabBarWidget;
+    // Every panel shares one rect, so exposing them all sends the hit test —
+    // and the focus that follows it — to the last.
+    let panels: Vec<Box<dyn Widget>> = vec![
+        Box::new(FixedSizeWidget::focusable(100, 40)),
+        Box::new(FixedSizeWidget::new(100, 40)),
+    ];
+    let mut bar = TabBarWidget::new(
+        vec![String::from("one"), String::from("two")],
+        0,
+        None,
+        panels,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut bar,
+        BoxConstraints::tight(Size::new(200, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut bar, Rect::new(0, 0, 200, 200));
+    assert_eq!(bar.children().len(), 1);
+    // Tab 0 is active, so its panel — the focusable one — is what a hit finds.
+    let hit = hit_test(&bar, 50, 150).expect("a hit inside the panel");
+    let policy = {
+        fn find(w: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {
+            if w.id() == id {
+                return w.focus_policy();
+            }
+            for child in w.children() {
+                let p = find(child.as_ref(), id);
+                if p.is_focusable() {
+                    return p;
+                }
+            }
+            FocusPolicy::None
+        }
+        find(&bar, hit.target)
+    };
+    assert!(policy.is_focusable());
+}
+
+fn test_a_popup_swallows_a_press_its_child_ignored() {
+    // A press inside the popup that the child did not want is still the
+    // popup's; falling through reaches the tree behind the open menu.
+    let mut popup = popup_at(30, 40, 60, 50);
+    let mut sink = MessageSink::new();
+    let resp = popup.event(
+        &press(50, 60, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+}
+
+fn test_a_zero_extent_clip_damages_nothing() {
+    // `DamageRect`'s bounds are inclusive, so a rect of no extent must come out
+    // invalid rather than as the single pixel an exclusive conversion gives.
+    assert!(!Rect::new(10, 10, 0, 5).to_damage_rect().is_valid());
+    assert!(!Rect::new(10, 10, 5, 0).to_damage_rect().is_valid());
+    let dr = Rect::new(10, 20, 4, 3).to_damage_rect();
+    assert_eq!((dr.x0, dr.y0, dr.x1, dr.y1), (10, 20, 13, 22));
+}
+
+fn test_line_edit_reports_keys_only_when_focused() {
+    use super::widgets::line_edit::{LineEditInput, LineEditWidget};
+    let make = |focused: bool| {
+        let mut edit = LineEditWidget::new(
+            String::from("query"),
+            String::from("Find"),
+            5,
+            focused,
+            None,
+            String::new(),
+            false,
+            Some(Box::new(|i: LineEditInput| {
+                Box::new(i) as Box<dyn std::any::Any>
+            })),
+        );
+        let style = StyleSheet::dark();
+        let mut ctx = MeasureCtx { style: &style };
+        measure_widget(
+            &mut edit,
+            BoxConstraints::tight(Size::new(200, 28)),
+            &mut ctx,
+        );
+        place_widget(&mut edit, Rect::new(0, 0, 200, 28));
+        edit
+    };
+
+    let mut sink = MessageSink::new();
+    let text = WidgetEvent::TextInput { character: 'x' };
+    let mut blurred = make(false);
+    assert!(
+        !blurred
+            .event(&text, EventPhase::Target, &mut sink)
+            .is_consumed()
+    );
+    assert!(sink.drain_typed::<LineEditInput>().is_empty());
+
+    let mut focused = make(true);
+    assert!(
+        focused
+            .event(&text, EventPhase::Target, &mut sink)
+            .is_consumed()
+    );
+    assert!(matches!(
+        sink.drain_typed::<LineEditInput>().first(),
+        Some(LineEditInput::Text { character: 'x' })
+    ));
+}
+
+fn test_text_field_types_a_space() {
+    let mut field = super::widgets::text_field::TextFieldWidget::new(
+        String::from("ab"),
+        String::new(),
+        None,
+        None,
+        false,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut field,
+        BoxConstraints::tight(Size::new(200, 28)),
+        &mut ctx,
+    );
+    place_widget(&mut field, Rect::new(0, 0, 200, 28));
+    let mut sink = MessageSink::new();
+    // A field answers keys only when it holds the focus, which is what stops it
+    // taking them from whatever else is on screen.
+    field.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
+    field.event(
+        &WidgetEvent::KeyDown {
+            key: super::event::Key::Named(super::event::NamedKey::End),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    field.event(
+        &WidgetEvent::KeyDown {
+            key: super::event::Key::Named(super::event::NamedKey::Space),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!(field.text(), "ab ");
+}
+
+fn test_card_gives_its_child_the_whole_rect() {
+    let child = Box::new(FixedSizeWidget::new(40, 20));
+    let mut card = super::widgets::card::CardWidget::new(
+        slopos_abi::draw::Color32::BLACK,
+        None,
+        6,
+        true,
+        child,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut card,
+        BoxConstraints::loose(Size::new(200, 100)),
+        &mut ctx,
+    );
+    place_widget(&mut card, Rect::new(10, 10, 120, 60));
+    assert_eq!(card.children()[0].layout_rect(), Rect::new(10, 10, 120, 60));
+}
+
+fn test_elide_keeps_what_fits() {
+    use super::widgets::tree_view::elide;
+    // Eight pixels per character, so the arithmetic is the test's rather than
+    // the installed font's.
+    let width = |t: &str| t.chars().count() as i32 * 8;
+    assert_eq!(elide("short.rs", 10_000, width), "short.rs");
+    let squeezed = elide("a-very-long-file-name.rs", 40, width);
+    assert!(squeezed.starts_with('\u{2026}'));
+    assert!(width(&squeezed) <= 40);
+    // The tail is what a long file name is distinguished by, so that is what
+    // survives: four characters of it, plus the ellipsis, is the whole budget.
+    assert!(squeezed.ends_with("e.rs"));
+    // No budget at all elides to the ellipsis alone rather than panicking.
+    assert_eq!(elide("name.rs", 4, width), "\u{2026}");
+}
+
 /// Every appkit unit test, for a host `cargo test` run and for the
 /// `/bin/appkit_test` userland binary that reports them over KTAP.
 pub fn cases() -> &'static [(&'static str, fn())] {
     &[
+        ("display_col_expands_tabs", test_display_col_expands_tabs),
+        (
+            "char_col_from_display_inverts_display_col",
+            test_char_col_from_display_inverts_display_col,
+        ),
+        (
+            "click_inside_a_tab_snaps_to_one_side",
+            test_click_inside_a_tab_snaps_to_one_side,
+        ),
+        (
+            "click_past_a_glyphs_midpoint_lands_after_it",
+            test_click_past_a_glyphs_midpoint_lands_after_it,
+        ),
+        (
+            "gutter_width_grows_with_the_line_count",
+            test_gutter_width_grows_with_the_line_count,
+        ),
+        ("visible_line_count_floors", test_visible_line_count_floors),
+        (
+            "code_view_click_reports_a_document_position",
+            test_code_view_click_reports_a_document_position,
+        ),
+        (
+            "code_view_drags_only_while_selecting",
+            test_code_view_drags_only_while_selecting,
+        ),
+        (
+            "code_view_shift_click_extends",
+            test_code_view_shift_click_extends,
+        ),
+        (
+            "code_scrollbar_drags_rather_than_placing_the_caret",
+            test_code_scrollbar_drags_rather_than_placing_the_caret,
+        ),
+        (
+            "tree_scrollbar_drags_rather_than_opening_a_row",
+            test_tree_scrollbar_drags_rather_than_opening_a_row,
+        ),
+        (
+            "tree_click_on_the_twisty_toggles_rather_than_opens",
+            test_tree_click_on_the_twisty_toggles_rather_than_opens,
+        ),
+        (
+            "tree_keys_only_reach_a_focused_tree",
+            test_tree_keys_only_reach_a_focused_tree,
+        ),
+        (
+            "editor_tabs_close_box_is_distinct_from_the_tab",
+            test_editor_tabs_close_box_is_distinct_from_the_tab,
+        ),
+        (
+            "drag_handle_reports_begin_move_end",
+            test_drag_handle_reports_begin_move_end,
+        ),
+        (
+            "a_release_outside_a_widget_still_reaches_it",
+            test_a_release_outside_a_widget_still_reaches_it,
+        ),
+        (
+            "a_zero_extent_clip_damages_nothing",
+            test_a_zero_extent_clip_damages_nothing,
+        ),
+        (
+            "scroll_goes_to_what_is_under_the_pointer",
+            test_scroll_goes_to_what_is_under_the_pointer,
+        ),
+        (
+            "a_popup_swallows_a_press_its_child_ignored",
+            test_a_popup_swallows_a_press_its_child_ignored,
+        ),
+        (
+            "only_the_visible_tab_panel_is_reachable",
+            test_only_the_visible_tab_panel_is_reachable,
+        ),
+        (
+            "line_edit_reports_keys_only_when_focused",
+            test_line_edit_reports_keys_only_when_focused,
+        ),
+        ("text_field_types_a_space", test_text_field_types_a_space),
+        (
+            "card_gives_its_child_the_whole_rect",
+            test_card_gives_its_child_the_whole_rect,
+        ),
+        ("elide_keeps_what_fits", test_elide_keeps_what_fits),
         ("tight_constraints", test_tight_constraints),
         ("loose_constraints", test_loose_constraints),
         ("constrain_clamps", test_constrain_clamps),
@@ -858,6 +1775,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         ("focus_prev", test_focus_prev),
         ("focus_wrap", test_focus_wrap),
         ("focus_scope", test_focus_scope),
+        (
+            "focus_scope_restores_across_a_rebuild",
+            test_focus_scope_restores_across_a_rebuild,
+        ),
         ("hit_test_leaf", test_hit_test_leaf),
         ("hit_test_miss", test_hit_test_miss),
         ("edge_insets_symmetric", test_edge_insets_symmetric),

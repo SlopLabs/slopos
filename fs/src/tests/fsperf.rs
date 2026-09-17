@@ -351,10 +351,22 @@ fn perf_body() -> TestResult {
     };
     let table = process.table();
 
+    // Quiesce before the counters are reset: anything left dirty is written
+    // back inside the window and counted against it, which makes the row a
+    // property of how much the image was carrying rather than of the code.
+    if let Err(e) = crate::vfs::vfs_sync_all() {
+        return fail!("could not quiesce the filesystem before measuring: {:?}", e);
+    }
     stats::reset();
     dev_reset();
     let start = monotonic_ns();
     let wrote = write_through_vfs(table, PERF_PATH, PERF_BYTES, chunk.as_slice());
+    // And at the far end, so the number is the whole cost. The write already
+    // fdatasyncs; this absorbs the flusher's pass over the metadata it
+    // dirtied, which otherwise lands inside or outside by the idle timer.
+    if let Err(e) = crate::vfs::vfs_sync_all() {
+        return fail!("could not flush the filesystem after measuring: {:?}", e);
+    }
     let ns = monotonic_ns().saturating_sub(start);
     let counters = stats::snapshot();
     let (devwrites, devblocks, barriers) = dev_counts();

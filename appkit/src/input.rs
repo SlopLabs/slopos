@@ -46,11 +46,13 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
         Event::PointerMotion { x, y } => Some(WidgetEvent::PointerMove { x: *x, y: *y }),
         Event::PointerPress { button } => {
             let btn = pointer_button(*button);
-            // Position will be filled in by the framework from tracked pointer state.
+            // Position and modifiers are filled in by the framework from the
+            // pointer and keyboard state it tracks.
             Some(WidgetEvent::PointerDown {
                 x: 0,
                 y: 0,
                 button: btn,
+                modifiers: Modifiers::default(),
             })
         }
         Event::PointerRelease { button } => {
@@ -65,6 +67,10 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             let delta_lines = *value_v120 / 120;
             let delta_px = delta_lines * 20; // ~line_height
             Some(WidgetEvent::Scroll {
+                // Filled in by `fill_pointer_state`, which is the only place
+                // that knows where the pointer is.
+                x: 0,
+                y: 0,
                 delta_x: 0,
                 delta_y: delta_px,
             })
@@ -106,16 +112,19 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             width: *width,
             height: *height,
         }),
-        Event::CloseRequest => None, // Handled at the appkit level.
+        // Handled at the appkit level, before translation.
+        Event::CloseRequest | Event::ClipboardOffer { .. } | Event::ClipboardData { .. } => None,
         Event::Other => None,
     }
 }
 
+/// The wire carries the PS/2 button **mask** (left 0x01, right 0x02, middle
+/// 0x04), not an index into them, so middle arrived as left and nothing ever
+/// decoded as middle.
 fn pointer_button(button: u8) -> super::event::PointerButton {
     match button {
-        0 | 1 => super::event::PointerButton::Left,
-        2 => super::event::PointerButton::Right,
-        3 => super::event::PointerButton::Middle,
+        0x02 => super::event::PointerButton::Right,
+        0x04 => super::event::PointerButton::Middle,
         _ => super::event::PointerButton::Left,
     }
 }

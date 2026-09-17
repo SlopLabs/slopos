@@ -107,11 +107,37 @@ impl Widget for PopupWidget {
                 if !self.child.layout_rect().contains(*x, *y) {
                     return self.dismiss(sink);
                 }
-                self.child.event(event, EventPhase::Target, sink)
+                // A press inside the popup that the child ignored — a
+                // separator, the padding round a list — is still the popup's.
+                self.child.event(event, EventPhase::Target, sink);
+                EventResponse::Consumed
             }
 
-            // Modal: swallow what the child ignores so the tree underneath
-            // cannot act while the popup is open.
+            // A popup holds the keyboard while it is open, so Tab must not
+            // reach the document behind it.
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Tab),
+                ..
+            } => {
+                self.child.event(event, EventPhase::Target, sink);
+                EventResponse::Consumed
+            }
+
+            // Modal against acting, not against knowing where the pointer is:
+            // the menu bar underneath still switches menus as it slides.
+            WidgetEvent::PointerMove { .. } => {
+                // A menu's highlight changing is a repaint, and nothing else
+                // redraws it.
+                let resp = self.child.event(event, EventPhase::Target, sink);
+                if resp.is_consumed() {
+                    EventResponse::Consumed
+                } else {
+                    EventResponse::Ignored
+                }
+            }
+
+            // Modal otherwise: swallow what the child ignores so the tree
+            // underneath cannot act while the popup is open.
             _ => {
                 let resp = self.child.event(event, phase, sink);
                 if resp.is_consumed() {
@@ -129,6 +155,15 @@ impl Widget for PopupWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
+    }
+
+    /// A popup is modal, so while it is open it holds the keyboard.
+    ///
+    /// A menu opens by mouse and the widget that opened it is not focusable,
+    /// so nothing else would. A declarer inside the popup still wins: the
+    /// search takes the last in depth-first order.
+    fn declares_focus(&self) -> bool {
+        true
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

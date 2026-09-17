@@ -29,19 +29,24 @@ pub struct RasterizedGlyph {
 const SUPERSAMPLE: usize = 8;
 
 /// Rasterize a list of edges into a coverage bitmap.
-pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
+///
+/// `None` when the buffers it needs cannot be allocated. The glyph's bounding
+/// box comes out of the font file, so an absurd one asks for an absurd
+/// allocation — and every other step of loading a font degrades to a fallback
+/// rather than taking the process down.
+pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Option<KVec<u8>> {
     if width == 0 || height == 0 || edges.is_empty() {
-        return KVec::<u8>::zeroed(width * height).expect("rasterize: alloc");
+        return KVec::<u8>::zeroed(width * height).ok();
     }
 
     let sub_height = height * SUPERSAMPLE;
     let inv_ss = 1.0f32 / SUPERSAMPLE as f32;
 
     // Per-pixel area accumulator (0.0 = uncovered, ±1.0 = fully covered).
-    let mut area = KVec::<f32>::zeroed(width * height).expect("rasterize: alloc");
+    let mut area = KVec::<f32>::zeroed(width * height).ok()?;
 
     // Winding-delta buffer, reused each sub-scanline.
-    let mut scanline_fill = KVec::<f32>::zeroed(width + 1).expect("rasterize: alloc");
+    let mut scanline_fill = KVec::<f32>::zeroed(width + 1).ok()?;
 
     for sub_y in 0..sub_height {
         // Sample at the centre of each sub-scanline.
@@ -104,7 +109,7 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
         }
     }
 
-    let mut coverage = KVec::<u8>::zeroed(width * height).expect("rasterize: alloc");
+    let mut coverage = KVec::<u8>::zeroed(width * height).ok()?;
     for (idx, &a) in area.iter().enumerate() {
         let cov = libm::fabsf(a);
         coverage[idx] = if cov >= 1.0 {
@@ -114,5 +119,5 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
         };
     }
 
-    coverage
+    Some(coverage)
 }

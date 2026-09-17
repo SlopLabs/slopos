@@ -752,15 +752,18 @@ impl ProtocolBridge {
     /// `ClipboardRead` carrying a destination memfd, since the server event path
     /// cannot itself carry an fd.
     fn handle_clipboard_paste(&mut self, client_idx: usize, serial: u32) {
-        if !self.client_holds_keyboard_serial(client_idx, serial) {
-            return;
-        }
-        let _ = self.server.queue_event(
-            client_idx,
-            &Event::PasteReady {
-                len: self.clipboard.len,
-            },
-        );
+        // A refusal is still an answer. A client that asked and heard nothing
+        // waits for a reply that will never come, and its own fallback — a
+        // process-local clipboard, say — is unreachable from there; a zero
+        // length is what "nothing for you" looks like on this path already.
+        let len = if self.client_holds_keyboard_serial(client_idx, serial) {
+            self.clipboard.len
+        } else {
+            0
+        };
+        let _ = self
+            .server
+            .queue_event(client_idx, &Event::PasteReady { len });
     }
 
     /// Copy the clipboard into the client-provided destination memfd and report
@@ -1294,6 +1297,16 @@ impl ProtocolBridge {
         self.surfaces
             .iter()
             .position(|s| s.active && s.client_idx == client_idx && s.toplevel_id == toplevel_id)
+    }
+
+    /// The generation of the surface `task_id` currently designates.
+    ///
+    /// A task id is a slot index, and slots are recycled, so an id held across
+    /// a destroy designates the successor. Pairing it with the generation the
+    /// holder saw is what tells the two apart.
+    pub fn surface_generation_for_task(&self, task_id: u32) -> Option<u32> {
+        self.task_id_to_surface_idx(task_id)
+            .map(|idx| self.surfaces[idx].generation)
     }
 
     fn task_id_to_surface_idx(&self, task_id: u32) -> Option<usize> {

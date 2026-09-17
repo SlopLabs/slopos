@@ -15,6 +15,7 @@ pub struct ListViewWidget {
     items: Vec<Box<dyn Widget>>,
     scroll_offset: i32,
     focused: bool,
+    hovered: Option<usize>,
 }
 
 impl ListViewWidget {
@@ -32,6 +33,7 @@ impl ListViewWidget {
             items,
             scroll_offset: 0,
             focused: false,
+            hovered: None,
         }
     }
 
@@ -101,8 +103,6 @@ impl Widget for ListViewWidget {
             .constrain(Size::new(w, self.total_content_height()))
             .height;
 
-        // Rows are uniform, so measuring here keeps the measure pass the only
-        // place a child is sized.
         let item_constraints = BoxConstraints::tight(Size::new(w, self.item_height));
         for item in &mut self.items {
             crate::traits::measure_widget(item.as_mut(), item_constraints, ctx);
@@ -127,12 +127,29 @@ impl Widget for ListViewWidget {
                 let item_rect = Rect::new(rect.x, y, rect.width, self.item_height);
 
                 if self.selected == Some(i) {
+                    // Tinted with an accent edge, not a solid bar: the label
+                    // stays in the ordinary text colour.
                     ctx.fill_rect(
                         item_rect.x,
                         item_rect.y,
                         item_rect.width,
                         item_rect.height,
-                        ctx.style.bg_accent,
+                        ctx.style.bg_selected,
+                    );
+                    ctx.fill_rect(
+                        item_rect.x,
+                        item_rect.y,
+                        2,
+                        item_rect.height,
+                        ctx.style.text_accent,
+                    );
+                } else if self.hovered == Some(i) {
+                    ctx.fill_rect(
+                        item_rect.x,
+                        item_rect.y,
+                        item_rect.width,
+                        item_rect.height,
+                        ctx.style.bg_hover,
                     );
                 }
 
@@ -160,15 +177,10 @@ impl Widget for ListViewWidget {
                 if *delta_y == 0 {
                     return EventResponse::Ignored;
                 }
-                let line_height = self.item_height;
-                let scroll_lines = if *delta_y > 0 {
-                    (delta_y / 120).max(1) * 3
-                } else {
-                    (delta_y / 120).min(-1) * 3
-                };
+                // Already pixels: `translate_event` converts the wire's v120.
                 let old = self.scroll_offset;
-                self.scroll_offset = (self.scroll_offset + scroll_lines * line_height)
-                    .clamp(0, self.max_scroll_offset());
+                self.scroll_offset =
+                    (self.scroll_offset + delta_y).clamp(0, self.max_scroll_offset());
 
                 if self.scroll_offset != old {
                     self.place_items();
@@ -176,6 +188,26 @@ impl Widget for ListViewWidget {
                 } else {
                     EventResponse::Ignored
                 }
+            }
+
+            WidgetEvent::PointerMove { x, y } => {
+                let hovered = if self.item_height > 0 && self.layout_rect().contains(*x, *y) {
+                    let relative_y = *y - self.layout_rect().y + self.scroll_offset;
+                    let index = (relative_y / self.item_height) as usize;
+                    (index < self.items.len()).then_some(index)
+                } else {
+                    None
+                };
+                if hovered != self.hovered {
+                    self.hovered = hovered;
+                    return EventResponse::Consumed;
+                }
+                EventResponse::Ignored
+            }
+
+            WidgetEvent::PointerLeave => {
+                self.hovered = None;
+                EventResponse::Ignored
             }
 
             WidgetEvent::PointerDown { x, y, .. } => {
@@ -195,7 +227,9 @@ impl Widget for ListViewWidget {
                 }
             }
 
-            WidgetEvent::KeyDown { key, .. } => match key {
+            // `on_select` on a palette runs a command, so an unfocused list
+            // answering the arrows runs one nobody asked for.
+            WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Up) => {
                     if let Some(sel) = self.selected {
                         if sel > 0 {

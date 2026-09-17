@@ -18,6 +18,10 @@ pub struct DialogWidget {
     actions: Vec<Box<dyn Widget>>,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     card_rect: Rect,
+    /// Title-row height from the last measure; `layout` and `paint` run without
+    /// a style, and a card whose title band disagreed with paint's would place
+    /// its content over the title.
+    title_height: i32,
     /// `None` until Tab or an arrow key names one, so a stray Enter cannot fire
     /// a confirm dialog's typically-destructive first action.
     focused_action: Option<usize>,
@@ -37,21 +41,33 @@ impl DialogWidget {
             actions,
             on_dismiss,
             card_rect: Rect::ZERO,
+            title_height: 0,
             focused_action: None,
         }
     }
 
-    fn cycle_action(&mut self, forward: bool) {
+    fn cycle_action(&mut self, forward: bool, sink: &mut MessageSink) {
         let len = self.actions.len();
         if len == 0 {
             return;
         }
-        self.focused_action = Some(match self.focused_action {
+        let previous = self.focused_action;
+        let next = match self.focused_action {
             Some(i) if forward => (i + 1) % len,
             Some(i) => (i + len - 1) % len,
             None if forward => 0,
             None => len - 1,
-        });
+        };
+        self.focused_action = Some(next);
+        // The framework never tells these buttons anything, and one never
+        // told it has focus answers no key. The caller's sink, or a message
+        // emitted here is dropped.
+        if let Some(action) = previous.and_then(|i| self.actions.get_mut(i)) {
+            action.event(&WidgetEvent::FocusLost, EventPhase::Target, sink);
+        }
+        if let Some(action) = self.actions.get_mut(next) {
+            action.event(&WidgetEvent::FocusGained, EventPhase::Target, sink);
+        }
     }
 
     pub fn card_rect(&self) -> Rect {
@@ -86,7 +102,7 @@ impl DialogWidget {
     }
 
     fn card_height(&self) -> i32 {
-        let title_h = crate::text::cell_height() + CARD_PADDING;
+        let title_h = self.title_height + CARD_PADDING;
         let content_h = self.content.measured_size().height;
         let actions_h = self.actions_height();
         let mut h = title_h + content_h + CARD_PADDING;
@@ -110,10 +126,9 @@ impl Widget for DialogWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
+        self.title_height = crate::text::ui::line_height(ctx.style.font_size_heading as u16);
         let inner_w = self.inner_width(constraints.max_width);
 
-        // Content height is unbounded: `card_height` reads the measured value
-        // back rather than assuming a line count.
         let content_constraints = BoxConstraints {
             min_width: inner_w,
             max_width: inner_w,
@@ -127,7 +142,6 @@ impl Widget for DialogWidget {
             measure_widget(action.as_mut(), action_constraints, ctx);
         }
 
-        // The dialog itself covers the parent so the backdrop dims everything.
         constraints.constrain(constraints.max_size())
     }
 
@@ -140,7 +154,7 @@ impl Widget for DialogWidget {
         let card_y = rect.y + (rect.height - card_h) / 2;
         self.card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
-        let title_h = crate::text::cell_height() + CARD_PADDING;
+        let title_h = self.title_height + CARD_PADDING;
         let content_h = self.content.measured_size().height;
         place_widget(
             self.content.as_mut(),
@@ -186,10 +200,18 @@ impl Widget for DialogWidget {
             style.border_default,
         );
 
-        let text_h = ctx.text_height();
+        let heading = style.font_size_heading;
+        let text_h = crate::text::ui::line_height(heading as u16);
         let title_x = self.card_rect.x + CARD_PADDING;
-        let title_y = self.card_rect.y + (CARD_PADDING + crate::text::cell_height() - text_h) / 2;
-        ctx.draw_text_transparent(title_x, title_y, &self.title, style.text_primary);
+        let title_y = self.card_rect.y + (CARD_PADDING + self.title_height - text_h) / 2;
+        ctx.draw_text_styled(
+            title_x,
+            title_y,
+            &self.title,
+            heading,
+            crate::text::ui::Weight::Semibold,
+            style.text_primary,
+        );
 
         let selected = self.focused_action;
         ctx.with_clip(self.card_rect, |ctx| {
@@ -232,7 +254,8 @@ impl Widget for DialogWidget {
                 EventResponse::Consumed
             }
 
-            WidgetEvent::PointerDown { x, y, button } | WidgetEvent::PointerUp { x, y, button } => {
+            WidgetEvent::PointerDown { x, y, button, .. }
+            | WidgetEvent::PointerUp { x, y, button } => {
                 if *button == PointerButton::Left
                     && matches!(event, WidgetEvent::PointerDown { .. })
                     && !self.card_rect.contains(*x, *y)
@@ -243,13 +266,21 @@ impl Widget for DialogWidget {
                     return EventResponse::Consumed;
                 }
 
-                // Only the action under the pointer gets the event; offering it
-                // to each in turn would let "Cancel" fire "Kill".
+                // Offering it to each in turn would let "Cancel" fire "Kill".
                 for action in &mut self.actions {
                     if action.layout_rect().contains(*x, *y) {
                         let resp = action.event(event, EventPhase::Target, sink);
                         if resp.is_consumed() {
                             return resp;
+                        }
+                    }
+                }
+                // Or the one pressed stays drawn pressed. A button ignores a
+                // release outside its rect, so this cannot fire one.
+                if matches!(event, WidgetEvent::PointerUp { .. }) {
+                    for action in &mut self.actions {
+                        if !action.layout_rect().contains(*x, *y) {
+                            action.event(event, EventPhase::Target, sink);
                         }
                     }
                 }
@@ -265,15 +296,15 @@ impl Widget for DialogWidget {
             WidgetEvent::KeyDown { key, modifiers, .. } => {
                 match key {
                     Key::Named(NamedKey::Tab) => {
-                        self.cycle_action(!modifiers.shift);
+                        self.cycle_action(!modifiers.shift, sink);
                         return EventResponse::Consumed;
                     }
                     Key::Named(NamedKey::Right) | Key::Named(NamedKey::Down) => {
-                        self.cycle_action(true);
+                        self.cycle_action(true, sink);
                         return EventResponse::Consumed;
                     }
                     Key::Named(NamedKey::Left) | Key::Named(NamedKey::Up) => {
-                        self.cycle_action(false);
+                        self.cycle_action(false, sink);
                         return EventResponse::Consumed;
                     }
                     _ => {}
@@ -293,6 +324,10 @@ impl Widget for DialogWidget {
                     EventResponse::Consumed
                 }
             }
+
+            // Stops here: the catch-all below would mark every action focused
+            // and each would draw a ring.
+            WidgetEvent::FocusGained | WidgetEvent::FocusLost => EventResponse::Ignored,
 
             _ => {
                 for action in &mut self.actions {
@@ -315,7 +350,6 @@ impl Widget for DialogWidget {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        // Content is painted and hit-tested directly; only actions join the tab chain.
         &self.actions
     }
 

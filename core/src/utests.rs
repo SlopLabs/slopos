@@ -56,6 +56,7 @@ crate::utest!(
 crate::utest!(name = utest_clipboard, bin = "/bin/clipboard_test");
 crate::utest!(name = utest_keymap, bin = "/bin/keymap_test");
 crate::utest!(name = utest_appkit, bin = "/bin/appkit_test");
+crate::utest!(name = utest_editor, bin = "/bin/editor_test");
 crate::utest!(
     name = utest_spawn_privilege,
     bin = "/bin/spawn_privilege_test"

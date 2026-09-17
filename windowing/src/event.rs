@@ -45,6 +45,16 @@ pub enum Event {
         width: u32,
         height: u32,
     },
+    /// The selection holds `len` bytes; answer with
+    /// [`crate::Clipboard::accept_offer`].
+    ClipboardOffer {
+        len: u32,
+    },
+    /// The destination buffer now holds `len` bytes; take them with
+    /// [`crate::Clipboard::take`].
+    ClipboardData {
+        len: u32,
+    },
     Other,
 }
 
@@ -104,6 +114,8 @@ impl Event {
                     })
                 }
             }
+            ProtocolEvent::PasteReady { len, .. } => Some(Event::ClipboardOffer { len: *len }),
+            ProtocolEvent::PasteResult { len, .. } => Some(Event::ClipboardData { len: *len }),
             ProtocolEvent::Close { .. } => Some(Event::CloseRequest),
             ProtocolEvent::Configure { width, height, .. } => Some(Event::Configure {
                 width: *width,

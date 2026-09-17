@@ -69,6 +69,34 @@
 # do catch a 2x are the per-MiB counts above, which is why they carry the
 # narrow caps and this one does not.
 
+# 2026-09-17, the editor. No cap moved; the *measurement* did.
+#
+# The window used to be opened with `stats::reset()` on whatever the boot had
+# left dirty and closed on whatever had landed by then, so what it reported was
+# the write plus however much unrelated writeback the flusher's idle timer
+# happened to overlap with it. That was invisible while the image was small and
+# the phase was stable: three runs of the parent commit measure 44 requests /
+# 4624 sectors / 10 barriers every time. Adding the editor's binaries and two
+# font files to the tests image shifted the phase, and the same code then
+# measured 44-65 requests and 4624-4786 sectors over four runs — a row the
+# header calls a property of the code behaving like a property of the host.
+#
+# `perf_body` now flushes to quiescence at both ends of the window, so the
+# number is the whole cost of getting 2 MiB onto the medium rather than the
+# part of it that had landed when the counters were read. Three of four runs
+# then measure 48 / 4650 / 13, against 44 / 4624 / 10 before: the +4 requests
+# are the metadata pass that used to fall outside the window as often as in.
+# 24 requests per MiB, inside the 29 below, so no cap moves.
+#
+# The residual is one run in four measuring 78 / 4890 / 15 (39 per MiB, over
+# the cap). That is the *eager* flusher: a 2 MiB write passes
+# `FLUSH_EAGER_THRESHOLD` many times over, so the flusher wakes inside the
+# window and splits what one pass would have coalesced. Isolating it needs the
+# flusher held off for the duration, which is a change to `Ext2Mount` and not
+# one to make from here. Until then this row can fail on a loaded host, and the
+# answer is to re-run rather than to raise the cap: `txns` and `commits` are
+# 10/10 in every run of both trees, which is the write path's actual shape.
+
 max-txns-per-mib	post-kernel-tests	8
 max-commits-per-mib	post-kernel-tests	8
 max-devwrites-per-mib	post-kernel-tests	29

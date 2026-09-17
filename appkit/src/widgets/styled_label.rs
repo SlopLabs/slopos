@@ -33,7 +33,7 @@ impl Widget for StyledLabelWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_w = crate::text::string_width(&self.text);
+        let text_w = ctx.text_width(&self.text);
         let line_height = ctx.style.line_height;
         constraints.constrain(Size::new(text_w, line_height))
     }
@@ -46,7 +46,11 @@ impl Widget for StyledLabelWidget {
             TextAlignment::Center => rect.x + (rect.width - tw) / 2,
             TextAlignment::End => rect.x + rect.width - tw,
         };
-        ctx.draw_text_transparent(x, rect.y, &self.text, self.color);
+        // Centred in the rect, not parked at its top: a label in a bar taller
+        // than one line — a status bar, a header — gets the bar's height, and
+        // drawing at `rect.y` leaves the text riding high in it.
+        let y = rect.y + (rect.height - ctx.text_height()) / 2;
+        ctx.draw_text_transparent(x, y, &self.text, self.color);
     }
 
     fn event(

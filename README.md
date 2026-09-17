@@ -122,8 +122,10 @@ and — for auditing your own two sockets — `nmap`.
 
 **Desktop** — a compositor with damage tracking and occlusion culling,
 clients passing buffers over memfd + SCM_RIGHTS (the Wayland trick), an
-appkit widget toolkit, and apps: terminal (with scrollback reflow), file
-manager, image viewer, system monitor.
+appkit widget toolkit that draws proportional UI text beside a fixed-cell code
+surface, and apps: terminal (with scrollback reflow), a code editor with a file
+tree, syntax highlighting and a command palette, file manager, image viewer,
+system monitor.
 
 **Plumbing** — our own libc (`slibc`) with an mmap-only malloc, an
 io_uring-style submission ring (SlopRing), a VFS with ext2, devfs, ramfs,

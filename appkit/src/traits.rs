@@ -20,6 +20,19 @@ pub struct MeasureCtx<'a> {
     pub style: &'a StyleSheet,
 }
 
+impl MeasureCtx<'_> {
+    /// Advance of `text` as [`PaintContext::draw_text`](super::paint::PaintContext::draw_text)
+    /// will lay it out — measure and paint must agree or a label is clipped by
+    /// its own box.
+    pub fn text_width(&self, text: &str) -> i32 {
+        super::text::ui::width(text, self.style.font_size as u16)
+    }
+
+    pub fn text_height(&self) -> i32 {
+        super::text::ui::line_height(self.style.font_size as u16)
+    }
+}
+
 /// Identity and geometry every widget carries, owned by the framework.
 ///
 /// `measured` is written only by [`measure_widget`], `rect` only by
@@ -83,6 +96,11 @@ pub fn place_widget(widget: &mut dyn Widget, rect: Rect) {
     widget.layout(rect);
 }
 
+/// A widget in the retained tree.
+///
+/// Keys carry no position, so they are offered to every widget in turn until
+/// one consumes: a widget that answers `KeyDown` without gating on its own
+/// focus takes the key from whatever the user was aiming at.
 pub trait Widget {
     /// Implemented by storing a [`WidgetCore`] and returning references to it.
     fn core(&self) -> &WidgetCore;
@@ -121,6 +139,15 @@ pub trait Widget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::None
+    }
+
+    /// Whether the *application* says this widget holds the keyboard focus.
+    ///
+    /// A widget built focused and one the `FocusManager` points at can
+    /// disagree; keys go to every widget until one consumes, so the
+    /// application's answer has to win.
+    fn declares_focus(&self) -> bool {
+        false
     }
 
     fn id(&self) -> WidgetId {

@@ -150,6 +150,14 @@ impl LauncherShelf {
             b'F',
         );
         self.entries[2] = make_pinned(
+            b"Editor",
+            b"/bin/editor",
+            b"org.slopos.editor",
+            ICON_EDITOR,
+            ICON_EDITOR_ALPHA,
+            b'E',
+        );
+        self.entries[3] = make_pinned(
             b"System Monitor",
             b"/bin/sysmon",
             b"org.slopos.sysmon",
@@ -157,7 +165,7 @@ impl LauncherShelf {
             ICON_MONITOR_ALPHA,
             b'M',
         );
-        self.entries[3] = make_pinned(
+        self.entries[4] = make_pinned(
             b"Image Viewer",
             b"/bin/image_viewer",
             b"org.slopos.image-viewer",
@@ -165,7 +173,7 @@ impl LauncherShelf {
             ICON_IMAGES_ALPHA,
             b'I',
         );
-        self.entry_count = 4;
+        self.entry_count = 5;
     }
 
     /// Synchronize running state from the current window list; running apps

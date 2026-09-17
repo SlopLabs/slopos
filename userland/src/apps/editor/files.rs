@@ -1,0 +1,220 @@
+//! The editor's filesystem boundary.
+//!
+//! Every read and write the editor does is here, so a failure is a message on
+//! the status bar rather than a panic in a message handler, and so
+//! `editor-core` stays free of `std::fs`.
+
+use std::fs;
+use std::io::Write;
+
+use slopos_editor_core::document::DiskStamp;
+use slopos_editor_core::filetree::DirEntry;
+
+/// Largest file the editor opens. Past it the buffer's per-line `String` vector
+/// is no longer the right shape and the read alone would hold the UI; refusing
+/// says so instead of appearing to hang.
+pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The editor's own documentation, as the image installs it.
+pub const DOC_PATH: &str = "/usr/share/slopos/doc/sloped.md";
+
+/// Bytes examined when deciding whether a file is text.
+const SNIFF_BYTES: usize = 8192;
+
+pub fn read_file(path: &str) -> Result<String, String> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => return Err(format!("{path} is a directory")),
+        Ok(meta) if meta.len() > MAX_FILE_BYTES => {
+            return Err(format!(
+                "{path} is {} MiB; the editor opens up to {} MiB",
+                meta.len() / (1024 * 1024),
+                MAX_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        _ => {}
+    }
+    let bytes = fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    // The metadata above is a separate syscall; the read is what decides.
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!(
+            "{path} is larger than the {} MiB the editor opens",
+            MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    // Opening it would produce replacement characters that a save then writes
+    // back over the file.
+    if bytes[..bytes.len().min(SNIFF_BYTES)].contains(&0) {
+        return Err(format!("{path} is a binary file"));
+    }
+    // Lossy: a text file with one stray byte is still worth opening.
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Writes `text` to `path` through a sibling temporary file.
+///
+/// `File::create` truncates first, so a partial write would destroy the file
+/// while the editor held the only copy. Writing a sibling, `fsync`-ing it and
+/// renaming leaves the old file or the whole new one, never a prefix: the
+/// rename is one journalled metadata operation.
+pub fn write_file(path: &str, text: &str) -> Result<(), String> {
+    // A new inode does not inherit the old one's mode, so an executable script
+    // would come back un-executable.
+    let mode = crate::apps::coreutils::fsutil::mode_of(path)
+        .ok()
+        .map(|mode| mode & 0o7777);
+    let temp = temp_path(path);
+    let write = || -> Result<(), String> {
+        let mut file = fs::File::create(&temp).map_err(|e| format!("{temp}: {e}"))?;
+        file.write_all(text.as_bytes())
+            .map_err(|e| format!("{temp}: {e}"))?;
+        file.flush().map_err(|e| format!("{temp}: {e}"))?;
+        file.sync_all().map_err(|e| format!("{temp}: {e}"))?;
+        Ok(())
+    };
+    if let Err(message) = write() {
+        let _ = fs::remove_file(&temp);
+        return Err(message);
+    }
+    if let Some(mode) = mode {
+        let _ = crate::apps::coreutils::fsutil::chmod(&temp, mode);
+    }
+    if let Err(e) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("{path}: {e}"));
+    }
+    Ok(())
+}
+
+/// A sibling of `path` — the rename below has to stay inside one directory —
+/// named so a crash between the write and the rename leaves something a user
+/// can recognise and delete.
+fn temp_path(path: &str) -> String {
+    let (dir, name) = match path.rfind('/') {
+        Some(at) => (&path[..at + 1], &path[at + 1..]),
+        None => ("", path),
+    };
+    let suffix = format!(".sloped-{}", std::process::id());
+    // The original name is what gets shortened, so the decoration cannot be
+    // what pushes a file that saved yesterday over the name limit.
+    let room = slopos_abi::fs::USER_NAME_MAX.saturating_sub(suffix.len() + 1);
+    let mut stem = String::new();
+    for (index, ch) in name.char_indices() {
+        if index + ch.len_utf8() > room {
+            break;
+        }
+        stem.push(ch);
+    }
+    format!("{dir}.{stem}{suffix}")
+}
+
+/// Entries one directory contributes to the tree. A directory larger than this
+/// is shown truncated rather than read into a vector the sidebar cannot scroll.
+pub const MAX_DIR_ENTRIES: usize = 20_000;
+
+pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, String> {
+    let mut out = Vec::new();
+    let entries = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
+    for entry in entries {
+        if out.len() >= MAX_DIR_ENTRIES {
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+        let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+        out.push(DirEntry { name, is_dir });
+    }
+    Ok(out)
+}
+
+/// What `path` looks like on the medium right now, or `None` when it is not
+/// there (or the filesystem will not say).
+pub fn disk_stamp(path: &str) -> Option<DiskStamp> {
+    let meta = fs::metadata(path).ok()?;
+    let modified_secs = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(DiskStamp {
+        modified_secs,
+        len: meta.len(),
+    })
+}
+
+pub fn is_file(path: &str) -> bool {
+    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+}
+
+pub fn is_dir(path: &str) -> bool {
+    fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+/// The directory the editor starts in: its argument if it is one, else the
+/// working directory, else the root.
+pub fn start_directory(arg: Option<&str>) -> String {
+    // Always absolute: `absolutize` is textual, so it treats its base as
+    // absolute and a relative one re-roots everything at `/`.
+    let working = working_directory();
+    if let Some(path) = arg {
+        if is_dir(path) {
+            return absolutize(&working, path);
+        }
+        let parent = slopos_editor_core::document::parent_dir(path);
+        if !parent.is_empty() {
+            let parent = absolutize(&working, parent);
+            if is_dir(&parent) {
+                return parent;
+            }
+        }
+    }
+    working
+}
+
+fn working_directory() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .filter(|p| p.starts_with('/') && is_dir(p))
+        .unwrap_or_else(|| String::from("/"))
+}
+
+/// `path` made absolute against `base`, with `.` and `..` resolved.
+///
+/// Textual, not a syscall: the editor asks this of paths a person typed, which
+/// may not exist yet — a `Save As` target is the whole point.
+pub fn absolutize(base: &str, path: &str) -> String {
+    let joined = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        let mut out = String::from(base.trim_end_matches('/'));
+        out.push('/');
+        out.push_str(path);
+        out
+    };
+
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let mut out = String::new();
+    for part in parts {
+        out.push('/');
+        out.push_str(part);
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
+}

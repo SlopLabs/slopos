@@ -2,7 +2,9 @@ const FONT_DIR: &str = "/usr/share/fonts";
 
 const FONT_MAP: &[(&str, &str)] = &[
     ("mono", "JetBrainsMono-Regular.ttf"),
+    ("mono-bold", "JetBrainsMono-Bold.ttf"),
     ("sans", "Inter-Regular.ttf"),
+    ("sans-semibold", "Inter-SemiBold.ttf"),
 ];
 
 pub fn load_font(name: &str) -> Option<&'static [u8]> {

@@ -14,6 +14,7 @@ pub struct CheckboxWidget {
     on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     enabled: bool,
     hovered: bool,
+    focused: bool,
 }
 
 impl CheckboxWidget {
@@ -30,6 +31,7 @@ impl CheckboxWidget {
             on_toggle,
             enabled,
             hovered: false,
+            focused: false,
         }
     }
 
@@ -51,8 +53,8 @@ impl Widget for CheckboxWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let cb_size = ctx.style.checkbox_size;
         let gap = ctx.style.checkbox_gap;
-        let text_w = crate::text::string_width(&self.label);
-        let text_h = crate::text::cell_height();
+        let text_w = ctx.text_width(&self.label);
+        let text_h = ctx.text_height();
 
         let width = cb_size + gap + text_w;
         let height = cb_size.max(text_h);
@@ -108,9 +110,12 @@ impl Widget for CheckboxWidget {
         };
         ctx.draw_text_transparent(text_x, text_y, &self.label, fg);
 
-        // Ring the box, not the label.
         let box_rect = Rect::new(box_x, box_y, cb_size, cb_size);
-        ctx.draw_focus_ring(box_rect);
+        // `focus_visible` only means the keyboard is in use, so it rings every
+        // checkbox in the window on its own.
+        if self.focused {
+            ctx.draw_focus_ring(box_rect);
+        }
     }
 
     fn event(
@@ -127,6 +132,7 @@ impl Widget for CheckboxWidget {
                 x,
                 y,
                 button: PointerButton::Left,
+                ..
             } => {
                 if !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
@@ -145,10 +151,18 @@ impl Widget for CheckboxWidget {
                 self.hovered = false;
                 EventResponse::Ignored
             }
+            WidgetEvent::FocusGained => {
+                self.focused = true;
+                EventResponse::Ignored
+            }
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResponse::Ignored
+            }
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Space),
                 ..
-            } => {
+            } if self.focused => {
                 self.toggle();
                 if let Some(f) = &self.on_toggle {
                     sink.emit_raw(f());
@@ -167,8 +181,14 @@ impl Widget for CheckboxWidget {
         Some(&self.label)
     }
 
+    /// A disabled control is not a tab stop: it answers nothing, draws no ring,
+    /// and leaving it in the chain makes Tab appear to skip two.
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+        if self.enabled {
+            FocusPolicy::StrongFocus
+        } else {
+            FocusPolicy::None
+        }
     }
 }
 

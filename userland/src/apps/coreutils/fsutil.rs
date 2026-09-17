@@ -21,6 +21,21 @@ pub fn chmod(path: &str, mode: u32) -> Result<(), std::io::Error> {
     Sys::chmod(c_path.as_ptr() as *const u8, mode).map_err(os_error)
 }
 
+/// `stat(2)`'s `st_mode`. The patched std's `Metadata` carries no mode, so a
+/// tool that has to preserve one — copying a file, or replacing it through a
+/// temporary — has to ask the kernel directly.
+pub fn mode_of(path: &str) -> Result<u32, std::io::Error> {
+    let c_path = CString::new(path).map_err(|_| bad_path())?;
+    let mut buf = [0u8; core::mem::size_of::<slopos_abi::fs::UserFsStat>()];
+    Sys::stat(c_path.as_ptr() as *const u8, buf.as_mut_ptr()).map_err(os_error)?;
+    // `st_mode` sits at a fixed offset in the Linux x86-64 layout the struct
+    // reproduces; reading it by offset avoids a transmute of a byte buffer.
+    const ST_MODE_OFFSET: usize = 24;
+    let mut mode = [0u8; 4];
+    mode.copy_from_slice(&buf[ST_MODE_OFFSET..ST_MODE_OFFSET + 4]);
+    Ok(u32::from_ne_bytes(mode))
+}
+
 /// `symlink(2)`.
 pub fn symlink(target: &[u8], link: &str) -> Result<(), std::io::Error> {
     let c_target = CString::new(target).map_err(|_| bad_path())?;

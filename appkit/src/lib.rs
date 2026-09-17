@@ -26,6 +26,7 @@
 pub mod platform;
 pub mod text;
 
+pub mod clipboard;
 pub mod constraints;
 pub mod dirty;
 pub mod event;
@@ -47,6 +48,15 @@ pub use node::{
     SortIndicator, TableColumn, TableColumnWidth,
 };
 pub use run::run_app;
+pub use widgets::code_view::{
+    CodeInput, CodeLine, StyledSpan, gutter_width, text_area_reserved, visible_line_count,
+};
+pub use widgets::drag_handle::DragInput;
+pub use widgets::editor_tabs::{EditorTab, TabInput};
+pub use widgets::icon::IconKind;
+pub use widgets::line_edit::LineEditInput;
+pub use widgets::menu_bar::MenuBarInput;
+pub use widgets::tree_view::{TreeInput, TreeRow};
 
 pub use constraints::{
     BoxConstraints, CrossAxisAlignment, EdgeInsets, ImageScale, Length, Orientation, Rect,

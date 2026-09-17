@@ -57,9 +57,7 @@ impl Widget for ProgressBarWidget {
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
-            ctx.style
-                .field_min_width
-                .max(crate::text::string_width(&self.label))
+            ctx.style.field_min_width.max(ctx.text_width(&self.label))
         };
         constraints.constrain(Size::new(width, height))
     }

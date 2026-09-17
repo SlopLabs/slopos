@@ -281,8 +281,9 @@ impl Widget for ScrollViewWidget {
         let line_height = 20;
 
         match event {
-            WidgetEvent::Scroll { delta_x, delta_y } => {
-                // Deltas arrive in pixels; input.rs has already converted from v120.
+            WidgetEvent::Scroll {
+                delta_x, delta_y, ..
+            } => {
                 let can_scroll_v = matches!(
                     self.direction,
                     ScrollDirection::Vertical | ScrollDirection::Both
@@ -370,7 +371,7 @@ impl Widget for ScrollViewWidget {
                 EventResponse::Ignored
             }
 
-            WidgetEvent::KeyDown { key, .. } => {
+            WidgetEvent::KeyDown { key, .. } if self.focused => {
                 let can_v = matches!(
                     self.direction,
                     ScrollDirection::Vertical | ScrollDirection::Both
@@ -430,7 +431,9 @@ impl Widget for ScrollViewWidget {
                 EventResponse::Ignored
             }
 
-            _ => EventResponse::Ignored,
+            // The rest belongs to what is being scrolled: `children()` offers
+            // it to the hit test and the tab chain either way.
+            _ => self.child.event(event, phase, sink),
         }
     }
 

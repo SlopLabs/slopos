@@ -166,6 +166,18 @@ pub trait Canvas {
         0
     }
 
+    /// Reads the pixel at `(x, y)` in the buffer's native encoding; 0 outside
+    /// the buffer, and 0 throughout on a write-only surface.
+    #[inline]
+    fn read_pixel(&self, x: i32, y: i32) -> u32 {
+        if x < 0 || y < 0 || x >= self.width() as i32 || y >= self.height() as i32 {
+            return 0;
+        }
+        let off =
+            (y as usize) * self.pitch_bytes() + (x as usize) * self.bytes_per_pixel() as usize;
+        self.read_encoded_at(off)
+    }
+
     /// Report that a rectangular region was modified. A no-op by default, which
     /// suits direct framebuffers; buffer-backed surfaces feed a damage tracker.
     #[inline]

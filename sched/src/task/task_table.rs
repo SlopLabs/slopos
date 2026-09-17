@@ -966,14 +966,3 @@ pub fn task_slot_census() -> (u32, u32, u32, u32) {
         )
     })
 }
-
-pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestReport> {
-    let Some(task) = task_find_by_id(task_id) else {
-        return KVec::new();
-    };
-    let mut ring = match task.take_test_reports() {
-        Some(ring) => ring,
-        None => return KVec::new(),
-    };
-    ring.drain().unwrap_or_else(|_| KVec::new())
-}

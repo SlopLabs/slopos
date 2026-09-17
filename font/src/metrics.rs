@@ -19,11 +19,7 @@ pub fn measure_text(font: &TtfFont<'_>, text: &str, size_px: u16) -> (i32, i32) 
     let mut width_f = 0.0f32;
 
     for ch in text.chars() {
-        if let Some(glyph_id) = font.glyph_index(ch as u32) {
-            if let Some(hm) = font.h_metrics(glyph_id) {
-                width_f += hm.advance_width as f32 * scale;
-            }
-        }
+        width_f += crate::advance_px(font, ch as u32, scale, size_px);
     }
 
     (libm::ceilf(width_f) as i32, height.max(1))

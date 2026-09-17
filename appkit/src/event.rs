@@ -52,6 +52,11 @@ pub enum WidgetEvent {
         x: i32,
         y: i32,
         button: PointerButton,
+        /// Modifier state at the press, as the last key event reported it.
+        /// The compositor sends no modifiers with a pointer event — Wayland
+        /// does not either — so this is the keyboard's most recent snapshot,
+        /// which is what a shift-click needs and all it needs.
+        modifiers: Modifiers,
     },
     PointerUp {
         x: i32,
@@ -65,6 +70,12 @@ pub enum WidgetEvent {
     PointerEnter,
     PointerLeave,
     Scroll {
+        /// Where the pointer was. A wheel turn belongs to what is *under* the
+        /// pointer, and without the position it can only be offered to every
+        /// widget in turn until one consumes — which hands it to whatever the
+        /// container happens to visit first.
+        x: i32,
+        y: i32,
         delta_x: i32,
         delta_y: i32,
     },

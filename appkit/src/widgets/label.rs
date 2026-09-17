@@ -73,7 +73,7 @@ impl Widget for LabelWidget {
         let line_height = ctx.style.line_height;
 
         if !self.wrap {
-            let text_w = crate::text::string_width(&self.text);
+            let text_w = ctx.text_width(&self.text);
             let mut lines = 1i32;
             if self.text.contains('\n') {
                 lines = self.text.split('\n').count() as i32;
@@ -89,10 +89,7 @@ impl Widget for LabelWidget {
             let avail_w = if constraints.is_width_bounded() {
                 constraints.max_width
             } else {
-                return constraints.constrain(Size::new(
-                    crate::text::string_width(&self.text),
-                    line_height,
-                ));
+                return constraints.constrain(Size::new(ctx.text_width(&self.text), line_height));
             };
             let mut line_count = 0u32;
             for raw_line in self.text.split('\n') {
@@ -103,12 +100,12 @@ impl Widget for LabelWidget {
                 let mut current_w = 0i32;
                 let mut on_line = false;
                 for word in raw_line.split_whitespace() {
-                    let word_w = crate::text::string_width(word);
+                    let word_w = ctx.text_width(word);
                     if !on_line {
                         current_w = word_w;
                         on_line = true;
                     } else {
-                        let space_w = crate::text::string_width(" ");
+                        let space_w = ctx.text_width(" ");
                         if current_w + space_w + word_w <= avail_w {
                             current_w += space_w + word_w;
                         } else {
