@@ -245,6 +245,8 @@ pub const PALETTE_COMMANDS: &[Command] = &[
     Command::MoveLineUp,
     Command::MoveLineDown,
     Command::ToggleComment,
+    Command::Indent,
+    Command::Outdent,
     Command::NextTab,
     Command::PrevTab,
     Command::ToggleSidebar,

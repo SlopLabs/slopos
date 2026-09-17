@@ -14,6 +14,14 @@ pub struct FocusScope {
 
 pub struct FocusManager {
     focused: Option<WidgetId>,
+    /// Where `focused` sits in the tab chain.
+    ///
+    /// A `WidgetId` comes from a global counter and the whole tree is rebuilt
+    /// on every message, so an id does not survive a rebuild — remembering only
+    /// the id means focus is lost the moment anything happens. The position in
+    /// the chain does survive, because the chain is built by walking the same
+    /// view in the same order, so it is what focus is re-derived from.
+    focused_index: Option<usize>,
     /// Every focusable widget, in depth-first order.
     tab_chain: Vec<WidgetId>,
     /// Empty means the global chain is active.
@@ -27,6 +35,7 @@ impl FocusManager {
     pub fn new() -> Self {
         Self {
             focused: None,
+            focused_index: None,
             tab_chain: Vec::new(),
             scope_stack: Vec::new(),
             keyboard_active: false,
@@ -47,7 +56,9 @@ impl FocusManager {
     }
 
     pub fn set_focused(&mut self, id: Option<WidgetId>) {
+        let index = id.and_then(|id| self.active_chain().iter().position(|&c| c == id));
         self.focused = id;
+        self.focused_index = index;
     }
 
     /// Record a non-modifier key press.
@@ -59,9 +70,23 @@ impl FocusManager {
         self.keyboard_active = false;
     }
 
-    pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) {
+    /// Rebuilds the chain and re-derives `focused` from its position in it.
+    ///
+    /// Answers the id that should now be told it has focus, when that is a
+    /// different widget from the one that held it before — which after a
+    /// rebuild it always is, because every widget is new.
+    pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) -> Option<WidgetId> {
         self.tab_chain.clear();
         Self::collect_focusable(root, &mut self.tab_chain);
+        let index = self.focused_index?;
+        let restored = self.active_chain().get(index).copied();
+        // A view that lost controls can leave the index past the end; dropping
+        // focus is better than moving it somewhere the user did not put it.
+        self.focused = restored;
+        if restored.is_none() {
+            self.focused_index = None;
+        }
+        restored
     }
 
     fn collect_focusable(widget: &dyn Widget, chain: &mut Vec<WidgetId>) {
@@ -87,17 +112,16 @@ impl FocusManager {
         if chain.is_empty() {
             return;
         }
-        let next = match self.focused {
-            Some(current) => {
-                if let Some(pos) = chain.iter().position(|&id| id == current) {
-                    chain[(pos + 1) % chain.len()]
-                } else {
-                    chain[0]
-                }
-            }
-            None => chain[0],
+        let index = match self
+            .focused
+            .and_then(|current| chain.iter().position(|&id| id == current))
+        {
+            Some(pos) => (pos + 1) % chain.len(),
+            None => 0,
         };
+        let next = chain[index];
         self.focused = Some(next);
+        self.focused_index = Some(index);
     }
 
     pub fn move_focus_prev(&mut self) {
@@ -106,21 +130,16 @@ impl FocusManager {
         if chain.is_empty() {
             return;
         }
-        let prev = match self.focused {
-            Some(current) => {
-                if let Some(pos) = chain.iter().position(|&id| id == current) {
-                    if pos == 0 {
-                        chain[chain.len() - 1]
-                    } else {
-                        chain[pos - 1]
-                    }
-                } else {
-                    chain[chain.len() - 1]
-                }
-            }
-            None => chain[chain.len() - 1],
+        let index = match self
+            .focused
+            .and_then(|current| chain.iter().position(|&id| id == current))
+        {
+            Some(0) | None => chain.len() - 1,
+            Some(pos) => pos - 1,
         };
+        let prev = chain[index];
         self.focused = Some(prev);
+        self.focused_index = Some(index);
     }
 
     pub fn push_scope(&mut self, focusable_ids: Vec<WidgetId>) -> FocusScopeId {

@@ -70,6 +70,12 @@ pub enum WidgetEvent {
     PointerEnter,
     PointerLeave,
     Scroll {
+        /// Where the pointer was. A wheel turn belongs to what is *under* the
+        /// pointer, and without the position it can only be offered to every
+        /// widget in turn until one consumes — which hands it to whatever the
+        /// container happens to visit first.
+        x: i32,
+        y: i32,
         delta_x: i32,
         delta_y: i32,
     },

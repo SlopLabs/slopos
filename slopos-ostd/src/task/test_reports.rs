@@ -1,8 +1,11 @@
 //! Per-task ring buffer for `SYSCALL_TEST_REPORT` payloads.
 //!
 //! A task's first `SYSCALL_TEST_REPORT` lazily allocates one into
-//! `Task::test_reports`; after the task exits the userland-test runner calls
-//! `task_drain_test_reports` to take ownership and read out the subtests.
+//! `Task::test_reports`; after the task exits the userland-test runner takes
+//! the whole ring with `take_test_reports`, reads `overflow_flag` and then
+//! `drain`s it — in that order, because draining clears the flag. A path that
+//! drains without reading the flag first silently loses the fact that results
+//! were dropped, which is the one thing the flag exists to say.
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX, TEST_REPORT_RING_CAPACITY};
 
@@ -59,8 +62,9 @@ impl TestReportRing {
     }
 }
 
-/// In-place init keeps the ~12 KiB `TestReportRing` rvalue off the caller's
-/// stack, under the 2 KiB stack-frame gate.
+/// In-place init keeps the `TestReportRing` rvalue off the caller's stack,
+/// under the 2 KiB stack-frame gate. At `TEST_REPORT_RING_CAPACITY` of 192 it
+/// is ~37 KiB, which is why it is a `KBox` and not a local.
 pub fn alloc_ring() -> Result<KBox<TestReportRing>, AllocError> {
     KBox::<TestReportRing>::zeroed()
 }

@@ -111,23 +111,28 @@ impl History {
         self.transaction += 1;
     }
 
-    pub fn end(&mut self) {
+    /// Closes the transaction, recording `cursor_after` as where the whole
+    /// operation leaves the caret.
+    ///
+    /// Taken here rather than left to each caller because every compound
+    /// operation restores the cursor *after* its last primitive change, and a
+    /// group that kept that change's own end position redoes to the wrong
+    /// place — which is not cosmetic, because the next keystroke reads it: a
+    /// redone "move line up" followed by another one moves a different line.
+    pub fn end(&mut self, cursor_after: Cursor) {
         self.transaction = self.transaction.saturating_sub(1);
         if self.transaction == 0 {
+            // Only the group this transaction actually created. A transaction
+            // that recorded nothing must not restate some earlier group's
+            // cursor.
+            if let Some(group) = self
+                .transaction_group
+                .and_then(|index| self.undo.get_mut(index))
+            {
+                group.cursor_after = cursor_after;
+            }
             self.transaction_group = None;
             self.seal();
-        }
-    }
-
-    /// Restates where the open group leaves the cursor.
-    ///
-    /// A compound edit whose last primitive change does not end where the user
-    /// is left — splitting `{|}`, which inserts the closing line *after* the
-    /// line the caret ends on — would otherwise redo to the wrong place, since
-    /// each recorded change stamps the position its own text ends at.
-    pub fn retarget_cursor_after(&mut self, cursor: Cursor) {
-        if let Some(group) = self.undo.last_mut() {
-            group.cursor_after = cursor;
         }
     }
 

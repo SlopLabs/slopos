@@ -70,9 +70,11 @@ Indentation is read from the file rather than assumed: a tab-indented file
 indents with tabs, and a file indented two spaces stays that way.
 
 Line endings survive a round trip — a file that arrived with CRLF is saved with
-CRLF — and so does a missing final newline.
+CRLF — and so does a missing final newline. A file with *mixed* endings is
+normalised to whichever it mostly uses; a carriage return that is not an ending
+is content and is left alone.
 
 A save writes a sibling file, flushes it to the disk and renames it over the
 target, so a save that fails part way leaves the old file intact rather than a
-truncated one. A file with a NUL byte in it is refused rather than opened as
-replacement characters that saving would then write back.
+truncated one. A file with a NUL byte in its first 8 KiB is refused rather than
+opened as replacement characters that saving would then write back.

@@ -175,6 +175,60 @@ fn tree_expands_a_directory() -> bool {
     after.len() > before && after.iter().any(|r| r.0 == "inner.txt") && app.documents().len() == 1
 }
 
+/// An argument the editor cannot open leaves a window, not a corpse.
+fn an_unopenable_argument_still_starts() -> bool {
+    // The refusal messages in `files.rs` are only worth writing if the process
+    // survives long enough to draw one.
+    let missing = format!("{DIR}/does-not-exist.txt");
+    let app = EditorApp::new(&[missing.clone()]);
+    if app.documents().len() != 1 || !app.status().contains("does-not-exist") {
+        return false;
+    }
+    // And the window it does start is usable.
+    let _ = app.view();
+
+    let binary = format!("{DIR}/blob.bin");
+    if std::fs::write(&binary, [0x7f, b'E', b'L', b'F', 0, 1, 2, 0]).is_err() {
+        return false;
+    }
+    let app = EditorApp::new(&[binary]);
+    app.documents().len() == 1 && app.status().contains("binary")
+}
+
+/// F3 finds with the bar closed, which is what the documentation promises.
+fn find_next_works_with_the_bar_closed() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    key(&mut app, Key::Char('f'), ctrl());
+    app.type_in_prompt("answer");
+    key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
+    app.clear_status();
+    key(&mut app, Key::Named(NamedKey::F3), Modifiers::default());
+    if app.status().contains("Nothing to find") {
+        return false;
+    }
+    if app.documents()[0].selected_text().as_deref() != Some("answer") {
+        return false;
+    }
+    // Re-opening the bar brings the query back rather than an empty field.
+    key(&mut app, Key::Char('f'), ctrl());
+    app.prompt_text() == "answer"
+}
+
+/// Opening a file over the scratch buffer cancels a Save As that named it.
+fn opening_over_the_scratch_buffer_cancels_save_as() -> bool {
+    let mut app = EditorApp::new(&[String::from(DIR)]);
+    if app.documents().len() != 1 || app.documents()[0].path().is_some() {
+        return false;
+    }
+    key(&mut app, Key::Char('s'), ctrl_shift());
+    if !app.prompt_is_open() {
+        return false;
+    }
+    app.open(&format!("{DIR}/sample.rs"));
+    // The prompt named index 0, and index 0 is a different document now.
+    !app.prompt_is_open() && app.documents()[0].path().is_some()
+}
+
 /// The finder offers files from directories the sidebar never expanded.
 fn finder_reaches_unexpanded_directories() -> bool {
     let deep = format!("{DIR}/deep/deeper");
@@ -395,6 +449,18 @@ fn main() {
         (
             "finder_reaches_unexpanded_directories",
             finder_reaches_unexpanded_directories,
+        ),
+        (
+            "an_unopenable_argument_still_starts",
+            an_unopenable_argument_still_starts,
+        ),
+        (
+            "find_next_works_with_the_bar_closed",
+            find_next_works_with_the_bar_closed,
+        ),
+        (
+            "opening_over_the_scratch_buffer_cancels_save_as",
+            opening_over_the_scratch_buffer_cancels_save_as,
         ),
         ("builds_a_view", builds_a_view),
         ("find_field_accepts_a_space", find_field_accepts_a_space),

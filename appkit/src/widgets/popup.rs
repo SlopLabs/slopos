@@ -107,7 +107,12 @@ impl Widget for PopupWidget {
                 if !self.child.layout_rect().contains(*x, *y) {
                     return self.dismiss(sink);
                 }
-                self.child.event(event, EventPhase::Target, sink)
+                // Consumed whatever the child said. A press *inside* the popup
+                // that the child ignored — a menu separator, the padding round
+                // a palette's list — is still the popup's: letting it fall
+                // through opens a file in the tree behind the open menu.
+                self.child.event(event, EventPhase::Target, sink);
+                EventResponse::Consumed
             }
 
             // Tab is the framework's, not the tree's: swallowing it would

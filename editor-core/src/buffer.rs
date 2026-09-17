@@ -231,7 +231,10 @@ impl TextBuffer {
         let final_newline = text.ends_with('\n');
         let body = if final_newline {
             let trimmed = &text[..text.len() - 1];
-            trimmed.strip_suffix('\r').unwrap_or(trimmed)
+            match line_ending {
+                LineEnding::Crlf => trimmed.strip_suffix('\r').unwrap_or(trimmed),
+                LineEnding::Lf => trimmed,
+            }
         } else {
             text
         };
@@ -241,7 +244,15 @@ impl TextBuffer {
             if lines.len() >= MAX_LINES {
                 return Err(LoadError::TooManyLines);
             }
-            lines.push(String::from(line.strip_suffix('\r').unwrap_or(line)));
+            // Only a carriage return that *terminates* a line is an ending, and
+            // only in a file whose endings are CRLF. Stripping unconditionally
+            // deleted a lone `\r` — the whole content of a one-byte file — and
+            // silently rewrote the endings of a mixed file on the next save.
+            let line = match line_ending {
+                LineEnding::Crlf => line.strip_suffix('\r').unwrap_or(line),
+                LineEnding::Lf => line,
+            };
+            lines.push(String::from(line));
         }
         if lines.is_empty() {
             lines.push(String::new());

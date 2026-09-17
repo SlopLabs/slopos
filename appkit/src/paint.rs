@@ -15,6 +15,13 @@ pub struct PaintContext<'a> {
     pub scroll_offset_x: i32,
     pub scroll_offset_y: i32,
     pub focus_visible: bool,
+    /// Where the pointer is, in window coordinates.
+    ///
+    /// Hover is derived from this at paint time rather than remembered: the
+    /// widget tree is rebuilt on every message, so a stored hover flag is gone
+    /// by the next frame — which makes a widget draw one thing and hit-test
+    /// another.
+    pub pointer: (i32, i32),
     pub style: &'a StyleSheet,
 }
 
@@ -28,6 +35,7 @@ impl<'a> PaintContext<'a> {
             scroll_offset_x: 0,
             scroll_offset_y: 0,
             focus_visible: false,
+            pointer: (-1, -1),
             style,
         }
     }

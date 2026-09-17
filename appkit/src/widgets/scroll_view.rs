@@ -281,7 +281,9 @@ impl Widget for ScrollViewWidget {
         let line_height = 20;
 
         match event {
-            WidgetEvent::Scroll { delta_x, delta_y } => {
+            WidgetEvent::Scroll {
+                delta_x, delta_y, ..
+            } => {
                 // Deltas arrive in pixels; input.rs has already converted from v120.
                 let can_scroll_v = matches!(
                     self.direction,

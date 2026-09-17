@@ -530,7 +530,10 @@ impl Widget for CodeViewWidget {
                 self.emit(CodeInput::Drag { line, col }, sink)
             }
 
-            WidgetEvent::PointerUp { .. } => {
+            WidgetEvent::PointerUp {
+                button: PointerButton::Left,
+                ..
+            } => {
                 // Unconditional: a press and its release can arrive in one
                 // event batch, with no rebuild between them, so this widget's
                 // `selecting` is still the value from before the press. The

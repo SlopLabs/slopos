@@ -138,6 +138,10 @@ impl Document {
             self.title = file_name(&path).to_string();
             self.language = detect_language(&path);
             self.highlighter.set_language(self.language);
+            // The indent is read from the content, and by now there is content:
+            // an untitled buffer took the default, and saving it as a `.py`
+            // should indent it the way it is actually indented.
+            self.indent = self.buffer.detect_indent(self.indent);
             self.invalidate_from(0);
             self.path = Some(path);
         }
@@ -251,11 +255,17 @@ impl Document {
     pub fn insert_text(&mut self, text: &str) -> bool {
         // Replacing a selection is a delete and an insert, and one Ctrl+Z has
         // to take back both — and so is the re-indent a closing brace triggers.
-        let dedent = self.closing_brace_dedent(text);
-        let transactional = self.cursor.has_selection() || dedent > 0;
+        let had_any_selection = self.cursor.has_selection();
+        let transactional = had_any_selection || self.closing_brace_dedent(text) > 0;
         if transactional {
             self.history.begin();
         }
+        // The selection goes first. `apply_delete` parks the caret at the
+        // range's start and clears the anchor, so a dedent computed before this
+        // would delete the indent, lose the selection with it, and leave the
+        // brace welded to the text the user meant to replace.
+        let had_selection = self.delete_selection();
+        let dedent = self.closing_brace_dedent(text);
         if dedent > 0 {
             let pos = self.cursor.position;
             self.apply_delete(Range::new(
@@ -269,14 +279,13 @@ impl Document {
             self.cursor
                 .set_position(Position::new(pos.line, pos.col - dedent), false);
         }
-        let had_selection = self.delete_selection();
         let at = self.cursor.position;
         // A typed character coalesces with the run before it; a paste does not,
         // and neither does the first insert after a selection was replaced.
         let coalesce = !had_selection && text.chars().count() == 1 && !text.contains('\n');
         let inserted = self.apply_insert(at, text, coalesce);
         if transactional {
-            self.history.end();
+            self.history.end(self.cursor);
         }
         inserted
     }
@@ -325,7 +334,7 @@ impl Document {
     pub fn insert_newline(&mut self) {
         self.history.begin();
         self.insert_newline_inner();
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     fn insert_newline_inner(&mut self) {
@@ -362,7 +371,6 @@ impl Document {
             self.apply_insert(at, &text, false);
             self.apply_insert(inner_end, &closing, false);
             self.cursor.set_position(inner_end, false);
-            self.history.retarget_cursor_after(self.cursor);
             return;
         }
 
@@ -447,7 +455,7 @@ impl Document {
             start
         };
         self.apply_delete(Range::new(start, end));
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     /// Duplicates the cursor's line (or the selected lines) below itself.
@@ -469,7 +477,7 @@ impl Document {
             cursor.position.line + moved,
             cursor.position.col,
         )));
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     /// Moves the cursor's line (or the selected lines) one line up or down,
@@ -477,7 +485,7 @@ impl Document {
     pub fn move_lines(&mut self, down: bool) {
         self.history.begin();
         self.move_lines_inner(down);
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     fn move_lines_inner(&mut self, down: bool) {
@@ -625,7 +633,7 @@ impl Document {
             anchor: cursor_before.anchor.map(|a| self.buffer.clamp(adjust(a))),
             goal_col: None,
         };
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     /// Comments the selected lines, or uncomments them when they all already
@@ -672,7 +680,7 @@ impl Document {
             anchor: cursor_before.anchor.map(|a| self.buffer.clamp(a)),
             goal_col: None,
         };
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     /// Replaces every match of `needle` with `replacement`, as one undoable
@@ -694,7 +702,7 @@ impl Document {
             self.apply_delete(*range);
             self.apply_insert(range.start, replacement, false);
         }
-        self.history.end();
+        self.history.end(self.cursor);
         matches.len()
     }
 
@@ -703,7 +711,7 @@ impl Document {
         self.history.begin();
         self.apply_delete(range);
         self.apply_insert(range.start, text, false);
-        self.history.end();
+        self.history.end(self.cursor);
     }
 
     pub fn undo(&mut self) -> bool {

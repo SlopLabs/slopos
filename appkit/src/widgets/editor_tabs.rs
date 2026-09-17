@@ -144,11 +144,16 @@ impl Widget for EditorTabsWidget {
 
         let text_h = ctx.text_height();
         let mut x = rect.x;
+        // Derived from the live pointer, not from a field the last rebuild
+        // cleared: the close glyph has to be drawn exactly where a click on it
+        // will close the tab.
+        let (px, py) = ctx.pointer;
+        let pointer_tab = rect.contains(px, py).then(|| self.tab_at(px)).flatten();
 
         for (index, tab) in self.tabs.iter().enumerate() {
             let width = *self.widths.get(index).unwrap_or(&MIN_TAB_WIDTH);
             let active = index == self.active;
-            let hovered = self.hovered == Some(index);
+            let hovered = pointer_tab == Some(index);
 
             if active {
                 ctx.fill_rect(x, rect.y, width, rect.height, style.code_bg);
@@ -246,10 +251,12 @@ impl Widget for EditorTabsWidget {
                 if *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
-                // Only where the glyph is drawn: an inactive, unhovered tab
-                // shows nothing there, and a click that closed it would be a
-                // click on nothing.
-                let shows_close = index == self.active || self.hovered == Some(index);
+                // Only where the glyph is drawn: an inactive tab the pointer
+                // is not over shows nothing there, and a click that closed it
+                // would be a click on nothing. The press itself says where the
+                // pointer is, which is the same thing `paint` reads — a
+                // remembered hover would have been wiped by the last rebuild.
+                let shows_close = index == self.active || self.tab_at(*x) == Some(index);
                 if shows_close {
                     if let Some(close_x) = self.close_rect_x(index) {
                         if *x >= close_x && *x < close_x + CLOSE_SIZE {

@@ -618,6 +618,8 @@ fn test_popup_swallows_unhandled_events() {
     let mut sink = MessageSink::new();
     let resp = popup.event(
         &WidgetEvent::Scroll {
+            x: 40,
+            y: 50,
             delta_x: 0,
             delta_y: 10,
         },
@@ -1274,6 +1276,106 @@ fn test_a_release_outside_a_widget_still_reaches_it() {
     ));
 }
 
+fn test_scroll_goes_to_what_is_under_the_pointer() {
+    // A wheel turn has a position like any other pointer event. Without one it
+    // can only be offered to every child until one consumes, which hands it to
+    // whichever the container visits first — and a code surface consumes every
+    // scroll, so nothing else in the window could ever be scrolled.
+    struct Counter {
+        core: WidgetCore,
+        seen: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    impl Widget for Counter {
+        fn core(&self) -> &WidgetCore {
+            &self.core
+        }
+        fn core_mut(&mut self) -> &mut WidgetCore {
+            &mut self.core
+        }
+        fn measure(&mut self, c: BoxConstraints, _: &mut MeasureCtx) -> Size {
+            // Half the row each, so the two rects are distinguishable.
+            c.constrain(Size::new(200, 200))
+        }
+        fn paint(&self, _: &mut PaintContext) {}
+        fn event(
+            &mut self,
+            event: &WidgetEvent,
+            _: EventPhase,
+            _: &mut MessageSink,
+        ) -> EventResponse {
+            if matches!(event, WidgetEvent::Scroll { .. }) {
+                self.seen.set(self.seen.get() + 1);
+                return EventResponse::Consumed;
+            }
+            EventResponse::Ignored
+        }
+    }
+
+    let left = std::rc::Rc::new(std::cell::Cell::new(0));
+    let right = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut stack = HStackWidget::new(
+        vec![
+            Box::new(Counter {
+                core: WidgetCore::new(),
+                seen: left.clone(),
+            }) as Box<dyn Widget>,
+            Box::new(Counter {
+                core: WidgetCore::new(),
+                seen: right.clone(),
+            }) as Box<dyn Widget>,
+        ],
+        0,
+        CrossAxisAlignment::Stretch,
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut stack,
+        BoxConstraints::tight(Size::new(400, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut stack, Rect::new(0, 0, 400, 200));
+
+    let mut sink = MessageSink::new();
+    stack.event(
+        &WidgetEvent::Scroll {
+            x: 40,
+            y: 100,
+            delta_x: 0,
+            delta_y: -3,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!((left.get(), right.get()), (1, 0), "left half");
+
+    stack.event(
+        &WidgetEvent::Scroll {
+            x: 360,
+            y: 100,
+            delta_x: 0,
+            delta_y: -3,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!((left.get(), right.get()), (1, 1), "right half");
+}
+
+fn test_a_popup_swallows_a_press_its_child_ignored() {
+    // A press inside the popup that the child did not want — a menu separator,
+    // the padding round a palette's list — is still the popup's. Letting it
+    // fall through opens a file in the tree behind the open menu.
+    let mut popup = popup_at(30, 40, 60, 50);
+    let mut sink = MessageSink::new();
+    let resp = popup.event(
+        &press(50, 60, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+}
+
 fn test_a_zero_extent_clip_damages_nothing() {
     // `DamageRect`'s bounds are inclusive, so a rect of no extent must come out
     // invalid rather than as the single pixel an exclusive conversion gives.
@@ -1462,6 +1564,14 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "a_zero_extent_clip_damages_nothing",
             test_a_zero_extent_clip_damages_nothing,
+        ),
+        (
+            "scroll_goes_to_what_is_under_the_pointer",
+            test_scroll_goes_to_what_is_under_the_pointer,
+        ),
+        (
+            "a_popup_swallows_a_press_its_child_ignored",
+            test_a_popup_swallows_a_press_its_child_ignored,
         ),
         (
             "line_edit_reports_keys_only_when_focused",

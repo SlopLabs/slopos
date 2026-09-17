@@ -94,6 +94,9 @@ pub struct EditorApp {
     prompt: Prompt,
     /// First visible row of the palette/finder list; see `overlay_first_row`.
     overlay_scroll: usize,
+    /// The last thing searched for, which outlives the find bar; see
+    /// `find_query`.
+    last_query: String,
     /// `(menu index, anchor x, anchor y)` while a menu is open.
     menu_open: Option<(usize, i32, i32)>,
     dialog: Option<Dialog>,
@@ -118,7 +121,10 @@ pub struct EditorApp {
     sidebar_dragging: bool,
     /// Where the last click landed and how many have landed there, so the
     /// second and third select a word and a line.
-    click_run: Option<(usize, usize, u8)>,
+    /// `(document, line, column, clicks)` — the document too, because a click
+    /// run is a run on *one* place in *one* file, and without it switching tabs
+    /// and clicking the same cell reads as a double click.
+    click_run: Option<(usize, usize, usize, u8)>,
 }
 
 impl EditorApp {
@@ -134,6 +140,7 @@ impl EditorApp {
             focus: Focus::Editor,
             prompt: Prompt::None,
             overlay_scroll: 0,
+            last_query: String::new(),
             menu_open: None,
             dialog: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -292,6 +299,17 @@ impl EditorApp {
         }
     }
 
+    /// Whether any prompt is open.
+    pub fn prompt_is_open(&self) -> bool {
+        self.prompt.is_open()
+    }
+
+    /// Empties the status line, so a test can tell "nothing happened" from
+    /// "whatever was already there".
+    pub fn clear_status(&mut self) {
+        self.status.clear();
+    }
+
     /// Whether the open prompt is one of the two overlays (the palette, the
     /// file finder) rather than the one-line bar.
     pub fn prompt_is_overlay(&self) -> bool {
@@ -315,6 +333,21 @@ impl EditorApp {
 
     pub(super) fn tree_row_count(&self) -> usize {
         self.tree.rows().len()
+    }
+
+    /// Clamps the sidebar's selected row against a tree that may have shrunk.
+    ///
+    /// The selection is a *row* index and a refresh rebuilds the rows, so a
+    /// stale one silently designates a different file — or nothing, which makes
+    /// Enter look like a dead key.
+    fn clamp_tree_selection(&mut self) {
+        let rows = self.tree.rows().len();
+        self.tree_selected = match self.tree_selected {
+            Some(_) if rows == 0 => None,
+            Some(row) => Some(row.min(rows - 1)),
+            None => None,
+        };
+        self.tree_scroll = self.tree_scroll.min(rows.saturating_sub(1));
     }
 
     /// `count` visible tree rows from `first`, as the sidebar draws them.
@@ -343,6 +376,10 @@ impl EditorApp {
 
     // ── documents ───────────────────────────────────────────────────────────
 
+    /// The active document. `EditorApp` keeps at least one at all times —
+    /// `close_tab` opens a scratch buffer rather than leaving none — and the
+    /// one path that can transiently hold zero is a refused open during
+    /// construction, which `sync_viewport` returns early from.
     fn doc(&self) -> &Document {
         &self.docs[self.active]
     }
@@ -384,6 +421,14 @@ impl EditorApp {
                         && !self.docs[0].is_modified()
                         && self.docs[0].buffer.is_empty();
                     if replace_scratch {
+                        // The scratch buffer is gone, so a Save As that named
+                        // it now names whatever lands at its index — and would
+                        // write this file's bytes to the scratch buffer's path
+                        // and re-point the tab at it.
+                        if matches!(self.prompt, Prompt::SaveAs { .. }) {
+                            self.prompt = Prompt::None;
+                            self.focus = Focus::Editor;
+                        }
                         self.docs.clear();
                     }
                     self.docs.push(doc);
@@ -504,6 +549,11 @@ impl EditorApp {
 
     /// Reads whatever directories the tree is waiting on.
     fn sync_tree(&mut self) {
+        self.sync_tree_inner();
+        self.clamp_tree_selection();
+    }
+
+    fn sync_tree_inner(&mut self) {
         for _ in 0..64 {
             let pending = self.tree.pending();
             if pending.is_empty() {
@@ -647,6 +697,14 @@ impl EditorApp {
         );
         self.visible_lines = lines;
         self.visible_cols = cols;
+        // There may be no document yet: a refused open — a missing file, a
+        // binary one, one past the size cap — leaves `docs` empty on the way
+        // through `EditorApp::new`, and indexing it there kills the process
+        // before the window exists, so the refusal the user should have read
+        // is never drawn.
+        if self.docs.is_empty() {
+            return;
+        }
         let doc = self.doc_mut();
         doc.viewport.visible_lines = lines;
         doc.viewport.visible_cols = cols;
@@ -704,14 +762,33 @@ impl EditorApp {
 
     // ── search ──────────────────────────────────────────────────────────────
 
+    /// What to search for: the open find bar's field, or — when it is closed —
+    /// the last thing that was searched for.
+    ///
+    /// The fallback is what makes F3 work at all. Closing the bar replaces the
+    /// prompt with `Prompt::None`, and reading the query only out of the live
+    /// prompt meant "find next with the bar closed" could never find anything,
+    /// and the palette's own Find Next was dead by construction: accepting a
+    /// palette entry clears the prompt before running the command.
     fn find_query(&self) -> Option<String> {
         match &self.prompt {
             Prompt::Find { query, .. } if !query.text.is_empty() => Some(query.text.clone()),
-            _ => None,
+            Prompt::Find { .. } => None,
+            _ => Some(self.last_query.clone()).filter(|q| !q.is_empty()),
+        }
+    }
+
+    /// Remembers the open find bar's query, so closing the bar does not lose it.
+    fn remember_query(&mut self) {
+        if let Prompt::Find { query, .. } = &self.prompt {
+            if !query.text.is_empty() {
+                self.last_query = query.text.clone();
+            }
         }
     }
 
     fn refresh_find(&mut self) {
+        self.remember_query();
         let Some(query) = self.find_query() else {
             if let Prompt::Find { total, current, .. } = &mut self.prompt {
                 *total = 0;
@@ -1064,6 +1141,13 @@ impl EditorApp {
                 self.sync_viewport();
             }
             Command::ToggleComment => {
+                let language = self.doc().language();
+                if language.line_comment().is_none() {
+                    // Otherwise the key reads as broken rather than as
+                    // inapplicable.
+                    self.status = format!("{} has no line comment", language.label());
+                    return;
+                }
                 self.doc_mut().toggle_comment();
                 self.sync_viewport();
             }
@@ -1083,7 +1167,9 @@ impl EditorApp {
                     .filter(|s| !s.contains('\n'))
                     .unwrap_or_else(|| match &self.prompt {
                         Prompt::Find { query, .. } => query.text.clone(),
-                        _ => String::new(),
+                        // Re-opening the bar brings back what was last searched
+                        // for, rather than an empty field.
+                        _ => self.last_query.clone(),
                     });
                 let replace = if command == Command::Replace {
                     Some(match &self.prompt {
@@ -1300,7 +1386,16 @@ impl EditorApp {
             Key::Named(NamedKey::Tab) if mods.shift => self.run(Command::Outdent),
             Key::Named(NamedKey::Tab) => self.run(Command::Indent),
             Key::Named(NamedKey::Escape) => {
-                self.doc_mut().cursor.clear_selection();
+                // "Close whatever is open" means the bar too. Clicking into the
+                // code moves focus out of a find or Save As bar without closing
+                // it, and Escape then reached only the selection — leaving the
+                // one key documented to dismiss things unable to dismiss the
+                // thing that was open.
+                if self.prompt.is_open() {
+                    self.close_prompt();
+                } else {
+                    self.doc_mut().cursor.clear_selection();
+                }
             }
             _ => {}
         }
@@ -1519,10 +1614,10 @@ impl EditorApp {
                 // and the cost of reading it that way is a word selected rather
                 // than a caret placed.
                 let clicks = match self.click_run {
-                    Some((l, c, n)) if l == line && c == col => (n % 3) + 1,
+                    Some((d, l, c, n)) if d == self.active && l == line && c == col => (n % 3) + 1,
                     _ => 1,
                 };
-                self.click_run = Some((line, col, clicks));
+                self.click_run = Some((self.active, line, col, clicks));
                 let position = Position::new(line, col);
                 match clicks {
                     2 => self.doc_mut().select_word_at(position),
@@ -1654,6 +1749,8 @@ impl App for EditorApp {
                 if index < self.docs.len() {
                     self.active = index;
                     self.focus = Focus::Editor;
+                    // The find readout counts matches in the *active* document.
+                    self.refresh_find();
                     self.sync_viewport();
                 }
             }

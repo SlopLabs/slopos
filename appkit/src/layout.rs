@@ -227,7 +227,8 @@ impl StackWidget {
         let pointer_pos = match event {
             WidgetEvent::PointerDown { x, y, .. }
             | WidgetEvent::PointerUp { x, y, .. }
-            | WidgetEvent::PointerMove { x, y } => Some((*x, *y)),
+            | WidgetEvent::PointerMove { x, y }
+            | WidgetEvent::Scroll { x, y, .. } => Some((*x, *y)),
             _ => None,
         };
 
@@ -264,7 +265,12 @@ impl StackWidget {
                 if child.layout_rect().contains(px, py) {
                     continue;
                 }
-                child.event(event, phase, sink);
+                // Folded in rather than dropped: a child clearing its own hover
+                // is a repaint, and a response thrown away is a highlight that
+                // stays lit after the pointer has left.
+                if child.event(event, phase, sink).is_consumed() {
+                    response = EventResponse::Consumed;
+                }
             }
         }
 

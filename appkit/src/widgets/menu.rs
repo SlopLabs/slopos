@@ -34,16 +34,21 @@ impl MenuWidget {
         }
     }
 
-    /// Index of the item at window-space `y`, or `None` outside the menu.
-    fn item_at_y(&self, y: i32) -> Option<usize> {
+    /// Index of the item at window-space `(x, y)`, or `None` outside the menu.
+    ///
+    /// The horizontal test is not redundant: an enclosing popup forwards every
+    /// pointer move to its child whatever its position, so a `y`-only test
+    /// highlights whichever row the pointer is *level* with while the pointer
+    /// is somewhere else entirely.
+    fn item_at(&self, x: i32, y: i32) -> Option<usize> {
         if self.item_height <= 0 {
             return None;
         }
         let rect = self.layout_rect();
-        let rel_y = y - rect.y;
-        if rel_y < 0 || rel_y >= rect.height {
+        if !rect.contains(x, y) {
             return None;
         }
+        let rel_y = y - rect.y;
         let idx = (rel_y / self.item_height) as usize;
         (idx < self.items.len()).then_some(idx)
     }
@@ -216,8 +221,8 @@ impl Widget for MenuWidget {
         }
 
         match event {
-            WidgetEvent::PointerMove { y, .. } => {
-                let hovered = self.item_at_y(*y).filter(|&idx| self.is_activatable(idx));
+            WidgetEvent::PointerMove { x, y } => {
+                let hovered = self.item_at(*x, *y).filter(|&idx| self.is_activatable(idx));
                 let changed = hovered != self.hovered_index;
                 self.hovered_index = hovered;
                 if changed {
@@ -231,7 +236,7 @@ impl Widget for MenuWidget {
                 if !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
-                let Some(idx) = self.item_at_y(*y).filter(|&i| self.is_activatable(i)) else {
+                let Some(idx) = self.item_at(*x, *y).filter(|&i| self.is_activatable(i)) else {
                     return EventResponse::Ignored;
                 };
                 if let Some(cb) = &self.on_action {
@@ -240,7 +245,10 @@ impl Widget for MenuWidget {
                 EventResponse::Consumed
             }
 
-            WidgetEvent::KeyDown { key, .. } => match key {
+            // Only a focused menu answers keys. The popup forwards them
+            // whatever the pointer is doing, so an unguarded Enter here runs
+            // whichever row the pointer happens to be level with.
+            WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Up) => {
                     self.hovered_index = self.next_actionable(self.hovered_index, false);
                     EventResponse::Consumed

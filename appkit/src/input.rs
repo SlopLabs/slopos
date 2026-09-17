@@ -67,6 +67,10 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             let delta_lines = *value_v120 / 120;
             let delta_px = delta_lines * 20; // ~line_height
             Some(WidgetEvent::Scroll {
+                // Filled in by `fill_pointer_state`, which is the only place
+                // that knows where the pointer is.
+                x: 0,
+                y: 0,
                 delta_x: 0,
                 delta_y: delta_px,
             })

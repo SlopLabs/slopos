@@ -43,7 +43,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
 
     let mut window_size = super::constraints::Size::new(width as i32, height as i32);
     tree::layout_tree(root.as_mut(), window_size, &style);
-    focus.rebuild_tab_chain(root.as_ref());
+    let _ = focus.rebuild_tab_chain(root.as_ref());
 
     let mut needs_rebuild = false;
     let mut needs_repaint = true;
@@ -200,17 +200,26 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let node = app.view();
             root = tree::build_widget_tree(&node);
             tree::layout_tree(root.as_mut(), window_size, &style);
-            focus.rebuild_tab_chain(root.as_ref());
+            // A rebuild replaces every widget, so the one that held the focus
+            // has to be told again — otherwise the focus gate every widget now
+            // consults is false for the rest of the session and Enter, Space
+            // and the arrows reach nothing.
+            if let Some(id) = focus.rebuild_tab_chain(root.as_ref()) {
+                send_to_id(root.as_mut(), id, &WidgetEvent::FocusGained, &mut sink);
+            }
             needs_rebuild = false;
             needs_repaint = true;
         }
 
         if needs_repaint {
+            // Read before the renderer is borrowed mutably for the frame.
+            let pointer = win.pointer();
             if let Some(mut fb) = win.renderer_mut().frame() {
                 let fmt = fb.pixel_format();
                 fb.clear_canvas(fmt.encode(style.bg_primary));
                 let mut ctx = PaintContext::new(&mut fb, &style);
                 ctx.focus_visible = focus.is_focus_visible();
+                ctx.pointer = pointer;
                 tree::paint_tree(root.as_ref(), &mut ctx);
                 overlays.paint(&mut ctx);
             }
@@ -286,7 +295,7 @@ fn fill_pointer_state(
             *y = py;
             *modifiers = mods;
         }
-        WidgetEvent::PointerUp { x, y, .. } => {
+        WidgetEvent::PointerUp { x, y, .. } | WidgetEvent::Scroll { x, y, .. } => {
             *x = px;
             *y = py;
         }

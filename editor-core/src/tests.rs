@@ -560,6 +560,65 @@ fn test_detect_indent_ignores_a_whitespace_only_line() -> bool {
     true
 }
 
+fn test_a_closing_brace_replaces_a_backwards_selection() -> bool {
+    // Shift+Home, or a right-to-left drag, parks the caret where everything
+    // before it on the line is whitespace — which is exactly where the electric
+    // dedent fires. Computing the dedent first cleared the anchor, so the
+    // selection was never deleted and the brace landed in front of it.
+    let mut d = plain_doc("fn f() {\n    foo\n");
+    d.place_cursor(pos(1, 7), false);
+    d.move_cursor(Motion::LineStart, true);
+    assert!(d.cursor.has_selection());
+    d.insert_text("}");
+    assert_eq!(d.buffer.line(1), "}");
+    // One Ctrl+Z takes back the whole of it.
+    d.undo();
+    assert_eq!(d.buffer.to_text(), "fn f() {\n    foo\n");
+    true
+}
+
+fn test_redo_restores_where_a_compound_edit_left_the_caret() -> bool {
+    // Not cosmetic: the next keystroke reads the cursor, so a redone move-line
+    // followed by another one would move a different line.
+    let text = "    aaa\n    bbb\n    ccc\n    ddd\n";
+    let cases: [(&str, fn(&mut Document)); 4] = [
+        ("toggle_comment", |d| d.toggle_comment()),
+        ("indent", |d| d.indent_selection()),
+        ("outdent", |d| d.outdent()),
+        ("move_lines", |d| d.move_lines(true)),
+    ];
+    for (name, op) in cases {
+        let mut d = plain_doc(text);
+        d.set_indent(IndentStyle::Spaces(4));
+        d.place_cursor(pos(1, 4), false);
+        d.place_cursor(pos(2, 7), true);
+        op(&mut d);
+        let after = (d.cursor.position, d.cursor.anchor);
+        let landed = d.buffer.to_text();
+        d.undo();
+        d.redo();
+        assert_eq!(d.buffer.to_text(), landed, "{name}: redo text");
+        assert_eq!(d.cursor.position, after.0, "{name}: redo caret");
+        assert_eq!(d.cursor.anchor, after.1, "{name}: redo anchor");
+    }
+    true
+}
+
+fn test_a_lone_carriage_return_is_content_not_an_ending() -> bool {
+    // A one-byte file whose byte is `\r` used to load as empty and save as
+    // empty — a plain Ctrl+S with no edit at all destroying the file.
+    let b = TextBuffer::from_str("\r").expect("load");
+    assert_eq!(b.to_text(), "\r");
+    // And a stray CR inside an LF file is text the file had.
+    let b = TextBuffer::from_str("a\rb\nc\n").expect("load");
+    assert_eq!(b.to_text(), "a\rb\nc\n");
+    // A CRLF file still round-trips.
+    let b = TextBuffer::from_str("a\r\nb\r\n").expect("load");
+    assert_eq!(b.line(0), "a");
+    assert_eq!(b.to_text(), "a\r\nb\r\n");
+    true
+}
+
 fn test_duplicate_line_puts_the_copy_below() -> bool {
     let mut d = plain_doc("alpha\nbeta\n");
     d.place_cursor(pos(0, 2), false);
@@ -1168,6 +1227,18 @@ pub fn cases() -> &'static [(&'static str, fn() -> bool)] {
         (
             "electric_dedent_keeps_the_caret_after_the_brace",
             test_electric_dedent_keeps_the_caret_after_the_brace,
+        ),
+        (
+            "a_closing_brace_replaces_a_backwards_selection",
+            test_a_closing_brace_replaces_a_backwards_selection,
+        ),
+        (
+            "a_lone_carriage_return_is_content_not_an_ending",
+            test_a_lone_carriage_return_is_content_not_an_ending,
+        ),
+        (
+            "redo_restores_where_a_compound_edit_left_the_caret",
+            test_redo_restores_where_a_compound_edit_left_the_caret,
         ),
         (
             "display_columns_round_trip_through_tabs",
