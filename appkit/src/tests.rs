@@ -950,6 +950,14 @@ fn code_view(
     lines: Vec<super::widgets::code_view::CodeLine>,
     selecting: bool,
 ) -> super::widgets::code_view::CodeViewWidget {
+    code_view_dragging(lines, selecting, false)
+}
+
+fn code_view_dragging(
+    lines: Vec<super::widgets::code_view::CodeLine>,
+    selecting: bool,
+    scroll_dragging: bool,
+) -> super::widgets::code_view::CodeViewWidget {
     let total = lines.len();
     let mut view = super::widgets::code_view::CodeViewWidget::new(
         lines,
@@ -962,6 +970,7 @@ fn code_view(
         true,
         true,
         selecting,
+        scroll_dragging,
         Some(Box::new(|i: super::widgets::code_view::CodeInput| {
             Box::new(i) as Box<dyn std::any::Any>
         })),
@@ -1062,6 +1071,14 @@ fn test_code_view_shift_click_extends() {
 }
 
 fn tree_view(rows: usize, selecting_focused: bool) -> super::widgets::tree_view::TreeViewWidget {
+    tree_view_dragging(rows, selecting_focused, false)
+}
+
+fn tree_view_dragging(
+    rows: usize,
+    selecting_focused: bool,
+    scroll_dragging: bool,
+) -> super::widgets::tree_view::TreeViewWidget {
     let rows: Vec<super::widgets::tree_view::TreeRow> = (0..rows)
         .map(|i| super::widgets::tree_view::TreeRow {
             label: format!("entry{i}"),
@@ -1079,6 +1096,7 @@ fn tree_view(rows: usize, selecting_focused: bool) -> super::widgets::tree_view:
         total,
         None,
         selecting_focused,
+        scroll_dragging,
         Some(Box::new(|i: super::widgets::tree_view::TreeInput| {
             Box::new(i) as Box<dyn std::any::Any>
         })),
@@ -1092,6 +1110,76 @@ fn tree_view(rows: usize, selecting_focused: bool) -> super::widgets::tree_view:
     );
     place_widget(&mut view, Rect::new(0, 0, 220, 200));
     view
+}
+
+/// The scrollbar is draggable, not just scrollable: a press on its column
+/// scrolls instead of placing the caret, and a move continues it.
+fn test_code_scrollbar_drags_rather_than_placing_the_caret() {
+    use super::widgets::code_view::CodeInput;
+    // Far more lines than fit, so there is a thumb to grab.
+    let mut view = code_view(code_lines(400), false);
+    let mut sink = MessageSink::new();
+    // The rightmost column of the 400px-wide surface.
+    view.event(
+        &press(396, 150, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    let first = sink.drain_typed::<CodeInput>();
+    match first.first() {
+        Some(CodeInput::ScrollTo { first_line }) => assert!(*first_line > 0),
+        other => panic!("scrollbar press gave {other:?}"),
+    }
+
+    // A move continues the drag only while the application says one is live.
+    let mut idle = code_view_dragging(code_lines(400), false, false);
+    let mut sink = MessageSink::new();
+    idle.event(
+        &WidgetEvent::PointerMove { x: 396, y: 20 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<CodeInput>().is_empty());
+
+    let mut dragging = code_view_dragging(code_lines(400), false, true);
+    let mut sink = MessageSink::new();
+    dragging.event(
+        &WidgetEvent::PointerMove { x: 396, y: 20 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<CodeInput>().first(),
+        Some(CodeInput::ScrollTo { .. })
+    ));
+}
+
+/// And the same for the tree, which has its own scrollbar.
+fn test_tree_scrollbar_drags_rather_than_opening_a_row() {
+    use super::widgets::tree_view::TreeInput;
+    let mut view = tree_view(200, true);
+    let mut sink = MessageSink::new();
+    view.event(
+        &press(216, 150, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    match sink.drain_typed::<TreeInput>().first() {
+        Some(TreeInput::ScrollTo { first_row }) => assert!(*first_row > 0),
+        other => panic!("scrollbar press gave {other:?}"),
+    }
+
+    let mut dragging = tree_view_dragging(200, true, true);
+    let mut sink = MessageSink::new();
+    dragging.event(
+        &WidgetEvent::PointerMove { x: 216, y: 10 },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(matches!(
+        sink.drain_typed::<TreeInput>().first(),
+        Some(TreeInput::ScrollTo { first_row: 0 })
+    ));
 }
 
 fn test_tree_click_on_the_twisty_toggles_rather_than_opens() {
@@ -1616,6 +1704,14 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "code_view_shift_click_extends",
             test_code_view_shift_click_extends,
+        ),
+        (
+            "code_scrollbar_drags_rather_than_placing_the_caret",
+            test_code_scrollbar_drags_rather_than_placing_the_caret,
+        ),
+        (
+            "tree_scrollbar_drags_rather_than_opening_a_row",
+            test_tree_scrollbar_drags_rather_than_opening_a_row,
         ),
         (
             "tree_click_on_the_twisty_toggles_rather_than_opens",

@@ -32,6 +32,11 @@ const TEXT_PAD: i32 = 8;
 const CARET_WIDTH: i32 = 2;
 /// Width of the overview scrollbar on the right edge.
 const SCROLLBAR_WIDTH: i32 = 6;
+/// Shortest the thumb gets, so a huge file still leaves something to grab.
+const THUMB_MIN_HEIGHT: i32 = 24;
+/// How wide the scrollbar's *grab* target is. Wider than the bar it draws,
+/// which is 6px and not something to ask a pointer to land on.
+const SCROLLBAR_GRAB: i32 = 12;
 
 /// A coloured run within a line, in character indices.
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +76,10 @@ pub enum CodeInput {
     Release,
     Scroll {
         delta_lines: i32,
+    },
+    /// The scrollbar was pressed or dragged to an absolute position.
+    ScrollTo {
+        first_line: usize,
     },
     Key {
         key: Key,
@@ -196,6 +205,9 @@ pub struct CodeViewWidget {
     /// the widget tree is rebuilt on every message, so a flag the widget set on
     /// the press would be gone before the first move arrived.
     selecting: bool,
+    /// Whether a scrollbar drag is in progress, held by the application for the
+    /// same reason as `selecting`.
+    scroll_dragging: bool,
     on_input: Option<InputCallback>,
     /// Cell metrics from the last paint/measure; hit testing must use what paint
     /// used or a click lands on the wrong column.
@@ -216,6 +228,7 @@ impl CodeViewWidget {
         show_line_numbers: bool,
         focused: bool,
         selecting: bool,
+        scroll_dragging: bool,
         on_input: Option<InputCallback>,
     ) -> Self {
         Self {
@@ -230,6 +243,7 @@ impl CodeViewWidget {
             show_line_numbers,
             focused,
             selecting,
+            scroll_dragging,
             on_input,
             cell_w: crate::text::cell_width(),
             line_h: crate::text::cell_height(),
@@ -354,26 +368,68 @@ impl CodeViewWidget {
         }
     }
 
-    fn paint_scrollbar(&self, ctx: &mut PaintContext) {
+    /// `(thumb rect, span)` for the overview scrollbar, or `None` when the file
+    /// fits and there is nothing to scroll.
+    ///
+    /// One source for the thumb the pointer grabs and the thumb that is drawn,
+    /// so a press lands on what the eye is aiming at.
+    fn scrollbar_thumb(&self) -> Option<(Rect, usize)> {
         let rect = self.layout_rect();
         let visible = visible_line_count(rect.height, self.line_h).max(1);
         if self.total_lines <= visible {
-            return;
+            return None;
         }
         let track_h = rect.height;
         let thumb_h = ((visible as i64 * track_h as i64) / self.total_lines as i64)
-            .max(24)
+            .max(THUMB_MIN_HEIGHT as i64)
             .min(track_h as i64) as i32;
-        let span = (self.total_lines - visible).max(1);
-        let offset =
-            ((self.first_line.min(span) as i64) * (track_h - thumb_h) as i64 / span as i64) as i32;
-        let x = rect.x + rect.width - SCROLLBAR_WIDTH;
-        ctx.fill_rect_blended(
-            x,
+        let span = self.total_lines - visible;
+        let offset = ((self.first_line.min(span) as i64) * (track_h - thumb_h) as i64
+            / span.max(1) as i64) as i32;
+        let thumb = Rect::new(
+            rect.x + rect.width - SCROLLBAR_WIDTH,
             rect.y + offset,
             SCROLLBAR_WIDTH,
             thumb_h,
-            Color32::new(0xc8, 0xcc, 0xd4, 0x4c),
+        );
+        Some((thumb, span))
+    }
+
+    /// Whether a window-space point is on the scrollbar's column.
+    ///
+    /// The whole column, not just the thumb: pressing the track is how every
+    /// editor jumps, and a 6px target is hard enough to hit without asking for
+    /// the thumb exactly.
+    fn point_on_scrollbar(&self, x: i32, y: i32) -> bool {
+        let rect = self.layout_rect();
+        rect.contains(x, y) && x >= rect.x + rect.width - SCROLLBAR_GRAB
+    }
+
+    /// The first line that puts the thumb's middle under `y`.
+    fn first_line_at(&self, y: i32) -> usize {
+        let Some((thumb, span)) = self.scrollbar_thumb() else {
+            return 0;
+        };
+        let rect = self.layout_rect();
+        let usable = rect.height - thumb.height;
+        if usable <= 0 {
+            return 0;
+        }
+        let top = (y - rect.y - thumb.height / 2).clamp(0, usable);
+        ((top as i64 * span as i64) / usable as i64) as usize
+    }
+
+    fn paint_scrollbar(&self, ctx: &mut PaintContext) {
+        let Some((thumb, _)) = self.scrollbar_thumb() else {
+            return;
+        };
+        let alpha = if self.scroll_dragging { 0x8c } else { 0x4c };
+        ctx.fill_rect_blended(
+            thumb.x,
+            thumb.y,
+            thumb.width,
+            thumb.height,
+            Color32::new(0xc8, 0xcc, 0xd4, alpha),
         );
     }
 }
@@ -519,6 +575,13 @@ impl Widget for CodeViewWidget {
                 if *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
+                // The scrollbar first: a press on it scrolls rather than
+                // placing the caret on whatever line happens to be behind it.
+                if self.point_on_scrollbar(*x, *y) && self.scrollbar_thumb().is_some() {
+                    let first_line = self.first_line_at(*y);
+                    self.emit(CodeInput::ScrollTo { first_line }, sink);
+                    return EventResponse::CapturePointer;
+                }
                 let (line, col) = self.position_at(*x, *y);
                 self.emit(
                     CodeInput::Click {
@@ -532,6 +595,10 @@ impl Widget for CodeViewWidget {
             }
 
             WidgetEvent::PointerMove { x, y } => {
+                if self.scroll_dragging {
+                    let first_line = self.first_line_at(*y);
+                    return self.emit(CodeInput::ScrollTo { first_line }, sink);
+                }
                 if !self.selecting {
                     return EventResponse::Ignored;
                 }

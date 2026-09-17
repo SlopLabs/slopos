@@ -29,6 +29,13 @@ pub struct TableWidget {
     header_height: i32,
     col_widths: Vec<i32>,
     focused: bool,
+    /// A scrollbar drag is live. Internal, unlike the code surface's: this
+    /// widget scrolls itself and emits nothing, so no rebuild intervenes.
+    thumb_dragging: bool,
+    /// Scrollbar metrics from the last measure. Hit testing must use what
+    /// paint used, or a press lands beside the bar it is aiming at.
+    sb_width: i32,
+    thumb_min: i32,
 }
 
 impl TableWidget {
@@ -67,6 +74,9 @@ impl TableWidget {
             header_height: row_height,
             col_widths: vec![0; col_count],
             focused: false,
+            thumb_dragging: false,
+            sb_width: 8,
+            thumb_min: 20,
         }
     }
 
@@ -203,6 +213,64 @@ impl TableWidget {
         (rect.x, y.clamp(body_top, bottom))
     }
 
+    /// `(track, thumb)` for the vertical scrollbar, or `None` when every row
+    /// fits. One source for what is drawn and what a press lands on.
+    fn scrollbar_rects(&self) -> Option<(Rect, Rect)> {
+        let total_h = self.total_content_height();
+        let body_h = self.body_height();
+        if total_h <= body_h || body_h <= 0 {
+            return None;
+        }
+        let rect = self.layout_rect();
+        let sb_width = self.sb_width;
+        let track = Rect::new(
+            rect.x + rect.width - sb_width,
+            rect.y + self.header_height,
+            sb_width,
+            body_h,
+        );
+        let max_off = self.max_scroll_offset();
+        let thumb_size = if max_off > 0 {
+            ((body_h as i64 * track.height as i64) / total_h as i64) as i32
+        } else {
+            track.height
+        }
+        .max(self.thumb_min)
+        .min(track.height);
+        let thumb_pos = if max_off > 0 {
+            ((self.scroll_offset as i64 * (track.height - thumb_size) as i64) / max_off as i64)
+                as i32
+        } else {
+            0
+        };
+        let thumb = Rect::new(track.x, track.y + thumb_pos, sb_width, thumb_size);
+        Some((track, thumb))
+    }
+
+    /// Whether a point is on the scrollbar's column.
+    fn on_scrollbar(&self, x: i32, y: i32) -> bool {
+        self.scrollbar_rects()
+            .is_some_and(|(track, _)| x >= track.x && y >= track.y && y < track.y + track.height)
+    }
+
+    /// Scrolls so the thumb's middle sits under `y`. True when a drag is live.
+    fn scroll_to_thumb(&mut self, y: i32) -> bool {
+        let Some((track, thumb)) = self.scrollbar_rects() else {
+            return false;
+        };
+        let usable = track.height - thumb.height;
+        if usable <= 0 {
+            return false;
+        }
+        let top = (y - track.y - thumb.height / 2).clamp(0, usable);
+        let offset = ((top as i64 * self.max_scroll_offset() as i64) / usable as i64) as i32;
+        if offset != self.scroll_offset {
+            self.scroll_offset = offset.clamp(0, self.max_scroll_offset());
+            self.place_cells();
+        }
+        true
+    }
+
     fn emit_context_menu(&self, row: usize, x: i32, y: i32, sink: &mut MessageSink) -> bool {
         match &self.on_context_menu {
             Some(cb) => {
@@ -226,6 +294,8 @@ impl Widget for TableWidget {
         let w = constraints.max_width;
         let h = constraints.max_height;
         self.resolve_col_widths(w);
+        self.sb_width = ctx.style.scrollbar_width;
+        self.thumb_min = ctx.style.scrollbar_thumb_min;
 
         // Cells are sized by their column, so layout stays pure placement.
         for row in &mut self.rows {
@@ -342,39 +412,19 @@ impl Widget for TableWidget {
             }
         });
 
-        let total_h = self.total_content_height();
-        let body_h = self.body_height();
-        if total_h > body_h {
-            let sb_width = style.scrollbar_width;
-            let thumb_min = style.scrollbar_thumb_min;
-
-            let track_x = rect.x + rect.width - sb_width;
-            let track_y = rect.y + self.header_height;
-            let track_h = body_h;
-
-            ctx.fill_rect(track_x, track_y, sb_width, track_h, style.bg_secondary);
-
-            let max_off = self.max_scroll_offset();
-            let thumb_size = if max_off > 0 && total_h > 0 {
-                ((body_h as i64 * track_h as i64) / total_h as i64) as i32
-            } else {
-                track_h
-            }
-            .max(thumb_min)
-            .min(track_h);
-
-            let thumb_pos = if max_off > 0 {
-                ((self.scroll_offset as i64 * (track_h - thumb_size) as i64) / max_off as i64)
-                    as i32
-            } else {
-                0
-            };
-
+        if let Some((track, thumb)) = self.scrollbar_rects() {
             ctx.fill_rect(
-                track_x,
-                track_y + thumb_pos,
-                sb_width,
-                thumb_size,
+                track.x,
+                track.y,
+                track.width,
+                track.height,
+                style.bg_secondary,
+            );
+            ctx.fill_rect(
+                thumb.x,
+                thumb.y,
+                thumb.width,
+                thumb.height,
                 style.bg_tertiary,
             );
         }
@@ -399,6 +449,12 @@ impl Widget for TableWidget {
                 let rect = self.layout_rect();
                 if !rect.contains(*x, *y) {
                     return EventResponse::Ignored;
+                }
+                // The scrollbar first: a press on it scrolls rather than
+                // selecting whatever row is behind it.
+                if *button == PointerButton::Left && self.on_scrollbar(*x, *y) {
+                    self.thumb_dragging = self.scroll_to_thumb(*y);
+                    return EventResponse::CapturePointer;
                 }
                 // A secondary click on the header addresses no row, so it opens nothing.
                 if *y < rect.y + self.header_height {
@@ -436,7 +492,16 @@ impl Widget for TableWidget {
                 }
             }
 
+            WidgetEvent::PointerUp { .. } if self.thumb_dragging => {
+                self.thumb_dragging = false;
+                EventResponse::ReleasePointer
+            }
+
             WidgetEvent::PointerMove { x: _, y } => {
+                if self.thumb_dragging {
+                    self.scroll_to_thumb(*y);
+                    return EventResponse::Consumed;
+                }
                 let body_top = self.layout_rect().y + self.header_height;
                 let old_hover = self.hovered_row;
                 if *y >= body_top && self.row_height > 0 {

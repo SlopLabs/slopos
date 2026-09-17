@@ -172,6 +172,7 @@ fn sidebar(app: &EditorApp) -> Node<EditorMsg> {
             total_rows: app.tree_row_count(),
             selected: app.tree_selected,
             focused: app.focus == Focus::Tree,
+            scroll_dragging: app.tree_scroll_dragging,
             on_input: Some(EditorMsg::Tree),
         }),
     }
@@ -273,6 +274,7 @@ fn code_view(app: &EditorApp) -> Node<EditorMsg> {
         show_line_numbers: app.line_numbers_visible(),
         focused: app.focus == Focus::Editor,
         selecting: app.selecting,
+        scroll_dragging: app.code_scroll_dragging,
         on_input: Some(EditorMsg::Code),
     }
 }

@@ -138,6 +138,11 @@ pub struct EditorApp {
     selecting: bool,
     /// The sidebar splitter is being dragged, for the same reason.
     sidebar_dragging: bool,
+    /// A scrollbar thumb is being dragged, in the code surface and in the tree.
+    /// Held here for the same reason: the widget that saw the press is gone by
+    /// the time the first move arrives.
+    code_scroll_dragging: bool,
+    tree_scroll_dragging: bool,
     /// `(document id, line, column, clicks)`, so the second and third click
     /// select a word and a line. The id rather than the tab position, because
     /// opening a file over the scratch buffer reuses the index.
@@ -177,6 +182,8 @@ impl EditorApp {
             visible_cols: 80,
             selecting: false,
             sidebar_dragging: false,
+            code_scroll_dragging: false,
+            tree_scroll_dragging: false,
             click_run: None,
         };
         app.sync_tree();
@@ -1719,7 +1726,10 @@ impl EditorApp {
     fn handle_code_input(&mut self, input: CodeInput) {
         // Any interaction supersedes the status bar — but a release reaches
         // every widget, so it would wipe the message its own press produced.
-        if !matches!(input, CodeInput::Scroll { .. } | CodeInput::Release) {
+        if !matches!(
+            input,
+            CodeInput::Scroll { .. } | CodeInput::ScrollTo { .. } | CodeInput::Release
+        ) {
             self.status.clear();
         }
         match input {
@@ -1752,9 +1762,17 @@ impl EditorApp {
             }
             CodeInput::Release => {
                 self.selecting = false;
+                self.code_scroll_dragging = false;
             }
             CodeInput::Scroll { delta_lines } => {
                 self.doc_mut().scroll_by(delta_lines as isize);
+            }
+            CodeInput::ScrollTo { first_line } => {
+                // The press opens the drag and every move continues it; the
+                // release above is what ends it.
+                self.code_scroll_dragging = true;
+                let max = self.doc().buffer.line_count().saturating_sub(1);
+                self.doc_mut().viewport.first_line = first_line.min(max);
             }
             CodeInput::Key { key, modifiers } => {
                 if self.dialog.is_some() {
@@ -1804,6 +1822,18 @@ impl EditorApp {
                 let max = rows.saturating_sub(height);
                 let next = self.tree_scroll as isize + delta_rows as isize;
                 self.tree_scroll = next.clamp(0, max as isize) as usize;
+            }
+            TreeInput::Release => {
+                self.tree_scroll_dragging = false;
+            }
+            TreeInput::ScrollTo { first_row } => {
+                self.tree_scroll_dragging = true;
+                let max = self
+                    .tree
+                    .rows()
+                    .len()
+                    .saturating_sub(self.tree_rows_visible());
+                self.tree_scroll = first_row.min(max);
             }
             TreeInput::Key { key, modifiers } => {
                 if let Some(command) = self.global_command(key, modifiers) {

@@ -255,6 +255,8 @@ pub enum Node<M> {
         /// A selection drag is live; the application sets this between the press
         /// and the release.
         selecting: bool,
+        /// A scrollbar drag is live, for the same reason.
+        scroll_dragging: bool,
         on_input: Option<fn(CodeInput) -> M>,
     },
     /// A virtualized tree of rows, as a file sidebar shows them.
@@ -265,6 +267,9 @@ pub enum Node<M> {
         total_rows: usize,
         selected: Option<usize>,
         focused: bool,
+        /// A scrollbar drag is live; the application sets this between the
+        /// press and the release, because the tree is rebuilt in between.
+        scroll_dragging: bool,
         on_input: Option<fn(TreeInput) -> M>,
     },
     /// Open-document tabs, with a modified marker and a close affordance.

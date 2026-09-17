@@ -331,6 +331,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             show_line_numbers,
             focused,
             selecting,
+            scroll_dragging,
             on_input,
         } => {
             let erased: Option<Box<dyn Fn(widgets::code_view::CodeInput) -> Box<dyn Any>>> =
@@ -349,6 +350,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 *show_line_numbers,
                 *focused,
                 *selecting,
+                *scroll_dragging,
                 erased,
             ))
         }
@@ -358,6 +360,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             total_rows,
             selected,
             focused,
+            scroll_dragging,
             on_input,
         } => {
             let erased: Option<Box<dyn Fn(widgets::tree_view::TreeInput) -> Box<dyn Any>>> =
@@ -371,6 +374,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 *total_rows,
                 *selected,
                 *focused,
+                *scroll_dragging,
                 erased,
             ))
         }

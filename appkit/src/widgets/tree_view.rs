@@ -10,7 +10,7 @@ use std::any::Any;
 
 use slopos_abi::draw::Color32;
 
-use crate::constraints::{BoxConstraints, Size};
+use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, PointerButton, WidgetEvent,
 };
@@ -21,6 +21,15 @@ use super::icon::{IconKind, draw_icon};
 
 /// Indent per depth level, in pixels.
 const INDENT: i32 = 14;
+/// Overview scrollbar: its width, and how far its right edge sits from the
+/// widget's, so the track a press lands on is the bar that is drawn.
+const SCROLLBAR_WIDTH: i32 = 4;
+const SCROLLBAR_INSET: i32 = 5;
+/// How wide the *grab* target is. Wider than the bar, which is a 4px line and
+/// not something to ask a pointer to land on.
+const SCROLLBAR_GRAB: i32 = 12;
+/// Shortest the thumb gets, so a long tree still leaves something to grab.
+const THUMB_MIN_HEIGHT: i32 = 24;
 const PAD_LEFT: i32 = 8;
 const ICON_GAP: i32 = 6;
 
@@ -49,6 +58,12 @@ pub enum TreeInput {
     Scroll {
         delta_rows: i32,
     },
+    /// The scrollbar was pressed or dragged to an absolute position.
+    ScrollTo {
+        first_row: usize,
+    },
+    /// The pointer was released; ends a scrollbar drag.
+    Release,
     Key {
         key: Key,
         modifiers: Modifiers,
@@ -65,6 +80,10 @@ pub struct TreeViewWidget {
     total_rows: usize,
     selected: Option<usize>,
     focused: bool,
+    /// Whether a scrollbar drag is in progress. Given rather than remembered:
+    /// the widget tree is rebuilt on every message, so a flag set on the press
+    /// would be gone before the first move arrived.
+    scroll_dragging: bool,
     row_height: i32,
     on_input: Option<InputCallback>,
     hovered: Option<usize>,
@@ -77,6 +96,7 @@ impl TreeViewWidget {
         total_rows: usize,
         selected: Option<usize>,
         focused: bool,
+        scroll_dragging: bool,
         on_input: Option<InputCallback>,
     ) -> Self {
         Self {
@@ -86,10 +106,56 @@ impl TreeViewWidget {
             total_rows,
             selected,
             focused,
+            scroll_dragging,
             row_height: 22,
             on_input,
             hovered: None,
         }
+    }
+
+    /// `(thumb rect, span)` for the overview scrollbar, or `None` when every
+    /// row fits. One source for what is drawn and what a press lands on.
+    fn scrollbar_thumb(&self) -> Option<(Rect, usize)> {
+        let rect = self.layout_rect();
+        let visible = (rect.height / self.row_height.max(1)).max(1) as usize;
+        if self.total_rows <= visible {
+            return None;
+        }
+        let track_h = rect.height;
+        let thumb_h = ((visible as i64 * track_h as i64) / self.total_rows as i64)
+            .max(THUMB_MIN_HEIGHT as i64)
+            .min(track_h as i64) as i32;
+        let span = self.total_rows - visible;
+        let offset = ((self.first_row.min(span) as i64) * (track_h - thumb_h) as i64
+            / span.max(1) as i64) as i32;
+        let thumb = Rect::new(
+            rect.x + rect.width - SCROLLBAR_INSET,
+            rect.y + offset,
+            SCROLLBAR_WIDTH,
+            thumb_h,
+        );
+        Some((thumb, span))
+    }
+
+    /// Whether a point is on the scrollbar's column — the track, not just the
+    /// thumb, since pressing the track is how a list jumps.
+    fn point_on_scrollbar(&self, x: i32, y: i32) -> bool {
+        let rect = self.layout_rect();
+        rect.contains(x, y) && x >= rect.x + rect.width - SCROLLBAR_GRAB
+    }
+
+    /// The first row that puts the thumb's middle under `y`.
+    fn first_row_at(&self, y: i32) -> usize {
+        let Some((thumb, span)) = self.scrollbar_thumb() else {
+            return 0;
+        };
+        let rect = self.layout_rect();
+        let usable = rect.height - thumb.height;
+        if usable <= 0 {
+            return 0;
+        }
+        let top = (y - rect.y - thumb.height / 2).clamp(0, usable);
+        ((top as i64 * span as i64) / usable as i64) as usize
     }
 
     fn row_at(&self, y: i32) -> Option<usize> {
@@ -163,6 +229,13 @@ impl Widget for TreeViewWidget {
                 if !self.layout_rect().contains(*x, *y) || *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
+                // The scrollbar first: a press on it scrolls rather than
+                // opening whatever row happens to be behind it.
+                if self.point_on_scrollbar(*x, *y) && self.scrollbar_thumb().is_some() {
+                    let first_row = self.first_row_at(*y);
+                    self.emit(TreeInput::ScrollTo { first_row }, sink);
+                    return EventResponse::CapturePointer;
+                }
                 let Some(row) = self.row_at(*y) else {
                     return EventResponse::Ignored;
                 };
@@ -174,6 +247,10 @@ impl Widget for TreeViewWidget {
             }
 
             WidgetEvent::PointerMove { x, y } => {
+                if self.scroll_dragging {
+                    let first_row = self.first_row_at(*y);
+                    return self.emit(TreeInput::ScrollTo { first_row }, sink);
+                }
                 let inside = self.layout_rect().contains(*x, *y);
                 let hovered = if inside { self.row_at(*y) } else { None };
                 if hovered != self.hovered {
@@ -181,6 +258,15 @@ impl Widget for TreeViewWidget {
                     return EventResponse::Consumed;
                 }
                 EventResponse::Ignored
+            }
+
+            WidgetEvent::PointerUp { .. } => {
+                // Unconditional, as in the code surface: a press and its
+                // release can arrive in one batch with no rebuild between, so
+                // this widget's `scroll_dragging` is still the pre-press value.
+                // The application ignores a release it did not start.
+                self.emit(TreeInput::Release, sink);
+                EventResponse::ReleasePointer
             }
 
             WidgetEvent::PointerLeave => {
@@ -352,21 +438,14 @@ impl TreeViewWidget {
         }
 
         // Overview scrollbar, matching the code surface's.
-        let visible = (rect.height / self.row_height.max(1)).max(1) as usize;
-        if self.total_rows > visible {
-            let track_h = rect.height;
-            let thumb_h = ((visible as i64 * track_h as i64) / self.total_rows as i64)
-                .max(24)
-                .min(track_h as i64) as i32;
-            let span = (self.total_rows - visible).max(1);
-            let offset = ((self.first_row.min(span) as i64) * (track_h - thumb_h) as i64
-                / span as i64) as i32;
+        if let Some((thumb, _)) = self.scrollbar_thumb() {
+            let alpha = if self.scroll_dragging { 0x80 } else { 0x40 };
             ctx.fill_rect_blended(
-                rect.x + rect.width - 5,
-                rect.y + offset,
-                4,
-                thumb_h,
-                Color32::new(0xc8, 0xcc, 0xd4, 0x40),
+                thumb.x,
+                thumb.y,
+                thumb.width,
+                thumb.height,
+                Color32::new(0xc8, 0xcc, 0xd4, alpha),
             );
         }
     }
