@@ -72,8 +72,6 @@ struct WindowManager {
     /// release is delivered to whatever is underneath instead, and the client
     /// is left holding a drag it was never told had ended.
     protocol_pointer_grab: u32,
-    /// Buttons currently held on the grabbing surface, by button number.
-    protocol_pointer_buttons: u32,
 
     first_frame: bool,
     /// This frame's accumulated, disjoint damage region.
@@ -132,7 +130,6 @@ impl WindowManager {
             protocol_serial: 0,
             protocol_pointer_focus: 0,
             protocol_pointer_grab: 0,
-            protocol_pointer_buttons: 0,
             first_frame: true,
             output_damage: Region::new(),
             force_full_redraw: false,
@@ -429,11 +426,19 @@ impl WindowManager {
                         &self.system_bar,
                         proto_box.as_deref_mut(),
                     );
+                    // A press with nothing else held ends a grab left over
+                    // from a release the kernel queue dropped under a motion
+                    // flood — the same self-heal the input layer's own drag and
+                    // resize grabs carry, and without which one lost release
+                    // pins every pointer event to one surface for good.
+                    if self.input.mouse_buttons & !button == 0 {
+                        self.protocol_pointer_grab = 0;
+                        self.sync_pointer_focus(proto_box.as_deref_mut());
+                    }
                     if should_forward && self.protocol_pointer_focus != 0 {
                         if self.protocol_pointer_grab == 0 {
                             self.protocol_pointer_grab = self.protocol_pointer_focus;
                         }
-                        self.protocol_pointer_buttons |= 1u32 << (button & 31);
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
                             p.send_pointer_button_for_task(
@@ -451,7 +456,6 @@ impl WindowManager {
                     let should_forward = self
                         .input
                         .on_button_release(button, proto_box.as_deref_mut());
-                    self.protocol_pointer_buttons &= !(1u32 << (button & 31));
                     // A grab only exists because the press was forwarded, so
                     // its release is owed to the same surface whatever is under
                     // the pointer now.
@@ -474,7 +478,10 @@ impl WindowManager {
                             );
                         }
                     }
-                    if self.protocol_pointer_buttons == 0 && self.protocol_pointer_grab != 0 {
+                    // `mouse_buttons` is the one authoritative mask, already
+                    // updated by `on_button_release`; a second copy here is a
+                    // second thing that can fall out of step with it.
+                    if self.input.mouse_buttons == 0 && self.protocol_pointer_grab != 0 {
                         self.protocol_pointer_grab = 0;
                         // Enter/leave catches up with wherever the pointer
                         // actually ended.

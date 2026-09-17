@@ -270,6 +270,25 @@
 #     and `pinnedbytes` 4.
 
 #
+# 2026-09-17, the editor ("An editor you can work in" in
+# plans/self-hosting.md). Two rows moved, both in the userland phase and both
+# from the same cause: `editor_test` is one more utest binary.
+#   post-userland-tests `process` 245 -> 246. One more account row, live at the
+#     dump point like the rest of the phase's children. Deterministic at 246
+#     across four fresh runs of one ISO; the cap stays exact.
+#   post-userland-tests `kernelmeta` 9293 -> 10035. Measured
+#     9840/9699/9794/9645 over those same four runs, spread 195; the cap is
+#     that maximum plus the spread, in the style of every order-dependent row
+#     above. The delta is that process's task stacks (12 pages each) and the
+#     page tables behind its address space; the editor maps the two new font
+#     files and holds a proportional glyph cache beside the fixed-cell atlas,
+#     which is the heap half.
+#   Nothing else moved above its cap over those four runs: post-userland
+#     `pages` measured 1 779 616-1 825 083 inside 1 887 717, `residentpages`
+#     148 965-150 881 inside 153 268, `diskblocks` 1656 exact inside 2911;
+#     boot `kernelmeta` 1750 and post-kernel-tests `kernelmeta` 6066-6068,
+#     both inside their caps. Only the two rows above are re-recorded.
+#
 # 2026-09-16, the terminal gaining the coverage an editor needs ("The terminal
 # is one an editor can be written against" in plans/self-hosting.md). Two rows
 # moved, and only one of them because of that work.
@@ -328,11 +347,11 @@ post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	2911
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	9293
+post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1887717
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	245
+post-userland-tests	process	246
 post-userland-tests	residentpages	153268
 post-userland-tests	task	10
 

@@ -167,8 +167,12 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
 
     // Move the entries out so the ring's KBox is released before the
     // per-subtest klog emissions.
+    let mut truncated = false;
     let report_vec: KVec<TestReport> = match maybe_ring {
-        Some(mut ring) => ring.drain().unwrap_or_else(|_| KVec::new()),
+        Some(mut ring) => {
+            truncated = ring.overflow_flag();
+            ring.drain().unwrap_or_else(|_| KVec::new())
+        }
         None => KVec::new(),
     };
 
@@ -193,6 +197,20 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
                 ktap::emit_subtest_not_ok(sub_idx, name, "invalid status");
             }
         }
+    }
+
+    // A dropped report is a case whose result nobody has. Saying so is the
+    // difference between "everything passed" and "everything we still have a
+    // record of passed" — and a failure past the cap otherwise shows only as a
+    // non-zero exit code with no name on it.
+    if truncated {
+        sub_idx += 1;
+        sub_failed += 1;
+        ktap::emit_subtest_not_ok(
+            sub_idx,
+            "report_ring_overflow",
+            "more cases than TEST_REPORT_RING_CAPACITY; later results were dropped",
+        );
     }
 
     roll_up(bin, sub_failed, report_vec.len(), exit_info)

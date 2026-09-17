@@ -119,6 +119,29 @@ impl IndentStyle {
     }
 }
 
+impl TextBuffer {
+    /// Characters in `range`, counting one per line break.
+    ///
+    /// Separate from [`TextBuffer::slice`] because the status bar wants only
+    /// the number: building the string to count it allocates the whole
+    /// selection on every rebuild, and a rebuild is every keystroke.
+    pub fn count_chars(&self, range: Range) -> usize {
+        let start = self.clamp(range.start);
+        let end = self.clamp(range.end);
+        if start >= end {
+            return 0;
+        }
+        if start.line == end.line {
+            return end.col - start.col;
+        }
+        let mut total = self.line_len(start.line) - start.col;
+        for line in (start.line + 1)..end.line {
+            total += self.line_len(line) + 1;
+        }
+        total + end.col + 1
+    }
+}
+
 /// Display column of character column `col` on `text`, expanding tabs.
 ///
 /// A character column and a display column differ wherever a tab can appear,
@@ -486,6 +509,11 @@ impl TextBuffer {
                 // not break the chain.
                 None => continue,
                 _ => {}
+            }
+            // Nor does one that is only whitespace: its trailing spaces are not
+            // an indent level and would record a step nothing took.
+            if line.trim().is_empty() {
+                continue;
             }
             let n = line.chars().take_while(|c| *c == ' ').count();
             if let Some(previous) = previous {

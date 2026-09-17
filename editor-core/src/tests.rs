@@ -533,6 +533,33 @@ fn test_electric_dedent_keeps_the_caret_after_the_brace() -> bool {
     true
 }
 
+fn test_count_chars_matches_the_slice_it_avoids_building() -> bool {
+    let d = plain_doc("alpha\nbeta\n\ngamma delta\n");
+    for sl in 0..d.buffer.line_count() {
+        for sc in 0..=d.buffer.line_len(sl) {
+            for el in sl..d.buffer.line_count() {
+                for ec in 0..=d.buffer.line_len(el) {
+                    let range = Range::new(pos(sl, sc), pos(el, ec));
+                    let expected = d.buffer.slice(range).chars().count();
+                    assert_eq!(d.buffer.count_chars(range), expected);
+                }
+            }
+        }
+    }
+    true
+}
+
+fn test_detect_indent_ignores_a_whitespace_only_line() -> bool {
+    // The blank line's eight spaces are not an indent level, and counting them
+    // as one records a step nothing took.
+    let b = TextBuffer::from_str("fn a() {\n  x();\n        \n  y();\n}\n").expect("load");
+    assert_eq!(
+        b.detect_indent(IndentStyle::Spaces(4)),
+        IndentStyle::Spaces(2)
+    );
+    true
+}
+
 fn test_duplicate_line_puts_the_copy_below() -> bool {
     let mut d = plain_doc("alpha\nbeta\n");
     d.place_cursor(pos(0, 2), false);
@@ -1157,6 +1184,14 @@ pub fn cases() -> &'static [(&'static str, fn() -> bool)] {
         (
             "relative_to_requires_a_separator_boundary",
             test_relative_to_requires_a_separator_boundary,
+        ),
+        (
+            "count_chars_matches_the_slice_it_avoids_building",
+            test_count_chars_matches_the_slice_it_avoids_building,
+        ),
+        (
+            "detect_indent_ignores_a_whitespace_only_line",
+            test_detect_indent_ignores_a_whitespace_only_line,
         ),
         (
             "duplicate_line_puts_the_copy_below",

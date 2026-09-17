@@ -58,6 +58,7 @@ editor /src       # a folder
 | `Ctrl+Shift+P` | The command palette: every command, by name |
 | `Ctrl+B` | Show or hide the sidebar |
 | `Escape` | Close whatever is open |
+| `Ctrl+Backspace` | In a prompt: back one path segment, or one word |
 
 Drag the line between the sidebar and the code to resize it. A double click
 selects a word, a triple click selects the line, and a drag selects a range.
@@ -70,3 +71,8 @@ indents with tabs, and a file indented two spaces stays that way.
 
 Line endings survive a round trip — a file that arrived with CRLF is saved with
 CRLF — and so does a missing final newline.
+
+A save writes a sibling file, flushes it to the disk and renames it over the
+target, so a save that fails part way leaves the old file intact rather than a
+truncated one. A file with a NUL byte in it is refused rather than opened as
+replacement characters that saving would then write back.

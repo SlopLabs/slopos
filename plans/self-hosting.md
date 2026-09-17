@@ -1027,12 +1027,24 @@ What it rests on, in case a later phase disturbs it:
   Those now live in the application and are *given* to the widget, which is the
   same discipline the rest of the toolkit follows — and the reason a drag
   selection, a double click and a sidebar resize work at all.
+- **A widget answers a key only when the key is its own.** Keyboard events are
+  offered to every widget in turn until one consumes, and nothing ever sent
+  `FocusGained`/`FocusLost` — so every widget's `focused` flag was permanently
+  false, and the two that answered keys without consulting it answered *every*
+  key. A button took Enter and Space from whatever was being typed into, which
+  made a space unsearchable and a newline untypable while the find bar was
+  open; a list took the arrows and emitted its row-chosen message, which for
+  the command palette meant running each command the selection passed over.
+  `run_app` now tells the widget losing focus and the one gaining it, and both
+  widgets ask before answering.
 - **A drag that leaves the thing it started on is still a drag.** State the
   application holds has to be *ended*, and a release is only an ending if it
-  arrives. Two layers had to say so. A `StackWidget` now tells a release to the
-  children whose rect it missed, because a widget that latched on a press is
-  the one waiting for it and every other widget guards on containment or on its
-  own latch. Under that, the compositor holds the `wl_pointer` implicit grab: a
+  arrives. Two layers had to say so. A `StackWidget` now tells a move *and* a
+  release to the children whose rect they missed, because a widget that latched
+  on a press is the one waiting for them and every other widget guards on
+  containment or on its own latch — a six-pixel splitter that hears about the
+  pointer only while the pointer is still on it cannot be moved at all. Under
+  that, the compositor holds the `wl_pointer` implicit grab: a
   press on a client's content pins pointer delivery to that client until every
   button is up, so dragging past the window edge no longer hands the pointer —
   and the release — to whatever is underneath. Without either, a selection goes
@@ -1363,7 +1375,9 @@ every image this kernel writes.
   interaction state (a drag, a click run, a resize) belongs to the application
   because the widget holding it is rebuilt between events, a release reaches
   the widget that latched on the press whether or not it lands inside it and
-  whether or not it lands inside the window, `Rect::to_damage_rect`'s bounds
+  whether or not it lands inside the window, a widget answers a key only when it
+  holds the focus (nothing else in the tree will decline it),
+  `Rect::to_damage_rect`'s bounds
   are inclusive like every other `DamageRect`, and `measure` and
   `paint` must agree on a font size or a click lands on the wrong character.
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,

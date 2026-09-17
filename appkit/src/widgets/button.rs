@@ -9,7 +9,6 @@ use crate::event::{
 use crate::node::ButtonStyle;
 use crate::paint::PaintContext;
 use crate::style::StyleSheet;
-use crate::text as font;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -111,8 +110,12 @@ impl Widget for ButtonWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let text_w = font::string_width(&self.label);
-        let text_h = font::cell_height();
+        // The proportional metrics, because `paint` draws with them: measuring
+        // with the fixed-cell atlas over-pads every button and, where the UI
+        // font's line box is the taller of the two, makes the label overflow
+        // the box that was sized for it.
+        let text_w = ctx.text_width(&self.label);
+        let text_h = ctx.text_height();
         let w = (text_w + ctx.style.button_padding_h * 2).max(ctx.style.button_min_width);
         let h = text_h + ctx.style.button_padding_v * 2;
         constraints.constrain(Size::new(w, h))
@@ -225,7 +228,11 @@ impl Widget for ButtonWidget {
                 }
                 EventResponse::Ignored
             }
-            WidgetEvent::KeyDown { key, .. } => {
+            // Only when this button holds the keyboard focus. A key is offered
+            // to every widget in turn until one consumes it, so a button that
+            // answered Enter or Space unconditionally took them from whatever
+            // the user was actually typing into.
+            WidgetEvent::KeyDown { key, .. } if self.focused => {
                 if matches!(
                     key,
                     Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space)

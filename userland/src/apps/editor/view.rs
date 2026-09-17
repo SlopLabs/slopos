@@ -462,10 +462,7 @@ fn status_bar(app: &EditorApp) -> Node<EditorMsg> {
     let selection = doc
         .cursor
         .selection()
-        .map(|r| {
-            let text = doc.buffer.slice(r);
-            format!("  ({} selected)", text.chars().count())
-        })
+        .map(|r| format!("  ({} selected)", doc.buffer.count_chars(r)))
         .unwrap_or_default();
 
     let left = if app.status.is_empty() {

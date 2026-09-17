@@ -268,6 +268,16 @@ impl Widget for DialogWidget {
                         }
                     }
                 }
+                // A release the actions all missed still has to reach them, or
+                // the one pressed stays drawn as pressed. A button ignores a
+                // release outside its own rect, so this cannot fire one.
+                if matches!(event, WidgetEvent::PointerUp { .. }) {
+                    for action in &mut self.actions {
+                        if !action.layout_rect().contains(*x, *y) {
+                            action.event(event, EventPhase::Target, sink);
+                        }
+                    }
+                }
                 if self.content.layout_rect().contains(*x, *y) {
                     let resp = self.content.event(event, EventPhase::Target, sink);
                     if resp.is_consumed() {

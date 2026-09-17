@@ -18,6 +18,10 @@ mod prompt;
 mod theme;
 mod view;
 
+/// Rows the palette and the file finder draw at once, for a test that has to
+/// step past the window edge.
+pub use view::PALETTE_MAX_ROWS;
+
 use slopos_appkit::widgets::code_view::CodeInput;
 use slopos_appkit::widgets::drag_handle::DragInput;
 use slopos_appkit::widgets::editor_tabs::TabInput;
@@ -88,6 +92,8 @@ pub struct EditorApp {
     tree_scroll: usize,
     focus: Focus,
     prompt: Prompt,
+    /// First visible row of the palette/finder list; see `overlay_first_row`.
+    overlay_scroll: usize,
     /// `(menu index, anchor x, anchor y)` while a menu is open.
     menu_open: Option<(usize, i32, i32)>,
     dialog: Option<Dialog>,
@@ -127,6 +133,7 @@ impl EditorApp {
             tree_scroll: 0,
             focus: Focus::Editor,
             prompt: Prompt::None,
+            overlay_scroll: 0,
             menu_open: None,
             dialog: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -184,14 +191,38 @@ impl EditorApp {
         self.find_query()
     }
 
-    /// First result row the overlay list shows, scrolled to keep the selection
-    /// inside the window it can draw.
-    pub(super) fn overlay_first_row(&self) -> usize {
-        let selected = match &self.prompt {
-            Prompt::Palette { selected, .. } | Prompt::FileFinder { selected, .. } => *selected,
-            _ => return 0,
+    /// First result row the overlay list shows.
+    ///
+    /// A remembered origin rather than one derived from the selection: deriving
+    /// it pins the selection to the *last* drawn row, so nothing after it is
+    /// ever visible and every step down scrolls the whole list by one.
+    pub fn overlay_first_row(&self) -> usize {
+        self.overlay_scroll
+    }
+
+    /// Scrolls the overlay window the least that brings `selected` inside it.
+    fn sync_overlay_scroll(&mut self) {
+        let (selected, total) = match &self.prompt {
+            Prompt::Palette {
+                selected, results, ..
+            } => (*selected, results.len()),
+            Prompt::FileFinder {
+                selected, results, ..
+            } => (*selected, results.len()),
+            _ => {
+                self.overlay_scroll = 0;
+                return;
+            }
         };
-        selected.saturating_sub(view::PALETTE_MAX_ROWS.saturating_sub(1))
+        let rows = view::PALETTE_MAX_ROWS.max(1);
+        let max_first = total.saturating_sub(rows);
+        let mut first = self.overlay_scroll.min(max_first);
+        if selected < first {
+            first = selected;
+        } else if selected >= first + rows {
+            first = selected + 1 - rows;
+        }
+        self.overlay_scroll = first;
     }
 
     /// A result row the overlay clicked, in the result list's own indexing.
@@ -241,6 +272,21 @@ impl EditorApp {
     /// Opens `path` as if the tree or the open prompt had asked for it.
     pub fn open(&mut self, path: &str) {
         self.open_path(path);
+    }
+
+    /// The text in whichever prompt is open, for a test that has to see what a
+    /// keystroke actually reached.
+    pub fn prompt_text(&self) -> String {
+        self.prompt
+            .input_text()
+            .map(|(text, _)| text)
+            .unwrap_or_default()
+    }
+
+    /// Whether the open prompt is one of the two overlays (the palette, the
+    /// file finder) rather than the one-line bar.
+    pub fn prompt_is_overlay(&self) -> bool {
+        self.prompt.is_overlay()
     }
 
     /// Empties whichever prompt is open, as Ctrl+U does.
@@ -753,6 +799,7 @@ impl EditorApp {
 
     fn open_prompt(&mut self, prompt: Prompt) {
         self.prompt = prompt;
+        self.overlay_scroll = 0;
         self.focus = Focus::Prompt;
         self.menu_open = None;
         self.sync_viewport();
@@ -780,6 +827,7 @@ impl EditorApp {
             *results = scored.into_iter().map(|(c, _)| c).collect();
             *selected = (*selected).min(results.len().saturating_sub(1));
         }
+        self.sync_overlay_scroll();
     }
 
     fn refresh_finder(&mut self) {
@@ -805,6 +853,7 @@ impl EditorApp {
             *results = scored.into_iter().map(|(p, _)| p).collect();
             *selected = (*selected).min(results.len().saturating_sub(1));
         }
+        self.sync_overlay_scroll();
     }
 
     /// Enter in whichever prompt is open.
@@ -890,6 +939,7 @@ impl EditorApp {
             }
             _ => {}
         }
+        self.sync_overlay_scroll();
     }
 
     // ── commands ────────────────────────────────────────────────────────────
@@ -1406,7 +1456,9 @@ impl EditorApp {
     fn handle_code_input(&mut self, input: CodeInput) {
         // Any interaction with the text supersedes whatever the status bar was
         // reporting, which is what keeps "Saved …" from outliving the save.
-        if !matches!(input, CodeInput::Scroll { .. }) {
+        // A release is not one: it reaches every widget, so the release of the
+        // very click that produced a message would wipe the message.
+        if !matches!(input, CodeInput::Scroll { .. } | CodeInput::Release) {
             self.status.clear();
         }
         match input {

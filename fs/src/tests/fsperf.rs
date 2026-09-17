@@ -351,10 +351,30 @@ fn perf_body() -> TestResult {
     };
     let table = process.table();
 
+    // Quiesce first, then open the window. Anything still dirty when the
+    // counters are reset — the mount's own metadata, whatever the boot left —
+    // is written back by the flusher *during* the measured write and counted
+    // against it, which is how a row that is a property of the code became a
+    // property of how much the image happened to be carrying: measured 22
+    // device requests per MiB on one tree and 22-33 on the same code with a
+    // larger image behind it.
+    if let Err(e) = crate::vfs::vfs_sync_all() {
+        return fail!("could not quiesce the filesystem before measuring: {:?}", e);
+    }
     stats::reset();
     dev_reset();
     let start = monotonic_ns();
     let wrote = write_through_vfs(table, PERF_PATH, PERF_BYTES, chunk.as_slice());
+    // And close it at the far end too, so the number is the *whole* cost of
+    // getting 2 MiB onto the medium rather than however much of it happened to
+    // have landed when the counters were read. The write already fdatasyncs;
+    // what this absorbs is the flusher's own pass over the metadata the write
+    // dirtied, which otherwise falls inside or outside the window depending on
+    // where the flusher's idle timer happens to be — the same block written
+    // once either way, counted or not depending on the clock.
+    if let Err(e) = crate::vfs::vfs_sync_all() {
+        return fail!("could not flush the filesystem after measuring: {:?}", e);
+    }
     let ns = monotonic_ns().saturating_sub(start);
     let counters = stats::snapshot();
     let (devwrites, devblocks, barriers) = dev_counts();

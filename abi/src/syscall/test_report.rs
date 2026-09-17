@@ -9,7 +9,13 @@ pub const TEST_REPORT_MSG_MAX: usize = 128;
 
 /// Per-task report ring capacity. Reports beyond this count are dropped and
 /// the ring's overflow flag is set so KTAP output can mark the truncation.
-pub const TEST_REPORT_RING_CAPACITY: usize = 64;
+///
+/// Sized for the largest suite a single binary runs rather than for a round
+/// number: a binary that overruns it loses the *results* of everything past
+/// the cap, so a failure in the tail arrives only as a non-zero exit code with
+/// no name attached. The ring is one lazily allocated `KBox` per reporting
+/// task, freed when it exits.
+pub const TEST_REPORT_RING_CAPACITY: usize = 192;
 
 /// Status carried in `arg0` of `SYSCALL_TEST_REPORT`.
 #[repr(u8)]

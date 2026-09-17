@@ -11,7 +11,12 @@ trusted `metadata` across the syscall gap that follows it, a directory read with
 no entry bound, a nesting counter that could wrap on a pathological line, a save
 that truncated the target before writing a byte of its replacement, and a
 pointer release that a drag leaving the window never delivered, which left the
-editor extending a selection under a pointer with no button held.
+editor extending a selection under a pointer with no button held. The implicit
+pointer grab added to close that last one is itself a shared-state risk — while
+one is held no other client receives pointer input — so it self-heals on the
+next press with nothing else down, the way the compositor's own drag and resize
+grabs already did; without that, one release lost to a full kernel event queue
+would pin the pointer to a single surface until the compositor restarted.
 Swept before that on 2026-09-14 (the utilities becoming executables: a multicall
 binary whose archive extractor, patch applier, regex engine, inflater and digest
 all read attacker-supplied input, plus the `/bin` symlink install and the

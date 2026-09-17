@@ -114,11 +114,13 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
     }
 }
 
+/// The wire carries the PS/2 button **mask** (left 0x01, right 0x02, middle
+/// 0x04), not an index into them, so middle arrived as left and nothing ever
+/// decoded as middle.
 fn pointer_button(button: u8) -> super::event::PointerButton {
     match button {
-        0 | 1 => super::event::PointerButton::Left,
-        2 => super::event::PointerButton::Right,
-        3 => super::event::PointerButton::Middle,
+        0x02 => super::event::PointerButton::Right,
+        0x04 => super::event::PointerButton::Middle,
         _ => super::event::PointerButton::Left,
     }
 }

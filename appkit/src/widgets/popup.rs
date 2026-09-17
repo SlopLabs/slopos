@@ -117,6 +117,15 @@ impl Widget for PopupWidget {
                 ..
             } => self.child.event(event, EventPhase::Target, sink),
 
+            // Motion passes through. A popup is modal against *acting*, not
+            // against knowing where the pointer is: the menu bar underneath
+            // needs the move to switch menus as the pointer slides across it,
+            // and a widget that latched on a press needs it to keep tracking.
+            WidgetEvent::PointerMove { .. } => {
+                self.child.event(event, EventPhase::Target, sink);
+                EventResponse::Ignored
+            }
+
             // Modal otherwise: swallow what the child ignores so the tree
             // underneath cannot act while the popup is open.
             _ => {

@@ -246,14 +246,20 @@ impl StackWidget {
             }
         }
 
-        // A release is also told to the children it missed. A widget that
-        // latched on a press — a drag selection, a splitter, a scrollbar thumb
-        // — is holding state the press gave it, and a drag that ends outside
-        // its rect is the ordinary way to end one; without this the latch
-        // never clears and the widget then tracks a pointer with no button
+        // A move and a release are also told to the children they missed. A
+        // widget that latched on a press — a drag selection, a splitter, a
+        // scrollbar thumb — is holding state the press gave it, and a drag
+        // that leaves its rect is the ordinary way to drag: a 6 px splitter
+        // cannot be moved at all if it only hears about the pointer while the
+        // pointer is still on it, and a release it never hears leaves the
+        // latch set so the widget goes on tracking a pointer with no button
         // held. Every widget either guards on containment or on its own latch,
         // so this pass reaches only the one that was waiting for it.
-        if let (WidgetEvent::PointerUp { .. }, Some((px, py))) = (event, pointer_pos) {
+        let is_drag_event = matches!(
+            event,
+            WidgetEvent::PointerUp { .. } | WidgetEvent::PointerMove { .. }
+        );
+        if let (true, Some((px, py))) = (is_drag_event, pointer_pos) {
             for child in self.children.iter_mut().rev() {
                 if child.layout_rect().contains(px, py) {
                     continue;

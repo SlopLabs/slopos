@@ -136,7 +136,9 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 if matches!(widget_event, WidgetEvent::PointerDown { .. }) {
                     let target_policy = find_focus_policy(root.as_ref(), hit.target);
                     if target_policy.is_focusable() {
+                        let previous = focus.focused();
                         focus.set_focused(Some(hit.target));
+                        move_focus_events(root.as_mut(), previous, Some(hit.target), &mut sink);
                     }
                     if overlays.hit_test(px, py).is_none() && !overlays.is_empty() {
                         overlays.dismiss_light(&mut focus);
@@ -161,11 +163,13 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 // indents with Tab, and stealing it before dispatch would make
                 // that impossible to express.
                 if matches!(key, super::event::Key::Named(super::event::NamedKey::Tab)) {
+                    let previous = focus.focused();
                     if m.shift {
                         focus.move_focus_prev();
                     } else {
                         focus.move_focus_next();
                     }
+                    move_focus_events(root.as_mut(), previous, focus.focused(), &mut sink);
                     needs_repaint = true;
                 } else {
                     unhandled_key = Some((*key, *m));
@@ -289,6 +293,48 @@ fn fill_pointer_state(
         _ => {}
     }
     event
+}
+
+/// Tells the widget losing focus and the one gaining it.
+///
+/// Nothing sent these before, so every widget's `focused` flag was permanently
+/// false — which is why `ButtonWidget` and `ListViewWidget` acted on Enter,
+/// Space and the arrow keys without ever asking whether the key was theirs.
+/// Keyboard events are offered to every child until one consumes, so a widget
+/// that answers a key it was not given takes it from whoever was.
+fn move_focus_events(
+    root: &mut dyn Widget,
+    previous: Option<super::traits::WidgetId>,
+    next: Option<super::traits::WidgetId>,
+    sink: &mut MessageSink,
+) {
+    if previous == next {
+        return;
+    }
+    if let Some(id) = previous {
+        send_to_id(root, id, &WidgetEvent::FocusLost, sink);
+    }
+    if let Some(id) = next {
+        send_to_id(root, id, &WidgetEvent::FocusGained, sink);
+    }
+}
+
+fn send_to_id(
+    widget: &mut dyn Widget,
+    id: super::traits::WidgetId,
+    event: &WidgetEvent,
+    sink: &mut MessageSink,
+) -> bool {
+    if widget.id() == id {
+        widget.event(event, super::event::EventPhase::Target, sink);
+        return true;
+    }
+    for child in widget.children_mut() {
+        if send_to_id(child.as_mut(), id, event, sink) {
+            return true;
+        }
+    }
+    false
 }
 
 fn find_focus_policy(widget: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {

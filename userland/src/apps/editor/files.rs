@@ -62,6 +62,11 @@ pub fn read_file(path: &str) -> Result<String, String> {
 /// one, and never a prefix of either; the rename is itself one journalled
 /// metadata operation, so a rude exit cannot catch it half done.
 pub fn write_file(path: &str, text: &str) -> Result<(), String> {
+    // The replacement is a new inode, so it does not inherit the old one's
+    // mode: an executable script saved here would come back un-executable.
+    let mode = crate::apps::coreutils::fsutil::mode_of(path)
+        .ok()
+        .map(|mode| mode & 0o7777);
     let temp = temp_path(path);
     let write = || -> Result<(), String> {
         let mut file = fs::File::create(&temp).map_err(|e| format!("{temp}: {e}"))?;
@@ -74,6 +79,9 @@ pub fn write_file(path: &str, text: &str) -> Result<(), String> {
     if let Err(message) = write() {
         let _ = fs::remove_file(&temp);
         return Err(message);
+    }
+    if let Some(mode) = mode {
+        let _ = crate::apps::coreutils::fsutil::chmod(&temp, mode);
     }
     if let Err(e) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);
@@ -90,7 +98,20 @@ fn temp_path(path: &str) -> String {
         Some(at) => (&path[..at + 1], &path[at + 1..]),
         None => ("", path),
     };
-    format!("{dir}.{name}.sloped-{}", std::process::id())
+    let suffix = format!(".sloped-{}", std::process::id());
+    // A name is bounded; the decoration must not be what pushes a file that
+    // saved yesterday over the limit, so the *original* name is what gets
+    // shortened. It only has to be unique within one directory for the moment
+    // between the write and the rename.
+    let room = slopos_abi::fs::USER_NAME_MAX.saturating_sub(suffix.len() + 1);
+    let mut stem = String::new();
+    for (index, ch) in name.char_indices() {
+        if index + ch.len_utf8() > room {
+            break;
+        }
+        stem.push(ch);
+    }
+    format!("{dir}.{stem}{suffix}")
 }
 
 /// Entries one directory contributes to the tree. A directory larger than this

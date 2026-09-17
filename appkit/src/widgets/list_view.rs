@@ -235,7 +235,12 @@ impl Widget for ListViewWidget {
                 }
             }
 
-            WidgetEvent::KeyDown { key, .. } => match key {
+            // Only when this list holds the keyboard focus. Its selection is
+            // usually the application's — an overlay list is a *display* of
+            // app state — and a list that answered the arrows unconditionally
+            // moved a selection its owner did not know had moved, and emitted
+            // `on_select`, which for a palette means running the command.
+            WidgetEvent::KeyDown { key, .. } if self.focused => match key {
                 Key::Named(NamedKey::Up) => {
                     if let Some(sel) = self.selected {
                         if sel > 0 {
