@@ -454,6 +454,10 @@ impl<'a> FontRenderer<'a> {
 #[inline]
 pub(crate) fn advance_px(font: &TtfFont<'_>, codepoint: u32, scale: f32, size_px: u16) -> f32 {
     font.glyph_index(codepoint)
+        // `.notdef` is "no glyph", and `rasterize_glyph` refuses it — so
+        // measuring its advance is how a measured width and a drawn run
+        // disagree on exactly the codepoints this fallback exists for.
+        .filter(|&gid| gid != 0 || codepoint == 0)
         .and_then(|gid| font.h_metrics(gid))
         .map(|hm| hm.advance_width as f32 * scale)
         .unwrap_or(size_px as f32 * 0.5)

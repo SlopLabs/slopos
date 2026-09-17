@@ -168,10 +168,10 @@ impl FocusManager {
             restore_to: self.focused,
         };
         self.scope_stack.push(scope);
-        if let Some(scope) = self.scope_stack.last() {
-            if let Some(&first) = scope.chain.first() {
-                self.focused = Some(first);
-            }
+        // Through `set_focused`, so the index and chain length a rebuild
+        // restores from describe the scope that is now active.
+        if let Some(&first) = self.scope_stack.last().and_then(|s| s.chain.first()) {
+            self.set_focused(Some(first));
         }
         id
     }
@@ -179,7 +179,7 @@ impl FocusManager {
     /// Pop the topmost focus scope, restoring the focus it was entered with.
     pub fn pop_scope(&mut self) -> Option<FocusScopeId> {
         if let Some(scope) = self.scope_stack.pop() {
-            self.focused = scope.restore_to;
+            self.set_focused(scope.restore_to);
             Some(scope.id)
         } else {
             None

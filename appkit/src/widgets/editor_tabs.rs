@@ -71,12 +71,20 @@ impl EditorTabsWidget {
             self.widths.push(width);
             total += width;
         }
-        // Tabs shrink together rather than scrolling, so every tab the
-        // keyboard switcher can reach is on screen.
-        if total > ctx_width && ctx_width > 0 {
-            let scale = ctx_width as f32 / total as f32;
-            for width in self.widths.iter_mut() {
-                *width = ((*width as f32 * scale) as i32).max(40);
+        // Tabs shrink together rather than scrolling, so every tab the keyboard
+        // switcher can reach is on screen. Shared out exactly rather than
+        // scaled: a floor under the scaled width overflows the row once there
+        // are enough tabs, and the ones past the edge are then unclickable.
+        if total > ctx_width && ctx_width > 0 && !self.widths.is_empty() {
+            let count = self.widths.len() as i32;
+            let each = ctx_width / count;
+            let last = ctx_width - each * (count - 1);
+            for (index, width) in self.widths.iter_mut().enumerate() {
+                *width = if index as i32 == count - 1 {
+                    last
+                } else {
+                    each
+                };
             }
         }
     }
@@ -138,87 +146,90 @@ impl Widget for EditorTabsWidget {
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
-        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, style.bg_secondary);
+        // A tab row narrower than its tabs still draws only inside itself.
+        ctx.with_clip(rect, |ctx| {
+            let style = ctx.style;
+            ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, style.bg_secondary);
 
-        let text_h = ctx.text_height();
-        let mut x = rect.x;
-        // From the live pointer, not a field the last rebuild cleared: the
-        // glyph must be drawn exactly where clicking it closes the tab.
-        let (px, py) = ctx.pointer;
-        let pointer_tab = rect.contains(px, py).then(|| self.tab_at(px)).flatten();
+            let text_h = ctx.text_height();
+            let mut x = rect.x;
+            // From the live pointer, not a field the last rebuild cleared: the
+            // glyph must be drawn exactly where clicking it closes the tab.
+            let (px, py) = ctx.pointer;
+            let pointer_tab = rect.contains(px, py).then(|| self.tab_at(px)).flatten();
 
-        for (index, tab) in self.tabs.iter().enumerate() {
-            let width = *self.widths.get(index).unwrap_or(&MIN_TAB_WIDTH);
-            let active = index == self.active;
-            let hovered = pointer_tab == Some(index);
+            for (index, tab) in self.tabs.iter().enumerate() {
+                let width = *self.widths.get(index).unwrap_or(&MIN_TAB_WIDTH);
+                let active = index == self.active;
+                let hovered = pointer_tab == Some(index);
 
-            if active {
-                ctx.fill_rect(x, rect.y, width, rect.height, style.code_bg);
-                ctx.fill_rect(x, rect.y, width, 2, style.text_accent);
-            } else if hovered {
-                ctx.fill_rect(x, rect.y, width, rect.height, style.bg_hover);
+                if active {
+                    ctx.fill_rect(x, rect.y, width, rect.height, style.code_bg);
+                    ctx.fill_rect(x, rect.y, width, 2, style.text_accent);
+                } else if hovered {
+                    ctx.fill_rect(x, rect.y, width, rect.height, style.bg_hover);
+                }
+                ctx.fill_rect(
+                    x + width - 1,
+                    rect.y + 6,
+                    1,
+                    rect.height - 12,
+                    style.border_divider,
+                );
+
+                let label_color = if active {
+                    style.text_primary
+                } else {
+                    style.text_secondary
+                };
+                let label_budget = width - TAB_PAD_H * 2 - CLOSE_GAP - CLOSE_SIZE;
+                let label = elide(&tab.title, label_budget, |t| ctx.text_width(t));
+                let label_y = rect.y + (rect.height - text_h) / 2;
+                ctx.draw_text_transparent(x + TAB_PAD_H, label_y, &label, label_color);
+
+                let icon_x = x + width - TAB_PAD_H - CLOSE_SIZE;
+                let icon_y = rect.y + (rect.height - CLOSE_SIZE) / 2;
+                // One slot: the dot gives way to the close affordance on hover.
+                if tab.modified && !hovered {
+                    draw_icon(
+                        ctx,
+                        IconKind::Dot,
+                        icon_x,
+                        icon_y,
+                        CLOSE_SIZE,
+                        style.text_accent,
+                    );
+                } else if hovered || active {
+                    draw_icon(
+                        ctx,
+                        IconKind::Close,
+                        icon_x,
+                        icon_y,
+                        CLOSE_SIZE,
+                        style.text_secondary,
+                    );
+                }
+
+                x += width;
+            }
+
+            if x < rect.x + rect.width {
+                ctx.fill_rect(
+                    x,
+                    rect.y,
+                    rect.x + rect.width - x,
+                    rect.height,
+                    style.bg_secondary,
+                );
             }
             ctx.fill_rect(
-                x + width - 1,
-                rect.y + 6,
+                rect.x,
+                rect.y + rect.height - 1,
+                rect.width,
                 1,
-                rect.height - 12,
                 style.border_divider,
             );
-
-            let label_color = if active {
-                style.text_primary
-            } else {
-                style.text_secondary
-            };
-            let label_budget = width - TAB_PAD_H * 2 - CLOSE_GAP - CLOSE_SIZE;
-            let label = elide(&tab.title, label_budget, |t| ctx.text_width(t));
-            let label_y = rect.y + (rect.height - text_h) / 2;
-            ctx.draw_text_transparent(x + TAB_PAD_H, label_y, &label, label_color);
-
-            let icon_x = x + width - TAB_PAD_H - CLOSE_SIZE;
-            let icon_y = rect.y + (rect.height - CLOSE_SIZE) / 2;
-            // One slot: the dot gives way to the close affordance on hover.
-            if tab.modified && !hovered {
-                draw_icon(
-                    ctx,
-                    IconKind::Dot,
-                    icon_x,
-                    icon_y,
-                    CLOSE_SIZE,
-                    style.text_accent,
-                );
-            } else if hovered || active {
-                draw_icon(
-                    ctx,
-                    IconKind::Close,
-                    icon_x,
-                    icon_y,
-                    CLOSE_SIZE,
-                    style.text_secondary,
-                );
-            }
-
-            x += width;
-        }
-
-        if x < rect.x + rect.width {
-            ctx.fill_rect(
-                x,
-                rect.y,
-                rect.x + rect.width - x,
-                rect.height,
-                style.bg_secondary,
-            );
-        }
-        ctx.fill_rect(
-            rect.x,
-            rect.y + rect.height - 1,
-            rect.width,
-            1,
-            style.border_divider,
-        );
+        });
     }
 
     fn event(

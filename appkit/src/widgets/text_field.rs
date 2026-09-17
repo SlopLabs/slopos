@@ -327,8 +327,13 @@ impl Widget for TextFieldWidget {
             }
 
             WidgetEvent::KeyDown { key, modifiers, .. } if self.focused => {
+                // Against the text, not against the key: a read-only field
+                // consumes Space and Backspace without changing anything, and
+                // so does a Backspace at position zero.
+                let may_modify = !self.read_only && self.is_text_modifying_key(key, modifiers);
+                let before = may_modify.then(|| self.text.clone());
                 let resp = self.handle_key_down(key, modifiers);
-                if resp.is_consumed() && self.is_text_modifying_key(key, modifiers) {
+                if resp.is_consumed() && before.is_some_and(|before| before != self.text) {
                     if let Some(cb) = &self.on_change {
                         sink.emit_raw(cb(self.text.clone()));
                     }

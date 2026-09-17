@@ -1328,7 +1328,7 @@ boot step reads first.
 **Decided.** Rust toolchain: Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
 C library and a Rust-written C frontend are Workstream 1.6, off the critical
-path. Scope: the full in-guest loop, Phases 1–3, in QEMU; bare metal is not
+path. Scope: the full in-guest loop, Phases 1–2, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
 scope and `stat`'s uid/gid fields exist for layout only. Directory scaling: an

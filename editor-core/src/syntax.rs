@@ -135,6 +135,22 @@ struct LangSpec {
     capitalized_types: bool,
     /// `"""…"""` strings, which span lines.
     triple_quotes: bool,
+    /// `'a` is a lifetime, so an apostrophe opens a literal only when one
+    /// character or escape and a closing apostrophe follow it.
+    lifetimes: bool,
+}
+
+/// Whether the apostrophe at `i` opens a character literal rather than a
+/// lifetime. `'a'` and `'\n'` do; `'a` in `&'a str` does not, and reading it as
+/// one paints the rest of the line — or up to the next apostrophe — as a string.
+fn opens_char_literal(chars: &[char], i: usize) -> bool {
+    match chars.get(i + 1) {
+        // An escape is variable width (`'\n'`, `'\u{1F600}'`), so scan for the
+        // close within the longest one Rust allows.
+        Some('\\') => chars.iter().skip(i + 2).take(11).any(|&c| c == '\''),
+        Some(_) => chars.get(i + 2) == Some(&'\''),
+        None => false,
+    }
 }
 
 const RUST: LangSpec = LangSpec {
@@ -157,6 +173,7 @@ const RUST: LangSpec = LangSpec {
     call_syntax: true,
     capitalized_types: true,
     triple_quotes: false,
+    lifetimes: true,
 };
 
 const C_LANG: LangSpec = LangSpec {
@@ -178,6 +195,7 @@ const C_LANG: LangSpec = LangSpec {
     call_syntax: true,
     capitalized_types: false,
     triple_quotes: false,
+    lifetimes: false,
 };
 
 const SHELL: LangSpec = LangSpec {
@@ -196,6 +214,7 @@ const SHELL: LangSpec = LangSpec {
     call_syntax: false,
     capitalized_types: false,
     triple_quotes: false,
+    lifetimes: false,
 };
 
 const PYTHON: LangSpec = LangSpec {
@@ -217,6 +236,7 @@ const PYTHON: LangSpec = LangSpec {
     call_syntax: true,
     capitalized_types: true,
     triple_quotes: true,
+    lifetimes: false,
 };
 
 /// Every language answers `line()` before reaching the lexer except these, so
@@ -234,6 +254,7 @@ const PLAIN: LangSpec = LangSpec {
     call_syntax: false,
     capitalized_types: false,
     triple_quotes: false,
+    lifetimes: false,
 };
 
 pub struct Highlighter {
@@ -403,7 +424,9 @@ fn lex(spec: &LangSpec, text: &str, state: LineState) -> (Vec<Span>, LineState) 
             }
         }
 
-        if spec.quotes.contains(&c) {
+        if spec.quotes.contains(&c)
+            && !(spec.lifetimes && c == '\'' && !opens_char_literal(&chars, i))
+        {
             // A triple quote spans lines; a doubled quote that is not tripled is
             // an empty string and must not be read as one.
             if spec.triple_quotes && chars.get(i + 1) == Some(&c) && chars.get(i + 2) == Some(&c) {

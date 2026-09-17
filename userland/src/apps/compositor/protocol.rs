@@ -1299,6 +1299,16 @@ impl ProtocolBridge {
             .position(|s| s.active && s.client_idx == client_idx && s.toplevel_id == toplevel_id)
     }
 
+    /// The generation of the surface `task_id` currently designates.
+    ///
+    /// A task id is a slot index, and slots are recycled, so an id held across
+    /// a destroy designates the successor. Pairing it with the generation the
+    /// holder saw is what tells the two apart.
+    pub fn surface_generation_for_task(&self, task_id: u32) -> Option<u32> {
+        self.task_id_to_surface_idx(task_id)
+            .map(|idx| self.surfaces[idx].generation)
+    }
+
     fn task_id_to_surface_idx(&self, task_id: u32) -> Option<usize> {
         let idx = (NonZeroU32::new(task_id)?.get() - 1) as usize;
         if idx < MAX_SURFACES && self.surfaces[idx].active {

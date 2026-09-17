@@ -14,10 +14,23 @@ use crate::memfd_buf::MemfdBuffer;
 /// Ceiling on one transfer, matching the compositor's.
 pub const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 
+/// Where a paste round trip has got to.
+///
+/// Explicit, because the round trip is three messages long and a second
+/// request part way through it used to drop the destination buffer the first
+/// was still waiting on — losing that paste, or answering it with the *next*
+/// transfer's buffer.
+#[derive(Default)]
+enum Paste {
+    #[default]
+    Idle,
+    AwaitingOffer,
+    AwaitingData(MemfdBuffer),
+}
+
 #[derive(Default)]
 pub struct Clipboard {
-    /// The destination buffer between `ClipboardRead` and `PasteResult`.
-    pending: Option<MemfdBuffer>,
+    paste: Paste,
 }
 
 impl Clipboard {
@@ -48,17 +61,32 @@ impl Clipboard {
 
     /// Asks for the selection; the answer arrives as
     /// [`crate::Event::ClipboardOffer`].
+    ///
+    /// False while a round trip is already running, which leaves the caller to
+    /// fall back rather than cancelling a paste that is about to land.
     pub fn request(&mut self, handle: &ProtocolHandle) -> bool {
-        self.pending = None;
-        match handle.try_borrow_client() {
+        if !matches!(self.paste, Paste::Idle) {
+            return false;
+        }
+        let sent = match handle.try_borrow_client() {
             Some(mut client) => client.clipboard_paste().is_ok(),
             None => false,
+        };
+        if sent {
+            self.paste = Paste::AwaitingOffer;
         }
+        sent
     }
 
     /// Answers an offer with a destination buffer of exactly `len` bytes.
+    ///
+    /// Every failure here ends the round trip, or an empty selection would
+    /// leave the clipboard refusing every later paste.
     pub fn accept_offer(&mut self, handle: &ProtocolHandle, len: u32) -> bool {
-        self.pending = None;
+        if !matches!(self.paste, Paste::AwaitingOffer) {
+            return false;
+        }
+        self.paste = Paste::Idle;
         let len = len as usize;
         if len == 0 || len > MAX_CLIPBOARD_BYTES {
             return false;
@@ -70,7 +98,7 @@ impl Clipboard {
             return false;
         };
         if client.clipboard_read(buffer.fd(), len as u32).is_ok() {
-            self.pending = Some(buffer);
+            self.paste = Paste::AwaitingData(buffer);
             true
         } else {
             false
@@ -83,7 +111,9 @@ impl Clipboard {
     /// untrusted input, and an editor that accepted an escape sequence would be
     /// pasting something no one typed.
     pub fn take(&mut self, len: u32) -> Option<String> {
-        let mut buffer = self.pending.take()?;
+        let Paste::AwaitingData(mut buffer) = core::mem::take(&mut self.paste) else {
+            return None;
+        };
         let len = (len as usize).min(buffer.size());
         let bytes = &buffer.as_mut_slice()[..len];
         let mut out: Vec<u8> = Vec::with_capacity(len);

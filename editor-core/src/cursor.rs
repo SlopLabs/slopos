@@ -137,13 +137,18 @@ impl Cursor {
     }
 }
 
+/// Home: the first non-blank column, or column zero when already there.
+///
+/// A toggle in both directions, so a third press comes back — Home from column
+/// zero on an indented line is how the caret reaches the text again.
 fn line_start(buffer: &TextBuffer, pos: Position) -> Position {
-    let indent = buffer.indent_len(pos.line);
-    if pos.col > indent || indent == 0 {
-        Position::new(pos.line, indent.min(buffer.line_len(pos.line)))
+    let indent = buffer.indent_len(pos.line).min(buffer.line_len(pos.line));
+    let col = if indent == 0 || pos.col == indent {
+        0
     } else {
-        Position::new(pos.line, 0)
-    }
+        indent
+    };
+    Position::new(pos.line, col)
 }
 
 /// The start of the word before `pos`, crossing at most one line break.

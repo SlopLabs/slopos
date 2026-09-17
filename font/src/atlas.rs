@@ -244,9 +244,12 @@ impl GlyphAtlas {
         &self.chunks.as_slice()[idx / self.slots_per_chunk].as_slice()[at..at + stride]
     }
 
-    /// Draw a single character at (x, y). Never reads back from the target, so
-    /// it is safe over MMIO. A transparent `bg` (`bg.0 == 0`) leaves uncovered
-    /// pixels untouched and blends edge pixels against opaque black.
+    /// Draw a single character at (x, y).
+    ///
+    /// An opaque `bg` never reads the target, so it is safe over MMIO. A
+    /// transparent one (`bg.0 == 0`) leaves uncovered pixels untouched and
+    /// composites edge pixels against what is already there — which *reads*
+    /// the target, so it needs one that can be read back.
     pub fn draw_char<T: Canvas>(
         &self,
         target: &mut T,
@@ -421,6 +424,8 @@ impl GlyphAtlas {
         damage
     }
 
+    /// [`GlyphAtlas::draw_char`] bounded to `clip`, and with the same contract:
+    /// a transparent `bg` reads the target back to composite against it.
     pub fn draw_char_clipped<T: Canvas>(
         &self,
         target: &mut T,

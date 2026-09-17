@@ -161,6 +161,24 @@ fn test_home_toggles_between_indent_and_column_zero() -> bool {
     true
 }
 
+/// Home toggles both ways: a third press comes back to the text.
+fn test_home_from_column_zero_returns_to_the_indent() -> bool {
+    let mut d = doc("    indented\n");
+    d.place_cursor(pos(0, 0), false);
+    d.move_cursor(Motion::LineStart, false);
+    assert_eq!(d.cursor.position, pos(0, 4));
+    d.move_cursor(Motion::LineStart, false);
+    assert_eq!(d.cursor.position, pos(0, 0));
+    // An unindented line has only one answer.
+    let mut d = doc("flush\n");
+    d.place_cursor(pos(0, 3), false);
+    d.move_cursor(Motion::LineStart, false);
+    assert_eq!(d.cursor.position, pos(0, 0));
+    d.move_cursor(Motion::LineStart, false);
+    assert_eq!(d.cursor.position, pos(0, 0));
+    true
+}
+
 fn test_vertical_motion_keeps_the_goal_column() -> bool {
     let mut d = doc("aaaaaa\nbb\ncccccc\n");
     d.place_cursor(pos(0, 5), false);
@@ -918,6 +936,17 @@ fn test_block_comment_state_crosses_lines() -> bool {
     true
 }
 
+/// `&'a str` is a lifetime, not a string that runs to the end of the line.
+fn test_rust_lifetimes_are_not_strings() -> bool {
+    let h = Highlighter::new(Language::Rust);
+    let (spans, _) = h.line("fn f<'a>(x: &'a str) -> &'a str { x }", LineState::Normal);
+    assert!(!spans.iter().any(|s| s.kind == TokenKind::Str));
+    // A real character literal still is one.
+    let (spans, _) = h.line("let c = 'x'; let n = '\\n';", LineState::Normal);
+    assert_eq!(spans.iter().filter(|s| s.kind == TokenKind::Str).count(), 2);
+    true
+}
+
 fn test_rust_block_comments_nest() -> bool {
     let h = Highlighter::new(Language::Rust);
     let (_, state) = h.line("/* a /* b", LineState::Normal);
@@ -1427,6 +1456,14 @@ pub fn cases() -> &'static [(&'static str, fn() -> bool)] {
             test_block_comment_state_crosses_lines,
         ),
         ("rust_block_comments_nest", test_rust_block_comments_nest),
+        (
+            "rust_lifetimes_are_not_strings",
+            test_rust_lifetimes_are_not_strings,
+        ),
+        (
+            "home_from_column_zero_returns_to_the_indent",
+            test_home_from_column_zero_returns_to_the_indent,
+        ),
         ("raw_string_spans_lines", test_raw_string_spans_lines),
         (
             "line_comment_swallows_the_rest_of_the_line",

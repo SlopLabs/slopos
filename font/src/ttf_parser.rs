@@ -400,12 +400,12 @@ impl<'a> TtfFont<'a> {
         for &end in &end_pts {
             let end = end as usize;
             // `endPtsOfContours` comes from the file and is not checked to be
-            // monotonic, so a malformed font can put `end` behind `start` —
-            // which underflows the capacity below and, with overflow checks on,
-            // aborts a process whose every other path degrades to a fallback
-            // font.
+            // monotonic, so a malformed font can put `end` behind `start`, which
+            // underflows the capacity below. The whole glyph goes rather than
+            // the rest of it: the contours already read are half a shape, and
+            // drawing half a shape is worse than drawing the fallback.
             if end >= num_points || end < start {
-                break;
+                return None;
             }
             let mut points: KVec<OutlinePoint> = KVec::with_capacity(end - start + 1).ok()?;
             for i in start..=end {
