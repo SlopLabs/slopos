@@ -8,8 +8,13 @@ pub struct FocusScope {
     pub id: FocusScopeId,
     /// Widgets in this scope, in tab order.
     pub chain: Vec<WidgetId>,
-    /// Which widget was focused when this scope was entered.
-    pub restore_to: Option<WidgetId>,
+    /// Where focus sat in the enclosing chain when this scope was entered, and
+    /// how long that chain was.
+    ///
+    /// A position and not a `WidgetId`: ids come from a global counter and the
+    /// tree is rebuilt on every message, so by the time a scope closes the id
+    /// that held focus when it opened designates nothing.
+    pub restore_to: Option<(usize, usize)>,
 }
 
 pub struct FocusManager {
@@ -165,7 +170,7 @@ impl FocusManager {
         let scope = FocusScope {
             id,
             chain: focusable_ids,
-            restore_to: self.focused,
+            restore_to: self.focused_index.zip(self.chain_len_at_focus),
         };
         self.scope_stack.push(scope);
         // Through `set_focused`, so the index and chain length a rebuild
@@ -177,13 +182,21 @@ impl FocusManager {
     }
 
     /// Pop the topmost focus scope, restoring the focus it was entered with.
+    ///
+    /// By position, against the chain as it is now: the tree is rebuilt on
+    /// every message while a scope is open, so the id that held focus when the
+    /// scope was entered names a widget that no longer exists.
     pub fn pop_scope(&mut self) -> Option<FocusScopeId> {
-        if let Some(scope) = self.scope_stack.pop() {
-            self.set_focused(scope.restore_to);
-            Some(scope.id)
-        } else {
-            None
-        }
+        let scope = self.scope_stack.pop()?;
+        let outer_len = self.active_chain().len();
+        let restored = match scope.restore_to {
+            // Same rule as a rebuild: a chain that gained or lost a control
+            // indexes a different widget, and dropping focus cannot be wrong.
+            Some((index, len)) if len == outer_len => self.active_chain().get(index).copied(),
+            _ => None,
+        };
+        self.set_focused(restored);
+        Some(scope.id)
     }
 }
 

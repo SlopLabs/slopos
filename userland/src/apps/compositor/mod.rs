@@ -465,11 +465,15 @@ impl WindowManager {
                         .input
                         .on_button_release(button, proto_box.as_deref_mut());
                     // The press was forwarded, so the release is owed to the
-                    // same surface.
+                    // same surface — and to nobody else. A grab whose holder is
+                    // gone leaves the release with no owner: the surface under
+                    // the pointer now never saw the press, and may be the one
+                    // that took the dead grab's slot.
+                    let held_grab = self.protocol_pointer_grab != 0;
                     let grab = self.live_pointer_grab(proto_box.as_deref());
                     let target = if grab != 0 {
                         grab
-                    } else if should_forward {
+                    } else if should_forward && !held_grab {
                         self.protocol_pointer_focus
                     } else {
                         0

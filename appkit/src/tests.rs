@@ -335,6 +335,39 @@ fn test_focus_scope() {
     assert_eq!(fm.focused(), Some(id_a));
 }
 
+/// A scope outlives the tree it was opened over, and the id it was opened on
+/// with it: every message rebuilds every widget. Focus has to come back to the
+/// same *place*, since the widget that held it no longer exists.
+fn test_focus_scope_restores_across_a_rebuild() {
+    fn tree() -> (VStackWidget, Vec<crate::traits::WidgetId>) {
+        let a = FixedSizeWidget::focusable(10, 10);
+        let b = FixedSizeWidget::focusable(10, 10);
+        let c = FixedSizeWidget::focusable(10, 10);
+        let ids = vec![a.id(), b.id(), c.id()];
+        let children: Vec<Box<dyn Widget>> = vec![Box::new(a), Box::new(b), Box::new(c)];
+        (
+            VStackWidget::new(children, 0, CrossAxisAlignment::Start),
+            ids,
+        )
+    }
+
+    let (first, first_ids) = tree();
+    let mut fm = FocusManager::new();
+    fm.rebuild_tab_chain(&first);
+    fm.set_focused(Some(first_ids[1]));
+
+    fm.push_scope(Vec::new());
+    // The overlay is open and the application keeps producing messages, so the
+    // tree underneath it is replaced — new widgets, new ids.
+    let (second, second_ids) = tree();
+    fm.rebuild_tab_chain(&second);
+    fm.pop_scope();
+
+    // The middle control of the *current* tree, not the id the scope captured.
+    assert_eq!(fm.focused(), Some(second_ids[1]));
+    assert_ne!(first_ids[1], second_ids[1]);
+}
+
 fn test_hit_test_leaf() {
     let mut w = FixedSizeWidget::new(100, 50);
     place_widget(&mut w, Rect::new(10, 20, 100, 50));
@@ -1646,6 +1679,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         ("focus_prev", test_focus_prev),
         ("focus_wrap", test_focus_wrap),
         ("focus_scope", test_focus_scope),
+        (
+            "focus_scope_restores_across_a_rebuild",
+            test_focus_scope_restores_across_a_rebuild,
+        ),
         ("hit_test_leaf", test_hit_test_leaf),
         ("hit_test_miss", test_hit_test_miss),
         ("edge_insets_symmetric", test_edge_insets_symmetric),
