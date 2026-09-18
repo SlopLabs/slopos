@@ -18,34 +18,11 @@ use super::{DEFAULT_STACK_SIZE, pthread_attr_t, pthread_t};
 
 /// Unmapped page at the low end of every thread stack. Without it a stack
 /// overflow silently writes into whatever the allocator put below.
-pub const THREAD_STACK_GUARD_SIZE: usize = PAGE_SIZE as usize;
-
-/// Answers 0 for a thread whose stack this library did not allocate — the
-/// initial thread runs on the kernel's stack.
 ///
-/// # Safety
-/// `lo` and `hi` must each be null or point to a writable `u64`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_thread_stack_guard(lo: *mut u64, hi: *mut u64) -> i32 {
-    let (guard_lo, guard_hi) = if super::tls::tls_is_initialized() {
-        let tcb = Tcb::current();
-        if tcb.is_null() || (*tcb).stack_base.is_null() {
-            (0u64, 0u64)
-        } else {
-            let base = (*tcb).stack_base as u64;
-            (base, base + THREAD_STACK_GUARD_SIZE as u64)
-        }
-    } else {
-        (0, 0)
-    };
-    if !lo.is_null() {
-        *lo = guard_lo;
-    }
-    if !hi.is_null() {
-        *hi = guard_hi;
-    }
-    if guard_hi == 0 { -1 } else { 0 }
-}
+/// Callers learn the range through `pthread_getattr_np` plus
+/// `pthread_attr_getstack`/`pthread_attr_getguardsize`, which is where a
+/// stack-overflow handler looks for it.
+pub const THREAD_STACK_GUARD_SIZE: usize = PAGE_SIZE as usize;
 
 const CLONE_THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_FS
@@ -136,9 +113,19 @@ pub unsafe extern "C" fn pthread_create(
         (*attr).detach_state == super::PTHREAD_CREATE_DETACHED
     };
 
+    // A default attr, and a null one, carry the guard page; only an explicit
+    // `pthread_attr_setguardsize(attr, 0)` drops it.
+    let guard_size = if attr.is_null() {
+        THREAD_STACK_GUARD_SIZE
+    } else if (*attr).guard_size == 0 && (*attr).stack_size != 0 {
+        0
+    } else {
+        THREAD_STACK_GUARD_SIZE
+    };
+
     // The guard page is part of the mapping, and `stack_size` in the TCB is the
     // whole mapping, so the teardown `munmap` still covers it.
-    let mapped_size = stack_size + THREAD_STACK_GUARD_SIZE;
+    let mapped_size = stack_size + guard_size;
     let stack_base = match Sys::mmap(
         ptr::null_mut(),
         mapped_size,
@@ -154,10 +141,12 @@ pub unsafe extern "C" fn pthread_create(
         }
     };
 
-    if let Err(e) = Sys::mprotect(stack_base, THREAD_STACK_GUARD_SIZE, PROT_NONE) {
-        let _ = Sys::munmap(stack_base, mapped_size);
-        errno::errno_set(e.raw());
-        return e.raw();
+    if guard_size != 0 {
+        if let Err(e) = Sys::mprotect(stack_base, guard_size, PROT_NONE) {
+            let _ = Sys::munmap(stack_base, mapped_size);
+            errno::errno_set(e.raw());
+            return e.raw();
+        }
     }
 
     // A full block (TLS image + TCB) is what leaves the new thread's `.tbss`
@@ -176,6 +165,7 @@ pub unsafe extern "C" fn pthread_create(
     (*tcb_ptr).start_arg = arg;
     (*tcb_ptr).detached = detach;
     (*tcb_ptr).child_tid = -1;
+    (*tcb_ptr).guard_size = guard_size;
 
     let stack_top = stack_base.add(mapped_size);
 

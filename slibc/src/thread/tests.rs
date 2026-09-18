@@ -3,7 +3,6 @@ use core::sync::atomic::AtomicI32;
 
 use super::condvar::*;
 use super::mutex::*;
-use super::rwlock::*;
 use super::shim;
 use super::tcb::PTHREAD_KEYS_MAX;
 use super::tcb::*;
@@ -56,7 +55,6 @@ pub fn run_thread_tests() -> (u32, u32) {
         "mutex init state 0",
         init.state.load(core::sync::atomic::Ordering::Relaxed) == 0
     );
-    check!("mutex init owner 0", init.owner_tid == 0);
     check!("mutex init kind normal", init.kind == PTHREAD_MUTEX_NORMAL);
 
     let cond_init = PTHREAD_COND_INITIALIZER;
@@ -65,19 +63,6 @@ pub fn run_thread_tests() -> (u32, u32) {
         cond_init.seq.load(core::sync::atomic::Ordering::Relaxed) == 0
     );
     check!("cond init mutex null", cond_init.mutex.is_null());
-
-    let rw_init = PTHREAD_RWLOCK_INITIALIZER;
-    check!(
-        "rwlock init state 0",
-        rw_init.state.load(core::sync::atomic::Ordering::Relaxed) == 0
-    );
-    check!(
-        "rwlock init writer_waiting 0",
-        rw_init
-            .writer_waiting
-            .load(core::sync::atomic::Ordering::Relaxed)
-            == 0
-    );
 
     check!("pthread_t is u64", mem::size_of::<pthread_t>() == 8);
     check!(

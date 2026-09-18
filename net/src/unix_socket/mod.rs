@@ -15,6 +15,7 @@ mod slot;
 
 use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
+use slopos_abi::quota::CustodyAxis;
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
 use slopos_ostd::handle::HandleTable;
 use slopos_ostd::lock_class;
@@ -24,6 +25,7 @@ use slopos_ostd::{KVec, KVecDeque};
 use pair::{PairSide, PairTable};
 use slopos_fs::{FileRef, LeafFileRef};
 use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::Reservation;
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
 
 pub use buffer::UNIX_BUF_SIZE;
@@ -473,10 +475,12 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
 /// # Atomicity contract
 ///
 /// Data bytes and ancillary fds become visible to the peer **together**: the
-/// peer's next `unix_recvmsg` either sees both or neither. One critical section
-/// capacity-checks both targets (ancillary all-or-nothing; data may write
-/// partially, per Linux's per-skb semantics), pushes fds before data, then
-/// unlocks once and wakes once.
+/// peer's next `unix_recvmsg` either sees both or neither. One critical
+/// section settles every refusal the ancillary batch has — the
+/// `MAX_INFLIGHT_FDS` cap and the sender's custody charge for *all* of
+/// `files`, both taken before any of it moves — then pushes fds before data,
+/// unlocks once and wakes once. Ancillary transfer is all-or-nothing; data may
+/// write partially, per Linux's per-skb semantics.
 ///
 /// Nothing publishes partially. `files` are owned aliases: on commit they move
 /// into the peer's ancillary queue, and on any error return they stay in the
@@ -497,6 +501,14 @@ pub fn unix_sendmsg(
 ) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return Errno::EBADF.raw();
+    };
+
+    // Custody tokens for the batch, one per file. Allocated here because
+    // `AncillaryQueue::reserve` fills it under the socket lock, where an
+    // allocation has no business being.
+    let mut custody: KVec<Reservation<CustodyAxis>> = match KVec::with_capacity(files.len()) {
+        Ok(v) => v,
+        Err(_) => return Errno::ENOMEM.raw(),
     };
 
     loop {
@@ -528,7 +540,9 @@ pub fn unix_sendmsg(
             };
 
             let fd_count = files.len();
-            if fd_count > 0 && pair.send_anc(side).len() + fd_count > pair::MAX_INFLIGHT_FDS {
+            if fd_count > 0 && !pair.send_anc(side).has_room(fd_count) {
+                // Refused before the park below: a batch that cannot fit will
+                // not start fitting because the data FIFO drained.
                 return Errno::ENOMEM.raw();
             }
 
@@ -538,13 +552,18 @@ pub fn unix_sendmsg(
             } else {
                 if fd_count > 0 {
                     let anc = pair.send_anc(side);
-                    for file in files.drain(..) {
-                        // The only refusal left is the sender's custody
-                        // ceiling; a refused file drops here rather than
-                        // travelling uncharged.
-                        if let Err(refused) = anc.push(file, sender_account) {
-                            drop(refused);
-                        }
+                    if !anc.reserve(fd_count, sender_account, &mut custody) {
+                        // Nothing has moved yet: `files` is still the
+                        // caller's, and `custody` refunds off-lock what it
+                        // took. Reporting a byte count for a descriptor this
+                        // send then dropped is the alternative.
+                        return Errno::ENOMEM.raw();
+                    }
+                    // One token per file, so neither side of the zip runs
+                    // short and every push commits. The loop has no refusal
+                    // arm left, which is what the contract above requires.
+                    for (file, token) in files.drain(..).zip(custody.drain(..)) {
+                        anc.push(file, token);
                     }
                 }
                 let n = if data.is_empty() {

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! libc signal()/sigaction() handler-install end-to-end test.
 //!
 //! The kernel rejects a catchable handler whose `sa_restorer` is 0, so libc
@@ -12,6 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::signal::UserSigaction;
 use slopos_slibc::signal::{self, SIG_DFL, SIGUSR1, SIGUSR2};
+use slopos_slibc::types::{sigaction as SigAction, sigset_t as SigSet};
 
 static SIGUSR1_COUNT: AtomicU32 = AtomicU32::new(0);
 static SIGUSR2_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -83,16 +82,20 @@ fn test_signal_installs_and_delivers() -> bool {
     true
 }
 
-/// `sigaction()` with `sa_restorer == 0` on a real handler must have libc
+/// `sigaction()` with a null `sa_restorer` on a real handler must have libc
 /// substitute its own restorer (glibc behavior) so the install succeeds.
+///
+/// The struct is libc's 152-byte one, not the kernel's 32-byte
+/// `UserSigaction`: narrowing between the two is slibc's job, and this is the
+/// call that exercises it.
 fn test_sigaction_injects_restorer() -> bool {
     SIGUSR2_COUNT.store(0, Ordering::SeqCst);
 
-    let act = UserSigaction {
-        sa_handler: on_sigusr2 as *const () as usize as u64,
+    let act = SigAction {
+        sa_sigaction: on_sigusr2 as *const () as usize,
+        sa_mask: SigSet::empty(),
         sa_flags: 0,
-        sa_restorer: 0,
-        sa_mask: 0,
+        sa_restorer: None,
     };
 
     let rc = unsafe { signal::sigaction(SIGUSR2, &act, core::ptr::null_mut()) };

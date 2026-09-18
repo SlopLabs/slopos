@@ -1,3 +1,5 @@
+mod abi_pins;
+
 use core::cell::SyncUnsafeCell;
 use core::ffi::c_char;
 
@@ -8,18 +10,11 @@ pub type MainFn =
 struct SyncCharPtrPtr(*const *const c_char);
 unsafe impl Sync for SyncCharPtrPtr {}
 
-static MAIN_FN: SyncUnsafeCell<Option<MainFn>> = SyncUnsafeCell::new(None);
 static ARGC: SyncUnsafeCell<isize> = SyncUnsafeCell::new(0);
 static ARGV: SyncUnsafeCell<SyncCharPtrPtr> =
     SyncUnsafeCell::new(SyncCharPtrPtr(core::ptr::null()));
 static ENVP: SyncUnsafeCell<SyncCharPtrPtr> =
     SyncUnsafeCell::new(SyncCharPtrPtr(core::ptr::null()));
-
-pub fn set_main(main: MainFn) {
-    unsafe {
-        *MAIN_FN.get() = Some(main);
-    }
-}
 
 pub fn argc() -> isize {
     unsafe { *ARGC.get() }
@@ -34,38 +29,6 @@ pub fn envp() -> *const *const c_char {
 }
 
 /// # Safety
-/// Must be called exactly once from a context where RSP points at the
-/// kernel-prepared stack layout (argc at [rsp], argv at [rsp+8], ...).
-pub unsafe fn init_from_stack() {
-    unsafe {
-        use core::arch::asm;
-
-        let sp: u64;
-        asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack));
-
-        let stack_ptr = sp as *const u64;
-
-        let raw_argc = *stack_ptr as isize;
-        if raw_argc < 0 || raw_argc > 1024 {
-            *ARGC.get() = 0;
-            (*ARGV.get()).0 = core::ptr::null();
-            (*ENVP.get()).0 = core::ptr::null();
-            return;
-        }
-
-        *ARGC.get() = raw_argc;
-        (*ARGV.get()).0 = stack_ptr.add(1) as *const *const c_char;
-
-        let envp_offset = 1 + (raw_argc as usize) + 1;
-        (*ENVP.get()).0 = stack_ptr.add(envp_offset) as *const *const c_char;
-
-        // Capture the PT_TLS template so spawned threads can build valid TLS
-        // blocks (the kernel only sets up the main thread's TLS image).
-        crate::thread::tls::capture_tls_template_from_stack(stack_ptr as *const usize);
-    }
-}
-
-/// # Safety
 /// `main`, `argc`, and `argv` must be valid. `envp` is derived from
 /// `argv[argc+1]` per the System V ABI.
 #[unsafe(no_mangle)]
@@ -74,7 +37,6 @@ pub unsafe extern "C" fn __libc_start_main(
     argc: isize,
     argv: *const *const c_char,
 ) -> ! {
-    *MAIN_FN.get() = Some(main);
     *ARGC.get() = argc;
     (*ARGV.get()).0 = argv;
 
@@ -122,27 +84,6 @@ pub unsafe extern "C" fn __slibc_start(stack_base: *const usize) -> ! {
 
     let ret = main(argc, argv as *const *const u8);
     crate::process::exit(ret as i32)
-}
-
-/// # Safety
-/// Same RSP requirements as [`init_from_stack`].
-pub unsafe fn crt0_start() -> ! {
-    init_from_stack();
-
-    let argc = *ARGC.get();
-    let argv = (*ARGV.get()).0;
-    let envp = (*ENVP.get()).0;
-
-    crate::env::environ = envp as *mut *mut u8;
-    crate::thread::tls::tls_init_main_thread();
-    crate::stdio::streams::stdio_init();
-
-    if let Some(main) = *MAIN_FN.get() {
-        let ret = main(argc, argv, envp);
-        crate::process::exit(ret);
-    } else {
-        crate::process::_exit(127);
-    }
 }
 
 pub fn get_arg(index: usize) -> Option<&'static [u8]> {

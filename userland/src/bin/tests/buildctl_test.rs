@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! The Phase 1 exit criterion: a hand-written build driver running in-guest.
 //!
 //! A build system is the thing that breaks first when a POSIX floor is

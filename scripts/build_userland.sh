@@ -8,8 +8,14 @@ set -euo pipefail
 # With --test:    also builds userland test binaries (requires testbins feature)
 #
 # Environment:
-#   CARGO        - cargo binary (default: cargo)
-#   RUST_CHANNEL - toolchain channel (parsed from rust-toolchain.toml if unset)
+#   CARGO           - cargo binary (default: cargo)
+#   USERLAND_TARGET - target JSON (default: targets/x86_64-unknown-slopos.json)
+#   BUILD_STD       - std crates -Zbuild-std compiles (default: core,alloc,std,panic_abort)
+#
+# The build runs on `+slopos`, not on the rustup channel: std for
+# `x86_64-unknown-slopos` comes from the pinned std + libc forks that
+# scripts/make_slopos_sysroot.sh materialises into an owned sysroot, and
+# `-Zbuild-std` only ever reads std from the sysroot it was invoked under.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -19,23 +25,57 @@ CARGO_TARGET_DIR="${2:?Usage: build_userland.sh <build_dir> <cargo_target_dir> [
 TEST_MODE="${3:-}"
 
 CARGO="${CARGO:-cargo}"
-RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
-USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
+USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-unknown-slopos.json}"
+# Cargo names the output directory after the target JSON's stem.
+USERLAND_TRIPLE="$(basename "$USERLAND_TARGET" .json)"
 
 BINS="init shell coreutils terminal compositor roulette halt editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping widget_gallery oops_smoke"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
-# Ensure toolchain is available and std patches are applied
+# Install the pinned channel and materialise the owned `slopos` sysroot.
 "$SCRIPT_DIR/ensure_toolchain.sh"
-if [[ "$BUILD_STD" == *"std"* ]]; then
-    "$SCRIPT_DIR/patch_std.sh"
-    # Purge any stale build-std artifacts if the patches changed since the
-    # cached libstd was compiled. Content-addressed and reliable — see the
-    # script header for why the old mtime heuristic was insufficient.
-    "$SCRIPT_DIR/std_cache_guard.sh" "$CARGO_TARGET_DIR" "x86_64-slos-userland"
-fi
 
 mkdir -p "$BUILD_DIR"
+
+# crt0.o, the C-program entry object: `_start` lives in the `slopos-crt0`
+# crate (slibc's crt0), not in any binary, so `ENTRY(_start)` in
+# userland/userland.ld resolves to nothing unless every binary links it.
+# Emitted as a single object (`codegen-units=1`) and passed on the link line
+# of the binary builds below.
+CRT0_OBJ="$(cd "$BUILD_DIR" && pwd)/crt0.o"
+# RUSTFLAGS rather than `cargo rustc` for the binaries, because they are built
+# in one invocation and `cargo rustc` takes a single target. A link-arg is
+# inert for the rlib units it also reaches, and carrying it on the crt0 build
+# too keeps one `-Zbuild-std` fingerprint across every invocation below rather
+# than rebuilding core for each.
+USERLAND_RUSTFLAGS="-C link-arg=$CRT0_OBJ"
+
+rm -f "$CRT0_OBJ"
+# `--emit=obj` is a side effect of *compiling*, so a warm fingerprint makes
+# cargo print `Finished` and write no object at all — deleting crt0.o alone is
+# not enough to get it back. Cleaning just this package forces the one
+# compilation that emits it (~1 s; `core` stays cached).
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+$CARGO +slopos clean \
+    --package slopos-crt0 \
+    --release \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="$USERLAND_RUSTFLAGS" \
+$CARGO +slopos rustc \
+    -Zbuild-std=core \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-crt0 \
+    --release \
+    -- --emit=obj="$CRT0_OBJ" -Ccodegen-units=1
+if [ ! -f "$CRT0_OBJ" ]; then
+    echo "build_userland: slopos-crt0 built but emitted no object at $CRT0_OBJ" >&2
+    exit 1
+fi
 
 # Build main userland binaries
 BIN_ARGS=()
@@ -44,10 +84,12 @@ for bin in $BINS; do
 done
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-$CARGO +"$RUST_CHANNEL" build \
+RUSTFLAGS="$USERLAND_RUSTFLAGS" \
+$CARGO +slopos build \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
+    -Zjson-target-spec \
     --target "$USERLAND_TARGET" \
     --package slopos-userland \
     "${BIN_ARGS[@]}" \
@@ -55,7 +97,7 @@ $CARGO +"$RUST_CHANNEL" build \
     --release
 
 # Copy built binaries
-RELEASE_DIR="${CARGO_TARGET_DIR}/x86_64-slos-userland/release"
+RELEASE_DIR="${CARGO_TARGET_DIR}/${USERLAND_TRIPLE}/release"
 for bin in $BINS; do
     if [ -f "$RELEASE_DIR/$bin" ]; then
         cp "$RELEASE_DIR/$bin" "$BUILD_DIR/${bin}.elf"
@@ -67,10 +109,12 @@ echo "Userland binaries built: $(for b in $BINS; do printf '%s/%s.elf ' "$BUILD_
 # Build test binaries if requested
 if [ "$TEST_MODE" = "--test" ]; then
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    $CARGO +"$RUST_CHANNEL" build \
+    RUSTFLAGS="$USERLAND_RUSTFLAGS" \
+    $CARGO +slopos build \
         -Zbuild-std="$BUILD_STD" \
         -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options \
+        -Zjson-target-spec \
         --target "$USERLAND_TARGET" \
         --package slopos-userland \
         --bin fork_test \
@@ -113,6 +157,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin spawn_output_test \
         --bin dns_resolve_test \
         --bin persist_test \
+        --bin libc_abi_test \
         --features testbins \
         --no-default-features \
         --release
@@ -240,6 +285,31 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/persist_test" ]; then
         cp "$RELEASE_DIR/persist_test" "$BUILD_DIR/persist_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/libc_abi_test" ]; then
+        cp "$RELEASE_DIR/libc_abi_test" "$BUILD_DIR/libc_abi_test.elf"
+    fi
 
     echo "Userland test binaries built:$BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf $BUILD_DIR/image_test.elf $BUILD_DIR/curl_recv_repro_test.elf $BUILD_DIR/curl_e2e_test.elf $BUILD_DIR/cd_test.elf $BUILD_DIR/ring_test.elf $BUILD_DIR/pidfd_e2e_test.elf $BUILD_DIR/signalfd_test.elf $BUILD_DIR/slopfut_test.elf $BUILD_DIR/multishot_test.elf $BUILD_DIR/tls_independence_test.elf $BUILD_DIR/percore_reactor_test.elf $BUILD_DIR/signal_handler_test.elf $BUILD_DIR/ctrlc_flood_test.elf $BUILD_DIR/pty_flow_test.elf $BUILD_DIR/mm_stress_test.elf $BUILD_DIR/bigprog_test.elf $BUILD_DIR/sigwinch_default_test.elf $BUILD_DIR/spin_signal_test.elf $BUILD_DIR/terminal_grid_test.elf $BUILD_DIR/sysmon_selection_test.elf $BUILD_DIR/clipboard_test.elf $BUILD_DIR/keymap_test.elf $BUILD_DIR/appkit_test.elf $BUILD_DIR/editor_test.elf $BUILD_DIR/spawn_privilege_test.elf $BUILD_DIR/seat_test.elf $BUILD_DIR/mount_test.elf $BUILD_DIR/stdio_stream_test.elf $BUILD_DIR/shell_script_test.elf $BUILD_DIR/ip_e2e_test.elf"
 fi
+
+# libc.a, the archive a `cc`-style link line finds via `-lc`. No binary in this
+# tree links it — the `slopos-slibc-staticlib` wrapper exists for C consumers —
+# so without this step nothing ever compiles it, and the `#[panic_handler]` the
+# archive has to carry (a duplicate lang item for slibc's rlib users, which is
+# why it lives in a wrapper package) rots unobserved.
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="$USERLAND_RUSTFLAGS" \
+$CARGO +slopos build \
+    -Zbuild-std="$BUILD_STD" \
+    -Zbuild-std-features=compiler-builtins-mem \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-slibc-staticlib \
+    --release
+if [ ! -f "$RELEASE_DIR/libc.a" ]; then
+    echo "build_userland: slopos-slibc-staticlib built but emitted no archive at $RELEASE_DIR/libc.a" >&2
+    exit 1
+fi
+
+echo "C archive built: $RELEASE_DIR/libc.a"

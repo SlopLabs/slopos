@@ -2,7 +2,7 @@
 //! mode, and lock calls.
 
 use slopos_abi::Errno;
-use slopos_abi::fs::{UIO_MAXIOV, UserIovec};
+use slopos_abi::fs::UserIovec;
 
 use slopos_fs::fileio::{
     file_fchmod_fd, file_flock_fd, file_getdents_commit_fd, file_getdents_fd, file_pread_fd,
@@ -10,7 +10,7 @@ use slopos_fs::fileio::{
 };
 
 use slopos_mm::user_copy::copy_bytes_to_user;
-use slopos_mm::user_io_buf::{UserIovecBuf, UserReadBuf, UserWriteBuf};
+use slopos_mm::user_io_buf::{UserIovecBuf, UserReadBuf, UserWriteBuf, stage_iovec};
 use slopos_mm::user_ptr::UserBytes as MmUserBytes;
 use slopos_ostd::KVec;
 
@@ -20,9 +20,8 @@ use crate::syscall::common::errno_from_neg;
 /// A user buffer larger than this is served short, which `getdents64` permits.
 const GETDENTS_STAGING_MAX: usize = 64 * 1024;
 
-/// `struct iovec` is two `u64`s, decoded field by field so no alignment or
-/// padding assumption reaches userland.
-const IOVEC_BYTES: usize = 16;
+// `stage_iovec` and the segment-list validation live in `slopos_mm` so the
+// syscall handlers, `sendmsg`/`recvmsg` and the ring share exactly one copy.
 
 define_syscall!(syscall_pread64
     (ctx, fd: Fd, buf: UserBytes, offset: u64)
@@ -59,32 +58,6 @@ define_syscall!(syscall_pwrite64
         Ok(bytes as u64)
     }
 });
-
-/// Stage the segment descriptors on the heap: `UIO_MAXIOV` of them is 16 KiB
-/// against a 2 KiB frame. The addresses stay untrusted — [`UserIovecBuf`]
-/// re-validates each range it touches.
-#[inline(never)]
-pub(crate) fn stage_iovec(base: u64, count: usize) -> Result<KVec<UserIovec>, Errno> {
-    if count > UIO_MAXIOV {
-        return Err(Errno::EINVAL);
-    }
-    let mut out = KVec::<UserIovec>::with_capacity(count).map_err(|_| Errno::ENOMEM)?;
-    if count == 0 {
-        return Ok(out);
-    }
-    let byte_len = count * IOVEC_BYTES;
-    let user = MmUserBytes::try_new(base, byte_len).map_err(|_| Errno::EFAULT)?;
-    let mut raw = KVec::<u8>::zeroed(byte_len).map_err(|_| Errno::ENOMEM)?;
-    slopos_mm::user_copy::copy_bytes_from_user(user, &mut raw).map_err(|_| Errno::EFAULT)?;
-    for chunk in raw.chunks_exact(IOVEC_BYTES) {
-        out.push(UserIovec {
-            iov_base: u64::from_le_bytes(chunk[0..8].try_into().unwrap_or([0; 8])),
-            iov_len: u64::from_le_bytes(chunk[8..16].try_into().unwrap_or([0; 8])),
-        })
-        .map_err(|_| Errno::ENOMEM)?;
-    }
-    Ok(out)
-}
 
 define_syscall!(syscall_readv
     (ctx, fd: Fd, iov: UserSlice<UserIovec>)

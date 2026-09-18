@@ -1,11 +1,27 @@
 //! Signal handling — taming the chaos of asynchronous fate.
+//!
+//! Two shapes meet here. Userland sees the 152-byte `struct sigaction` and the
+//! 128-byte `sigset_t` the target's `libc` declares; the kernel takes a
+//! 32-byte `UserSigaction` and a single-`u64` mask. Every function below is
+//! the translation between them, and the kernel structs are not changed to
+//! suit libc.
+//!
+//! The kernel accepts signals `1..=NSIG` — `1..=32`, bit `N-1` of its mask —
+//! and has no realtime signals beyond that. So the whole of a `sigset_t` that
+//! can mean anything lives in word 0, and libc refuses exactly what the
+//! kernel refuses: a signal *number* outside that range is `EINVAL`, and a
+//! *mask* word above it is dropped, because a set bit for a signal that
+//! cannot be raised has nothing to block.
 
 pub mod tests;
 
+use core::ffi::c_int;
 use core::mem;
 
+use crate::errno::{EINTR, EINVAL, ENOSYS, errno_set};
 use crate::pal::slopos::signal_restorer_addr;
 use crate::pal::{Pal, Sys};
+use crate::types::{KERNEL_SIGSET_MASK, sigaction as SigAction, sigset_t, stack_t};
 use slopos_abi::signal::{UserSigAltStack, UserSigaction};
 
 /// True when `handler` is a real function pointer (not `SIG_DFL`/`SIG_IGN`).
@@ -41,15 +57,35 @@ pub const SIGWINCH: i32 = slopos_abi::signal::SIGWINCH as i32;
 
 pub const SIG_DFL: usize = slopos_abi::signal::SIG_DFL as usize;
 pub const SIG_IGN: usize = slopos_abi::signal::SIG_IGN as usize;
+/// `signal()`'s failure return.
+pub const SIG_ERR: usize = usize::MAX;
+
+pub const SIG_BLOCK: c_int = slopos_abi::signal::SIG_BLOCK as c_int;
+pub const SIG_UNBLOCK: c_int = slopos_abi::signal::SIG_UNBLOCK as c_int;
+pub const SIG_SETMASK: c_int = slopos_abi::signal::SIG_SETMASK as c_int;
+
+pub const SS_ONSTACK: c_int = slopos_abi::signal::SS_ONSTACK as c_int;
+pub const SS_DISABLE: c_int = slopos_abi::signal::SS_DISABLE as c_int;
 
 pub type SigHandler = unsafe extern "C" fn(i32);
 
+/// The kernel's `sigsetsize` argument: it accepts 8 and nothing else.
 const SIGSET_SIZE: usize = mem::size_of::<u64>();
+
+/// Highest signal number the kernel accepts. Its `parse_signum` admits
+/// `1..=NSIG` inclusive, so libc must too: refusing 32 here would reject a
+/// number `kill` would deliver.
+const SIGNAL_MAX: c_int = crate::types::NSIG;
+
+#[inline]
+fn signal_in_range(sig: c_int) -> bool {
+    (1..=SIGNAL_MAX).contains(&sig)
+}
 
 /// Install a handler, BSD-style. Returns the previous handler, or `SIG_ERR`
 /// (`usize::MAX` cast) on error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn signal(signum: i32, handler: usize) -> usize {
+pub unsafe extern "C" fn signal(signum: c_int, handler: usize) -> usize {
     let mut act: UserSigaction = mem::zeroed();
     act.sa_handler = handler as u64;
     act.sa_flags = slopos_abi::signal::SA_RESTART;
@@ -69,112 +105,299 @@ pub unsafe extern "C" fn signal(signum: i32, handler: usize) -> usize {
         SIGSET_SIZE,
     ) {
         Ok(()) => old_act.sa_handler as usize,
-        Err(_) => usize::MAX,
+        Err(e) => {
+            errno_set(e.raw());
+            SIG_ERR
+        }
     }
 }
 
-/// Examine or change a signal action. Returns 0, or -1 with errno set.
+/// Examine or change a signal action.
+///
+/// The libc-declared `sa_mask` is 128 bytes and the kernel's is 8; only bits
+/// for signals `1..=31` survive the narrowing, which is every signal that
+/// exists. `sa_restorer` is injected when the caller left it null and the
+/// handler is catchable — without one the kernel refuses the install.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
-    signum: i32,
-    act: *const UserSigaction,
-    oldact: *mut UserSigaction,
-) -> i32 {
-    let mut patched: UserSigaction;
-    let act_ptr: *const u8 = if !act.is_null() {
-        let a = &*act;
-        if a.sa_restorer == 0 && is_catchable_handler(a.sa_handler) {
-            patched = *a;
-            patched.sa_restorer = signal_restorer_addr();
-            &patched as *const UserSigaction as *const u8
-        } else {
-            act as *const u8
-        }
-    } else {
+    signum: c_int,
+    act: *const SigAction,
+    oldact: *mut SigAction,
+) -> c_int {
+    if !signal_in_range(signum) {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+
+    let mut kernel_act: UserSigaction = mem::zeroed();
+    let act_ptr: *const u8 = if act.is_null() {
         core::ptr::null()
+    } else {
+        let a = &*act;
+        kernel_act.sa_handler = a.sa_sigaction as u64;
+        // `sa_flags` is a signed `int` in userland and a `u64` in the kernel;
+        // `SA_RESETHAND` has bit 31 set, so the widening must go through u32.
+        kernel_act.sa_flags = a.sa_flags as u32 as u64;
+        kernel_act.sa_mask = a.sa_mask.kernel_mask();
+        kernel_act.sa_restorer = match a.sa_restorer {
+            Some(f) => f as *const () as u64,
+            None if is_catchable_handler(kernel_act.sa_handler) => signal_restorer_addr(),
+            None => 0,
+        };
+        &raw const kernel_act as *const u8
     };
 
-    match Sys::rt_sigaction(signum, act_ptr, oldact as *mut u8, SIGSET_SIZE) {
-        Ok(()) => 0,
-        Err(_) => -1,
+    let mut kernel_old: UserSigaction = mem::zeroed();
+    let old_ptr = if oldact.is_null() {
+        core::ptr::null_mut()
+    } else {
+        &raw mut kernel_old as *mut u8
+    };
+
+    match Sys::rt_sigaction(signum, act_ptr, old_ptr, SIGSET_SIZE) {
+        Ok(()) => {
+            if !oldact.is_null() {
+                *oldact = SigAction {
+                    sa_sigaction: kernel_old.sa_handler as usize,
+                    sa_mask: sigset_t::from_kernel_mask(kernel_old.sa_mask),
+                    sa_flags: kernel_old.sa_flags as u32 as c_int,
+                    sa_restorer: if kernel_old.sa_restorer == 0 {
+                        None
+                    } else {
+                        Some(mem::transmute::<u64, extern "C" fn()>(
+                            kernel_old.sa_restorer,
+                        ))
+                    },
+                };
+            }
+            0
+        }
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
     }
 }
 
-/// A three-argument `SA_SIGINFO` handler.
-pub type SigInfoHandler = unsafe extern "C" fn(i32, *mut u8, *mut u8);
-
-/// Installs with `SA_SIGINFO | SA_ONSTACK`: a fault caused by stack exhaustion
-/// cannot be delivered on the stack that ran out.
+/// `sigaltstack(2)`. The kernel's `stack_t` already *is* Linux's, so this is a
+/// straight call with the C return convention put back on.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_sigaction_onstack(signum: i32, handler: SigInfoHandler) -> i32 {
-    let mut act: UserSigaction = mem::zeroed();
-    act.sa_handler = handler as usize as u64;
-    act.sa_flags = slopos_abi::signal::SA_SIGINFO
-        | slopos_abi::signal::SA_ONSTACK
-        | slopos_abi::signal::SA_RESTART;
-    act.sa_mask = 0;
-    act.sa_restorer = signal_restorer_addr();
-
-    match Sys::rt_sigaction(
-        signum,
-        &act as *const UserSigaction as *const u8,
-        core::ptr::null_mut(),
-        SIGSET_SIZE,
-    ) {
+pub unsafe extern "C" fn sigaltstack(ss: *const stack_t, oss: *mut stack_t) -> c_int {
+    match Sys::sigaltstack(ss as *const UserSigAltStack, oss as *mut UserSigAltStack) {
         Ok(()) => 0,
-        Err(_) => -1,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
     }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_sigaltstack_install(sp: *mut u8, size: usize) -> i32 {
-    let ss = UserSigAltStack {
-        ss_sp: sp as u64,
-        ss_flags: 0,
-        _pad: 0,
-        ss_size: size as u64,
-    };
-    match Sys::sigaltstack(&ss as *const UserSigAltStack, core::ptr::null_mut()) {
-        Ok(()) => 0,
-        Err(_) => -1,
+pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
+    if set.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
     }
+    *set = sigset_t::empty();
+    0
+}
+
+/// Fills the bits for the signals that exist, and no others: a set bit for a
+/// realtime signal would be a claim this kernel cannot honour.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
+    if set.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    *set = sigset_t::from_kernel_mask(KERNEL_SIGSET_MASK);
+    0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_sigaltstack_disable() -> i32 {
-    let ss = UserSigAltStack {
-        ss_sp: 0,
-        ss_flags: slopos_abi::signal::SS_DISABLE,
-        _pad: 0,
-        ss_size: 0,
-    };
-    match Sys::sigaltstack(&ss as *const UserSigAltStack, core::ptr::null_mut()) {
-        Ok(()) => 0,
-        Err(_) => -1,
+pub unsafe extern "C" fn sigaddset(set: *mut sigset_t, sig: c_int) -> c_int {
+    if set.is_null() || !signal_in_range(sig) {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    (*set).__val[0] |= 1u64 << (sig - 1);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigdelset(set: *mut sigset_t, sig: c_int) -> c_int {
+    if set.is_null() || !signal_in_range(sig) {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    (*set).__val[0] &= !(1u64 << (sig - 1));
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigismember(set: *const sigset_t, sig: c_int) -> c_int {
+    if set.is_null() || !signal_in_range(sig) {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    if (*set).__val[0] & (1u64 << (sig - 1)) != 0 {
+        1
+    } else {
+        0
     }
 }
 
 /// Examine or change the blocked signal mask. `how` is `SIG_BLOCK`,
-/// `SIG_UNBLOCK` or `SIG_SETMASK`. Returns 0, or -1.
+/// `SIG_UNBLOCK` or `SIG_SETMASK`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32 {
-    match Sys::rt_sigprocmask(how, set, oldset, SIGSET_SIZE) {
-        Ok(()) => 0,
-        Err(_) => -1,
+pub unsafe extern "C" fn sigprocmask(
+    how: c_int,
+    set: *const sigset_t,
+    oldset: *mut sigset_t,
+) -> c_int {
+    match mask_op(how, set, oldset) {
+        0 => 0,
+        err => {
+            errno_set(err);
+            -1
+        }
     }
 }
+
+/// Every task here is a thread of one process and the kernel keeps one mask
+/// per task, so this is `sigprocmask` with the errno returned rather than set
+/// — which is the only difference POSIX draws between the two.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_sigmask(
+    how: c_int,
+    set: *const sigset_t,
+    oldset: *mut sigset_t,
+) -> c_int {
+    mask_op(how, set, oldset)
+}
+
+/// Shared body of `sigprocmask`/`pthread_sigmask`. Answers 0 or an errno.
+unsafe fn mask_op(how: c_int, set: *const sigset_t, oldset: *mut sigset_t) -> c_int {
+    if !set.is_null() && how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK {
+        return EINVAL.raw();
+    }
+
+    // Initialised once rather than zeroed and overwritten: the kernel reads
+    // the word only through `new_ptr`, which is null exactly when there was
+    // no set to narrow.
+    let kernel_new = if set.is_null() {
+        0
+    } else {
+        (*set).kernel_mask()
+    };
+    let new_ptr = if set.is_null() {
+        core::ptr::null()
+    } else {
+        &raw const kernel_new
+    };
+    let mut kernel_old = 0u64;
+    let old_ptr = if oldset.is_null() {
+        core::ptr::null_mut()
+    } else {
+        &raw mut kernel_old
+    };
+
+    match Sys::rt_sigprocmask(how, new_ptr, old_ptr, SIGSET_SIZE) {
+        Ok(()) => {
+            if !oldset.is_null() {
+                *oldset = sigset_t::from_kernel_mask(kernel_old);
+            }
+            0
+        }
+        Err(e) => e.raw(),
+    }
+}
+
+/// SlopOS has no `rt_sigpending`: the pending set lives only in the task
+/// struct and no syscall publishes it, so there is nothing to report.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
+    if set.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    errno_set(ENOSYS.raw());
+    -1
+}
+
+/// Replace the mask and block until a signal arrives, then restore it.
+///
+/// There is no `pause(2)` here, but `nanosleep(2)` reports `EINTR` the moment
+/// a deliverable signal exists, so a repeated long sleep is the wait: the only
+/// difference from an unbounded one is that it wakes and re-sleeps every
+/// [`SIGSUSPEND_SLICE_SECS`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigsuspend(set: *const sigset_t) -> c_int {
+    if set.is_null() {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+
+    let mut saved = 0u64;
+    let wanted = (*set).kernel_mask();
+    if let Err(e) = Sys::rt_sigprocmask(SIG_SETMASK, &raw const wanted, &raw mut saved, SIGSET_SIZE)
+    {
+        errno_set(e.raw());
+        return -1;
+    }
+
+    let slice = crate::time::Timespec {
+        tv_sec: SIGSUSPEND_SLICE_SECS,
+        tv_nsec: 0,
+    };
+    loop {
+        match Sys::nanosleep(&raw const slice, core::ptr::null_mut()) {
+            // A full slice elapsed with nothing pending: keep waiting.
+            Ok(()) => continue,
+            Err(_) => break,
+        }
+    }
+
+    let _ = Sys::rt_sigprocmask(
+        SIG_SETMASK,
+        &raw const saved,
+        core::ptr::null_mut(),
+        SIGSET_SIZE,
+    );
+    // `sigsuspend` has no success return: it always answers -1/EINTR once the
+    // handler has run.
+    errno_set(EINTR.raw());
+    -1
+}
+
+/// How long one `sigsuspend` sleep lasts before it is re-armed.
+const SIGSUSPEND_SLICE_SECS: i64 = 3600;
 
 /// Send a signal to a process. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
+pub unsafe extern "C" fn kill(pid: i32, sig: c_int) -> c_int {
     match Sys::kill(pid, sig) {
         Ok(()) => 0,
-        Err(_) => -1,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
     }
 }
 
+/// `kill(-pgrp)`, which is how the process-group fan-out is spelled at the
+/// syscall. A zero `pgrp` means the caller's own group, which `kill(0)` is.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn raise(sig: i32) -> i32 {
+pub unsafe extern "C" fn killpg(pgrp: i32, sig: c_int) -> c_int {
+    if pgrp < 0 {
+        errno_set(EINVAL.raw());
+        return -1;
+    }
+    kill(if pgrp == 0 { 0 } else { -pgrp }, sig)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn raise(sig: c_int) -> c_int {
     kill(Sys::getpid(), sig)
 }
 

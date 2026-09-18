@@ -140,28 +140,84 @@ pub const BUS_OBJERR: i32 = 3;
 /// SIGILL: illegal opcode.
 pub const ILL_ILLOPC: i32 = 1;
 
-/// The `siginfo_t` an `SA_SIGINFO` handler receives. Only the leading fields
-/// Linux guarantees for a fault signal are populated; padded to Linux's 128
-/// bytes so a handler compiled against a real `siginfo_t` can index it.
+/// Byte offsets into [`UserSiginfo`]'s `_sifields` union, Linux x86-64's.
+///
+/// Exported because the union is a word array rather than named fields, so a
+/// consumer that cannot name those fields — `libc`'s own `siginfo_t`, which
+/// does not depend on this crate — has nothing to point `offset_of!` at. The
+/// asserts below hold them to the struct's real shape.
+pub const SI_ADDR_OFFSET: usize = 16;
+/// `si_pid` — `_sifields._kill._pid`, overlapping [`SI_ADDR_OFFSET`].
+pub const SI_PID_OFFSET: usize = 16;
+/// `si_uid` — `_sifields._kill._uid`.
+pub const SI_UID_OFFSET: usize = 20;
+/// `si_status` — `_sifields._sigchld._status`, the union's second word. This
+/// kernel delivers no `SIGCHLD` `siginfo`, so it always reads 0.
+pub const SI_STATUS_OFFSET: usize = 24;
+
+/// The `siginfo_t` an `SA_SIGINFO` handler receives. Linux x86-64's layout:
+/// three `int`s, four bytes of padding, then the 112-byte `_sifields` union —
+/// 128 bytes in all.
+///
+/// The union is a word array behind an accessor rather than a Rust `union`:
+/// this crate is `#![forbid(unsafe_code)]`, and reading a union field is
+/// `unsafe`. Word 0 is the overlap that matters — `si_addr` for a fault
+/// signal, `si_pid`/`si_uid` for a `kill`-originated one. This kernel records
+/// no sender, so those two always read 0 and only
+/// [`si_addr`](Self::si_addr) is ever populated; the rest of the union stays
+/// zero, as Linux's tail padding is.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserSiginfo {
     pub si_signo: i32,
     pub si_errno: i32,
     pub si_code: i32,
-    pub _pad0: i32,
-    /// Sender's task id for a `kill`-originated signal, 0 otherwise.
-    pub si_pid: u32,
-    pub si_uid: u32,
-    /// Faulting address for SIGSEGV/SIGBUS, exit status for SIGCHLD.
-    pub si_addr: u64,
-    pub _pad: [u64; 12],
+    _pad0: i32,
+    _sifields: [u64; 14],
+}
+
+impl UserSiginfo {
+    /// The `siginfo` for `si_signo`. `si_addr` is the faulting address for
+    /// `SIGSEGV`/`SIGBUS`/`SIGILL`, and 0 for every other signal — which is
+    /// the same word `si_pid`/`si_uid` read as 0 from.
+    #[inline]
+    pub const fn new(si_signo: i32, si_code: i32, si_addr: u64) -> Self {
+        let mut sifields = [0u64; 14];
+        sifields[0] = si_addr;
+        Self {
+            si_signo,
+            si_errno: 0,
+            si_code,
+            _pad0: 0,
+            _sifields: sifields,
+        }
+    }
+
+    /// The faulting address a `SIGSEGV`/`SIGBUS`/`SIGILL` handler reads.
+    #[inline]
+    pub const fn si_addr(&self) -> u64 {
+        self._sifields[0]
+    }
 }
 
 const _: () = assert!(
     core::mem::size_of::<UserSiginfo>() == 128,
     "UserSiginfo must match the Linux x86-64 siginfo_t size"
 );
+const _: () = assert!(
+    core::mem::align_of::<UserSiginfo>() == 8,
+    "UserSiginfo must match the Linux x86-64 siginfo_t alignment"
+);
+const _: () = assert!(core::mem::offset_of!(UserSiginfo, si_signo) == 0);
+const _: () = assert!(core::mem::offset_of!(UserSiginfo, si_errno) == 4);
+const _: () = assert!(core::mem::offset_of!(UserSiginfo, si_code) == 8);
+// Four bytes of padding before the union is what puts `si_addr` at 16 rather
+// than at 24 behind an `si_pid`/`si_uid` pair laid out as struct fields.
+const _: () = assert!(core::mem::offset_of!(UserSiginfo, _sifields) == SI_ADDR_OFFSET);
+const _: () = assert!(SI_ADDR_OFFSET == 16);
+const _: () = assert!(SI_PID_OFFSET == SI_ADDR_OFFSET);
+const _: () = assert!(SI_UID_OFFSET == SI_PID_OFFSET + 4);
+const _: () = assert!(SI_STATUS_OFFSET == SI_ADDR_OFFSET + 8);
 
 /// The machine state an `SA_SIGINFO` handler receives as its third argument.
 /// Layout is the leading part of the Linux x86-64 `ucontext_t`: the

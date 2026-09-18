@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 use slopos_abi::draw::Color32;
 use slopos_image::{DecodeOptions, PngError};
 use slopos_userland as _;

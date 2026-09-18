@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![feature(restricted_std)]
 
 use slopos_abi::draw::Color32;
 use std::fmt;

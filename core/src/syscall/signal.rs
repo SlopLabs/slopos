@@ -243,7 +243,12 @@ define_syscall!(syscall_rt_sigprocmask
             SIG_SETMASK => blocked = set,
             _ => return Err(Errno::EINVAL),
         }
-        task_ref.set_signal_blocked(blocked & !SIG_UNCATCHABLE);
+        // `SIGNAL_MASK` as well as the uncatchable pair: `set` is user-authored,
+        // and bit `NSIG` is the kernel-private kill flag. Every reader masks
+        // already, so this is inert today — and that is the fragile direction.
+        // Filtering at the writer makes the private bit unrepresentable in
+        // `signal_blocked` instead of merely unread.
+        task_ref.set_signal_blocked(blocked & SIGNAL_MASK & !SIG_UNCATCHABLE);
     }
 
     Ok(())
@@ -534,8 +539,10 @@ define_syscall!(syscall_rt_sigreturn (ctx) cap(NoneSelf)
         regs.rflags_user_subset = sigframe.rflags;
         ctx.user_ctx().set_regs(regs);
 
+        // The mask came out of a sigframe the caller wrote: masked to
+        // `SIGNAL_MASK` for the reason `rt_sigprocmask` above masks.
         ctx.task()
-            .set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
+            .set_signal_blocked(sigframe.saved_mask & SIGNAL_MASK & !SIG_UNCATCHABLE);
         true
     });
 
@@ -791,16 +798,7 @@ fn push_siginfo(addr: u64, signum: u8, si_code: i32, si_addr: u64) -> bool {
     let Ok(ptr) = MmUserPtr::<UserSiginfo>::try_new(addr) else {
         return false;
     };
-    let info = UserSiginfo {
-        si_signo: signum as i32,
-        si_errno: 0,
-        si_code,
-        _pad0: 0,
-        si_pid: 0,
-        si_uid: 0,
-        si_addr,
-        _pad: [0; 12],
-    };
+    let info = UserSiginfo::new(signum as i32, si_code, si_addr);
     copy_to_user(ptr, &info).is_ok()
 }
 
@@ -1045,7 +1043,9 @@ fn deliver_pending_signal_core(
     if (action.flags & SA_NODEFER) == 0 {
         blocked |= bit;
     }
-    task_ref.set_signal_blocked(blocked & !SIG_UNCATCHABLE);
+    // `action.mask` is `sa_mask` as userland wrote it, so the same filter as
+    // the other two `set_signal_blocked` writers applies.
+    task_ref.set_signal_blocked(blocked & SIGNAL_MASK & !SIG_UNCATCHABLE);
 
     let mut redirected = regs_snapshot;
     redirected.rsp = frame_addr;

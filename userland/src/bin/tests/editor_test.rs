@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! The editor on the machine it was written for.
 //!
 //! Two halves: every `editor-core` case, run here against the target's

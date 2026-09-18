@@ -165,6 +165,50 @@ pub fn test_demand_dispatch_absent_for_a_reaped_process() -> TestResult {
     pass!()
 }
 
+/// A `PROT_NONE` mapping is the guard page slibc puts below every thread
+/// stack, and the POSIX floor leans on it: std tells a stack overflow from an
+/// ordinary `SIGSEGV` only if touching the guard kills the task. Driven
+/// through `try_resolve_user_fault` rather than `can_satisfy_fault` because
+/// the whole hazard was that every *other* arm of the fault path says yes.
+pub fn test_demand_read_of_a_prot_none_mapping_is_fatal() -> TestResult {
+    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_NONE};
+
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("create VM");
+    };
+
+    let addr = crate::process_vm::process_vm_mmap(
+        vm.process,
+        0,
+        PAGE_SIZE_4KB,
+        PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    assert_test!(addr != 0, "PROT_NONE mmap failed");
+
+    let Some(handle) = crate::process_vm::process_vm_handle(vm.process) else {
+        return fail!("no VM handle");
+    };
+    let packed = crate::process_vm::pack_process_vm_handle(handle);
+
+    // 0x04: user read against an absent page — the one shape whose access
+    // bits name nothing `can_satisfy_fault` used to look at.
+    let outcome = crate::page_fault::try_resolve_user_fault(addr, 0x04, packed, 1);
+    assert_test!(
+        outcome
+            == crate::page_fault::FaultOutcome::Fatal(slopos_abi::task::TaskFaultReason::UserPage),
+        "a read of a PROT_NONE page was not fatal"
+    );
+    assert_test!(
+        vm.virt_to_phys(addr).is_null(),
+        "a PROT_NONE page was backed by a frame"
+    );
+
+    pass!()
+}
+
 slopos_testing::stest!(name = test_demand_fault_present_page, suite = demand);
 slopos_testing::stest!(name = test_demand_fault_no_vma, suite = demand);
 slopos_testing::stest!(name = test_demand_fault_lazy_anon_vma, suite = demand);
@@ -178,5 +222,9 @@ slopos_testing::stest!(name = test_demand_permission_allow_read, suite = demand)
 slopos_testing::stest!(name = test_demand_permission_allow_write, suite = demand);
 slopos_testing::stest!(
     name = test_demand_dispatch_absent_for_a_reaped_process,
+    suite = demand
+);
+slopos_testing::stest!(
+    name = test_demand_read_of_a_prot_none_mapping_is_fatal,
     suite = demand
 );

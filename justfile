@@ -3,7 +3,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 cargo             := env("CARGO", "cargo")
 rust_channel      := `sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml`
 rust_target       := "targets/x86_64-slos.json"
-userland_target   := "targets/x86_64-slos-userland.json"
+userland_target   := "targets/x86_64-unknown-slopos.json"
 kernel_rustflags  := env("KERNEL_RUSTFLAGS", "-C force-frame-pointers=yes")
 
 build_dir        := env("BUILD_DIR", "builddir")
@@ -96,21 +96,24 @@ userland_bins      := "init shell coreutils terminal compositor roulette halt ed
 # fifty-odd copies of std. This list is the *installed* set; the binary's own
 # table is the implemented set, and `coreutils_test` fails if they disagree.
 coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test"
+test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test"
 
-[doc("Install Rust + Go toolchains and verify workspace")]
+[doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
     scripts/ensure_toolchain.sh
     scripts/ensure_go.sh
     mkdir -p {{build_dir}}
     CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --format-version 1 >/dev/null
 
+# Not the pinned rustup channel: the userland target builds on the owned
+# `slopos` sysroot (scripts/make_slopos_sysroot.sh), which carries the pinned
+# std and libc forks that `-Zbuild-std` resolves this target's std from.
 _build-userland:
-    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} USERLAND_TARGET={{userland_target}} \
+    CARGO={{cargo}} USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}"
 
 _build-userland-tests: _build-userland
-    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} USERLAND_TARGET={{userland_target}} \
+    CARGO={{cargo}} USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
 
 # `VERITY=off` for the tests image because the suite writes to it; the
@@ -551,7 +554,9 @@ check-framekernel-gates:
     scripts/check_fs_image.sh --self-test
     scripts/check_fs_throughput.sh --self-test
     scripts/check_syscall_abi.sh --self-test
+    scripts/check_toolchain_pin.sh --self-test
     scripts/check_vendor_pin.sh
+    scripts/check_toolchain_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh
@@ -574,7 +579,7 @@ check-framekernel-gates:
 
 # TODO(tech-debt): no `cargo clippy -- -D warnings` gate here — there is no
 # clippy config in tree and the custom `no_std` target needs plumbing first.
-[doc("Run every framekernel-discipline gate: vendor pin / unsafe source + expansion / async / alloc / Drop / stack / registry sections / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
+[doc("Run every framekernel-discipline gate: vendor pin / toolchain pin / unsafe source + expansion / async / alloc / Drop / stack / registry sections / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
 check-framekernel: check-framekernel-gates
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri

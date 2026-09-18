@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Signal-on-IRQ-exit end-to-end test.
 //!
 //! The child spins in userspace issuing no syscalls, so only a timer IRQ

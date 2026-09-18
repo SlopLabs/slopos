@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! PTY output-flow regression test.
 //!
 //! A writer that fills the master's 4 KiB read buffer blocks inside `write()`;

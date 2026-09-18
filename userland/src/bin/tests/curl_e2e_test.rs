@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! End-to-end TCP proof: opens a connection to a peer off this machine, sends a
 //! frame and asserts the same bytes come back inside the budget curl uses.
 //!

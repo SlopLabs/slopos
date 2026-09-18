@@ -22,6 +22,8 @@ members = [
   "service-core",
   "ktesting",
   "slibc",
+  "slibc/crt0",
+  "slibc/staticlib",
   "userland",
   "terminal-core",
   "keymap-core",

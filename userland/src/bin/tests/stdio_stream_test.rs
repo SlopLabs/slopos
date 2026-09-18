@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! slibc stdio conformance: the open-stream registry, per-stream locking, and
 //! read/write direction state on an update stream.
 //!

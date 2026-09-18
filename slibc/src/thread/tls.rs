@@ -66,6 +66,10 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
     }
     p = p.add(1); // step past the envp NULL → first auxv entry
 
+    // The only walk of the entry stack in the whole library, so `getauxval`
+    // records its base here rather than the CRT growing a second one.
+    crate::auxv::capture(p);
+
     let (mut phdr, mut phnum, mut phent) = (0usize, 0usize, 0usize);
     loop {
         let a_type = *p as u64;

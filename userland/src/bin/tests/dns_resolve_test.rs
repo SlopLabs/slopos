@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Name resolution must actually resolve.
 //!
 //! Everything else in the suite that touches the network dials a literal IP —

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Panic-recovery smoke: `SYSCALL_TEST_PANIC` panics the kernel inside this
 //! task's syscall context. Under `panic.recover_smoke=on` the kernel kills the
 //! task, so the syscall must never return — a return means the recovery

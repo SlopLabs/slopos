@@ -130,6 +130,14 @@ const _: () = assert!(
     "UserFsStat must match the Linux x86-64 struct stat"
 );
 
+// The three timestamps, pinned separately because a consumer reads them by
+// offset rather than by field: cargo's whole fingerprint model is `st_mtim`,
+// so a layout slip here is a build system that stops noticing edits rather
+// than a compile error.
+const _: () = assert!(core::mem::offset_of!(UserFsStat, st_atim) == 72);
+const _: () = assert!(core::mem::offset_of!(UserFsStat, st_mtim) == 88);
+const _: () = assert!(core::mem::offset_of!(UserFsStat, st_ctim) == 104);
+
 /// `st_mode` type field and the values it takes. Linux/POSIX numbering.
 pub const S_IFMT: u32 = 0o170_000;
 pub const S_IFSOCK: u32 = 0o140_000;

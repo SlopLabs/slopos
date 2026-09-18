@@ -1,6 +1,5 @@
 pub mod raw;
 pub mod slopos;
-pub mod syscall;
 
 pub use slopos::Sys;
 
@@ -29,6 +28,9 @@ pub trait Pal {
     fn chmod(path: *const u8, mode: u32) -> Result<(), Errno>;
     fn dup(fd: i32) -> Result<i32, Errno>;
     fn dup2(old: i32, new: i32) -> Result<i32, Errno>;
+    /// `dup3(2)`. Unlike `dup2` this refuses `old == new` (`EINVAL`), and
+    /// `O_CLOEXEC` in `flags` is set on the new descriptor.
+    fn dup3(old: i32, new: i32, flags: i32) -> Result<i32, Errno>;
     fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i32, Errno>;
     fn pipe(fds: *mut [i32; 2]) -> Result<(), Errno>;
     fn pipe2(fds: *mut [i32; 2], flags: u32) -> Result<(), Errno>;
@@ -43,7 +45,6 @@ pub trait Pal {
         timeout: *mut u8,
     ) -> Result<i32, Errno>;
     fn ioctl(fd: i32, request: u64, arg: u64) -> Result<i32, Errno>;
-    fn list(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno>;
 
     fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> Result<i32, Errno>;
     fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> Result<(), Errno>;
@@ -107,6 +108,9 @@ pub trait Pal {
     fn fork() -> Result<i32, Errno>;
     fn exec(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> Result<(), Errno>;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> Result<i32, Errno>;
+    /// `wait4(2)`. `rusage` is a [`crate::types::rusage`] or null; this kernel
+    /// accounts none of it, so a non-null one is refused rather than zeroed.
+    fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut u8) -> Result<i32, Errno>;
     fn exit(code: i32) -> !;
     fn getpid() -> i32;
     fn getppid() -> i32;
@@ -133,6 +137,9 @@ pub trait Pal {
     fn get_cpu_count() -> Result<u32, Errno>;
     fn get_current_cpu() -> Result<u32, Errno>;
     fn set_cpu_affinity(target: u32, affinity: u32) -> Result<(), Errno>;
+    /// `sched_getaffinity(2)`. Answers the bytes of `mask` the kernel wrote;
+    /// the kernel's mask is one `unsigned long` wide.
+    fn sched_getaffinity(pid: i32, len: usize, mask: *mut u8) -> Result<usize, Errno>;
     fn arch_prctl_set_fs(base: u64) -> Result<(), Errno>;
     fn arch_prctl_get_fs() -> Result<u64, Errno>;
 
@@ -193,10 +200,19 @@ pub trait Pal {
     fn getpeername(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<(), Errno>;
     fn getsockname(fd: i32, addr: *mut u8, addrlen: *mut u32) -> Result<(), Errno>;
     fn resolve(hostname: *const u8, hostname_len: usize, result: *mut u8) -> Result<(), Errno>;
+    /// `net_query`: one class of network state, `NET_Q_*`, into `buf`. The
+    /// buffer receives a [`slopos_abi::net::UserNetQueryHdr`] followed by
+    /// `record_count` fixed-size records; a header-sized buffer is the sizing
+    /// query.
+    fn net_query(what: u32, ifindex: u32, buf: *mut u8, buf_len: usize) -> Result<usize, Errno>;
 
     fn clock_gettime(clk_id: u64, tp: *mut u8) -> Result<(), Errno>;
     fn get_time_ms() -> u64;
     fn sleep_ms(ms: u64);
+    /// `nanosleep(2)`. Signal-interruptible: a deliverable signal ends the
+    /// sleep with `EINTR` and, for a non-null `rem`, the time left. Prefer it
+    /// over [`Pal::sleep_ms`] wherever the caller can observe a short sleep.
+    fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> Result<(), Errno>;
 
     /// Only `CLOCK_REALTIME` is settable.
     fn clock_settime(clk_id: u64, tp: *const Timespec) -> Result<(), Errno>;

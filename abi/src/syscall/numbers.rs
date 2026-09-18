@@ -162,6 +162,14 @@ pub const SYSCALL_SENDTO: u64 = 44;
 /// srclen: *mut u32) -> bytes received`; 0 means the peer closed.
 pub const SYSCALL_RECVFROM: u64 = 45;
 
+/// `sendmsg(fd, msg: *const MsgHdr, flags) -> bytes sent`, optionally
+/// carrying `SCM_RIGHTS` ancillary data.
+pub const SYSCALL_SENDMSG: u64 = 46;
+
+/// `recvmsg(fd, msg: *mut MsgHdr, flags) -> bytes received`, optionally
+/// carrying `SCM_RIGHTS` ancillary data; 0 means the peer closed.
+pub const SYSCALL_RECVMSG: u64 = 47;
+
 /// `shutdown(fd, how)` — `SHUT_RD` 0, `SHUT_WR` 1, `SHUT_RDWR` 2.
 pub const SYSCALL_SHUTDOWN: u64 = 48;
 
@@ -511,21 +519,9 @@ pub const SYSCALL_SPAWN_PATH: u64 = SYSCALL_PRIVATE_BASE + 6;
 /// overriding a caught handler or `SIG_IGN`, in one call.
 pub const SYSCALL_SIGDEFAULT: u64 = SYSCALL_PRIVATE_BASE + 7;
 
-/// `sendmsg(fd, msg: *const MsgHdr, flags) -> bytes sent`, optionally carrying
-/// `SCM_RIGHTS` ancillary data.
-///
-/// Private rather than Linux's 46 because [`crate::syscall::MsgHdr`] and
-/// `CmsgHdr` are not Linux's layouts yet; adopting the number waits on that.
-pub const SYSCALL_SENDMSG: u64 = SYSCALL_PRIVATE_BASE + 8;
-
-/// `recvmsg(fd, msg: *mut MsgHdr, flags) -> bytes received`, optionally
-/// carrying `SCM_RIGHTS` ancillary data. Private for the reason
-/// [`SYSCALL_SENDMSG`] gives.
-pub const SYSCALL_RECVMSG: u64 = SYSCALL_PRIVATE_BASE + 9;
-
 /// `resolve(host: *const u8, host_len, out: *mut [u8; 4])` via the in-kernel
 /// DNS client. `host` is not NUL-terminated and must be at most 253 bytes.
-pub const SYSCALL_RESOLVE: u64 = SYSCALL_PRIVATE_BASE + 10;
+pub const SYSCALL_RESOLVE: u64 = SYSCALL_PRIVATE_BASE + 8;
 
 /// `net_query(what, ifindex, buf, len) -> bytes written`, as a
 /// [`UserNetQueryHdr`](crate::net::UserNetQueryHdr) followed by `record_count`
@@ -534,53 +530,53 @@ pub const SYSCALL_RESOLVE: u64 = SYSCALL_PRIVATE_BASE + 10;
 /// buffer is the sizing query and anything smaller is `EINVAL`. Unprivileged,
 /// but `NET_Q_SOCKETS` names `owner_pid` only for the caller's own sockets
 /// unless it holds `TASK_FLAG_NET_ADMIN`.
-pub const SYSCALL_NET_QUERY: u64 = SYSCALL_PRIVATE_BASE + 11;
+pub const SYSCALL_NET_QUERY: u64 = SYSCALL_PRIVATE_BASE + 9;
 
 /// `net_iface_ctl(ifindex, op, arg)` — admin up/down, MTU, DHCP lifecycle,
 /// neighbour and address flushes, plus the global operations addressed to
 /// `NET_IFINDEX_GLOBAL`. Requires `TASK_FLAG_NET_ADMIN`.
-pub const SYSCALL_NET_IFACE_CTL: u64 = SYSCALL_PRIVATE_BASE + 12;
+pub const SYSCALL_NET_IFACE_CTL: u64 = SYSCALL_PRIVATE_BASE + 10;
 
 /// `net_addr_ctl(op, ptr, len)`, where `op` is `NET_ADDROP_ADD`/`_DEL` and
 /// `ptr` points at exactly one [`UserAddrReq`](crate::net::UserAddrReq) whose
 /// size `len` must equal. Requires `TASK_FLAG_NET_ADMIN`.
-pub const SYSCALL_NET_ADDR_CTL: u64 = SYSCALL_PRIVATE_BASE + 13;
+pub const SYSCALL_NET_ADDR_CTL: u64 = SYSCALL_PRIVATE_BASE + 11;
 
 /// `net_route_ctl(op, ptr, len)`, where `op` is `NET_ROUTEOP_ADD`/`_DEL` and
 /// `ptr` points at exactly one [`UserRouteReq`](crate::net::UserRouteReq) whose
 /// size `len` must equal. Requires `TASK_FLAG_NET_ADMIN`.
-pub const SYSCALL_NET_ROUTE_CTL: u64 = SYSCALL_PRIVATE_BASE + 14;
+pub const SYSCALL_NET_ROUTE_CTL: u64 = SYSCALL_PRIVATE_BASE + 12;
 
 /// `net_resolver_set(ptr, len)` — exactly one
 /// [`UserResolverReq`](crate::net::UserResolverReq) whose size `len` must
 /// equal. Clearing the static override is a request naming zero servers.
 /// Requires `TASK_FLAG_NET_ADMIN`.
-pub const SYSCALL_NET_RESOLVER_SET: u64 = SYSCALL_PRIVATE_BASE + 15;
+pub const SYSCALL_NET_RESOLVER_SET: u64 = SYSCALL_PRIVATE_BASE + 13;
 
 /// `net_monitor(mask, flags) -> fd` that becomes `POLLIN`-ready whenever the
 /// stack's configuration changes and whose `read` drains whole
 /// [`NetEvent`](crate::net::NetEvent) records. A dropped record is reported in
 /// band, as a `NET_EV_OVERFLOW` ordered before the records that followed the
 /// drop, so a reader never loses its position. Unprivileged.
-pub const SYSCALL_NET_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 16;
+pub const SYSCALL_NET_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 14;
 
 /// `fb_info(out: *mut DisplayInfo)`.
-pub const SYSCALL_FB_INFO: u64 = SYSCALL_PRIVATE_BASE + 17;
+pub const SYSCALL_FB_INFO: u64 = SYSCALL_PRIVATE_BASE + 15;
 
 /// `fb_flip(seat_fd, damage: *const DamageRect, count)` — present the acquired
 /// seat's back buffer.
-pub const SYSCALL_FB_FLIP: u64 = SYSCALL_PRIVATE_BASE + 18;
+pub const SYSCALL_FB_FLIP: u64 = SYSCALL_PRIVATE_BASE + 16;
 
 /// `cursor_set_image(image: *const u8, len, hotspot)` — a 64x64 BGRA image,
 /// `hotspot` packing `(hot_x << 16) | hot_y`. Compositor-only.
-pub const SYSCALL_CURSOR_SET_IMAGE: u64 = SYSCALL_PRIVATE_BASE + 19;
+pub const SYSCALL_CURSOR_SET_IMAGE: u64 = SYSCALL_PRIVATE_BASE + 17;
 
 /// `cursor_move(pos)` in absolute display coords, `pos` packing
 /// `(x << 16) | y`. Compositor-only.
-pub const SYSCALL_CURSOR_MOVE: u64 = SYSCALL_PRIVATE_BASE + 20;
+pub const SYSCALL_CURSOR_MOVE: u64 = SYSCALL_PRIVATE_BASE + 18;
 
 /// `set_display_mode(width: u32, height: u32)`. Compositor-only.
-pub const SYSCALL_SET_DISPLAY_MODE: u64 = SYSCALL_PRIVATE_BASE + 21;
+pub const SYSCALL_SET_DISPLAY_MODE: u64 = SYSCALL_PRIVATE_BASE + 19;
 
 /// `screen_acquire(seat_id)` — take the framebuffer seat, returning a
 /// non-duplicable descriptor naming it.
@@ -588,20 +584,20 @@ pub const SYSCALL_SET_DISPLAY_MODE: u64 = SYSCALL_PRIVATE_BASE + 21;
 /// `seat_id` is `slopos_ostd::seat::SeatId`: 0 compositor-primary, 1 virtcon.
 /// `EBUSY` when a seat of equal or higher rank is held. Ownership is announced
 /// here and never conferred by presenting a frame.
-pub const SYSCALL_SCREEN_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 22;
+pub const SYSCALL_SCREEN_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 20;
 
 /// `input_sink_acquire(seat_id)` — as [`SYSCALL_SCREEN_ACQUIRE`], for the raw
 /// input event stream that `input_poll_batch` drains.
-pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 23;
+pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = SYSCALL_PRIVATE_BASE + 21;
 
 /// `input_poll_batch(out: *mut u8, max) -> events written`.
-pub const SYSCALL_INPUT_POLL_BATCH: u64 = SYSCALL_PRIVATE_BASE + 24;
+pub const SYSCALL_INPUT_POLL_BATCH: u64 = SYSCALL_PRIVATE_BASE + 22;
 
 /// `clipboard_copy(buf: *const u8, len)`.
-pub const SYSCALL_CLIPBOARD_COPY: u64 = SYSCALL_PRIVATE_BASE + 25;
+pub const SYSCALL_CLIPBOARD_COPY: u64 = SYSCALL_PRIVATE_BASE + 23;
 
 /// `clipboard_paste(buf: *mut u8, len) -> bytes written`.
-pub const SYSCALL_CLIPBOARD_PASTE: u64 = SYSCALL_PRIVATE_BASE + 26;
+pub const SYSCALL_CLIPBOARD_PASTE: u64 = SYSCALL_PRIVATE_BASE + 24;
 
 /// `font_set(data: *const u8, width, height, glyph_count, format)`.
 ///
@@ -609,17 +605,17 @@ pub const SYSCALL_CLIPBOARD_PASTE: u64 = SYSCALL_PRIVATE_BASE + 26;
 /// `glyph_count x height` bytes; width must be 8. Coverage format (1): 8-bit
 /// alpha, one `width x height` cell per `slopos_font::GLYPH_RANGES` slot then
 /// one replacement cell; `glyph_count` must equal `slopos_font::GLYPH_COUNT`.
-pub const SYSCALL_FONT_SET: u64 = SYSCALL_PRIVATE_BASE + 27;
+pub const SYSCALL_FONT_SET: u64 = SYSCALL_PRIVATE_BASE + 25;
 
 /// `keymap_load(data: *const u8, len)` — a serialised `LayoutTable` blob (see
 /// `slopos_abi::input::layout`), `EINVAL` if malformed. Unprivileged: the
 /// kernel-side binary validator is the safety boundary, and the kernel never
 /// parses layout text.
-pub const SYSCALL_KEYMAP_LOAD: u64 = SYSCALL_PRIVATE_BASE + 28;
+pub const SYSCALL_KEYMAP_LOAD: u64 = SYSCALL_PRIVATE_BASE + 26;
 
 /// `keymap_get_name(buf: *mut u8, buf_len) -> bytes written` of the active
 /// layout's short name. Unprivileged.
-pub const SYSCALL_KEYMAP_GET_NAME: u64 = SYSCALL_PRIVATE_BASE + 29;
+pub const SYSCALL_KEYMAP_GET_NAME: u64 = SYSCALL_PRIVATE_BASE + 27;
 
 /// SlopRing: create a submission/completion ring (SLOPRING SS 6.1).
 /// `ring_setup(entries: u32, params: *mut RingParams) -> ring fd`. Maps the
@@ -627,35 +623,35 @@ pub const SYSCALL_KEYMAP_GET_NAME: u64 = SYSCALL_PRIVATE_BASE + 29;
 ///
 /// Private rather than io_uring's 425: the SQE, the params and the register
 /// ops are SlopOS's own shapes, and a Linux number would promise otherwise.
-pub const SYSCALL_RING_SETUP: u64 = SYSCALL_PRIVATE_BASE + 30;
+pub const SYSCALL_RING_SETUP: u64 = SYSCALL_PRIVATE_BASE + 28;
 
 /// SlopRing: submit and/or harvest ring completions (SLOPRING SS 6.2).
 /// `ring_enter(ring_fd, to_submit, min_complete, flags) -> submissions`.
 /// With `min_complete > 0` the calling task blocks on the in-flight resource
 /// queues until that many CQEs are ready, a signal arrives, or the deadline
 /// elapses.
-pub const SYSCALL_RING_ENTER: u64 = SYSCALL_PRIVATE_BASE + 31;
+pub const SYSCALL_RING_ENTER: u64 = SYSCALL_PRIVATE_BASE + 29;
 
 /// SlopRing: register provided/fixed buffers with a ring (SLOPRING SS 13, ABI
 /// v2). `ring_register(ring_fd, op, arg: u64, nr_args)`; the implemented ops
 /// sit behind [`super::super::ring::SLOPRING_FEAT_REG_BUFFERS`] and an unknown
 /// one is `-ENOSYS`.
-pub const SYSCALL_RING_REGISTER: u64 = SYSCALL_PRIVATE_BASE + 32;
+pub const SYSCALL_RING_REGISTER: u64 = SYSCALL_PRIVATE_BASE + 30;
 
 /// `roulette()` — spin the Wheel of Fate.
-pub const SYSCALL_ROULETTE: u64 = SYSCALL_PRIVATE_BASE + 33;
+pub const SYSCALL_ROULETTE: u64 = SYSCALL_PRIVATE_BASE + 31;
 
 /// `roulette_result(packed)` — report a spin's outcome.
-pub const SYSCALL_ROULETTE_RESULT: u64 = SYSCALL_PRIVATE_BASE + 34;
+pub const SYSCALL_ROULETTE_RESULT: u64 = SYSCALL_PRIVATE_BASE + 32;
 
 /// `roulette_draw(fate: u32)` — draw the wheel for a fate.
-pub const SYSCALL_ROULETTE_DRAW: u64 = SYSCALL_PRIVATE_BASE + 35;
+pub const SYSCALL_ROULETTE_DRAW: u64 = SYSCALL_PRIVATE_BASE + 33;
 
 /// `test_report(status, name: *const u8, name_len, msg: *const u8, msg_len)` —
 /// one userland subtest result; `status` is 0 Pass / 1 Fail / 2 Skip. Name and
 /// message are UTF-8 without NUL, truncated at `TEST_REPORT_NAME_MAX` /
 /// `TEST_REPORT_MSG_MAX`.
-pub const SYSCALL_TEST_REPORT: u64 = SYSCALL_PRIVATE_BASE + 36;
+pub const SYSCALL_TEST_REPORT: u64 = SYSCALL_PRIVATE_BASE + 34;
 
 /// Drive the kernel-side userland-test phase: spawn each `TestKind::Userland`
 /// entry of the `.test_registry`, drain its `SYSCALL_TEST_REPORT` ring, emit
@@ -663,13 +659,13 @@ pub const SYSCALL_TEST_REPORT: u64 = SYSCALL_PRIVATE_BASE + 36;
 ///
 /// Caller must be a real kernel-scheduled task (`/sbin/init` is the canonical
 /// one) — `task_wait_for` requires a non-null `current_task`.
-pub const SYSCALL_RUN_USERLAND_TESTS: u64 = SYSCALL_PRIVATE_BASE + 37;
+pub const SYSCALL_RUN_USERLAND_TESTS: u64 = SYSCALL_PRIVATE_BASE + 35;
 
 /// Deliberately panic in syscall context to exercise the task-scoped
 /// panic-recovery boundary. `ENOSYS` unless the `panic.recover_smoke` boot flag
 /// is set, so production images expose no panic trigger; when armed the call
 /// does not return.
-pub const SYSCALL_TEST_PANIC: u64 = SYSCALL_PRIVATE_BASE + 38;
+pub const SYSCALL_TEST_PANIC: u64 = SYSCALL_PRIVATE_BASE + 36;
 
 /// `getrandom` flags. Both are accepted and change nothing: the pool is
 /// seeded before userland runs.

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! `spawn_path` privilege containment, exercised through the real syscall entry.
 //!
 //! The utest runner spawns test binaries with `TASK_FLAG_USER_MODE |

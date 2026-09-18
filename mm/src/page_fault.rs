@@ -276,10 +276,16 @@ pub fn complete_file_fault(
 /// x86-64 `#PF` error-code shapes a user write takes: against an absent page
 /// (the demand-paging shape) and against a present one (the COW shape).
 const USER_WRITE_ABSENT: u64 = 0x06;
+/// The same shape for a user *read* against an absent page.
+const USER_READ_ABSENT: u64 = 0x04;
 const USER_WRITE_PRESENT: u64 = 0x07;
 
 /// `Retry` means a peer holds the address space for a bounded window, so the
 /// bound is generous; a stuck retry is a defect, not a reason to spin forever.
+/// Kept generous rather than trimmed now that the user-copy path reaches here
+/// only after a copy has already failed: exhausting the bound is a spurious
+/// `EFAULT` handed to userland, so the cost of spinning too long is latency in
+/// a rare case and the cost of spinning too little is a wrong answer.
 const POPULATE_SPINS: u32 = 4096;
 
 #[derive(Clone, Copy)]
@@ -313,9 +319,15 @@ fn page_write_state(handle: Handle<ProcessVm>, page: u64) -> Option<PageWriteSta
 /// address space `process_vm_handle` names.
 ///
 /// The user-copy primitives take no page faults — they validate the leaf and
-/// refuse — so a path that *chooses* a user address rather than being handed
-/// one has to populate it first. Signal-frame delivery is that path: it writes
-/// below the interrupted RSP, where a forked child's stack pages are still COW.
+/// refuse — so a kernel→user write against an absent or still-COW page has to
+/// fault the range in itself. Two callers: signal-frame delivery, which picks
+/// an address below the interrupted RSP where a forked child's stack is still
+/// COW, and [`crate::user_copy`], which comes here after a copy has already
+/// refused.
+///
+/// Non-blocking, exactly as the read twin below is: a `NeedsIo` plan answers
+/// `false` rather than reading, so a write into a not-yet-faulted
+/// `MAP_PRIVATE` file mapping still ends in `EFAULT`.
 pub fn populate_user_range_for_write(
     process_vm_handle: u64,
     addr: u64,
@@ -342,6 +354,48 @@ pub fn populate_user_range_for_write(
             match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
                 FaultOutcome::Resolved | FaultOutcome::Retry => {}
                 // A file read must not run from the delivery path.
+                FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => return false,
+            }
+            spins += 1;
+            if spins == POPULATE_SPINS {
+                return false;
+            }
+        }
+        page += page_size;
+    }
+    true
+}
+
+/// Make every page of `[addr, addr + len)` present, as a user *read* would.
+///
+/// The write twin above breaks COW because a write must; a read must not, or
+/// a reader would be handed a private copy nobody wrote to. A file-backed
+/// page that needs I/O is left absent: this runs on paths that must not
+/// block, and the copy that follows then answers what it answered before.
+pub fn populate_user_range_for_read(
+    process_vm_handle: u64,
+    addr: u64,
+    len: u64,
+    task_id: u32,
+) -> bool {
+    let Some(handle) = process_vm::unpack_process_vm_handle(process_vm_handle) else {
+        return false;
+    };
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    let page_size = crate::paging_defs::PAGE_SIZE_4KB;
+    let mut page = addr & !(page_size - 1);
+    while page < end {
+        let mut spins = 0u32;
+        loop {
+            match page_write_state(handle, page) {
+                Some(PageWriteState::Writable | PageWriteState::Present) => break,
+                Some(PageWriteState::Absent) => {}
+                None => return false,
+            }
+            match try_resolve_user_fault(page, USER_READ_ABSENT, process_vm_handle, task_id) {
+                FaultOutcome::Resolved | FaultOutcome::Retry => {}
                 FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => return false,
             }
             spins += 1;

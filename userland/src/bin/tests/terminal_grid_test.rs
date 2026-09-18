@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Terminal grid VT semantics — deferred autowrap and the editor's
 //! region-based redraw contract.
 

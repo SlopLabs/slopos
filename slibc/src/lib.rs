@@ -1,10 +1,19 @@
 //! slibc — SlopOS Rust-native C standard library.
+//!
+//! The exported surface is C's: every entry point carries its real C name,
+//! the layouts in [`types`] are the ones the target's `libc` declares, and
+//! failure is `-1`/`NULL`/`MAP_FAILED` with `errno` set. Where SlopOS's own
+//! kernel struct differs from the C one — `sigaction`, the signal mask, the
+//! `getdents64` record — slibc translates at the syscall boundary and the
+//! kernel struct stays as it is.
 
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(sync_unsafe_cell)]
 
 pub mod alloc;
+pub mod auxv;
+pub mod conf;
 pub mod crt;
 pub mod env;
 pub mod errno;
@@ -22,6 +31,7 @@ pub mod test_harness;
 pub mod thread;
 pub mod time;
 pub mod tty;
+pub mod types;
 
 pub use errno::{__errno_location, Errno, errno_get, errno_set};
 pub use error::{SyscallError, SyscallResult, demux, mux};

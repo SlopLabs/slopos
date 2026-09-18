@@ -19,7 +19,6 @@
 //! pub fn main() -> ! { run_app(MyApp, 640, 480) }
 //! ```
 
-#![feature(restricted_std)]
 // Widget fields are read by run_app and tree reconciliation, not by the impls.
 #![allow(dead_code)]
 

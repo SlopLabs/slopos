@@ -13,7 +13,6 @@
 //! compiler-native `#[thread_local]` arm over variant-II FS_BASE TLS), so each
 //! OS thread that calls `block_on` gets its own scheduler, reactor and `Ring`.
 
-#![feature(restricted_std)]
 #![allow(dead_code)]
 
 pub mod ring;

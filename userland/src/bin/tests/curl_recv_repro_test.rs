@@ -1,12 +1,10 @@
-#![feature(restricted_std)]
-
 //! Regression test for `curl: receive failed` on SlopOS.
 //!
-//! `scripts/patch_std.sh` installs a dedicated `slopos.rs` io-error decoder
-//! (from `slibc/std_pal/io_error/slopos.rs`); std's generic decoder maps every
-//! errno to `ErrorKind::Uncategorized`, which curl reports as a receive
-//! failure. These cases assert the kind mapping, so an accidental fallback to
-//! the generic decoder or a missed errno in the table fails CI.
+//! A unix-family target decodes errno through std's own `sys/io/error/unix.rs`
+//! over `libc`; the generic decoder maps every errno to
+//! `ErrorKind::Uncategorized`, which curl reports as a receive failure. These
+//! cases assert the kind mapping, so a target that lost its unix errno
+//! decoder, or a missed errno in `libc`'s slopos module, fails CI.
 
 use slopos_userland as _;
 

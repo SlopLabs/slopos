@@ -8177,6 +8177,725 @@ slopos_testing::stest!(
     suite = syscall_net
 );
 
+/// Byte offsets of one user page's `sendmsg`/`recvmsg` scratch. Every slot is
+/// 8-aligned, which `MsgHdr`, `CmsgHdr` and `UserIovec` all require, and the
+/// two data slots per direction are 64 bytes apart so a kernel that read one
+/// segment and ran off its end would copy padding rather than the other half.
+struct MsgScratch {
+    iov: u64,
+    head: u64,
+    tail: u64,
+    ctl: u64,
+    hdr: u64,
+}
+
+impl MsgScratch {
+    const fn at(base: u64) -> Self {
+        Self {
+            iov: base,
+            head: base + 0x40,
+            tail: base + 0x80,
+            ctl: base + 0xc0,
+            hdr: base + 0x100,
+        }
+    }
+}
+
+fn write_user_bytes(table: FdTable, addr: u64, data: &[u8]) -> bool {
+    let Ok(bytes) = slopos_mm::user_ptr::UserBytes::try_new(addr, data.len()) else {
+        return false;
+    };
+    with_user_process_context(table, || {
+        slopos_mm::user_copy::copy_bytes_to_user(bytes, data).is_ok()
+    })
+    .unwrap_or(false)
+}
+
+fn read_user_bytes(table: FdTable, addr: u64, out: &mut [u8]) -> bool {
+    let Ok(bytes) = slopos_mm::user_ptr::UserBytes::try_new(addr, out.len()) else {
+        return false;
+    };
+    with_user_process_context(table, || {
+        slopos_mm::user_copy::copy_bytes_from_user(bytes, out).is_ok()
+    })
+    .unwrap_or(false)
+}
+
+/// Stage the send side: two non-adjacent 4-byte segments and one `SCM_RIGHTS`
+/// item naming `fd`.
+#[inline(never)]
+fn stage_sendmsg(table: FdTable, s: &MsgScratch, fd: i32) -> bool {
+    use slopos_abi::fs::UserIovec;
+    use slopos_abi::syscall::{
+        CMSG_DATA_OFFSET, CmsgHdr, MsgHdr, SCM_RIGHTS, SOL_SOCKET, cmsg_len,
+    };
+
+    let iov = [
+        UserIovec {
+            iov_base: s.head,
+            iov_len: 4,
+        },
+        UserIovec {
+            iov_base: s.tail,
+            iov_len: 4,
+        },
+    ];
+    let cmsg = CmsgHdr {
+        cmsg_len: cmsg_len(core::mem::size_of::<i32>()) as u64,
+        cmsg_level: SOL_SOCKET,
+        cmsg_type: SCM_RIGHTS,
+    };
+    let hdr = MsgHdr {
+        msg_iov: s.iov,
+        msg_iovlen: 2,
+        msg_control: s.ctl,
+        msg_controllen: cmsg_len(core::mem::size_of::<i32>()) as u64,
+        ..MsgHdr::default()
+    };
+
+    user_copy_out(table, s.iov, &iov)
+        && write_user_bytes(table, s.head, b"HEAD")
+        && write_user_bytes(table, s.tail, b"TAIL")
+        && user_copy_out(table, s.ctl, &cmsg)
+        && user_copy_out(table, s.ctl + CMSG_DATA_OFFSET as u64, &fd)
+        && user_copy_out(table, s.hdr, &hdr)
+}
+
+/// Stage the receive side: a 3-byte segment and a 5-byte one, 64 bytes apart,
+/// plus a control buffer with room for the kernel's whole `SCM_MAX_FDS` cap.
+#[inline(never)]
+fn stage_recvmsg(table: FdTable, s: &MsgScratch) -> bool {
+    use slopos_abi::fs::UserIovec;
+    use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS, cmsg_space};
+
+    let iov = [
+        UserIovec {
+            iov_base: s.head,
+            iov_len: 3,
+        },
+        UserIovec {
+            iov_base: s.tail,
+            iov_len: 5,
+        },
+    ];
+    let hdr = MsgHdr {
+        msg_iov: s.iov,
+        msg_iovlen: 2,
+        msg_control: s.ctl,
+        msg_controllen: cmsg_space(SCM_MAX_FDS * core::mem::size_of::<i32>()) as u64,
+        ..MsgHdr::default()
+    };
+    user_copy_out(table, s.iov, &iov) && user_copy_out(table, s.hdr, &hdr)
+}
+
+/// `sendmsg`/`recvmsg` over Linux's `msghdr`: a real iovec array the kernel
+/// must walk, and a 16-byte `cmsghdr` whose payload starts at +16.
+///
+/// Three offsets are under test, and each was somewhere else before: `msg_iov`
+/// at 16 (the header used to inline a single segment), `msg_controllen` at 40,
+/// and `CMSG_DATA` at +16 rather than +12. Splitting the payload across two
+/// non-adjacent segments is what tells a real walk from the old inlined one —
+/// a kernel that honoured only `msg_iov[0]` would pass a one-segment test and
+/// fail this. The delivered descriptor is resolved back to the sender's memfd,
+/// so a control buffer read at the wrong offset cannot pass by luck.
+pub fn test_sendmsg_recvmsg_linux_layouts() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some(task) = OwnedTask::user() else {
+        return fail!("task creation failed");
+    };
+    let task_guard = assert_some!(task_find_by_id(task.id()), "task lookup failed");
+    let Some(pid) = task_guard.process().as_deref().and_then(FdTable::of) else {
+        return fail!("no fd table");
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+    let _srv = OwnedFd::new(pid, srv_fd);
+    let _cli = OwnedFd::new(pid, cli_fd);
+
+    // A memfd is a leaf description, so it is the one kind the ancillary path
+    // accepts, and its handle is what identifies the delivered fd below.
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(h) => h,
+            None => return fail!("memfd_create failed"),
+        };
+    let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        mfd_ops,
+        mfd_handle,
+        Some(mfd_backing),
+        slopos_fs::fileio::FdFlags::NONE,
+    );
+    let Some(_mfd) = OwnedFd::new(pid, mfd_fd) else {
+        return fail!("memfd fd install failed");
+    };
+
+    let Some(page) = map_user_rw_page(pid) else {
+        return fail!("could not map a user page");
+    };
+    let send = MsgScratch::at(page);
+    let recv = MsgScratch::at(page + 0x800);
+    assert_test!(
+        stage_sendmsg(pid, &send, mfd_fd) && stage_recvmsg(pid, &recv),
+        "could not stage the message headers"
+    );
+
+    let mut frame = zero_frame_boxed();
+    frame.regs_mut().rdi = srv_fd as u64;
+    frame.regs_mut().rsi = send.hdr;
+    frame.regs_mut().rdx = 0;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            crate::syscall::net_handlers::syscall_sendmsg,
+            &task_guard,
+            &mut *frame,
+        )
+    });
+    assert_eq_test!(frame.rax(), 8, "sendmsg must gather both segments");
+
+    frame.regs_mut().rdi = cli_fd as u64;
+    frame.regs_mut().rsi = recv.hdr;
+    frame.regs_mut().rdx = 0;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            crate::syscall::net_handlers::syscall_recvmsg,
+            &task_guard,
+            &mut *frame,
+        )
+    });
+    assert_eq_test!(frame.rax(), 8, "recvmsg must scatter into both segments");
+
+    let check = verify_recvmsg_payload(pid, &recv);
+    if check.is_failure() {
+        return check;
+    }
+    verify_recvmsg_control(pid, &recv, mfd_handle)
+}
+
+/// The data half of [`test_sendmsg_recvmsg_linux_layouts`], split out because
+/// its assertions' format temporaries put the whole test past the 2 KiB frame
+/// cap `check_stack_sizes.sh` enforces.
+#[inline(never)]
+fn verify_recvmsg_payload(table: FdTable, recv: &MsgScratch) -> TestResult {
+    use slopos_abi::syscall::MsgHdr;
+    use slopos_abi::syscall::cmsg_space;
+
+    let mut got = [0u8; 8];
+    assert_test!(
+        read_user_bytes(table, recv.head, &mut got[..3])
+            && read_user_bytes(table, recv.tail, &mut got[3..]),
+        "could not read the received segments back"
+    );
+    assert_test!(
+        &got == b"HEADTAIL",
+        "the payload did not land split across both receive segments"
+    );
+
+    let out_hdr: MsgHdr = assert_some!(user_copy_in(table, recv.hdr), "msghdr readback");
+    assert_eq_test!(
+        out_hdr.msg_controllen,
+        cmsg_space(core::mem::size_of::<i32>()) as u64,
+        "msg_controllen must report one item's CMSG_SPACE"
+    );
+    assert_eq_test!(out_hdr.msg_flags, 0, "nothing was truncated");
+    assert_eq_test!(out_hdr.msg_namelen, 0, "AF_UNIX recv reports no address");
+    pass!()
+}
+
+/// The ancillary half: the `cmsghdr` shape and that `CMSG_DATA` at +16 holds
+/// the sender's own memfd rather than whatever a wrong offset would read.
+#[inline(never)]
+fn verify_recvmsg_control(table: FdTable, recv: &MsgScratch, mfd_handle: usize) -> TestResult {
+    use slopos_abi::syscall::cmsg_len;
+    use slopos_abi::syscall::{CMSG_DATA_OFFSET, CmsgHdr, SCM_RIGHTS, SOL_SOCKET};
+
+    let out_cmsg: CmsgHdr = assert_some!(user_copy_in(table, recv.ctl), "cmsghdr readback");
+    assert_eq_test!(
+        out_cmsg.cmsg_len,
+        cmsg_len(core::mem::size_of::<i32>()) as u64,
+        "cmsg_len must be CMSG_LEN(sizeof(int))"
+    );
+    assert_eq_test!(out_cmsg.cmsg_level, SOL_SOCKET, "cmsg_level");
+    assert_eq_test!(out_cmsg.cmsg_type, SCM_RIGHTS, "cmsg_type");
+
+    let delivered: i32 = assert_some!(
+        user_copy_in(table, recv.ctl + CMSG_DATA_OFFSET as u64),
+        "fd readback"
+    );
+    let Some(_delivered) = OwnedFd::new(table, delivered) else {
+        return fail!("no descriptor at CMSG_DATA (+{})", CMSG_DATA_OFFSET);
+    };
+    let (kind, handle, _mode) = assert_some!(
+        fileio_get_open_file_handle(table, delivered),
+        "delivered fd does not resolve"
+    );
+    assert_test!(
+        kind == slopos_abi::file_ops::FileKind::Memfd && handle == mfd_handle,
+        "the descriptor at CMSG_DATA must be the sender's memfd (kind {:?}, handle {})",
+        kind,
+        handle
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_sendmsg_recvmsg_linux_layouts,
+    suite = syscall_net
+);
+
+/// Dispatch one `msghdr` syscall and answer the raw `rax`. Split out so the
+/// register frame and the handler's own locals stay out of the caller's frame.
+#[inline(never)]
+fn dispatch_msg_syscall(
+    table: FdTable,
+    task: &slopos_sched::task::TaskRef,
+    handler: crate::syscall::common::SyscallHandler,
+    fd: i32,
+    hdr: u64,
+) -> u64 {
+    let mut frame = zero_frame_boxed();
+    frame.regs_mut().rdi = fd as u64;
+    frame.regs_mut().rsi = hdr;
+    frame.regs_mut().rdx = 0;
+    let _ = with_user_process_context(table, || {
+        crate::syscall::dispatch::dispatch_handler(handler, task, &mut *frame)
+    });
+    frame.rax()
+}
+
+/// Stage a send whose control buffer holds *two* `SCM_RIGHTS` items, each
+/// naming one descriptor, plus one 4-byte data segment.
+///
+/// The second item sits one `CMSG_ALIGN(cmsg_len)` on from the first — the
+/// padded stride `CMSG_NXTHDR` walks by, 24 bytes for a one-descriptor item,
+/// not its unpadded 20-byte `cmsg_len`.
+#[inline(never)]
+fn stage_two_item_send(table: FdTable, s: &MsgScratch, fds: &[i32; 2]) -> bool {
+    use slopos_abi::fs::UserIovec;
+    use slopos_abi::syscall::{
+        CMSG_DATA_OFFSET, CmsgHdr, MsgHdr, SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
+    };
+
+    let stride = cmsg_space(core::mem::size_of::<i32>()) as u64;
+    let iov = [UserIovec {
+        iov_base: s.head,
+        iov_len: 4,
+    }];
+    let cmsg = CmsgHdr {
+        cmsg_len: cmsg_len(core::mem::size_of::<i32>()) as u64,
+        cmsg_level: SOL_SOCKET,
+        cmsg_type: SCM_RIGHTS,
+    };
+    let hdr = MsgHdr {
+        msg_iov: s.iov,
+        msg_iovlen: 1,
+        msg_control: s.ctl,
+        msg_controllen: 2 * stride,
+        ..MsgHdr::default()
+    };
+
+    user_copy_out(table, s.iov, &iov)
+        && write_user_bytes(table, s.head, b"TWOS")
+        && user_copy_out(table, s.ctl, &cmsg)
+        && user_copy_out(table, s.ctl + CMSG_DATA_OFFSET as u64, &fds[0])
+        && user_copy_out(table, s.ctl + stride, &cmsg)
+        && user_copy_out(table, s.ctl + stride + CMSG_DATA_OFFSET as u64, &fds[1])
+        && user_copy_out(table, s.hdr, &hdr)
+}
+
+/// Both items' descriptors arrived, in one item, and both are the sender's
+/// memfd.
+#[inline(never)]
+fn verify_two_item_control(table: FdTable, recv: &MsgScratch, mfd_handle: usize) -> TestResult {
+    use slopos_abi::syscall::{CMSG_DATA_OFFSET, CmsgHdr, cmsg_len};
+
+    let out_cmsg: CmsgHdr = assert_some!(user_copy_in(table, recv.ctl), "cmsghdr readback");
+    // A handler that read the first `cmsghdr` and stopped reports one
+    // descriptor here, not two.
+    assert_eq_test!(
+        out_cmsg.cmsg_len,
+        cmsg_len(2 * core::mem::size_of::<i32>()) as u64,
+        "both items' descriptors must arrive as one CMSG_LEN(2 * sizeof(int)) item"
+    );
+
+    let delivered: [i32; 2] = assert_some!(
+        user_copy_in(table, recv.ctl + CMSG_DATA_OFFSET as u64),
+        "fd pair readback"
+    );
+    let Some(_first) = OwnedFd::new(table, delivered[0]) else {
+        return fail!("no descriptor for the first control item");
+    };
+    let Some(_second) = OwnedFd::new(table, delivered[1]) else {
+        return fail!("no descriptor for the second control item");
+    };
+    for fd in delivered {
+        let Some((kind, handle, _mode)) = fileio_get_open_file_handle(table, fd) else {
+            return fail!("delivered fd {} does not resolve", fd);
+        };
+        if kind != slopos_abi::file_ops::FileKind::Memfd || handle != mfd_handle {
+            return fail!("fd {} is not the sender's memfd (kind {:?})", fd, kind);
+        }
+    }
+    pass!()
+}
+
+/// A control buffer with two `SCM_RIGHTS` items delivers both descriptors.
+///
+/// `scm_rights_fds` walks with `cmsg_nxthdr` rather than reading the first
+/// header and stopping, and this is the only test that tells the two apart:
+/// every other one stages a single item, which both shapes handle. Both items
+/// name the same memfd, so one description is enough to identify what arrived.
+pub fn test_sendmsg_walks_every_cmsg_item() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some(task) = OwnedTask::user() else {
+        return fail!("task creation failed");
+    };
+    let task_guard = assert_some!(task_find_by_id(task.id()), "task lookup failed");
+    let Some(pid) = task_guard.process().as_deref().and_then(FdTable::of) else {
+        return fail!("no fd table");
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+    let _srv = OwnedFd::new(pid, srv_fd);
+    let _cli = OwnedFd::new(pid, cli_fd);
+
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(h) => h,
+            None => return fail!("memfd_create failed"),
+        };
+    let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        mfd_ops,
+        mfd_handle,
+        Some(mfd_backing),
+        slopos_fs::fileio::FdFlags::NONE,
+    );
+    let Some(_mfd) = OwnedFd::new(pid, mfd_fd) else {
+        return fail!("memfd fd install failed");
+    };
+
+    let Some(page) = map_user_rw_page(pid) else {
+        return fail!("could not map a user page");
+    };
+    let send = MsgScratch::at(page);
+    let recv = MsgScratch::at(page + 0x800);
+    assert_test!(
+        stage_two_item_send(pid, &send, &[mfd_fd, mfd_fd]) && stage_recvmsg(pid, &recv),
+        "could not stage the message headers"
+    );
+
+    assert_eq_test!(
+        dispatch_msg_syscall(
+            pid,
+            &task_guard,
+            crate::syscall::net_handlers::syscall_sendmsg,
+            srv_fd,
+            send.hdr
+        ),
+        4,
+        "sendmsg must accept a two-item control buffer"
+    );
+    assert_eq_test!(
+        dispatch_msg_syscall(
+            pid,
+            &task_guard,
+            crate::syscall::net_handlers::syscall_recvmsg,
+            cli_fd,
+            recv.hdr
+        ),
+        4,
+        "recvmsg must return the data that travelled with them"
+    );
+    verify_two_item_control(pid, &recv, mfd_handle)
+}
+
+slopos_testing::stest!(
+    name = test_sendmsg_walks_every_cmsg_item,
+    suite = syscall_net
+);
+
+/// One malformed control buffer and the refusal `sendmsg` must answer for it.
+struct CmsgCase {
+    controllen: u64,
+    cmsg_len: u64,
+    level: i32,
+    ctype: i32,
+    want: slopos_abi::Errno,
+    why: &'static str,
+}
+
+/// Every refusal `scm_rights_fds` can reach, each from an ordinary
+/// `sendmsg(2)` with a well-formed data segment.
+///
+/// The descriptor payload is left as the mapped page's zeros: every case must
+/// be refused before a descriptor number is read at all, so none of them
+/// depends on what fd 0 happens to be.
+const CMSG_REFUSALS: &[CmsgCase] = &[
+    CmsgCase {
+        controllen: 24,
+        cmsg_len: 8,
+        level: slopos_abi::syscall::SOL_SOCKET,
+        ctype: slopos_abi::syscall::SCM_RIGHTS,
+        want: slopos_abi::Errno::EINVAL,
+        why: "a cmsg_len below the 16-byte header",
+    },
+    CmsgCase {
+        controllen: 24,
+        cmsg_len: 40,
+        level: slopos_abi::syscall::SOL_SOCKET,
+        ctype: slopos_abi::syscall::SCM_RIGHTS,
+        want: slopos_abi::Errno::EINVAL,
+        why: "an item declaring more than the buffer holds",
+    },
+    CmsgCase {
+        controllen: 24,
+        cmsg_len: 20,
+        level: slopos_abi::syscall::IPPROTO_TCP,
+        ctype: slopos_abi::syscall::SCM_RIGHTS,
+        want: slopos_abi::Errno::EINVAL,
+        why: "a cmsg_level other than SOL_SOCKET",
+    },
+    CmsgCase {
+        controllen: 24,
+        cmsg_len: 20,
+        level: slopos_abi::syscall::SOL_SOCKET,
+        // 2 is Linux's `SCM_CREDENTIALS`: the unimplemented type a real
+        // caller is likeliest to reach for.
+        ctype: 2,
+        want: slopos_abi::Errno::EINVAL,
+        why: "a cmsg_type this kernel does not implement",
+    },
+    CmsgCase {
+        controllen: slopos_abi::syscall::cmsg_len(
+            (slopos_abi::syscall::SCM_MAX_FDS + 1) * core::mem::size_of::<i32>(),
+        ) as u64,
+        cmsg_len: slopos_abi::syscall::cmsg_len(
+            (slopos_abi::syscall::SCM_MAX_FDS + 1) * core::mem::size_of::<i32>(),
+        ) as u64,
+        level: slopos_abi::syscall::SOL_SOCKET,
+        ctype: slopos_abi::syscall::SCM_RIGHTS,
+        want: slopos_abi::Errno::EINVAL,
+        why: "one more descriptor than SCM_MAX_FDS",
+    },
+    CmsgCase {
+        controllen: (slopos_mm::user_msghdr::SCM_CONTROLLEN_MAX + 1) as u64,
+        cmsg_len: 20,
+        level: slopos_abi::syscall::SOL_SOCKET,
+        ctype: slopos_abi::syscall::SCM_RIGHTS,
+        want: slopos_abi::Errno::ENOBUFS,
+        why: "a control buffer one byte past SCM_CONTROLLEN_MAX",
+    },
+];
+
+/// Stage one [`CmsgCase`]: a single 4-byte data segment and a control buffer
+/// holding exactly the case's `cmsghdr`.
+#[inline(never)]
+fn stage_cmsg_case(table: FdTable, s: &MsgScratch, case: &CmsgCase) -> bool {
+    use slopos_abi::fs::UserIovec;
+    use slopos_abi::syscall::{CmsgHdr, MsgHdr};
+
+    let iov = [UserIovec {
+        iov_base: s.head,
+        iov_len: 4,
+    }];
+    let cmsg = CmsgHdr {
+        cmsg_len: case.cmsg_len,
+        cmsg_level: case.level,
+        cmsg_type: case.ctype,
+    };
+    let hdr = MsgHdr {
+        msg_iov: s.iov,
+        msg_iovlen: 1,
+        msg_control: s.ctl,
+        msg_controllen: case.controllen,
+        ..MsgHdr::default()
+    };
+
+    user_copy_out(table, s.iov, &iov)
+        && write_user_bytes(table, s.head, b"DATA")
+        && user_copy_out(table, s.ctl, &cmsg)
+        && user_copy_out(table, s.hdr, &hdr)
+}
+
+#[inline(never)]
+fn run_cmsg_refusal_cases(
+    table: FdTable,
+    task: &slopos_sched::task::TaskRef,
+    fd: i32,
+    s: &MsgScratch,
+) -> TestResult {
+    for case in CMSG_REFUSALS {
+        if !stage_cmsg_case(table, s, case) {
+            return fail!("could not stage {}", case.why);
+        }
+        let rax = dispatch_msg_syscall(
+            table,
+            task,
+            crate::syscall::net_handlers::syscall_sendmsg,
+            fd,
+            s.hdr,
+        );
+        if rax != case.want.as_u64() {
+            return fail!(
+                "{} answered {}, want {}",
+                case.why,
+                rax as i64,
+                case.want.as_u64() as i64
+            );
+        }
+    }
+    pass!()
+}
+
+/// Every control-buffer refusal on the `sendmsg` path, including the cap that
+/// bounds the walk itself.
+///
+/// Each case is a control buffer a process can hand the kernel today, and each
+/// refusal branch is the only thing between it and a descriptor number read
+/// out of a length the caller chose. The `ENOBUFS` case is the walk's bound:
+/// without it, `msg_controllen` alone decides how many `copy_from_user`s of a
+/// `cmsghdr` one `sendmsg` performs.
+pub fn test_sendmsg_refuses_malformed_cmsg() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some(task) = OwnedTask::user() else {
+        return fail!("task creation failed");
+    };
+    let task_guard = assert_some!(task_find_by_id(task.id()), "task lookup failed");
+    let Some(pid) = task_guard.process().as_deref().and_then(FdTable::of) else {
+        return fail!("no fd table");
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+    let _srv = OwnedFd::new(pid, srv_fd);
+    let _cli = OwnedFd::new(pid, cli_fd);
+
+    let Some(page) = map_user_rw_page(pid) else {
+        return fail!("could not map a user page");
+    };
+    let send = MsgScratch::at(page);
+    run_cmsg_refusal_cases(pid, &task_guard, srv_fd, &send)
+}
+
+slopos_testing::stest!(
+    name = test_sendmsg_refuses_malformed_cmsg,
+    suite = syscall_net
+);
+
+/// A custody ceiling reached part way through an `SCM_RIGHTS` batch fails the
+/// whole send.
+///
+/// `unix_sendmsg` promises all-or-nothing ancillary delivery, and the
+/// `MAX_INFLIGHT_FDS` pre-check does not model the sender's custody charge: the
+/// commit loop's own refusal arm used to drop the descriptor it could not
+/// charge, report the byte count anyway, and count the dropped descriptor in
+/// the peer wake. With headroom for one of two descriptors, that shape returns
+/// a byte count and leaves `files` empty; the batch reservation makes it
+/// `ENOMEM` with both aliases still the caller's.
+pub fn test_unix_scm_rights_custody_refusal_is_atomic() -> TestResult {
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_net::unix_socket;
+    use slopos_ostd::process::quota::{NO_LIMIT, quota_mode, set_limit, set_quota_mode, stats};
+
+    let _fixture = SyscallFixture::new();
+
+    let Some(task) = OwnedTask::user() else {
+        return fail!("task creation failed");
+    };
+    let Some(process) = task_find_by_id(task.id()).and_then(|task| task.process()) else {
+        return fail!("no process");
+    };
+    let account = process.account();
+    let Some(pid) = FdTable::of(&process) else {
+        return fail!("no fd table");
+    };
+
+    let Some(pair) = RawUnixPair::create() else {
+        return fail!("could not create connected pair");
+    };
+
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(triple) => triple,
+            None => return fail!("memfd_create failed"),
+        };
+    let Some(mfd) = OwnedFd::new(
+        pid,
+        slopos_fs::fileio::fileio_open_fd_with_ops(
+            pid,
+            mfd_ops,
+            mfd_handle,
+            Some(mfd_backing),
+            slopos_fs::fileio::FdFlags::NONE,
+        ),
+    ) else {
+        return fail!("memfd fd install failed");
+    };
+
+    let mut files: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
+        match slopos_ostd::KVec::with_capacity(2) {
+            Ok(v) => v,
+            Err(_) => return fail!("alias vec alloc"),
+        };
+    for _ in 0..2 {
+        let Some(alias) = slopos_fs::fileio_clone_file_ref(pid, mfd.fd) else {
+            return fail!("clone failed");
+        };
+        let Ok(leaf) = slopos_fs::LeafFileRef::try_new(alias) else {
+            return fail!("a memfd is a leaf");
+        };
+        if files.push(leaf).is_err() {
+            return fail!("alias push failed");
+        }
+    }
+
+    let before = stats(account, ResourceKind::Custody).map_or(0, |s| s.used);
+    let saved_limit = stats(account, ResourceKind::Custody).map_or(NO_LIMIT, |s| s.limit);
+    // A ceiling only refuses under `Enforce`; `Warn` grants and counts, which
+    // would exercise the commit loop with a charge that succeeded.
+    let saved_mode = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(account, ResourceKind::Custody, before + 1);
+    let rc = unix_socket::unix_sendmsg(pair.server, b"X", &mut files, account);
+    set_limit(account, ResourceKind::Custody, saved_limit);
+    set_quota_mode(saved_mode);
+
+    assert_eq_test!(
+        rc,
+        -12,
+        "a batch that cannot be charged whole must be ENOMEM"
+    );
+    assert_eq_test!(
+        files.len(),
+        2,
+        "a refused send leaves every alias with the caller"
+    );
+    let after = stats(account, ResourceKind::Custody).map_or(0, |s| s.used);
+    assert_eq_test!(
+        after,
+        before,
+        "a refused batch charges nothing: a queued descriptor would still be held"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_unix_scm_rights_custody_refusal_is_atomic,
+    suite = unix_scm_rights
+);
+
 /// Stage `mount(2)`'s three C-string arguments in one user page, answering the
 /// (target, fstype) user addresses. `source` is the empty string at the page's
 /// base, which is what every fstype but `ext2` expects.

@@ -1,5 +1,5 @@
 use slopos_abi::Errno;
-use slopos_abi::fs::UserIovec;
+use slopos_abi::fs::{UIO_MAXIOV, UserIovec};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_ostd::KVec;
 
@@ -203,4 +203,36 @@ impl IoBufWrite for UserIovecBuf {
     fn len(&self) -> usize {
         self.total
     }
+}
+
+/// `struct iovec` is two `u64`s, decoded field by field so no alignment or
+/// padding assumption reaches userland.
+const IOVEC_BYTES: usize = 16;
+
+/// Stage `count` segment descriptors from user memory onto the heap:
+/// `UIO_MAXIOV` of them is 16 KiB against a 2 KiB frame. The addresses stay
+/// untrusted — [`UserIovecBuf`] re-validates each range it touches.
+///
+/// `EINVAL` past `UIO_MAXIOV`, as `readv`/`writev` answer.
+#[inline(never)]
+pub fn stage_iovec(base: u64, count: usize) -> Result<KVec<UserIovec>, Errno> {
+    if count > UIO_MAXIOV {
+        return Err(Errno::EINVAL);
+    }
+    let mut out = KVec::<UserIovec>::with_capacity(count).map_err(|_| Errno::ENOMEM)?;
+    if count == 0 {
+        return Ok(out);
+    }
+    let byte_len = count * IOVEC_BYTES;
+    let user = UserBytes::try_new(base, byte_len).map_err(|_| Errno::EFAULT)?;
+    let mut raw = KVec::<u8>::zeroed(byte_len).map_err(|_| Errno::ENOMEM)?;
+    copy_bytes_from_user(user, &mut raw).map_err(|_| Errno::EFAULT)?;
+    for chunk in raw.chunks_exact(IOVEC_BYTES) {
+        out.push(UserIovec {
+            iov_base: u64::from_le_bytes(chunk[0..8].try_into().unwrap_or([0; 8])),
+            iov_len: u64::from_le_bytes(chunk[8..16].try_into().unwrap_or([0; 8])),
+        })
+        .map_err(|_| Errno::ENOMEM)?;
+    }
+    Ok(out)
 }

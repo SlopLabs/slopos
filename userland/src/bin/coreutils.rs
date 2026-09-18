@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! The multicall utility binary. `/bin/<tool>` is a symlink to this file, so
 //! `argv[0]` names the utility; `coreutils <tool> [args]` works too, which is
 //! what makes the installed set testable from one path.

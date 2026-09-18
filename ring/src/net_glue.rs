@@ -9,15 +9,17 @@
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::io::IoBufWrite;
 use slopos_abi::net::{AF_INET, AF_UNIX, SockAddrIn};
 use slopos_abi::ring::{SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER};
-use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET};
+use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS};
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
 use slopos_fs::fileio::FdTable;
 
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
+use slopos_mm::user_msghdr::{msg_iovec_buf, msghdr_write_out};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 use slopos_fs::fileio::FileRef;
@@ -245,12 +247,12 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
 }
 
 /// `OP_RECVMSG`: socket-only recvmsg (SLOPRING § 12). Parses the user `MsgHdr`
-/// at `sqe.addr`, recvs into a staging buffer, copies the data out to
-/// `iov_base`/`iov_len`, and — for AF_UNIX with SCM_RIGHTS fds — installs the
-/// received fds into the caller's fd table and writes the `CmsgHdr` back into
-/// `control`/`control_len`. AF_INET fills data only (no SCM_RIGHTS), which is
-/// correct, not an error. An ownership op (it installs fds), so the caller
-/// reserves a CQE slot before dispatch (SLOPRING § 11).
+/// at `sqe.addr`, recvs into a staging buffer, scatters the data across the
+/// caller's `msg_iov` segments, and — for AF_UNIX with SCM_RIGHTS fds —
+/// installs the received fds into the caller's fd table and writes one
+/// `SCM_RIGHTS` item back into `msg_control`. AF_INET fills data only (no
+/// SCM_RIGHTS), which is correct, not an error. An ownership op (it installs
+/// fds), so the caller reserves a CQE slot before dispatch (SLOPRING § 11).
 pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u32) -> Outcome {
     let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
@@ -265,8 +267,12 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
         Ok(m) => m,
         Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
     };
+    let mut io_buf = match msg_iovec_buf(&msg) {
+        Ok(b) => b,
+        Err(e) => return Outcome::Inline(e.raw()),
+    };
 
-    let data_len = (msg.iov_len as usize).min(STAGING_CAP);
+    let data_len = IoBufWrite::len(&io_buf).min(STAGING_CAP);
     let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(STAGING_CAP) {
         Ok(v) => v,
         Err(_) => return Outcome::Inline(Errno::ENOMEM.raw()),
@@ -295,19 +301,12 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
         } else {
             0
         };
-        if copied > 0 && msg.iov_base != 0 {
-            let user_out = match UserBytes::try_new(msg.iov_base, copied) {
-                Ok(u) => u,
-                Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
-            };
-            if copy_bytes_to_user(user_out, &scratch[..copied]).is_err() {
-                return Outcome::Inline(Errno::EFAULT.raw());
-            }
+        if copied > 0 && io_buf.copy_in(0, &scratch[..copied]).is_err() {
+            return Outcome::Inline(Errno::EFAULT.raw());
         }
-        if n_fds > 0 {
-            if let Err(e) = recvmsg_writeback_cmsg(table, &msg, received, msg_ptr) {
-                return Outcome::Inline(e.raw());
-            }
+        if let Err(e) = slopos_fs::fileio::fileio_deliver_scm_rights(table, &msg, received, msg_ptr)
+        {
+            return Outcome::Inline(e.raw());
         }
         Outcome::Inline(copied as i32)
     } else {
@@ -321,16 +320,18 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
             return Outcome::Inline(rc as i32);
         }
         let copied = rc as usize;
-        if copied > 0 && msg.iov_base != 0 {
-            // The bytes are already consumed; if the copy to iov_base faults
-            // they are lost (TCP has no un-consume), as in the recv syscall.
-            let user_out = match UserBytes::try_new(msg.iov_base, copied) {
-                Ok(u) => u,
-                Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
-            };
-            if copy_bytes_to_user(user_out, &scratch[..copied]).is_err() {
+        if copied > 0 {
+            // The bytes are already consumed; if the scatter into `msg_iov`
+            // faults they are lost (TCP has no un-consume), as in the recv
+            // syscall.
+            if io_buf.copy_in(0, &scratch[..copied]).is_err() {
                 return Outcome::Inline(Errno::EFAULT.raw());
             }
+        }
+        // An AF_INET recv carries no ancillary data, but `msg_controllen` and
+        // `msg_flags` are still out-fields the caller reads.
+        if let Err(e) = msghdr_write_out(msg_ptr, &msg, 0, 0) {
+            return Outcome::Inline(e.raw());
         }
         Outcome::Inline(copied as i32)
     }
@@ -408,87 +409,6 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
     }
 
     Outcome::Inline(copied as i32)
-}
-
-/// Install the received SCM_RIGHTS files into the caller's fd table and write
-/// the `CmsgHdr` + fd array back into the user `control` buffer, updating
-/// `control_len`. Consumes `received`: undeliverable aliases drop (close) here,
-/// and a copy back to user memory failing *after* fds were installed closes
-/// every installed fd — the caller never learns the numbers, so they would
-/// otherwise be orphaned into an fd-table-exhaustion DoS.
-fn recvmsg_writeback_cmsg(
-    table: FdTable,
-    msg: &MsgHdr,
-    mut received: slopos_ostd::KVec<slopos_fs::FileRef>,
-    msg_ptr: UserPtr<MsgHdr>,
-) -> Result<(), Errno> {
-    let n_fds = received.len();
-
-    if msg.control == 0 {
-        // No control buffer to report them in — the aliases drop.
-        return Ok(());
-    }
-
-    let hdr_size = core::mem::size_of::<CmsgHdr>();
-    let needed = hdr_size + n_fds * 4;
-    if (msg.control_len as usize) < needed {
-        drop(received);
-        let updated = MsgHdr {
-            iov_base: msg.iov_base,
-            iov_len: msg.iov_len,
-            control: msg.control,
-            control_len: 0,
-        };
-        copy_to_user(msg_ptr, &updated).map_err(|_| Errno::EFAULT)?;
-        return Ok(());
-    }
-
-    debug_assert!(n_fds <= SCM_MAX_FDS);
-    let mut fd_nums = [0i32; SCM_MAX_FDS];
-    for (j, file) in received.drain(..).enumerate() {
-        let new_fd = slopos_fs::fileio::fileio_install_file_ref(table, file);
-        if new_fd < 0 {
-            // The failed install dropped its alias and the drain drops the
-            // rest; roll back the installed fds so none are orphaned.
-            for &fd in fd_nums.iter().take(j) {
-                let _ = slopos_fs::fileio::file_close_fd(table, fd);
-            }
-            return Err(Errno::ENOMEM);
-        }
-        fd_nums[j] = new_fd;
-    }
-
-    let writeback = || -> Result<(), Errno> {
-        let cmsg = CmsgHdr {
-            cmsg_len: needed as u32,
-            cmsg_level: SOL_SOCKET as u32,
-            cmsg_type: SCM_RIGHTS,
-        };
-        let cmsg_ptr = UserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
-        copy_to_user(cmsg_ptr, &cmsg).map_err(|_| Errno::EFAULT)?;
-
-        let fd_bytes = &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
-        let fd_out = UserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4)
-            .map_err(|_| Errno::EFAULT)?;
-        copy_bytes_to_user(fd_out, fd_bytes).map_err(|_| Errno::EFAULT)?;
-
-        let updated = MsgHdr {
-            iov_base: msg.iov_base,
-            iov_len: msg.iov_len,
-            control: msg.control,
-            control_len: needed as u64,
-        };
-        copy_to_user(msg_ptr, &updated).map_err(|_| Errno::EFAULT)?;
-        Ok(())
-    };
-
-    if let Err(e) = writeback() {
-        for &fd in fd_nums.iter().take(n_fds) {
-            let _ = slopos_fs::fileio::file_close_fd(table, fd);
-        }
-        return Err(e);
-    }
-    Ok(())
 }
 
 // The registered / provided buffer fast paths below never re-validate a user

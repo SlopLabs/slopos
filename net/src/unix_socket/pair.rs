@@ -7,7 +7,7 @@
 use slopos_abi::quota::CustodyAxis;
 use slopos_fs::{FileRef, LeafFileRef};
 use slopos_ostd::process::AccountId;
-use slopos_ostd::process::quota::{Charge, try_charge};
+use slopos_ostd::process::quota::{Charge, Reservation, try_charge};
 use slopos_ostd::{AllocError, KVec};
 
 use super::MAX_UNIX_SOCKETS;
@@ -15,8 +15,9 @@ use super::buffer::UnixFifo;
 
 /// Soft cap on in-flight file descriptors per direction (SCM_RIGHTS).
 ///
-/// Enforced at the call site, not by the storage shape: the bound stops a
-/// sender pinning arbitrary kernel memory; the exact number is policy.
+/// Enforced by [`AncillaryQueue::has_room`] rather than by the storage shape:
+/// the bound stops a sender pinning arbitrary kernel memory; the exact number
+/// is policy.
 pub(super) const MAX_INFLIGHT_FDS: usize = 8;
 
 /// Every pair owns two slots, so the table can never need more than half as
@@ -64,44 +65,58 @@ impl AncillaryQueue {
         })
     }
 
-    /// Push a file, capped at [`MAX_INFLIGHT_FDS`] and charged to `sender`.
-    /// Returns the file back on refusal so the caller can drop it off-lock.
-    ///
-    /// The charge is minted **after** the only two things that can refuse —
-    /// the cap and the reservation — because `KVec::push` consumes its
-    /// argument on failure, so a token built before a failing push would be
-    /// lost with it.
-    pub(super) fn push(&mut self, file: LeafFileRef, sender: AccountId) -> Result<(), LeafFileRef> {
-        if self.entries.len() >= MAX_INFLIGHT_FDS {
-            return Err(file);
-        }
-        let Ok(reservation) = try_charge::<CustodyAxis>(sender, 1) else {
-            return Err(file);
-        };
-        let file = file.into_inner();
-        let alias = file.alias();
-        if self
-            .entries
-            .push(InFlightFile {
-                file,
-                custody: Charge::commit(reservation),
-            })
-            .is_err()
-        {
-            // The queue refused it, so the proof is still valid: hand the
-            // witness back rather than re-deriving it.
-            return Err(LeafFileRef::try_new(alias).unwrap_or_else(|f| {
-                drop(f);
-                unreachable!("a leaf reference cannot stop being a leaf")
-            }));
-        }
-        drop(alias);
-        Ok(())
+    /// Whether `n` more in-flight descriptors fit under [`MAX_INFLIGHT_FDS`].
+    #[inline]
+    pub(super) fn has_room(&self, n: usize) -> bool {
+        self.entries.len() + n <= MAX_INFLIGHT_FDS
     }
 
-    #[inline]
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
+    /// Take the sender's custody headroom for a whole batch of `n`
+    /// descriptors, appending one token per descriptor to `custody`.
+    ///
+    /// Charging the batch here, before any of it is queued, is what leaves
+    /// [`push`](Self::push) with no refusal arm. A charge that failed part way
+    /// through a commit loop leaves two choices, and both break the caller's
+    /// contract: drop a descriptor the send is about to report as delivered,
+    /// or leave half a batch queued with no way to unqueue it off-lock.
+    ///
+    /// `false` refuses the batch whole: whatever was taken goes back when
+    /// `custody` drops, and every file is still the caller's.
+    pub(super) fn reserve(
+        &self,
+        n: usize,
+        sender: AccountId,
+        custody: &mut KVec<Reservation<CustodyAxis>>,
+    ) -> bool {
+        if !self.has_room(n) {
+            return false;
+        }
+        for _ in 0..n {
+            let Ok(reservation) = try_charge::<CustodyAxis>(sender, 1) else {
+                return false;
+            };
+            if custody.push(reservation).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Queue one file against a token [`reserve`](Self::reserve) already took
+    /// for it.
+    ///
+    /// `expect`: `reserve` checked the cap and the storage was pre-reserved to
+    /// that cap at pair creation, so the `KVec` cannot need to allocate. The
+    /// failure arm is not recoverable either — `KVec::push` has already
+    /// dropped the entry, under the socket state lock — so the only options
+    /// are to say so or to lose a descriptor silently.
+    pub(super) fn push(&mut self, file: LeafFileRef, custody: Reservation<CustodyAxis>) {
+        self.entries
+            .push(InFlightFile {
+                file: file.into_inner(),
+                custody: Charge::commit(custody),
+            })
+            .expect("ancillary storage pre-reserved to MAX_INFLIGHT_FDS");
     }
 
     /// Drain all entries.  The returned `KVec` owns the aliases, so the caller

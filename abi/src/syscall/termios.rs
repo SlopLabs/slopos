@@ -34,6 +34,14 @@ pub const TIOCSCTTY: u64 = 0x540E;
 pub const TIOCNOTTY: u64 = 0x5422;
 /// Get the number of bytes available for reading (same as TIOCINQ).
 pub const FIONREAD: u64 = 0x541B;
+/// Set the descriptor's close-on-exec flag. Linux answers this in the fd
+/// layer (`do_vfs_ioctl`), for every descriptor and not only for a terminal.
+pub const FIOCLEX: u64 = 0x5451;
+/// Clear the descriptor's close-on-exec flag. As [`FIOCLEX`], fd-layer.
+pub const FIONCLEX: u64 = 0x5450;
+/// Set or clear `O_NONBLOCK` on the open file, from a `*const c_int` argument.
+/// Also fd-layer in Linux.
+pub const FIONBIO: u64 = 0x5421;
 /// Get the number of bytes in the output queue.
 pub const TIOCOUTQ: u64 = 0x5411;
 /// Set PTY slave lock state (0=unlock, 1=lock). Master FD only.

@@ -6,15 +6,16 @@ use slopos_fs::fileio::FdTable;
 use slopos_abi::Errno;
 use slopos_abi::signal::SIGTTOU;
 use slopos_abi::syscall::{
-    FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCEXCL,
-    TIOCGETD, TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ,
-    TIOCNOTTY, TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
+    F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, FIOCLEX, FIONBIO, FIONCLEX, FIONREAD, O_NONBLOCK,
+    POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCEXCL, TIOCGETD,
+    TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCNOTTY,
+    TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
     UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{
-    file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused_by_token,
-    fileio_get_open_file_handle,
+    file_fcntl_fd, file_get_tty_index, file_open_tty_fd, file_poll_fused,
+    file_poll_unfused_by_token, fileio_get_open_file_handle,
 };
 
 use slopos_kernel_services::driver_runtime::{
@@ -631,12 +632,66 @@ define_syscall!(syscall_select
     }
 });
 
+/// The three ioctls Linux answers in the fd layer rather than in the file's own
+/// `ioctl`: two descriptor flags and one open-file status flag. `None` means
+/// the command is not one of them and the terminal path should run.
+///
+/// Each is expressed through the `fcntl` path that already owns the flag, so
+/// there is one implementation of "this descriptor is close-on-exec" rather
+/// than two.
+#[inline(never)]
+fn fd_layer_ioctl(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> Option<Result<u64, Errno>> {
+    fn from_fcntl(rc: i64) -> Result<u64, Errno> {
+        if rc < 0 {
+            Err(Errno::from_raw(rc as i32).unwrap_or(Errno::EINVAL))
+        } else {
+            Ok(0)
+        }
+    }
+
+    match cmd {
+        FIOCLEX => Some(from_fcntl(file_fcntl_fd(table, fd, F_SETFD, FD_CLOEXEC))),
+        FIONCLEX => Some(from_fcntl(file_fcntl_fd(table, fd, F_SETFD, 0))),
+        FIONBIO => {
+            let ptr = match MmUserPtr::<c_int>::try_new(arg) {
+                Ok(p) => p,
+                Err(_) => return Some(Err(Errno::EFAULT)),
+            };
+            let on = match copy_from_user(ptr) {
+                Ok(v) => v != 0,
+                Err(_) => return Some(Err(Errno::EFAULT)),
+            };
+            let current = file_fcntl_fd(table, fd, F_GETFL, 0);
+            if current < 0 {
+                return Some(from_fcntl(current));
+            }
+            let mut flags = current as u64;
+            if on {
+                flags |= O_NONBLOCK;
+            } else {
+                flags &= !O_NONBLOCK;
+            }
+            Some(from_fcntl(file_fcntl_fd(table, fd, F_SETFL, flags)))
+        }
+        _ => None,
+    }
+}
+
 define_syscall!(syscall_ioctl
     (ctx, fd: Fd, cmd: u64, arg: u64)
     cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
+    // FIOCLEX/FIONCLEX/FIONBIO are properties of the descriptor and of the open
+    // file, not of a terminal, and Linux answers them in the fd layer
+    // (`do_vfs_ioctl`) before a file's own `ioctl` is consulted. std's
+    // `FileDesc::set_cloexec`/`set_nonblocking` use them on every descriptor it
+    // owns, so answering `ENOTTY` here fails every pipe and socket it opens.
+    if let Some(result) = fd_layer_ioctl(pid, fd.raw(), cmd, arg) {
+        return result;
+    }
+
     // `file_get_tty_index` cannot tell a non-TTY from a descriptor that does
     // not exist, and the two answer differently: `isatty` keys on `EBADF` to
     // report a bad descriptor rather than "not a terminal".

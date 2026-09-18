@@ -4,9 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "slibc - SlopOS Rust-native C standard library for userland"
+# Generates slibc/include/**: the C headers for `libc.a`, rendered from the
+# `src/unix/slopos/mod.rs` creation hunk of toolchain/libc/*.patch, plus the
+# `slopos-abi` layout pins `src/crt/abi_pins.rs` includes.
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
+# `rlib` only, deliberately. Userland's Rust binaries link slibc as an rlib
+# (211 `slopos_slibc::` uses) and take their panic runtime from `std`;
+# a `staticlib` needs an in-crate `#[panic_handler]`, cargo emits every
+# declared crate type in ONE rustc invocation even for a dependency unit, and
+# that handler is then a duplicate `panic_impl` lang item (E0152) for every
+# one of those binaries. `libc.a` therefore comes from the `slibc/staticlib`
+# wrapper package, which adds the panic runtime and nothing else, and
+# `crt0.o` from `slibc/crt0`.
 crate-type = ["rlib"]
 
 test = false

@@ -90,22 +90,114 @@ pub unsafe extern "C" fn time(tloc: *mut i64) -> i64 {
     ts.tv_sec
 }
 
+/// `nanosleep(2)`. Interruptible: a delivered signal ends the sleep with
+/// `EINTR` and, for a non-null `rem`, the time that was left.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> i32 {
+pub unsafe extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
     if req.is_null() {
         errno_set(crate::errno::EINVAL.raw());
         return -1;
     }
+    match Sys::nanosleep(req, rem) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
 
-    let ms = ((*req).tv_sec as u64) * 1000 + ((*req).tv_nsec as u64) / 1_000_000;
-    Sys::sleep_ms(ms);
-
-    // Sleep is not interruptible here, so the remainder is always zero.
-    if !_rem.is_null() {
-        (*_rem).tv_sec = 0;
-        (*_rem).tv_nsec = 0;
+/// `clock_getres(2)`.
+///
+/// The kernel has no `clock_getres` syscall, so the clock id is validated by
+/// reading the clock itself rather than against a list here that could drift
+/// from the kernel's. The resolution reported is one nanosecond because that
+/// is the denomination `clock_gettime` answers in; the underlying counter is
+/// coarser, exactly as it is on any host whose libc reports the same.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_getres(clk_id: i32, tp: *mut Timespec) -> i32 {
+    let mut probe = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if let Err(e) = Sys::clock_gettime(clk_id as u64, &raw mut probe as *mut u8) {
+        errno_set(e.raw());
+        return -1;
+    }
+    if !tp.is_null() {
+        (*tp).tv_sec = 0;
+        (*tp).tv_nsec = 1;
     }
     0
+}
+
+/// `TIMER_ABSTIME`: `rqtp` is a deadline on `clk_id` rather than an interval.
+pub const TIMER_ABSTIME: i32 = 1;
+
+/// `clock_nanosleep(2)`.
+///
+/// Answers the errno directly rather than setting it, which is the convention
+/// this one call uses. An absolute deadline is converted against the named
+/// clock's current reading, because the kernel's sleep takes an interval.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_nanosleep(
+    clk_id: i32,
+    flags: i32,
+    rqtp: *const Timespec,
+    rmtp: *mut Timespec,
+) -> i32 {
+    if rqtp.is_null() {
+        return crate::errno::EFAULT.raw();
+    }
+    if flags != 0 && flags != TIMER_ABSTIME {
+        return crate::errno::EINVAL.raw();
+    }
+    // A CPU-time clock is an accounting total, not something to sleep on.
+    if clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC {
+        return crate::errno::EINVAL.raw();
+    }
+    let want = *rqtp;
+    if want.tv_sec < 0 || !(0..1_000_000_000).contains(&want.tv_nsec) {
+        return crate::errno::EINVAL.raw();
+    }
+
+    let interval = if flags == TIMER_ABSTIME {
+        let mut now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if let Err(e) = Sys::clock_gettime(clk_id as u64, &raw mut now as *mut u8) {
+            return e.raw();
+        }
+        let mut sec = want.tv_sec - now.tv_sec;
+        let mut nsec = want.tv_nsec - now.tv_nsec;
+        if nsec < 0 {
+            nsec += 1_000_000_000;
+            sec -= 1;
+        }
+        if sec < 0 {
+            // The deadline has passed; there is nothing to wait for.
+            return 0;
+        }
+        Timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
+    } else {
+        want
+    };
+
+    // An absolute sleep has no remainder to report: the deadline is the
+    // caller's own and re-deriving it is a second call to this function.
+    let rem = if flags == TIMER_ABSTIME {
+        core::ptr::null_mut()
+    } else {
+        rmtp
+    };
+    match Sys::nanosleep(&raw const interval, rem) {
+        Ok(()) => 0,
+        Err(e) => e.raw(),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -117,12 +209,24 @@ pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
     nanosleep(&ts, core::ptr::null_mut())
 }
 
+/// Answers the seconds left when a signal cut the sleep short, as POSIX
+/// requires — the sleep is interruptible now, so 0 would be a wrong answer
+/// rather than a simplification.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sleep(seconds: u32) -> u32 {
     let ts = Timespec {
         tv_sec: seconds as i64,
         tv_nsec: 0,
     };
-    nanosleep(&ts, core::ptr::null_mut());
-    0
+    let mut rem = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if nanosleep(&ts, &mut rem) == 0 {
+        return 0;
+    }
+    // Round up: POSIX wants the count of seconds still unslept, and reporting
+    // a truncated 0 would look like the whole interval elapsed.
+    let left = rem.tv_sec + i64::from(rem.tv_nsec > 0);
+    left.clamp(0, u32::MAX as i64) as u32
 }

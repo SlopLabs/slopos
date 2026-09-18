@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! A toolchain-sized process, in the dimensions that used to cap one.
 //!
 //! Every case here was a refusal before: the binary is 24x the 1 MiB the slab

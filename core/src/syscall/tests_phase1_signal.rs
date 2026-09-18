@@ -5,9 +5,9 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{
-    MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_SIGINFO, SEGV_MAPERR, SIG_DFL, SIGCONT,
-    SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE, SS_ONSTACK, UserSigAltStack,
-    UserSiginfo, UserUcontext, sig_bit,
+    MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_SIGINFO, SEGV_MAPERR, SI_ADDR_OFFSET,
+    SIG_DFL, SIGCONT, SIGNAL_KILLED, SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE,
+    SS_ONSTACK, SignalFrame, UserSigAltStack, UserSiginfo, UserUcontext, sig_bit,
 };
 use slopos_abi::syscall::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
 use slopos_abi::task::{
@@ -557,10 +557,25 @@ pub fn test_fault_signal_delivers_siginfo_with_fault_address() -> TestResult {
             return TestResult::Fail;
         }
     };
+    // Addressed by offset, not by field: what a fault handler compiled
+    // against a real `siginfo_t` indexes is byte 16 of the struct, and that
+    // is the thing under test.
+    let si_addr: u64 = match user_copy_in(table, frame.rsi() + SI_ADDR_OFFSET as u64) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
     assert_eq_test!(
-        info.si_addr,
+        si_addr,
         FAULT_ADDR,
-        "si_addr must be the faulting address"
+        "si_addr must be the faulting address, at Linux's offset 16"
+    );
+    assert_eq_test!(
+        info.si_addr(),
+        FAULT_ADDR,
+        "si_addr's accessor must read the same word"
     );
     assert_eq_test!(info.si_code, SEGV_MAPERR, "si_code must survive delivery");
     assert_eq_test!(
@@ -1474,6 +1489,76 @@ pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
     pass!()
 }
 
+/// `rt_sigreturn` restores the blocked mask from a sigframe the caller wrote,
+/// so a user-authored word reaches `signal_blocked` directly. The kill flag
+/// lives above `NSIG`, outside `SIGNAL_MASK`, and every reader masks before
+/// looking — which is exactly why the writer has to: an unmasked store leaves
+/// a kernel-private bit set in a field userland chose.
+pub fn test_sigreturn_cannot_set_a_kernel_private_mask_bit() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    const INTERRUPTED_RIP: u64 = 0x5000_7777;
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(table) = fdtable_of(task_id) else {
+        return fail_and_clean(&[task_id]);
+    };
+
+    assert_test!(
+        install_action(task_id, SIGUSR1, 0),
+        "installing a SIGUSR1 handler failed"
+    );
+    assert_test!(task::task_signal_post(&task, SIGUSR1), "SIGUSR1 must pend");
+
+    let stack_top = process_vm_get_stack_top(table.process().expect("a live process"));
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);
+    frame.regs_mut().rip = INTERRUPTED_RIP;
+    assert_test!(
+        deliver_pending_signal_as_current(task_id, table, &frame),
+        "delivering SIGUSR1 failed"
+    );
+
+    // The handler's `ret` pops the restorer word, so the frame the restorer
+    // enters `rt_sigreturn` on sits eight bytes above the delivered RSP.
+    let sigframe_addr = frame.rsp().wrapping_add(8);
+    let Some(mut sigframe) = user_copy_in::<SignalFrame>(table, sigframe_addr) else {
+        drop(task);
+        return fail_and_clean(&[task_id]);
+    };
+    sigframe.saved_mask = u64::MAX;
+    assert_test!(
+        user_copy_out(table, sigframe_addr, &sigframe),
+        "rewriting the sigframe's saved mask failed"
+    );
+
+    frame.regs_mut().rsp = sigframe_addr;
+    assert_test!(
+        sigreturn_as_current(task_id, table, &mut frame),
+        "rt_sigreturn failed to run"
+    );
+    // A refused frame leaves the delivery's own mask in place, in which the
+    // private bit is clear anyway — so the check below would pass for the
+    // wrong reason without proving the restore committed.
+    assert_eq_test!(
+        frame.rip(),
+        INTERRUPTED_RIP,
+        "rt_sigreturn did not commit the frame"
+    );
+
+    assert_eq_test!(
+        task.signal_blocked() & SIGNAL_KILLED,
+        0,
+        "a user-authored sigframe set the kernel-private kill flag in the blocked mask"
+    );
+
+    drop(task);
+    task_terminate(task_id);
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_group_stop_parks_every_thread_and_continue_resumes,
     suite = syscall_signal_phase1
@@ -1552,6 +1637,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_a_thread_is_not_its_creators_child,
+    suite = syscall_signal_phase1
+);
+slopos_testing::stest!(
+    name = test_sigreturn_cannot_set_a_kernel_private_mask_bit,
     suite = syscall_signal_phase1
 );
 

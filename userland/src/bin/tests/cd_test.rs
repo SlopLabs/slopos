@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 use slopos_userland as _;
 
 use std::env;
@@ -68,6 +66,12 @@ fn std_temp_dir_is_tmp() -> bool {
 /// `canonicalize` joined a relative path onto `/` rather than onto the working
 /// directory, so it answered the canonical path of a different file — and
 /// answered it successfully whenever that other file happened to exist.
+///
+/// `/bin/ls` is a symlink to the multicall binary and `realpath(3)` resolves
+/// the final component too, so the canonical answer is `/bin/coreutils`. That
+/// is what makes one case prove both halves: resolving against `/` rather
+/// than the cwd could not produce it, and neither could a walk that stopped
+/// short of the last symlink.
 fn std_canonicalize_resolves_against_the_cwd() -> bool {
     if env::set_current_dir("/bin").is_err() {
         eprintln!("cd_test: cd /bin failed");
@@ -76,7 +80,7 @@ fn std_canonicalize_resolves_against_the_cwd() -> bool {
     let resolved = fs::canonicalize("ls");
     let _ = env::set_current_dir("/");
     match resolved {
-        Ok(path) => path.to_str() == Some("/bin/ls"),
+        Ok(path) => path.to_str() == Some("/bin/coreutils"),
         Err(e) => {
             eprintln!("cd_test: canonicalize(\"ls\") from /bin failed: {e:?}");
             false

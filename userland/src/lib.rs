@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 pub mod apps;
 pub mod gfx;
 pub mod keymap;
@@ -17,18 +15,8 @@ pub use slopos_slibc as slibc;
 
 pub fn init() {}
 
-/// Process entry. Hands the raw initial stack pointer (`&argc`) to the C
-/// runtime per the standard `_start -> __libc_start_main` contract.
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-#[unsafe(naked)]
-extern "C" fn _start() -> ! {
-    core::arch::naked_asm!(
-        "xor rbp, rbp",
-        "mov rdi, rsp",
-        "and rsp, -16",
-        "call {start}",
-        "ud2",
-        start = sym slopos_slibc::crt::__slibc_start,
-    );
-}
+// Process entry lives in `slopos-crt0`, not here: `crt0.o` carries the naked
+// `_start` that hands the raw initial stack pointer to slibc's
+// `__slibc_start`, exactly as a C program's does, and
+// `scripts/build_userland.sh` links that object into every binary. A second
+// `_start` in this rlib would be a duplicate symbol against it.

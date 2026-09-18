@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 use slopos_userland::apps::shell;
 
 fn ensure_shell_initialized() {

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! SlopRing end-to-end userland test: opcode dispatch, deferred completion and
 //! the `slopfut` executor, driven against real fds from a process fd table.
 

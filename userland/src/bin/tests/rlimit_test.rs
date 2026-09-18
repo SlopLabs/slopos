@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! `prlimit64` reports the ceilings the kernel actually enforces.
 //!
 //! These assert the *relationship* between what is reported and what is

@@ -1,16 +1,19 @@
 use slopos_abi::Errno;
 use slopos_abi::file_ops::FileKind;
+use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
-use slopos_abi::syscall::SOL_SOCKET;
+use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS};
 use slopos_abi::unix::SockAddrUn;
 use slopos_fs::fileio::FdTable;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
+use slopos_mm::user_msghdr::{msg_iovec_buf, scm_rights_fds};
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
+use slopos_ostd::KVec;
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
@@ -59,9 +62,10 @@ fn socket_fd_for(table: FdTable, fd: i32) -> Result<SocketFd, Errno> {
     }
 }
 
-/// Reject every `flags` bit: `slopos-abi` defines no `MSG_*` constant, so there
-/// is nothing a caller can legitimately ask for, and a dropped bit is worse
-/// than a refusal — a silently ignored `MSG_PEEK` consumes the datagram.
+/// Reject every `flags` bit: this kernel implements no input `MSG_*` option,
+/// so there is nothing a caller can legitimately ask for, and a dropped bit is
+/// worse than a refusal — a silently ignored `MSG_PEEK` consumes the datagram.
+/// `MSG_CTRUNC` is not an input: it is a `msghdr::msg_flags` out-bit.
 fn check_msg_flags(flags: u32) -> Result<(), Errno> {
     if flags == 0 {
         Ok(())
@@ -576,16 +580,40 @@ define_syscall!(syscall_resolve
     Ok(())
 });
 
-// Private-numbered: `MsgHdr` and `CmsgHdr` are not Linux's layouts yet, so this
-// keeps a `SYSCALL_PRIVATE_BASE` slot until they are.
+/// Staging-buffer cap for AF_UNIX user↔kernel marshalling, the same 4 KiB
+/// bound `sendto`/`recvfrom` above stage through. The short count is the
+/// caller's to loop on.
+const MSG_STAGING_CAP: usize = 4096;
+
+/// Turn the descriptor numbers a control buffer names into owned aliases of
+/// the sender's open-file descriptions.
+fn collect_scm_rights(
+    table: FdTable,
+    msg: &MsgHdr,
+    files: &mut KVec<slopos_fs::LeafFileRef>,
+) -> Result<(), Errno> {
+    let mut fd_buf = [0i32; SCM_MAX_FDS];
+    let n_fds = scm_rights_fds(msg, &mut fd_buf)?;
+    for &send_fd in fd_buf.iter().take(n_fds) {
+        let file = slopos_fs::fileio_clone_file_ref(table, send_fd).ok_or(Errno::EBADF)?;
+        // A description that owns descriptions cannot travel this way: passing
+        // one into a queue it can reach closes a reference cycle nothing
+        // collects.
+        let leaf = slopos_fs::LeafFileRef::try_new(file).map_err(|refused| {
+            drop(refused);
+            Errno::EOPNOTSUPP
+        })?;
+        files.push(leaf).map_err(|_| Errno::ENOMEM)?;
+    }
+    Ok(())
+}
+
 define_syscall!(syscall_sendmsg
-    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, flags: u32)
+    (ctx, fd: Fd, msg_ptr: UserPtr<MsgHdr>, flags: u32)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
-
     check_msg_flags(flags)?;
 
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
@@ -596,57 +624,24 @@ define_syscall!(syscall_sendmsg
 
     let msg: MsgHdr = copy_from_user(msg_ptr.inner()).map_err(|_| Errno::EFAULT)?;
 
-    let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
-    if data_len > 0 && msg.iov_base != 0 {
-        let user_data = MmUserBytes::try_new(msg.iov_base, data_len).map_err(|_| Errno::EFAULT)?;
-        copy_bytes_from_user(user_data, &mut scratch[..data_len]).map_err(|_| Errno::EFAULT)?;
-    }
+    let io_buf = msg_iovec_buf(&msg)?;
+    let data_len = IoBufRead::len(&io_buf).min(MSG_STAGING_CAP);
+    let mut scratch = KVec::<u8>::zeroed(MSG_STAGING_CAP).map_err(|_| Errno::ENOMEM)?;
+    let staged = if data_len > 0 {
+        io_buf.copy_out(0, &mut scratch[..data_len])?
+    } else {
+        0
+    };
 
     // Owned aliases of the fds being passed, each sharing the sender's open-file
     // description per POSIX fd-passing semantics; on error the vec drops them.
-    let mut files: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
-        slopos_ostd::KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
-
-    if msg.control_len >= core::mem::size_of::<CmsgHdr>() as u64 && msg.control != 0 {
-        let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
-        let cmsg: CmsgHdr = copy_from_user(cmsg_ptr).map_err(|_| Errno::EFAULT)?;
-
-        if cmsg.cmsg_type == SCM_RIGHTS {
-            let hdr_size = core::mem::size_of::<CmsgHdr>();
-            let fd_data_len = cmsg.cmsg_len as usize - hdr_size;
-            let n_fds = (fd_data_len / 4).min(SCM_MAX_FDS);
-
-            if n_fds > 0 {
-                let fd_array_addr = msg.control + hdr_size as u64;
-                let mut fd_buf = [0i32; SCM_MAX_FDS];
-                let fd_bytes = n_fds * 4;
-                let user_fds = MmUserBytes::try_new(fd_array_addr, fd_bytes)
-                    .map_err(|_| Errno::EFAULT)?;
-                let fd_buf_bytes =
-                    &mut slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(&mut fd_buf)
-                        [..fd_bytes];
-                copy_bytes_from_user(user_fds, fd_buf_bytes).map_err(|_| Errno::EFAULT)?;
-
-                for &send_fd in fd_buf.iter().take(n_fds) {
-                    let file = slopos_fs::fileio_clone_file_ref(process_id, send_fd)
-                        .ok_or(Errno::EBADF)?;
-                    // A description that owns descriptions cannot travel this
-                    // way: passing one into a queue it can reach closes a
-                    // reference cycle nothing collects.
-                    let leaf = slopos_fs::LeafFileRef::try_new(file).map_err(|refused| {
-                        drop(refused);
-                        Errno::EOPNOTSUPP
-                    })?;
-                    files.push(leaf).map_err(|_| Errno::ENOMEM)?;
-                }
-            }
-        }
-    }
+    let mut files: KVec<slopos_fs::LeafFileRef> =
+        KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
+    collect_scm_rights(process_id, &msg, &mut files)?;
 
     let rc = unix_socket::unix_sendmsg(
         sh,
-        &scratch[..data_len],
+        &scratch[..staged],
         &mut files,
         process_id.account(),
     );
@@ -658,92 +653,7 @@ define_syscall!(syscall_sendmsg
 });
 
 #[inline(never)]
-fn recvmsg_writeback_cmsg(
-    table: FdTable,
-    msg: &slopos_abi::syscall::MsgHdr,
-    mut received: slopos_ostd::KVec<slopos_fs::FileRef>,
-    msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
-) -> Result<(), Errno> {
-    use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
-
-    let n_fds = received.len();
-    if msg.control == 0 {
-        // No control buffer to report them in — the aliases drop.
-        return Ok(());
-    }
-
-    let hdr_size = core::mem::size_of::<CmsgHdr>();
-    let needed = hdr_size + n_fds * 4;
-    if (msg.control_len as usize) < needed {
-        drop(received);
-        let updated_msg = MsgHdr {
-            iov_base: msg.iov_base,
-            iov_len: msg.iov_len,
-            control: msg.control,
-            control_len: 0,
-        };
-        copy_to_user(msg_ptr.inner(), &updated_msg).map_err(|_| Errno::EFAULT)?;
-        return Ok(());
-    }
-
-    debug_assert!(n_fds <= SCM_MAX_FDS);
-    let mut fd_nums = [0i32; SCM_MAX_FDS];
-    for (j, file) in received.drain(..).enumerate() {
-        let new_fd = slopos_fs::fileio_install_file_ref(table, file);
-        if new_fd < 0 {
-            // Ending the drain drops the remaining aliases; a partial install
-            // with no cmsg writeback would orphan the fds already made.
-            for &fd in fd_nums.iter().take(j) {
-                let _ = slopos_fs::fileio::file_close_fd(table, fd);
-            }
-            return Err(Errno::ENOMEM);
-        }
-        fd_nums[j] = new_fd;
-    }
-
-    // The fds are installed in the caller's table from here: a faulting copy
-    // back must close them, or the caller never learns their numbers.
-    let writeback = || -> Result<(), Errno> {
-        let cmsg = CmsgHdr {
-            cmsg_len: needed as u32,
-            cmsg_level: SOL_SOCKET as u32,
-            cmsg_type: SCM_RIGHTS,
-        };
-        let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
-        copy_to_user(cmsg_ptr, &cmsg).map_err(|_| Errno::EFAULT)?;
-
-        let fd_bytes = &slopos_ostd::util::byte_view::pod_slice_as_bytes(&fd_nums[..])[..n_fds * 4];
-        let fd_out = MmUserBytes::try_new(msg.control + hdr_size as u64, n_fds * 4)
-            .map_err(|_| Errno::EFAULT)?;
-        copy_bytes_to_user(fd_out, fd_bytes).map_err(|_| Errno::EFAULT)?;
-
-        let updated_msg = MsgHdr {
-            iov_base: msg.iov_base,
-            iov_len: msg.iov_len,
-            control: msg.control,
-            control_len: needed as u64,
-        };
-        copy_to_user(msg_ptr.inner(), &updated_msg).map_err(|_| Errno::EFAULT)?;
-        Ok(())
-    };
-
-    if let Err(e) = writeback() {
-        for &fd in fd_nums.iter().take(n_fds) {
-            let _ = slopos_fs::fileio::file_close_fd(table, fd);
-        }
-        return Err(e);
-    }
-    Ok(())
-}
-
-#[inline(never)]
-fn recvmsg_impl(
-    table: FdTable,
-    fd: Fd,
-    msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
-) -> Result<u64, Errno> {
-    use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS};
-
+fn recvmsg_impl(table: FdTable, fd: Fd, msg_ptr: UserPtr<MsgHdr>) -> Result<u64, Errno> {
     let sh = match socket_fd_for(table, fd.raw())? {
         SocketFd::Unix(sh) => sh,
         SocketFd::Inet(_) => return Err(Errno::ENOTSOCK),
@@ -751,11 +661,12 @@ fn recvmsg_impl(
 
     let msg: MsgHdr = copy_from_user(msg_ptr.inner()).map_err(|_| Errno::EFAULT)?;
 
-    let data_len = (msg.iov_len as usize).min(4096);
-    let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
+    let mut io_buf = msg_iovec_buf(&msg)?;
+    let data_len = IoBufWrite::len(&io_buf).min(MSG_STAGING_CAP);
+    let mut scratch = KVec::<u8>::zeroed(MSG_STAGING_CAP).map_err(|_| Errno::ENOMEM)?;
 
-    let mut received: slopos_ostd::KVec<slopos_fs::FileRef> =
-        slopos_ostd::KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
+    let mut received: KVec<slopos_fs::FileRef> =
+        KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
     let (bytes_read, n_fds) =
         unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received, SCM_MAX_FDS);
 
@@ -763,24 +674,20 @@ fn recvmsg_impl(
         // `received` drops, closing any drained aliases.
         return Err(errno_from_neg(bytes_read));
     }
+    debug_assert_eq!(n_fds, received.len());
 
     let copied = bytes_read as usize;
-    if copied > 0 && msg.iov_base != 0 {
-        let user_out = MmUserBytes::try_new(msg.iov_base, copied).map_err(|_| Errno::EFAULT)?;
-        copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
+    if copied > 0 {
+        io_buf.copy_in(0, &scratch[..copied])?;
     }
 
-    if n_fds > 0 {
-        recvmsg_writeback_cmsg(table, &msg, received, msg_ptr)?;
-    }
+    slopos_fs::fileio::fileio_deliver_scm_rights(table, &msg, received, msg_ptr.inner())?;
 
     Ok(copied as u64)
 }
 
-// Private-numbered for the reason `syscall_sendmsg` gives: `MsgHdr` and
-// `CmsgHdr` are not Linux's layouts yet.
 define_syscall!(syscall_recvmsg
-    (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, flags: u32)
+    (ctx, fd: Fd, msg_ptr: UserPtr<MsgHdr>, flags: u32)
     cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
@@ -789,10 +696,12 @@ define_syscall!(syscall_recvmsg
     recvmsg_impl(process_id, fd, msg_ptr)
 });
 
-// `accept` and `getsockname` / `getpeername` materialise a 110-byte
-// `SockAddrUn` on the unix branch; the `#[inline(never)]` split keeps the
-// dispatch frame out of the union of both branches' locals, which together blow
-// the 2 KiB stack gate.
+// `accept` and `getsockname` / `getpeername` each stage a 110-byte
+// `SockAddrUn` on the unix branch, built from the 108-byte path copy
+// `unix_get_peer_path` returns by value. Neither branch is near the 2 KiB
+// stack gate; the `#[inline(never)]` split is frame hygiene, keeping the
+// dispatch frame off the union of both branches' staging rather than being
+// what makes the gate pass.
 
 /// Read an in/out `socklen_t*`. A negative length is `EINVAL`, as in Linux's
 /// `move_addr_to_user`.

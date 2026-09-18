@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! SlopRing multishot (ABI v2) end-to-end test.
 //!
 //! Driven by `poll_add_multishot` over a pipe: each readiness transition

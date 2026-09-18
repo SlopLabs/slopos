@@ -40,22 +40,15 @@ pub fn calloc(nmemb: usize, size: usize) -> *mut c_void {
     ptr
 }
 
+/// The C `memalign`/`posix_memalign`/`malloc_usable_size` entry points live in
+/// [`crate::ffi`] beside `malloc`; these are the Rust-side helpers they and
+/// the TLS allocator call.
 pub fn memalign(alignment: usize, size: usize) -> *mut u8 {
     ALLOCATOR.lock().memalign(alignment, size)
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn memalign_ffi(alignment: usize, size: usize) -> *mut u8 {
-    memalign(alignment, size)
-}
-
 pub fn malloc_usable_size(ptr: *mut u8) -> usize {
     ALLOCATOR.lock().malloc_usable_size(ptr)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn malloc_usable_size_ffi(ptr: *mut u8) -> usize {
-    malloc_usable_size(ptr)
 }
 
 pub fn heap_stats() -> HeapStats {

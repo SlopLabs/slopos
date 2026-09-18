@@ -37,6 +37,7 @@ pub mod tlb;
 pub mod user_copy;
 pub mod user_io_buf;
 pub mod user_mappings;
+pub mod user_msghdr;
 pub mod user_ptr;
 pub mod vma_region;
 

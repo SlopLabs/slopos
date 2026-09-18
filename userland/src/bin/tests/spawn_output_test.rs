@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! A spawned program's output must reach the process that spawned it.
 //!
 //! `exec` replaces the program image, and everything about where that image

@@ -59,6 +59,17 @@ pub fn can_satisfy_fault(error_code: u64, region: &VmaRegion) -> bool {
         return false;
     }
 
+    // A region with no protection at all is `PROT_NONE` — a guard page. The
+    // arms above each test only the access the error code names, and a read
+    // names none of them, so a read fault used to walk straight through. x86
+    // has no read-disable bit: a frame installed here is published
+    // `PRESENT | USER` and the guard reads back. Mirrors Linux's
+    // `vma_is_accessible`; write-only stays readable, as it is on this
+    // hardware.
+    if !(region.protection.read || region.protection.write || region.protection.exec) {
+        return false;
+    }
+
     true
 }
 

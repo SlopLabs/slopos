@@ -146,6 +146,7 @@ define_errnos! {
     ETIME           =  62, "Timer expired";
     ENOTSOCK        =  88, "Not a socket";
     EDESTADDRREQ    =  89, "Destination address required";
+    EMSGSIZE        =  90, "Message too long";
     EPROTONOSUPPORT =  93, "Protocol not supported";
     EOPNOTSUPP      =  95, "Operation not supported";
     EAFNOSUPPORT    =  97, "Address family not supported";

@@ -6,10 +6,39 @@ Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `vi
 ## Build, Test, and Development Commands
 [`just`](https://github.com/casey/just) is the command runner; the `justfile` drives cargo + `rust-lld` via `scripts/`. Run `just --list` for all recipes. No git submodules — `scripts/ensure_limine.sh` fetches pinned Limine v12.3.1 into `third_party/limine` on first ISO build.
 
-- `just setup` — install pinned nightly from `rust-toolchain.toml`; verifies Go >= 1.22 on PATH (for `tools/run_tests/`)
+- `just setup` — install pinned nightly from `rust-toolchain.toml`; materialize the owned `slopos` sysroot (`scripts/make_slopos_sysroot.sh`, see below); verifies Go >= 1.22 on PATH (for `tools/run_tests/`)
 - `just build` — emits `builddir/kernel-dev.elf`; `just iso` regenerates `builddir/slop.iso`
 - `just boot` (interactive) / `just boot-fast` (skips roulette) / `just boot-log` (non-interactive, 15 s timeout)
 - `just test` — the CI/agent entry point (see Testing Guidelines)
+
+**The userland target builds on its own toolchain.** The kernel is built by
+`cargo +<pinned nightly>` against `targets/x86_64-slos.json`; the userland
+target `targets/x86_64-unknown-slopos.json` is built by `cargo +slopos`
+against an *owned* sysroot at `third_party/rust-slopos`. That sysroot is a
+hardlink clone of the pinned rustup toolchain whose `lib/rustlib/src` is a
+real copy carrying two pinned forks — `rust-lang/rust`'s `library/` and
+`rust-lang/libc` — applied from the patches under `toolchain/`, because
+`-Zbuild-std` reads std from the invoking sysroot's source tree and nothing
+in this workspace can reach it. `scripts/make_slopos_sysroot.sh` builds and
+registers it (idempotent: a stamp over `toolchain/` makes a warm run ~20 ms),
+`scripts/ensure_toolchain.sh` calls it, and `scripts/check_toolchain_pin.sh`
+fails the build when the materialized sysroot has drifted from the pin.
+Nothing on this path writes inside the rustup toolchain directory; the only
+thing it adds to `$RUSTUP_HOME` is the `slopos` symlink that registration is.
+
+The fork is cut against a *pristine* `rust-src`, and the retired std patcher
+this replaces mutated that component in place, so a machine that ever ran it
+needs a one-time reset. `make_slopos_sysroot.sh` refuses to run while the
+residue is there and prints the fix; both halves are required, because
+`rustup component remove` deletes only what its own manifest lists, so the
+files the patcher *added* survive a reinstall (measured — a remove/add left
+six of them behind):
+
+```sh
+ch="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup component remove rust-src --toolchain "$ch" && rustup component add rust-src --toolchain "$ch"
+find "$(rustc +"$ch" --print sysroot)/lib/rustlib/src" -name '*slopos*' -delete
+```
 
 Boot targets rebuild a secondary `builddir/slop-notests.iso` with `tests=off`; override via `BOOT_CMDLINE=... just boot`, add `VIDEO=1` for a graphical window.
 
@@ -118,6 +147,7 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_registry_sections.sh`** — holds the kernel ELF to `link.ld`'s section set and each linker registry's span to a whole number of entries. Catches a *dependency's* `link_section`, which no first-party scan can see, and the wrong-entry-size case that would make `registry_slice`'s `offset_from` unsound.
 - **`scripts/check_authority_reachability.sh`** — walks the linked ELF's call graph from every syscall handler to the terminal power primitives, and fails unless each handler that can reach one is either classified `Power` itself or carries a stated reason in `scripts/gates/authority/<variant>.txt`. The `rustc`-level classification gate in `core/src/syscall/handlers.rs` covers *the table*, not *reachability*: `roulette_result` was classified, the gate was green, and its loss arm called `kernel_reboot` two syscalls from an unprivileged caller. The ELF is the input rather than the source because inlining, generic instantiation and trait-object dispatch all change who really calls whom. Indirect calls (`call *%rax`) are the seam it cannot see, which is why the kernel-initiated `PowerOps` callers are a tracked list rather than something it discovers. Runs against the dev kernel from `check-framekernel-gates`, and separately in CI against the **tests** and **release** ELFs — the tests kernel is the only variant whose allowlist carries `run_userland_tests`, which powers the machine off to end the run. Gated in CI rather than on the build path because the walk disassembles the whole ELF (~8 s).
 - **`scripts/check_safe_contract_surface.sh`** — ratchet on safe `pub fn`s in `slopos-ostd/` that carry a `# Safety` section. Those are self-declared caller obligations the compiler does not check, so a fault lands in the trusted core while the cause is an ordinary safe call in a service crate. The baseline is **0**: every such contract is currently expressed instead, as a capability witness (`&IrqDisabled`, `&BspToken`, `Osxsave`), a validated newtype (`Xcr0Mask`), a linear handle (`ptr_buf::OneShotBuf`), an owning reference (`KArc`), a sealed trait (`ApTrampolineAbi`), a runtime-checked borrow (`sync::PerCpuSlot`), or a slice in place of a pointer and a length. Reach for those before raising the baseline. Not a count of safe fns containing `unsafe` — that is the design working, not a defect.
+- **`scripts/check_toolchain_pin.sh`** — holds the userland target's standard library to the fork it is pinned to. `x86_64-unknown-slopos` builds on an owned sysroot (`third_party/rust-slopos`, materialised by `scripts/make_slopos_sysroot.sh` out of the patches under `toolchain/`), and every way that can drift is silent: a fork cut against a different `rust-toolchain.toml` channel, a patch edited without its `toolchain/PIN` checksum, a sysroot left over from a previous overlay, or a `slopos` toolchain registered against some other directory. A stale sysroot compiles — it just compiles the previous std. It is the replacement for the retired std-patching script's `cfg_select!` arm-order check, whose failure mode (an arm placed after the `_` wildcard, dead code that still compiles — it shipped once as a `ud2` in `std::process::exit`) cannot occur now that the target is unix-family and rides std's own `sys/pal/unix`. It also asserts that every file the patches *create* is present in a materialized sysroot: the stamp describes the overlay, not the result, so a tree a broken run left half-patched — patched std, unpatched libc — otherwise carries a correct stamp and passes (observed). The sysroot and link checks are conditional on those existing, so CI that never materialises a sysroot still passes on the pin alone.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
 
 `scripts/check_return_types.sh` is a separate, advisory `just check-return-types` recipe that flags `pub fn`s returning large by-value types — useful when reviewing new code, not part of the load-bearing build path.
@@ -331,7 +361,7 @@ cargo fmt --all                       # then stage the reformatted files
 just fmt                              # CI: Check formatting
 just test-host                        # CI: Host-side unit tests
 just build                            # CI: Build kernel
-just check-framekernel-gates          # CI: Framekernel gates (self-tests + all source/ELF scans)
+just check-framekernel-gates          # CI: Framekernel gates (self-tests + vendor/toolchain pins + all source/ELF scans)
 
 # CI: Run tests — one raw capture, which the ratchets then parse.
 just _build-run-tests
@@ -361,6 +391,8 @@ Commit order: `cargo fmt --all` → the sequence above → stage → `caveman-co
 
 ## Environment & Tooling Tips
 First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads the pinned Limine binary release into `third_party/limine`; offline environments should pre-populate that directory (it only needs `limine-bios.sys` + `BOOTX64.EFI`) or set `LIMINE_URL`/`LIMINE_VERSION` to avoid network stalls. Rust crates are auto-discovered via the workspace, so most build changes belong in `justfile`, `scripts/`, `Cargo.toml`, and `targets/*.json`; ensure `link.ld` maps any new sections intentionally. The entry point is the assembly `_start` trampoline, which jumps into `kernel_main`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the legacy 8259 PIC path has been sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered. VirtIO devices require MSI-X (preferred) or MSI as a minimum — legacy polling has been removed; probe panics if neither interrupt mechanism is available.**
+
+`scripts/make_slopos_sysroot.sh` needs the pinned `libc` crate; it takes it from `$CARGO_HOME/registry/cache` when it is already there and only falls back to `static.crates.io`, so an offline environment should pre-populate that cache (or point `LIBC_URL` at a local copy). It also needs the `rust-src` component, which `scripts/ensure_toolchain.sh` installs.
 
 ## Safety & Execution Boundaries
 Keep all work inside this repository. Do not copy kernel binaries to system paths, do not install or chainload on real hardware, and never run outside QEMU/OVMF. The scripts already sandbox execution; if you need fresh firmware or boot assets, use the provided automation instead of manual installs. Treat Limine, OVMF, and the kernel as development artifacts only and avoid touching `/boot`, `/efi`, or other host-level locations.

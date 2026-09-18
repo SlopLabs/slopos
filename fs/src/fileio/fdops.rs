@@ -6,10 +6,15 @@ use super::*;
 use slopos_abi::Errno;
 use slopos_abi::fs::{UserDirent64, UserFlock, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
+use slopos_abi::syscall::MsgHdr;
 use slopos_abi::syscall::{
     F_DUPFD, F_GETFD, F_GETFL, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_WRLCK, FD_CLOEXEC,
-    O_CLOEXEC, O_NOCTTY, O_NONBLOCK, SEEK_CUR, SEEK_END, SEEK_SET,
+    O_CLOEXEC, O_NOCTTY, O_NONBLOCK, SCM_MAX_FDS, SEEK_CUR, SEEK_END, SEEK_SET,
 };
+use slopos_mm::user_msghdr::{
+    msghdr_report_ctrunc, msghdr_write_out, put_scm_rights, scm_rights_fits,
+};
+use slopos_mm::user_ptr::UserPtr;
 
 use crate::pipe;
 use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, pipe_backings};
@@ -1536,6 +1541,59 @@ pub fn fileio_install_file_ref(table: FdTable, file: FileRef) -> c_int {
     };
     inner.descriptors[idx] = Some(FdEntry::new(file.open_file, FdFlags::NONE, reservation));
     idx as c_int
+}
+
+/// Deliver received `SCM_RIGHTS` aliases: install each into `table`, report
+/// the numbers as one ancillary item, and update the caller's `msghdr`
+/// out-fields. The single receive-side path, shared by `recvmsg(2)` and
+/// SlopRing's `OP_RECVMSG`.
+///
+/// Consumes `received`: undeliverable aliases drop (close) here. A control
+/// buffer too small for the item drops them and says `MSG_CTRUNC` rather than
+/// reporting an empty buffer the caller reads as "no descriptors were sent",
+/// and a copy back to user memory failing *after* fds were installed closes
+/// every installed fd — the caller never learns the numbers, so they would
+/// otherwise be orphaned into an fd-table-exhaustion DoS. That invariant is
+/// why this lives beside the fd table rather than at each caller.
+#[inline(never)]
+pub fn fileio_deliver_scm_rights(
+    table: FdTable,
+    msg: &MsgHdr,
+    mut received: KVec<FileRef>,
+    msg_ptr: UserPtr<MsgHdr>,
+) -> Result<(), Errno> {
+    let n_fds = received.len();
+    if n_fds == 0 {
+        return msghdr_write_out(msg_ptr, msg, 0, 0);
+    }
+    if n_fds > SCM_MAX_FDS || !scm_rights_fits(msg, n_fds) {
+        drop(received);
+        return msghdr_report_ctrunc(msg_ptr, msg);
+    }
+
+    let mut fd_nums = [0i32; SCM_MAX_FDS];
+    for (j, file) in received.drain(..).enumerate() {
+        let new_fd = fileio_install_file_ref(table, file);
+        if new_fd < 0 {
+            // Ending the drain drops the remaining aliases; a partial install
+            // with no ancillary writeback would orphan the fds already made.
+            for &fd in fd_nums.iter().take(j) {
+                let _ = file_close_fd(table, fd);
+            }
+            return Err(Errno::ENOMEM);
+        }
+        fd_nums[j] = new_fd;
+    }
+
+    // The fds are in the caller's table from here: a faulting copy back must
+    // close them, or the caller never learns their numbers.
+    if let Err(e) = put_scm_rights(msg_ptr, msg, &fd_nums[..n_fds]) {
+        for &fd in fd_nums.iter().take(n_fds) {
+            let _ = file_close_fd(table, fd);
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Install a [`FileRef`] at exactly `target_fd`, displacing any occupant. On

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! SIGWINCH default-disposition end-to-end test.
 //!
 //! The default must be ignore — a process with no handler installed survives

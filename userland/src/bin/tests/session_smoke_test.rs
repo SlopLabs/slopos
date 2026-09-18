@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! A deterministic desktop-shaped resource population, so the quota gate has
 //! something real to measure.
 //!

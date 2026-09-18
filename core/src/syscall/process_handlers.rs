@@ -353,8 +353,19 @@ struct WaitReport {
     commit: WaitCommit,
 }
 
+/// A death caused by a signal reports `WIFSIGNALED`, whichever path recorded
+/// it. `TaskExitReason::UserFault` is a *diagnostic* distinction — which
+/// vector, for the klog line — not a different kind of death: a task the
+/// kernel killed on an unresolvable #PF died of `SIGSEGV`, and a waiter that
+/// read `exited(139)` for it could not tell that from a program that called
+/// `exit(139)`. Both arms already stamp `exit_signal`; only this word was
+/// keyed on the reason.
 fn exit_status_word(info: &ExitInfo) -> u32 {
-    if info.exit_reason == TaskExitReason::Signalled && info.signal != 0 {
+    let signalled = matches!(
+        info.exit_reason,
+        TaskExitReason::Signalled | TaskExitReason::UserFault
+    );
+    if signalled && info.signal != 0 {
         wait_status_signalled(info.signal)
     } else {
         wait_status_exited(info.exit_code as u8)

@@ -190,7 +190,10 @@ pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
 
     match Sys::getcwd(buf, size) {
         Ok(_) => buf,
-        Err(_) => ptr::null_mut(),
+        Err(e) => {
+            errno::errno_set(e.raw());
+            ptr::null_mut()
+        }
     }
 }
 
@@ -204,7 +207,10 @@ pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
 
     match Sys::chdir(path) {
         Ok(()) => 0,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }
 

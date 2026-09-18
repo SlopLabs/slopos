@@ -1,4 +1,14 @@
-//! Terminal I/O — ioctl, termios, raw mode.
+//! Terminal I/O — termios and raw mode.
+//!
+//! `termios` is the one shape slibc does *not* translate to the
+//! libc-declared layout: `NCCS` is 19 here and 32 on Linux, and no std path
+//! reads the struct, so the plan keeps that divergence rather than paying for
+//! a conversion nothing consumes. [`crate::types`] pins the kernel's size so
+//! it stays the stated divergence.
+//!
+//! These entry points therefore speak [`UserTermios`], and `ioctl` — which
+//! lives in [`crate::io::misc`] — passes the caller's pointer through
+//! untouched.
 
 #[allow(dead_code)]
 pub(crate) mod shim;
@@ -13,17 +23,6 @@ use slopos_abi::syscall::{
 pub const TCSANOW: i32 = 0;
 pub const TCSADRAIN: i32 = 1;
 pub const TCSAFLUSH: i32 = 2;
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ioctl(fd: i32, request: u64, arg: u64) -> i32 {
-    match Sys::ioctl(fd, request, arg) {
-        Ok(ret) => ret,
-        Err(e) => {
-            errno_set(e.raw());
-            -1
-        }
-    }
-}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetattr(fd: i32, termios: *mut UserTermios) -> i32 {

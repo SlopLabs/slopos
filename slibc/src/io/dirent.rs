@@ -32,6 +32,14 @@ impl<'a> DirentIter<'a> {
     pub const fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
+
+    /// Bytes of the buffer consumed so far. A caller that keeps its own
+    /// cursor — `readdir`, which re-packs one record per call — needs this
+    /// because `d_reclen` is what says where the next record begins and the
+    /// walker is the only thing that has validated it.
+    pub const fn byte_offset(&self) -> usize {
+        self.pos
+    }
 }
 
 impl<'a> Iterator for DirentIter<'a> {

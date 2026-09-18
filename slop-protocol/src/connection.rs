@@ -9,9 +9,12 @@
 
 use crate::codec::{Decode, Encode, FdFifo};
 use crate::types::ProtocolError;
+use slopos_abi::fs::UserIovec;
 use slopos_abi::syscall::posix::{F_SETFL, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_abi::syscall::types::UserPollFd;
-use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_RIGHTS};
+use slopos_abi::syscall::{
+    CMSG_DATA_OFFSET, CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET, cmsg_len, cmsg_space,
+};
 use slopos_slibc::errno;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -20,6 +23,25 @@ const MAX_MSG_SIZE: usize = 8192;
 
 /// Maximum queued fds from recvmsg ancillary data.
 pub const MAX_PENDING_FDS: usize = 8;
+
+/// A control buffer holding exactly one `SCM_RIGHTS` item, sized for the
+/// kernel's `SCM_MAX_FDS` cap — one `recvmsg` drains the socket's ancillary
+/// queue, not just the item that rode with this message's bytes.
+///
+/// Typed rather than a byte array because the kernel writes a `CmsgHdr` at its
+/// head and this side reads one back: a `[u8; N]` is 1-aligned, so the read
+/// would be unaligned.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScmRightsBuf {
+    hdr: CmsgHdr,
+    fds: [i32; SCM_MAX_FDS],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<ScmRightsBuf>() == cmsg_space(SCM_MAX_FDS * core::mem::size_of::<i32>()),
+    "ScmRightsBuf must be exactly one SCM_RIGHTS item's CMSG_SPACE"
+);
 
 /// Set O_NONBLOCK on a socket FD, preserving any existing flags.
 pub fn set_nonblock(fd: i32) {
@@ -106,24 +128,27 @@ impl Connection {
         buf[0..4].copy_from_slice(&len_bytes);
         let total = 4 + payload_len;
 
-        let hdr_size = core::mem::size_of::<CmsgHdr>();
-        let mut cmsg_buf = [0u8; 32];
-        let cmsg = CmsgHdr {
-            cmsg_len: (hdr_size + 4) as u32,
-            cmsg_level: slopos_abi::syscall::posix::SOL_SOCKET as u32,
-            cmsg_type: SCM_RIGHTS,
+        let mut fds = [-1i32; SCM_MAX_FDS];
+        fds[0] = fd;
+        let cmsg = ScmRightsBuf {
+            hdr: CmsgHdr {
+                cmsg_len: cmsg_len(core::mem::size_of::<i32>()) as u64,
+                cmsg_level: SOL_SOCKET,
+                cmsg_type: SCM_RIGHTS,
+            },
+            fds,
         };
-        let cmsg_bytes =
-            unsafe { core::slice::from_raw_parts(&cmsg as *const _ as *const u8, hdr_size) };
-        cmsg_buf[..hdr_size].copy_from_slice(cmsg_bytes);
-        let fd_bytes = fd.to_le_bytes();
-        cmsg_buf[hdr_size..hdr_size + 4].copy_from_slice(&fd_bytes);
-
-        let msg_hdr = MsgHdr {
+        let iov = UserIovec {
             iov_base: buf.as_ptr() as u64,
             iov_len: total as u64,
-            control: cmsg_buf.as_ptr() as u64,
-            control_len: (hdr_size + 4) as u64,
+        };
+
+        let msg_hdr = MsgHdr {
+            msg_iov: &iov as *const UserIovec as u64,
+            msg_iovlen: 1,
+            msg_control: &cmsg as *const ScmRightsBuf as u64,
+            msg_controllen: cmsg_len(core::mem::size_of::<i32>()) as u64,
+            ..Default::default()
         };
 
         // The fd attaches to the first byte via SCM_RIGHTS, so it rides exactly
@@ -271,14 +296,18 @@ impl Connection {
         let ptr = unsafe { self.read_buf.as_mut_ptr().add(self.read_len) };
         let avail = READ_BUF_SIZE - self.read_len;
 
-        let hdr_size = core::mem::size_of::<CmsgHdr>();
-        let mut cmsg_buf = [0u8; 32];
-
-        let mut msg_hdr = MsgHdr {
+        let mut cmsg = ScmRightsBuf::default();
+        let iov = UserIovec {
             iov_base: ptr as u64,
             iov_len: avail as u64,
-            control: cmsg_buf.as_mut_ptr() as u64,
-            control_len: cmsg_buf.len() as u64,
+        };
+
+        let mut msg_hdr = MsgHdr {
+            msg_iov: &iov as *const UserIovec as u64,
+            msg_iovlen: 1,
+            msg_control: &mut cmsg as *mut ScmRightsBuf as u64,
+            msg_controllen: core::mem::size_of::<ScmRightsBuf>() as u64,
+            ..Default::default()
         };
 
         match Sys::recvmsg(self.fd, &mut msg_hdr, 0) {
@@ -291,18 +320,18 @@ impl Connection {
             Ok(_) => return Ok(()),
         }
 
-        if msg_hdr.control_len as usize >= hdr_size + 4 {
-            let cmsg: CmsgHdr = unsafe { core::ptr::read(cmsg_buf.as_ptr() as *const CmsgHdr) };
-            if cmsg.cmsg_type == SCM_RIGHTS && cmsg.cmsg_len as usize >= hdr_size + 4 {
-                let fd_data_len = cmsg.cmsg_len as usize - hdr_size;
-                let n_fds = fd_data_len / 4;
-                for i in 0..n_fds {
-                    let off = hdr_size + i * 4;
-                    let mut fb = [0u8; 4];
-                    fb.copy_from_slice(&cmsg_buf[off..off + 4]);
-                    let fd = i32::from_le_bytes(fb);
-                    self.enqueue_fd(fd);
-                }
+        // One item is all the kernel writes, and it names between one and
+        // `SCM_MAX_FDS` descriptors: a single `recvmsg` drains the socket's
+        // whole ancillary queue, so reading only the first would leak the rest.
+        let reported = msg_hdr.msg_controllen as usize;
+        if reported >= cmsg_len(core::mem::size_of::<i32>())
+            && cmsg.hdr.cmsg_level == SOL_SOCKET
+            && cmsg.hdr.cmsg_type == SCM_RIGHTS
+        {
+            let payload = (cmsg.hdr.cmsg_len as usize).saturating_sub(CMSG_DATA_OFFSET);
+            let n_fds = (payload / core::mem::size_of::<i32>()).min(SCM_MAX_FDS);
+            for &fd in cmsg.fds.iter().take(n_fds) {
+                self.enqueue_fd(fd);
             }
         }
 

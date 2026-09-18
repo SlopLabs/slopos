@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! memfd page-ownership regression test.
 //!
 //! Invariant under test: a memfd is the single MetaSlot owner of its backing

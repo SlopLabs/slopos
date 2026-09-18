@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Per-core reactor + cross-core channel test.
 //!
 //! N worker OS threads each run their own `block_on` reactor, take work from the

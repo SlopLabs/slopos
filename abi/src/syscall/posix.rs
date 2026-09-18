@@ -126,34 +126,121 @@ pub const O_NOCTTY: u64 = 0x100;
 pub const O_CLOEXEC: u64 = 0x80_000;
 
 /// Ancillary data type: pass file descriptors.
-pub const SCM_RIGHTS: u32 = 1;
+pub const SCM_RIGHTS: i32 = 1;
 
 /// Maximum number of file descriptors in a single sendmsg ancillary payload.
 pub const SCM_MAX_FDS: usize = 4;
 
-/// User-space message header for sendmsg/recvmsg.
+/// `msg_flags` out-bit: the control buffer could not hold every ancillary
+/// item, so some were discarded. Linux's `MSG_CTRUNC`.
+pub const MSG_CTRUNC: i32 = 0x08;
+
+/// `sendmsg`/`recvmsg` message header. Linux x86-64 `struct msghdr`.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct MsgHdr {
-    pub iov_base: u64,
-    pub iov_len: u64,
-    /// Pointer to ancillary (control) data buffer.
-    pub control: u64,
-    /// Ancillary data buffer length (input: capacity, output: actual).
-    pub control_len: u64,
+    /// Optional peer address; 0 on a connected socket.
+    pub msg_name: u64,
+    pub msg_namelen: u32,
+    pub _pad0: u32,
+    /// User VA of an array of [`UserIovec`](crate::fs::UserIovec) data
+    /// segments — at most [`UIO_MAXIOV`](crate::fs::UIO_MAXIOV) of them.
+    pub msg_iov: u64,
+    pub msg_iovlen: u64,
+    /// User VA of the ancillary buffer: a run of [`CmsgHdr`]-headed items.
+    pub msg_control: u64,
+    /// In: the ancillary buffer's capacity. Out: the bytes of it used.
+    pub msg_controllen: u64,
+    /// Out on `recvmsg`: [`MSG_CTRUNC`] when ancillary data was discarded.
+    pub msg_flags: i32,
+    pub _pad1: u32,
 }
 
-/// Ancillary data header (simplified POSIX cmsghdr).
+const _: () = assert!(
+    core::mem::size_of::<MsgHdr>() == 56,
+    "MsgHdr must match the Linux x86-64 struct msghdr size"
+);
+const _: () = assert!(core::mem::align_of::<MsgHdr>() == 8);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_name) == 0);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_namelen) == 8);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_iov) == 16);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_iovlen) == 24);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_control) == 32);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_controllen) == 40);
+const _: () = assert!(core::mem::offset_of!(MsgHdr, msg_flags) == 48);
+
+/// One ancillary data item's header. Linux x86-64 `struct cmsghdr`; the
+/// payload begins [`CMSG_DATA_OFFSET`] bytes past the header's start.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct CmsgHdr {
-    /// Total length including this header and data.
-    pub cmsg_len: u32,
-    /// Originating protocol (SOL_SOCKET).
-    pub cmsg_level: u32,
-    /// Protocol-specific type (SCM_RIGHTS).
-    pub cmsg_type: u32,
-    // Followed by i32[] of fd numbers (up to SCM_MAX_FDS).
+    /// This item's header plus payload, unpadded — see [`cmsg_len`].
+    pub cmsg_len: u64,
+    /// Originating protocol ([`SOL_SOCKET`]).
+    pub cmsg_level: i32,
+    /// Protocol-specific type ([`SCM_RIGHTS`]).
+    pub cmsg_type: i32,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<CmsgHdr>() == 16,
+    "CmsgHdr must match the Linux x86-64 struct cmsghdr size"
+);
+const _: () = assert!(core::mem::align_of::<CmsgHdr>() == 8);
+const _: () = assert!(core::mem::offset_of!(CmsgHdr, cmsg_len) == 0);
+const _: () = assert!(core::mem::offset_of!(CmsgHdr, cmsg_level) == 8);
+const _: () = assert!(core::mem::offset_of!(CmsgHdr, cmsg_type) == 12);
+
+/// `CMSG_DATA`'s offset from its item's header — the header size rounded up
+/// to the ancillary alignment, which on x86-64 needs no rounding.
+pub const CMSG_DATA_OFFSET: usize = cmsg_align(core::mem::size_of::<CmsgHdr>());
+
+const _: () = assert!(CMSG_DATA_OFFSET == 16);
+
+/// `CMSG_ALIGN`: ancillary items start on a `size_t` boundary.
+pub const fn cmsg_align(len: usize) -> usize {
+    (len + 7) & !7
+}
+
+/// `CMSG_LEN`: the `cmsg_len` an item carrying `payload` bytes declares.
+pub const fn cmsg_len(payload: usize) -> usize {
+    CMSG_DATA_OFFSET + payload
+}
+
+/// `CMSG_SPACE`: the control-buffer bytes an item carrying `payload` bytes
+/// occupies, including the padding up to the next item.
+pub const fn cmsg_space(payload: usize) -> usize {
+    CMSG_DATA_OFFSET + cmsg_align(payload)
+}
+
+/// `CMSG_FIRSTHDR`: the offset of the first item in a control buffer of
+/// `controllen` bytes, or `None` when it cannot hold a header.
+///
+/// Offsets rather than pointers: the buffer is user memory the kernel reads a
+/// field at a time through its own copy-in, and userland indexes its own
+/// buffer the same way.
+pub const fn cmsg_firsthdr(controllen: usize) -> Option<usize> {
+    if controllen >= core::mem::size_of::<CmsgHdr>() {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// `CMSG_NXTHDR`: the offset of the item after the one at `offset` whose
+/// header declared `len`, or `None` once no whole header is left.
+pub const fn cmsg_nxthdr(controllen: usize, offset: usize, len: usize) -> Option<usize> {
+    if len < core::mem::size_of::<CmsgHdr>() {
+        return None;
+    }
+    let next = match offset.checked_add(cmsg_align(len)) {
+        Some(n) => n,
+        None => return None,
+    };
+    match controllen.checked_sub(next) {
+        Some(left) if left >= core::mem::size_of::<CmsgHdr>() => Some(next),
+        _ => None,
+    }
 }
 
 pub const SEEK_SET: u64 = 0;

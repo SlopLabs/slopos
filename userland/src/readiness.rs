@@ -45,8 +45,10 @@ impl ReadinessGate {
     pub fn wait(self) {
         let _ = slopos_slibc::ffi::close(NOTIFIER_FD);
         let mut buf = [0u8; 1];
-        let _ =
-            slopos_slibc::ffi::read(self.read_fd, buf.as_mut_ptr() as *mut core::ffi::c_void, 1);
+        // SAFETY: `buf` is a live one-byte buffer, which is the length passed.
+        let _ = unsafe {
+            slopos_slibc::ffi::read(self.read_fd, buf.as_mut_ptr() as *mut core::ffi::c_void, 1)
+        };
         let _ = slopos_slibc::ffi::close(self.read_fd);
     }
 
@@ -74,7 +76,10 @@ impl ReadinessNotifier {
     }
 
     pub fn signal_ready(self) {
-        let _ = slopos_slibc::ffi::write(NOTIFIER_FD, b"R".as_ptr() as *const core::ffi::c_void, 1);
+        // SAFETY: a one-byte read-only buffer handed to the C `write`.
+        let _ = unsafe {
+            slopos_slibc::ffi::write(NOTIFIER_FD, b"R".as_ptr() as *const core::ffi::c_void, 1)
+        };
         let _ = slopos_slibc::ffi::close(NOTIFIER_FD);
     }
 }

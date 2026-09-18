@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Sysmon selection identity — a selected row must name a *task*, not a
 //! position in a list that re-sorts under it.
 

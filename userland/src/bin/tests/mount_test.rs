@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 use slopos_userland as _;
 
 use slopos_userland::syscall::error::SyscallError;

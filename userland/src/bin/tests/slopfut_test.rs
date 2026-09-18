@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! `slopfut` production-runtime test: real wakers + multi-task scheduler.
 
 use slopos_abi::signal::{SIGCHLD, sig_bit};

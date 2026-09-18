@@ -18,7 +18,6 @@
 //! pub fn main() -> ! { run(MyApp, 640, 480) }
 //! ```
 
-#![feature(restricted_std)]
 #![allow(dead_code)]
 
 pub mod app;

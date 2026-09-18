@@ -62,7 +62,7 @@ cargo install just  # or: https://github.com/casey/just#installation
 sudo pacman -S qemu-full xorriso e2fsprogs just go
 
 # Then:
-just setup          # installs the pinned rust nightly
+just setup          # installs the pinned rust nightly + the forked `slopos` sysroot
 just boot           # spins the wheel
 ```
 

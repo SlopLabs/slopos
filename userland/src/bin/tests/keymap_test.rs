@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 // Pull in the userland lib so its `_start` ELF entry point is linked.
 use slopos_userland as _;
 

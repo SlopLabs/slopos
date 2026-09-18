@@ -1,0 +1,24 @@
+[package]
+name = "slopos-crt0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "crt0 - SlopOS process entry object (_start) for slibc-linked programs"
+
+# The artifact is not the rlib: `scripts/build_userland.sh` runs
+#   cargo rustc -p slopos-crt0 ... -- --emit=obj=$BUILD_DIR/crt0.o -Ccodegen-units=1
+# and links that single relocatable object into every program. `rlib` (rather
+# than `staticlib`) is deliberate: `--emit=obj` on an rlib needs no in-crate
+# `#[panic_handler]`, so crt0.o carries `_start` and nothing else — a
+# `staticlib` would demand a panic runtime and its `rust_begin_unwind` would
+# then collide with the linked binary's own.
+[lib]
+name = "slopos_crt0"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true

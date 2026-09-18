@@ -138,6 +138,12 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn dup3(old: i32, new: i32, flags: i32) -> Result<i32, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_DUP3, old as u64, new as u64, flags as u64) };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
     fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i32, Errno> {
         let ret = unsafe { syscall3(SYSCALL_FCNTL, fd as u64, cmd as u64, arg) };
         let val = to_result(ret)?;
@@ -187,50 +193,6 @@ impl Pal for Sys {
         let ret = unsafe { syscall3(SYSCALL_IOCTL, fd as u64, request, arg) };
         let val = to_result(ret)?;
         Ok(val as i32)
-    }
-
-    /// Newline-joined names of every entry, with `.` and `..` dropped.
-    fn list(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
-        use crate::io::dirent::DirentIter;
-
-        let fd = Self::open(path, slopos_abi::fs::O_RDONLY as i32, 0)?;
-        let mut batch = [0u8; 4096];
-        let mut pos = 0usize;
-
-        let result = loop {
-            let filled = match Self::getdents64(fd, batch.as_mut_ptr(), batch.len()) {
-                Ok(0) => break Ok(pos),
-                Ok(n) => n,
-                Err(e) => break Err(e),
-            };
-
-            let mut overflow = false;
-            for record in DirentIter::new(&batch[..filled]) {
-                let name = record.name;
-                if name.is_empty() || name == b"." || name == b".." {
-                    continue;
-                }
-                let needed = if pos == 0 { name.len() } else { name.len() + 1 };
-                if pos + needed > buf_len {
-                    overflow = true;
-                    break;
-                }
-                if pos > 0 {
-                    unsafe { *buf.add(pos) = b'\n' };
-                    pos += 1;
-                }
-                unsafe {
-                    core::ptr::copy_nonoverlapping(name.as_ptr(), buf.add(pos), name.len());
-                }
-                pos += name.len();
-            }
-            if overflow {
-                break Err(crate::errno::ERANGE);
-            }
-        };
-
-        let _ = Self::close(fd);
-        result
     }
 
     fn rmdir(path: *const u8) -> Result<(), Errno> {
@@ -551,9 +513,20 @@ impl Pal for Sys {
         Ok(())
     }
 
-    /// `rusage` is null: the kernel has no per-task accounting to report.
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> Result<i32, Errno> {
-        let ret = unsafe { syscall4(SYSCALL_WAIT4, pid as u64, status as u64, options as u64, 0) };
+        Self::wait4(pid, status, options, core::ptr::null_mut())
+    }
+
+    fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut u8) -> Result<i32, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_WAIT4,
+                pid as u64,
+                status as u64,
+                options as u64,
+                rusage as u64,
+            )
+        };
         let val = to_result(ret)?;
         Ok(val as i32)
     }
@@ -705,6 +678,19 @@ impl Pal for Sys {
         };
         to_result(ret)?;
         Ok(())
+    }
+
+    fn sched_getaffinity(pid: i32, len: usize, mask: *mut u8) -> Result<usize, Errno> {
+        let ret = unsafe {
+            syscall3(
+                SYSCALL_SCHED_GETAFFINITY,
+                pid as u64,
+                len as u64,
+                mask as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as usize)
     }
 
     fn arch_prctl_set_fs(base: u64) -> Result<(), Errno> {
@@ -958,6 +944,20 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn net_query(what: u32, ifindex: u32, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_NET_QUERY,
+                what as u64,
+                ifindex as u64,
+                buf as u64,
+                buf_len as u64,
+            )
+        };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
     fn clock_gettime(clk_id: u64, tp: *mut u8) -> Result<(), Errno> {
         let ret = unsafe { syscall2(SYSCALL_CLOCK_GETTIME, clk_id, tp as u64) };
         to_result(ret)?;
@@ -1013,6 +1013,12 @@ impl Pal for Sys {
                 _ => return,
             }
         }
+    }
+
+    fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_NANOSLEEP, req as u64, rem as u64) };
+        to_result(ret)?;
+        Ok(())
     }
 
     fn clock_settime(clk_id: u64, tp: *const Timespec) -> Result<(), Errno> {

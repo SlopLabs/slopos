@@ -67,9 +67,17 @@ pub unsafe fn fd_isset(fd: i32, set: *const FdSet) -> bool {
     ((*set).fds_bits[fd / BITS_PER_WORD] & (1u64 << (fd % BITS_PER_WORD))) != 0
 }
 
+/// `nfds` is `nfds_t`, an `unsigned long`. The kernel's `poll` takes a 32-bit
+/// count and caps it at its own `SELECT_MAX_FDS`, so a count that cannot be
+/// narrowed without loss is `EINVAL` here rather than a silently truncated
+/// array walk.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: u32, timeout: i32) -> i32 {
-    match Sys::poll(fds as *mut u8, nfds, timeout) {
+pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: crate::types::nfds_t, timeout: i32) -> i32 {
+    let Ok(count) = u32::try_from(nfds) else {
+        errno_set(crate::errno::EINVAL.raw());
+        return -1;
+    };
+    match Sys::poll(fds as *mut u8, count, timeout) {
         Ok(n) => n,
         Err(e) => {
             errno_set(e.raw());

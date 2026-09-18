@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 use std::fs;
 
 use slopos_userland::apps::shell;

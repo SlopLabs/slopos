@@ -29,8 +29,8 @@ use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
 use slopos_testing::{TestResult, assert_eq_test, assert_test, fail, pass};
 
 use crate::syscall::args::UserPath;
-use crate::syscall::fs::io_handlers::stage_iovec;
 use crate::syscall::ui_handlers::syscall_getrandom;
+use slopos_mm::user_io_buf::stage_iovec;
 
 type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 

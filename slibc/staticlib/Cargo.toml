@@ -1,0 +1,27 @@
+[package]
+name = "slopos-slibc-staticlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "libc.a - slibc packaged as a linkable C archive for C consumers"
+
+# `libc.a`, the archive a `cc`-style link line finds via `-lc`. It exists as a
+# separate package because `slibc` itself cannot carry `staticlib`: cargo emits
+# every declared crate type in ONE rustc invocation (even for a dependency
+# unit), a `no_std` staticlib requires an in-crate `#[panic_handler]`, and that
+# handler is then a duplicate `panic_impl` lang item (E0152) for the 211
+# rlib-level `slopos_slibc::` uses in userland. Wrapping is how a crate can be
+# both an rlib for Rust consumers and an archive for C ones.
+[lib]
+name = "c"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+slopos-slibc = { workspace = true }

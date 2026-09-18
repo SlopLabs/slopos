@@ -1,6 +1,7 @@
 //! Process lifecycle — fork, exec, wait, exit.
 
 pub mod atexit;
+pub mod ids;
 pub mod rlimit;
 pub mod shim;
 pub mod tests;
@@ -21,7 +22,10 @@ pub use wait::{WEXITSTATUS, WIFCONTINUED, WIFEXITED, WIFSIGNALED, WIFSTOPPED, WS
 pub unsafe extern "C" fn fork() -> i32 {
     match Sys::fork() {
         Ok(pid) => pid,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }
 
@@ -38,7 +42,10 @@ pub unsafe extern "C" fn execve(
     }
     match Sys::exec(path, argv, envp) {
         Ok(()) => 0,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }
 
@@ -114,7 +121,10 @@ pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 
 pub unsafe extern "C" fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
     match Sys::waitpid(pid, status, options) {
         Ok(ret) => ret,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }
 
@@ -179,7 +189,10 @@ pub unsafe extern "C" fn getegid() -> u32 {
 pub unsafe extern "C" fn setpgid(pid: i32, pgid: i32) -> i32 {
     match Sys::setpgid(pid, pgid) {
         Ok(()) => 0,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }
 
@@ -187,7 +200,10 @@ pub unsafe extern "C" fn setpgid(pid: i32, pgid: i32) -> i32 {
 pub unsafe extern "C" fn getpgid(pid: i32) -> i32 {
     match Sys::getpgid(pid) {
         Ok(pgid) => pgid,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }
 
@@ -195,6 +211,9 @@ pub unsafe extern "C" fn getpgid(pid: i32) -> i32 {
 pub unsafe extern "C" fn setsid() -> i32 {
     match Sys::setsid() {
         Ok(sid) => sid,
-        Err(_) => -1,
+        Err(e) => {
+            errno::errno_set(e.raw());
+            -1
+        }
     }
 }

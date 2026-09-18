@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Shell regression tests.
 //!
 //! Most cases feed `/bin/shell` a script down a pipe and assert on the exact

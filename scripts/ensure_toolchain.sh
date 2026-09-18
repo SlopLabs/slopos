@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ensure the pinned Rust nightly toolchain and required targets are installed.
+# Ensure the pinned Rust nightly toolchain, its required components and
+# targets, and the owned `slopos` sysroot are all present.
 # Reads the channel from rust-toolchain.toml in the repository root.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +28,19 @@ if ! rustup toolchain list | grep -q "^${RUST_CHANNEL}"; then
         --component=llvm-tools-preview
 fi
 
+# `rust-src` is where `-Zbuild-std` and the owned sysroot both get the standard
+# library from, so a toolchain that predates this script must gain it too — the
+# install above only runs when the toolchain is absent entirely.
+if ! rustup component list --installed --toolchain "$RUST_CHANNEL" | grep -q "^rust-src"; then
+    rustup component add rust-src --toolchain "$RUST_CHANNEL"
+fi
+
 if ! rustup target list --toolchain "$RUST_CHANNEL" --installed | grep -q "^x86_64-unknown-none"; then
     rustup target add x86_64-unknown-none --toolchain "$RUST_CHANNEL"
 fi
+
+# The userland target is built by `cargo +slopos`, not by `cargo +$channel`:
+# std for `x86_64-unknown-slopos` comes from the pinned std + libc forks, which
+# live in an owned sysroot rather than in the rustup toolchain. Materialising it
+# is a no-op once the stamp matches.
+"$SCRIPT_DIR/make_slopos_sysroot.sh"

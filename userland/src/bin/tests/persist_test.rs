@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 use slopos_userland as _;
 
 use slopos_abi::fs::{O_RDONLY, O_RDWR};

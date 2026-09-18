@@ -1,0 +1,665 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 788c990..4e440d7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -82,6 +82,7 @@ rustflags = [
+ 
+ [patch.crates-io]
+ # See comments in `library/rustc-std-workspace-core/README.md` for what's going on here
++libc = { path = 'libc' }
+ rustc-std-workspace-core = { path = 'rustc-std-workspace-core' }
+ rustc-std-workspace-alloc = { path = 'rustc-std-workspace-alloc' }
+ rustc-std-workspace-std = { path = 'rustc-std-workspace-std' }
+diff --git a/backtrace/src/backtrace/mod.rs b/backtrace/src/backtrace/mod.rs
+index 2a36214..ac959ee 100644
+--- a/backtrace/src/backtrace/mod.rs
++++ b/backtrace/src/backtrace/mod.rs
+@@ -175,6 +175,7 @@ cfg_if::cfg_if! {
+             all(
+                 unix,
+                 not(target_os = "emscripten"),
++                not(target_os = "slopos"),
+                 not(all(target_os = "ios", target_arch = "arm")),
+             ),
+             all(
+diff --git a/std/build.rs b/std/build.rs
+index 98856b5..f235e87 100644
+--- a/std/build.rs
++++ b/std/build.rs
+@@ -38,6 +38,7 @@ fn main() {
+         || target_os == "trusty"
+         || target_os == "l4re"
+         || target_os == "redox"
++        || target_os == "slopos"
+         || target_os == "haiku"
+         || target_os == "vxworks"
+         || target_arch == "wasm32"
+diff --git a/std/src/os/mod.rs b/std/src/os/mod.rs
+index 8068f92..26089c5 100644
+--- a/std/src/os/mod.rs
++++ b/std/src/os/mod.rs
+@@ -129,6 +129,8 @@ pub mod nuttx;
+ pub mod openbsd;
+ #[cfg(target_os = "redox")]
+ pub mod redox;
++#[cfg(target_os = "slopos")]
++pub mod slopos;
+ #[cfg(target_os = "rtems")]
+ pub mod rtems;
+ #[cfg(target_os = "solaris")]
+diff --git b/std/src/os/slopos/fs.rs b/std/src/os/slopos/fs.rs
+new file mode 100644
+index 0000000..bb17934
+--- /dev/null
++++ b/std/src/os/slopos/fs.rs
+@@ -0,0 +1,398 @@
++#![stable(feature = "metadata_ext", since = "1.1.0")]
++
++use crate::fs::Metadata;
++#[allow(deprecated)]
++use crate::os::slopos::raw;
++use crate::sys::AsInner;
++
++/// OS-specific extensions to [`fs::Metadata`].
++///
++/// [`fs::Metadata`]: crate::fs::Metadata
++#[stable(feature = "metadata_ext", since = "1.1.0")]
++pub trait MetadataExt {
++    /// Gain a reference to the underlying `stat` structure which contains
++    /// the raw information returned by the OS.
++    ///
++    /// The contents of the returned [`stat`] are **not** consistent across
++    /// Unix platforms. The `os::unix::fs::MetadataExt` trait contains the
++    /// cross-Unix abstractions contained within the raw stat.
++    ///
++    /// [`stat`]: crate::os::slopos::raw::stat
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     let stat = meta.as_raw_stat();
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext", since = "1.1.0")]
++    #[deprecated(
++        since = "1.8.0",
++        note = "deprecated in favor of the accessor \
++                methods of this trait"
++    )]
++    #[allow(deprecated)]
++    fn as_raw_stat(&self) -> &raw::stat;
++
++    /// Returns the device ID on which this file resides.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_dev());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_dev(&self) -> u64;
++    /// Returns the inode number.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_ino());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_ino(&self) -> u64;
++    /// Returns the file type and mode.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_mode());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_mode(&self) -> u32;
++    /// Returns the number of hard links to file.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_nlink());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_nlink(&self) -> u64;
++    /// Returns the user ID of the file owner.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_uid());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_uid(&self) -> u32;
++    /// Returns the group ID of the file owner.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_gid());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_gid(&self) -> u32;
++    /// Returns the device ID that this file represents. Only relevant for special file.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_rdev());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_rdev(&self) -> u64;
++    /// Returns the size of the file (if it is a regular file or a symbolic link) in bytes.
++    ///
++    /// The size of a symbolic link is the length of the pathname it contains,
++    /// without a terminating null byte.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_size());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_size(&self) -> u64;
++    /// Returns the last access time of the file, in seconds since Unix Epoch.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_atime());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_atime(&self) -> i64;
++    /// Returns the last access time of the file, in nanoseconds since [`st_atime`].
++    ///
++    /// [`st_atime`]: Self::st_atime
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_atime_nsec());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_atime_nsec(&self) -> i64;
++    /// Returns the last modification time of the file, in seconds since Unix Epoch.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_mtime());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_mtime(&self) -> i64;
++    /// Returns the last modification time of the file, in nanoseconds since [`st_mtime`].
++    ///
++    /// [`st_mtime`]: Self::st_mtime
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_mtime_nsec());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_mtime_nsec(&self) -> i64;
++    /// Returns the last status change time of the file, in seconds since Unix Epoch.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_ctime());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_ctime(&self) -> i64;
++    /// Returns the last status change time of the file, in nanoseconds since [`st_ctime`].
++    ///
++    /// [`st_ctime`]: Self::st_ctime
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_ctime_nsec());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_ctime_nsec(&self) -> i64;
++    /// Returns the "preferred" block size for efficient filesystem I/O.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_blksize());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_blksize(&self) -> u64;
++    /// Returns the number of blocks allocated to the file, 512-byte units.
++    ///
++    /// # Examples
++    ///
++    #[cfg_attr(target_os = "slopos", doc = "```no_run")]
++    #[cfg_attr(not(target_os = "slopos"), doc = "```ignore (needs slopos)")]
++    /// use std::fs;
++    /// use std::io;
++    /// use std::os::slopos::fs::MetadataExt;
++    ///
++    /// fn main() -> io::Result<()> {
++    ///     let meta = fs::metadata("some_file")?;
++    ///     println!("{}", meta.st_blocks());
++    ///     Ok(())
++    /// }
++    /// ```
++    #[stable(feature = "metadata_ext2", since = "1.8.0")]
++    fn st_blocks(&self) -> u64;
++}
++
++#[stable(feature = "metadata_ext", since = "1.1.0")]
++impl MetadataExt for Metadata {
++    #[allow(deprecated)]
++    fn as_raw_stat(&self) -> &raw::stat {
++        unsafe { &*(self.as_inner().as_inner() as *const libc::stat as *const raw::stat) }
++    }
++    fn st_dev(&self) -> u64 {
++        self.as_inner().as_inner().st_dev as u64
++    }
++    fn st_ino(&self) -> u64 {
++        self.as_inner().as_inner().st_ino as u64
++    }
++    fn st_mode(&self) -> u32 {
++        self.as_inner().as_inner().st_mode as u32
++    }
++    fn st_nlink(&self) -> u64 {
++        self.as_inner().as_inner().st_nlink as u64
++    }
++    fn st_uid(&self) -> u32 {
++        self.as_inner().as_inner().st_uid as u32
++    }
++    fn st_gid(&self) -> u32 {
++        self.as_inner().as_inner().st_gid as u32
++    }
++    fn st_rdev(&self) -> u64 {
++        self.as_inner().as_inner().st_rdev as u64
++    }
++    fn st_size(&self) -> u64 {
++        self.as_inner().as_inner().st_size as u64
++    }
++    fn st_atime(&self) -> i64 {
++        self.as_inner().as_inner().st_atime as i64
++    }
++    fn st_atime_nsec(&self) -> i64 {
++        self.as_inner().as_inner().st_atime_nsec as i64
++    }
++    fn st_mtime(&self) -> i64 {
++        self.as_inner().as_inner().st_mtime as i64
++    }
++    fn st_mtime_nsec(&self) -> i64 {
++        self.as_inner().as_inner().st_mtime_nsec as i64
++    }
++    fn st_ctime(&self) -> i64 {
++        self.as_inner().as_inner().st_ctime as i64
++    }
++    fn st_ctime_nsec(&self) -> i64 {
++        self.as_inner().as_inner().st_ctime_nsec as i64
++    }
++    fn st_blksize(&self) -> u64 {
++        self.as_inner().as_inner().st_blksize as u64
++    }
++    fn st_blocks(&self) -> u64 {
++        self.as_inner().as_inner().st_blocks as u64
++    }
++}
+diff --git b/std/src/os/slopos/mod.rs b/std/src/os/slopos/mod.rs
+new file mode 100644
+index 0000000..f133271
+--- /dev/null
++++ b/std/src/os/slopos/mod.rs
+@@ -0,0 +1,6 @@
++//! SlopOS-specific definitions
++
++#![stable(feature = "raw_ext", since = "1.1.0")]
++
++pub mod fs;
++pub mod raw;
+diff --git b/std/src/os/slopos/raw.rs b/std/src/os/slopos/raw.rs
+new file mode 100644
+index 0000000..566ae9f
+--- /dev/null
++++ b/std/src/os/slopos/raw.rs
+@@ -0,0 +1,80 @@
++//! SlopOS-specific raw type definitions
++
++#![stable(feature = "raw_ext", since = "1.1.0")]
++#![deprecated(
++    since = "1.8.0",
++    note = "these type aliases are no longer supported by \
++            the standard library, the `libc` crate on \
++            crates.io should be used instead for the correct \
++            definitions"
++)]
++#![allow(deprecated)]
++
++use crate::os::raw::{c_int, c_long, c_uint, c_ulong};
++
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type dev_t = c_ulong;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type gid_t = c_uint;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type mode_t = c_uint;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type uid_t = c_uint;
++
++#[stable(feature = "pthread_t", since = "1.8.0")]
++pub type pthread_t = c_ulong;
++
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type blkcnt_t = c_long;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type blksize_t = c_long;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type ino_t = c_ulong;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type nlink_t = c_ulong;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type off_t = c_long;
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub type time_t = c_long;
++
++#[repr(C)]
++#[derive(Clone)]
++#[stable(feature = "raw_ext", since = "1.1.0")]
++pub struct stat {
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_dev: dev_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_ino: ino_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_nlink: nlink_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_mode: mode_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_uid: uid_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_gid: gid_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub __pad0: c_int,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_rdev: dev_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_size: off_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_blksize: blksize_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_blocks: blkcnt_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_atime: time_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_atime_nsec: c_long,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_mtime: time_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_mtime_nsec: c_long,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_ctime: time_t,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub st_ctime_nsec: c_long,
++    #[stable(feature = "raw_ext", since = "1.1.0")]
++    pub __unused: [c_long; 3],
++}
+diff --git a/std/src/os/unix/mod.rs b/std/src/os/unix/mod.rs
+index c994174..2f32ad4 100644
+--- a/std/src/os/unix/mod.rs
++++ b/std/src/os/unix/mod.rs
+@@ -78,6 +78,8 @@ mod platform {
+     pub use crate::os::openbsd::*;
+     #[cfg(target_os = "redox")]
+     pub use crate::os::redox::*;
++    #[cfg(target_os = "slopos")]
++    pub use crate::os::slopos::*;
+     #[cfg(target_os = "rtems")]
+     pub use crate::os::rtems::*;
+     #[cfg(target_os = "solaris")]
+diff --git a/std/src/sys/args/unix.rs b/std/src/sys/args/unix.rs
+index 197931d..3e13619 100644
+--- a/std/src/sys/args/unix.rs
++++ b/std/src/sys/args/unix.rs
+@@ -77,6 +77,7 @@ pub fn args() -> Args {
+     target_os = "l4re",
+     target_os = "fuchsia",
+     target_os = "redox",
++    target_os = "slopos",
+     target_os = "vxworks",
+     target_os = "horizon",
+     target_os = "aix",
+diff --git a/std/src/sys/io/error/unix.rs b/std/src/sys/io/error/unix.rs
+index 5f60abf..bbe37dd 100644
+--- a/std/src/sys/io/error/unix.rs
++++ b/std/src/sys/io/error/unix.rs
+@@ -18,6 +18,7 @@ unsafe extern "C" {
+             target_os = "l4re",
+             target_os = "hurd",
+             target_os = "teeos",
++            target_os = "slopos",
+         ),
+         link_name = "__errno_location"
+     )]
+diff --git a/std/src/sys/paths/unix.rs b/std/src/sys/paths/unix.rs
+index e023451..18576c8 100644
+--- a/std/src/sys/paths/unix.rs
++++ b/std/src/sys/paths/unix.rs
+@@ -360,6 +360,13 @@ pub fn current_exe() -> io::Result<PathBuf> {
+     crate::fs::read_to_string("/scheme/sys/exe").map(PathBuf::from)
+ }
+ 
++#[cfg(target_os = "slopos")]
++pub fn current_exe() -> io::Result<PathBuf> {
++    // SlopOS has no procfs and no `sys:exe`-style query, so a process cannot
++    // name its own image.
++    Err(io::const_error!(io::ErrorKind::Unsupported, "SlopOS cannot name a process's own image"))
++}
++
+ #[cfg(target_os = "rtems")]
+ pub fn current_exe() -> io::Result<PathBuf> {
+     crate::fs::read_to_string("sys:exe").map(PathBuf::from)
+diff --git a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
+index bc3dd50..0ac26ff 100644
+--- a/std/src/sys/random/mod.rs
++++ b/std/src/sys/random/mod.rs
+@@ -53,6 +53,10 @@ cfg_select! {
+         mod unix_legacy;
+         pub use unix_legacy::fill_bytes;
+     }
++    target_os = "slopos" => {
++        mod slopos;
++        pub use slopos::fill_bytes;
++    }
+     target_os = "redox" => {
+         mod redox;
+         pub use redox::fill_bytes;
+diff --git b/std/src/sys/random/slopos.rs b/std/src/sys/random/slopos.rs
+new file mode 100644
+index 0000000..71a122e
+--- /dev/null
++++ b/std/src/sys/random/slopos.rs
+@@ -0,0 +1,16 @@
++pub fn fill_bytes(bytes: &mut [u8]) {
++    let mut filled = 0;
++    while filled < bytes.len() {
++        let rest = &mut bytes[filled..];
++        // SAFETY: `rest` is a valid, writable slice of `rest.len()` bytes.
++        let ret = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
++        if ret < 0 {
++            // SlopOS's pool is always seeded, so the only failure a correct
++            // call can see is an interrupting signal.
++            let err = unsafe { *libc::__errno_location() };
++            assert_eq!(err, libc::EINTR, "failed to generate random data");
++        } else {
++            filled += ret as usize;
++        }
++    }
++}
+diff --git a/std/src/sys/thread/unix.rs b/std/src/sys/thread/unix.rs
+index b7908de..6cd2084 100644
+--- a/std/src/sys/thread/unix.rs
++++ b/std/src/sys/thread/unix.rs
+@@ -165,6 +165,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
+             target_vendor = "apple",
+             target_os = "cygwin",
+             target_os = "redox",
++            target_os = "slopos",
+             target_os = "wasi",
+         ) => {
+             #[allow(unused_assignments)]
+@@ -445,7 +446,8 @@ pub fn set_name(name: &CStr) {
+     target_os = "freebsd",
+     target_os = "dragonfly",
+     target_os = "nuttx",
+-    target_os = "cygwin"
++    target_os = "cygwin",
++    target_os = "slopos"
+ ))]
+ pub fn set_name(name: &CStr) {
+     unsafe {

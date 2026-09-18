@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! signalfd end-to-end test: with SIGCHLD blocked, a child's exit arrives as an
 //! in-band `POLLIN` on the signalfd, so a single `poll(2)` — no EINTR-retry
 //! loop — observes it.

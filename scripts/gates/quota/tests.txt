@@ -270,6 +270,19 @@
 #     and `pinnedbytes` 4.
 
 #
+# 2026-09-18, Workstream 1.1 ("The target is a host's target" in
+# plans/self-hosting.md). One row moved, from one cause: `libc_abi_test` is
+# one more utest binary.
+#   post-userland-tests `process` 246 -> 247. One more account row, live at
+#     the dump point like the rest of the phase's children. Deterministic at
+#     247 across three fresh runs of one ISO; the cap stays exact. Nothing
+#     else moved above its cap over those runs, including every row the
+#     platform-layer swap could plausibly have touched: post-userland
+#     `kernelmeta`, `pages` and `residentpages` all stayed inside their
+#     recorded spreads, so std riding `sys/pal/unix` over slibc costs the
+#     same kernel accounting the bespoke PAL did. Only the deterministic row
+#     is re-recorded.
+#
 # 2026-09-17, the editor ("An editor you can work in" in
 # plans/self-hosting.md). Two rows moved, both in the userland phase and both
 # from the same cause: `editor_test` is one more utest binary.
@@ -351,7 +364,7 @@ post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1887717
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	246
+post-userland-tests	process	247
 post-userland-tests	residentpages	153268
 post-userland-tests	task	10
 

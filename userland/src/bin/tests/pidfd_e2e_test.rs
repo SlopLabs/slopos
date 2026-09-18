@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! pidfd end-to-end test (process-exit fd).
 //!
 //! Verifies a child's `pidfd` signals `POLLIN` on exit through both `poll(2)`

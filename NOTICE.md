@@ -32,14 +32,45 @@ numbers, `errno` values, ioctl codes, struct layouts, hardware register
 offsets) are reproduced where compatibility requires it; those are interface
 facts rather than authorship.
 
-## Modified Rust standard library
+## Pinned Rust standard library and `libc` forks
 
-SlopOS builds against a modified copy of the Rust standard library. Files under
-`library/std/src/sys` are patched at build time by `scripts/patch_std.sh` to add
-the `slopos` target platform-abstraction layer. Those modifications are
-© 2025–2026 The SlopOS Authors and are licensed GPL-3.0-or-later; the
-unmodified Rust standard library is © The Rust Project Contributors under
-`MIT OR Apache-2.0`.
+SlopOS's userland target `x86_64-unknown-slopos` is built against two pinned
+forks, both of upstream Rust projects licensed `MIT OR Apache-2.0`:
+
+- a fork of [`rust-lang/rust`](https://github.com/rust-lang/rust)'s
+  `library/` tree, at the commit `rust-toolchain.toml` pins, adding the
+  `slopos` target to `library/std`: its platform allowlist, the per-target
+  `os/slopos/` and `sys/random/slopos.rs` modules, and the `cfg` sites a
+  unix-family target has to appear in;
+- a fork of [`rust-lang/libc`](https://github.com/rust-lang/libc), adding
+  `src/unix/slopos/` — the `libc` bindings for SlopOS's C library.
+
+Neither fork is vendored into this repository. What is tracked is the diff:
+`toolchain/PIN` records the channel, the pinned `libc` crate version and its
+checksum, and a checksum per patch, and `toolchain/rust/` and
+`toolchain/libc/` carry the patches themselves.
+`scripts/make_slopos_sysroot.sh` materialises both into an owned sysroot at
+`third_party/rust-slopos/` at build time, and
+`scripts/check_toolchain_pin.sh` fails the build if what is materialised has
+drifted from what is pinned. Upstream's code reaches a SlopOS build only
+through that step. Both patches are licensed `MIT OR Apache-2.0` rather than
+GPL-3.0-or-later, because they are written to be contributed upstream under the
+tier-3 target policy.
+
+Authorship within the patches is split. New work, © 2025–2026 The SlopOS
+Authors, is the `libc` fork's `src/unix/slopos/` module, the `target_os =
+"slopos"` arms the std patch adds to lists that were already there, and
+`std/src/sys/random/slopos.rs`. The three files the std patch creates under
+`std/src/os/slopos/` are instead derived from upstream's own
+`std/src/os/redox/` ones: `fs.rs` is `os/redox/fs.rs` with `redox` renamed to
+`slopos` and nothing else changed, and `raw.rs` is `os/redox/raw.rs` with
+SlopOS's own type widths and `stat` padding. Those are substantial portions of
+the upstream work, so The Rust Project Contributors' copyright in them is
+retained as MIT's notice-retention clause requires — recorded here and in the
+`MIT OR Apache-2.0` licence the patch elects, upstream's own library files
+carrying no per-file copyright header to carry over. The unmodified upstream
+sources remain © The Rust Project Contributors and © The `rust-lang/libc`
+Developers respectively.
 
 ## Components linked into SlopOS binaries
 
@@ -50,12 +81,13 @@ once at the end of this section and applies to every entry.
 | Component | Version | Copyright |
 |---|---|---|
 | [`bitflags`](https://github.com/bitflags/bitflags) | 2.11.0 | Copyright (c) 2014 The Rust Project Developers |
+| [`libc`](https://github.com/rust-lang/libc) | 0.2.189, forked | Copyright (c) 2014 The Rust Project Developers |
 | [`libm`](https://github.com/rust-lang/libm) | 0.2.16 | **MIT only** — see the note below |
 | [`limine`](https://github.com/limine-bootloader/limine-rs) | 0.6.3 | Copyright © 2026 Julian Scheffers |
 | [`paste`](https://github.com/dtolnay/paste) | 1.0.15 | David Tolnay (upstream ships no copyright line) |
 | [`gimli`](https://github.com/gimli-rs/gimli) | 0.33.0 | Copyright (c) 2015 The Rust Project Developers |
 | [`unwinding`](https://github.com/nbdd0121/unwinding/) | 0.2.9 | Gary Guo (upstream ships no copyright line) |
-| Rust `core`, `alloc`, `std` | pinned nightly | Copyright © The Rust Project Contributors |
+| Rust `core`, `alloc`, `std` | pinned nightly, `std` forked | Copyright © The Rust Project Contributors |
 
 `gimli` and `unwinding` are vendored verbatim under [`vendor/`](vendor/); each
 directory retains its upstream `LICENSE-MIT` and `LICENSE-APACHE`.

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Phase 1.1's standing proof: the utilities are executables.
 //!
 //! Every case here spawns `/bin/<tool>` from a program that is not the shell

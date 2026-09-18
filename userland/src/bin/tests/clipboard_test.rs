@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! fd-based clipboard: wire format + memfd transport.
 
 use slopos_userland as _;

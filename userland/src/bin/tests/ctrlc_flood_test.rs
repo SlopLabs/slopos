@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Ctrl-C-under-output-flood end-to-end regression test.
 //!
 //! Locks the full interrupt pipeline interactive Ctrl-C rides: PTY master write

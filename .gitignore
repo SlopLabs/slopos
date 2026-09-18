@@ -2,6 +2,10 @@
 .cache/
 builddir/
 third_party/*
+# The owned `slopos` sysroot (scripts/make_slopos_sysroot.sh materialises it
+# from the pinned toolchain plus the toolchain/ fork overlay). Named rather
+# than left to `third_party/*` above because it is generated, not fetched.
+third_party/rust-slopos/
 EFI/
 boot_fat/
 test_efi_dir/

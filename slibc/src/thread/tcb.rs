@@ -22,6 +22,14 @@ pub struct Tcb {
     pub child_tid: i32,
     pub tls_data: [u8; 64],
     pub thread_local_keys: [*mut u8; PTHREAD_KEYS_MAX],
+    /// `pthread_setname_np`'s NUL-padded name. Appended last on purpose: the
+    /// x86_64 TLS ABI fixes `self_ptr` at 0 and the rest of the offsets are
+    /// what `thread::tests` pins, so growth has to happen at the tail.
+    pub name: [u8; super::PTHREAD_NAME_MAX],
+    /// Bytes of [`crate::thread::create::THREAD_STACK_GUARD_SIZE`] actually
+    /// mprotected at the low end of `stack_base`, which an attr with
+    /// `guardsize == 0` sets to zero. `pthread_getattr_np` reports it.
+    pub guard_size: usize,
 }
 
 unsafe impl Send for Tcb {}
@@ -43,6 +51,8 @@ impl Tcb {
             child_tid: 0,
             tls_data: [0; 64],
             thread_local_keys: [ptr::null_mut(); PTHREAD_KEYS_MAX],
+            name: [0; super::PTHREAD_NAME_MAX],
+            guard_size: 0,
         }
     }
 

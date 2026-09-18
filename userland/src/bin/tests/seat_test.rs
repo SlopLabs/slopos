@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Seat exclusivity, non-transferability and virtcon fallback, exercised
 //! through the real syscall entry.
 //!

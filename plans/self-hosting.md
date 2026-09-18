@@ -28,11 +28,12 @@ are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with two remaining exceptions (dynamic linking and the
-compiler bootstrap itself). Seven more, a page-fault path that can reach the
+compiler bootstrap itself). Eight more, a page-fault path that can reach the
 device, a POSIX floor a build system can stand on, a filesystem that can hold a
 tree, a utility set that is executables rather than shell builtins, a shell
 a build script can be written in, a terminal an editor can be written
-against, and an editor written against the machine itself, have landed.
+against, an editor written against the machine itself, and a target that is a
+unix-family Rust target over a real C library, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -320,26 +321,29 @@ What it rests on, in case a later phase disturbs it:
   real `timespec`, relative for `FUTEX_WAIT` and absolute for
   `FUTEX_WAIT_BITSET`, and the bitset and requeue forms exist.
 - **`std` reaches the syscalls that exist.** `read_dir` runs over `getdents64`
-  on an owned directory descriptor rather than splitting `slopos_list`'s output
-  on newlines, so a filename containing a newline is just bytes; `symlink`,
-  `read_link`, `hard_link`, `set_permissions`, `File::set_times`,
+  on an owned directory descriptor rather than splitting the output of a
+  bespoke listing call on newlines, so a filename containing a newline is just
+  bytes; `symlink`, `read_link`, `hard_link`, `set_permissions`, `File::set_times`,
   `read_vectored`, `write_vectored` and `FileExt::read_at`/`write_at` are real
   instead of `unsupported`; and `Command::spawn` goes through `spawn_path` with
   a cwd in `SpawnAttrs`, so nothing allocates between fork and exec against the
   single global malloc spinlock a multithreaded parent could hand over locked.
 - **The ABI is Linux's, numbers included.** A syscall number below
   `SYSCALL_PRIVATE_BASE` is Linux x86-64's number for the call of that name and
-  carries that call's Linux signature: 112 of them, in a dense table sized to
-  the 472 numbers Linux has allocated. The 39 operations Linux has no name for
+  carries that call's Linux signature: 114 of them, in a dense table sized to
+  the 472 numbers Linux has allocated. The 37 operations Linux has no name for
   — the seat and screen acquisition, SlopRing, the compositor and cursor calls,
   the keymap and font uploads, the net-config surface that replaces netlink,
   `spawn_path`, the fate calls, the KTAP hooks, the fd-less console write and
   controlling-terminal read, and `sys_info` — live in a private range based at
   1024, which is the discipline ARM takes with `__ARM_NR_BASE` and is clear of
   both the allocated space and `__X32_SYSCALL_BIT`. Nothing borrows a Linux
-  number for a shape it does not implement: `sendmsg`/`recvmsg` are private
-  because `MsgHdr`/`CmsgHdr` are not Linux's layouts, and SlopRing declines
-  io_uring's 425-427 because its SQE is its own.
+  number for a shape it does not implement, and nothing keeps a private number
+  once the shape agrees: `sendmsg`/`recvmsg` were private *because*
+  `MsgHdr`/`CmsgHdr` were not Linux's layouts, and they took 46 and 47 the
+  moment those layouts became Linux's — the allowlist that carried their
+  justification is now empty. SlopRing still declines io_uring's 425-427,
+  because its SQE is its own.
   `scripts/check_syscall_abi.sh` holds every non-private constant to Linux's
   own `syscall_64.tbl`, requires the private range contiguous, and fails a
   private name that collides with a Linux syscall unless the allowlist states
@@ -355,26 +359,28 @@ decision below, not an omission. `wait4` takes Linux's `rusage` argument and
 refuses a non-null one, because there is no per-task resource accounting to
 report.
 
-Five divergences, stated rather than hidden:
+Four divergences, stated rather than hidden:
 
 - **The cwd is per-thread.** `CLONE_FS` is accepted and ignored, so a `chdir`
   is visible only to the thread that made it, where POSIX has the cwd per
   process. The buffer is a `TaskOwnCell` whose whole contract is that only its
   owning task reads or writes it, so sharing it means a lock, a lock class and
   a changed signature at every reader.
-- **Seven layouts are not Linux's**, and they are exactly the ones a binary
+- **Five layouts are not Linux's**, and they are exactly the ones a binary
   compiled against Linux headers could not work around: `getdents64`'s `d_name`
   sits at offset 24 rather than 19 (the record header is naturally aligned
-  rather than packed, which every in-tree consumer and its asserts agree on);
-  `siginfo_t.si_addr` is at 24 rather than 16, so a fault handler reads 0 for
-  the fault address; `ucontext_t` is truncated (no `fpstate` pointer,
+  rather than packed, which every in-tree consumer and its asserts agree on,
+  and which `slibc`'s `opendir`/`readdir` now hide from a C caller entirely);
+  `ucontext_t` is truncated (no `fpstate` pointer,
   `uc_sigmask` at 224 rather than 296) and `rt_sigreturn` restores from
   `SignalFrame` and ignores the ucontext, so a handler cannot redirect
-  execution by editing `uc_mcontext`; `msghdr` is 32 bytes with one inlined
-  iovec and `cmsghdr` is 12 with `CMSG_DATA` at +12; `NSIG` is 32, so there are
+  execution by editing `uc_mcontext`; `NSIG` is 32, so there are
   no realtime signals and therefore no glibc thread cancellation; `struct
   termios` is `termios2`-shaped behind `TCGETS`, which overruns a Linux-header
-  `tcgetattr`; and `signalfd_siginfo` is 16 bytes rather than 128.
+  `tcgetattr`; and `signalfd_siginfo` is 16 bytes rather than 128. Two more
+  used to stand here and no longer do: `siginfo_t.si_addr` is at Linux's
+  offset 16 and `msghdr`/`cmsghdr` are Linux's 56- and 16-byte forms, because
+  std's unix PAL reads both and the target now rides it.
 - **Advisory locks are 128 rows machine-wide**, shared by `flock(2)` and
   `fcntl(2)` record locks because they contend on the same file. A principal's
   share is bounded and a principal holding no lock can always take one, so no
@@ -626,7 +632,7 @@ What it rests on, in case a later phase disturbs it:
   this change exercised the combination, which is why a builtins-only shell
   never saw it.
 - **`canonicalize` resolves against the working directory.** The std port
-  joined a relative path onto `/` (`slibc/std_pal/fs/slopos.rs`), so it
+  joined a relative path onto `/` (then in `slibc/std_pal/`, since deleted), so it
   answered the canonical path of a *different* file — and answered it
   successfully whenever that other file happened to exist. `cp`'s
   copy-into-itself refusal is what found it: the guard passed by accident for
@@ -652,10 +658,11 @@ What it rests on, in case a later phase disturbs it:
 
 **Five divergences and costs, stated rather than hidden.**
 
-- **A non-UTF-8 operand is refused.** `std::path::Path` is UTF-8-backed on this
-  target — `OsStrExt` is not among the wired extensions — so a path that is not
-  UTF-8 is diagnosed instead of being mangled into the name of a different
-  file. Byte-clean paths would mean bypassing `std::fs` entirely.
+- **A non-UTF-8 operand is refused, and the reason is now the utilities' own.**
+  `OsStrExt` came with the unix family and `sys/os_str` already routed this
+  target at the `bytes` implementation, so a byte-clean path is expressible
+  here; what still refuses one is that every utility reads `std::env::args()`
+  rather than `args_os()`. That is a change to 54 utilities, not to a target.
 - **`ls -l` cannot report a mode, an owner or a link count.** `Metadata` on
   this target carries length, type, mtime and a read-only bit and nothing else,
   so the permission string is derived from the type and the link count prints
@@ -1131,6 +1138,194 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## The target is a host's target
+
+The ninth thing this plan rests on, and the one that makes the rest of Phase 1
+a *toolchain* problem rather than a platform problem: `x86_64-unknown-slopos`
+is a **unix-family Rust target over a real C library**, and `std` is upstream
+`std`. What a SlopOS binary runs on is `library/std/src/sys/pal/unix`; the
+20-file, 3 963-line bespoke platform layer that used to sit beside it is
+deleted, and so is the 729-line script that used to sed it into the rustup
+sysroot in place. `libc_abi_test` is the standing proof — fourteen in-guest
+cases holding slibc to the libc module's own declarations: a zeroed
+`pthread_mutex_t`/`cond_t`/`rwlock_t` usable without `_init` and a requested
+stack size that reaches the thread, `read_dir` enumerating exactly what
+`getdents64` does, a `sigaction` round trip through the 152-byte struct, a
+`SIGSEGV` handler reading back the address it faulted at, an fd crossing an
+AF_UNIX socket beside two non-adjacent iovec segments, `sysconf` agreeing
+with the kernel on the page size and the CPU count, `environ` and `getenv`
+being one environment, `realpath` resolving a relative link against the
+link's own directory, and the sigset narrowing that turns the 128-byte
+userspace mask into the kernel's 8-byte one. It exists because under this
+design a wrong struct is a *miscompile* rather than a compile error, which
+was the one new risk the decision carried — and two of its cases were
+falsified before being believed, by breaking `si_addr` and the `SCM_RIGHTS`
+count in the kernel and watching exactly those two fail.
+
+What it rests on, in case a later phase disturbs it:
+
+- **`restricted_std` was a string allowlist, and it is retired.**
+  `library/std/build.rs` compares `CARGO_CFG_TARGET_OS` against ~45 names and
+  emits `--cfg restricted_std` on a miss, which flipped the whole crate from
+  `#[stable]` to `#[unstable(feature = "restricted_std")]` and forced that
+  attribute into **65** files. One line — `|| target_os == "slopos"` — retired
+  all 65 of them.
+- **The sysroot is owned, not mutated.** `-Zbuild-std` resolves std from
+  `<host sysroot>/lib/rustlib/src/rust/library`, so the old flow had no choice
+  but to edit the rustup toolchain in place: a shared, unversioned, silently
+  drifting input. `scripts/make_slopos_sysroot.sh` instead `cp -al`s the pinned
+  toolchain (0.5 s cold, 0.04 s warm, one inode per file), replaces
+  `lib/rustlib/src` with a real copy, applies the two fork patches, and
+  registers the result with `rustup toolchain link slopos`. Builds are
+  `cargo +slopos`.
+- **The forks are diffs, and the diffs are the PRs.**
+  `toolchain/rust/0001-slopos-std.patch` is 665 lines over 14 files of
+  `library/`; `toolchain/libc/0001-slopos-libc.patch` is 1 550 lines over 6
+  files of a pinned `libc 0.2.189`. Nothing is vendored: the libc tarball comes
+  from the local cargo cache or from static.crates.io against the checksum in
+  `toolchain/PIN`, and each patch is verified against its pinned SHA before it
+  is allowed to touch a file. That is what makes "upstream it and the fork
+  shrinks to nothing" an end state rather than a hope.
+- **`libc/src/unix/slopos/mod.rs` is one file, and every layout in it is
+  Linux's.** Redox's equivalent is 1 450 lines; this is 1 461 — the type
+  aliases, the structs, the constant blocks, the `CMSG_*`/`FD_*`/`W*` helpers,
+  `impl siginfo_t`, and one `extern "C"` block declaring **227** entry points.
+  SlopOS's ABI already *was* Linux's at the numbers and the constants, so the
+  module is not a translation layer; it is a statement of what slibc owes.
+- **The std diff is cfg-sites, not a parallel PAL.** 665 lines over 14 files,
+  of which three are new: `os/slopos/{mod,raw,fs}.rs`, the `MetadataExt`
+  surface every unix target owns, derived from upstream's own `os/redox/`
+  ones. A fourth, `sys/random/slopos.rs`, is a dozen lines over `getrandom`,
+  exactly redox's shape. Everything else adds a `target_os = "slopos"` arm to
+  a list that was already there: the `restricted_std` allowlist, `os/mod.rs`
+  and `os/unix/mod.rs`'s platform module, `sys/args/unix.rs`'s stored-argv
+  set, `sys/random/mod.rs`, `sys/thread/unix.rs`'s `set_name` and
+  `available_parallelism`, and `sys/io/error/unix.rs`'s `__errno_location`
+  spelling. Two arms *subtract*: `current_exe` is `Unsupported`, because
+  SlopOS has no procfs and a process cannot name its own image; and
+  `backtrace`'s unix arm is declined, because a userland binary is
+  `panic = abort` with `.eh_frame` discarded by its linker script, so the
+  libunwind `_Unwind_*` the unix arm references is not there to link against.
+- **Synchronisation rides pthreads, which costs the std fork nothing.**
+  `sys/sync/mutex/mod.rs`'s `target_family = "unix"` arm already selects
+  `pthread`, so `Mutex`, `Condvar`, `RwLock`, `Once` and thread parking are
+  slibc's futex-based primitives with no cfg-site at all. The price is paid on
+  the slibc side, which is the right side: those objects grew to their declared
+  glibc sizes (`pthread_mutex_t` 16 → 40, `pthread_cond_t` 16 → 48,
+  `pthread_rwlock_t` 8 → 56, `pthread_attr_t` 16 → 56) and must work
+  zero-initialised, because std allocates them with `PTHREAD_*_INITIALIZER`
+  semantics and only sometimes calls `_init`.
+- **slibc is a C library now, not a Rust crate that happens to export C
+  symbols.** `libc.a` comes from a `slibc/staticlib` wrapper package whose
+  whole content is the dependency plus a `#[panic_handler]`, and `crt0.o` from
+  a `slibc/crt0` crate carrying the `_start` that used to live in
+  `userland/src/lib.rs` — which is the single gate that turns "can a C program
+  be built here" from *no* into *yes*, pulled onto this critical path by the
+  unix-family decision rather than waiting for a C frontend. It is a wrapper
+  and not `crate-type = ["rlib", "staticlib"]` on slibc itself because cargo
+  emits every declared crate type in *one* rustc invocation even for a
+  dependency unit: a `no_std` staticlib needs an in-crate `#[panic_handler]`,
+  and that handler is then a duplicate `panic_impl` lang item for all 211 of
+  userland's rlib uses. The 42 headers under `slibc/include/` are *generated*
+  by `slibc/build.rs` from the creation hunk of
+  `toolchain/libc/0001-slopos-libc.patch` — the same declarations the compiler
+  reads, so a header cannot drift from the export it describes.
+- **The `slopos_` thunk layer is gone.** 40 exports existed only so a patched
+  PAL could `extern "C"`-declare them — the whole `*at` family, `lseek`,
+  `stat`/`lstat`/`fstat`, `readv`/`writev`, `mmap`, `flock`, `utimensat`,
+  `uname` — and they carry their real C names. Seven keep the prefix because
+  they name calls no libc has: `slopos_spawn_path`, `slopos_getdents64`,
+  `slopos_futex_wait`, `slopos_futex_wake`, and the three CPU calls
+  (`get_cpu_count`, `get_current_cpu`, `set_cpu_affinity`); the ones whose
+  only caller was the deleted PAL are deleted with it, and so are the four
+  that had a real C equivalent and no caller at all.
+- **Two ABI divergences are closed, by force rather than by choice.** std's
+  unix PAL reads `siginfo_t.si_addr` and uses `msghdr`/`cmsghdr`, so `si_addr`
+  moved from offset 24 to **16** — into the union arm Linux has, rather than a
+  sibling field — `msghdr` became Linux's 56-byte form with a real `*mut iovec`
+  that the kernel now walks instead of one inlined descriptor, and `cmsghdr`
+  became 16 bytes with `CMSG_DATA` at +16. Both were named as divergences by
+  the POSIX-floor section above; both now read the same from a Linux header and
+  from `abi/`.
+- **`sendmsg`/`recvmsg` stopped borrowing the private range.** They were
+  private *because* their layouts were not Linux's, and the gate's allowlist
+  said exactly that. With the layouts fixed the reason is false, so they take
+  Linux's 46 and 47 and the private range compacts behind them.
+- **Swapping the platform layer found three real bugs, and they were in the
+  kernel and in slibc rather than in the port.** A patched PAL had been
+  hiding each one by choosing a different path:
+  - **The kernel could not write into a page that was merely promised.**
+    OSTD's user-copy validates the leaf and refuses — it takes no fault — so a
+    user buffer was only copyable once its pages were *already* present. Since
+    `brk`, `mmap` and `fork` all leave pages absent or COW by design, the first
+    `read(2)` into a fresh `Vec` had no present leaf to write and answered
+    `EFAULT`; the old PAL never saw it because every kernel→user write in the
+    tree targeted eagerly-mapped memory (`exec`'s segments, the signal frame).
+    `mm::user_copy` now resolves the range through the ordinary fault path
+    first, which is what Linux does by faulting. The ordering is load-bearing
+    and cost one debugging session: the populate runs *before* the copy's
+    `KArc<VmSpace>` is taken, because the demand path refuses to install a
+    page while another reference to the space is live — populating with the
+    copy's own handle held spun to its bound and then gave up, and made the
+    faulting task's retries look like an address-space reader that was not
+    draining.
+  - **A task the kernel killed on a fault reported `exited(139)`, not
+    `signalled(SIGSEGV)`.** `exit_status_word` keyed on
+    `TaskExitReason::Signalled`, and the fatal-fault path records
+    `UserFault` — a diagnostic distinction, not a different kind of death.
+    The old PAL read `ExitInfo`'s fields directly and papered over it; std
+    reads the POSIX status word, where `exit(139)` and death by `SIGSEGV` are
+    different answers and a build driver acts on which it got.
+  - **`realpath` resolved a relative symlink target against the wrong
+    directory.** It stripped a component that had not been appended, so
+    `/bin/ls -> coreutils` canonicalised to `/coreutils` and answered
+    `ENOENT`. `libc_abi_test` holds that case now.
+- **The gate this replaces, replaced.** `patch_std.sh`'s
+  `check_arm_precedes_fallback` existed because a `cfg_select!` arm placed
+  after the `_` wildcard is dead code that still compiles — it shipped once as
+  a `ud2` in `std::process::exit`. That failure mode went with the script. Two
+  appear in its place: the fork drifting from `rust-toolchain.toml`, and a
+  `libc` struct disagreeing with `abi/`. `scripts/check_toolchain_pin.sh` and
+  the const asserts on both sides are what catch them. A third was found by
+  building it: `git apply` run inside a work tree resolves a patch's paths
+  against the *repository* root, so a sysroot materialised under
+  `third_party/` got every path ignored and exit 0 — an unpatched sysroot
+  reported as success. Repository discovery is ceilinged above the sysroot and
+  every patch is re-checked in reverse, because a gate that cannot see a no-op
+  is not a gate.
+
+**What this deliberately did not do.**
+
+- **The triple is still a JSON spec, not a built-in.** Tier 3 buys the built-in
+  name, the `--print target-list` entry and the `STAGE0_MISSING_TARGETS` row —
+  and ships **no artifacts**, so `-Zbuild-std` stays mandatory either way until
+  tier 2, which is where `x86_64-unknown-redox` sits. What a built-in triple
+  actually costs is a stage-2 cross toolchain built from the fork, whose own
+  dev-guide figure is ~100 GB of build directory, and what it buys over the
+  linked sysroot is dropping three flags from one script. The diff a tier-3 PR
+  wants — `spec/base/slopos.rs`, `spec/targets/x86_64_unknown_slopos.rs`, the
+  `supported_targets!` entry and `platform-support/slopos.md` — is therefore
+  written when the PR is, not before it.
+- **Upstreaming has not happened.** The two patches *are* the two PRs, in the
+  order the tier policy asks for (`rust-lang/libc` before `rust-lang/rust`),
+  and the cost is unchanged: a maintainer name on record, the verbatim
+  policy-response text, and an `MIT OR Apache-2.0` licence on the contributed
+  files. Nothing contributed is GPL'd kernel or slibc code — the libc module
+  and the std cfg-sites are new work, and the three `os/slopos/` files derive
+  from upstream's own `os/redox/` ones under the same licence.
+- **Being a *host* is still gated on proc macros, not on the target spec.**
+  `compiler/rustc_driver/Cargo.toml` is `crate-type = ["dylib"]` and
+  `rustc_session`'s `invalid_output_for_target` rejects `Dylib`/`ProcMacro`
+  outright when `!target.dynamic_linking`, so a static rustc that expands proc
+  macros is not a thing that exists today. That is unchanged, and it is
+  Workstream 1.2's problem.
+- **The three layouts std's unix PAL never reads stay divergent**: the
+  truncated `ucontext_t` with its `rt_sigreturn`, the `termios2`-shaped
+  `struct termios`, and `NSIG` at 32. They are binary-compatibility work, not
+  platform-layer work, and the open decision below is where they belong.
+
+---
+
 ## Phase 1 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
@@ -1140,221 +1335,14 @@ with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
 about *who compiles Rust*, not about which languages SlopOS supports: declining
 LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
 the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 1.5.
+A C toolchain written in Rust is a separate and wanted track — Workstream 1.4.
 The cost of this decision is upstream work: cranelift-only rustc bootstrap does
 not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
 
-### Workstream 1.1 — A target that can be a host (**L**)
-
-**Three things were conflated here, and they are independent.** Measured
-against the pinned `nightly-2026-09-03` sysroot and upstream master:
-
-1. **`restricted_std` is a string allowlist, not a property of targethood.**
-   `library/std/build.rs` compares `CARGO_CFG_TARGET_OS` against ~40 names and
-   emits `--cfg restricted_std` on a miss; `library/std/src/lib.rs:216-227`
-   then flips the whole crate from `#[stable]` to
-   `#[unstable(feature = "restricted_std")]`, which is what forces the
-   attribute into **65** files (not 59: 61 under `userland/`, plus `appkit`,
-   `image`, `windowing`, `slopos-rt`). One line — `|| target_os == "slopos"` —
-   retires all of it. Proven: with that line added to a private copy of std,
-   an unmodified `serde_json 1.0.151` (pulling `memchr` and `itoa`) compiles
-   for this target with no feature gate in any crate.
-2. **Mutating the rustup sysroot is already unnecessary.** `-Zbuild-std`
-   resolves std from `<host sysroot>/lib/rustlib/src/rust/library` (cargo
-   `src/compiler/standard_lib.rs:220-251`) and builds it in an *ephemeral*
-   workspace, so a `[patch]` cannot reach it — but owning the sysroot can.
-   `cp -al` the rustup toolchain, replace `lib/rustlib/src` with a real copy,
-   `rustup toolchain link`: measured at 0.2 s and 79 MB, `rustc --print
-   sysroot` answers the linked directory, and the rustup toolchain's
-   `build.rs` hash is unchanged afterwards. The undocumented
-   `__CARGO_TESTS_ONLY_SRC_ROOT=<fork>/library` does the same with one env var
-   and no link — it works, and its name is a promise that it will not keep
-   working. Either way the 729-line `scripts/patch_std.sh` stops being a
-   *mutation* and becomes a *fork*, which is the same diff an upstream PR
-   wants.
-3. **Only *hosting* needs the triple in `rustc_target`.** "A JSON target can
-   never be a rustc host" was the right conclusion for the wrong reason:
-   bootstrap does accept a JSON `--host` (the dev guide shows it), but that
-   path has been broken since 1.48 (rust-lang/rust#81702, still open) and
-   `STAGE0_MISSING_TARGETS` in `src/bootstrap/src/core/sanity.rs` is keyed on
-   in-tree triple *names*. Tier 3 buys the built-in triple, the allowlist
-   entry and `--print target-list` recognition; it ships **no artifacts**, so
-   `-Zbuild-std` stays mandatory until tier 2 (which is where
-   `x86_64-unknown-redox` sits, with `rust-std` shipped daily).
-
-**The PAL is already upstreamable.** `slibc/std_pal/` is 20 files / 3,963
-lines using the exact module names `library/std/src/sys/mod.rs` declares, and
-its dependency closure on this workspace is **zero**: 17 `unsafe extern "C"`
-blocks resolved at link time against slibc's `#[unsafe(no_mangle)]` exports,
-no `extern crate`, no path dependency, and `cvt`/`cvt_r`/`IsMinusOne`/
-`__errno_location` copied from std's own unix idioms. The move in-tree is a
-file move plus ~25 `cfg_select!` arms, which is what `patch_std.sh` already
-performs by sed. Two costs are real and not in the script: anything merged
-upstream must be `MIT OR Apache-2.0` (tier-3 policy), so those 3,963 lines
-need a dual licence, and a Motor-style runtime crate would have to be
-*published* to crates.io under the same terms and added to
-`PERMITTED_STDLIB_DEPENDENCIES` in `src/tools/tidy/src/deps.rs` — which a
-GPL-3.0 `slibc` can never be.
-
-**`x86_64-slos-userland` is the wrong triple name** and must be renamed before
-any upstream contact: it contradicts its own `os: "slopos"`/`vendor: "slopos"`
-fields, and the tier-3 naming clause is explicit that renaming later is
-disruptive. The conventional name is `x86_64-unknown-slopos`.
-
-**Decided: A — SlopOS becomes a unix-family target over a real libc.**
-`families = ["unix"]`, `env = "slibc"`, `libc/src/unix/slopos/`, and std rides
-its own `sys/pal/unix` rather than a parallel copy of it. That is Redox's
-architecture, and it is the only one that has ever produced a self-hosting
-Rust OS: `x86_64-unknown-redox` is `families = cvs!["unix"]`,
-`env = Env::Relibc`, carries **one** redox-specific file in all of
-`library/std/src/sys/` (`sys/random/redox.rs`, 12 lines) plus 28 cfg-sites
-that *subtract* unsupported calls, and depends on no ABI crate — only on
-`libc`. Redox once had SlopOS's exact current shape (`libstd/sys/redox` over
-`redox_syscall`, non-unix family) and deleted it in 2019 (rust-lang/rust
-#60547); Soller's retrospective is that doing so "led to a great number of
-Rust crates suddenly gaining Redox OS support". The decisive argument is that
-the *goal* is an in-guest `cargo`+`rustc`, and rustc's and cargo's own
-dependency sets are unix-shaped: `libloading` (which `rustc_metadata` cannot
-build without), `filetime`, `tempfile`, `memmap2`, `jobserver`. Under A all
-15 of them work; the rejected alternative B (Motor OS's shape — a bespoke PAL
-over a crates.io ABI crate, no libc) leaves **6 hard breaks** (`rustix`,
-whose `build.rs` gates `linux_raw` on `os == "linux"` with no feature escape;
-`filetime`; `num_cpus`; `socket2`; `is-terminal`; `libloading`), a *silently
-non-functional* `tempfile`, three degraded crates and a missing cfg arm
-inside cargo's own `flock.rs` — permanent carve-outs in code this project
-does not own.
-
-The cost of A is stated rather than hidden. It promotes Workstream 1.5's
-"cheap half" onto the 1.1 critical path, and it closes two of the seven ABI
-divergences by force:
-
-- **The C library becomes load-bearing.** `slibc` is `crate-type = ["rlib"]`
-  with no headers and no `crt0.o`; it must gain `staticlib`, generated
-  `include/*.h`, and a `crt0.o` emitted from the existing `_start` +
-  `__slibc_start` pair. Several exported shapes are wrong for a libc rather
-  than merely absent: `open` is 2-arg where POSIX and std need a variadic
-  3-arg, `pthread_attr_t` is 16 bytes where the ABI wants 56,
-  `pthread_mutex_t`/`pthread_cond_t`/`pthread_rwlock_t` are slibc-invented
-  layouts, and `sigaction` exposes the *kernel* struct with an 8-byte
-  `sa_mask`. 80 of the ~280 exports carry a `slopos_` prefix — a thunk layer
-  that existed only so the patched PAL could `extern "C"`-declare it, and
-  which the whole `*at` family, `getdents64`, `pread`/`pwrite`,
-  `readv`/`writev`, `mmap`, `flock`, `utimensat` and `uname` currently hide
-  behind. Those become their real C names.
-- **The gap is measured, not guessed.** std's unix PAL is 60 files /
-  19.3 kLoC and calls **146** libc functions for a Linux-shaped target;
-  slibc already exports **73** of them. Of the 73 missing, four groups are
-  *not* work: `dlsym` (only apple's `weak!` uses it — ELF targets get true
-  weak linkage), `futex`/`syscall` (reached only from `target_os = "linux"`
-  arms), the eight `posix_spawn*` entry points (opt-in per platform; a new
-  target uses the fork/exec path), and `readdir_r` (deprecated). What remains
-  is ~55 functions, nearly all thin: the path and metadata family
-  (`mkdir` `rmdir` `unlink` `link` `linkat` `symlink` `readlink` `rename`
-  `realpath` `chown`/`lchown`/`fchown` `fchmod`/`fchmodat` `utimensat`
-  `futimens` `fsync` `fdatasync` `mkfifo` `flock` `makedev`), the `DIR`
-  family (`opendir` `closedir` `dirfd` — the one real new abstraction, over
-  the existing `getdents64`), vectored and socket I/O (`readv` `writev`
-  `preadv` `pwritev` `pipe2` `accept4` `socketpair` `sendmsg` `recvmsg`),
-  memory (`mprotect` `posix_memalign`), threads (`pthread_cond_timedwait`,
-  the three `pthread_condattr_*`, `pthread_attr_getstack`/`_getguardsize`,
-  `pthread_getattr_np`, `pthread_setname_np`, `sched_yield`,
-  `sched_getaffinity`, `gettid`, `prctl`), process (`killpg` `pause`
-  `setuid`/`setgid`/`setgroups` `chroot`), time (`clock_getres`
-  `clock_nanosleep`), and five one-offs (`sysconf` `getauxval` `gethostname`
-  `getpwuid_r` — single-user, so a fixed uid-0 row — and `memalign`).
-- **Two divergences must go.** std's unix PAL reads `siginfo_t.si_addr` in
-  `pal/unix/stack_overflow.rs` and uses `msghdr`/`cmsghdr` in
-  `net/connection/socket/unix.rs`, so both must become Linux's layouts —
-  `si_addr` at offset 16 rather than 24, a 56-byte `msghdr` with a real
-  iovec pointer, a 16-byte `cmsghdr` with `CMSG_DATA` at +16. Both are
-  wanted by the binary-compatibility decision anyway. `ucontext_t`,
-  `termios` and `NSIG` are **not** touched by the unix PAL and stay
-  divergent. `getdents64`'s `d_name` offset stops being visible at all: it
-  becomes slibc's private business behind `opendir`/`readdir`.
-- **The new risk is silence.** Under B a divergence is a compile error;
-  under A a wrong `libc` struct definition is a *miscompile*. The mitigation
-  is that `libc/src/unix/slopos/` is one file, every layout in it is pinned
-  by a `const _: () = assert!` against the kernel's own definition (the
-  pattern `slibc/src/ffi/syscalls.rs`'s `std_pal_layout_pins` already uses),
-  and `libc-test/semver/` carries the symbol list upstream checks against.
-
-**There is no hybrid.** `families = ["unix"]` is not separable from a
-populated `libc`: `sys/pal/mod.rs`'s first `cfg_select!` arm is a bare
-`unix =>`, and `library/std/src/os/unix/mod.rs` unconditionally declares
-`ffi fs io net process raw thread xdg`, whose `MetadataExt`, `PermissionsExt`
-and `os::unix::net` surfaces call `libc` directly. Byte-clean paths are *not*
-a reason to prefer A — `sys/os_str` already routes this target to the `bytes`
-impl, and A gets `OsStrExt` for free from `os::unix::ffi` rather than from an
-`os/slopos/ffi.rs`. That closes the utilities' "a non-UTF-8 operand is
-refused" divergence as a side effect.
-
-**What closing 1.1 requires, in dependency order:**
-
-1. **Rename the target** to `x86_64-unknown-slopos` and add
-   `"target-family": ["unix"]` to the JSON, *before* anything else — every
-   step below is keyed on the name, and the rename is disruptive later.
-   Expect this alone to break the build loudly: `cfg(unix)` turning true
-   routes std at `sys/pal/unix`, which is the point.
-2. **`slibc` becomes a C library**: `staticlib` beside `rlib`, generated
-   headers, `crt0.o`, the ~55 functions above, the four wrong ABI shapes
-   fixed, and the `slopos_`-prefixed thunks renamed to their C names. This is
-   Workstream 1.5's first bullet, pulled forward, and it is the long pole.
-3. **Fix the two kernel-side layouts** (`siginfo_t.si_addr`,
-   `msghdr`/`cmsghdr`) and the userland wrappers over them. Each is a
-   divergence the POSIX-floor section already names, so each has a stated
-   before/after.
-4. **`libc/src/unix/slopos/mod.rs`** — one file, Redox's is 1,450 lines over
-   the shared 2,520-line `unix/mod.rs`. Layouts pinned by const assert
-   against `abi/`. Carried in a pinned `rust-lang/libc` fork first,
-   upstreamed after.
-5. **A pinned `rust-lang/rust` fork** (submodule or vendored, at the
-   `rust-toolchain.toml` commit) carrying `spec/base/slopos.rs` +
-   `spec/targets/x86_64_unknown_slopos.rs` + the `supported_targets!` entry,
-   the `STAGE0_MISSING_TARGETS` entry, the `build.rs` allowlist line, the
-   `target_os = "slopos"` *subtractions* in `sys/**/unix.rs` for whatever
-   slibc declines to provide, and `platform-support/slopos.md`. Note the
-   shape of the diff under A: cfg-sites that say "not here", not a parallel
-   PAL. `slibc/std_pal/` is **deleted**, not moved.
-6. **A stage-2 cross toolchain** built from it with `llvm.download-ci-llvm =
-   true`, `build.host = ["x86_64-unknown-linux-gnu"]`, `build.target =
-   [host, "x86_64-unknown-slopos"]`, registered with `rustup toolchain link`
-   — after which `cargo +slopos build --target x86_64-unknown-slopos` needs
-   no `-Zbuild-std`, no `-Zjson-target-spec` and no `#![feature]`. Budget
-   ~100 GB of build directory (the dev guide's own figure) and a `just setup`
-   that can fetch a prebuilt toolchain rather than build one.
-7. **Deletion, not deprecation**: `scripts/patch_std.sh`,
-   `scripts/std_cache_guard.sh`, the `BUILD_STD` plumbing in
-   `scripts/build_userland.sh`, `slibc/std_pal/`,
-   `targets/x86_64-slos-userland.json`, the 65 `#![feature(restricted_std)]`
-   attributes, and `NOTICE.md`'s patched-std clause.
-8. **A gate, because this replaces one.** `patch_std.sh`'s
-   `check_arm_precedes_fallback` exists because a `cfg_select!` arm placed
-   after the `_` wildcard is dead code that still compiles — it shipped once
-   as a `ud2` in `std::process::exit`. Under A that failure mode is gone
-   (there are no slopos arms to misorder) and two new ones appear: the fork
-   drifting from `rust-toolchain.toml`, and a `libc` struct disagreeing with
-   `abi/`. The replacement check is a commit-pin assertion plus the const
-   asserts of item 4.
-9. **Tier-3 upstreaming last, not first.** The two forks' diffs *are* the two
-   PRs (`rust-lang/libc` before `rust-lang/rust`, which is the ordering the
-   tier policy asks for). Cost: a maintainer name on record, the verbatim
-   policy-response text, and an `MIT OR Apache-2.0` licence on the
-   contributed files — the target spec, the libc module and the std
-   cfg-subtractions, none of which is GPL'd kernel or slibc code. Upstreaming
-   is what makes both forks shrink to nothing.
-
-**Deliberately not in 1.1.** Being a *host* is gated on proc macros, not on
-the target spec: `compiler/rustc_driver/Cargo.toml` is
-`crate-type = ["dylib"]`, and `rustc_session`'s `invalid_output_for_target`
-rejects `Dylib`/`ProcMacro` outright when `!target.dynamic_linking`, so a
-static rustc that expands proc macros is not a thing that exists today.
-That is Workstream 1.3's problem and the reason it is not optional — see
-there for the `-Zwasm-proc-macros` escape, which upstream has now accepted.
-
-### Workstream 1.2 — A Rust codegen path for a `no_std` kernel target (**L**)
+### Workstream 1.1 — A Rust codegen path for a `no_std` kernel target (**L**)
 
 Decided pure Rust, so the C floor is out of scope and the risk moves into
 cranelift's coverage of *this* tree's kernel target. Spike this first, before
@@ -1374,7 +1362,7 @@ LLVM rustc on a host for as long as cranelift's codegen quality matters, while
 the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
 every artifact is self-built on day one.
 
-### Workstream 1.3 — Dynamic linking is mandatory (**L**)
+### Workstream 1.2 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
@@ -1394,13 +1382,14 @@ the decision below wants settling here rather than separately.
 `compiler/rustc_driver/Cargo.toml` hard-codes `crate-type = ["dylib"]`, and
 `rustc_session`'s `invalid_output_for_target` returns "invalid" for
 `Dylib`/`Cdylib`/`ProcMacro` whenever `!sess.target.dynamic_linking` — which
-is what `targets/x86_64-slos-userland.json` says today by omission. Upstream
+is what `targets/x86_64-unknown-slopos.json` says today by omission. Upstream
 has declined to make `+crt-static` and proc macros coexist (rust-lang/rust
 #78210, closed "not intending to fix"), and `-Zdual-proc-macros` solves
 cross-*compiling to* SlopOS, not running rustc *on* it, because there the host
 is SlopOS. `rustc_metadata` additionally reaches `dlopen` through
 `libloading`, whose `unix` module is gated `any(unix, target_os = "motor", …)`
-— i.e. a non-unix target needs a carve-out upstream just to build rustc.
+— which the unix-family decision has already satisfied, so what is left owing
+here is the loader itself rather than a carve-out upstream.
 
 **One escape is now real rather than novel work.** `-Zwasm-proc-macros`
 exists: the flag is in `rustc_session/src/options.rs`, the loader arm is in
@@ -1424,7 +1413,7 @@ relocations for undefined symbol indices, an allocator mismatch between the
 libc and the dynamic linker, `mremap`, and spurious futex wakeups being
 mistaken for timeouts.
 
-### Workstream 1.4 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.3 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -1435,7 +1424,7 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 1+
 comfort, not a blocker for the goal.
 
-### Workstream 1.5 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 1.4 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
@@ -1520,17 +1509,20 @@ boot step reads first.
 - [ ] **Does the ABI become binary-compatible, and does the toolchain then stop
       being a port?** SlopOS is Linux-ABI at the numbers, the constants and
       most of the layouts, which buys *source* compatibility. Running prebuilt
-      glibc-linked binaries — the upstream `rustc` among them — needs the seven
-      layouts named in the POSIX-floor section above (chiefly `si_addr`, the
-      ucontext and `rt_sigreturn`, `msghdr`/`cmsghdr`, and `NSIG` 32 → 64, for
-      which glibc reserves signals 32 and 33), plus ~70-90 thin entry points
-      and the dynamic-linking trio Workstream 1.3 already owes. The reference
+      glibc-linked binaries — the upstream `rustc` among them — needs the
+      layouts the POSIX-floor section above still names as divergent (the
+      ucontext and `rt_sigreturn`, `struct termios`, `signalfd_siginfo`, and
+      `NSIG` 32 → 64, for which glibc reserves signals 32 and 33), plus
+      ~70-90 thin entry points and the dynamic-linking trio Workstream 1.2
+      already owes. Two of the seven left that list on their own: `si_addr`
+      and `msghdr`/`cmsghdr` were closed by the unix-family decision, because
+      std's own PAL reads them. The reference
       class says it is reachable: Asterinas runs an unmodified NixOS userland
       on 240+ syscalls of safe Rust with no private calls at all, and gVisor
       runs unmodified binaries with 277 of 351 implemented, because a runtime
       that meets `ENOSYS` probes for a fallback. Decide it *with* Workstream
-      1.3. It would *not* retire Workstreams 1.1 and 1.2 — the earlier claim
-      that it would was wrong. Asterinas is the proof of the ceiling: it is
+      1.2. It would *not* retire Workstream 1.1 — the earlier claim that it
+      would was wrong. Asterinas is the proof of the ceiling: it is
       binary-compatible to the point of running an unmodified NixOS userland,
       with a real vDSO, `PT_INTERP`, Linux-layout `siginfo_t`/`ucontext_t` and
       procfs, and it is still *always* cross-built from Linux — there is no
@@ -1559,7 +1551,7 @@ boot step reads first.
 at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 1.5, off the critical
+C library and a Rust-written C frontend are Workstream 1.4, off the critical
 path. Scope: the full in-guest loop, Phases 1–2, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
@@ -1567,21 +1559,21 @@ scope and `stat`'s uid/gid fields exist for layout only. Directory scaling: an
 in-memory name index, not an on-disk htree, so `e2fsck` stays the oracle for
 every image this kernel writes.
 
-**Std platform layer: unix family over a real libc.**
+**Std platform layer: unix family over a real libc — landed.**
 `x86_64-unknown-slopos`, `target-family = ["unix"]`, `env = "slibc"`, a
 `libc/src/unix/slopos/` module, and std riding its own `sys/pal/unix` — Redox's
 architecture, and the only one that has produced a self-hosting Rust OS.
-`slibc/std_pal/` is deleted rather than moved; `slibc` becomes a real C library
-(`staticlib`, headers, `crt0.o`), which pulls Workstream 1.5's first bullet onto
-the 1.1 critical path; and the `siginfo_t.si_addr` and `msghdr`/`cmsghdr`
-divergences are closed because std's unix PAL reads both. The rejected
-alternative is a bespoke PAL over a crates.io ABI crate (Motor OS's shape),
-which costs six hard-breaking third-party crates — `libloading` among them, so
-an in-guest rustc could not be built at all — as permanent carve-outs.
-The mechanics are settled and measured: `restricted_std` is one allowlist line
-in `library/std/build.rs`, sysroot mutation is replaced by a pinned fork plus
-`rustup toolchain link`, and tier 3 ships no artifacts so `-Zbuild-std` stays
-until tier 2. See Workstream 1.1.
+`slibc/std_pal/` is deleted rather than moved; `slibc` is a real C library
+(`staticlib`, generated headers, `crt0.o`), which pulled Workstream 1.4's first
+bullet forward; and the `siginfo_t.si_addr` and `msghdr`/`cmsghdr` divergences
+are closed, because std's unix PAL reads both. The rejected alternative was a
+bespoke PAL over a crates.io ABI crate (Motor OS's shape), which costs six
+hard-breaking third-party crates — `libloading` among them, so an in-guest
+rustc could not be built at all — as permanent carve-outs. What is *not* done
+is the built-in triple: tier 3 ships no artifacts, so `-Zbuild-std` stays
+mandatory until tier 2 either way, and the fork is two patches over a linked
+sysroot rather than a stage-2 cross toolchain. See "The target is a host's
+target".
 
 ---
 
@@ -1635,17 +1627,18 @@ until tier 2. See Workstream 1.1.
   `Rect::to_damage_rect`'s bounds
   are inclusive like every other `DamageRect`, and `measure` and
   `paint` must agree on a font size or a click lands on the wrong character.
-- `scripts/patch_std.sh`, `scripts/std_cache_guard.sh`,
-  `scripts/build_userland.sh`'s `BUILD_STD` plumbing, `slibc/std_pal/`,
-  `targets/x86_64-slos-userland.json`, `userland/userland.ld:44-50` and
-  `NOTICE.md`'s patched-std clause — the std/target/unwinding triangle
-  (Phase 1). Every one of these is slated for *deletion* by Workstream 1.1,
-  not for maintenance: the PAL moves into a pinned `rust-lang/rust` fork and
-  the target becomes `x86_64-unknown-slopos` in `rustc_target`. Until that
-  lands, the invariant a change nearby must not undo is `patch_std.sh`'s
-  `check_arm_precedes_fallback`: a `cfg_select!` arm inserted after the `_`
-  wildcard is dead code that still compiles, and it shipped once as a `ud2`
-  in `std::process::exit`.
+- `toolchain/PIN`, `toolchain/rust/`, `toolchain/libc/`,
+  `scripts/make_slopos_sysroot.sh`, `scripts/check_toolchain_pin.sh`,
+  `targets/x86_64-unknown-slopos.json` and `userland/userland.ld:44-50` — the
+  std/target/unwinding triangle, a fork now rather than a mutation. Listed not
+  as work but as what a later phase must not quietly undo: the materialiser
+  must replace `lib/rustlib/src` with a real copy before it patches anything,
+  because the clone is hardlinked and patching in place writes through into
+  `$RUSTUP_HOME`; `git apply` must run with repository discovery ceilinged
+  above the sysroot, or it resolves the patch's paths against *this*
+  repository's root, ignores every one of them and exits 0; each patch is then
+  re-checked in reverse so that silent no-op cannot pass; and `toolchain/PIN`
+  is the only place a patch's hash is written down.
 - `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs`,
   `scripts/check_syscall_abi.sh`, `scripts/gates/syscall/` — the Linux number
   table, the two dispatch tables and the gate that holds them to

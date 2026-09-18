@@ -9,5 +9,4 @@
 # dead entry: when the shape is adopted, the constant moves to its Linux
 # number and the line goes with it.
 
-sendmsg MsgHdr/CmsgHdr are not Linux's layouts yet; number 46 waits on that
-recvmsg same layout gap as sendmsg; number 47 waits on it
+# Empty: every private constant's name is one Linux has no syscall for.

@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! End-to-end proof of the network management surface against the live stack
 //! in QEMU, from the syscalls up to what `/bin/ip` actually renders.
 //!

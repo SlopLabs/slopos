@@ -1,5 +1,3 @@
-#![feature(restricted_std)]
-
 //! Per-thread TLS independence test (Phase-6 native/FS_BASE proof).
 //!
 //! std routes through the compiler-native (`#[thread_local]`) arm, backed by

@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Materialise the owned `slopos` sysroot and register it with rustup.
+#
+# `-Zbuild-std` resolves the standard library from
+# `<host sysroot>/lib/rustlib/src/rust/library` and rebuilds it in an ephemeral
+# workspace, so a `[patch]` in this workspace can never reach it — but owning
+# the sysroot can. This script therefore does not mutate the rustup toolchain
+# in place, the way the retired std-patching script did. It builds a
+# *separate* sysroot:
+#
+#   1. `cp -al` the pinned rustup toolchain into third_party/rust-slopos.
+#      Hardlinks, so it costs ~0.2 s and no disk.
+#   2. Replace `lib/rustlib/src` with a real (unlinked) copy. Editing through
+#      the hardlinks would write into the rustup toolchain itself, which is
+#      exactly the failure mode owning a sysroot is meant to retire, so the
+#      unlinking is asserted rather than assumed.
+#   3. Unpack the pinned `libc` crate at `.../library/libc`, apply
+#      toolchain/libc/*.patch inside it, then toolchain/rust/*.patch over
+#      `.../library/`. That order, because the std patch points
+#      `[patch.crates-io]` at the libc tree step 3 just unpacked.
+#   4. `rustup toolchain link slopos third_party/rust-slopos`.
+#
+# After which `cargo +slopos ... --target targets/x86_64-unknown-slopos.json`
+# builds against the fork. Nothing inside the pinned rustup toolchain
+# directory is ever written; the only thing this adds to $RUSTUP_HOME is the
+# `slopos` symlink that registration *is*.
+#
+# Idempotent: the stamp at third_party/rust-slopos/.slopos-stamp records the
+# hash of the whole toolchain/ overlay, so a second run with an unchanged
+# overlay re-checks the registration and exits. Any change to the overlay
+# rebuilds from scratch — the fork is a fork, not an incremental mutation.
+#
+# Usage: make_slopos_sysroot.sh
+#
+# Environment:
+#   RUSTUP_HOME  - rustup root (default: ~/.rustup)
+#   CARGO_HOME   - cargo root, searched for a cached libc crate (default: ~/.cargo)
+#   LIBC_URL     - override the crate download URL (default: static.crates.io)
+
+SELF="make_slopos_sysroot"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+. "$SCRIPT_DIR/lib/toolchain_pin.sh"
+
+case "${1:-}" in
+    "") ;;
+    *) echo "usage: $SELF.sh" >&2; exit 2 ;;
+esac
+
+die() {
+    echo "$SELF: $*" >&2
+    exit 1
+}
+
+PIN="$REPO_ROOT/$TP_PIN_REL"
+OVERLAY="$REPO_ROOT/$TP_OVERLAY_REL"
+SYSROOT="$REPO_ROOT/$TP_SYSROOT_REL"
+STAMP="$SYSROOT/$TP_STAMP_NAME"
+
+[ -d "$OVERLAY" ] || die "missing $TP_OVERLAY_REL/ — the fork overlay (PIN + patches) is tracked in-repo; check out the tree that carries it"
+[ -f "$PIN" ] || die "missing $TP_PIN_REL — the fork overlay (PIN + patches) is tracked in-repo; check out the tree that carries it"
+
+CHANNEL="$(tp_channel "$REPO_ROOT")"
+[ -n "$CHANNEL" ] || die "failed to read the Rust channel from rust-toolchain.toml"
+
+PIN_CHANNEL="$(tp_pin_value_required "$PIN" channel "$SELF")"
+LIBC_VERSION="$(tp_pin_value_required "$PIN" libc_version "$SELF")"
+LIBC_CHECKSUM="$(tp_pin_value_required "$PIN" libc_checksum "$SELF")"
+
+if [ "$PIN_CHANNEL" != "$CHANNEL" ]; then
+    die "$TP_PIN_REL pins channel=$PIN_CHANNEL but rust-toolchain.toml says $CHANNEL
+       The fork is cut against one compiler. Re-cut the patches, then update
+       $TP_PIN_REL. scripts/check_toolchain_pin.sh gates exactly this."
+fi
+
+STAMP_WANT="$(tp_stamp "$REPO_ROOT")"
+
+# ---------------------------------------------------------------------------
+# Registration. `rustup toolchain link` is a symlink, so an already-correct
+# link is free to detect and a stale one is cheap to replace without touching
+# the materialised tree.
+# ---------------------------------------------------------------------------
+register() {
+    local want linked
+    want="$(tp_abspath "$SYSROOT")"
+    linked="$(tp_link_target)"
+    if [ "$linked" = "$want" ]; then
+        return 0
+    fi
+    command -v rustup >/dev/null 2>&1 || die "rustup is required to register the $TP_TOOLCHAIN_NAME toolchain"
+    if [ -n "$linked" ]; then
+        rustup toolchain uninstall "$TP_TOOLCHAIN_NAME" >/dev/null
+    fi
+    rustup toolchain link "$TP_TOOLCHAIN_NAME" "$want"
+}
+
+# ---------------------------------------------------------------------------
+# Fast path: the overlay is unchanged, so the tree is what the stamp says it
+# is. Only the registration is re-checked — a materialised sysroot nothing
+# points at builds nothing.
+# ---------------------------------------------------------------------------
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$STAMP_WANT" ]; then
+    register
+    echo "$SELF: $TP_SYSROOT_REL up to date, linked as +$TP_TOOLCHAIN_NAME (stamp $STAMP_WANT)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Locate the pinned rustup toolchain to clone from.
+# ---------------------------------------------------------------------------
+command -v rustc >/dev/null 2>&1 || die "rustc is required; run scripts/ensure_toolchain.sh"
+RUSTUP_TOOLCHAIN_DIR="$(rustc "+$CHANNEL" --print sysroot 2>/dev/null || true)"
+[ -n "$RUSTUP_TOOLCHAIN_DIR" ] && [ -d "$RUSTUP_TOOLCHAIN_DIR" ] \
+    || die "toolchain $CHANNEL is not installed; run scripts/ensure_toolchain.sh"
+
+RUSTUP_SRC="$RUSTUP_TOOLCHAIN_DIR/lib/rustlib/src"
+[ -d "$RUSTUP_SRC/rust/library" ] \
+    || die "toolchain $CHANNEL has no rust-src component at $RUSTUP_SRC/rust/library
+       Install it with: rustup component add rust-src --toolchain $CHANNEL"
+
+if [ "$(tp_abspath "$RUSTUP_TOOLCHAIN_DIR")" = "$(tp_abspath "$SYSROOT")" ]; then
+    die "rustc +$CHANNEL already resolves to $TP_SYSROOT_REL — refusing to clone the clone.
+       Something has overridden the $CHANNEL toolchain to point at the fork."
+fi
+
+# The fork is cut against *pristine* rust-src. A machine that ever ran the
+# retired in-place std-patching script has slopos files sitting in the rustup
+# component itself, and the fork patches would then apply on top of them —
+# silently, and to a tree nobody can reproduce.
+POLLUTED="$(find "$RUSTUP_SRC" -name '*slopos*' -print 2>/dev/null | head -n 3)"
+if [ -n "$POLLUTED" ]; then
+    die "the rustup rust-src component is not pristine — it carries SlopOS files:
+$(printf '%s\n' "$POLLUTED" | sed 's/^/         /')
+       This machine ran the retired in-place std patcher. Both steps are
+       needed: a reinstall restores the files it *edited*, but rustup only
+       deletes what its own manifest lists, so the files it *added* survive
+       a remove/add untouched (measured, not assumed).
+         rustup component remove rust-src --toolchain $CHANNEL && \\
+           rustup component add rust-src --toolchain $CHANNEL
+         find '$RUSTUP_SRC' -name '*slopos*' -delete
+       then re-run this script."
+fi
+
+# The one invariant worth asserting: after the copy, the src tree must not
+# share inodes with the rustup toolchain, or applying a patch would rewrite
+# the toolchain every other project on this machine compiles against.
+link_count() {
+    if stat -c '%h' "$1" >/dev/null 2>&1; then
+        stat -c '%h' "$1"
+    else
+        stat -f '%l' "$1"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Clone the toolchain, then unlink the source tree.
+# ---------------------------------------------------------------------------
+rm -rf "$SYSROOT"
+mkdir -p "$(dirname "$SYSROOT")"
+cp -al "$RUSTUP_TOOLCHAIN_DIR" "$SYSROOT" \
+    || die "cp -al failed — this needs a cp(1) with hardlink support (-l) and a
+       \$RUSTUP_HOME on the same filesystem as $TP_SYSROOT_REL"
+
+rm -rf "$SYSROOT/lib/rustlib/src"
+cp -a "$RUSTUP_SRC" "$SYSROOT/lib/rustlib/src"
+
+LIBRARY="$SYSROOT/$TP_LIBRARY_REL"
+[ -d "$LIBRARY" ] || die "copied source tree has no rust/library at $LIBRARY"
+
+for sample in "$LIBRARY/std/src/lib.rs" "$LIBRARY/std/build.rs"; do
+    [ -f "$sample" ] || die "copied source tree is missing $sample — the rust-src layout changed"
+    count="$(link_count "$sample")"
+    if [ "$count" != "1" ]; then
+        die "$sample still has $count links after the copy: it is shared with
+       $RUSTUP_TOOLCHAIN_DIR and patching it would corrupt the rustup toolchain.
+       Aborting before any patch is applied."
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# The pinned libc crate. Registry cache first (offline, and it is already on
+# disk for any workspace that depends on libc), static.crates.io otherwise.
+# ---------------------------------------------------------------------------
+CRATE_NAME="libc-${LIBC_VERSION}.crate"
+CRATE_FILE=""
+for candidate in "${CARGO_HOME:-$HOME/.cargo}"/registry/cache/*/"$CRATE_NAME"; do
+    [ -f "$candidate" ] || continue
+    if [ "$(tp_sha256_file "$candidate")" = "$LIBC_CHECKSUM" ]; then
+        CRATE_FILE="$candidate"
+        break
+    fi
+    echo "$SELF: cached $candidate does not match libc_checksum, ignoring it" >&2
+done
+
+DOWNLOAD=""
+if [ -z "$CRATE_FILE" ]; then
+    command -v curl >/dev/null 2>&1 || die "no cached $CRATE_NAME and curl is unavailable to fetch it"
+    DOWNLOAD="$(mktemp "${TMPDIR:-/tmp}/slopos-libc.XXXXXX")"
+    trap 'rm -f "$DOWNLOAD"' EXIT INT TERM
+    curl -fL -o "$DOWNLOAD" "${LIBC_URL:-https://static.crates.io/crates/libc/$CRATE_NAME}" \
+        || die "failed to download $CRATE_NAME"
+    CRATE_FILE="$DOWNLOAD"
+fi
+
+CRATE_SHA="$(tp_sha256_file "$CRATE_FILE")"
+if [ "$CRATE_SHA" != "$LIBC_CHECKSUM" ]; then
+    die "$CRATE_NAME checksum mismatch
+       expected: $LIBC_CHECKSUM ($TP_PIN_REL)
+       actual:   $CRATE_SHA ($CRATE_FILE)"
+fi
+
+LIBC_DIR="$LIBRARY/libc"
+rm -rf "$LIBC_DIR"
+mkdir -p "$LIBC_DIR"
+tar -xzf "$CRATE_FILE" -C "$LIBC_DIR" --strip-components=1 \
+    || die "failed to unpack $CRATE_FILE into $LIBC_DIR"
+
+# ---------------------------------------------------------------------------
+# The fork patches. Each is verified against its PIN line before it is
+# allowed to touch a file: a patch that changed without its pin changing is
+# the drift this whole scheme exists to make impossible.
+#
+# `git apply`, not `patch(1)`: both patches are `git diff` output that creates
+# whole new directories (`std/src/os/slopos/`, `libc/src/unix/slopos/`, …),
+# which GNU patch does not do reliably.
+#
+# The sysroot lives *inside* this git repository, and `git apply` run inside a
+# work tree resolves the patch's paths against the repository root rather than
+# the working directory: every path then lands outside the directory it was
+# invoked in, which `git apply` silently ignores and still exits 0. Measured,
+# not theoretical — it is how this script once materialised an unpatched
+# sysroot and reported success. `GIT_CEILING_DIRECTORIES` stops repository
+# discovery above the sysroot so `git apply` runs in its non-repo mode, where
+# paths are relative to the working directory, and every patch is then
+# re-checked in reverse so a no-op can never pass again.
+# ---------------------------------------------------------------------------
+command -v git >/dev/null 2>&1 || die "git is required to apply the fork patches (git apply)"
+GIT_CEILING="$(tp_abspath "$(dirname "$SYSROOT")")"
+
+git_apply() {
+    (cd "$1" && GIT_CEILING_DIRECTORIES="$GIT_CEILING" git apply -p1 "$2" 2>&1)
+}
+
+apply_patches() {
+    local prefix="$1" dir="$2" rel sha want out applied=0
+    for rel in $(tp_patch_files "$REPO_ROOT"); do
+        case "$rel" in
+            "$prefix"*) ;;
+            *) continue ;;
+        esac
+        want="$(tp_pin_patch_sha "$PIN" "$rel")"
+        [ -n "$want" ] || die "$rel carries no \`patch_sha256=$rel:<sha256>\` line in $TP_PIN_REL"
+        sha="$(tp_sha256_file "$REPO_ROOT/$rel")"
+        if [ "$sha" != "$want" ]; then
+            die "$rel does not match its pin
+       expected: $want ($TP_PIN_REL)
+       actual:   $sha"
+        fi
+        # git apply is quiet on success; its account of a rejected hunk is
+        # only interesting when it failed, and this function's stdout is the
+        # count it returns.
+        if ! out="$(git_apply "$dir" "$REPO_ROOT/$rel")"; then
+            printf '%s\n' "$out" >&2
+            die "patch failed to apply: $rel (in $dir)"
+        fi
+        if ! (cd "$dir" && GIT_CEILING_DIRECTORIES="$GIT_CEILING" \
+                git apply -p1 --reverse --check "$REPO_ROOT/$rel" >/dev/null 2>&1); then
+            die "$rel reported success but is not applied in $dir
+       git apply resolved its paths somewhere else and changed nothing."
+        fi
+        applied=$((applied + 1))
+    done
+    printf '%s\n' "$applied"
+}
+
+# libc first: the std patch adds `libc = { path = "libc" }` under
+# `[patch.crates-io]` in library/Cargo.toml, so the tree it names has to be
+# unpacked and patched before that resolution exists.
+LIBC_PATCHES="$(apply_patches "$TP_OVERLAY_REL/libc/" "$LIBC_DIR")"
+RUST_PATCHES="$(apply_patches "$TP_OVERLAY_REL/rust/" "$LIBRARY")"
+
+if [ "$LIBC_PATCHES" = "0" ]; then
+    die "no patches under $TP_OVERLAY_REL/libc/ — an unpatched libc has no slopos module"
+fi
+if [ "$RUST_PATCHES" = "0" ]; then
+    die "no patches under $TP_OVERLAY_REL/rust/ — the std fork is what makes this sysroot a fork"
+fi
+
+# ---------------------------------------------------------------------------
+# Stamp last: a tree that failed halfway through must not look finished.
+# ---------------------------------------------------------------------------
+printf '%s\n' "$STAMP_WANT" > "$STAMP"
+register
+
+echo "$SELF: materialised $TP_SYSROOT_REL from $CHANNEL — libc $LIBC_VERSION, $RUST_PATCHES rust + $LIBC_PATCHES libc patch(es), linked as +$TP_TOOLCHAIN_NAME (stamp $STAMP_WANT)"

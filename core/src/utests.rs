@@ -68,6 +68,24 @@ crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
 crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
 
-// Last deliberately: tests run in link order, and this one leaves a
-// desktop-shaped resource population for the `post-userland-tests` quota dump.
+// Nothing below is ordered by its position in this file. The userland phase
+// walks `ktesting::registry::registry_sorted()`, which orders by
+// `(module, name)`, and every utest here shares one module — so the sorted
+// `name` is the running order, and this file's order is presentation only.
+//
+// `libc_abi` opens AF_UNIX endpoints, and the kernel phase has a known bug
+// where exercising unix sockets leaves UDP dead for the rest of the run (see
+// `dns_resolve_test`'s header), so it has to follow every network case. It
+// does, by name: `utest_curl_e2e`, `utest_curl_recv_repro`,
+// `utest_dns_resolve` and `utest_ip_e2e` all sort before `utest_libc_abi`. A
+// network case named past `l` breaks that and has to be renamed.
+crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test");
+
+// Not last, and deliberately not renamed to be: `utest_s…` sorts ahead of
+// `utest_terminal_grid` and `utest_tls_independence`. This one spawns eight
+// concurrent children, so its `process` peak is those eight plus every account
+// the phase has accumulated by the time it runs — moving it later moves that
+// peak, and `scripts/gates/quota/tests.txt` records the number exactly. What
+// it contributes to the `post-userland-tests` dump is a desktop-shaped
+// population wherever it lands.
 crate::utest!(name = utest_session_smoke, bin = "/bin/session_smoke_test");
