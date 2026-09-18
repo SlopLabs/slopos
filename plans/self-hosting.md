@@ -323,8 +323,9 @@ What it rests on, in case a later phase disturbs it:
 - **`std` reaches the syscalls that exist.** `read_dir` runs over `getdents64`
   on an owned directory descriptor rather than splitting the output of a
   bespoke listing call on newlines, so a filename containing a newline is just
-  bytes; `symlink`, `read_link`, `hard_link`, `set_permissions`, `File::set_times`,
-  `read_vectored`, `write_vectored` and `FileExt::read_at`/`write_at` are real
+  bytes; `symlink`, `read_link`, `hard_link`, `set_permissions`,
+  `File::set_times`, `read_vectored`, `write_vectored` and
+  `FileExt::read_at`/`write_at` are real
   instead of `unsupported`; and `Command::spawn` goes through `spawn_path` with
   a cwd in `SpawnAttrs`, so nothing allocates between fork and exec against the
   single global malloc spinlock a multithreaded parent could hand over locked.
@@ -1341,6 +1342,14 @@ not currently work (it did in 2020 and regressed), cranelift emits no debug
 info, and `wild` is explicitly not production-grade. Redox took the other road —
 relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
 is the reference class this decision is *declining*, with eyes open.
+
+**What is left of it.** The target half is done and is described above, in
+"The target is a host's target": SlopOS is a unix-family Rust target over a
+real libc, and a cross-built `cargo +slopos build` produces every binary this
+repository ships. What remains is the compiler itself — a codegen path for the
+kernel target, and the dynamic linking without which rustc cannot expand a
+proc macro. Neither is a platform question any more, which is the whole value
+of the workstream that closed.
 
 ### Workstream 1.1 — A Rust codegen path for a `no_std` kernel target (**L**)
 
