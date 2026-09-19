@@ -178,6 +178,8 @@ PROBE_LOG=""
 PROBE_ARCHIVE=""
 BASE_ARCHIVE=""
 
+# Updates PROBE_LOG and PROBE_ARCHIVE for one flag set, succeeding only when
+# Cargo both exits cleanly and leaves the expected static archive.
 build_probe() {
     local tag="$1" features="$2" extra_flags="$3"
     local target_dir="$PROBE_DIR/target-$tag"
@@ -268,6 +270,8 @@ XCR0_CLASSIFIER='
         else if (mnem ~ /^[xf](save|rstor)/) print mnem;
     }'
 
+# Reports soft-float support only when the addition remains present without
+# touching any XCR0-managed register class.
 probe_soft_float() {
     local hits libcall
     hits="$("$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=probe_float_add \
@@ -320,6 +324,8 @@ stack_size_of_probe_frame() {
          want && $1 == "Size:" && !found { print $2; found = 1 }' "$1"
 }
 
+# Holds the emitted frame record above the probe array's known minimum size,
+# so an accepted flag that emits no usable data cannot pass.
 probe_stack_sizes() {
     local size
     "$READOBJ" --stack-sizes "$BASE_ARCHIVE" > "$PROBE_DIR/stack-sizes.txt" 2>/dev/null || true
@@ -333,6 +339,8 @@ probe_stack_sizes() {
     fi
 }
 
+# Confirms that the backend preserves a requested registry section in the
+# archive rather than merely accepting the source attribute.
 probe_link_section() {
     local hits
     hits="$("$READOBJ" --sections "$BASE_ARCHIVE" 2>/dev/null | grep -c 'Name: [.]probe_registry' || true)"
@@ -343,6 +351,8 @@ probe_link_section() {
     fi
 }
 
+# Requires the naked function's first instructions to match its literal body;
+# an accepted attribute with an empty or transformed body is a failed probe.
 probe_naked_fn() {
     local body
     body="$("$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=probe_naked \
@@ -384,6 +394,8 @@ probe_safestack() {
     fi
 }
 
+# Uses the relocation to probe_frame as evidence that an asm `sym` operand was
+# resolved, rather than treating a successful feature build as sufficient.
 probe_asm_sym() {
     if ! build_probe asmsym asm-sym ""; then
         record_build_failure asm-sym
@@ -400,6 +412,8 @@ probe_asm_sym() {
     fi
 }
 
+# Runs every capability from one validated base archive; a failed base build
+# makes each dependent verdict unknown instead of falsely unsupported.
 run_probes() {
     if ! build_probe base "" ""; then
         record object-format unknown "$(probe_failure_reason)"
@@ -423,6 +437,8 @@ run_probes() {
 # The gate
 # ---------------------------------------------------------------------------
 
+# Locates a backend only within the pinned toolchain's host sysroot, avoiding
+# an unrelated shared object from PATH or another installed toolchain.
 backend_shared_object() {
     local sysroot host
     sysroot="$(rustc +"$RUST_CHANNEL" --print sysroot)"
