@@ -260,7 +260,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#endif",
             "",
             "/* `NULL` belongs to the compiler's <stddef.h>, which SlopOS has no C compiler",
-            " * to provide yet (Workstream 1.5). Defined here, guarded, so a hosted",
+            " * to provide yet (Workstream 1.3). Defined here, guarded, so a hosted",
             " * compiler's own definition still wins.",
             " */",
             "#ifndef NULL",

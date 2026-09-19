@@ -28,12 +28,13 @@ are appliance-sized constants and appliance-sized policies. A workbench needs
 those quantities derived from the medium (image size, RAM, file size) instead of
 frozen at values that fit a test fixture. The work is mostly *widening under
 proof*, not redesign — with two remaining exceptions (dynamic linking and the
-compiler bootstrap itself). Eight more, a page-fault path that can reach the
+compiler bootstrap itself). Nine more, a page-fault path that can reach the
 device, a POSIX floor a build system can stand on, a filesystem that can hold a
 tree, a utility set that is executables rather than shell builtins, a shell
 a build script can be written in, a terminal an editor can be written
-against, an editor written against the machine itself, and a target that is a
-unix-family Rust target over a real C library, have landed.
+against, an editor written against the machine itself, a target that is a
+unix-family Rust target over a real C library, and a measured answer to which
+toolchain can build this kernel, have landed.
 
 ## Architectural constraints (do not violate)
 
@@ -1319,7 +1320,7 @@ What it rests on, in case a later phase disturbs it:
   `rustc_session`'s `invalid_output_for_target` rejects `Dylib`/`ProcMacro`
   outright when `!target.dynamic_linking`, so a static rustc that expands proc
   macros is not a thing that exists today. That is unchanged, and it is
-  Workstream 1.2's problem.
+  Workstream 1.1's problem.
 - **The three layouts std's unix PAL never reads stay divergent**: the
   truncated `ucontext_t` with its `rt_sigreturn`, the `termios2`-shaped
   `struct termios`, and `NSIG` at 32. They are binary-compatibility work, not
@@ -1327,51 +1328,192 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## The backend is measured, and it is still LLVM
+
+The tenth thing this plan rests on, and the one that prices the rest of
+Phase 1 honestly: the spike this plan asked for before anything else has been
+run, and its answer is a pair of gates rather than a paragraph.
+`just check-toolchain-coverage` holds every codegen backend to the
+capabilities `targets/x86_64-slos.json` depends on and every linker to the
+constructs `link.ld` uses, against tracked expectations under
+`scripts/gates/codegen/` and `scripts/gates/linker/`. LLVM answers seven of
+seven and `rust-lld` eighteen of eighteen. cranelift answers three of seven
+and `wild` twelve of eighteen — and what each is missing is the part that
+decides whether the result is a kernel.
+
+The gate fails in *both* directions, which is the whole reason it is a gate: a
+`lacks` that becomes a `has` fails the run exactly as a regression does.
+"cranelift cannot build this kernel yet" is a claim with a shelf life, and
+nothing else in the tree would notice it expiring.
+
+What it rests on, in case a later phase disturbs it:
+
+- **cranelift cannot compile a kernel that must not touch the vector file.**
+  `probe_float_add` lowers `a + b` to `addsd %xmm1, %xmm0` and takes its
+  arguments in XMM; LLVM under `+soft-float` takes them in `%rdi`/`%rsi` and
+  calls `__adddf3`. rustc says so itself — "target feature `soft-float` must
+  be enabled to ensure that the ABI of the current target can be implemented
+  correctly" — because cg_clif's `target_config` returns no target features at
+  all for `Os::None`. Underneath that, SSE2 sits *below* cranelift's lowest
+  x86 feature toggle (`has_sse3` is the lowest one the ISA defines) and a
+  float is `RegClass::Float` unconditionally in the x64 ABI. It is a property
+  of the backend, not a flag nobody passed, and no issue tracks changing it.
+  The cost is not a gate failing: a syscall or fault entering from userland
+  saves no vector state, so one such instruction in the kernel clobbers the
+  interrupted task's live registers.
+- **`.stack_sizes` is an LLVM feature, and S-5 is what reads it.**
+  `-Zemit-stack-sizes` is documented as an LLVM passthrough
+  (rust-lang/rust#54192) and cg_clif never mentions it. It is accepted and
+  emits nothing. `check_stack_sizes.sh` fails closed on that through
+  `min-records`, which is the only reason the 2 KiB ceiling against a 4 KiB
+  guard page is not silently unenforced.
+- **`-Zsanitizer=safestack` is accepted and does nothing.** cg_clif
+  implements no sanitizer and rejects only LTO and `-Cinstrument-coverage`, so
+  the flag passes and `probe_frame` comes out uninstrumented. The companion
+  `-Cllvm-args=-safestack-use-pointer-address` does not even have a spelling:
+  cg_clif takes `-Cllvm-args` as its *own* option namespace, documents
+  `jit-mode` and nothing else in it, and answers "Unknown option" to the
+  rest. Nothing in the tree would have caught either — which is what
+  the `safestack` probe is for.
+- **`sym` operands are the one gap that is only a switch.** "asm! and
+  global_asm! sym operands are not yet supported" is a `cfg!` guard with the
+  implementation directly beneath it, gated on cg_clif's `inline_asm_sym`
+  cargo feature, which the `rustc-codegen-cranelift-preview` component leaves
+  off. rustc_codegen_cranelift#1204 has been open since 2021; what it names
+  is the object-file linking the global-asm case needs, which is why a symbol
+  private to its codegen unit does not resolve. Four sites here need it
+  — `AP_PCR_PTRS` and `ap_early_entry` in the AP trampoline
+  (`slopos-ostd/src/arch/x86_64/naked.rs`), and the dispatch entry/exit thunks
+  (`slopos-ostd/src/task/switch.rs`).
+- **`wild` refuses `link.ld` on one line, and starts the image in the wrong
+  place on the rest.** Twelve of the eighteen constructs work — `PHDRS` with
+  declared flags, `KEEP` against a control link without it,
+  `ASSERT(SIZEOF())`, `/DISCARD/`, `ENTRY` of a non-default symbol, a
+  top-level definition, and symbols bracketing exactly the output section
+  they are written in. Three it refuses: `. = KERNEL_VIRT_BASE` — the
+  location counter taken from a symbol, which is `link.ld` line 19 and the
+  reason `wild -T link.ld` never reaches anything else — `(NOLOAD)`, and the
+  pre-colon `.text ALIGN(4096) :` (the other two `ALIGN` spellings work).
+  And three it accepts and gets wrong, which are the ones that matter because
+  they do not announce themselves: the image starts past the base it was
+  given, and the output sections come out in wild's order rather than the
+  script's — though only when no `PHDRS` is declared. Given `link.ld`'s own
+  shape, the composed probe finds wild keeping the script's order and putting
+  the first declared section in the first `LOAD` segment, and still starting
+  the image 0x13e8 past the base. The eleven registries would be bracketed
+  correctly, around an image at the wrong address. That links, boots nothing,
+  and says nothing about why.
+  Measured on wild 0.10.0, whose own support matrix marks `PHDRS` and
+  `(NOLOAD)` partial and the top-level assignment done — all three true, and
+  none of them the construct that actually fails. The gate exists because a
+  matrix is not a measurement, and it carries one deliberately non-minimal
+  probe because a linker can take every construct alone and compose them
+  differently: wild reorders sections when no `PHDRS` is declared and keeps
+  the order when one is.
+- **The spike found one real bug, and it was ours.**
+  `targets/x86_64-slos.json` spelled its `llvm-target` `x86_64-unknown-none`
+  where upstream's own `x86_64-unknown-none` spec spells it
+  `x86_64-unknown-none-elf`. Without the object-format component
+  `target-lexicon` answers `BinaryFormat::Unknown` and cg_clif ICEs in
+  `driver::aot::make_module` before compiling a line. The suffix is a no-op
+  for LLVM's codegen — the same instructions and the same `--print cfg` — so
+  the target spec was simply under-specified, and `object-format` is a probe
+  rather than an assumption because of it. It is not a no-op for the build
+  directory: the spec's hash feeds the crate disambiguator, so every symbol
+  is renamed and the kernel target rebuilds once.
+- **Two of the four cranelift gaps are silent, and they are the reason this
+  is a gate.** `-Zemit-stack-sizes` is accepted and emits nothing, and
+  `-Zsanitizer=safestack` is accepted and instruments nothing — that second
+  one is the verdict the gate records, because the probe asks for the
+  sanitizer before asking for its pointer-address option. The other two do
+  say something: soft-float is a warning nobody has to read, and the `sym`
+  operands are a hard error. The gate re-asks those two for free, which is
+  what will notice the day either stops refusing.
+
+**What this deliberately did not do.**
+
+- **Two spec properties are stated as residual rather than probed.**
+  `disable-redzone` would need an optimised build and a disassembly heuristic
+  to tell a red-zone spill from an ordinary one; `panic-strategy: unwind`
+  cannot be expressed in a standalone `no_std` probe at all, which rustc
+  refuses with "unwinding panics are not supported without std". `link.ld`'s
+  own `ASSERT` on `.eh_frame_hdr` holds the second at every kernel link,
+  which is stronger than a probe would be. The seven the gate does measure
+  are the seven that could be.
+- **No patch to cranelift, and no linker written here.** Soft-float in the
+  x64 backend is a lowering pass, not a setting, and a linker that honours
+  this script is the part `wild` has left. Both are upstream-shaped work whose
+  cost is not paid by this plan; what this workstream owed was the answer, and
+  the answer is now re-taken on every CI run instead of believed.
+- **Userland is not gated, though it was measured.** cg_clif refuses slibc
+  outright — "Defining variadic functions is not yet supported by Cranelift",
+  at `openat` — and hits the same `sym` wall in `slopos-ostd`, which every
+  userland binary links. The gate stays scoped to the kernel target, because
+  that is what the capabilities it probes are derived from, and
+  `targets/x86_64-unknown-slopos.json` keeps its `x86_64-unknown-none`
+  spelling for the same reason: the `-elf` suffix is the same
+  under-specification and the same one-line fix there, but it belongs with
+  the work that first needs it rather than with a gate that does not read
+  it.
+- **The reference class was checked, and nobody has done this.** Asterinas
+  is structurally the same machine — LLVM, the built-in `x86_64-unknown-none`
+  with the same `+soft-float` and `rustc-abi: softfloat`, `rust-lld`, and a
+  full GNU linker script — with no cranelift anywhere and no self-hosting on
+  its roadmap. Redox, the one Rust OS that self-hosts, got there in January
+  2026 by porting **LLVM 18** and linking through a gcc driver. Rust-for-Linux
+  generates a target spec with `rustc-abi: softfloat` *and* passes
+  `-Ctarget-feature=-sse,-sse2,…` from `arch/x86/Makefile`, which is this
+  target's own belt-and-braces shape; it has no cranelift story, and no
+  frame-size check for Rust at all — `CONFIG_FRAME_WARN` reaches C only, and
+  the klint proposal that would change that is unmerged, so
+  `check_stack_sizes.sh` is ahead of mainline rather than behind it.
+- **`mold` is now the other candidate, and it is not ready either.** It is
+  being rewritten in Rust — 2.42.1 is announced as likely the last C++
+  release — and mold 3.x names kernel and firmware linker scripts as a
+  priority, but its script parser understands only `GROUP`, `INPUT`,
+  `AS_NEEDED`, `OUTPUT_FORMAT` and `VERSION`: it cannot read `link.ld` at
+  all. Adding it is a `--linker mold` arm and a gate file when that changes.
+
+---
+
 ## Phase 1 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
 
-This phase is **XL**. **Decided: the Rust toolchain is Rust-hosted** — rustc
-with the cranelift backend and a Rust linker, no LLVM. Read that as a statement
-about *who compiles Rust*, not about which languages SlopOS supports: declining
-LLVM declines a **C++** toolchain port (templates, exceptions, libc++/libc++abi,
-the Itanium ABI), which is the expensive part, and says nothing about C.
-A C toolchain written in Rust is a separate and wanted track — Workstream 1.4.
-The cost of this decision is upstream work: cranelift-only rustc bootstrap does
-not currently work (it did in 2020 and regressed), cranelift emits no debug
-info, and `wild` is explicitly not production-grade. Redox took the other road —
-relibc, GCC, binutils, then rustc in January 2026 on its third attempt — which
-is the reference class this decision is *declining*, with eyes open.
+This phase is **XL**, and the decision it opened with has been measured. It
+read: **the Rust toolchain is Rust-hosted** — rustc with the cranelift backend
+and a Rust linker, no LLVM — on the grounds that declining LLVM declines a
+**C++** toolchain port (templates, exceptions, libc++/libc++abi, the Itanium
+ABI), which is the expensive part, and says nothing about C. That reasoning
+still holds. What does not hold is the premise that cranelift and `wild` can
+build *this* kernel: "The backend is measured, and it is still LLVM" above is
+the spike, and it came back negative on both halves. Soft-float alone is
+fatal, and it is a property of cranelift's x64 backend rather than a flag.
+
+**What that changes.** The split this phase used to permit is gone. It read:
+the release kernel can keep being cross-built while the self-hosted loop
+builds the dev kernel. The measurement says *no* variant of the kernel can be
+built by the Rust-hosted toolchain, and the userland target is no nearer —
+cg_clif refuses slibc's variadic `openat` outright and hits the same `sym`
+wall in `slopos-ostd`, which every userland binary links. Those two are
+ordinary unimplemented features rather than an ISA baseline, so userland is
+the side that could move; the kernel is not. Phase 1's exit criterion names
+the kernel, so one of three roads has to be taken, and the open decision
+below is where that is settled: wait on cranelift (nobody is working on
+soft-float), pay for LLVM in-guest (Redox's road, the C++ port this phase
+declined), or move the criterion so the in-guest loop owns userland and the
+kernel stays cross-built.
 
 **What is left of it.** The target half is done and is described above, in
 "The target is a host's target": SlopOS is a unix-family Rust target over a
 real libc, and a cross-built `cargo +slopos build` produces every binary this
-repository ships. What remains is the compiler itself — a codegen path for the
-kernel target, and the dynamic linking without which rustc cannot expand a
-proc macro. Neither is a platform question any more, which is the whole value
-of the workstream that closed.
+repository ships. The backend half is answered and gated. What remains is the
+dynamic linking without which rustc cannot expand a proc macro, and getting
+source in and out — the first a capability, the second a workflow choice.
+Neither is a platform question any more, which is the whole value of the
+workstream that closed.
 
-### Workstream 1.1 — A Rust codegen path for a `no_std` kernel target (**L**)
-
-Decided pure Rust, so the C floor is out of scope and the risk moves into
-cranelift's coverage of *this* tree's kernel target. Spike this first, before
-anything else in this phase, because a negative answer changes the decision:
-`targets/x86_64-slos.json` requires soft-float with `-sse` and `rustc-abi:
-softfloat`, safestack, custom `link_section`s, naked functions, and
-`-Zemit-stack-sizes` — the last is what `check_stack_sizes.sh` reads, so a
-backend that does not emit `.stack_sizes` silently disarms the S-5 gate. Naked
-functions are backend-independent now (emitted as global asm) and inline asm is
-largely stable in cg_clif; soft-float, safestack and `.stack_sizes` are
-unverified. The linker is the second half: `wild` or a linker written here, and
-it must honour `-T link.ld` with the registry sections
-`check_registry_sections.sh` polices.
-
-Note the split this permits: the *release* kernel can keep being built by an
-LLVM rustc on a host for as long as cranelift's codegen quality matters, while
-the self-hosted loop builds the dev kernel. Self-hosting does not have to mean
-every artifact is self-built on day one.
-
-### Workstream 1.2 — Dynamic linking is mandatory (**L**)
+### Workstream 1.1 — Dynamic linking is mandatory (**L**)
 
 Not optional, and pure Rust does not dodge it: `slopos-ostd-derive` is a
 proc-macro crate (`#[derive(SlotFields)]`) and `paste` is another, and rustc
@@ -1422,7 +1564,7 @@ relocations for undefined symbol indices, an allocator mismatch between the
 libc and the dynamic linker, `mremap`, and spurious futex wakeups being
 mistaken for timeouts.
 
-### Workstream 1.3 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.2 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -1433,7 +1575,7 @@ proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
 TCP window is capped at 32 KiB by a fixed buffer), but they are Phase 1+
 comfort, not a blocker for the goal.
 
-### Workstream 1.4 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
+### Workstream 1.3 — A C toolchain, written in Rust (**M**/**L**, not on the critical path)
 
 C is not foreclosed by the pure-Rust decision, and closing it off would be a
 mistake: C is the interoperability floor of the world, and every piece of it can
@@ -1522,7 +1664,7 @@ boot step reads first.
       layouts the POSIX-floor section above still names as divergent (the
       ucontext and `rt_sigreturn`, `struct termios`, `signalfd_siginfo`, and
       `NSIG` 32 → 64, for which glibc reserves signals 32 and 33), plus
-      ~70-90 thin entry points and the dynamic-linking trio Workstream 1.2
+      ~70-90 thin entry points and the dynamic-linking trio Workstream 1.1
       already owes. Two of the seven left that list on their own: `si_addr`
       and `msghdr`/`cmsghdr` were closed by the unix-family decision, because
       std's own PAL reads them. The reference
@@ -1530,14 +1672,33 @@ boot step reads first.
       on 240+ syscalls of safe Rust with no private calls at all, and gVisor
       runs unmodified binaries with 277 of 351 implemented, because a runtime
       that meets `ENOSYS` probes for a fallback. Decide it *with* Workstream
-      1.2. It would *not* retire Workstream 1.1 — the earlier claim that it
-      would was wrong. Asterinas is the proof of the ceiling: it is
+      1.1. It does *not* answer the backend question either — a prebuilt
+      rustc is an LLVM rustc. Asterinas is the proof of the ceiling: it is
       binary-compatible to the point of running an unmodified NixOS userland,
       with a real vDSO, `PT_INTERP`, Linux-layout `siginfo_t`/`ucontext_t` and
       procfs, and it is still *always* cross-built from Linux — there is no
       published instance of a Rust compile running inside it. Binary
       compatibility buys running a prebuilt rustc; it does not buy a target
       that can be a host, and it does not remove the proc-macro `dlopen`.
+- [ ] **Which road does Phase 1's exit criterion take, now that cranelift
+      cannot build the kernel?** "The backend is measured, and it is still
+      LLVM" above closed that question and opened this one. Three roads, and
+      they are not equally priced. *Wait*: cranelift needs soft-float in its
+      x64 backend, and SSE2 is below its lowest feature toggle with no issue
+      open — this is an indefinite wait on work nobody has started. *Pay*:
+      LLVM in-guest is Redox's road and is exactly the C++ toolchain port this
+      phase declined, on a machine that has no C++ compiler and no `libstdc++`
+      — the cost is not the port alone but everything under it. *Move the
+      line*: let the in-guest loop own userland and keep the kernel
+      cross-built. What stands between here and that is two unimplemented
+      cg_clif features rather than an ISA baseline — variadic `extern "C"`
+      definitions, which slibc's `openat` needs, and the same `sym` operands —
+      and both have a route around them on this side of the fence, which
+      soft-float does not. Only the third road is reachable from here, and
+      taking it rewrites this phase's Outcome rather than satisfying it, so it
+      is a decision and not a fallback. Decide it before Workstream 1.1,
+      because dynamic linking is only worth its cost if an in-guest rustc is
+      going to exist.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
       building itself un-attests exactly the blocks it changes — and now keeps
       them un-attested across host rebuilds, so the count only ever falls.
@@ -1558,10 +1719,11 @@ boot step reads first.
 
 **Decided.** Syscall ABI: **Linux x86-64 numbering, one table, a private range
 at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
-Rust-hosted (cranelift + a Rust linker), no LLVM
-and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
-C library and a Rust-written C frontend are Workstream 1.4, off the critical
-path. Scope: the full in-guest loop, Phases 1–2, in QEMU; bare metal is not
+Rust-hosted (cranelift + a Rust linker), no LLVM and no C++ toolchain port;
+time is not the constraint — decided, and now *measured against this kernel*
+and found not to reach it, which is the second open decision above. C is
+*not* excluded — a C library and a Rust-written C frontend are Workstream 1.3,
+off the critical path. Scope: the full in-guest loop, Phases 1–2, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
 scope and `stat`'s uid/gid fields exist for layout only. Directory scaling: an
@@ -1573,7 +1735,7 @@ every image this kernel writes.
 `libc/src/unix/slopos/` module, and std riding its own `sys/pal/unix` — Redox's
 architecture, and the only one that has produced a self-hosting Rust OS.
 `slibc/std_pal/` is deleted rather than moved; `slibc` is a real C library
-(`staticlib`, generated headers, `crt0.o`), which pulled Workstream 1.4's first
+(`staticlib`, generated headers, `crt0.o`), which pulled Workstream 1.3's first
 bullet forward; and the `siginfo_t.si_addr` and `msghdr`/`cmsghdr` divergences
 are closed, because std's unix PAL reads both. The rejected alternative was a
 bespoke PAL over a crates.io ABI crate (Motor OS's shape), which costs six
@@ -1657,6 +1819,15 @@ target".
   private constant that borrows a Linux syscall's name needs a stated reason
   in the allowlist. The capability histogram counts registered entry points,
   so it still moves when a syscall is added.
+- `scripts/check_codegen_backend.sh`, `scripts/check_linker_script.sh`,
+  `scripts/gates/codegen/`, `scripts/gates/linker/`,
+  `targets/x86_64-slos.json`'s `llvm-target` and `link.ld` — the backend and
+  linker answer above. Listed not as work but as what a later phase must not
+  quietly undo: both gates fail on a capability *gained* as well as one lost,
+  which is the only thing that will tell anyone the answer has changed; the
+  `object-format` probe depends on the `-elf` suffix the target spec now
+  carries; and the linker gate's coverage check means a construct added to
+  `link.ld` without a probe fails the gate rather than going ungraded.
 - `scripts/qemu_run.sh` — disk attachment, boot order (Phase 2).
 - `fs/src/devfs/mod.rs`, `fs/src/partition.rs` — writable block nodes,
   partition writing (Phase 2).

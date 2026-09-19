@@ -194,6 +194,51 @@ jobs:
           # reaching power by a path the dev build does not have.
           scripts/check_authority_reachability.sh --variant release builddir/kernel-release.elf
 
+  # The `ci` job grades the shipping pair through `check-framekernel-gates`,
+  # where both candidates report `skipped`. This job installs them and grades
+  # the candidates only — re-asking whether a Rust-hosted toolchain can build
+  # this kernel yet (plans/self-hosting.md, Phase 1). wild is pinned so the
+  # answer moves when someone bumps it, not underneath a run.
+  toolchain-coverage:
+    name: Codegen backend + linker coverage
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        run: scripts/ensure_toolchain.sh
+
+      # The probe target directories under builddir/gates/ are deliberately not
+      # cached: a stale one would be a cached answer to the question this job
+      # exists to re-ask.
+      - name: Cache the pinned wild binary
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/wild
+          key: wild-linker-0.10.0-${{ runner.os }}
+
+      # `-preview` components go missing from individual nightlies, and a day
+      # cg_clif did not build upstream must not be a red job with no
+      # SlopOS-side remedy. The pinned wild install fails loudly by contrast.
+      - name: Install the candidate backend and linker
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup component add rustc-codegen-cranelift-preview --toolchain "$channel" \
+            || echo "::warning::cranelift is not published for $channel — the gate will skip it"
+          command -v wild >/dev/null || cargo install wild-linker --locked --version 0.10.0
+
+      # `--require` on wild only: it is installed unconditionally here, so a
+      # skip would mean the job stopped asking.
+      - name: Codegen backend and linker coverage
+        run: |
+          scripts/check_codegen_backend.sh --self-test
+          scripts/check_linker_script.sh --self-test
+          scripts/check_codegen_backend.sh --backend cranelift
+          scripts/check_linker_script.sh --linker wild --require
+
   miri:
     name: KernMiri (OSTD UB detection)
     runs-on: blacksmith-4vcpu-ubuntu-2404
