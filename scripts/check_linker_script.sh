@@ -15,6 +15,11 @@
 # wild 0.10.0 refuses link.ld on `. = KERNEL_VIRT_BASE`, and given the shape
 # it does accept it keeps the script's section order and still starts the
 # image 0x13e8 past the base. A refusal is a bad day; that is a wrong image.
+# What each verdict conflates is recorded per verdict in
+# scripts/gates/linker/wild.txt, because they do not age alike: the refusal is
+# already fixed upstream and unreleased, the section ordering is a stated
+# design difference wild's own test suite excuses, and the base offset is a
+# disagreement about whether `. = X` places the headers or the first section.
 #
 # Two rules follow. Each probe's script carries the construct under test and
 # nothing else a probe grades, or the linker's support for the scaffolding
