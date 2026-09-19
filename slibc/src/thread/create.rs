@@ -1,9 +1,7 @@
-use core::ffi::c_void;
 use core::mem;
 use core::ptr;
 
 use crate::errno;
-use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
 use slopos_abi::PAGE_SIZE;
 use slopos_abi::syscall::{
@@ -151,7 +149,7 @@ pub unsafe extern "C" fn pthread_create(
 
     // A full block (TLS image + TCB) is what leaves the new thread's `.tbss`
     // thread-locals zero-initialized.
-    let (tls_base, tcb_ptr) = super::tls::alloc_thread_tls();
+    let (_tls_base, tcb_ptr) = super::tls::alloc_thread_tls();
     if tcb_ptr.is_null() {
         let _ = Sys::munmap(stack_base, mapped_size);
         return crate::errno::ENOMEM.raw();
@@ -181,7 +179,7 @@ pub unsafe extern "C" fn pthread_create(
 
     if ret < 0 {
         let err = (-ret) as i32;
-        malloc::dealloc(tls_base as *mut c_void);
+        super::tls::free_thread_tls(tcb_ptr);
         let _ = Sys::munmap(stack_base, mapped_size);
         errno::errno_set(err);
         return err;

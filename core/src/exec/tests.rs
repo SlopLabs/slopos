@@ -1,6 +1,6 @@
 //! exec() ELF loader tests.
 
-use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
+use slopos_abi::auxv::{AT_BASE, AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -85,6 +85,140 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf[112..120].copy_from_slice(&0x1000u64.to_le_bytes()); // p_align
 
     elf
+}
+
+/// An `ET_DYN` with two `PT_LOAD`s, listed in the order the caller asks for.
+///
+/// A real linker emits them sorted by `p_vaddr`, which is what the gABI
+/// requires; the reversed order is the shape this fixture exists to feed the
+/// validator.
+fn create_two_segment_dyn(ascending: bool, entry: u64) -> [u8; 176] {
+    let mut elf = [0u8; 176];
+
+    elf[0..4].copy_from_slice(&ELF_MAGIC);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    elf[16..18].copy_from_slice(&3u16.to_le_bytes()); // e_type: ET_DYN
+    elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    elf[24..32].copy_from_slice(&entry.to_le_bytes());
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    elf[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+
+    let low = (0x0000u64, 0x1000u64);
+    let high = (0x2000u64, 0x1000u64);
+    let order = if ascending { [low, high] } else { [high, low] };
+    for (index, (vaddr, size)) in order.iter().enumerate() {
+        let at = 64 + index * 56;
+        elf[at..at + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        elf[at + 4..at + 8].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+        elf[at + 8..at + 16].copy_from_slice(&0u64.to_le_bytes()); // p_offset
+        elf[at + 16..at + 24].copy_from_slice(&vaddr.to_le_bytes());
+        elf[at + 24..at + 32].copy_from_slice(&vaddr.to_le_bytes());
+        elf[at + 32..at + 40].copy_from_slice(&0u64.to_le_bytes()); // p_filesz
+        elf[at + 40..at + 48].copy_from_slice(&size.to_le_bytes()); // p_memsz
+        elf[at + 48..at + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+    }
+    elf
+}
+
+/// The loader's VMA pass walks the validated segments in table order, so an
+/// unsorted set would leave a mapped page outside the VMA tree — invisible to
+/// `exec`'s address-space reset, to the gap finder and to the page ledger.
+pub fn test_elf_refuses_unsorted_load_segments() -> TestResult {
+    let ascending = create_two_segment_dyn(true, 0);
+    let reversed = create_two_segment_dyn(false, 0);
+    let mut out = slopos_ostd::KVec::<slopos_mm::elf::ValidatedSegment>::zeroed(
+        slopos_mm::elf::MAX_LOAD_SEGMENTS,
+    )
+    .expect("test alloc");
+
+    let ok = ElfValidator::new(&ascending, ascending.len() as u64)
+        .expect("sorted header parses")
+        .validate_load_segments_into(out.as_mut_slice());
+    if ok != Ok(2) {
+        klog_info!(
+            "EXEC_TEST: BUG - a sorted two-segment image was refused: {:?}",
+            ok
+        );
+        return TestResult::Fail;
+    }
+
+    let bad = ElfValidator::new(&reversed, reversed.len() as u64)
+        .expect("reversed header parses")
+        .validate_load_segments_into(out.as_mut_slice());
+    if bad.is_ok() {
+        klog_info!("EXEC_TEST: BUG - ElfValidator accepted unsorted PT_LOAD segments");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// The entry point becomes the task's user RIP, and `iretq` to a
+/// non-canonical address faults in ring 0 after `swapgs`. It has to be inside
+/// a loaded segment, not merely a number in the header.
+pub fn test_elf_refuses_entry_outside_every_segment() -> TestResult {
+    let mut out = slopos_ostd::KVec::<slopos_mm::elf::ValidatedSegment>::zeroed(
+        slopos_mm::elf::MAX_LOAD_SEGMENTS,
+    )
+    .expect("test alloc");
+
+    for entry in [0x0000_8000_0000_0000u64, 0x1_0000u64] {
+        let elf = create_two_segment_dyn(true, entry);
+        let validator = ElfValidator::new(&elf, elf.len() as u64).expect("header parses");
+        let count = validator
+            .validate_load_segments_into(out.as_mut_slice())
+            .expect("segments validate");
+        if validator
+            .validate_entry_point(&out.as_slice()[..count])
+            .is_ok()
+        {
+            klog_info!(
+                "EXEC_TEST: BUG - entry {:#x} outside every segment was accepted",
+                entry
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// The mapped-extent cap is per `exec`, not per image: an executable and its
+/// interpreter share one budget or a dynamic `exec` spends twice what a
+/// static one may.
+pub fn test_segment_budget_is_shared_across_images() -> TestResult {
+    let elf = create_two_segment_dyn(true, 0);
+    let mut out = slopos_ostd::KVec::<slopos_mm::elf::ValidatedSegment>::zeroed(
+        slopos_mm::elf::MAX_LOAD_SEGMENTS,
+    )
+    .expect("test alloc");
+
+    let validator = ElfValidator::new(&elf, elf.len() as u64).expect("header parses");
+    let count = validator
+        .validate_load_segments_into(out.as_mut_slice())
+        .expect("segments validate");
+    let left = slopos_mm::elf::SegmentBudget::FULL.less(&out.as_slice()[..count]);
+    if left.mapped >= slopos_mm::elf::MAX_TOTAL_MAPPED_SIZE {
+        klog_info!("EXEC_TEST: BUG - the budget did not fall after an image was accepted");
+        return TestResult::Fail;
+    }
+
+    let spent = slopos_mm::elf::SegmentBudget {
+        mapped: 0x1000,
+        zero_fill: slopos_mm::elf::MAX_TOTAL_ZERO_FILL_SIZE,
+    };
+    let refused = ElfValidator::new(&elf, elf.len() as u64)
+        .expect("header parses")
+        .with_budget(spent)
+        .validate_load_segments_into(out.as_mut_slice());
+    if refused.is_ok() {
+        klog_info!("EXEC_TEST: BUG - an image was accepted past the remaining budget");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
 }
 
 fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
@@ -330,40 +464,6 @@ pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
     }
 }
 
-/// A kernel-half `e_entry` is the one address the loader still folds, and it is
-/// the only value that reaches the translation from an untrusted header.
-pub fn test_translate_address_kernel_to_user() -> TestResult {
-    use slopos_mm::process_vm::process_vm_translate_elf_address;
-
-    let code_base = PROCESS_CODE_START_VA;
-    let translated = process_vm_translate_elf_address(0xFFFF_FFFF_8000_1000u64, code_base);
-
-    if translated >= 0xFFFF_8000_0000_0000 {
-        klog_info!("EXEC_TEST: BUG - translate_address didn't move kernel addr to user space");
-        return TestResult::Fail;
-    }
-    if translated != code_base + 0x1000 {
-        klog_info!("EXEC_TEST: BUG - kernel addr did not fold to its offset in the image");
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-pub fn test_translate_address_user_passthrough() -> TestResult {
-    use slopos_mm::process_vm::process_vm_translate_elf_address;
-
-    let user_addr = PROCESS_CODE_START_VA + 0x1000;
-    let translated = process_vm_translate_elf_address(user_addr, PROCESS_CODE_START_VA);
-
-    if translated != user_addr {
-        klog_info!("EXEC_TEST: BUG - a user address was translated");
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
 /// Reaped, not invented: a pid out of the air is only absent by luck.
 pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
     let _scope = KernelTestScope::enter();
@@ -453,6 +553,8 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
         tls_memsz: 0,
         tls_align: 0,
         tls_vaddr: 0,
+        interp_base: 0,
+        interp_entry: 0,
         tls_tp: 0,
     };
 
@@ -520,6 +622,8 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         tls_memsz: 0,
         tls_align: 0,
         tls_vaddr: 0,
+        interp_base: 0x5_0000_0000,
+        interp_entry: 0x5_0000_1000,
         tls_tp: 0,
     };
 
@@ -553,6 +657,7 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
     let mut saw_phent = false;
     let mut saw_phnum = false;
     let mut saw_pagesz = false;
+    let mut saw_base = false;
     let mut saw_entry = false;
     let mut saw_null = false;
 
@@ -567,6 +672,8 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
             saw_phnum = true;
         } else if key == AT_PAGESZ && val == PAGE_SIZE_4KB {
             saw_pagesz = true;
+        } else if key == AT_BASE && val == exec_info.interp_base {
+            saw_base = true;
         } else if key == AT_ENTRY && val == exec_info.entry {
             saw_entry = true;
         } else if key == AT_NULL && val == 0 {
@@ -577,13 +684,14 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
     }
 
     process_vm::destroy_process_vm(resolve_pid(pid));
-    if !(saw_phdr && saw_phent && saw_phnum && saw_pagesz && saw_entry && saw_null) {
+    if !(saw_phdr && saw_phent && saw_phnum && saw_pagesz && saw_base && saw_entry && saw_null) {
         klog_info!(
-            "EXEC_TEST: auxv missing entries phdr={} phent={} phnum={} pagesz={} entry={} null={}",
+            "EXEC_TEST: auxv missing entries phdr={} phent={} phnum={} pagesz={} base={} entry={} null={}",
             saw_phdr,
             saw_phent,
             saw_phnum,
             saw_pagesz,
+            saw_base,
             saw_entry,
             saw_null
         );
@@ -612,6 +720,8 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         tls_memsz: 0,
         tls_align: 0,
         tls_vaddr: 0,
+        interp_base: 0,
+        interp_entry: 0,
         tls_tp: 0,
     };
 
@@ -768,6 +878,8 @@ pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
         tls_memsz: 0,
         tls_align: 0,
         tls_vaddr: 0,
+        interp_base: 0,
+        interp_entry: 0,
         tls_tp: 0,
     };
 
@@ -854,6 +966,8 @@ pub fn test_setup_user_stack_high_argument_count() -> TestResult {
         tls_memsz: 0,
         tls_align: 0,
         tls_vaddr: 0,
+        interp_base: 0,
+        interp_entry: 0,
         tls_tp: 0,
     };
 
@@ -931,8 +1045,6 @@ slopos_testing::stest!(
     name = test_program_path_resolves_against_the_cwd,
     suite = exec
 );
-slopos_testing::stest!(name = test_translate_address_kernel_to_user, suite = exec);
-slopos_testing::stest!(name = test_translate_address_user_passthrough, suite = exec);
 slopos_testing::stest!(
     name = test_process_vm_root_absent_for_a_reaped_process,
     suite = exec
@@ -942,6 +1054,15 @@ slopos_testing::stest!(name = test_elf_phentsize_mismatch, suite = exec);
 slopos_testing::stest!(name = test_init_path_is_absolute, suite = exec);
 slopos_testing::stest!(name = test_init_path_within_exec_limit, suite = exec);
 slopos_testing::stest!(name = test_setup_user_stack_contract_layout, suite = exec);
+slopos_testing::stest!(name = test_elf_refuses_unsorted_load_segments, suite = exec);
+slopos_testing::stest!(
+    name = test_elf_refuses_entry_outside_every_segment,
+    suite = exec
+);
+slopos_testing::stest!(
+    name = test_segment_budget_is_shared_across_images,
+    suite = exec
+);
 slopos_testing::stest!(
     name = test_setup_user_stack_auxv_required_entries,
     suite = exec
@@ -1055,6 +1176,10 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     assert_test!(
         !covers_grant_path(b"/tmp"),
         "an ordinary directory must stay mountable"
+    );
+    assert_test!(
+        covers_grant_path(b"/lib"),
+        "the interpreter runs before the program, so its directory is uncoverable"
     );
 
     TestResult::Pass

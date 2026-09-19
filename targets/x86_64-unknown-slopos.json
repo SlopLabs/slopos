@@ -4,6 +4,7 @@
   "cpu": "x86-64",
   "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
   "disable-redzone": true,
+  "dynamic-linking": true,
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
   "env": "slibc",
@@ -17,16 +18,15 @@
   "max-atomic-width": 64,
   "os": "slopos",
   "panic-strategy": "abort",
-  "pre-link-args": {
-    "ld.lld": ["-Tuserland/userland.ld", "--emit-relocs"]
-  },
   "relocation-model": "static",
   "stack-probes": {
     "kind": "inline"
   },
-  "target-family": ["unix"],
+  "target-family": [
+    "unix"
+  ],
   "target-pointer-width": 64,
-  "tls-model": "local-exec",
+  "tls-model": "global-dynamic",
   "trap-unreachable": true,
   "vendor": "slopos"
 }

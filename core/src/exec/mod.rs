@@ -13,9 +13,9 @@ use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
 use slopos_ostd::mm::vm_space::VmSpace;
-use slopos_ostd::{KArc, KVec};
+use slopos_ostd::{KArc, KBox, KVec};
 
-use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
+use slopos_abi::auxv::{AT_BASE, AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::fs::USER_PATH_MAX;
 use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
 use slopos_fs::VfsError;
@@ -27,13 +27,15 @@ use slopos_fs::vfs::CanonPath;
 use slopos_fs::vfs::ops::{VfsHandle, vfs_open};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_canon_at};
 use slopos_mm::elf::{
-    ELF_HEADER_WINDOW, ElfError, ElfExecInfo, MAX_LOAD_SEGMENTS, ValidatedSegment,
+    ELF_HEADER_WINDOW, ElfError, ElfExecInfo, MAX_LOAD_SEGMENTS, SegmentBudget, ValidatedSegment,
+    interpreter_extent,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
-    process_vm_get_stack_top, process_vm_get_vm_space, process_vm_map_elf_image,
-    process_vm_reset_for_exec, process_vm_reset_stack, process_vm_write_user_bytes,
+    InterpreterImage, process_vm_get_stack_top, process_vm_get_vm_space, process_vm_map_elf_image,
+    process_vm_map_interpreter, process_vm_reset_for_exec, process_vm_reset_stack,
+    process_vm_write_user_bytes,
 };
 use slopos_ostd::klog_info;
 
@@ -68,8 +70,9 @@ pub const EXEC_READ_CHUNK: usize = 64 * 1024;
 pub const INIT_PATH: &[u8] = b"/sbin/init";
 
 /// What `setup_user_stack` spends whatever the argument count: red zone, two
-/// realignments, six auxv pairs, argc and the two NULL sentinels.
-const EXEC_ARG_STACK_FIXED: usize = 128 + 16 + 16 + 6 * 16 + 3 * 8;
+/// realignments, the odd-slot pad, seven auxv pairs, argc and the two NULL
+/// sentinels — plus the word `setup_user_stack` drops before any of it.
+const EXEC_ARG_STACK_FIXED: usize = 8 + 128 + 16 + 16 + 8 + 7 * 16 + 3 * 8;
 
 /// [`EXEC_MAX_ARG_PAGES`] as bytes. Also what a syscall handler may stage out
 /// of user memory before the exact accounting below runs.
@@ -582,15 +585,12 @@ pub fn do_exec(
     Ok(())
 }
 
-/// Open `path`, validate it, and install its image in `process`'s address
-/// space. Out of line to keep its locals out of `do_exec`'s frame, which is
-/// measured against the 2 KiB stack gate.
+/// Open `path` as an executable and answer its size.
+///
+/// Out of line because [`FileStat`](slopos_fs::FileStat) is large enough to
+/// push its caller over the 2 KiB stack gate.
 #[inline(never)]
-fn load_image(
-    path: &[u8],
-    process: slopos_ostd::process::ProcessId,
-    entry_out: &mut u64,
-) -> Result<ElfExecInfo, ExecError> {
+fn open_executable(path: &[u8]) -> Result<(VfsHandle, u64), ExecError> {
     let handle = vfs_open(path, false).map_err(|e| match e {
         slopos_fs::VfsError::NotFound => ExecError::NoEntry,
         slopos_fs::VfsError::IsDirectory => ExecError::NoExec,
@@ -598,18 +598,45 @@ fn load_image(
         _ => ExecError::IoError,
     })?;
 
-    let file_stat = handle
+    let stat = handle
         .fs
         .stat(handle.inode)
         .map_err(|_| ExecError::IoError)?;
-    if (file_stat.mode & 0o111) == 0 {
+    if (stat.mode & 0o111) == 0 {
         return Err(ExecError::NoExec);
     }
+    if stat.size == 0 || stat.size > EXEC_MAX_ELF_SIZE as u64 {
+        return Err(ExecError::NoExec);
+    }
+    Ok((handle, stat.size))
+}
 
-    let file_size = file_stat.size;
-    if file_size == 0 || file_size > EXEC_MAX_ELF_SIZE as u64 {
-        return Err(ExecError::NoExec);
-    }
+/// The interpreter, opened and read before `exec` reaches its point of no
+/// return so that a bad `PT_INTERP` is an errno rather than a dead process.
+struct StagedInterpreter {
+    handle: VfsHandle,
+    header: KVec<u8>,
+    file_len: u64,
+}
+
+/// Open `path`, validate it, and install its image in `process`'s address
+/// space. Out of line to keep its locals out of `do_exec`'s frame, which is
+/// measured against the 2 KiB stack gate.
+///
+/// The *filesystem* is resolved before `process_vm_reset_for_exec` — both
+/// images are open and their header windows are in hand — because a missing
+/// or unreadable `PT_INTERP` is the likeliest failure on a dynamically
+/// linked system and past that call the old image is gone, so an error the
+/// caller is handed is an error it cannot return to act on. Header
+/// *validation* still runs after it, and a malformed image therefore still
+/// costs the caller its address space.
+#[inline(never)]
+fn load_image(
+    path: &[u8],
+    process: slopos_ostd::process::ProcessId,
+    entry_out: &mut u64,
+) -> Result<ElfExecInfo, ExecError> {
+    let (handle, file_size) = open_executable(path)?;
 
     // Only the header window is staged; the rest goes from the file straight
     // into the mapping, so the image may exceed the 1 MiB slab ceiling.
@@ -617,8 +644,10 @@ fn load_image(
     let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| ExecError::NoMem)?;
     read_exact_at(&handle, 0, header.as_mut_slice())?;
 
-    let mut segments =
-        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| ExecError::NoMem)?;
+    let interp = match interpreter_extent(header.as_slice(), file_size).map_err(ExecError::from)? {
+        Some((offset, len)) => Some(stage_interpreter(&handle, offset, len)?),
+        None => None,
+    };
 
     // The address-space boundary. Everything the old image mapped — heap,
     // mmap arena, shared memfds, rings — is severed here, before the new
@@ -627,18 +656,123 @@ fn load_image(
         return Err(ExecError::NoMem);
     }
 
-    let (exec_info, segment_count) = process_vm_map_elf_image(
-        process,
+    install_images(
+        &handle,
         header.as_slice(),
+        file_size,
+        interp.as_deref(),
+        process,
+        entry_out,
+    )
+}
+
+/// Map the executable, then the interpreter, then stream the executable's
+/// bytes in.
+///
+/// The ordering is load-bearing: mapping takes the page-table cursor, which
+/// refuses to install a leaf while a second reference to the address space is
+/// live, and streaming holds exactly such a reference.
+///
+/// Out of line so its segment array and address-space reference stay off
+/// [`load_image`]'s frame, which is measured against the 2 KiB stack gate.
+#[inline(never)]
+fn install_images(
+    handle: &VfsHandle,
+    header: &[u8],
+    file_size: u64,
+    interp: Option<&StagedInterpreter>,
+    process: slopos_ostd::process::ProcessId,
+    entry_out: &mut u64,
+) -> Result<ElfExecInfo, ExecError> {
+    let mut segments =
+        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| ExecError::NoMem)?;
+    let (mut exec_info, segment_count) = process_vm_map_elf_image(
+        process,
+        header,
         file_size,
         segments.as_mut_slice(),
         entry_out,
     )
     .map_err(ExecError::from)?;
 
+    if let Some(staged) = interp {
+        let image = map_interpreter(staged, process, &segments.as_slice()[..segment_count])?;
+        exec_info.interp_base = image.base;
+        exec_info.interp_entry = image.entry;
+        *entry_out = image.entry;
+    }
+
     let vm_space = process_vm_get_vm_space(process).ok_or(ExecError::Fault)?;
-    stream_segments(&handle, &vm_space, &segments.as_slice()[..segment_count])?;
+    stream_segments(handle, &vm_space, &segments.as_slice()[..segment_count])?;
     Ok(exec_info)
+}
+
+/// Read `PT_INTERP`'s path out of `image` and open what it names.
+///
+/// Out of line so the path buffer stays off [`load_image`]'s frame, which is
+/// measured against the 2 KiB stack gate.
+#[inline(never)]
+fn stage_interpreter(
+    image: &VfsHandle,
+    offset: u64,
+    len: u64,
+) -> Result<KBox<StagedInterpreter>, ExecError> {
+    let mut path: KVec<u8> = KVec::<u8>::zeroed(len as usize).map_err(|_| ExecError::NoMem)?;
+    read_exact_at(image, offset, path.as_mut_slice())?;
+    let name = trim_nul_bytes(path.as_slice());
+    // Resolved against `/`, never against the caller's cwd: the interpreter
+    // is part of the program's identity, and a relative one would name a
+    // different file per caller.
+    if name.is_empty() || name[0] != b'/' {
+        return Err(ExecError::NoExec);
+    }
+
+    let (handle, file_len) = open_executable(name)?;
+    let window_len = (file_len as usize).min(ELF_HEADER_WINDOW);
+    let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| ExecError::NoMem)?;
+    read_exact_at(&handle, 0, header.as_mut_slice())?;
+    // Boxed: `load_image`'s frame is measured against the 2 KiB stack gate
+    // and an open handle plus a header window does not fit in it.
+    KBox::try_new(StagedInterpreter {
+        handle,
+        header,
+        file_len,
+    })
+    .map_err(|_| ExecError::NoMem)
+}
+
+/// Place the staged interpreter and stream it in.
+///
+/// `mapped` is the executable's segment set, whose extent the interpreter's
+/// budget is the residue of: an `exec` spends the image caps once, not once
+/// per image.
+///
+/// Out of line so its segment array and address-space reference stay off
+/// [`load_image`]'s frame.
+#[inline(never)]
+fn map_interpreter(
+    staged: &StagedInterpreter,
+    process: slopos_ostd::process::ProcessId,
+    mapped: &[ValidatedSegment],
+) -> Result<InterpreterImage, ExecError> {
+    let mut segments =
+        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| ExecError::NoMem)?;
+    let image = process_vm_map_interpreter(
+        process,
+        staged.header.as_slice(),
+        staged.file_len,
+        SegmentBudget::FULL.less(mapped),
+        segments.as_mut_slice(),
+    )
+    .map_err(ExecError::from)?;
+
+    let vm_space = process_vm_get_vm_space(process).ok_or(ExecError::Fault)?;
+    stream_segments(
+        &staged.handle,
+        &vm_space,
+        &segments.as_slice()[..image.segment_count],
+    )?;
+    Ok(image)
 }
 
 /// Fill `buf` from `offset`. A short read fails the load rather than leaving
@@ -739,16 +873,20 @@ fn setup_user_stack(
     sp &= !0xF;
 
     // SysV ABI: rsp must be 16-byte aligned at _start with argc at [rsp].
-    let total_slots = argc + envc + 15; // 12 auxv + 3 sentinel/argc
+    let total_slots = argc + envc + 17; // 14 auxv + 3 sentinel/argc
     if total_slots % 2 != 0 {
         sp = sp.wrapping_sub(8);
     }
 
+    // `AT_BASE` is emitted even for a static image, where it reads 0, because
+    // a fixed-size vector is what the two constants above can be stated
+    // against. Linux does the same.
     let auxv = [
         (AT_PHDR, exec_info.phdr_addr),
         (AT_PHENT, exec_info.phent_size as u64),
         (AT_PHNUM, exec_info.phnum as u64),
         (AT_PAGESZ, PAGE_SIZE_4KB),
+        (AT_BASE, exec_info.interp_base),
         (AT_ENTRY, exec_info.entry),
         (AT_NULL, 0),
     ];

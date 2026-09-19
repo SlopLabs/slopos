@@ -1,0 +1,26 @@
+[package]
+name = "slopos-dltest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The dynamically linked probe and shared object the dl_test utest drives"
+
+# Deliberately no `slopos-slibc` dependency. These two artifacts are what a
+# dynamically linked program looks like: they reach the C library through
+# `libc.so` at runtime, so a second, statically linked copy of slibc inside
+# them would be exactly the two-allocator bug `libc.so` exists to prevent.
+
+[lib]
+name = "dltest"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[[bin]]
+name = "dl_probe"
+path = "src/bin/dl_probe.rs"
+test = false
+
+[lints]
+workspace = true

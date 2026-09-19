@@ -117,13 +117,13 @@ impl Types {
             .ok_or_else(|| format!("array length `{text}` is not a known integer constant"))
     }
 
-    /// POSIX spells a type whose name ends in `_t` (plus `fd_set` and
-    /// `Dl_info`) as a typedef, and everything else as a struct tag: C code
-    /// writes `sigset_t s;` but `struct stat st;`. A typedef named `stat`
-    /// would also collide with the function of the same name, which is exactly
-    /// why the C library never introduces one.
+    /// POSIX spells a type whose name ends in `_t` (plus `fd_set`, `Dl_info`
+    /// and the ELF gABI's own `Elf64_*`) as a typedef, and everything else as
+    /// a struct tag: C code writes `sigset_t s;` but `struct stat st;`. A
+    /// typedef named `stat` would also collide with the function of the same
+    /// name, which is exactly why the C library never introduces one.
     pub fn is_typedef_shaped(name: &str) -> bool {
-        name.ends_with("_t") || name == "fd_set" || name == "Dl_info"
+        name.ends_with("_t") || name == "fd_set" || name == "Dl_info" || name.starts_with("Elf64_")
     }
 
     fn primitive(name: &str) -> Option<(&'static str, u8, bool)> {

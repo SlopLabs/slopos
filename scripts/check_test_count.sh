@@ -25,7 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BASELINE="${TEST_COUNT_BASELINE:-3334}"
+BASELINE="${TEST_COUNT_BASELINE:-3346}"
 
 LOG=""
 while [ $# -gt 0 ]; do

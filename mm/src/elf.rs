@@ -78,6 +78,10 @@ pub const ELF_HEADER_WINDOW: usize = 64 + MAX_PROGRAM_HEADERS * 56;
 
 pub const MIN_ELF_SIZE: usize = 64;
 
+/// Ceiling on an interpreter path, matching `USER_PATH_MAX`. A `PT_INTERP`
+/// past it is refused rather than truncated into the name of another file.
+pub const MAX_INTERP_PATH_LEN: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
     BufferTooSmall,
@@ -103,7 +107,8 @@ pub enum ElfError {
     TooManyLoadSegments,
     NoLoadSegments,
     NullPointer,
-    DynamicNotSupported,
+    InterpreterInvalid,
+    AliasedFileExtent,
     UnsupportedLoadBase,
 }
 
@@ -133,7 +138,10 @@ impl fmt::Display for ElfError {
             Self::TooManyLoadSegments => write!(f, "too many PT_LOAD segments"),
             Self::NoLoadSegments => write!(f, "no PT_LOAD segments found"),
             Self::NullPointer => write!(f, "null pointer"),
-            Self::DynamicNotSupported => write!(f, "dynamic linking (PT_INTERP) not supported"),
+            Self::InterpreterInvalid => write!(f, "PT_INTERP does not name a path"),
+            Self::AliasedFileExtent => {
+                write!(f, "segments name more file bytes than the file holds")
+            }
             Self::UnsupportedLoadBase => {
                 write!(f, "image is not linked at the process code base")
             }
@@ -391,20 +399,6 @@ impl ValidatedSegment {
     pub fn page_count(&self) -> u64 {
         (self.vaddr_end - self.vaddr_start) / PAGE_SIZE_4KB
     }
-
-    /// Whether this segment's interior intersects `other`'s; adjacent segments
-    /// are contiguous, not overlapping.
-    pub fn has_conflicting_overlap(&self, other: &ValidatedSegment) -> bool {
-        let self_start = self.original_vaddr;
-        let self_end = self.original_vaddr.saturating_add(self.mem_size);
-        let other_start = other.original_vaddr;
-        let other_end = other.original_vaddr.saturating_add(other.mem_size);
-
-        self_start < other_end
-            && self_end > other_start
-            && self_start != other_end
-            && self_end != other_start
-    }
 }
 
 /// Performs every security check on an ELF file before returning structures
@@ -417,6 +411,36 @@ pub struct ElfValidator<'a> {
     file_len: u64,
     header: Elf64Header,
     load_base: u64,
+    budget: SegmentBudget,
+}
+
+/// What an image may still spend of the per-`exec` ceilings.
+///
+/// Carried rather than restarted, because an `exec` loads two images: an
+/// executable and its interpreter would otherwise have a budget each.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentBudget {
+    pub mapped: u64,
+    pub zero_fill: u64,
+}
+
+impl SegmentBudget {
+    pub const FULL: Self = Self {
+        mapped: MAX_TOTAL_MAPPED_SIZE,
+        zero_fill: MAX_TOTAL_ZERO_FILL_SIZE,
+    };
+
+    /// What is left after `segments` were accepted.
+    pub fn less(self, segments: &[ValidatedSegment]) -> Self {
+        let mut left = self;
+        for seg in segments.iter() {
+            left.mapped = left.mapped.saturating_sub(seg.vaddr_end - seg.vaddr_start);
+            left.zero_fill = left
+                .zero_fill
+                .saturating_sub(seg.mem_size.saturating_sub(seg.file_size));
+        }
+        left
+    }
 }
 
 impl<'a> ElfValidator<'a> {
@@ -431,11 +455,17 @@ impl<'a> ElfValidator<'a> {
             file_len,
             header,
             load_base: 0,
+            budget: SegmentBudget::FULL,
         })
     }
 
     pub fn with_load_base(mut self, base: u64) -> Self {
         self.load_base = base;
+        self
+    }
+
+    pub fn with_budget(mut self, budget: SegmentBudget) -> Self {
+        self.budget = budget;
         self
     }
 
@@ -457,6 +487,7 @@ impl<'a> ElfValidator<'a> {
         let mut count = 0usize;
         let mut total_size: u64 = 0;
         let mut total_zero_fill: u64 = 0;
+        let mut total_file: u64 = 0;
 
         for i in 0..self.header.e_phnum as usize {
             let phdr = self.get_program_header(i)?;
@@ -471,12 +502,25 @@ impl<'a> ElfValidator<'a> {
 
             let validated = self.validate_segment(&phdr)?;
 
+            // Ascending and disjoint, on the segments' own addresses rather
+            // than their page-aligned extents -- two segments legitimately
+            // share a page. The gABI requires the order, and a consumer that
+            // walks the array in table order (the loader's VMA pass does)
+            // would otherwise leave a mapped page uncovered.
+            if count > 0 {
+                let prev = &out[count - 1];
+                let prev_end = prev.original_vaddr.saturating_add(prev.mem_size);
+                if validated.original_vaddr < prev_end {
+                    return Err(ElfError::SegmentOverlap);
+                }
+            }
+
             let segment_size = validated.vaddr_end - validated.vaddr_start;
             total_size = total_size
                 .checked_add(segment_size)
                 .ok_or(ElfError::TotalSizeExceeded)?;
 
-            if total_size > MAX_TOTAL_MAPPED_SIZE {
+            if total_size > self.budget.mapped {
                 return Err(ElfError::TotalSizeExceeded);
             }
 
@@ -484,8 +528,20 @@ impl<'a> ElfValidator<'a> {
                 .checked_add(validated.mem_size.saturating_sub(validated.file_size))
                 .ok_or(ElfError::TotalSizeExceeded)?;
 
-            if total_zero_fill > MAX_TOTAL_ZERO_FILL_SIZE {
+            if total_zero_fill > self.budget.zero_fill {
                 return Err(ElfError::TotalSizeExceeded);
+            }
+
+            // No two segments may name the same file bytes. What this bounds
+            // is the *read* volume: the loader streams `p_filesz` per
+            // segment, so 64 segments each naming the whole of a 512 MiB file
+            // would issue 32 GiB of reads, taking the mount lock every chunk,
+            // from an unprivileged caller.
+            total_file = total_file
+                .checked_add(validated.file_size)
+                .ok_or(ElfError::TotalSizeExceeded)?;
+            if total_file > self.file_len {
+                return Err(ElfError::AliasedFileExtent);
             }
 
             out[count] = validated;
@@ -494,14 +550,6 @@ impl<'a> ElfValidator<'a> {
 
         if count == 0 {
             return Err(ElfError::NoLoadSegments);
-        }
-
-        for i in 0..count {
-            for j in (i + 1)..count {
-                if out[i].has_conflicting_overlap(&out[j]) {
-                    return Err(ElfError::SegmentOverlap);
-                }
-            }
         }
 
         Ok(count)
@@ -614,14 +662,38 @@ impl<'a> ElfValidator<'a> {
         })
     }
 
-    pub fn has_interpreter(&self) -> ElfResult<bool> {
+    /// The strictest `p_align` any `PT_LOAD` asks for, never below a page.
+    /// An `ET_DYN` placed at a base that is not a multiple of it has its
+    /// alignment-sensitive data misaligned rather than refused.
+    pub fn max_load_align(&self) -> ElfResult<u64> {
+        let mut align = PAGE_SIZE_4KB;
         for i in 0..self.header.e_phnum as usize {
             let phdr = self.get_program_header(i)?;
-            if phdr.p_type == PT_INTERP {
-                return Ok(true);
+            if phdr.is_load() && phdr.p_align > align {
+                align = phdr.p_align;
             }
         }
-        Ok(false)
+        Ok(align)
+    }
+
+    /// `PT_INTERP`'s `(p_offset, p_filesz)`, the file extent holding the
+    /// interpreter's NUL-terminated path.
+    pub fn interpreter_extent(&self) -> ElfResult<Option<(u64, u64)>> {
+        for i in 0..self.header.e_phnum as usize {
+            let phdr = self.get_program_header(i)?;
+            if phdr.p_type != PT_INTERP {
+                continue;
+            }
+            let end = phdr.file_end()?;
+            if phdr.p_filesz == 0
+                || phdr.p_filesz > MAX_INTERP_PATH_LEN as u64
+                || end > self.file_len
+            {
+                return Err(ElfError::InterpreterInvalid);
+            }
+            return Ok(Some((phdr.p_offset, phdr.p_filesz)));
+        }
+        Ok(None)
     }
 
     /// Returns PT_TLS's `(p_vaddr, p_filesz, p_memsz, p_align)` when present.
@@ -653,6 +725,12 @@ impl<'a> ElfValidator<'a> {
     }
 }
 
+/// `PT_INTERP`'s `(p_offset, p_filesz)` for an image the caller has only the
+/// header window of, or `None` when the image is statically linked.
+pub fn interpreter_extent(header: &[u8], file_len: u64) -> ElfResult<Option<(u64, u64)>> {
+    ElfValidator::new(header, file_len)?.interpreter_extent()
+}
+
 /// Metadata collected during ELF loading, used to populate the auxiliary vector
 /// on the user stack.
 #[derive(Debug, Clone, Copy)]
@@ -668,6 +746,12 @@ pub struct ElfExecInfo {
     pub tls_memsz: u64,
     pub tls_align: u64,
     pub tls_vaddr: u64,
+    /// Load base of the `PT_INTERP` interpreter, or 0 when the image is
+    /// statically linked. Handed to the process as `AT_BASE`.
+    pub interp_base: u64,
+    /// Where the interpreter is entered. Zero when there is none, in which
+    /// case the process starts at [`Self::entry`].
+    pub interp_entry: u64,
     /// Thread pointer (TCB address) to load into FS base.
     pub tls_tp: u64,
 }

@@ -1,52 +1,184 @@
-//! TLS initialization — heap-allocate and install TCB via FS_BASE.
+//! TLS: the static block, the DTV, and `__tls_get_addr`.
 //!
 //! x86_64 variant-II layout: the thread pointer (`fs_base`) points at the
-//! [`Tcb`], the program's TLS image (`.tdata`/`.tbss`) sits *below* it at
-//! `[tp - tls_size, tp)`, and `#[thread_local]` statics are addressed at
-//! negative offsets from `fs_base`.
+//! [`Tcb`], every module's TLS image sits *below* it, and module `m`'s block
+//! begins at `tp - offset[m]`. A `#[thread_local]` in the executable is
+//! reached at a negative offset from `fs_base` without a lookup; one in a
+//! shared object goes through `__tls_get_addr` and the DTV.
 //!
-//! libc owns all TLS: every thread, main included, builds its own block from
-//! the program's `PT_TLS` template discovered via `AT_PHDR`, copying `.tdata`
-//! and zeroing `.tbss`. The kernel never constructs a TLS image.
+//! libc owns all TLS. A static program registers its own `PT_TLS` from
+//! `AT_PHDR` at startup; under an interpreter the loader registers every
+//! module it maps, which is the same table.
 
 use core::cell::SyncUnsafeCell;
 use core::mem;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
 
 use super::tcb::Tcb;
 
+/// TLS modules one process may hold: the startup set plus whatever `dlopen`
+/// adds. A miss makes the `dlopen` fail rather than the access.
+pub const MAX_TLS_MODULES: usize = 64;
+
+/// The whole block is aligned to at least this, so an SSE spill inside a
+/// thread-local lands aligned whatever the modules ask for.
+const MIN_TLS_ALIGN: usize = 16;
+
 static mut TLS_READY: bool = false;
 
-/// Program TLS template (the `PT_TLS` segment), captured once at startup.
-/// All-integer so `SyncUnsafeCell<TlsTemplate>` is `Sync` without an unsafe
-/// impl. `image_addr` addresses the pristine `.tdata` image (`p_vaddr`).
+/// Guards [`LAYOUT`] and a thread's DTV growth.
+///
+/// Its own lock rather than the loader's, and ordered *below* it: `dlsym` and
+/// `dl_iterate_phdr` resolve a thread-local while holding the loader's, and a
+/// second acquire of a non-reentrant flag is a hang.
+static LAYOUT_LOCK: AtomicBool = AtomicBool::new(false);
+
+struct LayoutGuard;
+
+impl Drop for LayoutGuard {
+    fn drop(&mut self) {
+        LAYOUT_LOCK.store(false, Ordering::Release);
+    }
+}
+
+fn lock_layout() -> LayoutGuard {
+    while LAYOUT_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    LayoutGuard
+}
+
+/// One module's TLS template.
+///
+/// `offset` is the distance below the thread pointer at which the module's
+/// block sits, and zero means the module is not in the static block — a
+/// `dlopen`ed object, whose block `__tls_get_addr` allocates per thread on
+/// first use.
 #[derive(Clone, Copy)]
-struct TlsTemplate {
-    image_addr: usize,
+struct TlsModule {
+    image: usize,
     filesz: usize,
     memsz: usize,
     align: usize,
+    offset: usize,
 }
 
-static TLS_TEMPLATE: SyncUnsafeCell<TlsTemplate> = SyncUnsafeCell::new(TlsTemplate {
-    image_addr: 0,
+const EMPTY_MODULE: TlsModule = TlsModule {
+    image: 0,
     filesz: 0,
     memsz: 0,
-    align: 8,
+    align: MIN_TLS_ALIGN,
+    offset: 0,
+};
+
+struct TlsLayout {
+    modules: [TlsModule; MAX_TLS_MODULES],
+    count: usize,
+    /// Bytes below the thread pointer the static modules occupy.
+    static_size: usize,
+    max_align: usize,
+}
+
+static LAYOUT: SyncUnsafeCell<TlsLayout> = SyncUnsafeCell::new(TlsLayout {
+    modules: [EMPTY_MODULE; MAX_TLS_MODULES],
+    count: 0,
+    static_size: 0,
+    max_align: MIN_TLS_ALIGN,
 });
 
 #[inline]
 fn align_up(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    (value + align - 1) & !(align - 1)
+    let a = if align == 0 { 1 } else { align };
+    (value + a - 1) & !(a - 1)
 }
 
-/// Capture the program's `PT_TLS` template by walking the auxv to `AT_PHDR`
-/// and scanning the program headers. Idempotent. With no TLS segment or no
-/// usable `AT_PHDR` the template stays empty and threads get a TCB-only block.
+/// Give a module a place in the static block and answer its module id.
+///
+/// Ids start at 1, which is what a `DTPMOD64` relocation stores and what
+/// indexes the DTV. Zero means the layout is full.
+///
+/// # Safety
+/// Must run before any thread exists, from the loader or from startup.
+pub unsafe fn register_static_module(
+    image: usize,
+    filesz: usize,
+    memsz: usize,
+    align: usize,
+) -> usize {
+    let _guard = lock_layout();
+    let layout = &mut *LAYOUT.get();
+    if layout.count >= MAX_TLS_MODULES {
+        return 0;
+    }
+    let align = align.max(1);
+    // Variant II grows downward from the thread pointer, so a module's offset
+    // is the running total rounded up to its own alignment: the block then
+    // starts at `tp - offset`, which is `align`-aligned because `tp` is.
+    let offset = align_up(layout.static_size + memsz, align);
+    layout.modules[layout.count] = TlsModule {
+        image,
+        filesz,
+        memsz,
+        align,
+        offset,
+    };
+    layout.count += 1;
+    layout.static_size = offset;
+    if align > layout.max_align {
+        layout.max_align = align;
+    }
+    layout.count
+}
+
+/// Give a `dlopen`ed module an id with no place in the static block.
+///
+/// # Safety
+/// Caller holds the loader's lock; the image must outlive every thread.
+pub unsafe fn register_dynamic_module(
+    image: usize,
+    filesz: usize,
+    memsz: usize,
+    align: usize,
+) -> usize {
+    let _guard = lock_layout();
+    let layout = &mut *LAYOUT.get();
+    if layout.count >= MAX_TLS_MODULES {
+        return 0;
+    }
+    layout.modules[layout.count] = TlsModule {
+        image,
+        filesz,
+        memsz,
+        align: align.max(1),
+        offset: 0,
+    };
+    layout.count += 1;
+    layout.count
+}
+
+/// A registered module's distance below the thread pointer, which is what a
+/// `TPOFF64` relocation subtracts. Zero for a `dlopen`ed module, which has no
+/// static place and therefore cannot satisfy initial-exec.
+pub fn static_offset(modid: usize) -> usize {
+    unsafe {
+        let layout = &*LAYOUT.get();
+        if modid == 0 || modid > layout.count {
+            return 0;
+        }
+        layout.modules[modid - 1].offset
+    }
+}
+
+/// Capture the program's own `PT_TLS` by walking the auxv to `AT_PHDR` and
+/// scanning the program headers. Idempotent, and a no-op once the loader has
+/// registered a module — under an interpreter the loader owns the layout.
 ///
 /// # Safety
 /// `stack_base` must point at the kernel-prepared entry stack (`argc` at
@@ -69,6 +201,10 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
     // The only walk of the entry stack in the whole library, so `getauxval`
     // records its base here rather than the CRT growing a second one.
     crate::auxv::capture(p);
+
+    if (*LAYOUT.get()).count != 0 {
+        return;
+    }
 
     let (mut phdr, mut phnum, mut phent) = (0usize, 0usize, 0usize);
     loop {
@@ -107,52 +243,61 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
             let p_filesz = ptr::read_unaligned(ph.add(32) as *const u64) as usize;
             let p_memsz = ptr::read_unaligned(ph.add(40) as *const u64) as usize;
             let p_align = ptr::read_unaligned(ph.add(48) as *const u64) as usize;
-            tls = Some((
-                p_vaddr,
-                p_filesz,
-                p_memsz,
-                if p_align == 0 { 8 } else { p_align },
-            ));
+            tls = Some((p_vaddr, p_filesz, p_memsz, p_align));
         }
     }
     if let Some((p_vaddr, filesz, memsz, align)) = tls {
-        *TLS_TEMPLATE.get() = TlsTemplate {
-            image_addr: bias.wrapping_add(p_vaddr),
-            filesz,
-            memsz,
-            align,
-        };
+        register_static_module(bias.wrapping_add(p_vaddr), filesz, memsz, align);
     }
 }
 
-/// Allocate and initialize a per-thread TLS block in variant-II layout.
+/// Allocate and initialise a per-thread TLS block in variant-II layout.
+///
 /// Returns `(alloc_base, tp)`: the raw allocation to free later, and the
 /// thread pointer (the [`Tcb`] address) to load into `fs_base`. Null on OOM.
 ///
 /// # Safety
-/// Reads `filesz` bytes from the captured template image.
+/// Reads each registered module's image, which must stay mapped.
 pub unsafe fn alloc_thread_tls() -> (*mut u8, *mut Tcb) {
-    let t = *TLS_TEMPLATE.get();
-    // The linker computes each thread-local's negative `%fs` offset against
-    // `tls_size`, so every thread must size its block identically or the
-    // thread-locals land at the wrong address.
-    let align = t.align.max(8);
-    let tls_size = align_up(t.memsz, align);
+    // Held across the allocations: a `dlopen` raising `count` between sizing
+    // the DTV and filling it would write past the vector and leave `dtv[0]`
+    // claiming slots the allocation does not contain.
+    let _guard = lock_layout();
+    let layout = &*LAYOUT.get();
+    let align = layout.max_align.max(MIN_TLS_ALIGN);
+    let tls_size = align_up(layout.static_size, align);
     let block_size = tls_size + mem::size_of::<Tcb>();
 
     let base = malloc::memalign(align, block_size);
     if base.is_null() {
         return (ptr::null_mut(), ptr::null_mut());
     }
-    // Zeroing the whole image region is what initialises `.tbss`.
+    // Zeroing the whole image region is what initialises every `.tbss`.
     ptr::write_bytes(base, 0, tls_size);
-    if t.filesz > 0 && t.image_addr != 0 {
-        ptr::copy_nonoverlapping(t.image_addr as *const u8, base, t.filesz);
-    }
-    // `base` is `align`-aligned and `tls_size` a multiple of `align`, so `tp`
-    // is `align`-aligned too.
     let tp = base.add(tls_size) as *mut Tcb;
     ptr::write_bytes(tp as *mut u8, 0, mem::size_of::<Tcb>());
+
+    let dtv = malloc::alloc((layout.count + 1) * mem::size_of::<usize>()) as *mut usize;
+    if dtv.is_null() {
+        malloc::dealloc(base.cast());
+        return (ptr::null_mut(), ptr::null_mut());
+    }
+    *dtv = layout.count;
+
+    for (index, module) in layout.modules[..layout.count].iter().enumerate() {
+        if module.offset == 0 {
+            // A `dlopen`ed module: no static place, allocated on first access.
+            *dtv.add(index + 1) = 0;
+            continue;
+        }
+        let block = (tp as *mut u8).sub(module.offset);
+        if module.filesz > 0 && module.image != 0 {
+            ptr::copy_nonoverlapping(module.image as *const u8, block, module.filesz);
+        }
+        *dtv.add(index + 1) = block as usize;
+    }
+    (*tp).dtv = dtv;
+    (*tp).tls_block = base;
     (base, tp)
 }
 
@@ -168,7 +313,9 @@ pub fn tls_is_initialized() -> bool {
 /// # Safety
 /// Must be called exactly once from the main thread during CRT startup.
 pub unsafe fn tls_init_main_thread() {
-    // Adopt an already-installed valid TCB rather than building a second one.
+    // Adopt an already-installed valid TCB rather than building a second one:
+    // under an interpreter the loader has already built the block, DTV and
+    // all, before the program's own `_start` runs.
     if let Ok(fs_base) = Sys::arch_prctl_get_fs() {
         if fs_base != 0 {
             let tcb_ptr = fs_base as *mut Tcb;
@@ -194,8 +341,136 @@ pub unsafe fn tls_init_main_thread() {
     TLS_READY = true;
 }
 
+/// Install the block this thread was handed, and declare TLS live.
+///
+/// # Safety
+/// `tcb` must be the thread pointer the caller loaded into `fs_base`.
+pub unsafe fn adopt_thread_tls(tcb: *mut Tcb) {
+    (*tcb).self_ptr = tcb;
+    TLS_READY = true;
+}
+
 /// # Safety
 /// `tcb` must be a valid TCB pointer passed as TLS arg to `clone()`.
 pub unsafe fn tls_init_new_thread(tcb: *mut Tcb) {
     debug_assert_eq!((*tcb).self_ptr, tcb);
+}
+
+/// Release a finished thread's TLS: its DTV, the blocks `__tls_get_addr`
+/// allocated for `dlopen`ed modules, and the block the TCB sits at the top
+/// of. Frees the allocation's base, not the thread pointer.
+///
+/// # Safety
+/// `tcb` must be a thread pointer [`alloc_thread_tls`] produced, and no
+/// thread may still be running on it.
+pub unsafe fn free_thread_tls(tcb: *mut Tcb) {
+    let dtv = (*tcb).dtv;
+    if !dtv.is_null() {
+        let layout = &*LAYOUT.get();
+        for modid in 1..=*dtv {
+            let block = *dtv.add(modid);
+            // A static module's block is inside the TLS allocation below;
+            // only a dynamic one was allocated on its own.
+            if block != 0 && modid <= layout.count && layout.modules[modid - 1].offset == 0 {
+                malloc::dealloc(block as *mut core::ffi::c_void);
+            }
+        }
+        malloc::dealloc(dtv.cast());
+        (*tcb).dtv = ptr::null_mut();
+    }
+    let base = (*tcb).tls_block;
+    if base.is_null() {
+        malloc::dealloc(tcb.cast());
+    } else {
+        malloc::dealloc(base.cast());
+    }
+}
+
+/// The general-dynamic TLS accessor every `dlopen`able object's thread-local
+/// reference goes through.
+///
+/// # Safety
+/// `ti` must address a `TlsIndex` a `TLSGD` call site built, and the calling
+/// thread must have a live TCB.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __tls_get_addr(ti: *const crate::ld_so::elf::TlsIndex) -> *mut u8 {
+    let index = ptr::read(ti);
+    let tcb = Tcb::current();
+    let dtv = (*tcb).dtv;
+    if dtv.is_null() || index.ti_module == 0 {
+        return ptr::null_mut();
+    }
+    let block = if index.ti_module <= *dtv {
+        let slot = dtv.add(index.ti_module);
+        if *slot == 0 {
+            let fresh = {
+                let _guard = lock_layout();
+                alloc_dynamic_block(index.ti_module)
+            };
+            if fresh == 0 {
+                return ptr::null_mut();
+            }
+            *slot = fresh;
+        }
+        *slot
+    } else {
+        let grown = grow_dtv(tcb, index.ti_module);
+        if grown == 0 {
+            return ptr::null_mut();
+        }
+        grown
+    };
+    (block + index.ti_offset) as *mut u8
+}
+
+/// This thread's block for a module `dlopen` added after the DTV was built.
+///
+/// Takes [`LAYOUT_LOCK`]: reading a module count that a concurrent `dlopen`
+/// is in the middle of raising would size the new vector short.
+unsafe fn grow_dtv(tcb: *mut Tcb, modid: usize) -> usize {
+    let _guard = lock_layout();
+    let layout = &*LAYOUT.get();
+    if modid > layout.count {
+        return 0;
+    }
+    let fresh = malloc::alloc((layout.count + 1) * mem::size_of::<usize>()) as *mut usize;
+    if fresh.is_null() {
+        return 0;
+    }
+    let old = (*tcb).dtv;
+    let old_len = *old;
+    ptr::write_bytes(
+        fresh as *mut u8,
+        0,
+        (layout.count + 1) * mem::size_of::<usize>(),
+    );
+    ptr::copy_nonoverlapping(old.add(1), fresh.add(1), old_len);
+    *fresh = layout.count;
+    (*tcb).dtv = fresh;
+    malloc::dealloc(old.cast());
+
+    let block = alloc_dynamic_block(modid);
+    if block != 0 {
+        *fresh.add(modid) = block;
+    }
+    block
+}
+
+/// # Safety
+/// Caller holds [`LAYOUT_LOCK`].
+unsafe fn alloc_dynamic_block(modid: usize) -> usize {
+    let layout = &*LAYOUT.get();
+    if modid == 0 || modid > layout.count {
+        return 0;
+    }
+    let module = layout.modules[modid - 1];
+    let block = malloc::memalign(module.align.max(MIN_TLS_ALIGN), module.memsz.max(1));
+    if block.is_null() {
+        return 0;
+    }
+    ptr::write_bytes(block, 0, module.memsz);
+    if module.filesz > 0 && module.image != 0 {
+        ptr::copy_nonoverlapping(module.image as *const u8, block, module.filesz);
+    }
+    block as usize
 }

@@ -32,7 +32,15 @@ unsafe fn reset(stream: *mut FILE, flags: u32) {
 /// Reset the standard streams and put them on the open-stream list.
 ///
 /// Called from the CRT before `main`. Buffering follows C11 §7.21.3.
+/// Idempotent: under an interpreter the loader runs this before the first
+/// constructor, and the program's own CRT then runs it again. A second
+/// `reset` would discard whatever a constructor had buffered.
+static STDIO_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn stdio_init() {
+    if STDIO_READY.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     unsafe {
         reset(&raw mut STDIN_FILE, FILE_FLAG_READABLE);
         reset(&raw mut STDOUT_FILE, FILE_FLAG_WRITABLE);

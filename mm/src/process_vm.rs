@@ -15,16 +15,16 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
 use crate::aslr;
-use crate::elf::{ElfError, ElfValidator, PF_W, ValidatedSegment};
+use crate::elf::{ElfError, ElfValidator, PF_R, PF_W, PF_X, SegmentBudget, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
-use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
+use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::tlb::TlbProcessKey;
 use crate::user_mappings::{
     ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
-    ostd_mark_range_user_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
+    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
 };
 use crate::vma_region::{FileMapRef, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -1080,10 +1080,6 @@ pub fn process_vm_map_elf_image(
 
     let validator = ElfValidator::new(header, file_len)?.with_load_base(code_base);
 
-    if validator.has_interpreter()? {
-        return Err(ElfError::DynamicNotSupported);
-    }
-
     let segment_count = validator.validate_load_segments_into(segments_out)?;
 
     let slot = find_slot_for_pid(process).ok_or(ElfError::NullPointer)?;
@@ -1097,6 +1093,202 @@ pub fn process_vm_map_elf_image(
     )?;
     *entry_out = info.entry;
     Ok((info, segment_count))
+}
+
+/// Where the `PT_INTERP` interpreter landed, and how much of `segments_out`
+/// the caller must stream file bytes into.
+#[derive(Debug, Clone, Copy)]
+pub struct InterpreterImage {
+    pub base: u64,
+    pub entry: u64,
+    pub segment_count: usize,
+}
+
+/// Place an `ET_DYN` interpreter at a free address and map its `PT_LOAD`
+/// pages, zeroed.
+///
+/// The base comes from the mmap arena's gap finder rather than a constant, so
+/// the interpreter cannot collide with the executable at
+/// `PROCESS_CODE_START_VA` and a later `mmap` cannot land on top of it: the
+/// per-segment VMAs installed here are what the finder skips.
+///
+/// Like [`process_vm_map_elf_image`] this reads nothing — the caller streams
+/// the file into the first `segment_count` of `segments_out` afterwards.
+pub fn process_vm_map_interpreter(
+    process: ProcessId,
+    header: &[u8],
+    file_len: u64,
+    budget: SegmentBudget,
+    segments_out: &mut [crate::elf::ValidatedSegment],
+) -> Result<InterpreterImage, ElfError> {
+    let probe = ElfValidator::new(header, file_len)?.with_budget(budget);
+    if !probe.header().is_pie() {
+        return Err(ElfError::UnsupportedLoadBase);
+    }
+    if probe.interpreter_extent()?.is_some() {
+        return Err(ElfError::InterpreterInvalid);
+    }
+
+    let count = probe.validate_load_segments_into(segments_out)?;
+    let (low, high) = segment_extent(&segments_out[..count]);
+    let span = high - low;
+    if span > budget.mapped {
+        return Err(ElfError::TotalSizeExceeded);
+    }
+    let align = probe.max_load_align()?;
+
+    let slot = find_slot_for_pid(process).ok_or(ElfError::NullPointer)?;
+    place_interpreter(
+        slot,
+        process,
+        Placement {
+            header,
+            file_len,
+            budget,
+            low,
+            span,
+            align,
+        },
+        segments_out,
+    )
+}
+
+/// What [`place_interpreter`] needs to know, gathered so the locked function
+/// takes one argument rather than seven.
+struct Placement<'a> {
+    header: &'a [u8],
+    file_len: u64,
+    budget: SegmentBudget,
+    low: u64,
+    span: u64,
+    align: u64,
+}
+
+/// Out of line so the second validator and the locked slot stay off
+/// [`process_vm_map_interpreter`]'s frame, measured against the 2 KiB gate.
+#[inline(never)]
+fn place_interpreter(
+    slot: usize,
+    process: ProcessId,
+    plan: Placement<'_>,
+    segments_out: &mut [crate::elf::ValidatedSegment],
+) -> Result<InterpreterImage, ElfError> {
+    let mut guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process.id() || guard.vm_space.is_none() {
+        return Err(ElfError::NullPointer);
+    }
+
+    let inner = &mut *guard;
+    // Over-asked by the alignment slack, so the rounding below stays inside
+    // what the gap search found free.
+    let reserve = plan
+        .span
+        .checked_add(plan.align - PAGE_SIZE_4KB)
+        .ok_or(ElfError::TotalSizeExceeded)?;
+    let gap = inner
+        .vma_map
+        .find_gap(
+            crate::memory_layout_defs::PROCESS_MMAP_START_VA,
+            crate::memory_layout_defs::PROCESS_MMAP_END_VA,
+            reserve,
+        )
+        .ok_or(ElfError::AddressOutOfBounds)?;
+    // The gABI's relation is `runtime_addr == p_vaddr (mod p_align)`, so the
+    // *bias* is what must be a multiple of the strictest declared alignment.
+    // Rounding the base instead is the same thing only when the image's
+    // lowest segment sits at zero, which is what a linker emits and not what
+    // a crafted image has to.
+    let bias = (gap.saturating_sub(plan.low) + plan.align - 1) & !(plan.align - 1);
+    let base = bias + plan.low;
+    let validator = ElfValidator::new(plan.header, plan.file_len)?
+        .with_load_base(bias)
+        .with_budget(plan.budget);
+    let count = validator.validate_load_segments_into(segments_out)?;
+    let entry = validator.validate_entry_point(&segments_out[..count])?;
+
+    let mapped: &[ValidatedSegment] = &segments_out[..count];
+    let mut linked = base;
+    for segment in mapped.iter() {
+        // Two segments share a page whenever one ends mid-page, and the VMA
+        // tree rejects an overlap. The validator requires the segments
+        // ascending and disjoint, so clamping the start to the last VMA's
+        // end can only ever drop a range another VMA already covers -- never
+        // leave a mapped page outside the tree.
+        let start = segment.vaddr_start.max(linked);
+        if start > segment.vaddr_start {
+            // The leaf is mapped with the union of both segments' `p_flags`,
+            // so the VMA describing it takes the same union — this segment's
+            // flags alone would record a page as non-executable that the leaf
+            // still executes.
+            let mut merged = interp_region(segment.flags).protection;
+            if let Some((_, _, existing)) = inner.vma_map.find_containing(segment.vaddr_start) {
+                merged.read |= existing.protection.read;
+                merged.write |= existing.protection.write;
+                merged.exec |= existing.protection.exec;
+            }
+            if inner
+                .vma_map
+                .protect_range(segment.vaddr_start, start, merged)
+                .is_err()
+            {
+                return Err(ElfError::NullPointer);
+            }
+        }
+        if start < segment.vaddr_end {
+            if add_vma_to_inner(
+                inner,
+                start,
+                segment.vaddr_end,
+                interp_region(segment.flags),
+            ) != 0
+            {
+                return Err(ElfError::NullPointer);
+            }
+            linked = segment.vaddr_end;
+        }
+
+        let vm_space_ref = inner
+            .vm_space
+            .as_mut()
+            .expect("place_interpreter: vm_space present per segment");
+        map_segment_pages(vm_space_ref, segment, mapped)?;
+    }
+
+    drop(guard);
+
+    Ok(InterpreterImage {
+        base,
+        entry,
+        segment_count: count,
+    })
+}
+fn interp_region(flags: u32) -> VmaRegion {
+    VmaRegion {
+        protection: Protection {
+            read: (flags & PF_R) != 0,
+            write: (flags & PF_W) != 0,
+            exec: (flags & PF_X) != 0,
+        },
+        backing: RegionBacking::Anonymous,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Code,
+    }
+}
+
+fn segment_extent(segments: &[ValidatedSegment]) -> (u64, u64) {
+    let low = segments
+        .iter()
+        .map(|s| s.vaddr_start)
+        .min()
+        .unwrap_or_default();
+    let high = segments
+        .iter()
+        .map(|s| s.vaddr_end)
+        .max()
+        .unwrap_or_default();
+    (low, high)
 }
 
 /// Out of line so its locked slot and nine-field return value stay out of the
@@ -1126,6 +1318,11 @@ fn load_segments_and_tls(
         return Err(ElfError::UnsupportedLoadBase);
     }
 
+    // Before the lock and before a page is mapped: a refusal here still
+    // costs the caller the address space `process_vm_reset_for_exec` took,
+    // but it costs nothing else.
+    let user_entry = validator.validate_entry_point(segments)?;
+
     let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process.id() {
         return Err(ElfError::NullPointer);
@@ -1147,13 +1344,12 @@ fn load_segments_and_tls(
             .vm_space
             .as_mut()
             .expect("load_segments_and_tls: vm_space present per segment");
-        map_segment_pages(vm_space_ref, segment)?;
+        map_segment_pages(vm_space_ref, segment, segments)?;
     }
 
     let tls_tp = 0u64;
 
-    let user_entry = process_vm_translate_elf_address(header.e_entry, code_base);
-    let phdr_user_addr = compute_phdr_user_addr(header, segments, code_base);
+    let phdr_user_addr = compute_phdr_user_addr(header, segments);
     // Zero means the linker left the phdrs out of every PT_LOAD. libc walks
     // AT_PHDR to find PT_TLS, so refuse the exec rather than ship a process
     // that faults on its first thread-local access.
@@ -1172,6 +1368,8 @@ fn load_segments_and_tls(
         tls_memsz,
         tls_align,
         tls_vaddr,
+        interp_base: 0,
+        interp_entry: 0,
         tls_tp,
     })
 }
@@ -1181,16 +1379,13 @@ fn load_segments_and_tls(
 fn compute_phdr_user_addr(
     header: &crate::elf::Elf64Header,
     segments: &[crate::elf::ValidatedSegment],
-    code_base: u64,
 ) -> u64 {
     let phoff = header.e_phoff;
     let phdr_end = phoff + (header.e_phnum as u64) * (header.e_phentsize as u64);
     for seg in segments.iter() {
         let seg_file_end = seg.file_offset + seg.file_size;
         if phoff >= seg.file_offset && phdr_end <= seg_file_end {
-            let offset_in_seg = phoff - seg.file_offset;
-            let seg_user = process_vm_translate_elf_address(seg.original_vaddr, code_base);
-            return seg_user + offset_in_seg;
+            return seg.original_vaddr + (phoff - seg.file_offset);
         }
     }
     0
@@ -1198,17 +1393,6 @@ fn compute_phdr_user_addr(
 
 fn lowest_segment_vaddr(segments: &[ValidatedSegment]) -> u64 {
     segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0)
-}
-
-/// The user address a validated ELF address loads at. An image's lowest segment
-/// is `code_base` or the load is refused, so only a kernel-half `e_entry` —
-/// which a crafted header can still carry — is folded into the image.
-pub fn process_vm_translate_elf_address(addr: u64, code_base: u64) -> u64 {
-    if addr >= KERNEL_VIRTUAL_BASE {
-        code_base.wrapping_add(addr.wrapping_sub(KERNEL_VIRTUAL_BASE))
-    } else {
-        addr
-    }
 }
 
 fn unmap_existing_code_region(
@@ -1298,33 +1482,52 @@ fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Res
 /// Map every page of `segment`, zeroed. The file's bytes are streamed in
 /// afterwards by the caller of [`process_vm_map_elf_image`], because a
 /// filesystem read cannot happen here, under the per-process lock.
+/// The `p_flags` a page of `segment` must be mapped with. A neighbour whose
+/// page extent reaches this one contributes its own: the two segments share
+/// the page, so it carries the union of what each asks for.
+///
+/// Resolved before the first map rather than by re-protecting afterwards. A
+/// `protect` on a live leaf issues a TLB shootdown and waits for every peer to
+/// acknowledge it, which is cross-CPU work inside `exec`'s mapping loop for an
+/// address space no CPU is running yet.
+fn shared_page_flags(
+    segment: &ValidatedSegment,
+    neighbours: &[ValidatedSegment],
+    page: u64,
+) -> u32 {
+    let mut flags = segment.flags;
+    for other in neighbours {
+        if core::ptr::eq(other, segment) {
+            continue;
+        }
+        if page >= other.vaddr_start && page < other.vaddr_end {
+            flags |= other.flags;
+        }
+    }
+    flags
+}
+
 fn map_segment_pages(
     vm_space: &mut KArc<VmSpace>,
     segment: &ValidatedSegment,
+    neighbours: &[ValidatedSegment],
 ) -> Result<(), ElfError> {
-    let map_flags = if (segment.flags & PF_W) != 0 {
-        PageFlags::USER_RW.bits()
-    } else {
-        PageFlags::USER_RO.bits()
-    };
-
     let mut dst = segment.vaddr_start;
     while dst < segment.vaddr_end {
+        // From the segment's own `p_flags`, so a `PT_LOAD` that does not ask
+        // to be executed is not: the VMA the interpreter loader installs says
+        // so, and a leaf that disagreed would make that statement false.
+        let map_flags = interp_region(shared_page_flags(segment, neighbours, dst))
+            .to_page_flags()
+            .bits();
+
         // Two ELF segments can overlap within a page, so an existing mapping
         // here is expected, and must keep the earlier segment's bytes — which
-        // is why only a fresh page is zeroed.
+        // is why only a fresh page is zeroed. Its permissions are already the
+        // union, because the segment that mapped it resolved the same one.
         let existing_phys =
             crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
         let (phys, fresh) = if !existing_phys.is_null() {
-            if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
-                ostd_mark_range_user_4kb(
-                    vm_space,
-                    VirtAddr::new(dst),
-                    VirtAddr::new(dst + PAGE_SIZE_4KB),
-                    true,
-                )
-                .map_err(|_| ElfError::NullPointer)?;
-            }
             (existing_phys, false)
         } else {
             match ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(dst), map_flags) {

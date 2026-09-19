@@ -101,6 +101,13 @@ build_stamp() {
         printf '%s ' "$bin"
         sha256sum "${BUILD_DIR}/${bin}.elf" 2>/dev/null | cut -d' ' -f1 || echo missing
     done
+    # The shared objects are not in BINS and are named without the .elf
+    # suffix, so a preserved image would otherwise keep last build's
+    # interpreter while every static binary refreshed.
+    for so in libc.so ${EXTRA_SHARED_OBJECTS:-}; do
+        printf '%s ' "$so"
+        sha256sum "${BUILD_DIR}/${so}" 2>/dev/null | cut -d' ' -f1 || echo missing
+    done
     for asset in "${REPO_ROOT}/assets/fonts"/* "${REPO_ROOT}/assets/keymaps"/* \
                  "${REPO_ROOT}/assets/logo.png"; do
         [ -f "$asset" ] || continue
@@ -382,6 +389,23 @@ if [ -n "${COREUTILS_LINKS:-}" ]; then
     echo "Installed $(set -f; set -- $COREUTILS_LINKS; echo $#) utility names in /bin -> coreutils"
 fi
 
+# /lib: the shared C library, which is also the program interpreter every
+# dynamically linked binary names in its PT_INTERP. Sealed and in a sealed
+# directory for the same reason /bin is: the interpreter runs before the
+# program does, so replacing it is replacing every dynamic program at once.
+mkdir_p /lib
+if [ -f "${BUILD_DIR}/libc.so" ]; then
+    install_binary "${BUILD_DIR}/libc.so" /lib/libc.so
+    debugfs -w -R "rm /lib/ld-slopos.so.1" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    debugfs -w -R "symlink /lib/ld-slopos.so.1 libc.so" "$IMAGE_PATH" >/dev/null
+    echo "Installed /lib/libc.so and /lib/ld-slopos.so.1"
+fi
+# Only the -tests recipes set this. Installing by file presence would put a
+# dlopen fixture into the shipped, attested root out of a stale builddir.
+for so in ${EXTRA_SHARED_OBJECTS:-}; do
+    install_binary "${BUILD_DIR}/${so}" "/lib/${so}"
+done
+
 # The directories too, on a root userland can write: a sealed binary cannot be
 # overwritten, but until now its *directory* could be renamed aside and a
 # fresh /bin/halt planted under the path the grant is keyed on. debugfs is not
@@ -391,6 +415,7 @@ seal_dir() {
 }
 seal_dir /bin
 seal_dir /sbin
+seal_dir /lib
 
 # Install font files into /usr/share/fonts/ if assets/fonts/ exists
 FONTS_DIR="${REPO_ROOT}/assets/fonts"

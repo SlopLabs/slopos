@@ -104,6 +104,20 @@ def main() -> None:
     for tool in os.environ.get("COREUTILS_LINKS", "").split():
         entries.append((b"/bin/" + tool.encode(), MODE_LINK, b"coreutils"))
 
+    # The shared C library, which is also the program interpreter, so a
+    # dynamically linked binary runs under `root=initramfs` exactly as it
+    # does on the disk root. `ld-slopos.so.1` is a symlink to it, the way
+    # musl ships one artifact under both names.
+    # EXTRA_SHARED_OBJECTS is set by the -tests recipes only, so a dlopen
+    # fixture cannot reach the shipped image out of a stale build directory.
+    shared = ["libc.so"] + os.environ.get("EXTRA_SHARED_OBJECTS", "").split()
+    for so in shared:
+        src = os.path.join(build_dir, so)
+        if os.path.isfile(src):
+            entries.append((b"/lib/" + so.encode(), MODE_EXEC, read_file(src)))
+    if os.path.isfile(os.path.join(build_dir, "libc.so")):
+        entries.append((b"/lib/ld-slopos.so.1", MODE_LINK, b"libc.so"))
+
     fonts_dir = os.path.join(repo_root, "assets", "fonts")
     if os.path.isdir(fonts_dir):
         for fname in sorted(os.listdir(fonts_dir)):

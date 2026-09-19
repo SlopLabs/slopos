@@ -120,6 +120,11 @@ pub fn grant_for(path: &[u8]) -> (u16, Option<TaskPriority>) {
     }
 }
 
+/// Where a dynamically linked program's interpreter lives. Not a grant path,
+/// but protected as one: the interpreter runs before the program's first
+/// instruction, so substituting it substitutes every program that names it.
+const INTERPRETER_DIR: &[u8] = b"/lib";
+
 /// Whether `path` is, or is an ancestor of, a path this table keys a privilege
 /// on. `path` must be canonical.
 ///
@@ -128,13 +133,17 @@ pub fn grant_for(path: &[u8]) -> (u16, Option<TaskPriority>) {
 /// inode seal cannot see it — a mount changes the namespace rather than an
 /// inode.
 pub fn covers_grant_path(path: &[u8]) -> bool {
-    PROGRAM_GRANTS.iter().any(|grant| {
-        if grant.path == path {
-            return true;
-        }
-        // A prefix only at a component boundary: `/bindings` is not `/bin`.
-        grant.path.len() > path.len()
-            && grant.path.starts_with(path)
-            && (path == b"/" || grant.path[path.len()] == b'/')
-    })
+    PROGRAM_GRANTS
+        .iter()
+        .map(|grant| grant.path)
+        .chain(core::iter::once(INTERPRETER_DIR))
+        .any(|grant| {
+            if grant == path {
+                return true;
+            }
+            // A prefix only at a component boundary: `/bindings` is not `/bin`.
+            grant.len() > path.len()
+                && grant.starts_with(path)
+                && (path == b"/" || grant[path.len()] == b'/')
+        })
 }

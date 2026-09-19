@@ -20,6 +20,7 @@ pub mod errno;
 pub mod error;
 pub mod ffi;
 pub mod io;
+pub mod ld_so;
 pub mod mem;
 pub mod net;
 pub mod pal;

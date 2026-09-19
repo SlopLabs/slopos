@@ -280,7 +280,7 @@ const CASES: &[(&str, fn() -> bool)] = &[
 /// rename, and refuses a create or unlink beneath it, on whichever root booted.
 fn grant_directories_are_sealed() -> bool {
     let mut ok = true;
-    for dir in ["/bin", "/sbin"] {
+    for dir in ["/bin", "/sbin", "/lib"] {
         if std::fs::rename(dir, "/spawn_priv_moved").is_ok() {
             eprintln!("spawn_privilege_test: {dir} was renamed aside");
             let _ = std::fs::rename("/spawn_priv_moved", dir);
@@ -297,7 +297,7 @@ fn grant_directories_are_sealed() -> bool {
             ok = false;
         }
     }
-    // The seal is on those two names and nothing else.
+    // The seal is on those three names and nothing else.
     if std::fs::create_dir("/spawn_priv_dir").is_err() {
         eprintln!("spawn_privilege_test: the directory seal reached the root");
         ok = false;

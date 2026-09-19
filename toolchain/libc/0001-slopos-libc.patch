@@ -129,6 +129,11 @@ index 0000000..6585d11
 +pub type useconds_t = u32;
 +pub type nl_item = c_int;
 +pub type fsword_t = i64;
++pub type Elf64_Addr = u64;
++pub type Elf64_Half = u16;
++pub type Elf64_Off = u64;
++pub type Elf64_Word = u32;
++pub type Elf64_Xword = u64;
 +
 +extern_ty! {
 +    pub type FILE;
@@ -167,6 +172,28 @@ index 0000000..6585d11
 +        pub dli_fbase: *mut c_void,
 +        pub dli_sname: *const c_char,
 +        pub dli_saddr: *mut c_void,
++    }
++
++    pub struct Elf64_Phdr {
++        pub p_type: Elf64_Word,
++        pub p_flags: Elf64_Word,
++        pub p_offset: Elf64_Off,
++        pub p_vaddr: Elf64_Addr,
++        pub p_paddr: Elf64_Addr,
++        pub p_filesz: Elf64_Xword,
++        pub p_memsz: Elf64_Xword,
++        pub p_align: Elf64_Xword,
++    }
++
++    pub struct dl_phdr_info {
++        pub dlpi_addr: Elf64_Addr,
++        pub dlpi_name: *const c_char,
++        pub dlpi_phdr: *const Elf64_Phdr,
++        pub dlpi_phnum: Elf64_Half,
++        pub dlpi_adds: c_ulonglong,
++        pub dlpi_subs: c_ulonglong,
++        pub dlpi_tls_modid: size_t,
++        pub dlpi_tls_data: *mut c_void,
 +    }
 +
 +    pub struct sigset_t {
@@ -969,6 +996,8 @@ index 0000000..6585d11
 +pub const RTLD_NOW: c_int = 2;
 +pub const RTLD_LOCAL: c_int = 0;
 +pub const RTLD_GLOBAL: c_int = 0x100;
++pub const RTLD_NOLOAD: c_int = 4;
++pub const RTLD_DEFAULT: *mut c_void = 0 as *mut c_void;
 +
 +pub const SYS_futex: c_long = 202;
 +pub const SYS_gettid: c_long = 186;
@@ -1372,6 +1401,15 @@ index 0000000..6585d11
 +    pub fn alarm(seconds: c_uint) -> c_uint;
 +    pub fn prctl(option: c_int, ...) -> c_int;
 +    pub fn getauxval(type_: c_ulong) -> c_ulong;
++    pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
++    pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
++    pub fn dlclose(handle: *mut c_void) -> c_int;
++    pub fn dlerror() -> *mut c_char;
++    pub fn dladdr(addr: *const c_void, info: *mut Dl_info) -> c_int;
++    pub fn dl_iterate_phdr(
++        callback: Option<unsafe extern "C" fn(*mut dl_phdr_info, size_t, *mut c_void) -> c_int>,
++        data: *mut c_void,
++    ) -> c_int;
 +    pub fn sysconf(name: c_int) -> c_long;
 +    pub fn uname(buf: *mut utsname) -> c_int;
 +    pub fn gethostname(name: *mut c_char, len: size_t) -> c_int;

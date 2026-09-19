@@ -168,7 +168,7 @@ fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, Cp
 /// a sealed binary cannot be overwritten, but an unsealed parent could be
 /// renamed aside and a fresh `/bin/halt` planted under the path the grant is
 /// keyed on. Sealing the parent closes create, unlink and rename beneath it.
-const SEALED_DIRS: &[&[u8]] = &[b"/bin", b"/sbin"];
+const SEALED_DIRS: &[&[u8]] = &[b"/bin", b"/sbin", b"/lib"];
 
 /// Unpack a `newc` cpio archive into the currently mounted root filesystem,
 /// creating directories and files via the VFS. Returns the number of entries
@@ -258,6 +258,10 @@ fn make_symlink(path: &[u8], target: &[u8]) -> Result<(), CpioError> {
     if target.is_empty() {
         return Err(CpioError::BadField);
     }
+    // Not sealed: `vfs_set_sealed` follows its final component, so sealing a
+    // symlink seals what it points at. `/lib/ld-slopos.so.1` is protected by
+    // `/lib` being in `SEALED_DIRS`, which refuses the unlink and the rename
+    // a re-point needs.
     match vfs_symlink(target, path) {
         Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
         Err(e) => Err(CpioError::Vfs(e)),

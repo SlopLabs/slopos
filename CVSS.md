@@ -1,6 +1,6 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are open.**
+**One finding is open.**
 
 Swept 2026-09-16: the editor — `editor-core`'s buffer, lexer, search and tree
 model, the new `appkit` surfaces, the fd-based clipboard transfer in
@@ -24,12 +24,55 @@ all fixed inside the same unreleased change, so none is an entry.
 > expected. The git history is the audit trail: `git log -p -- CVSS.md` recovers
 > any entry that was here, and a fix's own test is the durable record of it.
 
-The highest ID issued so far is **SLOPOS-2026-0055**. The next finding is
-`SLOPOS-2026-0056`.
+Swept 2026-09-19: the dynamic loader — the kernel's `PT_INTERP` path and the
+userland linker behind it, both of which parse attacker-chosen ELF. Twenty-two
+defects across three reviewers, every one fixed inside the same unreleased
+change and so not an entry. The sweep also proved a **pre-existing** defect the
+interpreter work made visible by contrast, which is the entry below: the
+executable's own segments have never been covered by a VMA.
+
+The highest ID issued so far is **SLOPOS-2026-0056**. The next finding is
+`SLOPOS-2026-0057`.
 
 ## Open findings
 
-None.
+### SLOPOS-2026-0056 — the executable's `PT_LOAD` pages are mapped with no VMA
+
+- **Status:** `open`
+- **Confidence:** 92 (evidence 40 — every line read directly; exploitability 26
+  — a deterministic crafted-ELF path that stays inside the attacker's own
+  process, since `execve` can only narrow authority; reproducibility 26 — a
+  hand-built ELF with a second `PT_LOAD` above the seeded data region)
+- **CVSS:** `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H` — **6.1 MEDIUM**
+- **Evidence:** `mm/src/process_vm.rs:1289-1382` (`load_segments_and_tls` maps
+  every segment and inserts no VMA), `:1309-1311` (the only positional check is
+  on the *lowest* segment), `:844-851` (`seed_fresh_layout`'s two pre-seeded
+  regions, which the loader silently relies on), `:718-760`
+  (`process_vm_reset_for_exec` walks the VMA tree, so an orphan survives an
+  `exec`), `:1487-1497` (an already-present leaf is adopted without being
+  zeroed), `mm/src/vma_region.rs:385-393` (`PagesAxis` is charged only on a VMA
+  insert), `mm/src/elf.rs:639-645` (`validate_segment` permits any `p_vaddr`
+  below `USER_SPACE_END_VA`).
+- **Why it is open rather than fixed:** pre-existing and outside the change that
+  found it. The fix is to give the executable the per-segment VMAs
+  `place_interpreter` now installs and stop relying on the seeded code/data
+  regions, which is a change to the load path of every process on the machine.
+  `RegionPurpose::Code`/`Data` are written and never read, so nothing depends on
+  the two seeded regions being one entry each.
+- **Adjacent, same follow-up:** the eager mapping path chose raw
+  `PageFlags::USER_RW`/`USER_RO`, neither of which carries `NO_EXECUTE`, so
+  every eagerly mapped user page was executable. `map_segment_pages` now
+  derives its flags from the segment's own `p_flags`, but the eager anonymous
+  `mmap` (`mm/src/process_vm.rs:2433-2437`), the ring path (`:2196`) and COW
+  resolution (`mm/src/cow.rs:96`) still use the raw constants and still drop
+  the `NO_EXECUTE` the VMA-driven paths apply.
+- **Repro:** build an ELF whose `PT_LOAD[0]` is at `0x400000` (so
+  `min_vaddr == code_base` passes) and whose `PT_LOAD[1]` is at
+  `0x5_0000_0000`; `execve` it, then `execve` something else in the same
+  process. The second image's interpreter is placed by the gap finder at
+  `PROCESS_MMAP_START_VA`, finds the first image's leaves still present, and
+  adopts them un-zeroed — `map_segment_pages` zeroes only a frame it just
+  allocated. The pages are also absent from the `Pages` quota throughout.
 
 ## Cadence
 

@@ -605,7 +605,10 @@ impl VmaMap {
         for entry in self.map.range(from..) {
             let vma_start = *entry.0;
             let vma_end = entry.1.0;
-            if candidate + size <= vma_start {
+            // Against `limit` too: a VMA past it -- the stack's growth
+            // extent always is -- would otherwise make the gap before it look
+            // unbounded.
+            if candidate + size <= vma_start.min(limit) {
                 return Some(candidate);
             }
             if vma_end > candidate {

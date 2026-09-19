@@ -48,7 +48,12 @@ CRT0_OBJ="$(cd "$BUILD_DIR" && pwd)/crt0.o"
 # inert for the rlib units it also reaches, and carrying it on the crt0 build
 # too keeps one `-Zbuild-std` fingerprint across every invocation below rather
 # than rebuilding core for each.
-USERLAND_RUSTFLAGS="-C link-arg=$CRT0_OBJ"
+#
+# The linker script and `--emit-relocs` used to live in the target spec's
+# `pre-link-args`, where every artifact built for this target got them. The
+# shared objects below must not: `userland.ld` fixes an image at 0x400000 and
+# discards `.interp`, which is the opposite of what a `.so` needs.
+USERLAND_RUSTFLAGS="-C link-arg=$CRT0_OBJ -C link-arg=-Tuserland/userland.ld -C link-arg=--emit-relocs"
 
 rm -f "$CRT0_OBJ"
 # `--emit=obj` is a side effect of *compiling*, so a warm fingerprint makes
@@ -117,6 +122,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         -Zjson-target-spec \
         --target "$USERLAND_TARGET" \
         --package slopos-userland \
+        --bin dl_test \
         --bin fork_test \
         --bin io_capture_test \
         --bin heap_allocator_test \
@@ -162,6 +168,9 @@ if [ "$TEST_MODE" = "--test" ]; then
         --no-default-features \
         --release
 
+    if [ -f "$RELEASE_DIR/dl_test" ]; then
+        cp "$RELEASE_DIR/dl_test" "$BUILD_DIR/dl_test.elf"
+    fi
     if [ -f "$RELEASE_DIR/fork_test" ]; then
         cp "$RELEASE_DIR/fork_test" "$BUILD_DIR/fork_test.elf"
     fi
@@ -313,3 +322,77 @@ if [ ! -f "$RELEASE_DIR/libc.a" ]; then
 fi
 
 echo "C archive built: $RELEASE_DIR/libc.a"
+
+# libc.so, which is both the shared C library and the program interpreter.
+#
+#   -Bsymbolic  binds its own references at link time, so the only relocation
+#               its pre-relocation bootstrap has to apply is RELATIVE.
+#   -z now      eager binding; the loader writes no GOT slot after startup,
+#               which is what makes full RELRO free.
+#   --soname    what a DT_NEEDED on the C library resolves to: the already
+#               mapped interpreter rather than a second copy of it.
+#   --entry     the interpreter entry the kernel jumps to.
+# No linker script and no crt0.o: neither belongs in a shared object, and no
+# `compiler-builtins-mem`: it defines memcpy, memset, memcmp and strlen with
+# hidden visibility, which wins over slibc's own and leaves them out of
+# `.dynsym` — a C program linking libc.so could not call them.
+SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec"
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-Bsymbolic -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
+$CARGO +slopos build \
+    -Zbuild-std=core \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-slibc-cdylib \
+    --release
+if [ ! -f "$RELEASE_DIR/libc.so" ]; then
+    echo "build_userland: slopos-slibc-cdylib built but emitted no shared object at $RELEASE_DIR/libc.so" >&2
+    exit 1
+fi
+cp "$RELEASE_DIR/libc.so" "$BUILD_DIR/libc.so"
+
+echo "C shared library built: $BUILD_DIR/libc.so"
+
+if [ "$TEST_MODE" = "--test" ]; then
+    # The dynamically linked probe and the object it dlopens. Built against
+    # libc.so rather than the slibc rlib, which is the whole point of them:
+    # two copies of the C library in one process is the bug `libc.so` exists
+    # to prevent, and only a program that links none of it can prove it.
+    #
+    # --export-dynamic on the probe is what lets the shared object bind back
+    # to a symbol the executable defines.
+    DL_LINK="-C link-arg=-L$RELEASE_DIR -C link-arg=-lc"
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    RUSTFLAGS="$SO_RUSTFLAGS -Z tls-model=global-dynamic $DL_LINK -C link-arg=-znow -C link-arg=--soname=libdltest.so" \
+    $CARGO +slopos build \
+        -Zbuild-std=core \
+        -Zunstable-options \
+        -Zjson-target-spec \
+        --target "$USERLAND_TARGET" \
+        --package slopos-dltest \
+        --lib \
+        --release
+
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    RUSTFLAGS="-C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
+    $CARGO +slopos build \
+        -Zbuild-std=core \
+        -Zunstable-options \
+        -Zjson-target-spec \
+        --target "$USERLAND_TARGET" \
+        --package slopos-dltest \
+        --bin dl_probe \
+        --release
+
+    for artifact in libdltest.so dl_probe; do
+        if [ ! -f "$RELEASE_DIR/$artifact" ]; then
+            echo "build_userland: slopos-dltest emitted no $artifact" >&2
+            exit 1
+        fi
+    done
+    cp "$RELEASE_DIR/libdltest.so" "$BUILD_DIR/libdltest.so"
+    cp "$RELEASE_DIR/dl_probe" "$BUILD_DIR/dl_probe.elf"
+
+    echo "Dynamic probe built: $BUILD_DIR/dl_probe.elf $BUILD_DIR/libdltest.so"
+fi

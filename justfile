@@ -96,7 +96,11 @@ userland_bins      := "init shell coreutils terminal compositor roulette halt ed
 # fifty-odd copies of std. This list is the *installed* set; the binary's own
 # table is the implemented set, and `coreutils_test` fails if they disagree.
 coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test"
+# Shared objects the suite dlopens. Kept out of `userland_bins`' shape because
+# they are libraries, not programs, and out of the shipped image entirely.
+test_shared_objects := "libdltest.so"
+
+test_userland_bins := userland_bins + " dl_probe dl_test fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -127,6 +131,7 @@ _fs-image: _build-userland
 
 _fs-image-tests: _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size_tests}} VERITY=off PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
+        EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 # The developer's persistent disk: `VERITY=rw` (a v2 trailer) so the kernel
@@ -187,7 +192,7 @@ _initramfs: _build-userland
     COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs-tests: _build-userland-tests
-    COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
+    COREUTILS_LINKS="{{coreutils_tools}}" EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 [doc("Build the kernel (implies fs-image)")]
 build: _fs-image

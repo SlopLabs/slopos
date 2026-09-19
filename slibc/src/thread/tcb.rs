@@ -30,6 +30,13 @@ pub struct Tcb {
     /// mprotected at the low end of `stack_base`, which an attr with
     /// `guardsize == 0` sets to zero. `pthread_getattr_np` reports it.
     pub guard_size: usize,
+    /// This thread's dynamic thread vector: `dtv[0]` is the module count and
+    /// `dtv[m]` module `m`'s block. Null until TLS is installed.
+    pub dtv: *mut usize,
+    /// The TLS allocation's base. The thread pointer is `tls_block + tls_size`
+    /// in the variant-II layout, so freeing the TCB address would hand the
+    /// allocator the middle of a chunk.
+    pub tls_block: *mut u8,
 }
 
 unsafe impl Send for Tcb {}
@@ -53,6 +60,8 @@ impl Tcb {
             thread_local_keys: [ptr::null_mut(); PTHREAD_KEYS_MAX],
             name: [0; super::PTHREAD_NAME_MAX],
             guard_size: 0,
+            dtv: ptr::null_mut(),
+            tls_block: ptr::null_mut(),
         }
     }
 

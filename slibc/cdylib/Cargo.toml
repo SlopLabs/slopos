@@ -1,0 +1,26 @@
+[package]
+name = "slopos-slibc-cdylib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "libc.so - slibc as the shared C library and the program interpreter"
+
+# One artifact is both the C library and `ld-slopos.so.1`, which is what musl
+# does and what keeps a process to one allocator, one `errno` and one TLS
+# implementation however many objects it loads. It is a separate package for
+# the same reason `slibc/staticlib` is: a `no_std` cdylib needs an in-crate
+# `#[panic_handler]`, and cargo would emit that handler for slibc's rlib users
+# too, where it is a duplicate `panic_impl` lang item.
+[lib]
+name = "c"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+slopos-slibc = { workspace = true }

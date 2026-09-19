@@ -1,7 +1,4 @@
-use core::ffi::c_void;
-
 use crate::errno::{EDEADLK, EINVAL};
-use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
 
 use super::pthread_t;
@@ -48,7 +45,7 @@ pub unsafe extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut u8) -
         let _ = Sys::munmap(stack_base, stack_size);
     }
 
-    malloc::dealloc(tcb as *mut c_void);
+    super::tls::free_thread_tls(tcb);
     0
 }
 
@@ -68,7 +65,7 @@ pub unsafe extern "C" fn pthread_detach(thread: pthread_t) -> i32 {
         if !stack_base.is_null() && stack_size > 0 {
             let _ = Sys::munmap(stack_base, stack_size);
         }
-        malloc::dealloc(tcb as *mut c_void);
+        super::tls::free_thread_tls(tcb);
     }
 
     0

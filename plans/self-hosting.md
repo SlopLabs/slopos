@@ -25,23 +25,18 @@ holds 52 GB across 219,895 files. Against that, SlopOS now runs a 24 MiB
 executable with a gigabyte of anonymous address space and a demand-paged file
 mapping, resolves a 4096-byte path with symlinks in it, stats a file for a real
 mtime, mounts a 16 GiB volume holding a million inodes — this repository and
-that sysroot among them — and refuses `PT_INTERP` outright (`mm/src/elf.rs`).
-The remaining gap is one order of magnitude in linking, and every constant that
+that sysroot among them — and runs a `PT_INTERP` executable that `dlopen`s a
+shared object. The remaining gap is a C++ runtime, and every constant that
 produced the storage gap was chosen correctly for an appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes,
 they are appliance-sized constants and appliance-sized policies. A workbench
 needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
-*widening under proof*, not redesign — with three remaining exceptions: dynamic
-linking, a C++ runtime for SlopOS, and the compiler bootstrap itself. Nine
-more, a page-fault path that can reach the device, a POSIX floor a build system
-can stand on, a filesystem that can hold a tree, a utility set that is
-executables rather than shell builtins, a shell a build script can be written
-in, a terminal an editor can be written against, an editor written against the
-machine itself, a target that is a unix-family Rust target over a real C
-library, and a measured answer to which toolchain can build this kernel, have
-landed.
+*widening under proof*, not redesign, and two exceptions remain: a C++ runtime
+for SlopOS, and the compiler bootstrap itself. The eleven sections between here
+and Phase 1 are what has landed, each stating the constraints a later phase
+must not disturb.
 
 
 ## Architectural constraints (do not violate)
@@ -63,23 +58,15 @@ landed.
 - **Task ownership I1–I8** and **no `async fn` in a kernel crate**. The
   sleepable fault path this rests on is a blocking task on its own kernel
   stack, not an executor.
-- **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source, ever
-  — which ruled out lifting busybox-lineage utilities or Linux userland code
-  for the utilities, so the multicall *shape* was taken and every line
-  written here. The same rule ruled busybox `ash` out of the shell: the
-  grammar below is written from the POSIX Shell Command Language (IEEE Std
-  1003.1 §2.3–2.14), which is a specification rather than an implementation,
-  and the architectural references consulted for it — dash (BSD-3), toybox
-  `sh` (0BSD), mrsh (MIT) — are compatible and were read for shape, not text.
-  Concepts, ABI numbers and struct layouts are free to
-  take; prose and implementation are not. Anything new linked into a shipped
-  binary needs a `NOTICE.md` entry. Fonts stay runtime-loaded. Both candidate
-  C++ runtimes are clear: LLVM, clang, `lld`, libc++ and libc++abi are
-  Apache-2.0-with-LLVM-exception, GPLv3-compatible in the direction this
-  repository needs, and GCC's `libstdc++`/`libgcc_s` are GPL-3.0 with the
-  Runtime Library Exception, which is the licence SlopOS already ships under.
-  Licensing is the one thing about the C++ port that costs nothing beyond the
-  `NOTICE.md` entries.
+- **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source,
+  ever: concepts, ABI numbers and struct layouts are free to take, prose and
+  implementation are not. That ruled out busybox-lineage utilities and
+  busybox `ash`, so the multicall *shape* and the POSIX Shell Command Language
+  (IEEE Std 1003.1 §2.3–2.14) were the inputs and every line was written here.
+  Anything new linked into a shipped binary needs a `NOTICE.md` entry; fonts
+  stay runtime-loaded. Both candidate C++ runtimes are clear — LLVM's stack is
+  Apache-2.0-with-LLVM-exception, GCC's is GPL-3.0 with the Runtime Library
+  Exception — so the C++ port costs nothing here beyond those entries.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
   quota, lockdep, test-count and filesystem-cost pools. Re-measure with each
   gate's `--emit-allowlist` in the same commit and say which change added the
@@ -92,39 +79,28 @@ landed.
 
 ## The loop this plan starts from
 
-`just boot-persist` is a machine whose state survives, including a rude QEMU
-exit, and no host build destroys guest data. Every measurement below depends on
-that, because a root that silently reverts to RAM makes each of them a
-measurement of the initramfs.
+`just boot-persist` is a machine whose state survives a rude QEMU exit, and no
+host build destroys guest data. Every measurement below depends on it: a root
+that silently reverts to RAM makes each of them a measurement of the
+initramfs. `AGENTS.md` documents the mechanism; what a later phase must not
+disturb is four properties of it.
 
-What it rests on, in case a later phase disturbs it:
-
-- **The image is marked clean while it is idle.** The flusher calls
-  `mark_filesystem_clean` (`fs/src/ext2_vfs.rs`) on every pass that leaves
-  nothing dirty, nothing unbarriered, no superblock drift and an empty log, and
-  `Ext2Fs::transaction` re-stamps `EXT2_ERROR_FS` before the next mutation
-  reaches the device. That is ext4's freeze/thaw ordering, arrived at
-  automatically rather than through `fsfreeze`. A rude exit costs the last idle
-  window instead of an image that mounts read-only forever, which `root=auto`
-  would then demote to `/mnt` while booting the initramfs.
-  `test_ext2_clean_stamp_thaws_before_the_next_write` holds the ordering to the
-  offset of the first device write.
-- **The host refuses rather than rebuilds.** `build_fs_image.sh` holds a
-  `PRESERVE_FS_IMAGE=1` image to `check_fs_image.sh` — sound *and* clean, since
-  `e2fsck -fn` alone exits 0 on a dirty superblock — and an image it cannot
-  keep stops the build with the command that repairs it. `just
-  boot-persist-reset` is the only path that deletes one. A larger
-  `PERSIST_IMAGE_SIZE` grows the existing image through `resize2fs` with the
-  trailer kept aside, so a failed resize leaves it byte-identical.
-- **A rebuild no longer re-blesses guest writes.** `gen_verity.py` AND-s the
-  old attested bitmap into the new one, so a block a boot rewrote stays
-  un-attested across rebuilds — what `fs/src/verity.rs` already said the bitmap
-  meant.
-- **The persist root is 512M against a 32M shipped image, and 1 GiB is no
-  longer the ceiling.** The verity hash array is chunked at 4 bytes per 4 KiB
-  block in 256 KiB pieces, so what bounds an image is the resident hash a
-  machine's RAM can hold — which the mount computes and *refuses* past
-  (`VerityError::TooLarge`) rather than discovering as an allocation failure.
+- **The image is marked clean while it is idle**, and re-stamped dirty before
+  the next mutation reaches the device — ext4's freeze/thaw ordering, reached
+  automatically rather than through `fsfreeze`.
+  `test_ext2_clean_stamp_thaws_before_the_next_write` holds it to the offset of
+  the first device write.
+- **The host refuses rather than rebuilds.** A `PRESERVE_FS_IMAGE=1` image must
+  be sound *and* clean (`e2fsck -fn` alone exits 0 on a dirty superblock); one
+  that is not stops the build naming its repair. `just boot-persist-reset` is
+  the only path that deletes one, and growth goes through `resize2fs` so a
+  failed resize leaves the image byte-identical.
+- **A rebuild does not re-bless guest writes.** `gen_verity.py` AND-s the old
+  attested bitmap into the new one.
+- **Image size is bounded by RAM, not by one allocation.** The verity hash is
+  chunked, and a mount that cannot hold it answers `VerityError::TooLarge`
+  rather than discovering an allocation failure. 512M persist against a 32M
+  shipped image.
 
 ---
 
@@ -134,92 +110,64 @@ The second thing this plan rests on, and the reason the phases below are
 *measurable*: a toolchain-sized process can start. `bigprog_test` is the
 standing proof — a 24 MiB binary that loads intact, maps a gigabyte of
 anonymous space, maps a file past a ragged EOF, recurses through three
-megabytes of stack and forks with 192 MiB resident. Every one of those was a
-hard refusal before, and the last two are sized deliberately: 3 MiB is past the
-whole of the old fixed stack, and 192 MiB is past the ~170 MiB at which `fork`'s
-single-`KVec` snapshot used to exceed the slab's 1 MiB ceiling and panic. The
-suite's guest is 1 GiB rather than 512 MiB to afford that residency.
+megabytes of stack and forks with 192 MiB resident. Every one was a hard
+refusal before; the last two are sized past the old fixed stack and past the
+~170 MiB at which `fork`'s single-`KVec` snapshot used to exceed the 1 MiB slab
+ceiling and panic. The suite's guest is 1 GiB to afford that residency.
 
 What it rests on, in case a later phase disturbs it:
 
-- **A user page fault can reach the device.** #PF has no IST entry
-  (`boot/src/ist_stacks.rs`), so a user-mode fault lands on the faulting task's
-  own kernel stack via `TSS.RSP0` — exactly as a timer IRQ from user mode
-  already did — and `vector_uses_ist` excludes vector 14 so no preempt hold is
-  taken. The handler re-enables interrupts, leaves interrupt-nesting context,
-  resolves, and hands off to the scheduler at trap exit. That is what makes a
-  blocking `fs.read` legal on the fault path, and it is a *blocking task*
-  rather than an executor, as the constraints above require. The cost is
-  stated: a kernel #PF taken with no room to push its frame now escalates to
-  #DF, which `exception_double_fault` classifies against the IST, exception
-  data-stack, emergency and task-stack guard pages.
+- **A user page fault can reach the device.** #PF has no IST entry, so a
+  user-mode fault lands on the faulting task's own kernel stack via `TSS.RSP0`
+  and takes no preempt hold; the handler re-enables interrupts, leaves
+  interrupt-nesting context and resolves. That is what makes a blocking
+  `fs.read` legal on the fault path, as a *blocking task* rather than an
+  executor. The cost is stated: a kernel #PF with no room for its frame
+  escalates to #DF, which `exception_double_fault` classifies against the
+  guard pages.
 - **The per-process lock is not held across the I/O.** A file-backed fault
-  plans under `PROCESS_VMS[slot]` (`demand::plan_file_fault`), drops it, reads
-  one page through `filemap::fault_page_in_set`, then re-takes the lock and
-  re-validates that the region still names the same file page before installing
-  (`demand::install_file_page`). A mapping unmapped or replaced mid-read
-  resolves as a retry, not as a page from the wrong file.
-- **`exec` stages a header, not an image.** `do_exec` reads
-  `ELF_HEADER_WINDOW` (7232 bytes — the ELF header plus the largest
-  program-header table), validates every segment extent against the file's real
-  length, maps each `PT_LOAD` zeroed under the lock, then streams the file into
-  the mapping in `EXEC_READ_CHUNK` pieces with the lock dropped. Kernel memory
-  per `exec` is therefore independent of the binary's size; `EXEC_MAX_ELF_SIZE`
-  is 512 MiB and, unlike the 16 MiB it replaced, reachable. The *mapping* is
-  still eager, so what an image may ask the frame allocator for is bounded from
-  the other side too: `MAX_TOTAL_ZERO_FILL_SIZE` caps the `p_memsz`-past-
-  `p_filesz` part at the 256 MiB the whole-image ceiling used to permit, or a
-  one-page ELF declaring a 2 GiB `PT_LOAD` would have an unprivileged `exec`
-  memset half a million frames under the per-process lock. The relocation pass
-  that forced whole-file staging is gone: it only ever ran for an image not
-  linked at `PROCESS_CODE_START_VA`, nothing the tree builds is, and it relied
-  on the loader handing it physically contiguous frames. Such an image is now
-  refused (`ElfError::UnsupportedLoadBase`) rather than loaded unrelocated.
+  plans under the lock, drops it, reads one page, then re-takes it and
+  re-validates that the region still names the same file page. A mapping
+  replaced mid-read is a retry, not a page from the wrong file.
+- **`exec` stages a header, not an image.** `ELF_HEADER_WINDOW` (7232 bytes),
+  every segment extent validated against the file's real length, then the file
+  streamed into the mapping in `EXEC_READ_CHUNK` pieces with the lock dropped
+  — so kernel memory per `exec` is independent of binary size and
+  `EXEC_MAX_ELF_SIZE` (512 MiB) is reachable. The mapping is still eager, so
+  `MAX_TOTAL_ZERO_FILL_SIZE` caps the `p_memsz`-past-`p_filesz` part at
+  256 MiB, or a one-page ELF declaring a 2 GiB `PT_LOAD` would have an
+  unprivileged `exec` memset half a million frames under the lock. The
+  whole-file-staging relocation pass is gone; such an image is refused
+  (`ElfError::UnsupportedLoadBase`) rather than loaded unrelocated.
 - **Mappings are lazy, and the ledger says which are resident.** `brk`, `mmap`
-  and both file-mapping modes install no PTE; the fault installs one page. The
-  stack is 1 MiB mapped inside an 8 MiB lazy extent with a guard gap below it,
-  so a deeper stack is an ordinary demand fault and one past the ceiling finds
-  no VMA. `Pages` is 4 GiB of VA per process and means what it always meant —
-  `RLIMIT_AS`, not memory — and the new `ResidentPages` axis is the other
-  number: the count of present user leaves, maintained by the page-table cursor
-  because that is the only place one appears or disappears. The suite measures
-  ~113 000 resident against ~950 000 mapped — a factor of eight, which is
-  demand paging working rather than a discrepancy. Page tables are charged too,
-  so a multi-gigabyte address space is no longer free.
-- **`fork` fails rather than panicking.** The parent's PTE snapshot is chunked
-  at `CLONE_CHUNK_PAGES` and every push is fallible, so a parent with a
-  gigabyte resident gets `ENOMEM` where it used to take the kernel down on a
-  `KVec` over the 1 MiB slab ceiling. `VmaMap::remove_range` and `drain` are
-  allocation-free for the same reason: `munmap` and teardown have no failure
-  channel. Fork's cost is still O(resident) in kernel memory, and deliberately
-  so — the whole parent walk happens under one hold of its lock, because a
-  parent whose other threads could write between the COW mark and the child's
+  and both file-mapping modes install no PTE. The stack is 1 MiB inside an
+  8 MiB lazy extent over a guard gap. `Pages` is 4 GiB of VA per process and
+  still means `RLIMIT_AS`; `ResidentPages` counts present user leaves,
+  maintained by the page-table cursor because that is the only place one
+  appears. ~113 000 resident against ~950 000 mapped is demand paging working.
+  Page tables are charged, so a multi-gigabyte address space is not free.
+- **`fork` fails rather than panicking.** The PTE snapshot is chunked at
+  `CLONE_CHUNK_PAGES` and every push fallible. `VmaMap::remove_range` and
+  `drain` are allocation-free because `munmap` and teardown have no failure
+  channel. Fork stays O(resident) under one hold of the parent's lock: a
+  parent whose threads could write between the COW mark and the child's
   mapping would not be handing over a snapshot.
-- **`mprotect` splits.** `VmaMap::split_at` / `protect_range` / `coalesce_at`
-  carve the range out, rewrite only it, and re-merge the boundaries, so a
-  sub-range no longer rewrites its whole VMA's recorded protection while
-  touching only some of its PTEs. A file-backed VMA rebases its file offset on
-  every split, or a fault in the tail would read the wrong page — and
-  `can_merge_before` compares those offsets for contiguity, so restoring a
-  protection re-merges the halves instead of leaving an entry per call.
+- **`mprotect` splits.** A sub-range no longer rewrites its whole VMA's
+  protection. A file-backed VMA rebases its offset on every split, or a fault
+  in the tail reads the wrong page, and `can_merge_before` compares those
+  offsets so restoring a protection re-merges.
 - **`exec`'s argument surface is byte-bounded.** `EXEC_MAX_ARG_PAGES` is the
-  same 128 KiB the retired 32-argument cap implied, now spendable as many short
-  strings; `EXEC_MAX_ARG_STRINGS` is only a loop bound so a NULL-less user
-  array terminates. `setup_user_stack` resolves the address space once instead
-  of per write.
-- **The filemap caps come from the medium.** 128 inodes, and a page ceiling of
-  a quarter of usable frames with the old 1024 as the floor, because a page
-  under a live user PTE is unreclaimable by construction. A page whose *start*
-  is past EOF is refused per page; one straddling EOF is zero-filled, which is
-  what makes a mapping of a file whose size is not page-aligned legal.
+  128 KiB the retired 32-argument cap implied; `EXEC_MAX_ARG_STRINGS` is only a
+  loop bound so a NULL-less array terminates.
+- **The filemap caps come from the medium.** 128 inodes and a quarter of usable
+  frames (floor 1024), because a page under a live user PTE is unreclaimable.
+  A page whose start is past EOF is refused; one straddling EOF is zero-filled.
 
-**Two clauses of this did not land, and are not hiding.** There is still no OOM
-*disposition*: a fault that cannot find a frame kills the faulter with a
-SIGBUS-coded exit, and choosing a victim instead is a policy subsystem rather
-than a constant. It belongs with swap, which also did not land — see the
-storage section below, which is where both were expected to arrive. And user
-mappings are all 4 KiB; nothing instantiates the 2 MiB leaf the page tables
-already support, which is a throughput item, not a capability one.
+**Two clauses did not land.** There is no OOM *disposition* — a fault that
+cannot find a frame kills the faulter with a SIGBUS-coded exit — and choosing a
+victim is a policy subsystem that belongs with swap, which also did not land.
+User mappings are all 4 KiB; the 2 MiB leaf the page tables support is a
+throughput item, not a capability one.
 
 ---
 
@@ -227,188 +175,100 @@ already support, which is a throughput item, not a capability one.
 
 The third thing this plan rests on: a program can find its files, learn whether
 they changed, spawn children and know how they died. `buildctl_test` is the
-standing proof — an in-guest build driver that creates a source tree under a
-relative path with names past 32 bytes and a symlinked include directory,
-spawns a stub compiler per file with `Command::current_dir` set, fingerprints
-each input by `mtime`, skips every unchanged input on a second run, recompiles
-exactly the one input it touched, reads a child's real exit code, sees a child's
-`SIGSEGV` as a signal rather than as exit 139, and holds a `flock` a second
-attempt cannot take. Every one of those was a wrong answer before.
+standing proof — an in-guest build driver that builds a source tree under a
+relative path with a symlinked include directory, spawns a stub compiler per
+file with `Command::current_dir` set, fingerprints by `mtime` and recompiles
+exactly the one input it touched, reads a child's real exit code, tells a
+`SIGSEGV` from exit 139, and holds a `flock` a second attempt cannot take.
+Every one was a wrong answer before.
 
 What it rests on, in case a later phase disturbs it:
 
-- **A path is 4096 bytes and can contain a symlink.** `MAX_PATH_LEN` and
-  `USER_PATH_MAX` are `PATH_MAX`; `MAX_NAME_LEN` and `USER_NAME_MAX` are ext2's
-  own 255, which is what a `libcore-<hash>.rlib` needs. The walk
-  (`fs/src/vfs/path.rs`) stats each component, keeps a stack of the ancestors
-  it has resolved, and on a symlink splices the target and restarts — so the
-  budget is `MAX_SYMLINK_FOLLOWS` (40) for the *whole* resolution, as Linux
-  has had it since 4.2, and exhausting it is `VfsError::TooManySymlinks` →
-  `ELOOP`. `..` pops that ancestor stack rather than being folded away
-  lexically before the walk, which is the only way it can mean what POSIX says
-  it means once a component can be a symlink: `a/link/..` is the directory
-  holding the link's *target*, not the directory holding the link.
-  `RESOLVE_NOFOLLOW_FINAL` is what makes `lstat` and `AT_SYMLINK_NOFOLLOW`
-  expressible, and `RESOLVE_MUST_BE_DIR` — set by a trailing slash or
-  `O_DIRECTORY` — is what makes `open("file/")` the `ENOTDIR` POSIX requires.
+- **A path is 4096 bytes and can contain a symlink.** `MAX_PATH_LEN` is
+  `PATH_MAX`, `MAX_NAME_LEN` ext2's 255 — what a `libcore-<hash>.rlib` needs —
+  and `MAX_SYMLINK_FOLLOWS` (40) is the budget for the whole resolution. `..`
+  pops the resolved-ancestor stack rather than being folded lexically, the only
+  way it can mean what POSIX says once a component can be a symlink.
+  `RESOLVE_NOFOLLOW_FINAL` makes `lstat` expressible; `RESOLVE_MUST_BE_DIR`
+  makes `open("file/")` the `ENOTDIR` POSIX requires.
 - **No path is a stack frame.** A 4096-byte array on a 2 KiB frame steps clean
-  over the 4 KiB guard page in one instruction, which no allowlist can raise.
-  `CanonPath` is a `KVec<u8>`, and the walk builds the resolved canonical path
-  incrementally into another rather than carrying a per-component offset table.
-  `UserPath` (`core/src/syscall/args.rs`) stages a path syscall's argument on
-  the heap, which is what Linux's `getname()` does for the same reason, and
-  answers `ENAMETOOLONG` rather than truncating into the name of a different
-  file. `NameBuf` borrows the final component out of the canonical path the walk
-  already allocated, so `resolve_parent` costs one allocation rather than two
-  and carries no inline 255-byte array. The shell's own 256-byte ceiling is
-  gone the same way, or `cd` into a registry path would still fail on a machine
-  that can now resolve one.
-- **Relative paths resolve against the caller's cwd.** Every path syscall goes
-  through `resolve_path_at`/`resolve_parent_at` with the cwd from
-  `SyscallContext::with_cwd`, which is the only place a handler may read one,
-  and `exec` and `spawn_path` resolve the program the same way — a `Command`
-  with a relative program and a `current_dir` is the shape a build driver
-  actually has. The task's cwd is heap-backed at 4096 bytes, and `chdir`
-  resolves against the *old* cwd and requires a directory before storing the
-  *walked* path — an unvalidated or lexical cwd is a correctness bug the moment
-  the VFS consults it. A `dirfd` likewise stores the path its walk ended on,
-  and every `*at` call re-checks that it still names the descriptor's own inode
-  before resolving against it: a base renamed underneath answers `ESTALE`
-  rather than silently redirecting into whatever holds that name now, which is
-  the race the `*at` family exists to be immune to.
-- **`stat` is the Linux `struct stat`.** 144 bytes, field-for-field, every hole
-  a named field because `copy_to_user` copies `size_of::<Self>()` raw bytes.
-  `FileStat::fill_user_stat` is the single producer and `FileType::to_s_ifmt`
-  the single type mapping, which is what closed the bug where `fstat` on a
-  regular file reported `FS_TYPE_DIRECTORY`: the enum's discriminants and the
-  ABI's constants never agreed, and two call sites each had their own table.
-- **The wall clock is real, and a timestamp can be set.** A CMOS RTC driver
-  (`drivers/src/rtc.rs`, over a safe `slopos_ostd::io::CmosRegs` window whose
-  serialisation obligation is a witness type rather than prose) is what the
-  boot step prefers, with Limine's one-shot date as the fallback; neither
-  answering still leaves `realtime_ns()` as `None`, which `fs/src/ext2/time.rs`
-  depends on to decline to stamp rather than claim 1970. `clock_settime` is
-  gated on `Capability::Clock` — not `Power`, which reaches a power primitive
-  and must keep meaning that — and `set_realtime` refuses an out-of-range value
-  instead of silently no-opping. ext2 and ramfs both implement
-  `FileSystem::set_times`, so `utimensat` works on either root, and cargo's
-  whole fingerprint model is mtime-based.
-- **`waitpid` is POSIX.** `(pid, status, options)`, returning the reaped pid and
-  writing `(code<<8)|sig`. slibc was already sending those three registers; the
-  kernel read the status pointer as flags and never wrote it, so `ExitStatus`
-  was `Some(0)` for every child and **every failed compiler reported success**.
-  `WNOHANG` with a live child now returns 0 rather than `EAGAIN`, which no
-  longer collides with a child that exited 0 — the bug that made `try_wait`
-  never complete. `ExitInfo.signal` and `TaskExitReason::Signalled` are what let
-  a signal death be told from `exit(139)`.
-- **A stop is a state, not a dropped bit.** `TaskStatus::Stopped` exists;
-  `task_group_stop`/`task_group_continue` park and resume every member of a
-  thread group; a stopped task holds no runqueue position, is not reapable, and
-  still parents its children. A member that is executing is poked and parks
-  itself at its next return-to-user boundary rather than being descheduled
-  mid-syscall from another CPU. `WUNTRACED`/`WCONTINUED` report it exactly once,
-  which is what makes the shell's `fg`/`bg` able to resume a job and Ctrl-Z able
-  to suspend one. `kill(pid)` fans out over the thread group, and `exit_group`
-  exists because `exit` is the right primitive for a thread and the wrong one
-  for a process.
-- **A fault can be caught.** A user-mode fault posts `SIGSEGV`/`SIGBUS`/`SIGILL`
-  with a `si_code` and a `si_addr` and returns to the trap exit, where the
-  existing delivery hook builds the frame; the default disposition still kills,
-  which is the same outcome as before rather than a regression. The frame is
-  `[restorer][SignalFrame][UserSiginfo][UserUcontext][FPU]` — `SignalFrame`
-  stays immediately above the restorer word, because both userland restorer
-  trampolines document and depend on RSP pointing at it once the handler's `ret`
-  pops the restorer. `sigaltstack(2)` is what makes a handler for a fault caused
-  by stack exhaustion deliverable at all, and `MINSIGSTKSZ` is pinned to the
-  real frame total by a const assert. A frame push that cannot be written
-  terminates the task — immediately for a fault signal, whose interrupted
-  instruction would re-execute and fault again, and on the second consecutive
-  failure for any other, so an ordinary `SIGTERM` whose frame cannot be pushed
-  is retried once and then fatal rather than re-pended at every boundary
-  forever. slibc maps a `PROT_NONE` guard page below every thread stack, so
-  std can tell a stack overflow from an ordinary `SIGSEGV`.
+  over the guard page, which no allowlist can raise, so `CanonPath` and
+  `UserPath` are heap-backed — Linux's `getname()` — and answer
+  `ENAMETOOLONG` rather than truncating into another file's name.
+- **Relative paths resolve against the caller's cwd**, including `exec` and
+  `spawn_path`, because a `Command` with a relative program and a
+  `current_dir` is the shape a build driver has. `chdir` stores the *walked*
+  path; an `*at` call re-checks that its base still names the descriptor's
+  inode and answers `ESTALE` if not, which is the race that family exists to
+  be immune to.
+- **`stat` is the Linux `struct stat`**, 144 bytes field-for-field with every
+  hole named, because `copy_to_user` copies raw bytes. One producer and one
+  type mapping, which is what closed `fstat` reporting a regular file as
+  `FS_TYPE_DIRECTORY`.
+- **The wall clock is real and settable.** CMOS RTC with Limine's date as
+  fallback; neither answering leaves `realtime_ns()` `None`, which ext2 needs
+  to decline to stamp rather than claim 1970. `clock_settime` is gated on
+  `Capability::Clock`, not `Power`. Cargo's fingerprint model is mtime-based.
+- **`waitpid` is POSIX** — `(pid, status, options)`, status written as
+  `(code<<8)|sig`. The kernel used to read that pointer as flags and never
+  write it, so **every failed compiler reported success**. `WNOHANG` with a
+  live child returns 0, which no longer collides with a child that exited 0.
+- **A stop is a state, not a dropped bit.** `TaskStatus::Stopped`, group stop
+  and continue, no runqueue position, not reapable, still parenting; an
+  executing member parks at its next return-to-user boundary rather than being
+  descheduled mid-syscall from another CPU. That is what makes `fg`/`bg` and
+  Ctrl-Z work. `kill` fans out over the thread group, and `exit_group` exists
+  because `exit` is right for a thread and wrong for a process.
+- **A fault can be caught.** `SIGSEGV`/`SIGBUS`/`SIGILL` with `si_code` and
+  `si_addr`; the default disposition still kills. `SignalFrame` must stay
+  immediately above the restorer word, because both restorer trampolines
+  depend on RSP pointing at it, and `MINSIGSTKSZ` is pinned to the real frame
+  total by a const assert. An unwritable frame push kills immediately for a
+  fault signal — its instruction would re-execute and fault again — and on the
+  second consecutive failure otherwise. slibc maps a `PROT_NONE` guard below
+  every thread stack so std can tell overflow from an ordinary `SIGSEGV`.
 - **Threads share what POSIX says they share.** `CLONE_SIGHAND` was validated
-  and then ignored, so every thread got a private action table while
-  `pthread_create` asked for a shared one; the table now lives behind a
-  `KArc<SigHandTable>`. The futex decodes `op & FUTEX_CMD_MASK`, so
-  `FUTEX_PRIVATE_FLAG` — which every std- and glibc-shaped caller sets, and
-  which used to make the whole call `ENOSYS` — is accepted; the timeout is a
-  real `timespec`, relative for `FUTEX_WAIT` and absolute for
-  `FUTEX_WAIT_BITSET`, and the bitset and requeue forms exist.
-- **`std` reaches the syscalls that exist.** `read_dir` runs over `getdents64`
-  on an owned directory descriptor rather than splitting the output of a
-  bespoke listing call on newlines, so a filename containing a newline is just
-  bytes; `symlink`, `read_link`, `hard_link`, `set_permissions`,
-  `File::set_times`, `read_vectored`, `write_vectored` and
-  `FileExt::read_at`/`write_at` are real
-  instead of `unsupported`; and `Command::spawn` goes through `spawn_path` with
-  a cwd in `SpawnAttrs`, so nothing allocates between fork and exec against the
-  single global malloc spinlock a multithreaded parent could hand over locked.
-- **The ABI is Linux's, numbers included.** A syscall number below
-  `SYSCALL_PRIVATE_BASE` is Linux x86-64's number for the call of that name and
-  carries that call's Linux signature: 114 of them, in a dense table sized to
-  the 472 numbers Linux has allocated. The 37 operations Linux has no name for
-  — the seat and screen acquisition, SlopRing, the compositor and cursor calls,
-  the keymap and font uploads, the net-config surface that replaces netlink,
-  `spawn_path`, the fate calls, the KTAP hooks, the fd-less console write and
-  controlling-terminal read, and `sys_info` — live in a private range based at
-  1024, which is the discipline ARM takes with `__ARM_NR_BASE` and is clear of
-  both the allocated space and `__X32_SYSCALL_BIT`. Nothing borrows a Linux
-  number for a shape it does not implement, and nothing keeps a private number
-  once the shape agrees: `sendmsg`/`recvmsg` were private *because*
-  `MsgHdr`/`CmsgHdr` were not Linux's layouts, and they took 46 and 47 the
-  moment those layouts became Linux's — the allowlist that carried their
-  justification is now empty. SlopRing still declines io_uring's 425-427,
-  because its SQE is its own.
-  `scripts/check_syscall_abi.sh` holds every non-private constant to Linux's
-  own `syscall_64.tbl`, requires the private range contiguous, and fails a
-  private name that collides with a Linux syscall unless the allowlist states
-  why — so a number cannot drift from the call it claims.
+  and ignored; the action table is a `KArc<SigHandTable>`. The futex decodes
+  `op & FUTEX_CMD_MASK`, so `FUTEX_PRIVATE_FLAG` — set by every std-shaped
+  caller, and formerly `ENOSYS` — works, with real timeouts and the bitset and
+  requeue forms.
+- **`std` reaches the syscalls that exist**: `read_dir` over `getdents64` on an
+  owned descriptor so a filename with a newline is just bytes; the link, times
+  and vectored calls are real rather than `unsupported`; and `Command::spawn`
+  allocates nothing between fork and exec, against a malloc spinlock a
+  multithreaded parent could hand over locked.
+- **The ABI is Linux's, numbers included.** A number below
+  `SYSCALL_PRIVATE_BASE` is Linux x86-64's for the call of that name and
+  carries its signature — 114 of them. The 37 operations Linux has no name for
+  sit in a private range based at 1024, ARM's `__ARM_NR_BASE` discipline,
+  clear of the allocated space and `__X32_SYSCALL_BIT`. Nothing borrows a
+  Linux number for a shape it does not implement and nothing keeps a private
+  one once the shape agrees. `scripts/check_syscall_abi.sh` holds all of it to
+  `syscall_64.tbl`.
 
-**What this deliberately did not do.** The layouts are Linux's in all but the
-places listed below, and those are what stand between source compatibility —
-which this is — and *binary* compatibility with prebuilt Linux userland, which
-is the open decision further down. Process-group waits (`pid == 0`,
-`pid < -1`) are still `ESRCH`, because there is no process-group wait to answer
-with. `st_uid`/`st_gid` exist for layout and read 0, which is the single-user
-decision below, not an omission. `wait4` takes Linux's `rusage` argument and
-refuses a non-null one, because there is no per-task resource accounting to
-report.
+**What this deliberately did not do.** The layouts are Linux's except below,
+which is the line between source compatibility — this — and binary
+compatibility, the open decision further down. Process-group waits are
+`ESRCH`; `st_uid`/`st_gid` exist for layout and read 0 (the single-user
+decision); `wait4` refuses a non-null `rusage` because there is no per-task
+accounting to report. Four divergences, stated rather than hidden:
 
-Four divergences, stated rather than hidden:
-
-- **The cwd is per-thread.** `CLONE_FS` is accepted and ignored, so a `chdir`
-  is visible only to the thread that made it, where POSIX has the cwd per
-  process. The buffer is a `TaskOwnCell` whose whole contract is that only its
-  owning task reads or writes it, so sharing it means a lock, a lock class and
-  a changed signature at every reader.
-- **Five layouts are not Linux's**, and they are exactly the ones a binary
-  compiled against Linux headers could not work around: `getdents64`'s `d_name`
-  sits at offset 24 rather than 19 (the record header is naturally aligned
-  rather than packed, which every in-tree consumer and its asserts agree on,
-  and which `slibc`'s `opendir`/`readdir` now hide from a C caller entirely);
-  `ucontext_t` is truncated (no `fpstate` pointer,
-  `uc_sigmask` at 224 rather than 296) and `rt_sigreturn` restores from
-  `SignalFrame` and ignores the ucontext, so a handler cannot redirect
-  execution by editing `uc_mcontext`; `NSIG` is 32, so there are
-  no realtime signals and therefore no glibc thread cancellation; `struct
-  termios` is `termios2`-shaped behind `TCGETS`, which overruns a Linux-header
-  `tcgetattr`; and `signalfd_siginfo` is 16 bytes rather than 128. Two more
-  used to stand here and no longer do: `siginfo_t.si_addr` is at Linux's
-  offset 16 and `msghdr`/`cmsghdr` are Linux's 56- and 16-byte forms, because
-  std's unix PAL reads both and the target now rides it.
-- **Advisory locks are 128 rows machine-wide**, shared by `flock(2)` and
-  `fcntl(2)` record locks because they contend on the same file. A principal's
-  share is bounded and a principal holding no lock can always take one, so no
-  caller can deny locking to another; what the fixed table does bound is how
-  many ranges one process may hold at once. Deadlock detection is the trivial
-  self-conflict only: a two-process cycle parks both until a signal, where
-  Linux answers `EDEADLK`.
-- **Shared futexes are private-only.** The key is now
-  `(address space, address)`, which is what stops one process reaching
-  another's waiters; a genuinely *shared* futex needs the key to name the
-  backing page rather than the mapping, which is a further change and not a
-  flag decode.
+- **The cwd is per-thread.** `CLONE_FS` is accepted and ignored. The buffer is
+  a `TaskOwnCell` whose whole contract is single-owner access, so sharing it
+  costs a lock, a lock class and a changed signature at every reader.
+- **Five layouts are not Linux's**, and they are the ones a Linux-header binary
+  could not work around: `getdents64`'s `d_name` at offset 24 (naturally
+  aligned, hidden from C callers by slibc's `readdir`); a truncated
+  `ucontext_t` whose `rt_sigreturn` restores from `SignalFrame`, so a handler
+  cannot redirect execution through `uc_mcontext`; `NSIG` 32, so no realtime
+  signals and no glibc thread cancellation; `termios2`-shaped `struct termios`;
+  and a 16-byte `signalfd_siginfo`.
+- **Advisory locks are 128 rows machine-wide**, shared by `flock(2)` and record
+  locks because they contend on the same file; a principal's share is bounded
+  and one holding no lock can always take one. Deadlock detection is the
+  self-conflict only, so a two-process cycle parks where Linux says `EDEADLK`.
+- **Shared futexes are private-only.** The key is `(address space, address)`; a
+  genuinely shared one needs the key to name the backing page.
 
 ---
 
@@ -417,289 +277,182 @@ Four divergences, stated rather than hidden:
 The fourth thing this plan rests on: a volume two orders of magnitude past the
 appliance root mounts, holds a working tree, and takes a write at a cost
 proportional to the bytes it moves. `just test-capacity` is the standing proof
-— a 16 GiB ext2 volume (4 194 304 blocks of 4 KiB across 128 groups, a million
-inodes) carrying a checked-out copy of this repository *and* the pinned
-toolchain sysroot, which the guest mounts, walks, searches and writes, and
-which `e2fsck -fn` then accepts with a clean superblock. The numbers are on the
-wire as `FSPERF[<phase>]` and `FSCAP[<phase>]`, and
-`scripts/check_fs_throughput.sh` is the ratchet that keeps them there.
+— a 16 GiB ext2 volume carrying a checked-out copy of this repository *and* the
+pinned toolchain sysroot, which the guest mounts, walks, searches and writes,
+and which `e2fsck -fn` then accepts clean. `scripts/check_fs_throughput.sh` is
+the ratchet over the `FSPERF`/`FSCAP` report lines.
 
-Measured on that volume: it holds **5 445 files and 1 105 385 677 bytes in
-1 207 directories** — the host's staged tree to the byte — which the guest walks
-in 1 634 device reads and reads back out of, not merely enumerates. The mount
-costs **26–27 device reads** — geometry plus the journal's block map, not a
-sweep — and a lookup of the last of 4 000 names in one directory costs
-**0 block reads** once the directory index is warm. Measured on the appliance
-root: 2 MiB written through the real `write(2)` path costs **10 transactions,
-10 commit records, 44 block-layer write requests carrying 4 624 sectors, and 10
-barriers**, identical across six runs of one ISO. Before this work the same
-2 MiB was 512 transactions and 578 requests.
+Measured: 5 445 files and 1.1 GB in 1 207 directories walked in 1 634 device
+reads; a mount 26–27 reads, geometry plus the journal's block map rather than a
+sweep; the last of 4 000 names in one directory 0 block reads warm. On the
+appliance root, 2 MiB through the real `write(2)` path is 10 transactions, 44
+write requests and 10 barriers — against 512 and 578 before this work.
 
 What it rests on, in case a later phase disturbs it:
 
-- **Every appliance-sized constant is derived from the medium now.** The block
-  cache's capacity comes from the volume's group count at mount
-  (`cache_entries_for`, clamped to `[512, 8192]`), because a group's block and
-  inode bitmaps plus the group-descriptor table are what every allocation
-  re-reads — at 16 GiB that is 257 blocks against a floor of 512 slots, where
-  the old fixed 512 would have spent half its capacity on them and evicted a
-  bitmap it was about to need. The log is 1/64 of the image floored at 4M and
-  capped at 64M (`scripts/build_fs_image.sh`), so the 16 GiB volume ships 16 383
-  slots against the appliance root's 1 023. The verity hash array and attest
-  bitmap are chunked at 256 KiB and streamed in against a running CRC, so no
-  two full-size allocations are ever live and the trailer's bytes are unchanged.
-  The ramfs derives its per-file ceiling and inode count from usable memory with
-  the old 16 MiB / 4096 as *floors*, and its file bodies are page-chunked —
-  without which the derived ceiling was a lie, since a single `KVec` body made
-  the real limit `MAX_ALLOC_SIZE` and `/tmp` refused a 1 MiB object file.
-- **A miss is O(1) and an insert is not O(n²).** The block cache evicts through
-  an intrusive LRU rather than three linear scans of every entry, prefers a
-  victim that is not a bitmap or a group descriptor, and drives its
-  per-transaction bookkeeping from a preallocated list of the slots the
-  operation touched instead of walking the whole cache. The journal answers
-  "where does this block's newest copy live" from a chained hash index over its
-  slot arrays — preallocated at attach, because **a commit must not allocate** —
-  instead of scanning backwards from the head, which is what made a bigger log
-  quadratic; `flush_revokes` and replay's revoke disposition go through the same
-  index. Directory lookup and insert go through a bounded in-memory name index
-  and a free-space hint: 1 600 names of 255 bytes into one directory used to
-  visit 853 333 directory blocks and now costs **2 device reads**. The hint
-  alone was not enough and the measurement said so — a growing directory still
-  re-scanned its whole prefix every time a block filled — so each hint carries a
-  *proof*, the size no block below it has slack for, and skipping the prefix
-  requires the request to be at least that big. That is what makes the skip
-  safe: it can never turn an insert that would have fitted into a new block.
-- **The directory index is a cache, and its correctness rests on two rules.** A
-  hit is a *candidate*: the record at that position is read and its name
-  compared before it is trusted, so a stale entry resolves to nothing. The
-  dangerous direction is the other one — a complete index missing a name — so
-  `complete` is granted only by a walk that reached the directory's end with
-  every record filed, every mutation must keep it, and anything that cannot
-  drops the table. A failed transaction drops the index of every directory
-  inode it touched, wired through the same op-touched bookkeeping the cache
-  already keeps, because `Ext2Txn::drop` restores block contents the index would
-  otherwise still be describing.
-- **A write is one transaction per 256 KiB, and one request per run of
-  blocks.** `IO_FILE_BATCH_SIZE` is the regular-file staging bound (`abi/src/io.rs`)
-  and is deliberately not `IO_STAGING_SIZE`, which stays 4 KiB because for a tty,
-  a pipe or a datagram that number is a latency decision. 256 KiB is 64 blocks
-  per transaction, above the point where a transaction's data is written home
-  and barriered once instead of going into the log, and well under the block
-  cache so a batch cannot evict its own blocks. The user copy stays *outside*
-  the mount lock, and must: `copy_bytes_from_user` takes the `PROCESS_VMS` slot
-  lock, the file-fault path already runs PROCESS_VMS → drop → filemap →
-  `CACHED_EXT2`, and copying under the mount lock would close that cycle. Then
-  three write paths gather runs of consecutive blocks into one
-  `BlockDevice::write_vectored`: the transaction's data write-home loop, the
-  journal's record header plus its payload slots, and the log checkpoint's
-  copy home. Ordered writeback survives because a run may only ever contain
-  this operation's dirty data blocks, the commit record is still a separate
-  write issued after every payload, and each phase still barriers once.
-- **The check point is the lock owner's, not the operation's.**
-  `Ext2Fs::transaction` used to notice the log was short of headroom and run an
-  unbounded whole-filesystem `sync()` *inside* a hold of the mount lock, so
-  every path walk on the machine queued behind it. The decision moved up to
-  `Ext2Mount::with_fs`, which drives the chunked `sync_step` pass with the lock
-  given back between steps and only then takes it for the operation; the
-  in-transaction checkpoint survives as the last resort for callers that reach
-  `transaction` without the VFS wrapper. The log's low-water mark scales with
-  its capacity instead of being capped at 256 slots, or a batched transaction
-  would fail with `NoSpace` on exactly the log size that was supposed to help
-  it.
-- **The block layer is four requests deep and 32 KiB wide.** `virtio_blk` built
-  a fixed three-descriptor chain, bounced through two freshly allocated frames
-  per request, and serialised every logical request machine-wide behind a
-  `Mutex<()>`; a 1 MiB write was 256 round trips and 512 buddy allocations. Now
-  a request is a `1 + N + 1` chain of up to eight data pages, each slot's pages
-  are allocated once at probe so the steady state allocates nothing, and four
-  slots are in flight at once — the arithmetic is stated and asserted, because
-  `DEFAULT_QUEUE_SIZE` is 64 and shared with virtio-net and virtio-gpu:
-  4 slots × 10 descriptors plus 2 quarantine chains is 60. Completion wakes one
-  slot's waiter rather than broadcasting to all of them. Errors have variants —
-  `Busy`, `Timeout`, `DeviceFault`, `Unsupported`, `OutOfMemory` beside the
-  original four — with a bounded three-attempt retry on the retryable ones only,
-  and a timed-out chain's pages move to a quarantine list while the slot gets a
-  fresh page set, so a stall costs memory and a log line instead of permanently
-  costing one of eight slots.
-- **There is more than one filesystem.** The seven module statics that *were*
-  the one ext2 instance are fields of an `Ext2Mount` value, and four of them
-  live in a pool with **four separate `lock_class!` sites** — one class per
-  instance, because `lock_class!` keys on its expansion site, a path walk
-  crossing a mount holds one mount's lock while taking the next one's, and a
-  shared class would make that legal nesting look like an unordered self-nest.
-  Slot 0's class is still named `CACHED_EXT2`, so the class boot registers is
-  the class it always was. `mount(2)` with `fstype=ext2` takes a `source`
-  naming a block device, resolving it to devfs's read-only view for `MS_RDONLY`
-  or to the device's exclusive write claim otherwise; `umount` of an instance's
-  last mount flushes it, marks the image clean, drops the device and returns the
-  slot, which is what gives the write claim back — a leaked claim answers
-  `AlreadyClaimed` forever, and that is what the remount test exists to catch.
-  One flusher serves the pool, taking one instance's lock at a time, and the
-  reclaim hook stays `try_lock` per slot because waiting there would block on
-  the I/O that needs the memory.
-- **The cost is measured, and the measurement is a gate.**
-  `slopos_fs::blockdev::stats` counts read and write requests, the sectors they
-  carry, barriers, transactions and commit records at one relaxed atomic add
-  each; `fs/src/fsreport.rs` puts them on the wire at the post-kernel-tests
-  phase boundary, not from inside the measuring test, because a passing test's
-  klog is not on the wire at the default verbosity — which is exactly the
-  capture CI grades. The gate holds the per-MiB counts to caps, because they are
-  deterministic for one ISO, and holds throughput to the quotient of the
-  filesystem's write rate and the *same run's* raw block-device rate, because
-  that is the only rate invariant under a change of accelerator; its self-test
-  asserts that a uniformly three-times-slower machine still passes. A mount is
-  graded in device reads per GiB rather than in seconds for the same reason.
+- **Every appliance-sized constant is derived from the medium.** The block
+  cache's capacity comes from the volume's group count at mount, clamped
+  `[512, 8192]`, because a group's bitmaps and descriptor table are what every
+  allocation re-reads; the log is 1/64 of the image, floored at 4M, capped at
+  64M; the verity hash and attest bitmap are chunked at 256 KiB and streamed
+  against a running CRC. The ramfs derives its per-file ceiling from usable
+  memory with the old 16 MiB as a *floor* and page-chunks its bodies — without
+  which the derived ceiling was a lie, since one `KVec` body made the real
+  limit `MAX_ALLOC_SIZE` and `/tmp` refused a 1 MiB object file.
+- **A miss is O(1) and an insert is not O(n²).** An intrusive LRU that prefers
+  a non-bitmap victim; a chained hash index over the journal's slot arrays,
+  preallocated at attach because **a commit must not allocate**; and a bounded
+  directory name index with a free-space hint — 1 600 255-byte names into one
+  directory used to visit 853 333 directory blocks and now costs 2 device
+  reads. The hint alone was not enough, so each carries a *proof*, the size no
+  block below it has slack for, which is what stops the skip turning an insert
+  that would have fitted into a new block.
+- **The directory index is a cache, and two rules keep it correct.** A hit is a
+  *candidate* — the record is read and its name compared, so a stale entry
+  resolves to nothing. The dangerous direction is a complete index missing a
+  name, so `complete` is granted only by a walk that reached the end with every
+  record filed, and anything that cannot maintain it drops the table; a failed
+  transaction drops the index of every directory inode it touched, because
+  `Ext2Txn::drop` restores block contents the index would still describe.
+- **A write is one transaction per 256 KiB and one request per run of blocks.**
+  `IO_FILE_BATCH_SIZE` is deliberately not `IO_STAGING_SIZE`, which stays 4 KiB
+  because for a tty or a pipe that number is a latency decision. 256 KiB is
+  above the point where data is written home and barriered once instead of
+  logged, and under the cache so a batch cannot evict its own blocks. The user
+  copy stays *outside* the mount lock and must: the file-fault path runs
+  PROCESS_VMS → drop → filemap → `CACHED_EXT2`, and copying under the mount
+  lock closes that cycle. Ordered writeback survives gathering because a run
+  holds only this operation's dirty data and the commit record is still a
+  separate write after every payload.
+- **The check point is the lock owner's, not the operation's.** An unbounded
+  whole-filesystem `sync()` used to run *inside* the mount lock, so every path
+  walk queued behind it; the decision moved to `Ext2Mount::with_fs`, which
+  drives the chunked `sync_step` with the lock given back between steps. The
+  log's low-water mark scales with capacity, or a batched transaction fails
+  with `NoSpace` on exactly the log size meant to help it.
+- **The block layer is four requests deep and 32 KiB wide.** Each slot's pages
+  are allocated once at probe so the steady state allocates nothing, and the
+  descriptor arithmetic is asserted because `DEFAULT_QUEUE_SIZE` is 64 and
+  shared with virtio-net and virtio-gpu. A timed-out chain's pages move to
+  quarantine, so a stall costs memory and a log line rather than one of eight
+  slots permanently.
+- **There is more than one filesystem.** The statics that *were* the one ext2
+  instance are fields of an `Ext2Mount`, four of them pooled with **four
+  separate `lock_class!` sites** — one per instance, because a path walk
+  crossing a mount holds one mount's lock while taking the next one's and a
+  shared class would make legal nesting look like an unordered self-nest.
+  `umount` of an instance's last mount flushes, marks clean and returns the
+  slot, which is what gives the write claim back; a leaked claim answers
+  `AlreadyClaimed` forever, and that is what the remount test catches. The
+  reclaim hook stays `try_lock` because waiting there blocks on the I/O that
+  needs the memory.
+- **The cost is measured, and the measurement is a gate.** Counters reported at
+  the phase boundary rather than from inside the measuring test, because a
+  passing test's klog is not on the wire at the verbosity CI grades. Per-MiB
+  counts carry caps because they are deterministic for one ISO; throughput is
+  graded only against the same run's raw block-device rate, the one quantity
+  invariant under a change of accelerator.
 
 **What this deliberately did not do.**
 
-- **No swap, and still no OOM disposition.** Anonymous memory is never evicted;
-  a fault that cannot find a frame kills the faulter. Both were expected here
-  and neither landed: swap is a subsystem (a backing store, a PTE encoding, a
-  reclaim policy and a victim choice), not a constant, and it belongs with
-  whichever phase first needs a build to survive overcommit rather than being
-  smuggled into a storage-sizing change.
-- **No on-disk htree.** Directory scaling is the in-memory index above, so the
-  on-disk format stays plain linear ext2 and `e2fsck` stays the oracle. The
-  costs are stated: a lookup after a mount or a reclaim pays one scan to build
-  the index, only four directories are indexed at a time, and a directory past
-  the index's name cap falls back to scanning (with a test that proves it still
-  works). The one thing that *had* to be handled is: an inode carrying
-  `EXT2_INDEX_FL` hides its index inside records that look free, and
-  `append_dir_entry` would have written an entry on top of an index node while
-  `Inode::encode` faithfully kept the flag — so a directory a Linux host
-  indexed is now **de-indexed** on its first mutation rather than corrupted.
-  `Superblock::parse` also stopped ignoring `s_feature_compat` in silence: the
-  bits the kernel understands are named, and a mount says which it is ignoring.
-- **Mutations serialise per mount, not per inode.** Two mounts now proceed
-  independently, and that is what `-j16` across `/` and `/home` buys; two
-  writers to one filesystem still queue on that mount's lock. The waits are
-  bounded rather than unbounded — that was the check-point work — but a
-  per-inode design is a further change.
-- **A write is still ~15% of the raw device's rate**, and the gap is request
-  count and barriers rather than bytes: 4 624 sectors for 4 096 of data is
-  1.13x amplification, while the reference write issues no barriers at all.
-  22 block-layer requests per MiB is what the ratchet records.
+- **No swap, and still no OOM disposition.** Swap is a subsystem — backing
+  store, PTE encoding, reclaim policy, victim choice — and belongs with
+  whichever phase first needs a build to survive overcommit, not smuggled into
+  a storage-sizing change.
+- **No on-disk htree.** Directory scaling is the in-memory index, so the format
+  stays linear ext2 and `e2fsck` stays the oracle: a lookup after a mount pays
+  one scan, four directories are indexed at a time, one past the name cap falls
+  back to scanning. The case that *had* to be handled is `EXT2_INDEX_FL`, whose
+  index hides inside records that look free — a directory a Linux host indexed
+  is **de-indexed** on its first mutation rather than corrupted.
+- **Mutations serialise per mount, not per inode.** Two mounts proceed
+  independently, which is what `-j16` across `/` and `/home` buys; two writers
+  to one filesystem still queue, on bounded waits.
+- **A write is still ~15 % of the raw device's rate**, and the gap is requests
+  and barriers rather than bytes: 4 624 sectors for 4 096 of data is 1.13x
+  amplification, while the reference write issues no barriers at all.
 
 ---
 
 ## The utilities are executables
 
 The fifth thing this plan rests on: a program that is not the shell can run a
-utility. `coreutils_test` is the standing proof — a test binary that spawns
-`/bin/<tool>` by path, reads back what it produced, and checks the status it
-exited with. Before this, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `diff`, `env`
-and `ps` existed only as functions inside the shell
-(`userland/src/apps/shell/builtins/`), so anything that spawned one got
-`ENOENT`; `/bin` held GUI and network binaries and nothing a build could use.
+utility. `coreutils_test` is the standing proof — it spawns `/bin/<tool>` by
+path, reads what it produced and checks the status. Before this, `ls`, `cat`,
+`cp`, `mv`, `rm`, `mkdir`, `diff`, `env` and `ps` existed only as functions
+inside the shell, so anything that spawned one got `ENOENT`.
 
 **54 names in `/bin`, one 939 KB binary.** `/bin/coreutils` is a multicall
-binary and each name is a symlink to it, so `argv[0]` selects the utility
-(`userland/src/apps/coreutils/`, 13.5 kLoC). That is busybox's, toybox's and
-uutils's shape, and the shape Asterinas ships in its own initramfs; Redox takes
-uutils, which offers both a multicall binary and one binary per tool. The
-alternative was measured rather than assumed: the smallest SlopOS binary in the
-tree is 158 KB of std, slibc and unwinder before a line of its own code, so 54
-of them would be ~8 MiB of a 32 MiB root for no behaviour at all. Each name
-instead costs one inode and no block — `debugfs symlink` writes a *fast*
-symlink, target inside `i_block` — and the initramfs carries the same set as
-`newc` `S_IFLNK` records, which is why the utest passes unchanged under
-`root=initramfs`. The installed set comes from the justfile's
-`coreutils_tools`; the implemented set is the binary's own table; and
-`coreutils --list` plus `coreutils_test` is what stops the two from drifting.
+binary and each name is a symlink to it, so `argv[0]` selects the utility —
+busybox's, toybox's and uutils's shape. The alternative was measured: the
+smallest SlopOS binary is 158 KB of std, slibc and unwinder before a line of
+its own code, so 54 of them would be ~8 MiB of a 32 MiB root for no behaviour.
+Each name instead costs one inode and no block (a *fast* symlink, target inside
+`i_block`), and the initramfs carries the same set as `S_IFLNK` records, which
+is why the utest passes unchanged under `root=initramfs`. `coreutils --list`
+plus `coreutils_test` is what stops the installed and implemented sets
+drifting.
 
 What it rests on, in case a later phase disturbs it:
 
-- **There is one implementation of each utility, not two.** The shell's builtin
-  table lost every file and text utility; what remains is what changes the
-  shell itself (`cd`, `write`, `export`/`unset`/`set`/`env`, `jobs`/`fg`/`bg`,
-  `kill`, `wait`, `exec`, `exit`, `time`, `help`, the control builtins POSIX
-  requires of a shell — `:`, `.`/`source`, `eval`, `read`, `shift`, `return`,
-  `break`, `continue`, `command`, `type` — and the SlopOS-specific
-  `info`/`free`/`uptime`/`cpuinfo`/`random`/`roulette`/`wl`/`resolve`) plus the
-  six POSIX resolves without a fork — `echo`, `printf`, `test`, `[`, `true`,
-  `false` — which *delegate into the same functions* the `/bin` names run
-  (`builtins/utility.rs`). Everything else the shell reaches through `PATH`
-  like any other program, which is also what gives it correct job control: a
-  Ctrl-C reaches a forked `yes` and could never reach an in-process one.
-- **A utility writes to a `Sink`, never to fd 1.** That is the mechanism that
-  makes one implementation serve both callers: the multicall binary points the
-  sink at fd 1, and so does the shell, because the executor `dup2`s a `>`
-  target onto fd 1 around a builtin and puts the shell's own back afterwards —
-  so `echo hi > f` keeps working and is the same code path as `echo hi`. The
-  sink also carries whether its destination is a terminal, which is why `ls`
-  can lay out columns and colour on a tty and emit bare newline-separated names
-  into a pipe — the old builtin printed `name (size)` and `(empty)`, which no
-  pipeline could parse.
+- **There is one implementation of each utility, not two.** The shell keeps
+  only what changes the shell itself, plus the six POSIX resolves without a
+  fork — `echo`, `printf`, `test`, `[`, `true`, `false` — which *delegate into
+  the same functions* the `/bin` names run. Everything else goes through
+  `PATH`, which is also what gives correct job control: a Ctrl-C reaches a
+  forked `yes` and could never reach an in-process one.
+- **A utility writes to a `Sink`, never to fd 1.** That is what lets one
+  implementation serve both callers: the shell `dup2`s a `>` target onto fd 1
+  around a builtin and restores its own, so `echo hi > f` is the same code path
+  as `echo hi`. The sink carries whether its destination is a terminal, which
+  is why `ls` can column and colour on a tty and emit bare names into a pipe —
+  the old builtin printed `name (size)`, which no pipeline could parse.
 - **The semantics that were wrong are fixed, not merely present.** `cat` no
-  longer stops at 512 bytes; `cp -r` and `rm -r` recurse (through one shared
-  `Walk`, post-order for removal); `mkdir -p` creates parents; `diff -u`
-  produces a unified patch and `patch` applies it — that round trip is a test
-  case, not a claim. `grep` exits 0/1/2 and `test` 0/1/2, because a build
-  driver reads a status rather than a message.
-- **`execve` resets the thread pointer.** Making the utilities executables put
-  a *fork-and-exec* on the path of every pipeline stage, and that path was
-  broken: `execve` installed the new image's `FS_BASE` only when the image
-  carried a `PT_TLS`, so an image without one kept the *old* image's thread
-  pointer, and slibc's startup adopts a non-zero `FS_BASE` as an
-  already-installed TCB (`slibc/src/thread/tls.rs`). `echo x | tee f` therefore
-  faulted at `cr2=0x500000060` in `tls_init_main_thread` — a dangling pointer
-  read, not a missing tool. The reset is now unconditional
-  (`core/src/syscall/process_handlers.rs`), as Linux has it. Nothing before
-  this change exercised the combination, which is why a builtins-only shell
-  never saw it.
-- **`canonicalize` resolves against the working directory.** The std port
-  joined a relative path onto `/` (then in `slibc/std_pal/`, since deleted), so it
-  answered the canonical path of a *different* file — and answered it
-  successfully whenever that other file happened to exist. `cp`'s
-  copy-into-itself refusal is what found it: the guard passed by accident for
-  `.` and not at all for anything else. Fixed at the port, with the case in
-  `cd_test`; `cp` still folds `..` lexically of its own accord, because a
-  destination that does not exist yet cannot be canonicalised at all.
-- **The set is the POSIX floor a build needs**: `ls cat cp mv rm mkdir rmdir ln
-  touch stat install mktemp basename dirname which grep sed find xargs sort
-  uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes
-  seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat
-  sha256sum stty less`. Three engines are written here rather than depended on,
-  because the vendoring rule is nine third-party crates and a utility set is
-  not a reason to change it: a POSIX regex engine (BRE and ERE, with a step
-  budget, because the pattern is user input), RFC 1951 DEFLATE plus RFC 1952
-  framing with the CRC verified on read, and FIPS 180-4 SHA-256.
-- **The privilege story is unchanged.** `/bin` and `/sbin` stay sealed, so a
-  name inside them cannot be replaced, and a symlink's content cannot be
-  rewritten in place. The grant table is keyed on the path `exec` *resolves*
-  to, which for all 54 names is `/bin/coreutils` — an entry with no grant. The
-  visible cost is that a spawned utility's task name is `coreutils`, because
-  `task_name_from_path` names the canonical path: `ps` shows the binary, not
-  the name that was typed.
+  longer stops at 512 bytes, `cp -r`/`rm -r` recurse through one shared `Walk`,
+  `mkdir -p` creates parents, and `diff -u` → `patch` is a round trip that is a
+  test case rather than a claim. `grep` and `test` exit 0/1/2, because a build
+  driver reads a status.
+- **`execve` resets the thread pointer.** `execve` installed the new image's
+  `FS_BASE` only when the image carried a `PT_TLS`, so an image without one
+  kept the old image's thread pointer and slibc's startup adopted it as an
+  installed TCB: `echo x | tee f` faulted at `cr2=0x500000060`. The reset is
+  unconditional now, as Linux has it. A builtins-only shell never saw it,
+  because nothing before this put a fork-and-exec on a pipeline stage.
+- **`canonicalize` resolves against the working directory.** The old std port
+  joined a relative path onto `/`, so it answered the canonical path of a
+  *different* file — successfully, whenever that file existed. `cp`'s
+  copy-into-itself refusal is what found it.
+- **The set is the POSIX floor a build needs**, 54 names from `ls` to `stty`.
+  Three engines are written here rather than vendored, because nine
+  third-party crates is the rule and a utility set is not a reason to change
+  it: a POSIX regex engine (BRE and ERE, with a step budget, because the
+  pattern is user input), DEFLATE plus gzip framing with the CRC verified on
+  read, and SHA-256.
+- **The privilege story is unchanged.** `/bin` and `/sbin` stay sealed and the
+  grant table is keyed on the path `exec` resolves to, which for all 54 names
+  is `/bin/coreutils` — an entry with no grant. The visible cost is that `ps`
+  shows `coreutils` rather than the name that was typed.
 
 **Five divergences and costs, stated rather than hidden.**
 
-- **A non-UTF-8 operand is refused, and the reason is now the utilities' own.**
-  `OsStrExt` came with the unix family and `sys/os_str` already routed this
-  target at the `bytes` implementation, so a byte-clean path is expressible
-  here; what still refuses one is that every utility reads `std::env::args()`
-  rather than `args_os()`. That is a change to 54 utilities, not to a target.
-- **`ls -l` cannot report a mode, an owner or a link count.** `Metadata` on
-  this target carries length, type, mtime and a read-only bit and nothing else,
-  so the permission string is derived from the type and the link count prints
-  as 1. `test -r/-w/-x` answer from existence for the same reason, which is
-  also the single-user decision below: everything runs as uid 0 and the loader
-  does not consult the mode bits.
-- **`sed` has no branching** (`b`, `t`, `:label`), and `cp -p` preserves a
-  file's mtime but not a directory's — there is no path-taking `utimensat` in
-  the userland wrappers, only `File::set_times`.
-- **`gzip` encodes with fixed Huffman blocks**, falling back to stored blocks
-  when a block would not shrink, so its output is correct and reads everywhere
-  but is larger than GNU gzip's. `inflate` handles all three block types, so
-  what a host produced is readable here.
-- **The shell links the utilities it does not run.** `shell.elf` went from
-  640 KB to 1.37 MB, because `help` and completion walk the tool table and a
-  table entry holds its `run` pointer, so referencing any of it keeps all of it
-  alive. The alternative is a second, metadata-only table — the drift this
-  design exists to prevent — so the ~730 KB is paid deliberately. A `/bin`-
-  scanning completion would cost nothing and cover programs the table does not
-  know, and is the right fix once Phase 2 makes new binaries a thing that
-  happens in-guest.
+- **A non-UTF-8 operand is refused**, because every utility reads
+  `std::env::args()` rather than `args_os()`. A byte-clean path is expressible
+  on this target now; this is a change to 54 utilities, not to a target.
+- **`ls -l` cannot report a mode, an owner or a link count.** `Metadata` here
+  carries length, type, mtime and a read-only bit, so the permission string is
+  derived from the type and the link count prints as 1. `test -r/-w/-x` answer
+  from existence, which is the single-user decision below.
+- **`sed` has no branching**, and `cp -p` preserves a file's mtime but not a
+  directory's — there is no path-taking `utimensat` in the wrappers.
+- **`gzip` encodes with fixed Huffman blocks**, falling back to stored, so its
+  output reads everywhere but is larger than GNU gzip's. `inflate` handles all
+  three block types.
+- **The shell links the utilities it does not run.** `shell.elf` went 640 KB →
+  1.37 MB, because `help` and completion walk the tool table and an entry holds
+  its `run` pointer. The alternative is a second metadata-only table — the
+  drift this design prevents — so the ~730 KB is paid deliberately. A
+  `/bin`-scanning completion costs nothing and is the right fix once new
+  binaries are a thing that happens in-guest.
 
 ---
 
@@ -708,301 +461,190 @@ What it rests on, in case a later phase disturbs it:
 The sixth thing this plan rests on: what a build system writes is a *script*,
 and a shell that cannot loop, branch or substitute is not a workbench however
 many utilities it can reach. `shell_script_test` is the standing proof — 33
-cases against the real `/bin/shell`, 32 of them feeding it a script down a pipe
-and asserting on the exact bytes it produces, and one driving it on a PTY
-because the continuation prompt exists only on the interactive path. Between
-them they run `if`/`elif`/`else`, `while`, `until`, `for` with and without
-`in`, `case` with alternation, functions with their own positional parameters,
-`break n`/`continue n`, `$(...)` and backticks, here-documents in all four
-forms, `* ? [...]` globbing, the parameter-expansion operators, `$(( ))`
-arithmetic, `"$@"` against `$*`, a twelve-stage pipeline, a hundred-word
-command and a thousand-byte variable. Every one of those was a syntax error, a
-wrong answer or a refusal before. Related properties share one shell
-invocation deliberately: `MAX_PROCESSES` is 256, a run reaches ~170 before
-this utest starts, and a spawn per assertion measured 243 processes held at
-the phase boundary with the next dozen answering `ENOMEM`.
+cases against the real `/bin/shell` asserting on exact bytes, one of them on a
+PTY because the continuation prompt exists only on the interactive path.
+Between them: `if`/`while`/`until`/`for`/`case`, functions with their own
+positional parameters, `break n`, `$(...)` and backticks, here-documents in all
+four forms, globbing, the parameter-expansion operators, `$(( ))`, `"$@"`
+against `$*`, a twelve-stage pipeline and a thousand-byte variable. Related
+properties share one shell invocation deliberately: `MAX_PROCESSES` is 256, a
+run reaches ~170 before this utest, and a spawn per assertion measured 243 held
+at the phase boundary with the next dozen answering `ENOMEM`.
 
-Everything pure about the grammar is `shell-core`, host-tested by `just
-test-host`: token recognition, the syntax tree and the recursive-descent parser
-over it, POSIX pattern matching, IFS field splitting, the `${...}` operator
-split and the arithmetic evaluator — 77 tests that run in milliseconds with no
-QEMU. What stayed in `userland/src/apps/shell/` is the part that has to talk to
-the kernel: expansion's variable lookup and command substitution, pathname
-expansion's directory walk, and execution.
+Everything pure about the grammar is `shell-core`, 77 host tests under `just
+test-host`: tokens, the tree, the parser, POSIX pattern matching, IFS splitting,
+the `${...}` operator split and arithmetic. What stayed in the application is
+what has to talk to the kernel — variable lookup, command substitution,
+pathname expansion's walk, and execution.
 
 What it rests on, in case a later phase disturbs it:
 
-- **`Incomplete` is a third answer, and it is the whole mechanism.** The lexer
-  and the parser distinguish *wrong* input from *unfinished* input, so one
-  reader serves a multi-line script file and a PS2 continuation prompt alike:
-  append a line, re-parse, run when the parse stops asking for more. The
-  failure mode that shape has is precise, and a test found it — `for; do`
-  answered `Incomplete` because "no word token here" and "no token at all"
-  shared a branch, so the reader waited for the rest of a command that could
-  never arrive and swallowed the remainder of the script with it. A malformed
-  construct must be a syntax error.
-- **Quoting is recorded per byte, not in band.** `QBuf` carries a flag vector
-  beside the bytes: quoted (neither splits nor globs), and came-from-an-
-  unquoted-expansion (splits). A sentinel byte answers the same question and is
-  what several C shells use, but a sentinel collides with the arbitrary bytes a
-  filename may hold. The flags are what make `IFS=:` split `$x` and not the
-  literal `a:b` beside it, and `case '*' in "*")` compare an asterisk with an
-  asterisk.
+- **`Incomplete` is a third answer, and it is the whole mechanism.** Wrong
+  input and unfinished input are distinguished, so one reader serves a script
+  file and a PS2 prompt alike. The failure mode is precise and a test found it:
+  `for; do` answered `Incomplete` because "no word token here" and "no token at
+  all" shared a branch, so the reader swallowed the rest of the script waiting
+  for a command that could never arrive.
+- **Quoting is recorded per byte, not in band.** `QBuf` carries a flag vector —
+  quoted, and came-from-an-unquoted-expansion. A sentinel byte answers the same
+  question and is what several C shells use, but it collides with the arbitrary
+  bytes a filename may hold.
 - **Field splitting only ever touches an expansion's output**, and `"$@"` puts
-  a hard field boundary between parameters that survives it. The one case the
-  bytes cannot answer is an empty result — `cmd $x` with `x` empty passes no
-  argument and `cmd "$x"` passes one — so the splitter is told whether the word
-  held a quoted byte at all. `"$@"` over an empty parameter list is the
-  exception to that exception and contributes no field.
-- **A command substitution's output is data.** `$(...)` forks, pipes, reads to
-  EOF and strips every trailing newline; the bytes are then subject to
-  splitting and globbing but never re-tokenized, so a `;` or a `>` among them
-  is a byte the command receives. The inner text is lexed and parsed at
-  expansion time, which is what makes `$( ... $( ... ) ... )` nest by
-  construction rather than by a counter.
-- **An unmatched pattern is left exactly as written, and a generated pathname
-  has to exist.** There is no `nullglob`, a wildcard matches neither a leading
-  `.` nor a `/`, and a field with no unquoted `*`, `?` or `[` is not globbed at
-  all — so `rm *.o` in a directory with no object files runs `rm` with a
-  literal argument rather than with none. A literal component *after* a
-  wildcard is checked too, or `echo */nope` would hand the command one
-  nonexistent path per directory instead of the word it was given. The matcher
-  has a single backtrack point rather than a recursion per `*`: nine stars
-  against forty bytes took eleven seconds the other way, and both a `case`
-  subject and a `${x##pattern}` value are script-controlled. The walk goes
-  through `std::fs::read_dir`, so a glob inherits the utilities' UTF-8-path
-  divergence.
-- **A here-document's writer is a separate process.** The body goes on a pipe,
-  and one larger than the pipe's 4 KiB capacity would otherwise block the shell
-  on its own read end before anything has read it. The writer is reaped *after*
-  the descriptors are put back and never before, or a command that read only
-  part of a long body would deadlock the reap.
+  a hard field boundary between parameters. The one case the bytes cannot
+  answer is an empty result — `cmd $x` passes no argument, `cmd "$x"` passes
+  one — so the splitter is told whether the word held a quoted byte at all.
+- **A command substitution's output is data.** Forked, piped, read to EOF,
+  trailing newlines stripped; the bytes are split and globbed but never
+  re-tokenized, so a `;` among them is a byte the command receives. The inner
+  text is lexed at expansion time, which is what makes nesting structural
+  rather than a counter.
+- **An unmatched pattern is left as written, and a generated pathname must
+  exist.** No `nullglob`; a wildcard matches neither a leading `.` nor a `/`;
+  a field with no unquoted metacharacter is not globbed at all, so `rm *.o`
+  with no object files runs `rm` with a literal argument rather than none. A
+  literal component *after* a wildcard is checked too. The matcher has a single
+  backtrack point rather than a recursion per `*` — nine stars against forty
+  bytes took eleven seconds the other way, and both a `case` subject and a
+  `${x##pattern}` value are script-controlled.
+- **A here-document's writer is a separate process**, or a body past the pipe's
+  4 KiB capacity blocks the shell on its own read end. It is reaped *after* the
+  descriptors are restored, or a command that read part of a long body
+  deadlocks the reap.
 - **Where a command runs is decided per command.** A builtin, a function and a
   compound command run in this shell, so `cd`, an assignment and a loop counter
-  survive; an external program, a `( )` subshell and every stage of a
-  multi-stage pipeline run in a fork. Redirections follow from that: applied
-  around an in-shell command and undone afterwards, applied *in* the child
-  otherwise, so a path that cannot be opened is the child's status and the
-  shell's own descriptors are never at risk. The cost is stated: a subshell and
-  a substitution are each a process, which is what `(cd x; make)` costs here
-  and everywhere else.
+  survive; an external program, a `( )` subshell and every pipeline stage run
+  in a fork. Redirections follow: applied around an in-shell command and undone
+  after, applied *in* the child otherwise, so an unopenable path is the child's
+  status and the shell's descriptors are never at risk.
 - **A redirected builtin has one output mechanism, not two.** The executor
-  `dup2`s the target onto fd 1 and restores the shell's own, which is what a
-  compound command and an external child need anyway; the global "write here
-  instead" descriptor the shell used to consult is gone, and with it the
-  question of which of the two was in force.
-- **Only exported variables reach a child.** A bare `FOO=bar` is a shell
-  variable; `export FOO`, `export FOO=bar` and a `FOO=bar cmd` prefix are what
-  put one in a child's environment. The table exported everything before, which
-  is how a stray assignment changes what a configure script decides. It is also
-  heap-backed and unbounded in both directions now: 64 entries of 256 bytes
-  silently truncated a `CFLAGS` or a `PATH` with a dozen entries in it.
-- **`set -e` does not fire inside a condition.** `if grep -q x f; then`,
-  `a && b`, `a || b` and `! p` are tests, and a condition-depth counter is what
-  keeps errexit from ending the script on one. `break`, `continue` and `return`
-  reach the construct that can honour them through a requested control flow
-  rather than a return value, because a builtin's signature is a status — which
-  is also what makes `eval break` break the enclosing loop with no second
-  mechanism.
-- **The pre-expanded word list is still an entry point, and no longer
-  double-expands.** `exec::execute_tokens` takes words that are already final —
-  `time`, and the in-tree tests that drive a pipeline without writing one — so
-  `time echo '$HOME'` passes the four characters it was given. A caller that
-  wants `|` or `2>` says so with `push_operator`; deciding by *lexing* the
-  bytes instead made `command echo '>'` a redirection with no operand.
+  `dup2`s and restores; the global "write here instead" descriptor is gone,
+  and with it the question of which was in force.
+- **Only exported variables reach a child.** The table exported everything
+  before, which is how a stray assignment changes what a configure script
+  decides. It is heap-backed now too: 64 entries of 256 bytes silently
+  truncated a `PATH` with a dozen entries in it.
+- **`set -e` does not fire inside a condition.** A condition-depth counter is
+  what keeps errexit off `if p; then`, `&&`, `||` and `!`. `break`, `continue`
+  and `return` reach their construct through a requested control flow rather
+  than a return value, because a builtin's signature is a status — which is
+  also what makes `eval break` work with no second mechanism.
 - **Two things must see past a name's first meaning.** `command NAME` resolves
-  blind to the function table, or the canonical wrapper
-  `ls() { command ls -F "$@"; }` calls itself until the stack runs out; and
-  `unset NAME` names a *variable*, touching a function of that name only when
-  no such variable exists.
+  blind to the function table, or `ls() { command ls -F "$@"; }` recurses until
+  the stack runs out; `unset NAME` names a *variable* first.
 - **A redirection's backup is taken before its target is opened.** The kernel
-  hands out the lowest free descriptor, so `3>out` in a shell holding only
-  0/1/2 opens exactly fd 3 — a backup taken afterwards captures the file
-  itself, the `dup2` is a no-op and the close that follows drops the only copy,
-  leaving the command with fd 3 shut and the shell with the file leaked onto
-  it. The open landing on the descriptor being redirected is then a no-op
-  success rather than a copy-and-close.
+  hands out the lowest free descriptor, so `3>out` in a shell holding 0/1/2
+  opens exactly fd 3 — a backup taken afterwards captures the file itself, and
+  the close that follows drops the only copy.
 
-**What this deliberately did not do.**
-
-- **No `trap`.** A build script's `trap ... EXIT` cleanup is a real want and it
-  needs a disposition table the shell consults at every exit path, not a
-  constant. It belongs with whichever phase first needs a failed build to clean
-  up after itself.
-- **No `local`, no `getopts`, no aliases.** None is POSIX-required of a shell
-  (`local` is not in the standard at all), and each is a scoping or parsing
-  mechanism rather than a widening. A function's variables are the shell's.
-  `set -o` exists, and names the same four options the letters do — `errexit`,
-  `nounset`, `xtrace`, `noglob` — and nothing else.
-- **None of the non-POSIX conveniences**: no `$'...'`, no brace expansion
-  `{a,b}`, no `[[ ]]`, no arrays, no `select`, no `case` `;&` fallthrough.
-  `>|` parses and behaves as `>`, because `set -C` does not exist to
-  distinguish them.
-- **Arithmetic is signed 64-bit and wraps.** An overflowing `$(( ))` gives what
-  C gives rather than ending the script.
-- **`time` is a builtin over pre-expanded words**, not the reserved word POSIX
-  makes it, so `time a | b` times `a` rather than the pipeline.
-- **`set NAME=VALUE`** is kept beside POSIX `set --`, because the shell
-  accepted it before this and something in the tree may use it.
+**What this deliberately did not do.** No `trap` — a disposition table the
+shell consults at every exit path, which belongs with whichever phase first
+needs a failed build to clean up after itself. No `local`, `getopts` or
+aliases: none is POSIX-required and each is a scoping or parsing mechanism
+rather than a widening. None of the non-POSIX conveniences (`$'...'`, brace
+expansion, `[[ ]]`, arrays, `select`, `;&`), and `>|` behaves as `>` because
+`set -C` does not exist to distinguish them. Arithmetic is signed 64-bit and
+wraps. `time` is a builtin over pre-expanded words rather than the reserved
+word POSIX makes it, so `time a | b` times `a`. `set NAME=VALUE` is kept beside
+POSIX `set --`, because the shell accepted it before this.
 
 ---
 
 ## The terminal is one an editor can be written against
 
 The seventh thing this plan rests on: a full-screen program can read the
-keyboard, read the mouse, ask the terminal what it is, and draw a frame around
-what it shows. `terminal_grid_test` is the standing proof — an in-guest test
-that drives the real encoder and the real emulator and checks the exact bytes:
-F1 as `SS3 P`, F12 as `CSI 24~`, Ctrl+Left as `CSI 1;5D`, Up as `SS3 A` once
-DECCKM is on, Shift+Tab as `CSI Z`, PageUp as `CSI 5~`, a left click as
-`CSI <0;10;5M` and its release as the same with `m`, a bare move refused under
-button-event tracking and reported under any-event, `CSI c` answered
-`CSI ?1;2c` and `CSI >c` answered `CSI >0;1;0c` with nothing printed, and
-`CSI 6n` answered with the cursor's 1-based position. Every one of those was a
-dropped key, a wrong answer, a stray glyph or a refusal before.
+keyboard, read the mouse, ask the terminal what it is, and draw a frame.
+`terminal_grid_test` is the standing proof — it drives the real encoder and
+emulator and checks exact bytes: F1 as `SS3 P`, Ctrl+Left as `CSI 1;5D`, Up as
+`SS3 A` under DECCKM, Shift+Tab as `CSI Z`, a click as `CSI <0;10;5M`, a bare
+move refused under button-event tracking and reported under any-event, `CSI c`
+answered `CSI ?1;2c` and `CSI >c` answered with nothing printed, and `CSI 6n`
+answered with the cursor's position. Every one was a dropped key, a wrong
+answer, a stray glyph or a refusal before.
 
 What it rests on, in case a later phase disturbs it:
 
 - **A key is identified by its canonical keycode, not by a pseudo-byte.** The
-  keyboard driver bakes a legacy `ascii` code for nine navigation keys
-  (`named_to_legacy_ascii`, `drivers/src/ps2/keyboard.rs`) and 0 for everything
-  else, so F1–F12, Insert and Menu left the kernel already anonymous — and
-  `classify` then discarded the canonical HID `keycode` and the per-event
-  modifier byte the compositor had faithfully carried the whole way. Both were
-  drops, not absences: `encode_key` now takes a `KeyPress`
-  (`terminal-core/src/input.rs`) holding ascii, keycode, codepoint and mods. A
-  baked navigation byte still resolves first, because it is the one thing that
-  survives a keypad key whose layout meaning is navigation; everything the
-  driver left anonymous — every F-key, Insert, KP-0-as-Insert — resolves from
-  the canonical keycode, which is also a second source for the navigation block
-  so a nav key no longer *depends* on a pseudo-code the rest of the system has
-  to agree on. The unreachable scancode table that used to sit at the end of
-  the encoder is gone: `legacy_scancode = byte & 0x7F`, so no arm above 0x7F
-  could ever have matched.
+  driver bakes a legacy `ascii` code for nine navigation keys and 0 for
+  everything else, and `classify` then discarded the canonical HID keycode and
+  the per-event modifier byte the compositor had carried the whole way — both
+  drops, not absences. `encode_key` takes a `KeyPress` holding ascii, keycode,
+  codepoint and mods; a baked navigation byte resolves first, because it is
+  what survives a keypad key whose layout meaning is navigation, and
+  everything the driver left anonymous resolves from the keycode.
 - **The encoding is xterm's PC-style one, and the modifier is a parameter.**
-  `1 + shift + 2*alt + 4*ctrl` in the second CSI parameter, so Ctrl+Left is
-  `CSI 1;5D` and Shift+F5 is `CSI 15;2~`; F1–F4 are `SS3 P`–`SS3 S` unmodified
-  and `CSI 1;mod P`–`S` modified; the editing keypad is `CSI n ~` with the
-  modifier as its second parameter. DECCKM is honoured — the parser had tracked
-  `cursor_key_mode` since it was written and nothing had ever read it — and only
-  for an *unmodified* cursor key, because a modified one needs the parameter
-  slot that `SS3` does not have. AltGr is excluded from the Alt bit: the kernel
-  reports it with `MODIFIER_ALT` set as well, and counting it would turn the
-  `@` an AltGr level resolved into a modified keypress.
-- **Alt is a prefix, Shift+Tab is a sequence.** Alt+x is `ESC x` and Alt+ä is
-  `ESC` plus the UTF-8, which is what every terminal does and what a line
-  editor's meta bindings are written against. Shift+Tab is `CSI Z`, and the
-  modifier snapshot is the only thing that can produce it: the keymap folds Tab
-  and Shift+Tab to the same 0x09.
-- **PgUp/PgDn belong to the application.** They were consumed locally for
-  scrollback, so a full-screen program could not page. The local scrollback
-  chord is now Ctrl+Shift+PgUp/PgDn, beside the Ctrl+Shift+C/V clipboard chords
-  that were already terminal commands — and the kernel's own Shift+PgUp
-  interception for the vconsole had to learn to require Shift *without* Ctrl, or
-  the chord would never have reached a client at all.
+  `1 + shift + 2*alt + 4*ctrl` in the second CSI parameter. F1–F4 are `SS3`
+  unmodified and `CSI 1;mod P`–`S` modified; DECCKM is honoured only for an
+  *unmodified* cursor key, because a modified one needs the parameter slot
+  `SS3` does not have. AltGr is excluded from the Alt bit — the kernel reports
+  it with `MODIFIER_ALT` set, and counting it would turn an AltGr-resolved `@`
+  into a modified keypress.
+- **Alt is a prefix, Shift+Tab is a sequence.** Alt+x is `ESC x`; Shift+Tab is
+  `CSI Z`, and the modifier snapshot is the only thing that can produce it
+  because the keymap folds both to 0x09.
+- **PgUp/PgDn belong to the application.** Local scrollback moved to
+  Ctrl+Shift+PgUp/PgDn, and the kernel's own Shift+PgUp interception had to
+  learn to require Shift *without* Ctrl or the chord would never reach a
+  client.
 - **Mouse reporting is the application's, and Shift is the way out.** DECSET
-  1000/1002/1003 select press-only, drag and any-motion; 1006 selects the SGR
-  encoding. The three tracking modes are one selector, as xterm has them, so
-  resetting any of them stops reporting. While reporting is on, a pointer event
-  drives the PTY instead of the local selection — unless Shift is held, which is
-  xterm's override and the only reason a selection stays possible under a
-  full-screen program. Motion emits one report per *cell crossed*, not per
-  pixel, and the X10 encoding refuses a coordinate past 223 rather than
-  truncating it into the wrong cell: it has one byte per field, and 1006 is the
-  encoding with no such limit.
-- **A query is answered on the turn it was asked.** `VtAction` gained
-  `DeviceAttributes` and `DeviceStatus`, the grid gained a bounded reply queue,
-  and the event loop drains it into the existing `MasterWriteQueue` immediately
-  after `drain_master` rather than at the next wake — a program blocked reading
-  a CPR would otherwise wait for a keystroke or a blink. The queue is 256 bytes
-  and drops a whole answer rather than truncating one, because a half-written
-  `CSI ?1;2c` is worse than silence. A reply is also not a cursor movement, so
-  it must not cancel a deferred autowrap the way every other non-printing action
-  does.
-- **A CSI private marker is tracked rather than aborted on.** `?` was the only
-  marker the parser knew; `>` dropped it back to Ground, so `CSI > c` printed a
-  literal `c` into the grid the moment an editor probed for a secondary DA. The
-  marker is now a byte, and dispatch is split by it — which also closed the
-  quieter half of the same bug: the old dispatch consulted the marker for
-  `h`/`l` and for nothing else, so `CSI ? 5 m` reached the SGR handler and
-  turned a mode query into a blink attribute.
+  1000/1002/1003 are one selector as xterm has them, so resetting any stops
+  reporting; 1006 selects SGR. Shift overrides to local selection, which is the
+  only reason one stays possible under a full-screen program. Motion emits one
+  report per *cell crossed*, and X10 refuses a coordinate past 223 rather than
+  truncating it into the wrong cell.
+- **A query is answered on the turn it was asked.** The reply queue drains
+  immediately after `drain_master`, or a program blocked reading a CPR waits
+  for a keystroke. It is 256 bytes and drops a whole answer rather than
+  truncating one, and a reply must not cancel a deferred autowrap the way
+  every other non-printing action does.
+- **A CSI private marker is tracked rather than aborted on.** `>` used to drop
+  the parser to Ground, so `CSI > c` printed a literal `c` the moment an editor
+  probed for a secondary DA. Splitting dispatch by marker also closed the
+  quieter half: the old dispatch consulted the marker for `h`/`l` only, so
+  `CSI ? 5 m` turned a mode query into a blink attribute.
 - **The shell's own decoder understands what the terminal now sends.** It
-  matched `CSI A`/`CSI 3~` and a handful of literal forms, and answered
-  `Partial` for anything parameterised until the buffer passed eight bytes — so
-  one Ctrl+Left swallowed the next characters typed. It recognizes the whole
-  CSI/SS3 shape now (parameters, intermediates, one final byte), and a
-  well-formed sequence it has no use for is consumed *whole*: that is what keeps
-  an F-key's tail from arriving as text. Ctrl or Alt on a horizontal arrow is
-  word motion, sharing the boundary rule `CTRL_W` already deleted to. `ESC`
-  plus a byte that cannot begin a sequence is the one form it re-emits instead
-  of consuming: nothing here binds a meta chord, and dropping the pair would
-  make Alt+x type nothing where it used to type `x` — and would swallow the
-  lead byte of Alt+ä outright.
-- **The glyph set is the blocks a TUI draws with.** 194 slots became 1190 over
-  twelve ranges (`GLYPH_RANGES`, `font/src/lib.rs`): ASCII, Latin-1, Latin
-  Extended-A, the spacing accents a dead key can flush, Greek, Cyrillic, General
-  Punctuation, Currency, Arrows, Box Drawing, Block Elements and Geometric
-  Shapes — which is what the shipped JetBrains Mono actually covers, so "non-
-  Latin renders" means the scripts the font has rather than a promise it cannot
-  keep.
-- **Box drawing and block elements are drawn, not rasterized.** The atlas cell
-  is derived from ASCII metrics and a glyph is centred on its advance and
-  clipped, and JetBrains Mono's box glyphs do not span the em box — rasterizing
-  them leaves a seam at every cell boundary, which is a framed TUI that looks
-  broken. `font/src/boxdraw.rs` draws U+2500..U+259F procedurally instead, as
-  kitty and wezterm do: one `Geom` derives the midlines and the light/heavy/
-  double thicknesses from the cell once, every stroke goes through it, so a
-  weight lands on identical rows in every glyph that carries it. The line block
-  is a 128-entry weight table (four legs × none/light/heavy/double) plus one
-  renderer rather than 128 hand-written cases; the eighths are
+  answered `Partial` for anything parameterised until eight bytes, so one
+  Ctrl+Left swallowed the next characters typed. It recognizes the whole
+  CSI/SS3 shape now and consumes a well-formed sequence *whole*. `ESC` plus a
+  byte that cannot begin a sequence is re-emitted rather than consumed, or
+  Alt+x would type nothing and Alt+ä would lose its lead byte.
+- **The glyph set is the blocks a TUI draws with** — 194 slots became 1190 over
+  twelve ranges, which is what the shipped JetBrains Mono actually covers, so
+  "non-Latin renders" means the scripts the font has.
+- **Box drawing and block elements are drawn, not rasterized.** JetBrains
+  Mono's box glyphs do not span the em box, and a centred-and-clipped glyph
+  leaves a seam at every cell boundary — a framed TUI that looks broken.
+  `font/src/boxdraw.rs` draws U+2500..U+259F procedurally as kitty and wezterm
+  do: one `Geom` derives the midlines and thicknesses from the cell once, so a
+  weight lands on identical rows in every glyph carrying it. The lines are a
+  128-entry weight table plus one renderer; the eighths are
   `round(n * extent / 8)` so `█` equals `▀ | ▄` byte for byte; the shades are a
-  4×4 Bayer dither, not a flat grey, so a shaded region reads as texture at any
-  cell size. The boot console gets the same coverage, which the VGA 8×16 ROM
-  font has none of.
-- **The atlas is chunked, and a missing glyph is the notdef.** One
-  `KVec::zeroed(GLYPH_COUNT * stride)` at 1190 slots and the ABI's largest
-  32×32 cell is 1.2 MB, past `MAX_ALLOC_SIZE`; storage is now `KVec<KVec<u8>>`
-  in 256 KiB pieces behind an `AtlasBuilder`, and the `SYS_FONT_SET` handler
-  copies the user buffer into each chunk in turn instead of materialising the
-  upload. `get_coverage` is two divisions and a slice index, still the per-cell
-  hot path. A set codepoint the loaded font lacks now reads back the replacement
-  diamond rather than a blank cell — without which growing the set by a thousand
-  slots would have turned a visible notdef into an invisible one. The keying is
-  `glyph_index(cp)` answering a *non-zero* glyph id: it answers `Some(0)`, never
-  `None`, for a codepoint its cmap does not cover.
-- **The measured cost.** At JetBrains Mono 16 px the cell is 10×22, so the
-  atlas is 261 800 bytes in one chunk; at the ABI's 32×32 maximum it is
-  1 218 560 bytes in five. The upload ceiling is `(GLYPH_COUNT + 1) * 32 * 32`
-  and bounds *user* memory only. `net-core`'s hand-copied `is_renderable`
-  mirror moved in lockstep, and its test asserts both ends of all twelve ranges
-  rather than a sample.
+  4×4 Bayer dither so a region reads as texture at any cell size.
+- **The atlas is chunked, and a missing glyph is the notdef.** 1190 slots at
+  the ABI's 32×32 cell is 1.2 MB, past `MAX_ALLOC_SIZE`, so storage is
+  `KVec<KVec<u8>>` in 256 KiB pieces and `SYS_FONT_SET` copies into each chunk
+  rather than materialising the upload. A set codepoint the font lacks reads
+  back the replacement diamond — without which growing the set by a thousand
+  slots would turn a visible notdef into an invisible one.
 
 **What this deliberately did not do.**
 
 - **The kernel vconsole answers no query.** Its reply would have to reach the
-  line discipline of the very TTY whose write lock it runs under, so a DA or DSR
-  on `/dev/tty0` is ignored rather than answered wrongly; a program that queries
-  there sees a timeout. Routing a reply through the deferred `PostLockWork` the
-  echo flush already uses is the shape of the fix, and it is a TTY-layer change
-  rather than a terminal one.
+  line discipline of the TTY whose write lock it runs under, so a DA or DSR on
+  `/dev/tty0` is ignored rather than answered wrongly. Routing it through the
+  deferred `PostLockWork` the echo flush already uses is the shape of the fix,
+  and it is a TTY-layer change.
 - **No `modifyOtherKeys`, no CSI-u, no Kitty keyboard protocol.** Ctrl folding
-  happens in the kernel keymap, so `Ctrl+A` arrives as 0x01 and the terminal
-  cannot report `Ctrl+;` at all — the kernel's `ctrl_transform` covers letters
-  only. That is a keymap gap with a terminal-visible symptom, and the protocols
-  that would expose it need the unfolded key, not a different encoder.
-- **No focus reporting (1004), no 1005/1015 mouse encodings, no SGR-pixel
-  (1016).** Focus needs a keyboard-focus event the compositor does not send a
-  client; the other two are encodings nothing modern asks for once 1006 exists.
-- **Bold is still a brighter colour and underline is still invisible.** A cell
-  holds `{codepoint, fg, bg}` and the attributes are flattened into the colours
-  at print time, so `SGR 4` is parsed, tracked on the cursor, and then dropped.
-  Fixing it means an attribute byte per cell — `Cell` is 12 bytes across a
-  100×240 grid plus two 1000-row rings — and `Cell::is_blank`'s definition,
-  which the whole reflow trim rests on. Stated rather than hidden: an editor
-  drawing with colour is served, one drawing with underline is not.
+  happens in the kernel keymap and covers letters only, so `Ctrl+;` cannot be
+  reported at all. That is a keymap gap with a terminal-visible symptom.
+- **No focus reporting, no 1005/1015, no SGR-pixel.** Focus needs an event the
+  compositor does not send a client; the others are encodings nothing modern
+  asks for once 1006 exists.
+- **Bold is a brighter colour and underline is invisible.** Attributes are
+  flattened into the colours at print time. Fixing it means an attribute byte
+  per cell — `Cell` is 12 bytes across a 100×240 grid plus two 1000-row rings —
+  and a new `Cell::is_blank`, which the whole reflow trim rests on.
 - **No astral-plane glyphs and no CJK.** The TTF parser reads cmap format 4
-  only, so anything past U+FFFF resolves to nothing, and the shipped mono font
-  has no CJK to cover even if it did.
+  only, and the shipped mono font has no CJK to cover even if it did.
 
 ---
 
@@ -1010,147 +652,100 @@ What it rests on, in case a later phase disturbs it:
 
 The eighth thing this plan rests on, and the last of the workbench: a file can
 be opened, changed and written back without a Linux host in the path.
-`/bin/editor` — Sloped — is a native GUI application: a file tree beside a
-column of tabs, a code surface with syntax highlighting, find and replace, a
-command palette, a file finder and an undo history, over `appkit` and the
-compositor. `editor_test` is the standing proof — an in-guest run of every
-`editor-core` case against the target's allocator, plus the application's own
-state machine driven through the messages its widgets emit: open a file, type,
-Save As, find and walk the matches, filter the palette and run what it lands on,
-close a modified tab and be asked first, expand a directory in the tree, and
-refuse a binary file.
-
-It was written rather than ported, for the reason the plan gave: nothing
-upstream is reachable before a C frontend exists, and an editor is where a
-desktop OS earns its character. What that bought, beyond the editor, is a
-toolkit that can express one.
+`/bin/editor` — Sloped — is a native GUI application over `appkit` and the
+compositor: a file tree, tabs, a code surface with highlighting, find and
+replace, a command palette, a file finder and undo. `editor_test` is the
+standing proof — every `editor-core` case against the target's allocator, plus
+the application's state machine driven through the messages its widgets emit.
+It was written rather than ported because nothing upstream is reachable before
+a C frontend exists; what that bought beyond the editor is a toolkit that can
+express one.
 
 What it rests on, in case a later phase disturbs it:
 
 - **The logic is a crate, and the crate is host-testable.** `editor-core` holds
-  the buffer, the cursor and its motions, the edit operations with their undo
-  history, literal search, the fuzzy matcher and the syntax lexer, and it
-  touches no syscall — the same split `terminal-core` and `shell-core` already
-  draw, and the reason 91 cases run under `just test-host` in milliseconds and
-  again in the guest under `just test`. The application above it owns the
-  filesystem, the clipboard, the keymap and the window.
+  the buffer, motions, edits with undo, search, the fuzzy matcher and the
+  syntax lexer and touches no syscall — the split `terminal-core` and
+  `shell-core` already draw, and why 91 cases run in milliseconds under `just
+  test-host` and again in the guest.
 - **A line vector, not a rope, and the trade is stated.** What this edits is
-  source code on a machine whose root filesystem is tens of megabytes: the cost
-  that matters is per-keystroke work inside one line, which is O(line), and a
-  line insert, which is a `Vec` move of `line_count` pointers. `MAX_LINES` is a
-  million and a file past it is refused at load; `EDITOR_MAX_FILE_BYTES` is
-  8 MiB. A rope buys a logarithm back at a complexity the whole crate would have
+  source on a machine whose root is tens of megabytes: the cost that matters is
+  per-keystroke work inside one line, O(line), and a line insert, a move of
+  `line_count` pointers. `MAX_LINES` is a million and `EDITOR_MAX_FILE_BYTES`
+  is 8 MiB. A rope buys a logarithm at a complexity the whole crate would have
   to be tested against.
-- **Positions are characters, never bytes.** The cursor, the selection, the
-  renderer's column arithmetic and the search all count cells; one conversion
-  (`TextBuffer::byte_of`) exists for the places `String` needs an offset. Tabs
-  are the one place a *display* column diverges from a character column, which
-  is why the code surface carries both and why a click inside a tab resolves to
-  the side of it the pointer is nearer.
+- **Positions are characters, never bytes.** One conversion exists for where
+  `String` needs an offset. Tabs are the one place a *display* column diverges,
+  which is why the surface carries both and a click inside a tab resolves to
+  the side the pointer is nearer.
 - **Undo is a transaction, not a keystroke.** Typing coalesces while it stays a
-  run of single characters advancing from the last one; a motion, a paste, a
-  save or a compound edit seals the group. Replacing a selection, splitting a
-  brace pair, moving a line, commenting a block and the electric dedent a
-  closing brace triggers are each *one* Ctrl+Z, because each opens a transaction
-  around the several primitive changes it makes.
+  run of single characters advancing from the last; a motion, paste or save
+  seals the group. Replacing a selection, splitting a brace pair, moving a
+  line, commenting a block and an electric dedent are each *one* Ctrl+Z.
 - **Highlighting is a line at a time, against the state the line above left.**
-  A block comment or an unterminated raw string *is* that state, so a viewport
-  costs the lines above it once and the viewport each frame — never the file.
-  The cache lives behind a `RefCell` because drawing is a read that happens to
-  memoize, and a view that had to borrow the document mutably would not be a
-  view. Rust, C, TOML, JSON, Markdown, shell and Python are lexed; the lexer
-  resolves what a *character run* is and never what a name means, which is why a
-  keyword list and a delimiter table are enough.
+  A block comment *is* that state, so a viewport costs the lines above it once
+  and the viewport each frame, never the file. The cache is behind a `RefCell`
+  because drawing is a read that happens to memoize. The lexer resolves what a
+  *character run* is and never what a name means, which is why a keyword list
+  and a delimiter table are enough.
 - **The toolkit grew what the editor needed, and every application got it.**
-  `appkit` had one font, fixed-cell, which is why every SlopOS application used
-  to read as a terminal wearing a window. It now has two roles: proportional UI
-  text (Inter, through `FontRenderer`) for every label, button, menu and header,
-  and the fixed-cell atlas for content whose columns must line up. The new
-  widgets are a virtualized code surface, a virtualized tree, editor tabs with a
-  modified marker, an in-window menu bar, a focus-explicit line input, a
-  draggable splitter, a card with a real shadow and a procedurally drawn icon
-  set. The palette is One Dark.
-- **Transient interaction state belongs to the application.** The widget tree is
-  rebuilt on every message, so anything a widget remembered between a press and
-  the move that follows it was already gone: a drag, a click run, a resize.
-  Those now live in the application and are *given* to the widget, which is the
-  same discipline the rest of the toolkit follows — and the reason a drag
-  selection, a double click and a sidebar resize work at all.
-- **A widget answers a key only when the key is its own.** Keyboard events are
-  offered to every widget in turn until one consumes, and nothing ever sent
-  `FocusGained`/`FocusLost` — so every widget's `focused` flag was permanently
-  false, and the two that answered keys without consulting it answered *every*
-  key. A button took Enter and Space from whatever was being typed into, which
-  made a space unsearchable and a newline untypable while the find bar was
-  open; a list took the arrows and emitted its row-chosen message, which for
-  the command palette meant running each command the selection passed over.
-  `run_app` now tells the widget losing focus and the one gaining it, and both
-  widgets ask before answering.
-- **A drag that leaves the thing it started on is still a drag.** State the
-  application holds has to be *ended*, and a release is only an ending if it
-  arrives. Two layers had to say so. A `StackWidget` now tells a move *and* a
-  release to the children whose rect they missed, because a widget that latched
-  on a press is the one waiting for them and every other widget guards on
-  containment or on its own latch — a six-pixel splitter that hears about the
-  pointer only while the pointer is still on it cannot be moved at all. Under
-  that, the compositor holds the `wl_pointer` implicit grab: a
-  press on a client's content pins pointer delivery to that client until every
-  button is up, so dragging past the window edge no longer hands the pointer —
-  and the release — to whatever is underneath. Without either, a selection goes
-  on following a pointer with no button held, and the next keystroke replaces
-  text the user never selected.
+  `appkit` had one fixed-cell font, which is why every SlopOS application read
+  as a terminal wearing a window; it now has proportional UI text beside the
+  fixed-cell atlas for content whose columns must line up, plus a virtualized
+  code surface and tree, tabs, a menu bar, a focus-explicit line input, a
+  splitter, cards and a procedural icon set.
+- **Transient interaction state belongs to the application.** The widget tree
+  is rebuilt on every message, so anything a widget remembered between a press
+  and the move after it was already gone. Drags, click runs and resizes live in
+  the application and are *given* to the widget.
+- **A widget answers a key only when the key is its own.** Nothing ever sent
+  `FocusGained`/`FocusLost`, so every `focused` flag was permanently false and
+  the two widgets that answered keys without consulting it answered *every*
+  key: a button took Enter and Space from whatever was being typed into, and a
+  list took the arrows — which for the command palette meant running each
+  command the selection passed over.
+- **A drag that leaves the thing it started on is still a drag.** Two layers
+  say so. `StackWidget` tells a move *and* a release to children whose rect
+  they missed, because a widget that latched on a press is the one waiting for
+  them; under that, the compositor holds the `wl_pointer` implicit grab, so
+  dragging past the window edge does not hand the release to whatever is
+  underneath. Without either, a selection follows a pointer with no button
+  held and the next keystroke replaces text nobody selected.
 - **A space is a character.** The keymap reports Space as a *named* key so a
-  focused button can be pressed with it, which meant no `appkit` text input
-  could type one. Text-entering widgets translate it; buttons still get their
-  chord.
-- **The clipboard is the compositor's.** `windowing` gained the fd-based
-  transfer both ways — a copy hands over a memfd, a paste is ask, be told the
-  size, hand back a destination of exactly that size — and `appkit` exposes it
-  as `clipboard::copy` and a `request_paste` whose answer arrives at
-  `App::on_paste`. Control bytes other than tab and newline are dropped on the
-  way in: a clipboard is untrusted input.
-- **What the file had, the file keeps.** Line endings are detected and restored,
-  a missing final newline stays missing, and indentation is read from the file
-  rather than assumed — a tab-indented file indents with tabs, and a file
-  indented two spaces stays that way. What is histogrammed is the *step into* a
-  block, not the absolute indent a line carries, because every indent a file
-  shows is a multiple of its unit and a four-space file with enough nesting
-  shows as many eights as fours. A binary file is refused rather than opened as
-  replacement characters that saving would then write back.
+  focused button can be pressed with it; text-entering widgets translate it.
+- **The clipboard is the compositor's** — an fd-based transfer both ways, with
+  control bytes other than tab and newline dropped on the way in, because a
+  clipboard is untrusted input.
+- **What the file had, the file keeps.** Line endings, a missing final newline
+  and the indent unit are detected and restored. What is histogrammed is the
+  *step into* a block rather than the absolute indent, because every indent is
+  a multiple of the unit and a four-space file with enough nesting shows as
+  many eights as fours. A binary file is refused rather than opened as
+  replacement characters a save would write back.
 - **A save cannot destroy what it fails to replace.** `File::create` truncates
-  before the first new byte lands, so a write that fails part way — a full
-  image, a device error — would leave the user's file gone while the editor
-  held the only copy. A save writes a sibling, `fsync`s it and renames over the
-  target, which the journal makes one atomic metadata operation: what is on the
-  medium is the old file or the whole new one, never a prefix of either. It
-  also asks before writing at all when the file it is about to land on is not
-  the one the tab read — changed underneath it, gone, or a Save As target that
-  already exists — compared by modification time and length, recorded at open
-  and re-taken at every save.
+  before the first new byte lands, so a partial write would leave the user's
+  file gone while the editor held the only copy. A save writes a sibling,
+  `fsync`s and renames, which the journal makes one atomic metadata operation.
+  It also asks before landing on a file that is not the one the tab read,
+  compared by mtime and length recorded at open and re-taken at every save.
 
 **What this deliberately did not do.**
 
-- **No syntax tree, and no `syntect`.** The lexer is a hand-written one over a
-  language table, because TextMate grammars want a regex engine and tree-sitter
-  wants a C toolchain that does not exist yet. What that costs is precision a
-  parser would have: a capitalized identifier is typed as a type, and a lowercase
-  one before `(` as a call, because that is what a lexer can know.
-- **No LSP, no multi-cursor, no split panes, no file watching.** Each is a
-  separate feature with its own state; none of them is what "you can edit a
-  file" needs. A file changed underneath the editor is therefore not noticed
-  *while it is open* — the buffer does not reload and nothing marks it stale —
-  only at the moment a save would overwrite it, which is where the damage
-  would be.
-- **The terminal editor was not written.** The plan offered either; the GUI one
-  is what landed, because the toolkit gap it closed (a real text widget, a
-  proportional font, a tree) is what every other SlopOS application needed too,
-  and a TUI editor would have closed none of it. The terminal's own gaps named
-  above — a per-cell underline, the unfolded Ctrl chords — are therefore still
-  open, and still exactly what a full-screen program would find missing.
-- **No shift-click without a keyboard focus.** The compositor sends no modifier
+- **No syntax tree, and no `syntect`.** TextMate grammars want a regex engine
+  and tree-sitter wants a C toolchain that does not exist yet. The cost is
+  precision: a capitalized identifier is typed as a type and a lowercase one
+  before `(` as a call, because that is what a lexer can know.
+- **No LSP, no multi-cursor, no split panes, no file watching.** A file changed
+  underneath the editor is therefore not noticed *while it is open*, only at
+  the moment a save would overwrite it — which is where the damage would be.
+- **The terminal editor was not written.** The GUI one is what landed, because
+  the toolkit gap it closed is what every other SlopOS application needed and a
+  TUI editor would have closed none of it. The terminal's own gaps above are
+  therefore still open.
+- **No shift-click without keyboard focus.** The compositor sends no modifier
   state with a pointer event, as Wayland does not; `appkit` stamps a press with
-  the keyboard's most recent snapshot, which is right while the window has focus
-  and stale if the modifier was pressed before it got any.
+  the keyboard's most recent snapshot, which is stale if the modifier was
+  pressed before the window had focus.
 
 ---
 
@@ -1159,413 +754,371 @@ What it rests on, in case a later phase disturbs it:
 The ninth thing this plan rests on, and the one that took the *std platform
 layer* out of the remaining work entirely: `x86_64-unknown-slopos` is a
 **unix-family Rust target over a real C library**, and `std` is upstream `std`.
-What it does not take out — and what the backend measurement below then put
-back, in a different shape — is Phase 1's platform work: a dynamic loader and a
-C++ runtime are not std's problem and this section does not touch them. What a
-SlopOS binary runs on is `library/std/src/sys/pal/unix`; the 20-file,
-3 963-line bespoke platform layer that used to sit beside it is deleted, and so
-is the 729-line script that used to sed it into the rustup sysroot in place.
-`libc_abi_test` is the standing proof — fourteen in-guest cases holding slibc
-to the libc module's own declarations: a zeroed
-`pthread_mutex_t`/`cond_t`/`rwlock_t` usable without `_init` and a requested
-stack size that reaches the thread, `read_dir` enumerating exactly what
-`getdents64` does, a `sigaction` round trip through the 152-byte struct, a
-`SIGSEGV` handler reading back the address it faulted at, an fd crossing an
-AF_UNIX socket beside two non-adjacent iovec segments, `sysconf` agreeing with
-the kernel on the page size and the CPU count, `environ` and `getenv` being one
-environment, `realpath` resolving a relative link against the link's own
-directory, and the sigset narrowing that turns the 128-byte userspace mask into
-the kernel's 8-byte one. It exists because under this design a wrong struct is
-a *miscompile* rather than a compile error, which was the one new risk the
-decision carried — and two of its cases were falsified before being believed,
-by breaking `si_addr` and the `SCM_RIGHTS` count in the kernel and watching
-exactly those two fail.
+What a SlopOS binary runs on is `library/std/src/sys/pal/unix`; the 20-file,
+3 963-line bespoke platform layer beside it is deleted, and so is the 729-line
+script that used to sed it into the rustup sysroot in place. `libc_abi_test` is
+the standing proof — fourteen in-guest cases holding slibc to the libc module's
+own declarations, from a zeroed `pthread_mutex_t` usable without `_init` to the
+sigset narrowing that turns a 128-byte userspace mask into the kernel's
+8-byte one. It exists because under this design a wrong struct is a
+*miscompile* rather than a compile error, which was the one new risk the
+decision carried; two of its cases were falsified before being believed, by
+breaking `si_addr` and the `SCM_RIGHTS` count in the kernel.
 
 What it rests on, in case a later phase disturbs it:
 
 - **`restricted_std` was a string allowlist, and it is retired.**
   `library/std/build.rs` compares `CARGO_CFG_TARGET_OS` against ~45 names and
-  emits `--cfg restricted_std` on a miss, which flipped the whole crate from
-  `#[stable]` to `#[unstable(feature = "restricted_std")]` and forced that
-  attribute into **65** files. One line — `|| target_os == "slopos"` — retired
-  all 65 of them.
-- **The sysroot is owned, not mutated.** `-Zbuild-std` resolves std from
-  `<host sysroot>/lib/rustlib/src/rust/library`, so the old flow had no choice
-  but to edit the rustup toolchain in place: a shared, unversioned, silently
-  drifting input. `scripts/make_slopos_sysroot.sh` instead `cp -al`s the pinned
-  toolchain (0.5 s cold, 0.04 s warm, one inode per file), replaces
-  `lib/rustlib/src` with a real copy, applies the two fork patches, and
-  registers the result with `rustup toolchain link slopos`. Builds are
-  `cargo +slopos`.
-- **The forks are diffs, and the diffs are the PRs.**
-  `toolchain/rust/0001-slopos-std.patch` is 665 lines over 14 files of
-  `library/`; `toolchain/libc/0001-slopos-libc.patch` is 1 550 lines over 6
-  files of a pinned `libc 0.2.189`. Nothing is vendored: the libc tarball comes
-  from the local cargo cache or from static.crates.io against the checksum in
-  `toolchain/PIN`, and each patch is verified against its pinned SHA before it
-  is allowed to touch a file. That is what makes "upstream it and the fork
+  flips the whole crate to `unstable` on a miss, which had forced that
+  attribute into **65** files. One line retired all of them.
+- **The sysroot is owned, not mutated.** `-Zbuild-std` resolves std from the
+  host sysroot's own source tree, so the old flow had to edit the rustup
+  toolchain in place — a shared, unversioned, silently drifting input.
+  `scripts/make_slopos_sysroot.sh` builds and registers an owned clone
+  instead; `AGENTS.md` documents it and `scripts/check_toolchain_pin.sh` holds
+  it to the pin. Builds are `cargo +slopos`.
+- **The forks are diffs, and the diffs are the PRs.** 665 lines over 14 files
+  of `library/`, and 1 550 over 6 files of a pinned `libc 0.2.189`. Nothing is
+  vendored: the tarball comes from the cargo cache or crates.io against the
+  checksum in `toolchain/PIN`, and each patch is verified against its pinned
+  SHA before it touches a file. That is what makes "upstream it and the fork
   shrinks to nothing" an end state rather than a hope.
 - **`libc/src/unix/slopos/mod.rs` is one file, and every layout in it is
-  Linux's.** Redox's equivalent is 1 450 lines; this is 1 461 — the type
-  aliases, the structs, the constant blocks, the `CMSG_*`/`FD_*`/`W*` helpers,
-  `impl siginfo_t`, and one `extern "C"` block declaring **227** entry points.
-  SlopOS's ABI already *was* Linux's at the numbers and the constants, so the
-  module is not a translation layer; it is a statement of what slibc owes.
-- **The std diff is cfg-sites, not a parallel PAL.** 665 lines over 14 files,
-  of which three are new: `os/slopos/{mod,raw,fs}.rs`, the `MetadataExt`
-  surface every unix target owns, derived from upstream's own `os/redox/`
-  ones. A fourth, `sys/random/slopos.rs`, is a dozen lines over `getrandom`,
-  exactly redox's shape. Everything else adds a `target_os = "slopos"` arm to
-  a list that was already there: the `restricted_std` allowlist, `os/mod.rs`
-  and `os/unix/mod.rs`'s platform module, `sys/args/unix.rs`'s stored-argv
-  set, `sys/random/mod.rs`, `sys/thread/unix.rs`'s `set_name` and
-  `available_parallelism`, and `sys/io/error/unix.rs`'s `__errno_location`
-  spelling. Two arms *subtract*: `current_exe` is `Unsupported`, because
-  SlopOS has no procfs and a process cannot name its own image; and
-  `backtrace`'s unix arm is declined, because a userland binary is
-  `panic = abort` with `.eh_frame` discarded by its linker script, so the
-  libunwind `_Unwind_*` the unix arm references is not there to link against.
-- **Synchronisation rides pthreads, which costs the std fork nothing.**
-  `sys/sync/mutex/mod.rs`'s `target_family = "unix"` arm already selects
-  `pthread`, so `Mutex`, `Condvar`, `RwLock`, `Once` and thread parking are
-  slibc's futex-based primitives with no cfg-site at all. The price is paid on
-  the slibc side, which is the right side: those objects grew to their declared
-  glibc sizes (`pthread_mutex_t` 16 → 40, `pthread_cond_t` 16 → 48,
-  `pthread_rwlock_t` 8 → 56, `pthread_attr_t` 16 → 56) and must work
+  Linux's.** 1 461 lines — types, structs, constants, the `CMSG_*`/`FD_*`/`W*`
+  helpers, and one `extern "C"` block declaring **227** entry points. SlopOS's
+  ABI already *was* Linux's at the numbers and constants, so the module is not
+  a translation layer; it is a statement of what slibc owes.
+- **The std diff is cfg-sites, not a parallel PAL.** Three new files
+  (`os/slopos/{mod,raw,fs}.rs`, derived from upstream's own `os/redox/`) plus a
+  dozen-line `sys/random/slopos.rs`; everything else adds a
+  `target_os = "slopos"` arm to a list that was already there. Two arms
+  *subtract*: `current_exe` is `Unsupported`, because there is no procfs and a
+  process cannot name its own image, and `backtrace`'s unix arm is declined,
+  because a userland binary is `panic = abort` with `.eh_frame` discarded and
+  the libunwind symbols are not there to link against.
+- **Synchronisation rides pthreads, which costs the std fork nothing.** The
+  `target_family = "unix"` arm already selects `pthread`, so `Mutex`,
+  `Condvar`, `RwLock`, `Once` and parking are slibc's futex primitives with no
+  cfg-site at all. The price is paid on the slibc side, which is the right
+  side: those objects grew to their declared glibc sizes and must work
   zero-initialised, because std allocates them with `PTHREAD_*_INITIALIZER`
   semantics and only sometimes calls `_init`.
-- **slibc is a C library now, not a Rust crate that happens to export C
-  symbols.** `libc.a` comes from a `slibc/staticlib` wrapper package whose
-  whole content is the dependency plus a `#[panic_handler]`, and `crt0.o` from
-  a `slibc/crt0` crate carrying the `_start` that used to live in
-  `userland/src/lib.rs` — which is the single gate that turns "can a C program
-  be built here" from *no* into *yes*, pulled onto this critical path by the
-  unix-family decision rather than waiting for a C frontend. It is a wrapper
-  and not `crate-type = ["rlib", "staticlib"]` on slibc itself because cargo
-  emits every declared crate type in *one* rustc invocation even for a
-  dependency unit: a `no_std` staticlib needs an in-crate `#[panic_handler]`,
-  and that handler is then a duplicate `panic_impl` lang item for all 211 of
-  userland's rlib uses. The 42 headers under `slibc/include/` are *generated*
-  by `slibc/build.rs` from the creation hunk of
-  `toolchain/libc/0001-slopos-libc.patch` — the same declarations the compiler
+- **slibc is a C library now, not a Rust crate that exports C symbols.**
+  `libc.a` comes from a `slibc/staticlib` wrapper and `crt0.o` from a
+  `slibc/crt0` crate — the single gate that turns "can a C program be built
+  here" from no into yes, pulled onto this path by the unix-family decision
+  rather than waiting for a C frontend. It is a wrapper rather than a second
+  crate type on slibc because cargo emits every declared type in one rustc
+  invocation, and a `no_std` staticlib's `#[panic_handler]` would then be a
+  duplicate lang item for all 211 rlib uses. The 42 headers under
+  `slibc/include/` are *generated* from the same patch hunk the compiler
   reads, so a header cannot drift from the export it describes.
 - **The `slopos_` thunk layer is gone.** 40 exports existed only so a patched
-  PAL could `extern "C"`-declare them — the whole `*at` family, `lseek`,
-  `stat`/`lstat`/`fstat`, `readv`/`writev`, `mmap`, `flock`, `utimensat`,
-  `uname` — and they carry their real C names. Seven keep the prefix because
-  they name calls no libc has: `slopos_spawn_path`, `slopos_getdents64`,
-  `slopos_futex_wait`, `slopos_futex_wake`, and the three CPU calls
-  (`get_cpu_count`, `get_current_cpu`, `set_cpu_affinity`); the ones whose
-  only caller was the deleted PAL are deleted with it, and so are the four
-  that had a real C equivalent and no caller at all.
+  PAL could declare them and now carry their real C names. Seven keep the
+  prefix because they name calls no libc has.
 - **Two ABI divergences are closed, by force rather than by choice.** std's
-  unix PAL reads `siginfo_t.si_addr` and uses `msghdr`/`cmsghdr`, so `si_addr`
-  moved from offset 24 to **16** — into the union arm Linux has, rather than a
-  sibling field — `msghdr` became Linux's 56-byte form with a real `*mut iovec`
-  that the kernel now walks instead of one inlined descriptor, and `cmsghdr`
-  became 16 bytes with `CMSG_DATA` at +16. Both were named as divergences by
-  the POSIX-floor section above; both now read the same from a Linux header and
-  from `abi/`.
-- **`sendmsg`/`recvmsg` stopped borrowing the private range.** They were
-  private *because* their layouts were not Linux's, and the gate's allowlist
-  said exactly that. With the layouts fixed the reason is false, so they take
-  Linux's 46 and 47 and the private range compacts behind them.
+  unix PAL reads `siginfo_t.si_addr` and `msghdr`/`cmsghdr`, so `si_addr` moved
+  to offset **16** — into the union arm Linux has — `msghdr` became Linux's
+  56-byte form with a real `*mut iovec` the kernel walks, and `cmsghdr` 16
+  bytes. `sendmsg`/`recvmsg` were private *because* those layouts were not
+  Linux's, so they took 46 and 47 and the private range compacted.
 - **Swapping the platform layer found three real bugs, and they were in the
-  kernel and in slibc rather than in the port.** A patched PAL had been
-  hiding each one by choosing a different path:
-  - **The kernel could not write into a page that was merely promised.**
-    OSTD's user-copy validates the leaf and refuses — it takes no fault — so a
-    user buffer was only copyable once its pages were *already* present. Since
-    `brk`, `mmap` and `fork` all leave pages absent or COW by design, the first
-    `read(2)` into a fresh `Vec` had no present leaf to write and answered
-    `EFAULT`; the old PAL never saw it because every kernel→user write in the
-    tree targeted eagerly-mapped memory (`exec`'s segments, the signal frame).
-    `mm::user_copy` now resolves the range through the ordinary fault path
-    first, which is what Linux does by faulting. The ordering is load-bearing
-    and cost one debugging session: the populate runs *before* the copy's
-    `KArc<VmSpace>` is taken, because the demand path refuses to install a
-    page while another reference to the space is live — populating with the
-    copy's own handle held spun to its bound and then gave up, and made the
-    faulting task's retries look like an address-space reader that was not
-    draining.
-  - **A task the kernel killed on a fault reported `exited(139)`, not
-    `signalled(SIGSEGV)`.** `exit_status_word` keyed on
-    `TaskExitReason::Signalled`, and the fatal-fault path records
-    `UserFault` — a diagnostic distinction, not a different kind of death.
-    The old PAL read `ExitInfo`'s fields directly and papered over it; std
-    reads the POSIX status word, where `exit(139)` and death by `SIGSEGV` are
+  kernel and in slibc rather than in the port.** A patched PAL had been hiding
+  each by taking a different path.
+  - **The kernel could not write into a page that was merely promised.** OSTD's
+    user-copy validates the leaf and takes no fault, so the first `read(2)`
+    into a fresh `Vec` answered `EFAULT`; every kernel→user write in the tree
+    had targeted eagerly-mapped memory. `mm::user_copy` resolves the range
+    through the ordinary fault path first, and the ordering is load-bearing:
+    the populate runs *before* the copy's `KArc<VmSpace>` is taken, because the
+    demand path refuses to install a page while another reference is live.
+  - **A task killed on a fault reported `exited(139)`, not
+    `signalled(SIGSEGV)`.** The fatal-fault path records `UserFault`, a
+    diagnostic distinction; std reads the POSIX status word, where those are
     different answers and a build driver acts on which it got.
   - **`realpath` resolved a relative symlink target against the wrong
-    directory.** It stripped a component that had not been appended, so
-    `/bin/ls -> coreutils` canonicalised to `/coreutils` and answered
-    `ENOENT`. `libc_abi_test` holds that case now.
-- **The gate this replaces, replaced.** `patch_std.sh`'s
-  `check_arm_precedes_fallback` existed because a `cfg_select!` arm placed
-  after the `_` wildcard is dead code that still compiles — it shipped once as
-  a `ud2` in `std::process::exit`. That failure mode went with the script. Two
-  appear in its place: the fork drifting from `rust-toolchain.toml`, and a
-  `libc` struct disagreeing with `abi/`. `scripts/check_toolchain_pin.sh` and
-  the const asserts on both sides are what catch them. A third was found by
-  building it: `git apply` run inside a work tree resolves a patch's paths
-  against the *repository* root, so a sysroot materialised under
-  `third_party/` got every path ignored and exit 0 — an unpatched sysroot
-  reported as success. Repository discovery is ceilinged above the sysroot and
-  every patch is re-checked in reverse, because a gate that cannot see a no-op
-  is not a gate.
+    directory**, so `/bin/ls -> coreutils` canonicalised to `/coreutils`.
+- **The gate this replaces, replaced.** `patch_std.sh`'s arm-order check
+  existed because a `cfg_select!` arm after the `_` wildcard is dead code that
+  still compiles — it shipped once as a `ud2` in `std::process::exit`. That
+  failure mode went with the script; the two that replace it are the fork
+  drifting from the pin and a `libc` struct disagreeing with `abi/`. A third
+  was found by building it: `git apply` inside a work tree resolves paths
+  against the *repository* root, so a sysroot under `third_party/` got every
+  path ignored and exit 0. Discovery is ceilinged and every patch re-checked in
+  reverse, because a gate that cannot see a no-op is not a gate.
 
 **What this deliberately did not do.**
 
-- **The triple is still a JSON spec, not a built-in.** Tier 3 buys the built-in
-  name, the `--print target-list` entry and the `STAGE0_MISSING_TARGETS` row —
-  and ships **no artifacts**, so `-Zbuild-std` stays mandatory either way until
-  tier 2, which is where `x86_64-unknown-redox` sits. What a built-in triple
-  actually costs is a stage-2 cross toolchain built from the fork, whose own
-  dev-guide figure is ~100 GB of build directory, and what it buys over the
-  linked sysroot is dropping three flags from one script. The diff a tier-3 PR
-  wants — `spec/base/slopos.rs`, `spec/targets/x86_64_unknown_slopos.rs`, the
-  `supported_targets!` entry and `platform-support/slopos.md` — is therefore
-  written when the PR is, not before it.
+- **The triple is still a JSON spec, not a built-in.** Tier 3 buys the name and
+  ships **no artifacts**, so `-Zbuild-std` stays mandatory either way until
+  tier 2. What a built-in triple costs is a stage-2 cross toolchain (~100 GB of
+  build directory by the dev guide's own figure) and what it buys is dropping
+  three flags from one script, so the tier-3 diff is written when the PR is.
 - **Upstreaming has not happened.** The two patches *are* the two PRs, in the
-  order the tier policy asks for (`rust-lang/libc` before `rust-lang/rust`),
-  and the cost is unchanged: a maintainer name on record, the verbatim
-  policy-response text, and an `MIT OR Apache-2.0` licence on the contributed
-  files. Nothing contributed is GPL'd kernel or slibc code — the libc module
-  and the std cfg-sites are new work, and the three `os/slopos/` files derive
-  from upstream's own `os/redox/` ones under the same licence.
-- **Being a *host* is still gated on proc macros, not on the target spec.**
-  `compiler/rustc_driver/Cargo.toml` is `crate-type = ["dylib"]` and
-  `rustc_session`'s `invalid_output_for_target` rejects `Dylib`/`ProcMacro`
-  outright when `!target.dynamic_linking`, so a static rustc that expands proc
-  macros is not a thing that exists today. That is unchanged, and it is
-  Workstream 1.1's problem.
+  order the tier policy asks for, and the cost is a maintainer name on record
+  and an `MIT OR Apache-2.0` licence on the contributed files. Nothing
+  contributed is GPL'd kernel or slibc code.
+- **Being a *host* was gated on proc macros, not on the target spec, and the
+  gate is now open.** `rustc_driver` is `crate-type = ["dylib"]` and
+  `invalid_output_for_target` rejects that outright when `!dynamic_linking`, so
+  a static rustc that expands proc macros does not exist. The spec says
+  `dynamic-linking: true` and the loader behind it exists; what remains is
+  Workstream 2.1's built-in triple.
 - **The three layouts std's unix PAL never reads stay divergent**: the
-  truncated `ucontext_t` with its `rt_sigreturn`, the `termios2`-shaped
-  `struct termios`, and `NSIG` at 32. They are binary-compatibility work, not
-  platform-layer work, and the open decision below is where they belong.
+  truncated `ucontext_t`, the `termios2`-shaped `struct termios`, and `NSIG`
+  at 32. They are binary-compatibility work, which is an open decision below.
 
 ---
 
 ## The backend is measured, and it is still LLVM
 
 The tenth thing this plan rests on, and the one that decided which toolchain
-the phases below are written for: the spike this plan asked for before anything
-else has been run, and its answer is a pair of gates rather than a paragraph.
-`just check-toolchain-coverage` holds every codegen backend to the
-capabilities `targets/x86_64-slos.json` depends on and every linker to the
-constructs `link.ld` uses, against tracked expectations under
-`scripts/gates/codegen/` and `scripts/gates/linker/`. LLVM answers seven of
-seven and `rust-lld` eighteen of eighteen. cranelift answers three of seven
-and `wild` twelve of eighteen — and what each is missing is the part that
-decides whether the result is a kernel.
+the phases below are written for. The spike this plan asked for before anything
+else has been run, and its answer is a pair of gates rather than a paragraph:
+`just check-toolchain-coverage` holds every codegen backend to the capabilities
+`targets/x86_64-slos.json` depends on and every linker to the constructs
+`link.ld` uses. LLVM answers seven of seven and `rust-lld` eighteen of
+eighteen; cranelift three of seven and `wild` twelve of eighteen. Verdicts and
+their reasoning live in `scripts/gates/{codegen,linker}/`.
 
-The gate fails in *both* directions, which is the whole reason it is a gate: a
-`lacks` that becomes a `has` fails the run exactly as a regression does.
+**The gate fails in both directions**, which is the whole reason it is a gate:
+a `lacks` that becomes a `has` fails the run exactly as a regression does.
 "cranelift cannot build this kernel yet" is a claim with a shelf life, and
 nothing else in the tree would notice it expiring.
 
 What it rests on, in case a later phase disturbs it:
 
 - **cranelift cannot compile a kernel that must not touch the vector file.**
-  `probe_float_add` lowers `a + b` to `addsd %xmm1, %xmm0` and takes its
-  arguments in XMM; LLVM under `+soft-float` takes them in `%rdi`/`%rsi` and
-  calls `__adddf3`. rustc says so itself — "target feature `soft-float` must
-  be enabled to ensure that the ABI of the current target can be implemented
-  correctly" — because cg_clif's `target_config` returns no target features at
-  all for `Os::None`. Underneath that, SSE2 sits *below* cranelift's lowest
-  x86 feature toggle (`has_sse3` is the lowest one the ISA defines) and a
-  float is `RegClass::Float` unconditionally in the x64 ABI. It is a property
-  of the backend, not a flag nobody passed, and no issue tracks changing it.
-  The cost is not a gate failing: a syscall or fault entering from userland
-  saves no vector state, so one such instruction in the kernel clobbers the
-  interrupted task's live registers.
-- **`.stack_sizes` is an LLVM feature, and S-5 is what reads it.**
-  `-Zemit-stack-sizes` is documented as an LLVM passthrough
-  (rust-lang/rust#54192) and cg_clif never mentions it. It is accepted and
-  emits nothing. `check_stack_sizes.sh` fails closed on that through
-  `min-records`, which is the only reason the 2 KiB ceiling against a 4 KiB
-  guard page is not silently unenforced.
-- **`-Zsanitizer=safestack` is accepted and does nothing.** cg_clif
-  implements no sanitizer and rejects only LTO and `-Cinstrument-coverage`, so
-  the flag passes and `probe_frame` comes out uninstrumented. The companion
-  `-Cllvm-args=-safestack-use-pointer-address` does not even have a spelling:
-  cg_clif takes `-Cllvm-args` as its *own* option namespace, documents
-  `jit-mode` and nothing else in it, and answers "Unknown option" to the
-  rest. Nothing in the tree would have caught either — which is what
-  the `safestack` probe is for.
-- **`sym` operands are the one gap that is only a switch.** "asm! and
-  global_asm! sym operands are not yet supported" is a `cfg!` guard with the
-  implementation directly beneath it, gated on cg_clif's `inline_asm_sym`
-  cargo feature, which the `rustc-codegen-cranelift-preview` component leaves
-  off. rustc_codegen_cranelift#1204 has been open since 2021; what it names
-  is the object-file linking the global-asm case needs, which is why a symbol
-  private to its codegen unit does not resolve. Four sites here need it
-  — `AP_PCR_PTRS` and `ap_early_entry` in the AP trampoline
-  (`slopos-ostd/src/arch/x86_64/naked.rs`), and the dispatch entry/exit thunks
-  (`slopos-ostd/src/task/switch.rs`).
+  SSE2 sits *below* cranelift's lowest x86 feature toggle and a float is
+  `RegClass::Float` unconditionally in its x64 ABI, so soft-float is a property
+  of the backend rather than a flag nobody passed; cg_clif returns no target
+  features at all for `Os::None`, and rustc refuses the ABI on that basis. The
+  cost is not a gate failing: a syscall or fault entering from userland saves
+  no vector state, so one such instruction clobbers the interrupted task's live
+  registers.
+- **Two of cranelift's four gaps are silent, and they are why this is a gate.**
+  `-Zemit-stack-sizes` is accepted and emits nothing, so S-5's 2 KiB ceiling
+  against a 4 KiB guard page would be enforced by nothing; `-Zsanitizer=safestack`
+  is accepted and instruments nothing, and its companion `-Cllvm-args` option
+  does not even have a spelling. `check_stack_sizes.sh` fails closed on the
+  first through `min-records`. The `sym`-operand gap is the one that is only a
+  switch — the implementation sits under a `cfg!` the shipped component leaves
+  off — and four sites here need it.
 - **`wild` puts the output sections in its own order, which is the finding that
-  disqualifies it.** Twelve of the eighteen constructs work — `PHDRS` with
-  declared flags, `KEEP` against a control link without it,
-  `ASSERT(SIZEOF())`, `/DISCARD/`, `ENTRY` of a non-default symbol, a
-  top-level definition, and symbols bracketing exactly the output section
-  they are written in. Three it refuses outright: `. = KERNEL_VIRT_BASE` — the
-  location counter taken from a symbol, which is `link.ld` line 19 and the
-  reason `wild -T link.ld` never reaches anything else — `(NOLOAD)`, and the
-  pre-colon `.text ALIGN(4096) :` (the other two `ALIGN` spellings work). And
-  three it accepts and gets wrong, which are the ones that matter because they
-  do not announce themselves.
-  Of those, **section order is the one that is a property rather than a
-  default.** wild emits sections in permission-class order, and its own test
-  suite says so: the script-layout test carries `//#ReferenceLinkers:` — no
-  reference linker at all — beside the comment "`.text` is the first section
-  in ld, so this test wouldn't work with ld", and the lld-suite skip group
-  is named `design_differences`, reason "Wild uses immediate binding or
-  different load address; output differs from lld by design". `link.ld`'s
-  order is load-bearing, so that alone is disqualifying.
-  **The wrong base is a disagreement about what `. = X` means.** wild reads it
-  as "the image starts at X" and puts the ELF and program headers there; ld
-  and lld read it as "the next output section starts at X" and keep the
-  headers out of the way. The first `LOAD` segment is at the script's address
-  under both; the first *section* is not, and that is the one `link.ld` cares
-  about, because `.limine_requests` has to be in the first `LOAD` and
-  `_kernel_start` brackets the counter. How far past the base wild puts a
-  section depends on the phdr count, so the gate prints the address rather
-  than recording one. `--nmagic` — which drops wild's `.relro_padding` and its
-  page-aligned loadable segments — reduces that offset without removing it:
-  `base+0x1350` to `base+0x280` on a single-section object. The header
-  placement sits underneath the page rounding rather than instead of it, so no
-  invocation flag reaches it.
-  **The refusal is version-bound and upstream has already fixed it.**
-  `. = <symbol> + …` fails at `layout.rs:5251` in 0.10.0 — one `bail!` with no
-  issue reference — and wild-linker/wild#2418 (2026-08-31) and #2475
-  (2026-09-02) implement exactly that, with a regression test whose script is
-  `. = foo + 0x100000;`. There is no 0.11.0, so nothing installable carries
-  them. Linker-script support is a funded GSoC 2026 project whose stated aim
-  is "linking of Linux kernel modules and possibly even the kernel itself
-  using Wild", with no timeline anywhere; issue #2096, "Evaluate symbols in
-  linker scripts lazily", is the open architectural statement of the
-  limitation. Read `lacks` here as "not in a release", not "not possible" —
-  which is the opposite of how soft-float reads, and the distinction the gate
-  exists to keep visible.
-  **One more divergence, undocumented and load-bearing here: wild defaults
-  `--gc-sections` on** where ld and lld default it off. `KEEP` is honoured, so
-  the eleven linker registries survive, but any section that relies on ld's
-  default would not. Measured on wild 0.10.0; its own support matrix marks
-  `PHDRS` and `(NOLOAD)` partial and the top-level assignment done — all three
-  true, and none of them the construct that actually fails. The gate exists
-  because a matrix is not a measurement, and it carries one deliberately
-  non-minimal
-  probe because a linker can take every construct alone and compose them
-  differently: wild reorders sections when no `PHDRS` is declared and keeps
-  the order when one is.
+  disqualifies it.** That is a design property, not a default: its own suite
+  skips lld comparisons under a group named `design_differences`, and
+  `link.ld`'s order is load-bearing. Three more: it reads `. = X` as "the image
+  starts at X" where ld and lld read "the next output section starts at X", so
+  the first *section* lands past the base by an amount that depends on the phdr
+  count; it refuses `. = <symbol>`, which is `link.ld` line 19; and it defaults
+  `--gc-sections` on, where `KEEP` saves the eleven registries but nothing
+  relying on ld's default would survive. Its refusals read "not in a release" —
+  upstream has implemented the location-counter case and there is no release
+  carrying it — which is the opposite of how soft-float reads, and the
+  distinction the gate exists to keep visible.
+- **The "no floating point anyway" escape is false.** `libm` is in the kernel's
+  dependency tree through `slopos-font`, and on this exact target spec it
+  compiles to zero XMM instructions under LLVM and 19 037 under cranelift.
 - **The spike found one real bug, and it was ours.**
   `targets/x86_64-slos.json` spelled its `llvm-target` `x86_64-unknown-none`
-  where upstream's own `x86_64-unknown-none` spec spells it
-  `x86_64-unknown-none-elf`. Without the object-format component
-  `target-lexicon` answers `BinaryFormat::Unknown` and cg_clif ICEs in
-  `driver::aot::make_module` before compiling a line. The suffix is a no-op
-  for LLVM's codegen — the same instructions and the same `--print cfg` — so
-  the target spec was simply under-specified, and `object-format` is a probe
-  rather than an assumption because of it. It is not a no-op for the build
-  directory: the spec's hash feeds the crate disambiguator, so every symbol
-  is renamed and the kernel target rebuilds once.
-- **Two of the four cranelift gaps are silent, and they are the reason this
-  is a gate.** `-Zemit-stack-sizes` is accepted and emits nothing, and
-  `-Zsanitizer=safestack` is accepted and instruments nothing — that second
-  one is the verdict the gate records, because the probe asks for the
-  sanitizer before asking for its pointer-address option. The other two do
-  say something: soft-float is a warning nobody has to read, and the `sym`
-  operands are a hard error. The gate re-asks those two for free, which is
-  what will notice the day either stops refusing.
+  where upstream's own spec spells it `x86_64-unknown-none-elf`; without the
+  object-format component `target-lexicon` answers `BinaryFormat::Unknown` and
+  cg_clif ICEs before compiling a line. A no-op for LLVM's codegen, which is
+  why `object-format` is a probe rather than an assumption.
 
 **What this deliberately did not do.**
 
 - **Two spec properties are stated as residual rather than probed.**
-  `disable-redzone` would need an optimised build and a disassembly heuristic
-  to tell a red-zone spill from an ordinary one; `panic-strategy: unwind`
-  cannot be expressed in a standalone `no_std` probe at all, which rustc
-  refuses with "unwinding panics are not supported without std". `link.ld`'s
-  own `ASSERT` on `.eh_frame_hdr` holds the second at every kernel link,
-  which is stronger than a probe would be. The seven the gate does measure
-  are the seven that could be.
-- **No patch to cranelift, and no linker written here.** Soft-float in the
-  x64 backend is a lowering pass, not a setting, and a linker that honours
-  this script is the part `wild` has left. Both are upstream-shaped work whose
-  cost is not paid by this plan; what this workstream owed was the answer, and
-  the answer is now re-taken on every CI run instead of believed.
-- **Userland is not gated, though it was measured.** cg_clif refuses slibc
-  outright — "Defining variadic functions is not yet supported by Cranelift",
-  at `openat` — and hits the same `sym` wall in `slopos-ostd`, which every
-  userland binary links. The gate stays scoped to the kernel target, because
-  that is what the capabilities it probes are derived from, and
-  `targets/x86_64-unknown-slopos.json` keeps its `x86_64-unknown-none`
-  spelling for the same reason: the `-elf` suffix is the same
-  under-specification and the same one-line fix there, but it belongs with
-  the work that first needs it rather than with a gate that does not read
-  it. The linker half was measured on the way past and closes the road that
-  looked open: `userland/userland.ld` opens `. = USER_CODE_BASE +
-  SIZEOF_HEADERS`, so `wild -T userland/userland.ld` fails on the same
-  location-counter symbol as `link.ld`, and with the base inlined as a literal
-  it links and mislays the image — `0x401000` against lld's `0x400000`, `.text`
-  at `0x402350` against `0x400120`, plus a `.relro_padding` and a `GNU_RELRO`
-  the script never named. `USER_CODE_BASE` would stop matching
-  `PROCESS_CODE_START_VA`. "Let the in-guest loop own userland and keep the
-  kernel cross-built" needed a Rust linker for userland too, and it does not
-  have one either.
-- **The reference class was checked, and nobody has done this.** Asterinas
-  is structurally the same machine — LLVM, the built-in `x86_64-unknown-none`
-  with the same `+soft-float` and `rustc-abi: softfloat`, `rust-lld`, and a
-  full GNU linker script — with no cranelift anywhere and no self-hosting on
-  its roadmap. Redox, the one Rust OS that self-hosts, got there in January
-  2026 by porting **LLVM 18** and linking through a gcc driver. Rust-for-Linux
-  generates a target spec with `rustc-abi: softfloat` *and* passes
-  `-Ctarget-feature=-sse,-sse2,…` from `arch/x86/Makefile`, which is this
-  target's own belt-and-braces shape; it has no cranelift story, and no
-  frame-size check for Rust at all — `CONFIG_FRAME_WARN` reaches C only, and
-  the klint proposal that would change that is unmerged, so
-  `check_stack_sizes.sh` is ahead of mainline rather than behind it.
-- **`mold` is now the other candidate, and it is not ready either.** It is
-  being rewritten in Rust — 2.42.1 is announced as likely the last C++
-  release — and mold 3.x names kernel and firmware linker scripts as a
-  priority, but its script parser understands only `GROUP`, `INPUT`,
-  `AS_NEEDED`, `OUTPUT_FORMAT` and `VERSION`: it cannot read `link.ld` at
-  all. Adding it is a `--linker mold` arm and a gate file when that changes.
+  `disable-redzone` needs an optimised build and a disassembly heuristic to
+  tell a red-zone spill from an ordinary one, and `panic-strategy: unwind`
+  cannot be expressed in a standalone `no_std` probe at all. `link.ld`'s own
+  `ASSERT` on `.eh_frame_hdr` holds the second at every kernel link, which is
+  stronger than a probe.
+- **No patch to cranelift, and no linker written here.** Soft-float in the x64
+  backend is a lowering pass and a linker that honours this script is what
+  `wild` has left; both are upstream-shaped work this plan does not pay for.
+  What this workstream owed was the answer, and the answer is re-taken on every
+  CI run instead of believed.
+- **Userland is not gated, though it was measured.** cg_clif refuses slibc on
+  variadics and hits the same `sym` wall in `slopos-ostd`, which every userland
+  binary links; `wild` fails `userland.ld` on the same location-counter symbol
+  and, with the base inlined, mislays the image so `USER_CODE_BASE` would stop
+  matching `PROCESS_CODE_START_VA`. "Let the in-guest loop own userland and
+  keep the kernel cross-built" needed a Rust linker for userland too, and does
+  not have one either.
+- **`mold` cannot read `link.ld` at all.** Its script parser understands five
+  directives, none of them the ones here. Adding it is a `--linker mold` arm
+  and a gate file when that changes.
 
 **What it decided.** LLVM and `rust-lld`, cross-built from Linux, with the C++
 runtime ported to SlopOS. That is not the answer this plan was written to want
-— it is the one the measurement leaves. The Rust-hosted premise rested on
-soft-float being a flag; it is a property of cranelift's x64 backend, and the
-escape that looked available on our side of the fence ("the kernel has no
-floating point, so the property holds without the flag") is false: `libm` is in
-the kernel's dependency tree through `slopos-font`, and on this exact target
-spec it compiles to zero XMM instructions under LLVM and 19,037 under
-cranelift. Writing SlopOS's sources around what a backend cannot express would
-also make every third-party crate a compatibility question, which is the
-opposite of what a development machine is for. Phases 1 and 2 below are the
-consequence, and both gates keep their whole value as the thing that would
-notice the day either candidate stops refusing — `wild`'s refusals in
-particular read "not in a release", which soft-float's do not.
+— it is the one the measurement leaves. Writing SlopOS's sources around what a
+backend cannot express would also make every third-party crate a compatibility
+question, which is the opposite of what a development machine is for. Phases 1
+and 2 are the consequence, and both gates keep their value as the thing that
+would notice the day either candidate stops refusing.
 
 ---
 
-## Phase 1 — The dynamic platform
+## A program can be linked at run time
 
-**Outcome:** a `PT_INTERP` executable on SlopOS `dlopen`s a shared object and
-calls into it, and a cross-built C++ program runs against a C++ standard
-library on SlopOS.
+The eleventh thing this plan rests on, and the one Phase 2 could not have begun
+without: a `PT_INTERP` executable runs on SlopOS, `dlopen`s a shared object and
+calls into it. `dl_test` is the standing proof — it spawns `/bin/dl_probe`, the
+tree's only dynamically linked program, which works through twenty-eight
+ordered checks and exits with the number of the first failure: that it started
+at all (so `PT_INTERP`, `AT_BASE`, the interpreter's own relocations, the
+executable's `DT_NEEDED` and the static TLS block all worked), `dlerror`
+reporting and clearing, `dlsym` on a function and on data, a call *out* of the
+loaded object into a symbol the executable exports, a thread-local inside it
+through `__tls_get_addr`, `dladdr` and `dl_iterate_phdr`, and `dlclose`
+unmapping it. A second case writes into the object's RELRO region and is graded
+on dying by `SIGSEGV` — *which* signal, because a probe that failed to start
+also dies without an exit code.
 
-This phase did not exist while the toolchain was going to be Rust-hosted. It is
-what the LLVM decision buys, and it is **XL** — the largest phase in this plan
-and the one Redox spent most of eight and a half years on. Everything in it is
-userland, so none of it touches the framekernel discipline; what it does touch
-is `mm/src/elf.rs`, which refuses the first line of it.
+**`libc.so` is the interpreter, and that is the whole design.** One artifact,
+193 064 bytes and 892 exported symbols, entered at `_dlstart` when the kernel
+runs it as an interpreter and linked as `-lc` when a program needs the C
+library; `/lib/ld-slopos.so.1` is a symlink to it. musl ships exactly this
+shape, and it is what makes the two-libc bug Redox names — "an allocator
+mismatch between the libc and the dynamic linker" — *unexpressible* rather than
+fixed: one allocator, one `errno`, one TLS implementation and one object table
+in a process however many objects it loads. The loader is 2 406 lines under
+`slibc/src/ld_so/`, the same crate as everything it has to agree with.
 
-Three things make it cheaper than "port a C++ standard library" sounds, and two
-of them are already in the tree rather than hoped for.
+What it rests on, in case a later phase disturbs it:
+
+- **The kernel loads two images, and the second one's address comes from the
+  gap finder.** `process_vm_map_interpreter` places the interpreter's `ET_DYN`
+  segments at a `find_gap` base with one VMA per segment carrying that
+  segment's own protection. The base is not a constant: the VMAs are what stop
+  a later `mmap` landing on the interpreter, and a constant would have needed
+  a new band in `memory_layout_defs.rs`'s ascending chain.
+  `UnsupportedLoadBase` survives, because an `ET_EXEC` image away from
+  `PROCESS_CODE_START_VA` still cannot be shifted.
+- **The executable's bytes are streamed after the interpreter is mapped, and
+  the ordering is load-bearing.** Mapping takes the page-table cursor, which
+  refuses to install a leaf while a second reference to the address space is
+  live, and streaming holds exactly such a reference — the first version held
+  the `KArc<VmSpace>` across the interpreter's map and got `WouldBlock` out of
+  every map call. It is the same rule the user-copy populate path learned from
+  the other side.
+- **`AT_BASE` is always emitted, even at zero**, so the vector is a fixed seven
+  pairs and `EXEC_ARG_STACK_FIXED` and the stack's alignment slot count can be
+  stated against it rather than recomputed per exec. Linux does the same.
+- **A `PT_LOAD`'s leaf permissions come from its own `p_flags`**, which they
+  did not before: the eager mapper picked raw `USER_RW`/`USER_RO`, neither
+  carrying `NO_EXECUTE`, so every mapped page of every process was executable —
+  harmless while nothing described a page otherwise, and a false statement the
+  moment the interpreter's per-segment VMAs say `exec: false`. A page two
+  segments share takes the *union* of what each asks for — the first page of a
+  Rust binary holds the program headers and the first bytes of `.text`, so
+  keeping only the earlier segment's permissions hangs the boot — and that
+  union is resolved before the first map rather than by re-protecting
+  afterwards, because a `protect` on a live leaf issues a TLB shootdown and
+  waits for every peer to acknowledge it, which is cross-CPU work inside
+  `exec`'s mapping loop for an address space no CPU is running yet. The eager
+  anonymous `mmap`, ring and COW paths still use the raw constants;
+  `CVSS.md`'s SLOPOS-2026-0056 owns them.
+- **The bootstrap touches no pointer that lives in memory.** `_dlstart` takes
+  its load base from `lea rip + __ehdr_start` — the ELF header sits at vaddr 0
+  in a shared object, so its RIP-relative address *is* the bias — walks its own
+  `PT_DYNAMIC`, and applies `R_X86_64_RELATIVE` and `DT_RELR` and nothing else.
+  There are 229 of them in `libc.so` and exactly one `JUMP_SLOT`, which is
+  `main`. Everything past that point is ordinary Rust.
+- **`-Bsymbolic` is what keeps that bootstrap honest.** Without it the
+  interpreter's own references are preemptible `GLOB_DAT` relocations, and
+  resolving one needs a string table pointer the pass has not fixed yet.
+- **Binding is eager, and full RELRO is what that buys.** `.rela.plt` is
+  processed exactly like `.rela.dyn`, so there is no PLT trampoline, no
+  `GOT[1]`/`GOT[2]` handshake and no resolver running with a caller's argument
+  registers live — the part of a lazy loader that is all ABI and no algorithm.
+  Nothing writes a GOT slot after relocation, so `PT_GNU_RELRO` is sealed whole
+  rather than stopping short of `.got.plt`, and the `SIGSEGV` case proves it.
+- **TLS is one table, and the loader fills it.** A static program registers its
+  own module from `AT_PHDR` as before; under an interpreter the loader
+  registers every startup module and assigns each an offset below the thread
+  pointer. A thread's block is that layout plus a TCB plus a DTV, and a
+  `dlopen`ed module's slot is allocated on first access. A `TPOFF64` against
+  such a module is refused (`RelocError::DynamicStaticTls`) rather than
+  resolved to a wrong offset, which is what musl does.
+- **A handle is the address of the loader's table entry**, so it cannot be
+  forged from an integer and a closed slot's address fails the liveness check
+  rather than naming whatever took its place. `dlclose` refuses an object
+  `dlopen` did not load, because `dlopen(NULL)` hands back the executable's
+  entry.
+- **`compiler-builtins-mem` is off for the shared library, and that is a
+  finding rather than a tweak.** It defines `memcpy`, `memset`, `memcmp` and
+  `strlen` with *hidden* visibility, which wins over slibc's own and leaves
+  them out of `.dynsym` — measured, so a C program linking `libc.so` could not
+  call the four functions a C program calls most. Nothing static notices,
+  because an archive has no dynamic symbol table to be absent from.
+- **The link line moved out of the target spec.** `pre-link-args` applied
+  `-Tuserland/userland.ld --emit-relocs` to every artifact, and a shared object
+  must have neither: `userland.ld` fixes an image at 0x400000 and discards
+  `.interp`. Static binaries take those from `scripts/build_userland.sh`; the
+  shared objects take none, and `--image-base=0x400000` is what produces a
+  correct non-PIE dynamic executable.
+
+**What this deliberately did not do.**
+
+- **Four of the six target-spec fields did not flip.** `dynamic-linking` is
+  `true` (the `cdylib` crate type needs it) and `tls-model` is
+  `global-dynamic` (a ceiling — LLVM still lowers a non-PIC executable's own
+  thread-locals to local-exec, which is why the static binaries are
+  byte-for-byte unaffected). `relocation-model` and PIE are met per invocation
+  instead, and the interpreter does not collide with the executable because it
+  is placed in the mmap arena. `panic-strategy` and `eh-frame-header` are the
+  unwinder's, would change every binary in the tree, and turn on an FDE choice
+  that is the C++ runtime's to make.
+- **The system's own binaries stay static.** Every one links slibc as an rlib —
+  211 `slopos_slibc::` uses — so making them dynamic is a userland refactor,
+  and it would put `/sbin/init` behind the loader for no behaviour it does not
+  already have. The cost is that the loader is exercised by one program rather
+  than by the whole boot, which is what `dl_test` is for.
+- **No lazy binding.** The cost is that a program pays for every PLT slot at
+  startup: at 100 000 slots that is a GNU hash lookup each, which is the scale
+  `librustc_driver.so` will ask for and the number to re-measure when it does.
+- **`R_X86_64_COPY` is implemented and unexercised.** It arises only for a
+  non-PIE executable referencing a shared library's *data*, the toolchain
+  binaries are PIE, and covering it needs a third fixture object — the
+  `dlopen`ed one cannot serve, because making it a `DT_NEEDED` is what would
+  stop the unmap case testing an unmap.
+- **No symbol versioning, no `DT_RPATH`/`DT_RUNPATH`, no `LD_LIBRARY_PATH`, no
+  `LD_PRELOAD`.** The search path is `/lib` then `/usr/lib`, and a name with a
+  slash is used as written. `DT_VERSYM` is not consulted.
+- **No `_r_debug`, no `link_map` chain, `DT_DEBUG` left at zero.** A debugger
+  attached to a dynamic SlopOS program sees the executable and nothing the
+  loader mapped. It is a dozen lines and a protocol, and it buys debugging
+  rather than running.
+- **`dlerror` is process-wide.** POSIX allows it; glibc and Redox make it
+  per-thread. Doing the same means a thread-local in the loader, and the loader
+  deliberately touches none.
+- **The object table is 128 entries and never grows.** A `dlopen` past it is
+  `ENOMEM`, because the table is what `dl_iterate_phdr` walks and what a handle
+  is the address of, so its entries have to keep their addresses.
+
+---
+
+## Phase 1 — The C++ runtime
+
+**Outcome:** a cross-built C++ program runs on SlopOS against a C++ standard
+library.
+
+This phase did not exist while the toolchain was going to be Rust-hosted; it
+is what the LLVM decision buys. Everything in it is userland, so none of it
+touches the framekernel discipline. It opened with a dynamic loader, which has
+landed — "A program can be linked at run time" above — and what remains is
+**M/L**: the runtime a C++ program needs and the libc surface underneath it.
+
+Three things make it cheaper than "port a C++ standard library" sounds, and
+all three are in the tree rather than hoped for.
 
 - **Rustc's LLVM uses neither C++ exceptions nor RTTI.** `LLVM_ENABLE_EH` and
   `LLVM_ENABLE_RTTI` both default off and rust's bootstrap overrides neither,
   so the `__cxa_throw` path and `__dynamic_cast` may be needed by nothing the
-  compiler links. Workstream 1.2 carries the measurement and the two cautions
+  compiler links. Workstream 1.1 carries the measurement and the two cautions
   that go with it.
 - **The unwinder is vendored, and it already has what C++ needs.**
   `vendor/unwinding` exports sixteen `_Unwind_*` entry points — the complete
@@ -1575,89 +1128,16 @@ of them are already in the tree rather than hoped for.
   (`toolchain/rust`, `fde-custom`), and the kernel takes it as
   `fde-gnu-eh-frame-hdr`. Finding FDEs across a `dlopen`ed boundary is a
   feature change from there, either to `fde-phdr-dl` or to `fde-registry` —
-  Workstream 1.2 says which and why it matters to the loader. `libunwind` does
-  not get ported.
-- **`libc.a`, `crt0.o` and 43 headers already exist.** `slibc/staticlib` and
-  `slibc/crt0` landed with the target work, so what the C++ runtime needs from
-  the libc is a list of *missing functions* rather than a C library.
+  Workstream 1.1 says which. `dl_iterate_phdr` exists either way, so the
+  choice is no longer a dependency on anything. `libunwind` does not get
+  ported.
+- **`libc.a`, `libc.so`, `crt0.o` and 44 headers already exist.**
+  `slibc/staticlib` and `slibc/crt0` landed with the target work and
+  `slibc/cdylib` with the loader, so what the C++ runtime needs from the libc
+  is a list of *missing functions* rather than a C library — and it can link
+  against a shared one, which is what `libstdc++.so` or `libc++.so` will do.
 
-### Workstream 1.1 — The dynamic loader (**L**)
-
-Not optional, and the LLVM decision removed the one escape that existed. Pure
-Rust did not dodge it either: `slopos-ostd-derive` is a proc-macro crate
-(`#[derive(SlotFields)]`) and `paste` is another, and rustc loads proc-macro
-crates as host **dylibs** at runtime. `librustc_driver.so` is a 161 MB shared
-object and `libLLVM.so` is another, so under this road the loader carries the
-compiler itself rather than only its macros.
-
-Today `PT_INTERP` is rejected (`mm/src/elf.rs:620`, `DynamicNotSupported`),
-`ET_DYN` is accepted only at `PROCESS_CODE_START_VA`
-(`ElfError::UnsupportedLoadBase`), and `targets/x86_64-unknown-slopos.json`
-says `relocation-model: static` with `tls-model: local-exec` and no
-`dynamic-linking`. Four fields of that spec flip for the loader, and two more
-flip for the unwinder — one of them conditionally:
-
-| Field | Today | Needed | Why |
-|---|---|---|---|
-| `dynamic-linking` | absent (false) | `true` | `rustc_session`'s `invalid_output_for_target` refuses `Dylib`/`ProcMacro` without it |
-| `relocation-model` | `static` | `pic` | a shared object that is not PIC cannot be loaded at a chosen base |
-| `position-independent-executables` | absent | `true` | an interpreter and its executable cannot both sit at 0x400000 |
-| `tls-model` | `local-exec` | `global-dynamic` | a `dlopen`ed object's TLS is not in the initial block |
-| `panic-strategy` | `abort` | `unwind` | `rustc_driver::catch_fatal_errors` is `catch_unwind`, and it is the *normal* path out of a failed compile, not only an ICE |
-| `eh-frame-header` | `false` | `true` | only if `fde-phdr-dl` wins Workstream 1.2's FDE choice — it reads `PT_GNU_EH_FRAME`, where `fde-registry` does not |
-
-Every row is checked against `rustc -Zunstable-options --target <spec> --print
-cfg`, which takes all six and reports `panic="unwind"` and
-`relocation_model="pic"` back. `panic-strategy` is the finding this workstream
-should not lose: with `panic-strategy: abort` an in-guest rustc aborts instead
-of exiting after a compile error, so the Rust unwinder has to work in userland
-whether or not a C++ exception is ever thrown. And note that a Rust binary here
-has no `crtbegin` — `crt0.o` is slibc's — so if `fde-registry` wins, Rust
-objects need registering explicitly where a C++ one registers itself.
-
-**What the loader owes.** `DT_NEEDED` with a breadth-first scope,
-`R_X86_64_{RELATIVE,GLOB_DAT,JUMP_SLOT,64,COPY}` plus the four TLS
-relocations (`TPOFF64`, `DTPMOD64`, `DTPOFF64`, `TLSDESC`),
-`DT_INIT_ARRAY`/`DT_FINI_ARRAY` — which is how every C++ static constructor in
-LLVM runs — `PT_GNU_RELRO` re-protection, lazy or eager PLT binding,
-`dlopen`/`dlsym`/`dlclose`/`dladdr`/`dlerror`, `dl_iterate_phdr`, and dynamic
-TLS (`__tls_get_addr` + a DTV). `slibc/include/dlfcn.h` already declares
-`Dl_info` and the four `RTLD_*` constants and says in its header comment that
-"SlopOS is static, so the types exist and the calls do not" — that sentence is
-the workstream's own definition of done.
-
-**One copy of the libc, not two.** Once anything is `dlopen`ed, a statically
-linked `libc.a` in the executable and another inside the loaded object give two
-allocators, two `errno`s and two atexit lists. Redox's residual bug list names
-exactly this — "an allocator mismatch between the libc and the dynamic linker"
-— so `slibc` needs a `cdylib` sibling beside `slibc/staticlib`, and the loader
-must not link the static one.
-
-**Kernel side.** `mm/src/elf.rs` loads the interpreter at an offset and passes
-`AT_BASE`/`AT_PHDR`/`AT_PHNUM`/`AT_ENTRY`; `ET_DYN` gets an arbitrary base.
-`MAP_FIXED` and `MAP_PRIVATE` file mappings with demand paging already work
-(`mm/src/process_vm.rs`, `mm/src/page_fault.rs`), and `mprotect` already
-exists, so RELRO needs no new plumbing — the caps are policy, as the touch list
-has said all along.
-
-**The reference class prices this and nothing here is cheaper.** Redox's 2017
-attempt static-linked rustc's components and *disabled proc macros*; by 2019
-"rustc is no longer capable of running statically linked"; the answer was a
-real ELF dynamic linker (`relibc/src/ld_so`, `ld64.so.1`) plus
-`dynamic_linking: true`, `position_independent_executables: true`,
-`crt_static_respected: true`. Its residual bug list is a ready-made checklist:
-TPOFF relocations for undefined symbol indices, the allocator mismatch above,
-`mremap`, and spurious futex wakeups mistaken for timeouts.
-
-**`-Zwasm-proc-macros` is no longer an escape, and should be recorded as
-closed.** The flag is real — `rustc_session/src/options.rs`, the loader arm in
-`rustc_metadata/src/creader.rs`, bootstrap key `rust.wasm-proc-macros`, MCP
-compiler-team#1017 accepted 2026-08-02 — and under the Rust-hosted road it was
-the one path a `dynamic_linking: false` rustc could expand a macro at all. It
-buys nothing against `libLLVM.so` and `librustc_driver.so`, which are shared
-objects for reasons no flag changes.
-
-### Workstream 1.2 — The C++ runtime (**M/L**)
+### Workstream 1.1 — The C++ runtime (**M/L**)
 
 Cross-built from Linux, never built in-guest. That distinction is the whole
 reason this phase is affordable: running a C++ program on SlopOS needs the C++
@@ -1710,22 +1190,22 @@ Decide it by cross-building one of them and linking `libLLVM` against it, not
 on paper; the open-decisions list carries the question. What is *not* open is
 that one of the two is needed, and that neither needs a C++ compiler on SlopOS.
 
-**`libunwind` is not ported either way, and `dl_iterate_phdr` may not be
-owed.** `vendor/unwinding` is the Level-1 provider; `__gxx_personality_v0` —
-the Level-2 half — comes from whichever C++ library wins above, as it does on
-any Linux. The unwinder then finds FDEs one of two ways, and the choice is the
-loader's:
+**`libunwind` is not ported either way, and both FDE roads are now open.**
+`vendor/unwinding` is the Level-1 provider; `__gxx_personality_v0` — the
+Level-2 half — comes from whichever C++ library wins above, as it does on any
+Linux. The unwinder then finds FDEs one of two ways, and the loader no longer
+constrains the choice:
 
-- `fde-phdr-dl`, which calls `dl_iterate_phdr` — the obvious answer, and the
-  one that puts a sixth function on Workstream 1.1's list.
+- `fde-phdr-dl`, which calls `dl_iterate_phdr`. That exists, with glibc's
+  `struct dl_phdr_info` layout and `link.h` to declare it, so this road costs
+  a feature flag and `eh-frame-header: true` in the target spec.
 - `fde-registry`, which provides `__register_frame_info` and friends and needs
   no `dl_iterate_phdr` at all, because `crtbegin` registers each object as it
   is initialised. Redox is the existence proof that this is sufficient:
   relibc has no `link.h` and no `dl_iterate_phdr`, its GCC fork's
   `unwind-dw2-fde-dip.c` gates `USE_PT_GNU_EH_FRAME` on a platform list Redox
-  is not on, and the fallback registry path is what carries it. The
-  prerequisite is `DT_INIT_ARRAY` running on `dlopen`, which Workstream 1.1
-  owes regardless.
+  is not on, and the fallback registry path is what carries it. Its
+  prerequisite, `DT_INIT_ARRAY` running on `dlopen`, is met.
 
 Hold whichever wins to a test that throws from a `dlopen`ed object and catches
 in the executable, because that is the case a single-object unwinder passes by
@@ -1737,7 +1217,7 @@ the property in either project.
 Each piece cross-built into a shipped image needs its own `NOTICE.md` entry;
 the constraint block above says why that costs nothing beyond the entries.
 
-### Workstream 1.3 — The libc surface underneath it (**M**)
+### Workstream 1.2 — The libc surface underneath it (**M**)
 
 This is the surviving half of what used to be "A C toolchain, written in
 Rust", and the LLVM decision promotes it from off-the-critical-path to
@@ -1747,11 +1227,9 @@ load-bearing. Measured against the tree today, `slibc` already has `mmap`,
 `ftruncate`, `getrandom`, `clock_gettime`, `nanosleep`, `snprintf`,
 `strerror_r`, `gettimeofday`, and 51 `pthread_*` entry points across mutex,
 condvar, rwlock, keys, create and join. What a C++ standard library and an
-in-guest rustc add to that list:
+in-guest rustc add to that list, the loader's own six (`dlopen`, `dlsym`,
+`dlclose`, `dlerror`, `dladdr`, `dl_iterate_phdr`) having landed with it:
 
-- **The loader's own six:** `dlopen`, `dlsym`, `dlclose`, `dlerror`, `dladdr`
-  and `dl_iterate_phdr`. Workstream 1.1 implements them; they are listed here
-  because `dlfcn.h` is generated and its comment has to change with them.
 - **The Itanium ABI's libc half:** `__cxa_atexit` and `__cxa_finalize`, which
   `cxxabi.h` names as the libc's and libc++abi deliberately does not define,
   plus `_ITM_registerTMCloneTable`/`_ITM_deregisterTMCloneTable` as no-ops so
@@ -1786,9 +1264,8 @@ arrives as a by-product of a decision taken for Rust's sake. That is a real
 scope reduction — one **M**/**L** workstream removed — and it is the only place
 the LLVM road is cheaper than the road it replaced.
 
-**Phase 1 exit criteria:** on SlopOS, a `PT_INTERP` executable `dlopen`s a
-shared object, calls a function in it, and a C++ exception thrown inside that
-object is caught in the executable. `libc.so` is the only libc in the process.
+**Phase 1 exit criteria:** on SlopOS, a C++ exception thrown inside a
+`dlopen`ed object is caught in the executable that loaded it.
 
 ---
 
@@ -1819,8 +1296,8 @@ ratchet that would notice `wild` becoming viable, which is now a reason to
 re-open a decision rather than a blocker to route around.
 
 **What the reversal costs.** Phase 1 above, in full. The dynamic loader was
-always owed; the C++ runtime is new, and it is the price of the sentence at the
-top of this document.
+always owed and has since landed; the C++ runtime is new, and it is the price
+of the sentence at the top of this document.
 
 ### Workstream 2.1 — The target becomes a host (**M**)
 
@@ -2006,210 +1483,101 @@ not been made at all.
 - [ ] **Does the ABI become binary-compatible, and does the toolchain then stop
       being a port?** SlopOS is Linux-ABI at the numbers, the constants and
       most of the layouts, which buys *source* compatibility. Running prebuilt
-      glibc-linked binaries — the upstream `rustc` among them — needs the
-      layouts the POSIX-floor section above still names as divergent (the
-      ucontext and `rt_sigreturn`, `struct termios`, `signalfd_siginfo`, and
-      `NSIG` 32 → 64, for which glibc reserves signals 32 and 33), plus
-      ~70-90 thin entry points and the dynamic-linking trio Workstream 1.1
-      already owes. Two of the seven left that list on their own: `si_addr`
-      and `msghdr`/`cmsghdr` were closed by the unix-family decision, because
-      std's own PAL reads them. The reference
-      class says it is reachable: Asterinas runs an unmodified NixOS userland
-      on 240+ syscalls of safe Rust with no private calls at all, and gVisor
-      runs unmodified binaries with 277 of 351 implemented, because a runtime
-      that meets `ENOSYS` probes for a fallback. Decide it *with* Workstream
-      1.1. The backend decision changed what this is worth rather than
-      whether it is worth anything: a prebuilt rustc is an LLVM rustc, which
-      used to be the objection to this road and is now what the tree is
-      building towards anyway — so binary compatibility became a possible
-      *shortcut past* Workstream 2.2's cross-build rather than a detour away
-      from it. Asterinas is the proof of the ceiling: it is
-      binary-compatible to the point of running an unmodified NixOS userland,
-      with a real vDSO, `PT_INTERP`, Linux-layout `siginfo_t`/`ucontext_t` and
-      procfs, and it is still *always* cross-built from Linux — there is no
-      published instance of a Rust compile running inside it. Binary
-      compatibility buys running a prebuilt rustc; it does not buy a target
-      that can be a host, and it does not remove the proc-macro `dlopen`.
-- [ ] **Is `libLLVM` shared or static, and does that change what the loader
-      owes?** Shared is what upstream ships and what the 161 MB
-      `librustc_driver.so` measurement was taken against; static removes one
-      `dlopen` from the hot path but not the proc-macro one, because
-      `rustc_driver` is `crate-type = ["dylib"]` in the compiler's own
-      `Cargo.toml` and no configuration changes that. Decide it with Workstream
-      2.2's first bootstrap run rather than on paper, and note that the answer
-      does not shrink Phase 1 either way.
-- [ ] **Which C++ runtime: GCC's `libstdc++` or LLVM's `libc++`?** Workstream
-      1.2 has the evidence and not the answer, and the evidence points away
-      from the tidy choice. `libstdc++` is what Redox builds its LLVM, clang
-      and rustc against despite having both in tree, and its whole libc cost is
-      four symbols in `relibc/src/cxa.rs`; `libc++` is the same project as the
-      compiler and is cheaper here than it was there, because Redox's stated
-      blocker (`LIBCXXABI_USE_LLVM_UNWINDER` wanting `link.h`) does not apply
-      to a tree that already vendors `unwinding`. Both cost a cross-build of a
-      C++ toolchain on Linux; only `libstdc++` costs a GCC port as well, and
-      only `libc++` has never been shown carrying an LLVM. Settle it by
-      cross-building one and linking `libLLVM` against it — reading more will
-      not decide this, because the thing nobody has published is the link
-      itself.
+      glibc-linked binaries needs the five layouts the POSIX-floor section
+      still names as divergent, plus ~70-90 thin entry points; the
+      dynamic-linking trio is served by a loader that exists, and `si_addr`
+      and `msghdr` left the list on their own when std's PAL started reading
+      them. The reference class says it is reachable — Asterinas runs an
+      unmodified NixOS userland, gVisor runs unmodified binaries with 277 of
+      351 — and the backend decision changed what it is worth: a prebuilt
+      rustc is an LLVM rustc, which used to be the objection and is now what
+      the tree builds towards anyway, so this became a possible *shortcut
+      past* Workstream 2.2 rather than a detour from it. Asterinas is also the
+      proof of the ceiling: binary-compatible to the point of an unmodified
+      NixOS userland, and still always cross-built. Binary compatibility buys
+      running a prebuilt rustc; it does not buy a target that can be a host,
+      and it does not remove the proc-macro `dlopen`.
+- [ ] **Is `libLLVM` shared or static?** Shared is what upstream ships and what
+      the 161 MB `librustc_driver.so` measurement was taken against; static
+      removes one `dlopen` but not the proc-macro one, because `rustc_driver`
+      is `crate-type = ["dylib"]` and no configuration changes that. It is no
+      longer a question about what the loader owes but about how many
+      `PT_LOAD`s and how much startup relocation an in-guest rustc pays for,
+      which is the first number Workstream 2.2's bootstrap run produces.
+      Decide it there rather than on paper.
+- [ ] **Which C++ runtime: GCC's `libstdc++` or LLVM's `libc++`?** The
+      evidence points away from the tidy choice: `libstdc++` is what Redox
+      builds its LLVM, clang and rustc against despite having both in tree,
+      and its whole libc cost is four symbols. `libc++` is the same project as
+      the compiler and is cheaper here than it was there, because Redox's
+      stated blocker (`LIBCXXABI_USE_LLVM_UNWINDER` wanting `link.h`) does not
+      apply to a tree that already vendors `unwinding`. Both cost a
+      cross-build; only `libstdc++` costs a GCC port as well, and only
+      `libc++` has never been shown carrying an LLVM. Settle it by
+      cross-building one and linking `libLLVM` against it — the thing nobody
+      has published is the link itself, so reading more will not decide it.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
-      building itself un-attests exactly the blocks it changes — and now keeps
-      them un-attested across host rebuilds, so the count only ever falls.
-      Decide which paths stay verified and what `verity=require` asserts for a
-      workbench.
-- [ ] **How does source get in, now that a second disk can hold it?** The
-      cheapest answer was always a second virtio-blk disk carrying the vendored
-      tree, and its prerequisite is done: `mount(2)` takes a named device, and
-      `just test-capacity` already builds a 16 GiB volume populated from the
-      host with this repository and the pinned sysroot. What is left to decide
-      is the *workflow*, not the capability — a host-built image refreshed per
-      session, a 9p/virtiofs mount, or a plain TCP transfer once there is one.
+      building itself un-attests exactly the blocks it changes, and now keeps
+      them un-attested across host rebuilds. Decide which paths stay verified
+      and what `verity=require` asserts for a workbench.
+- [ ] **How does source get in?** The capability is done — `mount(2)` takes a
+      named device and `just test-capacity` already builds a 16 GiB volume
+      populated from the host with this repository and the pinned sysroot.
+      What is left is the *workflow*: a host-built image refreshed per session,
+      a 9p/virtiofs mount, or a plain TCP transfer once there is one.
 - [ ] **When does swap arrive, and what chooses the victim?** No longer
-      deferrable, which is what the LLVM decision changed about it: rustc with
-      LLVM peaks far above anything cranelift would have, and a build that
-      overcommits currently dies at the faulting task with a SIGBUS-coded exit.
-      Decide whether the answer is swap plus a reclaim policy, or a per-build
-      memory budget that makes overcommit not happen — before Workstream 2.3,
-      not after it.
+      deferrable, which is what the LLVM decision changed: rustc with LLVM
+      peaks far above anything cranelift would have, and a build that
+      overcommits currently dies at the faulting task with a SIGBUS-coded
+      exit. Decide between swap plus a reclaim policy and a per-build memory
+      budget that makes overcommit not happen — before Workstream 2.3.
 
 **Decided.** Syscall ABI: **Linux x86-64 numbering, one table, a private range
 at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 **LLVM, cross-built from Linux, with the C++ runtime ported to SlopOS** — the
-Rust-hosted answer (cranelift + a Rust linker, no LLVM, no C++) was decided
-first and then *measured against this kernel* and found not to reach it, and
-"The backend is measured, and it is still LLVM" above is that measurement.
-Soft-float is the blocker and it is architectural: it is below cranelift's
-lowest x86 feature toggle, cg_clif reads no target features at all, and nobody
-upstream has ever asked. C is *not* excluded and is now cheaper than it was —
-clang arrives in the same cross-build as `libLLVM.so`, which deletes the
+Rust-hosted answer was decided first, then measured against this kernel and
+found not to reach it. C is *not* excluded and is now cheaper, because clang
+arrives in the same cross-build as `libLLVM.so`, which deletes the
 Rust-written C frontend this plan used to owe. Scope: the full in-guest loop,
-Phases 1–3, in QEMU; bare metal is not committed, and neither is rebuilding the
-toolchain in-guest. Identity: single-user, uid 0, permanently — no persistable
-principal, so file ownership and a medium-resident quota ledger stay out of
-scope and `stat`'s uid/gid fields exist for layout only. Directory scaling: an
-in-memory name index, not an on-disk htree, so `e2fsck` stays the oracle for
-every image this kernel writes.
-
-**Std platform layer: unix family over a real libc — landed.**
-`x86_64-unknown-slopos`, `target-family = ["unix"]`, `env = "slibc"`, a
-`libc/src/unix/slopos/` module, and std riding its own `sys/pal/unix` — Redox's
-architecture, and the only one that has produced a self-hosting Rust OS.
-`slibc/std_pal/` is deleted rather than moved; `slibc` is a real C library
-(`staticlib`, generated headers, `crt0.o`), which pulled most of Workstream
-1.3's C-library work forward before the C++ decision made it load-bearing; and the `siginfo_t.si_addr` and `msghdr`/`cmsghdr` divergences
-are closed, because std's unix PAL reads both. The rejected alternative was a
-bespoke PAL over a crates.io ABI crate (Motor OS's shape), which costs six
-hard-breaking third-party crates — `libloading` among them, so an in-guest
-rustc could not be built at all — as permanent carve-outs. What is *not* done
-is the built-in triple: tier 3 ships no artifacts, so `-Zbuild-std` stays
-mandatory until tier 2 either way, and the fork is two patches over a linked
-sysroot rather than a stage-2 cross toolchain. See "The target is a host's
-target".
+Phases 1–3, in QEMU. Identity: single-user, uid 0, permanently — so file
+ownership and a medium-resident quota ledger stay out of scope and `stat`'s
+uid/gid fields exist for layout only. Directory scaling: an in-memory name
+index, not an on-disk htree, so `e2fsck` stays the oracle for every image this
+kernel writes. Std platform layer: **unix family over a real libc** —
+`target-family = ["unix"]`, `env = "slibc"`, a `libc/src/unix/slopos/` module,
+std riding its own `sys/pal/unix`, and `slibc/std_pal/` deleted rather than
+moved. The rejected alternative was a bespoke PAL over a crates.io ABI crate
+(Motor OS's shape), which costs six hard-breaking third-party crates —
+`libloading` among them, so an in-guest rustc could not be built at all — as
+permanent carve-outs.
 
 ---
 
 ## Touch list (current paths — verify before editing)
 
-- `mm/src/elf.rs` — `PT_INTERP` rejection and `UnsupportedLoadBase`, the two
-  image caps that are still policy rather than plumbing (Workstream 1.1).
-- `vt/src/lib.rs`, `terminal-core/src/{input,grid}.rs`,
-  `userland/src/apps/terminal/{input,mod}.rs`,
-  `userland/src/apps/shell/input.rs`, `font/src/{lib,atlas,boxdraw,bitmap}.rs`,
-  `core/src/syscall/font_handlers.rs`, `net-core/src/render.rs` — the terminal
-  above. Listed not as work but as what a later phase must not quietly undo:
-  the parser's private-marker byte (`>` must not reach the SGR handler), the
-  reply queue's drop-whole-answers rule and its drain landing on the same loop
-  turn, "a reply is not a cursor movement" (it must not cancel a pending
-  autowrap), Shift as the mouse-reporting override, the kernel's Shift+PgUp
-  interception requiring Shift *without* Ctrl, `boxdraw`'s single `Geom` (every
-  stroke must come from it or cells stop joining), the atlas chunk arithmetic,
-  and `is_renderable` mirroring `GLYPH_RANGES` — each is an invariant a change
-  nearby can break without failing to compile.
-- `shell-core/src/{lexer,syntax,pattern,fields,arith,param,qbuf}.rs`,
-  `userland/src/apps/shell/{expand,glob,exec,funcs}.rs` — the shell above.
-  Listed not as work but as what a later phase must not quietly undo: the
-  lexer's `Incomplete`, `QBuf`'s per-byte quoting, "an unmatched pattern is
-  left literal" and "a substitution's output is never re-tokenized" are each
-  an invariant a change nearby can break without failing to compile.
-- `userland/src/apps/coreutils/`, `userland/src/bin/coreutils.rs`, the
-  justfile's `coreutils_tools`, `scripts/build_fs_image.sh`'s symlink loop and
-  `scripts/gen_initramfs.py`'s `MODE_LINK` records — the utility set above.
-  Listed not as work but as what a later phase must not quietly undo: the
-  installed names, the implemented table and `coreutils_test`'s check that they
-  agree are three places one utility appears, and `mod.rs`'s `TOOL_SETS` is
-  what keeps a new tool to one file.
-- `editor-core/src/`, `userland/src/apps/editor/`,
-  `appkit/src/{text,paint,run,node,tree,style}.rs`,
-  `appkit/src/widgets/{code_view,tree_view,editor_tabs,menu_bar,line_edit,drag_handle,card,icon}.rs`,
-  `appkit/src/layout.rs`'s release pass, `windowing/src/clipboard.rs` and
-  `userland/src/apps/compositor/mod.rs`'s `protocol_pointer_grab` — the editor
-  above. Listed not as work but as
-  what a later phase must not quietly undo: positions are characters and only
-  `byte_of` converts, a display column is not a character column wherever a tab
-  can appear (`Viewport::first_col` is a display column, and `buffer.rs`'s
-  `display_col` and `code_view.rs`'s copy of it must agree), a compound edit
-  opens one history transaction, the highlight cache
-  is invalidated at the *first* edited line and nowhere later, transient
-  interaction state (a drag, a click run, a resize) belongs to the application
-  because the widget holding it is rebuilt between events, a release reaches
-  the widget that latched on the press whether or not it lands inside it and
-  whether or not it lands inside the window, a widget answers a key only when it
-  holds the focus (nothing else in the tree will decline it),
-  `Rect::to_damage_rect`'s bounds
-  are inclusive like every other `DamageRect`, and `measure` and
-  `paint` must agree on a font size or a click lands on the wrong character.
-- `toolchain/PIN`, `toolchain/rust/`, `toolchain/libc/`,
-  `scripts/make_slopos_sysroot.sh`, `scripts/check_toolchain_pin.sh`,
-  `targets/x86_64-unknown-slopos.json` and `userland/userland.ld:44-50` — the
-  std/target/unwinding triangle, a fork now rather than a mutation. Listed not
-  as work but as what a later phase must not quietly undo: the materialiser
-  must replace `lib/rustlib/src` with a real copy before it patches anything,
-  because the clone is hardlinked and patching in place writes through into
-  `$RUSTUP_HOME`; `git apply` must run with repository discovery ceilinged
-  above the sysroot, or it resolves the patch's paths against *this*
-  repository's root, ignores every one of them and exits 0; each patch is then
-  re-checked in reverse so that silent no-op cannot pass; and `toolchain/PIN`
-  is the only place a patch's hash is written down. Workstream 1.1 flips six
-  fields of that target spec together — `dynamic_linking`,
-  `relocation-model`, `position-independent-executables`, `tls-model`,
-  `panic-strategy` and `eh-frame-header` — and `userland.ld`'s own
-  `. = USER_CODE_BASE + SIZEOF_HEADERS` is why no Rust linker can take it
-  either.
-- `vendor/unwinding`, `Cargo.toml`'s `unwinding` feature list,
-  `slibc/staticlib/`, `slibc/crt0/`, `slibc/include/`, `slibc/build/decls.rs`
-  and `NOTICE.md` — the C++ platform above. Listed as work rather than as an
-  invariant: the unwinder is already the Level-1 provider a C++ runtime links
-  against and needs a feature change (`fde-phdr-dl` or `fde-registry`) rather
-  than a port; `libc.a` and `crt0.o` exist but `libc.so` does not, and two
-  libcs in one process is the allocator bug Redox names; `dlfcn.h` declares
-  `Dl_info` and the `RTLD_*` constants and says in its own header comment that
-  the calls do not exist, which is the sentence Workstream 1.1 is done when it
-  changes; and `<ctype.h>` and `<wchar.h>` are not generated at all.
-- `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs`,
-  `scripts/check_syscall_abi.sh`, `scripts/gates/syscall/` — the Linux number
-  table, the two dispatch tables and the gate that holds them to
-  `syscall_64.tbl`. Listed not as work but as what a later phase must not
-  quietly undo: a number below `SYSCALL_PRIVATE_BASE` means Linux's call of
-  that name and nothing else, the private range stays contiguous, and a
-  private constant that borrows a Linux syscall's name needs a stated reason
-  in the allowlist. The capability histogram counts registered entry points,
-  so it still moves when a syscall is added.
-- `scripts/check_codegen_backend.sh`, `scripts/check_linker_script.sh`,
-  `scripts/gates/codegen/`, `scripts/gates/linker/`,
-  `targets/x86_64-slos.json`'s `llvm-target` and `link.ld` — the backend and
-  linker answer above. Listed not as work but as what a later phase must not
-  quietly undo: both gates fail on a capability *gained* as well as one lost,
-  which is the only thing that will tell anyone the answer has changed; the
-  `object-format` probe depends on the `-elf` suffix the target spec now
-  carries; and the linker gate's coverage check means a construct added to
-  `link.ld` without a probe fails the gate rather than going ungraded.
-- `scripts/qemu_run.sh` — disk attachment, boot order (Phase 3).
-- `fs/src/devfs/mod.rs`, `fs/src/partition.rs` — writable block nodes,
-  partition writing (Phase 3).
-- `AGENTS.md` — the QEMU-only execution boundary, which forbids exactly the
-  Phase 3 install operation and needs a scoped exception.
-- `fs/src/ext2/dirindex.rs`, `fs/src/ext2/journal.rs`, `fs/src/verity.rs`,
-  `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` — the storage work above.
-  Listed not as work but as what a later phase must not quietly undo: each one
-  carries an invariant (index completeness, no allocation on the commit path,
-  the trailer's byte layout, the descriptor-ring arithmetic, the report's wire
-  form) that a change nearby can break without failing to compile.
+Each landed section above states the invariants its paths carry; this list is
+where they live, not a second copy of what they say. An entry marked
+*invariant* carries something a change nearby can break without failing to
+compile.
+
+| Area | Paths | |
+|---|---|---|
+| Dynamic loader | `mm/src/elf.rs`, `mm/src/process_vm.rs`, `core/src/exec/mod.rs`, `slibc/src/ld_so/`, `slibc/cdylib/` | *invariant* |
+| Terminal | `vt/src/lib.rs`, `terminal-core/src/{input,grid}.rs`, `userland/src/apps/terminal/`, `userland/src/apps/shell/input.rs`, `font/src/{lib,atlas,boxdraw,bitmap}.rs`, `core/src/syscall/font_handlers.rs`, `net-core/src/render.rs` | *invariant* |
+| Shell | `shell-core/src/`, `userland/src/apps/shell/{expand,glob,exec,funcs}.rs` | *invariant* |
+| Utilities | `userland/src/apps/coreutils/`, `userland/src/bin/coreutils.rs`, the justfile's `coreutils_tools`, `scripts/build_fs_image.sh`, `scripts/gen_initramfs.py` | *invariant* |
+| Editor and toolkit | `editor-core/src/`, `userland/src/apps/editor/`, `appkit/src/`, `windowing/src/clipboard.rs`, the compositor's `protocol_pointer_grab` | *invariant* |
+| Std/target/unwinding | `toolchain/`, `scripts/make_slopos_sysroot.sh`, `scripts/check_toolchain_pin.sh`, `targets/x86_64-unknown-slopos.json`, `userland/userland.ld` | *invariant* |
+| Syscall ABI | `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs`, `scripts/check_syscall_abi.sh`, `scripts/gates/syscall/` | *invariant* |
+| Backend and linker gates | `scripts/check_codegen_backend.sh`, `scripts/check_linker_script.sh`, `scripts/gates/{codegen,linker}/`, `targets/x86_64-slos.json`, `link.ld` | *invariant* |
+| Storage | `fs/src/ext2/{dirindex,journal}.rs`, `fs/src/verity.rs`, `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` | *invariant* |
+| C++ platform | `vendor/unwinding`, `slibc/{staticlib,crt0,include,build}/`, `NOTICE.md` | work |
+| Phase 3 install | `scripts/qemu_run.sh`, `fs/src/devfs/mod.rs`, `fs/src/partition.rs` | work |
+| Execution boundary | `AGENTS.md` | Phase 3 needs a scoped exception |
+
+Three things are worth naming here because their paths sit apart from the
+section that explains them: the unwinder is already the Level-1 provider a C++
+runtime links against and needs a feature change (`fde-phdr-dl` or
+`fde-registry`) rather than a port; the C++ library must link `libc.so` rather
+than `libc.a`, because two libcs in one process is the allocator bug Redox
+names; and `<ctype.h>` and `<wchar.h>` are not generated at all.

@@ -256,6 +256,10 @@ path = "src/bin/tests/dns_resolve_test.rs"
 name = "libc_abi_test"
 path = "src/bin/tests/libc_abi_test.rs"
 
+[[bin]]
+name = "dl_test"
+path = "src/bin/tests/dl_test.rs"
+
 [features]
 default = []
 testbins = []

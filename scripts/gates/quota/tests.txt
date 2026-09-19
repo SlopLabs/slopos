@@ -283,6 +283,30 @@
 #     same kernel accounting the bespoke PAL did. Only the deterministic row
 #     is re-recorded.
 #
+# 2026-09-19, the dynamic loader ("A program can be linked at run time" in
+# plans/self-hosting.md). One row moved, from one cause: `dl_test` is one more
+# utest binary, and it spawns `/bin/dl_probe` twice — once for the dlopen
+# checks and once for the RELRO fault.
+#   post-userland-tests `process` 247 -> 250. Three more account rows, live at
+#     the dump point like the rest of the phase's children. Deterministic at
+#     250 across four fresh runs of one ISO; the cap stays exact.
+#   post-userland-tests `residentpages` 153268 -> 157348 and `pages`
+#     1887717 -> 1977053. Measured over those same four runs:
+#     `residentpages` 154070/154429/154457/154592 and `pages`
+#     1833467/1833874/1857895/1905260. `residentpages`' own spread here is
+#     522, but the cap is the maximum plus **2756**, the widest spread this
+#     row has been observed with (2026-09-15) — four runs of one ISO
+#     understate a row whose value depends on which of the phase's
+#     short-lived children are still unreaped at the dump. `pages` takes its
+#     own spread of 71793, which is the widest this row has shown and in the
+#     same style as its earlier notes.
+#   `kernelmeta` measured 9322-9439 inside 10035, `diskblocks` 315 inside
+#     2911 and `task` 6 inside 10, so those rows are left alone. The
+#     interpreter itself is cheap — it is mapped into the process that runs
+#     it, once — and what the two rows above measure is `dl_test` spawning
+#     `/bin/dl_probe` twice on top of a userland phase that already reaches
+#     ~250 live account rows.
+#
 # 2026-09-17, the editor ("An editor you can work in" in
 # plans/self-hosting.md). Two rows moved, both in the userland phase and both
 # from the same cause: `editor_test` is one more utest binary.
@@ -362,10 +386,10 @@ post-userland-tests	diskblocks	2911
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
-post-userland-tests	pages	1887717
+post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	247
-post-userland-tests	residentpages	153268
+post-userland-tests	process	250
+post-userland-tests	residentpages	157348
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

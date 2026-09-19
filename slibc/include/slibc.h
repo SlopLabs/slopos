@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <link.h>
 #include <locale.h>
 #include <net/if.h>
 #include <netdb.h>
