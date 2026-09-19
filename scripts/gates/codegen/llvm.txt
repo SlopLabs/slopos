@@ -1,0 +1,34 @@
+# check_codegen_backend expectations — backend: llvm
+#
+# Measured by: scripts/check_codegen_backend.sh --backend llvm --emit-allowlist
+# against targets/x86_64-slos.json on the pinned channel.
+#
+# <capability> <TAB> has|lacks
+#
+# This is the backend the kernel ships on, so every line here is `has` and
+# each one is load-bearing rather than decorative:
+#
+#   soft-float    a syscall or fault entering from userland saves no vector
+#                 state, so one XCR0-touching instruction in the kernel
+#                 clobbers the interrupted task's live registers.
+#   stack-sizes   the only input to check_stack_sizes.sh, which is what
+#                 enforces S-5 against the 4 KiB guard page.
+#   safestack     the dual-stack split, read through
+#                 __safestack_pointer_address at PCR offset 40.
+#   link-section  eleven linker registries; check_registry_sections.sh holds
+#                 their spans to whole entries.
+#   naked-fn      five files under slopos-ostd/src/ carry one, among them
+#                 the AP entry stub and the safestack pointer accessor.
+#   asm-sym       four sym operands, in the AP trampoline and in task
+#                 dispatch.
+#
+# A `lacks` appearing here is a toolchain regression that disarms one of
+# those, not a number to re-measure into place.
+
+object-format	has
+soft-float	has
+stack-sizes	has
+link-section	has
+naked-fn	has
+safestack	has
+asm-sym	has

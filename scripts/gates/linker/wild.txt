@@ -1,0 +1,110 @@
+# check_linker_script expectations — linker: wild
+#
+# Measured by:
+#   cargo install wild-linker
+#   scripts/check_linker_script.sh --linker wild --emit-allowlist
+#
+# <construct> <TAB> has|lacks
+#
+# wild is the Rust-written ELF linker plans/self-hosting.md named as the
+# candidate for a toolchain with no C++ in it. That decision went the other
+# way — see "The backend is measured, and it is still LLVM" — so this gate's
+# job now is to notice the day the answer changes. Measured against
+# wild 0.10.0, it takes twelve of the eighteen constructs link.ld uses.
+#
+# Three it refuses:
+#
+#   dot-from-symbol    "Symbols with the set location operation are not yet
+#                      supported" (libwild 0.10.0 layout.rs:5251, one bail!
+#                      with no issue reference). This is the one link.ld is
+#                      refused on — `. = KERNEL_VIRT_BASE` — and it is why
+#                      `wild -T link.ld` never reaches anything else. Note
+#                      what it is *not*: a top-level definition is fine, and
+#                      top-level-assign records that.
+#                      This one is version-bound, not architectural:
+#                      wild-linker/wild#2418 (2026-08-31) and #2475
+#                      (2026-09-02) implement it, with a regression test whose
+#                      script is `. = foo + 0x100000;`. There is no 0.11.0, so
+#                      nothing installable carries them. A future `has` here
+#                      is the expected outcome, not a surprise.
+#   noload             `(NOLOAD)` draws the same message. `*(COMMON)` beside
+#                      it links, so the section type specifier is what fails.
+#   output-align-expr  `.text ALIGN(4096) :` — "Missing memory offset for
+#                      section N present in a program segment". The other two
+#                      ALIGN spellings work: section-align-attr and dot-align
+#                      are both `has`.
+#
+# Three it accepts and gets wrong, and these are the ones worth understanding
+# because they do not announce themselves — the link succeeds and the image is
+# different:
+#
+#   explicit-base      the first LOAD segment starts exactly where the script
+#                      says; the first *section* does not, and that is what
+#                      this probe measures because it is what link.ld cares
+#                      about (.limine_requests must be in the first LOAD, and
+#                      _kernel_start brackets the counter). wild reads
+#                      `. = X` as "the image starts at X" and puts the ELF and
+#                      program headers there; ld and lld read it as "the next
+#                      output section starts at X" and keep the headers out of
+#                      the way. lld puts the first section at the base exactly;
+#                      how far past it wild puts one depends on the phdr count
+#                      and so on the fixture, which is why the run prints the
+#                      address rather than this file naming it. `--nmagic` —
+#                      which drops wild's .relro_padding and its page-aligned
+#                      loadable segments — reduces the offset without removing
+#                      it: base+0x1350 to base+0x280 on a single-section
+#                      object. The header placement sits underneath the page
+#                      rounding rather than instead of it, so no invocation
+#                      flag reaches it.
+#   section-order      output sections come out in wild's order — permission
+#                      class, not declaration order — but only when no PHDRS
+#                      is declared. This is the one that is a property rather
+#                      than a default, and wild says so itself: its
+#                      script-layout test carries `//#ReferenceLinkers:` (no
+#                      reference linker at all) beside the comment that .text
+#                      is the first section in ld, and its lld-suite skip
+#                      group is named design_differences, reason "Wild uses
+#                      immediate binding or different load address; output
+#                      differs from lld by design". link.ld's order is
+#                      load-bearing, so this is the disqualifying finding.
+#   composed-layout    which is why this probe exists. Given link.ld's own
+#                      shape (PHDRS, phdr-assigned sections, bracketed
+#                      registries), wild *does* keep the script's order, and
+#                      the probe asserts the first PT_LOAD starts at the first
+#                      declared section. What it does not do is start the
+#                      image where the location counter says: measured at
+#                      0x13e8 past the base, which is where this verdict comes
+#                      from. That is the finding that would break a kernel,
+#                      and the minimal section-order verdict above describes a
+#                      script shape link.ld does not have.
+#
+# One divergence this gate does not probe and should not be forgotten: wild
+# defaults --gc-sections ON where ld and lld default it off, and documents
+# that nowhere. KEEP is honoured, so link.ld's eleven registries survive; a
+# section relying on ld's default would not.
+#
+# PHDRS with declared flags, KEEP against a control link, ASSERT(SIZEOF()),
+# /DISCARD/, ENTRY of a non-default symbol, and symbols bracketing exactly the
+# section they are written in are all `has`. So the eleven registries would be
+# measured correctly — around an image that starts in the wrong place. That is
+# why this is a gate rather than a note: a `lacks` that turns into a `has` is
+# the signal to re-try the whole link.
+
+output-format	has
+entry	has
+top-level-assign	has
+dot-from-symbol	lacks
+explicit-base	lacks
+section-order	lacks
+output-align-expr	lacks
+section-align-attr	has
+in-section-assign	has
+symbol-alias	has
+keep	has
+assert-sizeof	has
+noload	lacks
+phdrs	has
+discard	has
+location-gap	has
+dot-align	has
+composed-layout	lacks

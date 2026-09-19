@@ -11,7 +11,7 @@
   "has-rpath": false,
   "linker": "rust-lld",
   "linker-flavor": "ld.lld",
-  "llvm-target": "x86_64-unknown-none",
+  "llvm-target": "x86_64-unknown-none-elf",
   "max-atomic-width": 64,
   "os": "none",
   "panic-strategy": "unwind",

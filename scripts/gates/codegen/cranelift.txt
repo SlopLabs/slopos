@@ -1,0 +1,49 @@
+# check_codegen_backend expectations — backend: cranelift
+#
+# Measured by:
+#   rustup component add rustc-codegen-cranelift-preview --toolchain <channel>
+#   scripts/check_codegen_backend.sh --backend cranelift --emit-allowlist
+#
+# <capability> <TAB> has|lacks
+#
+# Why this file exists: Phase 1 of plans/self-hosting.md decided a Rust-hosted
+# toolchain, which makes "can cg_clif build targets/x86_64-slos.json yet?" a
+# standing question rather than a settled one. Recording the answer here is
+# what re-asks it on every toolchain bump. A `lacks` the probe finds present
+# fails the run — that is the signal to go and re-decide, not a nuisance.
+#
+# The four absences, with what each costs:
+#
+#   soft-float    probe_float_add lowers `a + b` to `addsd %xmm1, %xmm0` and
+#                 passes its arguments in XMM, where LLVM under +soft-float
+#                 passes them in GP registers and calls __adddf3. rustc says
+#                 so itself: "target feature `soft-float` must be enabled to
+#                 ensure that the ABI of the current target can be
+#                 implemented correctly". cranelift's x64 backend has no
+#                 software-float lowering, so this is a property of the
+#                 backend rather than a missing flag.
+#   stack-sizes   -Zemit-stack-sizes is accepted and produces no section.
+#                 check_stack_sizes.sh fails closed on it through
+#                 min-records, which is the only reason S-5 is not silently
+#                 unenforced.
+#   safestack     cg_clif takes -Cllvm-args as its own option namespace and
+#                 answers "Unknown option" to -safestack-use-pointer-address,
+#                 so that half has no spelling here. The half the gate records
+#                 is the quieter one: -Zsanitizer=safestack alone is accepted
+#                 and instruments nothing, which nothing else would catch.
+#   asm-sym       "asm! and global_asm! sym operands are not yet supported".
+#                 Four sites use them: the AP trampoline's AP_PCR_PTRS and
+#                 ap_early_entry, and task dispatch's entry/exit thunks.
+#
+# object-format is `has` only because targets/x86_64-slos.json spells its
+# llvm-target `x86_64-unknown-none-elf`. Without the object-format component
+# target-lexicon answers BinaryFormat::Unknown and cg_clif ICEs in
+# driver::aot::make_module before compiling anything.
+
+object-format	has
+soft-float	lacks
+stack-sizes	lacks
+link-section	has
+naked-fn	has
+safestack	lacks
+asm-sym	lacks

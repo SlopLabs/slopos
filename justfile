@@ -555,6 +555,8 @@ check-framekernel-gates:
     scripts/check_fs_throughput.sh --self-test
     scripts/check_syscall_abi.sh --self-test
     scripts/check_toolchain_pin.sh --self-test
+    scripts/check_codegen_backend.sh --self-test
+    scripts/check_linker_script.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_toolchain_pin.sh
     scripts/check_unsafe_outside_ostd.sh
@@ -575,7 +577,15 @@ check-framekernel-gates:
     scripts/check_safe_contract_surface.sh
     scripts/check_charge_linearity.sh
     scripts/check_syscall_abi.sh
+    just check-toolchain-coverage
     scripts/tcb_ratio.sh --max 1.0
+
+[doc("Hold every codegen backend and linker to what targets/x86_64-slos.json and link.ld need. `llvm`/`lld` are the shipping pair; `cranelift`/`wild` skip when not installed.")]
+check-toolchain-coverage:
+    scripts/check_codegen_backend.sh --backend llvm
+    scripts/check_codegen_backend.sh --backend cranelift
+    scripts/check_linker_script.sh --linker lld
+    scripts/check_linker_script.sh --linker wild
 
 # TODO(tech-debt): no `cargo clippy -- -D warnings` gate here — there is no
 # clippy config in tree and the custom `no_std` target needs plumbing first.
@@ -639,6 +649,7 @@ stack-audit:
 clean:
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
     rm -f {{build_dir}}/kernel-*.elf
+    rm -rf {{build_dir}}/gates/codegen-probe
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean

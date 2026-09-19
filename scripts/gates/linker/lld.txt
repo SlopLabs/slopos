@@ -1,0 +1,74 @@
+# check_linker_script expectations — linker: lld
+#
+# Measured by: scripts/check_linker_script.sh --linker lld --emit-allowlist
+# against link.ld's construct set, using the `rust-lld -flavor gnu` in the
+# pinned sysroot — the same binary the kernel links with.
+#
+# <construct> <TAB> has|lacks
+#
+# This is the linker the kernel ships on, so every line is `has`. Each one is
+# load-bearing:
+#
+#   top-level-assign   KERNEL_VIRT_BASE is defined before SECTIONS.
+#   dot-from-symbol    and assigned to the location counter, which is how the
+#                      image reaches the higher half.
+#   explicit-base      that assignment starts the image there, with no offset
+#                      of the linker's own in front of it.
+#   section-order      output sections come out in the order the script names
+#                      them. Whether the first one lands in the first LOAD
+#                      segment — which is what .limine_requests needs — is
+#                      composed-layout's question, not this one's.
+#   output-align-expr  `.text ALIGN(4096) :`, the pre-colon form.
+#   section-align-attr `.bss (NOLOAD) : ALIGN(4096)`, the post-colon one.
+#   dot-align          `. = ALIGN(0x1000);` before the early page tables.
+#                      link.ld uses all three ALIGN spellings and they are
+#                      separate productions.
+#   in-section-assign  __start_/__stop_ pairs bracket eleven registries;
+#                      check_registry_sections.sh holds their spans to whole
+#                      entries. Measured against each section's own address
+#                      and size, so this stays independent of where the
+#                      section landed.
+#   phdrs              three PT_LOADs with declared flags — a .rodata that
+#                      lands in the RW segment is a writable constant pool.
+#                      Measured with FLAGS(7) on the text segment, which
+#                      flag-derived grouping cannot produce, so a linker that
+#                      ignored PHDRS entirely could not pass.
+#   noload             a PROGBITS section marked (NOLOAD) occupies no file
+#                      space. Measured on .probe_registry rather than .bss,
+#                      whose input is NOBITS either way.
+#   location-gap       early_pml4 through early_pd_kernel are four pages
+#                      carved out of the location counter past _bss_end.
+#   keep               every registry and both .eh_frame sections are
+#                      unreferenced and rustc passes --gc-sections. Measured
+#                      against a control link without KEEP, so a linker that
+#                      ignores --gc-sections cannot pass on the first half.
+#   assert-sizeof      the .eh_frame_hdr assertion turns a missing index into
+#                      a link failure rather than a linear scan at runtime.
+#   composed-layout    all of the above at once, in link.ld's own shape, plus
+#                      the one property only the composition has: the first
+#                      PT_LOAD starts at the first declared section, which is
+#                      where the bootloader looks for .limine_requests. The
+#                      one probe that is deliberately not minimal, because a
+#                      linker can take every construct alone and compose them
+#                      differently.
+#
+# A `lacks` here is a toolchain regression, not a number to re-measure.
+
+output-format	has
+entry	has
+top-level-assign	has
+dot-from-symbol	has
+explicit-base	has
+section-order	has
+output-align-expr	has
+section-align-attr	has
+in-section-assign	has
+symbol-alias	has
+keep	has
+assert-sizeof	has
+noload	has
+phdrs	has
+discard	has
+location-gap	has
+dot-align	has
+composed-layout	has
