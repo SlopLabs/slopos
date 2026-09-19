@@ -192,7 +192,12 @@ build_probe() {
         feature_args=(--features "$features")
     fi
 
+    # CARGO_TERM_COLOR=never, not inherited: this log is parsed, not read, and
+    # an ambient `always` (CI sets one) wraps `error:` in escapes that anchored
+    # patterns never match. probe_failure_reason strips them too; this stops
+    # them being written.
     if CARGO_TARGET_DIR="$target_dir" \
+       CARGO_TERM_COLOR=never \
        RUSTFLAGS="$BACKEND_FLAG -Zunstable-options -Zemit-stack-sizes $extra_flags" \
        cargo +"$RUST_CHANNEL" build \
            -Zbuild-std=core \
@@ -234,8 +239,13 @@ record_build_failure() {
 # rustc to learn about target-specific information", once as "could not
 # compile" — and the backend's refusal is the indented line between them.
 probe_failure_reason() {
-    local reasons
-    reasons="$(sed -E -n 's/^[[:space:]]*error(\[[A-Za-z0-9]*\])?: //p' "$PROBE_LOG")"
+    local reasons esc
+    # A literal ESC rather than \x1b: that escape is GNU-only, and this script
+    # is held to the same portability as the rest of scripts/.
+    esc="$(printf '\033')"
+    reasons="$(sed -E -n \
+        -e "s/${esc}\\[[0-9;]*[A-Za-z]//g" \
+        -e 's/^[[:space:]]*error(\[[A-Za-z0-9]*\])?: //p' "$PROBE_LOG")"
     printf '%s\n' "$reasons" \
         | awk '!/^(failed to run|could not compile|aborting due to)/ && !found { print; found = 1 }'
 }
@@ -518,9 +528,40 @@ compare_against_allowlist() {
     { diff <(verdict_lines "$expected") <(verdict_lines "$observed") || true; } \
         | sed -n 's/^< /  recorded but not observed: /p; s/^> /  observed but not recorded: /p' >&2
     printf '%s' "$FINDINGS" | awk -F'\t' 'NF >= 3 { printf "  %-14s %-6s %s\n", $1, $2, $3 }' >&2
+    report_unknown_logs
     echo "  Re-measure with --emit-allowlist, restore the per-row prose it does not" >&2
     echo "  print, and say in the commit message what moved." >&2
     return 1
+}
+
+# An `unknown` says the probe broke and not why, which is unactionable from a
+# CI log where builddir/ is gone with the runner. Print the tail that produced
+# it — that is the evidence the verdict is standing on.
+report_unknown_logs() {
+    local capability log
+    printf '%s' "$FINDINGS" | awk -F'\t' '$2 == "unknown" { print $1 }' | while read -r capability; do
+        [ -n "$capability" ] || continue
+        log="$(probe_log_for "$capability")"
+        if [ -n "$log" ] && [ -r "$log" ]; then
+            echo "  --- $capability: last 20 lines of $(basename "$log") ---" >&2
+            tail -n 20 "$log" | sed 's/^/    /' >&2
+        else
+            echo "  --- $capability: no probe log was written ---" >&2
+        fi
+    done
+}
+
+# The probe tags are not the capability names, so the mapping is written down
+# rather than derived; a capability with no entry prints the no-log line.
+probe_log_for() {
+    local tag
+    case "$1" in
+        asm-sym) tag=asmsym ;;
+        safestack) tag=safestack ;;
+        object-format|soft-float|stack-sizes|link-section|naked-fn) tag=base ;;
+        *) return 0 ;;
+    esac
+    printf '%s/%s.log' "$PROBE_DIR" "$tag"
 }
 
 main() {
@@ -674,6 +715,16 @@ EOF
     : > "$PROBE_LOG"
     expect_parse "probe_failure_reason silent" "" "$(probe_failure_reason)"
 
+    # The form CI produces. `CARGO_TERM_COLOR=always` is set in the workflow
+    # env, so cargo wraps `error` in SGR escapes and an anchored pattern reads
+    # the refusal as absent — which is `unknown`, which fails the run. This
+    # shipped: the asm-sym row read `lacks` on a developer's terminal and
+    # `unknown` on the first CI run of the gate.
+    printf '\033[1m\033[91merror\033[0m\033[1m: asm! and global_asm! sym operands are not yet supported\033[0m\n' \
+        > "$PROBE_LOG"
+    expect_parse "probe_failure_reason coloured" \
+        "asm! and global_asm! sym operands are not yet supported" "$(probe_failure_reason)"
+
     # The classifier, in both directions, and through the assignment that once
     # ended the run under pipefail when every line was a cargo wrapper.
     expect_class() {
@@ -698,6 +749,9 @@ EOF
     expect_class "a full disk" unknown
     : > "$PROBE_LOG"
     expect_class "nothing at all" unknown
+    printf '\033[1m\033[91merror\033[0m\033[1m: asm! sym operands are not yet supported\033[0m\n' \
+        > "$PROBE_LOG"
+    expect_class "a coloured refusal" lacks
 
     cat > "$root/disasm.txt" <<'EOF'
 0000000000000000 <probe_float_add>:
