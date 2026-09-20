@@ -368,9 +368,8 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
             }
         }
         TestResult::Fail | TestResult::Panic => {
-            crate::capture::with_log(log_cpu, |log| {
-                crate::ktap::emit_not_ok(idx, desc, time_ms, final_outcome, log, truncated)
-            });
+            crate::ktap::emit_not_ok(idx, desc, time_ms, final_outcome);
+            emit_log_block(log_cpu, truncated);
         }
     }
 
@@ -381,6 +380,10 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
     }
 }
 
+/// Per-ring cap on captured-log emission, to bound serial output.
+#[cfg(feature = "tests")]
+const MAX_LOG_EMIT: usize = 4096;
+
 #[cfg(feature = "tests")]
 fn emit_verbose_log(primary_cpu: usize, truncated_bytes: usize) {
     let primary_empty = crate::capture::with_log(primary_cpu, |log| log.is_empty());
@@ -389,6 +392,13 @@ fn emit_verbose_log(primary_cpu: usize, truncated_bytes: usize) {
         return;
     }
     klog_info!("KTAP\t  ---");
+    emit_log_block(primary_cpu, truncated_bytes);
+}
+
+/// Every ring, not just the harness CPU's: a user fault is reported by
+/// whichever CPU took it, and dropping that leaves a failure with no cause.
+#[cfg(feature = "tests")]
+fn emit_log_block(primary_cpu: usize, truncated_bytes: usize) {
     klog_info!("KTAP\t  log: |");
     crate::capture::with_log(primary_cpu, emit_log_lines);
     if truncated_bytes > 0 {
@@ -411,7 +421,16 @@ fn emit_verbose_log(primary_cpu: usize, truncated_bytes: usize) {
 
 #[cfg(feature = "tests")]
 fn emit_log_lines(log: &[u8]) {
-    for line in log.split(|&b| b == b'\n') {
+    let emit_slice = if log.len() > MAX_LOG_EMIT {
+        &log[log.len() - MAX_LOG_EMIT..]
+    } else {
+        log
+    };
+    let head_skipped = log.len() - emit_slice.len();
+    if head_skipped > 0 {
+        klog_info!("KTAP\t   [head trimmed: {} bytes]", head_skipped);
+    }
+    for line in emit_slice.split(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
         }

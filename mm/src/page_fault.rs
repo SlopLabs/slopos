@@ -1,9 +1,14 @@
+use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::TaskFaultReason;
 use slopos_ostd::handle::HandleError;
+use slopos_ostd::mm::KArc;
+use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::{klog_info, klog_warn};
 
 use crate::error::MmError;
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::ProcessVm;
+use crate::user_mappings::ostd_get_pte_flags_4kb;
 use crate::{cow, demand, filemap_hook, process_vm};
 use slopos_ostd::handle::Handle;
 
@@ -94,6 +99,35 @@ fn retry(task_id: u32, fault_addr: u64) -> FaultOutcome {
     FaultOutcome::Retry
 }
 
+enum Prefault {
+    Spurious,
+    Cow(Result<(), MmError>),
+    /// Neither; the region walk decides.
+    Unclaimed,
+}
+
+/// Whether the page tables already permit the access that faulted.
+///
+/// A sibling can resolve the page between the trap and this handler, and a
+/// permission upgrade is published with a local invalidation only, so a peer
+/// CPU's stale entry faults on an access its tables now allow. Both are the
+/// architecture's spurious fault (SDM Vol. 3 §4.10.4.3), not a violation.
+fn fault_is_spurious(error_code: u64, vm_space: &KArc<VmSpace>, fault_addr: u64) -> bool {
+    let is_write = (error_code & 0x02) != 0;
+    let is_ifetch = (error_code & 0x10) != 0;
+
+    let Some(flags) = ostd_get_pte_flags_4kb(vm_space, VirtAddr::new(fault_addr)) else {
+        return false;
+    };
+    if !flags.contains(PageFlags::PRESENT) || !flags.contains(PageFlags::USER) {
+        return false;
+    }
+    if is_write && !flags.contains(PageFlags::WRITABLE) {
+        return false;
+    }
+    !(is_ifetch && flags.contains(PageFlags::NO_EXECUTE))
+}
+
 /// Try to service a user page fault in the address space named by
 /// `process_vm_handle`, returning whether it was resolved.
 ///
@@ -112,17 +146,25 @@ pub fn try_resolve_user_fault(
     };
 
     // One hold of the per-process lock, not two: a sibling can resolve the page between.
-    let cow = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
-        if !cow::is_cow_fault(error_code, vs, fault_addr) {
-            return None;
+    let prefault = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
+        if cow::is_cow_fault(error_code, vs, fault_addr) {
+            return Prefault::Cow(cow::handle_cow_fault(vs, fault_addr));
         }
-        Some(cow::handle_cow_fault(vs, fault_addr))
+        if fault_is_spurious(error_code, vs, fault_addr) {
+            return Prefault::Spurious;
+        }
+        Prefault::Unclaimed
     });
 
-    match cow {
-        Ok(Some(Ok(()))) => return FaultOutcome::Resolved,
-        Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
-        Ok(Some(Err(MmError::NoMemory))) => {
+    match prefault {
+        // Nothing to publish: only this CPU's cached translation is stale.
+        Ok(Prefault::Spurious) => {
+            crate::tlb::flush_page_local(VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1)));
+            return FaultOutcome::Resolved;
+        }
+        Ok(Prefault::Cow(Ok(()))) => return FaultOutcome::Resolved,
+        Ok(Prefault::Cow(Err(MmError::Retry))) => return retry(task_id, fault_addr),
+        Ok(Prefault::Cow(Err(MmError::NoMemory))) => {
             klog_info!(
                 "PF: COW copy for task {} at cr2=0x{:x} found no memory",
                 task_id,
@@ -130,14 +172,14 @@ pub fn try_resolve_user_fault(
             );
             return FaultOutcome::Fatal(TaskFaultReason::UserOom);
         }
-        Ok(Some(Err(_))) => {
+        Ok(Prefault::Cow(Err(_))) => {
             klog_info!(
                 "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
                 task_id,
                 fault_addr
             );
         }
-        Ok(None) => {}
+        Ok(Prefault::Unclaimed) => {}
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
             return FaultOutcome::Fatal(TaskFaultReason::UserPage);

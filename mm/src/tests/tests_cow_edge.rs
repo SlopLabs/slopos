@@ -354,6 +354,72 @@ pub fn test_cow_handle_invalid_address() -> TestResult {
     }
 }
 
+/// A sibling resolves the COW page while this CPU's fault is in flight, so
+/// the handler arrives at a leaf that already permits the write. That is what
+/// `threads_share_one_stream` used to die of after the fork before it.
+pub fn test_cow_write_fault_on_an_already_resolved_page_is_not_fatal() -> TestResult {
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("create VM");
+    };
+
+    let addr: u64 = 0x9000;
+    let Some(phys) = vm.map_test_page(addr, PageFlags::USER_RO.bits()) else {
+        return fail!("map test page");
+    };
+    vm.mark_cow(addr);
+
+    // The sibling's resolution: single-ref, so the leaf is upgraded in place.
+    if let Err(e) = vm.handle_cow_fault(addr) {
+        return fail!("the peer's COW resolution failed: {:?}", e);
+    }
+    assert_test!(!vm.is_cow(addr), "the page is still COW after resolution");
+
+    let Some(handle) = crate::process_vm::process_vm_handle(vm.process) else {
+        return fail!("no VM handle");
+    };
+    let packed = crate::process_vm::pack_process_vm_handle(handle);
+
+    // 0x07: user write against a page the error code reports as present.
+    let outcome = crate::page_fault::try_resolve_user_fault(addr, 0x07, packed, 1);
+    assert_test!(
+        outcome == crate::page_fault::FaultOutcome::Resolved,
+        "a write fault on a leaf that already permits the write was not resolved"
+    );
+    assert_test!(
+        vm.virt_to_phys(addr) == phys,
+        "the late fault moved the page"
+    );
+
+    pass!()
+}
+
+/// The other side of that arm: a leaf that does not permit the write is a
+/// protection violation, and staleness never makes one spurious.
+pub fn test_write_fault_on_a_read_only_page_stays_fatal() -> TestResult {
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("create VM");
+    };
+
+    let addr: u64 = 0xA000;
+    if vm.map_test_page(addr, PageFlags::USER_RO.bits()).is_none() {
+        return fail!("map test page");
+    }
+
+    let Some(handle) = crate::process_vm::process_vm_handle(vm.process) else {
+        return fail!("no VM handle");
+    };
+    let packed = crate::process_vm::pack_process_vm_handle(handle);
+
+    let outcome = crate::page_fault::try_resolve_user_fault(addr, 0x07, packed, 1);
+    assert_test!(
+        outcome
+            == crate::page_fault::FaultOutcome::Fatal(slopos_abi::task::TaskFaultReason::UserPage),
+        "a write to a read-only page was not fatal"
+    );
+
+    pass!()
+}
+
 slopos_testing::stest!(name = test_cow_read_not_cow_fault, suite = cow_edge);
 slopos_testing::stest!(name = test_cow_not_present_not_cow, suite = cow_edge);
 slopos_testing::stest!(
@@ -368,3 +434,11 @@ slopos_testing::stest!(name = test_cow_clone_modify_both, suite = cow_edge);
 slopos_testing::stest!(name = test_cow_multiple_clones, suite = cow_edge);
 slopos_testing::stest!(name = test_cow_no_collateral_damage, suite = cow_edge);
 slopos_testing::stest!(name = test_cow_handle_invalid_address, suite = cow_edge);
+slopos_testing::stest!(
+    name = test_cow_write_fault_on_an_already_resolved_page_is_not_fatal,
+    suite = cow_edge
+);
+slopos_testing::stest!(
+    name = test_write_fault_on_a_read_only_page_stays_fatal,
+    suite = cow_edge
+);

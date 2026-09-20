@@ -465,8 +465,10 @@ pub fn flush_local_all() {
     flush_tlb_local_full();
 }
 
+/// Local-only single-page invalidation (no IPI): for a mapping that is
+/// already what it should be, where only this CPU cached it otherwise.
 #[inline]
-fn flush_page_local(vaddr: VirtAddr) {
+pub fn flush_page_local(vaddr: VirtAddr) {
     cpu::invlpg(vaddr.as_u64());
 }
 

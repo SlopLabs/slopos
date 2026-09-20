@@ -8,9 +8,6 @@ use slopos_ostd::klog_info;
 use crate::registry::TestDesc;
 use crate::result::TestResult;
 
-/// Per-failing-test cap on captured-log emission, to bound serial output.
-const MAX_LOG_EMIT: usize = 4096;
-
 /// Holds `time_ms=N`'s position so a trailing directive keeps the space the host parser needs.
 const NO_TIME_BASE: &str = "NO_TIME_BASE";
 
@@ -64,14 +61,7 @@ pub fn emit_skip(idx: u32, desc: &TestDesc, reason: &str) {
     );
 }
 
-pub fn emit_not_ok(
-    idx: u32,
-    desc: &TestDesc,
-    time_ms: Option<u32>,
-    outcome: TestResult,
-    log: &[u8],
-    truncated_bytes: usize,
-) {
+pub fn emit_not_ok(idx: u32, desc: &TestDesc, time_ms: Option<u32>, outcome: TestResult) {
     match time_ms {
         Some(ms) => klog_info!(
             "KTAP\tnot ok {} - {}::{} # time_ms={}",
@@ -91,31 +81,6 @@ pub fn emit_not_ok(
     klog_info!("KTAP\t  ---");
     klog_info!("KTAP\t  outcome: {:?}", outcome);
     klog_info!("KTAP\t  file: {}:{}", desc.file, desc.line);
-    klog_info!("KTAP\t  log: |");
-
-    let emit_slice = if log.len() > MAX_LOG_EMIT {
-        &log[log.len() - MAX_LOG_EMIT..]
-    } else {
-        log
-    };
-    let head_skipped = log.len().saturating_sub(emit_slice.len());
-    if head_skipped > 0 {
-        klog_info!("KTAP\t   [head trimmed: {} bytes]", head_skipped);
-    }
-    for line in emit_slice.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let s = core::str::from_utf8(line).unwrap_or("<non-utf8 log line>");
-        klog_info!("KTAP\t   {}", s);
-    }
-    if truncated_bytes > 0 {
-        klog_info!(
-            "KTAP\t   [tail trimmed: {} bytes lost to ring overflow]",
-            truncated_bytes
-        );
-    }
-    klog_info!("KTAP\t  ...");
 }
 
 pub fn emit_footer(elapsed_ms: u32, pass: u32, fail: u32, skip: u32, over_time: u32) {
