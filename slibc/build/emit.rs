@@ -179,6 +179,10 @@ impl World<'_> {
             for (name, item) in self.ordered_consts(spec) {
                 let value = ctype::const_expr(&item.expr, &item.ty, &self.types)
                     .map_err(|err| format!("{}: constant `{name}`: {err}", spec.path))?;
+                if item.ty.ends_with(HANDLER_TYPE) && !value.starts_with("((") {
+                    let _ = writeln!(out, "#define {name} (({HANDLER_TYPE}){value})");
+                    continue;
+                }
                 let _ = writeln!(out, "#define {name} {}", parenthesise(&value));
             }
 
@@ -308,6 +312,10 @@ impl World<'_> {
                 let _ = writeln!(out, "{line}");
             }
             TypeDef::Alias { name, underlying } => {
+                if *name == HANDLER_TYPE {
+                    out.push_str(HANDLER_TYPEDEF);
+                    return Ok(out);
+                }
                 let declaration = self
                     .types
                     .declare(underlying, name)
@@ -566,14 +574,19 @@ pub fn umbrella(source: &str) -> String {
     out
 }
 
+/// `sighandler_t` is an integer in the contract, which is the `libc` crate's
+/// convention and the right one for Rust — `SIG_DFL` and `SIG_IGN` are 0 and
+/// 1. C code assigns a function to it, so the header spells it as the
+/// function pointer POSIX and glibc do, and every constant of that type is
+/// emitted as a cast. The two renderings are the same eight bytes.
+const HANDLER_TYPE: &str = "sighandler_t";
+const HANDLER_TYPEDEF: &str = "typedef void (*sighandler_t)(int);\n";
+
 /// POSIX gives one storage slot in `struct sigaction` two names with two
-/// function-pointer types. The contract states it as an integer, which is the
-/// `libc` crate's convention and the right one for Rust; C code assigns a
-/// function to it, so the header spells it as the union POSIX describes.
+/// function-pointer types.
 const HANDLER_SLOT: &str = "    union {
-        void (*sa_handler)(int);
+        sighandler_t sa_handler;
         void (*sa_sigaction)(int, siginfo_t *, void *);
-        sighandler_t __sa_word;
     };
 ";
 

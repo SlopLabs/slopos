@@ -1546,8 +1546,10 @@ errors, against slibc's own headers and the C++ runtime this tree builds.
 `LLVMSupport` alone because that is where a port lives: `Unix/Path.inc`,
 `Unix/Process.inc`, `Unix/Program.inc` and `Unix/Signals.inc` are the files
 that name a libc, `raw_ostream.cpp` and `ConvertUTF.cpp` the ones that name a
-C++ library, and the other twelve hundred objects are portable C++ over them.
-48 s cold on four cores, 1.5 s warm.
+C++ library, `Triple.{h,cpp}` where the port's own enumerator lives, and the
+other twelve hundred objects are portable C++ over them. Four of the port's
+six files; clang's two need a clang to build. 47 s cold on four cores, 1.5 s
+warm.
 
 The estimate this replaces is the one the workstream below carried, and it was
 wrong in the direction that mattered. It priced *localization* at 120 libc
@@ -1591,7 +1593,9 @@ What it rests on, in case a later phase disturbs it:
   simply absent — `strdup`, `strndup`, `strcoll`, `strxfrm`, `strsignal`,
   `isascii`, `toascii`, `rand`, `srand`, `_Exit`, `asprintf`, `vasprintf`,
   `vsscanf`, `vfscanf`, `vscanf`, `fseeko`, `ftello`, `getentropy`,
-  `getpwnam_r`, `pathconf`, `fpathconf`, `utimes` and `getsid`. Four headers
+  `getpwnam_r`, `pathconf`, `fpathconf`, `utimes` and `getsid`, together with
+  `<inttypes.h>`'s own six — `imaxabs`, `imaxdiv`, `strtoimax`, `strtoumax`,
+  `wcstoimax` and `wcstoumax`. Four headers
   were new with them: `<wctype.h>`, `<inttypes.h>`, `<endian.h>` and
   `<sysexits.h>`, every one of which LLVM includes.
 - **The `_l` family is an answer, not a placeholder.** SlopOS has exactly one
@@ -1653,14 +1657,33 @@ What it rests on, in case a later phase disturbs it:
   *cross-built* clang to predefine it; the host clang that runs the cross
   build is not that clang, so `check_llvm_port.sh` passes `-D__slopos__` and
   says why. The first toolchain built from this tree is what retires the flag.
-- **The gate builds `LLVMSupport`, not LLVM.** The full set above was built
+- **The gate builds two libraries, not LLVM.** The full set above was built
   once, by hand, to find out whether it would; what CI can afford every run is
-  the portability surface. A gate that compiled all of LLVM would be measuring
-  the host's core count.
+  the portability surface and the Triple. A gate that compiled all of LLVM
+  would be measuring the host's core count. Clang's half of the port is the
+  residual: nothing but `git apply --reverse --check` holds
+  `SlopOSTargetInfo`, and reaching it means building a clang.
 - **The gate borrows the host's `llvm-tblgen`.** It builds no host tools, and
   the `.inc` files tablegen emits are data tables rather than code, so a host
   tool of the same major serves. A build that needs its own would be building
   a second LLVM first.
+- **The narrow `scanf` engines grew what the new header advertises.**
+  Shipping `SCNo*`, `SCNx*` and `SCNi*` meant the engines behind them had to
+  exist: there was no `%o` arm in either, no `%x` arm in the stream one, and
+  `%i` read decimal whatever its subject's prefix said. Assignment suppression
+  and the maximum field width were missing too, which mattered more — `%*d`
+  aborted the whole scan rather than converting and discarding, and `%31s`
+  was no bound at all, so a caller's own overflow mitigation did nothing. All
+  six conversions now share one subject reader over the existing `Cursor`,
+  which is what had let the two engines disagree about `%x` in the first
+  place.
+- **`libc_probe` covers the new surface.** 120 entry points arrived with no
+  behavioural test between them; the C probe now carries six more checks —
+  the locale objects and the `_l` identity, `<wctype.h>`, wide stdio, the
+  `<inttypes.h>` six and their format macros, the scan conversions above, and
+  the ordinary POSIX names. Every expectation in them was first run against
+  glibc under a UTF-8 locale, so a failure on SlopOS is slibc's and not the
+  test's.
 - **No wide `scanf`.** `fwscanf`, `swscanf` and the `v` forms are absent and
   undeclared. The wide `printf` family transcodes its template to UTF-8 and
   runs the narrow engine — C gives the two templates the same conversions, so
@@ -1670,9 +1693,18 @@ What it rests on, in case a later phase disturbs it:
 - **`<inttypes.h>` is literal C rather than a generated contract.** Its format
   macros expand to string literals that the header generator's
   `#define NAME (value)` rendering would parenthesise into a syntax error, and
-  its six entry points are spelled in the compiler's own `intmax_t`. They are
-  the only declarations in `slibc/include/**` that no ABI check covers.
-- **`libc.so` grew by 36 KB**, 530 624 to 567 744, and `libc++.so` is now
+  its six entry points are spelled in the compiler's own `intmax_t`. A header
+  spec's `raw` block is emitted verbatim and never reaches `build.rs`'s
+  signature check, which iterates `extra` — so these six join the four
+  `long double` prototypes, `imaxdiv_t`, `LC_GLOBAL_LOCALE`, the three
+  `st_*time` defines and all of `<endian.h>` as declarations nothing grades.
+  That is why each `PRI`/`SCN` macro is the compiler's own
+  `__<TYPE>_FMT<conv>__` predefine rather than a length modifier written down
+  here: a hand-written table says what the author believes `int_fast16_t` to
+  be, and clang makes that one a `short`. `libc_probe` now exercises the
+  macros against their own types instead, which is the nearest thing to a
+  check that a verbatim block can have.
+- **`libc.so` grew by 40 KB**, 530 624 to 571 696, and `libc++.so` is now
   1 762 808 bytes — four options' worth of C++ library, and the locale facets
   are most of it. The runtime is on the tests image only; the C library is on
   every image, and a libc that differs between images is the worse hazard.

@@ -133,6 +133,11 @@ tp_patch_files() {
 tp_patch_tree_rel() {
     case "$1" in
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
+        # The llvm fork's tree is `third_party/llvm-project-<version>.src`,
+        # whose name this file has no version to spell, so `check_cxx_pin.sh`
+        # grades it instead. Answering the overlay's own path matches none of
+        # the trees the materialisation check walks, which is the point.
+        "$TP_LLVM_OVERLAY_REL/"*) printf '%s\n' "$TP_LLVM_OVERLAY_REL" ;;
         *) printf '%s\n' "$TP_SYSROOT_REL" ;;
     esac
 }

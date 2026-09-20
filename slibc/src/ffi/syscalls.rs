@@ -1117,6 +1117,11 @@ pub unsafe extern "C" fn utimes(path: *const c_char, times: *const crate::types:
     if times.is_null() {
         return utimensat(AT_FDCWD, path, core::ptr::null(), 0);
     }
+    for index in 0..2 {
+        if !(0..1_000_000).contains(&(*times.add(index)).tv_usec) {
+            return fail(EINVAL, -1);
+        }
+    }
     let widened = [
         Timespec {
             tv_sec: (*times).tv_sec,

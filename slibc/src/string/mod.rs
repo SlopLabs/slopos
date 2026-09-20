@@ -397,8 +397,6 @@ pub unsafe extern "C" fn strxfrm(dst: *mut u8, src: *const u8, n: usize) -> usiz
     len
 }
 
-/// `strdup(3)`.
-///
 /// # Safety
 /// `s` is a NUL-terminated C string.
 #[unsafe(no_mangle)]
@@ -406,8 +404,6 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     strndup(s, usize::MAX)
 }
 
-/// `strndup(3)`.
-///
 /// # Safety
 /// `s` addresses a NUL-terminated C string or at least `n` bytes.
 #[unsafe(no_mangle)]

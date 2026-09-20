@@ -60,7 +60,8 @@ unsafe fn store_float(text: *const u8, length: Length, ap: &mut VaList<'_>) {
                 *dst = value;
             }
         }
-        Length::Default => {
+        // C has no `%hf`; a width narrower than `float` is the default one.
+        Length::Default | Length::Short | Length::Char => {
             let value = strtof(text, core::ptr::null_mut());
             let dst = ap.next_arg::<*mut f32>();
             if !dst.is_null() {
@@ -70,12 +71,205 @@ unsafe fn store_float(text: *const u8, length: Length, ap: &mut VaList<'_>) {
     }
 }
 
-/// What a directive's `l` or `L` asked for.
+/// The width a directive's length modifier asked for. `z`, `j` and `t` are
+/// [`Length::Long`] because every one of them is 64 bits here.
 #[derive(Clone, Copy, PartialEq)]
 enum Length {
+    Char,
+    Short,
     Default,
     Long,
     LongDouble,
+}
+
+/// # Safety
+/// `fp` points into a NUL-terminated format string.
+/// `*`, which C17 7.21.6.2 p3 makes "convert but do not store": the input is
+/// consumed and the conversion is not counted.
+unsafe fn read_suppress(fp: &mut *const u8) -> bool {
+    if **fp == b'*' {
+        *fp = fp.add(1);
+        return true;
+    }
+    false
+}
+
+/// The maximum field width, or `usize::MAX` for a conversion with none. A
+/// width that is stated and ignored is what makes `%31s` no bound at all.
+unsafe fn read_width(fp: &mut *const u8) -> usize {
+    if !(**fp).is_ascii_digit() {
+        return usize::MAX;
+    }
+    let mut width = 0usize;
+    while (**fp).is_ascii_digit() {
+        width = width
+            .saturating_mul(10)
+            .saturating_add((**fp - b'0') as usize);
+        *fp = fp.add(1);
+    }
+    width
+}
+
+/// The magnitude and sign of the integer at `cursor`, or `None` for a
+/// matching failure. `%i` reads its base off the subject's own prefix, which
+/// is the whole of what distinguishes it from `%d`; `%x` accepts the prefix
+/// C makes optional for it, and `%o` and `%u` take none.
+fn read_integer(cursor: &mut impl Cursor, spec: u8, width: usize) -> Option<(u64, bool)> {
+    let mut left = width;
+    let mut negative = false;
+
+    // A sign spends field width and is not a digit, which is why `%1d` on
+    // "-5" converts nothing.
+    if matches!(cursor.peek(), b'-' | b'+') {
+        negative = cursor.peek() == b'-';
+        cursor.bump();
+        left = left.saturating_sub(1);
+    }
+
+    let mut base: u64 = match spec {
+        b'o' => 8,
+        b'x' | b'X' => 16,
+        b'i' => 0,
+        _ => 10,
+    };
+    let mut value = 0u64;
+    let mut digits = 0usize;
+
+    // A `0x` prefix is consumed whole, and the leading `0` stands as the
+    // conversion's digit if nothing hexadecimal follows it — so "0xz" reads
+    // as 0 with the `z` left, rather than as a matching failure.
+    if left > 0 && (base == 0 || base == 16) && cursor.peek() == b'0' {
+        cursor.bump();
+        left -= 1;
+        digits = 1;
+        if left > 0 && matches!(cursor.peek(), b'x' | b'X') {
+            cursor.bump();
+            left -= 1;
+            base = 16;
+        } else if base == 0 {
+            base = 8;
+        }
+    }
+    if base == 0 {
+        base = 10;
+    }
+
+    while left > 0 {
+        let Some(d) = digit_of(cursor.peek(), base) else {
+            break;
+        };
+        value = value.wrapping_mul(base).wrapping_add(d);
+        cursor.bump();
+        left -= 1;
+        digits += 1;
+    }
+    if digits == 0 {
+        return None;
+    }
+    Some((value, negative))
+}
+
+fn digit_of(c: u8, base: u64) -> Option<u64> {
+    let d = match c {
+        b'0'..=b'9' => (c - b'0') as u64,
+        b'a'..=b'f' => (c - b'a' + 10) as u64,
+        b'A'..=b'F' => (c - b'A' + 10) as u64,
+        _ => return None,
+    };
+    if d < base { Some(d) } else { None }
+}
+
+unsafe fn read_length(fp: &mut *const u8) -> Length {
+    match **fp {
+        b'h' => {
+            *fp = fp.add(1);
+            if **fp == b'h' {
+                *fp = fp.add(1);
+                Length::Char
+            } else {
+                Length::Short
+            }
+        }
+        b'l' => {
+            *fp = fp.add(1);
+            if **fp == b'l' {
+                *fp = fp.add(1);
+            }
+            Length::Long
+        }
+        b'j' | b'z' | b't' => {
+            *fp = fp.add(1);
+            Length::Long
+        }
+        b'L' => {
+            *fp = fp.add(1);
+            Length::LongDouble
+        }
+        _ => Length::Default,
+    }
+}
+
+/// # Safety
+/// The next variadic argument is a pointer to a signed integer of that width.
+unsafe fn store_signed(val: i64, length: Length, ap: &mut VaList<'_>) {
+    match length {
+        Length::Char => {
+            let ptr = ap.next_arg::<*mut i8>();
+            if !ptr.is_null() {
+                *ptr = val as i8;
+            }
+        }
+        Length::Short => {
+            let ptr = ap.next_arg::<*mut i16>();
+            if !ptr.is_null() {
+                *ptr = val as i16;
+            }
+        }
+        Length::Long | Length::LongDouble => {
+            let ptr = ap.next_arg::<*mut i64>();
+            if !ptr.is_null() {
+                *ptr = val;
+            }
+        }
+        Length::Default => {
+            let ptr = ap.next_arg::<*mut i32>();
+            if !ptr.is_null() {
+                *ptr = val as i32;
+            }
+        }
+    }
+}
+
+/// # Safety
+/// The next variadic argument is a pointer to an unsigned integer of that
+/// width.
+unsafe fn store_unsigned(val: u64, length: Length, ap: &mut VaList<'_>) {
+    match length {
+        Length::Char => {
+            let ptr = ap.next_arg::<*mut u8>();
+            if !ptr.is_null() {
+                *ptr = val as u8;
+            }
+        }
+        Length::Short => {
+            let ptr = ap.next_arg::<*mut u16>();
+            if !ptr.is_null() {
+                *ptr = val as u16;
+            }
+        }
+        Length::Long | Length::LongDouble => {
+            let ptr = ap.next_arg::<*mut u64>();
+            if !ptr.is_null() {
+                *ptr = val;
+            }
+        }
+        Length::Default => {
+            let ptr = ap.next_arg::<*mut u32>();
+            if !ptr.is_null() {
+                *ptr = val as u32;
+            }
+        }
+    }
 }
 
 /// C17 7.21.6.2 p9's two lengths at a float directive: `len` is the longest
@@ -284,17 +478,9 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
             break;
         }
 
-        let length = match *fp {
-            b'l' => {
-                fp = fp.add(1);
-                Length::Long
-            }
-            b'L' => {
-                fp = fp.add(1);
-                Length::LongDouble
-            }
-            _ => Length::Default,
-        };
+        let suppress = read_suppress(&mut fp);
+        let width = read_width(&mut fp);
+        let length = read_length(&mut fp);
 
         let spec = *fp;
         if spec == 0 {
@@ -303,7 +489,7 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
         fp = fp.add(1);
 
         match spec {
-            b'd' | b'i' => {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
                 while *ip != 0 && is_whitespace(*ip) {
                     ip = ip.add(1);
                 }
@@ -314,124 +500,30 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                     return matched;
                 }
 
-                let mut neg = false;
-                if *ip == b'-' {
-                    neg = true;
-                    ip = ip.add(1);
-                } else if *ip == b'+' {
-                    ip = ip.add(1);
-                }
-
-                if !(*ip).is_ascii_digit() {
+                let mut cursor = Text(ip);
+                let Some((magnitude, negative)) = read_integer(&mut cursor, spec, width) else {
                     return matched;
-                }
-
-                let mut val: i64 = 0;
-                while (*ip).is_ascii_digit() {
-                    val = val.wrapping_mul(10).wrapping_add((*ip - b'0') as i64);
-                    ip = ip.add(1);
-                }
-                if neg {
-                    val = -val;
-                }
-
-                if length == Length::Long {
-                    let ptr = ap.next_arg::<*mut i64>();
-                    if !ptr.is_null() {
-                        *ptr = val;
-                    }
-                } else {
-                    let ptr = ap.next_arg::<*mut i32>();
-                    if !ptr.is_null() {
-                        *ptr = val as i32;
-                    }
-                }
-                matched += 1;
-            }
-
-            b'u' => {
-                while *ip != 0 && is_whitespace(*ip) {
-                    ip = ip.add(1);
-                }
-                if *ip == 0 {
-                    if matched == 0 {
-                        return EOF;
-                    }
-                    return matched;
-                }
-
-                if !(*ip).is_ascii_digit() {
-                    return matched;
-                }
-
-                let mut val: u64 = 0;
-                while (*ip).is_ascii_digit() {
-                    val = val.wrapping_mul(10).wrapping_add((*ip - b'0') as u64);
-                    ip = ip.add(1);
-                }
-
-                if length == Length::Long {
-                    let ptr = ap.next_arg::<*mut u64>();
-                    if !ptr.is_null() {
-                        *ptr = val;
-                    }
-                } else {
-                    let ptr = ap.next_arg::<*mut u32>();
-                    if !ptr.is_null() {
-                        *ptr = val as u32;
-                    }
-                }
-                matched += 1;
-            }
-
-            b'x' | b'X' => {
-                while *ip != 0 && is_whitespace(*ip) {
-                    ip = ip.add(1);
-                }
-                if *ip == 0 {
-                    if matched == 0 {
-                        return EOF;
-                    }
-                    return matched;
-                }
-
-                if *ip == b'0' && (*ip.add(1) == b'x' || *ip.add(1) == b'X') {
-                    ip = ip.add(2);
-                }
-
-                let start = ip;
-                let mut val: u64 = 0;
-                loop {
-                    let c = *ip;
-                    let d = if c.is_ascii_digit() {
-                        (c - b'0') as u64
-                    } else if (b'a'..=b'f').contains(&c) {
-                        (c - b'a' + 10) as u64
-                    } else if (b'A'..=b'F').contains(&c) {
-                        (c - b'A' + 10) as u64
+                };
+                ip = cursor.0;
+                if !suppress {
+                    // `%u` negates into the unsigned range, exactly as
+                    // `strtoul` does, rather than refusing the sign.
+                    if spec == b'd' || spec == b'i' {
+                        let val = magnitude as i64;
+                        store_signed(if negative { -val } else { val }, length, ap);
                     } else {
-                        break;
-                    };
-                    val = val.wrapping_mul(16).wrapping_add(d);
-                    ip = ip.add(1);
-                }
-
-                if ip == start {
-                    return matched;
-                }
-
-                if length == Length::Long {
-                    let ptr = ap.next_arg::<*mut u64>();
-                    if !ptr.is_null() {
-                        *ptr = val;
+                        store_unsigned(
+                            if negative {
+                                magnitude.wrapping_neg()
+                            } else {
+                                magnitude
+                            },
+                            length,
+                            ap,
+                        );
                     }
-                } else {
-                    let ptr = ap.next_arg::<*mut u32>();
-                    if !ptr.is_null() {
-                        *ptr = val as u32;
-                    }
+                    matched += 1;
                 }
-                matched += 1;
             }
 
             b'a' | b'A' | b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
@@ -449,9 +541,11 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                 if !subject.complete() {
                     return matched;
                 }
-                store_float(ip, length, ap);
+                if !suppress {
+                    store_float(ip, length, ap);
+                    matched += 1;
+                }
                 ip = ip.add(subject.len);
-                matched += 1;
             }
 
             b's' => {
@@ -465,22 +559,33 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                     return matched;
                 }
 
-                let dst = ap.next_arg::<*mut u8>();
-                if dst.is_null() {
+                let dst = if suppress {
+                    core::ptr::null_mut()
+                } else {
+                    ap.next_arg::<*mut u8>()
+                };
+                if !suppress && dst.is_null() {
                     return matched;
                 }
 
                 let mut i = 0usize;
-                while *ip != 0 && !is_whitespace(*ip) {
-                    *dst.add(i) = *ip;
+                while *ip != 0 && !is_whitespace(*ip) && i < width {
+                    if !dst.is_null() {
+                        *dst.add(i) = *ip;
+                    }
                     ip = ip.add(1);
                     i += 1;
                 }
-                *dst.add(i) = 0;
-                matched += 1;
+                if !dst.is_null() {
+                    *dst.add(i) = 0;
+                    matched += 1;
+                }
             }
 
             b'c' => {
+                // `%c` writes no terminator, and takes one character when
+                // no width says otherwise.
+                let want = if width == usize::MAX { 1 } else { width };
                 if *ip == 0 {
                     if matched == 0 {
                         return EOF;
@@ -488,12 +593,25 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
                     return matched;
                 }
 
-                let ptr = ap.next_arg::<*mut u8>();
-                if !ptr.is_null() {
-                    *ptr = *ip;
+                let ptr = if suppress {
+                    core::ptr::null_mut()
+                } else {
+                    ap.next_arg::<*mut u8>()
+                };
+                let mut i = 0usize;
+                while i < want && *ip != 0 {
+                    if !ptr.is_null() {
+                        *ptr.add(i) = *ip;
+                    }
+                    ip = ip.add(1);
+                    i += 1;
                 }
-                ip = ip.add(1);
-                matched += 1;
+                if i < want {
+                    return matched;
+                }
+                if !suppress {
+                    matched += 1;
+                }
             }
 
             b'%' => {
@@ -562,17 +680,9 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
             break;
         }
 
-        let length = match *fp {
-            b'l' => {
-                fp = fp.add(1);
-                Length::Long
-            }
-            b'L' => {
-                fp = fp.add(1);
-                Length::LongDouble
-            }
-            _ => Length::Default,
-        };
+        let suppress = read_suppress(&mut fp);
+        let width = read_width(&mut fp);
+        let length = read_length(&mut fp);
 
         let spec = *fp;
         if spec == 0 {
@@ -581,7 +691,7 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
         fp = fp.add(1);
 
         match spec {
-            b'd' | b'i' => {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
                 loop {
                     let c = fgetc_unlocked(stream);
                     if c == EOF {
@@ -593,108 +703,41 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     }
                 }
 
-                let mut neg = false;
-                let c = fgetc_unlocked(stream);
-                if c == EOF {
+                let mut text = [0u8; SUBJECT_MAX];
+                let mut cursor = Stream {
+                    stream,
+                    pending: fgetc_unlocked(stream),
+                    text: &mut text,
+                    n: 0,
+                };
+                if cursor.pending == EOF {
                     if matched == 0 {
                         return EOF;
                     }
                     return matched;
                 }
-                if c as u8 == b'-' {
-                    neg = true;
-                } else if c as u8 == b'+' {
-                } else if (c as u8).is_ascii_digit() {
-                    ungetc_unlocked(c, stream);
-                } else {
-                    ungetc_unlocked(c, stream);
+                let read = read_integer(&mut cursor, spec, width);
+                ungetc_unlocked(cursor.pending, stream);
+                let Some((magnitude, negative)) = read else {
                     return matched;
+                };
+                if !suppress {
+                    if spec == b'd' || spec == b'i' {
+                        let val = magnitude as i64;
+                        store_signed(if negative { -val } else { val }, length, ap);
+                    } else {
+                        store_unsigned(
+                            if negative {
+                                magnitude.wrapping_neg()
+                            } else {
+                                magnitude
+                            },
+                            length,
+                            ap,
+                        );
+                    }
+                    matched += 1;
                 }
-
-                let first = fgetc_unlocked(stream);
-                if first == EOF || !(first as u8).is_ascii_digit() {
-                    if first != EOF {
-                        ungetc_unlocked(first, stream);
-                    }
-                    return matched;
-                }
-
-                let mut val: i64 = (first as u8 - b'0') as i64;
-                loop {
-                    let d = fgetc_unlocked(stream);
-                    if d == EOF || !(d as u8).is_ascii_digit() {
-                        if d != EOF {
-                            ungetc_unlocked(d, stream);
-                        }
-                        break;
-                    }
-                    val = val.wrapping_mul(10).wrapping_add((d as u8 - b'0') as i64);
-                }
-                if neg {
-                    val = -val;
-                }
-
-                if length == Length::Long {
-                    let ptr = ap.next_arg::<*mut i64>();
-                    if !ptr.is_null() {
-                        *ptr = val;
-                    }
-                } else {
-                    let ptr = ap.next_arg::<*mut i32>();
-                    if !ptr.is_null() {
-                        *ptr = val as i32;
-                    }
-                }
-                matched += 1;
-            }
-
-            b'u' => {
-                loop {
-                    let c = fgetc_unlocked(stream);
-                    if c == EOF {
-                        break;
-                    }
-                    if !is_whitespace(c as u8) {
-                        ungetc_unlocked(c, stream);
-                        break;
-                    }
-                }
-
-                let first = fgetc_unlocked(stream);
-                if first == EOF || !(first as u8).is_ascii_digit() {
-                    if first != EOF {
-                        ungetc_unlocked(first, stream);
-                    }
-                    if matched == 0 {
-                        return EOF;
-                    }
-                    return matched;
-                }
-
-                let mut val: u64 = (first as u8 - b'0') as u64;
-                loop {
-                    let d = fgetc_unlocked(stream);
-                    if d == EOF || !(d as u8).is_ascii_digit() {
-                        if d != EOF {
-                            ungetc_unlocked(d, stream);
-                        }
-                        break;
-                    }
-                    val = val.wrapping_mul(10).wrapping_add((d as u8 - b'0') as u64);
-                }
-
-                if length == Length::Long {
-                    let ptr = ap.next_arg::<*mut u64>();
-                    if !ptr.is_null() {
-                        *ptr = val;
-                    }
-                } else {
-                    let ptr = ap.next_arg::<*mut u32>();
-                    if !ptr.is_null() {
-                        *ptr = val as u32;
-                    }
-                }
-                matched += 1;
             }
 
             b'a' | b'A' | b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
@@ -721,8 +764,10 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                 if !read_subject(stream, &mut text).complete() {
                     return matched;
                 }
-                store_float(text.as_ptr(), length, ap);
-                matched += 1;
+                if !suppress {
+                    store_float(text.as_ptr(), length, ap);
+                    matched += 1;
+                }
             }
 
             b's' => {
@@ -737,8 +782,12 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     }
                 }
 
-                let dst = ap.next_arg::<*mut u8>();
-                if dst.is_null() {
+                let dst = if suppress {
+                    core::ptr::null_mut()
+                } else {
+                    ap.next_arg::<*mut u8>()
+                };
+                if !suppress && dst.is_null() {
                     return matched;
                 }
 
@@ -751,10 +800,12 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                 }
 
                 let mut i = 0usize;
-                *dst.add(i) = first as u8;
+                if !dst.is_null() {
+                    *dst.add(i) = first as u8;
+                }
                 i += 1;
 
-                loop {
+                while i < width {
                     let c = fgetc_unlocked(stream);
                     if c == EOF || is_whitespace(c as u8) {
                         if c != EOF {
@@ -762,26 +813,44 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                         }
                         break;
                     }
-                    *dst.add(i) = c as u8;
+                    if !dst.is_null() {
+                        *dst.add(i) = c as u8;
+                    }
                     i += 1;
                 }
-                *dst.add(i) = 0;
-                matched += 1;
+                if !dst.is_null() {
+                    *dst.add(i) = 0;
+                    matched += 1;
+                }
             }
 
             b'c' => {
-                let c = fgetc_unlocked(stream);
-                if c == EOF {
-                    if matched == 0 {
+                let want = if width == usize::MAX { 1 } else { width };
+                let ptr = if suppress {
+                    core::ptr::null_mut()
+                } else {
+                    ap.next_arg::<*mut u8>()
+                };
+                let mut i = 0usize;
+                while i < want {
+                    let c = fgetc_unlocked(stream);
+                    if c == EOF {
+                        break;
+                    }
+                    if !ptr.is_null() {
+                        *ptr.add(i) = c as u8;
+                    }
+                    i += 1;
+                }
+                if i < want {
+                    if matched == 0 && i == 0 {
                         return EOF;
                     }
                     return matched;
                 }
-                let ptr = ap.next_arg::<*mut u8>();
-                if !ptr.is_null() {
-                    *ptr = c as u8;
+                if !suppress {
+                    matched += 1;
                 }
-                matched += 1;
             }
 
             _ => break,
@@ -809,8 +878,6 @@ pub unsafe extern "C" fn scanf(fmt: *const u8, mut args: ...) -> i32 {
     vfscanf_impl(streams::stdin_file(), fmt, &mut args)
 }
 
-/// `vsscanf(3)`.
-///
 /// # Safety
 /// `fmt`'s conversions match `ap`; `buf` is a NUL-terminated C string.
 #[unsafe(no_mangle)]
@@ -818,8 +885,6 @@ pub unsafe extern "C" fn vsscanf(buf: *const u8, fmt: *const u8, mut ap: VaList<
     vsscanf_impl(buf, fmt, &mut ap)
 }
 
-/// `vfscanf(3)`.
-///
 /// # Safety
 /// As [`vsscanf`], over an open readable stream.
 #[unsafe(no_mangle)]
@@ -827,8 +892,6 @@ pub unsafe extern "C" fn vfscanf(stream: *mut FILE, fmt: *const u8, mut ap: VaLi
     vfscanf_impl(stream, fmt, &mut ap)
 }
 
-/// `vscanf(3)`.
-///
 /// # Safety
 /// As [`vfscanf`].
 #[unsafe(no_mangle)]

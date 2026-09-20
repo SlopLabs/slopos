@@ -37,9 +37,8 @@ pub const LC_MONETARY_MASK: c_int = 16;
 pub const LC_MESSAGES_MASK: c_int = 32;
 pub const LC_ALL_MASK: c_int = 63;
 
-// Each mask is its category's bit, and `LC_ALL_MASK` is all six. The header
-// generator renders a `pub const` rather than evaluating one, so the shift
-// that says so is here instead of in the initialiser.
+// The header generator renders a `pub const` rather than evaluating one, so
+// the shift each value is stands here instead of in its initialiser.
 const _: () = assert!(LC_CTYPE_MASK == 1 << LC_CTYPE);
 const _: () = assert!(LC_NUMERIC_MASK == 1 << LC_NUMERIC);
 const _: () = assert!(LC_TIME_MASK == 1 << LC_TIME);
@@ -52,11 +51,8 @@ static C_LOCALE: SyncUnsafeCell<__locale_struct> =
     SyncUnsafeCell::new(__locale_struct { _opaque: 0 });
 
 /// `((locale_t)-1)`, POSIX's designator for whatever `setlocale` selected.
-/// `locale.h` spells the same value for C; neither side can say anything
-/// else, because the value is the standard's.
 const GLOBAL: locale_t = ptr::without_provenance_mut(usize::MAX);
 
-/// The one locale, as a handle.
 pub fn c_locale() -> locale_t {
     C_LOCALE.get()
 }
@@ -93,7 +89,6 @@ pub unsafe extern "C" fn newlocale(mask: c_int, name: *const c_char, _base: loca
     }
 }
 
-/// `duplocale(3)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn duplocale(base: locale_t) -> locale_t {
     if base.is_null() {
@@ -103,7 +98,6 @@ pub extern "C" fn duplocale(base: locale_t) -> locale_t {
     C_LOCALE.get()
 }
 
-/// `freelocale(3)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn freelocale(_loc: locale_t) {}
 

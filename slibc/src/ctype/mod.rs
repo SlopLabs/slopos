@@ -99,7 +99,6 @@ pub extern "C" fn isascii(c: c_int) -> c_int {
     (0..=0x7f).contains(&c) as c_int
 }
 
-/// `toascii(3)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn toascii(c: c_int) -> c_int {
     c & 0x7f

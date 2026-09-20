@@ -679,7 +679,7 @@ stack-audit:
 clean:
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
     rm -f {{build_dir}}/kernel-*.elf
-    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test
+    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean

@@ -18,6 +18,7 @@ extern "C" {
 #define GRND_RANDOM (0x0002)
 
 ssize_t getrandom(void *buf, size_t buflen, unsigned int flags);
+int getentropy(void *buf, size_t len);
 
 #ifdef __cplusplus
 }

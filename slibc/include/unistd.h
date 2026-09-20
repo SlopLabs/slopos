@@ -116,9 +116,9 @@ long syscall(long num, ...);
 unsigned int sleep(unsigned int seconds);
 int usleep(useconds_t usec);
 pid_t getsid(pid_t pid);
-int getentropy(void *buf, size_t len);
 long pathconf(const char *path, int name);
 long fpathconf(int fd, int name);
+int getentropy(void *buf, size_t len);
 
 #ifdef __cplusplus
 }

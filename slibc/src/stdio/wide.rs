@@ -14,39 +14,70 @@ use core::ffi::{VaList, c_int, c_void};
 
 use slopos_slibc_core::utf8::{self, MbState, Step};
 
-use super::chars::{fgetc, fputc, ungetc};
+use super::chars::{fgetc_unlocked, fputc_unlocked, ungetc_unlocked};
+use super::file::{flockfile, funlockfile};
 use super::printf::{format_to_cb, vfprintf_impl};
-use super::{EOF, FILE, streams};
+use super::{EOF, FILE, FILE_FLAG_ERR, streams};
 use crate::errno::{EILSEQ, ENOMEM, errno_set};
 use crate::ffi::size_t;
 use crate::wchar::{WEOF, wchar_t, wint_t};
 
-/// `fgetwc(3)`. An encoding error is `WEOF` with `EILSEQ`, and the bytes that
-/// caused it are consumed: C leaves the stream position unspecified there.
+/// Marks `stream` as having hit an encoding error, which C99 7.24.3.1 asks
+/// for beside the `EILSEQ`. An incomplete character at end of input is one of
+/// those, not a clean end of file.
+unsafe fn encoding_error(stream: *mut FILE) -> wint_t {
+    if !stream.is_null() {
+        (*stream).flags |= FILE_FLAG_ERR;
+    }
+    errno_set(EILSEQ.raw());
+    WEOF
+}
+
+unsafe fn fgetwc_locked(stream: *mut FILE) -> wint_t {
+    let mut state = MbState::default();
+    loop {
+        let byte = fgetc_unlocked(stream);
+        if byte == EOF {
+            if state.is_initial() {
+                return WEOF;
+            }
+            return encoding_error(stream);
+        }
+        match utf8::decode_step(&mut state, byte as u8) {
+            Step::Done(scalar) => return scalar,
+            Step::More => {}
+            Step::Invalid => return encoding_error(stream),
+        }
+    }
+}
+
+unsafe fn fputwc_locked(wc: wchar_t, stream: *mut FILE) -> wint_t {
+    let mut bytes = [0u8; 4];
+    let Some(len) = utf8::encode(wc as u32, &mut bytes) else {
+        return encoding_error(stream);
+    };
+    for byte in &bytes[..len] {
+        if fputc_unlocked(*byte as c_int, stream) == EOF {
+            return WEOF;
+        }
+    }
+    wc as wint_t
+}
+
+/// `fgetwc(3)`. An encoding error is `WEOF` with `EILSEQ` and the stream's
+/// error indicator set; the bytes that caused it are consumed, which is what
+/// C leaves unspecified.
 ///
 /// # Safety
 /// `stream` is an open readable stream or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fgetwc(stream: *mut FILE) -> wint_t {
-    let mut state = MbState::default();
-    loop {
-        let byte = fgetc(stream);
-        if byte == EOF {
-            return WEOF;
-        }
-        match utf8::decode_step(&mut state, byte as u8) {
-            Step::Done(scalar) => return scalar,
-            Step::More => {}
-            Step::Invalid => {
-                errno_set(EILSEQ.raw());
-                return WEOF;
-            }
-        }
-    }
+    flockfile(stream);
+    let wc = fgetwc_locked(stream);
+    funlockfile(stream);
+    wc
 }
 
-/// `getwc(3)`.
-///
 /// # Safety
 /// As [`fgetwc`].
 #[unsafe(no_mangle)]
@@ -54,33 +85,21 @@ pub unsafe extern "C" fn getwc(stream: *mut FILE) -> wint_t {
     fgetwc(stream)
 }
 
-/// `getwchar(3)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getwchar() -> wint_t {
     fgetwc(streams::stdin_file())
 }
 
-/// `fputwc(3)`.
-///
 /// # Safety
 /// `stream` is an open writable stream or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fputwc(wc: wchar_t, stream: *mut FILE) -> wint_t {
-    let mut bytes = [0u8; 4];
-    let Some(len) = utf8::encode(wc as u32, &mut bytes) else {
-        errno_set(EILSEQ.raw());
-        return WEOF;
-    };
-    for byte in &bytes[..len] {
-        if fputc(*byte as c_int, stream) == EOF {
-            return WEOF;
-        }
-    }
-    wc as wint_t
+    flockfile(stream);
+    let written = fputwc_locked(wc, stream);
+    funlockfile(stream);
+    written
 }
 
-/// `putwc(3)`.
-///
 /// # Safety
 /// As [`fputwc`].
 #[unsafe(no_mangle)]
@@ -88,36 +107,39 @@ pub unsafe extern "C" fn putwc(wc: wchar_t, stream: *mut FILE) -> wint_t {
     fputwc(wc, stream)
 }
 
-/// `putwchar(3)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putwchar(wc: wchar_t) -> wint_t {
     fputwc(wc, streams::stdout_file())
 }
 
 /// `ungetwc(3)`. The character's whole encoding goes back, so a following
-/// byte read sees it too.
+/// byte read sees it too — and it goes back whole or not at all, since a
+/// half-pushed sequence would be bytes the stream never held.
 ///
 /// # Safety
 /// `stream` is an open readable stream or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ungetwc(wc: wint_t, stream: *mut FILE) -> wint_t {
-    if wc == WEOF {
+    if wc == WEOF || stream.is_null() {
         return WEOF;
     }
     let mut bytes = [0u8; 4];
     let Some(len) = utf8::encode(wc, &mut bytes) else {
-        errno_set(EILSEQ.raw());
-        return WEOF;
+        return encoding_error(stream);
     };
-    for byte in bytes[..len].iter().rev() {
-        if ungetc(*byte as c_int, stream) == EOF {
-            return WEOF;
+    flockfile(stream);
+    let room = (*stream).ungot.len() - (*stream).ungot_len >= len;
+    if room {
+        for byte in bytes[..len].iter().rev() {
+            ungetc_unlocked(*byte as c_int, stream);
         }
     }
-    wc
+    funlockfile(stream);
+    if room { wc } else { WEOF }
 }
 
-/// `fgetws(3)`.
+/// `fgetws(3)`. `NULL` on a read or encoding error, as C99 7.24.3.2 asks,
+/// which is what distinguishes it from a short line at end of file.
 ///
 /// # Safety
 /// `s` addresses `n` wide characters; `stream` is open and readable.
@@ -128,12 +150,16 @@ pub unsafe extern "C" fn fgetws(s: *mut wchar_t, n: c_int, stream: *mut FILE) ->
     }
     let max = (n - 1) as usize;
     let mut at = 0usize;
+    let mut ended = false;
+    flockfile(stream);
+    // `FILE_FLAG_ERR` is sticky until `clearerr`, so a flag this call did not
+    // raise would otherwise make a perfectly good line read as a failure —
+    // and the line is consumed either way.
+    let held = take_error(stream);
     while at < max {
-        let wc = fgetwc(stream);
+        let wc = fgetwc_locked(stream);
         if wc == WEOF {
-            if at == 0 {
-                return core::ptr::null_mut();
-            }
+            ended = true;
             break;
         }
         *s.add(at) = wc as wchar_t;
@@ -142,12 +168,31 @@ pub unsafe extern "C" fn fgetws(s: *mut wchar_t, n: c_int, stream: *mut FILE) ->
             break;
         }
     }
+    let failed = !stream.is_null() && (*stream).flags & FILE_FLAG_ERR != 0;
+    restore_error(stream, held);
+    funlockfile(stream);
+    if failed || (ended && at == 0) {
+        return core::ptr::null_mut();
+    }
     *s.add(at) = 0;
     s
 }
 
-/// `fputws(3)`.
-///
+unsafe fn take_error(stream: *mut FILE) -> bool {
+    if stream.is_null() {
+        return false;
+    }
+    let held = (*stream).flags & FILE_FLAG_ERR != 0;
+    (*stream).flags &= !FILE_FLAG_ERR;
+    held
+}
+
+unsafe fn restore_error(stream: *mut FILE, held: bool) {
+    if held && !stream.is_null() {
+        (*stream).flags |= FILE_FLAG_ERR;
+    }
+}
+
 /// # Safety
 /// `s` is a NUL-terminated wide string; `stream` is open and writable.
 #[unsafe(no_mangle)]
@@ -155,14 +200,18 @@ pub unsafe extern "C" fn fputws(s: *const wchar_t, stream: *mut FILE) -> c_int {
     if s.is_null() {
         return EOF;
     }
+    flockfile(stream);
     let mut p = s;
+    let mut status = 0;
     while *p != 0 {
-        if fputwc(*p, stream) == WEOF {
-            return EOF;
+        if fputwc_locked(*p, stream) == WEOF {
+            status = EOF;
+            break;
         }
         p = p.add(1);
     }
-    0
+    funlockfile(stream);
+    status
 }
 
 /// `fwide(3)`. Always 0; see the module note.
@@ -208,8 +257,6 @@ impl Drop for NarrowFormat {
     }
 }
 
-/// `vfwprintf(3)`.
-///
 /// # Safety
 /// `fmt` is a NUL-terminated wide string whose conversions match `ap`.
 #[unsafe(no_mangle)]
@@ -228,8 +275,6 @@ unsafe fn vfwprintf_impl(stream: *mut FILE, fmt: *const wchar_t, ap: &mut VaList
     }
 }
 
-/// `fwprintf(3)`.
-///
 /// # Safety
 /// As [`vfwprintf`].
 #[unsafe(no_mangle)]
@@ -237,8 +282,6 @@ pub unsafe extern "C" fn fwprintf(stream: *mut FILE, fmt: *const wchar_t, mut ar
     vfwprintf_impl(stream, fmt, &mut args)
 }
 
-/// `vwprintf(3)`.
-///
 /// # Safety
 /// As [`vfwprintf`].
 #[unsafe(no_mangle)]
@@ -246,8 +289,6 @@ pub unsafe extern "C" fn vwprintf(fmt: *const wchar_t, mut ap: VaList<'_>) -> c_
     vfwprintf_impl(streams::stdout_file(), fmt, &mut ap)
 }
 
-/// `wprintf(3)`.
-///
 /// # Safety
 /// As [`vfwprintf`].
 #[unsafe(no_mangle)]
@@ -286,7 +327,10 @@ unsafe fn vswprintf_impl(
     let mut state = MbState::default();
     let mut written = 0usize;
     let mut overflowed = false;
+    // One flag for both directions: the narrow engine reports a wide argument
+    // it cannot encode, this closure a byte sequence it cannot decode.
     let mut malformed = false;
+    let mut unencodable = false;
     format_to_cb(
         &mut |byte: u8| match utf8::decode_step(&mut state, byte) {
             Step::Done(scalar) => {
@@ -302,10 +346,11 @@ unsafe fn vswprintf_impl(
         },
         narrow.bytes,
         ap,
+        &mut unencodable,
     );
 
     *s.add(written) = 0;
-    if malformed {
+    if malformed || unencodable {
         errno_set(EILSEQ.raw());
         return -1;
     }
@@ -315,8 +360,6 @@ unsafe fn vswprintf_impl(
     written as c_int
 }
 
-/// `swprintf(3)`.
-///
 /// # Safety
 /// As [`vswprintf`].
 #[unsafe(no_mangle)]

@@ -150,7 +150,6 @@ pub unsafe extern "C" fn wctype(name: *const c_char) -> wctype_t {
     lookup(name, &CLASSES) as wctype_t
 }
 
-/// `iswctype(3)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn iswctype(c: wint_t, desc: wctype_t) -> c_int {
     match desc {
@@ -170,8 +169,6 @@ pub extern "C" fn iswctype(c: wint_t, desc: wctype_t) -> c_int {
     }
 }
 
-/// `wctrans(3)`.
-///
 /// # Safety
 /// `name` is a NUL-terminated C string or null.
 #[unsafe(no_mangle)]
@@ -179,7 +176,6 @@ pub unsafe extern "C" fn wctrans(name: *const c_char) -> wctrans_t {
     lookup(name, &TRANSFORMS)
 }
 
-/// `towctrans(3)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn towctrans(c: wint_t, map: wctrans_t) -> wint_t {
     match map {

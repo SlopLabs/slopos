@@ -85,10 +85,11 @@ $(echo "$missing" | sed 's/^/       /')
 # than recomputed: a second copy of that digest here would be a second thing
 # to drift.
 compare_stamp() {
-    local maker="$1" out="$2"
+    local maker="$1" out="$2" libdir="$3"
     [ -x "$maker" ] || fail "missing $maker"
     local want have
-    want="$("$maker" --print-stamp)" || fail "$(basename "$maker") --print-stamp failed"
+    want="$("$maker" --print-stamp "$libdir")" ||
+        fail "$(basename "$maker") --print-stamp failed"
     [ -n "$want" ] || fail "$(basename "$maker") --print-stamp printed nothing"
     have="$(cat "$out/.slopos-stamp" 2>/dev/null || true)"
     [ "$want" = "$have" ] || fail "third_party/slopos-cxx was built from other inputs
@@ -160,6 +161,23 @@ check_tree() {
        actual:   $have_sha"
     done < <(sed -n 's/^patch_sha256=\(.*\)$/\1/p' "$pin")
 
+    # And by *scope*: `make_slopos_cxx.sh`'s stamp deliberately leaves these
+    # patches out, on the grounds that a tree carrying them builds the same
+    # libc++. A hunk reaching into the runtime's own sources makes that false
+    # without changing the stamp, so the next build keeps a runtime nothing
+    # in the tree was built against.
+    local patch touched
+    for patch in "$root"/toolchain/llvm/*.patch; do
+        [ -f "$patch" ] || continue
+        touched="$(sed -n -e 's|^+++ b/\([^[:space:]]*\)$|\1|p' \
+            -e 's|^--- a/\([^[:space:]]*\)$|\1|p' "$patch" |
+            sort -u | grep -E '^(libcxx|libcxxabi|runtimes)/' || true)"
+        [ -z "$touched" ] || fail "${patch#"$root"/} patches the C++ runtime's own sources:
+$(echo "$touched" | sed 's/^/       /')
+       scripts/make_slopos_cxx.sh does not hash these patches, so a runtime
+       built from that hunk carries a stamp saying it was built without it."
+    done
+
     local llvm_src="$root/third_party/llvm-project-${version}.src"
     if [ -f "$llvm_src/.slopos-llvm-stamp" ]; then
         local want_stamp have_stamp
@@ -200,12 +218,13 @@ check_tree() {
     local libc="${libc_override:-$root/builddir/libc.so}"
     if [ -n "$libc_override" ]; then
         [ -f "$libc" ] || fail "no libc.so at $libc"
-    elif [ ! -f "$root/builddir/libc++.so" ] || [ ! -f "$libc" ]; then
+    elif [ ! -f "$root/builddir/libc++.so" ] || [ ! -f "$libc" ] ||
+        [ ! -f "$(dirname "$libc")/libbuiltins.a" ]; then
         echo "$SELF: OK — pin consistent; the tests userland has staged no runtime here"
         return 0
     fi
 
-    compare_stamp "$root/scripts/make_slopos_cxx.sh" "$out"
+    compare_stamp "$root/scripts/make_slopos_cxx.sh" "$out" "$(dirname "$libc")"
 
     command -v nm >/dev/null 2>&1 || fail "nm is required to check the runtime's undefined symbols"
     local work
@@ -266,6 +285,37 @@ EOF
     fi
     sed -i '/^patch_sha256=/d' "$tmp/toolchain/cxx/PIN"
 
+    # A port patch reaching into the C++ runtime's own sources, and one
+    # reaching into LLVM's, which is what the port is for.
+    write_probe_patch() {
+        printf -- '--- a/%s\n+++ b/%s\n' "$1" "$1" \
+            >"$tmp/toolchain/llvm/0001-probe.patch"
+        printf 'patch_sha256=toolchain/llvm/0001-probe.patch:%s\n' \
+            "$(sha256sum <"$tmp/toolchain/llvm/0001-probe.patch" | cut -d' ' -f1)" \
+            >>"$tmp/toolchain/cxx/PIN"
+    }
+    write_probe_patch llvm/lib/Support/Unix/Path.inc
+    (check_tree "$tmp" >/dev/null 2>&1) ||
+        fail "--self-test: a patch confined to llvm/ was rejected"
+    sed -i '/^patch_sha256=/d' "$tmp/toolchain/cxx/PIN"
+    write_probe_patch libcxx/src/locale.cpp
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a patch reaching into libcxx/ was accepted"
+    fi
+    sed -i '/^patch_sha256=/d' "$tmp/toolchain/cxx/PIN"
+    # A deletion names its file on the `--- a/` side and `/dev/null` on the
+    # other, so a scan of the `+++` lines alone would accept it.
+    printf -- '--- a/libcxxabi/src/cxa_exception.cpp\n+++ /dev/null\n' \
+        >"$tmp/toolchain/llvm/0001-probe.patch"
+    printf 'patch_sha256=toolchain/llvm/0001-probe.patch:%s\n' \
+        "$(sha256sum <"$tmp/toolchain/llvm/0001-probe.patch" | cut -d' ' -f1)" \
+        >>"$tmp/toolchain/cxx/PIN"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a patch deleting a libcxxabi/ file was accepted"
+    fi
+    rm "$tmp/toolchain/llvm/0001-probe.patch"
+    sed -i '/^patch_sha256=/d' "$tmp/toolchain/cxx/PIN"
+
     # A floor above the sources' own major: every build would then be a
     # skewed one, which is not a thing this pin may ask for.
     sed -i 's|^clang_major_min=18|clang_major_min=19|' "$tmp/toolchain/cxx/PIN"
@@ -304,6 +354,12 @@ EOF
     (check_tree "$tmp" >/dev/null 2>&1) ||
         fail "--self-test: a cached tree was graded off the shipped libc.so alone"
     : >"$tmp/builddir/libc++.so"
+    # `make_slopos_cxx.sh --print-stamp` reads `libbuiltins.a` out of the same
+    # directory and dies without it, so a build interrupted between the two
+    # has to skip here rather than fail on a stamp it cannot compute.
+    (check_tree "$tmp" >/dev/null 2>&1) ||
+        fail "--self-test: a tree staged without libbuiltins.a was graded"
+    : >"$tmp/builddir/libbuiltins.a"
     if (check_tree "$tmp" >/dev/null 2>&1); then
         fail "--self-test: a staged runtime built from other inputs was accepted"
     fi
@@ -322,14 +378,14 @@ EOF
     printf '#!/bin/sh\necho deadbeef\n' >"$tmp/scripts/maker.sh"
     chmod +x "$tmp/scripts/maker.sh"
     echo deadbeef >"$tmp/built/.slopos-stamp"
-    (compare_stamp "$tmp/scripts/maker.sh" "$tmp/built" >/dev/null 2>&1) ||
+    (compare_stamp "$tmp/scripts/maker.sh" "$tmp/built" "$tmp" >/dev/null 2>&1) ||
         fail "--self-test: a tree whose stamp matches its inputs was rejected"
     echo stale >"$tmp/built/.slopos-stamp"
-    if (compare_stamp "$tmp/scripts/maker.sh" "$tmp/built" >/dev/null 2>&1); then
+    if (compare_stamp "$tmp/scripts/maker.sh" "$tmp/built" "$tmp" >/dev/null 2>&1); then
         fail "--self-test: a tree built from other inputs was accepted"
     fi
     rm "$tmp/built/.slopos-stamp"
-    if (compare_stamp "$tmp/scripts/maker.sh" "$tmp/built" >/dev/null 2>&1); then
+    if (compare_stamp "$tmp/scripts/maker.sh" "$tmp/built" "$tmp" >/dev/null 2>&1); then
         fail "--self-test: a tree with no stamp at all was accepted"
     fi
 

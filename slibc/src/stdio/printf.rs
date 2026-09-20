@@ -61,17 +61,17 @@ unsafe fn next_long_double(ap: &mut VaList<'_>) -> f64 {
 }
 
 /// Bytes the multibyte form of `wide` would take, stopping at the last whole
-/// character that fits in `cap`.
-unsafe fn multibyte_len(wide: *const wchar_t, cap: usize) -> usize {
-    if wide.is_null() {
-        return 0;
-    }
+/// character that fits in `cap`, and whether it stopped on a character with
+/// no multibyte form. The cap is tested before each element is read, because
+/// C99 7.19.6.1 lets a `%.Nls` argument be an array a precision bounds rather
+/// than one a NUL ends.
+unsafe fn multibyte_len(wide: *const wchar_t, cap: usize) -> (usize, bool) {
     let mut total = 0usize;
     let mut at = 0isize;
-    while *wide.offset(at) != 0 {
+    while total < cap && *wide.offset(at) != 0 {
         let mut encoded = [0u8; 4];
         let Some(used) = utf8::encode(*wide.offset(at) as u32, &mut encoded) else {
-            break;
+            return (total, true);
         };
         if total + used > cap {
             break;
@@ -79,7 +79,19 @@ unsafe fn multibyte_len(wide: *const wchar_t, cap: usize) -> usize {
         total += used;
         at += 1;
     }
-    total
+    (total, false)
+}
+
+/// What a null string argument prints, which C leaves undefined and every
+/// libc answers anyway.
+fn null_string(precision: i32) -> (*const u8, usize) {
+    const NULL_STR: &[u8; 6] = b"(null)";
+    let len = if precision >= 0 && (precision as usize) < NULL_STR.len() {
+        precision as usize
+    } else {
+        NULL_STR.len()
+    };
+    (NULL_STR.as_ptr(), len)
 }
 
 unsafe fn write_unsigned(value: u64, base: u64, digits: &[u8; 16], buf: &mut [u8; 22]) -> usize {
@@ -97,10 +109,15 @@ unsafe fn write_unsigned(value: u64, base: u64, digits: &[u8; 16], buf: &mut [u8
     22 - pos
 }
 
+/// Runs `fmt`'s conversions, emitting each byte through `out` and answering
+/// how many there were. `malformed` reports a wide argument with no multibyte
+/// form, which C makes the conversion fail on rather than write nothing and
+/// claim success.
 pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
     out: &mut F,
     fmt: *const u8,
     ap: &mut VaList<'_>,
+    malformed: &mut bool,
 ) -> i32 {
     let mut count: i32 = 0;
     let mut p = fmt;
@@ -346,12 +363,30 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
             // pads to that byte count.
             b's' if length == Length::Long => {
                 let wide: *const wchar_t = ap.next_arg::<*const wchar_t>();
+                if wide.is_null() {
+                    let (null_str, slen) = null_string(precision);
+                    let pad = (width as usize).saturating_sub(slen) as i32;
+                    if flags & FLAG_LEFT == 0 {
+                        emit_pad!(b' ', pad);
+                    }
+                    for i in 0..slen {
+                        emit!(*null_str.add(i));
+                    }
+                    if flags & FLAG_LEFT != 0 {
+                        emit_pad!(b' ', pad);
+                    }
+                    continue;
+                }
                 let cap = if precision >= 0 {
                     precision as usize
                 } else {
                     usize::MAX
                 };
-                let bytes = multibyte_len(wide, cap);
+                let (bytes, unencodable) = multibyte_len(wide, cap);
+                if unencodable {
+                    *malformed = true;
+                    break;
+                }
                 let pad = (width as usize).saturating_sub(bytes) as i32;
 
                 if flags & FLAG_LEFT == 0 {
@@ -361,9 +396,8 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
                 let mut at = 0isize;
                 while written < bytes {
                     let mut encoded = [0u8; 4];
-                    let Some(used) = utf8::encode(*wide.offset(at) as u32, &mut encoded) else {
-                        break;
-                    };
+                    let used =
+                        utf8::encode(*wide.offset(at) as u32, &mut encoded).unwrap_or_default();
                     for byte in &encoded[..used] {
                         emit!(*byte);
                     }
@@ -377,7 +411,10 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
 
             b'c' if length == Length::Long => {
                 let mut encoded = [0u8; 4];
-                let used = utf8::encode(ap.next_arg::<u32>(), &mut encoded).unwrap_or(0);
+                let Some(used) = utf8::encode(ap.next_arg::<u32>(), &mut encoded) else {
+                    *malformed = true;
+                    break;
+                };
                 let pad = (width as usize).saturating_sub(used) as i32;
 
                 if flags & FLAG_LEFT == 0 {
@@ -393,19 +430,17 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
 
             b's' => {
                 let s_ptr: *const u8 = ap.next_arg::<*const u8>();
-                let null_str = b"(null)\0";
-                let actual = if s_ptr.is_null() {
-                    null_str.as_ptr()
+                let (actual, mut slen) = if s_ptr.is_null() {
+                    null_string(precision)
                 } else {
-                    s_ptr
+                    let mut len = 0usize;
+                    let mut q = s_ptr;
+                    while *q != 0 {
+                        len += 1;
+                        q = q.add(1);
+                    }
+                    (s_ptr, len)
                 };
-
-                let mut slen = 0usize;
-                let mut q = actual;
-                while *q != 0 {
-                    slen += 1;
-                    q = q.add(1);
-                }
 
                 if precision >= 0 && (precision as usize) < slen {
                     slen = precision as usize;
@@ -531,20 +566,27 @@ pub(crate) unsafe fn vfprintf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut V
     // POSIX §2.5.1 requires the whole conversion to be atomic against other
     // stdio on the stream; locking here keeps it off the per-byte emit path.
     (*stream).lock.lock();
+    let mut malformed = false;
     let count = format_to_cb(
         &mut |b: u8| {
             fputc_unlocked(b as i32, stream);
         },
         fmt,
         ap,
+        &mut malformed,
     );
     (*stream).lock.unlock();
+    if malformed {
+        crate::errno::errno_set(crate::errno::EILSEQ.raw());
+        return -1;
+    }
     count
 }
 
 unsafe fn vsnprintf_impl(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
     let mut pos: usize = 0;
     let limit = if n > 0 { n - 1 } else { 0 };
+    let mut malformed = false;
 
     let total = format_to_cb(
         &mut |b: u8| {
@@ -555,6 +597,7 @@ unsafe fn vsnprintf_impl(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList
         },
         fmt,
         ap,
+        &mut malformed,
     );
 
     if n > 0 {
@@ -562,6 +605,10 @@ unsafe fn vsnprintf_impl(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList
         *buf.add(term) = 0;
     }
 
+    if malformed {
+        crate::errno::errno_set(crate::errno::EILSEQ.raw());
+        return -1;
+    }
     total
 }
 
@@ -623,6 +670,7 @@ unsafe fn vasprintf_impl(strp: *mut *mut u8, fmt: *const u8, ap: &mut VaList<'_>
     if strp.is_null() {
         return -1;
     }
+    *strp = core::ptr::null_mut();
     let mut probe = ap.clone();
     let len = vsnprintf_impl(core::ptr::null_mut(), 0, fmt, &mut probe);
     if len < 0 {
@@ -639,8 +687,6 @@ unsafe fn vasprintf_impl(strp: *mut *mut u8, fmt: *const u8, ap: &mut VaList<'_>
     written
 }
 
-/// `asprintf(3)`.
-///
 /// # Safety
 /// As [`vasprintf`].
 #[unsafe(no_mangle)]

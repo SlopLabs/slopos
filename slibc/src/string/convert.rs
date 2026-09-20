@@ -518,8 +518,6 @@ pub unsafe extern "C" fn strtold(_nptr: *const u8, _endptr: *mut *const u8) {
     );
 }
 
-/// `strtoimax(3)`. `intmax_t` is `long long` here, so this is `strtoll`.
-///
 /// # Safety
 /// As [`strtoll`].
 #[unsafe(no_mangle)]
@@ -527,8 +525,6 @@ pub unsafe extern "C" fn strtoimax(s: *const u8, endptr: *mut *const u8, base: i
     strtoll(s, endptr, base)
 }
 
-/// `strtoumax(3)`.
-///
 /// # Safety
 /// As [`strtoull`].
 #[unsafe(no_mangle)]

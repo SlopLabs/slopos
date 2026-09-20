@@ -27,9 +27,8 @@ pub extern "C" fn llabs(n: c_longlong) -> c_longlong {
     n.wrapping_abs()
 }
 
-/// C's widest signed integer, which on x86-64 is `long long`.
-pub type intmax_t = c_longlong;
-pub type uintmax_t = core::ffi::c_ulonglong;
+pub type intmax_t = c_long;
+pub type uintmax_t = c_ulong;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -109,8 +108,8 @@ pub extern "C" fn imaxabs(n: intmax_t) -> intmax_t {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn imaxdiv(numer: intmax_t, denom: intmax_t) -> imaxdiv_t {
-    imaxdiv_t {
-        quot: numer / denom,
-        rem: numer % denom,
+    match (numer.checked_div(denom), numer.checked_rem(denom)) {
+        (Some(quot), Some(rem)) => imaxdiv_t { quot, rem },
+        _ => imaxdiv_t { quot: 0, rem: 0 },
     }
 }

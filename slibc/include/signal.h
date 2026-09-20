@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-typedef size_t sighandler_t;
+typedef void (*sighandler_t)(int);
 typedef struct {
     unsigned long __val[16];
 } sigset_t;
@@ -25,9 +25,8 @@ typedef struct {
 } __slibc_aligned(8) siginfo_t;
 struct sigaction {
     union {
-        void (*sa_handler)(int);
+        sighandler_t sa_handler;
         void (*sa_sigaction)(int, siginfo_t *, void *);
-        sighandler_t __sa_word;
     };
     sigset_t sa_mask;
     int sa_flags;
@@ -98,9 +97,9 @@ typedef struct {
 #define SIGXCPU (24)
 #define SIGXFSZ (25)
 #define SIG_BLOCK (0)
-#define SIG_DFL (0)
+#define SIG_DFL ((sighandler_t)0)
 #define SIG_ERR (((sighandler_t)~0))
-#define SIG_IGN (1)
+#define SIG_IGN ((sighandler_t)1)
 #define SIG_SETMASK (2)
 #define SIG_UNBLOCK (1)
 #define SI_KERNEL (0x80)

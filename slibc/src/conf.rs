@@ -297,7 +297,6 @@ pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> c_long {
     limit(name)
 }
 
-/// `fpathconf(3)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn fpathconf(_fd: c_int, name: c_int) -> c_long {
     limit(name)

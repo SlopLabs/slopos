@@ -503,8 +503,6 @@ pub unsafe extern "C" fn fseeko(stream: *mut FILE, offset: i64, whence: i32) -> 
     fseek(stream, offset, whence)
 }
 
-/// `ftello(3)`.
-///
 /// # Safety
 /// As [`ftell`].
 #[unsafe(no_mangle)]

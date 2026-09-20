@@ -141,12 +141,6 @@ pub unsafe extern "C" fn _exit(status: i32) -> ! {
     Sys::exit_group(status)
 }
 
-/// Clean exit — flushes stdio, runs the `atexit` and `__cxa_atexit` list,
-/// then terminates.
-///
-/// The flush after the handlers is what C11 §7.22.4.4 requires; the one before
-/// them keeps a handler that faults or calls `_exit` from discarding what
-/// `main` buffered. Flushing is idempotent, so no conforming program can tell.
 // `<sysexits.h>`'s codes, which a program picks a status out of. 4.3BSD's
 // values, which every Unix since has kept.
 pub const EX_OK: i32 = 0;
@@ -175,6 +169,12 @@ pub unsafe extern "C" fn _Exit(status: i32) -> ! {
     _exit(status)
 }
 
+/// Clean exit — flushes stdio, runs the `atexit` and `__cxa_atexit` list,
+/// then terminates.
+///
+/// The flush after the handlers is what C11 §7.22.4.4 requires; the one before
+/// them keeps a handler that faults or calls `_exit` from discarding what
+/// `main` buffered. Flushing is idempotent, so no conforming program can tell.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
     crate::stdio::__stdio_exit();

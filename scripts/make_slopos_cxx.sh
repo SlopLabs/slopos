@@ -4,7 +4,7 @@ set -euo pipefail
 # Cross-build the C++ runtime for `x86_64-unknown-slopos`.
 #
 # Usage: make_slopos_cxx.sh <sysroot_lib_dir>
-#        make_slopos_cxx.sh --print-stamp
+#        make_slopos_cxx.sh --print-stamp <sysroot_lib_dir>
 #        make_slopos_cxx.sh --print-abi-flags
 #
 # `<sysroot_lib_dir>` holds `libc.so`, which the runtime links: the C++ library
@@ -72,14 +72,15 @@ if [ "${1:-}" = "--print-abi-flags" ]; then
     exit 0
 elif [ "${1:-}" = "--print-stamp" ]; then
     PRINT_STAMP=1
-else
-    SYSROOT_LIB="${1:?usage: make_slopos_cxx.sh <sysroot_lib_dir> | --print-stamp}"
-    SYSROOT_LIB="$(cd "$SYSROOT_LIB" && pwd)"
-    for library in libc.so libbuiltins.a; do
-        [ -f "$SYSROOT_LIB/$library" ] ||
-            die "no $library in $SYSROOT_LIB — build the userland first"
-    done
+    shift
 fi
+
+SYSROOT_LIB="${1:?usage: make_slopos_cxx.sh [--print-stamp] <sysroot_lib_dir>}"
+SYSROOT_LIB="$(cd "$SYSROOT_LIB" && pwd)"
+for library in libc.so libbuiltins.a; do
+    [ -f "$SYSROOT_LIB/$library" ] ||
+        die "no $library in $SYSROOT_LIB — build the userland first"
+done
 
 PIN="$REPO_ROOT/toolchain/cxx/PIN"
 [ -f "$PIN" ] || die "missing toolchain/cxx/PIN"
@@ -120,14 +121,20 @@ if [ "$PRINT_STAMP" -eq 0 ]; then
     done
 fi
 
-# The pin and the C headers, and deliberately not `libc.so` itself: the
-# runtime is *compiled* against the headers and only *linked* against the
-# library, so rebuilding it for every change to slibc's implementation would
-# put three minutes on the interactive loop for nothing. A libc that loses a
-# symbol the runtime needs is what `scripts/check_cxx_pin.sh` is for.
+# The pin's values, the C headers and `libbuiltins.a`. Deliberately not
+# `libc.so`: the runtime is *compiled* against the headers and only *linked*
+# against that library, so rebuilding it for every change to slibc's
+# implementation would put three minutes on the interactive loop for nothing,
+# and a libc that loses a symbol the runtime needs is what
+# `scripts/check_cxx_pin.sh` is for. `libbuiltins.a` is different in kind:
+# its members are copied *into* the object linked below.
+#
+# The pin's values and not its prose, and only the lines this build reads: a
+# comment, or the llvm port's checksum, must not invalidate a three-minute
+# build it cannot change the result of.
 stamp_want() {
     {
-        cat "$PIN"
+        sed -n 's/^\(llvm_[a-z_]*\|clang_[a-z_]*\)=/\1=/p' "$PIN"
         # The compiler, by its own version string: two hosts at different
         # majors produce different objects from these same sources, and the
         # probes `build_userland.sh` compiles must come from the one that
@@ -141,6 +148,7 @@ stamp_want() {
         # Names as well as contents: two headers with swapped bodies, or a
         # header added empty, leave a content-only digest unchanged.
         (cd "$REPO_ROOT/slibc/include" && find . -type f | sort | xargs sha256sum)
+        sha256sum <"$SYSROOT_LIB/libbuiltins.a"
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -165,6 +173,15 @@ if [ ! -d "$SOURCE/runtimes" ]; then
         curl -L --fail --show-error "$LLVM_URL" -o "$TARBALL.part" || die "could not fetch $LLVM_URL
        An offline checkout pre-populates third_party/ with
        $(basename "$TARBALL"), or points LLVM_URL at a local copy."
+        # Verified before it is cached: a corrupt-but-complete download
+        # promoted to the real name is one every later run then dies on.
+        HAVE="$(sha256sum "$TARBALL.part" | cut -d' ' -f1)"
+        [ "$HAVE" = "$LLVM_SHA256" ] || {
+            rm -f "$TARBALL.part"
+            die "checksum mismatch for the fetched $(basename "$TARBALL")
+       expected: $LLVM_SHA256 (toolchain/cxx/PIN)
+       actual:   $HAVE"
+        }
         mv "$TARBALL.part" "$TARBALL"
     fi
     HAVE="$(sha256sum "$TARBALL" | cut -d' ' -f1)"

@@ -1091,8 +1091,6 @@ pub unsafe extern "C" fn wcstold(_s: *const wchar_t, _endptr: *mut *const wchar_
     );
 }
 
-/// `wcstoimax(3)`.
-///
 /// # Safety
 /// As [`wcstoll`].
 #[unsafe(no_mangle)]
@@ -1104,8 +1102,6 @@ pub unsafe extern "C" fn wcstoimax(
     wcstoll(s, endptr, base)
 }
 
-/// `wcstoumax(3)`.
-///
 /// # Safety
 /// As [`wcstoull`].
 #[unsafe(no_mangle)]
