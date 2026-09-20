@@ -40,6 +40,43 @@ rustup component remove rust-src --toolchain "$ch" && rustup component add rust-
 find "$(rustc +"$ch" --print sysroot)/lib/rustlib/src" -name '*slopos*' -delete
 ```
 
+**The C++ runtime is cross-built and test-only.** `x86_64-unknown-slopos` has
+a C++ standard library: LLVM's `libc++` and `libc++abi`, cross-built by the
+host clang whose major `toolchain/cxx/PIN` names, linked whole-archived into a
+single `third_party/slopos-cxx/lib/libc++.so`. `scripts/make_slopos_cxx.sh`
+builds it (idempotent: a stamp over the pin, the build script and
+`slibc/include` makes a warm run milliseconds), `scripts/check_cxx_pin.sh`
+gates it, and `scripts/build_userland.sh --test` is the only caller — the
+shipped appliance root runs no C++ program, so the runtime is on the tests
+image only, beside `cxx_probe` and `libcxxtest.so`, whose `cxx_test` proves a
+C++ exception crosses a `dlopen` boundary, and `cxx_static_probe`, which links
+`libc++.a` and `libc.a` instead and so is the only thing that exercises either
+archive or the frame finder's `AT_PHDR` road. One artifact rather than two because
+libc++abi's caught-exception stack and the `type_info` a `catch` matches on are
+process-wide: two instances of it in one process is a throw that cannot be
+caught across the boundary between them.
+
+That build is the one place SlopOS needs host tools beyond rust and QEMU:
+`clang`, `clang++`, `ld.lld` and `llvm-ar` at the pinned major, plus `cmake`
+and `ninja`. `CLANG`/`CLANGXX`/`LD_LLD`/`LLVM_AR` override the names, which is
+how CI points them at a distribution's `-18` suffixes. The sources are the
+pinned `llvm-project` release tarball, fetched into `third_party/` on the first
+build; an offline checkout pre-populates that file or points `LLVM_URL` at a
+local copy, exactly as `LIMINE_URL` works for Limine. `just distclean` removes
+the extracted 91 MB source tree; nothing removes `third_party/slopos-cxx`,
+because the build is minutes and its inputs are pinned.
+
+**The unwinder is not test-only.** `libc.so` and `libc.a` supply the Level-1
+Itanium unwinder (`vendor/unwinding`, seventeen `_Unwind_*` entry points) on
+every image, behind slibc's `unwinder` cargo feature which only those two
+wrapper crates enable, and both are built `-C force-unwind-tables` because the
+first frame of every unwind is one of their own. The cost is that the shipped
+`libc.so` carries the DWARF reader — 412 384 bytes against 241 376 before —
+which `--gc-sections` cannot drop while startup registers the frame finder
+unconditionally. The 60 static Rust binaries are unaffected: they take slibc as
+an rlib with the feature off, and `userland/userland.ld` discards `.eh_frame`
+outright.
+
 Boot targets rebuild a secondary `builddir/slop-notests.iso` with `tests=off`; override via `BOOT_CMDLINE=... just boot`, add `VIDEO=1` for a graphical window.
 
 **The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the shipped verified `ext2.img`, so `just boot` still runs `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot-persist` is the developer's persistent machine: it boots `fs/assets/ext2-persist.img`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`, binaries only) so what the guest wrote survives. `VERITY=on` builds the shipped v1 trailer, which write-protects the device and is what `just boot`'s `verity=require` asserts; `VERITY=off` builds no trailer. The shipped and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
@@ -148,6 +185,7 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_authority_reachability.sh`** — walks the linked ELF's call graph from every syscall handler to the terminal power primitives, and fails unless each handler that can reach one is either classified `Power` itself or carries a stated reason in `scripts/gates/authority/<variant>.txt`. The `rustc`-level classification gate in `core/src/syscall/handlers.rs` covers *the table*, not *reachability*: `roulette_result` was classified, the gate was green, and its loss arm called `kernel_reboot` two syscalls from an unprivileged caller. The ELF is the input rather than the source because inlining, generic instantiation and trait-object dispatch all change who really calls whom. Indirect calls (`call *%rax`) are the seam it cannot see, which is why the kernel-initiated `PowerOps` callers are a tracked list rather than something it discovers. Runs against the dev kernel from `check-framekernel-gates`, and separately in CI against the **tests** and **release** ELFs — the tests kernel is the only variant whose allowlist carries `run_userland_tests`, which powers the machine off to end the run. Gated in CI rather than on the build path because the walk disassembles the whole ELF (~8 s).
 - **`scripts/check_safe_contract_surface.sh`** — ratchet on safe `pub fn`s in `slopos-ostd/` that carry a `# Safety` section. Those are self-declared caller obligations the compiler does not check, so a fault lands in the trusted core while the cause is an ordinary safe call in a service crate. The baseline is **0**: every such contract is currently expressed instead, as a capability witness (`&IrqDisabled`, `&BspToken`, `Osxsave`), a validated newtype (`Xcr0Mask`), a linear handle (`ptr_buf::OneShotBuf`), an owning reference (`KArc`), a sealed trait (`ApTrampolineAbi`), a runtime-checked borrow (`sync::PerCpuSlot`), or a slice in place of a pointer and a length. Reach for those before raising the baseline. Not a count of safe fns containing `unsafe` — that is the design working, not a defect.
 - **`scripts/check_toolchain_pin.sh`** — holds the userland target's standard library to the fork it is pinned to. `x86_64-unknown-slopos` builds on an owned sysroot (`third_party/rust-slopos`, materialised by `scripts/make_slopos_sysroot.sh` out of the patches under `toolchain/`), and every way that can drift is silent: a fork cut against a different `rust-toolchain.toml` channel, a patch edited without its `toolchain/PIN` checksum, a sysroot left over from a previous overlay, or a `slopos` toolchain registered against some other directory. A stale sysroot compiles — it just compiles the previous std. It is the replacement for the retired std-patching script's `cfg_select!` arm-order check, whose failure mode (an arm placed after the `_` wildcard, dead code that still compiles — it shipped once as a `ud2` in `std::process::exit`) cannot occur now that the target is unix-family and rides std's own `sys/pal/unix`. It also asserts that every file the patches *create* is present in a materialized sysroot: the stamp describes the overlay, not the result, so a tree a broken run left half-patched — patched std, unpatched libc — otherwise carries a correct stamp and passes (observed). The sysroot and link checks are conditional on those existing, so CI that never materialises a sysroot still passes on the pin alone.
+- **`scripts/check_cxx_pin.sh`** — holds the cross-built C++ runtime to `toolchain/cxx/PIN` and to what `libc.so` exports. Two silent failures: a `third_party/slopos-cxx` built from a different llvm-project or a different clang still links, it just links a different C++ ABI; and `libc++.so` is linked without `-z defs`, because an undefined symbol in a shared object is legal and the loader resolves it at load time — so a libc gap that would have been a link error is instead a `dlopen` that fails on a machine, at the point the runtime is first needed. The gate holds every symbol `libc++.so` leaves undefined (68 today) to being one `libc.so` defines, and holds the built tree's stamp to what `make_slopos_cxx.sh --print-stamp` says it should be — asked of the build script rather than recomputed, so there is no second copy of that digest to drift. All three are conditional on the runtime having been built, so a checkout that never cross-built it still passes on the pin's own consistency.
 - **`scripts/check_codegen_backend.sh`** — holds a rustc codegen backend to seven of the capabilities `targets/x86_64-slos.json` depends on: an ELF object format, soft-float, `.stack_sizes`, safestack instrumentation through `__safestack_pointer_address`, `#[unsafe(link_section)]`, `#[unsafe(naked)]`, and `sym` operands in `asm!`. Two of those are flags a backend can *accept and ignore* — `-Zemit-stack-sizes` and `-Zsanitizer=safestack` — so a backend swap can leave the build green with S-5 and the dual-stack split enforced by nothing. Tracked verdicts live in `scripts/gates/codegen/<backend>.txt` and a mismatch fails **in either direction**: a `lacks` the probe finds present is the signal that the self-hosting question in `plans/self-hosting.md` needs re-deciding. `disable-redzone` and the `unwind` panic strategy are stated as residual rather than probed — the gate's header says why. Cold it costs ~60 s and ~460 MB for `llvm` / ~310 MB for `cranelift` under `builddir/gates/codegen-probe/` (which `just clean` removes); warm it is ~1 s. `llvm` is graded on every `just check-framekernel-gates`; `cranelift` reports `skipped` when the rustup component is absent, and CI installs it in a job of its own so the answer is re-taken rather than assumed.
 - **`scripts/check_linker_script.sh`** — holds a linker to the eighteen linker-script constructs `link.ld` uses, from `. = KERNEL_VIRT_BASE` through `PHDRS`, `(NOLOAD)`, all three spellings of `ALIGN`, `KEEP` under `--gc-sections` and the four page-table reservations past `_bss_end`. Each probe's script carries the construct under test and nothing else a probe grades — a script that scaffolds itself with an `ALIGN` reports the linker's `ALIGN` support under whatever name that probe carries — with one deliberate exception, `composed-layout`, which links a `link.ld`-shaped script because a linker can take every construct alone and compose them differently. That exception is what the gate is built around: wild 0.10.0 refuses `link.ld` on its location-counter assignment, and given the shape it does accept it keeps the script's section order and still starts the image 0x13e8 past the base it was given. A second, self-maintaining half compares the constructs probed against the keywords `link.ld` actually uses, so a construct added to the script with no probe fails the gate and a probe whose construct left the script fails as a dead entry. `scripts/gates/linker/<linker>.txt`; `lld` is graded on every `just check-framekernel-gates`, `wild` reports `skipped` when it is not installed and is pinned in the CI job that installs it.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
@@ -369,6 +407,10 @@ just check-framekernel-gates          # CI: Framekernel gates (self-tests + vend
 just _build-run-tests
 set -o pipefail
 builddir/run_tests --raw --no-color 2>&1 | tee builddir/ci-test.log
+
+# The userland exists now, so the half of the C++ gate that needs a `libc.so`
+# to compare against runs. It is skipped in the gates step above.
+scripts/check_cxx_pin.sh
 
 scripts/check_authority_reachability.sh --variant tests builddir/kernel-tests.elf
 scripts/check_test_count.sh        --log builddir/ci-test.log

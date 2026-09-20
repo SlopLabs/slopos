@@ -43,5 +43,5 @@ pub fn atexit(func: extern "C" fn()) -> i32 {
     // SAFETY: `func` is a valid function pointer with the required signature;
     // the coercion to `unsafe extern "C" fn()` adds no obligation to the
     // caller, and `atexit` only stores it.
-    unsafe { super::atexit::atexit(func) }
+    unsafe { crate::cxa::atexit(func) }
 }

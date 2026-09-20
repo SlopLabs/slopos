@@ -9,6 +9,10 @@
 
 #include <sys/socket.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct addrinfo {
     int ai_flags;
     int ai_family;
@@ -43,5 +47,9 @@ struct addrinfo {
 int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
 void freeaddrinfo(struct addrinfo *res);
 const char *gai_strerror(int errcode);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_NETDB_H */

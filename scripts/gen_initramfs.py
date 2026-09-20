@@ -118,6 +118,18 @@ def main() -> None:
     if os.path.isfile(os.path.join(build_dir, "libc.so")):
         entries.append((b"/lib/ld-slopos.so.1", MODE_LINK, b"libc.so"))
 
+    # The C++ runtime's license texts, beside the library they cover, for the
+    # same reason the fonts below carry theirs. Staged by the -tests recipes
+    # only, because only those images carry `libc++.so`.
+    cxx_licenses = os.path.join(build_dir, "libc++-licenses")
+    if os.path.isdir(cxx_licenses):
+        for fname in sorted(os.listdir(cxx_licenses)):
+            src = os.path.join(cxx_licenses, fname)
+            if not os.path.isfile(src):
+                continue
+            dest = b"/usr/share/licenses/libc++/" + fname.encode()
+            entries.append((dest, MODE_DATA, read_file(src)))
+
     fonts_dir = os.path.join(repo_root, "assets", "fonts")
     if os.path.isdir(fonts_dir):
         for fname in sorted(os.listdir(fonts_dir)):

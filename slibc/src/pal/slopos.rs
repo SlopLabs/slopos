@@ -504,6 +504,9 @@ impl Pal for Sys {
     fn fork() -> Result<i32, Errno> {
         let ret = unsafe { syscall0(SYSCALL_FORK) };
         let val = to_result(ret)?;
+        if val == 0 {
+            crate::cxa::reset_after_fork();
+        }
         Ok(val as i32)
     }
 

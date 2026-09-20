@@ -354,6 +354,45 @@
 #     inside 153268, `kernelmeta` 9216 inside 9293, `diskblocks` 2383 inside
 #     2911, `fdslot` 256, `objectrow` 257, `task` 6 and `pinnedbytes` 4.
 
+#
+# 2026-09-19, the C++ runtime ("A C++ exception crosses an object boundary" in
+# plans/self-hosting.md). Three rows moved, each from its own cause, and all
+# three deterministic across three fresh runs of one ISO so all three caps stay
+# exact.
+#   post-userland-tests `process` 250 -> 254. `cxx_test` is one more utest
+#     binary and it spawns three children: `/bin/cxx_probe` twice — once for
+#     the twelve ordered checks and once for the uncaught-throw case — and
+#     `/bin/cxx_static_probe` once. Four more account rows, live at the dump
+#     point like the rest of the phase's children.
+#     `MAX_PROCESSES` is 256, so this leaves two slots. The phase is at that
+#     ceiling because its children are not reaped until it ends, which is
+#     pre-existing and is the reason the 2026-09-15 note gives for grouping a
+#     utest's cases rather than spawning per assertion. A further utest that
+#     spawns will not fit.
+#   post-userland-tests `pinnedbytes` 8 -> 98. This row is file-backed pages
+#     held in the page cache by a mapping, charged in pages despite the name,
+#     and the probe maps two objects the suite never mapped before:
+#     `libc++.so` at 776 056 bytes and `libcxxtest.so`. The previous 4-8 was
+#     `dl_test`'s `libdltest.so` alone.
+#   post-userland-tests `diskblocks` 2911 -> 3658 (3658/3658/3658 over the
+#     three runs that took the row, 3272 once the licence texts and the static
+#     probe joined the image), and it is the image and not
+#     the change: `fs_image_size_tests` is 80M rather than 64M because the
+#     tests root now also carries `libc++.so`, `libcxxtest.so` and two more
+#     binaries, and at 64M `persist_test`'s space filler met the volume's
+#     819-block reserve with 809 blocks free and was refused before writing
+#     anything. A larger volume means the filler reaches that reserve later,
+#     which is the same arithmetic the 2026-09-09 note records for the 32M ->
+#     64M step.
+#   Nothing else moved above its cap over those three runs: post-userland
+#     `kernelmeta` 9592/9652/9802 inside 10035, `pages`
+#     1 872 931/1 911 825/1 865 037 inside 1 977 053, `residentpages`
+#     155 937/156 002/153 560 inside 157 348, `task` 6, `fdslot` 256,
+#     `objectrow` 257 and `custody` 8; boot `kernelmeta` 1750 inside 1756;
+#     post-kernel-tests `kernelmeta` 6069/6068/6068 inside 6120, `pages`
+#     54 131/62 273/53 871 inside 65 536, `residentpages` 772 exact,
+#     `process` 14, `diskblocks` 6 and `pinnedbytes` 4.
+
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
@@ -382,13 +421,13 @@ post-kernel-tests	process	20
 post-kernel-tests	residentpages	772
 post-kernel-tests	task	8
 post-userland-tests	custody	8
-post-userland-tests	diskblocks	2911
+post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
-post-userland-tests	pinnedbytes	8
-post-userland-tests	process	250
+post-userland-tests	pinnedbytes	98
+post-userland-tests	process	254
 post-userland-tests	residentpages	157348
 post-userland-tests	task	10
 

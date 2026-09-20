@@ -227,6 +227,10 @@ pub unsafe extern "C" fn dlclose(handle: *mut c_void) -> c_int {
             let _guard = lock();
             *loader().get(*slot as usize)
         };
+        // The object's `__cxa_atexit` registrations first: they are C++
+        // static destructors, and one of them may still reach a `DT_FINI`
+        // the next line is about to run.
+        crate::cxa::finalize_range(dso.map_start, dso.map_len);
         super::run_fini(&dso);
     }
 

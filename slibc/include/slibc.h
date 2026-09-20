@@ -9,6 +9,8 @@
 #define _SLIBC_H
 
 #include <arpa/inet.h>
+#include <assert.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -16,6 +18,7 @@
 #include <limits.h>
 #include <link.h>
 #include <locale.h>
+#include <math.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -49,6 +52,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
+#include <uchar.h>
 #include <unistd.h>
 
 #endif /* _SLIBC_H */

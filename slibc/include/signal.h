@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef size_t sighandler_t;
 typedef struct {
     unsigned long __val[16];
@@ -116,5 +120,9 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oset);
 int sigpending(sigset_t *set);
 int sigsuspend(const sigset_t *set);
 sighandler_t signal(int signum, sighandler_t handler);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SIGNAL_H */

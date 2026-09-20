@@ -20,6 +20,12 @@ pub enum Abi {
         bytes: u8,
         signed: bool,
     },
+    /// Passed in an SSE register, never an integer one, so a `double`
+    /// declared as an integer of the same width is a miscompile rather than a
+    /// near miss.
+    Float {
+        bytes: u8,
+    },
     Ptr,
     /// `...`; only ever the final parameter.
     Variadic,
@@ -39,6 +45,7 @@ impl Abi {
             Abi::Int { bytes, signed } => {
                 format!("{}{}", if *signed { "i" } else { "u" }, bytes * 8)
             }
+            Abi::Float { bytes } => format!("f{}", bytes * 8),
             Abi::Ptr => "ptr".to_string(),
             Abi::Variadic => "...".to_string(),
             Abi::Aggregate(name) => format!("struct {name}"),
@@ -73,6 +80,15 @@ const PRIMITIVES: &[(&str, &str, u8, bool)] = &[
     ("u64", "unsigned long", 8, false),
     ("isize", "long", 8, true),
     ("usize", "unsigned long", 8, false),
+];
+
+/// The floating-point spellings, kept apart from [`PRIMITIVES`] because they
+/// classify to [`Abi::Float`] rather than to an integer of the same width.
+const FLOATS: &[(&str, &str, u8)] = &[
+    ("c_float", "float", 4),
+    ("c_double", "double", 8),
+    ("f32", "float", 4),
+    ("f64", "double", 8),
 ];
 
 /// The type universe of the generated headers.
@@ -126,6 +142,13 @@ impl Types {
         name.ends_with("_t") || name == "fd_set" || name == "Dl_info" || name.starts_with("Elf64_")
     }
 
+    fn float(name: &str) -> Option<(&'static str, u8)> {
+        FLOATS
+            .iter()
+            .find(|(rust, _, _)| *rust == name)
+            .map(|(_, c, bytes)| (*c, *bytes))
+    }
+
     fn primitive(name: &str) -> Option<(&'static str, u8, bool)> {
         PRIMITIVES
             .iter()
@@ -143,6 +166,9 @@ impl Types {
     fn base(&self, ty: &str) -> Result<String, String> {
         let ty = Self::unqualify(ty);
         if let Some((c, _, _)) = Self::primitive(ty) {
+            return Ok(c.to_string());
+        }
+        if let Some((c, _)) = Self::float(ty) {
             return Ok(c.to_string());
         }
         if self.typedefs.contains(ty) {
@@ -262,6 +288,9 @@ impl Types {
         }
         let mut name = Self::unqualify(ty).to_string();
         for _ in 0..8 {
+            if let Some((_, bytes)) = Self::float(&name) {
+                return Abi::Float { bytes };
+            }
             if let Some((_, bytes, signed)) = Self::primitive(&name) {
                 return if bytes == 0 {
                     Abi::Void

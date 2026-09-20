@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define MADV_DONTNEED (4)
 #define MADV_FREE (8)
 #define MADV_NORMAL (0)
@@ -33,5 +37,9 @@ int munmap(void *addr, size_t len);
 int mprotect(void *addr, size_t len, int prot);
 int madvise(void *addr, size_t len, int advice);
 int msync(void *addr, size_t len, int flags);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_MMAN_H */

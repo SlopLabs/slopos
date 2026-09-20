@@ -128,6 +128,36 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+## The C++ runtime
+
+SlopOS's C++ runtime is [LLVM's `libc++` and
+`libc++abi`](https://github.com/llvm/llvm-project), cross-built from the
+pinned source release for `x86_64-unknown-slopos` and linked into a single
+`libc++.so`. It is **Apache License 2.0 with the LLVM exception**, which is
+compatible with GPL-3.0-or-later:
+
+```
+Copyright (c) 2009-2019 by the contributors listed in CREDITS.TXT (llvm-project)
+Licensed under the Apache License, Version 2.0, with LLVM Exceptions.
+See https://llvm.org/LICENSE.txt for license information.
+SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+```
+
+Nothing from llvm-project is vendored into this repository. `toolchain/cxx/PIN`
+records the release, its download URL and its checksum;
+`scripts/make_slopos_cxx.sh` fetches and builds it into
+`third_party/slopos-cxx/`, and `scripts/check_cxx_pin.sh` fails the build if
+what is on disk has drifted from what is pinned. The runtime reaches the
+**tests** image only: `libc++.so` as a file, and `libc++.a` as the C++ half of
+the statically linked `cxx_static_probe`. Both projects' license texts ship
+beside it, in `/usr/share/licenses/libc++/`, the way the OFL fonts carry
+theirs.
+
+The runtime is built with localization, wide characters, the filesystem
+library, the random device and the time-zone database turned off, so the parts
+of libc++ that need a locale layer SlopOS has not got are not compiled at
+all.
+
 ## Components distributed on the SlopOS ISO
 
 ### Limine bootloader

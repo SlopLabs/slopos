@@ -16,11 +16,14 @@ fs_image_tests   := fs_image_dir / "ext2-tests.img"
 fs_image_persist := fs_image_dir / "ext2-persist.img"
 fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 # The tests image carries `bigprog_test`, a deliberately 24 MiB binary that is
-# what proves `exec` no longer stages an image in kernel memory. Sized on its
-# own so the shipped root stays 32M — and no larger than it has to be, because
+# what proves `exec` no longer stages an image in kernel memory, and the C++
+# runtime with the two fixtures that exercise it. Sized on its own so the
+# shipped root stays 32M — and no larger than it has to be, because
 # `persist_test`'s space filler must still meet the volume's reserve before it
-# meets the 8192-block `DiskBlocks` quota.
-fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "64M")
+# meets the 8192-block `DiskBlocks` quota. 64M left 809 free blocks against a
+# 819-block reserve once `libc++.so` was on it, which refuses the filler before
+# it has written anything.
+fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "80M")
 # `test_userland_bins` feeds `initramfs-tests.cpio` too, so `bigprog_test`
 # costs ~25 MB of guest RAM on every test boot as well (~39 MB of cpio against
 # `qemu_mem`'s 512M). `boot-ramonly` is unaffected: it builds `_iso-notests`,
@@ -98,9 +101,9 @@ userland_bins      := "init shell coreutils terminal compositor roulette halt ed
 coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
 # Shared objects the suite dlopens. Kept out of `userland_bins`' shape because
 # they are libraries, not programs, and out of the shipped image entirely.
-test_shared_objects := "libdltest.so"
+test_shared_objects := "libdltest.so libc++.so libcxxtest.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test"
+test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -560,10 +563,12 @@ check-framekernel-gates:
     scripts/check_fs_throughput.sh --self-test
     scripts/check_syscall_abi.sh --self-test
     scripts/check_toolchain_pin.sh --self-test
+    scripts/check_cxx_pin.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_toolchain_pin.sh
+    scripts/check_cxx_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh
@@ -660,3 +665,4 @@ clean:
 distclean: clean
     rm -rf {{build_dir}} {{iso}} {{iso_notests}} {{iso_tests}} {{log_file}}
     rm -f {{fs_image}} {{fs_image_tests}} {{initramfs}} {{initramfs_tests}}
+    rm -rf third_party/llvm-project-*.src

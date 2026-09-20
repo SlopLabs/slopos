@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct passwd {
     char *pw_name;
     char *pw_passwd;
@@ -20,5 +24,9 @@ struct passwd {
 };
 
 int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_PWD_H */

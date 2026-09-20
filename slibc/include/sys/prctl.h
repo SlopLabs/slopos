@@ -7,6 +7,14 @@
 #ifndef _SLIBC_SYS_PRCTL_H
 #define _SLIBC_SYS_PRCTL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int prctl(int option, ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_PRCTL_H */

@@ -9,6 +9,28 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C"
+#endif
+long double strtold(const char *s, char **endptr);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    int quot;
+    int rem;
+} div_t;
+typedef struct {
+    long quot;
+    long rem;
+} ldiv_t;
+typedef struct {
+    long long quot;
+    long long rem;
+} lldiv_t;
+
 #define EXIT_FAILURE (1)
 #define EXIT_SUCCESS (0)
 
@@ -18,6 +40,7 @@ void *realloc(void *ptr, size_t size);
 void free(void *ptr);
 int posix_memalign(void **memptr, size_t align, size_t size);
 void *memalign(size_t align, size_t size);
+void *aligned_alloc(size_t align, size_t size);
 __slibc_noreturn void abort(void);
 __slibc_noreturn void exit(int status);
 int atexit(void (*cb)(void));
@@ -25,11 +48,29 @@ char *getenv(const char *name);
 int setenv(const char *name, const char *val, int overwrite);
 int unsetenv(const char *name);
 char *realpath(const char *path, char *resolved);
+int abs(int n);
+long labs(long n);
+long long llabs(long long n);
+div_t div(int numer, int denom);
+ldiv_t ldiv(long numer, long denom);
+lldiv_t lldiv(long long numer, long long denom);
+double atof(const char *s);
+double strtod(const char *s, char **endptr);
+float strtof(const char *s, char **endptr);
+long long strtoll(const char *s, char **endptr, int base);
+unsigned long long strtoull(const char *s, char **endptr, int base);
+int __cxa_atexit(void (*dtor)(void *), void *arg, void *dso);
+void __cxa_finalize(void *dso);
+int __cxa_thread_atexit_impl(void (*dtor)(void *), void *arg, void *dso);
 int atoi(const char *s);
 long atol(const char *s);
 long strtol(const char *s, char **endptr, int base);
 unsigned long strtoul(const char *s, char **endptr, int base);
 int putenv(char *string);
 size_t malloc_usable_size(void *ptr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_STDLIB_H */

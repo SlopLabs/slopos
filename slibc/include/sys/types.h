@@ -25,17 +25,24 @@
 #  endif
 #endif
 
-/* `NULL` belongs to the compiler's <stddef.h>, which SlopOS has no C compiler
- * to provide yet (Workstream 1.3). Defined here, guarded, so a hosted
- * compiler's own definition still wins.
+/* `NULL` belongs to the compiler's <stddef.h>. Defined here, guarded, so
+ * a hosted compiler's own definition still wins. `((void *)0)` is not a
+ * null pointer constant in C++ — `char *p = NULL;` would not compile and
+ * `f(NULL)` would pick the wrong overload — so C++ gets `nullptr`.
  */
 #ifndef NULL
-#  define NULL ((void *)0)
+#  ifdef __cplusplus
+#    define NULL nullptr
+#  else
+#    define NULL ((void *)0)
+#  endif
 #endif
 
 typedef unsigned long size_t;
 typedef long ssize_t;
+#ifndef __cplusplus
 typedef int wchar_t;
+#endif
 typedef long off_t;
 typedef long off64_t;
 typedef long blkcnt_t;

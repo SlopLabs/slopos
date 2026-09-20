@@ -7,6 +7,10 @@
 #ifndef _SLIBC_DLFCN_H
 #define _SLIBC_DLFCN_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     const char *dli_fname;
     void *dli_fbase;
@@ -26,5 +30,9 @@ void *dlsym(void *handle, const char *symbol);
 int dlclose(void *handle);
 char *dlerror(void);
 int dladdr(const void *addr, Dl_info *info);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_DLFCN_H */

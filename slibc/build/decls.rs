@@ -43,6 +43,9 @@ pub struct HeaderSpec {
     /// they exist because C needs a spelling the Rust contract has no way to
     /// carry.
     pub raw: &'static [&'static str],
+    /// Literal C lines emitted past the include guard, for the one header C
+    /// requires to mean something different each time it is included.
+    pub raw_unguarded: &'static [&'static str],
 }
 
 /// The 17 items the contract reaches through `crate::`, as
@@ -259,14 +262,20 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#  endif",
             "#endif",
             "",
-            "/* `NULL` belongs to the compiler's <stddef.h>, which SlopOS has no C compiler",
-            " * to provide yet (Workstream 1.3). Defined here, guarded, so a hosted",
-            " * compiler's own definition still wins.",
+            "/* `NULL` belongs to the compiler's <stddef.h>. Defined here, guarded, so",
+            " * a hosted compiler's own definition still wins. `((void *)0)` is not a",
+            " * null pointer constant in C++ — `char *p = NULL;` would not compile and",
+            " * `f(NULL)` would pick the wrong overload — so C++ gets `nullptr`.",
             " */",
             "#ifndef NULL",
-            "#  define NULL ((void *)0)",
+            "#  ifdef __cplusplus",
+            "#    define NULL nullptr",
+            "#  else",
+            "#    define NULL ((void *)0)",
+            "#  endif",
             "#endif",
         ],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "limits.h",
@@ -332,6 +341,234 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#  define ULLONG_MAX 18446744073709551615ULL",
             "#endif",
         ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "assert.h",
+        summary: "the diagnostic macro",
+        // For `__slibc_noreturn`, which is what "does not return" is spelled
+        // as when the compiler may not have C11's `_Noreturn`.
+        includes: &["sys/types.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "__slibc_assert_fail(expr: *const c_char, file: *const c_char, line: c_uint, \
+             func: *const c_char) -> !",
+        ],
+        variables: &[],
+        raw: &[],
+        // C requires `<assert.h>` to be re-includable with a different
+        // `NDEBUG` each time, so the macro sits past the include guard and
+        // undefines itself first. It is the only header in C that does.
+        raw_unguarded: &[
+            "#undef assert",
+            "#ifdef NDEBUG",
+            "#  define assert(e) ((void)0)",
+            "#else",
+            "#  define assert(e) \\",
+            "      ((e) ? (void)0 : __slibc_assert_fail(#e, __FILE__, __LINE__, __func__))",
+            "#endif",
+        ],
+    },
+    HeaderSpec {
+        path: "ctype.h",
+        summary: "character classification, in the C locale",
+        includes: &[],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[
+            "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph", "islower", "isprint",
+            "ispunct", "isspace", "isupper", "isxdigit", "tolower", "toupper",
+        ],
+        extra: &[],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "uchar.h",
+        summary: "the multibyte conversion state",
+        includes: &["sys/types.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        // `mbstate_t` and nothing else. C11 puts the type in `<wchar.h>` too,
+        // which slibc has not got; libc++ reaches for this one when wide
+        // characters are off, and takes a `#error` if neither exists. The
+        // object is opaque and wider than any state a UTF-8 conversion needs,
+        // so a later `<wchar.h>` can define the conversion against it without
+        // changing the layout.
+        raw: &[
+            "typedef struct {",
+            "    unsigned int __size[2];",
+            "} mbstate_t;",
+        ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "math.h",
+        summary: "floating-point mathematics, for `double` and `float`",
+        includes: &[],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "acos(x: f64) -> f64",
+            "acosf(x: f32) -> f32",
+            "acosh(x: f64) -> f64",
+            "acoshf(x: f32) -> f32",
+            "asin(x: f64) -> f64",
+            "asinf(x: f32) -> f32",
+            "asinh(x: f64) -> f64",
+            "asinhf(x: f32) -> f32",
+            "atan(x: f64) -> f64",
+            "atan2(y: f64, x: f64) -> f64",
+            "atan2f(y: f32, x: f32) -> f32",
+            "atanf(x: f32) -> f32",
+            "atanh(x: f64) -> f64",
+            "atanhf(x: f32) -> f32",
+            "cbrt(x: f64) -> f64",
+            "cbrtf(x: f32) -> f32",
+            "ceil(x: f64) -> f64",
+            "ceilf(x: f32) -> f32",
+            "copysign(x: f64, y: f64) -> f64",
+            "copysignf(x: f32, y: f32) -> f32",
+            "cos(x: f64) -> f64",
+            "cosf(x: f32) -> f32",
+            "cosh(x: f64) -> f64",
+            "coshf(x: f32) -> f32",
+            "erf(x: f64) -> f64",
+            "erfc(x: f64) -> f64",
+            "erfcf(x: f32) -> f32",
+            "erff(x: f32) -> f32",
+            "exp(x: f64) -> f64",
+            "exp2(x: f64) -> f64",
+            "exp2f(x: f32) -> f32",
+            "expf(x: f32) -> f32",
+            "expm1(x: f64) -> f64",
+            "expm1f(x: f32) -> f32",
+            "fabs(x: f64) -> f64",
+            "fabsf(x: f32) -> f32",
+            "fdim(x: f64, y: f64) -> f64",
+            "fdimf(x: f32, y: f32) -> f32",
+            "floor(x: f64) -> f64",
+            "floorf(x: f32) -> f32",
+            "fma(x: f64, y: f64, z: f64) -> f64",
+            "fmaf(x: f32, y: f32, z: f32) -> f32",
+            "fmax(x: f64, y: f64) -> f64",
+            "fmaxf(x: f32, y: f32) -> f32",
+            "fmin(x: f64, y: f64) -> f64",
+            "fminf(x: f32, y: f32) -> f32",
+            "fmod(x: f64, y: f64) -> f64",
+            "fmodf(x: f32, y: f32) -> f32",
+            "frexp(x: f64, exp: *mut c_int) -> f64",
+            "frexpf(x: f32, exp: *mut c_int) -> f32",
+            "hypot(x: f64, y: f64) -> f64",
+            "hypotf(x: f32, y: f32) -> f32",
+            "ilogb(x: f64) -> c_int",
+            "ilogbf(x: f32) -> c_int",
+            "ldexp(x: f64, n: c_int) -> f64",
+            "ldexpf(x: f32, n: c_int) -> f32",
+            "lgamma(x: f64) -> f64",
+            "lgammaf(x: f32) -> f32",
+            "llrint(x: f64) -> c_longlong",
+            "llrintf(x: f32) -> c_longlong",
+            "llround(x: f64) -> c_longlong",
+            "llroundf(x: f32) -> c_longlong",
+            "log(x: f64) -> f64",
+            "log10(x: f64) -> f64",
+            "log10f(x: f32) -> f32",
+            "log1p(x: f64) -> f64",
+            "log1pf(x: f32) -> f32",
+            "log2(x: f64) -> f64",
+            "log2f(x: f32) -> f32",
+            "logb(x: f64) -> f64",
+            "logbf(x: f32) -> f32",
+            "logf(x: f32) -> f32",
+            "lrint(x: f64) -> c_long",
+            "lrintf(x: f32) -> c_long",
+            "lround(x: f64) -> c_long",
+            "lroundf(x: f32) -> c_long",
+            "modf(x: f64, iptr: *mut f64) -> f64",
+            "modff(x: f32, iptr: *mut f32) -> f32",
+            "nan(tag: *const c_char) -> f64",
+            "nanf(tag: *const c_char) -> f32",
+            "nearbyint(x: f64) -> f64",
+            "nearbyintf(x: f32) -> f32",
+            "nextafter(x: f64, y: f64) -> f64",
+            "nextafterf(x: f32, y: f32) -> f32",
+            "pow(x: f64, y: f64) -> f64",
+            "powf(x: f32, y: f32) -> f32",
+            "remainder(x: f64, y: f64) -> f64",
+            "remainderf(x: f32, y: f32) -> f32",
+            "remquo(x: f64, y: f64, quo: *mut c_int) -> f64",
+            "remquof(x: f32, y: f32, quo: *mut c_int) -> f32",
+            "rint(x: f64) -> f64",
+            "rintf(x: f32) -> f32",
+            "round(x: f64) -> f64",
+            "roundf(x: f32) -> f32",
+            "scalbln(x: f64, n: c_long) -> f64",
+            "scalblnf(x: f32, n: c_long) -> f32",
+            "scalbn(x: f64, n: c_int) -> f64",
+            "scalbnf(x: f32, n: c_int) -> f32",
+            "sin(x: f64) -> f64",
+            "sinf(x: f32) -> f32",
+            "sinh(x: f64) -> f64",
+            "sinhf(x: f32) -> f32",
+            "sqrt(x: f64) -> f64",
+            "sqrtf(x: f32) -> f32",
+            "tan(x: f64) -> f64",
+            "tanf(x: f32) -> f32",
+            "tanh(x: f64) -> f64",
+            "tanhf(x: f32) -> f32",
+            "tgamma(x: f64) -> f64",
+            "tgammaf(x: f32) -> f32",
+            "trunc(x: f64) -> f64",
+            "truncf(x: f32) -> f32",
+        ],
+        variables: &[],
+        // Classification, comparison and the special values are compiler
+        // builtins rather than calls: C states them as macros, and each is a
+        // bit test the compiler does inline.
+        raw: &[
+            "#define FP_NAN 0",
+            "#define FP_INFINITE 1",
+            "#define FP_ZERO 2",
+            "#define FP_SUBNORMAL 3",
+            "#define FP_NORMAL 4",
+            "#define HUGE_VAL (__builtin_huge_val())",
+            "#define HUGE_VALF (__builtin_huge_valf())",
+            "#define INFINITY (__builtin_inff())",
+            "#define NAN (__builtin_nanf(\"\"))",
+            "#define MATH_ERRNO 1",
+            "#define MATH_ERREXCEPT 2",
+            "#define math_errhandling MATH_ERRNO",
+            "#define fpclassify(x) \\",
+            "      __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, x)",
+            "#define isfinite(x) __builtin_isfinite(x)",
+            "#define isinf(x) __builtin_isinf(x)",
+            "#define isnan(x) __builtin_isnan(x)",
+            "#define isnormal(x) __builtin_isnormal(x)",
+            "#define signbit(x) __builtin_signbit(x)",
+            "#define isgreater(x, y) __builtin_isgreater(x, y)",
+            "#define isgreaterequal(x, y) __builtin_isgreaterequal(x, y)",
+            "#define isless(x, y) __builtin_isless(x, y)",
+            "#define islessequal(x, y) __builtin_islessequal(x, y)",
+            "#define islessgreater(x, y) __builtin_islessgreater(x, y)",
+            "#define isunordered(x, y) __builtin_isunordered(x, y)",
+        ],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "errno.h",
@@ -347,6 +584,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         // `errno` is a macro over the thread-local slot, never an object; the
         // accessor it expands to is a contract entry point declared above.
         raw: &["#define errno (*__errno_location())"],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "string.h",
@@ -377,12 +615,13 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "stdlib.h",
         summary: "general utilities: allocation, environment, conversion",
         includes: &["sys/types.h"],
-        types: &[],
+        types: &["div_t", "ldiv_t", "lldiv_t"],
         consts: &["EXIT_*"],
         slibc_consts: &[],
         macros: &[],
@@ -393,6 +632,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "free",
             "posix_memalign",
             "memalign",
+            "aligned_alloc",
             "abort",
             "exit",
             "atexit",
@@ -400,6 +640,24 @@ pub const HEADERS: &[HeaderSpec] = &[
             "setenv",
             "unsetenv",
             "realpath",
+            "abs",
+            "labs",
+            "llabs",
+            "div",
+            "ldiv",
+            "lldiv",
+            "atof",
+            "strtod",
+            "strtof",
+            "strtoll",
+            "strtoull",
+            // The Itanium C++ ABI names these the C library's, and libc++abi
+            // deliberately defines none of them. They are declared here
+            // because that is the header a C++ runtime's own `cxxabi.h`
+            // expects the libc to have them in.
+            "__cxa_atexit",
+            "__cxa_finalize",
+            "__cxa_thread_atexit_impl",
         ],
         extra: &[
             "atoi(s: *const c_char) -> c_int",
@@ -410,7 +668,19 @@ pub const HEADERS: &[HeaderSpec] = &[
             "malloc_usable_size(ptr: *mut c_void) -> size_t",
         ],
         variables: &[],
-        raw: &[],
+        // `long double` has no Rust spelling — it is x87 80-bit here — so
+        // `strtold` is written in assembly and cannot be a contract entry.
+        // libc++ requires it to build.
+        // The one `raw` line in the tree that is a declaration rather than a
+        // macro, so it carries its own linkage: `raw` is emitted ahead of the
+        // header's `extern "C"` block.
+        raw: &[
+            "#ifdef __cplusplus",
+            "extern \"C\"",
+            "#endif",
+            "long double strtold(const char *s, char **endptr);",
+        ],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "stdio.h",
@@ -422,7 +692,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         consts: &[],
         slibc_consts: &["EOF", "_IOFBF", "_IOLBF", "_IONBF"],
         macros: &[],
-        functions: &["rename", "renameat"],
+        functions: &["remove", "rename", "renameat"],
         extra: &[
             "clearerr(stream: *mut FILE)",
             "fclose(stream: *mut FILE) -> c_int",
@@ -478,6 +748,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         variables: &["stdin: *mut FILE", "stdout: *mut FILE", "stderr: *mut FILE"],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "unistd.h",
@@ -559,7 +830,20 @@ pub const HEADERS: &[HeaderSpec] = &[
             "usleep(usec: useconds_t) -> c_int",
         ],
         variables: &["environ"],
-        raw: &[],
+        // The POSIX option macros, which are how a portable program asks what
+        // this system has before it calls anything. Each one below names a
+        // facility that is implemented; an option slibc has not got is absent
+        // rather than defined to -1, which POSIX gives the same meaning.
+        raw: &[
+            "#define _POSIX_VERSION 200809L",
+            "#define _POSIX_THREADS 200809L",
+            "#define _POSIX_TIMERS 200809L",
+            "#define _POSIX_MONOTONIC_CLOCK 200809L",
+            "#define _POSIX_MAPPED_FILES 200809L",
+            "#define _POSIX_MEMORY_PROTECTION 200809L",
+            "#define _POSIX_THREAD_SAFE_FUNCTIONS 200809L",
+        ],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "fcntl.h",
@@ -588,6 +872,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/stat.h",
@@ -616,6 +901,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/file.h",
@@ -629,6 +915,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "dirent.h",
@@ -650,6 +937,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "signal.h",
@@ -694,6 +982,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &["signal(signum: c_int, handler: sighandler_t) -> sighandler_t"],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "time.h",
@@ -714,11 +1003,16 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/time.h",
         summary: "microsecond-resolution time",
-        includes: &["sys/types.h"],
+        // `<time.h>` because POSIX lets a program reach the `CLOCK_*` ids
+        // through this header, and libc++'s `steady_clock` is one that does:
+        // it tests `CLOCK_MONOTONIC` having included only this and
+        // `<unistd.h>`, and takes a `#error` when neither defines it.
+        includes: &["sys/types.h", "time.h"],
         types: &["timeval"],
         consts: &[],
         slibc_consts: &[],
@@ -727,6 +1021,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/select.h",
@@ -740,6 +1035,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/uio.h",
@@ -753,6 +1049,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/mman.h",
@@ -766,6 +1063,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/socket.h",
@@ -823,6 +1121,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/un.h",
@@ -836,6 +1135,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "netinet/in.h",
@@ -858,6 +1158,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "arpa/inet.h",
@@ -878,6 +1179,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "netdb.h",
@@ -891,6 +1193,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "net/if.h",
@@ -904,6 +1207,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/wait.h",
@@ -928,6 +1232,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/resource.h",
@@ -941,6 +1246,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/statvfs.h",
@@ -954,6 +1260,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/statfs.h",
@@ -967,6 +1274,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/utsname.h",
@@ -980,6 +1288,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/random.h",
@@ -993,6 +1302,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/prctl.h",
@@ -1006,6 +1316,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/auxv.h",
@@ -1019,6 +1330,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/syscall.h",
@@ -1032,6 +1344,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sys/ioctl.h",
@@ -1047,6 +1360,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "pwd.h",
@@ -1060,6 +1374,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "sched.h",
@@ -1073,6 +1388,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "pthread.h",
@@ -1086,6 +1402,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "pthread_condattr_t",
             "pthread_rwlock_t",
             "pthread_rwlockattr_t",
+            "pthread_once_t",
         ],
         consts: &["PTHREAD_*"],
         slibc_consts: &[],
@@ -1108,6 +1425,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "pthread_getattr_np",
             "pthread_setname_np",
             "pthread_getname_np",
+            "pthread_once",
             "pthread_key_create",
             "pthread_key_delete",
             "pthread_getspecific",
@@ -1147,6 +1465,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "semaphore.h",
@@ -1160,6 +1479,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "poll.h",
@@ -1173,6 +1493,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "termios.h",
@@ -1198,6 +1519,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         ],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "locale.h",
@@ -1211,6 +1533,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "dlfcn.h",
@@ -1224,6 +1547,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
     HeaderSpec {
         path: "link.h",
@@ -1245,5 +1569,6 @@ pub const HEADERS: &[HeaderSpec] = &[
         extra: &[],
         variables: &[],
         raw: &[],
+        raw_unguarded: &[],
     },
 ];

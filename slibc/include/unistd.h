@@ -9,6 +9,18 @@
 
 #include <sys/types.h>
 
+#define _POSIX_VERSION 200809L
+#define _POSIX_THREADS 200809L
+#define _POSIX_TIMERS 200809L
+#define _POSIX_MONOTONIC_CLOCK 200809L
+#define _POSIX_MAPPED_FILES 200809L
+#define _POSIX_MEMORY_PROTECTION 200809L
+#define _POSIX_THREAD_SAFE_FUNCTIONS 200809L
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define F_OK (0)
 #define R_OK (4)
 #define SEEK_CUR (1)
@@ -97,5 +109,9 @@ long sysconf(int name);
 long syscall(long num, ...);
 unsigned int sleep(unsigned int seconds);
 int usleep(useconds_t usec);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_UNISTD_H */

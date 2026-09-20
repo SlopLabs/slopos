@@ -423,6 +423,21 @@ FONTS_DIR="${REPO_ROOT}/assets/fonts"
 mkdir_p /usr
 mkdir_p /usr/share
 
+# The C++ runtime's license texts, beside the library they cover, for the same
+# reason the fonts below carry theirs. Only the -tests recipes stage them,
+# because only the tests image carries `libc++.so`.
+CXX_LICENSES="${BUILD_DIR}/libc++-licenses"
+if [ -d "$CXX_LICENSES" ]; then
+    mkdir_p /usr/share/licenses
+    mkdir_p /usr/share/licenses/libc++
+    for text in "$CXX_LICENSES"/*; do
+        [ -f "$text" ] || continue
+        fname="$(basename "$text")"
+        install_file "$text" "/usr/share/licenses/libc++/$fname"
+        echo "Installed license: /usr/share/licenses/libc++/$fname"
+    done
+fi
+
 if [ -d "$FONTS_DIR" ]; then
     mkdir_p /usr/share/fonts
 

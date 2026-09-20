@@ -173,6 +173,15 @@ impl Loader {
         index < self.count && self.objects[index].flags & (DSO_USED | DSO_DYING) == DSO_USED
     }
 
+    /// Whether `index` names an object that is still *mapped*, which is a
+    /// weaker question than [`Self::is_live`] and the right one for an
+    /// unwinder: a `dlclose` marks an object dying, then runs its destructors
+    /// with its pages still in place, so a throw from one of them has to find
+    /// frame tables that `is_live` has already stopped admitting.
+    pub fn is_mapped(&self, index: usize) -> bool {
+        index < self.count && self.objects[index].flags & DSO_USED != 0
+    }
+
     pub fn objects_slice(&self) -> &[Dso] {
         &self.objects[..self.count]
     }
@@ -621,7 +630,7 @@ pub unsafe fn run_fini(dso: &Dso) {
     call_hook(dso.fini);
 }
 
-unsafe fn call_hook(addr: usize) {
+pub(crate) unsafe fn call_hook(addr: usize) {
     // A `DT_INIT` an object does not carry reads 0 here; `-1` is what a
     // stripped `DT_*_ARRAY` slot is conventionally filled with.
     if addr == 0 || addr == usize::MAX {

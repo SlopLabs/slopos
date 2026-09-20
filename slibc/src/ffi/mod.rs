@@ -209,6 +209,22 @@ pub unsafe extern "C" fn memalign(align: size_t, size: size_t) -> *mut c_void {
     p as *mut c_void
 }
 
+/// `aligned_alloc(3)`. C11 requires the size to be a multiple of the
+/// alignment; a size that is not is an `EINVAL` refusal rather than a block
+/// whose tail the caller may not touch.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aligned_alloc(align: size_t, size: size_t) -> *mut c_void {
+    if align == 0 || !align.is_power_of_two() || size % align != 0 {
+        errno_set(crate::errno::EINVAL.raw());
+        return core::ptr::null_mut();
+    }
+    let p = heap::memalign(align, size);
+    if p.is_null() {
+        errno_set(ENOMEM.raw());
+    }
+    p as *mut c_void
+}
+
 /// `malloc_usable_size(3)`: the bytes actually available in `ptr`'s block,
 /// which is at least what was asked for.
 #[unsafe(no_mangle)]

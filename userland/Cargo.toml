@@ -260,6 +260,10 @@ path = "src/bin/tests/libc_abi_test.rs"
 name = "dl_test"
 path = "src/bin/tests/dl_test.rs"
 
+[[bin]]
+name = "cxx_test"
+path = "src/bin/tests/cxx_test.rs"
+
 [features]
 default = []
 testbins = []

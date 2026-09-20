@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <sys/time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned long rlim_t;
 struct rlimit {
     rlim_t rlim_cur;
@@ -50,5 +54,9 @@ struct rusage {
 int getrlimit(int resource, struct rlimit *rlim);
 int setrlimit(int resource, const struct rlimit *rlim);
 int getrusage(int resource, struct rusage *usage);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_RESOURCE_H */

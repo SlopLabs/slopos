@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _slibc_dir DIR;
 struct dirent {
     ino_t d_ino;
@@ -32,5 +36,9 @@ struct dirent64 *readdir64(DIR *dirp);
 int closedir(DIR *dirp);
 void rewinddir(DIR *dirp);
 int dirfd(DIR *dirp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_DIRENT_H */

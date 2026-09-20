@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct flock {
     short l_type;
     short l_whence;
@@ -63,5 +67,9 @@ int open(const char *path, int oflag, ...);
 int openat(int dirfd, const char *path, int oflag, ...);
 int creat(const char *path, mode_t mode);
 int fcntl(int fd, int cmd, ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_FCNTL_H */

@@ -7,6 +7,14 @@
 #ifndef _SLIBC_SYS_AUXV_H
 #define _SLIBC_SYS_AUXV_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 unsigned long getauxval(unsigned long type_);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_AUXV_H */

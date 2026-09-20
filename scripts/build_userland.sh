@@ -123,6 +123,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --target "$USERLAND_TARGET" \
         --package slopos-userland \
         --bin dl_test \
+        --bin cxx_test \
         --bin fork_test \
         --bin io_capture_test \
         --bin heap_allocator_test \
@@ -170,6 +171,9 @@ if [ "$TEST_MODE" = "--test" ]; then
 
     if [ -f "$RELEASE_DIR/dl_test" ]; then
         cp "$RELEASE_DIR/dl_test" "$BUILD_DIR/dl_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/cxx_test" ]; then
+        cp "$RELEASE_DIR/cxx_test" "$BUILD_DIR/cxx_test.elf"
     fi
     if [ -f "$RELEASE_DIR/fork_test" ]; then
         cp "$RELEASE_DIR/fork_test" "$BUILD_DIR/fork_test.elf"
@@ -307,7 +311,7 @@ fi
 # archive has to carry (a duplicate lang item for slibc's rlib users, which is
 # why it lives in a wrapper package) rots unobserved.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-RUSTFLAGS="$USERLAND_RUSTFLAGS" \
+RUSTFLAGS="$USERLAND_RUSTFLAGS -C force-unwind-tables" \
 $CARGO +slopos build \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
@@ -336,11 +340,17 @@ echo "C archive built: $RELEASE_DIR/libc.a"
 # `compiler-builtins-mem`: it defines memcpy, memset, memcmp and strlen with
 # hidden visibility, which wins over slibc's own and leaves them out of
 # `.dynsym` — a C program linking libc.so could not call them.
-SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec"
+# `-C force-unwind-tables` because this artifact carries the Level-1 unwinder:
+# `_Unwind_RaiseException` saves its context and looks the resulting return
+# address up first, so the very first frame of every unwind is one of its own.
+# A `panic = abort` Rust artifact emits no `.eh_frame` at all, and without
+# these an exception ends at frame zero with `_URC_END_OF_STACK` — measured,
+# and indistinguishable from a program with no handler.
+SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-tables"
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-Bsymbolic -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
 $CARGO +slopos build \
-    -Zbuild-std=core \
+    -Zbuild-std=core,alloc \
     -Zunstable-options \
     -Zjson-target-spec \
     --target "$USERLAND_TARGET" \
@@ -395,4 +405,65 @@ if [ "$TEST_MODE" = "--test" ]; then
     cp "$RELEASE_DIR/dl_probe" "$BUILD_DIR/dl_probe.elf"
 
     echo "Dynamic probe built: $BUILD_DIR/dl_probe.elf $BUILD_DIR/libdltest.so"
+
+    # The C++ runtime and the three artifacts that prove it works. Cross-built
+    # from this host and never in the guest, and staged only here, because the
+    # shipped appliance root runs no C++ program.
+    "$SCRIPT_DIR/make_slopos_cxx.sh" "$RELEASE_DIR"
+    CXX_DIR="${REPO_ROOT}/third_party/slopos-cxx"
+    cp "$CXX_DIR/lib/libc++.so" "$BUILD_DIR/libc++.so"
+    rm -rf "$BUILD_DIR/libc++-licenses"
+    cp -r "$CXX_DIR/licenses" "$BUILD_DIR/libc++-licenses"
+
+    # The libc++ include directory comes before slibc's: `<cstdlib>` is a
+    # libc++ header that reaches the C one through `#include_next`, and the
+    # other order makes it find slibc's `<stdlib.h>` first and stop with a
+    # diagnostic about exactly this.
+    CXX_COMPILE=(
+        "${CLANGXX:-clang++}"
+        "--target=${USERLAND_TRIPLE}"
+        -nostdlibinc
+        -nostdinc++
+        -isystem "$CXX_DIR/include/c++/v1"
+        -isystem "${REPO_ROOT}/slibc/include"
+        -std=c++20
+        -O2
+    )
+    # `--eh-frame-hdr` on both: the unwinder's frame finder looks for a
+    # `PT_GNU_EH_FRAME` per object, and an object without one is one a throw
+    # cannot unwind out of. `--export-dynamic` on the probe is what lets the
+    # loaded object bind back to the type it throws.
+    CXX_LINK=(
+        --eh-frame-hdr
+        -znow
+        -zrelro
+        -L "$RELEASE_DIR"
+        -lc
+        -L "$CXX_DIR/lib"
+        -lc++
+    )
+
+    "${CXX_COMPILE[@]}" -fPIC -c "${REPO_ROOT}/userland/cxxtest/lib.cpp" \
+        -o "$BUILD_DIR/cxxtest-lib.o"
+    "${CXX_COMPILE[@]}" -c "${REPO_ROOT}/userland/cxxtest/probe.cpp" \
+        -o "$BUILD_DIR/cxxtest-probe.o"
+
+    "${LD_LLD:-ld.lld}" -shared -o "$BUILD_DIR/libcxxtest.so" "$BUILD_DIR/cxxtest-lib.o" \
+        --soname=libcxxtest.so "${CXX_LINK[@]}"
+    "${LD_LLD:-ld.lld}" -o "$BUILD_DIR/cxx_probe.elf" "$CRT0_OBJ" "$BUILD_DIR/cxxtest-probe.o" \
+        --image-base=0x400000 --dynamic-linker=/lib/ld-slopos.so.1 --export-dynamic \
+        "${CXX_LINK[@]}"
+
+    # The same runtime as archives. `--start-group` because libc++abi calls
+    # back into libc++ and `libc.a` carries the unwinder both of them call, so
+    # no single order of three archives resolves.
+    "${CXX_COMPILE[@]}" -c "${REPO_ROOT}/userland/cxxtest/static_probe.cpp" \
+        -o "$BUILD_DIR/cxxtest-static-probe.o"
+    "${LD_LLD:-ld.lld}" -static -o "$BUILD_DIR/cxx_static_probe.elf" \
+        "$CRT0_OBJ" "$BUILD_DIR/cxxtest-static-probe.o" --eh-frame-hdr \
+        --image-base=0x400000 \
+        -L "$CXX_DIR/lib" -L "$RELEASE_DIR" --start-group -lc++ -lc --end-group
+
+    echo "C++ probe built: $BUILD_DIR/cxx_probe.elf $BUILD_DIR/libcxxtest.so" \
+        "$BUILD_DIR/cxx_static_probe.elf"
 fi

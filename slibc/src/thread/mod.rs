@@ -6,6 +6,7 @@ pub(crate) mod futex;
 pub mod join;
 pub mod keys;
 pub mod mutex;
+pub mod once;
 pub mod rwlock;
 #[allow(dead_code)]
 pub(crate) mod shim;
@@ -57,6 +58,7 @@ pub use mutex::{
     PTHREAD_MUTEX_ERRORCHECK, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_NORMAL,
     PTHREAD_MUTEX_RECURSIVE, pthread_mutex_t,
 };
+pub use once::pthread_once;
 pub use rwlock::{PTHREAD_RWLOCK_INITIALIZER, pthread_rwlock_t};
 
 impl pthread_attr_t {

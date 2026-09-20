@@ -253,6 +253,8 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
 
     crate::env::environ = aux.envp as *mut *mut u8;
     crate::stdio::streams::stdio_init();
+    // Before the first constructor: one of them may throw.
+    crate::unwind::init();
 
     drop(guard);
     // Constructors run with the lock released: one of them may `dlopen`.

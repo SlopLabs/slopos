@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <sys/time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     unsigned long fds_bits[16];
 } fd_set;
@@ -30,5 +34,9 @@ typedef struct {
     } while (0)
 
 int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *errorfds, struct timeval *timeout);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_SELECT_H */
