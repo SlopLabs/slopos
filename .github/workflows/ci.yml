@@ -130,10 +130,10 @@ jobs:
           just _build-run-tests
           builddir/run_tests --raw --no-color 2>&1 | tee ci-test.log
 
-      # Again, and this time with a `libc.so` on disk: the gates step above runs
-      # before the userland is built, so the half of this check that matters —
-      # every symbol `libc++.so` needs, still exported by the C library — is
-      # skipped there.
+      # Again, and this time with the cross-built runtime staged: the tests
+      # build above is the only one that refreshes `third_party/slopos-cxx`,
+      # so the gates step grades the pin alone and the stamp and symbol
+      # halves are graded here.
       - name: C++ runtime against the C library it links
         run: scripts/check_cxx_pin.sh
 

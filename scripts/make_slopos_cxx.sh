@@ -109,8 +109,10 @@ stamp_want() {
         # built the runtime they link.
         "$CLANGXX" --version | sed -n 1p
         # This file, because the cmake line below decides what is in the
-        # archives as much as the pin does.
-        sha256sum "${BASH_SOURCE[0]}"
+        # archives as much as the pin does. Contents only: `sha256sum FILE`
+        # prints the path it was given, which would make the stamp depend on
+        # whether the caller invoked this script relatively or absolutely.
+        sha256sum <"${BASH_SOURCE[0]}"
         # Names as well as contents: two headers with swapped bodies, or a
         # header added empty, leave a content-only digest unchanged.
         (cd "$REPO_ROOT/slibc/include" && find . -type f | sort | xargs sha256sum)

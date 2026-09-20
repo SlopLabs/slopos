@@ -21,11 +21,12 @@
 #      is the measurement Workstream 1.1 produced, kept as a check: every
 #      symbol the C++ runtime needs from the C library, still there.
 #
-# The first is unconditional. The other two need the tree to have been built
-# *in this checkout*, which a `builddir/libc.so` is what says: a CI job
-# restores `third_party/slopos-cxx` from a cache before the step that would
-# refresh it, and a stamp failure there is a red run no later step can repair.
-# So a checkout that has never built the userland passes on the pin alone.
+# The first is unconditional. The other two need the runtime to have been
+# cross-built here, which the staged `builddir/libc++.so` says and
+# `builddir/libc.so` does not: the shipped userland build stages that one
+# too, two steps before the tests build that refreshes the runtime, so
+# keying on it graded a cache-restored tree at a point where failing is a
+# red run no later step can repair. `--libc` grades regardless.
 #
 # `MIN_UNDEFINED` is the floor that stops a measurement which stopped
 # happening from reading as one that got free: a truncated `libc++.so`, or an
@@ -171,15 +172,13 @@ check_tree() {
     # and a `find` picks whichever readdir reaches first — which can be a
     # stale one that still defines a symbol the shipped library has lost.
     local libc="${libc_override:-$root/builddir/libc.so}"
-    if [ ! -f "$libc" ]; then
-        echo "$SELF: OK — pin consistent; no libc.so built to check the runtime against"
+    if [ -n "$libc_override" ]; then
+        [ -f "$libc" ] || fail "no libc.so at $libc"
+    elif [ ! -f "$root/builddir/libc++.so" ] || [ ! -f "$libc" ]; then
+        echo "$SELF: OK — pin consistent; the tests userland has staged no runtime here"
         return 0
     fi
 
-    # Checked here rather than beside the artifact list, because a `libc.so`
-    # on disk is what says the userland has been built in this tree: a CI job
-    # restores `third_party/slopos-cxx` from a cache *before* the build that
-    # would refresh it, and failing there is a red run no later step can repair.
     compare_stamp "$root/scripts/make_slopos_cxx.sh" "$out"
 
     command -v nm >/dev/null 2>&1 || fail "nm is required to check the runtime's undefined symbols"
@@ -242,6 +241,37 @@ EOF
         fail "--self-test: a tested major below the floor was accepted"
     fi
     sed -i 's|^clang_major_tested=.*|clang_major_tested=18 22|' "$tmp/toolchain/cxx/PIN"
+
+    # The precondition, driven through `check_tree` itself: the shape that
+    # shipped broken is the whole gate's, a cache-restored tree with only
+    # the shipped `libc.so` beside it.
+    local cached="$tmp/third_party/slopos-cxx"
+    mkdir -p "$cached/lib" "$cached/include/c++/v1" "$cached/licenses" \
+        "$tmp/builddir" "$tmp/scripts"
+    for artifact in lib/libc++.so lib/libc++.a include/c++/v1/exception \
+        licenses/libcxx-LICENSE.TXT licenses/libcxxabi-LICENSE.TXT; do
+        : >"$cached/$artifact"
+    done
+    echo stale >"$cached/.slopos-stamp"
+    printf '#!/bin/sh\necho fresh\n' >"$tmp/scripts/make_slopos_cxx.sh"
+    chmod +x "$tmp/scripts/make_slopos_cxx.sh"
+    (check_tree "$tmp" >/dev/null 2>&1) ||
+        fail "--self-test: a cached tree with nothing staged was graded"
+    : >"$tmp/builddir/libc.so"
+    (check_tree "$tmp" >/dev/null 2>&1) ||
+        fail "--self-test: a cached tree was graded off the shipped libc.so alone"
+    : >"$tmp/builddir/libc++.so"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a staged runtime built from other inputs was accepted"
+    fi
+    rm "$tmp/builddir/libc++.so"
+    if (check_tree "$tmp" "$tmp/builddir/libc.so" >/dev/null 2>&1); then
+        fail "--self-test: an explicit libc did not reach the stamp check"
+    fi
+    if (check_tree "$tmp" "$tmp/builddir/absent.so" >/dev/null 2>&1); then
+        fail "--self-test: an explicit libc naming no file was reported OK"
+    fi
+    rm -rf "$cached" "$tmp/builddir"
 
     # The stamp half, driven with a maker that states an answer, because the
     # cases above all return before reaching it.
