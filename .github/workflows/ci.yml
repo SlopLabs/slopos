@@ -48,8 +48,11 @@ jobs:
 
       # clang/cmake/ninja/lld are the C++ runtime's cross-build, which the
       # tests image needs: `libc++.so` and the two fixtures that prove a C++
-      # exception crosses a `dlopen` boundary. `toolchain/cxx/PIN` names the
-      # clang major, and `scripts/make_slopos_cxx.sh` refuses another one.
+      # exception crosses a `dlopen` boundary. `toolchain/cxx/PIN` states a
+      # *floor* (`clang_major_min`) so a rolling host can build it at all, and
+      # the env vars below pin CI to the sources' own major regardless of what
+      # the runner image happens to default to — `scripts/cxx_host_tools.sh`
+      # treats them as an override that never falls back.
       - name: Install system dependencies
         run: |
           sudo apt-get update

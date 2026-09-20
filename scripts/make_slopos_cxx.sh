@@ -16,9 +16,10 @@ set -euo pipefail
 #   lib/libc++.a      the same two archives, for a static C++ program
 #   licenses/         both projects' license texts, to ship beside the object
 #
-# Idempotent: a stamp over toolchain/cxx/PIN, this file and slibc/include makes
-# a warm run a few milliseconds. `just clean` does not remove the result; the
-# build is minutes and the inputs are pinned.
+# Idempotent: a stamp over toolchain/cxx/PIN, the host compiler's version,
+# this file and slibc/include makes a warm run a few milliseconds. `just
+# clean` does not remove the result; the build is minutes and the inputs are
+# pinned.
 #
 # Two things about this build are not upstream's defaults and both are load
 # bearing.
@@ -65,8 +66,7 @@ pin_value() {
 LLVM_VERSION="$(pin_value llvm_version)"
 LLVM_URL="${LLVM_URL:-$(pin_value llvm_url)}"
 LLVM_SHA256="$(pin_value llvm_sha256)"
-CLANG_MAJOR="$(pin_value clang_major)"
-[ -n "$LLVM_VERSION" ] && [ -n "$LLVM_SHA256" ] && [ -n "$CLANG_MAJOR" ] ||
+[ -n "$LLVM_VERSION" ] && [ -n "$LLVM_SHA256" ] ||
     die "toolchain/cxx/PIN is missing a pinned value"
 
 TARGET="x86_64-unknown-slopos"
@@ -77,37 +77,23 @@ SOURCE="$REPO_ROOT/third_party/llvm-project-${LLVM_VERSION}.src"
 BUILD="${BUILD_DIR:-$REPO_ROOT/builddir}/cxx-build"
 
 # ---------------------------------------------------------------------------
-# Host tools. Named rather than searched for, because a different clang is a
-# different C++ ABI and a silently different answer.
-#
-# Checked ahead of the stamp, so a warm tree is held to the pin too: the
-# compiler that built `third_party/slopos-cxx` is not the only one that has to
-# match it — `build_userland.sh` compiles the C++ probe against these headers
-# with whatever `clang++` is on PATH now.
+# Host tools. Resolved by `cxx_host_tools.sh` against the pin's floor, and
+# resolved for `--print-stamp` too: the compiler is an input to the artifact,
+# so the stamp names it and a host compiler upgrade rebuilds the runtime
+# rather than leaving one object built by a compiler that is no longer here.
 # ---------------------------------------------------------------------------
-check_host_tools() {
-CLANG="${CLANG:-clang}"
-CLANGXX="${CLANGXX:-clang++}"
-LD_LLD="${LD_LLD:-ld.lld}"
-LLVM_AR="${LLVM_AR:-llvm-ar}"
-for tool in "$CLANG" "$CLANGXX" "$LD_LLD" "$LLVM_AR" cmake ninja; do
-    command -v "$tool" >/dev/null 2>&1 || die "$tool is required to cross-build the C++ runtime"
-done
-# The linker and the archiver are pinned beside the compiler, not just found:
-# they are what actually produce `libc++.so`, and a host with clang 18 and lld
-# 15 on PATH would otherwise pass the compiler check and link the runtime with
-# a mismatched linker.
-for tool in "$CLANGXX" "$LD_LLD" "$LLVM_AR"; do
-    have="$("$tool" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
-    have="${have%%.*}"
-    [ "$have" = "$CLANG_MAJOR" ] ||
-        die "toolchain/cxx/PIN wants LLVM $CLANG_MAJOR, $tool reports ${have:-unknown}
-       libc++ is one project with the compiler that builds it. Install the
-       matching LLVM $CLANG_MAJOR tools (CLANG/CLANGXX/LD_LLD/LLVM_AR override
-       the names), or re-pin against what is here."
-done
-}
-[ "$PRINT_STAMP" -eq 1 ] || check_host_tools
+# Assigned before it is eval'd: `eval "$(cmd)"` discards the substitution's
+# exit status, so a host with no usable toolchain would reach the stamp with
+# every tool variable unset.
+CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
+eval "$CXX_TOOLS"
+
+if [ "$PRINT_STAMP" -eq 0 ]; then
+    for tool in cmake ninja; do
+        command -v "$tool" >/dev/null 2>&1 ||
+            die "$tool is required to cross-build the C++ runtime"
+    done
+fi
 
 # The pin and the C headers, and deliberately not `libc.so` itself: the
 # runtime is *compiled* against the headers and only *linked* against the
@@ -117,6 +103,11 @@ done
 stamp_want() {
     {
         cat "$PIN"
+        # The compiler, by its own version string: two hosts at different
+        # majors produce different objects from these same sources, and the
+        # probes `build_userland.sh` compiles must come from the one that
+        # built the runtime they link.
+        "$CLANGXX" --version | sed -n 1p
         # This file, because the cmake line below decides what is in the
         # archives as much as the pin does.
         sha256sum "${BASH_SOURCE[0]}"
@@ -274,4 +265,4 @@ for project in libcxx libcxxabi; do
 done
 
 echo "$WANT" >"$STAMP"
-echo "$SELF: built third_party/slopos-cxx from llvm-project $LLVM_VERSION with clang $CLANG_MAJOR (stamp $WANT)"
+echo "$SELF: built third_party/slopos-cxx from llvm-project $LLVM_VERSION with LLVM $CXX_HOST_MAJOR (stamp $WANT)"

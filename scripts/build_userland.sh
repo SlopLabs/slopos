@@ -35,6 +35,16 @@ BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 # Install the pinned channel and materialise the owned `slopos` sysroot.
 "$SCRIPT_DIR/ensure_toolchain.sh"
 
+# The C++ runtime's host toolchain, resolved before any Rust builds: a host
+# with no usable LLVM would otherwise learn about it a whole userland later.
+# The probes are then compiled by the toolchain that built the runtime they
+# link, which on a host with several majors installed is not the unsuffixed
+# one.
+if [ "$TEST_MODE" = "--test" ]; then
+    CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
+    eval "$CXX_TOOLS"
+fi
+
 mkdir -p "$BUILD_DIR"
 
 # crt0.o, the C-program entry object: `_start` lives in the `slopos-crt0`
@@ -409,6 +419,7 @@ if [ "$TEST_MODE" = "--test" ]; then
     # The C++ runtime and the three artifacts that prove it works. Cross-built
     # from this host and never in the guest, and staged only here, because the
     # shipped appliance root runs no C++ program.
+    # `CLANG*`/`LD_LLD` are the ones resolved at the top of this script.
     "$SCRIPT_DIR/make_slopos_cxx.sh" "$RELEASE_DIR"
     CXX_DIR="${REPO_ROOT}/third_party/slopos-cxx"
     cp "$CXX_DIR/lib/libc++.so" "$BUILD_DIR/libc++.so"
@@ -420,7 +431,7 @@ if [ "$TEST_MODE" = "--test" ]; then
     # other order makes it find slibc's `<stdlib.h>` first and stop with a
     # diagnostic about exactly this.
     CXX_COMPILE=(
-        "${CLANGXX:-clang++}"
+        "$CLANGXX"
         "--target=${USERLAND_TRIPLE}"
         -nostdlibinc
         -nostdinc++
@@ -448,9 +459,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     "${CXX_COMPILE[@]}" -c "${REPO_ROOT}/userland/cxxtest/probe.cpp" \
         -o "$BUILD_DIR/cxxtest-probe.o"
 
-    "${LD_LLD:-ld.lld}" -shared -o "$BUILD_DIR/libcxxtest.so" "$BUILD_DIR/cxxtest-lib.o" \
+    "$LD_LLD" -shared -o "$BUILD_DIR/libcxxtest.so" "$BUILD_DIR/cxxtest-lib.o" \
         --soname=libcxxtest.so "${CXX_LINK[@]}"
-    "${LD_LLD:-ld.lld}" -o "$BUILD_DIR/cxx_probe.elf" "$CRT0_OBJ" "$BUILD_DIR/cxxtest-probe.o" \
+    "$LD_LLD" -o "$BUILD_DIR/cxx_probe.elf" "$CRT0_OBJ" "$BUILD_DIR/cxxtest-probe.o" \
         --image-base=0x400000 --dynamic-linker=/lib/ld-slopos.so.1 --export-dynamic \
         "${CXX_LINK[@]}"
 
@@ -459,7 +470,7 @@ if [ "$TEST_MODE" = "--test" ]; then
     # no single order of three archives resolves.
     "${CXX_COMPILE[@]}" -c "${REPO_ROOT}/userland/cxxtest/static_probe.cpp" \
         -o "$BUILD_DIR/cxxtest-static-probe.o"
-    "${LD_LLD:-ld.lld}" -static -o "$BUILD_DIR/cxx_static_probe.elf" \
+    "$LD_LLD" -static -o "$BUILD_DIR/cxx_static_probe.elf" \
         "$CRT0_OBJ" "$BUILD_DIR/cxxtest-static-probe.o" --eh-frame-hdr \
         --image-base=0x400000 \
         -L "$CXX_DIR/lib" -L "$RELEASE_DIR" --start-group -lc++ -lc --end-group

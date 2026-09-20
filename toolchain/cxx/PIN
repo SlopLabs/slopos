@@ -12,7 +12,16 @@
 llvm_version=18.1.8
 llvm_url=https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz
 llvm_sha256=0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a
-# The host compiler the runtime is built with. Its major must match the
-# sources': libc++ is one project with the compiler, and a mismatched pair is
-# a configuration upstream does not test.
-clang_major=18
+# The host LLVM the runtime is cross-built with. A *floor*, not an equality:
+# the pinned sources fix the C++ ABI and the libc symbols `libc++.so` needs,
+# and the host compiler only codegens them, so a newer major is accepted while
+# an older one is not. Demanding the sources' own major made the tests image
+# unbuildable on every rolling distribution — no Linux ships LLVM 18 by
+# default any more and Arch packages no versioned llvm18 at all.
+#
+# `clang_major_tested` is what has actually built a green `just test`; a major
+# outside it builds with a note, because the C++ probes on the tests image are
+# the functional gate (`cxx_test` throws across a `dlopen` boundary and
+# `cxx_static_probe` links the archives), not this line.
+clang_major_min=18
+clang_major_tested=18 22

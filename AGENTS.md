@@ -41,11 +41,12 @@ find "$(rustc +"$ch" --print sysroot)/lib/rustlib/src" -name '*slopos*' -delete
 ```
 
 **The C++ runtime is cross-built and test-only.** `x86_64-unknown-slopos` has
-a C++ standard library: LLVM's `libc++` and `libc++abi`, cross-built by the
-host clang whose major `toolchain/cxx/PIN` names, linked whole-archived into a
+a C++ standard library: LLVM's `libc++` and `libc++abi`, cross-built from the
+llvm-project release `toolchain/cxx/PIN` names, linked whole-archived into a
 single `third_party/slopos-cxx/lib/libc++.so`. `scripts/make_slopos_cxx.sh`
-builds it (idempotent: a stamp over the pin, the build script and
-`slibc/include` makes a warm run milliseconds), `scripts/check_cxx_pin.sh`
+builds it (idempotent: a stamp over the pin, the host compiler's version, the
+build script and `slibc/include` makes a warm run milliseconds),
+`scripts/check_cxx_pin.sh`
 gates it, and `scripts/build_userland.sh --test` is the only caller — the
 shipped appliance root runs no C++ program, so the runtime is on the tests
 image only, beside `cxx_probe` and `libcxxtest.so`, whose `cxx_test` proves a
@@ -57,13 +58,38 @@ process-wide: two instances of it in one process is a throw that cannot be
 caught across the boundary between them.
 
 That build is the one place SlopOS needs host tools beyond rust and QEMU:
-`clang`, `clang++`, `ld.lld` and `llvm-ar` at the pinned major, plus `cmake`
-and `ninja`. `CLANG`/`CLANGXX`/`LD_LLD`/`LLVM_AR` override the names, which is
-how CI points them at a distribution's `-18` suffixes. The sources are the
-pinned `llvm-project` release tarball, fetched into `third_party/` on the first
+`clang`, `clang++`, `ld.lld` and `llvm-ar` of **one** LLVM major at or above
+`clang_major_min`, plus `cmake` and `ninja`. The floor is a floor and not an
+equality because no Linux ships LLVM 18 by default any more — Arch is at 22
+and packages no versioned `llvm18` in either the repositories or the AUR,
+Fedora is at 20 with an `llvm18` compat tree, Debian 13 at 19, Ubuntu 24.04 at
+18 — and the two pins protect different things: the *sources* fix the C++ ABI
+and the libc symbols `libc++.so` ends up needing, which is slibc's side of the
+contract, while the host compiler only codegens them. `clang_major_tested`
+records the majors that have built a green `just test` (18 in CI, 22 on a
+rolling host); a major outside it builds with a note on stderr, because
+`cxx_test` and `cxx_static_probe` on the tests image are the functional gate,
+not a version string.
+
+`scripts/cxx_host_tools.sh` resolves the four tools and is the only thing that
+decides: the sources' own major wherever it is installed
+(`clang-18`, apt.llvm.org's `/usr/lib/llvm-18/bin`, Fedora's
+`/usr/lib64/llvm18/bin`) first, since that is the pairing upstream tests, then
+the unsuffixed default, then any other installed major above the floor. All
+four must report the same major — a host with clang 18 and lld 22 on PATH
+would otherwise link the runtime with a mismatched linker — and
+`build_userland.sh` compiles the C++ probes with the toolchain that answered,
+not with whatever `clang++` resolves to. `CLANG`/`CLANGXX`/`LD_LLD`/`LLVM_AR`
+override the names and never fall back, which is how CI pins itself to a
+distribution's `-18` suffixes. A host compiler upgrade changes the stamp and
+rebuilds the runtime rather than leaving one built by a compiler that is no
+longer installed.
+
+The sources are the pinned `llvm-project` release tarball, fetched into
+`third_party/` on the first
 build; an offline checkout pre-populates that file or points `LLVM_URL` at a
 local copy, exactly as `LIMINE_URL` works for Limine. `just distclean` removes
-the extracted 91 MB source tree; nothing removes `third_party/slopos-cxx`,
+the extracted 83 MB source tree; nothing removes `third_party/slopos-cxx`,
 because the build is minutes and its inputs are pinned.
 
 **The unwinder is not test-only.** `libc.so` and `libc.a` supply the Level-1

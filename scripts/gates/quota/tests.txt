@@ -393,6 +393,32 @@
 #     54 131/62 273/53 871 inside 65 536, `residentpages` 772 exact,
 #     `process` 14, `diskblocks` 6 and `pinnedbytes` 4.
 
+# 2026-09-20, the host LLVM floor (`toolchain/cxx/PIN`'s `clang_major_min`).
+# Two rows moved over three fresh runs of one ISO, and one of them for the
+# first time for a reason that is not in this tree.
+#   post-userland-tests `pinnedbytes` 98 -> 100. `libc++.so` is 781 768 bytes
+#     built by LLVM 22 where it was 776 056 built by 18, and this row counts
+#     the page-cache pages a mapping holds: 5712 more bytes is two more pages.
+#     100 on all three runs, so the cap stays exact.
+#     What this row no longer is, is host-independent — the cross-built C++
+#     runtime's size is a function of the compiler that built it, and the pin
+#     now states a floor rather than one major. CI builds it at 18 and reports
+#     98, inside this cap; a machine on a newer LLVM may report more, and the
+#     remedy there is a re-measurement rather than margin invented here.
+#   post-userland-tests `residentpages` 157348 -> 160371, and **not** because
+#     of the compiler: 154611/156262/157491 over the three runs, a spread of
+#     2880 against a change worth at most the two pages above. The cap is the
+#     maximum plus that spread, which is now the widest this row has been
+#     observed with (2756 previously, 2026-09-16) — the row's dominant term
+#     stays which of the phase's short-lived children are unreaped at the
+#     dump, and three runs of one ISO understate it.
+#   Nothing else left its cap on those runs: post-userland `pages`
+#     1 870 649/1 889 593/1 871 771 inside 1 977 053, `kernelmeta`
+#     9361/9293/9455 inside 10 035, `diskblocks` 3297 inside 3658,
+#     `process` 254, `fdslot` 256, `objectrow` 257, `task` 6, `custody` 8;
+#     boot `kernelmeta` 1706 inside 1756; post-kernel-tests `residentpages`
+#     772 exact and `pinnedbytes` 4.
+
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
@@ -426,9 +452,9 @@ post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
-post-userland-tests	pinnedbytes	98
+post-userland-tests	pinnedbytes	100
 post-userland-tests	process	254
-post-userland-tests	residentpages	157348
+post-userland-tests	residentpages	160371
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

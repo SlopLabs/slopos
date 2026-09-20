@@ -107,14 +107,17 @@ check_tree() {
     local pin="$root/toolchain/cxx/PIN"
     [ -f "$pin" ] || fail "missing toolchain/cxx/PIN"
 
-    local version url sha clang
+    local version url sha min tested major
     version="$(read_pin "$pin" llvm_version)"
     url="$(read_pin "$pin" llvm_url)"
     sha="$(read_pin "$pin" llvm_sha256)"
-    clang="$(read_pin "$pin" clang_major)"
+    min="$(read_pin "$pin" clang_major_min)"
+    tested="$(read_pin "$pin" clang_major_tested)"
     [ -n "$version" ] || fail "toolchain/cxx/PIN has no llvm_version"
     [ -n "$url" ] || fail "toolchain/cxx/PIN has no llvm_url"
-    [ -n "$clang" ] || fail "toolchain/cxx/PIN has no clang_major"
+    case "$min" in
+        '' | *[!0-9]*) fail "toolchain/cxx/PIN has no numeric clang_major_min" ;;
+    esac
     case "$sha" in
         [0-9a-f]*) [ "${#sha}" -eq 64 ] || fail "llvm_sha256 is not a sha256" ;;
         *) fail "toolchain/cxx/PIN has no llvm_sha256" ;;
@@ -123,6 +126,24 @@ check_tree() {
         *"$version"*) ;;
         *) fail "llvm_url does not name the pinned version $version" ;;
     esac
+    # The floor is the sources' own major, never a later one: a floor above
+    # the sources would make *every* build a skewed one, which is the
+    # configuration the tested list exists to keep track of rather than the
+    # one to demand.
+    [ "$min" = "${version%%.*}" ] ||
+        fail "clang_major_min ($min) is not llvm_version's major (${version%%.*})"
+    [ -n "$tested" ] || fail "toolchain/cxx/PIN has no clang_major_tested"
+    case " $tested " in
+        *" $min "*) ;;
+        *) fail "clang_major_tested ($tested) does not include the floor $min" ;;
+    esac
+    for major in $tested; do
+        case "$major" in
+            '' | *[!0-9]*) fail "clang_major_tested has a non-numeric entry: $major" ;;
+        esac
+        [ "$major" -ge "$min" ] ||
+            fail "clang_major_tested names $major, below the floor $min"
+    done
 
     local tarball="$root/third_party/llvm-project-${version}.src.tar.xz"
     if [ -f "$tarball" ]; then
@@ -169,7 +190,7 @@ check_tree() {
     local count
     count="$(compare_symbols "$work/undefined" "$work/defined")"
     rm -rf "$work"
-    echo "$SELF: OK — llvm-project $version, clang $clang; $count undefined symbols, all in $(basename "$libc")"
+    echo "$SELF: OK — llvm-project $version, host LLVM >= $min (tested: $tested); $count undefined symbols, all in $(basename "$libc")"
 }
 
 self_test() {
@@ -183,7 +204,8 @@ self_test() {
 llvm_version=18.1.8
 llvm_url=https://example.invalid/llvm-project-17.0.1.src.tar.xz
 llvm_sha256=0000000000000000000000000000000000000000000000000000000000000000
-clang_major=18
+clang_major_min=18
+clang_major_tested=18 22
 EOF
     if (check_tree "$tmp" >/dev/null 2>&1); then
         fail "--self-test: a pin whose URL names another release was accepted"
@@ -201,6 +223,25 @@ EOF
     rm "$tmp/third_party/llvm-project-18.1.8.src.tar.xz"
     (check_tree "$tmp" >/dev/null 2>&1) ||
         fail "--self-test: a consistent pin with nothing built was rejected"
+
+    # A floor above the sources' own major: every build would then be a
+    # skewed one, which is not a thing this pin may ask for.
+    sed -i 's|^clang_major_min=18|clang_major_min=19|' "$tmp/toolchain/cxx/PIN"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a floor above the pinned sources' major was accepted"
+    fi
+    sed -i 's|^clang_major_min=19|clang_major_min=18|' "$tmp/toolchain/cxx/PIN"
+
+    # A tested list that does not include the major CI builds with.
+    sed -i 's|^clang_major_tested=.*|clang_major_tested=22|' "$tmp/toolchain/cxx/PIN"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a tested list missing the floor was accepted"
+    fi
+    sed -i 's|^clang_major_tested=.*|clang_major_tested=18 17|' "$tmp/toolchain/cxx/PIN"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a tested major below the floor was accepted"
+    fi
+    sed -i 's|^clang_major_tested=.*|clang_major_tested=18 22|' "$tmp/toolchain/cxx/PIN"
 
     # The stamp half, driven with a maker that states an answer, because the
     # cases above all return before reaching it.
