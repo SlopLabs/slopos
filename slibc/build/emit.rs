@@ -12,6 +12,66 @@ use crate::ctype;
 use crate::ctype::Types;
 use crate::decls::HeaderSpec;
 
+/// Identifiers C accepts and C++ reserves. A typedef named one of these is
+/// emitted for C only; a parameter named one of these is a generation error,
+/// because the fix belongs at the declaration rather than in a rename the
+/// header would then disagree with.
+const CXX_KEYWORDS: &[&str] = &[
+    "and",
+    "and_eq",
+    "bitand",
+    "bitor",
+    "bool",
+    "catch",
+    "char16_t",
+    "char32_t",
+    "char8_t",
+    "class",
+    "compl",
+    "concept",
+    "const_cast",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "decltype",
+    "delete",
+    "dynamic_cast",
+    "explicit",
+    "export",
+    "false",
+    "friend",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "not",
+    "not_eq",
+    "nullptr",
+    "operator",
+    "or",
+    "or_eq",
+    "private",
+    "protected",
+    "public",
+    "reinterpret_cast",
+    "requires",
+    "static_assert",
+    "static_cast",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "true",
+    "try",
+    "typeid",
+    "typename",
+    "using",
+    "virtual",
+    "wchar_t",
+    "xor",
+    "xor_eq",
+];
+
 /// A type the headers can define.
 pub enum TypeDef<'a> {
     Alias {
@@ -69,11 +129,22 @@ impl World<'_> {
             }
         }
 
+        // Ahead of the linkage block, not inside it: `raw` carries macros,
+        // typedefs and `#include_next`, and a header reached through one of
+        // those would have every declaration in it given C linkage.
         if !spec.raw.is_empty() {
             out.push('\n');
             for line in spec.raw {
                 let _ = writeln!(out, "{line}");
             }
+        }
+
+        // Only what C++ would otherwise mangle needs the linkage block; a
+        // header of typedefs and macros gets an empty one otherwise.
+        let declares_symbols =
+            !spec.functions.is_empty() || !spec.extra.is_empty() || !spec.variables.is_empty();
+        if declares_symbols {
+            out.push_str("\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n");
         }
 
         if !spec.types.is_empty() {
@@ -181,7 +252,17 @@ impl World<'_> {
             }
         }
 
+        if declares_symbols {
+            out.push_str("\n#ifdef __cplusplus\n}\n#endif\n");
+        }
         let _ = writeln!(out, "\n#endif /* {guard} */");
+
+        if !spec.raw_unguarded.is_empty() {
+            out.push('\n');
+            for line in spec.raw_unguarded {
+                let _ = writeln!(out, "{line}");
+            }
+        }
         Ok(out)
     }
 
@@ -221,12 +302,29 @@ impl World<'_> {
                     .types
                     .declare(underlying, name)
                     .map_err(|err| format!("typedef `{name}`: {err}"))?;
-                let _ = writeln!(out, "typedef {declaration};");
+                if CXX_KEYWORDS.contains(name) {
+                    let _ = writeln!(out, "#ifndef __cplusplus");
+                    let _ = writeln!(out, "typedef {declaration};");
+                    let _ = writeln!(out, "#endif");
+                } else {
+                    let _ = writeln!(out, "typedef {declaration};");
+                }
             }
             TypeDef::Opaque(name) => {
                 let _ = writeln!(out, "typedef struct _slibc_{} {name};", name.to_lowercase());
             }
             TypeDef::Struct(item) => {
+                if let Some(field) = item
+                    .fields
+                    .iter()
+                    .find(|field| CXX_KEYWORDS.contains(&field.name.as_str()))
+                {
+                    return Err(format!(
+                        "`{}` has a field named `{}`, which C++ reserves; rename it at the \
+                         declaration",
+                        item.name, field.name
+                    ));
+                }
                 let typedef = Types::is_typedef_shaped(&item.name);
                 if typedef {
                     let _ = writeln!(out, "typedef struct {{");
@@ -263,8 +361,21 @@ impl World<'_> {
     }
 
     fn prototype(&self, signature: &Signature) -> Result<String, String> {
+        if CXX_KEYWORDS.contains(&signature.name.as_str()) {
+            return Err(format!(
+                "`{}` is an entry point named with a C++ keyword",
+                signature.name
+            ));
+        }
         let mut params: Vec<String> = Vec::new();
         for param in &signature.params {
+            if CXX_KEYWORDS.contains(&param.name.as_str()) {
+                return Err(format!(
+                    "`{}` names a parameter `{}`, which C++ reserves; rename it at the \
+                     declaration",
+                    signature.name, param.name
+                ));
+            }
             params.push(
                 self.types
                     .declare(&param.ty, &param.name)

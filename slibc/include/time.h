@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct timespec {
     time_t tv_sec;
     long tv_nsec;
@@ -43,5 +47,9 @@ int clock_getres(clockid_t clk_id, struct timespec *tp);
 int clock_nanosleep(clockid_t clk_id, int flags, const struct timespec *rqtp, struct timespec *rmtp);
 int nanosleep(const struct timespec *rqtp, struct timespec *rmtp);
 time_t time(time_t *tloc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_TIME_H */

@@ -23,4 +23,4 @@ doctest = false
 workspace = true
 
 [dependencies]
-slopos-slibc = { workspace = true }
+slopos-slibc = { workspace = true, features = ["unwinder"] }

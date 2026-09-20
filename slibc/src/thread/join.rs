@@ -76,6 +76,7 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     if super::tls::tls_is_initialized() {
         let tcb = Tcb::current();
         (*tcb).retval = retval;
+        crate::cxa::run_thread_destructors();
         super::keys::run_key_destructors(tcb);
     }
     Sys::exit(0)

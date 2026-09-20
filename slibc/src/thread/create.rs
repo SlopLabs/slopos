@@ -41,6 +41,7 @@ unsafe extern "C" fn thread_trampoline(tcb_raw: *mut u8) -> ! {
     let ret = start(arg);
     (*tcb).retval = ret;
 
+    crate::cxa::run_thread_destructors();
     run_key_destructors(tcb);
     Sys::exit(0)
 }

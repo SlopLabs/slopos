@@ -8,6 +8,11 @@
 #define _SLIBC_SYS_TIME_H
 
 #include <sys/types.h>
+#include <time.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct timeval {
     time_t tv_sec;
@@ -15,5 +20,9 @@ struct timeval {
 };
 
 int gettimeofday(struct timeval *tp, void *tz);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_TIME_H */

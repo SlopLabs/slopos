@@ -12,6 +12,10 @@
 #include <sched.h>
 #include <signal.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     unsigned long __size[7];
 } pthread_attr_t;
@@ -33,6 +37,9 @@ typedef struct {
 typedef struct {
     unsigned long __size[1];
 } pthread_rwlockattr_t;
+typedef struct {
+    unsigned int __size[1];
+} pthread_once_t;
 
 #define PTHREAD_COND_INITIALIZER { { 0 } }
 #define PTHREAD_MUTEX_DEFAULT (PTHREAD_MUTEX_NORMAL)
@@ -40,6 +47,7 @@ typedef struct {
 #define PTHREAD_MUTEX_INITIALIZER { { 0 } }
 #define PTHREAD_MUTEX_NORMAL (0)
 #define PTHREAD_MUTEX_RECURSIVE (1)
+#define PTHREAD_ONCE_INIT { { 0 } }
 #define PTHREAD_RWLOCK_INITIALIZER { { 0 } }
 
 int pthread_create(pthread_t *native, const pthread_attr_t *attr, void * (*f)(void *), void *value);
@@ -59,6 +67,7 @@ int pthread_attr_setguardsize(pthread_attr_t *attr, size_t guardsize);
 int pthread_getattr_np(pthread_t native, pthread_attr_t *attr);
 int pthread_setname_np(pthread_t thread, const char *name);
 int pthread_getname_np(pthread_t thread, char *name, size_t len);
+int pthread_once(pthread_once_t *control, void (*routine)(void));
 int pthread_key_create(pthread_key_t *key, void (*dtor)(void *));
 int pthread_key_delete(pthread_key_t key);
 void *pthread_getspecific(pthread_key_t key);
@@ -92,5 +101,9 @@ int pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr);
 int pthread_equal(pthread_t t1, pthread_t t2);
 int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_PTHREAD_H */

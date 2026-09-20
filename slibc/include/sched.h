@@ -9,11 +9,19 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct sched_param {
     int sched_priority;
 };
 
 int sched_yield(void);
 int sched_getaffinity(pid_t pid, size_t cpusetsize, void *cpuset);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SCHED_H */

@@ -86,7 +86,7 @@ new file mode 100644
 index 0000000..6585d11
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,1462 @@
+@@ -0,0 +1,1567 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -460,6 +460,25 @@ index 0000000..6585d11
 +
 +    pub struct pthread_mutexattr_t {
 +        __size: [u32; 1],
++    }
++
++    pub struct pthread_once_t {
++        __size: [u32; 1],
++    }
++
++    pub struct div_t {
++        pub quot: c_int,
++        pub rem: c_int,
++    }
++
++    pub struct ldiv_t {
++        pub quot: c_long,
++        pub rem: c_long,
++    }
++
++    pub struct lldiv_t {
++        pub quot: c_longlong,
++        pub rem: c_longlong,
 +    }
 +
 +    pub struct pthread_cond_t {
@@ -1027,6 +1046,7 @@ index 0000000..6585d11
 +pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t { __size: [0; 5] };
 +pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t { __size: [0; 6] };
 +pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t { __size: [0; 7] };
++pub const PTHREAD_ONCE_INIT: pthread_once_t = pthread_once_t { __size: [0; 1] };
 +
 +f! {
 +    pub unsafe fn CMSG_FIRSTHDR(mhdr: *const msghdr) -> *mut cmsghdr {
@@ -1286,12 +1306,12 @@ index 0000000..6585d11
 +    pub fn rmdir(path: *const c_char) -> c_int;
 +    pub fn unlink(path: *const c_char) -> c_int;
 +    pub fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int;
-+    pub fn rename(old: *const c_char, new: *const c_char) -> c_int;
++    pub fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
 +    pub fn renameat(
 +        olddirfd: c_int,
-+        old: *const c_char,
++        oldpath: *const c_char,
 +        newdirfd: c_int,
-+        new: *const c_char,
++        newpath: *const c_char,
 +    ) -> c_int;
 +    pub fn link(src: *const c_char, dst: *const c_char) -> c_int;
 +    pub fn linkat(
@@ -1586,4 +1606,51 @@ index 0000000..6585d11
 +    pub fn pthread_rwlockattr_destroy(attr: *mut pthread_rwlockattr_t) -> c_int;
 +
 +    pub fn strerror_r(n: c_int, buf: *mut c_char, buflen: size_t) -> c_int;
++
++    pub fn pthread_once(
++        control: *mut pthread_once_t,
++        routine: extern "C" fn(),
++    ) -> c_int;
++
++    pub fn remove(path: *const c_char) -> c_int;
++
++    pub fn abs(n: c_int) -> c_int;
++    pub fn labs(n: c_long) -> c_long;
++    pub fn llabs(n: c_longlong) -> c_longlong;
++    pub fn div(numer: c_int, denom: c_int) -> div_t;
++    pub fn ldiv(numer: c_long, denom: c_long) -> ldiv_t;
++    pub fn lldiv(numer: c_longlong, denom: c_longlong) -> lldiv_t;
++    pub fn aligned_alloc(align: size_t, size: size_t) -> *mut c_void;
++    pub fn strtoll(s: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_longlong;
++    pub fn strtoull(s: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulonglong;
++    pub fn strtod(s: *const c_char, endptr: *mut *mut c_char) -> c_double;
++    pub fn strtof(s: *const c_char, endptr: *mut *mut c_char) -> c_float;
++    pub fn atof(s: *const c_char) -> c_double;
++
++    pub fn isalnum(c: c_int) -> c_int;
++    pub fn isalpha(c: c_int) -> c_int;
++    pub fn isblank(c: c_int) -> c_int;
++    pub fn iscntrl(c: c_int) -> c_int;
++    pub fn isdigit(c: c_int) -> c_int;
++    pub fn isgraph(c: c_int) -> c_int;
++    pub fn islower(c: c_int) -> c_int;
++    pub fn isprint(c: c_int) -> c_int;
++    pub fn ispunct(c: c_int) -> c_int;
++    pub fn isspace(c: c_int) -> c_int;
++    pub fn isupper(c: c_int) -> c_int;
++    pub fn isxdigit(c: c_int) -> c_int;
++    pub fn tolower(c: c_int) -> c_int;
++    pub fn toupper(c: c_int) -> c_int;
++
++    pub fn __cxa_atexit(
++        dtor: extern "C" fn(*mut c_void),
++        arg: *mut c_void,
++        dso: *mut c_void,
++    ) -> c_int;
++    pub fn __cxa_finalize(dso: *mut c_void);
++    pub fn __cxa_thread_atexit_impl(
++        dtor: extern "C" fn(*mut c_void),
++        arg: *mut c_void,
++        dso: *mut c_void,
++    ) -> c_int;
 +}

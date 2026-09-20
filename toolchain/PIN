@@ -9,4 +9,4 @@ channel=nightly-2026-09-03
 libc_version=0.2.189
 libc_checksum=3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2
 patch_sha256=toolchain/rust/0001-slopos-std.patch:c41e97f9ed548e4032723f7bb63d758149e23fe3451c4197daaba95199adcf72
-patch_sha256=toolchain/libc/0001-slopos-libc.patch:ba3ea0380207c4c9070f45a69eb48a8dfb842e8d76885457169ac73d108fbebe
+patch_sha256=toolchain/libc/0001-slopos-libc.patch:3f807421e4f81cdc9c2ce0fabbb4277ebc193879bfd9bdb1fe05e50eda7aef66

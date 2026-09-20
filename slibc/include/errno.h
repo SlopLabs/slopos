@@ -9,6 +9,10 @@
 
 #define errno (*__errno_location())
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define E2BIG (7)
 #define EACCES (13)
 #define EADDRINUSE (98)
@@ -101,5 +105,9 @@
 #define EXDEV (18)
 
 int *__errno_location(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_ERRNO_H */

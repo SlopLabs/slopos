@@ -1,0 +1,18 @@
+# The SlopOS C++ runtime pin.
+#
+# `scripts/make_slopos_cxx.sh` cross-builds libc++ and libc++abi for
+# `x86_64-unknown-slopos` out of the source below and links them into one
+# `libc++.so`, and `scripts/check_cxx_pin.sh` fails if any line here stops
+# describing what is on disk.
+#
+# The runtime is LLVM's rather than GCC's because only LLVM's needs no second
+# compiler: the host clang that builds it is already here, where libstdc++
+# would cost a GCC cross-build first. `plans/self-hosting.md` carries the
+# measurement that settled it.
+llvm_version=18.1.8
+llvm_url=https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz
+llvm_sha256=0b58557a6d32ceee97c8d533a59b9212d87e0fc4d2833924eb6c611247db2f2a
+# The host compiler the runtime is built with. Its major must match the
+# sources': libc++ is one project with the compiler, and a mismatched pair is
+# a configuration upstream does not test.
+clang_major=18

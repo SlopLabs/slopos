@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int strerror_r(int n, char *buf, size_t buflen);
 void *memchr(const void *s, int c, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
@@ -26,5 +30,9 @@ char *strncpy(char *dest, const char *src, size_t n);
 size_t strnlen(const char *s, size_t maxlen);
 char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_STRING_H */

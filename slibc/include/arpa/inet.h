@@ -9,11 +9,19 @@
 
 #include <netinet/in.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 unsigned int htonl(unsigned int hostlong);
 unsigned short htons(unsigned short hostshort);
 unsigned int ntohl(unsigned int netlong);
 unsigned short ntohs(unsigned short netshort);
 in_addr_t inet_addr(const char *cp);
 char *inet_ntoa(struct in_addr addr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_ARPA_INET_H */

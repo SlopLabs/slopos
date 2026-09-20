@@ -549,9 +549,31 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_in
     }
 }
 
+/// `remove(3)`: `unlink` for anything but a directory, `rmdir` for one. C
+/// gives one entry point for both, and the caller cannot know which it has
+/// without a `stat` it did not ask for.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
-    match Sys::rename(old as *const u8, new as *const u8) {
+pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
+    let unlinked = match Sys::unlink(path as *const u8) {
+        Ok(()) => return 0,
+        Err(e) => e,
+    };
+    if unlinked != crate::errno::EISDIR && unlinked != crate::errno::EPERM {
+        return fail(unlinked, -1);
+    }
+    match Sys::rmdir(path as *const u8) {
+        Ok(()) => 0,
+        // `unlink` answers `EPERM` for a file in a sticky directory as well as
+        // for a directory, so an `ENOTDIR` here means the retry was the wrong
+        // guess and the first refusal is the one to report.
+        Err(e) if e == crate::errno::ENOTDIR => fail(unlinked, -1),
+        Err(e) => fail(e, -1),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int {
+    match Sys::rename(oldpath as *const u8, newpath as *const u8) {
         Ok(()) => 0,
         Err(e) => fail(e, -1),
     }
@@ -560,11 +582,16 @@ pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn renameat(
     olddirfd: c_int,
-    old: *const c_char,
+    oldpath: *const c_char,
     newdirfd: c_int,
-    new: *const c_char,
+    newpath: *const c_char,
 ) -> c_int {
-    match Sys::renameat(olddirfd, old as *const u8, newdirfd, new as *const u8) {
+    match Sys::renameat(
+        olddirfd,
+        oldpath as *const u8,
+        newdirfd,
+        newpath as *const u8,
+    ) {
         Ok(()) => 0,
         Err(e) => fail(e, -1),
     }

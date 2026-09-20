@@ -26,17 +26,17 @@ executable with a gigabyte of anonymous address space and a demand-paged file
 mapping, resolves a 4096-byte path with symlinks in it, stats a file for a real
 mtime, mounts a 16 GiB volume holding a million inodes — this repository and
 that sysroot among them — and runs a `PT_INTERP` executable that `dlopen`s a
-shared object. The remaining gap is a C++ runtime, and every constant that
-produced the storage gap was chosen correctly for an appliance.
+shared object, and throws a C++ exception out of one `dlopen`ed object into
+the program that loaded it. What is left is the toolchain itself, and every
+constant that produced the storage gap was chosen correctly for an appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes,
 they are appliance-sized constants and appliance-sized policies. A workbench
 needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
-*widening under proof*, not redesign, and two exceptions remain: a C++ runtime
-for SlopOS, and the compiler bootstrap itself. The eleven sections between here
-and Phase 1 are what has landed, each stating the constraints a later phase
-must not disturb.
+*widening under proof*, not redesign, and one exception remains: the compiler
+bootstrap itself. The twelve sections between here and Phase 1 are what has
+landed, each stating the constraints a later phase must not disturb.
 
 
 ## Architectural constraints (do not violate)
@@ -64,9 +64,8 @@ must not disturb.
   busybox `ash`, so the multicall *shape* and the POSIX Shell Command Language
   (IEEE Std 1003.1 §2.3–2.14) were the inputs and every line was written here.
   Anything new linked into a shipped binary needs a `NOTICE.md` entry; fonts
-  stay runtime-loaded. Both candidate C++ runtimes are clear — LLVM's stack is
-  Apache-2.0-with-LLVM-exception, GCC's is GPL-3.0 with the Runtime Library
-  Exception — so the C++ port costs nothing here beyond those entries.
+  stay runtime-loaded. The C++ runtime cost nothing here beyond its entry:
+  `libc++` is Apache-2.0-with-LLVM-exception, which GPL-3.0-or-later accepts.
 - **Ratchets are measurements, not numbers.** Every phase here grows the stack,
   quota, lockdep, test-count and filesystem-cost pools. Re-measure with each
   gate's `--emit-allowlist` in the same commit and say which change added the
@@ -1069,9 +1068,9 @@ What it rests on, in case a later phase disturbs it:
   thread-locals to local-exec, which is why the static binaries are
   byte-for-byte unaffected). `relocation-model` and PIE are met per invocation
   instead, and the interpreter does not collide with the executable because it
-  is placed in the mmap arena. `panic-strategy` and `eh-frame-header` are the
-  unwinder's, would change every binary in the tree, and turn on an FDE choice
-  that is the C++ runtime's to make.
+  is placed in the mmap arena. `panic-strategy` and `eh-frame-header` were the
+  unwinder's to decide; `eh-frame-header` has since flipped to `true` with the
+  C++ runtime, which is the section below.
 - **The system's own binaries stay static.** Every one links slibc as an rlib —
   211 `slopos_slibc::` uses — so making them dynamic is a userland refactor,
   and it would put `/sbin/init` behind the loader for no behaviour it does not
@@ -1101,159 +1100,225 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
-## Phase 1 — The C++ runtime
+## A C++ exception crosses an object boundary
 
-**Outcome:** a cross-built C++ program runs on SlopOS against a C++ standard
-library.
+The twelfth thing this plan rests on, and the one Phase 2 cannot be attempted
+without: a cross-built C++ program runs on SlopOS against a C++ standard
+library, and an exception thrown inside a `dlopen`ed object is caught by type
+in the executable that loaded it. `cxx_test` is the standing proof — it spawns
+`/bin/cxx_probe`, one of the tree's two cross-built C++ programs, which works
+through twelve ordered checks and exits with the number of the first failure:
+a local throw and catch, `dlopen`, the loaded object's `std::vector`, its static
+constructor, its `std::string`, the throw across the boundary caught as
+`CxxTestError&`, a destructor in the unwound frame proving phase-2 cleanup
+ran, a foreign type reaching `catch (...)` and not the typed handler, an
+exception thrown past a live `unique_ptr`, `std::exception_ptr` and
+`std::rethrow_exception`, the loaded object's static *destructor* running on
+`dlclose`, and a throw *from* one of those destructors, which unwinds inside an
+object the loader has already marked dying. A second case throws with no handler anywhere and is graded on
+dying by `SIGABRT` — *which* signal, because a probe that failed to start also
+dies without an exit code.
+
+**Nobody else has this test.** `unwinding`'s C++ claim is a README usage
+instruction with no C++ exception test in the crate; Redox's only C++ test
+contains no `throw`, and its libc++ recipe's own statement of testing is
+"tested as far as compiling recipes".
+
+**It is `libc++`, and the deciding fact was the second compiler.** The
+open-decisions list carried `libstdc++` against `libc++` and said to settle it
+by cross-building one. What settled it is that `libstdc++` is not a library you
+cross-build, it is a library GCC builds: it arrives out of a three-stage
+bootstrap of a GCC cross-compiler, which is a second toolchain to pin, patch
+and keep. `libc++` is built by the clang that has to be present anyway, because
+a C++ program for this target cannot be compiled without one. Redox's evidence
+pointed the other way and was about Redox: relibc has no `link.h` and no
+`dl_iterate_phdr`, so `LIBCXXABI_USE_LLVM_UNWINDER` was closed to it and
+libgcc's `__register_frame_info` registry was the road left. Neither constraint
+applies here.
+
+What it rests on, in case a later phase disturbs it:
+
+- **The runtime is one shared object, and that is not a packaging choice.**
+  `scripts/make_slopos_cxx.sh` builds libc++ and libc++abi as static archives
+  and links both, whole-archived, into a single `libc++.so` — 776 056 bytes.
+  libc++abi keeps the caught-exception stack and the `type_info` a `catch`
+  matches on in process-wide state, so two instances of it in one process is a
+  throw that cannot be caught across the boundary between them. The link is
+  written out in the script rather than left to CMake because clang has no
+  toolchain for an unknown OS and hands the link to `gcc`, which would supply
+  the host's crt objects and the host's libc. It is *not* `-Bsymbolic`:
+  `operator new` is replaceable by the program, and binding libc++'s own calls
+  to it locally is exactly what would stop that working.
+- **`libc.so` exports the seventeen `_Unwind_*` entry points**, from
+  `vendor/unwinding`. The C++ library's `__gxx_personality_v0` is the Level-2
+  half; putting the Level-1 half anywhere else would be a second object to find
+  before an exception can leave the frame that threw it, in a process that
+  already has exactly one artifact it must agree with about allocation, `errno`
+  and TLS. `libunwind` is not ported.
+- **Finding an FDE is `fde-custom`, and the two roads this plan named are both
+  closed.** `fde-phdr-dl` reaches `dl_iterate_phdr` through the `libc` *crate*,
+  which slibc cannot depend on, being what that crate declares; `fde-registry`
+  needs a `crtbegin` calling `__register_frame_info` per object, which this
+  target has not got. So slibc registers a finder of its own that answers out
+  of the loader's object table — the same walk `dl_iterate_phdr` does, with one
+  fewer indirection and no dependency at all — under the loader's lock, so a
+  concurrent `dlclose` cannot free the headers underneath it. A static program
+  has no loader table and its one object's headers come from `AT_PHDR`.
+- **The artifacts that carry the unwinder are built `-C force-unwind-tables`,
+  and this was the whole bug.** `_Unwind_RaiseException` saves its own context
+  and looks the resulting return address up first, so the first frame of every
+  unwind is one of its own — and a `panic = abort` Rust artifact emits no
+  `.eh_frame` at all. Without the flag, every throw ended at frame zero with
+  `_URC_END_OF_STACK`, which `__cxa_throw` turns into `std::terminate` printing
+  the exception's type: a program that looks exactly like one with no handler.
+  `eh-frame-header: true` in the target spec is the other half, so every shared
+  object carries the `PT_GNU_EH_FRAME` the finder looks for. The static
+  Rust binaries are unaffected either way: `userland/userland.ld` discards
+  `.eh_frame` outright, and they are `panic = abort` Rust that never unwinds.
+  `cxx_static_probe` is the case that needs the tables and it does not use that
+  script — it links `libc.a` and `libc++.a` directly, with `--eh-frame-hdr` and
+  `--image-base=0x400000`.
+- **The libc gap was sixty-eight symbols wide and is now zero.**
+  `scripts/check_cxx_pin.sh` holds it there: every symbol `libc++.so` leaves
+  undefined must be one `libc.so` exports. The C++ library is linked without
+  `-z defs` — an undefined symbol in a shared object is legal and the loader
+  resolves it at load time — so without this gate a libc gap is not a link
+  error but a `dlopen` that fails on a machine, at the point the runtime is
+  first needed.
+- **The headers became C++ headers, and the generator now enforces it.** Every
+  generated header wraps its declarations in `extern "C"`; a typedef whose name
+  C++ reserves (`wchar_t`) is emitted for C only; and a parameter named with a
+  C++ keyword is a generation error rather than a silent rename, because the
+  fix belongs at the declaration the header is generated from. `rename`'s and
+  `renameat`'s `new` parameters were the two that had to move.
+- **What the C++ runtime actually needed from the C library was measured, not
+  guessed.** `<math.h>` (complete for `double` and `float` over the vendored
+  `libm`, with classification and comparison as compiler builtins so they cost
+  no symbol), `<ctype.h>`, `<assert.h>`, `<uchar.h>` for `mbstate_t`,
+  `remove`, the `abs` and `div` families, `aligned_alloc`,
+  `strtod`/`strtof`/`strtold`/`strtoll`/`strtoull`, `pthread_once`, the POSIX
+  option macros in `<unistd.h>` (`_POSIX_TIMERS` is what `steady_clock` tests
+  for, and without it libc++ stops with `#error`), and `<sys/time.h>` pulling
+  `<time.h>` so the `CLOCK_*` ids are visible where a portable program looks
+  for them.
+- **`atexit` and `__cxa_atexit` are one list.** C++ requires the two orders to
+  interleave, so a destructor registered after an `atexit` handler runs before
+  it; two lists cannot express that. Order is a per-registration sequence
+  number rather than a slot position, so a slot a `dlclose` frees is refilled
+  by the next registration — otherwise a `dlopen`/`dlclose` loop consumes the
+  table monotonically — while `__cxa_finalize` still takes the highest
+  sequence and not the highest index. The lock is not held across a
+  call, because a destructor may register another one, call `exit`, or unload
+  the object it belongs to. Redox's `cxa.rs` does the opposite of all three,
+  and its `exit` never calls `__cxa_finalize` at all.
+- **A static program's `.init_array` had no one to run it.** A dynamically
+  linked program's constructors are the loader's `DT_INIT_ARRAY`, and until
+  `cxx_static_probe` existed nothing linked statically had any: a `panic =
+  abort` Rust binary emits an empty array, and lld then defines
+  `__init_array_start` and `__init_array_end` at the same address. A static C++
+  program cannot start that way — every namespace-scope object's constructor is
+  in there — so `__slibc_start` walks the bracketed range itself when the
+  loader's table is empty, which is the one condition under which nobody else
+  will have.
+- **`dlclose` finalises by span, not by handle.** `__dso_handle` is hidden and
+  absent from an object's `.dynsym`, so there is nothing for the loader to look
+  up; every handle a C++ object registers with points into its own image, which
+  makes the mapped span the question that can actually be asked.
+- **`R_X86_64_COPY` is exercised now.** A non-PIE C++ executable against a
+  shared C++ library produces five of them in `cxx_probe` — `stderr`,
+  `std::exception`'s `type_info`, and vtables — which is the relocation the
+  loader implemented and had no program to prove.
+- **A utest can say why it failed.** A userland test's stdio is init's console
+  rather than the serial line a run is read from, so a case that fails silently
+  is a name and nothing else. `test_harness::note` attaches a message to the
+  KTAP line, which is the only channel that reaches a reader; a case that
+  drives a second program has nothing else to report its exit status through.
+
+**What this deliberately did not do.**
+
+- **The runtime is built with localization, wide characters, `<filesystem>`,
+  the random device and the time-zone database off.** Those are the parts of
+  libc++ that need a locale layer SlopOS has not got — the `*_l` family,
+  `wcstof`, `wcstold`, `nl_langinfo` — and turning them off compiles them out
+  rather than stubbing them. `<iostream>`, `<regex>`, `<locale>` and `<fstream>`
+  are therefore unusable. Redox's libc++ is configured the same way and for the
+  same reason.
+- **`long double` is `strtold` and nothing else.** It is x87 80-bit on this
+  target, Rust has no type for it, and the System V ABI returns it in `st(0)`
+  — which no Rust signature can name — so the one entry point libc++ needs to
+  build is two instructions of assembly that widen `strtod`'s `double`. It
+  carries `double` precision, stated. The `long double` math family is absent;
+  a C++ `<cmath>` lowers those overloads to `__builtin_*l`, which only becomes
+  a call to a missing symbol if a program uses one.
+- **`strtod` does not read hexadecimal significands.** The scan stops at the
+  `x`, which is C89's reading of it and a refusal a caller can see in `endptr`
+  rather than a wrong value.
+- **The C++ runtime reaches the tests image only — the unwinder does not.**
+  `libc++.so` as a file and `libc++.a` inside `cxx_static_probe`; the shipped
+  appliance root runs no C++ program, and a megabyte of runtime nothing links
+  belongs on the dev disk Phase 2 builds rather than in the image `just boot`
+  attests. `libc.so` is a different matter: the `unwinder`
+  feature is on for it unconditionally, so every image's C library carries
+  `unwinding` and the DWARF reader behind it, and every process registers the
+  frame finder at startup. That is what `--gc-sections` cannot drop while
+  startup names the finder, and building a second, feature-off `libc.so` for
+  the shipped image would mean two C libraries that differ between images —
+  a worse hazard than the bytes. Measured: 412 384 against 241 376 before.
+- **The C++ programs are the two probes and no more.** Nothing in the system
+  is written in C++ and nothing should be; the runtime exists so that a
+  cross-built LLVM can run, which is Phase 2's first measurement.
+  `cxx_static_probe` is not a second feature — it is what keeps `libc++.a`,
+  `libc.a`'s unwind tables and the finder's `AT_PHDR` road from being three
+  things nothing has run.
+
+---
+
+## Phase 1 — The libc surface
+
+**Outcome:** the C library has what a cross-built LLVM asks of it.
 
 This phase did not exist while the toolchain was going to be Rust-hosted; it
 is what the LLVM decision buys. Everything in it is userland, so none of it
-touches the framekernel discipline. It opened with a dynamic loader, which has
-landed — "A program can be linked at run time" above — and what remains is
-**M/L**: the runtime a C++ program needs and the libc surface underneath it.
+touches the framekernel discipline. It opened with a dynamic loader and a C++
+runtime, both of which have landed — "A program can be linked at run time" and
+"A C++ exception crosses an object boundary" above — and what remains is
+**M**: the rest of the libc surface underneath them.
 
-Three things make it cheaper than "port a C++ standard library" sounds, and
-all three are in the tree rather than hoped for.
-
-- **Rustc's LLVM uses neither C++ exceptions nor RTTI.** `LLVM_ENABLE_EH` and
-  `LLVM_ENABLE_RTTI` both default off and rust's bootstrap overrides neither,
-  so the `__cxa_throw` path and `__dynamic_cast` may be needed by nothing the
-  compiler links. Workstream 1.1 carries the measurement and the two cautions
-  that go with it.
-- **The unwinder is vendored, and it already has what C++ needs.**
-  `vendor/unwinding` exports sixteen `_Unwind_*` entry points — the complete
-  Level-1 Itanium set a C++ runtime links against, `_Unwind_ForcedUnwind` and
-  `_Unwind_Resume_or_Rethrow` among them — plus the nine `__register_frame*`
-  extensions. The fork's `library/unwind` already uses it instead of libunwind
-  (`toolchain/rust`, `fde-custom`), and the kernel takes it as
-  `fde-gnu-eh-frame-hdr`. Finding FDEs across a `dlopen`ed boundary is a
-  feature change from there, either to `fde-phdr-dl` or to `fde-registry` —
-  Workstream 1.1 says which. `dl_iterate_phdr` exists either way, so the
-  choice is no longer a dependency on anything. `libunwind` does not get
-  ported.
-- **`libc.a`, `libc.so`, `crt0.o` and 44 headers already exist.**
-  `slibc/staticlib` and `slibc/crt0` landed with the target work and
-  `slibc/cdylib` with the loader, so what the C++ runtime needs from the libc
-  is a list of *missing functions* rather than a C library — and it can link
-  against a shared one, which is what `libstdc++.so` or `libc++.so` will do.
-
-### Workstream 1.1 — The C++ runtime (**M/L**)
-
-Cross-built from Linux, never built in-guest. That distinction is the whole
-reason this phase is affordable: running a C++ program on SlopOS needs the C++
-*runtime* on SlopOS, and only rebuilding the compiler needs a C++ *compiler* on
-SlopOS. The second is Phase 5 and is not committed.
-
-**The surface is much smaller than "port a C++ standard library" suggests,
-because rustc's LLVM uses neither exceptions nor RTTI.**
-`LLVM_ENABLE_EH` and `LLVM_ENABLE_RTTI` both default **OFF**
-(`llvm/cmake/modules/HandleLLVMOptions.cmake`, where EH additionally
-`FATAL_ERROR`s without RTTI), LLVM's coding standards have a section titled
-"`#include <iostream>` is Forbidden" and another "Do not use RTTI or
-Exceptions", and rust's bootstrap overrides neither — the only `-fno-rtti` in
-`src/bootstrap/.../llvm.rs` is for its own `libunwind.a`. Measured against the
-tree: zero `#include <iostream>` under `llvm/lib` or `clang/lib`, zero
-`#include <locale>` anywhere under `llvm/`, and `<regex>` only in the SPIRV
-target. So the `__cxa_throw`/`__cxa_begin_catch` path and `__dynamic_cast` may
-be needed by nothing rustc links. Two cautions: Redox passes
-`-DLLVM_ENABLE_RTTI=On` to both its `llvm21` and `clang21` recipes with no
-in-tree reason given, and nobody has published an LLVM built against a
-localization-off C++ library — `[INFERENCE]` until this tree links one.
-
-**Two roads, and the measured evidence does not point where the LLVM decision
-would suggest.**
-
-- **libstdc++ — Redox's road, and the proven one.** Cross-build GCC
-  (`--enable-languages=c,c++,lto`), ship `libstdc++.so` and `libgcc_s.so` out
-  of the cross sysroot, and add **four** symbols to the libc. That is the whole
-  C++ addition in `relibc/src/cxa.rs`, about a hundred lines:
-  `__cxa_atexit`, `__cxa_finalize`, `__cxa_thread_atexit_impl`, and
-  `_ITM_registerTMCloneTable`/`_ITM_deregisterTMCloneTable` as documented
-  no-ops so `crtstuff` resolves. Redox has both libraries in its tree and
-  builds `llvm21`, `clang21` and `rust` against **this** one — `cxx =
-  "…-g++"`, `clang21` dev-depends on `libstdcxx` — while its libc++ recipe is
-  three weeks old and exists for ports. GPL-3.0 with the GCC Runtime Library
-  Exception, which is the licence SlopOS already ships under.
-- **libc++/libc++abi — the same project as LLVM, and cheaper here than it was
-  there.** libc++abi provides every `__cxa_*` entry point *except*
-  `__cxa_atexit` and `__cxa_finalize`, which its own `cxxabi.h` names as the
-  libc's; `__cxa_thread_atexit_impl` is detected by weak symbol and has a
-  documented fallback, so it is optional. Redox's stated blocker was
-  `LIBCXXABI_USE_LLVM_UNWINDER` needing `link.h`, and **that blocker does not
-  apply here**: `vendor/unwinding` already provides the `_Unwind_*` set, so
-  `LIBCXXABI_USE_LLVM_UNWINDER=OFF` is the supported configuration and no
-  `link.h` is owed. What remains is the same locale gap slibc has —
-  Redox's recipe turns localization, filesystem and wide characters off with
-  in-tree TODOs naming the missing `*_l` family and `wcstof`/`wcstold`.
-
-Decide it by cross-building one of them and linking `libLLVM` against it, not
-on paper; the open-decisions list carries the question. What is *not* open is
-that one of the two is needed, and that neither needs a C++ compiler on SlopOS.
-
-**`libunwind` is not ported either way, and both FDE roads are now open.**
-`vendor/unwinding` is the Level-1 provider; `__gxx_personality_v0` — the
-Level-2 half — comes from whichever C++ library wins above, as it does on any
-Linux. The unwinder then finds FDEs one of two ways, and the loader no longer
-constrains the choice:
-
-- `fde-phdr-dl`, which calls `dl_iterate_phdr`. That exists, with glibc's
-  `struct dl_phdr_info` layout and `link.h` to declare it, so this road costs
-  a feature flag and `eh-frame-header: true` in the target spec.
-- `fde-registry`, which provides `__register_frame_info` and friends and needs
-  no `dl_iterate_phdr` at all, because `crtbegin` registers each object as it
-  is initialised. Redox is the existence proof that this is sufficient:
-  relibc has no `link.h` and no `dl_iterate_phdr`, its GCC fork's
-  `unwind-dw2-fde-dip.c` gates `USE_PT_GNU_EH_FRAME` on a platform list Redox
-  is not on, and the fallback registry path is what carries it. Its
-  prerequisite, `DT_INIT_ARRAY` running on `dlopen`, is met.
-
-Hold whichever wins to a test that throws from a `dlopen`ed object and catches
-in the executable, because that is the case a single-object unwinder passes by
-accident — and because **nobody else has that test.** `unwinding`'s C++ claim is
-a README usage instruction with no C++ exception test in the crate, and Redox's
-only C++ test contains no `throw`. This would be the first standing check of
-the property in either project.
-
-Each piece cross-built into a shipped image needs its own `NOTICE.md` entry;
-the constraint block above says why that costs nothing beyond the entries.
-
-### Workstream 1.2 — The libc surface underneath it (**M**)
+### Workstream 1.1 — The libc surface (**M**)
 
 This is the surviving half of what used to be "A C toolchain, written in
 Rust", and the LLVM decision promotes it from off-the-critical-path to
-load-bearing. Measured against the tree today, `slibc` already has `mmap`,
-`mprotect`, `madvise`, `munmap`, `fork`, `execve`, `waitpid`, `wait4`,
-`sysconf`, `getauxval`, `sigaltstack`, `realpath`, `statvfs`, `flock`,
-`ftruncate`, `getrandom`, `clock_gettime`, `nanosleep`, `snprintf`,
-`strerror_r`, `gettimeofday`, and 51 `pthread_*` entry points across mutex,
-condvar, rwlock, keys, create and join. What a C++ standard library and an
-in-guest rustc add to that list, the loader's own six (`dlopen`, `dlsym`,
-`dlclose`, `dlerror`, `dladdr`, `dl_iterate_phdr`) having landed with it:
+load-bearing. What a C++ standard library needs was settled by building one:
+`<math.h>` for `double` and `float`, `<ctype.h>`, `<assert.h>`, `<uchar.h>`,
+`remove`, the `abs` and `div` families, `aligned_alloc`, the `strto*` family,
+`pthread_once` and the Itanium ABI's `__cxa_atexit` trio all landed with it,
+and `scripts/check_cxx_pin.sh` holds `libc++.so` to exporting nothing the C
+library has not got. What an in-guest rustc adds beyond that list:
 
-- **The Itanium ABI's libc half:** `__cxa_atexit` and `__cxa_finalize`, which
-  `cxxabi.h` names as the libc's and libc++abi deliberately does not define,
-  plus `_ITM_registerTMCloneTable`/`_ITM_deregisterTMCloneTable` as no-ops so
-  `crtstuff` resolves. `__cxa_thread_atexit_impl` is *optional* — libc++abi
-  detects it by weak symbol and has a documented fallback — so it is worth
-  having but is not a blocker.
-- **`pthread_once`**, which libc++ uses for `std::call_once` and function-local
-  statics.
-- **`<ctype.h>` and `<wchar.h>`, neither of which exists** — no `isalpha`,
-  `isspace`, `tolower`, `wcslen`, `mbrtowc`, `wcrtomb`, `iswspace`,
-  `towlower`. Two headers are not generated at all.
+- **`<setjmp.h>`:** `setjmp`/`longjmp`, absent. Eight callee-saved slots and
+  the return address, and the layout is re-derivable from the System V AMD64
+  ABI rather than copied.
 - **`<locale.h>`'s functions:** `setlocale`, `localeconv`, `nl_langinfo`. The
-  header exists and declares `struct lconv`; nothing implements it. A
-  `LIBCXX_ENABLE_LOCALIZATION=OFF` build is the cheaper answer and should be
-  tried first.
-- **`<setjmp.h>`:** `setjmp`/`longjmp`, absent.
-- **The old list, minus what has since landed:** `strtod`, `qsort`, `strerror`
-  (`strerror_r` exists, the plain form does not), `aligned_alloc`
-  (`posix_memalign` exists), and the `<time.h>` calendar — `localtime`,
-  `mktime`, `gmtime` and `strftime` are all absent where `gettimeofday` and
-  `clock_gettime` are not.
-  `opendir`/`readdir`/`closedir` came with the target work and are off this
-  list.
-- **libm**, by wrapping the `libm` crate the tree already vendors for `font/`.
+  header exists and declares `struct lconv`; nothing implements it. libc++ is
+  built `LIBCXX_ENABLE_LOCALIZATION=OFF` precisely because this is missing, so
+  this workstream is what would make `<iostream>`, `<regex>` and `<fstream>`
+  compile at all — and nothing in the toolchain needs them, so it is the
+  lowest item here.
+- **`<wchar.h>`, which does not exist**, and with it `wcslen`, `mbrtowc`,
+  `wcrtomb`, `wcstof`, `wcstold`. `mbstate_t` landed in `<uchar.h>` and is
+  laid out so a later `<wchar.h>` can define the conversions against it
+  without changing it. Redox's in-tree TODOs name exactly `wcstof` and
+  `wcstold` as what keeps its libc++ narrow too.
+- **The `long double` family**, which `strtold` is the single stated exception
+  to: x87 80-bit arithmetic that neither Rust nor the vendored `libm` can
+  express. Needed only by a program that writes `long double`, which rustc's
+  LLVM does not.
+- **Hexadecimal significands in `strtod`**, which C99 requires and the current
+  scan refuses at the `x`.
+- **The old list, minus what has since landed:** `qsort`, `bsearch`,
+  `strerror` (`strerror_r` exists, the plain form does not), and the
+  `<time.h>` calendar — `localtime`, `mktime`, `gmtime` and `strftime` are all
+  absent where `gettimeofday` and `clock_gettime` are not.
 
 **What this workstream stops owing.** The C99 frontend written in Rust
 emitting cranelift IR is **deleted**, not deferred. Under the Rust-hosted road
@@ -1264,8 +1329,8 @@ arrives as a by-product of a decision taken for Rust's sake. That is a real
 scope reduction — one **M**/**L** workstream removed — and it is the only place
 the LLVM road is cheaper than the road it replaced.
 
-**Phase 1 exit criteria:** on SlopOS, a C++ exception thrown inside a
-`dlopen`ed object is caught in the executable that loaded it.
+**Phase 1 exit criteria:** `libLLVM.so`, cross-built and linked against
+SlopOS's `libc++.so`, resolves every symbol it needs from `libc.so`.
 
 ---
 
@@ -1296,8 +1361,8 @@ ratchet that would notice `wild` becoming viable, which is now a reason to
 re-open a decision rather than a blocker to route around.
 
 **What the reversal costs.** Phase 1 above, in full. The dynamic loader was
-always owed and has since landed; the C++ runtime is new, and it is the price
-of the sentence at the top of this document.
+always owed; the C++ runtime was new, and both have since landed. What is left
+of that cost is the libc surface, which was owed either way.
 
 ### Workstream 2.1 — The target becomes a host (**M**)
 
@@ -1347,6 +1412,22 @@ package payload. Its own automated self-hosted build config provisions a
 **10 GiB** filesystem (`config/sys-build.toml`, `filesystem_size = 10000`)
 against 650 MiB for its desktop image. Two orders of magnitude under the 1.1 GB
 host sysroot, because a shipped toolchain is not a rustup toolchain.
+
+**The C++ runtime this rests on is configured smaller than LLVM's own build
+assumes, and that is the risk to re-take here.** `make_slopos_cxx.sh` builds
+libc++ with localization, wide characters, `<filesystem>`, the random device
+and the time-zone database off, which is the same configuration Redox uses and
+is enough for `cxx_probe`. It is not known to be enough for LLVM: nobody has
+published an LLVM built against a libc++ configured that way, LLVM's own
+`LLVM_ENABLE_EH` and `LLVM_ENABLE_RTTI` default **OFF** while libc++abi's
+exception machinery does not, and Redox's own recipe passes
+`-DLLVM_ENABLE_RTTI=On`. The measurement Workstream 2.2 should take first is
+therefore not "does the bootstrap finish" but "does `libLLVM` configure and
+link against this libc++ at all" — a `<filesystem>` or `wchar_t` use in LLVM's
+support library is a link error the first time, not a subtle one, and the
+answer is either a narrower LLVM configuration or a wider libc++ one. Turning
+localization back on is the wider one, and it costs the `*_l` family,
+`nl_langinfo` and a locale layer slibc has not got.
 
 **What is genuinely open** is whether `libLLVM` is shared or static.
 Bootstrap's own default is **static** — `llvm_link_shared` is
@@ -1505,17 +1586,6 @@ not been made at all.
       `PT_LOAD`s and how much startup relocation an in-guest rustc pays for,
       which is the first number Workstream 2.2's bootstrap run produces.
       Decide it there rather than on paper.
-- [ ] **Which C++ runtime: GCC's `libstdc++` or LLVM's `libc++`?** The
-      evidence points away from the tidy choice: `libstdc++` is what Redox
-      builds its LLVM, clang and rustc against despite having both in tree,
-      and its whole libc cost is four symbols. `libc++` is the same project as
-      the compiler and is cheaper here than it was there, because Redox's
-      stated blocker (`LIBCXXABI_USE_LLVM_UNWINDER` wanting `link.h`) does not
-      apply to a tree that already vendors `unwinding`. Both cost a
-      cross-build; only `libstdc++` costs a GCC port as well, and only
-      `libc++` has never been shown carrying an LLVM. Settle it by
-      cross-building one and linking `libLLVM` against it — the thing nobody
-      has published is the link itself, so reading more will not decide it.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
       building itself un-attests exactly the blocks it changes, and now keeps
       them un-attested across host rebuilds. Decide which paths stay verified
@@ -1532,8 +1602,13 @@ not been made at all.
       exit. Decide between swap plus a reclaim policy and a per-build memory
       budget that makes overcommit not happen — before Workstream 2.3.
 
-**Decided.** Syscall ABI: **Linux x86-64 numbering, one table, a private range
-at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
+**Decided.** C++ runtime: **LLVM's `libc++`, cross-built, libc++ and
+libc++abi linked into one `libc++.so`** — settled by building it, and by the
+fact that `libstdc++` is not a library you cross-build but one a GCC
+cross-compiler emits, which is a second toolchain to pin and keep. What is
+still unmeasured is the link `libLLVM` makes against it, which is Phase 1's
+exit criterion. Syscall ABI: **Linux x86-64 numbering, one table, a private
+range at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 **LLVM, cross-built from Linux, with the C++ runtime ported to SlopOS** — the
 Rust-hosted answer was decided first, then measured against this kernel and
 found not to reach it. C is *not* excluded and is now cheaper, because clang
@@ -1571,13 +1646,13 @@ compile.
 | Syscall ABI | `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs`, `scripts/check_syscall_abi.sh`, `scripts/gates/syscall/` | *invariant* |
 | Backend and linker gates | `scripts/check_codegen_backend.sh`, `scripts/check_linker_script.sh`, `scripts/gates/{codegen,linker}/`, `targets/x86_64-slos.json`, `link.ld` | *invariant* |
 | Storage | `fs/src/ext2/{dirindex,journal}.rs`, `fs/src/verity.rs`, `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` | *invariant* |
-| C++ platform | `vendor/unwinding`, `slibc/{staticlib,crt0,include,build}/`, `NOTICE.md` | work |
+| C++ runtime | `scripts/make_slopos_cxx.sh`, `scripts/check_cxx_pin.sh`, `toolchain/cxx/PIN`, `slibc/src/{unwind,cxa,math,ctype,stdlib}/`, `slibc/build/`, `userland/cxxtest/` | *invariant* |
+| C++ platform | `vendor/unwinding`, `slibc/{staticlib,cdylib,crt0,include}/`, `NOTICE.md` | work |
 | Phase 3 install | `scripts/qemu_run.sh`, `fs/src/devfs/mod.rs`, `fs/src/partition.rs` | work |
 | Execution boundary | `AGENTS.md` | Phase 3 needs a scoped exception |
 
-Three things are worth naming here because their paths sit apart from the
-section that explains them: the unwinder is already the Level-1 provider a C++
-runtime links against and needs a feature change (`fde-phdr-dl` or
-`fde-registry`) rather than a port; the C++ library must link `libc.so` rather
-than `libc.a`, because two libcs in one process is the allocator bug Redox
-names; and `<ctype.h>` and `<wchar.h>` are not generated at all.
+Two things are worth naming here because their paths sit apart from the
+section that explains them: `libc.so` must keep exporting the seventeen
+`_Unwind_*` entry points and must keep being built `-C force-unwind-tables`,
+because the first frame of every unwind is one of its own; and `<wchar.h>` is
+still not generated at all.

@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned long Elf64_Addr;
 typedef unsigned short Elf64_Half;
 typedef unsigned long Elf64_Off;
@@ -36,5 +40,9 @@ struct dl_phdr_info {
 };
 
 int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void *), void *data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_LINK_H */

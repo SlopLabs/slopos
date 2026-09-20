@@ -7,6 +7,10 @@
 #ifndef _SLIBC_SYS_IOCTL_H
 #define _SLIBC_SYS_IOCTL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define FIOCLEX (0x5451)
 #define FIONBIO (0x5421)
 #define FIONCLEX (0x5450)
@@ -23,5 +27,9 @@
 #define TIOCSWINSZ (0x5414)
 
 int ioctl(int fd, unsigned long request, ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_IOCTL_H */

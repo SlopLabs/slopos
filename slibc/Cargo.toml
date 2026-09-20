@@ -28,4 +28,20 @@ doctest = false
 workspace = true
 
 [dependencies]
+libm = { workspace = true }
 slopos-abi = { workspace = true }
+# The Level-1 unwinder. `fde-custom` rather than `fde-phdr-dl`: that road
+# reaches `dl_iterate_phdr` through the `libc` crate, which slibc cannot depend
+# on, being what that crate declares.
+unwinding = { path = "../vendor/unwinding", default-features = false, optional = true, features = [
+    "unwinder",
+    "alloc",
+    "fde-custom",
+] }
+
+[features]
+# Off for the rlib every Rust userland binary links: those are `panic = abort`
+# and never unwind, and `unwinding` pulls in gimli, which `--gc-sections`
+# cannot drop while startup registers a frame finder unconditionally. On for
+# `libc.a` and `libc.so`, which are what a C++ program links.
+unwinder = ["dep:unwinding"]

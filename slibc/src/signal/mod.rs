@@ -15,7 +15,7 @@
 
 pub mod tests;
 
-use core::ffi::c_int;
+use core::ffi::{c_char, c_int, c_uint};
 use core::mem;
 
 use crate::errno::{EINTR, EINVAL, ENOSYS, errno_set};
@@ -406,4 +406,45 @@ pub unsafe extern "C" fn raise(sig: c_int) -> c_int {
 pub unsafe extern "C" fn abort() -> ! {
     let _ = raise(SIGABRT);
     crate::process::_exit(134)
+}
+
+/// What `<assert.h>`'s `assert` expands to when it fails. Writes straight to
+/// fd 2 rather than through `stderr`, because a failed assertion is as likely
+/// to be about the stdio lock as about anything else.
+///
+/// # Safety
+/// Every argument is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __slibc_assert_fail(
+    expr: *const c_char,
+    file: *const c_char,
+    line: c_uint,
+    func: *const c_char,
+) -> ! {
+    let say = |text: *const c_char| {
+        if !text.is_null() {
+            let bytes = text as *const u8;
+            let _ = Sys::write(2, bytes, crate::string::u_strlen(bytes));
+        }
+    };
+    say(file.cast());
+    say(c":".as_ptr());
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut value = line;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 || at == 0 {
+            break;
+        }
+    }
+    let _ = Sys::write(2, digits[at..].as_ptr(), digits.len() - at);
+    say(c": ".as_ptr());
+    say(func);
+    say(c": assertion failed: ".as_ptr());
+    say(expr);
+    say(c"\n".as_ptr());
+    abort()
 }

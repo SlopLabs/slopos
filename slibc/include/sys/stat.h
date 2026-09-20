@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct stat {
     dev_t st_dev;
     ino_t st_ino;
@@ -95,5 +99,9 @@ int mkfifo(const char *path, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
 int utimensat(int dirfd, const char *path, const struct timespec *times, int flags);
 int futimens(int fd, const struct timespec *times);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_STAT_H */

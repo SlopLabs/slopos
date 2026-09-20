@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int socklen_t;
 typedef unsigned short sa_family_t;
 struct sockaddr {
@@ -121,5 +125,9 @@ ssize_t recv(int sockfd, void *buf, size_t len, int flags);
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen);
 ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
 int shutdown(int sockfd, int how);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_SOCKET_H */

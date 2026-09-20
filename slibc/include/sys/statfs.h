@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int __val[2];
 } fsid_t;
@@ -29,5 +33,9 @@ struct statfs {
 
 int statfs(const char *path, struct statfs *buf);
 int fstatfs(int fd, struct statfs *buf);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_STATFS_H */

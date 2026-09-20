@@ -9,6 +9,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned long nfds_t;
 struct pollfd {
     int fd;
@@ -26,5 +30,9 @@ struct pollfd {
 #define POLLWRNORM (0x100)
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_POLL_H */

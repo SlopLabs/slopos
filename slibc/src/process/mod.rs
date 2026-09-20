@@ -1,6 +1,5 @@
 //! Process lifecycle — fork, exec, wait, exit.
 
-pub mod atexit;
 pub mod ids;
 pub mod rlimit;
 pub mod shim;
@@ -142,7 +141,8 @@ pub unsafe extern "C" fn _exit(status: i32) -> ! {
     Sys::exit_group(status)
 }
 
-/// Clean exit — flushes stdio, runs atexit handlers, then terminates.
+/// Clean exit — flushes stdio, runs the `atexit` and `__cxa_atexit` list,
+/// then terminates.
 ///
 /// The flush after the handlers is what C11 §7.22.4.4 requires; the one before
 /// them keeps a handler that faults or calls `_exit` from discarding what
@@ -150,7 +150,11 @@ pub unsafe extern "C" fn _exit(status: i32) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
     crate::stdio::__stdio_exit();
-    atexit::run_atexit_handlers();
+    // The initial thread reaches neither the thread trampoline nor
+    // `pthread_exit`, so this is the only place its `thread_local`
+    // destructors can run — and C++ runs them before the static ones.
+    crate::cxa::run_thread_destructors();
+    crate::cxa::__cxa_finalize(core::ptr::null_mut());
     crate::stdio::__stdio_exit();
     _exit(status)
 }

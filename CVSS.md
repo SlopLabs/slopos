@@ -31,6 +31,23 @@ change and so not an entry. The sweep also proved a **pre-existing** defect the
 interpreter work made visible by contrast, which is the entry below: the
 executable's own segments have never been covered by a VMA.
 
+Swept 2026-09-19: the C++ runtime — the cross-built `libc++`/`libc++abi`, the
+libc surface it needed (`<math.h>`, `<ctype.h>`, the `strto*` family,
+`pthread_once`, the `__cxa_*` trio), the Level-1 unwinder now in every image's
+`libc.so`, and the `.init_array` walk a static program needs. Three reviewers.
+One memory-safety defect, found by the third: `atexit(3)` registers a null
+`__dso_handle` — slibc has one shared `atexit` where glibc links a per-object
+copy from `libc_nonshared.a` — so `finalize_range` never reclaimed an `atexit`
+made from inside a `dlopen`ed object, and `exit` then called it through an
+unmapped address. It is also a slot leak: a `dlopen`/`dlclose` loop consumes
+the 256-entry table permanently. Fixed inside this change by testing the
+handler and argument addresses against the unloaded span as well as the
+handle, so not an entry. No privilege boundary is crossed either way — a
+process can only do this to itself, and `dlopen` already runs code of the
+caller's choosing. The rest of what the reviewers found was correctness
+(`std::stod("0e1")` throwing on a spurious `ERANGE`, a missing sentinel guard,
+a nonsense load-bias fallback), all closed in the same unreleased change.
+
 The highest ID issued so far is **SLOPOS-2026-0056**. The next finding is
 `SLOPOS-2026-0057`.
 

@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define WCONTINUED (8)
 #define WNOHANG (1)
 #define WUNTRACED (2)
@@ -28,5 +32,9 @@
 pid_t waitpid(pid_t pid, int *status, int options);
 pid_t wait(int *status);
 pid_t wait4(pid_t pid, int *status, int options, struct rusage *rusage);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_SYS_WAIT_H */

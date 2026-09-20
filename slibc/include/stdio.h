@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _slibc_file FILE;
 typedef __builtin_va_list va_list;
 
@@ -22,8 +26,9 @@ extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *stderr;
 
-int rename(const char *old, const char *new);
-int renameat(int olddirfd, const char *old, int newdirfd, const char *new);
+int remove(const char *path);
+int rename(const char *oldpath, const char *newpath);
+int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
 void clearerr(FILE *stream);
 int fclose(FILE *stream);
 FILE *fdopen(int fd, const char *mode);
@@ -73,5 +78,9 @@ int vfprintf(FILE *stream, const char *fmt, va_list ap);
 int vprintf(const char *fmt, va_list ap);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int vsprintf(char *buf, const char *fmt, va_list ap);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SLIBC_STDIO_H */

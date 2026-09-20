@@ -46,13 +46,34 @@ jobs:
       - name: Check formatting
         run: just fmt
 
+      # clang/cmake/ninja/lld are the C++ runtime's cross-build, which the
+      # tests image needs: `libc++.so` and the two fixtures that prove a C++
+      # exception crosses a `dlopen` boundary. `toolchain/cxx/PIN` names the
+      # clang major, and `scripts/make_slopos_cxx.sh` refuses another one.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 \
             xorriso \
-            e2fsprogs
+            e2fsprogs \
+            clang-18 \
+            lld-18 \
+            llvm-18 \
+            cmake \
+            ninja-build
+          # Named, not aliased: `update-alternatives --install` with a missing
+          # target warns and exits 0, so a wrong package name would surface
+          # much later as a cross-build failure with nothing pointing here.
+          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18; do
+            command -v "$tool" >/dev/null || { echo "::error::$tool not installed"; exit 1; }
+          done
+          {
+            echo "CLANG=clang-18"
+            echo "CLANGXX=clang++-18"
+            echo "LD_LLD=ld.lld-18"
+            echo "LLVM_AR=llvm-ar-18"
+          } >> "$GITHUB_ENV"
 
       - name: Verify KVM availability
         run: |
@@ -76,6 +97,8 @@ jobs:
           cache-directories: |
             third_party/limine
             third_party/ovmf
+            third_party/slopos-cxx
+            third_party/llvm-project-*.src.tar.xz
           cache-on-failure: true
 
       - name: Host-side unit tests (fast fail — same tests KernMiri interprets, minus UB detection)
@@ -103,6 +126,13 @@ jobs:
           set -o pipefail
           just _build-run-tests
           builddir/run_tests --raw --no-color 2>&1 | tee ci-test.log
+
+      # Again, and this time with a `libc.so` on disk: the gates step above runs
+      # before the userland is built, so the half of this check that matters —
+      # every symbol `libc++.so` needs, still exported by the C library — is
+      # skipped there.
+      - name: C++ runtime against the C library it links
+        run: scripts/check_cxx_pin.sh
 
       # Both boot-based ratchets parse the capture above rather than booting
       # again: three QEMU boots for one question each is two boots wasted, and a
