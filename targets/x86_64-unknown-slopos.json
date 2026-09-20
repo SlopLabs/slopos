@@ -14,11 +14,17 @@
   "has-thread-local": true,
   "linker": "rust-lld",
   "linker-flavor": "ld.lld",
-  "llvm-target": "x86_64-unknown-none",
+  "llvm-target": "x86_64-unknown-none-elf",
   "max-atomic-width": 64,
+  "metadata": {
+    "description": "SlopOS",
+    "host_tools": false,
+    "std": true,
+    "tier": 3
+  },
   "os": "slopos",
   "panic-strategy": "abort",
-  "relocation-model": "static",
+  "relocation-model": "pic",
   "stack-probes": {
     "kind": "inline"
   },
@@ -27,6 +33,5 @@
   ],
   "target-pointer-width": 64,
   "tls-model": "global-dynamic",
-  "trap-unreachable": true,
-  "vendor": "slopos"
+  "trap-unreachable": true
 }

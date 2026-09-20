@@ -524,6 +524,14 @@ tcb-ratio:
 ensure-verus:
     scripts/ensure_verus.sh >/dev/null
 
+[doc("Materialise the pinned rustc source tree with the SlopOS target patch under third_party/slopos-rustc-src (fetches 265 MB)")]
+rustc-src:
+    scripts/make_rustc_src.sh
+
+[doc("Hold the built-in x86_64-unknown-slopos target to targets/x86_64-unknown-slopos.json and to rustc's own consistency test. Needs `just rustc-src` first.")]
+check-rustc-target:
+    scripts/check_rustc_target.sh --require
+
 [doc("Machine-check the OSTD critical-path proofs under verification/proofs/ on the pinned Verus toolchain. Pass a proof stem to verify one file.")]
 verify FILTER='':
     scripts/verify.sh "{{FILTER}}"
@@ -563,11 +571,13 @@ check-framekernel-gates:
     scripts/check_fs_throughput.sh --self-test
     scripts/check_syscall_abi.sh --self-test
     scripts/check_toolchain_pin.sh --self-test
+    scripts/check_rustc_target.sh --self-test
     scripts/check_cxx_pin.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_toolchain_pin.sh
+    scripts/check_rustc_target.sh
     scripts/check_cxx_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
@@ -659,10 +669,10 @@ stack-audit:
 clean:
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
     rm -f {{build_dir}}/kernel-*.elf
-    rm -rf {{build_dir}}/gates/codegen-probe
+    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean
     rm -rf {{build_dir}} {{iso}} {{iso_notests}} {{iso_tests}} {{log_file}}
     rm -f {{fs_image}} {{fs_image_tests}} {{initramfs}} {{initramfs_tests}}
-    rm -rf third_party/llvm-project-*.src
+    rm -rf third_party/llvm-project-*.src third_party/slopos-rustc-src

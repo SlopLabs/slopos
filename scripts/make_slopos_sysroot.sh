@@ -28,9 +28,11 @@ set -euo pipefail
 # `slopos` symlink that registration *is*.
 #
 # Idempotent: the stamp at third_party/rust-slopos/.slopos-stamp records the
-# hash of the whole toolchain/ overlay, so a second run with an unchanged
-# overlay re-checks the registration and exits. Any change to the overlay
-# rebuilds from scratch — the fork is a fork, not an incremental mutation.
+# hash of toolchain/{PIN,rust,libc} and of this script — not toolchain/compiler/,
+# which stamps the separate tree make_rustc_src.sh builds — so a second run
+# with unchanged inputs re-checks the registration and exits. Any change to
+# them rebuilds from scratch — the fork is a fork, not an incremental
+# mutation.
 #
 # Usage: make_slopos_sysroot.sh
 #
@@ -219,68 +221,16 @@ tar -xzf "$CRATE_FILE" -C "$LIBC_DIR" --strip-components=1 \
     || die "failed to unpack $CRATE_FILE into $LIBC_DIR"
 
 # ---------------------------------------------------------------------------
-# The fork patches. Each is verified against its PIN line before it is
-# allowed to touch a file: a patch that changed without its pin changing is
-# the drift this whole scheme exists to make impossible.
-#
-# `git apply`, not `patch(1)`: both patches are `git diff` output that creates
-# whole new directories (`std/src/os/slopos/`, `libc/src/unix/slopos/`, …),
-# which GNU patch does not do reliably.
-#
-# The sysroot lives *inside* this git repository, and `git apply` run inside a
-# work tree resolves the patch's paths against the repository root rather than
-# the working directory: every path then lands outside the directory it was
-# invoked in, which `git apply` silently ignores and still exits 0. Measured,
-# not theoretical — it is how this script once materialised an unpatched
-# sysroot and reported success. `GIT_CEILING_DIRECTORIES` stops repository
-# discovery above the sysroot so `git apply` runs in its non-repo mode, where
-# paths are relative to the working directory, and every patch is then
-# re-checked in reverse so a no-op can never pass again.
+# The fork patches, libc first: the std patch adds `libc = { path = "libc" }`
+# under `[patch.crates-io]` in library/Cargo.toml, so the tree it names has to
+# be unpacked and patched before that resolution exists.
 # ---------------------------------------------------------------------------
 command -v git >/dev/null 2>&1 || die "git is required to apply the fork patches (git apply)"
-GIT_CEILING="$(tp_abspath "$(dirname "$SYSROOT")")"
 
-git_apply() {
-    (cd "$1" && GIT_CEILING_DIRECTORIES="$GIT_CEILING" git apply -p1 "$2" 2>&1)
-}
-
-apply_patches() {
-    local prefix="$1" dir="$2" rel sha want out applied=0
-    for rel in $(tp_patch_files "$REPO_ROOT"); do
-        case "$rel" in
-            "$prefix"*) ;;
-            *) continue ;;
-        esac
-        want="$(tp_pin_patch_sha "$PIN" "$rel")"
-        [ -n "$want" ] || die "$rel carries no \`patch_sha256=$rel:<sha256>\` line in $TP_PIN_REL"
-        sha="$(tp_sha256_file "$REPO_ROOT/$rel")"
-        if [ "$sha" != "$want" ]; then
-            die "$rel does not match its pin
-       expected: $want ($TP_PIN_REL)
-       actual:   $sha"
-        fi
-        # git apply is quiet on success; its account of a rejected hunk is
-        # only interesting when it failed, and this function's stdout is the
-        # count it returns.
-        if ! out="$(git_apply "$dir" "$REPO_ROOT/$rel")"; then
-            printf '%s\n' "$out" >&2
-            die "patch failed to apply: $rel (in $dir)"
-        fi
-        if ! (cd "$dir" && GIT_CEILING_DIRECTORIES="$GIT_CEILING" \
-                git apply -p1 --reverse --check "$REPO_ROOT/$rel" >/dev/null 2>&1); then
-            die "$rel reported success but is not applied in $dir
-       git apply resolved its paths somewhere else and changed nothing."
-        fi
-        applied=$((applied + 1))
-    done
-    printf '%s\n' "$applied"
-}
-
-# libc first: the std patch adds `libc = { path = "libc" }` under
-# `[patch.crates-io]` in library/Cargo.toml, so the tree it names has to be
-# unpacked and patched before that resolution exists.
-LIBC_PATCHES="$(apply_patches "$TP_OVERLAY_REL/libc/" "$LIBC_DIR")"
-RUST_PATCHES="$(apply_patches "$TP_OVERLAY_REL/rust/" "$LIBRARY")"
+LIBC_PATCHES="$(tp_apply_patches "$REPO_ROOT" "$TP_OVERLAY_REL/libc/")" ||
+    die "the libc fork did not apply"
+RUST_PATCHES="$(tp_apply_patches "$REPO_ROOT" "$TP_OVERLAY_REL/rust/")" ||
+    die "the std fork did not apply"
 
 if [ "$LIBC_PATCHES" = "0" ]; then
     die "no patches under $TP_OVERLAY_REL/libc/ — an unpatched libc has no slopos module"

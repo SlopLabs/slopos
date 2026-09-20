@@ -35,7 +35,7 @@ they are appliance-sized constants and appliance-sized policies. A workbench
 needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
 *widening under proof*, not redesign, and one exception remains: the compiler
-bootstrap itself. The thirteen sections between here and Phase 1 are what has
+bootstrap itself. The fourteen sections between here and Phase 1 are what has
 landed, each stating the constraints a later phase must not disturb.
 
 
@@ -849,21 +849,22 @@ What it rests on, in case a later phase disturbs it:
 
 **What this deliberately did not do.**
 
-- **The triple is still a JSON spec, not a built-in.** Tier 3 buys the name and
-  ships **no artifacts**, so `-Zbuild-std` stays mandatory either way until
-  tier 2. What a built-in triple costs is a stage-2 cross toolchain (~100 GB of
-  build directory by the dev guide's own figure) and what it buys is dropping
-  three flags from one script, so the tier-3 diff is written when the PR is.
-- **Upstreaming has not happened.** The two patches *are* the two PRs, in the
-  order the tier policy asks for, and the cost is a maintainer name on record
-  and an `MIT OR Apache-2.0` licence on the contributed files. Nothing
-  contributed is GPL'd kernel or slibc code.
+- **The triple is a JSON spec here.** It is a built-in one in the compiler
+  fork, the last landed section below, which is what bootstrap's `--host`
+  resolves through. Being built in is not free of consequences for this file
+  — rustc holds a built-in target to rules it relaxes for a JSON one, and the
+  section below says which — but tier 3 ships no artifacts either way, so
+  `-Zbuild-std` stays mandatory until tier 2.
+- **Upstreaming has not happened.** The patches *are* the PRs — these two and
+  the compiler fork's one — in the order the tier policy asks for, and the
+  cost is a maintainer name on record and an `MIT OR Apache-2.0` licence on
+  the contributed files. Nothing contributed is GPL'd kernel or slibc code.
 - **Being a *host* was gated on proc macros, not on the target spec, and the
   gate is now open.** `rustc_driver` is `crate-type = ["dylib"]` and
   `invalid_output_for_target` rejects that outright when `!dynamic_linking`, so
   a static rustc that expands proc macros does not exist. The spec says
-  `dynamic-linking: true` and the loader behind it exists; what remains is
-  Workstream 1.1's built-in triple.
+  `dynamic-linking: true` and the loader behind it exists; naming the triple
+  is the last landed section below.
 - **The three layouts std's unix PAL never reads stay divergent**: the
   truncated `ucontext_t`, the `termios2`-shaped `struct termios`, and `NSIG`
   at 32. They are binary-compatibility work, which is an open decision below.
@@ -1276,8 +1277,8 @@ What it rests on, in case a later phase disturbs it:
 
 ## The libc surface is complete
 
-The thirteenth thing this plan rests on, and the last before the toolchain
-itself: a C program compiled against SlopOS's own headers and linked against
+The thirteenth thing this plan rests on, and the last one the compiler stands
+on: a C program compiled against SlopOS's own headers and linked against
 its own C library runs. `/bin/libc_probe` is the standing proof — the tree's
 only pure-C program, cross-compiled by clang with `-nostdlibinc -isystem
 slibc/include` and statically linked against `libc.a`, working through
@@ -1397,11 +1398,138 @@ What it rests on, in case a later phase disturbs it:
   That is the first appliance-sized constant this plan has actually pressed
   against, and the next utest that spawns needs the constant raised rather
   than the gate.
-- **`libc.so` grew by 118 KB**, 412 384 to 530 648, for roughly 180 entry
+- **`libc.so` grew by 118 KB**, 412 384 to 530 624, for roughly 180 entry
   points. `qsort` alone costs more than the whole 56-entry `long double`
   family, which is the shape of a monomorphised sort against 56 naked stubs.
   Every image carries it, because a C library that differs between images is
   the worse hazard.
+
+---
+
+## The target is a built-in target
+
+The fourteenth thing this plan rests on, and the last before the toolchain
+itself: `x86_64-unknown-slopos` is a **built-in rustc target**, not only a
+JSON file. A JSON spec is enough to build *for*, and it is not enough to
+build rustc *for*: bootstrap resolves `--host` through the compiler's own
+built-in list, and `rustc_driver` is `crate-type = ["dylib"]` in its own
+`Cargo.toml`, so a host rustc is a dynamically linked compiler for a triple
+rustc can name. `toolchain/compiler/0001-slopos-target.patch` is that name —
+258 lines over twelve files of the pinned nightly's own sources — and
+`scripts/check_rustc_target.sh` is the standing proof: it holds the built-in
+spec to `targets/x86_64-unknown-slopos.json` field for field and then runs
+rustc's own per-target test against it.
+
+What it rests on, in case a later phase disturbs it:
+
+- **The compiler fork is a third tree, and it stamps its own inputs.** The
+  sysroot the std and libc forks live in is a clone of a *built* toolchain, so
+  a patch to rustc's sources has nowhere to land in it.
+  `scripts/make_rustc_src.sh` materialises `third_party/slopos-rustc-src`
+  instead — 265 MB fetched against a checksum in `toolchain/compiler/PIN`,
+  656 MiB on disk, 17 s — and `check_toolchain_pin.sh` now grades two trees
+  rather than one, each against the stamp of the overlay half it was built
+  from. Sharing one stamp would mean every compiler-fork edit re-extracting a
+  source tree and every std edit re-checking one it did not touch.
+- **What the tree does not carry is stated, because the phase below builds
+  from it.** `vendor/` (2.4 GB of crates.io copies) and `.cargo/`, which
+  redirects crates-io at it, are dropped together, so the bootstrap run is
+  not an offline one; `src/llvm-project/` (1.4 GB) is dropped because the C++
+  this tree needs is pinned in `toolchain/cxx/PIN` and a bootstrap takes LLVM
+  from there or from `download-ci-llvm`. Putting the three back is what an
+  offline or self-contained build costs.
+- **A built-in target may not say `Os::Other`.** `os`, `env` and `arch` are
+  enums with an open `Other` arm that `check_consistency` refuses for built-in
+  targets, so the patch adds `Os::Slopos` and `Env::Slibc` — which is also
+  what puts `slopos` and `slibc` in the `target_os`
+  and `target_env` values `--check-cfg` knows, and why the patch carries two
+  blessed snapshots of those lists, the arms librustdoc's *exhaustive* match
+  over both enums needs — without which the compiler no longer builds, which
+  a gate that compiles `rustc_target` alone cannot see and one match-arm grep
+  can — and tidy's per-target assembly revision, alongside the base opts, the
+  target module, the `supported_targets!` line and a tier-3 doc page. The JSON's `vendor: "slopos"` went the other way and
+  is **deleted**: the tuple's own vendor field is `unknown`, nothing reads
+  `cfg(target_vendor)` here, and claiming it would have blessed four more
+  snapshots to say something untrue.
+- **The JSON's `llvm-target` gained its object-format component.** It said
+  `x86_64-unknown-none` where upstream spells an OS LLVM does not know
+  `x86_64-unknown-none-elf`; the kernel spec was fixed for that in the backend
+  spike above, where `target-lexicon` answering `BinaryFormat::Unknown` ICEs
+  cg_clif, and the userland spec was left behind. A no-op under LLVM, which is
+  why it survived, and free to correct while both specs were moving anyway.
+- **A new target is not one the *stage0* compiler knows.** bootstrap validates
+  every `--host` and `--target` against the target list of the compiler it
+  starts from, before it builds anything, so a triple that exists only in the
+  tree being built fails sanity rather than bootstrapping. Upstream's answer
+  is `STAGE0_MISSING_TARGETS`, a list that is empty whenever no new target is
+  pending; the patch puts the tuple in it, and it comes back out the day a
+  stage0 that knows the triple ships.
+- **The JSON spec was internally inconsistent, and becoming a built-in target
+  is what said so.** It declared `dynamic-linking: true` with
+  `relocation-model: static`; rustc relaxes that pairing for JSON targets and
+  rejects it for built-in ones, because a target that allows dynamic linking
+  must be `pic`. The permission is load-bearing — `libc.so` is a `cdylib` and
+  `rustc_driver` is a `dylib` — so the spec says `pic` and the static images
+  pin `-C relocation-model=static` on the build line, beside the `crt0.o`, the
+  linker script and the `--emit-relocs` they already pin there. Measured, against a build of the
+  same tree under both specs: `.text` and `.rela.text` identical to the byte,
+  no `.got` in either, the residual difference string-merge packing behind a
+  changed `-C metadata` hash.
+- **One spec, and a gate rather than a convention.** Two files now describe
+  one machine, and a disagreement between them fails to compile nowhere: a
+  cross-built toolchain would produce binaries for a slightly different target
+  than the tree tests. The comparison is `Target::to_json()` on both sides —
+  rustc's own normalisation, every field, defaults elided — plus the two facts
+  the fork exists for: the tuple is in `TARGETS`, and the target still allows
+  dynamic linking.
+- **`host_tools` is a distribution fact, not a capability.** The metadata says
+  `host_tools: false` and `tier: 3`, and the only thing in the compiler tree
+  that reads that field is `src/tools/build-manifest`, which splits tier-1 and
+  tier-2 targets into the dist manifest's host list and its target list on
+  exactly that field and never reaches a tier-3 one. Redox ships `Some(false)`
+  and hosts a native rustc.
+- **The gate builds `rustc_target`, not a compiler.** Twenty-eight seconds
+  cold and 1.3 s warm, at 1.1 GB of probe and test objects under
+  `builddir/gates/` that `just clean` removes, against the hours a stage-1
+  build would cost — which is what makes "is the spec still real" a question
+  CI can ask every run. The source tree it needs is a 265 MB fetch, so the
+  gate reports `skipped` without one and the CI job that materialises one
+  passes `--require`.
+
+**What this deliberately did not do.**
+
+- **Nothing was upstreamed.** The patch is PR-shaped — the doc page, the
+  `SUMMARY.md` entry, the assembly revision tidy demands — because that is the
+  cheapest way to keep it small, not because a PR is open. Tier 3 ships no
+  artifacts, so `-Zbuild-std` and `-Zjson-target-spec` stay on every build
+  line until tier 2 whatever happens to the PR.
+- **One fixture is left un-extended, deliberately.**
+  `tests/rustdoc-html/doc-cfg/all-targets.rs` enumerates every `target_os` and
+  `target_env` by hand and asserts the rendered prose, and it does not derive
+  that list from the compiler — so it keeps passing with `slopos` missing,
+  while an entry added with a wrong expectation string would make it fail.
+  Regenerating it needs a built rustdoc, which this gate deliberately does not
+  pay for, so the list is one target short until the PR is prepared against a
+  tree that can run `x test rustdoc-html`.
+- **Two host flips are the bootstrap run's, and nobody's prior art covers
+  both.** The spec is `panic-strategy: abort`, and rustc is not a program that
+  can abort on a fatal diagnostic: `FatalError::raise` is a `resume_unwind`
+  and `catch_fatal_errors` is a `catch_unwind`. And `rustc_driver`'s dylib is
+  a hard-coded crate type. Motor OS's fork answers the second and not the
+  first: `compiler/rustc_driver/Cargo.toml` on `moturus/rust@motor-os-rustc`
+  is `["dylib", "rlib"]`, carrying a comment that rustc drops the dylib crate
+  type on a target without dynamic linking and links the driver statically
+  from the rlib — while `spec/base/motor.rs` there still sets
+  `PanicStrategy::Abort`, so what that fork ships is a native rustc that
+  aborts on a fatal diagnostic. Whether SlopOS unwinds in userland or patches
+  the driver is a measurement of the first bootstrap run rather than a
+  decision to take here; what the tree must not do is answer it in the
+  built-in spec alone, because the JSON one is what the system's own binaries
+  are built with.
+- **No bootstrap invocation.** This section makes `--host=x86_64-unknown-slopos`
+  a triple rustc can resolve. Whether bootstrap then *finishes* is the first
+  workstream below, and it is the one that produces numbers rather than
+  patches.
 
 ---
 
@@ -1431,7 +1559,7 @@ being paid for. `scripts/check_linker_script.sh` keeps its whole value as the
 ratchet that would notice `wild` becoming viable, which is now a reason to
 re-open a decision rather than a blocker to route around.
 
-**What the reversal costs.** Three sections above, all landed: the dynamic
+**What the reversal costs.** Three of the landed sections above: the dynamic
 loader, which was always owed; the C++ runtime, which was new; and the libc
 surface underneath them, which was owed either way and which the LLVM decision
 promoted from off the critical path to load-bearing. The C99 frontend written
@@ -1440,36 +1568,15 @@ clang arrives in the same monorepo pass that produces `libLLVM.so` and
 `rust-lld`, so the C compiler is a by-product of a decision taken for Rust's
 sake, and that is the only place this road is cheaper than the one it replaced.
 
-### Workstream 1.1 — The target becomes a host (**M**)
-
-`x86_64-unknown-slopos` is a JSON target today, and that is enough to *build
-for*. It is not enough to *build rustc for*: bootstrap's `--host` resolves a
-triple through the compiler's own built-in list, and `rustc_driver` is
-`crate-type = ["dylib"]` in `compiler/rustc_driver/Cargo.toml` — hard-coded, so
-there is no configuration in which a host rustc is a static binary. The target
-therefore has to become a built-in spec in `rustc_target/src/spec/targets/`,
-which is what `x86_64-unknown-redox` is and what the fork already has the
-machinery for: `toolchain/rust/` is a patch
-series over the pinned channel, `toolchain/PIN` is where its hash is written
-down, and `scripts/check_toolchain_pin.sh` already fails when a materialized
-sysroot drifts from it. One more patch hunk, held by the same gate.
-
-The Decided block below has said all along that the built-in triple is not
-done and that tier 3 ships no artifacts, so `-Zbuild-std` stays mandatory
-regardless. What changes is that it stops being a convenience and becomes a
-prerequisite for bootstrap taking `--host=x86_64-unknown-slopos` at all.
-Upstreaming it as a tier-3 target is worth doing for the maintenance it saves,
-and is not on the critical path.
-
-### Workstream 1.2 — The toolchain is cross-built and lands on a dev disk (**L**)
+### Workstream 1.1 — The toolchain is cross-built and lands on a dev disk (**L**)
 
 One bootstrap invocation on Linux, `--build=x86_64-unknown-linux-gnu
 --host=x86_64-unknown-slopos`, producing rustc, cargo, `rust-lld`, clang and
 `libLLVM.so` for SlopOS, plus the std built through the existing fork. Nothing
 in that sentence is novel — it is how every cross-hosted Rust distribution is
-produced — and everything in it depends on the three landed sections above,
-because every artifact in it is dynamically linked, throws, and calls a C
-library.
+produced — and everything in it depends on the four landed sections above:
+every artifact in it is dynamically linked, throws, calls a C library, and is
+built for a triple the compiler can name.
 
 **The medium is already reachable.** Measured from the host: the pinned sysroot
 is 1.1 GB, `librustc_driver.so` is a single 161 MB shared object, and the
@@ -1517,7 +1624,7 @@ proc-macro one, and `rustc_driver` is `crate-type = ["dylib"]` in the
 compiler's own `Cargo.toml` regardless. Decide it with the first bootstrap run
 rather than on paper; the open-decisions list carries it.
 
-### Workstream 1.3 — The build loop holds (**M**)
+### Workstream 1.2 — The build loop holds (**M**)
 
 A toolchain that starts is not a toolchain that finishes. What the loop needs
 beyond the landed sections above, with the tree's current answer beside it:
@@ -1542,7 +1649,7 @@ beyond the landed sections above, with the tree's current answer beside it:
   the honest number is the one a first in-guest build measures rather than one
   extrapolated here.
 
-### Workstream 1.4 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.3 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -1612,7 +1719,7 @@ What it would cost, with the parts that are not obvious named first:
   dependency of rebuilding the compiler is a second C++ port plus an
   interpreter, and none of the three is on any other phase's path.
 - **clang running in-guest is free, and it is not the hard part.** It arrives
-  with `libLLVM.so` in Workstream 1.2's single cross-build. Having the compiler
+  with `libLLVM.so` in Workstream 1.1's single cross-build. Having the compiler
   is not having the build system, the disk or the hours.
 - **Disk and time.** A release LLVM build is tens of gigabytes of objects and
   hours of CPU on a machine with a real scheduler and real I/O. Neither number
@@ -1652,7 +1759,7 @@ not been made at all.
       351 — and the backend decision changed what it is worth: a prebuilt
       rustc is an LLVM rustc, which used to be the objection and is now what
       the tree builds towards anyway, so this became a possible *shortcut
-      past* Workstream 1.2 rather than a detour from it. Asterinas is also the
+      past* Workstream 1.1 rather than a detour from it. Asterinas is also the
       proof of the ceiling: binary-compatible to the point of an unmodified
       NixOS userland, and still always cross-built. Binary compatibility buys
       running a prebuilt rustc; it does not buy a target that can be a host,
@@ -1663,8 +1770,21 @@ not been made at all.
       is `crate-type = ["dylib"]` and no configuration changes that. It is no
       longer a question about what the loader owes but about how many
       `PT_LOAD`s and how much startup relocation an in-guest rustc pays for,
-      which is the first number Workstream 1.2's bootstrap run produces.
+      which is the first number Workstream 1.1's bootstrap run produces.
       Decide it there rather than on paper.
+- [ ] **Does the toolchain's rustc unwind, or does the driver stop being a
+      dylib?** The built-in target is `panic-strategy: abort` because every
+      SlopOS binary is, and a rustc built that way aborts on its first fatal
+      diagnostic: `FatalError::raise` is a `resume_unwind` and
+      `catch_fatal_errors` a `catch_unwind`. Motor OS's fork answers only the
+      second half — `rustc_driver`'s `crate-type` widened to
+      `["dylib", "rlib"]` so a static compiler links — and keeps
+      `PanicStrategy::Abort`, so no one's prior art covers the unwinding road.
+      The cost of that road is `.eh_frame` in every userland binary and a
+      `panic = unwind` std; the cost of the other is a compiler patch upstream
+      will not take. Decide it with the first bootstrap run, and do not answer
+      it in the built-in spec alone: the JSON one is what the system's own
+      binaries are built with.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
       building itself un-attests exactly the blocks it changes, and now keeps
       them un-attested across host rebuilds. Decide which paths stay verified
@@ -1679,7 +1799,7 @@ not been made at all.
       peaks far above anything cranelift would have, and a build that
       overcommits currently dies at the faulting task with a SIGBUS-coded
       exit. Decide between swap plus a reclaim policy and a per-build memory
-      budget that makes overcommit not happen — before Workstream 1.3.
+      budget that makes overcommit not happen — before Workstream 1.2.
 
 **Decided.** C++ runtime: **LLVM's `libc++`, cross-built, libc++ and
 libc++abi linked into one `libc++.so`** — settled by building it, and by the
@@ -1687,7 +1807,7 @@ fact that `libstdc++` is not a library you cross-build but one a GCC
 cross-compiler emits, which is a second toolchain to pin and keep. The libc
 gap it needs is closed — `check_cxx_pin.sh` holds all 68 of its undefined
 symbols to `libc.so` — and what remains unmeasured is the LLVM build against
-it, which Workstream 1.2 takes first. Syscall ABI: **Linux x86-64 numbering,
+it, which Workstream 1.1 takes first. Syscall ABI: **Linux x86-64 numbering,
 one table, a private
 range at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 **LLVM, cross-built from Linux, with the C++ runtime ported to SlopOS** — the
@@ -1723,7 +1843,8 @@ compile.
 | Shell | `shell-core/src/`, `userland/src/apps/shell/{expand,glob,exec,funcs}.rs` | *invariant* |
 | Utilities | `userland/src/apps/coreutils/`, `userland/src/bin/coreutils.rs`, the justfile's `coreutils_tools`, `scripts/build_fs_image.sh`, `scripts/gen_initramfs.py` | *invariant* — the civil calendar is `slibc-core`'s and must not be re-inlined |
 | Editor and toolkit | `editor-core/src/`, `userland/src/apps/editor/`, `appkit/src/`, `windowing/src/clipboard.rs`, the compositor's `protocol_pointer_grab` | *invariant* |
-| Std/target/unwinding | `toolchain/`, `scripts/make_slopos_sysroot.sh`, `scripts/check_toolchain_pin.sh`, `targets/x86_64-unknown-slopos.json`, `userland/userland.ld` | *invariant* |
+| Std/target/unwinding | `toolchain/{PIN,rust,libc}`, `scripts/make_slopos_sysroot.sh`, `scripts/lib/toolchain_pin.sh`, `scripts/check_toolchain_pin.sh`, `targets/x86_64-unknown-slopos.json`, `userland/userland.ld` | *invariant* |
+| Compiler fork | `toolchain/compiler/`, `scripts/make_rustc_src.sh`, `scripts/check_rustc_target.sh`, `scripts/lib/toolchain_pin.sh`, `targets/x86_64-unknown-slopos.json`, `scripts/build_userland.sh` | *invariant* — the built-in spec and the JSON one are one spec in two files |
 | Syscall ABI | `abi/src/syscall/numbers.rs`, `core/src/syscall/handlers.rs`, `scripts/check_syscall_abi.sh`, `scripts/gates/syscall/` | *invariant* |
 | Backend and linker gates | `scripts/check_codegen_backend.sh`, `scripts/check_linker_script.sh`, `scripts/gates/{codegen,linker}/`, `targets/x86_64-slos.json`, `link.ld` | *invariant* |
 | Storage | `fs/src/ext2/{dirindex,journal}.rs`, `fs/src/verity.rs`, `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` | *invariant* |

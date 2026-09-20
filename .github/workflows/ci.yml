@@ -272,6 +272,43 @@ jobs:
           scripts/check_codegen_backend.sh --backend cranelift
           scripts/check_linker_script.sh --linker wild --require
 
+  # The `ci` job runs `check_rustc_target.sh` too, where it reports `skipped`:
+  # the compiler source tree is a 265 MB fetch that lands 656 MiB on disk,
+  # which does not belong in a job that also builds a kernel, a userland and
+  # three images. This one materialises it and asks for real.
+  rustc-target:
+    name: Built-in x86_64-unknown-slopos target
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # The pinned channel and nothing else: everything this job runs is
+      # `cargo +<channel>`, so materialising the `slopos` sysroot would add a
+      # crates.io fetch and a second fork's failure modes to the one job whose
+      # red means the built-in target spec drifted.
+      - name: Setup Rust toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
+
+      # The tarball only: the unpacked tree and the probe's target directory
+      # are what the gate is grading, and a cached one would be a cached
+      # answer.
+      - name: Cache the pinned rustc source tarball
+        uses: actions/cache@v6
+        with:
+          path: third_party/rustc-src-*.tar.xz
+          key: rustc-src-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Materialise the compiler fork
+        run: scripts/make_rustc_src.sh
+
+      - name: Built-in target against the JSON spec
+        run: |
+          scripts/check_rustc_target.sh --self-test
+          scripts/check_rustc_target.sh --require
+
   miri:
     name: KernMiri (OSTD UB detection)
     runs-on: blacksmith-4vcpu-ubuntu-2404

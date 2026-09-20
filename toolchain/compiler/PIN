@@ -1,0 +1,13 @@
+# The SlopOS compiler-fork pin.
+#
+# `scripts/make_rustc_src.sh` materialises the pinned rustc source tree with
+# the patch below applied, and `scripts/check_toolchain_pin.sh` fails if any
+# line here stops describing what is on disk.
+#
+# The channel is not repeated here: it lives in `toolchain/PIN`, held equal to
+# `rust-toolchain.toml`, and the source tarball's URL is derived from it. What
+# this file adds is the tarball's checksum and the patch that makes
+# `x86_64-unknown-slopos` a built-in target rather than a JSON file — the one
+# thing bootstrap's `--host` cannot resolve without.
+rustc_src_sha256=83e1649371c2b85317974ead0c9786766c090dc1b79afe41c8e7091f009da478
+patch_sha256=toolchain/compiler/0001-slopos-target.patch:46b54ce9070f9508f5feeeebbbef0e801b230db7a3ccfc7463640fa20c3fd35a

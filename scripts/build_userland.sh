@@ -63,7 +63,13 @@ CRT0_OBJ="$(cd "$BUILD_DIR" && pwd)/crt0.o"
 # `pre-link-args`, where every artifact built for this target got them. The
 # shared objects below must not: `userland.ld` fixes an image at 0x400000 and
 # discards `.interp`, which is the opposite of what a `.so` needs.
-USERLAND_RUSTFLAGS="-C link-arg=$CRT0_OBJ -C link-arg=-Tuserland/userland.ld -C link-arg=--emit-relocs"
+#
+# `relocation-model=static` is here rather than in the target spec because the
+# spec must say `pic`: a target that allows dynamic linking and does not is
+# rejected by rustc's own builtin-target consistency check, and `libc.so` needs
+# the permission. Everything built with these flags is a non-PIE image at a
+# fixed address; the shared objects pin `pic` on their own build line.
+USERLAND_RUSTFLAGS="-C relocation-model=static -C link-arg=$CRT0_OBJ -C link-arg=-Tuserland/userland.ld -C link-arg=--emit-relocs"
 
 rm -f "$CRT0_OBJ"
 # `--emit=obj` is a side effect of *compiling*, so a warm fingerprint makes
@@ -395,7 +401,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --release
 
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    RUSTFLAGS="-C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
+    RUSTFLAGS="-C relocation-model=static -C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
     $CARGO +slopos build \
         -Zbuild-std=core \
         -Zunstable-options \

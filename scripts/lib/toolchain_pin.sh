@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Shared plumbing for the pinned `slopos` toolchain fork.
 #
-# Two scripts must agree, byte for byte, on what the pin *is*:
-# `make_slopos_sysroot.sh` materialises the sysroot and writes the stamp, and
-# `check_toolchain_pin.sh` re-derives the same stamp and fails when it has
-# drifted. Duplicating the hash definition in both is how a stamp that never
-# goes stale gets shipped, so it lives here once.
+# Four scripts must agree, byte for byte, on what a pin *is*:
+# `make_slopos_sysroot.sh` and `make_rustc_src.sh` materialise a tree each and
+# write its stamp; `check_toolchain_pin.sh` and `check_rustc_target.sh`
+# re-derive those stamps and fail when one has drifted. Duplicating a hash
+# definition across four callers is how a stamp that never goes stale gets
+# shipped, so they live here once.
 #
 # Portability matches scripts/lib/gate_common.sh: bash 3.2, no `mapfile`, no
 # `declare -A`, no GNU-only `realpath`.
@@ -21,6 +22,13 @@ TP_PIN_REL="toolchain/PIN"
 # therefore the directory the rust patch applies in; the libc patch applies in
 # its `libc` subdirectory.
 TP_LIBRARY_REL="lib/rustlib/src/rust/library"
+# The compiler fork is a second materialised tree with a second stamp: the
+# sysroot is a clone of a *built* toolchain, so a patch to rustc's own sources
+# has nowhere to land in it, and re-cloning the sysroot for a compiler patch
+# would be work for nothing.
+TP_COMPILER_OVERLAY_REL="toolchain/compiler"
+TP_COMPILER_PIN_REL="toolchain/compiler/PIN"
+TP_RUSTC_SRC_REL="third_party/slopos-rustc-src"
 
 tp_sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -94,12 +102,40 @@ tp_pin_patch_sha() {
     tp_pin_patches "$pin" | awk -v want="$rel" '$1 == want { print $2; exit }'
 }
 
-# Every patch file the overlay carries, repo-relative and sorted. Both halves
-# of the fork live here: `toolchain/rust/` patches the std source tree,
-# `toolchain/libc/` patches the unpacked libc crate.
+tp_pin_files() {
+    printf '%s\n%s\n' "$TP_PIN_REL" "$TP_COMPILER_PIN_REL"
+}
+
+# The compiler fork keeps its own PIN so that editing it does not restamp the
+# sysroot, which is built from the other two.
+tp_patch_pin_file() {
+    case "$1" in
+        "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_COMPILER_PIN_REL" ;;
+        *) printf '%s\n' "$TP_PIN_REL" ;;
+    esac
+}
+
+# All three forks live here: `toolchain/rust/` patches the std source tree,
+# `toolchain/libc/` the unpacked libc crate, `toolchain/compiler/` rustc's own
+# sources.
 tp_patch_files() {
     local root="$1"
     (cd "$root" && find "$TP_OVERLAY_REL" -type f -name '*.patch' -print | LC_ALL=C sort)
+}
+
+tp_patch_tree_rel() {
+    case "$1" in
+        "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
+        *) printf '%s\n' "$TP_SYSROOT_REL" ;;
+    esac
+}
+
+tp_patch_apply_dir() {
+    case "$1" in
+        "$TP_OVERLAY_REL/libc/"*) printf '%s/%s/libc\n' "$TP_SYSROOT_REL" "$TP_LIBRARY_REL" ;;
+        "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
+        *) printf '%s/%s\n' "$TP_SYSROOT_REL" "$TP_LIBRARY_REL" ;;
+    esac
 }
 
 # The files a patch *creates*, one per line, `-p1`-stripped so each is
@@ -120,17 +156,100 @@ tp_patch_new_files() {
     ' "$1"
 }
 
-# The stamp: one sha256 over every file in the overlay — `toolchain/PIN`
-# included, since it lives there — keyed by path so a rename is a change. This
-# is what `.slopos-stamp` records and what makes re-materialising idempotent.
-tp_stamp() {
+# A materialiser is an input to the tree it builds: its unpack rules, and this
+# library's patch-placement rules, decide what ends up in one, so a tree built
+# under the previous set must not be stamped current. Absent under a scratch
+# root, which carries an overlay and no scripts.
+tp_materialiser_hash() {
+    if [ -f "$1/scripts/$2" ]; then
+        printf '%s  scripts/%s\n' "$(tp_sha256_file "$1/scripts/$2")" "$2"
+    fi
+}
+
+tp_hash_lines() {
     local root="$1"
     (
         cd "$root" || exit 1
-        find "$TP_OVERLAY_REL" -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+        LC_ALL=C sort | while IFS= read -r path; do
             printf '%s  %s\n' "$(tp_sha256_file "$path")" "$path"
         done
-    ) | tp_sha256_stream
+    )
+}
+
+# A stamp is one sha256 over what a materialised tree was built from, keyed by
+# path so a rename is a change. Each tree stamps its own inputs and nothing
+# else: the sysroot is `toolchain/{PIN,rust,libc}`, and the compiler source
+# tree is `toolchain/compiler/` plus the *channel* out of that PIN — the one
+# line it shares. A std patch, a compiler patch and a C++ pin bump therefore
+# restamp one tree, one tree and neither.
+tp_stamp() {
+    {
+        tp_materialiser_hash "$1" make_slopos_sysroot.sh
+        tp_materialiser_hash "$1" lib/toolchain_pin.sh
+        (cd "$1" && find "$TP_PIN_REL" "$TP_OVERLAY_REL/rust" "$TP_OVERLAY_REL/libc" \
+            -type f -print) | tp_hash_lines "$1"
+    } | tp_sha256_stream
+}
+
+tp_rustc_stamp() {
+    {
+        printf 'channel=%s\n' "$(tp_pin_value "$1/$TP_PIN_REL" channel)"
+        tp_materialiser_hash "$1" make_rustc_src.sh
+        tp_materialiser_hash "$1" lib/toolchain_pin.sh
+        (cd "$1" && find "$TP_COMPILER_OVERLAY_REL" -type f -print) | tp_hash_lines "$1"
+    } | tp_sha256_stream
+}
+
+# Apply every overlay patch under <prefix>, in the tree each one belongs to,
+# and print how many.
+#
+# `git apply`, not `patch(1)`: the patches are `git diff` output that creates
+# whole new directories, which GNU patch does not do reliably. Every
+# materialised tree lives *inside* this git repository, and `git apply` run in
+# a work tree resolves the patch's paths against the repository root rather
+# than the working directory — every path then lands outside the directory it
+# was invoked in, which `git apply` silently ignores while exiting 0.
+# Measured, not theoretical: it is how the sysroot script once materialised an
+# unpatched tree and reported success. `GIT_CEILING_DIRECTORIES` at the tree's
+# parent stops repository discovery so `git apply` runs in its non-repo mode,
+# and each patch is then re-checked in reverse so a no-op cannot pass again.
+tp_apply_patches() {
+    local root="$1" prefix="$2"
+    local rel pin want sha dir ceiling out applied=0
+    for rel in $(tp_patch_files "$root"); do
+        case "$rel" in
+            "$prefix"*) ;;
+            *) continue ;;
+        esac
+        pin="$root/$(tp_patch_pin_file "$rel")"
+        want="$(tp_pin_patch_sha "$pin" "$rel")"
+        if [ -z "$want" ]; then
+            echo "toolchain_pin: $rel carries no \`patch_sha256=$rel:<sha256>\` line in $(tp_patch_pin_file "$rel")" >&2
+            return 1
+        fi
+        sha="$(tp_sha256_file "$root/$rel")"
+        if [ "$sha" != "$want" ]; then
+            echo "toolchain_pin: $rel does not match its pin
+       expected: $want ($(tp_patch_pin_file "$rel"))
+       actual:   $sha" >&2
+            return 1
+        fi
+        dir="$root/$(tp_patch_apply_dir "$rel")"
+        ceiling="$(tp_abspath "$(dirname "$root/$(tp_patch_tree_rel "$rel")")")"
+        if ! out="$(cd "$dir" && GIT_CEILING_DIRECTORIES="$ceiling" git apply -p1 "$root/$rel" 2>&1)"; then
+            printf '%s\n' "$out" >&2
+            echo "toolchain_pin: patch failed to apply: $rel (in $dir)" >&2
+            return 1
+        fi
+        if ! (cd "$dir" && GIT_CEILING_DIRECTORIES="$ceiling" \
+                git apply -p1 --reverse --check "$root/$rel" >/dev/null 2>&1); then
+            echo "toolchain_pin: $rel reported success but is not applied in $dir
+       git apply resolved its paths somewhere else and changed nothing." >&2
+            return 1
+        fi
+        applied=$((applied + 1))
+    done
+    printf '%s\n' "$applied"
 }
 
 # `rustup toolchain link` is a symlink under $RUSTUP_HOME/toolchains on unix,

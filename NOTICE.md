@@ -32,10 +32,10 @@ numbers, `errno` values, ioctl codes, struct layouts, hardware register
 offsets) are reproduced where compatibility requires it; those are interface
 facts rather than authorship.
 
-## Pinned Rust standard library and `libc` forks
+## Pinned Rust standard library, `libc` and compiler forks
 
-SlopOS's userland target `x86_64-unknown-slopos` is built against two pinned
-forks, both of upstream Rust projects licensed `MIT OR Apache-2.0`:
+SlopOS's userland target `x86_64-unknown-slopos` is built against three pinned
+forks, all of upstream Rust projects licensed `MIT OR Apache-2.0`:
 
 - a fork of [`rust-lang/rust`](https://github.com/rust-lang/rust)'s
   `library/` tree, at the commit `rust-toolchain.toml` pins, adding the
@@ -43,24 +43,36 @@ forks, both of upstream Rust projects licensed `MIT OR Apache-2.0`:
   `os/slopos/` and `sys/random/slopos.rs` modules, and the `cfg` sites a
   unix-family target has to appear in;
 - a fork of [`rust-lang/libc`](https://github.com/rust-lang/libc), adding
-  `src/unix/slopos/` — the `libc` bindings for SlopOS's C library.
+  `src/unix/slopos/` — the `libc` bindings for SlopOS's C library;
+- a fork of [`rust-lang/rust`](https://github.com/rust-lang/rust)'s compiler
+  tree, at the same commit, making `x86_64-unknown-slopos` a built-in target:
+  `compiler/rustc_target/src/spec/{base/slopos.rs,targets/x86_64_unknown_slopos.rs}`,
+  the `Os`/`Env` variants and the match arms that follow from them, bootstrap's
+  stage0 target list, the tier-3 documentation page, and the test fixtures
+  those change.
 
-Neither fork is vendored into this repository. What is tracked is the diff:
+None of the three is vendored into this repository. What is tracked is the diff:
 `toolchain/PIN` records the channel, the pinned `libc` crate version and its
-checksum, and a checksum per patch, and `toolchain/rust/` and
-`toolchain/libc/` carry the patches themselves.
-`scripts/make_slopos_sysroot.sh` materialises both into an owned sysroot at
-`third_party/rust-slopos/` at build time, and
+checksum, and a checksum per patch; `toolchain/compiler/PIN` records the rustc
+source tarball's checksum and its own patch's; and `toolchain/{rust,libc,compiler}/`
+carry the patches themselves. `scripts/make_slopos_sysroot.sh` materialises the
+first two into an owned sysroot at `third_party/rust-slopos/` and
+`scripts/make_rustc_src.sh` materialises the third into
+`third_party/slopos-rustc-src/`, both at build time, and
 `scripts/check_toolchain_pin.sh` fails the build if what is materialised has
 drifted from what is pinned. Upstream's code reaches a SlopOS build only
-through that step. Both patches are licensed `MIT OR Apache-2.0` rather than
-GPL-3.0-or-later, because they are written to be contributed upstream under the
-tier-3 target policy.
+through those steps. All three patches are licensed `MIT OR Apache-2.0` rather
+than GPL-3.0-or-later, because they are written to be contributed upstream
+under the tier-3 target policy.
 
 Authorship within the patches is split. New work, © 2025–2026 The SlopOS
 Authors, is the `libc` fork's `src/unix/slopos/` module, the `target_os =
-"slopos"` arms the std patch adds to lists that were already there, and
-`std/src/sys/random/slopos.rs`. The three files the std patch creates under
+"slopos"` arms the std patch adds to lists that were already there,
+`std/src/sys/random/slopos.rs`, and the compiler fork's two spec modules and
+its documentation page — the modules following the shape of upstream's
+`spec/base/redox.rs` and `spec/targets/x86_64_unknown_redox.rs`, the page
+following `src/doc/rustc/src/platform-support/TEMPLATE.md`. The three files
+the std patch creates under
 `std/src/os/slopos/` are instead derived from upstream's own
 `std/src/os/redox/` ones: `fs.rs` is `os/redox/fs.rs` with `redox` renamed to
 `slopos` and nothing else changed, and `raw.rs` is `os/redox/raw.rs` with

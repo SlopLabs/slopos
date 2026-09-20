@@ -1,0 +1,258 @@
+diff --git a/compiler/rustc_target/src/spec/base/mod.rs b/compiler/rustc_target/src/spec/base/mod.rs
+--- a/compiler/rustc_target/src/spec/base/mod.rs
++++ b/compiler/rustc_target/src/spec/base/mod.rs
+@@ -29,6 +29,7 @@
+ pub(crate) mod openbsd;
+ pub(crate) mod qnx_sdp;
+ pub(crate) mod redox;
++pub(crate) mod slopos;
+ pub(crate) mod solaris;
+ pub(crate) mod solid;
+ pub(crate) mod teeos;
+diff --git a/compiler/rustc_target/src/spec/mod.rs b/compiler/rustc_target/src/spec/mod.rs
+--- a/compiler/rustc_target/src/spec/mod.rs
++++ b/compiler/rustc_target/src/spec/mod.rs
+@@ -1437,6 +1437,8 @@
+     ("riscv64gc-unknown-redox", riscv64gc_unknown_redox),
+     ("x86_64-unknown-redox", x86_64_unknown_redox),
+ 
++    ("x86_64-unknown-slopos", x86_64_unknown_slopos),
++
+     ("x86_64-unknown-managarm-mlibc", x86_64_unknown_managarm_mlibc),
+     ("aarch64-unknown-managarm-mlibc", aarch64_unknown_managarm_mlibc),
+     ("riscv64gc-unknown-managarm-mlibc", riscv64gc_unknown_managarm_mlibc),
+@@ -1868,6 +1870,7 @@
+         Qurt = "qurt",
+         Redox = "redox",
+         Rtems = "rtems",
++        Slopos = "slopos",
+         Solaris = "solaris",
+         SolidAsp3 = "solid_asp3",
+         TeeOs = "teeos",
+@@ -1909,6 +1912,7 @@
+         Relibc = "relibc",
+         Sgx = "sgx",
+         Sim = "sim",
++        Slibc = "slibc",
+         P1 = "p1",
+         P2 = "p2",
+         P3 = "p3",
+diff --git a/src/bootstrap/src/core/sanity.rs b/src/bootstrap/src/core/sanity.rs
+--- a/src/bootstrap/src/core/sanity.rs
++++ b/src/bootstrap/src/core/sanity.rs
+@@ -36,6 +36,7 @@
+ /// when the newly-bumped stage 0 compiler now knows about the formerly-missing targets.
+ const STAGE0_MISSING_TARGETS: &[&str] = &[
+     // just a dummy comment so the list doesn't get onelined
++    "x86_64-unknown-slopos",
+ ];
+ 
+ /// Minimum version threshold for libstdc++ required when using prebuilt LLVM
+diff --git a/src/doc/rustc/src/SUMMARY.md b/src/doc/rustc/src/SUMMARY.md
+--- a/src/doc/rustc/src/SUMMARY.md
++++ b/src/doc/rustc/src/SUMMARY.md
+@@ -138,6 +138,7 @@
+     - [\*-unknown-netbsd\*](platform-support/netbsd.md)
+     - [\*-unknown-openbsd](platform-support/openbsd.md)
+     - [\*-unknown-redox](platform-support/redox.md)
++    - [x86_64-unknown-slopos](platform-support/slopos.md)
+     - [\*-unknown-uefi](platform-support/unknown-uefi.md)
+     - [\*-pc-windows-msvc](platform-support/windows-msvc.md)
+     - [\*-uwp-windows-msvc](platform-support/uwp-windows-msvc.md)
+diff --git a/src/doc/rustc/src/platform-support.md b/src/doc/rustc/src/platform-support.md
+--- a/src/doc/rustc/src/platform-support.md
++++ b/src/doc/rustc/src/platform-support.md
+@@ -465,6 +465,7 @@
+ [`x86_64-unknown-managarm-mlibc`](platform-support/managarm.md) | ? |  | x86_64 Managarm
+ [`x86_64-unknown-motor`](platform-support/motor.md) | ✓ |  | x86_64 Motor OS
+ [`x86_64-unknown-openbsd`](platform-support/openbsd.md) | ✓ | ✓ | 64-bit OpenBSD
++[`x86_64-unknown-slopos`](platform-support/slopos.md) | ? |  | x86_64 SlopOS
+ [`x86_64-unknown-trusty`](platform-support/trusty.md) | ✓ |  |
+ `x86_64-uwp-windows-gnu` | ✓ |  |
+ [`x86_64-uwp-windows-msvc`](platform-support/uwp-windows-msvc.md) | ✓ |  |
+diff --git a/src/librustdoc/clean/cfg.rs b/src/librustdoc/clean/cfg.rs
+--- a/src/librustdoc/clean/cfg.rs
++++ b/src/librustdoc/clean/cfg.rs
+@@ -691,6 +691,7 @@
+         Qurt => "QuRT",
+         Redox => "Redox OS",
+         Rtems => "RTEMS OS",
++        Slopos => "SlopOS",
+         Solaris => "Solaris",
+         SolidAsp3 => "SOLID ASP3",
+         TeeOs => "TEEOS",
+@@ -773,6 +774,7 @@
+         Relibc => "relibc",
+         Sgx => "SGX",
+         Sim => "Simulator",
++        Slibc => "slibc",
+         Uclibc => "uClibc",
+         V5 => "V5",
+         // tidy-alphabetical-end
+diff --git a/tests/assembly-llvm/targets/targets-elf.rs b/tests/assembly-llvm/targets/targets-elf.rs
+--- a/tests/assembly-llvm/targets/targets-elf.rs
++++ b/tests/assembly-llvm/targets/targets-elf.rs
+@@ -769,6 +769,9 @@
+ //@ revisions: x86_64_unknown_redox
+ //@ [x86_64_unknown_redox] compile-flags: --target x86_64-unknown-redox
+ //@ [x86_64_unknown_redox] needs-llvm-components: x86
++//@ revisions: x86_64_unknown_slopos
++//@ [x86_64_unknown_slopos] compile-flags: --target x86_64-unknown-slopos
++//@ [x86_64_unknown_slopos] needs-llvm-components: x86
+ //@ revisions: x86_64_unknown_trusty
+ //@ [x86_64_unknown_trusty] compile-flags: --target x86_64-unknown-trusty
+ //@ [x86_64_unknown_trusty] needs-llvm-components: x86
+diff --git a/tests/ui/check-cfg/cfg-crate-features.stderr b/tests/ui/check-cfg/cfg-crate-features.stderr
+--- a/tests/ui/check-cfg/cfg-crate-features.stderr
++++ b/tests/ui/check-cfg/cfg-crate-features.stderr
+@@ -24,7 +24,7 @@
+ LL | #![cfg(not(target(os = "does_not_exist")))]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+-   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qnx`, `qurt`, `redox`, `rtems`, and `solaris` and 15 more
++   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qnx`, `qurt`, `redox`, `rtems`, and `slopos` and 16 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+ 
+diff --git a/tests/ui/check-cfg/well-known-values.stderr b/tests/ui/check-cfg/well-known-values.stderr
+--- a/tests/ui/check-cfg/well-known-values.stderr
++++ b/tests/ui/check-cfg/well-known-values.stderr
+@@ -167,7 +167,7 @@
+ LL |     target_env = "_UNEXPECTED_VALUE",
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+-   = note: expected values for `target_env` are: ``, `gnu`, `macabi`, `mlibc`, `msvc`, `musl`, `newlib`, `nto70`, `nto71`, `nto71_iosock`, `ohos`, `p1`, `p2`, `p3`, `relibc`, `sgx`, `sim`, `uclibc`, and `v5`
++   = note: expected values for `target_env` are: ``, `gnu`, `macabi`, `mlibc`, `msvc`, `musl`, `newlib`, `nto70`, `nto71`, `nto71_iosock`, `ohos`, `p1`, `p2`, `p3`, `relibc`, `sgx`, `sim`, `slibc`, `uclibc`, and `v5`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg.html> for more information about checking conditional configuration
+ 
+ warning: unexpected `cfg` condition value: `_UNEXPECTED_VALUE`
+@@ -232,7 +232,7 @@
+ LL |     target_os = "_UNEXPECTED_VALUE",
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+-   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qnx`, `qurt`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, `tvos`, `uefi`, `unknown`, `vexos`, `visionos`, `vita`, `vxworks`, `wasi`, `watchos`, `windows`, `xous`, and `zkvm`
++   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qnx`, `qurt`, `redox`, `rtems`, `slopos`, `solaris`, `solid_asp3`, `teeos`, `trusty`, `tvos`, `uefi`, `unknown`, `vexos`, `visionos`, `vita`, `vxworks`, `wasi`, `watchos`, `windows`, `xous`, and `zkvm`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg.html> for more information about checking conditional configuration
+ 
+ warning: unexpected `cfg` condition value: `_UNEXPECTED_VALUE`
+@@ -305,7 +305,7 @@
+    |                   |
+    |                   help: there is a expected value with a similar name: `"linux"`
+    |
+-   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qnx`, `qurt`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, `tvos`, `uefi`, `unknown`, `vexos`, `visionos`, `vita`, `vxworks`, `wasi`, `watchos`, `windows`, `xous`, and `zkvm`
++   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qnx`, `qurt`, `redox`, `rtems`, `slopos`, `solaris`, `solid_asp3`, `teeos`, `trusty`, `tvos`, `uefi`, `unknown`, `vexos`, `visionos`, `vita`, `vxworks`, `wasi`, `watchos`, `windows`, `xous`, and `zkvm`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg.html> for more information about checking conditional configuration
+ 
+ warning: 31 warnings emitted
+diff --git a/compiler/rustc_target/src/spec/base/slopos.rs b/compiler/rustc_target/src/spec/base/slopos.rs
+new file mode 100644
+--- /dev/null
++++ b/compiler/rustc_target/src/spec/base/slopos.rs
+@@ -0,0 +1,16 @@
++use crate::spec::{Env, Os, PanicStrategy, TargetOptions, cvs};
++
++pub(crate) fn opts() -> TargetOptions {
++    TargetOptions {
++        os: Os::Slopos,
++        env: Env::Slibc,
++        families: cvs!["unix"],
++        dynamic_linking: true,
++        has_thread_local: true,
++        // SlopOS binaries do not unwind: the system's static executables are
++        // linked with a script that discards `.eh_frame`, and the unwinder
++        // the C library exports serves C++ rather than Rust.
++        panic_strategy: PanicStrategy::Abort,
++        ..Default::default()
++    }
++}
+diff --git a/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs b/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs
+new file mode 100644
+--- /dev/null
++++ b/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs
+@@ -0,0 +1,33 @@
++use crate::spec::{
++    Arch, Cc, CodeModel, LinkerFlavor, Lld, StackProbeType, Target, TargetMetadata, base,
++};
++
++pub(crate) fn target() -> Target {
++    let mut base = base::slopos::opts();
++    base.cpu = "x86-64".into();
++    base.max_atomic_width = Some(64);
++    base.code_model = Some(CodeModel::Small);
++    base.features = "-mmx,+xsave,+avx,+avx2".into();
++    base.linker_flavor = LinkerFlavor::Gnu(Cc::No, Lld::Yes);
++    base.linker = Some("rust-lld".into());
++    base.stack_probes = StackProbeType::Inline;
++    // A SlopOS signal frame is written at the interrupted `rsp`, so a leaf
++    // function's red zone does not survive signal delivery.
++    base.disable_redzone = true;
++    base.emit_debug_gdb_scripts = false;
++
++    Target {
++        llvm_target: "x86_64-unknown-none-elf".into(),
++        metadata: TargetMetadata {
++            description: Some("SlopOS".into()),
++            tier: Some(3),
++            host_tools: Some(false),
++            std: Some(true),
++        },
++        pointer_width: 64,
++        data_layout:
++            "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128".into(),
++        arch: Arch::X86_64,
++        options: base,
++    }
++}
+diff --git a/src/doc/rustc/src/platform-support/slopos.md b/src/doc/rustc/src/platform-support/slopos.md
+new file mode 100644
+--- /dev/null
++++ b/src/doc/rustc/src/platform-support/slopos.md
+@@ -0,0 +1,48 @@
++# `x86_64-unknown-slopos`
++
++**Tier: 3**
++
++SlopOS on x86-64: a framekernel-discipline hobby operating system whose C
++library, `slibc`, is the target's `env`.
++
++## Target maintainers
++
++[@nil0ft](https://github.com/nil0ft)
++
++## Requirements
++
++The target supports `std` and cross-compilation only; it ships no host
++tools. The `std` port is a separate change (see "Building the target").
++
++Binaries are ELF and link against `slibc`, which supplies the C library, the
++`pthread` primitives `std` builds its synchronisation on, and the Itanium
++Level-1 unwinder. Both `libc.so` and `libc.a` are available, and
++`/lib/ld-slopos.so.1` is the program interpreter; a `PT_INTERP` executable and
++`dlopen` both work. The baseline is x86-64 with `xsave`, `avx` and `avx2`;
++`mmx` is off.
++
++`extern "C"` is the System V AMD64 calling convention. The target is
++`panic = "abort"`: nothing in the Rust standard library unwinds here, and the
++unwinder `libc.so` exports serves C++.
++
++## Building the target
++
++Add `x86_64-unknown-slopos` to the `target` list in `bootstrap.toml`. `std`
++for this target is a separate change: it needs the `target_os = "slopos"` arms
++in `library/`, which ride `sys/pal/unix`, and a `libc` carrying
++`src/unix/slopos/`. Both are cut against the same channel as this spec.
++
++## Building Rust programs
++
++Rust does not ship pre-compiled artifacts for this target. Build `std` with
++`-Zbuild-std`, or build a toolchain with the target enabled.
++
++## Testing
++
++Binaries run on SlopOS, which boots under QEMU with a `q35` machine, an
++IOAPIC and a virtio-blk disk. The Rust testsuite is not run on the target.
++
++## Cross-compilation toolchains and C code
++
++C code is supported. Compile it with `clang --target=x86_64-unknown-slopos
++-nostdlibinc -isystem <slibc>/include` and link against `libc.a` or `libc.so`.

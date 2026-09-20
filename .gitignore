@@ -6,6 +6,9 @@ third_party/*
 # from the pinned toolchain plus the toolchain/ fork overlay). Named rather
 # than left to `third_party/*` above because it is generated, not fetched.
 third_party/rust-slopos/
+# The pinned rustc source tree carrying the compiler fork
+# (scripts/make_rustc_src.sh), named for the same reason.
+third_party/slopos-rustc-src/
 EFI/
 boot_fat/
 test_efi_dir/
