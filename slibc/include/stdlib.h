@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <limits.h>
+#include <locale.h>
 
 #define MB_CUR_MAX ((size_t)MB_LEN_MAX)
 
@@ -16,6 +17,11 @@
 extern "C"
 #endif
 long double strtold(const char *s, char **endptr);
+
+#ifdef __cplusplus
+extern "C"
+#endif
+long double strtold_l(const char *s, char **endptr, locale_t loc);
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +40,7 @@ typedef struct {
     long long rem;
 } lldiv_t;
 
+#define RAND_MAX (32767)
 #define EXIT_FAILURE (1)
 #define EXIT_SUCCESS (0)
 
@@ -78,6 +85,15 @@ size_t mbstowcs(wchar_t *dst, const char *src, size_t len);
 size_t wcstombs(char *dst, const wchar_t *src, size_t len);
 void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
 void *bsearch(const void *key, const void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
+int rand(void);
+void srand(unsigned int seed);
+void _Exit(int status);
+double strtod_l(const char *s, char **endptr, locale_t loc);
+float strtof_l(const char *s, char **endptr, locale_t loc);
+long strtol_l(const char *s, char **endptr, int base, locale_t loc);
+unsigned long strtoul_l(const char *s, char **endptr, int base, locale_t loc);
+long long strtoll_l(const char *s, char **endptr, int base, locale_t loc);
+unsigned long long strtoull_l(const char *s, char **endptr, int base, locale_t loc);
 
 #ifdef __cplusplus
 }

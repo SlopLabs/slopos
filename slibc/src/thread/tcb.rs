@@ -42,6 +42,8 @@ pub struct Tcb {
     /// in the variant-II layout, so freeing the TCB address would hand the
     /// allocator the middle of a chunk.
     pub tls_block: *mut u8,
+    /// This thread's `uselocale` handle; null is the global locale.
+    pub locale: crate::locale::object::locale_t,
 }
 
 unsafe impl Send for Tcb {}
@@ -67,6 +69,7 @@ impl Tcb {
             guard_size: 0,
             dtv: ptr::null_mut(),
             tls_block: ptr::null_mut(),
+            locale: ptr::null_mut(),
         }
     }
 

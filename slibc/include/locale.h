@@ -9,6 +9,8 @@
 
 #include <stddef.h>
 
+#define LC_GLOBAL_LOCALE ((locale_t)-1)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -40,6 +42,8 @@ struct lconv {
     char int_p_sign_posn;
     char int_n_sign_posn;
 };
+typedef struct _slibc___locale_struct __locale_struct;
+typedef __locale_struct *locale_t;
 
 #define LC_CTYPE (0)
 #define LC_NUMERIC (1)
@@ -48,9 +52,21 @@ struct lconv {
 #define LC_MONETARY (4)
 #define LC_MESSAGES (5)
 #define LC_ALL (6)
+#define LC_CTYPE_MASK (1)
+#define LC_NUMERIC_MASK (2)
+#define LC_TIME_MASK (4)
+#define LC_COLLATE_MASK (8)
+#define LC_MONETARY_MASK (16)
+#define LC_MESSAGES_MASK (32)
+#define LC_ALL_MASK (63)
 
 char *setlocale(int category, const char *locale);
 struct lconv *localeconv(void);
+struct lconv *localeconv_l(locale_t loc);
+locale_t newlocale(int mask, const char *name, locale_t base);
+locale_t duplocale(locale_t base);
+void freelocale(locale_t loc);
+locale_t uselocale(locale_t loc);
 
 #ifdef __cplusplus
 }

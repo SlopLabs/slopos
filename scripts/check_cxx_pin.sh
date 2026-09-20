@@ -146,6 +146,32 @@ check_tree() {
             fail "clang_major_tested names $major, below the floor $min"
     done
 
+    # The port patch, by checksum: an edited patch that still applies
+    # produces a different compiler and a different `Path.inc`, and nothing
+    # downstream notices.
+    local entry patch_path patch_sha have_sha
+    while IFS= read -r entry; do
+        patch_path="${entry%%:*}"
+        patch_sha="${entry##*:}"
+        [ -f "$root/$patch_path" ] || fail "toolchain/cxx/PIN names a missing patch: $patch_path"
+        have_sha="$(sha256sum <"$root/$patch_path" | cut -d' ' -f1)"
+        [ "$have_sha" = "$patch_sha" ] || fail "$patch_path is not what toolchain/cxx/PIN names
+       expected: $patch_sha
+       actual:   $have_sha"
+    done < <(sed -n 's/^patch_sha256=\(.*\)$/\1/p' "$pin")
+
+    local llvm_src="$root/third_party/llvm-project-${version}.src"
+    if [ -f "$llvm_src/.slopos-llvm-stamp" ]; then
+        local want_stamp have_stamp
+        want_stamp="$("$root/scripts/make_slopos_llvm_src.sh" --print-stamp)"
+        have_stamp="$(cat "$llvm_src/.slopos-llvm-stamp")"
+        [ "$want_stamp" = "$have_stamp" ] ||
+            fail "third_party/$(basename "$llvm_src") was built from different inputs
+       expected: $want_stamp
+       actual:   $have_stamp
+       Rebuild it: scripts/make_slopos_llvm_src.sh"
+    fi
+
     local tarball="$root/third_party/llvm-project-${version}.src.tar.xz"
     if [ -f "$tarball" ]; then
         local have
@@ -222,6 +248,23 @@ EOF
     rm "$tmp/third_party/llvm-project-18.1.8.src.tar.xz"
     (check_tree "$tmp" >/dev/null 2>&1) ||
         fail "--self-test: a consistent pin with nothing built was rejected"
+
+    # A port patch whose checksum no longer describes it.
+    mkdir -p "$tmp/toolchain/llvm"
+    printf 'the port\n' >"$tmp/toolchain/llvm/0001-probe.patch"
+    printf 'patch_sha256=toolchain/llvm/0001-probe.patch:%s\n' \
+        "$(printf 'the port\n' | sha256sum | cut -d' ' -f1)" >>"$tmp/toolchain/cxx/PIN"
+    (check_tree "$tmp" >/dev/null 2>&1) ||
+        fail "--self-test: a patch matching its checksum was rejected"
+    printf 'the port, edited\n' >"$tmp/toolchain/llvm/0001-probe.patch"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: an edited patch was accepted"
+    fi
+    rm "$tmp/toolchain/llvm/0001-probe.patch"
+    if (check_tree "$tmp" >/dev/null 2>&1); then
+        fail "--self-test: a missing patch was accepted"
+    fi
+    sed -i '/^patch_sha256=/d' "$tmp/toolchain/cxx/PIN"
 
     # A floor above the sources' own major: every build would then be a
     # skewed one, which is not a thing this pin may ask for.

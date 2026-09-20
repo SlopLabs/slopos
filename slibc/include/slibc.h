@@ -13,8 +13,10 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <link.h>
@@ -52,10 +54,12 @@
 #include <sys/un.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <sysexits.h>
 #include <termios.h>
 #include <time.h>
 #include <uchar.h>
 #include <unistd.h>
 #include <wchar.h>
+#include <wctype.h>
 
 #endif /* _SLIBC_H */

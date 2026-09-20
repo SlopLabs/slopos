@@ -193,10 +193,15 @@ impl World<'_> {
                 .filter(|name| name.starts_with("S_IF") && *name != "S_IFMT")
                 .collect();
             for name in type_bits {
+                // The derivation is mechanical for every type but the FIFO,
+                // which POSIX spells `S_ISFIFO` rather than `S_ISIFO`.
+                let test = match name {
+                    "S_IFIFO" => "FIFO",
+                    other => &other["S_IF".len()..],
+                };
                 let _ = writeln!(
                     out,
-                    "#define S_IS{}(mode) (((mode) & S_IFMT) == {name})",
-                    &name["S_IF".len()..]
+                    "#define S_IS{test}(mode) (((mode) & S_IFMT) == {name})"
                 );
             }
         }
@@ -354,6 +359,10 @@ impl World<'_> {
                 for field in &item.fields {
                     if let Some(bytes) = zero_length_array(&field.ty, &self.types) {
                         align = Some(bytes);
+                        continue;
+                    }
+                    if field.ty.ends_with("sighandler_t") {
+                        out.push_str(HANDLER_SLOT);
                         continue;
                     }
                     let declaration = self
@@ -556,6 +565,17 @@ pub fn umbrella(source: &str) -> String {
     let _ = writeln!(out, "\n#endif /* _SLIBC_H */");
     out
 }
+
+/// POSIX gives one storage slot in `struct sigaction` two names with two
+/// function-pointer types. The contract states it as an integer, which is the
+/// `libc` crate's convention and the right one for Rust; C code assigns a
+/// function to it, so the header spells it as the union POSIX describes.
+const HANDLER_SLOT: &str = "    union {
+        void (*sa_handler)(int);
+        void (*sa_sigaction)(int, siginfo_t *, void *);
+        sighandler_t __sa_word;
+    };
+";
 
 /// Builds the `name -> TypeDef` index from the contract and the shared table.
 pub fn index_types<'a>(

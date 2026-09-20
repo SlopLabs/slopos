@@ -363,6 +363,24 @@ echo "C archive built: $RELEASE_DIR/libc.a"
 # these an exception ends at frame zero with `_URC_END_OF_STACK` — measured,
 # and indistinguishable from a program with no handler.
 SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-tables"
+
+# compiler-rt, position independent, for the shared objects. `libc.a` has the
+# same routines and cannot supply them: it is built for the fixed-address
+# images, so its relocations are the ones a `.so` may not carry.
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="-C relocation-model=pic" \
+$CARGO +slopos build \
+    -Zbuild-std=core \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-slibc-builtins \
+    --release
+if [ ! -f "$RELEASE_DIR/libbuiltins.a" ]; then
+    echo "build_userland: slopos-slibc-builtins built but emitted no archive at $RELEASE_DIR/libbuiltins.a" >&2
+    exit 1
+fi
+
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-Bsymbolic -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
 $CARGO +slopos build \
@@ -458,6 +476,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         -nostdinc++
         -isystem "$CXX_DIR/include/c++/v1"
         -isystem "${REPO_ROOT}/slibc/include"
+        $("$SCRIPT_DIR/make_slopos_cxx.sh" --print-abi-flags)
         -std=c++20
         -O2
     )

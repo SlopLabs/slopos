@@ -42,9 +42,10 @@ pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_execve, syscall_fork, syscall_futex,
     syscall_getcpu, syscall_getcwd, syscall_getegid, syscall_geteuid, syscall_getgid,
-    syscall_getpgid, syscall_getpid, syscall_getppid, syscall_gettid, syscall_getuid,
-    syscall_prlimit64, syscall_sched_getaffinity, syscall_sched_setaffinity, syscall_setpgid,
-    syscall_setsid, syscall_sigdefault, syscall_spawn_path, syscall_vhangup, syscall_wait4,
+    syscall_getpgid, syscall_getpid, syscall_getppid, syscall_getsid, syscall_gettid,
+    syscall_getuid, syscall_prlimit64, syscall_sched_getaffinity, syscall_sched_setaffinity,
+    syscall_setpgid, syscall_setsid, syscall_sigdefault, syscall_spawn_path, syscall_vhangup,
+    syscall_wait4,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
@@ -173,6 +174,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETPPID]           => syscall_getppid,           "getppid";
     [SYSCALL_SETSID]            => syscall_setsid,            "setsid";
     [SYSCALL_GETPGID]           => syscall_getpgid,           "getpgid";
+    [SYSCALL_GETSID]            => syscall_getsid,            "getsid";
     [SYSCALL_SIGALTSTACK]       => syscall_sigaltstack,       "sigaltstack";
     [SYSCALL_STATFS]            => syscall_statfs,            "statfs";
     [SYSCALL_FSTATFS]           => syscall_fstatfs,           "fstatfs";
@@ -308,7 +310,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 151;
+pub const SYSCALL_ENTRY_COUNT: usize = 152;
 
 /// The recorded shape of the classification.
 ///
@@ -320,7 +322,7 @@ const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 46),
     (Capability::NoneFd, 71),
-    (Capability::NoneRelation, 13),
+    (Capability::NoneRelation, 14),
     (Capability::Power, 1),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),

@@ -70,6 +70,7 @@ extern "C" {
 #define NOEXPR (0x50001)
 
 char *nl_langinfo(nl_item item);
+char *nl_langinfo_l(nl_item item, locale_t loc);
 
 #ifdef __cplusplus
 }

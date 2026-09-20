@@ -9,6 +9,8 @@
 
 #include <sys/types.h>
 #include <uchar.h>
+#include <locale.h>
+#include <stdio.h>
 
 #undef WCHAR_MAX
 #define WCHAR_MAX 0x7fffffff
@@ -19,6 +21,13 @@
 extern "C"
 #endif
 long double wcstold(const wchar_t *s, wchar_t **endptr);
+
+#ifdef __cplusplus
+extern "C"
+#endif
+long double wcstold_l(const wchar_t *s, wchar_t **endptr, locale_t loc);
+
+struct tm;
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +76,30 @@ long long wcstoll(const wchar_t *s, wchar_t **endptr, int base);
 unsigned long long wcstoull(const wchar_t *s, wchar_t **endptr, int base);
 double wcstod(const wchar_t *s, wchar_t **endptr);
 float wcstof(const wchar_t *s, wchar_t **endptr);
+int wcscoll_l(const wchar_t *a, const wchar_t *b, locale_t loc);
+size_t wcsxfrm_l(wchar_t *dst, const wchar_t *src, size_t n, locale_t loc);
+long wcstol_l(const wchar_t *s, wchar_t **endptr, int base, locale_t loc);
+unsigned long wcstoul_l(const wchar_t *s, wchar_t **endptr, int base, locale_t loc);
+long long wcstoll_l(const wchar_t *s, wchar_t **endptr, int base, locale_t loc);
+unsigned long long wcstoull_l(const wchar_t *s, wchar_t **endptr, int base, locale_t loc);
+double wcstod_l(const wchar_t *s, wchar_t **endptr, locale_t loc);
+float wcstof_l(const wchar_t *s, wchar_t **endptr, locale_t loc);
+wint_t fgetwc(FILE *stream);
+wint_t getwc(FILE *stream);
+wint_t getwchar(void);
+wint_t fputwc(wchar_t wc, FILE *stream);
+wint_t putwc(wchar_t wc, FILE *stream);
+wint_t putwchar(wchar_t wc);
+wint_t ungetwc(wint_t wc, FILE *stream);
+wchar_t *fgetws(wchar_t *s, int n, FILE *stream);
+int fputws(const wchar_t *s, FILE *stream);
+int fwide(FILE *stream, int mode);
+int fwprintf(FILE *stream, const wchar_t *fmt, ...);
+int wprintf(const wchar_t *fmt, ...);
+int swprintf(wchar_t *s, size_t n, const wchar_t *fmt, ...);
+int vfwprintf(FILE *stream, const wchar_t *fmt, va_list ap);
+int vwprintf(const wchar_t *fmt, va_list ap);
+int vswprintf(wchar_t *s, size_t n, const wchar_t *fmt, va_list ap);
 
 #ifdef __cplusplus
 }

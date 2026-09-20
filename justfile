@@ -532,6 +532,14 @@ rustc-src:
 check-rustc-target:
     scripts/check_rustc_target.sh --require
 
+[doc("Materialise the pinned llvm-project sources with the SlopOS port applied under third_party/llvm-project-<version>.src (1.5 GB on disk)")]
+llvm-src:
+    scripts/make_slopos_llvm_src.sh
+
+[doc("Compile LLVM's Support library for x86_64-unknown-slopos. Needs `just llvm-src` and a tests userland build first.")]
+check-llvm-port:
+    scripts/check_llvm_port.sh --require
+
 [doc("Machine-check the OSTD critical-path proofs under verification/proofs/ on the pinned Verus toolchain. Pass a proof stem to verify one file.")]
 verify FILTER='':
     scripts/verify.sh "{{FILTER}}"
@@ -573,12 +581,14 @@ check-framekernel-gates:
     scripts/check_toolchain_pin.sh --self-test
     scripts/check_rustc_target.sh --self-test
     scripts/check_cxx_pin.sh --self-test
+    scripts/check_llvm_port.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_toolchain_pin.sh
     scripts/check_rustc_target.sh
     scripts/check_cxx_pin.sh
+    scripts/check_llvm_port.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh

@@ -585,6 +585,12 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    fn getsid(pid: i32) -> Result<i32, Errno> {
+        let ret = unsafe { syscall1(SYSCALL_GETSID, pid as u64) };
+        let val = to_result(ret)?;
+        Ok(val as i32)
+    }
+
     fn chdir(path: *const u8) -> Result<(), Errno> {
         let ret = unsafe { syscall1(SYSCALL_CHDIR, path as u64) };
         to_result(ret)?;

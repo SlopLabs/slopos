@@ -24,6 +24,7 @@ members = [
   "slibc",
   "slibc-core",
   "slibc/crt0",
+  "slibc/builtins",
   "slibc/cdylib",
   "slibc/staticlib",
   "userland",

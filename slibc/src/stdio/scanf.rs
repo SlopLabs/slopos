@@ -808,3 +808,30 @@ pub unsafe extern "C" fn fscanf(stream: *mut FILE, fmt: *const u8, mut args: ...
 pub unsafe extern "C" fn scanf(fmt: *const u8, mut args: ...) -> i32 {
     vfscanf_impl(streams::stdin_file(), fmt, &mut args)
 }
+
+/// `vsscanf(3)`.
+///
+/// # Safety
+/// `fmt`'s conversions match `ap`; `buf` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vsscanf(buf: *const u8, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
+    vsscanf_impl(buf, fmt, &mut ap)
+}
+
+/// `vfscanf(3)`.
+///
+/// # Safety
+/// As [`vsscanf`], over an open readable stream.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vfscanf(stream: *mut FILE, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
+    vfscanf_impl(stream, fmt, &mut ap)
+}
+
+/// `vscanf(3)`.
+///
+/// # Safety
+/// As [`vfscanf`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vscanf(fmt: *const u8, mut ap: VaList<'_>) -> i32 {
+    vfscanf_impl(streams::stdin_file(), fmt, &mut ap)
+}

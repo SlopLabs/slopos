@@ -26,7 +26,7 @@ unsafe fn reset(stream: *mut FILE, flags: u32) {
     f.buf_pos = 0;
     f.buf_len = 0;
     f.flags = flags | (f.flags & FILE_FLAG_LINKED);
-    f.ungot = -1;
+    f.ungot_len = 0;
 }
 
 /// Reset the standard streams and put them on the open-stream list.

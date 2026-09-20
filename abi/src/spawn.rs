@@ -4,6 +4,17 @@
 //! descriptor table and each action installs exactly what it should inherit, so
 //! a spawner never mutates its own fd table around the call.
 
+/// Longest single `argv`/`envp` string an `execve` accepts.
+pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
+
+/// Pages of `argv` + `envp` an `execve` accepts, after Linux's
+/// `MAX_ARG_PAGES`. Here rather than in the kernel because the kernel
+/// enforces it and `sysconf(_SC_ARG_MAX)` reports it.
+pub const EXEC_MAX_ARG_PAGES: usize = 32;
+
+/// [`EXEC_MAX_ARG_PAGES`] as bytes.
+pub const EXEC_MAX_ARG_BYTES: usize = EXEC_MAX_ARG_PAGES * crate::PAGE_SIZE as usize;
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnFdActionKind {

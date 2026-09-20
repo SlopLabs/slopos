@@ -8,6 +8,7 @@
 #define _SLIBC_STRING_H
 
 #include <sys/types.h>
+#include <locale.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +32,13 @@ char *strncpy(char *dest, const char *src, size_t n);
 size_t strnlen(const char *s, size_t maxlen);
 char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
+int strcoll(const char *a, const char *b);
+size_t strxfrm(char *dst, const char *src, size_t n);
+int strcoll_l(const char *a, const char *b, locale_t loc);
+size_t strxfrm_l(char *dst, const char *src, size_t n, locale_t loc);
+char *strdup(const char *s);
+char *strndup(const char *s, size_t n);
+char *strsignal(int sig);
 
 #ifdef __cplusplus
 }

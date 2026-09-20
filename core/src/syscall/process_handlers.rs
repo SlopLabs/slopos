@@ -863,6 +863,19 @@ define_syscall!(syscall_getpgid
     Ok(task_ref.pgid())
 });
 
+define_syscall!(syscall_getsid
+    (ctx, target: u32)
+    cap(NoneRelation)
+    requires(let task_id: task_id)
+    -> Result<u32, Errno>
+{
+    let resolved = if target == 0 { task_id } else { target };
+    let Some(task_ref) = task_find_by_id(resolved) else {
+        return Err(Errno::ESRCH);
+    };
+    Ok(task_ref.sid())
+});
+
 define_syscall!(syscall_setpgid
     (ctx, pid: u32, pgid_arg: u32)
     cap(NoneRelation)

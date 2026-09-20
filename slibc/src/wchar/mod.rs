@@ -1,11 +1,22 @@
 //! `<wchar.h>` — wide characters as UTF-32, multibyte sequences as UTF-8.
 //!
-//! Wide stdio (`fwprintf`, `fgetwc`, stream orientation) is deliberately
-//! absent: nothing in LLVM, clang or libc++ asks for it, and a second
-//! orientation-tracking path through `FILE` would be load-bearing code with no
-//! caller.
+//! Classification is `<wctype.h>`'s and lives in [`wctype`]; the wide stdio
+//! `<wchar.h>` also declares lives in [`crate::stdio::wide`], because it is
+//! the byte streams' code with an encoder on the end.
+//!
+//! Wide `scanf` is absent. Nothing links against it, and the narrow engine it
+//! would transcode into consumes its template and its stream together, so it
+//! is a second parser rather than a second spelling.
 
 #![allow(non_camel_case_types)]
+
+pub mod wctype;
+
+pub use wctype::{
+    iswalnum, iswalpha, iswblank, iswcntrl, iswctype, iswdigit, iswgraph, iswlower, iswprint,
+    iswpunct, iswspace, iswupper, iswxdigit, towctrans, towlower, towupper, wctrans, wctrans_t,
+    wctype, wctype_t,
+};
 
 use core::ffi::{c_char, c_int, c_long, c_longlong, c_uint, c_ulong, c_ulonglong};
 
@@ -1078,4 +1089,45 @@ pub unsafe extern "C" fn wcstold(_s: *const wchar_t, _endptr: *mut *const wchar_
         "add rsp, 24",
         "ret",
     );
+}
+
+/// `wcstoimax(3)`.
+///
+/// # Safety
+/// As [`wcstoll`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstoimax(
+    s: *const wchar_t,
+    endptr: *mut *const wchar_t,
+    base: c_int,
+) -> c_longlong {
+    wcstoll(s, endptr, base)
+}
+
+/// `wcstoumax(3)`.
+///
+/// # Safety
+/// As [`wcstoull`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstoumax(
+    s: *const wchar_t,
+    endptr: *mut *const wchar_t,
+    base: c_int,
+) -> c_ulonglong {
+    wcstoull(s, endptr, base)
+}
+
+/// `wcstold_l(3)`. As [`crate::string::convert::strtold_l`]: the locale is
+/// discarded and the x87 return contract is [`wcstold`]'s.
+///
+/// # Safety
+/// As [`wcstold`].
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstold_l(
+    _s: *const wchar_t,
+    _endptr: *mut *const wchar_t,
+    _loc: *mut core::ffi::c_void,
+) {
+    core::arch::naked_asm!("jmp wcstold");
 }

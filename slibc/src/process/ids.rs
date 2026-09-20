@@ -157,6 +157,9 @@ pub unsafe extern "C" fn setrlimit(resource: c_int, rlim: *const rlimit) -> c_in
     crate::process::rlimit::setrlimit(resource as u32, &*rlim)
 }
 
+pub const RUSAGE_SELF: c_int = 0;
+pub const RUSAGE_CHILDREN: c_int = -1;
+
 /// No per-task accounting exists to report, and a zeroed `struct rusage` is
 /// indistinguishable from a process that has used no time at all.
 #[unsafe(no_mangle)]

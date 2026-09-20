@@ -91,3 +91,16 @@ pub extern "C" fn toupper(c: c_int) -> c_int {
         None => c,
     }
 }
+
+/// `isascii(3)`. Defined over every `int`, not just `unsigned char` and
+/// `EOF`, which is what makes it the guard the rest of this file needs.
+#[unsafe(no_mangle)]
+pub extern "C" fn isascii(c: c_int) -> c_int {
+    (0..=0x7f).contains(&c) as c_int
+}
+
+/// `toascii(3)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn toascii(c: c_int) -> c_int {
+    c & 0x7f
+}

@@ -21,6 +21,12 @@
 extern "C" {
 #endif
 
+#define STDIN_FILENO (0)
+#define STDOUT_FILENO (1)
+#define STDERR_FILENO (2)
+#define _SC_ARG_MAX (0)
+#define _PC_NAME_MAX (3)
+#define _PC_PATH_MAX (4)
 #define F_OK (0)
 #define R_OK (4)
 #define SEEK_CUR (1)
@@ -109,6 +115,10 @@ long sysconf(int name);
 long syscall(long num, ...);
 unsigned int sleep(unsigned int seconds);
 int usleep(useconds_t usec);
+pid_t getsid(pid_t pid);
+int getentropy(void *buf, size_t len);
+long pathconf(const char *path, int name);
+long fpathconf(int fd, int name);
 
 #ifdef __cplusplus
 }

@@ -314,6 +314,9 @@ pub const SYSCALL_SETSID: u64 = 112;
 /// `getpgid(pid)`.
 pub const SYSCALL_GETPGID: u64 = 121;
 
+/// `getsid(pid)`.
+pub const SYSCALL_GETSID: u64 = 124;
+
 /// `sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack)` —
 /// nominate a stack for `SA_ONSTACK` handlers.
 pub const SYSCALL_SIGALTSTACK: u64 = 131;

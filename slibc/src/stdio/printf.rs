@@ -1,10 +1,11 @@
 use core::ffi::VaList;
 
-use slopos_slibc_core::dtoa;
+use slopos_slibc_core::{dtoa, utf8};
 
 use super::FILE;
 use super::chars::fputc_unlocked;
 use super::streams;
+use crate::wchar::wchar_t;
 
 const FLAG_LEFT: u32 = 1;
 const FLAG_ZERO: u32 = 2;
@@ -59,6 +60,28 @@ unsafe fn next_long_double(ap: &mut VaList<'_>) -> f64 {
     narrowed
 }
 
+/// Bytes the multibyte form of `wide` would take, stopping at the last whole
+/// character that fits in `cap`.
+unsafe fn multibyte_len(wide: *const wchar_t, cap: usize) -> usize {
+    if wide.is_null() {
+        return 0;
+    }
+    let mut total = 0usize;
+    let mut at = 0isize;
+    while *wide.offset(at) != 0 {
+        let mut encoded = [0u8; 4];
+        let Some(used) = utf8::encode(*wide.offset(at) as u32, &mut encoded) else {
+            break;
+        };
+        if total + used > cap {
+            break;
+        }
+        total += used;
+        at += 1;
+    }
+    total
+}
+
 unsafe fn write_unsigned(value: u64, base: u64, digits: &[u8; 16], buf: &mut [u8; 22]) -> usize {
     if value == 0 {
         buf[21] = b'0';
@@ -74,7 +97,11 @@ unsafe fn write_unsigned(value: u64, base: u64, digits: &[u8; 16], buf: &mut [u8
     22 - pos
 }
 
-unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
+pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
+    out: &mut F,
+    fmt: *const u8,
+    ap: &mut VaList<'_>,
+) -> i32 {
     let mut count: i32 = 0;
     let mut p = fmt;
 
@@ -313,6 +340,57 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
                 }
             }
 
+            // C99 7.19.6.1: `%ls` takes a wide string and writes its
+            // multibyte form, and a precision bounds the *bytes* written at a
+            // character boundary. Measured first, because the field width
+            // pads to that byte count.
+            b's' if length == Length::Long => {
+                let wide: *const wchar_t = ap.next_arg::<*const wchar_t>();
+                let cap = if precision >= 0 {
+                    precision as usize
+                } else {
+                    usize::MAX
+                };
+                let bytes = multibyte_len(wide, cap);
+                let pad = (width as usize).saturating_sub(bytes) as i32;
+
+                if flags & FLAG_LEFT == 0 {
+                    emit_pad!(b' ', pad);
+                }
+                let mut written = 0usize;
+                let mut at = 0isize;
+                while written < bytes {
+                    let mut encoded = [0u8; 4];
+                    let Some(used) = utf8::encode(*wide.offset(at) as u32, &mut encoded) else {
+                        break;
+                    };
+                    for byte in &encoded[..used] {
+                        emit!(*byte);
+                    }
+                    written += used;
+                    at += 1;
+                }
+                if flags & FLAG_LEFT != 0 {
+                    emit_pad!(b' ', pad);
+                }
+            }
+
+            b'c' if length == Length::Long => {
+                let mut encoded = [0u8; 4];
+                let used = utf8::encode(ap.next_arg::<u32>(), &mut encoded).unwrap_or(0);
+                let pad = (width as usize).saturating_sub(used) as i32;
+
+                if flags & FLAG_LEFT == 0 {
+                    emit_pad!(b' ', pad);
+                }
+                for byte in &encoded[..used] {
+                    emit!(*byte);
+                }
+                if flags & FLAG_LEFT != 0 {
+                    emit_pad!(b' ', pad);
+                }
+            }
+
             b's' => {
                 let s_ptr: *const u8 = ap.next_arg::<*const u8>();
                 let null_str = b"(null)\0";
@@ -446,7 +524,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
     count
 }
 
-unsafe fn vfprintf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
+pub(crate) unsafe fn vfprintf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
     if stream.is_null() {
         return -1;
     }
@@ -530,4 +608,42 @@ pub unsafe extern "C" fn vsnprintf(
     mut ap: VaList<'_>,
 ) -> i32 {
     vsnprintf_impl(buf, n, fmt, &mut ap)
+}
+
+/// `vasprintf(3)`. Measures with a copy of the argument list, then formats.
+///
+/// # Safety
+/// `fmt`'s conversions match `ap`; `strp` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vasprintf(strp: *mut *mut u8, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
+    vasprintf_impl(strp, fmt, &mut ap)
+}
+
+unsafe fn vasprintf_impl(strp: *mut *mut u8, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
+    if strp.is_null() {
+        return -1;
+    }
+    let mut probe = ap.clone();
+    let len = vsnprintf_impl(core::ptr::null_mut(), 0, fmt, &mut probe);
+    if len < 0 {
+        return -1;
+    }
+    let size = len as usize + 1;
+    let buf = crate::mem::malloc::alloc(size) as *mut u8;
+    if buf.is_null() {
+        crate::errno::errno_set(crate::errno::ENOMEM.raw());
+        return -1;
+    }
+    let written = vsnprintf_impl(buf, size, fmt, ap);
+    *strp = buf;
+    written
+}
+
+/// `asprintf(3)`.
+///
+/// # Safety
+/// As [`vasprintf`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asprintf(strp: *mut *mut u8, fmt: *const u8, mut args: ...) -> i32 {
+    vasprintf_impl(strp, fmt, &mut args)
 }

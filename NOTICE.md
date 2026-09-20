@@ -165,10 +165,14 @@ the statically linked `cxx_static_probe`. Both projects' license texts ship
 beside it, in `/usr/share/licenses/libc++/`, the way the OFL fonts carry
 theirs.
 
-The runtime is built with localization, wide characters, the filesystem
-library, the random device and the time-zone database turned off, so the parts
-of libc++ that need a locale layer SlopOS has not got are not compiled at
-all.
+`toolchain/llvm/` holds SlopOS's own port of llvm-project as a patch, under
+the same license, applied to the fetched sources by
+`scripts/make_slopos_llvm_src.sh` and never distributed in a shipped binary.
+
+The runtime is built with the time-zone database turned off — there is no zone
+data on this system to answer from — and with localization, wide characters,
+the filesystem library and the random device on, because LLVM's own sources
+reach all four.
 
 ## Components distributed on the SlopOS ISO
 

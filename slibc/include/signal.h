@@ -17,8 +17,18 @@ typedef size_t sighandler_t;
 typedef struct {
     unsigned long __val[16];
 } sigset_t;
+typedef struct {
+    int si_signo;
+    int si_errno;
+    int si_code;
+    int _pad[29];
+} __slibc_aligned(8) siginfo_t;
 struct sigaction {
-    sighandler_t sa_sigaction;
+    union {
+        void (*sa_handler)(int);
+        void (*sa_sigaction)(int, siginfo_t *, void *);
+        sighandler_t __sa_word;
+    };
     sigset_t sa_mask;
     int sa_flags;
     void (*sa_restorer)(void);
@@ -28,12 +38,6 @@ typedef struct {
     int ss_flags;
     size_t ss_size;
 } stack_t;
-typedef struct {
-    int si_signo;
-    int si_errno;
-    int si_code;
-    int _pad[29];
-} __slibc_aligned(8) siginfo_t;
 
 #define BUS_ADRALN (1)
 #define BUS_ADRERR (2)
@@ -120,6 +124,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oset);
 int sigpending(sigset_t *set);
 int sigsuspend(const sigset_t *set);
 sighandler_t signal(int signum, sighandler_t handler);
+char *strsignal(int sig);
 
 #ifdef __cplusplus
 }

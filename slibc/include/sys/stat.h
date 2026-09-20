@@ -9,6 +9,11 @@
 
 #include <sys/types.h>
 #include <time.h>
+#include <sys/time.h>
+
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,12 +31,9 @@ struct stat {
     off_t st_size;
     blksize_t st_blksize;
     blkcnt_t st_blocks;
-    time_t st_atime;
-    long st_atime_nsec;
-    time_t st_mtime;
-    long st_mtime_nsec;
-    time_t st_ctime;
-    long st_ctime_nsec;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
     long __unused[3];
 };
 struct stat64 {
@@ -46,12 +48,9 @@ struct stat64 {
     off_t st_size;
     blksize_t st_blksize;
     blkcnt_t st_blocks;
-    time_t st_atime;
-    long st_atime_nsec;
-    time_t st_mtime;
-    long st_mtime_nsec;
-    time_t st_ctime;
-    long st_ctime_nsec;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
     long __unused[3];
 };
 
@@ -80,7 +79,7 @@ struct stat64 {
 #define S_ISBLK(mode) (((mode) & S_IFMT) == S_IFBLK)
 #define S_ISCHR(mode) (((mode) & S_IFMT) == S_IFCHR)
 #define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
-#define S_ISIFO(mode) (((mode) & S_IFMT) == S_IFIFO)
+#define S_ISFIFO(mode) (((mode) & S_IFMT) == S_IFIFO)
 #define S_ISLNK(mode) (((mode) & S_IFMT) == S_IFLNK)
 #define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
 #define S_ISSOCK(mode) (((mode) & S_IFMT) == S_IFSOCK)
@@ -99,6 +98,7 @@ int mkfifo(const char *path, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
 int utimensat(int dirfd, const char *path, const struct timespec *times, int flags);
 int futimens(int fd, const struct timespec *times);
+int utimes(const char *path, const struct timeval *times);
 
 #ifdef __cplusplus
 }

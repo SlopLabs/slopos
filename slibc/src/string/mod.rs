@@ -370,3 +370,58 @@ pub unsafe extern "C" fn strncat(dst: *mut u8, src: *const u8, n: usize) -> *mut
     *dst.add(dlen + i) = 0;
     dst
 }
+
+/// `strcoll(3)`. Byte order is collation order in the C locale, so this is
+/// `strcmp`.
+///
+/// # Safety
+/// Both arguments are NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcoll(a: *const u8, b: *const u8) -> i32 {
+    strcmp(a, b)
+}
+
+/// `strxfrm(3)`. The transform that makes `strcmp` agree with `strcoll` is
+/// the identity here, so this copies and answers the source length.
+///
+/// # Safety
+/// `src` is a NUL-terminated C string; `dst` addresses `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strxfrm(dst: *mut u8, src: *const u8, n: usize) -> usize {
+    let len = u_strlen(src);
+    if n > 0 {
+        let room = len.min(n - 1);
+        core::ptr::copy_nonoverlapping(src, dst, room);
+        *dst.add(room) = 0;
+    }
+    len
+}
+
+/// `strdup(3)`.
+///
+/// # Safety
+/// `s` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
+    strndup(s, usize::MAX)
+}
+
+/// `strndup(3)`.
+///
+/// # Safety
+/// `s` addresses a NUL-terminated C string or at least `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    let len = u_strnlen(s, n);
+    let out = crate::mem::malloc::alloc(len + 1) as *mut u8;
+    if out.is_null() {
+        crate::errno::errno_set(crate::errno::ENOMEM.raw());
+        return core::ptr::null_mut();
+    }
+    core::ptr::copy_nonoverlapping(s, out, len);
+    *out.add(len) = 0;
+    out
+}
