@@ -231,8 +231,10 @@ impl Ctx {
     }
 }
 
-/// `strerror` does not exist yet (Workstream 2.6), and `io::Error`'s own
-/// `Display` prints the raw errno on this target, so the mapping lives here.
+/// The POSIX diagnostic text for an `io::Error`, as a `&'static str`.
+///
+/// `io::Error`'s `Display` reaches `strerror_r` but appends
+/// `" (os error {code})"`, and only into a `Formatter`.
 pub fn io_message(error: &std::io::Error) -> &'static str {
     use std::io::ErrorKind::*;
     match error.kind() {

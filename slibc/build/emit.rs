@@ -12,6 +12,11 @@ use crate::ctype;
 use crate::ctype::Types;
 use crate::decls::HeaderSpec;
 
+/// Typedefs the compiler's own `<stddef.h>` also defines, and the guard macro
+/// it sets. Both headers reach one translation unit — `<locale.h>` takes
+/// `NULL` from `<stddef.h>` — and a repeated typedef is an error before C11.
+const STDDEF_TYPEDEFS: &[(&str, &str)] = &[("size_t", "_SIZE_T"), ("wchar_t", "_WCHAR_T")];
+
 /// Identifiers C accepts and C++ reserves. A typedef named one of these is
 /// emitted for C only; a parameter named one of these is a generation error,
 /// because the fix belongs at the declaration rather than in a rename the
@@ -302,12 +307,23 @@ impl World<'_> {
                     .types
                     .declare(underlying, name)
                     .map_err(|err| format!("typedef `{name}`: {err}"))?;
+                let guard = STDDEF_TYPEDEFS
+                    .iter()
+                    .find(|(shared, _)| shared == name)
+                    .map(|(_, guard)| *guard);
                 if CXX_KEYWORDS.contains(name) {
                     let _ = writeln!(out, "#ifndef __cplusplus");
-                    let _ = writeln!(out, "typedef {declaration};");
+                }
+                if let Some(guard) = guard {
+                    let _ = writeln!(out, "#ifndef {guard}");
+                    let _ = writeln!(out, "#define {guard}");
+                }
+                let _ = writeln!(out, "typedef {declaration};");
+                if guard.is_some() {
                     let _ = writeln!(out, "#endif");
-                } else {
-                    let _ = writeln!(out, "typedef {declaration};");
+                }
+                if CXX_KEYWORDS.contains(name) {
+                    let _ = writeln!(out, "#endif");
                 }
             }
             TypeDef::Opaque(name) => {

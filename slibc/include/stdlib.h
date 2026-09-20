@@ -8,6 +8,9 @@
 #define _SLIBC_STDLIB_H
 
 #include <sys/types.h>
+#include <limits.h>
+
+#define MB_CUR_MAX ((size_t)MB_LEN_MAX)
 
 #ifdef __cplusplus
 extern "C"
@@ -68,6 +71,13 @@ long strtol(const char *s, char **endptr, int base);
 unsigned long strtoul(const char *s, char **endptr, int base);
 int putenv(char *string);
 size_t malloc_usable_size(void *ptr);
+int mblen(const char *s, size_t n);
+int mbtowc(wchar_t *pwc, const char *s, size_t n);
+int wctomb(char *s, wchar_t wc);
+size_t mbstowcs(wchar_t *dst, const char *src, size_t len);
+size_t wcstombs(char *dst, const wchar_t *src, size_t len);
+void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
+void *bsearch(const void *key, const void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
 
 #ifdef __cplusplus
 }

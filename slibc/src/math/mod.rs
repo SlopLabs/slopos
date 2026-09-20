@@ -1,15 +1,18 @@
 //! `<math.h>` over the vendored `libm` crate.
 //!
-//! `double` and `float` are complete to C99. The `long double` family is not
-//! here: this target's `long double` is x87 80-bit and `libm` has no 80-bit
-//! code, so an 80-bit entry point would have to compute in `double` and
-//! widen. `strtold` does exactly that and says so; nothing else does.
+//! `double` and `float` are complete to C99, and [`longdouble`] mirrors them
+//! entry for entry.
 //!
 //! The classification and comparison macros stay in the header as compiler
 //! builtins, so they cost no symbol at all. Each wrapper below is written out
 //! rather than macro-generated because `slibc/build/exports.rs` reads this
 //! source to check the header against, and a macro expansion is invisible to
 //! it: generating the bodies would trade the ABI check for the typing.
+//! [`longdouble`] is the exception and macro-generates its narrowing
+//! wrappers: a `long double` prototype lives in `math.h`'s `raw:` block,
+//! which that check cannot see either way, so the macro trades nothing.
+
+pub mod longdouble;
 
 use core::ffi::{c_char, c_int, c_long, c_longlong};
 

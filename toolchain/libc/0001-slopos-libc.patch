@@ -86,7 +86,7 @@ new file mode 100644
 index 0000000..6585d11
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,1567 @@
+@@ -0,0 +1,1587 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -128,12 +128,15 @@ index 0000000..6585d11
 +pub type key_t = c_int;
 +pub type useconds_t = u32;
 +pub type nl_item = c_int;
++pub type wint_t = c_uint;
 +pub type fsword_t = i64;
 +pub type Elf64_Addr = u64;
 +pub type Elf64_Half = u16;
 +pub type Elf64_Off = u64;
 +pub type Elf64_Word = u32;
 +pub type Elf64_Xword = u64;
++pub type jmp_buf = [__jmp_buf_tag; 1];
++pub type sigjmp_buf = [__jmp_buf_tag; 1];
 +
 +extern_ty! {
 +    pub type FILE;
@@ -444,6 +447,23 @@ index 0000000..6585d11
 +        pub tm_isdst: c_int,
 +        pub tm_gmtoff: c_long,
 +        pub tm_zone: *const c_char,
++    }
++
++    /// A partially decoded multibyte character: the accumulated scalar and
++    /// the (seen, expected) byte pair. All-zero is the initial state, so a
++    /// `memset` initialisation means what C says it does.
++    pub struct mbstate_t {
++        __size: [c_uint; 2],
++    }
++
++    /// `__mask_was_saved` is `unsigned long` where glibc has `int`: the
++    /// padding it replaces is glibc's own and the struct is 200 bytes either
++    /// way. Every `setjmp`-family entry point writes it and `siglongjmp` is
++    /// its only reader.
++    pub struct __jmp_buf_tag {
++        __jmpbuf: [c_ulong; 8],
++        __mask_was_saved: c_ulong,
++        __saved_mask: [c_ulong; 16],
 +    }
 +
 +    pub struct fd_set {

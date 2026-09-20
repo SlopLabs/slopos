@@ -30,6 +30,7 @@ workspace = true
 [dependencies]
 libm = { workspace = true }
 slopos-abi = { workspace = true }
+slopos-slibc-core = { workspace = true }
 # The Level-1 unwinder. `fde-custom` rather than `fde-phdr-dl`: that road
 # reaches `dl_iterate_phdr` through the `libc` crate, which slibc cannot depend
 # on, being what that crate declares.

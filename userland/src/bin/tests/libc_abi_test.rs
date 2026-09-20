@@ -20,6 +20,8 @@ use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::fs;
 use std::mem;
+use std::os::unix::process::ExitStatusExt;
+use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -43,6 +45,7 @@ use slopos_slibc::net::{
     AF_UNIX, SOCK_STREAM, accept, bind, connect, listen, recvmsg, sendmsg, socket,
 };
 use slopos_slibc::signal::{self, SIG_DFL, SIGSEGV, SIGUSR1, SIGUSR2};
+use slopos_slibc::test_harness::note;
 use slopos_slibc::thread::{
     pthread_attr_t, pthread_cond_t, pthread_mutex_t, pthread_rwlock_t, pthread_self,
 };
@@ -1253,6 +1256,35 @@ fn realpath_resolves_a_relative_link_against_the_links_directory() -> bool {
     ok
 }
 
+/// The half of the C library only C can reach: `setjmp`, the `long double`
+/// family, and the generated headers compiled as C. The ordered checks live
+/// in `/bin/libc_probe`; its exit status is the number of the one that failed.
+fn a_c_program_uses_the_whole_libc_surface() -> bool {
+    // Captured rather than inherited: a utest's stdio is init's console, not
+    // the serial line this run is read from.
+    match Command::new("/bin/libc_probe").output() {
+        Ok(out) => {
+            if out.status.code() == Some(0) {
+                return true;
+            }
+            let said = String::from_utf8_lossy(&out.stderr);
+            match out.status.code() {
+                Some(code) => note(&format!("check {code}: {}", said.trim())),
+                None => note(&format!(
+                    "died by {:?}: {}",
+                    out.status.signal(),
+                    said.trim()
+                )),
+            }
+            false
+        }
+        Err(e) => {
+            note(&format!("spawning /bin/libc_probe failed: {e}"));
+            false
+        }
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "zeroed_pthread_locks_work_without_init",
@@ -1309,6 +1341,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "realpath_resolves_a_relative_link_against_the_links_directory",
         realpath_resolves_a_relative_link_against_the_links_directory,
+    ),
+    (
+        "a_c_program_uses_the_whole_libc_surface",
+        a_c_program_uses_the_whole_libc_surface,
     ),
 ];
 

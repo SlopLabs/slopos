@@ -1,5 +1,7 @@
 use core::ffi::VaList;
 
+use slopos_slibc_core::dtoa;
+
 use super::FILE;
 use super::chars::fputc_unlocked;
 use super::streams;
@@ -20,6 +22,41 @@ enum Length {
     LongLong,
     SizeT,
     PtrdiffT,
+    LongDouble,
+}
+
+/// The x86-64 System V `va_list`, whose layout [`VaList`] is `repr(transparent)`
+/// over: a `long double` is MEMORY class, so no `next_arg` can reach it and
+/// the overflow area has to be stepped by hand.
+#[repr(C)]
+struct SysVVaList {
+    gp_offset: u32,
+    fp_offset: u32,
+    overflow_arg_area: *mut u8,
+    reg_save_area: *mut u8,
+}
+
+/// `va_arg(ap, long double)`, narrowed. A MEMORY-class argument rounds the
+/// overflow area up to the type's 16-byte alignment, reads, and advances by
+/// 16, which is what clang emits for the same `va_arg`. Narrowing is Tier B
+/// of [`crate::math::longdouble`]: `%Lf` prints at `double` precision.
+///
+/// # Safety
+/// The next variadic argument is a `long double`.
+unsafe fn next_long_double(ap: &mut VaList<'_>) -> f64 {
+    let list = (ap as *mut VaList<'_>).cast::<SysVVaList>();
+    let slot = ((*list).overflow_arg_area as usize).next_multiple_of(16) as *mut u8;
+    (*list).overflow_arg_area = slot.add(16);
+
+    let mut narrowed = 0.0f64;
+    core::arch::asm!(
+        "fld tbyte ptr [{slot}]",
+        "fstp qword ptr [{narrowed}]",
+        slot = in(reg) slot,
+        narrowed = in(reg) &raw mut narrowed,
+        options(nostack, preserves_flags),
+    );
+    narrowed
 }
 
 unsafe fn write_unsigned(value: u64, base: u64, digits: &[u8; 16], buf: &mut [u8; 22]) -> usize {
@@ -123,6 +160,10 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
                 length = Length::PtrdiffT;
                 p = p.add(1);
             }
+            b'L' => {
+                length = Length::LongDouble;
+                p = p.add(1);
+            }
             b'h' => {
                 p = p.add(1);
                 if *p == b'h' {
@@ -144,7 +185,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
                 let val: i64 = match length {
                     Length::LongLong | Length::SizeT | Length::PtrdiffT => ap.next_arg::<i64>(),
                     Length::Long => ap.next_arg::<i64>(),
-                    Length::Default => ap.next_arg::<i32>() as i64,
+                    Length::Default | Length::LongDouble => ap.next_arg::<i32>() as i64,
                 };
 
                 let negative = val < 0;
@@ -208,7 +249,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
                 let val: u64 = match length {
                     Length::LongLong | Length::SizeT | Length::PtrdiffT => ap.next_arg::<u64>(),
                     Length::Long => ap.next_arg::<u64>(),
-                    Length::Default => ap.next_arg::<u32>() as u64,
+                    Length::Default | Length::LongDouble => ap.next_arg::<u32>() as u64,
                 };
 
                 let (base, digits): (u64, &[u8; 16]) = match spec {
@@ -332,6 +373,66 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
                 emit!(b'x');
                 for i in 0..num_len {
                     emit!(num_buf[num_start + i]);
+                }
+            }
+
+            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A' => {
+                let value = if length == Length::LongDouble {
+                    next_long_double(ap)
+                } else {
+                    ap.next_arg::<f64>()
+                };
+
+                let mut num_buf = [0u8; dtoa::BUFFER];
+                let Some(rendered) = dtoa::format(
+                    &mut num_buf,
+                    value,
+                    dtoa::Spec {
+                        conv: spec,
+                        precision,
+                        alt: flags & FLAG_ALT != 0,
+                        sign: if flags & FLAG_PLUS != 0 {
+                            Some(b'+')
+                        } else if flags & FLAG_SPACE != 0 {
+                            Some(b' ')
+                        } else {
+                            None
+                        },
+                    },
+                ) else {
+                    // Wider than C17 7.21.6.1 p15 asks any implementation to
+                    // render; 7.21.6.3 p3 is how to say no byte was emitted.
+                    return -1;
+                };
+
+                let pad = if (width as usize) > rendered.len {
+                    width as usize - rendered.len
+                } else {
+                    0
+                };
+                // Unlike the integer conversions, a precision does not
+                // disable the `0` flag for a float.
+                let zero_at = if flags & FLAG_ZERO != 0 && flags & FLAG_LEFT == 0 {
+                    rendered.zero_at
+                } else {
+                    None
+                };
+
+                if flags & FLAG_LEFT == 0 && zero_at.is_none() {
+                    emit_pad!(b' ', pad as i32);
+                }
+                let split = zero_at.unwrap_or(rendered.len);
+                for &byte in &num_buf[..split] {
+                    emit!(byte);
+                }
+                if zero_at.is_some() {
+                    emit_pad!(b'0', pad as i32);
+                }
+                for &byte in &num_buf[split..rendered.len] {
+                    emit!(byte);
+                }
+                if flags & FLAG_LEFT != 0 {
+                    emit_pad!(b' ', pad as i32);
                 }
             }
 

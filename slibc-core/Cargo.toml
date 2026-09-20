@@ -1,0 +1,17 @@
+[package]
+name = "slopos-slibc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "slibc's allocation-free algorithms: the civil calendar, strftime, UTF-8 conversion and hexadecimal float scanning, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]

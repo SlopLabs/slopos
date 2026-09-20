@@ -38,10 +38,16 @@
 #  endif
 #endif
 
+#ifndef _SIZE_T
+#define _SIZE_T
 typedef unsigned long size_t;
+#endif
 typedef long ssize_t;
 #ifndef __cplusplus
+#ifndef _WCHAR_T
+#define _WCHAR_T
 typedef int wchar_t;
+#endif
 #endif
 typedef long off_t;
 typedef long off64_t;

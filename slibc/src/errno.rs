@@ -74,11 +74,11 @@ pub const ENOLCK: Errno = Errno(37);
 pub const ENOSYS: Errno = Errno(38);
 pub const ENOTEMPTY: Errno = Errno(39);
 pub const ELOOP: Errno = Errno(40);
-/// Alias for EAGAIN — same value on Linux.
-pub const EWOULDBLOCK: Errno = Errno(11);
+pub const EWOULDBLOCK: Errno = EAGAIN;
 pub const ENOMSG: Errno = Errno(42);
 pub const EPROTO: Errno = Errno(71);
 pub const EOVERFLOW: Errno = Errno(75);
+pub const EILSEQ: Errno = Errno(84);
 pub const EUSERS: Errno = Errno(87);
 pub const ENOTSOCK: Errno = Errno(88);
 pub const EDESTADDRREQ: Errno = Errno(89);

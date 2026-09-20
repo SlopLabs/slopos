@@ -5,6 +5,8 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 
+use slopos_slibc_core::calendar;
+
 use super::input::{self, Input, as_str};
 use super::io::io_message;
 use super::opts::{Opt, Opts};
@@ -818,21 +820,11 @@ fn two(ctx: &mut Ctx, value: u64) {
     ctx.out.u(value);
 }
 
-/// `YYYY-MM-DD HH:MM` in UTC, by the civil-from-days identity: shifting the
-/// year to start in March makes the leap day the last day of the year, so the
-/// month arithmetic is exact without a table.
+/// `YYYY-MM-DD HH:MM` in UTC.
 fn stamp(ctx: &mut Ctx, secs: u64) {
     let days = (secs / 86400) as i64;
     let rest = secs % 86400;
-    let shifted = days + 719_468;
-    let era = shifted / 146_097;
-    let doe = shifted - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    let (year, month, day) = calendar::civil_from_days(days);
 
     ctx.out.u(year as u64);
     ctx.out.b(b'-');

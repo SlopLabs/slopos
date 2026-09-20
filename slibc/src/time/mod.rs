@@ -1,10 +1,13 @@
 //! Clock and sleep functions.
 
+pub mod calendar;
 #[allow(dead_code)]
 pub(crate) mod shim;
 pub mod tests;
 
-use crate::errno::errno_set;
+use core::ffi::c_long;
+
+use crate::errno::{EOVERFLOW, errno_set};
 use crate::pal::{Pal, Sys};
 
 /// Linux's clock ids, taken from the ABI rather than restated here.
@@ -20,7 +23,6 @@ pub const fn timespec_from_nanos(nanos: u64) -> Timespec {
     }
 }
 
-/// POSIX timeval.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Timeval {
@@ -90,6 +92,35 @@ pub unsafe extern "C" fn time(tloc: *mut i64) -> i64 {
     ts.tv_sec
 }
 
+pub const CLOCKS_PER_SEC: c_long = 1_000_000;
+
+/// `clock(3)`: processor time in [`CLOCKS_PER_SEC`] units, or `-1` when the
+/// clock cannot be read.
+#[unsafe(no_mangle)]
+pub extern "C" fn clock() -> c_long {
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+
+    let clk = slopos_abi::syscall::CLOCK_PROCESS_CPUTIME_ID;
+    if let Err(e) = Sys::clock_gettime(clk, (&raw mut ts).cast::<u8>()) {
+        errno_set(e.raw());
+        return -1;
+    }
+
+    let Some(ticks) = ts
+        .tv_sec
+        .checked_mul(CLOCKS_PER_SEC)
+        .and_then(|s| s.checked_add(ts.tv_nsec / 1000))
+    else {
+        errno_set(EOVERFLOW.raw());
+        return -1;
+    };
+
+    ticks
+}
+
 /// `nanosleep(2)`. Interruptible: a delivered signal ends the sleep with
 /// `EINTR` and, for a non-null `rem`, the time that was left.
 #[unsafe(no_mangle)]
@@ -111,9 +142,8 @@ pub unsafe extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> 
 ///
 /// The kernel has no `clock_getres` syscall, so the clock id is validated by
 /// reading the clock itself rather than against a list here that could drift
-/// from the kernel's. The resolution reported is one nanosecond because that
-/// is the denomination `clock_gettime` answers in; the underlying counter is
-/// coarser, exactly as it is on any host whose libc reports the same.
+/// from the kernel's. One nanosecond is the denomination `clock_gettime`
+/// answers in, not the counter's real step.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_getres(clk_id: i32, tp: *mut Timespec) -> i32 {
     let mut probe = Timespec {
@@ -136,9 +166,9 @@ pub const TIMER_ABSTIME: i32 = 1;
 
 /// `clock_nanosleep(2)`.
 ///
-/// Answers the errno directly rather than setting it, which is the convention
-/// this one call uses. An absolute deadline is converted against the named
-/// clock's current reading, because the kernel's sleep takes an interval.
+/// Answers the errno directly rather than setting it, as POSIX specifies for
+/// this call. An absolute deadline is converted against the named clock's
+/// current reading, because the kernel's sleep takes an interval.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_nanosleep(
     clk_id: i32,
@@ -176,7 +206,6 @@ pub unsafe extern "C" fn clock_nanosleep(
             sec -= 1;
         }
         if sec < 0 {
-            // The deadline has passed; there is nothing to wait for.
             return 0;
         }
         Timespec {
@@ -188,7 +217,7 @@ pub unsafe extern "C" fn clock_nanosleep(
     };
 
     // An absolute sleep has no remainder to report: the deadline is the
-    // caller's own and re-deriving it is a second call to this function.
+    // caller's own.
     let rem = if flags == TIMER_ABSTIME {
         core::ptr::null_mut()
     } else {
@@ -210,8 +239,7 @@ pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
 }
 
 /// Answers the seconds left when a signal cut the sleep short, as POSIX
-/// requires — the sleep is interruptible now, so 0 would be a wrong answer
-/// rather than a simplification.
+/// requires.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sleep(seconds: u32) -> u32 {
     let ts = Timespec {
@@ -225,8 +253,7 @@ pub unsafe extern "C" fn sleep(seconds: u32) -> u32 {
     if nanosleep(&ts, &mut rem) == 0 {
         return 0;
     }
-    // Round up: POSIX wants the count of seconds still unslept, and reporting
-    // a truncated 0 would look like the whole interval elapsed.
+    // Round up: a truncated 0 would read as the whole interval elapsed.
     let left = rem.tv_sec + i64::from(rem.tv_nsec > 0);
     left.clamp(0, u32::MAX as i64) as u32
 }

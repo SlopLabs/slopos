@@ -9,6 +9,8 @@
 
 #include <sys/types.h>
 
+#define CLOCKS_PER_SEC ((clock_t)1000000)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,12 +43,30 @@ struct tm {
 #define CLOCK_THREAD_CPUTIME_ID (3)
 #define TIMER_ABSTIME (1)
 
+extern long timezone;
+extern int daylight;
+extern char *tzname[2];
+
 int clock_gettime(clockid_t clk_id, struct timespec *tp);
 int clock_settime(clockid_t clk_id, const struct timespec *tp);
 int clock_getres(clockid_t clk_id, struct timespec *tp);
 int clock_nanosleep(clockid_t clk_id, int flags, const struct timespec *rqtp, struct timespec *rmtp);
 int nanosleep(const struct timespec *rqtp, struct timespec *rmtp);
 time_t time(time_t *tloc);
+struct tm *gmtime_r(const time_t *timep, struct tm *result);
+struct tm *localtime_r(const time_t *timep, struct tm *result);
+struct tm *gmtime(const time_t *timep);
+struct tm *localtime(const time_t *timep);
+time_t timegm(struct tm *tmp);
+time_t mktime(struct tm *tmp);
+double difftime(time_t time1, time_t time0);
+char *asctime_r(const struct tm *tmp, char *buf);
+char *asctime(const struct tm *tmp);
+char *ctime_r(const time_t *timep, char *buf);
+char *ctime(const time_t *timep);
+size_t strftime(char *s, size_t max, const char *format, const struct tm *tmp);
+void tzset(void);
+clock_t clock(void);
 
 #ifdef __cplusplus
 }

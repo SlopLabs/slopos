@@ -1,8 +1,10 @@
-//! `<stdlib.h>`'s integer arithmetic.
+//! `<stdlib.h>`'s integer arithmetic, with `qsort` and `bsearch` in [`sort`].
 //!
 //! The rest of the header lives where its subject does: allocation in
 //! [`crate::mem`], conversion in [`crate::string`], termination in
 //! [`crate::process`].
+
+pub mod sort;
 
 use core::ffi::{c_int, c_long, c_longlong};
 

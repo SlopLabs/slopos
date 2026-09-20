@@ -4,6 +4,10 @@ use core::ptr;
 
 pub const PTHREAD_KEYS_MAX: usize = 64;
 
+/// Room for the longest string [`crate::error::SyscallError::as_str`] answers
+/// ("Invalid or incomplete multibyte or wide character", 49 bytes) and its NUL.
+pub const STRERROR_BUF: usize = 64;
+
 /// Per-thread state. `self_ptr` at offset 0 is required by the x86_64
 /// TLS ABI (`mov rax, fs:[0]` must yield the TCB address).
 #[repr(C)]
@@ -20,11 +24,12 @@ pub struct Tcb {
     _pad: [u8; 3],
     /// Kernel writes 0 here on exit (`CLONE_CHILD_CLEARTID`) + futex-wakes it.
     pub child_tid: i32,
-    pub tls_data: [u8; 64],
+    /// `strerror`'s per-thread answer. Not a `#[thread_local]`: LLVM can
+    /// speculate `@llvm.threadlocal.address` above the `tls_is_initialized`
+    /// test that guards it, and [`Tcb::current`]'s `asm!` it cannot.
+    pub strerror_buf: [u8; STRERROR_BUF],
     pub thread_local_keys: [*mut u8; PTHREAD_KEYS_MAX],
-    /// `pthread_setname_np`'s NUL-padded name. Appended last on purpose: the
-    /// x86_64 TLS ABI fixes `self_ptr` at 0 and the rest of the offsets are
-    /// what `thread::tests` pins, so growth has to happen at the tail.
+    /// `pthread_setname_np`'s NUL-padded name.
     pub name: [u8; super::PTHREAD_NAME_MAX],
     /// Bytes of [`crate::thread::create::THREAD_STACK_GUARD_SIZE`] actually
     /// mprotected at the low end of `stack_base`, which an attr with
@@ -56,7 +61,7 @@ impl Tcb {
             detached: false,
             _pad: [0; 3],
             child_tid: 0,
-            tls_data: [0; 64],
+            strerror_buf: [0; STRERROR_BUF],
             thread_local_keys: [ptr::null_mut(); PTHREAD_KEYS_MAX],
             name: [0; super::PTHREAD_NAME_MAX],
             guard_size: 0,

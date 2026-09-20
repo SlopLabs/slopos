@@ -22,6 +22,7 @@ members = [
   "service-core",
   "ktesting",
   "slibc",
+  "slibc-core",
   "slibc/crt0",
   "slibc/cdylib",
   "slibc/staticlib",
@@ -96,6 +97,7 @@ slopos-ring = { path = "ring" }
 slopos-sched = { path = "sched" }
 slopos-signalfd = { path = "signalfd" }
 slopos-slibc = { path = "slibc" }
+slopos-slibc-core = { path = "slibc-core" }
 slopos-terminal-core = { path = "terminal-core" }
 slopos-keymap-core = { path = "keymap-core" }
 slopos-chrome-core = { path = "chrome-core" }

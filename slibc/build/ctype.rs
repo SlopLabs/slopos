@@ -208,7 +208,7 @@ impl Types {
                 .split_once(';')
                 .ok_or_else(|| format!("array type without a length: `{ty}`"))?;
             let len = self.array_len(len)?;
-            return Ok(format!("{} {name}[{len}]", self.base(elem)?, len = len));
+            return self.declare(elem, &format!("{name}[{len}]"));
         }
         if let Some(func) = self.function_pointer(ty, name)? {
             return Ok(func);

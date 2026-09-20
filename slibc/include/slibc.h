@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <langinfo.h>
 #include <limits.h>
 #include <link.h>
 #include <locale.h>
@@ -27,6 +28,7 @@
 #include <pwd.h>
 #include <sched.h>
 #include <semaphore.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,5 +56,6 @@
 #include <time.h>
 #include <uchar.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #endif /* _SLIBC_H */

@@ -112,19 +112,22 @@ fn parse_file(text: &str, label: &str) -> Result<Vec<(String, Export)>, String> 
         // the next blank line is a different item and means this marker sits
         // on something the generator does not model.
         let window = &text[at..text.len().min(at + 600)];
+        let window = match window.find("\n\n") {
+            Some(blank) => &window[..blank],
+            None => window,
+        };
         let Some(item) = window.find("pub ") else {
             continue;
         };
         let window = &window[item..];
 
         if let Some(rest) = strip_static(window) {
-            let (name, ty) = rest
+            let end = declaration_end(rest).ok_or_else(|| {
+                format!("{label}: exported static without a `;` or `=` to end its type")
+            })?;
+            let (name, ty) = rest[..end]
                 .split_once(':')
                 .ok_or_else(|| format!("{label}: exported static without a type"))?;
-            let ty = ty
-                .split('=')
-                .next()
-                .ok_or_else(|| format!("{label}: exported static without an initialiser"))?;
             out.push((
                 name.trim().to_string(),
                 Export {
@@ -144,6 +147,10 @@ fn parse_file(text: &str, label: &str) -> Result<Vec<(String, Export)>, String> 
         let Some(sig) = signature_text(window) else {
             continue;
         };
+        let is_macro_template = sig.starts_with('$');
+        if is_macro_template {
+            continue;
+        }
         let signature = contract::parse_signature(&sig).map_err(|err| format!("{label}: {err}"))?;
         out.push((
             signature.name.clone(),
@@ -161,7 +168,21 @@ fn strip_static(window: &str) -> Option<&str> {
     window
         .strip_prefix("pub static mut ")
         .or_else(|| window.strip_prefix("pub static "))
-        .map(|rest| rest.split(';').next().unwrap_or(rest))
+}
+
+/// The end of a `pub static`'s type: the `;` of a declaration or the `=` of a
+/// definition, neither of which is the `;` inside `[T; N]`.
+fn declaration_end(rest: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (offset, ch) in rest.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            ';' | '=' if depth == 0 => return Some(offset),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Recovers `name(params) -> ret` from a `pub [unsafe] extern "C" fn` item.

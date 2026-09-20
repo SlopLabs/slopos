@@ -282,6 +282,7 @@ slopos-protocol = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-shell-core = { workspace = true }
 slopos-slibc = { workspace = true }
+slopos-slibc-core = { workspace = true }
 slopos-terminal-core = { workspace = true }
 slopos-vt = { workspace = true }
 slopos-windowing = { workspace = true }

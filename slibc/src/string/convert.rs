@@ -1,8 +1,11 @@
+use slopos_slibc_core::hexfloat;
+
+use super::{slice_from_cstr, u_strlen};
 use crate::errno::{ERANGE, errno_set};
 
-/// C's `isspace`, which is what every `strto*` skips. The earlier `b <= 0x20`
-/// also accepted every control character, so `strtol("\x01" "5", &end)`
-/// converted 5 where C requires no conversion at all.
+/// C's `isspace`, which is what every `strto*` skips — not `b <= 0x20`, which
+/// would also skip the control characters and convert `strtol("\x01" "5", …)`
+/// where C requires no conversion at all.
 #[inline(always)]
 fn is_space(b: u8) -> bool {
     b == b' ' || (0x09..=0x0d).contains(&b)
@@ -294,19 +297,31 @@ pub unsafe extern "C" fn strtoull(s: *const u8, endptr: *mut *const u8, base: i3
     strtoul(s, endptr, base)
 }
 
-/// The longest prefix of `p` that C's `strtod` grammar accepts, as a `str`
-/// `core`'s own correctly-rounded parser can take. `None` means no conversion
-/// was performed, which is what sets `endptr` back to the original pointer.
-///
-/// Hexadecimal significands are deliberately absent: the scan stops at the
-/// `x`, so `strtod("0x10", &end)` answers 0 with `end` at the `x` — C89's
-/// reading of it, and a refusal a caller can see rather than a wrong value.
-unsafe fn scan_float(p: *const u8) -> Option<(&'static str, *const u8)> {
+/// What C's `strtod` grammar accepts at `p`. `None` means no conversion was
+/// performed, which is what sets `endptr` back to the original pointer.
+enum FloatText {
+    /// The longest decimal prefix, as a `str` `core`'s own correctly-rounded
+    /// parser can take, and the byte past it.
+    Decimal(&'static str, *const u8),
+    /// A hexadecimal significand, which that parser cannot read: the bytes
+    /// from the `0` of `0x` onwards, and the sign the caller applies.
+    /// `hexfloat` answers how many of them the subject sequence is.
+    Hex(&'static [u8], bool),
+}
+
+unsafe fn scan_float(p: *const u8) -> Option<FloatText> {
     let start = p;
     let mut at = p;
 
+    let mut negative = false;
     if *at == b'+' || *at == b'-' {
+        negative = *at == b'-';
         at = at.add(1);
+    }
+
+    let bytes = slice_from_cstr(at, u_strlen(at));
+    if hexfloat::is_hex_prefix(bytes) {
+        return Some(FloatText::Hex(bytes, negative));
     }
 
     let word = |at: *const u8, word: &[u8]| -> bool {
@@ -356,43 +371,65 @@ unsafe fn scan_float(p: *const u8) -> Option<(&'static str, *const u8)> {
 
     let len = end.offset_from(start) as usize;
     let text = core::str::from_utf8(core::slice::from_raw_parts(start, len)).ok()?;
-    Some((text, end))
+    Some(FloatText::Decimal(text, end))
 }
 
 /// # Safety
 /// `s` is a NUL-terminated C string or null; `endptr` is writable or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtod(s: *const u8, endptr: *mut *const u8) -> f64 {
-    let (text, end) = match parse_float_prefix(s, endptr) {
-        Some(parsed) => parsed,
-        None => return 0.0,
-    };
-    if !endptr.is_null() {
-        *endptr = end;
+    match parse_float_prefix(s, endptr) {
+        None => 0.0,
+        Some(FloatText::Decimal(text, end)) => {
+            if !endptr.is_null() {
+                *endptr = end;
+            }
+            let value: f64 = text.parse().unwrap_or(0.0);
+            if out_of_range(text, value == 0.0, value.is_infinite()) {
+                errno_set(ERANGE.raw());
+            }
+            value
+        }
+        Some(FloatText::Hex(bytes, negative)) => {
+            let hex = hexfloat::scan_f64(bytes);
+            if !endptr.is_null() {
+                *endptr = bytes.as_ptr().add(hex.consumed);
+            }
+            if hex.range_error {
+                errno_set(ERANGE.raw());
+            }
+            if negative { -hex.value } else { hex.value }
+        }
     }
-    let value: f64 = text.parse().unwrap_or(0.0);
-    if out_of_range(text, value == 0.0, value.is_infinite()) {
-        errno_set(ERANGE.raw());
-    }
-    value
 }
 
 /// # Safety
 /// `s` is a NUL-terminated C string or null; `endptr` is writable or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtof(s: *const u8, endptr: *mut *const u8) -> f32 {
-    let (text, end) = match parse_float_prefix(s, endptr) {
-        Some(parsed) => parsed,
-        None => return 0.0,
-    };
-    if !endptr.is_null() {
-        *endptr = end;
+    match parse_float_prefix(s, endptr) {
+        None => 0.0,
+        Some(FloatText::Decimal(text, end)) => {
+            if !endptr.is_null() {
+                *endptr = end;
+            }
+            let value: f32 = text.parse().unwrap_or(0.0);
+            if out_of_range(text, value == 0.0, value.is_infinite()) {
+                errno_set(ERANGE.raw());
+            }
+            value
+        }
+        Some(FloatText::Hex(bytes, negative)) => {
+            let hex = hexfloat::scan_f32(bytes);
+            if !endptr.is_null() {
+                *endptr = bytes.as_ptr().add(hex.consumed);
+            }
+            if hex.range_error {
+                errno_set(ERANGE.raw());
+            }
+            if negative { -hex.value } else { hex.value }
+        }
     }
-    let value: f32 = text.parse().unwrap_or(0.0);
-    if out_of_range(text, value == 0.0, value.is_infinite()) {
-        errno_set(ERANGE.raw());
-    }
-    value
 }
 
 /// Whether a conversion that produced zero or an infinity did so by running
@@ -429,10 +466,7 @@ pub unsafe extern "C" fn atof(s: *const u8) -> f64 {
 
 /// Skips leading whitespace and hands back the scanned prefix, writing the
 /// no-conversion `endptr` itself so both callers state it once.
-unsafe fn parse_float_prefix(
-    s: *const u8,
-    endptr: *mut *const u8,
-) -> Option<(&'static str, *const u8)> {
+unsafe fn parse_float_prefix(s: *const u8, endptr: *mut *const u8) -> Option<FloatText> {
     if s.is_null() {
         if !endptr.is_null() {
             *endptr = core::ptr::null();

@@ -419,6 +419,20 @@
 #     boot `kernelmeta` 1706 inside 1756; post-kernel-tests `residentpages`
 #     772 exact and `pinnedbytes` 4.
 
+# 2026-09-20, the libc surface ("The libc surface is complete" in
+# `plans/self-hosting.md`). One row moved.
+#   post-userland-tests `process` 254 -> 255: `libc_abi_test` now spawns
+#     `/bin/libc_probe`, the C program that exercises `<setjmp.h>`, the
+#     `long double` family and every generated header as C — the half of the
+#     surface no Rust caller can reach. 255 on all three runs, so the cap
+#     stays exact. That is one slot short of `MAX_PROCESSES` 256: the next
+#     utest that spawns needs the cap raised there first, not here.
+#   Nothing else left its cap on those runs: post-userland `pages`
+#     1 876 230/1 898 322/1 934 900 inside 1 977 053, `kernelmeta`
+#     9389/9461/9420 inside 10 035, `residentpages` 155 982/156 327/156 621
+#     inside 160 371, `diskblocks` 3020 inside 3658, `fdslot` 256,
+#     `objectrow` 257, `pinnedbytes` 100, `custody` 8, `task` 6/6/7.
+
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
@@ -453,7 +467,7 @@ post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	100
-post-userland-tests	process	254
+post-userland-tests	process	255
 post-userland-tests	residentpages	160371
 post-userland-tests	task	10
 

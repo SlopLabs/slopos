@@ -416,6 +416,21 @@ if [ "$TEST_MODE" = "--test" ]; then
 
     echo "Dynamic probe built: $BUILD_DIR/dl_probe.elf $BUILD_DIR/libdltest.so"
 
+    # The C library's own surface, compiled from C against the generated
+    # headers, so a header that disagrees with its export fails here at
+    # compile time. `-Wsystem-headers` is what makes those diagnostics
+    # reachable: clang silences warnings raised inside an `-isystem`
+    # directory, which is how a C consumer names this one.
+    "$CLANG" "--target=${USERLAND_TRIPLE}" -nostdlibinc \
+        -isystem "${REPO_ROOT}/slibc/include" -std=c11 -O2 \
+        -Wall -Wextra -Wsystem-headers -Werror \
+        -c "${REPO_ROOT}/userland/libctest/probe.c" -o "$BUILD_DIR/libctest-probe.o"
+    "$LD_LLD" -static -o "$BUILD_DIR/libc_probe.elf" \
+        "$CRT0_OBJ" "$BUILD_DIR/libctest-probe.o" --eh-frame-hdr \
+        --image-base=0x400000 -L "$RELEASE_DIR" -lc
+
+    echo "C probe built: $BUILD_DIR/libc_probe.elf"
+
     # The C++ runtime and the three artifacts that prove it works. Cross-built
     # from this host and never in the guest, and staged only here, because the
     # shipped appliance root runs no C++ program.

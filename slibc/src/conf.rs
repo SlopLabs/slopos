@@ -1,12 +1,11 @@
-//! System configuration and the odds and ends that belong to no subsystem:
-//! `sysconf`, the variadic `syscall` escape hatch, `gethostname`,
-//! `getpwuid_r` and `strerror_r`.
+//! System configuration and the odds and ends that belong to no subsystem.
 
 use core::ffi::{c_char, c_int, c_long};
 
 use crate::errno::{EINVAL, ENAMETOOLONG, ERANGE, errno_set};
 use crate::pal::raw::syscall6;
 use crate::pal::{Pal, Sys};
+use crate::thread::tcb::{STRERROR_BUF, Tcb};
 use crate::types::{passwd, uid_t, utsname as Utsname};
 
 pub const _SC_CLK_TCK: c_int = 2;
@@ -41,10 +40,9 @@ const PW_SHELL: &[u8] = b"/bin/shell\0";
 
 /// `sysconf(3)`.
 ///
-/// Every name answered here is one a caller can act on. An unrecognised name
-/// is `-1` with `EINVAL` rather than `-1` alone: a limit this library does not
-/// know about must not be indistinguishable from one it knows to be
-/// unbounded.
+/// An unrecognised name is `-1` with `EINVAL` rather than `-1` alone: a limit
+/// this library does not know about must not be indistinguishable from one it
+/// knows to be unbounded.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
     match name {
@@ -157,9 +155,8 @@ pub unsafe extern "C" fn getpwuid_r(
         return ERANGE.raw();
     }
 
-    // The five strings are laid down back to back in `buf` and the row's
-    // pointers are aimed into them. `PASSWD_BUF_MIN` is their total, so the
-    // check above is the only bound this loop needs.
+    // `PASSWD_BUF_MIN` is the total of the five strings, so the check above
+    // is the only bound this loop needs.
     let base = buf as *mut u8;
     let mut at = 0usize;
     for (field, text) in [
@@ -190,8 +187,8 @@ pub unsafe extern "C" fn strerror_r(n: c_int, buf: *mut c_char, buflen: usize) -
         .as_str()
         .as_bytes();
     if text.len() + 1 > buflen {
-        // POSIX truncates *and* reports ERANGE, so a caller that ignores the
-        // return still gets a usable string.
+        // Truncating as well as reporting ERANGE leaves a caller that ignores
+        // the return with a usable string.
         let room = buflen - 1;
         core::ptr::copy_nonoverlapping(text.as_ptr(), buf as *mut u8, room);
         *(buf as *mut u8).add(room) = 0;
@@ -200,4 +197,28 @@ pub unsafe extern "C" fn strerror_r(n: c_int, buf: *mut c_char, buflen: usize) -
     core::ptr::copy_nonoverlapping(text.as_ptr(), buf as *mut u8, text.len());
     *(buf as *mut u8).add(text.len()) = 0;
     0
+}
+
+/// As `errno`: until `TLS_READY` flips there is no TCB to answer out of.
+static mut STRERROR_FALLBACK: [u8; STRERROR_BUF] = [0; STRERROR_BUF];
+
+/// `strerror(3)`. Never `NULL`; an unknown number reads as "Unknown error".
+///
+/// The buffer is per-thread: `as_str` hands back a `&'static str` with no
+/// NUL, so the text must be copied, and one process-wide copy would let two
+/// threads in `strerror` at once read each other's answer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strerror(n: c_int) -> *mut c_char {
+    let text = crate::error::SyscallError::from_errno(n)
+        .as_str()
+        .as_bytes();
+    let len = text.len().min(STRERROR_BUF - 1);
+    let buf = if crate::thread::tls::tls_is_initialized() {
+        (&raw mut (*Tcb::current()).strerror_buf).cast::<u8>()
+    } else {
+        (&raw mut STRERROR_FALLBACK).cast::<u8>()
+    };
+    core::ptr::copy_nonoverlapping(text.as_ptr(), buf, len);
+    *buf.add(len) = 0;
+    buf.cast()
 }

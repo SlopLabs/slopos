@@ -39,9 +39,11 @@ pub struct HeaderSpec {
     pub extra: &'static [&'static str],
     /// Exported objects, as `name: <rust type>`, ABI-checked the same way.
     pub variables: &'static [&'static str],
-    /// Literal C lines. Each one is justified in a comment at its use site;
-    /// they exist because C needs a spelling the Rust contract has no way to
-    /// carry.
+    /// Literal C lines, emitted ahead of the header's `extern "C"` block so a
+    /// declaration here carries its own linkage. They exist because C needs a
+    /// spelling the Rust contract cannot carry — chiefly `long double`, which
+    /// has no Rust name, so its entry points live in assembly rather than in
+    /// the contract. Anything further is justified at its use site.
     pub raw: &'static [&'static str],
     /// Literal C lines emitted past the include guard, for the one header C
     /// requires to mean something different each time it is included.
@@ -326,7 +328,6 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#    define CHAR_MIN (-128)",
             "#    define CHAR_MAX 127",
             "#  endif",
-            "#  define MB_LEN_MAX 4",
             "#  define SHRT_MIN (-32768)",
             "#  define SHRT_MAX 32767",
             "#  define USHRT_MAX 65535",
@@ -340,6 +341,12 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#  define LLONG_MAX 9223372036854775807LL",
             "#  define ULLONG_MAX 18446744073709551615ULL",
             "#endif",
+            "",
+            // Clang's own `<limits.h>` answers 1, the freestanding value,
+            // which is below the four bytes a UTF-8 conversion produces and
+            // so below `<stdlib.h>`'s `MB_CUR_MAX`.
+            "#undef MB_LEN_MAX",
+            "#define MB_LEN_MAX 4",
         ],
         raw_unguarded: &[],
     },
@@ -394,29 +401,127 @@ pub const HEADERS: &[HeaderSpec] = &[
         path: "uchar.h",
         summary: "the multibyte conversion state",
         includes: &["sys/types.h"],
-        types: &[],
+        // C11 puts `mbstate_t` in `<wchar.h>` too; that header includes this
+        // one rather than declaring it twice.
+        types: &["mbstate_t"],
         consts: &[],
         slibc_consts: &[],
         macros: &[],
         functions: &[],
         extra: &[],
         variables: &[],
-        // `mbstate_t` and nothing else. C11 puts the type in `<wchar.h>` too,
-        // which slibc has not got; libc++ reaches for this one when wide
-        // characters are off, and takes a `#error` if neither exists. The
-        // object is opaque and wider than any state a UTF-8 conversion needs,
-        // so a later `<wchar.h>` can define the conversion against it without
-        // changing the layout.
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "wchar.h",
+        summary: "wide characters",
+        includes: &["sys/types.h", "uchar.h"],
+        types: &["wint_t"],
+        consts: &[],
+        slibc_consts: &["WEOF"],
+        macros: &[],
+        functions: &[],
+        // A C caller must see `wchar_t *` where the Rust side answers
+        // `*const wchar_t`, or `wchar_t *p = wcschr(s, c)` does not compile.
+        // No wide stdio: nothing in LLVM, clang or libc++ asks for one.
+        extra: &[
+            "wcslen(s: *const wchar_t) -> size_t",
+            "wcsnlen(s: *const wchar_t, maxlen: size_t) -> size_t",
+            "wmemcpy(dst: *mut wchar_t, src: *const wchar_t, n: size_t) -> *mut wchar_t",
+            "wmemmove(dst: *mut wchar_t, src: *const wchar_t, n: size_t) -> *mut wchar_t",
+            "wmemset(dst: *mut wchar_t, c: wchar_t, n: size_t) -> *mut wchar_t",
+            "wmemcmp(a: *const wchar_t, b: *const wchar_t, n: size_t) -> c_int",
+            "wmemchr(s: *const wchar_t, c: wchar_t, n: size_t) -> *mut wchar_t",
+            "wcscpy(dst: *mut wchar_t, src: *const wchar_t) -> *mut wchar_t",
+            "wcsncpy(dst: *mut wchar_t, src: *const wchar_t, n: size_t) -> *mut wchar_t",
+            "wcscat(dst: *mut wchar_t, src: *const wchar_t) -> *mut wchar_t",
+            "wcsncat(dst: *mut wchar_t, src: *const wchar_t, n: size_t) -> *mut wchar_t",
+            "wcscmp(a: *const wchar_t, b: *const wchar_t) -> c_int",
+            "wcsncmp(a: *const wchar_t, b: *const wchar_t, n: size_t) -> c_int",
+            "wcschr(s: *const wchar_t, c: wchar_t) -> *mut wchar_t",
+            "wcsrchr(s: *const wchar_t, c: wchar_t) -> *mut wchar_t",
+            "wcsstr(haystack: *const wchar_t, needle: *const wchar_t) -> *mut wchar_t",
+            "wcsspn(s: *const wchar_t, accept: *const wchar_t) -> size_t",
+            "wcscspn(s: *const wchar_t, reject: *const wchar_t) -> size_t",
+            "wcspbrk(s: *const wchar_t, accept: *const wchar_t) -> *mut wchar_t",
+            "wcstok(s: *mut wchar_t, delim: *const wchar_t, save: *mut *mut wchar_t) \
+             -> *mut wchar_t",
+            "wcscoll(a: *const wchar_t, b: *const wchar_t) -> c_int",
+            "wcsxfrm(dst: *mut wchar_t, src: *const wchar_t, n: size_t) -> size_t",
+            "wcsdup(s: *const wchar_t) -> *mut wchar_t",
+            "mbrtowc(pwc: *mut wchar_t, s: *const c_char, n: size_t, ps: *mut mbstate_t) \
+             -> size_t",
+            "wcrtomb(s: *mut c_char, wc: wchar_t, ps: *mut mbstate_t) -> size_t",
+            "mbrlen(s: *const c_char, n: size_t, ps: *mut mbstate_t) -> size_t",
+            "mbsrtowcs(dst: *mut wchar_t, src: *mut *const c_char, len: size_t, \
+             ps: *mut mbstate_t) -> size_t",
+            "wcsrtombs(dst: *mut c_char, src: *mut *const wchar_t, len: size_t, \
+             ps: *mut mbstate_t) -> size_t",
+            "mbsnrtowcs(dst: *mut wchar_t, src: *mut *const c_char, nmc: size_t, len: size_t, \
+             ps: *mut mbstate_t) -> size_t",
+            "wcsnrtombs(dst: *mut c_char, src: *mut *const wchar_t, nwc: size_t, len: size_t, \
+             ps: *mut mbstate_t) -> size_t",
+            "mbsinit(ps: *const mbstate_t) -> c_int",
+            "btowc(c: c_int) -> wint_t",
+            "wctob(c: wint_t) -> c_int",
+            "wcstol(s: *const wchar_t, endptr: *mut *mut wchar_t, base: c_int) -> c_long",
+            "wcstoul(s: *const wchar_t, endptr: *mut *mut wchar_t, base: c_int) -> c_ulong",
+            "wcstoll(s: *const wchar_t, endptr: *mut *mut wchar_t, base: c_int) -> c_longlong",
+            "wcstoull(s: *const wchar_t, endptr: *mut *mut wchar_t, base: c_int) -> c_ulonglong",
+            "wcstod(s: *const wchar_t, endptr: *mut *mut wchar_t) -> f64",
+            "wcstof(s: *const wchar_t, endptr: *mut *mut wchar_t) -> f32",
+        ],
+        variables: &[],
+        // C99 7.24 p2 wants both bounds, and C wants `WCHAR_MIN` to have type
+        // `wchar_t`, which `-2147483648` — a `long` — has not. `#undef` first:
+        // clang's resource `<stdint.h>` defines both under `-nostdlibinc`, and
+        // a redefinition that is not token-for-token identical breaks C11
+        // 6.10.3 p2.
         raw: &[
-            "typedef struct {",
-            "    unsigned int __size[2];",
-            "} mbstate_t;",
+            "#undef WCHAR_MAX",
+            "#define WCHAR_MAX 0x7fffffff",
+            "#undef WCHAR_MIN",
+            "#define WCHAR_MIN (-WCHAR_MAX - 1)",
+            "",
+            "#ifdef __cplusplus",
+            "extern \"C\"",
+            "#endif",
+            "long double wcstold(const wchar_t *s, wchar_t **endptr);",
         ],
         raw_unguarded: &[],
     },
     HeaderSpec {
+        path: "setjmp.h",
+        summary: "non-local jumps",
+        includes: &["sys/types.h"],
+        types: &["__jmp_buf_tag", "jmp_buf", "sigjmp_buf"],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        // A `jmp_buf` parameter decays to `struct __jmp_buf_tag *`, as in
+        // glibc, so the prototypes take the pointer. No `__returns_twice__`
+        // attribute: clang and gcc attach it at every call site of `setjmp`,
+        // `_setjmp` and `sigsetjmp`. `__setjmp` is in no builtin table, so it
+        // stays a link symbol and is not declared here.
+        extra: &[
+            "setjmp(env: *mut __jmp_buf_tag) -> c_int",
+            "_setjmp(env: *mut __jmp_buf_tag) -> c_int",
+            "longjmp(env: *mut __jmp_buf_tag, val: c_int) -> !",
+            "_longjmp(env: *mut __jmp_buf_tag, val: c_int) -> !",
+            "sigsetjmp(env: *mut __jmp_buf_tag, savemask: c_int) -> c_int",
+            "siglongjmp(env: *mut __jmp_buf_tag, val: c_int) -> !",
+        ],
+        variables: &[],
+        // C11 7.13 p1 makes `setjmp` a macro. Self-referential, so the
+        // prototype still declares the function and a call reaches the builtin.
+        raw: &["#define setjmp setjmp"],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
         path: "math.h",
-        summary: "floating-point mathematics, for `double` and `float`",
+        summary: "floating-point mathematics",
         includes: &[],
         types: &[],
         consts: &[],
@@ -549,6 +654,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#define FP_NORMAL 4",
             "#define HUGE_VAL (__builtin_huge_val())",
             "#define HUGE_VALF (__builtin_huge_valf())",
+            "#define HUGE_VALL (__builtin_huge_vall())",
             "#define INFINITY (__builtin_inff())",
             "#define NAN (__builtin_nanf(\"\"))",
             "#define MATH_ERRNO 1",
@@ -567,6 +673,70 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#define islessequal(x, y) __builtin_islessequal(x, y)",
             "#define islessgreater(x, y) __builtin_islessgreater(x, y)",
             "#define isunordered(x, y) __builtin_isunordered(x, y)",
+            // The `long double` family, in the order their `double` twins
+            // appear above.
+            "#ifdef __cplusplus",
+            "extern \"C\" {",
+            "#endif",
+            "long double acosl(long double x);",
+            "long double acoshl(long double x);",
+            "long double asinl(long double x);",
+            "long double asinhl(long double x);",
+            "long double atanl(long double x);",
+            "long double atanhl(long double x);",
+            "long double cbrtl(long double x);",
+            "long double ceill(long double x);",
+            "long double cosl(long double x);",
+            "long double coshl(long double x);",
+            "long double erfl(long double x);",
+            "long double erfcl(long double x);",
+            "long double expl(long double x);",
+            "long double exp2l(long double x);",
+            "long double expm1l(long double x);",
+            "long double fabsl(long double x);",
+            "long double floorl(long double x);",
+            "long double lgammal(long double x);",
+            "long double logl(long double x);",
+            "long double log10l(long double x);",
+            "long double log1pl(long double x);",
+            "long double log2l(long double x);",
+            "long double rintl(long double x);",
+            "long double roundl(long double x);",
+            "long double sinl(long double x);",
+            "long double sinhl(long double x);",
+            "long double sqrtl(long double x);",
+            "long double tanl(long double x);",
+            "long double tanhl(long double x);",
+            "long double tgammal(long double x);",
+            "long double truncl(long double x);",
+            "long double atan2l(long double y, long double x);",
+            "long double copysignl(long double x, long double y);",
+            "long double fdiml(long double x, long double y);",
+            "long double fmaxl(long double x, long double y);",
+            "long double fminl(long double x, long double y);",
+            "long double fmodl(long double x, long double y);",
+            "long double hypotl(long double x, long double y);",
+            "long double nextafterl(long double x, long double y);",
+            "long double powl(long double x, long double y);",
+            "long double remainderl(long double x, long double y);",
+            "long double fmal(long double x, long double y, long double z);",
+            "long double frexpl(long double x, int *exp);",
+            "long double modfl(long double x, long double *iptr);",
+            "long double remquol(long double x, long double y, int *quo);",
+            "int ilogbl(long double x);",
+            "long double ldexpl(long double x, int n);",
+            "long double scalbnl(long double x, int n);",
+            "long double scalblnl(long double x, long n);",
+            "long double nearbyintl(long double x);",
+            "long double logbl(long double x);",
+            "long lrintl(long double x);",
+            "long long llrintl(long double x);",
+            "long lroundl(long double x);",
+            "long long llroundl(long double x);",
+            "long double nanl(const char *tag);",
+            "#ifdef __cplusplus",
+            "}",
+            "#endif",
         ],
         raw_unguarded: &[],
     },
@@ -605,6 +775,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "strchr(s: *const c_char, c: c_int) -> *mut c_char",
             "strcmp(a: *const c_char, b: *const c_char) -> c_int",
             "strcpy(dest: *mut c_char, src: *const c_char) -> *mut c_char",
+            "strerror(n: c_int) -> *mut c_char",
             "strlen(s: *const c_char) -> size_t",
             "strncat(dest: *mut c_char, src: *const c_char, n: size_t) -> *mut c_char",
             "strncmp(a: *const c_char, b: *const c_char, n: size_t) -> c_int",
@@ -620,7 +791,8 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "stdlib.h",
         summary: "general utilities: allocation, environment, conversion",
-        includes: &["sys/types.h"],
+        // `limits.h` for `MB_LEN_MAX`, which `MB_CUR_MAX` below derives from.
+        includes: &["sys/types.h", "limits.h"],
         types: &["div_t", "ldiv_t", "lldiv_t"],
         consts: &["EXIT_*"],
         slibc_consts: &[],
@@ -666,15 +838,26 @@ pub const HEADERS: &[HeaderSpec] = &[
             "strtoul(s: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulong",
             "putenv(string: *mut c_char) -> c_int",
             "malloc_usable_size(ptr: *mut c_void) -> size_t",
+            // C puts the non-restartable conversions here rather than in
+            // `<wchar.h>`, and libc++'s `<cstdlib>` looks for them here.
+            "mblen(s: *const c_char, n: size_t) -> c_int",
+            "mbtowc(pwc: *mut wchar_t, s: *const c_char, n: size_t) -> c_int",
+            "wctomb(s: *mut c_char, wc: wchar_t) -> c_int",
+            "mbstowcs(dst: *mut wchar_t, src: *const c_char, len: size_t) -> size_t",
+            "wcstombs(dst: *mut c_char, src: *const wchar_t, len: size_t) -> size_t",
+            "qsort(base: *mut c_void, nmemb: size_t, size: size_t, \
+             compar: Option<unsafe extern \"C\" fn(*const c_void, *const c_void) -> c_int>)",
+            "bsearch(key: *const c_void, base: *const c_void, nmemb: size_t, size: size_t, \
+             compar: Option<unsafe extern \"C\" fn(*const c_void, *const c_void) -> c_int>) \
+             -> *mut c_void",
         ],
         variables: &[],
-        // `long double` has no Rust spelling — it is x87 80-bit here — so
-        // `strtold` is written in assembly and cannot be a contract entry.
-        // libc++ requires it to build.
-        // The one `raw` line in the tree that is a declaration rather than a
-        // macro, so it carries its own linkage: `raw` is emitted ahead of the
-        // header's `extern "C"` block.
+        // `MB_CUR_MAX` has type `size_t` (C11 7.22 p2) and may not exceed
+        // `MB_LEN_MAX`, so it derives from it rather than repeating the 4.
+        // `strtold` is here because libc++ requires it to build.
         raw: &[
+            "#define MB_CUR_MAX ((size_t)MB_LEN_MAX)",
+            "",
             "#ifdef __cplusplus",
             "extern \"C\"",
             "#endif",
@@ -1000,9 +1183,32 @@ pub const HEADERS: &[HeaderSpec] = &[
             "nanosleep",
             "time",
         ],
-        extra: &[],
-        variables: &[],
-        raw: &[],
+        extra: &[
+            "gmtime_r(timep: *const time_t, result: *mut tm) -> *mut tm",
+            "localtime_r(timep: *const time_t, result: *mut tm) -> *mut tm",
+            "gmtime(timep: *const time_t) -> *mut tm",
+            "localtime(timep: *const time_t) -> *mut tm",
+            "timegm(tmp: *mut tm) -> time_t",
+            "mktime(tmp: *mut tm) -> time_t",
+            "difftime(time1: time_t, time0: time_t) -> c_double",
+            "asctime_r(tmp: *const tm, buf: *mut c_char) -> *mut c_char",
+            "asctime(tmp: *const tm) -> *mut c_char",
+            "ctime_r(timep: *const time_t, buf: *mut c_char) -> *mut c_char",
+            "ctime(timep: *const time_t) -> *mut c_char",
+            "strftime(s: *mut c_char, max: size_t, format: *const c_char, tmp: *const tm) \
+             -> size_t",
+            "tzset()",
+            "clock() -> clock_t",
+        ],
+        // There is one zone, but a program still reads these three by name.
+        variables: &[
+            "timezone: c_long",
+            "daylight: c_int",
+            "tzname: [*mut c_char; 2]",
+        ],
+        // C17 7.27.1 p2 gives the macro type `clock_t`; an untyped literal
+        // would make `printf("%ld", CLOCKS_PER_SEC)` read eight bytes for four.
+        raw: &["#define CLOCKS_PER_SEC ((clock_t)1000000)"],
         raw_unguarded: &[],
     },
     HeaderSpec {
@@ -1524,13 +1730,98 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "locale.h",
         summary: "locale categories",
-        includes: &[],
+        // `<stddef.h>` for `NULL` (C17 7.11.1 p1), the compiler's because this
+        // tree has none. Not `<sys/types.h>`: its function-like `major`,
+        // `minor` and `makedev` collide with a C++ member spelled that way.
+        includes: &["stddef.h"],
         types: &["nl_item", "lconv"],
         consts: &[],
-        slibc_consts: &[],
+        slibc_consts: &[
+            "LC_CTYPE",
+            "LC_NUMERIC",
+            "LC_TIME",
+            "LC_COLLATE",
+            "LC_MONETARY",
+            "LC_MESSAGES",
+            "LC_ALL",
+        ],
         macros: &[],
         functions: &[],
-        extra: &[],
+        extra: &[
+            "setlocale(category: c_int, locale: *const c_char) -> *mut c_char",
+            "localeconv() -> *mut lconv",
+        ],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "langinfo.h",
+        summary: "locale data items",
+        // `nl_item` is `locale.h`'s; POSIX lets a program reach it from either.
+        includes: &["locale.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[
+            "CODESET",
+            "RADIXCHAR",
+            "THOUSEP",
+            "ABDAY_1",
+            "ABDAY_2",
+            "ABDAY_3",
+            "ABDAY_4",
+            "ABDAY_5",
+            "ABDAY_6",
+            "ABDAY_7",
+            "DAY_1",
+            "DAY_2",
+            "DAY_3",
+            "DAY_4",
+            "DAY_5",
+            "DAY_6",
+            "DAY_7",
+            "ABMON_1",
+            "ABMON_2",
+            "ABMON_3",
+            "ABMON_4",
+            "ABMON_5",
+            "ABMON_6",
+            "ABMON_7",
+            "ABMON_8",
+            "ABMON_9",
+            "ABMON_10",
+            "ABMON_11",
+            "ABMON_12",
+            "MON_1",
+            "MON_2",
+            "MON_3",
+            "MON_4",
+            "MON_5",
+            "MON_6",
+            "MON_7",
+            "MON_8",
+            "MON_9",
+            "MON_10",
+            "MON_11",
+            "MON_12",
+            "AM_STR",
+            "PM_STR",
+            "D_T_FMT",
+            "D_FMT",
+            "T_FMT",
+            "T_FMT_AMPM",
+            "ERA",
+            "ERA_D_FMT",
+            "ERA_D_T_FMT",
+            "ERA_T_FMT",
+            "ALT_DIGITS",
+            "CRNCYSTR",
+            "YESEXPR",
+            "NOEXPR",
+        ],
+        macros: &[],
+        functions: &[],
+        extra: &["nl_langinfo(item: nl_item) -> *mut c_char"],
         variables: &[],
         raw: &[],
         raw_unguarded: &[],
