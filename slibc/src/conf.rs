@@ -282,10 +282,9 @@ pub unsafe extern "C" fn strerror(n: c_int) -> *mut c_char {
 pub const _PC_NAME_MAX: c_int = 3;
 pub const _PC_PATH_MAX: c_int = 4;
 
-/// `pathconf(3)`. Every limit SlopOS has is a constant, so the path is only
-/// checked for existence — POSIX requires `ENOENT` for one that is not there,
-/// and a caller that skips the check would otherwise size a buffer off a
-/// name it cannot open.
+/// `pathconf(3)`. Every limit here is a constant, so the path is checked for
+/// existence and nothing else: POSIX wants `ENOENT` for one that is absent,
+/// and a caller would otherwise size a buffer off a name it cannot open.
 ///
 /// # Safety
 /// `path` is a NUL-terminated C string.

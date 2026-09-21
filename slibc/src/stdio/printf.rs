@@ -60,11 +60,10 @@ unsafe fn next_long_double(ap: &mut VaList<'_>) -> f64 {
     narrowed
 }
 
-/// Bytes the multibyte form of `wide` would take, stopping at the last whole
-/// character that fits in `cap`, and whether it stopped on a character with
-/// no multibyte form. The cap is tested before each element is read, because
-/// C99 7.19.6.1 lets a `%.Nls` argument be an array a precision bounds rather
-/// than one a NUL ends.
+/// Bytes the multibyte form of `wide` would take within `cap`, and whether
+/// it stopped on a character that has none. The cap is tested before each
+/// element is read, because C99 7.19.6.1 lets a `%.Nls` argument be an array
+/// a precision bounds rather than one a NUL ends.
 unsafe fn multibyte_len(wide: *const wchar_t, cap: usize) -> (usize, bool) {
     let mut total = 0usize;
     let mut at = 0isize;
@@ -361,10 +360,8 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
                 }
             }
 
-            // C99 7.19.6.1: `%ls` takes a wide string and writes its
-            // multibyte form, and a precision bounds the *bytes* written at a
-            // character boundary. Measured first, because the field width
-            // pads to that byte count.
+            // Measured before anything is written, because the field width
+            // pads to the byte count rather than the character count.
             b's' if length == Length::Long => {
                 let wide: *const wchar_t = ap.next_arg::<*const wchar_t>();
                 if wide.is_null() {
@@ -661,7 +658,8 @@ pub unsafe extern "C" fn vsnprintf(
     vsnprintf_impl(buf, n, fmt, &mut ap)
 }
 
-/// `vasprintf(3)`. Measures with a copy of the argument list, then formats.
+/// `vasprintf(3)`. The measuring pass takes a `va_copy`, because a `va_list`
+/// walked once cannot be rewound to format from.
 ///
 /// # Safety
 /// `fmt`'s conversions match `ap`; `strp` is writable.

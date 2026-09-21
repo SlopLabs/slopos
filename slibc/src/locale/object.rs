@@ -37,8 +37,8 @@ pub const LC_MONETARY_MASK: c_int = 16;
 pub const LC_MESSAGES_MASK: c_int = 32;
 pub const LC_ALL_MASK: c_int = 63;
 
-// The header generator renders a `pub const` rather than evaluating one, so
-// the shift each value is stands here instead of in its initialiser.
+// The header generator emits a `pub const` verbatim rather than evaluating
+// it, so each value is a literal and the shift it is says so here.
 const _: () = assert!(LC_CTYPE_MASK == 1 << LC_CTYPE);
 const _: () = assert!(LC_NUMERIC_MASK == 1 << LC_NUMERIC);
 const _: () = assert!(LC_TIME_MASK == 1 << LC_TIME);

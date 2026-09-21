@@ -6,9 +6,10 @@
 //! defined and [`fwide`] has nothing to report.
 //!
 //! The formatting family transcodes its wide template to UTF-8 and runs the
-//! narrow engine over it. C gives the two templates the same conversions —
-//! `%s` takes a multibyte string in both, `%ls` a wide one — so the transcode
-//! is the whole of the difference.
+//! narrow engine over it, because C gives the two templates the same
+//! conversions — `%s` takes a multibyte string in both, `%ls` a wide one.
+//! What the transcode does not carry is the count: these return wide
+//! characters where the narrow engine returns bytes.
 
 use core::ffi::{VaList, c_int, c_void};
 
@@ -152,9 +153,8 @@ pub unsafe extern "C" fn fgetws(s: *mut wchar_t, n: c_int, stream: *mut FILE) ->
     let mut at = 0usize;
     let mut ended = false;
     flockfile(stream);
-    // `FILE_FLAG_ERR` is sticky until `clearerr`, so a flag this call did not
-    // raise would otherwise make a perfectly good line read as a failure —
-    // and the line is consumed either way.
+    // `FILE_FLAG_ERR` is sticky until `clearerr`, so an inherited flag would
+    // otherwise make a good line read as a failure, consumed either way.
     let held = take_error(stream);
     while at < max {
         let wc = fgetwc_locked(stream);
@@ -277,9 +277,8 @@ unsafe fn vfwprintf_impl(stream: *mut FILE, fmt: *const wchar_t, ap: &mut VaList
     };
 
     // C99 7.24.2.5 counts wide characters, not the bytes the narrow engine
-    // emits, and the two differ for every conversion outside ASCII. The
-    // stream carries the bytes; the count is of the UTF-8 sequences they are,
-    // which is every byte that is not a continuation.
+    // emits. The stream takes the bytes; the count is of the sequences they
+    // are, which is every byte that is not a continuation.
     let mut written = 0usize;
     let mut unencodable = false;
     flockfile(stream);
@@ -355,8 +354,6 @@ unsafe fn vswprintf_impl(
     let mut state = MbState::default();
     let mut written = 0usize;
     let mut overflowed = false;
-    // One flag for both directions: the narrow engine reports a wide argument
-    // it cannot encode, this closure a byte sequence it cannot decode.
     let mut malformed = false;
     let mut unencodable = false;
     format_to_cb(
