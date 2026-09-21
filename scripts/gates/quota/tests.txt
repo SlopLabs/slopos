@@ -437,6 +437,25 @@
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
 
+# 2026-09-21, the LLVM port (`plans/self-hosting.md`, "LLVM builds for this
+# target"). One row moved, over two fresh runs of one ISO.
+#   post-userland-tests `pinnedbytes` 100 -> 308, 308 on both runs, so the cap
+#     stays exact as this row's previous two notes left it. The row counts the
+#     page-cache pages a mapping holds and `libc++.so` is 1 762 808 bytes where
+#     it was 781 768: the runtime is now built with localization, wide
+#     characters, `<filesystem>` and the random device on, because LLVM's own
+#     sources reach all four. 981 040 more bytes is 240 more pages of file, of
+#     which the probe's mapping holds 208.
+#   Measured under TCG rather than KVM, which this row does not care about: it
+#     is a page count, not a rate. The host built the runtime with clang 18,
+#     the major CI pins, so the size this cap follows from is CI's size.
+#   Nothing else moved above its cap over the two runs: post-userland
+#     `kernelmeta` 9997/9994 inside 10035, `pages` 1 907 206/1 903 118 inside
+#     1 977 053, `residentpages` 155 753/155 691 inside 160 371, `diskblocks`
+#     2709 inside 3658, `task` 6, `fdslot` 256, `objectrow` 257, `custody` 8;
+#     boot `kernelmeta` 1750 inside 1756; post-kernel-tests `pinnedbytes` 4,
+#     `process` 14, `task` 6, `residentpages` 772 exact.
+
 # Boot charges only the idle tasks' stacks, so it reports one kind and that
 # is the honest floor for it rather than evidence of a broken report.
 min-kinds-for boot 1
@@ -466,7 +485,7 @@ post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
-post-userland-tests	pinnedbytes	100
+post-userland-tests	pinnedbytes	308
 post-userland-tests	process	255
 post-userland-tests	residentpages	160371
 post-userland-tests	task	10
