@@ -1645,9 +1645,10 @@ What it rests on, in case a later phase disturbs it:
 
 - **No bootstrap.** This section makes LLVM a library that compiles for
   SlopOS. Building a *compiler* is the workstream below, and what stands
-  between the two is cargo rather than LLVM: cargo links libcurl and OpenSSL,
-  neither of which is ported, and bootstrap builds cargo before it builds
-  anything for the host triple.
+  between the two is cargo rather than LLVM: bootstrap builds cargo before
+  anything for the host triple, and cargo's manifest pulls six `-sys` crates
+  that build C libraries, none of them optional. The workstream below takes
+  that as a fifth fork rather than five C ports.
 - **No clang driver.** The patch adds the target that predefines the macros;
   it adds no `ToolChains/SlopOS.cpp`, so a cross-built clang cannot yet be
   handed a bare `-o` and asked to find `crt0.o` and `-lc` by itself. Every
@@ -1759,14 +1760,35 @@ every artifact in it is dynamically linked, throws, calls a C library, is
 built for a triple the compiler can name, and is *made of* a library that now
 compiles for that triple.
 
-**What is left is cargo, not LLVM.** bootstrap builds cargo before it builds
-anything for the host triple, and cargo links libcurl and OpenSSL. Neither is
-ported, and neither is on the critical path for the goal this plan states:
-`Cargo.lock` holds nine third-party crates, so building SlopOS on SlopOS needs
-no registry and no network. The cheapest road is therefore cargo's own
-`vendored-openssl` plus a curl configured with no TLS backend at all — the
-network stack a registry would need is a different plan — and the number that
-decides it is the first `x.py` run rather than this paragraph.
+**What is left is cargo, not LLVM, and cargo is a fifth fork.** bootstrap
+builds cargo before it builds anything for the host triple, and cargo's
+manifest pulls six `-sys` crates that each build a C library: `curl-sys`,
+`openssl-sys` with `openssl-src`, `libgit2-sys`, `libssh2-sys` and
+`libz-sys`. None of them is optional — `git2` is declared
+`features = ["https", "ssh"]` with no `optional = true`, and `curl` the same —
+so there is no feature flag that drops them and no "curl without a TLS
+backend" to configure. Building cargo unmodified for this target means
+porting five C build systems, OpenSSL's perl `Configure` among them.
+
+The decision is therefore taken here rather than at the first `x.py` run:
+**`toolchain/cargo/` becomes the fifth pinned fork**, alongside
+`toolchain/{rust,libc,compiler,llvm}` and built by the same machinery — a
+patch, a checksum in a `PIN`, a materialiser, a gate. The fork makes those
+six dependencies optional behind a feature bootstrap turns off for this
+target. It is one Rust crate against five C build systems, and the tree
+already owns the tooling for the first.
+
+What that road gives up is exactly what the goal does not need: no
+`cargo install` from a registry, no git dependencies, no `cargo publish`.
+`Cargo.lock` holds nine third-party crates, so building SlopOS on SlopOS is a
+vendored workspace build and reaches none of them. The network stack a
+registry would want is a different plan.
+
+The measurement that sizes the fork: seventeen of cargo's 260 source files
+name `curl::`, `git2::` or `openssl::`, and they sit in `util/network/`,
+`sources/git/`, `sources/registry/git_remote.rs`, `ops/cargo_fix/` and
+`bin/cargo/`. That is the cut, and whether it is a clean one is the first
+thing the fork has to establish.
 
 **The medium is already reachable.** Measured from the host: the pinned sysroot
 is 1.1 GB, `librustc_driver.so` is a single 161 MB shared object, and the
@@ -1787,13 +1809,21 @@ package payload. Its own automated self-hosted build config provisions a
 against 650 MiB for its desktop image. Two orders of magnitude under the 1.1 GB
 host sysroot, because a shipped toolchain is not a rustup toolchain.
 
-**What the run will need that the section above did not.** A clang driver
-toolchain, so a cross-built clang can be handed a bare `-o` and find `crt0.o`
-and `-lc` by itself; every link line in this tree states those explicitly,
-which is why nothing has needed it yet. And a decision on `libLLVM`: shared is
-what upstream ships and what the 161 MB measurement was taken against, static
-removes one `dlopen` from startup but not the proc-macro one, and the
-open-decisions list carries it because the first run is what prices it.
+**What the run will need that the section above did not.** Two things, and
+only one of them is a question. The work is a clang driver toolchain, so a
+cross-built clang can be handed a bare `-o` and find `crt0.o` and `-lc` by
+itself; every link line in this tree states those explicitly, which is why
+nothing has needed it yet, and there is nothing to decide — it is
+`clang/lib/Driver/ToolChains/` and it goes in `toolchain/llvm/` beside the
+port already there. The question is `libLLVM`: shared is what upstream ships
+and what the 161 MB measurement was taken against, static removes one
+`dlopen` from startup but not the proc-macro one, and it stays on the
+open-decisions list because the answer is a startup cost this tree cannot
+measure before there is a toolchain to measure it on.
+
+So the workstream reduces to four items in order: fork cargo, add the clang
+driver, run bootstrap, put the result on a second volume. None of them is
+open-ended; the one open decision is a number the first run prints.
 
 ### Workstream 1.2 — The build loop holds (**M**)
 
