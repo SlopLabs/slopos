@@ -1,0 +1,21 @@
+[package]
+name = "slopos-slibc-builtins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "libbuiltins.a - compiler-rt's helper routines, position independent"
+
+# The archive a shared object takes compiler-rt from. `libc.a` carries the same
+# routines, but it is built `-C relocation-model=static` for the fixed-address
+# images userland links, and a static relocation cannot go into a `.so`. This
+# package exists only to be built `pic` and archived.
+[lib]
+name = "builtins"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true

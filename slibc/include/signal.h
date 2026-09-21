@@ -13,12 +13,21 @@
 extern "C" {
 #endif
 
-typedef size_t sighandler_t;
+typedef void (*sighandler_t)(int);
 typedef struct {
     unsigned long __val[16];
 } sigset_t;
+typedef struct {
+    int si_signo;
+    int si_errno;
+    int si_code;
+    int _pad[29];
+} __slibc_aligned(8) siginfo_t;
 struct sigaction {
-    sighandler_t sa_sigaction;
+    union {
+        sighandler_t sa_handler;
+        void (*sa_sigaction)(int, siginfo_t *, void *);
+    };
     sigset_t sa_mask;
     int sa_flags;
     void (*sa_restorer)(void);
@@ -28,12 +37,6 @@ typedef struct {
     int ss_flags;
     size_t ss_size;
 } stack_t;
-typedef struct {
-    int si_signo;
-    int si_errno;
-    int si_code;
-    int _pad[29];
-} __slibc_aligned(8) siginfo_t;
 
 #define BUS_ADRALN (1)
 #define BUS_ADRERR (2)
@@ -94,9 +97,9 @@ typedef struct {
 #define SIGXCPU (24)
 #define SIGXFSZ (25)
 #define SIG_BLOCK (0)
-#define SIG_DFL (0)
+#define SIG_DFL ((sighandler_t)0)
 #define SIG_ERR (((sighandler_t)~0))
-#define SIG_IGN (1)
+#define SIG_IGN ((sighandler_t)1)
 #define SIG_SETMASK (2)
 #define SIG_UNBLOCK (1)
 #define SI_KERNEL (0x80)
@@ -120,6 +123,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oset);
 int sigpending(sigset_t *set);
 int sigsuspend(const sigset_t *set);
 sighandler_t signal(int signum, sighandler_t handler);
+char *strsignal(int sig);
 
 #ifdef __cplusplus
 }

@@ -179,6 +179,10 @@ impl World<'_> {
             for (name, item) in self.ordered_consts(spec) {
                 let value = ctype::const_expr(&item.expr, &item.ty, &self.types)
                     .map_err(|err| format!("{}: constant `{name}`: {err}", spec.path))?;
+                if item.ty.ends_with(HANDLER_TYPE) && !value.starts_with("((") {
+                    let _ = writeln!(out, "#define {name} (({HANDLER_TYPE}){value})");
+                    continue;
+                }
                 let _ = writeln!(out, "#define {name} {}", parenthesise(&value));
             }
 
@@ -193,10 +197,15 @@ impl World<'_> {
                 .filter(|name| name.starts_with("S_IF") && *name != "S_IFMT")
                 .collect();
             for name in type_bits {
+                // The derivation is mechanical for every type but the FIFO,
+                // which POSIX spells `S_ISFIFO` rather than `S_ISIFO`.
+                let test = match name {
+                    "S_IFIFO" => "FIFO",
+                    other => &other["S_IF".len()..],
+                };
                 let _ = writeln!(
                     out,
-                    "#define S_IS{}(mode) (((mode) & S_IFMT) == {name})",
-                    &name["S_IF".len()..]
+                    "#define S_IS{test}(mode) (((mode) & S_IFMT) == {name})"
                 );
             }
         }
@@ -303,6 +312,10 @@ impl World<'_> {
                 let _ = writeln!(out, "{line}");
             }
             TypeDef::Alias { name, underlying } => {
+                if *name == HANDLER_TYPE {
+                    out.push_str(HANDLER_TYPEDEF);
+                    return Ok(out);
+                }
                 let declaration = self
                     .types
                     .declare(underlying, name)
@@ -354,6 +367,10 @@ impl World<'_> {
                 for field in &item.fields {
                     if let Some(bytes) = zero_length_array(&field.ty, &self.types) {
                         align = Some(bytes);
+                        continue;
+                    }
+                    if field.ty.ends_with("sighandler_t") {
+                        out.push_str(HANDLER_SLOT);
                         continue;
                     }
                     let declaration = self
@@ -556,6 +573,22 @@ pub fn umbrella(source: &str) -> String {
     let _ = writeln!(out, "\n#endif /* _SLIBC_H */");
     out
 }
+
+/// `sighandler_t` is an integer in the contract, which is the `libc` crate's
+/// convention and the right one for Rust — `SIG_DFL` and `SIG_IGN` are zero
+/// and one. C code assigns a function to it, so the header spells it as the
+/// function pointer POSIX and glibc do, and every constant of that type is
+/// emitted as a cast. The two renderings are the same eight bytes.
+const HANDLER_TYPE: &str = "sighandler_t";
+const HANDLER_TYPEDEF: &str = "typedef void (*sighandler_t)(int);\n";
+
+/// POSIX gives one storage slot in `struct sigaction` two names with two
+/// function-pointer types.
+const HANDLER_SLOT: &str = "    union {
+        sighandler_t sa_handler;
+        void (*sa_sigaction)(int, siginfo_t *, void *);
+    };
+";
 
 /// Builds the `name -> TypeDef` index from the contract and the shared table.
 pub fn index_types<'a>(

@@ -4,9 +4,11 @@
 //! [`crate::mem`], conversion in [`crate::string`], termination in
 //! [`crate::process`].
 
+#![allow(non_camel_case_types)]
+
 pub mod sort;
 
-use core::ffi::{c_int, c_long, c_longlong};
+use core::ffi::{c_int, c_long, c_longlong, c_ulong};
 
 /// C leaves `abs(INT_MIN)` undefined, and the x86-64 negation of it is
 /// `INT_MIN` again. Wrapping is that answer, stated.
@@ -23,6 +25,16 @@ pub extern "C" fn labs(n: c_long) -> c_long {
 #[unsafe(no_mangle)]
 pub extern "C" fn llabs(n: c_longlong) -> c_longlong {
     n.wrapping_abs()
+}
+
+pub type intmax_t = c_long;
+pub type uintmax_t = c_ulong;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct imaxdiv_t {
+    pub quot: intmax_t,
+    pub rem: intmax_t,
 }
 
 #[repr(C)]
@@ -66,5 +78,38 @@ pub extern "C" fn lldiv(numer: c_longlong, denom: c_longlong) -> lldiv_t {
     match (numer.checked_div(denom), numer.checked_rem(denom)) {
         (Some(quot), Some(rem)) => lldiv_t { quot, rem },
         _ => lldiv_t { quot: 0, rem: 0 },
+    }
+}
+
+/// C99's example generator (§7.20.2.2), which is what `RAND_MAX` of 32767
+/// describes. One process-wide state, unsynchronised: C requires no more, and
+/// a lock on a function whose value is arbitrary buys nothing.
+static mut RAND_STATE: c_ulong = 1;
+
+pub const RAND_MAX: c_int = 32767;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn srand(seed: core::ffi::c_uint) {
+    unsafe { RAND_STATE = seed as c_ulong };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rand() -> c_int {
+    unsafe {
+        RAND_STATE = RAND_STATE.wrapping_mul(1103515245).wrapping_add(12345);
+        ((RAND_STATE / 65536) % 32768) as c_int
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn imaxabs(n: intmax_t) -> intmax_t {
+    n.wrapping_abs()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn imaxdiv(numer: intmax_t, denom: intmax_t) -> imaxdiv_t {
+    match (numer.checked_div(denom), numer.checked_rem(denom)) {
+        (Some(quot), Some(rem)) => imaxdiv_t { quot, rem },
+        _ => imaxdiv_t { quot: 0, rem: 0 },
     }
 }

@@ -448,3 +448,36 @@ pub unsafe extern "C" fn __slibc_assert_fail(
     say(c"\n".as_ptr());
     abort()
 }
+
+/// `strsignal(3)`. A static description, never NULL. glibc renders an unknown
+/// number into a per-thread buffer; there is nothing to render it from here
+/// that the caller does not already hold.
+#[unsafe(no_mangle)]
+pub extern "C" fn strsignal(sig: i32) -> *mut core::ffi::c_char {
+    let text: &[u8] = match sig {
+        SIGHUP => b"Hangup\0",
+        SIGINT => b"Interrupt\0",
+        SIGQUIT => b"Quit\0",
+        SIGILL => b"Illegal instruction\0",
+        SIGTRAP => b"Trace/breakpoint trap\0",
+        SIGABRT => b"Aborted\0",
+        SIGBUS => b"Bus error\0",
+        SIGFPE => b"Floating point exception\0",
+        SIGKILL => b"Killed\0",
+        SIGUSR1 => b"User defined signal 1\0",
+        SIGSEGV => b"Segmentation fault\0",
+        SIGUSR2 => b"User defined signal 2\0",
+        SIGPIPE => b"Broken pipe\0",
+        SIGALRM => b"Alarm clock\0",
+        SIGTERM => b"Terminated\0",
+        SIGCHLD => b"Child exited\0",
+        SIGCONT => b"Continued\0",
+        SIGSTOP => b"Stopped (signal)\0",
+        SIGTSTP => b"Stopped\0",
+        SIGTTIN => b"Stopped (tty input)\0",
+        SIGTTOU => b"Stopped (tty output)\0",
+        SIGWINCH => b"Window changed\0",
+        _ => b"Unknown signal\0",
+    };
+    text.as_ptr() as *mut core::ffi::c_char
+}

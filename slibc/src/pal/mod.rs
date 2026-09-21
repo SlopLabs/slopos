@@ -121,6 +121,7 @@ pub trait Pal {
     fn setpgid(pid: i32, pgid: i32) -> Result<(), Errno>;
     fn getpgid(pid: i32) -> Result<i32, Errno>;
     fn setsid() -> Result<i32, Errno>;
+    fn getsid(pid: i32) -> Result<i32, Errno>;
     fn chdir(path: *const u8) -> Result<(), Errno>;
     fn getcwd(buf: *mut u8, size: usize) -> Result<usize, Errno>;
 

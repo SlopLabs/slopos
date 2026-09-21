@@ -24,11 +24,10 @@ pub unsafe extern "C" fn fgetc_unlocked(stream: *mut FILE) -> i32 {
         return EOF;
     }
 
-    if f.ungot >= 0 {
-        let c = f.ungot;
-        f.ungot = -1;
+    if f.ungot_len > 0 {
+        f.ungot_len -= 1;
         f.flags &= !FILE_FLAG_EOF;
-        return c;
+        return f.ungot[f.ungot_len] as i32;
     }
 
     if f.buf_pos >= f.buf_len {
@@ -154,14 +153,14 @@ pub unsafe extern "C" fn ungetc_unlocked(c: i32, stream: *mut FILE) -> i32 {
     }
 
     let f = &mut *stream;
-    if f.ungot >= 0 {
-        // C guarantees only one byte of push-back.
+    if f.ungot_len == f.ungot.len() {
         return EOF;
     }
 
-    f.ungot = c & 0xFF;
+    f.ungot[f.ungot_len] = (c & 0xff) as u8;
+    f.ungot_len += 1;
     f.flags &= !FILE_FLAG_EOF;
-    f.ungot
+    c & 0xff
 }
 
 #[unsafe(no_mangle)]

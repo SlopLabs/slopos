@@ -23,7 +23,9 @@ jobs:
   ci:
     name: Build, Format & Test
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    # 35 rather than 30 since the LLVM port step joined: extracting the 1.5 GB
+    # source tree and compiling LLVMSupport is about two minutes on this runner.
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -136,6 +138,21 @@ jobs:
       # halves are graded here.
       - name: C++ runtime against the C library it links
         run: scripts/check_cxx_pin.sh
+
+      # Here rather than in a job of its own: the gate needs a staged C++
+      # runtime and a `builddir/libbuiltins.a`, which is the tests userland
+      # the step above has already built, and a job that rebuilt those to ask
+      # one more question would cost more than the 1.5 GB extraction does.
+      # The 132 MB tarball is cached; the extracted tree deliberately is not,
+      # because it is what `--require` grades.
+      # `--self-test` here rather than in the gates step above: that step runs
+      # before the tree is materialised, where the self-test's rejection cases
+      # can only report themselves skipped — a gate CI has never seen reject.
+      - name: LLVM port against slibc and libc++
+        run: |
+          scripts/make_slopos_llvm_src.sh
+          scripts/check_llvm_port.sh --self-test
+          scripts/check_llvm_port.sh --require
 
       # Both boot-based ratchets parse the capture above rather than booting
       # again: three QEMU boots for one question each is two boots wasted, and a

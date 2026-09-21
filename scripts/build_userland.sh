@@ -363,6 +363,27 @@ echo "C archive built: $RELEASE_DIR/libc.a"
 # these an exception ends at frame zero with `_URC_END_OF_STACK` — measured,
 # and indistinguishable from a program with no handler.
 SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-tables"
+
+# compiler-rt, position independent, for the shared objects. `libc.a` has the
+# same routines and cannot supply them: it is built for the fixed-address
+# images, so its relocations are the ones a `.so` may not carry.
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+RUSTFLAGS="-C relocation-model=pic" \
+$CARGO +slopos build \
+    -Zbuild-std=core \
+    -Zunstable-options \
+    -Zjson-target-spec \
+    --target "$USERLAND_TARGET" \
+    --package slopos-slibc-builtins \
+    --release
+if [ ! -f "$RELEASE_DIR/libbuiltins.a" ]; then
+    echo "build_userland: slopos-slibc-builtins built but emitted no archive at $RELEASE_DIR/libbuiltins.a" >&2
+    exit 1
+fi
+# Staged beside `libc.so`, because the C++ runtime's stamp names it and the
+# gate that reads that stamp knows only the staging directory.
+cp "$RELEASE_DIR/libbuiltins.a" "$BUILD_DIR/libbuiltins.a"
+
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-Bsymbolic -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
 $CARGO +slopos build \
@@ -451,6 +472,13 @@ if [ "$TEST_MODE" = "--test" ]; then
     # libc++ header that reaches the C one through `#include_next`, and the
     # other order makes it find slibc's `<stdlib.h>` first and stop with a
     # diagnostic about exactly this.
+    # Captured rather than substituted inside the array: an array assignment
+    # does not propagate a failing command substitution even under `set -e`,
+    # so a helper that broke would silently drop the ABI flag and build the
+    # probes against a `ctype_base::mask` the runtime does not share.
+    read -ra CXX_ABI_FLAGS <<<"$("$SCRIPT_DIR/make_slopos_cxx.sh" --print-abi-flags)"
+    [ "${#CXX_ABI_FLAGS[@]}" -gt 0 ] ||
+        { echo "build_userland: make_slopos_cxx.sh --print-abi-flags printed nothing" >&2; exit 1; }
     CXX_COMPILE=(
         "$CLANGXX"
         "--target=${USERLAND_TRIPLE}"
@@ -458,6 +486,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         -nostdinc++
         -isystem "$CXX_DIR/include/c++/v1"
         -isystem "${REPO_ROOT}/slibc/include"
+        "${CXX_ABI_FLAGS[@]}"
         -std=c++20
         -O2
     )
@@ -465,6 +494,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     # `PT_GNU_EH_FRAME` per object, and an object without one is one a throw
     # cannot unwind out of. `--export-dynamic` on the probe is what lets the
     # loaded object bind back to the type it throws.
+    # `libbuiltins.a` last, for the reason `make_slopos_cxx.sh` reads it last:
+    # a C++ program that calls a 128-bit helper finds it in an archive rather
+    # than failing to link with nothing to point at.
     CXX_LINK=(
         --eh-frame-hdr
         -znow
@@ -473,6 +505,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         -lc
         -L "$CXX_DIR/lib"
         -lc++
+        "$RELEASE_DIR/libbuiltins.a"
     )
 
     "${CXX_COMPILE[@]}" -fPIC -c "${REPO_ROOT}/userland/cxxtest/lib.cpp" \

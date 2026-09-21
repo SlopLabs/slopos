@@ -2,12 +2,13 @@
 
 use core::ffi::{c_char, c_int, c_long};
 
-use crate::errno::{EINVAL, ENAMETOOLONG, ERANGE, errno_set};
+use crate::errno::{EINVAL, EIO, ENAMETOOLONG, ERANGE, errno_set};
 use crate::pal::raw::syscall6;
 use crate::pal::{Pal, Sys};
 use crate::thread::tcb::{STRERROR_BUF, Tcb};
 use crate::types::{passwd, uid_t, utsname as Utsname};
 
+pub const _SC_ARG_MAX: c_int = 0;
 pub const _SC_CLK_TCK: c_int = 2;
 pub const _SC_OPEN_MAX: c_int = 4;
 pub const _SC_PAGESIZE: c_int = 30;
@@ -18,6 +19,11 @@ pub const _SC_NPROCESSORS_CONF: c_int = 83;
 pub const _SC_NPROCESSORS_ONLN: c_int = 84;
 pub const _SC_SYMLOOP_MAX: c_int = 173;
 pub const _SC_HOST_NAME_MAX: c_int = 180;
+
+/// POSIX's floor on `ARG_MAX`, which a program falls back to when
+/// `sysconf(_SC_ARG_MAX)` answers -1. The real budget is the kernel's, which
+/// `sysconf` reports.
+pub const _POSIX_ARG_MAX: c_long = 4096;
 
 /// Longest hostname `gethostname` will report, NUL excluded. Linux's.
 pub const HOST_NAME_MAX: usize = 64;
@@ -46,6 +52,7 @@ const PW_SHELL: &[u8] = b"/bin/shell\0";
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
     match name {
+        _SC_ARG_MAX => slopos_abi::spawn::EXEC_MAX_ARG_BYTES as c_long,
         _SC_PAGESIZE => slopos_abi::PAGE_SIZE as c_long,
         _SC_NPROCESSORS_CONF | _SC_NPROCESSORS_ONLN => match Sys::get_cpu_count() {
             // The affinity mask is what bounds a thread pool, and a mask that
@@ -177,6 +184,55 @@ pub unsafe extern "C" fn getpwuid_r(
     0
 }
 
+/// `getpwnam_r(3)`. The one row is named `root`; any other name is "no such
+/// entry", which POSIX spells as success with a null `*result`.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string; `buf` addresses `buflen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwnam_r(
+    name: *const c_char,
+    pwd: *mut passwd,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut passwd,
+) -> c_int {
+    if name.is_null() || pwd.is_null() || buf.is_null() || result.is_null() {
+        return EINVAL.raw();
+    }
+    let bytes = name as *const u8;
+    let requested = crate::string::slice_from_cstr(bytes, crate::string::u_strlen(bytes));
+    if requested != &PW_NAME[..PW_NAME.len() - 1] {
+        *result = core::ptr::null_mut();
+        return 0;
+    }
+    getpwuid_r(0, pwd, buf, buflen, result)
+}
+
+/// `getentropy(3)`. POSIX caps one call at 256 bytes, and the kernel's
+/// generator never blocks, so a short read is a failure rather than a retry.
+///
+/// # Safety
+/// `buf` addresses `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getentropy(buf: *mut core::ffi::c_void, len: usize) -> c_int {
+    if len > 256 {
+        errno_set(EIO.raw());
+        return -1;
+    }
+    match Sys::getrandom(buf as *mut u8, len, 0) {
+        Ok(got) if got == len => 0,
+        Ok(_) => {
+            errno_set(EIO.raw());
+            -1
+        }
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
 /// `strerror_r(3)`, the XSI form: 0, or an errno.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strerror_r(n: c_int, buf: *mut c_char, buflen: usize) -> c_int {
@@ -221,4 +277,43 @@ pub unsafe extern "C" fn strerror(n: c_int) -> *mut c_char {
     core::ptr::copy_nonoverlapping(text.as_ptr(), buf, len);
     *buf.add(len) = 0;
     buf.cast()
+}
+
+pub const _PC_NAME_MAX: c_int = 3;
+pub const _PC_PATH_MAX: c_int = 4;
+
+/// `pathconf(3)`. Every limit here is a constant, so the path is checked for
+/// existence and nothing else: POSIX wants `ENOENT` for one that is absent,
+/// and a caller would otherwise size a buffer off a name it cannot open.
+///
+/// # Safety
+/// `path` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> c_long {
+    if crate::io::misc::access(path as *const u8, 0) != 0 {
+        return -1;
+    }
+    limit(name)
+}
+
+/// `fpathconf(3)`. As [`pathconf`], with the descriptor checked in place of
+/// the path.
+#[unsafe(no_mangle)]
+pub extern "C" fn fpathconf(fd: c_int, name: c_int) -> c_long {
+    if let Err(e) = Sys::fcntl(fd, slopos_abi::syscall::F_GETFD as c_int, 0) {
+        errno_set(e.raw());
+        return -1;
+    }
+    limit(name)
+}
+
+fn limit(name: c_int) -> c_long {
+    match name {
+        _PC_NAME_MAX => 255,
+        _PC_PATH_MAX => 4096,
+        _ => {
+            errno_set(EINVAL.raw());
+            -1
+        }
+    }
 }

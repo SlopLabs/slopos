@@ -21,6 +21,7 @@ typedef __builtin_va_list va_list;
 #define _IOFBF (0)
 #define _IOLBF (1)
 #define _IONBF (2)
+#define BUFSIZ (4096)
 
 extern FILE *stdin;
 extern FILE *stdout;
@@ -51,7 +52,9 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *stream);
 int fscanf(FILE *stream, const char *fmt, ...);
 int fseek(FILE *stream, long offset, int whence);
+int fseeko(FILE *stream, off_t offset, int whence);
 long ftell(FILE *stream);
+off_t ftello(FILE *stream);
 int ftrylockfile(FILE *stream);
 void funlockfile(FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
@@ -78,6 +81,11 @@ int vfprintf(FILE *stream, const char *fmt, va_list ap);
 int vprintf(const char *fmt, va_list ap);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int vsprintf(char *buf, const char *fmt, va_list ap);
+int vfscanf(FILE *stream, const char *fmt, va_list ap);
+int vscanf(const char *fmt, va_list ap);
+int vsscanf(const char *buf, const char *fmt, va_list ap);
+int asprintf(char **strp, const char *fmt, ...);
+int vasprintf(char **strp, const char *fmt, va_list ap);
 
 #ifdef __cplusplus
 }

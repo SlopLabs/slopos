@@ -225,6 +225,20 @@ require-phase post-userland-tests
 #               385-394; userland edges 210-216, chains 434-442), so the bands
 #               are left as recorded rather than re-narrowed onto three runs
 #               of one machine.
+#   2026-09-21  userland edges band 185-218 -> 185-235: the LLVM port's new
+#               test coverage, not a new lock. `libc_probe` gained six checks
+#               (the locale objects, `<wctype.h>`, wide stdio, `<inttypes.h>`,
+#               the scan conversions and the absent POSIX names) and
+#               `cxx_probe` gained the localized-runtime half, which reads a
+#               file through `<fstream>`; between them the userland phase
+#               observes orderings it did not reach before. 221 and 223 over
+#               two fresh runs of one ISO, and the cycle detector is silent,
+#               so these are orderings newly *observed* rather than newly
+#               inverted. The low end stays at 185 and the kernel bands stay
+#               as recorded rather than re-narrowed onto two runs of one
+#               machine, per the note above. Class counts did not move:
+#               71/206/214 on both runs, and the chain bands were not left
+#               (userland 448/450 inside 359-467).
 #   2026-09-14  kernel 203 -> 206, userland 212 -> 214: the storage work in
 #               `plans/self-hosting.md` ("Storage holds a tree"). Boot is
 #               unchanged at 71 measured against its cap of 72, so none of
@@ -280,6 +294,6 @@ boot	chains	111
 # not a failure, so a band set slightly tight costs a DRIFT line to read,
 # never a red run.
 band post-kernel-tests edges 128 188
-band post-userland-tests edges 185 218
+band post-userland-tests edges 185 235
 band post-kernel-tests chains 309 417
 band post-userland-tests chains 359 467

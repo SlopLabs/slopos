@@ -42,6 +42,7 @@
 #undef MB_LEN_MAX
 #define MB_LEN_MAX 4
 
+#define _POSIX_ARG_MAX (4096)
 #define HOST_NAME_MAX (64)
 #define IOV_MAX (1024)
 #define NAME_MAX (255)

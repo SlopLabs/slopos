@@ -517,3 +517,32 @@ pub unsafe extern "C" fn strtold(_nptr: *const u8, _endptr: *mut *const u8) {
         "ret",
     );
 }
+
+/// # Safety
+/// As [`strtoll`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtoimax(s: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
+    strtoll(s, endptr, base)
+}
+
+/// # Safety
+/// As [`strtoull`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtoumax(s: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
+    strtoull(s, endptr, base)
+}
+
+/// `strtold_l(3)`. The locale is discarded, so this is [`strtold`]'s
+/// register contract with one more argument the callee never reads.
+///
+/// # Safety
+/// As [`strtold`].
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtold_l(
+    _nptr: *const u8,
+    _endptr: *mut *const u8,
+    _loc: *mut core::ffi::c_void,
+) {
+    core::arch::naked_asm!("jmp strtold");
+}

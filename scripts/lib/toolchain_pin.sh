@@ -28,6 +28,10 @@ TP_LIBRARY_REL="lib/rustlib/src/rust/library"
 # would be work for nothing.
 TP_COMPILER_OVERLAY_REL="toolchain/compiler"
 TP_COMPILER_PIN_REL="toolchain/compiler/PIN"
+
+# The llvm-project fork: a fourth tree, pinned beside the tarball it patches.
+TP_LLVM_OVERLAY_REL="toolchain/llvm"
+TP_LLVM_PIN_REL="toolchain/cxx/PIN"
 TP_RUSTC_SRC_REL="third_party/slopos-rustc-src"
 
 tp_sha256_file() {
@@ -106,18 +110,21 @@ tp_pin_files() {
     printf '%s\n%s\n' "$TP_PIN_REL" "$TP_COMPILER_PIN_REL"
 }
 
-# The compiler fork keeps its own PIN so that editing it does not restamp the
-# sysroot, which is built from the other two.
+# Each fork is pinned beside the tree it is applied to, so that editing one
+# does not restamp another: the compiler fork's own PIN, the llvm-project
+# fork's beside the tarball both it and the C++ runtime are cut from, and the
+# std and libc forks in the sysroot's.
 tp_patch_pin_file() {
     case "$1" in
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_COMPILER_PIN_REL" ;;
+        "$TP_LLVM_OVERLAY_REL/"*) printf '%s\n' "$TP_LLVM_PIN_REL" ;;
         *) printf '%s\n' "$TP_PIN_REL" ;;
     esac
 }
 
-# All three forks live here: `toolchain/rust/` patches the std source tree,
+# All four forks live here: `toolchain/rust/` patches the std source tree,
 # `toolchain/libc/` the unpacked libc crate, `toolchain/compiler/` rustc's own
-# sources.
+# sources, `toolchain/llvm/` llvm-project's.
 tp_patch_files() {
     local root="$1"
     (cd "$root" && find "$TP_OVERLAY_REL" -type f -name '*.patch' -print | LC_ALL=C sort)
@@ -126,6 +133,11 @@ tp_patch_files() {
 tp_patch_tree_rel() {
     case "$1" in
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
+        # The llvm fork's tree is `third_party/llvm-project-<version>.src`,
+        # whose name this file has no version to spell, so `check_cxx_pin.sh`
+        # grades it instead. Answering the overlay's own path matches none of
+        # the trees the materialisation check walks, which is the point.
+        "$TP_LLVM_OVERLAY_REL/"*) printf '%s\n' "$TP_LLVM_OVERLAY_REL" ;;
         *) printf '%s\n' "$TP_SYSROOT_REL" ;;
     esac
 }

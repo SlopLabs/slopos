@@ -149,9 +149,9 @@ unsafe fn fread_core(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut FILE)
     let mut done = 0usize;
 
     while done < total {
-        if f.ungot >= 0 {
-            *ptr.add(done) = f.ungot as u8;
-            f.ungot = -1;
+        if f.ungot_len > 0 {
+            f.ungot_len -= 1;
+            *ptr.add(done) = f.ungot[f.ungot_len];
             f.flags &= !FILE_FLAG_EOF;
             done += 1;
             continue;
@@ -336,7 +336,7 @@ pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: i32) -> i
 
     f.buf_pos = 0;
     f.buf_len = 0;
-    f.ungot = -1;
+    f.ungot_len = 0;
     // C11 §7.21.9.2: a successful `fseek` clears end-of-file and undoes
     // `ungetc`, and says nothing about the error indicator.
     f.flags &= !(FILE_FLAG_EOF | FILE_FLAG_READING | FILE_FLAG_WRITING);
@@ -491,4 +491,21 @@ pub unsafe extern "C" fn funlockfile(stream: *mut FILE) {
     if !stream.is_null() {
         (*stream).lock.unlock();
     }
+}
+
+/// `fseeko(3)`. `off_t` and `long` are both 64-bit here, so this and
+/// [`fseek`] differ only in the name the caller links against.
+///
+/// # Safety
+/// As [`fseek`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fseeko(stream: *mut FILE, offset: i64, whence: i32) -> i32 {
+    fseek(stream, offset, whence)
+}
+
+/// # Safety
+/// As [`ftell`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ftello(stream: *mut FILE) -> i64 {
+    ftell(stream)
 }

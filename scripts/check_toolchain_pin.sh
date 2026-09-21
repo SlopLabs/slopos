@@ -246,6 +246,19 @@ FIXTURE
 rustc_src_sha256=$(printf '%064d' 0)
 patch_sha256=toolchain/compiler/0001-slopos-target.patch:$(tp_sha256_file "$root/toolchain/compiler/0001-slopos-target.patch")
 FIXTURE
+        # The llvm fork, pinned in a third PIN beside the tarball it patches.
+        # It creates no file, so the materialisation check has nothing to look
+        # for; what this covers is the routing to `toolchain/cxx/PIN`.
+        mkdir -p "$root/toolchain/llvm" "$root/toolchain/cxx"
+        cat > "$root/toolchain/llvm/0001-slopos-support.patch" <<'FIXTURE'
+--- a/llvm/include/llvm/ADT/bit.h
++++ b/llvm/include/llvm/ADT/bit.h
+FIXTURE
+        cat > "$root/toolchain/cxx/PIN" <<FIXTURE
+# fixture
+llvm_version=18.1.8
+patch_sha256=toolchain/llvm/0001-slopos-support.patch:$(tp_sha256_file "$root/toolchain/llvm/0001-slopos-support.patch")
+FIXTURE
     }
 
     # Each case gets its own root and its own RUSTUP_HOME: the developer's real
@@ -305,6 +318,18 @@ FIXTURE
     ln -s "$(tp_abspath "$root/$TP_SYSROOT_REL")" "$root/rustup/toolchains/$TP_TOOLCHAIN_NAME"
     run_case good-materialised 0 "rust-slopos at .*slopos-rustc-src at .*linked as" \
         "silent on two fresh trees stamped and linked where they belong"
+
+    # The llvm fork's patch is pinned in `toolchain/cxx/PIN` rather than in
+    # `toolchain/PIN`, so an edit to it must be caught there and nowhere else.
+    root="$(fixture llvm-patch-edit)"
+    printf 'edited\n' >>"$root/toolchain/llvm/0001-slopos-support.patch"
+    run_case llvm-patch-edit 1 "toolchain/llvm/.*does not match its pin" \
+        "rejects an llvm patch its own PIN no longer describes"
+
+    root="$(fixture llvm-patch-unpinned)"
+    sed -i.bak '/^patch_sha256=toolchain\/llvm\//d' "$root/toolchain/cxx/PIN"
+    run_case llvm-patch-unpinned 1 "toolchain/llvm/.*has no .patch_sha256" \
+        "rejects an llvm patch no PIN names"
 
     # The failure a stamp cannot see: one half of the fork missing from a tree
     # whose stamp is current, which is what a buggy materialiser produces.

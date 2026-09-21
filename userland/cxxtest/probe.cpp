@@ -16,7 +16,11 @@
 #include <string.h>
 
 #include <exception>
+#include <fstream>
+#include <iomanip>
+#include <locale>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -38,6 +42,49 @@ int check = 0;
 bool fail(const char *what) {
     fprintf(stderr, "cxx_probe: check %d: %s\n", check, what);
     return false;
+}
+
+// The half of the runtime that needs a locale. LLVM reaches all of it:
+// `raw_os_ostream.cpp` writes through `std::ostream`, `ARMBuildAttrs.cpp`
+// formats through `<iomanip>` and `<sstream>`, fourteen clang translation
+// units read through `<fstream>`, and `ConvertUTF.cpp` converts to
+// `std::wstring`.
+bool localized_runtime_works() {
+    check = 13;
+    std::ostringstream out;
+    out << std::hex << std::setw(6) << std::setfill('0') << 0xbeef;
+    if (out.str() != "00beef") {
+        return fail("std::ostringstream formatted an integer wrongly");
+    }
+
+    check = 14;
+    int parsed = 0;
+    std::istringstream in("1234 rest");
+    in >> parsed;
+    if (parsed != 1234) {
+        return fail("std::istringstream parsed an integer wrongly");
+    }
+
+    check = 15;
+    const std::locale classic("C");
+    const auto &ctype = std::use_facet<std::ctype<char>>(classic);
+    if (!ctype.is(std::ctype_base::digit, '7') || ctype.is(std::ctype_base::digit, 'q')) {
+        return fail("std::ctype<char> classifies wrongly");
+    }
+
+    check = 16;
+    if (std::to_wstring(-4210) != L"-4210") {
+        return fail("std::to_wstring formatted wrongly");
+    }
+
+    check = 17;
+    std::ifstream self("/bin/cxx_probe", std::ios::binary);
+    char magic[4] = {};
+    if (!self.read(magic, sizeof magic) || magic[0] != 0x7f || magic[1] != 'E') {
+        return fail("std::ifstream did not read this binary's own header");
+    }
+
+    return true;
 }
 
 bool exception_is_caught_in_its_own_object() {
@@ -192,7 +239,7 @@ bool run(Library &library) {
         return fail("a throw from a static destructor did not unwind during dlclose");
     }
 
-    return true;
+    return localized_runtime_works();
 }
 
 } // namespace

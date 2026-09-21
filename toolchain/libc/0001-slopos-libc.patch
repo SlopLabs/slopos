@@ -86,7 +86,7 @@ new file mode 100644
 index 0000000..6585d11
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,1587 @@
+@@ -0,0 +1,1585 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -129,6 +129,9 @@ index 0000000..6585d11
 +pub type useconds_t = u32;
 +pub type nl_item = c_int;
 +pub type wint_t = c_uint;
++pub type wctype_t = c_ulong;
++pub type wctrans_t = c_int;
++pub type locale_t = *mut __locale_struct;
 +pub type fsword_t = i64;
 +pub type Elf64_Addr = u64;
 +pub type Elf64_Half = u16;
@@ -140,6 +143,7 @@ index 0000000..6585d11
 +
 +extern_ty! {
 +    pub type FILE;
++    pub type __locale_struct;
 +}
 +
 +s! {
@@ -215,12 +219,9 @@ index 0000000..6585d11
 +        pub st_size: off_t,
 +        pub st_blksize: blksize_t,
 +        pub st_blocks: blkcnt_t,
-+        pub st_atime: time_t,
-+        pub st_atime_nsec: i64,
-+        pub st_mtime: time_t,
-+        pub st_mtime_nsec: i64,
-+        pub st_ctime: time_t,
-+        pub st_ctime_nsec: i64,
++        pub st_atim: crate::timespec,
++        pub st_mtim: crate::timespec,
++        pub st_ctim: crate::timespec,
 +        __unused: [i64; 3],
 +    }
 +
@@ -236,12 +237,9 @@ index 0000000..6585d11
 +        pub st_size: off_t,
 +        pub st_blksize: blksize_t,
 +        pub st_blocks: blkcnt_t,
-+        pub st_atime: time_t,
-+        pub st_atime_nsec: i64,
-+        pub st_mtime: time_t,
-+        pub st_mtime_nsec: i64,
-+        pub st_ctime: time_t,
-+        pub st_ctime_nsec: i64,
++        pub st_atim: crate::timespec,
++        pub st_mtim: crate::timespec,
++        pub st_ctim: crate::timespec,
 +        __unused: [i64; 3],
 +    }
 +

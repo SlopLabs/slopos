@@ -13,6 +13,7 @@ pub mod scanf;
 pub mod shim;
 pub mod streams;
 pub mod tests;
+pub mod wide;
 
 pub use registry::WalkMode;
 pub use streams::{stderr, stdin, stdout};
@@ -84,8 +85,10 @@ pub struct FILE {
     pub buf_len: usize,
     pub flags: u32,
     pub mode: BufferMode,
-    /// `ungetc` push-back slot (−1 = empty, 0–255 = pushed-back byte).
-    pub ungot: i32,
+    /// Push-back bytes, next to be read last. Four rather than C's
+    /// guaranteed one because `ungetwc` pushes a whole UTF-8 sequence.
+    pub ungot: [u8; 4],
+    pub ungot_len: usize,
     /// Next stream on the open-stream list, or null.
     pub next: *mut FILE,
     /// Recursive per-stream lock (POSIX §2.5.1).
@@ -106,7 +109,8 @@ impl FILE {
             buf_len: 0,
             flags,
             mode,
-            ungot: -1,
+            ungot: [0; 4],
+            ungot_len: 0,
             next: ptr::null_mut(),
             lock: StreamLock::new(),
             buf: [0u8; BUFSIZ],
@@ -125,7 +129,8 @@ impl FILE {
         ptr::write(&raw mut (*dst).buf_len, 0);
         ptr::write(&raw mut (*dst).flags, flags);
         ptr::write(&raw mut (*dst).mode, mode);
-        ptr::write(&raw mut (*dst).ungot, -1);
+        ptr::write(&raw mut (*dst).ungot, [0; 4]);
+        ptr::write(&raw mut (*dst).ungot_len, 0);
         ptr::write(&raw mut (*dst).next, ptr::null_mut());
         ptr::write(&raw mut (*dst).lock, StreamLock::new());
         ptr::write_bytes(&raw mut (*dst).buf as *mut u8, 0, BUFSIZ);
@@ -181,11 +186,11 @@ impl FILE {
         }
     }
 
-    /// Bytes buffered but not yet consumed by the program, including the
-    /// `ungetc` slot. The fd offset is this far ahead of the stream position.
+    /// Bytes buffered but not yet consumed by the program, push-back
+    /// included. The fd offset is this far ahead of the stream position.
     pub fn read_ahead_len(&self) -> i64 {
         let buffered = self.buf_len.saturating_sub(self.buf_pos) as i64;
-        buffered + if self.ungot >= 0 { 1 } else { 0 }
+        buffered + self.ungot_len as i64
     }
 
     /// Rewind the fd over unconsumed read-ahead and drop it. Best effort:
@@ -198,7 +203,7 @@ impl FILE {
         }
         self.buf_pos = 0;
         self.buf_len = 0;
-        self.ungot = -1;
+        self.ungot_len = 0;
     }
 
     /// Enter the input direction. Returns `false` if a pending write could not

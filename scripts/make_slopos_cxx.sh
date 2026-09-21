@@ -4,7 +4,8 @@ set -euo pipefail
 # Cross-build the C++ runtime for `x86_64-unknown-slopos`.
 #
 # Usage: make_slopos_cxx.sh <sysroot_lib_dir>
-#        make_slopos_cxx.sh --print-stamp
+#        make_slopos_cxx.sh --print-stamp <sysroot_lib_dir>
+#        make_slopos_cxx.sh --print-abi-flags
 #
 # `<sysroot_lib_dir>` holds `libc.so`, which the runtime links: the C++ library
 # must reach the C library through the shared one, because two copies of a libc
@@ -21,9 +22,21 @@ set -euo pipefail
 # clean` does not remove the result; the build is minutes and the inputs are
 # pinned.
 #
-# Two things about this build are not upstream's defaults and both are load
+# Four things about this build are not upstream's defaults and all are load
 # bearing.
 #
+#   * Localization, wide characters and the random device are ON. Every one of
+#     them was off, and `llvm/lib/Support/raw_os_ostream.cpp` reaches `<ios>`,
+#     `ConvertUTF.cpp` reaches `std::wstring` and `LockFileManager.cpp` reaches
+#     `std::random_device`, so LLVM did not compile at all. What they cost the
+#     C library is measured in `plans/self-hosting.md`.
+#   * `_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE` takes libc++'s own classification
+#     table and its own `ctype_base::mask` bits. The alternative is the glibc
+#     road, where the table is `__ctype_b_loc()`'s and the bits are `_ISspace`
+#     and friends — a second classification of the same 128 characters, with a
+#     `#error` for any platform that supplies neither.
+#   * `_LIBCPP_USING_GETENTROPY` rather than the `/dev/urandom` default, which
+#     is the device SlopOS's devfs does not have.
 #   * CMake links nothing. Clang has no toolchain for an unknown OS, so its
 #     driver hands the link to `gcc`, which would then supply the host's crt
 #     objects and the host's libc. The runtimes are therefore built as static
@@ -47,14 +60,27 @@ die() {
 # `--print-stamp` answers "what should the stamp be", which is how
 # `check_cxx_pin.sh` holds a built tree to its inputs without a second copy of
 # the digest to drift from this one.
+# `_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE` changes `ctype_base::mask` and the
+# twelve class bits in it, so a consumer compiled without it disagrees with
+# this runtime about a type it passes by value. `--print-abi-flags` is how
+# `build_userland.sh` and the gates take it from here rather than restating it.
+ABI_FLAGS="-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE"
+
 PRINT_STAMP=0
-if [ "${1:-}" = "--print-stamp" ]; then
+if [ "${1:-}" = "--print-abi-flags" ]; then
+    echo "$ABI_FLAGS"
+    exit 0
+elif [ "${1:-}" = "--print-stamp" ]; then
     PRINT_STAMP=1
-else
-    SYSROOT_LIB="${1:?usage: make_slopos_cxx.sh <sysroot_lib_dir> | --print-stamp}"
-    SYSROOT_LIB="$(cd "$SYSROOT_LIB" && pwd)"
-    [ -f "$SYSROOT_LIB/libc.so" ] || die "no libc.so in $SYSROOT_LIB — build the userland first"
+    shift
 fi
+
+SYSROOT_LIB="${1:?usage: make_slopos_cxx.sh [--print-stamp] <sysroot_lib_dir>}"
+SYSROOT_LIB="$(cd "$SYSROOT_LIB" && pwd)"
+for library in libc.so libbuiltins.a; do
+    [ -f "$SYSROOT_LIB/$library" ] ||
+        die "no $library in $SYSROOT_LIB — build the userland first"
+done
 
 PIN="$REPO_ROOT/toolchain/cxx/PIN"
 [ -f "$PIN" ] || die "missing toolchain/cxx/PIN"
@@ -95,14 +121,20 @@ if [ "$PRINT_STAMP" -eq 0 ]; then
     done
 fi
 
-# The pin and the C headers, and deliberately not `libc.so` itself: the
-# runtime is *compiled* against the headers and only *linked* against the
-# library, so rebuilding it for every change to slibc's implementation would
-# put three minutes on the interactive loop for nothing. A libc that loses a
-# symbol the runtime needs is what `scripts/check_cxx_pin.sh` is for.
+# The pin's values, the C headers and `libbuiltins.a`. Deliberately not
+# `libc.so`: the runtime is *compiled* against the headers and only *linked*
+# against that library, so rebuilding it for every change to slibc's
+# implementation would put three minutes on the interactive loop for nothing,
+# and a libc that loses a symbol the runtime needs is what
+# `scripts/check_cxx_pin.sh` is for. `libbuiltins.a` is different in kind:
+# its members are copied *into* the object linked below.
+#
+# The pin's values and not its prose, and only the lines this build reads: a
+# comment, or the llvm port's checksum, must not invalidate a three-minute
+# build it cannot change the result of.
 stamp_want() {
     {
-        cat "$PIN"
+        sed -n 's/^\(llvm_[a-z_]*\|clang_[a-z_]*\)=/\1=/p' "$PIN"
         # The compiler, by its own version string: two hosts at different
         # majors produce different objects from these same sources, and the
         # probes `build_userland.sh` compiles must come from the one that
@@ -116,6 +148,7 @@ stamp_want() {
         # Names as well as contents: two headers with swapped bodies, or a
         # header added empty, leave a content-only digest unchanged.
         (cd "$REPO_ROOT/slibc/include" && find . -type f | sort | xargs sha256sum)
+        sha256sum <"$SYSROOT_LIB/libbuiltins.a"
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -140,6 +173,15 @@ if [ ! -d "$SOURCE/runtimes" ]; then
         curl -L --fail --show-error "$LLVM_URL" -o "$TARBALL.part" || die "could not fetch $LLVM_URL
        An offline checkout pre-populates third_party/ with
        $(basename "$TARBALL"), or points LLVM_URL at a local copy."
+        # Verified before it is cached: a corrupt-but-complete download
+        # promoted to the real name is one every later run then dies on.
+        HAVE="$(sha256sum "$TARBALL.part" | cut -d' ' -f1)"
+        [ "$HAVE" = "$LLVM_SHA256" ] || {
+            rm -f "$TARBALL.part"
+            die "checksum mismatch for the fetched $(basename "$TARBALL")
+       expected: $LLVM_SHA256 (toolchain/cxx/PIN)
+       actual:   $HAVE"
+        }
         mv "$TARBALL.part" "$TARBALL"
     fi
     HAVE="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
@@ -172,6 +214,7 @@ fi
 # never ran. Each one below is a fact about slibc, not a probe result.
 # ---------------------------------------------------------------------------
 FLAGS="--target=$TARGET -nostdlibinc -isystem $REPO_ROOT/slibc/include -fPIC"
+FLAGS="$FLAGS $ABI_FLAGS -D_LIBCPP_USING_GETENTROPY"
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
@@ -199,10 +242,10 @@ cmake -G Ninja -S "$SOURCE/runtimes" -B "$BUILD" -Wno-dev \
     -DLIBCXX_ENABLE_NEW_DELETE_DEFINITIONS=OFF \
     -DLIBCXX_ENABLE_THREADS=ON -DLIBCXX_HAS_PTHREAD_API=ON \
     -DLIBCXXABI_ENABLE_THREADS=ON -DLIBCXXABI_HAS_PTHREAD_API=ON \
-    -DLIBCXX_ENABLE_LOCALIZATION=OFF \
-    -DLIBCXX_ENABLE_WIDE_CHARACTERS=OFF \
-    -DLIBCXX_ENABLE_FILESYSTEM=OFF \
-    -DLIBCXX_ENABLE_RANDOM_DEVICE=OFF \
+    -DLIBCXX_ENABLE_LOCALIZATION=ON \
+    -DLIBCXX_ENABLE_WIDE_CHARACTERS=ON \
+    -DLIBCXX_ENABLE_RANDOM_DEVICE=ON \
+    -DLIBCXX_ENABLE_FILESYSTEM=ON \
     -DLIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF \
     -DLIBCXX_HAS_MUSL_LIBC=OFF \
     -DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_TESTS=OFF \
@@ -240,10 +283,17 @@ done
 rm -rf "$OUT"
 mkdir -p "$OUT/lib"
 
+#   libbuiltins.a  compiler-rt's 128-bit helpers, which x86-64 codegen calls
+#                  and no libgcc supplies here. `libc.so` cannot publish them:
+#                  rustc gives a cdylib a version script that localises
+#                  everything but the crate's own exports. An archive last on
+#                  the line yields only the members still undefined by the
+#                  point it is read, which is how every other platform takes
+#                  compiler-rt.
 "$LD_LLD" -shared -o "$OUT/lib/libc++.so" \
     --soname=libc++.so --eh-frame-hdr -z now -z relro \
     --whole-archive "$ABI_ARCHIVE" "$CXX_ARCHIVE" --no-whole-archive \
-    -L "$SYSROOT_LIB" -lc
+    -L "$SYSROOT_LIB" -lc "$SYSROOT_LIB/libbuiltins.a"
 
 # The same pair as an archive, for a C++ program that links no shared object.
 rm -f "$OUT/lib/libc++.a"

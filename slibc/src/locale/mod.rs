@@ -8,13 +8,11 @@
 //! glibc's flat enum — the two schemes disagree and one had to be picked —
 //! except for `CODESET`, which is 14 in both because programs hard-code it.
 //!
-//! No `locale_t`, `newlocale`, `uselocale` or `_l` family: libc++ is built
-//! with `LIBCXX_ENABLE_LOCALIZATION` and `LIBCXX_ENABLE_WIDE_CHARACTERS`
-//! off, and `build_userland.sh` puts its include directory ahead of slibc's,
-//! so a C++ translation unit reaching `<locale.h>`, `<langinfo.h>` or
-//! `<wchar.h>` takes libc++'s own `#error`. These headers are C-only here.
+//! POSIX's locale objects and the `_l` family live in [`object`].
 
 #![allow(non_camel_case_types)]
+
+pub mod object;
 
 use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};

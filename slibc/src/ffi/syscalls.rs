@@ -1104,3 +1104,33 @@ pub unsafe extern "C" fn slopos_spawn_path(
 // `as u64` casts in `truncate`/`ftruncate`/`mmap` become lossy and this fails
 // first.
 const _: () = assert!(size_of::<off_t>() == 8);
+
+/// `utimes(3)`, over [`utimensat`]: the microsecond pair C gives it widens to
+/// the nanosecond pair the kernel takes. A null `times` means "now", which
+/// `utimensat` spells the same way.
+///
+/// # Safety
+/// `path` is a NUL-terminated C string; `times`, if not null, addresses two
+/// `struct timeval`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utimes(path: *const c_char, times: *const crate::types::timeval) -> c_int {
+    if times.is_null() {
+        return utimensat(AT_FDCWD, path, core::ptr::null(), 0);
+    }
+    for index in 0..2 {
+        if !(0..1_000_000).contains(&(*times.add(index)).tv_usec) {
+            return fail(EINVAL, -1);
+        }
+    }
+    let widened = [
+        Timespec {
+            tv_sec: (*times).tv_sec,
+            tv_nsec: (*times).tv_usec * 1000,
+        },
+        Timespec {
+            tv_sec: (*times.add(1)).tv_sec,
+            tv_nsec: (*times.add(1)).tv_usec * 1000,
+        },
+    ];
+    utimensat(AT_FDCWD, path, widened.as_ptr(), 0)
+}

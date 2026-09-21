@@ -8,6 +8,7 @@
 #define _SLIBC_TIME_H
 
 #include <sys/types.h>
+#include <locale.h>
 
 #define CLOCKS_PER_SEC ((clock_t)1000000)
 
@@ -65,6 +66,7 @@ char *asctime(const struct tm *tmp);
 char *ctime_r(const time_t *timep, char *buf);
 char *ctime(const time_t *timep);
 size_t strftime(char *s, size_t max, const char *format, const struct tm *tmp);
+size_t strftime_l(char *s, size_t max, const char *format, const struct tm *tmp, locale_t loc);
 void tzset(void);
 clock_t clock(void);
 

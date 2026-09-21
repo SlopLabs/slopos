@@ -6,7 +6,9 @@
 // `libc_abi_test` grades the exit status: 0, or the number of the check
 // that failed.
 
+#include <ctype.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <locale.h>
@@ -14,12 +16,15 @@
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <wchar.h>
+#include <wctype.h>
 
 static int check = 0;
 
@@ -863,14 +868,443 @@ static int entry_points(void) {
     return 1;
 }
 
+static int locale_objects(void) {
+    locale_t c = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+    if (c == (locale_t)0) {
+        return fail("newlocale refused the C locale");
+    }
+    if (newlocale(LC_ALL_MASK, "en_US.UTF-8", (locale_t)0) != (locale_t)0) {
+        freelocale(c);
+        return fail("newlocale accepted a locale setlocale refuses");
+    }
+    if (errno != ENOENT) {
+        freelocale(c);
+        return fail("a refused newlocale did not set ENOENT");
+    }
+    // Not distinctness: one locale means `duplocale` may answer the handle it
+    // was given, which is what glibc does for its own static C object too.
+    locale_t copy = duplocale(c);
+    if (copy == (locale_t)0) {
+        freelocale(c);
+        return fail("duplocale refused a live handle");
+    }
+    locale_t previous = uselocale(copy);
+    if (previous != LC_GLOBAL_LOCALE) {
+        freelocale(c);
+        return fail("the thread started on something other than the global locale");
+    }
+    if (uselocale((locale_t)0) != copy) {
+        uselocale(LC_GLOBAL_LOCALE);
+        freelocale(c);
+        return fail("a query uselocale did not answer what was set");
+    }
+    if (uselocale(LC_GLOBAL_LOCALE) != copy) {
+        freelocale(c);
+        return fail("uselocale did not answer the handle it replaced");
+    }
+
+    // Every `_l` function is its base with the handle discarded, which is the
+    // whole of what one locale means.
+    char *end = NULL, *end_l = NULL;
+    if (strtod_l("2.5x", &end_l, c) != strtod("2.5x", &end) || end_l != end) {
+        freelocale(c);
+        return fail("strtod_l disagreed with strtod");
+    }
+    if ((isalpha_l('q', c) != 0) != (isalpha('q') != 0) ||
+        (isalpha_l('4', c) != 0) != (isalpha('4') != 0) ||
+        toupper_l('q', c) != toupper('q') ||
+        tolower_l('Q', c) != tolower('Q')) {
+        freelocale(c);
+        return fail("the ctype _l functions disagreed with the C locale");
+    }
+    if (iswalpha_l(L'q', c) == 0 || towupper_l(L'q', c) != towupper(L'q') ||
+        iswctype_l(L'q', wctype_l("alpha", c), c) == 0) {
+        freelocale(c);
+        return fail("the wide ctype _l functions disagreed with the C locale");
+    }
+    if (strcoll_l("a", "b", c) >= 0 || strcoll_l("a", "a", c) != 0 ||
+        wcscoll_l(L"a", L"b", c) >= 0) {
+        freelocale(c);
+        return fail("the collation _l functions are not a byte comparison");
+    }
+    char folded[8];
+    if (strxfrm_l(folded, "abc", sizeof folded, c) != strxfrm(folded, "abc", 0) ||
+        strcmp(folded, "abc") != 0) {
+        freelocale(c);
+        return fail("strxfrm_l is not the identity in the C locale");
+    }
+    if (strcmp(nl_langinfo_l(DAY_1, c), nl_langinfo(DAY_1)) != 0 ||
+        nl_langinfo_l(CODESET, c)[0] == '\0') {
+        freelocale(c);
+        return fail("nl_langinfo_l answered a different item than nl_langinfo");
+    }
+    char stamp[8], stamp_l[8];
+    struct tm when;
+    memset(&when, 0, sizeof when);
+    when.tm_year = 124;
+    when.tm_mon = 1;
+    when.tm_mday = 29;
+    if (strftime(stamp, sizeof stamp, "%b %d", &when) == 0 ||
+        strftime_l(stamp_l, sizeof stamp_l, "%b %d", &when, c) == 0 ||
+        strcmp(stamp, stamp_l) != 0) {
+        freelocale(c);
+        return fail("strftime_l disagreed with strftime");
+    }
+    freelocale(c);
+    return 1;
+}
+
+static int wide_classification(void) {
+    wctype_t alpha = wctype("alpha");
+    wctype_t digit = wctype("digit");
+    if (alpha == (wctype_t)0 || digit == (wctype_t)0 || alpha == digit) {
+        return fail("wctype did not name two distinct classes");
+    }
+    if (wctype("nonesuch") != (wctype_t)0) {
+        return fail("wctype named a class that does not exist");
+    }
+    if (!iswctype(L'q', alpha) || iswctype(L'4', alpha) ||
+        !iswctype(L'4', digit) || iswctype(L'q', digit)) {
+        return fail("iswctype disagreed with the class it was handed");
+    }
+    wctrans_t up = wctrans("toupper");
+    wctrans_t down = wctrans("tolower");
+    if (up == (wctrans_t)0 || down == (wctrans_t)0 || up == down) {
+        return fail("wctrans did not name two distinct transforms");
+    }
+    if (towctrans(L'q', up) != L'Q' || towctrans(L'Q', down) != L'q') {
+        return fail("towctrans did not transform");
+    }
+    if (wctrans("nonesuch") != (wctrans_t)0 || towctrans(L'q', (wctrans_t)0) != L'q') {
+        return fail("an unnamed transform was not the identity");
+    }
+    if (!iswalpha(L'q') || !iswdigit(L'4') || !iswspace(L' ') ||
+        !iswxdigit(L'f') || !iswpunct(L'.') || !iswupper(L'Q') ||
+        !iswlower(L'q') || !iswalnum(L'q') || !iswgraph(L'q') ||
+        !iswprint(L' ') || !iswcntrl(L'\n') || !iswblank(L'\t')) {
+        return fail("a classifier rejected a character of its own class");
+    }
+    if (towlower(L'Q') != L'q' || towupper(L'q') != L'Q' ||
+        towlower(L'4') != L'4') {
+        return fail("towlower/towupper did not fold ASCII");
+    }
+    if (iswalpha(WEOF) || iswdigit(WEOF) || towlower(WEOF) != WEOF ||
+        towupper(WEOF) != WEOF) {
+        return fail("WEOF belongs to a class or was transformed");
+    }
+    return 1;
+}
+
+static int wide_stdio(void) {
+    FILE *s = fopen("/tmp/libc_probe_widestdio", "w+");
+    if (s == NULL) {
+        return fail("could not open a scratch stream");
+    }
+    if (fputwc(L'c', s) != L'c' || fputws(L"af\u00e9", s) < 0) {
+        fclose(s);
+        return fail("a wide write failed");
+    }
+    if (fwprintf(s, L" %ls %d %ls", L"caf\u00e9", 7, L"ab") != 10) {
+        fclose(s);
+        return fail("fwprintf did not write the characters it converted");
+    }
+    // C99 7.19.6.1: a `%ls` precision counts *bytes* of the multibyte form
+    // and stops before a character it would have to split, so three bytes of
+    // "caf\u00e9" is "caf".
+    if (fwprintf(s, L"[%.3ls]", L"caf\u00e9") != 5) {
+        fclose(s);
+        return fail("a %ls precision did not cap in bytes");
+    }
+    if (fseek(s, 0, SEEK_SET) != 0) {
+        fclose(s);
+        return fail("could not rewind the scratch stream");
+    }
+    wint_t first = fgetwc(s);
+    if (first != L'c' || ungetwc(first, s) != L'c' || fgetwc(s) != L'c') {
+        fclose(s);
+        return fail("ungetwc did not put the character back");
+    }
+    wchar_t line[32];
+    if (fgetws(line, 32, s) == NULL || 
+        wcscmp(line, L"af\u00e9 caf\u00e9 7 ab[caf]") != 0) {
+        fclose(s);
+        return fail("fgetws did not read back what was written");
+    }
+    if (fgetwc(s) != WEOF || !feof(s)) {
+        fclose(s);
+        return fail("the stream did not end where it was written to");
+    }
+    fclose(s);
+
+    wchar_t buf[8];
+    // Unlike snprintf, C makes a `vswprintf` that does not fit an error
+    // rather than a length.
+    if (swprintf(buf, 8, L"%ls", L"caf\u00e9") != 4 ||
+        wcscmp(buf, L"caf\u00e9") != 0) {
+        return fail("swprintf did not write a fitting string");
+    }
+    if (swprintf(buf, 4, L"%ls", L"caf\u00e9") >= 0) {
+        return fail("a swprintf that did not fit answered a length");
+    }
+    if (swprintf(buf, 8, L"%lc%c%d", L'\u00e9', 'x', -1) != 4 ||
+        wcscmp(buf, L"\u00e9x-1") != 0) {
+        return fail("swprintf did not convert a mixture");
+    }
+    return 1;
+}
+
+static int widest_integers(void) {
+    if (imaxabs((intmax_t)-7) != 7) {
+        return fail("imaxabs did not take an absolute value");
+    }
+    imaxdiv_t d = imaxdiv((intmax_t)-7, (intmax_t)2);
+    if (d.quot != -3 || d.rem != -1) {
+        return fail("imaxdiv did not truncate towards zero");
+    }
+    char *end = NULL;
+    if (strtoimax("-9223372036854775808x", &end, 10) != INTMAX_MIN || *end != 'x') {
+        return fail("strtoimax did not reach its own minimum");
+    }
+    if (strtoumax("18446744073709551615x", &end, 10) != UINTMAX_MAX || *end != 'x') {
+        return fail("strtoumax did not reach its own maximum");
+    }
+    wchar_t *wend = NULL;
+    if (wcstoimax(L"-42x", &wend, 10) != -42 || *wend != L'x') {
+        return fail("wcstoimax did not convert a wide subject");
+    }
+    if (wcstoumax(L"42x", &wend, 10) != 42 || *wend != L'x') {
+        return fail("wcstoumax did not convert a wide subject");
+    }
+
+    // The format macros are the one part of `<inttypes.h>` no ABI check
+    // covers: each has to name the length its own type really is.
+    char text[64];
+    int_fast16_t fast = 0;
+    intmax_t widest = 0;
+    uint_least64_t least = 0;
+    if (snprintf(text, sizeof text, "%" PRIdFAST16 " %" PRIiMAX " %" PRIuLEAST64,
+                 (int_fast16_t)-300, (intmax_t)-4000000000LL,
+                 (uint_least64_t)18446744073709551615ULL) < 0) {
+        return fail("the format macros did not print");
+    }
+    if (sscanf(text, "%" SCNdFAST16 " %" SCNiMAX " %" SCNuLEAST64,
+               &fast, &widest, &least) != 3) {
+        return fail("the scan macros did not read back three values");
+    }
+    if (fast != -300 || widest != -4000000000LL ||
+        least != 18446744073709551615ULL) {
+        return fail("a format macro named the wrong length for its type");
+    }
+    return 1;
+}
+
+static int scan_conversions(void) {
+    unsigned u = 0;
+    int d = 0;
+
+    // `%i` reads its base off the subject; `%x` takes the prefix C makes
+    // optional for it and converts the leading 0 alone when nothing
+    // hexadecimal follows; `%o` takes none.
+    if (sscanf("0x1f", "%i", &d) != 1 || d != 31) {
+        return fail("%i did not read a hexadecimal subject");
+    }
+    if (sscanf("010", "%i", &d) != 1 || d != 8) {
+        return fail("%i did not read an octal subject");
+    }
+    if (sscanf("0xz", "%x", &u) != 1 || u != 0) {
+        return fail("%x did not convert a bare 0x prefix as zero");
+    }
+    if (sscanf("17", "%o", &u) != 1 || u != 15) {
+        return fail("%o did not read octal");
+    }
+    if (sscanf("08", "%o", &u) != 1 || u != 0) {
+        return fail("%o did not stop at a digit outside its base");
+    }
+    if (sscanf("0x1f", "%d", &d) != 1 || d != 0) {
+        return fail("%d took a hexadecimal prefix");
+    }
+    if (sscanf("-5", "%u", &u) != 1 || u != (unsigned)-5) {
+        return fail("%u did not negate into the unsigned range");
+    }
+
+    // A field width bounds the conversion, which is the whole of what makes
+    // `%Ns` a bound on the caller's buffer.
+    int first = 0, second = 0;
+    if (sscanf("1234", "%2d%d", &first, &second) != 2 || first != 12 ||
+        second != 34) {
+        return fail("a field width did not split one run of digits");
+    }
+    if (sscanf("-5", "%1d", &d) != 0) {
+        return fail("a width that covers only the sign matched anyway");
+    }
+    char text[8];
+    memset(text, '#', sizeof text);
+    if (sscanf("abcdef", "%3s", text) != 1 || strcmp(text, "abc") != 0 ||
+        text[4] != '#') {
+        return fail("%s wrote past its field width");
+    }
+    char pair[4] = {0};
+    if (sscanf("abcdef", "%2c", pair) != 1 || pair[0] != 'a' ||
+        pair[1] != 'b' || pair[2] != 0) {
+        return fail("%c did not take exactly its field width");
+    }
+
+    // Suppression converts without storing, and without counting.
+    d = 0;
+    if (sscanf("12 34", "%*d%d", &d) != 1 || d != 34) {
+        return fail("a suppressed conversion was stored or counted");
+    }
+    d = 0;
+    if (sscanf("  42", "%*c%d", &d) != 1 || d != 42) {
+        return fail("a suppressed %c did not consume one character");
+    }
+
+    // The stream engine is a second implementation of all of the above.
+    FILE *s = fopen("/tmp/libc_probe_scan", "w+");
+    if (s == NULL) {
+        return fail("could not open a scratch stream");
+    }
+    if (fputs("ff 17 0x1f abc 12 34", s) < 0 || fseek(s, 0, SEEK_SET) != 0) {
+        fclose(s);
+        return fail("could not write the scratch stream");
+    }
+    unsigned hex = 0, oct = 0;
+    int mixed = 0;
+    memset(text, '#', sizeof text);
+    if (fscanf(s, "%x %o %i %3s %*d %d", &hex, &oct, &d, text, &mixed) != 5) {
+        fclose(s);
+        return fail("the stream engine did not convert all five");
+    }
+    fclose(s);
+    if (hex != 255 || oct != 15 || d != 31 || strcmp(text, "abc") != 0 ||
+        mixed != 34) {
+        return fail("the stream engine disagreed with the string engine");
+    }
+    return 1;
+}
+
+static int asprintf_through(char **out, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int wrote = vasprintf(out, fmt, ap);
+    va_end(ap);
+    return wrote;
+}
+
+static int absent_posix(void) {
+    char *copy = strdup("caf\xc3\xa9");
+    if (copy == NULL || strcmp(copy, "caf\xc3\xa9") != 0) {
+        free(copy);
+        return fail("strdup did not copy");
+    }
+    free(copy);
+    copy = strndup("cafe", 3);
+    if (copy == NULL || strcmp(copy, "caf") != 0) {
+        free(copy);
+        return fail("strndup did not stop at n");
+    }
+    free(copy);
+    copy = strndup("ab", 8);
+    if (copy == NULL || strcmp(copy, "ab") != 0) {
+        free(copy);
+        return fail("strndup read past a shorter string");
+    }
+    free(copy);
+
+    if (strcoll("a", "b") >= 0 || strcoll("a", "a") != 0) {
+        return fail("strcoll is not a byte comparison");
+    }
+    char folded[8];
+    size_t want = strxfrm(folded, "abc", sizeof folded);
+    if (want != 3 || strcmp(folded, "abc") != 0) {
+        return fail("strxfrm is not the identity in the C locale");
+    }
+    if (strxfrm(NULL, "abcd", 0) != 4) {
+        return fail("a sizing strxfrm did not answer the length");
+    }
+
+    if (isascii('q') == 0 || isascii(0x80) != 0 || toascii(0x1e9) != 0x69) {
+        return fail("isascii/toascii did not mask to seven bits");
+    }
+
+    char *made = NULL;
+    if (asprintf(&made, "%s-%d", "x", 7) != 3 || made == NULL ||
+        strcmp(made, "x-7") != 0) {
+        free(made);
+        return fail("asprintf did not allocate what it wrote");
+    }
+    free(made);
+    made = NULL;
+    if (asprintf_through(&made, "%03d", 7) != 3 || made == NULL ||
+        strcmp(made, "007") != 0) {
+        free(made);
+        return fail("vasprintf did not allocate what it wrote");
+    }
+    free(made);
+
+    FILE *s = fopen("/tmp/libc_probe_offsets", "w+");
+    if (s == NULL) {
+        return fail("could not open a scratch stream");
+    }
+    if (fputs("0123456789", s) < 0 || fseeko(s, 4, SEEK_SET) != 0 ||
+        ftello(s) != 4 || fgetc(s) != '4') {
+        fclose(s);
+        return fail("fseeko/ftello did not agree on the position");
+    }
+    fclose(s);
+
+    char entropy[257];
+    memset(entropy, 0, sizeof entropy);
+    if (getentropy(entropy, 16) != 0) {
+        return fail("getentropy refused a 16-byte request");
+    }
+    if (getentropy(entropy, sizeof entropy) == 0 || errno != EIO) {
+        return fail("getentropy accepted a request past its own 256-byte maximum");
+    }
+
+    long max = pathconf("/tmp", _PC_NAME_MAX);
+    if (max <= 0) {
+        return fail("pathconf answered no limit at all");
+    }
+    FILE *held = fopen("/tmp/libc_probe_offsets", "r");
+    if (held == NULL) {
+        return fail("could not reopen the scratch file");
+    }
+    long by_fd = fpathconf(fileno(held), _PC_PATH_MAX);
+    fclose(held);
+    if (by_fd <= 0) {
+        return fail("fpathconf answered no limit for an open descriptor");
+    }
+    errno = 0;
+    if (fpathconf(-1, _PC_PATH_MAX) != -1 || errno != EBADF) {
+        return fail("fpathconf answered a limit for a descriptor nobody opened");
+    }
+
+    pid_t implicit = getsid(0);
+    pid_t named = getsid(getpid());
+    if (implicit < 0 || named < 0 || implicit != named) {
+        return fail("getsid(0) is not the calling process's session");
+    }
+
+    srand(7);
+    int first = rand();
+    srand(7);
+    if (rand() != first || first < 0 || first > RAND_MAX) {
+        return fail("srand did not restart the sequence");
+    }
+    return 1;
+}
+
 static int run(void) {
     static int (*const checks[])(void) = {
-        jumps,           mask_jumps,      calendar,
-        formatting,      cpu_clock,       float_formatting,
-        float_scanning,  locale,          sorting,
-        deep_sorts,      errors,          hex_floats,
-        wide,            bulk_conversion, wide_numbers,
-        long_doubles,    entry_points,
+        jumps,           mask_jumps,          calendar,
+        formatting,      cpu_clock,           float_formatting,
+        float_scanning,  locale,              sorting,
+        deep_sorts,      errors,              hex_floats,
+        wide,            bulk_conversion,     wide_numbers,
+        long_doubles,    locale_objects,      wide_classification,
+        wide_stdio,      widest_integers,     scan_conversions,
+        absent_posix,    entry_points,
     };
     for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         check = (int)i + 1;

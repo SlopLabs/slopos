@@ -45,11 +45,8 @@ use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{SpawnGuard, link_child, task_build, task_find_by_id, task_terminate};
 use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_from_kernel_va};
 
-pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
-/// Total argv+envp byte budget, in pages, after Linux's `MAX_ARG_PAGES`. The
-/// same 128 KiB the retired 32-argument cap implied, now spendable as many
-/// short strings rather than a few long ones.
-pub const EXEC_MAX_ARG_PAGES: usize = 32;
+pub use slopos_abi::spawn::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_PAGES, EXEC_MAX_ARG_STRLEN};
+
 /// Pointers walked before a user array missing its NULL is given up on. A loop
 /// bound, not a policy limit: [`EXEC_MAX_ARG_PAGES`] decides what fits.
 pub const EXEC_MAX_ARG_STRINGS: usize = 4096;
@@ -73,10 +70,6 @@ pub const INIT_PATH: &[u8] = b"/sbin/init";
 /// realignments, the odd-slot pad, seven auxv pairs, argc and the two NULL
 /// sentinels — plus the word `setup_user_stack` drops before any of it.
 const EXEC_ARG_STACK_FIXED: usize = 8 + 128 + 16 + 16 + 8 + 7 * 16 + 3 * 8;
-
-/// [`EXEC_MAX_ARG_PAGES`] as bytes. Also what a syscall handler may stage out
-/// of user memory before the exact accounting below runs.
-pub const EXEC_MAX_ARG_BYTES: usize = EXEC_MAX_ARG_PAGES * PAGE_SIZE_4KB as usize;
 
 /// Whether `argv` + `envp` fit the budget, counting exactly what
 /// [`setup_user_stack`] will push.

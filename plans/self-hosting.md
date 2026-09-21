@@ -27,15 +27,17 @@ mapping, resolves a 4096-byte path with symlinks in it, stats a file for a real
 mtime, mounts a 16 GiB volume holding a million inodes — this repository and
 that sysroot among them — and runs a `PT_INTERP` executable that `dlopen`s a
 shared object, and throws a C++ exception out of one `dlopen`ed object into
-the program that loaded it. What is left is the toolchain itself, and every
-constant that produced the storage gap was chosen correctly for an appliance.
+the program that loaded it — and LLVM itself, the library those 161 and 208 MB
+are, now compiles for this target. What is left is a compiler that runs here,
+and every constant that produced the storage gap was chosen correctly for an
+appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes,
 they are appliance-sized constants and appliance-sized policies. A workbench
 needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
 *widening under proof*, not redesign, and one exception remains: the compiler
-bootstrap itself. The fourteen sections between here and Phase 1 are what has
+bootstrap itself. The fifteen sections between here and Phase 1 are what has
 landed, each stating the constraints a later phase must not disturb.
 
 
@@ -1371,12 +1373,12 @@ What it rests on, in case a later phase disturbs it:
 - **No body quiets a signalling NaN**, where C17 F.10 p11 asks for the quiet
   form: `fld tbyte` does not, there is no `<fenv.h>` to observe the invalid
   flag with, and an sNaN can only arrive from punned bits.
-- **`<wchar.h>`, `<langinfo.h>` and `<locale.h>` are C-only in this tree.**
-  libc++ is built with localization and wide characters off and its include
-  directory comes first, so a C++ translation unit reaches libc++'s own
-  `#error` before slibc's copy. Turning both options on is 120 names measured
-  against `libcxx/src/locale.cpp`: the fifteen `<wctype.h>` entry points and
-  105 `_l`-suffixed ones. Neither `locale_t` nor any `_l` function is here.
+- **`<wchar.h>`, `<langinfo.h>` and `<locale.h>` were C-only in this tree,**
+  because libc++ was built with localization and wide characters off and a C++
+  translation unit reached its `#error` first. The estimate for turning them
+  on — 120 names, measured against `libcxx/src/locale.cpp` — was right about
+  the number and wrong about the set. "LLVM builds for this target" below
+  carries what it actually cost.
 - **`setlocale` refuses every locale but `C`.** `""`, `"C"` and `"POSIX"`
   select it, `NULL` queries it, anything else answers `NULL` with no state
   change. Answering `en_US.UTF-8` while behaving as the C locale is a lie the
@@ -1390,9 +1392,9 @@ What it rests on, in case a later phase disturbs it:
   past 512 bytes, which no `strto*` does, so they are not async-signal-safe.
   POSIX requires that of neither family, and truncating a 600-digit number
   instead would be a wrong answer rather than a slow one.
-- **No wide stdio**, no `fwprintf`, no stream orientation. A second
-  orientation-tracking path through `FILE` would be load-bearing code with no
-  caller.
+- **No wide stdio**, no `fwprintf`, no stream orientation, on the grounds that
+  nothing asked for one. libc++'s `std::wcin` does, which the section below
+  found out by building it.
 - **The tests image gained a process.** `libc_abi_test` spawns the probe, so
   the post-userland `process` peak is 255 against a `MAX_PROCESSES` of 256.
   That is the first appliance-sized constant this plan has actually pressed
@@ -1408,14 +1410,14 @@ What it rests on, in case a later phase disturbs it:
 
 ## The target is a built-in target
 
-The fourteenth thing this plan rests on, and the last before the toolchain
-itself: `x86_64-unknown-slopos` is a **built-in rustc target**, not only a
-JSON file. A JSON spec is enough to build *for*, and it is not enough to
-build rustc *for*: bootstrap resolves `--host` through the compiler's own
-built-in list, and `rustc_driver` is `crate-type = ["dylib"]` in its own
-`Cargo.toml`, so a host rustc is a dynamically linked compiler for a triple
-rustc can name. `toolchain/compiler/0001-slopos-target.patch` is that name —
-258 lines over twelve files of the pinned nightly's own sources — and
+The fourteenth thing this plan rests on: `x86_64-unknown-slopos` is a
+**built-in rustc target**, not only a JSON file. A JSON spec is enough to
+build *for*, and it is not enough to build rustc *for*: bootstrap resolves
+`--host` through the compiler's own built-in list, and `rustc_driver` is
+`crate-type = ["dylib"]` in its own `Cargo.toml`, so a host rustc is a
+dynamically linked compiler for a triple rustc can name.
+`toolchain/compiler/0001-slopos-target.patch` is that name — 258 lines over
+twelve files of the pinned nightly's own sources — and
 `scripts/check_rustc_target.sh` is the standing proof: it holds the built-in
 spec to `targets/x86_64-unknown-slopos.json` field for field and then runs
 rustc's own per-target test against it.
@@ -1533,6 +1535,183 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## LLVM builds for this target
+
+The fifteenth thing this plan rests on, and the one Phase 1 was actually
+blocked on: **LLVM cross-compiles for `x86_64-unknown-slopos`.** Not a
+translation unit and not a probe — the Support library, the IR, the MC layer,
+the X86 code generator, the pass managers and LTO: 1 345 build steps, no
+errors, against slibc's own headers and the C++ runtime this tree builds.
+`scripts/check_llvm_port.sh` is the standing proof, and it grades
+`LLVMSupport` alone because that is where a port lives: `Unix/Path.inc`,
+`Unix/Process.inc`, `Unix/Program.inc` and `Unix/Signals.inc` are the files
+that name a libc, `raw_ostream.cpp` and `ConvertUTF.cpp` the ones that name a
+C++ library, `Triple.{h,cpp}` where the port's own enumerator lives, and the
+other twelve hundred objects are portable C++ over them. Four of the port's
+six files; clang's two need a clang to build. 47 s cold on four cores, 1.5 s
+warm.
+
+The estimate this replaces is the one the workstream below carried, and it was
+wrong in the direction that mattered. It priced *localization* at 120 libc
+entry points and took that for the whole of it. Five libc++ options were off,
+LLVM reaches four of them, the C library underneath was missing four entire
+headers, and two of its existing declarations were wrong in a way only a C++
+compiler ever says out loud. The count came out at 120 exactly, over a
+different set.
+
+What it rests on, in case a later phase disturbs it:
+
+- **The C++ runtime is configured for a compiler rather than for a probe.**
+  Localization, wide characters, `<filesystem>` and the random device are all
+  on: `raw_os_ostream.cpp` reaches `<ios>`, `ConvertUTF.h` names
+  `std::wstring` unconditionally, eleven files under `clang/` include
+  `<fstream>`, and `LockFileManager.cpp` constructs a `std::random_device`.
+  Every one of those was a hard `#error` or an undefined template rather than
+  a link failure, and every one was reachable without cross-building anything.
+  The time-zone database stays off — nothing in LLVM or clang asks for one,
+  and there is no zone data on this system to answer from.
+- **libc++ classifies characters out of its own table.**
+  `_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE` is upstream's alternative to the glibc
+  road, where the table is `__ctype_b_loc()`'s and `ctype_base::mask` is
+  `_ISspace` and its eleven siblings — a second classification of the same 128
+  characters, living in the C library, which libc++ `#error`s for on any
+  platform that supplies neither. It is an *ABI* flag, because it decides the
+  width and the bit values of a type passed by value: a consumer compiled
+  without it disagrees with the runtime about `ctype_base::mask`. That is why
+  it is written down once, in `make_slopos_cxx.sh --print-abi-flags`, and why
+  `build_userland.sh` and the gate ask for it rather than restating it.
+- **The random device is `getentropy`, not `/dev/urandom`.** libc++'s default
+  opens a device SlopOS's devfs does not have; `_LIBCPP_USING_GETENTROPY`
+  takes the entry point instead, which is one `getrandom` with POSIX's
+  256-byte cap and no blocking path to get stuck in.
+- **120 C entry points, in four groups.** POSIX-2008's locale objects
+  (`locale_t`, `newlocale`, `duplocale`, `freelocale`, `uselocale`) and the 53
+  `_l`-suffixed functions that take one; `<wctype.h>`, which did not exist at
+  all — its eighteen classifiers and transforms; the sixteen wide stdio
+  entry points `<wchar.h>` has always declared and this tree never had, C99
+  §7.24.2 bar the wide `scanf` family; and the ordinary POSIX names that were
+  simply absent — `strdup`, `strndup`, `strcoll`, `strxfrm`, `strsignal`,
+  `isascii`, `toascii`, `rand`, `srand`, `_Exit`, `asprintf`, `vasprintf`,
+  `vsscanf`, `vfscanf`, `vscanf`, `fseeko`, `ftello`, `getentropy`,
+  `getpwnam_r`, `pathconf`, `fpathconf`, `utimes` and `getsid`, together with
+  `<inttypes.h>`'s own six — `imaxabs`, `imaxdiv`, `strtoimax`, `strtoumax`,
+  `wcstoimax` and `wcstoumax`. Four headers
+  were new with them: `<wctype.h>`, `<inttypes.h>`, `<endian.h>` and
+  `<sysexits.h>`, every one of which LLVM includes.
+- **The `_l` family is an answer, not a placeholder.** SlopOS has exactly one
+  locale, so each `_l` function is its base function with the handle
+  discarded — musl's shape, for musl's reason. `newlocale` still refuses a
+  name `setlocale` refuses, so a program asking for `en_US.UTF-8` is told no
+  rather than handed the C locale wearing that name, and `uselocale` really
+  does keep a per-thread handle (in the TCB, with the pre-TLS static fallback
+  `errno` uses) so that querying it answers what was set.
+- **`getsid` is a new syscall.** Number 124, Linux's, mirroring `getpgid`
+  against the session id the task already carries. `LockFileManager.cpp` asks
+  whether a lock's owner is alive, and there was no way to answer.
+- **Two C declarations were wrong, and only a C++ compiler said so.**
+  `struct sigaction` had one member, `sa_sigaction`, typed as the `size_t` the
+  `libc` crate spells it as — so `Handler.sa_handler = f` did not compile, in
+  three of LLVM's Support files. The header now renders that slot as the union
+  POSIX describes, with both names and both function-pointer types, which is
+  glibc's shape without glibc's global `#define`. And `S_ISFIFO` was spelled
+  `S_ISIFO`: the generator derives each test from its `S_IF*` constant, and
+  the FIFO is the one type whose POSIX name is not that derivation.
+- **`struct stat` carries POSIX-2008's three `timespec` members.** `st_atim`,
+  `st_mtim` and `st_ctim`, with the C89 spellings as the `#define`s glibc and
+  musl both use. libc++'s `<filesystem>` reads them by those names; the
+  previous `time_t` plus `long` pair was the same bytes under names no C++
+  standard library knows.
+- **The port of llvm-project is a patch, and it is the size a port is.** 102
+  lines over six files: the two places LLVM dispatches on the OS with no
+  default a new one can take (`<endian.h>` versus `<machine/endian.h>` in
+  `ADT/bit.h`, and `statvfs.f_flag` versus a BSD `f_flags` and `MNT_LOCAL` in
+  `Unix/Path.inc`), plus the `Triple` entry and the clang target that make
+  `__slopos__` a macro a compiler predefines. `scripts/make_slopos_llvm_src.sh`
+  materialises the tree (the same pinned tarball the C++ runtime is cut from,
+  extended to all of `llvm/` and `clang/`: 1.5 GB on disk, 11 s), and the
+  patch is pinned by checksum in `toolchain/cxx/PIN` — a fourth fork, graded
+  beside the tree it applies to for the reason the compiler fork is.
+- **compiler-rt is this C library's job.** x86-64 codegen calls out for
+  128-bit arithmetic, and there is no libgcc here to take those calls from.
+  `libc.a` already carried them, because a staticlib links `compiler_builtins`
+  whole; `libc.so` cannot publish them, because rustc gives a cdylib a version
+  script that localises everything but the crate's own exports. So
+  `libbuiltins.a` is a third artifact — the same routines, built
+  `relocation-model=pic`, read last on the C++ runtime's link line, which is
+  how every other platform takes compiler-rt: out of an archive that yields
+  only the members still undefined by the time it is reached.
+
+**What this deliberately did not do.**
+
+- **No bootstrap.** This section makes LLVM a library that compiles for
+  SlopOS. Building a *compiler* is the workstream below, and what stands
+  between the two is cargo rather than LLVM: bootstrap builds cargo before
+  anything for the host triple, and cargo's manifest pulls six `-sys` crates
+  that build C libraries, none of them optional. The workstream below takes
+  that as a fifth fork rather than five C ports.
+- **No clang driver.** The patch adds the target that predefines the macros;
+  it adds no `ToolChains/SlopOS.cpp`, so a cross-built clang cannot yet be
+  handed a bare `-o` and asked to find `crt0.o` and `-lc` by itself. Every
+  link line in this tree states those explicitly, which is why nothing needed
+  it yet and why the first in-guest `cc` will.
+- **`__slopos__` is still a command-line macro.** The port teaches a
+  *cross-built* clang to predefine it; the host clang that runs the cross
+  build is not that clang, so `check_llvm_port.sh` passes `-D__slopos__` and
+  says why. The first toolchain built from this tree is what retires the flag.
+- **The gate builds two libraries, not LLVM.** The full set above was built
+  once, by hand, to find out whether it would; what CI can afford every run is
+  the portability surface and the Triple. A gate that compiled all of LLVM
+  would be measuring the host's core count. Clang's half of the port is the
+  residual: nothing but `git apply --reverse --check` holds
+  `SlopOSTargetInfo`, and reaching it means building a clang.
+- **The gate borrows the host's `llvm-tblgen`.** It builds no host tools, and
+  the `.inc` files tablegen emits are data tables rather than code, so a host
+  tool of the same major serves. A build that needs its own would be building
+  a second LLVM first.
+- **The narrow `scanf` engines grew what the new header advertises.**
+  Shipping `SCNo*`, `SCNx*` and `SCNi*` meant the engines behind them had to
+  exist: there was no `%o` arm in either, no `%x` arm in the stream one, and
+  `%i` read decimal whatever its subject's prefix said. Assignment suppression
+  and the maximum field width were missing too, which mattered more — `%*d`
+  aborted the whole scan rather than converting and discarding, and `%31s`
+  was no bound at all, so a caller's own overflow mitigation did nothing. All
+  six conversions now share one subject reader over the existing `Cursor`,
+  which is what had let the two engines disagree about `%x` in the first
+  place.
+- **`libc_probe` covers the new surface.** 120 entry points arrived with no
+  behavioural test between them; the C probe now carries six more checks —
+  the locale objects and the `_l` identity, `<wctype.h>`, wide stdio, the
+  `<inttypes.h>` six and their format macros, the scan conversions above, and
+  the ordinary POSIX names. Every expectation in them was first run against
+  glibc under a UTF-8 locale, so a failure on SlopOS is slibc's and not the
+  test's.
+- **No wide `scanf`.** `fwscanf`, `swscanf` and the `v` forms are absent and
+  undeclared. The wide `printf` family transcodes its template to UTF-8 and
+  runs the narrow engine — C gives the two templates the same conversions, so
+  the transcode is the whole difference — and the scanning direction consumes
+  its template and its stream together, which makes it a second parser rather
+  than a second spelling. Nothing links against it.
+- **`<inttypes.h>` is literal C rather than a generated contract.** Its format
+  macros expand to string literals that the header generator's
+  `#define NAME (value)` rendering would parenthesise into a syntax error, and
+  its six entry points are spelled in the compiler's own `intmax_t`. A header
+  spec's `raw` block is emitted verbatim and never reaches `build.rs`'s
+  signature check, which iterates `extra` — so these six join the four
+  `long double` prototypes, `imaxdiv_t`, `LC_GLOBAL_LOCALE`, the three
+  `st_*time` defines and all of `<endian.h>` as declarations nothing grades.
+  That is why each `PRI`/`SCN` macro is the compiler's own
+  `__<TYPE>_FMT<conv>__` predefine rather than a length modifier written down
+  here: a hand-written table says what the author believes `int_fast16_t` to
+  be, and clang makes that one a `short`. `libc_probe` now exercises the
+  macros against their own types instead, which is the nearest thing to a
+  check that a verbatim block can have.
+- **`libc.so` grew by 40 KB**, 530 624 to 571 696, and `libc++.so` is now
+  1 762 808 bytes — four options' worth of C++ library, and the locale facets
+  are most of it. The runtime is on the tests image only; the C library is on
+  every image, and a libc that differs between images is the worse hazard.
+
+---
+
 ## Phase 1 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
@@ -1559,10 +1738,12 @@ being paid for. `scripts/check_linker_script.sh` keeps its whole value as the
 ratchet that would notice `wild` becoming viable, which is now a reason to
 re-open a decision rather than a blocker to route around.
 
-**What the reversal costs.** Three of the landed sections above: the dynamic
-loader, which was always owed; the C++ runtime, which was new; and the libc
+**What the reversal costs.** Four of the landed sections above: the dynamic
+loader, which was always owed; the C++ runtime, which was new; the libc
 surface underneath them, which was owed either way and which the LLVM decision
-promoted from off the critical path to load-bearing. The C99 frontend written
+promoted from off the critical path to load-bearing; and the port of
+llvm-project itself, which was the phase's first real measurement and is the
+one that came back cheapest. The C99 frontend written
 in Rust that the Rust-hosted road owed is **deleted** rather than deferred —
 clang arrives in the same monorepo pass that produces `libLLVM.so` and
 `rust-lld`, so the C compiler is a by-product of a decision taken for Rust's
@@ -1574,9 +1755,40 @@ One bootstrap invocation on Linux, `--build=x86_64-unknown-linux-gnu
 --host=x86_64-unknown-slopos`, producing rustc, cargo, `rust-lld`, clang and
 `libLLVM.so` for SlopOS, plus the std built through the existing fork. Nothing
 in that sentence is novel — it is how every cross-hosted Rust distribution is
-produced — and everything in it depends on the four landed sections above:
-every artifact in it is dynamically linked, throws, calls a C library, and is
-built for a triple the compiler can name.
+produced — and everything in it depends on the five landed sections above:
+every artifact in it is dynamically linked, throws, calls a C library, is
+built for a triple the compiler can name, and is *made of* a library that now
+compiles for that triple.
+
+**What is left is cargo, not LLVM, and cargo is a fifth fork.** bootstrap
+builds cargo before it builds anything for the host triple, and cargo's
+manifest pulls six `-sys` crates that each build a C library: `curl-sys`,
+`openssl-sys` with `openssl-src`, `libgit2-sys`, `libssh2-sys` and
+`libz-sys`. None of them is optional — `git2` is declared
+`features = ["https", "ssh"]` with no `optional = true`, and `curl` the same —
+so there is no feature flag that drops them and no "curl without a TLS
+backend" to configure. Building cargo unmodified for this target means
+porting five C build systems, OpenSSL's perl `Configure` among them.
+
+The decision is therefore taken here rather than at the first `x.py` run:
+**`toolchain/cargo/` becomes the fifth pinned fork**, alongside
+`toolchain/{rust,libc,compiler,llvm}` and built by the same machinery — a
+patch, a checksum in a `PIN`, a materialiser, a gate. The fork makes those
+six dependencies optional behind a feature bootstrap turns off for this
+target. It is one Rust crate against five C build systems, and the tree
+already owns the tooling for the first.
+
+What that road gives up is exactly what the goal does not need: no
+`cargo install` from a registry, no git dependencies, no `cargo publish`.
+`Cargo.lock` holds nine third-party crates, so building SlopOS on SlopOS is a
+vendored workspace build and reaches none of them. The network stack a
+registry would want is a different plan.
+
+The measurement that sizes the fork: seventeen of cargo's 260 source files
+name `curl::`, `git2::` or `openssl::`, and they sit in `util/network/`,
+`sources/git/`, `sources/registry/git_remote.rs`, `ops/cargo_fix/` and
+`bin/cargo/`. That is the cut, and whether it is a clean one is the first
+thing the fork has to establish.
 
 **The medium is already reachable.** Measured from the host: the pinned sysroot
 is 1.1 GB, `librustc_driver.so` is a single 161 MB shared object, and the
@@ -1597,32 +1809,21 @@ package payload. Its own automated self-hosted build config provisions a
 against 650 MiB for its desktop image. Two orders of magnitude under the 1.1 GB
 host sysroot, because a shipped toolchain is not a rustup toolchain.
 
-**The C++ runtime this rests on is configured smaller than LLVM's own build
-assumes, and the measurement has now been taken.** `make_slopos_cxx.sh` builds
-libc++ with localization, wide characters, `<filesystem>`, the random device
-and the time-zone database off, which is the same configuration Redox uses.
-Against the pinned llvm-project sources, that is **not** enough:
-`llvm/lib/Support/raw_os_ostream.cpp` includes `<ostream>` and
-`ARMBuildAttrs.cpp` includes `<iomanip>` and `<sstream>`, both unconditional
-entries in `Support`'s `CMakeLists.txt`, and all three reach libc++'s `<ios>`,
-which is a hard `#error` when localization is off. Fourteen clang translation
-units are in the same position, four of them on `<fstream>`. So `libLLVM`
-does not fail to *link* against this libc++ — it fails to *compile*, at the
-first of those files, and that is reachable today without cross-building
-anything. The answer is a narrower LLVM configuration or a wider libc++ one,
-and the wider one is now priced: 120 entry points measured against
-`libcxx/src/locale.cpp` — the fifteen `<wctype.h>` names slibc has not got,
-and 105 `_l`-suffixed ones. Everything else those two options need, the libc
-surface above already supplies.
+**What the run will need that the section above did not.** Two things, and
+only one of them is a question. The work is a clang driver toolchain, so a
+cross-built clang can be handed a bare `-o` and find `crt0.o` and `-lc` by
+itself; every link line in this tree states those explicitly, which is why
+nothing has needed it yet, and there is nothing to decide — it is
+`clang/lib/Driver/ToolChains/` and it goes in `toolchain/llvm/` beside the
+port already there. The question is `libLLVM`: shared is what upstream ships
+and what the 161 MB measurement was taken against, static removes one
+`dlopen` from startup but not the proc-macro one, and it stays on the
+open-decisions list because the answer is a startup cost this tree cannot
+measure before there is a toolchain to measure it on.
 
-**What is genuinely open** is whether `libLLVM` is shared or static.
-Bootstrap's own default is **static** — `llvm_link_shared` is
-`config.llvm_link_shared.unwrap_or(false)` and `LLVM_LINK_LLVM_DYLIB=ON` is set
-only when that is true — and Redox opts *into* shared with `[llvm] link-shared
-= true`. Static removes one `dlopen` from the critical path but not the
-proc-macro one, and `rustc_driver` is `crate-type = ["dylib"]` in the
-compiler's own `Cargo.toml` regardless. Decide it with the first bootstrap run
-rather than on paper; the open-decisions list carries it.
+So the workstream reduces to four items in order: fork cargo, add the clang
+driver, run bootstrap, put the result on a second volume. None of them is
+open-ended; the one open decision is a number the first run prints.
 
 ### Workstream 1.2 — The build loop holds (**M**)
 
@@ -1771,7 +1972,8 @@ not been made at all.
       longer a question about what the loader owes but about how many
       `PT_LOAD`s and how much startup relocation an in-guest rustc pays for,
       which is the first number Workstream 1.1's bootstrap run produces.
-      Decide it there rather than on paper.
+      Decide it there rather than on paper. Cross-building the library
+      settled nothing about this: both configurations compile.
 - [ ] **Does the toolchain's rustc unwind, or does the driver stop being a
       dylib?** The built-in target is `panic-strategy: abort` because every
       SlopOS binary is, and a rustc built that way aborts on its first fatal
@@ -1805,9 +2007,9 @@ not been made at all.
 libc++abi linked into one `libc++.so`** — settled by building it, and by the
 fact that `libstdc++` is not a library you cross-build but one a GCC
 cross-compiler emits, which is a second toolchain to pin and keep. The libc
-gap it needs is closed — `check_cxx_pin.sh` holds all 68 of its undefined
-symbols to `libc.so` — and what remains unmeasured is the LLVM build against
-it, which Workstream 1.1 takes first. Syscall ABI: **Linux x86-64 numbering,
+gap it needs is closed — `check_cxx_pin.sh` holds all 171 of its undefined
+symbols to `libc.so` — and the LLVM build against it is measured:
+`check_llvm_port.sh` compiles `LLVMSupport` for the target on every run. Syscall ABI: **Linux x86-64 numbering,
 one table, a private
 range at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 **LLVM, cross-built from Linux, with the C++ runtime ported to SlopOS** — the
@@ -1849,7 +2051,8 @@ compile.
 | Backend and linker gates | `scripts/check_codegen_backend.sh`, `scripts/check_linker_script.sh`, `scripts/gates/{codegen,linker}/`, `targets/x86_64-slos.json`, `link.ld` | *invariant* |
 | Storage | `fs/src/ext2/{dirindex,journal}.rs`, `fs/src/verity.rs`, `drivers/src/virtio_blk.rs`, `fs/src/fsreport.rs` | *invariant* |
 | libc surface | `slibc-core/src/`, `slibc/src/{setjmp,locale,wchar}/`, `slibc/src/{stdlib/sort.rs,math/longdouble.rs,time/calendar.rs,string/convert.rs,stdio/{printf,scanf}.rs,conf.rs}`, `slibc/build/decls.rs`, `toolchain/libc/0001-slopos-libc.patch`, `userland/libctest/` | *invariant* |
-| C++ runtime | `scripts/make_slopos_cxx.sh`, `scripts/check_cxx_pin.sh`, `toolchain/cxx/PIN`, `slibc/src/{unwind,cxa,math,ctype,stdlib,wchar,locale,setjmp,time}/`, `slibc-core/src/`, `slibc/build/`, `userland/cxxtest/` | *invariant* |
+| C++ runtime | `scripts/make_slopos_cxx.sh`, `scripts/check_cxx_pin.sh`, `toolchain/cxx/PIN`, `slibc/src/{unwind,cxa,math,ctype,stdlib,wchar,locale,setjmp,time}/`, `slibc-core/src/`, `slibc/build/`, `userland/cxxtest/` | *invariant* — `--print-abi-flags` is the one place the rune-table flag is written down |
+| LLVM port | `toolchain/llvm/`, `toolchain/cxx/PIN`, `scripts/make_slopos_llvm_src.sh`, `scripts/check_llvm_port.sh`, `scripts/lib/toolchain_pin.sh`, `slibc/build/decls.rs`, `slibc/builtins/` | *invariant* — the patch is the port, and `libbuiltins.a` is where a shared object takes compiler-rt from |
 | C++ platform | `vendor/unwinding`, `slibc/{staticlib,cdylib,crt0,include}/`, `NOTICE.md` | work |
 | Phase 2 install | `scripts/qemu_run.sh`, `fs/src/devfs/mod.rs`, `fs/src/partition.rs` | work |
 | Execution boundary | `AGENTS.md` | Phase 2 needs a scoped exception |

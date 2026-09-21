@@ -155,20 +155,37 @@ See https://llvm.org/LICENSE.txt for license information.
 SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ```
 
-Nothing from llvm-project is vendored into this repository. `toolchain/cxx/PIN`
-records the release, its download URL and its checksum;
-`scripts/make_slopos_cxx.sh` fetches and builds it into
-`third_party/slopos-cxx/`, and `scripts/check_cxx_pin.sh` fails the build if
-what is on disk has drifted from what is pinned. The runtime reaches the
+llvm-project's sources are not vendored into this repository. What is tracked
+is the diff: `toolchain/cxx/PIN` records the release, its download URL, its
+checksum and a checksum per patch, and `toolchain/llvm/` carries the patches
+themselves. `scripts/make_slopos_cxx.sh` fetches the release and builds the
+runtime into `third_party/slopos-cxx/`; `scripts/make_slopos_llvm_src.sh`
+materialises the whole tree with the port applied into
+`third_party/llvm-project-<version>.src/`; and `scripts/check_cxx_pin.sh`
+fails the build if either has drifted from what is pinned. Upstream's code
+reaches a SlopOS build only through those steps. The runtime reaches the
 **tests** image only: `libc++.so` as a file, and `libc++.a` as the C++ half of
 the statically linked `cxx_static_probe`. Both projects' license texts ship
 beside it, in `/usr/share/licenses/libc++/`, the way the OFL fonts carry
 theirs.
 
-The runtime is built with localization, wide characters, the filesystem
-library, the random device and the time-zone database turned off, so the parts
-of libc++ that need a locale layer SlopOS has not got are not compiled at
-all.
+`toolchain/llvm/` is SlopOS's port of llvm-project: the two places LLVM
+dispatches on the host OS without a default a new one can take, the
+`Triple::SlopOS` enumerator and the switches that have to name it, and
+clang's `SlopOSTargetInfo`. It is licensed **`Apache-2.0 WITH
+LLVM-exception`** rather than GPL-3.0-or-later, because it is written to be
+contributed upstream. Every line it adds is new work, © 2025–2026 The SlopOS
+Authors, `SlopOSTargetInfo` following the shape of the `OSTargetInfo`
+specializations it sits between in the same file; the context lines a diff
+carries remain © the llvm-project contributors. The patch touches neither
+`libcxx/` nor `libcxxabi/` — `scripts/check_cxx_pin.sh` fails if one ever
+does — so nothing built from it reaches a shipped or a tests image. It builds
+a compiler, not an artifact this project distributes.
+
+The runtime is built with the time-zone database turned off — there is no zone
+data on this system to answer from — and with localization, wide characters,
+the filesystem library and the random device on, because LLVM's own sources
+reach all four.
 
 ## Components distributed on the SlopOS ISO
 
