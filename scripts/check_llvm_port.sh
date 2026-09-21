@@ -23,10 +23,11 @@ set -euo pipefail
 #     and `<wctype.h>` exist because these files include them.
 #
 # `skipped` without a materialised source tree or a staged C++ runtime, since
-# a checkout that has cross-built neither still has a consistent pin; the CI
-# step that has both passes `--require`. `--self-test` grades the skip and
-# `--require` paths on every host and the rejection wherever there is a tree
-# to plant one in, so a checkout without one still exercises what it can.
+# a checkout that has cross-built neither still has a consistent pin; those
+# are the only two, and the CI step that has both passes `--require`.
+# `--self-test` grades the skip and `--require` paths on every host and the
+# rejection wherever there is a tree to plant one in, so a checkout without
+# one still exercises what it can.
 
 SELF="check_llvm_port"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,6 +73,33 @@ CLANGXX=""
 CXXFLAGS=()
 SKIP_REASON=""
 
+build_tblgen() {
+    local dir="$REPO_ROOT/builddir/gates/llvm-port-tblgen"
+    LLVM_TBLGEN="$dir/bin/llvm-tblgen"
+    if [ ! -x "$LLVM_TBLGEN" ]; then
+        echo "$SELF: building llvm-tblgen $LLVM_MAJOR from the pinned tree" >&2
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        cmake -G Ninja -S "$SOURCE/llvm" -B "$dir" -Wno-dev \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CLANG" -DCMAKE_CXX_COMPILER="$CLANGXX" \
+            -DCMAKE_CXX_FLAGS="-include cstdint" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_LIBPFM=OFF \
+            >"$dir/configure.log" 2>&1 &&
+            ninja -C "$dir" llvm-tblgen >"$dir/build.log" 2>&1 || {
+            SKIP_REASON="llvm-tblgen $LLVM_MAJOR does not build on this host — see
+       builddir/gates/llvm-port-tblgen/build.log, or point LLVM_TBLGEN at one"
+            return 1
+        }
+    fi
+    [ -x "$LLVM_TBLGEN" ]
+}
+
 # What a run needs that a checkout may legitimately not have. `llvm-tblgen` is
 # in here rather than in `prepare` so the self-test can tell the difference
 # between a case it declined to grade and one it silently exited out of.
@@ -94,10 +122,10 @@ inputs_ready() {
         command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
     done
 
-    # Borrowed from the host, matched to the *sources'* major rather than the
-    # host compiler's: tablegen consumes this tree's `.td` files, and a newer
-    # backend stops on a field an older record has not got (`GENERIC_RV32 does
-    # not have a field named MVendorID`, tblgen 22 over the pinned 18).
+    # Borrowed from the host only if its major is the *sources'*: tablegen
+    # consumes this tree's `.td` files, and a newer backend stops on a field
+    # an older record has not got (`GENERIC_RV32 does not have a field named
+    # MVendorID`, tblgen 22 over the pinned 18). Otherwise build the tree's.
     if [ -z "${LLVM_TBLGEN:-}" ]; then
         for candidate in "llvm-tblgen-$LLVM_MAJOR" \
             "/usr/lib/llvm-$LLVM_MAJOR/bin/llvm-tblgen" \
@@ -114,13 +142,7 @@ inputs_ready() {
             esac
         done
     fi
-    if [ -z "${LLVM_TBLGEN:-}" ] || [ ! -x "$LLVM_TBLGEN" ]; then
-        SKIP_REASON="no llvm-tblgen for LLVM $LLVM_MAJOR on this host — install
-       that major's tools (apt.llvm.org, Fedora's llvm$LLVM_MAJOR) or point
-       LLVM_TBLGEN at one; the host compiler's major may differ, tablegen's
-       may not"
-        return 1
-    fi
+    [ -n "${LLVM_TBLGEN:-}" ] && [ -x "$LLVM_TBLGEN" ] || build_tblgen || return 1
     return 0
 }
 
