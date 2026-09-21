@@ -16,7 +16,7 @@ use slopos_slibc_core::utf8::{self, MbState, Step};
 
 use super::chars::{fgetc_unlocked, fputc_unlocked, ungetc_unlocked};
 use super::file::{flockfile, funlockfile};
-use super::printf::{format_to_cb, vfprintf_impl};
+use super::printf::format_to_cb;
 use super::{EOF, FILE, FILE_FLAG_ERR, streams};
 use crate::errno::{EILSEQ, ENOMEM, errno_set};
 use crate::ffi::size_t;
@@ -269,10 +269,38 @@ pub unsafe extern "C" fn vfwprintf(
 }
 
 unsafe fn vfwprintf_impl(stream: *mut FILE, fmt: *const wchar_t, ap: &mut VaList<'_>) -> c_int {
-    match NarrowFormat::new(fmt) {
-        Some(narrow) => vfprintf_impl(stream, narrow.bytes, ap),
-        None => -1,
+    if stream.is_null() {
+        return -1;
     }
+    let Some(narrow) = NarrowFormat::new(fmt) else {
+        return -1;
+    };
+
+    // C99 7.24.2.5 counts wide characters, not the bytes the narrow engine
+    // emits, and the two differ for every conversion outside ASCII. The
+    // stream carries the bytes; the count is of the UTF-8 sequences they are,
+    // which is every byte that is not a continuation.
+    let mut written = 0usize;
+    let mut unencodable = false;
+    flockfile(stream);
+    format_to_cb(
+        &mut |byte: u8| {
+            if byte & 0xc0 != 0x80 {
+                written += 1;
+            }
+            fputc_unlocked(byte as c_int, stream);
+        },
+        narrow.bytes,
+        ap,
+        &mut unencodable,
+    );
+    funlockfile(stream);
+
+    if unencodable {
+        errno_set(EILSEQ.raw());
+        return -1;
+    }
+    written as c_int
 }
 
 /// # Safety

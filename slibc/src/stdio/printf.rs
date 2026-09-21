@@ -200,6 +200,10 @@ pub(crate) unsafe fn format_to_cb<F: FnMut(u8)>(
                 length = Length::SizeT;
                 p = p.add(1);
             }
+            b'j' => {
+                length = Length::Long;
+                p = p.add(1);
+            }
             b't' => {
                 length = Length::PtrdiffT;
                 p = p.add(1);
