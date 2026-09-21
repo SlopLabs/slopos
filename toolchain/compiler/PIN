@@ -1,13 +1,40 @@
 # The SlopOS compiler-fork pin.
 #
 # `scripts/make_rustc_src.sh` materialises the pinned rustc source tree with
-# the patch below applied, and `scripts/check_toolchain_pin.sh` fails if any
-# line here stops describing what is on disk.
+# the patches below applied, and `scripts/check_toolchain_pin.sh` fails if
+# any line here stops describing what is on disk.
 #
 # The channel is not repeated here: it lives in `toolchain/PIN`, held equal to
 # `rust-toolchain.toml`, and the source tarball's URL is derived from it. What
-# this file adds is the tarball's checksum and the patch that makes
-# `x86_64-unknown-slopos` a built-in target rather than a JSON file — the one
-# thing bootstrap's `--host` cannot resolve without.
+# this file adds is the tarball's checksum and four patches.
+#
+# 0001 makes `x86_64-unknown-slopos` a built-in target rather than a JSON
+# file — the one thing bootstrap's `--host` cannot resolve without. 0003
+# belongs to the same PR and is separate only because the first bootstrap run
+# is what found it: bootstrap maps a cross target's triple to a
+# `CMAKE_SYSTEM_NAME` by hand, and an unrecognised one falls back to
+# `Generic`, which loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file
+# the LLVM port patches.
+#
+# 0002 gives `build.tool.<name>` a `default-features` key: bootstrap can add
+# features to a tool and had no way to drop one, and dropping cargo's is how
+# a host with no libcurl, libgit2 or OpenSSL gets a cargo at all.
+#
+# The fourth patch is the SlopOS LLVM port a second time, because the port has
+# to exist in two llvm-project trees and they are different versions.
+# `toolchain/llvm/` cuts it against the 18.1.8 release `toolchain/cxx/PIN`
+# names, the tree the C++ runtime is built from; rustc bundles its own LLVM at
+# `src/llvm-project`, currently 23.1.1, and that is the one a cross-hosted
+# compiler's backend is built from. Not one hunk of the 18.1.8 patch applies
+# there — `Triple`'s OS names have moved into a `TripleName.def` table, the
+# clang driver's headers have moved out of `clang/lib/Driver/`, and
+# `Driver::getInstalledDir()` is gone — so
+# `toolchain/llvm-rustc/0001-slopos-support.patch` is that tree's copy. Without
+# it a `--host=x86_64-unknown-slopos` run reaches `llvm::Llvm` and stops in
+# `llvm/ADT/bit.h` looking for `machine/endian.h`, which is the port's first
+# hunk.
 rustc_src_sha256=83e1649371c2b85317974ead0c9786766c090dc1b79afe41c8e7091f009da478
 patch_sha256=toolchain/compiler/0001-slopos-target.patch:46b54ce9070f9508f5feeeebbbef0e801b230db7a3ccfc7463640fa20c3fd35a
+patch_sha256=toolchain/compiler/0002-bootstrap-tool-default-features.patch:982a8055cbd929cdbf4447b56626297c882b60b35965bbd070690413b3350882
+patch_sha256=toolchain/compiler/0003-bootstrap-cmake-system-name.patch:16989f469122ffa26e9a88349756e6ce4dc93c6dec7bbe874e8319a9490971fc
+patch_sha256=toolchain/llvm-rustc/0001-slopos-support.patch:55a65e0363c14759378ffea2135bb7a8ec8aa93234e432909512be18dcecee91

@@ -1,0 +1,1318 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index b0f7315..c4d226f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -163,7 +163,7 @@ anstyle.workspace = true
+ anstyle-progress.workspace = true
+ anyhow.workspace = true
+ async-trait.workspace = true
+-base64.workspace = true
++base64 = { workspace = true, optional = true }
+ blake3.workspace = true
+ cargo-credential.workspace = true
+ cargo-platform.workspace = true
+@@ -174,36 +174,36 @@ clap = { workspace = true, features = ["wrap_help"] }
+ clap_complete.workspace = true
+ color-print.workspace = true
+ crates-io.workspace = true
+-curl = { workspace = true, features = ["http2"] }
+-curl-sys.workspace = true
++curl = { workspace = true, features = ["http2"], optional = true }
++curl-sys = { workspace = true, optional = true }
+ filetime.workspace = true
+ flate2.workspace = true
+ futures.workspace = true
+ futures-timer.workspace = true
+-git2.workspace = true
+-git2-curl.workspace = true
++git2 = { workspace = true, optional = true }
++git2-curl = { workspace = true, optional = true }
+ gix.workspace = true
+ glob.workspace = true
+ heck.workspace = true
+ hex.workspace = true
+-hmac.workspace = true
++hmac = { workspace = true, optional = true }
+ home.workspace = true
+ http.workspace = true
+-http-auth.workspace = true
++http-auth = { workspace = true, optional = true }
+ ignore.workspace = true
+ im-rc.workspace = true
+ indexmap.workspace = true
+ itertools.workspace = true
+ jiff = { workspace = true, features = ["serde", "std"] }
+ jobserver.workspace = true
+-libgit2-sys.workspace = true
++libgit2-sys = { workspace = true, optional = true }
+ memchr.workspace = true
+ opener.workspace = true
+ os_info.workspace = true
+ pasetors.workspace = true
+ pathdiff.workspace = true
+ portable-atomic.workspace = true
+-rand.workspace = true
++rand = { workspace = true, optional = true }
+ regex.workspace = true
+ rusqlite = { workspace = true, features = ["fallible_uint"] }
+ rustc-hash.workspace = true
+@@ -215,7 +215,7 @@ serde = { workspace = true, features = ["derive"] }
+ serde-untagged.workspace = true
+ serde_ignored.workspace = true
+ serde_json = { workspace = true, features = ["raw_value"] }
+-sha1.workspace = true
++sha1 = { workspace = true, optional = true }
+ shell-escape.workspace = true
+ tar.workspace = true
+ tempfile.workspace = true
+@@ -286,15 +286,32 @@ test = false
+ doc = false
+ 
+ [features]
+-default = ["http-transport-curl"]
+-vendored-openssl = ["openssl/vendored"]
+-vendored-libgit2 = ["libgit2-sys/vendored"]
++default = ["network", "http-transport-curl"]
++# Talking to a registry or a git remote. Off, cargo resolves only the sources
++# that are already on the filesystem -- path, directory and local-registry --
++# which is what a vendored workspace build uses and all a platform without
++# curl, libgit2 and OpenSSL can offer.
++network = [
++  "dep:base64",
++  "dep:curl",
++  "dep:curl-sys",
++  "dep:git2",
++  "dep:git2-curl",
++  "dep:hmac",
++  "dep:http-auth",
++  "dep:libgit2-sys",
++  "dep:rand",
++  "dep:sha1",
++]
++vendored-openssl = ["network", "openssl/vendored"]
++vendored-libgit2 = ["network", "libgit2-sys/vendored"]
+ # This is primarily used by rust-lang/rust distributing cargo the executable.
+-all-static = ['vendored-openssl', 'curl/static-curl', 'curl/force-system-lib-on-osx', 'vendored-libgit2']
++all-static = ['network', 'vendored-openssl', 'curl/static-curl', 'curl/force-system-lib-on-osx', 'vendored-libgit2']
+ # Exactly one of 'http-transport-curl' or 'http-transport-reqwest' must be enabled
+-# when using Cargo as a library. By default, it is 'http-transport-curl'.
+-http-transport-curl = ["gix/blocking-http-transport-curl"]
+-http-transport-reqwest = ["gix/blocking-http-transport-reqwest"]
++# when using Cargo as a library with 'network'. By default, it is
++# 'http-transport-curl'.
++http-transport-curl = ["network", "gix/blocking-http-transport-curl"]
++http-transport-reqwest = ["network", "gix/blocking-http-transport-reqwest"]
+ 
+ [lints]
+ workspace = true
+diff --git a/src/bin/cargo/cli.rs b/src/bin/cargo/cli.rs
+index b6039f4..dd5ced1 100644
+--- a/src/bin/cargo/cli.rs
++++ b/src/bin/cargo/cli.rs
+@@ -214,7 +214,9 @@ pub fn get_version_string(is_verbose: bool) -> String {
+             version_string.push_str(&format!("commit-date: {}\n", ci.commit_date));
+         }
+         writeln!(version_string, "host: {}", env!("RUST_HOST_TARGET")).unwrap();
++        #[cfg(feature = "network")]
+         add_libgit2(&mut version_string);
++        #[cfg(feature = "network")]
+         add_curl(&mut version_string);
+         add_ssl(&mut version_string);
+         writeln!(version_string, "os: {}", os_info::get()).unwrap();
+@@ -222,6 +224,7 @@ pub fn get_version_string(is_verbose: bool) -> String {
+     version_string
+ }
+ 
++#[cfg(feature = "network")]
+ fn add_libgit2(version_string: &mut String) {
+     let git2_v = git2::Version::get();
+     let lib_v = git2_v.libgit2_version();
+@@ -242,6 +245,7 @@ fn add_libgit2(version_string: &mut String) {
+     .unwrap();
+ }
+ 
++#[cfg(feature = "network")]
+ fn add_curl(version_string: &mut String) {
+     let curl_v = curl::Version::get();
+     let vendored = if curl_v.vendored() {
+diff --git a/src/bin/cargo/commands/mod.rs b/src/bin/cargo/commands/mod.rs
+index b507226..cdaee4d 100644
+--- a/src/bin/cargo/commands/mod.rs
++++ b/src/bin/cargo/commands/mod.rs
+@@ -14,17 +14,22 @@ pub fn builtin() -> Vec<Command> {
+         generate_lockfile::cli(),
+         git_checkout::cli(),
+         help::cli(),
++        #[cfg(feature = "network")]
+         info::cli(),
+         init::cli(),
+         install::cli(),
+         locate_project::cli(),
++        #[cfg(feature = "network")]
+         login::cli(),
++        #[cfg(feature = "network")]
+         logout::cli(),
+         metadata::cli(),
+         new::cli(),
++        #[cfg(feature = "network")]
+         owner::cli(),
+         package::cli(),
+         pkgid::cli(),
++        #[cfg(feature = "network")]
+         publish::cli(),
+         read_manifest::cli(),
+         remove::cli(),
+@@ -32,6 +37,7 @@ pub fn builtin() -> Vec<Command> {
+         run::cli(),
+         rustc::cli(),
+         rustdoc::cli(),
++        #[cfg(feature = "network")]
+         search::cli(),
+         test::cli(),
+         tree::cli(),
+@@ -40,6 +46,7 @@ pub fn builtin() -> Vec<Command> {
+         vendor::cli(),
+         verify_project::cli(),
+         version::cli(),
++        #[cfg(feature = "network")]
+         yank::cli(),
+     ]
+ }
+@@ -60,17 +67,22 @@ pub fn builtin_exec(cmd: &str) -> Option<Exec> {
+         "generate-lockfile" => generate_lockfile::exec,
+         "git-checkout" => git_checkout::exec,
+         "help" => help::exec,
++        #[cfg(feature = "network")]
+         "info" => info::exec,
+         "init" => init::exec,
+         "install" => install::exec,
+         "locate-project" => locate_project::exec,
++        #[cfg(feature = "network")]
+         "login" => login::exec,
++        #[cfg(feature = "network")]
+         "logout" => logout::exec,
+         "metadata" => metadata::exec,
+         "new" => new::exec,
++        #[cfg(feature = "network")]
+         "owner" => owner::exec,
+         "package" => package::exec,
+         "pkgid" => pkgid::exec,
++        #[cfg(feature = "network")]
+         "publish" => publish::exec,
+         "read-manifest" => read_manifest::exec,
+         "remove" => remove::exec,
+@@ -78,6 +90,7 @@ pub fn builtin_exec(cmd: &str) -> Option<Exec> {
+         "run" => run::exec,
+         "rustc" => rustc::exec,
+         "rustdoc" => rustdoc::exec,
++        #[cfg(feature = "network")]
+         "search" => search::exec,
+         "test" => test::exec,
+         "tree" => tree::exec,
+@@ -86,6 +99,7 @@ pub fn builtin_exec(cmd: &str) -> Option<Exec> {
+         "vendor" => vendor::exec,
+         "verify-project" => verify_project::exec,
+         "version" => version::exec,
++        #[cfg(feature = "network")]
+         "yank" => yank::exec,
+         _ => return None,
+     };
+@@ -104,17 +118,22 @@ pub mod fix;
+ pub mod generate_lockfile;
+ pub mod git_checkout;
+ pub mod help;
++#[cfg(feature = "network")]
+ pub mod info;
+ pub mod init;
+ pub mod install;
+ pub mod locate_project;
++#[cfg(feature = "network")]
+ pub mod login;
++#[cfg(feature = "network")]
+ pub mod logout;
+ pub mod metadata;
+ pub mod new;
++#[cfg(feature = "network")]
+ pub mod owner;
+ pub mod package;
+ pub mod pkgid;
++#[cfg(feature = "network")]
+ pub mod publish;
+ pub mod read_manifest;
+ pub mod remove;
+@@ -122,6 +141,7 @@ pub mod report;
+ pub mod run;
+ pub mod rustc;
+ pub mod rustdoc;
++#[cfg(feature = "network")]
+ pub mod search;
+ pub mod test;
+ pub mod tree;
+@@ -130,4 +150,5 @@ pub mod update;
+ pub mod vendor;
+ pub mod verify_project;
+ pub mod version;
++#[cfg(feature = "network")]
+ pub mod yank;
+diff --git a/src/bin/cargo/main.rs b/src/bin/cargo/main.rs
+index 748b74b..62114a9 100644
+--- a/src/bin/cargo/main.rs
++++ b/src/bin/cargo/main.rs
+@@ -386,6 +386,7 @@ fn init_git() {
+     // validation in their code. This is inconvenient, but won't accidentally open consuming
+     // applications up to security issues if they use git2 to open repositories elsewhere in their
+     // code.
++    #[cfg(feature = "network")]
+     unsafe {
+         git2::opts::set_verify_owner_validation(false)
+             .expect("set_verify_owner_validation should never fail");
+diff --git a/src/context/mod.rs b/src/context/mod.rs
+index e33ecf3..74990d7 100644
+--- a/src/context/mod.rs
++++ b/src/context/mod.rs
+@@ -83,7 +83,9 @@ use crate::sources::CRATES_IO_REGISTRY;
+ use crate::util::OnceExt as _;
+ use crate::util::cache_lock::{CacheLock, CacheLockMode, CacheLocker};
+ use crate::util::errors::CargoResult;
++#[cfg(feature = "network")]
+ use crate::util::network::http::{HandleConfiguration, configure_http_handle, http_handle};
++#[cfg(feature = "network")]
+ use crate::util::network::http_async;
+ use crate::util::restricted_names::is_glob_pattern;
+ use crate::util::{CanonicalUrl, closest_msg, internal};
+@@ -97,6 +99,7 @@ use cargo_util::paths;
+ use cargo_util_schemas::manifest::RegistryName;
+ use cargo_util_terminal::report::Level;
+ use cargo_util_terminal::{Shell, Verbosity};
++#[cfg(feature = "network")]
+ use curl::easy::Easy;
+ use itertools::Itertools;
+ use serde::Deserialize;
+@@ -242,6 +245,7 @@ pub struct GlobalContext {
+     unstable_flags: CliUnstable,
+     /// Cli flags of the form "-Z something"
+     unstable_flags_cli: Option<Vec<String>>,
++#[cfg(feature = "network")]
+     /// A handle on curl easy mode for http calls
+     easy: OnceLock<Mutex<Easy>>,
+     /// Cache of the `SourceId` for crates.io
+@@ -269,6 +273,7 @@ pub struct GlobalContext {
+     package_cache_lock: CacheLocker,
+     /// Cached configuration parsed by Cargo
+     http_config: OnceLock<CargoHttpConfig>,
++#[cfg(feature = "network")]
+     http_async: OnceLock<http_async::Client>,
+     future_incompat_config: OnceLock<CargoFutureIncompatConfig>,
+     net_config: OnceLock<CargoNetConfig>,
+@@ -386,6 +391,7 @@ impl GlobalContext {
+             jobserver,
+             unstable_flags: CliUnstable::default(),
+             unstable_flags_cli: None,
++            #[cfg(feature = "network")]
+             easy: Default::default(),
+             crates_io_source_id: Default::default(),
+             cache_rustc_info,
+@@ -398,6 +404,7 @@ impl GlobalContext {
+             registry_config: Default::default(),
+             package_cache_lock: CacheLocker::new(),
+             http_config: Default::default(),
++            #[cfg(feature = "network")]
+             http_async: Default::default(),
+             future_incompat_config: Default::default(),
+             net_config: Default::default(),
+@@ -1918,6 +1925,7 @@ impl GlobalContext {
+         self.jobserver
+     }
+ 
++#[cfg(feature = "network")]
+     pub fn http(&self) -> CargoResult<&Mutex<Easy>> {
+         let http = self
+             .easy
+@@ -1931,6 +1939,7 @@ impl GlobalContext {
+         Ok(http)
+     }
+ 
++#[cfg(feature = "network")]
+     pub fn http_async(&self) -> CargoResult<&http_async::Client> {
+         self.http_async.try_borrow_with(|| {
+             let handle_config = HandleConfiguration::new(&self)?;
+@@ -1940,9 +1949,10 @@ impl GlobalContext {
+ 
+     pub fn http_config(&self) -> CargoResult<&CargoHttpConfig> {
+         self.http_config.try_borrow_with(|| {
++            #[cfg_attr(not(feature = "network"), allow(unused_mut))]
+             let mut http = self.get::<CargoHttpConfig>("http")?;
+-            let curl_v = curl::Version::get();
+-            disables_multiplexing_for_bad_curl(curl_v.version(), &mut http, self);
++            #[cfg(feature = "network")]
++            disables_multiplexing_for_bad_curl(curl::Version::get().version(), &mut http, self);
+             Ok(http)
+         })
+     }
+@@ -2563,6 +2573,7 @@ impl Tool {
+ /// However, Cargo can still link against old system libcurl if it is from a
+ /// custom built one or on macOS. For those cases, multiplexing needs to be
+ /// disabled when those versions are detected.
++#[cfg(feature = "network")]
+ fn disables_multiplexing_for_bad_curl(
+     curl_version: &str,
+     http: &mut CargoHttpConfig,
+diff --git a/src/ops/cargo_add/mod.rs b/src/ops/cargo_add/mod.rs
+index c31bb9e..3b8c3d8 100644
+--- a/src/ops/cargo_add/mod.rs
++++ b/src/ops/cargo_add/mod.rs
+@@ -381,10 +381,15 @@ fn resolve_dependency(
+             }
+             selected
+         } else {
+-            let source = crate::sources::GitSource::new(src.source_id()?, gctx)?;
+-            let packages = source.read_packages()?;
+-            let package = infer_package_for_git_source(packages, &src)?;
+-            Dependency::from(package.summary())
++            #[cfg(not(feature = "network"))]
++            return Err(crate::util::errors::no_network(format_args!("git source `{url}`")).into());
++            #[cfg(feature = "network")]
++            {
++                let source = crate::sources::GitSource::new(src.source_id()?, gctx)?;
++                let packages = source.read_packages()?;
++                let package = infer_package_for_git_source(packages, &src)?;
++                Dependency::from(package.summary())
++            }
+         };
+         selected
+     } else if let Some(raw_path) = &arg.path {
+@@ -1054,6 +1059,7 @@ fn select_package(
+     }
+ }
+ 
++#[cfg(feature = "network")]
+ fn infer_package_for_git_source(
+     mut packages: Vec<Package>,
+     src: &dyn std::fmt::Display,
+diff --git a/src/ops/cargo_fix/mod.rs b/src/ops/cargo_fix/mod.rs
+index 90aeb7a..9a3414d 100644
+--- a/src/ops/cargo_fix/mod.rs
++++ b/src/ops/cargo_fix/mod.rs
+@@ -236,8 +236,11 @@ fn check_version_control(gctx: &GlobalContext, opts: &FixOptions) -> CargoResult
+         return Ok(());
+     }
+ 
+-    let mut dirty_files = Vec::new();
+-    let mut staged_files = Vec::new();
++    #[cfg_attr(not(feature = "network"), allow(unused_mut))]
++    let mut dirty_files: Vec<String> = Vec::new();
++    #[cfg_attr(not(feature = "network"), allow(unused_mut))]
++    let mut staged_files: Vec<String> = Vec::new();
++    #[cfg(feature = "network")]
+     if let Ok(repo) = git2::Repository::discover(gctx.cwd()) {
+         let mut repo_opts = git2::StatusOptions::new();
+         repo_opts.include_ignored(false);
+diff --git a/src/ops/cargo_install.rs b/src/ops/cargo_install.rs
+index 7be6b98..29b92ac 100644
+--- a/src/ops/cargo_install.rs
++++ b/src/ops/cargo_install.rs
+@@ -10,7 +10,9 @@ use crate::context::FeatureUnification;
+ use crate::ops::{CompileFilter, Packages};
+ use crate::ops::{FilterRule, common_for_install_and_uninstall::*};
+ use crate::sources::source::Source;
+-use crate::sources::{GitSource, PathSource, SourceConfigMap};
++use crate::sources::{PathSource, SourceConfigMap};
++#[cfg(feature = "network")]
++use crate::sources::GitSource;
+ use crate::util::errors::CargoResult;
+ use crate::util::{Filesystem, GlobalContext, Rustc};
+ use crate::workspace::{Dependency, Edition, Package, PackageId, SourceId, Target, Workspace};
+@@ -139,14 +141,19 @@ impl<'gctx> InstallablePackage<'gctx> {
+             };
+ 
+             if source_id.is_git() {
+-                let mut source = GitSource::new(source_id, gctx)?;
+-                select_pkg(
+-                    &mut source,
+-                    dep,
+-                    |git: &mut GitSource<'_>| git.read_packages(),
+-                    gctx,
+-                    current_rust_version,
+-                )?
++                #[cfg(not(feature = "network"))]
++                return Err(crate::util::errors::no_network(format_args!("{source_id}")).into());
++                #[cfg(feature = "network")]
++                {
++                    let mut source = GitSource::new(source_id, gctx)?;
++                    select_pkg(
++                        &mut source,
++                        dep,
++                        |git: &mut GitSource<'_>| git.read_packages(),
++                        gctx,
++                        current_rust_version,
++                    )?
++                }
+             } else if source_id.is_path() {
+                 let mut src = path_source(source_id, gctx)?;
+                 if !src.path().is_dir() {
+diff --git a/src/ops/cargo_new.rs b/src/ops/cargo_new.rs
+index 0d15f08..28e5d7a 100644
+--- a/src/ops/cargo_new.rs
++++ b/src/ops/cargo_new.rs
+@@ -1,6 +1,8 @@
+ use crate::util::errors::CargoResult;
+ use crate::util::important_paths::find_root_manifest_for_wd;
+-use crate::util::{FossilRepo, GitRepo, HgRepo, PijulRepo, existing_vcs_repo};
++use crate::util::{FossilRepo, HgRepo, PijulRepo, existing_vcs_repo};
++#[cfg(feature = "network")]
++use crate::util::GitRepo;
+ use crate::util::{GlobalContext, restricted_names};
+ use crate::workspace::{Edition, Workspace};
+ use anyhow::{Context as _, anyhow};
+@@ -746,7 +748,13 @@ fn init_vcs(path: &Path, vcs: VersionControl, gctx: &GlobalContext) -> CargoResu
+                 // directory in the root of a posix filesystem.
+                 // See: https://github.com/libgit2/libgit2/issues/5130
+                 paths::create_dir_all(path)?;
++                #[cfg(feature = "network")]
+                 GitRepo::init(path, gctx.cwd())?;
++                #[cfg(not(feature = "network"))]
++                anyhow::bail!(
++                    "cannot initialise a git repository: this cargo was built \
++                     without the `network` feature"
++                );
+             }
+         }
+         VersionControl::Hg => {
+diff --git a/src/ops/cargo_package/mod.rs b/src/ops/cargo_package/mod.rs
+index ed47e1e..7b82984 100644
+--- a/src/ops/cargo_package/mod.rs
++++ b/src/ops/cargo_package/mod.rs
+@@ -239,6 +239,7 @@ pub fn package(ws: &Workspace<'_>, opts: &PackageOpts<'_>) -> CargoResult<Vec<Fi
+ /// Returns the generated package files and the dependencies between them. If
+ /// `opts.list` is true, skips generating package files and returns an empty
+ /// list.
++#[cfg(feature = "network")]
+ pub(crate) fn package_with_dep_graph(
+     ws: &Workspace<'_>,
+     opts: &PackageOpts<'_>,
+diff --git a/src/ops/cargo_vendor.rs b/src/ops/cargo_vendor.rs
+index 9cd5d7a..3b91d31 100644
+--- a/src/ops/cargo_vendor.rs
++++ b/src/ops/cargo_vendor.rs
+@@ -245,9 +245,14 @@ fn sync(
+             // To keep the unpacked source from registry in a pristine state,
+             // we'll do a direct extraction into the vendor directory.
+             let registry = match sid.kind() {
++                #[cfg(feature = "network")]
+                 SourceKind::Registry | SourceKind::SparseRegistry => {
+                     RegistrySource::remote(sid, gctx)?
+                 }
++                #[cfg(not(feature = "network"))]
++                SourceKind::Registry | SourceKind::SparseRegistry => {
++                    return Err(crate::util::errors::no_network(format_args!("{sid}")));
++                }
+                 SourceKind::LocalRegistry => {
+                     let path = sid.url().to_file_path().expect("local path");
+                     RegistrySource::local(sid, &path, gctx)
+diff --git a/src/ops/mod.rs b/src/ops/mod.rs
+index b39c033..923c2f8 100644
+--- a/src/ops/mod.rs
++++ b/src/ops/mod.rs
+@@ -36,16 +36,25 @@ pub use self::cargo_update::update_lockfile;
+ pub use self::cargo_vendor::{VendorOptions, vendor};
+ pub use self::common_for_install_and_uninstall::{InstallTracker, resolve_root};
+ pub use self::lockfile::{load_pkg_lockfile, resolve_to_string, write_pkg_lockfile};
++#[cfg(feature = "network")]
+ pub use self::registry::OwnersOptions;
++#[cfg(feature = "network")]
+ pub use self::registry::PublishOpts;
+ pub use self::registry::RegistryCredentialConfig;
+ pub use self::registry::RegistryOrIndex;
++#[cfg(feature = "network")]
+ pub use self::registry::info;
++#[cfg(feature = "network")]
+ pub use self::registry::modify_owners;
++#[cfg(feature = "network")]
+ pub use self::registry::publish;
++#[cfg(feature = "network")]
+ pub use self::registry::registry_login;
++#[cfg(feature = "network")]
+ pub use self::registry::registry_logout;
++#[cfg(feature = "network")]
+ pub use self::registry::search;
++#[cfg(feature = "network")]
+ pub use self::registry::yank;
+ pub use self::resolve::{
+     WorkspaceResolve, add_overrides, get_resolved_packages, resolve_with_previous, resolve_ws,
+diff --git a/src/ops/registry/cargo_publish.rs b/src/ops/registry/cargo_publish.rs
+index 46e20e3..eb82def 100644
+--- a/src/ops/registry/cargo_publish.rs
++++ b/src/ops/registry/cargo_publish.rs
+@@ -2,50 +2,84 @@
+ //!
+ //! [1]: https://doc.rust-lang.org/nightly/cargo/reference/registry-web-api.html#publish
+ 
++#[cfg(feature = "network")]
+ use crate::util::data_structures::HashMap;
+ use std::collections::BTreeMap;
++#[cfg(feature = "network")]
+ use std::collections::BTreeSet;
++#[cfg(feature = "network")]
+ use std::fs::File;
++#[cfg(feature = "network")]
+ use std::io::Seek;
++#[cfg(feature = "network")]
+ use std::io::SeekFrom;
++#[cfg(feature = "network")]
+ use std::time::Duration;
+ 
+ use anyhow::Context as _;
+ use anyhow::bail;
++#[cfg(feature = "network")]
+ use cargo_credential::Operation;
++#[cfg(feature = "network")]
+ use cargo_credential::Secret;
+ use cargo_util::paths;
++#[cfg(feature = "network")]
+ use cargo_util_terminal::report::Level;
+ use crates_io::NewCrate;
+ use crates_io::NewCrateDependency;
++#[cfg(feature = "network")]
+ use crates_io::Registry;
++#[cfg(feature = "network")]
+ use itertools::Itertools;
+ 
+ use crate::CargoResult;
+ use crate::GlobalContext;
++#[cfg(feature = "network")]
+ use crate::context::JobsConfig;
++#[cfg(feature = "network")]
+ use crate::ops;
++#[cfg(feature = "network")]
+ use crate::ops::PackageOpts;
++#[cfg(feature = "network")]
+ use crate::ops::Packages;
++#[cfg(feature = "network")]
+ use crate::ops::RegistryOrIndex;
++#[cfg(feature = "network")]
+ use crate::ops::registry::RegistryClient;
++#[cfg(feature = "network")]
+ use crate::ops::registry::RegistrySourceIds;
++#[cfg(feature = "network")]
+ use crate::resolver::CliFeatures;
++#[cfg(feature = "network")]
+ use crate::sources::CRATES_IO_REGISTRY;
++#[cfg(feature = "network")]
+ use crate::sources::RegistrySource;
++#[cfg(feature = "network")]
+ use crate::sources::SourceConfigMap;
++#[cfg(feature = "network")]
+ use crate::sources::source::QueryKind;
++#[cfg(feature = "network")]
+ use crate::sources::source::Source;
++#[cfg(feature = "network")]
+ use crate::util::Graph;
++#[cfg(feature = "network")]
+ use crate::util::Progress;
++#[cfg(feature = "network")]
+ use crate::util::ProgressStyle;
++#[cfg(feature = "network")]
+ use crate::util::VersionExt as _;
++#[cfg(feature = "network")]
+ use crate::util::auth;
++#[cfg(feature = "network")]
+ use crate::util::cache_lock::CacheLockMode;
++#[cfg(feature = "network")]
+ use crate::util::errors::ManifestError;
++#[cfg(feature = "network")]
+ use crate::workspace::Dependency;
+ use crate::workspace::Package;
++#[cfg(feature = "network")]
+ use crate::workspace::PackageId;
++#[cfg(feature = "network")]
+ use crate::workspace::PackageIdSpecQuery;
+ use crate::workspace::SourceId;
+ use crate::workspace::Workspace;
+@@ -53,8 +87,10 @@ use crate::workspace::dependency::DepKind;
+ use crate::workspace::manifest::ManifestMetadata;
+ use crate::workspace::parser::prepare_for_publish;
+ 
++#[cfg(feature = "network")]
+ use super::super::check_dep_has_version;
+ 
++#[cfg(feature = "network")]
+ pub struct PublishOpts<'gctx> {
+     pub gctx: &'gctx GlobalContext,
+     pub token: Option<Secret<String>>,
+@@ -69,6 +105,7 @@ pub struct PublishOpts<'gctx> {
+     pub cli_features: CliFeatures,
+ }
+ 
++#[cfg(feature = "network")]
+ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
+     let specs = opts.to_publish.to_package_id_specs(ws)?;
+ 
+@@ -382,6 +419,7 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
+ ///
+ /// Returns the subset of `pkgs` that are ready for use.
+ /// This will be an empty set if we timed out before confirming anything.
++#[cfg(feature = "network")]
+ fn wait_for_any_publish_confirmation(
+     gctx: &GlobalContext,
+     registry_src: SourceId,
+@@ -435,6 +473,7 @@ fn wait_for_any_publish_confirmation(
+     Ok(available)
+ }
+ 
++#[cfg(feature = "network")]
+ fn poll_one_package(
+     registry_src: SourceId,
+     pkg_id: &PackageId,
+@@ -447,6 +486,7 @@ fn poll_one_package(
+     Ok(!summaries.is_empty())
+ }
+ 
++#[cfg(feature = "network")]
+ fn verify_unpublished(
+     pkg: &Package,
+     source: &mut RegistrySource<'_>,
+@@ -484,6 +524,7 @@ fn verify_unpublished(
+     Ok(())
+ }
+ 
++#[cfg(feature = "network")]
+ fn verify_dependencies(
+     pkg: &Package,
+     registry: &Registry<RegistryClient<'_>>,
+@@ -646,6 +687,7 @@ pub(crate) fn prepare_transmit(
+     })
+ }
+ 
++#[cfg(feature = "network")]
+ fn transmit(
+     gctx: &GlobalContext,
+     ws: &Workspace<'_>,
+@@ -720,6 +762,7 @@ fn transmit(
+ }
+ 
+ /// State for tracking dependencies during upload.
++#[cfg(feature = "network")]
+ struct PublishPlan {
+     /// Graph of publishable packages where the edges are `(dependency -> dependent)`
+     dependents: Graph<PackageId, ()>,
+@@ -729,6 +772,7 @@ struct PublishPlan {
+     dependencies_count: HashMap<PackageId, usize>,
+ }
+ 
++#[cfg(feature = "network")]
+ impl PublishPlan {
+     /// Given a package dependency graph, creates a `PublishPlan` for tracking state.
+     fn new(graph: &Graph<PackageId, ()>) -> Self {
+@@ -818,6 +862,7 @@ impl PublishPlan {
+ /// e.g. "foo v0.1.0, bar v0.2.0, and baz v0.3.0".
+ ///
+ /// Note: the final separator (e.g. "and" in the previous example) can be chosen.
++#[cfg(feature = "network")]
+ fn package_list(pkgs: impl IntoIterator<Item = PackageId>, final_sep: &str) -> String {
+     let mut names: Vec<_> = pkgs
+         .into_iter()
+@@ -835,6 +880,7 @@ fn package_list(pkgs: impl IntoIterator<Item = PackageId>, final_sep: &str) -> S
+     }
+ }
+ 
++#[cfg(feature = "network")]
+ fn resolve_registry_or_index(
+     opts: &PublishOpts<'_>,
+     just_pkgs: &[&Package],
+@@ -875,6 +921,7 @@ help: use `--registry` instead or set `publish = true` in Cargo.toml to suppress
+     Ok(res)
+ }
+ 
++#[cfg(feature = "network")]
+ fn validate_registry(pkgs: &[&Package], reg_or_index: Option<&RegistryOrIndex>) -> CargoResult<()> {
+     let reg_name = match reg_or_index {
+         Some(RegistryOrIndex::Registry(r)) => Some(r.as_str()),
+diff --git a/src/ops/registry/mod.rs b/src/ops/registry/mod.rs
+index 525280e..5b1aae5 100644
+--- a/src/ops/registry/mod.rs
++++ b/src/ops/registry/mod.rs
+@@ -2,39 +2,67 @@
+ //!
+ //! [1]: https://doc.rust-lang.org/nightly/cargo/reference/registry-web-api.html
+ 
++#[cfg(feature = "network")]
+ mod cargo_info;
++#[cfg(feature = "network")]
+ mod cargo_login;
++#[cfg(feature = "network")]
+ mod cargo_logout;
++#[cfg(feature = "network")]
+ mod cargo_owner;
+ mod cargo_publish;
++#[cfg(feature = "network")]
+ mod cargo_search;
++#[cfg(feature = "network")]
+ mod cargo_yank;
+ 
+ use crate::util::data_structures::HashSet;
+ use std::str;
+ 
+-use anyhow::{Context as _, bail, format_err};
+-use cargo_credential::{Operation, Secret};
++use anyhow::bail;
++#[cfg(feature = "network")]
++use anyhow::{Context as _, format_err};
++use cargo_credential::Secret;
++#[cfg(feature = "network")]
++use cargo_credential::Operation;
++#[cfg(feature = "network")]
+ use crates_io::Registry;
+ use url::Url;
+ 
+ use crate::context::{GlobalContext, PathAndArgs};
++#[cfg(feature = "network")]
+ use crate::sources::source::Source;
+-use crate::sources::{RegistrySource, SourceConfigMap};
++use crate::sources::SourceConfigMap;
++#[cfg(feature = "network")]
++use crate::sources::RegistrySource;
++#[cfg(feature = "network")]
+ use crate::util::auth;
++#[cfg(feature = "network")]
+ use crate::util::cache_lock::CacheLockMode;
+ use crate::util::errors::CargoResult;
++#[cfg(feature = "network")]
+ use crate::util::network::http_async;
+-use crate::workspace::{Package, PackageId, SourceId};
++use crate::workspace::{Package, SourceId};
++#[cfg(feature = "network")]
++use crate::workspace::PackageId;
+ 
++#[cfg(feature = "network")]
+ pub use self::cargo_info::info;
++#[cfg(feature = "network")]
+ pub use self::cargo_login::registry_login;
++#[cfg(feature = "network")]
+ pub use self::cargo_logout::registry_logout;
++#[cfg(feature = "network")]
+ pub use self::cargo_owner::OwnersOptions;
++#[cfg(feature = "network")]
+ pub use self::cargo_owner::modify_owners;
++#[cfg(feature = "network")]
+ pub use self::cargo_publish::PublishOpts;
++#[cfg(feature = "network")]
+ pub use self::cargo_publish::publish;
++#[cfg(feature = "network")]
+ pub use self::cargo_search::search;
++#[cfg(feature = "network")]
+ pub use self::cargo_yank::yank;
+ 
+ pub(crate) use self::cargo_publish::prepare_transmit;
+@@ -47,6 +75,7 @@ pub enum RegistryOrIndex {
+ }
+ 
+ impl RegistryOrIndex {
++    #[cfg(feature = "network")]
+     fn is_index(&self) -> bool {
+         matches!(self, RegistryOrIndex::Index(..))
+     }
+@@ -119,6 +148,7 @@ impl RegistryCredentialConfig {
+ ///   `registry`, or `index` are set, then uses `crates-io`.
+ /// * `force_update`: If `true`, forces the index to be updated.
+ /// * `token_required`: If `true`, the token will be set.
++#[cfg(feature = "network")]
+ fn registry<'gctx>(
+     gctx: &'gctx GlobalContext,
+     source_ids: &RegistrySourceIds,
+@@ -193,6 +223,7 @@ pub(crate) fn get_source_id(
+         bail!(gen_replacement_error(replacement_sid));
+     } else {
+         Ok(RegistrySourceIds {
++            #[cfg(feature = "network")]
+             original: sid,
+             replacement: builtin_replacement_sid,
+         })
+@@ -200,6 +231,7 @@ pub(crate) fn get_source_id(
+ }
+ 
+ /// Very similar to [`get_source_id`], but is used when the `package_id` is known.
++#[cfg(feature = "network")]
+ fn get_source_id_with_package_id(
+     gctx: &GlobalContext,
+     package_id: Option<PackageId>,
+@@ -271,6 +303,7 @@ fn get_replacement_source_ids(
+     Ok((builtin_replacement_sid, replacement_sid))
+ }
+ 
++#[cfg(feature = "network")]
+ fn is_replacement_for_package_source(
+     gctx: &GlobalContext,
+     sid: SourceId,
+@@ -301,6 +334,7 @@ fn gen_replacement_error(replacement_sid: SourceId) -> String {
+ 
+ pub(crate) struct RegistrySourceIds {
+     /// Use when looking up the auth token, or writing out `Cargo.lock`
++    #[cfg(feature = "network")]
+     pub(crate) original: SourceId,
+     /// Use when interacting with the source (querying / publishing , etc)
+     ///
+@@ -361,8 +395,10 @@ pub(crate) fn infer_registry(pkgs: &[&Package]) -> CargoResult<Option<RegistryOr
+     }
+ }
+ 
++#[cfg(feature = "network")]
+ struct RegistryClient<'gctx>(&'gctx http_async::Client);
+ 
++#[cfg(feature = "network")]
+ impl<'gctx> crates_io::HttpClient for RegistryClient<'gctx> {
+     type Error = http_async::Error;
+ 
+diff --git a/src/sources/mod.rs b/src/sources/mod.rs
+index 5d92c92..e1fa4a3 100644
+--- a/src/sources/mod.rs
++++ b/src/sources/mod.rs
+@@ -28,6 +28,7 @@
+ 
+ pub use self::config::SourceConfigMap;
+ pub use self::directory::DirectorySource;
++#[cfg(feature = "network")]
+ pub use self::git::GitSource;
+ pub use self::path::PathEntry;
+ pub use self::path::PathSource;
+@@ -39,9 +40,12 @@ pub use self::replaced::ReplacedSource;
+ 
+ pub mod config;
+ pub mod directory;
++#[cfg(feature = "network")]
+ pub mod git;
+ pub mod overlay;
+ pub mod path;
+ pub mod registry;
+ pub mod replaced;
+ pub mod source;
++#[cfg(not(feature = "network"))]
++pub mod unavailable;
+diff --git a/src/sources/registry/mod.rs b/src/sources/registry/mod.rs
+index 4394af7..ad1eb20 100644
+--- a/src/sources/registry/mod.rs
++++ b/src/sources/registry/mod.rs
+@@ -397,10 +397,13 @@ pub enum MaybeLock {
+     },
+ }
+ 
++#[cfg(feature = "network")]
+ mod download;
++#[cfg(feature = "network")]
+ mod http_remote;
+ pub(crate) mod index;
+ pub use index::IndexSummary;
++#[cfg(feature = "network")]
+ mod git_remote;
+ mod local;
+ 
+@@ -425,6 +428,7 @@ impl<'gctx> RegistrySource<'gctx> {
+     /// Creates a [`Source`] of a "remote" registry.
+     /// It could be either an HTTP-based [`http_remote::HttpRegistry`] or
+     /// a Git-based [`git_remote::GitRegistry`].
++#[cfg(feature = "network")]
+     pub fn remote(
+         source_id: SourceId,
+         gctx: &'gctx GlobalContext,
+diff --git a/src/sources/unavailable.rs b/src/sources/unavailable.rs
+new file mode 100644
+index 0000000..08acf23
+--- /dev/null
++++ b/src/sources/unavailable.rs
+@@ -0,0 +1,88 @@
++//! A [`Source`] for a [`SourceId`] this build of cargo cannot reach.
++//!
++//! Without the `network` feature there is no registry client and no git
++//! implementation, but a replaced source is still *loaded*: source replacement
++//! asks the original whether it checksums and whether it needs a precise
++//! version before wrapping the replacement. Those two answers are constants of
++//! the source kind, so a vendored build is served by a source that answers
++//! them and refuses everything else.
++
++use crate::sources::source::MaybePackage;
++use crate::sources::source::QueryKind;
++use crate::sources::source::Source;
++use crate::sources::IndexSummary;
++use crate::util::CargoResult;
++use crate::util::errors::no_network;
++use crate::workspace::{Dependency, Package, PackageId, SourceId};
++
++pub struct UnavailableSource {
++    source_id: SourceId,
++    supports_checksums: bool,
++    requires_precise: bool,
++}
++
++impl UnavailableSource {
++    pub fn registry(source_id: SourceId) -> UnavailableSource {
++        UnavailableSource {
++            source_id,
++            supports_checksums: true,
++            requires_precise: false,
++        }
++    }
++
++    pub fn git(source_id: SourceId) -> UnavailableSource {
++        UnavailableSource {
++            source_id,
++            supports_checksums: false,
++            requires_precise: true,
++        }
++    }
++
++    fn refuse<T>(&self) -> CargoResult<T> {
++        Err(no_network(format_args!("{}", self.source_id)))
++    }
++}
++
++#[async_trait::async_trait(?Send)]
++impl Source for UnavailableSource {
++    fn source_id(&self) -> SourceId {
++        self.source_id
++    }
++
++    fn supports_checksums(&self) -> bool {
++        self.supports_checksums
++    }
++
++    fn requires_precise(&self) -> bool {
++        self.requires_precise
++    }
++
++    async fn query(
++        &self,
++        _dep: &Dependency,
++        _kind: QueryKind,
++        _f: &mut dyn FnMut(IndexSummary),
++    ) -> CargoResult<()> {
++        self.refuse()
++    }
++
++    fn invalidate_cache(&self) {}
++
++    fn set_quiet(&mut self, _quiet: bool) {}
++
++    async fn download(&self, _package: PackageId) -> CargoResult<MaybePackage> {
++        self.refuse()
++    }
++
++    async fn finish_download(&self, _id: PackageId, _contents: Vec<u8>) -> CargoResult<Package> {
++        self.refuse()
++    }
++
++    fn fingerprint(&self, _pkg: &Package) -> CargoResult<String> {
++        self.refuse()
++    }
++
++    fn describe(&self) -> String {
++        format!("{}", self.source_id)
++    }
++}
+diff --git a/src/util/errors.rs b/src/util/errors.rs
+index 3f15392..a7fb574 100644
+--- a/src/util/errors.rs
++++ b/src/util/errors.rs
+@@ -1,15 +1,31 @@
+ use anyhow::Error;
++#[cfg(feature = "network")]
+ use curl::easy::Easy;
++#[cfg(feature = "network")]
+ use http::Response;
+-use std::fmt::{self, Write};
++use std::fmt;
++#[cfg(feature = "network")]
++use std::fmt::Write;
+ use std::path::PathBuf;
+ 
++#[cfg(feature = "network")]
+ use crate::util::network::http_async::ResponsePartsExtensions;
+ 
++#[cfg(feature = "network")]
+ use super::truncate_with_ellipsis;
+ 
+ pub type CargoResult<T> = anyhow::Result<T>;
+ 
++/// The one refusal every source that needs a network stack answers with when
++/// cargo is built without the `network` feature.
++#[cfg(not(feature = "network"))]
++pub fn no_network(what: std::fmt::Arguments<'_>) -> Error {
++    anyhow::format_err!(
++        "cannot use {what}: this cargo was built without the `network` feature, \
++         so it resolves only path, directory and local-registry sources"
++    )
++}
++
+ /// These are headers that are included in error messages to help with
+ /// diagnosing issues.
+ pub const DEBUG_HEADERS: &[&str] = &[
+@@ -30,6 +46,7 @@ pub const DEBUG_HEADERS: &[&str] = &[
+     "x-served-by",
+ ];
+ 
++#[cfg(feature = "network")]
+ #[derive(Debug)]
+ pub struct HttpNotSuccessful {
+     pub code: u32,
+@@ -39,6 +56,7 @@ pub struct HttpNotSuccessful {
+     pub headers: Vec<String>,
+ }
+ 
++#[cfg(feature = "network")]
+ impl HttpNotSuccessful {
+     pub fn new_from_handle(
+         handle: &mut Easy,
+@@ -124,12 +142,14 @@ impl HttpNotSuccessful {
+     }
+ }
+ 
++#[cfg(feature = "network")]
+ impl fmt::Display for HttpNotSuccessful {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.write_str(&self.render(true))
+     }
+ }
+ 
++#[cfg(feature = "network")]
+ impl std::error::Error for HttpNotSuccessful {}
+ 
+ // =============================================================================
+diff --git a/src/util/mod.rs b/src/util/mod.rs
+index 4398894..a9abe23 100644
+--- a/src/util/mod.rs
++++ b/src/util/mod.rs
+@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
+ use std::time::Duration;
+ 
+ pub use self::canonical_url::CanonicalUrl;
++#[cfg(feature = "network")]
+ pub(crate) use self::counter::MetricsCounter;
+ pub use self::dependency_queue::DependencyQueue;
+ pub use self::diagnostic_server::RustfixDiagnosticServer;
+@@ -23,7 +24,9 @@ pub use self::queue::Queue;
+ pub use self::rustc::Rustc;
+ pub use self::semver_ext::{OptVersionReq, VersionExt};
+ pub use self::unhashed::Unhashed;
+-pub use self::vcs::{FossilRepo, GitRepo, HgRepo, PijulRepo, existing_vcs_repo};
++pub use self::vcs::{FossilRepo, HgRepo, PijulRepo, existing_vcs_repo};
++#[cfg(feature = "network")]
++pub use self::vcs::GitRepo;
+ pub use self::workspace::{
+     add_path_args, path_args, print_available_benches, print_available_binaries,
+     print_available_examples, print_available_packages, print_available_tests,
+@@ -34,6 +37,7 @@ pub mod auth;
+ pub mod cache_lock;
+ mod canonical_url;
+ pub mod command_prelude;
++#[cfg(feature = "network")]
+ mod counter;
+ pub mod cpu;
+ pub mod credential;
+diff --git a/src/util/network/mod.rs b/src/util/network/mod.rs
+index bb20ffa..81def1c 100644
+--- a/src/util/network/mod.rs
++++ b/src/util/network/mod.rs
+@@ -7,9 +7,13 @@ use std::net::SocketAddrV4;
+ use std::net::SocketAddrV6;
+ use std::task::Poll;
+ 
++#[cfg(feature = "network")]
+ pub mod http;
++#[cfg(feature = "network")]
+ pub mod http_async;
++#[cfg(feature = "network")]
+ pub mod proxy;
++#[cfg(feature = "network")]
+ pub mod retry;
+ 
+ /// LOCALHOST constants for both IPv4 and IPv6.
+@@ -34,6 +38,7 @@ impl<T> PollExt<T> for Poll<T> {
+ 
+ /// When dynamically linked against libcurl, we want to ignore some failures
+ /// when using old versions that don't support certain features.
++#[cfg(feature = "network")]
+ #[macro_export]
+ macro_rules! try_old_curl {
+     ($e:expr, $msg:expr) => {
+@@ -69,6 +74,7 @@ macro_rules! try_old_curl {
+ /// rather only one. Once the main one is opened we realized that pipelining is
+ /// possible and multiplexing is possible. All in all this reduces the number
+ /// of connections down to a more manageable state.
++#[cfg(feature = "network")]
+ #[macro_export]
+ macro_rules! try_old_curl_http2_pipewait {
+     ($multiplexing:expr, $handle:expr) => {
+diff --git a/src/util/vcs.rs b/src/util/vcs.rs
+index 2d747e1..265f8e9 100644
+--- a/src/util/vcs.rs
++++ b/src/util/vcs.rs
+@@ -9,6 +9,7 @@ use std::path::Path;
+ //    path in that repo.
+ // 2. We are in an HG repo.
+ pub fn existing_vcs_repo(path: &Path, cwd: &Path) -> bool {
++    #[cfg(feature = "network")]
+     fn in_git_repo(path: &Path, cwd: &Path) -> bool {
+         if let Ok(repo) = GitRepo::discover(path, cwd) {
+             // Don't check if the working directory itself is ignored.
+@@ -22,14 +23,21 @@ pub fn existing_vcs_repo(path: &Path, cwd: &Path) -> bool {
+         }
+     }
+ 
++    #[cfg(not(feature = "network"))]
++    fn in_git_repo(_: &Path, _: &Path) -> bool {
++        false
++    }
++
+     in_git_repo(path, cwd) || HgRepo::discover(path, cwd).is_ok()
+ }
+ 
+ pub struct HgRepo;
++#[cfg(feature = "network")]
+ pub struct GitRepo;
+ pub struct PijulRepo;
+ pub struct FossilRepo;
+ 
++#[cfg(feature = "network")]
+ impl GitRepo {
+     pub fn init(path: &Path, _: &Path) -> CargoResult<GitRepo> {
+         git2::Repository::init(path)?;
+diff --git a/src/workspace/package.rs b/src/workspace/package.rs
+index 378e9fd..0be9f6a 100644
+--- a/src/workspace/package.rs
++++ b/src/workspace/package.rs
+@@ -14,9 +14,11 @@ use cargo_util_schemas::manifest::{Hints, RustVersion};
+ use futures::FutureExt;
+ use futures::TryStreamExt;
+ use futures::stream::FuturesUnordered;
++#[cfg(feature = "network")]
+ use http::Request;
+ use semver::Version;
+ use serde::Serialize;
++#[cfg(feature = "network")]
+ use tracing::debug;
+ 
+ use crate::compiler::{CompileKind, RustcTargetData};
+@@ -25,8 +27,11 @@ use crate::resolver::{HasDevUnits, Resolve};
+ use crate::sources::source::{MaybePackage, SourceMap};
+ use crate::util::HumanBytes;
+ use crate::util::cache_lock::{CacheLock, CacheLockMode};
+-use crate::util::errors::{CargoResult, HttpNotSuccessful};
++use crate::util::errors::CargoResult;
++#[cfg(feature = "network")]
++use crate::util::errors::HttpNotSuccessful;
+ use crate::util::interning::InternedString;
++#[cfg(feature = "network")]
+ use crate::util::network::retry::{Retry, RetryResult};
+ use crate::util::{self, GlobalContext, Progress, ProgressStyle, internal};
+ use crate::workspace::dependency::DepKind;
+@@ -297,6 +302,7 @@ pub struct Downloads<'a, 'gctx> {
+     /// Progress bar.
+     progress: RefCell<Progress<'gctx>>,
+     /// Flag for keeping track of whether we've printed the Downloading message.
++    #[cfg(feature = "network")]
+     first: Cell<bool>,
+     /// Size (in bytes) and package name of the largest downloaded package.
+     largest: Cell<Option<(u64, InternedString)>>,
+@@ -325,6 +331,7 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
+         let dl = Downloads {
+             set,
+             progress,
++            #[cfg(feature = "network")]
+             first: Cell::new(true),
+             largest: Cell::new(None),
+             downloads_finished: Cell::new(0),
+@@ -397,6 +404,13 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
+                 descriptor,
+                 authorization,
+             } => {
++                #[cfg(not(feature = "network"))]
++                {
++                    let _ = (&descriptor, &authorization);
++                    return Err(crate::util::errors::no_network(format_args!("`{url}`")));
++                }
++                #[cfg(feature = "network")]
++                {
+                 let mut r = Retry::new(self.set.gctx)?;
+                 let contents = loop {
+                     self.tick(WhyTick::DownloadStarted)?;
+@@ -433,6 +447,7 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
+                 }
+ 
+                 Ok(source.finish_download(id, contents).await?)
++                }
+             }
+         }?;
+ 
+@@ -441,6 +456,7 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
+     }
+ 
+     /// Perform the request to download the .crate file.
++    #[cfg(feature = "network")]
+     async fn fetch(
+         &self,
+         url: &str,
+@@ -516,12 +532,15 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
+                 msg.push_str(&format!(", extracting {} ...", krate));
+             }
+             _ => {
++                #[cfg(feature = "network")]
+                 let remaining = self
+                     .set
+                     .gctx
+                     .http_async()
+                     .map(|c| c.bytes_pending())
+                     .unwrap_or_default();
++                #[cfg(not(feature = "network"))]
++                let remaining = 0usize;
+                 if remaining > 0 {
+                     msg.push_str(&format!(
+                         ", remaining bytes: {:.1}",
+@@ -807,6 +826,7 @@ impl<'gctx> PackageSet<'gctx> {
+ }
+ 
+ #[derive(Copy, Clone)]
++#[cfg_attr(not(feature = "network"), allow(dead_code))]
+ enum WhyTick<'a> {
+     DownloadStarted,
+     DownloadUpdate,
+diff --git a/src/workspace/source_id.rs b/src/workspace/source_id.rs
+index dbfbc36..4c288a5 100644
+--- a/src/workspace/source_id.rs
++++ b/src/workspace/source_id.rs
+@@ -2,7 +2,9 @@ use crate::context;
+ use crate::sources::registry::CRATES_IO_HTTP_INDEX;
+ use crate::sources::source::Source;
+ use crate::sources::{CRATES_IO_DOMAIN, CRATES_IO_INDEX, CRATES_IO_REGISTRY, DirectorySource};
+-use crate::sources::{GitSource, PathSource, RegistrySource};
++use crate::sources::{PathSource, RegistrySource};
++#[cfg(feature = "network")]
++use crate::sources::GitSource;
+ use crate::util::data_structures::HashSet;
+ use crate::util::interning::InternedString;
+ use crate::util::{CanonicalUrl, CargoResult, GlobalContext, IntoUrl};
+@@ -391,7 +393,12 @@ impl SourceId {
+     pub fn load<'a>(self, gctx: &'a GlobalContext) -> CargoResult<Box<dyn Source + 'a>> {
+         trace!("loading SourceId; {}", self);
+         match self.inner.kind {
++            #[cfg(feature = "network")]
+             SourceKind::Git(..) => Ok(Box::new(GitSource::new(self, gctx)?)),
++            #[cfg(not(feature = "network"))]
++            SourceKind::Git(..) => Ok(Box::new(
++                crate::sources::unavailable::UnavailableSource::git(self),
++            )),
+             SourceKind::Path => {
+                 let path = self
+                     .inner
+@@ -403,9 +410,14 @@ impl SourceId {
+                 }
+                 Ok(Box::new(PathSource::new(&path, self, gctx)))
+             }
++            #[cfg(feature = "network")]
+             SourceKind::Registry | SourceKind::SparseRegistry => {
+                 Ok(Box::new(RegistrySource::remote(self, gctx)?))
+             }
++            #[cfg(not(feature = "network"))]
++            SourceKind::Registry | SourceKind::SparseRegistry => Ok(Box::new(
++                crate::sources::unavailable::UnavailableSource::registry(self),
++            )),
+             SourceKind::LocalRegistry => {
+                 let path = self
+                     .inner

@@ -109,6 +109,13 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_MOUNT,
         priority: None,
     },
+    // This one mounts a *block device* by name, which is the
+    // `vfs_ext2_mount_named` path the mount test above never reaches.
+    ProgramGrant {
+        path: b"/bin/devdisk_test",
+        flags: TASK_FLAG_MOUNT,
+        priority: None,
+    },
 ];
 
 /// The flags and tier the kernel adds for `path`; `(0, None)` for any program

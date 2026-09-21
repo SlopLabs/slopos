@@ -708,6 +708,10 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#define FP_ZERO 2",
             "#define FP_SUBNORMAL 3",
             "#define FP_NORMAL 4",
+            // Both `INT_MIN`, which is what `libm` answers and therefore the
+            // only value this header can state.
+            "#define FP_ILOGB0 (-2147483647 - 1)",
+            "#define FP_ILOGBNAN (-2147483647 - 1)",
             "#define HUGE_VAL (__builtin_huge_val())",
             "#define HUGE_VALF (__builtin_huge_valf())",
             "#define HUGE_VALL (__builtin_huge_vall())",
@@ -838,6 +842,8 @@ pub const HEADERS: &[HeaderSpec] = &[
             "strncpy(dest: *mut c_char, src: *const c_char, n: size_t) -> *mut c_char",
             "strnlen(s: *const c_char, maxlen: size_t) -> size_t",
             "strrchr(s: *const c_char, c: c_int) -> *mut c_char",
+            "strspn(s: *const c_char, accept: *const c_char) -> size_t",
+            "strcspn(s: *const c_char, reject: *const c_char) -> size_t",
             "strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char",
             "strcoll(a: *const c_char, b: *const c_char) -> c_int",
             "strxfrm(dst: *mut c_char, src: *const c_char, n: size_t) -> size_t",
@@ -954,7 +960,14 @@ pub const HEADERS: &[HeaderSpec] = &[
         includes: &["sys/types.h", "unistd.h"],
         types: &["FILE", "va_list"],
         consts: &[],
-        slibc_consts: &["EOF", "_IOFBF", "_IOLBF", "_IONBF", "BUFSIZ"],
+        slibc_consts: &[
+            "EOF",
+            "_IOFBF",
+            "_IOLBF",
+            "_IONBF",
+            "BUFSIZ",
+            "FILENAME_MAX",
+        ],
         macros: &[],
         functions: &["remove", "rename", "renameat"],
         extra: &[

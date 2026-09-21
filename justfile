@@ -45,6 +45,12 @@ capacity_qemu_mem     := env("CAPACITY_QEMU_MEM", "2G")
 # The tree the volume is populated from, under build_dir so it is not tracked
 # and so `git clean` reclaims it.
 capacity_stage        := build_dir / "capacity-stage"
+
+# The dev disk: the workbench volume a cross-built toolchain lands on.
+# Preserved, because what the guest wrote to a workbench survives a rebuild.
+fs_image_devdisk      := fs_image_dir / "ext2-devdisk.img"
+dev_disk_size         := env("DEV_DISK_SIZE", "2G")
+dev_disk_inode_ratio  := env("DEV_DISK_INODE_RATIO", "16384")
 persist_qemu_mem   := env("PERSIST_QEMU_MEM", "2G")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
@@ -103,7 +109,7 @@ coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp 
 # they are libraries, not programs, and out of the shipped image entirely.
 test_shared_objects := "libdltest.so libc++.so libcxxtest.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test"
+test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test devdisk_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -190,6 +196,12 @@ _fs-image-capacity:
     FS_IMAGE_SIZE={{capacity_image_size}} FS_INODE_RATIO={{capacity_inode_ratio}} \
         VERITY=off PRESERVE_FS_IMAGE=1 FS_POPULATE_DIR="$populate" \
         scripts/build_fs_image.sh "{{fs_image_capacity}}" "{{build_dir}}"
+
+# `_build-userland-tests` rather than `_build-userland`: the volume carries
+# `libc++.so` and `libc++.a`, which only the tests build stages.
+_fs-image-devdisk: _build-userland-tests
+    DEV_DISK_SIZE={{dev_disk_size}} DEV_DISK_INODE_RATIO={{dev_disk_inode_ratio}} \
+        scripts/build_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}"
 
 _initramfs: _build-userland
     COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
@@ -469,6 +481,21 @@ test-capacity: _build-run-tests _fs-image-capacity
     scripts/check_fs_throughput.sh --log {{build_dir}}/capacity.log --require-capacity
     scripts/check_fs_image.sh "{{fs_image_capacity}}"
 
+# Separate from `just test` because the volume is opt-in; `just test` runs the
+# same utest with nothing attached and it passes by saying so.
+[doc("Dev-disk check: mount the cross-built toolchain volume in the guest, read its inventory back, remount it")]
+test-devdisk: _build-run-tests _fs-image-devdisk
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
+    rc=0
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" \
+        {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
+        --raw --no-color > {{build_dir}}/devdisk.log 2>&1 || rc=$?
+    tail -n 30 {{build_dir}}/devdisk.log
+    [ "$rc" -eq 0 ] || { echo "FAIL: the dev-disk boot exited $rc — full log in {{build_dir}}/devdisk.log" >&2; exit 1; }
+    scripts/check_fs_image.sh "{{fs_image_devdisk}}"
+
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, chrome-core, slibc-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
     {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd
@@ -528,6 +555,18 @@ ensure-verus:
 rustc-src:
     scripts/make_rustc_src.sh
 
+[doc("Hold the cargo fork's `network` cut to dropping every C library and still compiling. Needs `just rustc-src` first.")]
+check-cargo-fork:
+    scripts/check_cargo_fork.sh --require
+
+[doc("Cross-build the Rust toolchain that runs on SlopOS. Hours of CPU; `just check-bootstrap-config` is the affordable half.")]
+toolchain *ARGS:
+    scripts/bootstrap_slopos_toolchain.sh {{ARGS}}
+
+[doc("Hold the cross-build plan and the compiler wrapper to the toolchain they claim to produce. Needs `just rustc-src` and a tests userland build first.")]
+check-bootstrap-config:
+    scripts/check_bootstrap_config.sh --require
+
 [doc("Hold the built-in x86_64-unknown-slopos target to targets/x86_64-unknown-slopos.json and to rustc's own consistency test. Needs `just rustc-src` first.")]
 check-rustc-target:
     scripts/check_rustc_target.sh --require
@@ -539,6 +578,10 @@ llvm-src:
 [doc("Compile LLVM's Support library for x86_64-unknown-slopos. Needs `just llvm-src` and a tests userland build first.")]
 check-llvm-port:
     scripts/check_llvm_port.sh --require
+
+[doc("Hold the port's clang driver to the link line build_userland.sh writes by hand. Needs `just llvm-src` first.")]
+check-clang-driver:
+    scripts/check_clang_driver.sh --require
 
 [doc("Machine-check the OSTD critical-path proofs under verification/proofs/ on the pinned Verus toolchain. Pass a proof stem to verify one file.")]
 verify FILTER='':
@@ -582,6 +625,9 @@ check-framekernel-gates:
     scripts/check_rustc_target.sh --self-test
     scripts/check_cxx_pin.sh --self-test
     scripts/check_llvm_port.sh --self-test
+    scripts/check_clang_driver.sh --self-test
+    scripts/check_cargo_fork.sh --self-test
+    scripts/check_bootstrap_config.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_vendor_pin.sh
@@ -589,6 +635,9 @@ check-framekernel-gates:
     scripts/check_rustc_target.sh
     scripts/check_cxx_pin.sh
     scripts/check_llvm_port.sh
+    scripts/check_clang_driver.sh
+    scripts/check_cargo_fork.sh
+    scripts/check_bootstrap_config.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh
@@ -679,7 +728,7 @@ stack-audit:
 clean:
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
     rm -f {{build_dir}}/kernel-*.elf
-    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port
+    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/cargo-fork {{build_dir}}/gates/bootstrap-config
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean

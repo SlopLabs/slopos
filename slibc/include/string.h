@@ -31,6 +31,8 @@ int strncmp(const char *a, const char *b, size_t n);
 char *strncpy(char *dest, const char *src, size_t n);
 size_t strnlen(const char *s, size_t maxlen);
 char *strrchr(const char *s, int c);
+size_t strspn(const char *s, const char *accept);
+size_t strcspn(const char *s, const char *reject);
 char *strstr(const char *haystack, const char *needle);
 int strcoll(const char *a, const char *b);
 size_t strxfrm(char *dst, const char *src, size_t n);

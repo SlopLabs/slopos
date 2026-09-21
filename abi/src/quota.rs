@@ -175,8 +175,8 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         ResourceKind::ObjectRow => 512,
         // Threads per process, against a global `MAX_TASKS` of 8192.
         ResourceKind::Task => 512,
-        // `MAX_PROCESSES` is 256: a quarter of the table per principal.
-        ResourceKind::Process => 64,
+        // A quarter of `MAX_PROCESSES`, as this share has always been.
+        ResourceKind::Process => 256,
         // In-flight `SCM_RIGHTS` references, held by no descriptor table; the
         // structural system-wide bound is 8 fds x 2 directions x 16 pairs.
         ResourceKind::Custody => 64,

@@ -1,0 +1,18 @@
+# The SlopOS cargo-fork pin.
+#
+# `scripts/make_rustc_src.sh` applies the patch below in the rustc source
+# tree's `src/tools/cargo`, and `scripts/check_toolchain_pin.sh` fails if any
+# line here stops describing what is on disk.
+#
+# There is no tarball checksum: cargo's sources arrive inside the rustc source
+# tarball `toolchain/compiler/PIN` already pins, so the two forks share one
+# materialised tree and one stamp. They do not share a PIN, because this patch
+# is a PR to rust-lang/cargo and that one is a PR to rust-lang/rust.
+#
+# What the fork does: puts curl, libgit2, OpenSSL and the pure-Rust crates
+# only their code paths reach behind a `network` feature, on by default.
+# Without it cargo resolves path, directory and local-registry sources — a
+# vendored workspace build — which is what `x86_64-unknown-slopos` can offer
+# and all that building SlopOS on SlopOS needs. `rusqlite` stays: SQLite is
+# one amalgamated C file and it cross-compiles against slibc.
+patch_sha256=toolchain/cargo/0001-slopos-cargo.patch:327eff3b990b5c28268c9ea3366dc4232fcbcec23797e423db3acf8c0a9e9ff0

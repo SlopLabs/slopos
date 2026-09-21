@@ -46,13 +46,32 @@ target is enough to build *for*; bootstrap's `--host` resolves a triple
 through rustc's own built-in list, so hosting a compiler needs
 `x86_64-unknown-slopos` to be a built-in spec. That is
 `toolchain/compiler/0001-slopos-target.patch` over the pinned nightly's
-sources, pinned by `toolchain/compiler/PIN` and materialised by
+sources, with two more patches the first bootstrap run asked for: `0002`
+gives `build.tool.<name>` a `default-features` key, because bootstrap could
+add features to a tool and not drop one, and `0003` maps the tuple to a
+`CMAKE_SYSTEM_NAME` — an unrecognised one falls back to `Generic`, which
+loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file the LLVM port
+patches. All three are pinned by `toolchain/compiler/PIN` and materialised by
 `scripts/make_rustc_src.sh` into `third_party/slopos-rustc-src` (265 MB
 fetched, 656 MiB on disk, ~17 s; `just rustc-src`, removed by `just
 distclean`). The sysroot above cannot carry it — it is a clone of a *built*
 toolchain — so the two trees stamp their own inputs separately and neither
 re-materialises for the other's edits. The built-in spec and the JSON one
 must not drift: `scripts/check_rustc_target.sh` holds them equal.
+
+**cargo is the fifth fork, and it shares the compiler fork's tree.** The
+rustc source tarball carries cargo at `src/tools/cargo`, so
+`toolchain/cargo/0001-slopos-cargo.patch` lands there and the two forks share
+one materialised tree and one stamp — but not one PIN, because this patch is
+a PR to rust-lang/cargo and the others are PRs to rust-lang/rust. What it
+does is put `curl`, `git2`, `git2-curl`, `libgit2-sys` and the pure-Rust
+crates only their code paths reach behind a `network` feature that is on by
+default. Without it cargo resolves path, directory and local-registry
+sources — a vendored workspace build, which is what `Cargo.lock`'s nine
+third-party crates need and all a target with no libcurl, libgit2 or OpenSSL
+can offer. Six C libraries leave the closure; `rusqlite` stays, because
+SQLite is one amalgamated C file with no build system and it cross-compiles
+against slibc's headers. `scripts/check_cargo_fork.sh` holds the cut.
 
 **The C++ runtime is cross-built and test-only.** `x86_64-unknown-slopos` has
 a C++ standard library: LLVM's `libc++` and `libc++abi`, cross-built from the
@@ -88,11 +107,14 @@ everything but its own exports.
 
 **The llvm-project sources are patched too.** `toolchain/llvm/` is the SlopOS
 port — the two places LLVM dispatches on the OS with no default a new one can
-take, plus the `Triple` entry and clang target that make `__slopos__` a macro
-a compiler predefines — pinned by checksum in `toolchain/cxx/PIN` beside the
-tarball it applies to, materialised by `scripts/make_slopos_llvm_src.sh` into
-the same `third_party/llvm-project-<version>.src` the runtime is built from
-(1.5 GB on disk, 11 s), and held by `scripts/check_llvm_port.sh`.
+take, the `Triple` entry and clang target that make `__slopos__` a macro a
+compiler predefines, and `toolchains::SlopOS`, the clang driver that turns
+`cc a.o -o a` into the link line `build_userland.sh` writes by hand — pinned
+by checksum in `toolchain/cxx/PIN` beside the tarball it applies to,
+materialised by `scripts/make_slopos_llvm_src.sh` into the same
+`third_party/llvm-project-<version>.src` the runtime is built from (1.5 GB on
+disk, 11 s), and held by `scripts/check_llvm_port.sh` and
+`scripts/check_clang_driver.sh`.
 
 That build is the one place SlopOS needs host tools beyond rust and QEMU:
 `clang`, `clang++`, `ld.lld` and `llvm-ar` of **one** LLVM major at or above
@@ -130,6 +152,33 @@ the extracted 1.5 GB source tree — the C++ runtime and the LLVM port share
 it, so it carries `llvm/` and `clang/` as well as the two runtime
 directories; nothing removes `third_party/slopos-cxx`, because the build is
 minutes and its inputs are pinned.
+
+**The toolchain that runs on SlopOS is cross-built from here.**
+`scripts/bootstrap_slopos_toolchain.sh` (`just toolchain`) assembles a target
+sysroot out of the staged libraries, slibc's headers and the C++ runtime,
+writes a `bootstrap.toml` and a compiler wrapper into
+`builddir/slopos-toolchain/`, and runs `x.py` with
+`--build=x86_64-unknown-linux-gnu --host=x86_64-unknown-slopos`. The wrapper
+names two triples on purpose: SlopOS to compile, because otherwise the
+preprocessor defines `__linux__` and LLVM takes `/proc/self/exe` paths this
+system has not got, and Linux to link, because the host clang has no SlopOS
+toolchain and for that triple hands the link to `gcc`. It is
+`toolchains::SlopOS` written in shell and it goes away the day a clang built
+from `toolchain/llvm/` runs the build. `just check-bootstrap-config` is the
+affordable half — bootstrap's own dry run plus a compile and a link through
+the wrapper — and `--dry-run` is what it drives.
+
+**The result lands on a dev disk.** `scripts/build_devdisk.sh` (`just
+_fs-image-devdisk`) builds `fs/assets/ext2-devdisk.img`, a preserved,
+trailer-less 2 GiB volume carrying the target sysroot and, when
+`TOOLCHAIN_STAGE` names one, a cross-built toolchain over the top. It is
+attached by `DEV_DISK_IMG` as **virtio-disk4**, after the capacity disk, so
+`CAPACITY_IMG`'s `vdd` keeps its letter; the guest's letter is positional, so
+`just test-devdisk` attaches no capacity image and the volume comes up at
+`vdd`. The marker file at the volume root records every staged path's size
+read back *out of the image*, and `devdisk_test` mounts the device, grades
+the inventory, unmounts and mounts again — the second mount is the point,
+because a leaked write claim answers `AlreadyClaimed` forever.
 
 **The unwinder is not test-only.** `libc.so` and `libc.a` supply the Level-1
 Itanium unwinder (`vendor/unwinding`, seventeen `_Unwind_*` entry points) on
@@ -253,6 +302,9 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_rustc_target.sh`** — holds the built-in `x86_64-unknown-slopos` target to `targets/x86_64-unknown-slopos.json`. The compiler fork exists so bootstrap can resolve `--host=x86_64-unknown-slopos`, which leaves two specs describing one machine, and nothing about a disagreement between them fails to compile: a cross-built toolchain would simply produce binaries for a slightly different target than the tree tests. The comparison is `Target::to_json()` on both sides — rustc's own normalisation, every field — plus the two facts the fork is for: the tuple is in `TARGETS`, and the target still allows dynamic linking, which is what `rustc_driver`'s `crate-type = ["dylib"]` and `libc.so` both need. It then runs rustc's own per-target test (`check_consistency(TargetKind::Builtin)` and a JSON round trip), which is what upstream CI would run on the patch. That check is also why the JSON says `relocation-model: pic`: rustc refuses a built-in target that allows dynamic linking under any other model, and the static images pin `-C relocation-model=static` on the build line instead. 28 s cold and 1.3 s warm, at 1.1 GB under `builddir/gates/` that `just clean` removes; `skipped` without a materialised source tree, `--require` in the CI job that materialises one.
 - **`scripts/check_cxx_pin.sh`** — holds the cross-built C++ runtime to `toolchain/cxx/PIN` and to what `libc.so` exports. Two silent failures: a `third_party/slopos-cxx` built from a different llvm-project or a different clang still links, it just links a different C++ ABI; and `libc++.so` is linked without `-z defs`, because an undefined symbol in a shared object is legal and the loader resolves it at load time — so a libc gap that would have been a link error is instead a `dlopen` that fails on a machine, at the point the runtime is first needed. The gate holds every symbol `libc++.so` leaves undefined (171 today) to being one `libc.so` defines, and holds the built tree's stamp to what `make_slopos_cxx.sh --print-stamp` says it should be — asked of the build script rather than recomputed, so there is no second copy of that digest to drift. It also holds the LLVM port to its *scope*: `make_slopos_cxx.sh`'s stamp leaves `toolchain/llvm/*.patch` out on the grounds that a tree carrying them builds the same libc++, and a hunk reaching into `libcxx/` or `libcxxabi/` would make that false while leaving the stamp — and so the decision not to rebuild — unchanged. Both symbol and stamp halves are conditional on the tests userland having *staged* the runtime (`builddir/libc++.so`), so a checkout that never cross-built it still passes on the pin's own consistency. Deliberately not on `builddir/libc.so`: the shipped userland build stages that one too, two steps before the tests build that refreshes the runtime, so keying on it graded a cache-restored tree and turned every commit moving the pin, the build line or slibc's headers into a red gates step.
 - **`scripts/check_llvm_port.sh`** — compiles LLVM's `LLVMSupport` and `LLVMTargetParser` for `x86_64-unknown-slopos` against slibc's headers and the cross-built C++ runtime. Those two and not LLVM: `Unix/{Path,Process,Program,Signals}.inc` are the files that name a libc, `raw_ostream.cpp` and `ConvertUTF.cpp` the ones that name a C++ library, `Triple.{h,cpp}` are where the port's `SlopOS` enumerator lives, and the other twelve hundred objects in a full build are portable C++ over them. That covers four of the port's six files; clang's `OSTargets.h` and `Targets.cpp` are held by nothing but `git apply --reverse --check`, because reaching `SlopOSTargetInfo` means building clang, which is a different order of cost from this gate's minute. Two things break it and neither fails to compile on the host — `toolchain/llvm/*.patch` stopping to describe the tree, and slibc losing an entry point or one of the four headers (`<inttypes.h>`, `<endian.h>`, `<sysexits.h>`, `<wctype.h>`) these files include. `--self-test` grades the skip and `--require` paths on any host, and wherever there is a tree to plant one in it grades two rejections against their own positive controls, which a rejection test without one does not have: `Path.cpp` with `-U__slopos__`, the OS-dispatch half's effect removed, and a `static_assert` that `Triple::LastOSType` is `SlopOS` rather than the `Vulkan` it was before the patch. 47 s cold on four cores and 1.5 s warm, the self-test 3.5 s; `skipped` without a materialised source tree, a staged runtime or a host `llvm-tblgen`, `--require` in the CI step that has all three — the one after the tests build, since the stamp it checks reads a `builddir/libbuiltins.a` only a userland build produces. It borrows a host `llvm-tblgen` of the pinned major, because it builds no host tools and what tablegen emits is data tables.
+- **`scripts/check_clang_driver.sh`** — builds `clangDriver` and `clangBasic` out of the pinned tree for the *host*, drives a `clang::driver::Driver` at `x86_64-unknown-slopos` and grades the link job's argv. `toolchains::SlopOS` is a second copy of what `build_userland.sh` writes by hand — `crt0.o` first, `--image-base=0x400000`, `--dynamic-linker=/lib/ld-slopos.so.1`, `--eh-frame-hdr`, `-z now`, `-L<sysroot>/lib -lc`, `libbuiltins.a` last — and a driver that disagrees with it is not a compile error: it links on the host and produces a binary that dies at `execve`, with no interpreter, no `crt0.o` and no `PT_GNU_EH_FRAME`, at a load address the loader does not map. Fifty-four assertions over the four shapes of link (static, dynamic, shared, C++) plus the toolchain's own answers: `ld.lld`, the integrated assembler, no PIC or PIE default, asynchronous unwind tables, libc++, compiler-rt, and `<sysroot>/include/c++/v1` ahead of `<sysroot>/include` — the order libc++'s `#include_next` needs. `skipped` without a materialised source tree; the self-test's rejection is the same probe at a triple the port does not name, which is the `Generic_ELF` a missing dispatch hunk leaves behind. 2 min 29 s cold on 20 cores and 219 MB of build directory, ~4 s warm.
+- **`scripts/check_cargo_fork.sh`** — holds `toolchain/cargo/`'s `network` cut to dropping every C library and still compiling. Two silent failures: a rebase onto a newer cargo re-introduces one of those crates on the offline path — a new dependency, or an existing one losing its `optional = true` — and the Linux build stays green while the slopos build stops at a C compiler it does not have, hours into a bootstrap run; and the `#[cfg(feature = "network")]` cut stops compiling, which every default build also hides. So the gate reads the dependency closure on both sides of the feature and then compiles the offline side. `libsqlite3-sys` is asserted *present* rather than forbidden: SQLite is one amalgamated C file and it cross-compiles against slibc, and dropping it would make `toolchain/cargo/PIN` say something untrue. ~27 s cold, 0.6 s warm.
+- **`scripts/check_bootstrap_config.sh`** — holds the cross-build configuration to the toolchain it claims to produce, by running bootstrap's own dry run and then compiling and linking with the generated wrapper. Three silent failures: the step graph quietly loses an artifact — `cargo` is an *extended* tool and a stage2 rustc does not depend on it, so a config that stops naming it still builds a compiler and the dev disk arrives with no cargo on it; `toolchain/compiler/0003-bootstrap-cmake-system-name.patch` goes away, and an unrecognised triple prints a note, sets `CMAKE_SYSTEM_NAME=Generic` and exits 0, losing `LLVM_ON_UNIX` and every `Unix/*.inc` file the port patches; and the wrapper stops producing SlopOS binaries, which it does by naming two triples and would regress by naming one. ~1.4 s warm, after a first run that downloads bootstrap's stage0 (~200 MB).
 - **`scripts/check_codegen_backend.sh`** — holds a rustc codegen backend to seven of the capabilities `targets/x86_64-slos.json` depends on: an ELF object format, soft-float, `.stack_sizes`, safestack instrumentation through `__safestack_pointer_address`, `#[unsafe(link_section)]`, `#[unsafe(naked)]`, and `sym` operands in `asm!`. Two of those are flags a backend can *accept and ignore* — `-Zemit-stack-sizes` and `-Zsanitizer=safestack` — so a backend swap can leave the build green with S-5 and the dual-stack split enforced by nothing. Tracked verdicts live in `scripts/gates/codegen/<backend>.txt` and a mismatch fails **in either direction**: a `lacks` the probe finds present is the signal that the self-hosting question in `plans/self-hosting.md` needs re-deciding. `disable-redzone` and the `unwind` panic strategy are stated as residual rather than probed — the gate's header says why. Cold it costs ~60 s and ~460 MB for `llvm` / ~310 MB for `cranelift` under `builddir/gates/codegen-probe/` (which `just clean` removes); warm it is ~1 s. `llvm` is graded on every `just check-framekernel-gates`; `cranelift` reports `skipped` when the rustup component is absent, and CI installs it in a job of its own so the answer is re-taken rather than assumed.
 - **`scripts/check_linker_script.sh`** — holds a linker to the eighteen linker-script constructs `link.ld` uses, from `. = KERNEL_VIRT_BASE` through `PHDRS`, `(NOLOAD)`, all three spellings of `ALIGN`, `KEEP` under `--gc-sections` and the four page-table reservations past `_bss_end`. Each probe's script carries the construct under test and nothing else a probe grades — a script that scaffolds itself with an `ALIGN` reports the linker's `ALIGN` support under whatever name that probe carries — with one deliberate exception, `composed-layout`, which links a `link.ld`-shaped script because a linker can take every construct alone and compose them differently. That exception is what the gate is built around: wild 0.10.0 refuses `link.ld` on its location-counter assignment, and given the shape it does accept it keeps the script's section order and still starts the image 0x13e8 past the base it was given. A second, self-maintaining half compares the constructs probed against the keywords `link.ld` actually uses, so a construct added to the script with no probe fails the gate and a probe whose construct left the script fails as a dead entry. `scripts/gates/linker/<linker>.txt`; `lld` is graded on every `just check-framekernel-gates`, `wild` reports `skipped` when it is not installed and is pinned in the CI job that installs it.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
@@ -365,6 +417,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and a clean superblock. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
+- `just test-devdisk` — the dev-disk check: build (once, then preserve) the 2 GiB volume a cross-built toolchain lands on, attach it as `virtio-disk4`, and let the userland suite mount it by device name, read the staged inventory back and mount it a second time. Separate from `just test` for the reason `test-capacity` is: the volume is opt-in, and the same utest under `just test` passes by reporting that no dev disk is attached. `DEV_DISK_SIZE` overrides the size.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
 - `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and stays inside the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and an entry matching nothing fails as a dead entry. The three pools are not graded alike. Class counts are deterministic — a class registers on the first acquire of a declaration site, and three runs of one pinned ISO measured boot at 71 every time — so they carry **exact caps**. Boot's edge and chain counts carry caps rather than bands for the same reason, though the recorded values still hold the old convention's slack until they are re-measured onto the observed 43/110. The two test phases' edge and chain counts measure which orderings a run *happened to observe* and move between runs of identical code, so they carry **bands** (`band <phase> <pool> <lo> <hi>`) instead: leaving one prints `DRIFT` on stderr and the run still passes. Be clear about what that gives up — a banded pool has no upper failure of its own, so growth up to `max-fill-pct` (~3.5x observed) reaches you only as that DRIFT line; an *inverted* order is caught by the cycle detector and still fails. `min-classes` / `min-edges` / `min-chains` are the floors that stop a validator which quietly stopped recording from reading as maximally healthy. `--emit-allowlist` writes a fresh baseline (and accepts several `--log`s to merge), a single `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives its crafted logs through the parser — proving both that the gate rejects and that it stays silent on the forms it deliberately accepts.
@@ -479,10 +532,16 @@ builddir/run_tests --raw --no-color 2>&1 | tee builddir/ci-test.log
 # symbol halves of the C++ gate run. Both are skipped in the gates step above.
 scripts/check_cxx_pin.sh
 
-# The LLVM port. `just llvm-src` materialises the sources first — 1.5 GB, so
-# it is a deliberate step rather than something a build does; without them
-# this reports `skipped`. CI materialises them here and passes `--require`.
+# The LLVM port and the clang driver in it. `just llvm-src` materialises the
+# sources first — 1.5 GB, so it is a deliberate step rather than something a
+# build does; without them both report `skipped`. CI materialises them here
+# and passes `--require`.
 scripts/check_llvm_port.sh
+scripts/check_clang_driver.sh
+
+# The cross-build configuration, which needs both the source tree
+# (`just rustc-src`) and the target sysroot the tests build just staged.
+scripts/check_bootstrap_config.sh
 
 scripts/check_authority_reachability.sh --variant tests builddir/kernel-tests.elf
 scripts/check_test_count.sh        --log builddir/ci-test.log

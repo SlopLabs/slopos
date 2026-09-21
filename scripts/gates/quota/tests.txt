@@ -433,6 +433,18 @@
 #     inside 160 371, `diskblocks` 3020 inside 3658, `fdslot` 256,
 #     `objectrow` 257, `pinnedbytes` 100, `custody` 8, `task` 6/6/7.
 
+# 2026-09-21, the cross-built toolchain ("The toolchain is cross-built and
+# lands on a dev disk" in `plans/self-hosting.md`). One row moved.
+#   post-userland-tests `process` 255 -> 256: `devdisk_test` is one more
+#     utest binary. 256 on all three runs, so the cap stays exact. The
+#     previous entry's warning — one slot short of `MAX_PROCESSES` — is what
+#     this commit answers rather than absorbs: the constant is 1024 now.
+#   Nothing else left its cap on those runs: post-userland `pages`
+#     1 878 798/1 867 536/1 922 112 inside 1 977 053, `kernelmeta`
+#     9564/9509/9568 inside 10 035, `residentpages` 156 487/157 739/156 883
+#     inside 160 371, `diskblocks` 2636/2628/2626 inside 3658, `pinnedbytes`
+#     304, `fdslot` 256, `objectrow` 257, `custody` 8, `task` 6.
+
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
@@ -486,7 +498,7 @@ post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
-post-userland-tests	process	255
+post-userland-tests	process	256
 post-userland-tests	residentpages	160371
 post-userland-tests	task	10
 

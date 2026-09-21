@@ -7431,7 +7431,7 @@ slopos_testing::stest!(
 
 /// A process at its `Process` ceiling cannot spawn, and the refusal is exact.
 ///
-/// `MAX_PROCESSES` is 256 and reached long before `MAX_TASKS`, so this is the
+/// `MAX_PROCESSES` is reached long before `MAX_TASKS`, so this is the
 /// tighter global table.
 pub fn test_quota_process_ceiling_refuses_and_refunds() -> TestResult {
     use slopos_abi::quota::{QuotaMode, ResourceKind};

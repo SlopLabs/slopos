@@ -1,0 +1,49 @@
+--- a/bootstrap.example.toml
++++ b/bootstrap.example.toml
+@@ -446,6 +446,11 @@
+ # in tools which are not part of the internal "extra-features" preset might not always work.
+ #build.tool.TOOL_NAME.features = [FEATURE1, FEATURE2]
+ 
++# Whether a tool is built with its manifest's default features. Setting this to
++# `false` passes `--no-default-features`, which is the only way to drop a
++# default dependency a host platform cannot build.
++#build.tool.TOOL_NAME.default-features = true
++
+ # Verbosity level: 0 == not verbose, 1 == verbose, 2 == very verbose, 3 == print environment variables on each rustc invocation
+ #build.verbose = 0
+ 
+--- a/src/bootstrap/src/core/config/toml/build.rs
++++ b/src/bootstrap/src/core/config/toml/build.rs
+@@ -84,5 +84,6 @@
+     #[derive(Default, Clone)]
+     struct Tool {
+         features: Option<Vec<String>> = "features",
++        default_features: Option<bool> = "default-features",
+     }
+ }
+--- a/src/bootstrap/src/core/build_steps/tool.rs
++++ b/src/bootstrap/src/core/build_steps/tool.rs
+@@ -230,12 +230,22 @@
+     // features that are always enabled for a specific tool (e.g. "in-rust-tree" for rust-analyzer).
+     // Finally, `prepare_tool_cargo` above here might add more features to adapt the build
+     // to the chosen flags (e.g. "all-static" for cargo if `cargo_native_static` is true).
++    // `default-features = false` beside it is what lets a host target drop a
++    // tool's default feature set: `features` can only add, and a target whose
++    // platform cannot build a default dependency has no other way to say so.
++    let mut default_features = true;
+     builder
+         .config
+         .tool
+         .iter()
+         .filter(|(tool_name, _)| path.file_name().and_then(OsStr::to_str) == Some(tool_name))
+-        .for_each(|(_, tool)| features.extend(tool.features.clone().unwrap_or_default()));
++        .for_each(|(_, tool)| {
++            features.extend(tool.features.clone().unwrap_or_default());
++            default_features &= tool.default_features.unwrap_or(true);
++        });
++    if !default_features {
++        cargo.arg("--no-default-features");
++    }
+ 
+     // clippy tests need to know about the stage sysroot. Set them consistently while building to
+     // avoid rebuilding when running tests.

@@ -70,7 +70,6 @@ CHANNEL="$(tp_channel "$REPO_ROOT")"
 
 PIN_CHANNEL="$(tp_pin_value_required "$PIN" channel "$SELF")"
 LIBC_VERSION="$(tp_pin_value_required "$PIN" libc_version "$SELF")"
-LIBC_CHECKSUM="$(tp_pin_value_required "$PIN" libc_checksum "$SELF")"
 
 if [ "$PIN_CHANNEL" != "$CHANNEL" ]; then
     die "$TP_PIN_REL pins channel=$PIN_CHANNEL but rust-toolchain.toml says $CHANNEL
@@ -182,43 +181,8 @@ for sample in "$LIBRARY/std/src/lib.rs" "$LIBRARY/std/build.rs"; do
     fi
 done
 
-# ---------------------------------------------------------------------------
-# The pinned libc crate. Registry cache first (offline, and it is already on
-# disk for any workspace that depends on libc), static.crates.io otherwise.
-# ---------------------------------------------------------------------------
-CRATE_NAME="libc-${LIBC_VERSION}.crate"
-CRATE_FILE=""
-for candidate in "${CARGO_HOME:-$HOME/.cargo}"/registry/cache/*/"$CRATE_NAME"; do
-    [ -f "$candidate" ] || continue
-    if [ "$(tp_sha256_file "$candidate")" = "$LIBC_CHECKSUM" ]; then
-        CRATE_FILE="$candidate"
-        break
-    fi
-    echo "$SELF: cached $candidate does not match libc_checksum, ignoring it" >&2
-done
-
-DOWNLOAD=""
-if [ -z "$CRATE_FILE" ]; then
-    command -v curl >/dev/null 2>&1 || die "no cached $CRATE_NAME and curl is unavailable to fetch it"
-    DOWNLOAD="$(mktemp "${TMPDIR:-/tmp}/slopos-libc.XXXXXX")"
-    trap 'rm -f "$DOWNLOAD"' EXIT INT TERM
-    curl -fL -o "$DOWNLOAD" "${LIBC_URL:-https://static.crates.io/crates/libc/$CRATE_NAME}" \
-        || die "failed to download $CRATE_NAME"
-    CRATE_FILE="$DOWNLOAD"
-fi
-
-CRATE_SHA="$(tp_sha256_file "$CRATE_FILE")"
-if [ "$CRATE_SHA" != "$LIBC_CHECKSUM" ]; then
-    die "$CRATE_NAME checksum mismatch
-       expected: $LIBC_CHECKSUM ($TP_PIN_REL)
-       actual:   $CRATE_SHA ($CRATE_FILE)"
-fi
-
 LIBC_DIR="$LIBRARY/libc"
-rm -rf "$LIBC_DIR"
-mkdir -p "$LIBC_DIR"
-tar -xzf "$CRATE_FILE" -C "$LIBC_DIR" --strip-components=1 \
-    || die "failed to unpack $CRATE_FILE into $LIBC_DIR"
+tp_unpack_libc_crate "$REPO_ROOT" "$LIBC_DIR" || die "could not stage the pinned libc crate"
 
 # ---------------------------------------------------------------------------
 # The fork patches, libc first: the std patch adds `libc = { path = "libc" }`

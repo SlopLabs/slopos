@@ -1223,6 +1223,22 @@ static int absent_posix(void) {
         return fail("a sizing strxfrm did not answer the length");
     }
 
+    if (strspn("+-42x", "+-0123456789") != 4 || strspn("x", "abc") != 0) {
+        return fail("strspn did not measure the accepted prefix");
+    }
+    if (strcspn("abc=d", "=;") != 3 || strcspn("abc", "=;") != 3) {
+        return fail("strcspn did not measure the rejected prefix");
+    }
+    char room[FILENAME_MAX];
+    memset(room, 'p', sizeof room);
+    room[sizeof room - 1] = '\0';
+    if (strlen(room) + 1 != sizeof room || sizeof room < 256) {
+        return fail("FILENAME_MAX does not size a path buffer");
+    }
+    if (ilogb(0.0) != FP_ILOGB0 || ilogb(NAN) != FP_ILOGBNAN) {
+        return fail("FP_ILOGB0/FP_ILOGBNAN do not match what ilogb answers");
+    }
+
     if (isascii('q') == 0 || isascii(0x80) != 0 || toascii(0x1e9) != 0x69) {
         return fail("isascii/toascii did not mask to seven bits");
     }

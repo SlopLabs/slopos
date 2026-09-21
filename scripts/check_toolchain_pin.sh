@@ -134,8 +134,9 @@ EOF
         if [ "$tree_rel" = "$TP_SYSROOT_REL" ]; then
             want="$(tp_stamp "$root")"
             maker="scripts/make_slopos_sysroot.sh"
-        elif [ ! -d "$root/$TP_COMPILER_OVERLAY_REL" ]; then
-            fail "$tree_rel is materialised with no $TP_COMPILER_OVERLAY_REL/ to have built it — delete it"
+        elif [ ! -d "$root/$TP_COMPILER_OVERLAY_REL" ] ||
+            [ ! -d "$root/$TP_CARGO_OVERLAY_REL" ]; then
+            fail "$tree_rel is materialised with no $TP_COMPILER_OVERLAY_REL/ or $TP_CARGO_OVERLAY_REL/ to have built it — delete it"
             continue
         else
             want="$(tp_rustc_stamp "$root")"
@@ -155,10 +156,19 @@ EOF
         # by a broken run — patched std, unpatched libc — carries a correct
         # stamp. Every file the patches create is therefore checked for: it
         # is the cheapest evidence that each half actually landed.
+        #
+        # One overlay is exempt and only one: `toolchain/llvm-rustc/` lands
+        # in `src/llvm-project`, which only a bootstrap run unpacks, and a
+        # tree that never had one has nothing for it to have landed in. Every
+        # other apply directory is created by the materialiser, so an absent
+        # one is the failure, not a reason to skip.
         local created applied_in missing=""
         for rel in $(tp_patch_files "$root"); do
             [ "$(tp_patch_tree_rel "$rel")" = "$tree_rel" ] || continue
             applied_in="$root/$(tp_patch_apply_dir "$rel")"
+            case "$rel" in
+                "$TP_LLVM_RUSTC_OVERLAY_REL/"*) [ -d "$applied_in" ] || continue ;;
+            esac
             for created in $(tp_patch_new_files "$root/$rel"); do
                 [ -e "$applied_in/$created" ] || missing="$missing
          $(tp_patch_apply_dir "$rel")/$created ($rel)"
@@ -208,7 +218,8 @@ if [ "$SELF_TEST" -eq 1 ]; then
     # and a PIN that agrees with both.
     plant() {
         local root="$1"
-        mkdir -p "$root/toolchain/rust" "$root/toolchain/libc" "$root/toolchain/compiler"
+        mkdir -p "$root/toolchain/rust" "$root/toolchain/libc" \
+            "$root/toolchain/compiler" "$root/toolchain/cargo"
         cat > "$root/rust-toolchain.toml" <<'FIXTURE'
 [toolchain]
 channel = "nightly-2026-09-03"
@@ -241,10 +252,35 @@ libc_checksum=$(printf '%064d' 0)
 patch_sha256=toolchain/rust/0001-slopos-std.patch:$(tp_sha256_file "$root/toolchain/rust/0001-slopos-std.patch")
 patch_sha256=toolchain/libc/0001-slopos-libc.patch:$(tp_sha256_file "$root/toolchain/libc/0001-slopos-libc.patch")
 FIXTURE
+        # The second copy of the LLVM port: pinned in another fork's PIN,
+        # because it patches a subtree of that fork's tarball, and applied in
+        # `src/llvm-project`, which no materialiser stages.
+        mkdir -p "$root/toolchain/llvm-rustc"
+        cat > "$root/toolchain/llvm-rustc/0001-slopos-support.patch" <<'FIXTURE'
+--- a/llvm/include/llvm/ADT/bit.h
++++ b/llvm/include/llvm/ADT/bit.h
+--- /dev/null
++++ b/clang/lib/Driver/ToolChains/SlopOS.cpp
+FIXTURE
         cat > "$root/toolchain/compiler/PIN" <<FIXTURE
 # fixture
 rustc_src_sha256=$(printf '%064d' 0)
 patch_sha256=toolchain/compiler/0001-slopos-target.patch:$(tp_sha256_file "$root/toolchain/compiler/0001-slopos-target.patch")
+patch_sha256=toolchain/llvm-rustc/0001-slopos-support.patch:$(tp_sha256_file "$root/toolchain/llvm-rustc/0001-slopos-support.patch")
+FIXTURE
+        # The cargo fork shares the compiler fork's tree, one directory down,
+        # and is pinned separately. It creates a file too, so the
+        # materialisation check has to find that one under `src/tools/cargo`
+        # rather than at the tree root.
+        cat > "$root/toolchain/cargo/0001-slopos-cargo.patch" <<'FIXTURE'
+--- a/Cargo.toml
++++ b/Cargo.toml
+--- /dev/null
++++ b/src/sources/unavailable.rs
+FIXTURE
+        cat > "$root/toolchain/cargo/PIN" <<FIXTURE
+# fixture
+patch_sha256=toolchain/cargo/0001-slopos-cargo.patch:$(tp_sha256_file "$root/toolchain/cargo/0001-slopos-cargo.patch")
 FIXTURE
         # The llvm fork, pinned in a third PIN beside the tarball it patches.
         # It creates no file, so the materialisation check has nothing to look
@@ -281,6 +317,10 @@ FIXTURE
         tp_stamp "$root" > "$root/$TP_SYSROOT_REL/$TP_STAMP_NAME"
         mkdir -p "$src/compiler/rustc_target/src/spec/targets"
         touch "$src/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs"
+        mkdir -p "$src/$TP_CARGO_TREE_REL/src/sources"
+        touch "$src/$TP_CARGO_TREE_REL/src/sources/unavailable.rs"
+        mkdir -p "$src/$TP_LLVM_RUSTC_TREE_REL/clang/lib/Driver/ToolChains"
+        touch "$src/$TP_LLVM_RUSTC_TREE_REL/clang/lib/Driver/ToolChains/SlopOS.cpp"
         tp_rustc_stamp "$root" > "$src/$TP_STAMP_NAME"
     }
 
@@ -336,7 +376,7 @@ FIXTURE
     root="$(fixture half-applied)"
     materialise "$root"
     rm -f "$root/$TP_SYSROOT_REL/$TP_LIBRARY_REL/libc/src/unix/slopos/mod.rs"
-    run_case half-applied 1 'stamped current but the patches did not land' \
+    run_case half-applied 1 'libc/src/unix/slopos/mod\.rs \(toolchain/libc/' \
         "rejects a sysroot whose libc half never got patched"
 
     # 1. The fork drifting from rust-toolchain.toml.
@@ -368,6 +408,40 @@ FIXTURE
     run_case stale-rustc-src 1 "$TP_RUSTC_SRC_REL is stale" \
         "rejects a source tree whose stamp predates the compiler fork"
 
+    root="$(fixture cargo-patch-drift)"
+    echo "+++ b/Cargo.toml" >> "$root/toolchain/cargo/0001-slopos-cargo.patch"
+    run_case cargo-patch-drift 1 'toolchain/cargo/0001-slopos-cargo\.patch does not match its pin' \
+        "rejects a cargo patch edited without its own PIN"
+
+    root="$(fixture cargo-half-applied)"
+    materialise "$root"
+    rm -f "$root/$TP_RUSTC_SRC_REL/$TP_CARGO_TREE_REL/src/sources/unavailable.rs"
+    run_case cargo-half-applied 1 'src/tools/cargo/src/sources/unavailable\.rs \(toolchain/cargo/' \
+        "rejects a source tree whose cargo half never got patched"
+
+    # The second LLVM port: pinned in the *compiler* fork's PIN rather than
+    # beside its own overlay, which is the one routing arm that answers
+    # another fork's file.
+    root="$(fixture llvm-rustc-patch-drift)"
+    echo "+++ b/llvm/include/llvm/ADT/bit.h" >> "$root/toolchain/llvm-rustc/0001-slopos-support.patch"
+    run_case llvm-rustc-patch-drift 1 'toolchain/llvm-rustc/0001-slopos-support\.patch does not match its pin' \
+        "rejects the second llvm port edited without the compiler fork's PIN"
+
+    # The landing check's one exemption, both ways: a staged `src/llvm-project`
+    # missing the file the port creates is a failure, and no `src/llvm-project`
+    # at all is not, because no materialiser stages one.
+    root="$(fixture llvm-rustc-half-applied)"
+    materialise "$root"
+    rm -f "$root/$TP_RUSTC_SRC_REL/$TP_LLVM_RUSTC_TREE_REL/clang/lib/Driver/ToolChains/SlopOS.cpp"
+    run_case llvm-rustc-half-applied 1 'src/llvm-project/.*SlopOS\.cpp \(toolchain/llvm-rustc/' \
+        "rejects a staged llvm-project whose port never landed"
+
+    root="$(fixture llvm-rustc-unstaged)"
+    materialise "$root"
+    rm -rf "$root/$TP_RUSTC_SRC_REL/$TP_LLVM_RUSTC_TREE_REL"
+    run_case llvm-rustc-unstaged 0 "^$SELF: OK" \
+        "accepts a source tree with no llvm-project staged in it"
+
     # The decoupling the second PIN buys: an edited std patch restamps the
     # sysroot and must leave the source tree alone, or every compiler-fork edit
     # would re-extract 656 MiB and every std edit would re-check a tree it did
@@ -390,11 +464,13 @@ FIXTURE
         echo "  case std-edit-spares-rustc-src: a std edit restamps the sysroot and spares the source tree"
     fi
 
-    root="$(fixture rustc-src-without-overlay)"
-    materialise "$root"
-    rm -rf "$root/toolchain/compiler"
-    run_case rustc-src-without-overlay 1 'to have built it' \
-        "rejects a source tree whose overlay is no longer in the checkout"
+    for half in compiler cargo; do
+        root="$(fixture "rustc-src-without-$half")"
+        materialise "$root"
+        rm -rf "$root/toolchain/$half"
+        run_case "rustc-src-without-$half" 1 'to have built it' \
+            "rejects a source tree whose $half overlay is no longer in the checkout"
+    done
 
     # A materialiser decides what lands in the tree it builds, so it is one of
     # the tree's stamped inputs. Each fixture gets a copy of both, and editing

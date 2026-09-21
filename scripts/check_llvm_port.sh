@@ -62,8 +62,8 @@ STAGE_DIR="${BUILD_DIR:-$REPO_ROOT/builddir}"
 BUILD="$STAGE_DIR/gates/llvm-port"
 TARGET="x86_64-unknown-slopos"
 # `LLVMSupport` is the OS-facing half; `LLVMTargetParser` is where
-# `Triple::SlopOS` lives, and without it four of the port's six files compile
-# nowhere. Clang's two are still held by nothing but `git apply --check`:
+# `Triple::SlopOS` lives, and without it four of the port's ten files compile
+# nowhere. Clang's six are `scripts/check_clang_driver.sh`'s, because
 # reaching `SlopOSTargetInfo` means building clang, which is a different
 # order of cost from this gate's minute.
 TARGETS="LLVMSupport LLVMTargetParser"

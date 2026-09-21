@@ -311,7 +311,7 @@ fn dash_c_runs_the_string() -> bool {
 // The POSIX grammar
 // ---------------------------------------------------------------------------
 //
-// Related properties share one shell invocation: `MAX_PROCESSES` is 256 and a
+// Related properties share one shell invocation: `MAX_PROCESSES` is 1024 and a
 // run reaches ~170 before this test starts, so a spawn per assertion is a
 // budget this test does not have.
 

@@ -22,6 +22,7 @@ typedef __builtin_va_list va_list;
 #define _IOLBF (1)
 #define _IONBF (2)
 #define BUFSIZ (4096)
+#define FILENAME_MAX (4096)
 
 extern FILE *stdin;
 extern FILE *stdout;

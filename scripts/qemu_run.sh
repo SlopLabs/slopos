@@ -17,6 +17,7 @@ set -euo pipefail
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR,
+#   DEV_DISK_IMG,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
@@ -229,6 +230,15 @@ ADD_VERIFIED_DISK=0
 ADD_CAPACITY_DISK=0
 if [ -n "${CAPACITY_IMG:-}" ] && [ -f "$CAPACITY_IMG" ]; then
     ADD_CAPACITY_DISK=1
+fi
+# The dev disk (virtio-disk4), attached in every mode when DEV_DISK_IMG names
+# an existing file: a cross-built toolchain's workbench volume, which an
+# interactive boot wants as much as a graded run does. Last, because the guest
+# names a virtio device by its position among the attached ones rather than by
+# the id here, so anything earlier would move CAPACITY_IMG's letter.
+ADD_DEV_DISK=0
+if [ -n "${DEV_DISK_IMG:-}" ] && [ -f "$DEV_DISK_IMG" ]; then
+    ADD_DEV_DISK=1
 fi
 
 case "$MODE" in
@@ -482,6 +492,12 @@ if [ "$ADD_CAPACITY_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$CAPACITY_IMG,if=none,id=virtio-disk3,format=raw,cache=writeback"
         -device "virtio-blk-pci,drive=virtio-disk3,disable-legacy=on"
+    )
+fi
+if [ "$ADD_DEV_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -drive "file=$DEV_DISK_IMG,if=none,id=virtio-disk4,format=raw,cache=writeback"
+        -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on"
     )
 fi
 QEMU_ARGS+=(

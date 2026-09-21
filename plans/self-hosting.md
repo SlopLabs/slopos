@@ -28,16 +28,18 @@ mtime, mounts a 16 GiB volume holding a million inodes — this repository and
 that sysroot among them — and runs a `PT_INTERP` executable that `dlopen`s a
 shared object, and throws a C++ exception out of one `dlopen`ed object into
 the program that loaded it — and LLVM itself, the library those 161 and 208 MB
-are, now compiles for this target. What is left is a compiler that runs here,
-and every constant that produced the storage gap was chosen correctly for an
-appliance.
+are, now compiles for this target — and a bootstrap invocation on Linux
+cross-builds rustc, cargo, `rust-lld` and clang *for* it. What is left is
+running that toolchain here, and every constant that produced the storage gap
+was chosen correctly for an appliance.
 
 **The theme of this plan:** SlopOS's limits are not architectural mistakes,
 they are appliance-sized constants and appliance-sized policies. A workbench
 needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
-*widening under proof*, not redesign, and one exception remains: the compiler
-bootstrap itself. The fifteen sections between here and Phase 1 are what has
+*widening under proof*, not redesign, and the compiler bootstrap — the one
+exception this plan carried the longest — turned out to be mostly
+configuration. The sixteen sections between here and Phase 1 are what has
 landed, each stating the constraints a later phase must not disturb.
 
 
@@ -468,8 +470,8 @@ Between them: `if`/`while`/`until`/`for`/`case`, functions with their own
 positional parameters, `break n`, `$(...)` and backticks, here-documents in all
 four forms, globbing, the parameter-expansion operators, `$(( ))`, `"$@"`
 against `$*`, a twelve-stage pipeline and a thousand-byte variable. Related
-properties share one shell invocation deliberately: `MAX_PROCESSES` is 256, a
-run reaches ~170 before this utest, and a spawn per assertion measured 243 held
+properties share one shell invocation deliberately: `MAX_PROCESSES` was 256 when this
+was measured, a run reaches ~170 before this utest, and a spawn per assertion measured 243 held
 at the phase boundary with the next dozen answering `ENOMEM`.
 
 Everything pure about the grammar is `shell-core`, 77 host tests under `just
@@ -1548,7 +1550,8 @@ errors, against slibc's own headers and the C++ runtime this tree builds.
 that name a libc, `raw_ostream.cpp` and `ConvertUTF.cpp` the ones that name a
 C++ library, `Triple.{h,cpp}` where the port's own enumerator lives, and the
 other twelve hundred objects are portable C++ over them. Four of the port's
-six files; clang's two need a clang to build. 47 s cold on four cores, 1.5 s
+ten files; the clang half needs a clang, and the driver in it is graded
+separately by `scripts/check_clang_driver.sh`. 47 s cold on four cores, 1.5 s
 warm.
 
 The estimate this replaces is the one the workstream below carried, and it was
@@ -1622,7 +1625,8 @@ What it rests on, in case a later phase disturbs it:
   previous `time_t` plus `long` pair was the same bytes under names no C++
   standard library knows.
 - **The port of llvm-project is a patch, and it is the size a port is.** 102
-  lines over six files: the two places LLVM dispatches on the OS with no
+  lines over six files at this point — the clang driver takes it to ten, in
+  the section below: the two places LLVM dispatches on the OS with no
   default a new one can take (`<endian.h>` versus `<machine/endian.h>` in
   `ADT/bit.h`, and `statvfs.f_flag` versus a BSD `f_flags` and `MNT_LOCAL` in
   `Unix/Path.inc`), plus the `Triple` entry and the clang target that make
@@ -1712,6 +1716,176 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## The toolchain is cross-built and lands on a dev disk
+
+The sixteenth thing this plan rests on, and the one Phase 1 was named for:
+**one bootstrap invocation on Linux, `--build=x86_64-unknown-linux-gnu
+--host=x86_64-unknown-slopos`, builds rustc, cargo, `rust-lld`, clang and
+`libLLVM.so` for SlopOS, and a dev disk is where they land.** What the tree
+carries is that invocation and everything it needs — six pinned forks, a
+compiler wrapper, a sysroot, a volume and four gates — not its output, which
+is hours of CPU and tens of gigabytes and belongs on a disk rather than in a
+repository. Nothing in that sentence is novel — it is how every cross-hosted
+Rust distribution is produced — and everything in it depends on the fifteen
+sections above: every artifact is dynamically linked, throws, calls a C
+library, is built for a triple the compiler can name, and is *made of* a
+library that compiles for that triple.
+
+Four gates are the standing proof, because the build itself is hours of CPU
+and what can be graded every run is everything up to the first object.
+`scripts/check_bootstrap_config.sh` drives bootstrap's own dry run — which
+validates the config, resolves `--host` through the built-in target list and
+walks the whole step graph — 16 steps, ending at a stage2 rustc, cargo and
+std installed for the target — and then compiles and links a C program and a
+shared C++ object with the generated wrapper, grading the interpreter, the
+`NEEDED` entries and the image type of what came out.
+`scripts/check_cargo_fork.sh` holds cargo's `network` cut to dropping every C
+library and still compiling. `scripts/check_clang_driver.sh` drives a real
+`clang::driver::Driver` at the triple and grades the link job's argv against
+the line `build_userland.sh` writes by hand. `just test-devdisk` is the
+fourth: the guest mounts the volume, reads the staged inventory back and
+mounts it again.
+
+**Three things this workstream priced wrong, and the measurements that
+corrected them.** The estimate said bootstrap builds cargo before anything for
+the host triple; it does not — cargo is an *extended* tool, gated on
+`build.extended` and `build.tools`, and a stage2 rustc does not depend on it,
+so the fork is needed for the goal and not for the ordering. The estimate
+said six `-sys` crates, none optional; `openssl` and `openssl-src` were
+already `optional = true` upstream, the five that were not are `curl`,
+`curl-sys`, `git2`, `git2-curl` and `libgit2-sys`, and there is a *seventh* C
+library the list missed — SQLite, through `rusqlite`'s `bundled` feature. And
+the cut was priced at seventeen of cargo's 260 source files; the patch is 23
+files and 385 added lines against 43 removed.
+
+What it rests on, in case a later phase disturbs it:
+
+- **cargo is the fifth fork, and it shares the compiler fork's tree.** The
+  rustc source tarball carries cargo at `src/tools/cargo`, so
+  `toolchain/cargo/0001-slopos-cargo.patch` lands there and the two forks
+  share one materialised tree and one stamp — and not one PIN, because this
+  patch is a PR to rust-lang/cargo and the others are PRs to rust-lang/rust.
+  The feature is `network`, on by default, and what hangs off it is curl,
+  libgit2 and the five pure-Rust crates only their code paths reach. Twenty
+  crates leave the dependency closure, every C library among them. The cut
+  was established by building that cargo and using it: it builds a vendored
+  workspace and refuses a registry with a named reason rather than a link
+  error. What the gate holds every run is cheaper — the two closures and a
+  `cargo check` of the offline side — because a `cargo build` of cargo is
+  minutes.
+- **SQLite stays, and three libc names are the whole reason.** The seventh C
+  library is the cheapest of them — one amalgamated file, no build system,
+  and `cc` takes its target from `CARGO_CFG_TARGET_*`, which cargo sets for
+  any triple. Compiling it for `x86_64-unknown-slopos` against slibc's
+  headers stopped on exactly three names: `strspn`, `strcspn` and
+  `FILENAME_MAX`. With those it compiles clean, so the alternative — stubbing
+  1 840 lines of `global_cache_tracker` — was never paid.
+- **The fork is a cut, not a feature flag over dead code.** Without
+  `network`, `SourceId::load` answers an `UnavailableSource` for a git or
+  remote-registry id rather than an error, because source replacement *loads*
+  the original just to ask whether it checksums and whether it needs a
+  precise version. Answering those two constants and refusing everything else
+  is what makes a vendored build work at all; returning an error there broke
+  it, which is how the case was found.
+- **bootstrap needed two patches of its own, and running it is what found
+  them.** `build.tool.<name>.features` can only *add* features, so
+  `toolchain/compiler/0002` adds the `default-features` key that lets a host
+  target drop cargo's defaults. And bootstrap maps a cross target's triple to
+  a `CMAKE_SYSTEM_NAME` by hand: an unrecognised one prints a note, falls back
+  to `Generic` and exits 0 — losing `LLVM_ON_UNIX` and with it every
+  `Unix/*.inc` file the LLVM port patches. `0003` is the arm, and `Linux` is
+  the value, for the same reason `make_slopos_cxx.sh` gives.
+- **The clang driver is in the port; the wrapper stands in until a clang
+  built from the port runs the build.** `toolchains::SlopOS` is
+  `toolchain/llvm/0002-slopos-clang-driver.patch` — `crt0.o` first,
+  `--image-base=0x400000`, `--dynamic-linker=/lib/ld-slopos.so.1`,
+  `--eh-frame-hdr`, `-z now`, `-L<sysroot>/lib -lc`, `libbuiltins.a` last.
+  The host clang that runs the cross build is not that clang, so
+  `bootstrap_slopos_toolchain.sh` writes the same policy as a shell wrapper
+  and hands it to CMake and to every build script.
+- **The wrapper names two triples, and that is the whole reason it exists.**
+  Compilation must name SlopOS, or the preprocessor defines `__linux__` and
+  LLVM takes the `/proc/self/exe` and `sched_getaffinity` paths this system
+  has not got. Linking must not: the host clang has no SlopOS toolchain, so
+  for that triple it hands the link to `gcc` — a host GCC
+  `scripts/cxx_host_tools.sh` deliberately does not require, and the host's
+  library directories on the line. So a link invocation compiles its sources
+  for SlopOS first and links the objects under the Linux triple with
+  `-fuse-ld=lld`.
+- **`--sysroot` is what stops the host's libc answering.** Even under the
+  Linux triple clang adds its own `-L` paths, and slibc is one library — no
+  separate `libm`, `libdl`, `libpthread` or `librt` — so a probe for one of
+  those would otherwise resolve against glibc and produce a binary that dies
+  on SlopOS. The sysroot confines the search, and empty archives answer the
+  four names the way a musl-derived sysroot does. Measured: `-lm` is a link
+  error.
+- **The LLVM port exists twice, and running the build is what said so.**
+  `make_rustc_src.sh` drops `src/llvm-project` because no gate needs 1.4 GB
+  of C++, and the pinned llvm-project the C++ runtime is cut from is not a
+  substitute: rustc links a C++ shim against one specific LLVM API, and
+  `download-ci-llvm` serves the build triple only. So a real run unpacks that
+  subtree from the tarball already on disk — and then finds that
+  `toolchain/llvm/`'s hunks do not apply to it, because the two trees are
+  18.1.8 and 23.1.1. `toolchain/llvm-rustc/` is the same port against the
+  second: the same `Triple` entry, the same two OS dispatches, the same
+  `toolchains::SlopOS`, re-derived where five years of API moved under it.
+  Two copies of one port is the cost of a C++ shim pinned to a compiler's own
+  LLVM, and the one thing that must not happen is for them to diverge.
+- **The std and libc forks land in two trees for the same reason.** The
+  sysroot's `library/` is what `-Zbuild-std` reads; the rustc source tree's
+  is what bootstrap builds the target's std out of, and it arrives with no
+  `library/libc` at all — `make_slopos_sysroot.sh` is what unpacks the pinned
+  crate. Staging it is the bootstrap script's, stamped with the sysroot's own
+  digest so an edit to either fork re-stages this one.
+- **The materialised trees are outside this repository's cargo workspace.**
+  `Cargo.toml`'s `exclude` carries `third_party`, because cargo resolves
+  `src/bootstrap/Cargo.toml` against the nearest ancestor workspace that
+  claims it and found SlopOS's. Bootstrap refused to build at all — the same
+  class of failure as `git apply` resolving a patch's paths against the
+  repository root, and caught the same way, by running the thing.
+- **The dev disk is a fifth volume and the guest finds it by what is on it.**
+  `DEV_DISK_IMG` attaches `fs/assets/ext2-devdisk.img` as `virtio-disk4`,
+  after the capacity disk so `CAPACITY_IMG`'s `vdd` keeps its letter. The
+  marker at the volume root records every staged path's size *read back out
+  of the image* rather than off the stage, because a preserved volume is
+  refreshed in place and a stage-derived size then describes a file the
+  volume does not hold — observed, and fixed by measuring the medium.
+  `devdisk_test` mounts, grades the inventory, unmounts and mounts again: the
+  second mount is the point, because a leaked write claim answers
+  `AlreadyClaimed` forever.
+- **`MAX_PROCESSES` is 1024.** One `just test` reached 256 exactly, which was
+  the appliance's ceiling, and the quota gate's own note had already said the
+  next utest needed the constant raised rather than the cap. A slot costs
+  36 960 bytes of `.bss` for 768 of them — so what bounds it
+  is neither memory nor `PROCESS_SLOT_BITS` but how many processes a `-j N`
+  build wants at once.
+
+**What this deliberately did not do.**
+
+- **The build is not a gate and its output is not in the tree.** A cross LLVM
+  plus a stage2 rustc is hours of CPU and tens of gigabytes; what CI grades is
+  the plan, the wrapper and the two forks. `just toolchain` runs it, and the
+  first number it produces is the one the `libLLVM` decision has been waiting
+  for.
+- **Nothing packages clang.** bootstrap's `dist` steps cover rustc, cargo,
+  std and the llvm tools; `llvm.clang = true` only puts clang in the LLVM
+  CMake build. Staging it onto the dev disk is a copy, and the copy is the
+  script's, not bootstrap's.
+- **The wrapper is not a driver.** It splits compile from link and routes
+  arguments by shape; anything clang's real driver does that a shape cannot
+  express, it does not do. It is written to be deleted, and
+  `toolchains::SlopOS` is what deletes it.
+- **An offline cargo is a smaller cargo.** No `publish`, `yank`, `owner`,
+  `login`, `logout`, `search` or `info`; no git or remote-registry sources;
+  `cargo new --vcs git` refuses and `cargo fix`'s dirty check sees no VCS,
+  because without libgit2 there is no repository to see. `Cargo.lock` holds
+  nine third-party crates and a vendored workspace reaches none of that.
+- **No `cargo install`, no registry, no network.** The fork gives that up on
+  purpose and the goal does not need it; a general dev machine does, and it
+  is the same TLS-shaped work Workstream 1.2 names.
+
+---
+
 ## Phase 1 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
@@ -1738,94 +1912,19 @@ being paid for. `scripts/check_linker_script.sh` keeps its whole value as the
 ratchet that would notice `wild` becoming viable, which is now a reason to
 re-open a decision rather than a blocker to route around.
 
-**What the reversal costs.** Four of the landed sections above: the dynamic
+**What the reversal costs.** Five of the landed sections above: the dynamic
 loader, which was always owed; the C++ runtime, which was new; the libc
 surface underneath them, which was owed either way and which the LLVM decision
-promoted from off the critical path to load-bearing; and the port of
+promoted from off the critical path to load-bearing; the port of
 llvm-project itself, which was the phase's first real measurement and is the
-one that came back cheapest. The C99 frontend written
+one that came back cheapest; and the cross-build, which is the one that turned
+out to be mostly configuration. The C99 frontend written
 in Rust that the Rust-hosted road owed is **deleted** rather than deferred —
 clang arrives in the same monorepo pass that produces `libLLVM.so` and
 `rust-lld`, so the C compiler is a by-product of a decision taken for Rust's
 sake, and that is the only place this road is cheaper than the one it replaced.
 
-### Workstream 1.1 — The toolchain is cross-built and lands on a dev disk (**L**)
-
-One bootstrap invocation on Linux, `--build=x86_64-unknown-linux-gnu
---host=x86_64-unknown-slopos`, producing rustc, cargo, `rust-lld`, clang and
-`libLLVM.so` for SlopOS, plus the std built through the existing fork. Nothing
-in that sentence is novel — it is how every cross-hosted Rust distribution is
-produced — and everything in it depends on the five landed sections above:
-every artifact in it is dynamically linked, throws, calls a C library, is
-built for a triple the compiler can name, and is *made of* a library that now
-compiles for that triple.
-
-**What is left is cargo, not LLVM, and cargo is a fifth fork.** bootstrap
-builds cargo before it builds anything for the host triple, and cargo's
-manifest pulls six `-sys` crates that each build a C library: `curl-sys`,
-`openssl-sys` with `openssl-src`, `libgit2-sys`, `libssh2-sys` and
-`libz-sys`. None of them is optional — `git2` is declared
-`features = ["https", "ssh"]` with no `optional = true`, and `curl` the same —
-so there is no feature flag that drops them and no "curl without a TLS
-backend" to configure. Building cargo unmodified for this target means
-porting five C build systems, OpenSSL's perl `Configure` among them.
-
-The decision is therefore taken here rather than at the first `x.py` run:
-**`toolchain/cargo/` becomes the fifth pinned fork**, alongside
-`toolchain/{rust,libc,compiler,llvm}` and built by the same machinery — a
-patch, a checksum in a `PIN`, a materialiser, a gate. The fork makes those
-six dependencies optional behind a feature bootstrap turns off for this
-target. It is one Rust crate against five C build systems, and the tree
-already owns the tooling for the first.
-
-What that road gives up is exactly what the goal does not need: no
-`cargo install` from a registry, no git dependencies, no `cargo publish`.
-`Cargo.lock` holds nine third-party crates, so building SlopOS on SlopOS is a
-vendored workspace build and reaches none of them. The network stack a
-registry would want is a different plan.
-
-The measurement that sizes the fork: seventeen of cargo's 260 source files
-name `curl::`, `git2::` or `openssl::`, and they sit in `util/network/`,
-`sources/git/`, `sources/registry/git_remote.rs`, `ops/cargo_fix/` and
-`bin/cargo/`. That is the cut, and whether it is a clean one is the first
-thing the fork has to establish.
-
-**The medium is already reachable.** Measured from the host: the pinned sysroot
-is 1.1 GB, `librustc_driver.so` is a single 161 MB shared object, and the
-`libLLVM.so` beside it is 208 MB. Against that, `just test-capacity`
-already builds a 16 GiB ext2 volume populated with this repository and that
-sysroot, `mount(2)` takes a named device, and the verity hash array is chunked
-so an image's ceiling is what RAM allows rather than what one allocation
-allows. The toolchain disk is a second volume the installer reads, not a
-redesign.
-
-The better number is the one a self-hosted machine actually needs, and Redox
-publishes it by shipping it. Measured off `static.redox-os.org`: its
-`rust-install` is `rust.pkgar` (85 MiB) plus `llvm21.pkgar` (24.5 MiB) ≈ **110
-MiB**, and a full native C/C++/Rust set — rust, llvm21, its runtime, clang21,
-lld21, llvm-rt21, gcc13, gcc13.cxx, libstdcxx, libgcc — is ≈ **246 MiB** of
-package payload. Its own automated self-hosted build config provisions a
-**10 GiB** filesystem (`config/sys-build.toml`, `filesystem_size = 10000`)
-against 650 MiB for its desktop image. Two orders of magnitude under the 1.1 GB
-host sysroot, because a shipped toolchain is not a rustup toolchain.
-
-**What the run will need that the section above did not.** Two things, and
-only one of them is a question. The work is a clang driver toolchain, so a
-cross-built clang can be handed a bare `-o` and find `crt0.o` and `-lc` by
-itself; every link line in this tree states those explicitly, which is why
-nothing has needed it yet, and there is nothing to decide — it is
-`clang/lib/Driver/ToolChains/` and it goes in `toolchain/llvm/` beside the
-port already there. The question is `libLLVM`: shared is what upstream ships
-and what the 161 MB measurement was taken against, static removes one
-`dlopen` from startup but not the proc-macro one, and it stays on the
-open-decisions list because the answer is a startup cost this tree cannot
-measure before there is a toolchain to measure it on.
-
-So the workstream reduces to four items in order: fork cargo, add the clang
-driver, run bootstrap, put the result on a second volume. None of them is
-open-ended; the one open decision is a number the first run prints.
-
-### Workstream 1.2 — The build loop holds (**M**)
+### Workstream 1.1 — The build loop holds (**M**)
 
 A toolchain that starts is not a toolchain that finishes. What the loop needs
 beyond the landed sections above, with the tree's current answer beside it:
@@ -1850,7 +1949,7 @@ beyond the landed sections above, with the tree's current answer beside it:
   the honest number is the one a first in-guest build measures rather than one
   extrapolated here.
 
-### Workstream 1.3 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.2 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -1920,7 +2019,7 @@ What it would cost, with the parts that are not obvious named first:
   dependency of rebuilding the compiler is a second C++ port plus an
   interpreter, and none of the three is on any other phase's path.
 - **clang running in-guest is free, and it is not the hard part.** It arrives
-  with `libLLVM.so` in Workstream 1.1's single cross-build. Having the compiler
+  with `libLLVM.so` in the single cross-build above. Having the compiler
   is not having the build system, the disk or the hours.
 - **Disk and time.** A release LLVM build is tens of gigabytes of objects and
   hours of CPU on a machine with a real scheduler and real I/O. Neither number
@@ -1960,20 +2059,21 @@ not been made at all.
       351 — and the backend decision changed what it is worth: a prebuilt
       rustc is an LLVM rustc, which used to be the objection and is now what
       the tree builds towards anyway, so this became a possible *shortcut
-      past* Workstream 1.1 rather than a detour from it. Asterinas is also the
-      proof of the ceiling: binary-compatible to the point of an unmodified
-      NixOS userland, and still always cross-built. Binary compatibility buys
-      running a prebuilt rustc; it does not buy a target that can be a host,
-      and it does not remove the proc-macro `dlopen`.
-- [ ] **Is `libLLVM` shared or static?** Shared is what upstream ships and what
-      the 161 MB `librustc_driver.so` measurement was taken against; static
-      removes one `dlopen` but not the proc-macro one, because `rustc_driver`
-      is `crate-type = ["dylib"]` and no configuration changes that. It is no
-      longer a question about what the loader owes but about how many
-      `PT_LOAD`s and how much startup relocation an in-guest rustc pays for,
-      which is the first number Workstream 1.1's bootstrap run produces.
-      Decide it there rather than on paper. Cross-building the library
-      settled nothing about this: both configurations compile.
+      past* the cross-build above rather than a detour from it. Asterinas is
+      also the proof of the ceiling: binary-compatible to the point of an
+      unmodified NixOS userland, and still always cross-built. Binary
+      compatibility buys running a prebuilt rustc; it does not buy a target
+      that can be a host, and it does not remove the proc-macro `dlopen`.
+- [ ] **Is `libLLVM` shared or static?** Shared is what upstream ships, what
+      the 161 MB `librustc_driver.so` measurement was taken against, and what
+      `bootstrap_slopos_toolchain.sh` writes today (`llvm.link-shared`);
+      static removes one `dlopen` but not the proc-macro one, because
+      `rustc_driver` is `crate-type = ["dylib"]` and no configuration changes
+      that. It is no longer a question about what the loader owes but about
+      how many `PT_LOAD`s and how much startup relocation an in-guest rustc
+      pays for — a number neither cross-building the library nor planning the
+      build produces, because both configurations compile and both plan. The
+      first in-guest `rustc --version` is what answers it.
 - [ ] **Does the toolchain's rustc unwind, or does the driver stop being a
       dylib?** The built-in target is `panic-strategy: abort` because every
       SlopOS binary is, and a rustc built that way aborts on its first fatal
@@ -1984,7 +2084,7 @@ not been made at all.
       `PanicStrategy::Abort`, so no one's prior art covers the unwinding road.
       The cost of that road is `.eh_frame` in every userland binary and a
       `panic = unwind` std; the cost of the other is a compiler patch upstream
-      will not take. Decide it with the first bootstrap run, and do not answer
+      will not take. Decide it with the first in-guest run, and do not answer
       it in the built-in spec alone: the JSON one is what the system's own
       binaries are built with.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
@@ -2001,7 +2101,7 @@ not been made at all.
       peaks far above anything cranelift would have, and a build that
       overcommits currently dies at the faulting task with a SIGBUS-coded
       exit. Decide between swap plus a reclaim policy and a per-build memory
-      budget that makes overcommit not happen — before Workstream 1.2.
+      budget that makes overcommit not happen — before Workstream 1.1.
 
 **Decided.** C++ runtime: **LLVM's `libc++`, cross-built, libc++ and
 libc++abi linked into one `libc++.so`** — settled by building it, and by the
@@ -2016,7 +2116,11 @@ range at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
 Rust-hosted answer was decided first, then measured against this kernel and
 found not to reach it. C is *not* excluded and is now cheaper, because clang
 arrives in the same cross-build as `libLLVM.so`, which deletes the
-Rust-written C frontend this plan used to owe. Scope: the full in-guest loop,
+Rust-written C frontend this plan used to owe. cargo: **a pinned fork that
+puts curl, libgit2 and OpenSSL behind a `network` feature**, rather than
+Redox's road of porting the five C libraries as recipes or Motor OS's of
+shipping no cargo at all; SQLite stays, because three libc names were cheaper
+than a build-system port. Scope: the full in-guest loop,
 Phases 1–2, in QEMU. Identity: single-user, uid 0, permanently — so file
 ownership and a medium-resident quota ledger stay out of scope and `stat`'s
 uid/gid fields exist for layout only. Directory scaling: an in-memory name
@@ -2053,6 +2157,9 @@ compile.
 | libc surface | `slibc-core/src/`, `slibc/src/{setjmp,locale,wchar}/`, `slibc/src/{stdlib/sort.rs,math/longdouble.rs,time/calendar.rs,string/convert.rs,stdio/{printf,scanf}.rs,conf.rs}`, `slibc/build/decls.rs`, `toolchain/libc/0001-slopos-libc.patch`, `userland/libctest/` | *invariant* |
 | C++ runtime | `scripts/make_slopos_cxx.sh`, `scripts/check_cxx_pin.sh`, `toolchain/cxx/PIN`, `slibc/src/{unwind,cxa,math,ctype,stdlib,wchar,locale,setjmp,time}/`, `slibc-core/src/`, `slibc/build/`, `userland/cxxtest/` | *invariant* — `--print-abi-flags` is the one place the rune-table flag is written down |
 | LLVM port | `toolchain/llvm/`, `toolchain/cxx/PIN`, `scripts/make_slopos_llvm_src.sh`, `scripts/check_llvm_port.sh`, `scripts/lib/toolchain_pin.sh`, `slibc/build/decls.rs`, `slibc/builtins/` | *invariant* — the patch is the port, and `libbuiltins.a` is where a shared object takes compiler-rt from |
+| Cargo fork | `toolchain/cargo/`, `scripts/make_rustc_src.sh`, `scripts/check_cargo_fork.sh`, `scripts/lib/toolchain_pin.sh` | *invariant* — the patch shares the compiler fork's tree and stamp, and `rusqlite` stays only while slibc keeps `strspn`, `strcspn` and `FILENAME_MAX` |
+| Cross-build | `scripts/bootstrap_slopos_toolchain.sh`, `scripts/check_bootstrap_config.sh`, `toolchain/compiler/000{2,3}-*.patch`, `toolchain/llvm/000{1,2}-*.patch`, `toolchain/llvm-rustc/`, `scripts/check_clang_driver.sh`, `Cargo.toml`'s `exclude` | *invariant* — the wrapper's two triples, and the workspace exclusion without which bootstrap does not build |
+| Dev disk | `scripts/build_devdisk.sh`, `scripts/qemu_run.sh`, `userland/src/bin/tests/devdisk_test.rs`, `core/src/exec/grants.rs` | *invariant* — the marker's sizes are read off the volume, not off the stage |
 | C++ platform | `vendor/unwinding`, `slibc/{staticlib,cdylib,crt0,include}/`, `NOTICE.md` | work |
 | Phase 2 install | `scripts/qemu_run.sh`, `fs/src/devfs/mod.rs`, `fs/src/partition.rs` | work |
 | Execution boundary | `AGENTS.md` | Phase 2 needs a scoped exception |

@@ -172,6 +172,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin spawn_privilege_test \
         --bin seat_test \
         --bin mount_test \
+        --bin devdisk_test \
         --bin shell_script_test \
         --bin stdio_stream_test \
         --bin ip_e2e_test \
@@ -286,6 +287,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/mount_test" ]; then
         cp "$RELEASE_DIR/mount_test" "$BUILD_DIR/mount_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/devdisk_test" ]; then
+        cp "$RELEASE_DIR/devdisk_test" "$BUILD_DIR/devdisk_test.elf"
     fi
     if [ -f "$RELEASE_DIR/stdio_stream_test" ]; then
         cp "$RELEASE_DIR/stdio_stream_test" "$BUILD_DIR/stdio_stream_test.elf"

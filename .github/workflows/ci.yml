@@ -23,9 +23,11 @@ jobs:
   ci:
     name: Build, Format & Test
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # 35 rather than 30 since the LLVM port step joined: extracting the 1.5 GB
-    # source tree and compiling LLVMSupport is about two minutes on this runner.
-    timeout-minutes: 35
+    # 70 rather than 35 since the clang driver joined: that gate builds
+    # `clangDriver`, `clangBasic` and the LLVM libraries under them for the
+    # host — about 42 CPU-minutes, which is a quarter of an hour on four
+    # vCPUs — and the dev-disk check adds a 2 GiB image and one more boot.
+    timeout-minutes: 70
 
     steps:
       - name: Checkout repository
@@ -104,6 +106,7 @@ jobs:
             third_party/ovmf
             third_party/slopos-cxx
             third_party/llvm-project-*.src.tar.xz
+            third_party/rustc-src-*.tar.xz
           cache-on-failure: true
 
       - name: Host-side unit tests (fast fail — same tests KernMiri interprets, minus UB detection)
@@ -154,6 +157,24 @@ jobs:
           scripts/check_llvm_port.sh --self-test
           scripts/check_llvm_port.sh --require
 
+      # The clang half of the port, which the step above deliberately does
+      # not reach: a driver only exists once clang itself is built. Same
+      # tree, this time a host build.
+      - name: Clang driver link line
+        run: |
+          scripts/check_clang_driver.sh --self-test
+          scripts/check_clang_driver.sh --require
+
+      # The cross-build configuration, which needs the staged target sysroot
+      # the tests userland build above produced and a source tree this step
+      # materialises for itself. Bootstrap's own dry run plus the compiler
+      # wrapper; the build it plans is hours and is not run here.
+      - name: Cross-build plan and compiler wrapper
+        run: |
+          scripts/make_rustc_src.sh
+          scripts/check_bootstrap_config.sh --self-test
+          scripts/check_bootstrap_config.sh --require
+
       # Both boot-based ratchets parse the capture above rather than booting
       # again: three QEMU boots for one question each is two boots wasted, and a
       # second boot could disagree with the one that was actually graded.
@@ -193,6 +214,12 @@ jobs:
       # from scratch to save ~90 s of QEMU wall clock.
       - name: Two-boot persistence check
         run: just test-persist
+
+      # One boot with a 2 GiB toolchain volume on virtio-disk4. Cannot ride
+      # the capture above: that run attaches no dev disk, and the utest
+      # passes there by reporting there is none.
+      - name: Dev-disk check
+        run: just test-devdisk
 
       - name: Upload test log on failure
         if: failure()
@@ -289,12 +316,13 @@ jobs:
           scripts/check_codegen_backend.sh --backend cranelift
           scripts/check_linker_script.sh --linker wild --require
 
-  # The `ci` job runs `check_rustc_target.sh` too, where it reports `skipped`:
-  # the compiler source tree is a 265 MB fetch that lands 656 MiB on disk,
-  # which does not belong in a job that also builds a kernel, a userland and
-  # three images. This one materialises it and asks for real.
+  # The `ci` job's gates step runs `check_rustc_target.sh` and
+  # `check_cargo_fork.sh` where both report `skipped`; it materialises the
+  # source tree later, for the cross-build configuration, because that gate
+  # needs the staged target sysroot only that job has. Both forks live in
+  # that one tree, so this job is where they are asked for real.
   rustc-target:
-    name: Built-in x86_64-unknown-slopos target
+    name: Built-in x86_64-unknown-slopos target and the cargo fork
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
 
@@ -325,6 +353,14 @@ jobs:
         run: |
           scripts/check_rustc_target.sh --self-test
           scripts/check_rustc_target.sh --require
+
+      # The other fork in the same tree. `--require` because this job is the
+      # one that has it; the compile half is ~30 s warm and pulls cargo's own
+      # dependencies, which is why it is not in the `ci` job.
+      - name: Cargo fork against its `network` cut
+        run: |
+          scripts/check_cargo_fork.sh --self-test
+          scripts/check_cargo_fork.sh --require
 
   miri:
     name: KernMiri (OSTD UB detection)

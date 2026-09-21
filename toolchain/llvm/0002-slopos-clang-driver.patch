@@ -1,0 +1,287 @@
+--- /dev/null
++++ b/clang/lib/Driver/ToolChains/SlopOS.h
+@@ -0,0 +1,83 @@
++//===--- SlopOS.h - SlopOS ToolChain Implementations ------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_SLOPOS_H
++#define LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_SLOPOS_H
++
++#include "clang/Driver/Tool.h"
++#include "clang/Driver/ToolChain.h"
++
++namespace clang {
++namespace driver {
++namespace tools {
++namespace slopos {
++class LLVM_LIBRARY_VISIBILITY Linker final : public Tool {
++public:
++  Linker(const ToolChain &TC) : Tool("slopos::Linker", "ld.lld", TC) {}
++
++  bool hasIntegratedCPP() const override { return false; }
++  bool isLinkJob() const override { return true; }
++
++  void ConstructJob(Compilation &C, const JobAction &JA,
++                    const InputInfo &Output, const InputInfoList &Inputs,
++                    const llvm::opt::ArgList &TCArgs,
++                    const char *LinkingOutput) const override;
++};
++} // end namespace slopos
++} // end namespace tools
++
++namespace toolchains {
++
++class LLVM_LIBRARY_VISIBILITY SlopOS : public ToolChain {
++public:
++  SlopOS(const Driver &D, const llvm::Triple &Triple,
++         const llvm::opt::ArgList &Args);
++
++  bool HasNativeLLVMSupport() const override { return true; }
++  bool IsMathErrnoDefault() const override { return false; }
++  bool isPICDefault() const override { return false; }
++  bool isPIEDefault(const llvm::opt::ArgList &Args) const override {
++    return false;
++  }
++  bool isPICDefaultForced() const override { return false; }
++
++  RuntimeLibType GetDefaultRuntimeLibType() const override {
++    return ToolChain::RLT_CompilerRT;
++  }
++  CXXStdlibType GetDefaultCXXStdlibType() const override {
++    return ToolChain::CST_Libcxx;
++  }
++
++  // The C library carries the unwinder, and its first frame is one of its own
++  // callers: a frame without a table entry ends an unwind rather than finding
++  // the handler, so the tables are not optional here.
++  UnwindTableLevel
++  getDefaultUnwindTableLevel(const llvm::opt::ArgList &Args) const override {
++    return UnwindTableLevel::Asynchronous;
++  }
++
++  const char *getDefaultLinker() const override { return "ld.lld"; }
++
++  void
++  AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
++                            llvm::opt::ArgStringList &CC1Args) const override;
++  void AddClangCXXStdlibIncludeArgs(
++      const llvm::opt::ArgList &DriverArgs,
++      llvm::opt::ArgStringList &CC1Args) const override;
++  void AddCXXStdlibLibArgs(const llvm::opt::ArgList &Args,
++                           llvm::opt::ArgStringList &CmdArgs) const override;
++
++protected:
++  Tool *buildLinker() const override;
++};
++
++} // end namespace toolchains
++} // end namespace driver
++} // end namespace clang
++
++#endif // LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_SLOPOS_H
+--- /dev/null
++++ b/clang/lib/Driver/ToolChains/SlopOS.cpp
+@@ -0,0 +1,168 @@
++//===--- SlopOS.cpp - SlopOS ToolChain Implementations ----------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "SlopOS.h"
++#include "CommonArgs.h"
++#include "clang/Driver/Compilation.h"
++#include "clang/Driver/Driver.h"
++#include "clang/Driver/Options.h"
++#include "llvm/Option/ArgList.h"
++#include "llvm/Support/Path.h"
++
++using namespace clang::driver;
++using namespace clang::driver::toolchains;
++using namespace clang::driver::tools;
++using namespace clang;
++using namespace llvm::opt;
++
++void slopos::Linker::ConstructJob(Compilation &C, const JobAction &JA,
++                                  const InputInfo &Output,
++                                  const InputInfoList &Inputs,
++                                  const ArgList &Args,
++                                  const char *LinkingOutput) const {
++  const auto &ToolChain = static_cast<const SlopOS &>(getToolChain());
++  const Driver &D = ToolChain.getDriver();
++  const bool Static = Args.hasArg(options::OPT_static);
++  const bool Shared = Args.hasArg(options::OPT_shared);
++  ArgStringList CmdArgs;
++
++  // Silence warning for "clang -g foo.o -o foo"
++  Args.ClaimAllArgs(options::OPT_g_Group);
++  // and "clang -emit-llvm foo.o -o foo"
++  Args.ClaimAllArgs(options::OPT_emit_llvm);
++  // and for "clang -w foo.o -o foo". Other warning options are already
++  // handled somewhere else.
++  Args.ClaimAllArgs(options::OPT_w);
++
++  if (!D.SysRoot.empty())
++    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
++
++  if (Static)
++    CmdArgs.push_back("-static");
++  else if (Shared)
++    CmdArgs.push_back("-shared");
++
++  // The unwinder finds a frame's tables through the PT_GNU_EH_FRAME of the
++  // object that owns it, so an object linked without this is one a throw
++  // cannot unwind out of.
++  CmdArgs.push_back("--eh-frame-hdr");
++
++  if (!Shared) {
++    // Programs are loaded at a fixed address: the loader maps the executable
++    // where its PT_LOAD asks, and the userland image's is 0x400000.
++    CmdArgs.push_back("--image-base=0x400000");
++    if (!Static) {
++      CmdArgs.push_back("--dynamic-linker=/lib/ld-slopos.so.1");
++      // Eager binding: the loader writes no GOT slot after startup, which is
++      // what lets the relocated pages go read-only.
++      CmdArgs.push_back("-z");
++      CmdArgs.push_back("now");
++    }
++  }
++
++  if (Args.hasArg(options::OPT_rdynamic))
++    CmdArgs.push_back("--export-dynamic");
++
++  if (Args.hasArg(options::OPT_s))
++    CmdArgs.push_back("-s");
++
++  assert((Output.isFilename() || Output.isNothing()) && "Invalid output.");
++  if (Output.isFilename()) {
++    CmdArgs.push_back("-o");
++    CmdArgs.push_back(Output.getFilename());
++  }
++
++  if (!Shared && !Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
++                              options::OPT_r))
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt0.o")));
++
++  Args.addAllArgs(CmdArgs,
++                  {options::OPT_L, options::OPT_u, options::OPT_T_Group});
++  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
++
++  if (D.isUsingLTO()) {
++    assert(!Inputs.empty() && "Must have at least one input.");
++    auto Input = llvm::find_if(
++        Inputs, [](const InputInfo &II) -> bool { return II.isFilename(); });
++    if (Input == Inputs.end())
++      Input = Inputs.begin();
++
++    addLTOOptions(ToolChain, Args, CmdArgs, Output, *Input,
++                  D.getLTOMode() == LTOK_Thin);
++  }
++
++  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
++
++  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
++                   options::OPT_r)) {
++    if (D.CCCIsCXX() && ToolChain.ShouldLinkCXXStdlib(Args))
++      ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
++
++    // Silence warnings when linking C code with a C++ '-stdlib' argument.
++    Args.ClaimAllArgs(options::OPT_stdlib_EQ);
++
++    CmdArgs.push_back("-lc");
++    // The 128-bit helpers x86-64 codegen calls out for. There is no libgcc
++    // here, and a cdylib's version script localises everything but its own
++    // exports, so `libc.so` cannot publish them: they live in an archive,
++    // read last, the way every other platform takes compiler-rt.
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("libbuiltins.a")));
++  }
++
++  const char *Exec = Args.MakeArgString(ToolChain.GetLinkerPath());
++  C.addCommand(std::make_unique<Command>(JA, *this,
++                                         ResponseFileSupport::AtFileCurCP(),
++                                         Exec, CmdArgs, Inputs, Output));
++}
++
++/// SlopOS - SlopOS tool chain, which links with ld.lld and nothing else.
++
++SlopOS::SlopOS(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
++    : ToolChain(D, Triple, Args) {
++  getProgramPaths().push_back(getDriver().getInstalledDir());
++  if (getDriver().getInstalledDir() != D.Dir)
++    getProgramPaths().push_back(D.Dir);
++
++  getFilePaths().push_back(concat(D.SysRoot, "/lib"));
++}
++
++void SlopOS::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
++                                       ArgStringList &CC1Args) const {
++  const Driver &D = getDriver();
++
++  if (DriverArgs.hasArg(options::OPT_nostdinc))
++    return;
++
++  if (!DriverArgs.hasArg(options::OPT_nobuiltininc)) {
++    SmallString<128> P(D.ResourceDir);
++    llvm::sys::path::append(P, "include");
++    addSystemInclude(DriverArgs, CC1Args, P);
++  }
++
++  if (DriverArgs.hasArg(options::OPT_nostdlibinc))
++    return;
++
++  addExternCSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot, "/include"));
++}
++
++void SlopOS::AddClangCXXStdlibIncludeArgs(const ArgList &DriverArgs,
++                                          ArgStringList &CC1Args) const {
++  if (DriverArgs.hasArg(options::OPT_nostdinc, options::OPT_nostdlibinc,
++                        options::OPT_nostdincxx))
++    return;
++
++  addSystemInclude(DriverArgs, CC1Args,
++                   concat(getDriver().SysRoot, "/include/c++/v1"));
++}
++
++void SlopOS::AddCXXStdlibLibArgs(const ArgList &Args,
++                                 ArgStringList &CmdArgs) const {
++  CmdArgs.push_back("-lc++");
++}
++
++Tool *SlopOS::buildLinker() const { return new tools::slopos::Linker(*this); }
+--- a/clang/lib/Driver/CMakeLists.txt
++++ b/clang/lib/Driver/CMakeLists.txt
+@@ -75,6 +75,7 @@
+   ToolChains/OpenBSD.cpp
+   ToolChains/PS4CPU.cpp
+   ToolChains/RISCVToolchain.cpp
++  ToolChains/SlopOS.cpp
+   ToolChains/Solaris.cpp
+   ToolChains/SPIRV.cpp
+   ToolChains/TCE.cpp
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -43,6 +43,7 @@
+ #include "ToolChains/PS4CPU.h"
+ #include "ToolChains/RISCVToolchain.h"
+ #include "ToolChains/SPIRV.h"
++#include "ToolChains/SlopOS.h"
+ #include "ToolChains/Solaris.h"
+ #include "ToolChains/TCE.h"
+ #include "ToolChains/VEToolchain.h"
+@@ -6272,6 +6273,9 @@
+     case llvm::Triple::Fuchsia:
+       TC = std::make_unique<toolchains::Fuchsia>(*this, Target, Args);
+       break;
++    case llvm::Triple::SlopOS:
++      TC = std::make_unique<toolchains::SlopOS>(*this, Target, Args);
++      break;
+     case llvm::Triple::Solaris:
+       TC = std::make_unique<toolchains::Solaris>(*this, Target, Args);
+       break;

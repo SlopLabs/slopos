@@ -25,7 +25,12 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 /// Maximum number of concurrently live processes. The process registry, the
 /// address-space table and the descriptor tables are all sized by this and key
 /// on each other's slot indices, so the bound has to be one number.
-pub const MAX_PROCESSES: usize = 256;
+///
+/// Four times the appliance's 256, which one `just test` reached exactly.
+/// Measured: 768 more slots cost 36 960 bytes of `.bss`, so what bounds this
+/// is neither memory nor `PROCESS_SLOT_BITS` but how many processes a `-j N`
+/// build of this repository wants at once.
+pub const MAX_PROCESSES: usize = 1024;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

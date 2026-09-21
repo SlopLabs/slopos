@@ -1,0 +1,14 @@
+--- a/src/bootstrap/src/core/build_steps/llvm.rs
++++ b/src/bootstrap/src/core/build_steps/llvm.rs
+@@ -883,6 +883,11 @@
+             cfg.define("CMAKE_SYSTEM_NAME", "SunOS");
+         } else if target.contains("linux") {
+             cfg.define("CMAKE_SYSTEM_NAME", "Linux");
++        } else if target.contains("slopos") {
++            // Not `Generic`: it is CMake's `UNIX` that decides whether LLVM
++            // gets `LLVM_ON_UNIX` and the `Unix/*.inc` implementations, and
++            // SlopOS is a unix-family target over a real C library.
++            cfg.define("CMAKE_SYSTEM_NAME", "Linux");
+         } else if target.contains("darwin") {
+             // macOS
+             cfg.define("CMAKE_SYSTEM_NAME", "Darwin");

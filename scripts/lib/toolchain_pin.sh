@@ -29,10 +29,21 @@ TP_LIBRARY_REL="lib/rustlib/src/rust/library"
 TP_COMPILER_OVERLAY_REL="toolchain/compiler"
 TP_COMPILER_PIN_REL="toolchain/compiler/PIN"
 
+# The cargo fork lands inside the compiler fork's tree, at `src/tools/cargo`,
+# because the rustc source tarball already carries cargo's sources.
+TP_CARGO_OVERLAY_REL="toolchain/cargo"
+TP_CARGO_PIN_REL="toolchain/cargo/PIN"
+TP_CARGO_TREE_REL="src/tools/cargo"
+
 # The llvm-project fork: a fourth tree, pinned beside the tarball it patches.
 TP_LLVM_OVERLAY_REL="toolchain/llvm"
 TP_LLVM_PIN_REL="toolchain/cxx/PIN"
 TP_RUSTC_SRC_REL="third_party/slopos-rustc-src"
+
+# The same port, in rustc's own bundled LLVM — a different version from the
+# runtime's, which is why it is a second tree. See toolchain/compiler/PIN.
+TP_LLVM_RUSTC_OVERLAY_REL="toolchain/llvm-rustc"
+TP_LLVM_RUSTC_TREE_REL="src/llvm-project"
 
 tp_sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -107,24 +118,28 @@ tp_pin_patch_sha() {
 }
 
 tp_pin_files() {
-    printf '%s\n%s\n' "$TP_PIN_REL" "$TP_COMPILER_PIN_REL"
+    printf '%s\n%s\n%s\n' "$TP_PIN_REL" "$TP_COMPILER_PIN_REL" "$TP_CARGO_PIN_REL"
 }
 
 # Each fork is pinned beside the tree it is applied to, so that editing one
-# does not restamp another: the compiler fork's own PIN, the llvm-project
-# fork's beside the tarball both it and the C++ runtime are cut from, and the
-# std and libc forks in the sysroot's.
+# does not restamp another: the compiler fork's own PIN, the cargo fork's
+# own, the llvm-project fork's beside the tarball both it and the C++ runtime
+# are cut from, and the std and libc forks in the sysroot's.
 tp_patch_pin_file() {
     case "$1" in
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_COMPILER_PIN_REL" ;;
+        "$TP_CARGO_OVERLAY_REL/"*) printf '%s\n' "$TP_CARGO_PIN_REL" ;;
+        "$TP_LLVM_RUSTC_OVERLAY_REL/"*) printf '%s\n' "$TP_COMPILER_PIN_REL" ;;
         "$TP_LLVM_OVERLAY_REL/"*) printf '%s\n' "$TP_LLVM_PIN_REL" ;;
         *) printf '%s\n' "$TP_PIN_REL" ;;
     esac
 }
 
-# All four forks live here: `toolchain/rust/` patches the std source tree,
+# All six forks live here: `toolchain/rust/` patches the std source tree,
 # `toolchain/libc/` the unpacked libc crate, `toolchain/compiler/` rustc's own
-# sources, `toolchain/llvm/` llvm-project's.
+# sources, `toolchain/cargo/` cargo's inside them, `toolchain/llvm/` the
+# pinned llvm-project the C++ runtime is built from, and
+# `toolchain/llvm-rustc/` the one rustc ships.
 tp_patch_files() {
     local root="$1"
     (cd "$root" && find "$TP_OVERLAY_REL" -type f -name '*.patch' -print | LC_ALL=C sort)
@@ -132,7 +147,9 @@ tp_patch_files() {
 
 tp_patch_tree_rel() {
     case "$1" in
-        "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
+        "$TP_COMPILER_OVERLAY_REL/"* | "$TP_CARGO_OVERLAY_REL/"* | "$TP_LLVM_RUSTC_OVERLAY_REL/"*)
+            printf '%s\n' "$TP_RUSTC_SRC_REL"
+            ;;
         # The llvm fork's tree is `third_party/llvm-project-<version>.src`,
         # whose name this file has no version to spell, so `check_cxx_pin.sh`
         # grades it instead. Answering the overlay's own path matches none of
@@ -142,11 +159,21 @@ tp_patch_tree_rel() {
     esac
 }
 
+# The std and libc forks describe a `library/` tree and there are two of
+# those — the owned sysroot's, and the rustc source tree's, which a bootstrap
+# run builds the target's std out of — so the second argument names which one.
 tp_patch_apply_dir() {
-    case "$1" in
-        "$TP_OVERLAY_REL/libc/"*) printf '%s/%s/libc\n' "$TP_SYSROOT_REL" "$TP_LIBRARY_REL" ;;
+    local rel="$1" library="${2:-$TP_SYSROOT_REL/$TP_LIBRARY_REL}"
+    case "$rel" in
+        "$TP_OVERLAY_REL/libc/"*) printf '%s/libc\n' "$library" ;;
         "$TP_COMPILER_OVERLAY_REL/"*) printf '%s\n' "$TP_RUSTC_SRC_REL" ;;
-        *) printf '%s/%s\n' "$TP_SYSROOT_REL" "$TP_LIBRARY_REL" ;;
+        "$TP_CARGO_OVERLAY_REL/"*) printf '%s/%s\n' "$TP_RUSTC_SRC_REL" "$TP_CARGO_TREE_REL" ;;
+        "$TP_LLVM_RUSTC_OVERLAY_REL/"*) printf '%s/%s\n' "$TP_RUSTC_SRC_REL" "$TP_LLVM_RUSTC_TREE_REL" ;;
+        "$TP_LLVM_OVERLAY_REL/"*)
+            echo "toolchain_pin: $rel is applied by make_slopos_llvm_src.sh, not here" >&2
+            return 1
+            ;;
+        *) printf '%s\n' "$library" ;;
     esac
 }
 
@@ -191,9 +218,9 @@ tp_hash_lines() {
 # A stamp is one sha256 over what a materialised tree was built from, keyed by
 # path so a rename is a change. Each tree stamps its own inputs and nothing
 # else: the sysroot is `toolchain/{PIN,rust,libc}`, and the compiler source
-# tree is `toolchain/compiler/` plus the *channel* out of that PIN — the one
-# line it shares. A std patch, a compiler patch and a C++ pin bump therefore
-# restamp one tree, one tree and neither.
+# tree is `toolchain/{compiler,cargo}/` plus the *channel* out of that PIN —
+# the one line it shares. A std patch, a cargo patch and a C++ pin bump
+# therefore restamp one tree, the other tree and neither.
 tp_stamp() {
     {
         tp_materialiser_hash "$1" make_slopos_sysroot.sh
@@ -208,8 +235,65 @@ tp_rustc_stamp() {
         printf 'channel=%s\n' "$(tp_pin_value "$1/$TP_PIN_REL" channel)"
         tp_materialiser_hash "$1" make_rustc_src.sh
         tp_materialiser_hash "$1" lib/toolchain_pin.sh
-        (cd "$1" && find "$TP_COMPILER_OVERLAY_REL" -type f -print) | tp_hash_lines "$1"
+        (cd "$1" && find "$TP_COMPILER_OVERLAY_REL" "$TP_CARGO_OVERLAY_REL" \
+            -type f -print) | tp_hash_lines "$1"
     } | tp_sha256_stream
+}
+
+# Registry cache first (offline, and it is already on disk for any workspace
+# that depends on libc),
+# static.crates.io otherwise. Two trees need it: the owned sysroot, and the
+# rustc source tree a bootstrap run builds the target's std out of.
+tp_unpack_libc_crate() {
+    local root="$1" dest="$2"
+    local pin="$root/$TP_PIN_REL" version checksum name crate candidate download sha
+    version="$(tp_pin_value_required "$pin" libc_version toolchain_pin)" || return 1
+    checksum="$(tp_pin_value_required "$pin" libc_checksum toolchain_pin)" || return 1
+    name="libc-${version}.crate"
+    crate=""
+    for candidate in "${CARGO_HOME:-$HOME/.cargo}"/registry/cache/*/"$name"; do
+        [ -f "$candidate" ] || continue
+        if [ "$(tp_sha256_file "$candidate")" = "$checksum" ]; then
+            crate="$candidate"
+            break
+        fi
+        echo "toolchain_pin: cached $candidate does not match libc_checksum, ignoring it" >&2
+    done
+
+    download=""
+    if [ -z "$crate" ]; then
+        command -v curl >/dev/null 2>&1 || {
+            echo "toolchain_pin: no cached $name and curl is unavailable to fetch it" >&2
+            return 1
+        }
+        download="$(mktemp "${TMPDIR:-/tmp}/slopos-libc.XXXXXX")"
+        trap 'rm -f "$download"' INT TERM
+        curl -fL -o "$download" "${LIBC_URL:-https://static.crates.io/crates/libc/$name}" || {
+            rm -f "$download"
+            echo "toolchain_pin: failed to download $name" >&2
+            return 1
+        }
+        crate="$download"
+    fi
+
+    sha="$(tp_sha256_file "$crate")"
+    if [ "$sha" != "$checksum" ]; then
+        rm -f "$download"
+        echo "toolchain_pin: $name checksum mismatch
+       expected: $checksum ($TP_PIN_REL)
+       actual:   $sha ($crate)" >&2
+        return 1
+    fi
+
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    tar -xzf "$crate" -C "$dest" --strip-components=1 || {
+        rm -f "$download"
+        echo "toolchain_pin: failed to unpack $crate into $dest" >&2
+        return 1
+    }
+    rm -f "$download"
+    trap - INT TERM
 }
 
 # Apply every overlay patch under <prefix>, in the tree each one belongs to,
@@ -226,7 +310,7 @@ tp_rustc_stamp() {
 # parent stops repository discovery so `git apply` runs in its non-repo mode,
 # and each patch is then re-checked in reverse so a no-op cannot pass again.
 tp_apply_patches() {
-    local root="$1" prefix="$2"
+    local root="$1" prefix="$2" library="${3:-}"
     local rel pin want sha dir ceiling out applied=0
     for rel in $(tp_patch_files "$root"); do
         case "$rel" in
@@ -246,7 +330,7 @@ tp_apply_patches() {
        actual:   $sha" >&2
             return 1
         fi
-        dir="$root/$(tp_patch_apply_dir "$rel")"
+        dir="$root/$(tp_patch_apply_dir "$rel" "$library")"
         ceiling="$(tp_abspath "$(dirname "$root/$(tp_patch_tree_rel "$rel")")")"
         if ! out="$(cd "$dir" && GIT_CEILING_DIRECTORIES="$ceiling" git apply -p1 "$root/$rel" 2>&1)"; then
             printf '%s\n' "$out" >&2

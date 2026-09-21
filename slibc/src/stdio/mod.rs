@@ -58,6 +58,11 @@ pub const FILE_FLAG_HEAP: u32 = 256;
 /// Internal buffer size for FILE streams.
 pub const BUFSIZ: usize = 4096;
 
+/// C's longest-filename bound. A literal rather than `USER_PATH_MAX` because
+/// the header generator emits a constant's expression verbatim.
+pub const FILENAME_MAX: usize = 4096;
+const _: () = assert!(FILENAME_MAX == slopos_abi::fs::USER_PATH_MAX);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum BufferMode {

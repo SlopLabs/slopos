@@ -371,6 +371,52 @@ pub unsafe extern "C" fn strncat(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
+/// # Safety
+/// Both arguments are NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> usize {
+    span(s, accept, true)
+}
+
+/// # Safety
+/// Both arguments are NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> usize {
+    span(s, reject, false)
+}
+
+/// # Safety
+/// Both arguments are NUL-terminated C strings.
+unsafe fn span(s: *const u8, set: *const u8, want: bool) -> usize {
+    if s.is_null() || set.is_null() {
+        return 0;
+    }
+    let mut n = 0usize;
+    loop {
+        let ch = *s.add(n);
+        if ch == 0 || member(set, ch) != want {
+            return n;
+        }
+        n += 1;
+    }
+}
+
+/// # Safety
+/// `set` is a NUL-terminated C string.
+unsafe fn member(set: *const u8, ch: u8) -> bool {
+    let mut i = 0usize;
+    loop {
+        let candidate = *set.add(i);
+        if candidate == 0 {
+            return false;
+        }
+        if candidate == ch {
+            return true;
+        }
+        i += 1;
+    }
+}
+
 /// `strcoll(3)`. Byte order is collation order in the C locale, so this is
 /// `strcmp`.
 ///

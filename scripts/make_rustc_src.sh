@@ -21,10 +21,13 @@ set -euo pipefail
 #                     separately in toolchain/cxx/PIN, and a bootstrap run
 #                     takes LLVM from `download-ci-llvm` or from that tarball.
 #
+# The tree carries two forks: `toolchain/compiler/` and, in `src/tools/cargo`,
+# `toolchain/cargo/`. See toolchain/cargo/PIN for what the second one is for.
+#
 # Idempotent: the stamp at third_party/slopos-rustc-src/.slopos-stamp records
-# the hash of toolchain/compiler/, of this script — its --exclude set decides
-# what the tree holds — and of toolchain/PIN's channel, so a second run with
-# unchanged inputs exits immediately.
+# the hash of toolchain/{compiler,cargo}/, of this script — its --exclude set
+# decides what the tree holds — and of toolchain/PIN's channel, so a second
+# run with unchanged inputs exits immediately.
 #
 # Usage: make_rustc_src.sh
 #
@@ -49,10 +52,12 @@ die() {
 
 PIN="$REPO_ROOT/$TP_PIN_REL"
 COMPILER_PIN="$REPO_ROOT/$TP_COMPILER_PIN_REL"
+CARGO_PIN="$REPO_ROOT/$TP_CARGO_PIN_REL"
 SRC="$REPO_ROOT/$TP_RUSTC_SRC_REL"
 STAMP="$SRC/$TP_STAMP_NAME"
 
 [ -f "$COMPILER_PIN" ] || die "missing $TP_COMPILER_PIN_REL — the compiler fork (PIN + patch) is tracked in-repo"
+[ -f "$CARGO_PIN" ] || die "missing $TP_CARGO_PIN_REL — the cargo fork (PIN + patch) is tracked in-repo"
 
 STAMP_WANT="$(tp_rustc_stamp "$REPO_ROOT")"
 if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$STAMP_WANT" ]; then
@@ -121,6 +126,36 @@ if [ "$PATCHES" = "0" ]; then
     die "no patches under $TP_COMPILER_OVERLAY_REL/ — an unpatched tree has no slopos target"
 fi
 
+CARGO_PATCHES="$(tp_apply_patches "$REPO_ROOT" "$TP_CARGO_OVERLAY_REL/")" ||
+    die "the cargo fork did not apply"
+if [ "$CARGO_PATCHES" = "0" ]; then
+    die "no patches under $TP_CARGO_OVERLAY_REL/ — an unpatched cargo has no offline build"
+fi
+
+# The second LLVM port is applied by a bootstrap run, in a subtree this tree
+# does not carry, so nothing else would notice it ceasing to apply until
+# hours into one. Only the files it *edits* are unpacked — one `tar` pass,
+# because each pass reads the whole 253 MB archive — and the files it creates
+# are checked by being absent, which is what `git apply --check` wants.
+LLVM_EDITS="$(sed -n 's|^--- a/||p' "$REPO_ROOT/$TP_LLVM_RUSTC_OVERLAY_REL"/*.patch | LC_ALL=C sort -u)"
+[ -n "$LLVM_EDITS" ] ||
+    die "no patches under $TP_LLVM_RUSTC_OVERLAY_REL/ — an unported LLVM has no SlopOS triple"
+PROBE="$(mktemp -d)"
+trap 'rm -rf "$PROBE"' EXIT INT TERM
+# shellcheck disable=SC2086
+tar -xf "$TARBALL" -C "$PROBE" --strip-components=3 \
+    $(printf "rustc-nightly-src/src/llvm-project/%s\n" $LLVM_EDITS) ||
+    die "the files $TP_LLVM_RUSTC_OVERLAY_REL/ edits are not in $CHANNEL's src/llvm-project"
+# Applied rather than `--check`ed, so a second patch is graded against the
+# tree the first one left rather than against a pristine one.
+for patch in "$REPO_ROOT/$TP_LLVM_RUSTC_OVERLAY_REL"/*.patch; do
+    (cd "$PROBE" && GIT_CEILING_DIRECTORIES="$PROBE" git apply -p1 "$patch") ||
+        die "$TP_LLVM_RUSTC_OVERLAY_REL/$(basename "$patch") no longer applies to $CHANNEL's src/llvm-project
+       The port is cut against rustc's bundled LLVM, which a channel bump moves."
+done
+rm -rf "$PROBE"
+trap - EXIT INT TERM
+
 printf '%s\n' "$STAMP_WANT" > "$STAMP"
 
-echo "$SELF: materialised $TP_RUSTC_SRC_REL from $CHANNEL — $PATCHES compiler patch(es) (stamp $STAMP_WANT)"
+echo "$SELF: materialised $TP_RUSTC_SRC_REL from $CHANNEL — $PATCHES compiler, $CARGO_PATCHES cargo patch(es) (stamp $STAMP_WANT)"
