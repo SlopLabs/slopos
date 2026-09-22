@@ -663,7 +663,7 @@ unsafe fn spawn_direct(
     let mut buf = [0u8; 4096];
     let mut last = ENOENT;
     let mut seg_start = 0usize;
-    while seg_start < path_len {
+    while seg_start <= path_len {
         let mut seg_end = seg_start;
         while seg_end < path_len && *path_val.add(seg_end) != b':' {
             seg_end += 1;
