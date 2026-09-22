@@ -8,6 +8,7 @@
 //! maps [`slopos_ostd::user::copy::UserCopyError`] back onto the single
 //! [`UserPtrError`] type kernel callers expect.
 
+use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::sync::InitFlag;
 
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError};
@@ -112,6 +113,12 @@ enum Access {
 /// copy's own handle held would spin until its bound and then give up — and
 /// would make the faulting task's own retries look like an address-space
 /// reader that is not draining.
+///
+/// Preemption is held off while the handle is held, and that is load-bearing
+/// too: a holder switched out mid-copy pins the reference until it runs
+/// again, the exclusive roads spin for that reference under the process-VM
+/// lock, and dispatching the holder takes that same lock. The copy neither
+/// faults nor blocks, so the span is the copy and nothing else.
 #[inline]
 fn copy_then_populate<T>(
     access: Access,
@@ -120,6 +127,7 @@ fn copy_then_populate<T>(
     mut copy: impl FnMut(&slopos_ostd::mm::vm_space::VmSpace) -> Result<T, UserPtrError>,
 ) -> Result<T, UserPtrError> {
     {
+        let _pinned = PreemptGuard::new();
         let space = current_vm_space()?;
         match copy(&space) {
             Err(UserPtrError::NotMapped) => {}
@@ -127,6 +135,7 @@ fn copy_then_populate<T>(
         }
     }
     populate(access, addr, len);
+    let _pinned = PreemptGuard::new();
     let space = current_vm_space()?;
     copy(&space)
 }

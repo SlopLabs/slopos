@@ -86,7 +86,18 @@ interrupt-masking lock stopped acking TLB shootdowns and wedged every CPU
 behind it. The shipped kernel registers no capture backend and so never
 takes that lock; the ring masks interrupts while held, acks shootdowns while
 it waits, and drops an append nested from an NMI, so it is fixed here and
-not an entry.
+not an entry. Run on a host without KVM it then found two waits whose only
+releaser was the waiting CPU, both pre-existing: a dispatcher that dequeued
+the current task after a raced wake spun on that task's own `on_cpu` flag
+with every other CPU idle, and a user copy switched out mid-copy pinned a
+reference to the address space that an exclusive syscall on a sibling
+thread spun for under the process-VM lock, while dispatching the copier
+took that same lock; the spin's budget broke the cycle by failing the
+syscall, so a four-thread process lost a thread's guard-page `mprotect` as
+`EPERM`. Any user reaches both with threads that block and wake under
+load, an availability defect at most; the claim hands the current task
+back and the copy holds off preemption while it holds the reference, so
+they are fixed here and not entries.
 
 The highest ID issued so far is **SLOPOS-2026-0056**. The next finding is
 `SLOPOS-2026-0057`.

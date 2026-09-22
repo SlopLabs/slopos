@@ -2044,6 +2044,21 @@ What it rests on, in case a later phase disturbs it:
   regression test: three hundred spawned, forked and spawned-then-forking
   children ending on four CPUs at once, which found the panic on its first
   run.
+- **A CPU no longer waits on itself.** The same test, run on a host with no
+  KVM, found two waits whose only possible releaser was the waiting CPU. A
+  dispatcher whose dequeue handed back the *current* task — a wake that
+  raced its block had put it in its own CPU's queue — spun on that task's
+  `on_cpu` flag, which clears only in the switch-out tail the same claim is
+  part of, with every other CPU idle behind it; the claim now hands such a
+  task back and lets the idle switch publish it. And a syscall needing the
+  address space to itself — `mprotect`, `munmap`, a ring or shared map —
+  spins under the process-VM lock until no other reference to the space is
+  live; a user copy takes one, and a copier switched out mid-copy pinned it
+  until it ran again, which takes the lock the syscall holds. The spin's
+  budget broke that cycle by failing the syscall, so a four-thread process
+  lost the guard-page `mprotect` of a new thread's stack as `EPERM`. The
+  copy now holds off preemption for the span it holds the reference, and
+  the spin services the shootdown queue while it waits.
 - **cargo locked nothing, silently.** The pinned cargo takes its target-dir
   and package-cache locks through `std::fs::File::lock`, and std's `flock`
   arm is a `cfg` allowlist this target was not on: `Unsupported`, which
