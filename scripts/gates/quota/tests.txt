@@ -10,466 +10,23 @@
 # A cap matching nothing is a dead entry and fails, because a kind that
 # stopped being reported looks exactly like a kind that stayed cheap.
 #
-# Measured on the tests ISO under quota=enforce, with the session-smoke utest
-# holding a desktop-shaped population open across the post-userland-tests
-# dump. All eight kinds are charged.
-#
-# `pages` is mapped **virtual** address space, not resident memory -- the
-# RLIMIT_AS quantity. The root's 612 416 pages is 2.3 GiB of VA across ~108
-# live address spaces against 86 899 physical pages of RAM, and those two
-# numbers are not comparable *by design*: demand paging means a process may
-# map far more than it ever populates. The reconciling number is the per-row
-# one -- worst single address space 30 998 pages (121 MiB) -- which is what
-# the enforced per-process ceiling was derived from. That ceiling is now
-# 1 048 576 (4 GiB of VA) and is no longer derived from a measurement at all:
-# with lazy mappings a VA charge bounds no memory, so `Pages` is a stated
-# `RLIMIT_AS` and `residentpages` below is the number that tracks what is
-# actually held.
-#
-# The caps are the ROOT account's peaks — the sum over every principal plus
-# the kernel's own, not a per-process figure. Worst single user rows measured
-# 18 fdslot / 10 objectrow / 4 process / 1 task / 12 kernelmeta, against
-# enforced per-process defaults of 256 / 512 / 64 / 512 / 2048. Both numbers
-# matter and they live in different places on purpose: this file is the gate
-# ceiling, the enforced runtime defaults are in abi/src/quota.rs. Deriving
-# either from the other would make the ratchet measure its own configuration.
-#
-# kernelmeta is two things summed on the root. Task stacks are 12 pages each
-# — a 32 KiB kernel stack plus a 16 KiB SafeStack data stack — and are the
-# deterministic half; the kernel heap's own backing is the other, every page
-# the size-class slabs and the large-alloc tier take from the buddy, charged
-# once at the allocator so the root's row stays reconcilable against the
-# buddy's allocated count. The `memory` kconsole command prints both numbers
-# side by side for exactly that comparison.
-#
-# The heap half is why these caps carry visible slack rather than sitting one
-# observation above the measurement: a slab refill happens on whichever
-# allocation first empties a class, so the peak moves with test order.
-#
-# `process` at 113 against ~109 live account rows is not a leak: the userland
-# phase spawns a test binary per utest and most are still referenced at the
-# dump point.
-#
-# 2026-08-24, one more utest binary (`dns_resolve_test`):
-#   process    120 -> 121. Deterministic at 121; the cap is exact.
-#   pages      655360 -> 735232, kernelmeta 6500 -> 6933. Unlike `process`
-#     these move with test order, because which address spaces are still
-#     unreaped at the dump point varies. Re-measured over six runs: pages
-#     634 502-685 027 (spread 50 525), kernelmeta 6249-6591 (spread 342).
-#     Each cap is that maximum plus the spread, so ordinary interleaving
-#     cannot trip the gate while a real regression still does. The charge is released at the reap (`process_retire`), which is
-# when the registry slot is given up, rather than at the final `Drop`, which
-# lags for as long as any designator still resolves.
-#
-# 2026-09-03, one more utest binary (`persist_test`):
-#   process    121 -> 122. Deterministic at 122; the cap stays exact. No other
-#     row moved above its cap — a fresh --emit-allowlist over this run measured
-#     pages 638 507, kernelmeta 6056 and task 5, all inside the spreads above,
-#     so only the deterministic row is re-recorded and the measured margins on
-#     the order-dependent rows are left alone.
-#
-# 2026-09-06, `persist_test` spawns one unprivileged child (the disk-reserve
-# filler: the utest itself carries TASK_FLAG_SYSTEM, which is exactly the
-# entitlement the reserve waives, so the filler must be a separate process):
-#   process    122 -> 123. Deterministic at 123; the cap stays exact. A fresh
-#     --emit-allowlist over this run measured pages 656 963, kernelmeta 2918
-#     and task 5, all inside the spreads above, so as before only the
-#     deterministic row moves.
-#
-# 2026-09-06, Phase 6 lands one more utest binary (`mount_test`, for
-# `mount(2)`/`umount2(2)`):
-#   process    123 -> 124. Deterministic at 124; the cap stays exact. A fresh
-#     --emit-allowlist over this run measured pages 667 963, kernelmeta 3160
-#     and task 5, all inside the spreads above, so as before only the
-#     deterministic row moves.
-#
-# 2026-09-07, Phase 7 lands a ninth kind (`diskblocks`, the per-principal
-# ext2 block ceiling) and five kernel tests that each spawn a scratch
-# process:
-#   diskblocks new rows. Both deterministic over three runs: 6 in the kernel
-#     phase and 3875 in the userland phase, the latter being `persist_test`'s
-#     disk-reserve filler taking the volume down to `s_r_blocks_count`. No
-#     denial: the enforced per-process default (8192) sits above what that
-#     filler legitimately holds, which is the whole point of `max-denials 0`.
-#   kernelmeta post-kernel-tests 2200 -> 2300. The new tests' scratch
-#     processes are task stacks at 12 pages each. Measured 2191/2233/2245 over
-#     three runs, so the cap is the maximum plus that 54-page spread, in the
-#     same style as the order-dependent rows above.
-#
-# `task` moves with scheduling (measured 5-7 across runs), so its cap carries
-# the observed spread as margin rather than a single observation.
-#
-# max-denials 0 is the load-bearing line under quota=enforce: a denial means a
-# legitimate workload was refused, which is a finding rather than a pass.
-#
-# 2026-09-09, Phase 1 of `plans/self-hosting.md` (a toolchain-sized process):
-#   `kernelmeta` rises because **page tables are now charged**. Every frame
-#     `VmSpace::new`, the kernel-half prepopulate and the page-table walker
-#     take from the buddy is charged to the root, and with lazy heaps, lazy
-#     file mappings and an 8 MiB stack extent a process's table footprint stops
-#     being negligible. boot 900 -> 1787 (measured 1637-1712 over three fresh
-#     runs, spread 44), post-kernel-tests 2300 -> 3172 (3106-3139, spread 33).
-#     post-userland-tests measured 4949-4972, inside its existing 6933, so that
-#     row is left alone.
-#   `pages` rises because `brk` and `mmap` are lazy and the per-process `Pages`
-#     ceiling moved to 4 GiB of VA: the new `bigprog_test` maps a gigabyte of
-#     anonymous space and touches sixteen pages of it, which is the whole point
-#     of the row being virtual. post-userland-tests 735232 -> 973334 (measured
-#     927408-950371 over three fresh runs, spread 22963). post-kernel-tests
-#     measured 43644-56309, inside its existing 65536.
-#   `process` 124 -> 126: one more utest binary (`bigprog_test`) and the child
-#     it forks. Deterministic at 126 over three runs; the cap stays exact.
-#   `diskblocks` 3875 -> 3936: the tests image is 64M rather than 32M, so
-#     `persist_test`'s space filler reaches the volume's reserve later.
-#     Deterministic at 3936 over three runs. The image is deliberately no
-#     larger than that: at 128M the filler met the 8192-block per-process
-#     `DiskBlocks` quota instead of the reserve, which is a different test.
-#   The tests guest is 1G rather than 512M (`scripts/qemu_run.sh`), because
-#     `bigprog_test` holds ~170 MiB resident to cross the threshold `fork`'s
-#     chunked snapshot exists for. That is why `residentpages` and `pages` are
-#     both measured higher than a 512M run would report.
-#   `residentpages` is new: the address space's count of present user leaves,
-#     maintained by the page-table cursor and reflected into the ledger on the
-#     way out of a hold of the per-process lock. It is the number `pages` never
-#     was — post-userland-tests measures 64603-64640 resident against 917533-
-#     950371 mapped, a factor of about eight apart, which is demand paging
-#     working rather than a discrepancy. The cap is 114452 (that maximum plus
-#     the spread of 1520); post-kernel-tests is 516, deterministic over the same
-#     three runs, so that cap is exact. Unlimited by default: it reports what
-#     is held, and the ceiling on physical memory is the frame allocator.
-#     boot charges none of it (no user address space exists yet), so the
-#     `min-kinds-for boot 1` floor still describes that phase.
-#
-# 2026-09-13, Phase 1 of `plans/self-hosting.md` (the POSIX floor a build
-# system stands on):
-#   `process` 126 -> 134: one more utest binary (`buildctl_test`), the phase's
-#     exit-criterion build driver, which spawns a stub compiler per source
-#     file plus two children it kills by signal. Deterministic at 134 over
-#     three fresh runs; the cap stays exact.
-#   `pages` 973334 -> 1011657 (measured 997677-1004667 over the same three
-#     runs, spread 6990; the cap is that maximum plus the spread).
-#     `buildctl_test` is a `std` binary and each child is another address
-#     space with a lazy heap and an 8 MiB stack extent, and this row is
-#     virtual, so a child that touches a handful of pages still charges its
-#     whole mapping.
-#   post-kernel-tests `kernelmeta` 3172 -> 3328 (measured 3152-3240, spread
-#     88). The kernel phase gained 63 tests, and signal delivery now pushes a
-#     3216-byte frame — restorer, `SignalFrame`, `UserSiginfo`, `UserUcontext`
-#     and the XSAVE image — whose range is faulted in before the pushes, so a
-#     delivering task's page tables are charged where they were not before.
-#     post-userland-tests measured 4946-5054, inside its existing 6933, so
-#     that row is left alone.
-#   Nothing else moved above its cap and nothing else is re-recorded:
-#     `residentpages` measured 110944-112929 inside 114452, `diskblocks` 3927
-#     inside 3936, post-kernel-tests `pages` 53365-55170 inside 65536, and
-#     `task` 5 inside its caps.
-#
-# 2026-09-13, the review and security sweep of that same Phase 1 change:
-#   post-kernel-tests `residentpages` 516 -> 772, deterministic at 772 over
-#     three fresh runs so the cap stays exact. Two causes, both new kernel
-#     tests that hold user pages the kernel phase previously never populated:
-#     the signal-delivery cases now fault in the 3216-byte frame range before
-#     the pushes (a fault that used to livelock on a COW stack page and now
-#     resolves), and the advisory-lock cases open real descriptors against the
-#     ext2 root. Every other row measured inside its cap: post-kernel
-#     `kernelmeta` 3141-3151 inside 3328, `pages` 51152-60223 inside 65536,
-#     `process` 14 inside 20; post-userland `residentpages` 111129-112929
-#     inside 114452, `kernelmeta` 4841-4967 inside 6933, `pages`
-#     988042-1001043 inside 1011657, `process` 134 exact.
-#
-# 2026-09-14, the storage work ("Storage holds a tree" in
-# plans/self-hosting.md):
-#   post-kernel-tests `kernelmeta` 3328 -> 5680 (measured 5584/5606/5632 over
-#     three fresh runs, spread 48). post-userland-tests 6933 -> 7642
-#     (7494/7568/7568, spread 74). One cause, and it is the change working:
-#     an ext2 instance's block cache is now sized from the volume it mounted
-#     and there can be four instances at once. Each cache is a `KVec` of
-#     descriptors plus one buddy frame per entry, charged as kernel metadata,
-#     and the suite now mounts three (the boot root, the write-cost report's
-#     own mount of the same image, and the journal-headroom fixture) where it
-#     used to mount one. At the floor of 512 entries that is 512 frames per
-#     instance — the arithmetic, not a leak: the caps moved by ~2350 and
-#     ~700 pages respectively, against 512 per extra concurrent mount plus
-#     the log's per-slot arrays for a 16 383-slot log.
-#   Everything else stayed inside its existing cap on all three runs:
-#     post-kernel-tests `residentpages` 772 exact, `pages` 53k-55k inside
-#     65536, `diskblocks` 6, `process` 20; post-userland-tests
-#     `residentpages` inside 114452 and `process` 134 exact.
-#   Re-measured after the review fixes that followed: post-kernel-tests
-#     5680 -> 6065 (5953/6009/5999 over three fresh runs, spread 56),
-#     post-userland-tests 7642 -> 8128 (7780/7954/7905, spread 174). The
-#     delta is the tests the review added, not the change under review: the
-#     rollback/eviction case builds a 512-entry cache of its own and fills it,
-#     and the read-only-mount, block-pointer and umount cases each register a
-#     scratch process whose task stacks are 12 pages apiece.
-#   post-userland-tests `pages` 1011657 -> 1072000: measured
-#     986348/988238/997933/1029200 over four fresh runs, spread 42852. This
-#     row is mapped **virtual** address space, so its spread is the widest in
-#     the file and always has been — a lazily mapped `mmap` charges the whole
-#     extent whether or not a page of it is ever populated, and which utests
-#     overlap decides how many extents are live at the dump. The cap is the
-#     maximum plus that spread. `residentpages`, the row that tracks what is
-#     actually held, stayed inside 114452 on all four.
-#
-# 2026-09-14, the utilities becoming executables ("The utilities are
-# executables" in plans/self-hosting.md). One cause for every row that moved:
-# `coreutils_test` spawns a utility per assertion, so the userland phase now
-# creates ~37 more short-lived address spaces than it did.
-#   post-userland-tests `process` 134 -> 173. Deterministic at 173 over seven
-#     fresh runs (171 before the utest gained the two-stage shell pipeline case,
-#     which is two more), so the cap is exact. The charge is released at the reap, and
-#     most of those children are still referenced at the dump point.
-#   post-userland-tests `pages` 1072000 -> 1309452: measured
-#     1269829/1288157/1266862/1283955 over the same four runs, spread 21295;
-#     the cap is the maximum plus that spread. Each spawned utility is another
-#     address space with a lazy heap and an 8 MiB stack extent, and this row is
-#     virtual, so a tool that touches a handful of pages still charges its
-#     whole mapping.
-#   post-userland-tests `residentpages` 114452 -> 119949 (116387/116798/117153/
-#     118168, spread 1781) and `kernelmeta` 8128 -> 8503 (8293/8240/8359/8215,
-#     spread 144). Both are the same children: ~2 000 resident pages and the
-#     page tables plus 12-page task stacks behind them.
-#   post-userland-tests `diskblocks` 3936 -> 2911, a *fall*, deterministic over
-#     all four runs: the tests image carries the multicall binary and the new
-#     test binary, so `persist_test`'s space filler reaches the volume's
-#     reserve after fewer blocks of its own.
-#   Everything else stayed inside its existing cap on all four runs: boot
-#     `kernelmeta` 1644-1719 inside 1756, post-kernel-tests `kernelmeta`
-#     5976-6057 inside 6065, `pages` 52977-55483 inside 65536, `process` 14,
-#     `residentpages` 772 exact, `task` 6, and post-userland `pinnedbytes` 4.
-
-#
-# 2026-09-15, the shell learning the POSIX grammar ("A script can loop, branch
-# and substitute" in plans/self-hosting.md). One cause for every row that
-# moved: `shell_script_test` went from 14 cases to 33, and each case's script
-# now runs several external commands plus the things the old shell could not
-# express at all — a command substitution, a `( )` subshell, a here-document's
-# writer, a pipeline stage that is a compound command — so the userland phase
-# creates ~70 more short-lived address spaces than it did.
-#   post-userland-tests `process` 173 -> 243. Deterministic at 243 over three
-#     fresh runs, so the cap is exact. The charge is released at the reap and
-#     most of those children are still referenced at the dump point.
-#     `MAX_PROCESSES` is 256 and a run reaches ~170 before this utest starts,
-#     which is why its cases are grouped rather than one shell per assertion:
-#     a spawn per property measured 251 and the next dozen hit `ENOMEM`.
-#   post-userland-tests `pages` 1309452 -> 1887717: measured
-#     1843330/1827672/1798943 over the same three runs, spread 44387; the cap
-#     is that maximum plus the spread. This row is mapped **virtual** address
-#     space, so every forked shell charges its whole lazy heap and 8 MiB stack
-#     extent whether or not it touches a page of either, and which utests
-#     overlap at the dump decides how many extents are live.
-#   post-userland-tests `residentpages` 119949 -> 153268 (148019/147756/150512,
-#     spread 2756) and `kernelmeta` 8503 -> 9293 (9171/9111/9202, spread 91).
-#     Same children: what a forked shell actually holds, and the page tables
-#     plus 12-page task stacks behind them.
-#   Everything else stayed inside its existing cap on all three runs: boot
-#     `kernelmeta` 1628 inside 1756, post-kernel-tests `kernelmeta` 5973-5983
-#     inside 6065, `pages` 48623-55482 inside 65536, `process` 14,
-#     `residentpages` 772 exact, `task` 6, `diskblocks` 6; post-userland
-#     `diskblocks` 2434 inside 2911, `fdslot` 256, `objectrow` 257, `task` 6
-#     and `pinnedbytes` 4.
-
-#
-# 2026-09-18, Workstream 1.1 ("The target is a host's target" in
-# plans/self-hosting.md). One row moved, from one cause: `libc_abi_test` is
-# one more utest binary.
-#   post-userland-tests `process` 246 -> 247. One more account row, live at
-#     the dump point like the rest of the phase's children. Deterministic at
-#     247 across three fresh runs of one ISO; the cap stays exact. Nothing
-#     else moved above its cap over those runs, including every row the
-#     platform-layer swap could plausibly have touched: post-userland
-#     `kernelmeta`, `pages` and `residentpages` all stayed inside their
-#     recorded spreads, so std riding `sys/pal/unix` over slibc costs the
-#     same kernel accounting the bespoke PAL did. Only the deterministic row
-#     is re-recorded.
-#
-# 2026-09-19, the dynamic loader ("A program can be linked at run time" in
-# plans/self-hosting.md). One row moved, from one cause: `dl_test` is one more
-# utest binary, and it spawns `/bin/dl_probe` twice — once for the dlopen
-# checks and once for the RELRO fault.
-#   post-userland-tests `process` 247 -> 250. Three more account rows, live at
-#     the dump point like the rest of the phase's children. Deterministic at
-#     250 across four fresh runs of one ISO; the cap stays exact.
-#   post-userland-tests `residentpages` 153268 -> 157348 and `pages`
-#     1887717 -> 1977053. Measured over those same four runs:
-#     `residentpages` 154070/154429/154457/154592 and `pages`
-#     1833467/1833874/1857895/1905260. `residentpages`' own spread here is
-#     522, but the cap is the maximum plus **2756**, the widest spread this
-#     row has been observed with (2026-09-15) — four runs of one ISO
-#     understate a row whose value depends on which of the phase's
-#     short-lived children are still unreaped at the dump. `pages` takes its
-#     own spread of 71793, which is the widest this row has shown and in the
-#     same style as its earlier notes.
-#   `kernelmeta` measured 9322-9439 inside 10035, `diskblocks` 315 inside
-#     2911 and `task` 6 inside 10, so those rows are left alone. The
-#     interpreter itself is cheap — it is mapped into the process that runs
-#     it, once — and what the two rows above measure is `dl_test` spawning
-#     `/bin/dl_probe` twice on top of a userland phase that already reaches
-#     ~250 live account rows.
-#
-# 2026-09-17, the editor ("An editor you can work in" in
-# plans/self-hosting.md). Two rows moved, both in the userland phase and both
-# from the same cause: `editor_test` is one more utest binary.
-#   post-userland-tests `process` 245 -> 246. One more account row, live at the
-#     dump point like the rest of the phase's children. Deterministic at 246
-#     across four fresh runs of one ISO; the cap stays exact.
-#   post-userland-tests `kernelmeta` 9293 -> 10035. Measured
-#     9840/9699/9794/9645 over those same four runs, spread 195; the cap is
-#     that maximum plus the spread, in the style of every order-dependent row
-#     above. The delta is that process's task stacks (12 pages each) and the
-#     page tables behind its address space; the editor maps the two new font
-#     files and holds a proportional glyph cache beside the fixed-cell atlas,
-#     which is the heap half.
-#   Nothing else moved above its cap over those four runs: post-userland
-#     `pages` measured 1 779 616-1 825 083 inside 1 887 717, `residentpages`
-#     148 965-150 881 inside 153 268, `diskblocks` 1656 exact inside 2911;
-#     boot `kernelmeta` 1750 and post-kernel-tests `kernelmeta` 6066-6068,
-#     both inside their caps. Only the two rows above are re-recorded.
-#
-# 2026-09-16, the terminal gaining the coverage an editor needs ("The terminal
-# is one an editor can be written against" in plans/self-hosting.md). Two rows
-# moved, and only one of them because of that work.
-#   post-kernel-tests `kernelmeta` 6065 -> 6120. Measured 6083/6049/6046 over
-#     three fresh runs of one ISO, spread 37; the cap is that maximum plus the
-#     spread. The cause is the glyph atlas: the set went from 194 slots to
-#     1190, so `init`'s `upgrade_console_font` now stages a 261 800-byte upload
-#     payload and holds a 261 800-byte atlas of its own before handing the
-#     coverage to `SYS_FONT_SET`. That is ~128 more userland pages in one
-#     process, and this row is the page tables behind them plus the kernel-side
-#     chunks. The atlas itself is chunked at 256 KiB, so none of it is one
-#     allocation.
-#   post-userland-tests `process` 243 -> 245, and **not** because of this
-#     change: an unmodified tree at the parent commit measures 245 on this
-#     machine too, as do all three runs with the change. The recorded 243 was
-#     taken where fewer of the userland phase's short-lived children happened
-#     to still be referenced at the dump point — the same overlap sensitivity
-#     the 2026-09-15 note describes for `pages`. Deterministic at 245 across
-#     four runs (three with, one without), so the cap is exact. `MAX_PROCESSES`
-#     is still 256, so the headroom this consumes is real and the grouping rule
-#     for utest cases still holds.
-#   Everything else stayed inside its existing cap on all three runs: boot
-#     `kernelmeta` 1750 inside 1756, post-kernel-tests `pages` 47528 inside
-#     65536, `process` 14, `residentpages` 772 exact, `task` 6, `diskblocks` 6;
-#     post-userland `pages` 1874007 inside 1887717, `residentpages` 151164
-#     inside 153268, `kernelmeta` 9216 inside 9293, `diskblocks` 2383 inside
-#     2911, `fdslot` 256, `objectrow` 257, `task` 6 and `pinnedbytes` 4.
-
-#
-# 2026-09-19, the C++ runtime ("A C++ exception crosses an object boundary" in
-# plans/self-hosting.md). Three rows moved, each from its own cause, and all
-# three deterministic across three fresh runs of one ISO so all three caps stay
-# exact.
-#   post-userland-tests `process` 250 -> 254. `cxx_test` is one more utest
-#     binary and it spawns three children: `/bin/cxx_probe` twice — once for
-#     the twelve ordered checks and once for the uncaught-throw case — and
-#     `/bin/cxx_static_probe` once. Four more account rows, live at the dump
-#     point like the rest of the phase's children.
-#     `MAX_PROCESSES` is 256, so this leaves two slots. The phase is at that
-#     ceiling because its children are not reaped until it ends, which is
-#     pre-existing and is the reason the 2026-09-15 note gives for grouping a
-#     utest's cases rather than spawning per assertion. A further utest that
-#     spawns will not fit.
-#   post-userland-tests `pinnedbytes` 8 -> 98. This row is file-backed pages
-#     held in the page cache by a mapping, charged in pages despite the name,
-#     and the probe maps two objects the suite never mapped before:
-#     `libc++.so` at 776 056 bytes and `libcxxtest.so`. The previous 4-8 was
-#     `dl_test`'s `libdltest.so` alone.
-#   post-userland-tests `diskblocks` 2911 -> 3658 (3658/3658/3658 over the
-#     three runs that took the row, 3272 once the licence texts and the static
-#     probe joined the image), and it is the image and not
-#     the change: `fs_image_size_tests` is 80M rather than 64M because the
-#     tests root now also carries `libc++.so`, `libcxxtest.so` and two more
-#     binaries, and at 64M `persist_test`'s space filler met the volume's
-#     819-block reserve with 809 blocks free and was refused before writing
-#     anything. A larger volume means the filler reaches that reserve later,
-#     which is the same arithmetic the 2026-09-09 note records for the 32M ->
-#     64M step.
-#   Nothing else moved above its cap over those three runs: post-userland
-#     `kernelmeta` 9592/9652/9802 inside 10035, `pages`
-#     1 872 931/1 911 825/1 865 037 inside 1 977 053, `residentpages`
-#     155 937/156 002/153 560 inside 157 348, `task` 6, `fdslot` 256,
-#     `objectrow` 257 and `custody` 8; boot `kernelmeta` 1750 inside 1756;
-#     post-kernel-tests `kernelmeta` 6069/6068/6068 inside 6120, `pages`
-#     54 131/62 273/53 871 inside 65 536, `residentpages` 772 exact,
-#     `process` 14, `diskblocks` 6 and `pinnedbytes` 4.
-
-# 2026-09-20, the host LLVM floor (`toolchain/cxx/PIN`'s `clang_major_min`).
-# Two rows moved over three fresh runs of one ISO, and one of them for the
-# first time for a reason that is not in this tree.
-#   post-userland-tests `pinnedbytes` 98 -> 100. `libc++.so` is 781 768 bytes
-#     built by LLVM 22 where it was 776 056 built by 18, and this row counts
-#     the page-cache pages a mapping holds: 5712 more bytes is two more pages.
-#     100 on all three runs, so the cap stays exact.
-#     What this row no longer is, is host-independent — the cross-built C++
-#     runtime's size is a function of the compiler that built it, and the pin
-#     now states a floor rather than one major. CI builds it at 18 and reports
-#     98, inside this cap; a machine on a newer LLVM may report more, and the
-#     remedy there is a re-measurement rather than margin invented here.
-#   post-userland-tests `residentpages` 157348 -> 160371, and **not** because
-#     of the compiler: 154611/156262/157491 over the three runs, a spread of
-#     2880 against a change worth at most the two pages above. The cap is the
-#     maximum plus that spread, which is now the widest this row has been
-#     observed with (2756 previously, 2026-09-16) — the row's dominant term
-#     stays which of the phase's short-lived children are unreaped at the
-#     dump, and three runs of one ISO understate it.
-#   Nothing else left its cap on those runs: post-userland `pages`
-#     1 870 649/1 889 593/1 871 771 inside 1 977 053, `kernelmeta`
-#     9361/9293/9455 inside 10 035, `diskblocks` 3297 inside 3658,
-#     `process` 254, `fdslot` 256, `objectrow` 257, `task` 6, `custody` 8;
-#     boot `kernelmeta` 1706 inside 1756; post-kernel-tests `residentpages`
-#     772 exact and `pinnedbytes` 4.
-
-# 2026-09-20, the libc surface ("The libc surface is complete" in
-# `plans/self-hosting.md`). One row moved.
-#   post-userland-tests `process` 254 -> 255: `libc_abi_test` now spawns
-#     `/bin/libc_probe`, the C program that exercises `<setjmp.h>`, the
-#     `long double` family and every generated header as C — the half of the
-#     surface no Rust caller can reach. 255 on all three runs, so the cap
-#     stays exact. That is one slot short of `MAX_PROCESSES` 256: the next
-#     utest that spawns needs the cap raised there first, not here.
-#   Nothing else left its cap on those runs: post-userland `pages`
-#     1 876 230/1 898 322/1 934 900 inside 1 977 053, `kernelmeta`
-#     9389/9461/9420 inside 10 035, `residentpages` 155 982/156 327/156 621
-#     inside 160 371, `diskblocks` 3020 inside 3658, `fdslot` 256,
-#     `objectrow` 257, `pinnedbytes` 100, `custody` 8, `task` 6/6/7.
-
-# 2026-09-21, the cross-built toolchain ("The toolchain is cross-built and
-# lands on a dev disk" in `plans/self-hosting.md`). One row moved.
-#   post-userland-tests `process` 255 -> 256: `devdisk_test` is one more
-#     utest binary. 256 on all three runs, so the cap stays exact. The
-#     previous entry's warning — one slot short of `MAX_PROCESSES` — is what
-#     this commit answers rather than absorbs: the constant is 1024 now.
-#   Nothing else left its cap on those runs: post-userland `pages`
-#     1 878 798/1 867 536/1 922 112 inside 1 977 053, `kernelmeta`
-#     9564/9509/9568 inside 10 035, `residentpages` 156 487/157 739/156 883
-#     inside 160 371, `diskblocks` 2636/2628/2626 inside 3658, `pinnedbytes`
-#     304, `fdslot` 256, `objectrow` 257, `custody` 8, `task` 6.
+# Caps on the rows that move between runs of one ISO -- kernelmeta, pages,
+# residentpages, diskblocks, pinnedbytes, task -- keep the previously tracked
+# value where it still holds, since one capture is a point and not a spread;
+# the deterministic rows and every new row carry this capture's exact peak.
+# The process row fell from 256 to 20 because an exited process is now torn
+# down and retired instead of leaking until shutdown. The commitpages row
+# after userland is the build-loop tests reserving six tenths of the
+# headroom, which moves with usable memory by tens of pages between boots:
+# three captures measured 120 266, 120 318 and 120 319, and the cap is the
+# largest of them. The expected refusals are the kernel stest that lowers the
+# root ceiling and over-asks once, then the build-loop utest: its over-ask is
+# refused twice, because the mmap handler reclaims and retries a refused
+# request once, and its fork past the ceiling is refused once.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
-
-# 2026-09-21, the LLVM port (`plans/self-hosting.md`, "LLVM builds for this
-# target"). One row moved, over two fresh runs of one ISO.
-#   post-userland-tests `pinnedbytes` 100 -> 308, 308 on both runs, so the cap
-#     stays exact as this row's previous two notes left it. The row counts the
-#     page-cache pages a mapping holds and `libc++.so` is 1 762 808 bytes where
-#     it was 781 768: the runtime is now built with localization, wide
-#     characters, `<filesystem>` and the random device on, because LLVM's own
-#     sources reach all four. 981 040 more bytes is 240 more pages of file, of
-#     which the probe's mapping holds 208.
-#   Measured under TCG rather than KVM, which this row does not care about: it
-#     is a page count, not a rate. The host built the runtime with clang 18,
-#     the major CI pins, so the size this cap follows from is CI's size.
-#   Nothing else moved above its cap over the two runs: post-userland
-#     `kernelmeta` 9997/9994 inside 10035, `pages` 1 907 206/1 903 118 inside
-#     1 977 053, `residentpages` 155 753/155 691 inside 160 371, `diskblocks`
-#     2709 inside 3658, `task` 6, `fdslot` 256, `objectrow` 257, `custody` 8;
-#     boot `kernelmeta` 1750 inside 1756; post-kernel-tests `pinnedbytes` 4,
-#     `process` 14, `task` 6, `residentpages` 772 exact.
-
-# Boot charges only the idle tasks' stacks, so it reports one kind and that
-# is the honest floor for it rather than evidence of a broken report.
 min-kinds-for boot 1
 
 # A denial is an over-limit charge. Under quota=warn it is granted and
@@ -477,20 +34,28 @@ min-kinds-for boot 1
 # refused something — which is a finding, not a pass.
 max-denials 0
 
+# The refusals the suite provokes on purpose, held to their exact count:
+# fewer means a test stopped refusing, more means something else was.
+expect-denials post-kernel-tests commitpages 1
+expect-denials post-userland-tests commitpages 4
+
 require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
 boot	kernelmeta	1756
+post-kernel-tests	commitpages	2560
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
 post-kernel-tests	kernelmeta	6120
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
-post-kernel-tests	process	20
+post-kernel-tests	pinnedbytes	4
+post-kernel-tests	process	14
 post-kernel-tests	residentpages	772
 post-kernel-tests	task	8
+post-userland-tests	commitpages	120319
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
@@ -498,67 +63,22 @@ post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
-post-userland-tests	process	256
+post-userland-tests	process	20
 post-userland-tests	residentpages	160371
 post-userland-tests	task	10
 
-# The charge path's cost. It runs on every syscall that allocates, so a
-# regression here is a whole-kernel throughput regression -- Escort measured
-# end-to-end accounting at 8 %, and 15-50 % under load with protection domains.
-# Without a check here a change of that size passes every other check in this
-# file.
+# The charge path's cost, as ratios rather than cycle counts. A cycle
+# count here measures the accelerator: the same tree reports ~1500
+# cycles per charge under KVM and ~20000 under TCG, and both are
+# correct. Every number below is x100, so 420 means 4.20.
 #
-# Expressed as ratios, never as cycle counts. A cycle count on this path
-# measures the *accelerator*: the caps this file used to carry (3000 and 9000)
-# were taken on a KVM host, and the identical unmodified tree reports 20631 and
-# 81886 under TCG. That gate failed on every machine without /dev/kvm, which is
-# a gate measuring the host and calling it the kernel -- the same defect the
-# suite's own wall-clock assertions had.
-#
-# One cap and two floors. All ratio values are x100, so 420 reads as 4.20.
-#
-#   max-depth-cost-ratio <depth> <cap>          -- the check
-#       Depth 7 against depth 1. Each level is meant to add a bounded constant,
-#       so this stays near 4 and a walk that stopped amortising goes to 7 or
-#       beyond. It is the only quantity here that is invariant under a change
-#       of accelerator, which is why it is the only one carrying a ceiling.
-#
-#   min-charge-over-reference <depth> <floor>   -- a measurement floor
-#       One charge+refund round trip against one bare uncontended CAS round
-#       trip, measured in the same run, the same batch shape and the same
-#       interrupts-off window. This is deliberately a FLOOR and not a cap: the
-#       ratio itself moves with the accelerator (a CAS is relatively dearer
-#       under TCG than natively, so the same tree reads ~18x here and would read
-#       far more under KVM), so a ceiling measured on one accelerator would fail
-#       on the other -- the exact defect this file's history is about. What a
-#       floor can do is prove the charge path still performs the atomic work it
-#       is supposed to.
-#
-#   min-reference-cycles <floor>                -- a measurement floor
-#       An absolute floor on the reference itself, because the two floors above
-#       are ratios over it and a reference that collapsed to 1 satisfies both.
-#       Not a measurement: a `lock cmpxchg` round trip through memory is not
-#       under a couple of dozen cycles on any real or emulated x86, so this is
-#       a physical bound and stays valid whatever runs the guest.
-#
-# **What is NOT checked, stated plainly:** a slowdown that scales the whole
-# charge path uniformly -- every depth, and a bare CAS with it -- passes every
-# line above. Catching that needs an absolute cycle ceiling, and an absolute
-# cycle ceiling is what this file used to carry and what failed on every machine
-# without /dev/kvm. Restoring one costs a measurement on each accelerator CI
-# might use, which nobody has; a gate nobody can run green is worse than a gate
-# with a stated hole.
+# The reference floors are emitted at half the observed value, because
+# a bare CAS is relatively dearer under TCG than natively and this
+# ratio does move with the accelerator. They prove the measurement
+# happened; the depth ratio below is the check.
+min-charge-over-reference 1 982
+min-charge-over-reference 7 3759
+max-depth-cost-ratio 7 478
 
-# The tightest quantity in this file: 3.77 and 3.86 in the two pinned runs that
-# reached the report, 3.69-3.99 across the earlier runs. The cap is 5.00; a walk
-# that stopped amortising goes to 7.00 (one full charge per level) or beyond.
-max-depth-cost-ratio 7 500
-
-# Floors, emitted at half the TCG observation. TCG is the conservative source
-# for these: it makes an atomic relatively dearer than the surrounding work, so
-# charge-over-CAS is *lower* here (18.5x at depth 1) than it would be natively.
-min-charge-over-reference 1 900
-min-charge-over-reference 7 3400
-
-# The denominator those two divide by. A physical bound, not a measurement.
+# A physical bound on the reference, not a measurement.
 min-reference-cycles 20

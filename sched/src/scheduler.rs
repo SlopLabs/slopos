@@ -1104,6 +1104,19 @@ fn claim_next_task(cpu_id: usize) -> Option<TaskRef> {
         return None;
     }
 
+    // A wake that raced the current task's block lands it in its own CPU's
+    // queue; its `on_cpu` clears only in the switch-out tail this claim is
+    // part of, so waiting on it here is waiting on ourselves. Back on the
+    // queue, and the idle switch below hands it to `finish_switch`.
+    if TaskAddr::current() == Some(TaskAddr::of(next_task)) {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            let _ = sched.enqueue_from_on_cpu(&dispatch_ref);
+            sched.set_executing_task(false);
+        });
+        super::task::task_put(dispatch_ref);
+        return None;
+    }
+
     // Wait out the prior CPU's switch-out tail rather than publish a second
     // queue membership. Dispatch runs interrupts-off, so this spin takes no IPI:
     // `spin_relax` services cross-CPU work by hand, since the prior CPU may be

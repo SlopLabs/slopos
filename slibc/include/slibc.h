@@ -32,6 +32,7 @@
 #include <semaphore.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

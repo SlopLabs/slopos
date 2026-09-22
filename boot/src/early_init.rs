@@ -539,6 +539,27 @@ fn apply_root_option(cmdline: &str) {
     }
 }
 
+/// Out of line so the boot-config step's frame stays under the 2 KiB gate.
+#[inline(never)]
+fn apply_mem_commit_option(cmdline: &str) {
+    for token in cmdline.split_whitespace() {
+        let Some(value) = token.strip_prefix("mem.commit=") else {
+            continue;
+        };
+        match value.parse::<u32>() {
+            Ok(percent) => {
+                slopos_mm::commit::set_commit_percent(percent);
+                if percent == 0 {
+                    boot_info(b"Boot option: mem.commit=0 (no commit ceiling)\0");
+                } else {
+                    boot_info(b"Boot option: mem.commit set\0");
+                }
+            }
+            Err(_) => boot_info(b"Boot option: mem.commit ignored (want a percentage)\0"),
+        }
+    }
+}
+
 fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let cmdline = BOOT_RUNTIME.lock().cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
@@ -736,6 +757,8 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
             }
         }
     }
+
+    apply_mem_commit_option(cmdline);
 
     // A typed parser rather than more `contains` arms, so a malformed value
     // degrades to the shipped policy instead of to a disabled console.

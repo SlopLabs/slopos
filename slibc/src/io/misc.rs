@@ -132,9 +132,7 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, mut args: ...) -> c_int {
     }
 }
 
-/// `F_DUPFD_CLOEXEC`, which the kernel's `fcntl` table does not name but the
-/// target's `libc` declares.
-pub const F_DUPFD_CLOEXEC: u64 = 1030;
+pub const F_DUPFD_CLOEXEC: u64 = slopos_abi::syscall::F_DUPFD_CLOEXEC;
 
 /// Returns 1 if `fd` is a terminal, 0 otherwise.
 ///

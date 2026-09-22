@@ -35,11 +35,15 @@ pub struct UserSysInfo {
     pub schedule_calls: u32,
     pub wl_balance: i64,
     pub boot_flags: u32,
-    pub _pad1: u32,
+    /// Pages the commit ledger may still promise; `u32::MAX` when it has no
+    /// ceiling. What a build driver sizes its parallelism against.
+    pub commit_headroom_pages: u32,
+    pub commit_limit_pages: u32,
+    pub committed_pages: u32,
 }
 
 const _: () = assert!(
-    core::mem::size_of::<UserSysInfo>() == 72,
+    core::mem::size_of::<UserSysInfo>() == 80,
     "UserSysInfo must carry no implicit padding"
 );
 

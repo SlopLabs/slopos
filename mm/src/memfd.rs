@@ -6,17 +6,18 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use slopos_ostd::lock_class;
 
+use slopos_abi::Errno;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::{S_IFREG, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
-use slopos_abi::quota::ObjectRow;
+use slopos_abi::quota::{CommitPagesAxis, ObjectRow};
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
 use slopos_ostd::process::AccountId;
-use slopos_ostd::process::quota::{Charge, try_charge};
+use slopos_ostd::process::quota::{Charge, ChargeSlot, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::page_alloc::{alloc_kernel_pages, free_page_frame};
@@ -55,6 +56,8 @@ pub struct MemfdObject {
     /// Mapped pages referencing this memfd; pages are freed only once both
     /// this and `refcount` reach zero.
     map_count: u32,
+    /// The backing pages' promise against the commit ceiling, the sizer's.
+    commit: ChargeSlot<CommitPagesAxis>,
 }
 
 static MEMFD_REGISTRY: SpinLock<Option<HandleTable<MemfdObject>>> =
@@ -149,6 +152,7 @@ pub fn memfd_create(
             format: PixelFormat::Argb8888,
             refcount: 1,
             map_count: 0,
+            commit: ChargeSlot::empty(),
         })
         .ok()
         .map(|h| h.pack(SLOT_BITS))
@@ -168,8 +172,9 @@ pub fn memfd_create(
 }
 
 /// Set the size of a memfd; one-shot, refused once the size is non-zero.
-/// Allocates the contiguous physical pages eagerly.
-pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
+/// Allocates the contiguous physical pages eagerly, promised against
+/// `account`'s commit first.
+pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int {
     let h = handle_from_raw(handle);
     if size == 0 || size > MAX_MEMFD_SIZE {
         return -22; // EINVAL
@@ -178,9 +183,12 @@ pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
     let aligned_size = (size + PAGE_SIZE_4KB as usize - 1) & !(PAGE_SIZE_4KB as usize - 1);
     let page_count = (aligned_size / PAGE_SIZE_4KB as usize) as u32;
 
+    let Ok(commit) = try_charge::<CommitPagesAxis>(account, page_count) else {
+        return Errno::ENOMEM.raw();
+    };
     let phys = alloc_kernel_pages(page_count);
     if phys.is_null() {
-        return -12; // ENOMEM
+        return Errno::ENOMEM.raw();
     }
 
     // Claim one owning MetaSlot ref per backing page so the memfd is the sole
@@ -207,7 +215,7 @@ pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
         for i in claimed..page_count {
             free_page_frame(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
         }
-        return -12; // ENOMEM
+        return Errno::ENOMEM.raw();
     }
 
     let slot = h.slot() as usize;
@@ -216,6 +224,7 @@ pub fn memfd_ftruncate(handle: usize, size: usize) -> c_int {
             obj.phys_addr = phys;
             obj.size = aligned_size;
             obj.pages = page_count;
+            obj.commit.put(commit);
             // Published under the lock, in lock-step with the table view, so a
             // lock-free reader never sees a sized memfd with a zeroed atomic.
             MEMFD_PHYS[slot].store(phys.as_u64(), Ordering::Release);

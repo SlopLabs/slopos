@@ -986,7 +986,7 @@ pub fn test_memfd_create_and_release() -> TestResult {
 pub fn test_memfd_ftruncate_valid() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
-    let rc = memfd::memfd_ftruncate(handle, 4096);
+    let rc = memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
     assert_test!(rc == 0, "ftruncate(4096) should succeed");
     let (phys, size) = memfd::memfd_get_phys(handle);
     assert_test!(!phys.is_null(), "phys should be non-null after ftruncate");
@@ -998,7 +998,7 @@ pub fn test_memfd_ftruncate_valid() -> TestResult {
 pub fn test_memfd_ftruncate_zero() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
-    let rc = memfd::memfd_ftruncate(handle, 0);
+    let rc = memfd::memfd_ftruncate(handle, 0, slopos_ostd::process::AccountId::NONE);
     assert_test!(rc < 0, "ftruncate(0) should fail");
     drop(backing);
     pass!()
@@ -1007,7 +1007,11 @@ pub fn test_memfd_ftruncate_zero() -> TestResult {
 pub fn test_memfd_ftruncate_excessive() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
-    let rc = memfd::memfd_ftruncate(handle, 128 * 1024 * 1024);
+    let rc = memfd::memfd_ftruncate(
+        handle,
+        128 * 1024 * 1024,
+        slopos_ostd::process::AccountId::NONE,
+    );
     assert_test!(rc < 0, "ftruncate(128MB) should fail");
     drop(backing);
     pass!()
@@ -1016,9 +1020,9 @@ pub fn test_memfd_ftruncate_excessive() -> TestResult {
 pub fn test_memfd_ftruncate_twice() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
-    let rc1 = memfd::memfd_ftruncate(handle, 4096);
+    let rc1 = memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
     assert_test!(rc1 == 0, "first ftruncate should succeed");
-    let rc2 = memfd::memfd_ftruncate(handle, 8192);
+    let rc2 = memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
     assert_test!(rc2 < 0, "second ftruncate should fail (one-shot)");
     drop(backing);
     pass!()
@@ -1030,7 +1034,7 @@ pub fn test_memfd_refcount() -> TestResult {
     let alias = backing.clone();
     drop(backing);
     assert_test!(
-        memfd::memfd_ftruncate(handle, 4096) == 0,
+        memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE) == 0,
         "memfd must stay alive while an alias holds it"
     );
     drop(alias);
@@ -1054,7 +1058,7 @@ pub fn test_memfd_mapcount() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let h = memfd::handle_from_raw(handle);
-    memfd::memfd_ftruncate(handle, 4096);
+    memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
     memfd::memfd_inc_mapcount_by(h, 1);
     memfd::memfd_inc_mapcount_by(h, 1);
     // Closing the fd side must not free pages while map_count > 0; the pages go
@@ -1073,7 +1077,7 @@ pub fn test_memfd_get_info() -> TestResult {
         memfd::memfd_get_info(h).is_none(),
         "unsized memfd should return None"
     );
-    memfd::memfd_ftruncate(handle, 8192);
+    memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
     let info = memfd::memfd_get_info(h);
     assert_test!(info.is_some(), "sized memfd should return Some");
     if let Some((phys, size, pages)) = info {
@@ -1089,7 +1093,7 @@ pub fn test_memfd_size_query() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     assert_test!(memfd::memfd_size(handle) == 0, "size before ftruncate");
-    memfd::memfd_ftruncate(handle, 16384);
+    memfd::memfd_ftruncate(handle, 16384, slopos_ostd::process::AccountId::NONE);
     assert_test!(memfd::memfd_size(handle) >= 16384, "size after ftruncate");
     drop(backing);
     pass!()

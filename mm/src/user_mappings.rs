@@ -23,6 +23,8 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 /// [`PageFlags::COW`] sits at bit 9, the low bit of `PageProperty::software`.
 const SOFTWARE_BITS_SHIFT: u32 = 9;
 /// Only the fault paths can retry a `WouldBlock`; for syscalls the spin is all there is.
+/// The holder is usually a fault on another CPU, and its flush waits on this
+/// CPU's ack, so the spin services shootdowns or the two wait each other out.
 const VM_SPACE_MUT_SPINS: usize = 1_000_000;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD
@@ -102,6 +104,7 @@ fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapErr
             return Err(MapError::WouldBlock);
         }
         spins += 1;
+        slopos_ostd::sync::spin_relax();
         core::hint::spin_loop();
     }
     #[cfg(feature = "test-hooks")]

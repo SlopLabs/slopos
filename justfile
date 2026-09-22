@@ -109,7 +109,7 @@ coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp 
 # they are libraries, not programs, and out of the shipped image entirely.
 test_shared_objects := "libdltest.so libc++.so libcxxtest.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test devdisk_test"
+test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test devdisk_test buildloop_test exit_stress_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -532,16 +532,55 @@ check-fs-throughput: _build-run-tests
 # two witnesses for one task may hold live pointers into the same field, and
 # whether that is legal is a raw-pointer retagging question — exactly where
 # Stacked and Tree Borrows differ.
+#
+# Four processes, because Miri interprets every thread of a process on one core:
+# libtest's thread pool buys nothing here, so two invocations back to back leave
+# the machine idle. cargo serialises the four builds on the target-directory
+# lock and releases it before running the tests, so they share one target dir.
+# `cargo miri nextest run` shards per *test* instead, which is measurably worse:
+# a Miri process costs about a second to start and there are 643 of them.
+#
+# Naming targets excludes the doctests. OSTD's are `ignore` or `compile_fail` —
+# claims about the compiler, not about the machine — and `just test-host` runs
+# them.
 [doc("Run slopos-ostd unit + integration tests under Miri to detect UB in the OSTD critical path, under both Stacked and Tree Borrows. See tools/kernmiri/README.md.")]
 check-miri:
-    @rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' || rustup component add miri --toolchain {{rust_channel}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{build_dir}}
+    rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' \
+        || rustup component add miri --toolchain {{rust_channel}}
     {{cargo}} +{{rust_channel}} miri setup
-    @echo "── KernMiri: Stacked Borrows ──"
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" \
-        {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
-    @echo "── KernMiri: Tree Borrows ──"
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-tree-borrows" \
-        {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
+    pids=(); tags=()
+    for model in stacked tree; do
+        flags="-Zmiri-disable-isolation -Zmiri-ignore-leaks"
+        if [ "$model" = tree ]; then
+            flags="$flags -Zmiri-tree-borrows"
+        fi
+        for shard in lib tests; do
+            if [ "$shard" = lib ]; then
+                sel=(--lib)
+            else
+                sel=(--test '*')
+            fi
+            tag="$model-$shard"
+            MIRIFLAGS="$flags" {{cargo}} +{{rust_channel}} miri test -p slopos-ostd \
+                "${sel[@]}" --no-fail-fast \
+                >"{{build_dir}}/kernmiri-$tag.log" 2>&1 &
+            pids+=($!); tags+=("$tag")
+        done
+    done
+    rc=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            echo "── KernMiri ${tags[$i]}: ok ──"
+        else
+            echo "── KernMiri ${tags[$i]}: FAILED ({{build_dir}}/kernmiri-${tags[$i]}.log) ──" >&2
+            sed -n '/^failures:/,$p' "{{build_dir}}/kernmiri-${tags[$i]}.log" >&2
+            rc=1
+        fi
+    done
+    exit "$rc"
 
 [doc("Print TCB ratio: unsafe lines in slopos-ostd / total kernel Rust LoC (target Phase 1 <= 1.5%, Phase 2 <= 1.0%)")]
 tcb-ratio:
@@ -726,7 +765,20 @@ stack-audit:
 
 [doc("Clean build artifacts")]
 clean:
-    {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # cargo refuses an explicit --target-dir with no CACHEDIR.TAG, and writes one
+    # only for a directory it created itself.
+    tag="{{cargo_target_dir}}/CACHEDIR.TAG"
+    if [ -d "{{cargo_target_dir}}" ]; then
+        rm -f "$tag"
+        printf '%s\n' \
+            'Signature: 8a477f597d28d172789f06886806bc55' \
+            '# This file is a cache directory tag created by cargo.' \
+            '# For information about cache directory tags see https://bford.info/cachedir/' \
+            > "$tag"
+    fi
+    {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}}
     rm -f {{build_dir}}/kernel-*.elf
     rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/cargo-fork {{build_dir}}/gates/bootstrap-config
 

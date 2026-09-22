@@ -8,25 +8,13 @@ use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaRegion};
 
 fn anon_region(prot: Protection) -> VmaRegion {
-    VmaRegion {
-        protection: prot,
-        backing: RegionBacking::Anonymous,
-        lazy: true,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::General,
-    }
+    VmaRegion::new(prot, RegionBacking::Anonymous, true, RegionPurpose::General)
 }
 
 fn kernel_region(prot: Protection) -> VmaRegion {
-    VmaRegion {
-        protection: prot,
-        backing: RegionBacking::Anonymous,
-        lazy: true,
-        cow: false,
-        user: false,
-        purpose: RegionPurpose::General,
-    }
+    let mut region = anon_region(prot);
+    region.user = false;
+    region
 }
 
 pub fn test_demand_fault_present_page() -> TestResult {

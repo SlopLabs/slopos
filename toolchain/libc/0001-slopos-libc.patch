@@ -22,7 +22,7 @@ index f4387e7..f6a7785 100644
      } else if #[cfg(target_env = "sgx")] {
          mod sgx;
          // pub(crate) use sgx::*;
-diff --git b/src/new/slibc/mod.rs b/src/new/slibc/mod.rs
+diff --git a/src/new/slibc/mod.rs b/src/new/slibc/mod.rs
 new file mode 100644
 index 0000000..fff231d
 --- /dev/null
@@ -33,7 +33,7 @@ index 0000000..fff231d
 +//! * Headers: `slibc/include`
 +
 +pub(crate) mod unistd;
-diff --git b/src/new/slibc/unistd.rs b/src/new/slibc/unistd.rs
+diff --git a/src/new/slibc/unistd.rs b/src/new/slibc/unistd.rs
 new file mode 100644
 index 0000000..8d55ee5
 --- /dev/null
@@ -46,7 +46,7 @@ index 0000000..8d55ee5
 +    STDIN_FILENO,
 +    STDOUT_FILENO,
 +};
-diff --git b/src/new/slopos/mod.rs b/src/new/slopos/mod.rs
+diff --git a/src/new/slopos/mod.rs b/src/new/slopos/mod.rs
 new file mode 100644
 index 0000000..54fe1cf
 --- /dev/null
@@ -81,12 +81,12 @@ index 6c64020..0ec764e 100644
      } else if #[cfg(target_os = "redox")] {
          mod redox;
          pub use self::redox::*;
-diff --git b/src/unix/slopos/mod.rs b/src/unix/slopos/mod.rs
+diff --git a/src/unix/slopos/mod.rs b/src/unix/slopos/mod.rs
 new file mode 100644
-index 0000000..6585d11
+index 0000000..d2d9fa3
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,1585 @@
+@@ -0,0 +1,1674 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -431,6 +431,23 @@ index 0000000..6585d11
 +
 +    pub struct sched_param {
 +        pub sched_priority: c_int,
++    }
++
++    pub struct posix_spawnattr_t {
++        pub __flags: c_short,
++        pub __pgrp: crate::pid_t,
++        pub __sd: sigset_t,
++        pub __ss: sigset_t,
++        pub __sp: sched_param,
++        pub __policy: c_int,
++        pub __pad: [c_int; 16],
++    }
++
++    pub struct posix_spawn_file_actions_t {
++        pub __allocated: c_int,
++        pub __used: c_int,
++        pub __actions: *mut c_void,
++        pub __pad: [c_int; 16],
 +    }
 +
 +    pub struct tm {
@@ -937,6 +954,14 @@ index 0000000..6585d11
 +pub const NI_MAXSERV: socklen_t = 32;
 +
 +pub const WNOHANG: c_int = 1;
++
++pub const POSIX_SPAWN_RESETIDS: c_int = 0x01;
++pub const POSIX_SPAWN_SETPGROUP: c_int = 0x02;
++pub const POSIX_SPAWN_SETSIGDEF: c_int = 0x04;
++pub const POSIX_SPAWN_SETSIGMASK: c_int = 0x08;
++pub const POSIX_SPAWN_SETSCHEDPARAM: c_int = 0x10;
++pub const POSIX_SPAWN_SETSCHEDULER: c_int = 0x20;
++pub const POSIX_SPAWN_SETSID: c_int = 0x80;
 +pub const WUNTRACED: c_int = 2;
 +pub const WCONTINUED: c_int = 8;
 +
@@ -1670,5 +1695,69 @@ index 0000000..6585d11
 +        dtor: extern "C" fn(*mut c_void),
 +        arg: *mut c_void,
 +        dso: *mut c_void,
++    ) -> c_int;
++
++    pub fn posix_spawn(
++        pid: *mut crate::pid_t,
++        path: *const c_char,
++        file_actions: *const posix_spawn_file_actions_t,
++        attrp: *const posix_spawnattr_t,
++        argv: *const *mut c_char,
++        envp: *const *mut c_char,
++    ) -> c_int;
++    pub fn posix_spawnp(
++        pid: *mut crate::pid_t,
++        file: *const c_char,
++        file_actions: *const posix_spawn_file_actions_t,
++        attrp: *const posix_spawnattr_t,
++        argv: *const *mut c_char,
++        envp: *const *mut c_char,
++    ) -> c_int;
++    pub fn posix_spawnattr_init(attr: *mut posix_spawnattr_t) -> c_int;
++    pub fn posix_spawnattr_destroy(attr: *mut posix_spawnattr_t) -> c_int;
++    pub fn posix_spawnattr_getflags(attr: *const posix_spawnattr_t, flags: *mut c_short) -> c_int;
++    pub fn posix_spawnattr_setflags(attr: *mut posix_spawnattr_t, flags: c_short) -> c_int;
++    pub fn posix_spawnattr_getpgroup(
++        attr: *const posix_spawnattr_t,
++        pgroup: *mut crate::pid_t,
++    ) -> c_int;
++    pub fn posix_spawnattr_setpgroup(attr: *mut posix_spawnattr_t, pgroup: crate::pid_t) -> c_int;
++    pub fn posix_spawnattr_getsigdefault(
++        attr: *const posix_spawnattr_t,
++        sigdefault: *mut sigset_t,
++    ) -> c_int;
++    pub fn posix_spawnattr_setsigdefault(
++        attr: *mut posix_spawnattr_t,
++        sigdefault: *const sigset_t,
++    ) -> c_int;
++    pub fn posix_spawnattr_getsigmask(
++        attr: *const posix_spawnattr_t,
++        sigmask: *mut sigset_t,
++    ) -> c_int;
++    pub fn posix_spawnattr_setsigmask(
++        attr: *mut posix_spawnattr_t,
++        sigmask: *const sigset_t,
++    ) -> c_int;
++    pub fn posix_spawn_file_actions_init(actions: *mut posix_spawn_file_actions_t) -> c_int;
++    pub fn posix_spawn_file_actions_destroy(actions: *mut posix_spawn_file_actions_t) -> c_int;
++    pub fn posix_spawn_file_actions_addopen(
++        actions: *mut posix_spawn_file_actions_t,
++        fd: c_int,
++        path: *const c_char,
++        oflag: c_int,
++        mode: mode_t,
++    ) -> c_int;
++    pub fn posix_spawn_file_actions_addclose(
++        actions: *mut posix_spawn_file_actions_t,
++        fd: c_int,
++    ) -> c_int;
++    pub fn posix_spawn_file_actions_adddup2(
++        actions: *mut posix_spawn_file_actions_t,
++        fd: c_int,
++        newfd: c_int,
++    ) -> c_int;
++    pub fn posix_spawn_file_actions_addchdir_np(
++        actions: *mut posix_spawn_file_actions_t,
++        path: *const c_char,
 +    ) -> c_int;
 +}

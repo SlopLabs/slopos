@@ -365,7 +365,7 @@ jobs:
   miri:
     name: KernMiri (OSTD UB detection)
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 25
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -374,14 +374,10 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
 
-      - name: Setup Go toolchain
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: tools/run_tests/go.mod
-          cache-dependency-path: tools/run_tests/go.sum
-
-      - name: Setup Rust + Go toolchains
-        run: just setup
+      # Not `just setup`: this job builds one host-target crate and interprets
+      # it, so the owned `slopos` sysroot and Go are pure cost here.
+      - name: Setup Rust toolchain
+        run: scripts/ensure_toolchain.sh --no-sysroot
 
       - name: Cache Miri sysroot
         uses: actions/cache@v6

@@ -268,7 +268,8 @@ define_syscall!(syscall_ftruncate
     // A memfd's length is an allocation size, rounded to a page; a regular
     // file's is a file size, exact, and goes down `truncate(2)`'s path.
     let rc = if kind == slopos_abi::file_ops::FileKind::Memfd {
-        slopos_mm::memfd::memfd_ftruncate(handle, size as usize)
+        let account = process_id.process().ok_or(Errno::ESRCH)?.account();
+        slopos_mm::memfd::memfd_ftruncate(handle, size as usize, account)
     } else {
         slopos_fs::fileio::file_ftruncate_fd(process_id, fd.raw(), size)
     };

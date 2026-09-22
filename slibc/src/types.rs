@@ -40,6 +40,36 @@ pub type time_t = i64;
 pub type rlim_t = u64;
 pub type sighandler_t = usize;
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct sched_param {
+    pub sched_priority: c_int,
+}
+
+/// `posix_spawnattr_t`, in glibc's public layout.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct posix_spawnattr_t {
+    pub __flags: c_short,
+    pub __pgrp: pid_t,
+    pub __sd: sigset_t,
+    pub __ss: sigset_t,
+    pub __sp: sched_param,
+    pub __policy: c_int,
+    pub __pad: [c_int; 16],
+}
+
+/// `posix_spawn_file_actions_t`, in glibc's public layout: `__actions` is a
+/// heap array slibc owns.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct posix_spawn_file_actions_t {
+    pub __allocated: c_int,
+    pub __used: c_int,
+    pub __actions: *mut c_void,
+    pub __pad: [c_int; 16],
+}
+
 /// `sigset_t` is 128 bytes — glibc's `_SIGSET_NWORDS`, and what the target's
 /// `libc` declares — while the kernel's mask is a single `u64`. Only signals
 /// `1..=31` exist (`NSIG` is 32), so every bit slibc can hand the kernel lives

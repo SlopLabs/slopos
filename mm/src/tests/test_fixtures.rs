@@ -51,10 +51,10 @@ impl ProcessVmGuard {
     }
 
     pub fn handle_demand_fault(&self, fault_addr: u64, error_code: u64) -> Result<(), MmError> {
-        crate::process_vm::process_vm_with_vm_space_and_region(
+        crate::process_vm::process_vm_with_fault_context(
             self.process,
             fault_addr,
-            |vs, region| handle_demand_fault(vs, fault_addr, error_code, &region),
+            |vs, map, region| handle_demand_fault(vs, map, fault_addr, error_code, &region),
         )
         .unwrap_or(Err(MmError::NoAddressSpace))
     }

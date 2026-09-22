@@ -25,6 +25,9 @@ pub const TASK_EXIT_CLEANUP_ACCOUNTED: u8 = 1 << 2;
 /// questions: that one is the global live-task census, this one decides
 /// whether this exit is the one that tears down the address space.
 pub const TASK_EXIT_CLEANUP_CHARGES: u8 = 1 << 3;
+/// This task's leave was its process's last: the address space is its to tear
+/// down once it has switched off it. Kept because the self-exit road asks twice.
+pub const TASK_EXIT_LAST_IN_PROCESS: u8 = 1 << 4;
 
 /// The child-exit event for a task id. Parents blocked in `waitpid`-style
 /// waits park on this; the task's exit path publishes it. Public so the

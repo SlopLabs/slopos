@@ -225,6 +225,14 @@ name = "devdisk_test"
 path = "src/bin/tests/devdisk_test.rs"
 
 [[bin]]
+name = "buildloop_test"
+path = "src/bin/tests/buildloop_test.rs"
+
+[[bin]]
+name = "exit_stress_test"
+path = "src/bin/tests/exit_stress_test.rs"
+
+[[bin]]
 name = "shell_script_test"
 path = "src/bin/tests/shell_script_test.rs"
 

@@ -51,10 +51,15 @@ struct AccountRow {
     usage: [AtomicU64; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
-    /// Arena index of the account this one debits through. Written once at
-    /// creation and never given a setter, which makes charge migration
-    /// unrepresentable rather than merely discouraged.
-    parent: AtomicU32,
+    /// The account this one debits through: its arena slot and the low half
+    /// of its generation, packed so a reader sees both or neither. A reissued
+    /// slot carries a new generation and so reads as the root, never as the
+    /// stranger holding it. Written at creation and re-pointed only by the
+    /// parent's own release, which hands its children to their grandparent.
+    parent: AtomicU64,
+    /// Live rows debiting through this one. A release with none — nearly
+    /// every one — skips the scan that would find them.
+    children: AtomicU32,
     depth_remaining: AtomicU8,
     /// Matched against an [`AccountId`]'s generation before any row is touched.
     /// A mismatch is a stale designator and every operation on one is a no-op.
@@ -68,7 +73,8 @@ impl AccountRow {
             usage: [const { AtomicU64::new(0) }; KIND_COUNT],
             limit: [const { AtomicU32::new(NO_LIMIT) }; KIND_COUNT],
             denials: [const { AtomicU32::new(0) }; KIND_COUNT],
-            parent: AtomicU32::new(NO_PARENT),
+            parent: AtomicU64::new(pack_parent(NO_PARENT, 0)),
+            children: AtomicU32::new(0),
             depth_remaining: AtomicU8::new(ROOT_DEPTH_REMAINING),
             generation: AtomicU64::new(0),
             live: AtomicBool::new(false),
@@ -83,7 +89,62 @@ impl AccountRow {
             self.limit[kind].store(NO_LIMIT, Ordering::Relaxed);
             self.denials[kind].store(0, Ordering::Relaxed);
         }
+        self.children.store(0, Ordering::Relaxed);
     }
+
+    fn child_added(&self) {
+        self.children.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn child_removed(&self) {
+        let _ = self
+            .children
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            });
+    }
+}
+
+#[inline]
+const fn pack_parent(slot: u32, generation: u64) -> u64 {
+    ((generation as u32 as u64) << 32) | slot as u64
+}
+
+#[inline]
+const fn parent_slot_of(packed: u64) -> u32 {
+    packed as u32
+}
+
+#[inline]
+const fn parent_generation_of(packed: u64) -> u32 {
+    (packed >> 32) as u32
+}
+
+/// The parent `row` debits through. Only the root has none; a row whose
+/// recorded parent is gone — released before it could be handed on, or
+/// reissued to a stranger whose generation does not match — debits through
+/// the root, so no orphan ever escapes the ceiling.
+fn parent_of(row: &AccountRow) -> AccountId {
+    let packed = row.parent.load(Ordering::Acquire);
+    let slot = parent_slot_of(packed);
+    if slot == NO_PARENT {
+        return AccountId::NONE;
+    }
+    let parent = account_id_at(slot);
+    if parent.is_none() || parent.generation() as u32 != parent_generation_of(packed) {
+        return root_account();
+    }
+    parent
+}
+
+/// Point `child` at `parent`, or at nothing.
+fn adopt(child: &AccountRow, parent: AccountId) {
+    let packed = if parent.is_none() {
+        pack_parent(NO_PARENT, 0)
+    } else {
+        pack_parent(parent.slot(), parent.generation())
+    };
+    child.parent.store(packed, Ordering::Release);
 }
 
 #[inline]
@@ -102,6 +163,35 @@ const fn usage_peak(packed: u64) -> u32 {
 }
 
 static ACCOUNTS: [AccountRow; MAX_ACCOUNTS] = [const { AccountRow::new() }; MAX_ACCOUNTS];
+
+/// Per-process ceilings derived from the machine rather than frozen in `abi`,
+/// one slot per kind; `set` marks the kinds boot has derived.
+struct DerivedLimits {
+    limit: [AtomicU32; KIND_COUNT],
+    set: [AtomicBool; KIND_COUNT],
+}
+
+static DERIVED_PROCESS_LIMITS: DerivedLimits = DerivedLimits {
+    limit: [const { AtomicU32::new(NO_LIMIT) }; KIND_COUNT],
+    set: [const { AtomicBool::new(false) }; KIND_COUNT],
+};
+
+/// Replace the per-process default for `kind` with one measured off the
+/// machine. Boot use only: rows already created keep the ceiling they got.
+pub fn set_derived_process_limit(kind: ResourceKind, limit: u32) {
+    let idx = kind.index();
+    DERIVED_PROCESS_LIMITS.limit[idx].store(limit, Ordering::Release);
+    DERIVED_PROCESS_LIMITS.set[idx].store(true, Ordering::Release);
+}
+
+fn process_default_limit(kind: ResourceKind) -> u32 {
+    let idx = kind.index();
+    if DERIVED_PROCESS_LIMITS.set[idx].load(Ordering::Acquire) {
+        DERIVED_PROCESS_LIMITS.limit[idx].load(Ordering::Acquire)
+    } else {
+        slopos_abi::quota::default_process_limit(kind)
+    }
+}
 
 /// Refusal policy.
 ///
@@ -187,7 +277,8 @@ fn ensure_root() {
         return;
     }
     row.reset_counters();
-    row.parent.store(NO_PARENT, Ordering::Relaxed);
+    row.parent
+        .store(pack_parent(NO_PARENT, 0), Ordering::Relaxed);
     row.depth_remaining
         .store(ROOT_DEPTH_REMAINING, Ordering::Relaxed);
     row.generation.store(id.generation(), Ordering::Release);
@@ -210,15 +301,15 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
         return Err(AccountCreateError::OutOfBounds);
     }
 
-    let (parent_slot, depth) = if parent.is_none() {
-        (NO_PARENT, ROOT_DEPTH_REMAINING)
+    let (parent_row, parent_slot, depth) = if parent.is_none() {
+        (None, NO_PARENT, ROOT_DEPTH_REMAINING)
     } else {
         let parent_row = row_for(parent).ok_or(AccountCreateError::NoParent)?;
         let remaining = parent_row.depth_remaining.load(Ordering::Acquire);
         if remaining == 0 {
             return Err(AccountCreateError::TooDeep);
         }
-        (parent.slot(), remaining - 1)
+        (Some(parent_row), parent.slot(), remaining - 1)
     };
 
     let row = &ACCOUNTS[slot];
@@ -228,30 +319,67 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
     // refuse the machine's own aggregate. Its limits come from measured RAM.
     if slot != ROOT_ACCOUNT_SLOT as usize {
         for kind in ResourceKind::ALL {
-            row.limit[kind.index()].store(
-                slopos_abi::quota::default_process_limit(kind),
-                Ordering::Relaxed,
-            );
+            row.limit[kind.index()].store(process_default_limit(kind), Ordering::Relaxed);
         }
     }
-    row.parent.store(parent_slot, Ordering::Relaxed);
+    row.parent.store(
+        pack_parent(
+            parent_slot,
+            if parent.is_none() {
+                0
+            } else {
+                parent.generation()
+            },
+        ),
+        Ordering::Relaxed,
+    );
     row.depth_remaining.store(depth, Ordering::Relaxed);
     // Generation before `live`: a reader checks liveness first, so this order
     // never exposes a live row carrying its predecessor's generation.
     row.generation.store(id.generation(), Ordering::Release);
     row.live.store(true, Ordering::Release);
+    if let Some(parent_row) = parent_row {
+        parent_row.child_added();
+    }
     Ok(())
 }
 
 /// Release the row `id` names.
 ///
-/// Outstanding amounts move one hop up the immutable parent chain. The row
-/// itself goes dark, so a refund arriving later fails the generation compare
-/// and does nothing — which is what makes a leaked charge self-healing.
+/// Its live children are handed to its parent and its own outstanding amounts
+/// move one hop up. The row itself goes dark, so a refund arriving later fails
+/// the generation compare and does nothing — which is what makes a leaked
+/// charge self-healing.
 pub fn account_release(id: AccountId) {
     let Some(row) = row_for(id) else {
         return;
     };
+
+    // Live children go to the grandparent before this row goes dark, so what
+    // they charged through here stays counted above and their later refunds
+    // still reach it. Only this row's own share moves up.
+    let grandparent = parent_of(row);
+    let grandparent_row = row_for(grandparent);
+    let mut children_used = [0u32; KIND_COUNT];
+    if row.children.load(Ordering::Acquire) != 0 {
+        for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+            if child_slot as u32 == id.slot() || !child.live.load(Ordering::Acquire) {
+                continue;
+            }
+            if parent_of(child) != id {
+                continue;
+            }
+            adopt(child, grandparent);
+            if let Some(grandparent_row) = grandparent_row {
+                grandparent_row.child_added();
+            }
+            for kind in ResourceKind::ALL {
+                let idx = kind.index();
+                children_used[idx] = children_used[idx]
+                    .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
+            }
+        }
+    }
 
     // Dark first: the audit counts a live row among its parent's children, so
     // crediting the parent ahead of it dips the parent below their sum.
@@ -261,15 +389,18 @@ pub fn account_release(id: AccountId) {
     // bill the parent for blocks nothing can attribute to anyone.
     super::disk::release(id);
 
-    let parent_slot = row.parent.load(Ordering::Acquire);
-    if parent_slot != NO_PARENT {
-        let parent = account_id_at(parent_slot);
+    if !grandparent.is_none() {
         for kind in ResourceKind::ALL {
-            let outstanding = usage_used(row.usage[kind.index()].load(Ordering::Acquire));
-            if outstanding != 0 {
-                refund_raw(parent, kind, outstanding);
+            let idx = kind.index();
+            let own = usage_used(row.usage[idx].load(Ordering::Acquire))
+                .saturating_sub(children_used[idx]);
+            if own != 0 {
+                refund_raw(grandparent, kind, own);
             }
         }
+    }
+    if let Some(grandparent_row) = grandparent_row {
+        grandparent_row.child_removed();
     }
 
     row.generation.store(0, Ordering::Release);
@@ -350,11 +481,7 @@ pub fn try_charge<A: Refundable>(
         charged[depth] = current;
         depth += 1;
 
-        let parent_slot = row.parent.load(Ordering::Acquire);
-        if parent_slot == NO_PARENT {
-            break;
-        }
-        current = account_id_at(parent_slot);
+        current = parent_of(row);
         if current.is_none() {
             break;
         }
@@ -379,11 +506,7 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
             return;
         };
         release_row(row, kind, n);
-        let parent_slot = row.parent.load(Ordering::Acquire);
-        if parent_slot == NO_PARENT {
-            return;
-        }
-        current = account_id_at(parent_slot);
+        current = parent_of(row);
         if current.is_none() {
             return;
         }
@@ -516,11 +639,7 @@ pub fn for_each_account(mut f: impl FnMut(AccountId, AccountId)) {
             continue;
         }
         let id = AccountId::from_parts(slot as u32, row.generation.load(Ordering::Acquire));
-        let parent = match row.parent.load(Ordering::Acquire) {
-            NO_PARENT => AccountId::NONE,
-            parent_slot => account_id_at(parent_slot),
-        };
-        f(id, parent);
+        f(id, parent_of(row));
     }
 }
 
@@ -612,6 +731,25 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
         }
         let account = AccountId::from_parts(slot as u32, row.generation.load(Ordering::Acquire));
 
+        // Once for every kind rather than once per kind: the child edge does not
+        // depend on the kind, and the walk is `MAX_ACCOUNTS` rows wide.
+        let mut children = [0u32; KIND_COUNT];
+        for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+            if child_slot == slot || !child.live.load(Ordering::Acquire) {
+                continue;
+            }
+            if parent_of(child) != account {
+                continue;
+            }
+            for kind in ResourceKind::ALL {
+                let idx = kind.index();
+                // Saturating: several children can each exceed what a `u32`
+                // sum would hold.
+                children[idx] = children[idx]
+                    .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
+            }
+        }
+
         for kind in ResourceKind::ALL {
             let idx = kind.index();
             let usage = row.usage[idx].load(Ordering::Acquire);
@@ -639,25 +777,14 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             }
 
             // Every direct child debits through this row, so this row's `used`
-            // is at least their sum. Saturating: several children can each
-            // exceed what a `u32` sum would hold.
-            let mut children = 0u32;
-            for (child_slot, child) in ACCOUNTS.iter().enumerate() {
-                if child_slot == slot || !child.live.load(Ordering::Acquire) {
-                    continue;
-                }
-                if child.parent.load(Ordering::Acquire) == slot as u32 {
-                    children = children
-                        .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
-                }
-            }
-            if used < children {
+            // is at least their sum.
+            if used < children[idx] {
                 faults += 1;
                 report(LedgerFault::AncestorUnderCount {
                     ancestor: account,
                     kind,
                     ancestor_used: used,
-                    children_used: children,
+                    children_used: children[idx],
                 });
             }
         }
@@ -703,7 +830,7 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
                 if child_slot == slot || !child.live.load(Ordering::Acquire) {
                     continue;
                 }
-                if child.parent.load(Ordering::Acquire) == slot as u32 {
+                if parent_of(child) == account {
                     descendants = descendants
                         .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
                 }
@@ -765,6 +892,11 @@ pub(super) fn charge_raw_one_level_for_test(account: AccountId, kind: ResourceKi
 /// minted before a reset can never match the slot's next occupant.
 pub fn reset_for_test() {
     for row in ACCOUNTS.iter() {
+        // A row nothing created is still at its `.bss` value, and every mutation
+        // path reaches a row through a live, generation-matched id.
+        if !row.live.load(Ordering::Acquire) && row.generation.load(Ordering::Acquire) == 0 {
+            continue;
+        }
         row.live.store(false, Ordering::Release);
         row.generation.store(0, Ordering::Release);
         row.reset_counters();
@@ -811,6 +943,11 @@ mod tests {
         let leaf = account(1, root());
         let ancestor = root();
 
+        // Bounded under Miri, which interprets both threads on one core: an
+        // unbounded spin reader there takes nearly every scheduling slice.
+        const ROUNDS: u32 = if cfg!(miri) { 8 } else { 128 };
+        const SAMPLE_CAP: u64 = if cfg!(miri) { 64 } else { u64::MAX };
+
         let stop = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
@@ -830,7 +967,7 @@ mod tests {
                 }
                 samples += 1;
                 reader_started.store(true, StdOrdering::Release);
-                if reader_stop.load(StdOrdering::Acquire) {
+                if samples >= SAMPLE_CAP || reader_stop.load(StdOrdering::Acquire) {
                     return samples;
                 }
             }
@@ -839,7 +976,7 @@ mod tests {
         while !started.load(StdOrdering::Acquire) {
             core::hint::spin_loop();
         }
-        for round in 0..128u32 {
+        for round in 0..ROUNDS {
             let held = try_charge::<FdSlot>(leaf, 1 + round % 7).expect("charge");
             let also = try_charge::<FdSlot>(leaf, 2).expect("charge");
             drop(held);
@@ -868,5 +1005,105 @@ mod tests {
             refused.peak, 0,
             "the refusing row never held the amount, so its peak must not move"
         );
+    }
+
+    fn used(id: AccountId) -> u32 {
+        stats(id, ResourceKind::FdSlot).expect("row").used
+    }
+
+    #[test]
+    fn a_released_row_hands_its_children_to_the_grandparent() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        let held = try_charge::<FdSlot>(child, 5).expect("charge");
+        let own = try_charge::<FdSlot>(parent, 3).expect("charge");
+        assert_eq!((used(root()), used(parent), used(child)), (8, 8, 5));
+
+        account_release(parent);
+        assert_eq!(used(root()), 5, "only the parent's own share left the root");
+        assert!(
+            stats(parent, ResourceKind::FdSlot).is_none(),
+            "the parent is dark"
+        );
+        drop(own);
+        assert_eq!(used(root()), 5, "a refund against a dark row is a no-op");
+
+        let more = try_charge::<FdSlot>(child, 2).expect("charge");
+        assert_eq!(used(root()), 7, "the orphan still debits through the root");
+        drop(more);
+        drop(held);
+        assert_eq!((used(root()), used(child)), (0, 0));
+    }
+
+    #[test]
+    fn a_reissued_parent_slot_is_a_stranger() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        let held = try_charge::<FdSlot>(child, 4).expect("charge");
+        account_release(parent);
+        let stranger = account(1, root());
+        let theirs = try_charge::<FdSlot>(stranger, 1).expect("charge");
+        assert_eq!((used(root()), used(stranger), used(child)), (5, 1, 4));
+
+        account_release(child);
+        assert_eq!(
+            (used(root()), used(stranger)),
+            (1, 1),
+            "the child's release credits the root, never the slot's new occupant"
+        );
+        drop(held);
+        drop(theirs);
+        assert_eq!(used(root()), 0);
+    }
+
+    fn children_of(id: AccountId) -> u32 {
+        ACCOUNTS[id.slot() as usize]
+            .children
+            .load(StdOrdering::Acquire)
+    }
+
+    #[test]
+    fn an_orphan_debits_through_the_root() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        // The edge a release that never saw this child leaves behind.
+        adopt(
+            &ACCOUNTS[child.slot() as usize],
+            AccountId::from_parts(parent.slot(), parent.generation() + 1),
+        );
+        assert_eq!(parent_of(&ACCOUNTS[child.slot() as usize]), root());
+
+        let held = try_charge::<FdSlot>(child, 3).expect("charge");
+        assert_eq!((used(root()), used(parent), used(child)), (3, 0, 3));
+        set_limit(root(), ResourceKind::FdSlot, 4);
+        try_charge::<FdSlot>(child, 2).expect_err("the root ceiling still applies");
+        drop(held);
+        assert_eq!((used(root()), used(child)), (0, 0));
+    }
+
+    #[test]
+    fn the_child_count_follows_creation_release_and_adoption() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let first = account(2, parent);
+        let second = account(3, parent);
+        assert_eq!((children_of(root()), children_of(parent)), (1, 2));
+
+        account_release(first);
+        assert_eq!(children_of(parent), 1);
+
+        account_release(parent);
+        assert_eq!(
+            children_of(root()),
+            1,
+            "the parent left and its orphan arrived, so the root holds one child"
+        );
+        assert_eq!(parent_of(&ACCOUNTS[second.slot() as usize]), root());
+
+        account_release(second);
+        assert_eq!(children_of(root()), 0);
     }
 }

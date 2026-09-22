@@ -110,6 +110,8 @@ pub enum ElfError {
     InterpreterInvalid,
     AliasedFileExtent,
     UnsupportedLoadBase,
+    /// The image's pages could not be promised against the commit ceiling.
+    OutOfMemory,
 }
 
 impl fmt::Display for ElfError {
@@ -145,6 +147,7 @@ impl fmt::Display for ElfError {
             Self::UnsupportedLoadBase => {
                 write!(f, "image is not linked at the process code base")
             }
+            Self::OutOfMemory => write!(f, "no commit for the image's pages"),
         }
     }
 }

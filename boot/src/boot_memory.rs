@@ -133,6 +133,20 @@ fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
     );
 }
 
+fn boot_step_commit_ledger_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    let pages = slopos_mm::page_alloc::get_page_allocator_stats();
+    let usable = pages.free.saturating_add(pages.allocated);
+    let limit = slopos_mm::commit::install(usable);
+    let pinned = slopos_fs::filemap::install_pinned_default();
+    klog_info!(
+        "commit: {} of {} usable pages may be promised (mem.commit={}%), {} pinned per principal",
+        limit,
+        usable,
+        slopos_mm::commit::commit_percent(),
+        pinned
+    );
+}
+
 fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -262,4 +276,11 @@ crate::boot_init!(
     b"ostd reclaim tier\0",
     boot_step_register_reclaimers_fn,
     flags = boot_init_priority(57)
+);
+crate::boot_init!(
+    BOOT_STEP_COMMIT_LEDGER,
+    memory,
+    b"commit ledger\0",
+    boot_step_commit_ledger_fn,
+    flags = boot_init_priority(58)
 );

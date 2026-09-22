@@ -257,6 +257,43 @@ pass. Mutations remain serialised per mount — the plan's per-inode locking is
 deliberately not what landed, because the wait, not the lock count, is what G5
 was about.
 
+**Memory is promised before it is touched.** Every private mapping is charged
+against a *commit* ceiling when it is created — `mmap`, `brk`, an `mprotect`
+that makes a `PROT_NONE` reservation accessible, `fork` for the child's copy of
+every private region — and refused there with `ENOMEM` (or `EAGAIN` from
+`fork`), so a process that could never be backed is told at the allocator, not
+killed at its first page fault. The ledger is the `CommitPages` quota kind on
+the root account, its limit `mem.commit=<percent>` of usable frames (default
+100; `0` records without refusing) installed by the `commit ledger` boot step,
+and `sys_info` reports the limit, the promised total and the headroom left. The
+same boot step derives the per-process `PinnedBytes` default — a sixteenth of
+usable memory, the share the file map hands one owner — since the `abi`
+default was sized for an appliance and a compiler's shared objects exceed it
+before `main`. A region is charged one of two ways, and `VmaRegion::commit` says which: an
+`Extent` region owes its whole span when it is created, so a fault in it never
+finds itself unaccounted for; a `Frames` region — the loader's eager segments,
+the mapped stack, the stack's lazy growth extent, `MAP_NORESERVE` — is charged
+one page at a time as pages are placed, and a refusal at that point is the one
+road that still ends in `SIGBUS`, exactly as stack growth does under Linux's
+`overcommit_memory=2` and as illumos treats `MAP_NORESERVE`. Shared objects, a
+file's page set and the ring share are `Unreserved`: their frames are owned
+elsewhere. A class is never given back — `commit_under` moves only an
+unreserved region, the first time a protection lets its pages be populated —
+and `MAP_NORESERVE` is an attribute of the region, honoured rather than
+ignored because a caller that says it will not touch the whole reservation is
+asking for the fault-time road on purpose, and a sparse gigabyte is what a
+runtime's address-space reservation looks like. An `exec` is charged beside
+the image it replaces: the segments, interpreter and stack are sized from the
+headers and charged before the old image is released, then advanced to the
+loader, so a program that cannot fit is the caller's `ENOMEM` rather than a
+fault in a process that no longer has a program. `posix_spawn` matters under
+this policy: a `fork` of a compiler holding a gigabyte owes a second gigabyte,
+so slibc implements the `posix_spawn` family over the kernel's `spawn`
+primitive — the child's descriptor table is computed in the parent and handed
+over whole — and the std fork takes that road for `Command::spawn`, falling
+back to `fork` only for `pre_exec` closures and attributes the primitive
+cannot express.
+
 ## Knowledge Index (AI)
 `knowledge/` hosts a local semantic index for querying the codebase. Build once with `python3 -m venv knowledge/.venv && . knowledge/.venv/bin/activate && pip install -r knowledge/requirements.txt && python knowledge/index.py`, then query via `python knowledge/query.py "<question>"` for signatures, drivers, or file locations. Rebuild after large refactors or merges. Never commit the venv or embedding database artifacts.
 
@@ -450,6 +487,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `kconsole.arm_ms` | integer | how long the keyboard chord stays armed; default 3000 |
 | `kconsole.max_lines` | integer | per-command line budget; default 512 |
 | `kconsole.probe_ms` | integer | per-CPU answer budget for the all-CPU probe; default 250 |
+| `mem.commit` | integer | percent of usable frames the commit ledger may promise to private mappings; default 100, capped at 400, `0` measures without a ceiling |
 
 `lockdep=warn` reports each distinct finding once (deduped per class pair) and
 keeps booting, so one boot enumerates every ordering finding in the tree instead

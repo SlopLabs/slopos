@@ -186,15 +186,15 @@ pub fn try_resolve_user_fault(
         }
     }
 
-    let demanded = process_vm::process_vm_with_vm_space_and_region_by_handle(
+    let demanded = process_vm::process_vm_with_fault_context_by_handle(
         handle,
         fault_addr,
-        |vs, region| {
+        |vs, map, region| {
             if !demand::is_demand_fault_in_region(error_code, &region) || !region.is_anonymous() {
                 return None;
             }
             Some(demand::handle_demand_fault(
-                vs, fault_addr, error_code, &region,
+                vs, map, fault_addr, error_code, &region,
             ))
         },
     );

@@ -190,6 +190,17 @@ logic only**. What it does not reach, and what is audited instead:
   `release_row` are compare-exchange loops, so the proof is the sequential
   skeleton of the concurrency claim rather than the whole of it. Covered by
   KernMiri under both Stacked and Tree Borrows.
+- What `account_release` does with a row that still has live children. The
+  model's `SubAccountDrop` has no children and moves nothing; the tree hands
+  the released row's children to its parent and gives back only its own
+  share — its `used` less theirs — so their later refunds still find what
+  they charged. That arithmetic is held by the host tests beside
+  `account_release` in `arena.rs` and by the audit's `AncestorUnderCount`,
+  not by Verus. Nor is the handoff serialised against a concurrent release
+  of the grandparent: a child the handoff reaches after that row went dark
+  keeps an edge to a gone account, and `parent_of` resolves such an edge
+  to the root, so its charges still meet the ceiling; what the window can
+  still cost is the share that release moved up once already.
 - That a `Charge` lives in exactly one field for exactly its object's
   lifetime. That is a syntactic property of the tree, enforced by
   `scripts/check_charge_linearity.sh`, not a property of the state machine.

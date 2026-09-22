@@ -10,7 +10,9 @@
 //! and every megabyte between: a streamer that mis-computed a file offset would
 //! load a binary that still runs and has the wrong bytes in it.
 
-use slopos_abi::syscall::posix::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+use slopos_abi::syscall::posix::{
+    MAP_ANONYMOUS, MAP_NORESERVE, MAP_PRIVATE, PROT_READ, PROT_WRITE,
+};
 use slopos_userland as _;
 use slopos_userland::syscall::{core as sys_core, fs, memory, process};
 
@@ -72,11 +74,13 @@ fn test_gigabyte_of_anonymous_memory() -> bool {
     const LEN: u64 = 1024 * 1024 * 1024;
     const STRIDE: u64 = 64 * 1024 * 1024;
 
+    // `MAP_NORESERVE`: a gigabyte the caller will touch sparsely is a promise
+    // the caller makes, not one the commit ledger would.
     let base = memory::mmap(
         0,
         LEN,
         PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
         -1,
         0,
     );
