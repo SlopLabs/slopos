@@ -17,6 +17,7 @@ use crate::cpu::x86_64::interrupts::{restore_flags, save_flags_cli};
 use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
 
 use super::cpu_local::CacheAligned;
+use crate::util::static_table::StaticTable;
 
 /// Maximum distinct lock classes (one per [`LockClassKey`] declaration
 /// site, plus one per distinct subclass of a site).
@@ -585,41 +586,30 @@ struct PerCpuHeldStack(UnsafeCell<HeldStack>);
 // `poison_unlock_all_held` walks only the panicking CPU's slot.
 unsafe impl Sync for PerCpuHeldStack {}
 
-struct ClassArray([LockClass; MAX_CLASSES]);
-unsafe impl Sync for ClassArray {}
-
-static CLASSES: ClassArray = ClassArray([const { LockClass::empty() }; MAX_CLASSES]);
+static CLASSES: StaticTable<LockClass, MAX_CLASSES> =
+    StaticTable::new([const { LockClass::empty() }; MAX_CLASSES]);
 
 /// Next class slot to allocate (monotonic; overflow disables the validator).
 static CLASS_COUNT: AtomicU16 = AtomicU16::new(0);
 
-struct ClassHash([AtomicU16; CLASS_HASH_BUCKETS]);
-unsafe impl Sync for ClassHash {}
+static CLASS_HASH: StaticTable<AtomicU16, CLASS_HASH_BUCKETS> =
+    StaticTable::new([const { AtomicU16::new(NONE_IDX) }; CLASS_HASH_BUCKETS]);
 
-static CLASS_HASH: ClassHash = ClassHash([const { AtomicU16::new(NONE_IDX) }; CLASS_HASH_BUCKETS]);
-
-struct EdgeArray([Edge; MAX_EDGES]);
-unsafe impl Sync for EdgeArray {}
-
-static EDGES: EdgeArray = EdgeArray([const { Edge::empty() }; MAX_EDGES]);
+static EDGES: StaticTable<Edge, MAX_EDGES> = StaticTable::new([const { Edge::empty() }; MAX_EDGES]);
 static EDGE_COUNT: AtomicU32 = AtomicU32::new(0);
 
-struct ChainArray([Chain; MAX_CHAINS]);
-unsafe impl Sync for ChainArray {}
-
-static CHAINS: ChainArray = ChainArray([const { Chain::empty() }; MAX_CHAINS]);
+static CHAINS: StaticTable<Chain, MAX_CHAINS> =
+    StaticTable::new([const { Chain::empty() }; MAX_CHAINS]);
 static CHAIN_COUNT: AtomicU32 = AtomicU32::new(0);
 
-struct ChainHash([AtomicU16; CHAIN_HASH_BUCKETS]);
-unsafe impl Sync for ChainHash {}
+static CHAIN_HASH: StaticTable<AtomicU16, CHAIN_HASH_BUCKETS> =
+    StaticTable::new([const { AtomicU16::new(NONE_IDX) }; CHAIN_HASH_BUCKETS]);
 
-static CHAIN_HASH: ChainHash = ChainHash([const { AtomicU16::new(NONE_IDX) }; CHAIN_HASH_BUCKETS]);
-
-static HELD: [CacheAligned<PerCpuHeldStack>; MAX_CPUS] = {
+static HELD: StaticTable<CacheAligned<PerCpuHeldStack>, MAX_CPUS> = StaticTable::new({
     const INIT: CacheAligned<PerCpuHeldStack> =
         CacheAligned(PerCpuHeldStack(UnsafeCell::new(HeldStack::new())));
     [INIT; MAX_CPUS]
-};
+});
 
 /// Master enable. When `false`, all hooks short-circuit. Production boot
 /// flips this on after PCR init via [`enable_lock_tracking`].
@@ -735,12 +725,8 @@ static REPORT_PATH_LOCK: AtomicBool = AtomicBool::new(false);
 /// a boot should produce; filling it means something is very wrong.
 const MAX_VIOLATION_REPORTS: usize = 256;
 
-struct ViolationKeys([AtomicU64; MAX_VIOLATION_REPORTS]);
-// SAFETY: plain atomics; the wrapper exists only to name the array type.
-unsafe impl Sync for ViolationKeys {}
-
-static VIOLATION_KEYS: ViolationKeys =
-    ViolationKeys([const { AtomicU64::new(0) }; MAX_VIOLATION_REPORTS]);
+static VIOLATION_KEYS: StaticTable<AtomicU64, MAX_VIOLATION_REPORTS> =
+    StaticTable::new([const { AtomicU64::new(0) }; MAX_VIOLATION_REPORTS]);
 
 /// Distinct findings printed.
 static VIOLATION_REPORTS: AtomicU32 = AtomicU32::new(0);
@@ -856,7 +842,7 @@ pub fn for_each_held_lock_name(mut visit: impl FnMut(&'static str)) {
             visit("<untracked>");
             continue;
         }
-        let key = CLASSES.0[entry.class_idx as usize]
+        let key = CLASSES[entry.class_idx as usize]
             .key
             .load(Ordering::Relaxed);
         if key.is_null() {
@@ -882,7 +868,7 @@ pub fn for_each_held_lock_name_for_cpu(cpu: usize, mut visit: impl FnMut(&'stati
             visit("<untracked>");
             continue;
         }
-        let key = CLASSES.0[entry.class_idx as usize]
+        let key = CLASSES[entry.class_idx as usize]
             .key
             .load(Ordering::Relaxed);
         if key.is_null() {
@@ -1012,16 +998,14 @@ pub unsafe fn push_lock_ex(
             if h.class_idx == NONE_IDX {
                 continue;
             }
-            let held_lvl = CLASSES.0[h.class_idx as usize]
-                .level
-                .load(Ordering::Relaxed);
+            let held_lvl = CLASSES[h.class_idx as usize].level.load(Ordering::Relaxed);
             if held_lvl == LOCK_LEVEL_EPOCH {
                 violated |= report_epoch_violation(class_idx, lock_addr, cpu, i + 1);
             }
         }
     }
 
-    let class_flags = CLASSES.0[class_idx as usize].flags.load(Ordering::Relaxed);
+    let class_flags = CLASSES[class_idx as usize].flags.load(Ordering::Relaxed);
     let mut top_class = NONE_IDX;
     for i in 0..depth_before as usize {
         let h = held_entry_at(cpu, i);
@@ -1181,7 +1165,7 @@ pub unsafe fn push_epoch(epoch_addr: *const (), class: &'static LockClassKey) {
     // Force the sentinel level regardless of what the key says, so a
     // hand-rolled `lock_class!` cannot mint a half-epoch that the
     // epoch-scope check would miss.
-    CLASSES.0[class_idx as usize]
+    CLASSES[class_idx as usize]
         .level
         .store(LOCK_LEVEL_EPOCH, Ordering::Relaxed);
 
@@ -1529,7 +1513,7 @@ pub fn held_lock_snapshot() -> (u32, Option<(&'static str, &'static str, u64)>) 
             let named = if e.class_idx == NONE_IDX {
                 ("<untracked>", "<none>", e.lock_addr as u64)
             } else {
-                let cls = &CLASSES.0[e.class_idx as usize];
+                let cls = &CLASSES[e.class_idx as usize];
                 (cls.name(), cls.site(), e.lock_addr as u64)
             };
             return (depth, Some(named));
@@ -1621,7 +1605,7 @@ pub fn class_info(idx: usize) -> Option<ClassInfo> {
     if idx >= MAX_CLASSES {
         return None;
     }
-    let c = &CLASSES.0[idx];
+    let c = &CLASSES[idx];
     let id = c.id.load(Ordering::Acquire);
     if id == 0 {
         return None;
@@ -1736,7 +1720,7 @@ fn bump_chain_miss(cpu: usize) {
 /// a concrete lock. Slow-path only, and a no-op after the first success.
 #[inline]
 fn record_first_addr(class_idx: u16, lock_addr: *const ()) {
-    let cls = &CLASSES.0[class_idx as usize];
+    let cls = &CLASSES[class_idx as usize];
     if cls.first_addr.load(Ordering::Relaxed) == 0 {
         let _ = cls.first_addr.compare_exchange(
             0,
@@ -1761,9 +1745,9 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
     let id = subclass_id(key.id(), subclass);
     let bucket = class_bucket(id);
 
-    let mut idx = CLASS_HASH.0[bucket].load(Ordering::Acquire);
+    let mut idx = CLASS_HASH[bucket].load(Ordering::Acquire);
     while idx != NONE_IDX {
-        let cls = &CLASSES.0[idx as usize];
+        let cls = &CLASSES[idx as usize];
         if cls.id.load(Ordering::Acquire) == id {
             // The string compare runs only when the pointers differ — either
             // duplicated rodata or a genuine 64-bit collision.
@@ -1779,7 +1763,7 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
     if (new_idx as usize) >= REGISTRABLE_CLASSES {
         return None;
     }
-    let cls = &CLASSES.0[new_idx as usize];
+    let cls = &CLASSES[new_idx as usize];
     cls.level.store(key.level(), Ordering::Relaxed);
     cls.subclass.store(subclass, Ordering::Relaxed);
     cls.flags.store(key.flags(), Ordering::Relaxed);
@@ -1794,10 +1778,10 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
     // split one declaration site across two classes whenever two CPUs
     // first-acquire two different instances of it concurrently.
     loop {
-        let head = CLASS_HASH.0[bucket].load(Ordering::Acquire);
+        let head = CLASS_HASH[bucket].load(Ordering::Acquire);
         let mut probe = head;
         while probe != NONE_IDX {
-            let other = &CLASSES.0[probe as usize];
+            let other = &CLASSES[probe as usize];
             if other.id.load(Ordering::Acquire) == id {
                 // Lost the race; our slot leaks, bounded by the CPUs
                 // first-acquiring this class in one window.
@@ -1807,7 +1791,7 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
             probe = other.next_in_bucket.load(Ordering::Acquire);
         }
         cls.next_in_bucket.store(head, Ordering::Relaxed);
-        if CLASS_HASH.0[bucket]
+        if CLASS_HASH[bucket]
             .compare_exchange_weak(head, new_idx, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
@@ -1823,7 +1807,7 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
 #[cold]
 #[inline(never)]
 fn check_class_collision(idx: u16, incoming: &'static LockClassKey) {
-    let cls = &CLASSES.0[idx as usize];
+    let cls = &CLASSES[idx as usize];
     let Some(existing) = cls.key_ref() else {
         return;
     };
@@ -1852,10 +1836,10 @@ fn check_class_collision(idx: u16, incoming: &'static LockClassKey) {
 
 /// Add an edge `from -> to` to the dependency graph if not already present.
 fn add_edge(from: u16, to: u16) -> Result<(), ()> {
-    let cls_from = &CLASSES.0[from as usize];
+    let cls_from = &CLASSES[from as usize];
     let mut idx = cls_from.edges_after_head.load(Ordering::Acquire);
     while idx != NONE_IDX {
-        let e = &EDGES.0[idx as usize];
+        let e = &EDGES[idx as usize];
         if e.target.load(Ordering::Acquire) == to {
             return Ok(());
         }
@@ -1866,7 +1850,7 @@ fn add_edge(from: u16, to: u16) -> Result<(), ()> {
     if (new_idx as usize) >= MAX_EDGES {
         return Err(());
     }
-    let e = &EDGES.0[new_idx as usize];
+    let e = &EDGES[new_idx as usize];
     e.target.store(to, Ordering::Relaxed);
 
     loop {
@@ -1916,11 +1900,11 @@ fn path_exists(src: u16, target: u16) -> bool {
         let cur = queue[head];
         head += 1;
 
-        let mut edge_idx = CLASSES.0[cur as usize]
+        let mut edge_idx = CLASSES[cur as usize]
             .edges_after_head
             .load(Ordering::Acquire);
         while edge_idx != NONE_IDX {
-            let e = &EDGES.0[edge_idx as usize];
+            let e = &EDGES[edge_idx as usize];
             let nxt = e.target.load(Ordering::Acquire);
             if nxt == target {
                 return true;
@@ -1944,9 +1928,9 @@ fn path_exists(src: u16, target: u16) -> bool {
 /// Chain-hash lookup: has this chain prefix already been validated?
 fn chain_lookup(chain_key: u64) -> bool {
     let bucket = chain_bucket(chain_key);
-    let mut idx = CHAIN_HASH.0[bucket].load(Ordering::Acquire);
+    let mut idx = CHAIN_HASH[bucket].load(Ordering::Acquire);
     while idx != NONE_IDX {
-        let c = &CHAINS.0[idx as usize];
+        let c = &CHAINS[idx as usize];
         if c.chain_key.load(Ordering::Acquire) == chain_key {
             return true;
         }
@@ -1961,13 +1945,13 @@ fn chain_insert(chain_key: u64) -> Result<(), ()> {
     if (new_idx as usize) >= MAX_CHAINS {
         return Err(());
     }
-    let c = &CHAINS.0[new_idx as usize];
+    let c = &CHAINS[new_idx as usize];
     c.chain_key.store(chain_key, Ordering::Relaxed);
     let bucket = chain_bucket(chain_key);
     loop {
-        let head = CHAIN_HASH.0[bucket].load(Ordering::Relaxed);
+        let head = CHAIN_HASH[bucket].load(Ordering::Relaxed);
         c.next_in_bucket.store(head, Ordering::Relaxed);
-        if CHAIN_HASH.0[bucket]
+        if CHAIN_HASH[bucket]
             .compare_exchange_weak(head, new_idx as u16, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
@@ -2010,7 +1994,7 @@ fn violation_action(class_idx: u16) -> Action {
     if FATAL_BYPASS.load(Ordering::Relaxed) {
         return Action::Silent;
     }
-    if CLASSES.0[class_idx as usize].flags.load(Ordering::Relaxed) & LO_BLESSED != 0 {
+    if CLASSES[class_idx as usize].flags.load(Ordering::Relaxed) & LO_BLESSED != 0 {
         return Action::Silent;
     }
     if self_test_active() {
@@ -2044,12 +2028,12 @@ fn violation_is_new(kind: u8, held_class: u16, new_class: u16) -> bool {
         VK_OCCUPIED | ((kind as u64) << 32) | ((held_class as u64) << 16) | (new_class as u64);
     let mut slot = (avalanche(key) as usize) & (MAX_VIOLATION_REPORTS - 1);
     for _ in 0..MAX_VIOLATION_REPORTS {
-        let cur = VIOLATION_KEYS.0[slot].load(Ordering::Acquire);
+        let cur = VIOLATION_KEYS[slot].load(Ordering::Acquire);
         if cur == key {
             return false;
         }
         if cur == 0
-            && VIOLATION_KEYS.0[slot]
+            && VIOLATION_KEYS[slot]
                 .compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
@@ -2111,7 +2095,7 @@ fn print_held(cpu: usize, upto: usize) {
         if h.class_idx == NONE_IDX {
             continue;
         }
-        let cls = &CLASSES.0[h.class_idx as usize];
+        let cls = &CLASSES[h.class_idx as usize];
         crate::klog_warn!(
             "    #{}  {} ({}) level {}  inst {:#x}",
             i,
@@ -2129,7 +2113,7 @@ fn print_path(src: u16, target: u16) {
     if REPORT_PATH_LOCK.swap(true, Ordering::Acquire) {
         return;
     }
-    for c in CLASSES.0.iter() {
+    for c in CLASSES.iter() {
         c.bfs_parent.store(NONE_IDX, Ordering::Relaxed);
     }
     let mut queue = [0u16; MAX_BFS_FRONTIER];
@@ -2142,17 +2126,17 @@ fn print_path(src: u16, target: u16) {
     'bfs: while head < tail {
         let cur = queue[head];
         head += 1;
-        let mut e_idx = CLASSES.0[cur as usize]
+        let mut e_idx = CLASSES[cur as usize]
             .edges_after_head
             .load(Ordering::Acquire);
         while e_idx != NONE_IDX {
-            let e = &EDGES.0[e_idx as usize];
+            let e = &EDGES[e_idx as usize];
             let nxt = e.target.load(Ordering::Acquire);
             if (nxt as usize) < MAX_CLASSES
                 && (visited[(nxt as usize) / 64] >> ((nxt as usize) % 64)) & 1 == 0
             {
                 visited[(nxt as usize) / 64] |= 1u64 << ((nxt as usize) % 64);
-                CLASSES.0[nxt as usize]
+                CLASSES[nxt as usize]
                     .bfs_parent
                     .store(cur, Ordering::Relaxed);
                 if nxt == target {
@@ -2177,11 +2161,11 @@ fn print_path(src: u16, target: u16) {
             if cur == src {
                 break;
             }
-            cur = CLASSES.0[cur as usize].bfs_parent.load(Ordering::Relaxed);
+            cur = CLASSES[cur as usize].bfs_parent.load(Ordering::Relaxed);
         }
         crate::klog_warn!("  existing path ({} hops):", n.saturating_sub(1));
         for i in (0..n).rev() {
-            let cls = &CLASSES.0[route[i] as usize];
+            let cls = &CLASSES[route[i] as usize];
             crate::klog_warn!("    -> {} ({})", cls.name(), cls.site());
         }
     }
@@ -2190,7 +2174,7 @@ fn print_path(src: u16, target: u16) {
 
 /// Header line shared by every finding: what was being acquired.
 fn print_acquiring(kind: &str, class_idx: u16, addr: *const ()) {
-    let cls = &CLASSES.0[class_idx as usize];
+    let cls = &CLASSES[class_idx as usize];
     crate::klog_warn!(
         "LOCKDEP: {}\n  acquiring  {} ({}) level {}  inst {:#x}",
         kind,
@@ -2217,7 +2201,7 @@ fn report_cycle(new_class: u16, new_addr: *const (), cpu: usize, upto: usize) ->
         }
     }
     if let Action::Panic = action {
-        let cls = &CLASSES.0[new_class as usize];
+        let cls = &CLASSES[new_class as usize];
         panic!(
             "LOCK DEPENDENCY CYCLE: acquiring {} ({}) would close a cycle through a held class",
             cls.name(),
@@ -2241,7 +2225,7 @@ fn report_epoch_violation(new_class: u16, new_addr: *const (), cpu: usize, upto:
         print_held(cpu, upto);
     }
     if let Action::Panic = action {
-        let cls = &CLASSES.0[new_class as usize];
+        let cls = &CLASSES[new_class as usize];
         panic!(
             "LOCK INSIDE EPOCH: acquiring {} ({}) while an Epoch is held — holding a lock \
              across a wake site inside an epoch breaks the atomic-publish invariant",
@@ -2266,7 +2250,7 @@ fn report_recursion(new_class: u16, new_addr: *const (), cpu: usize, upto: usize
         print_held(cpu, upto);
     }
     if let Action::Panic = action {
-        let cls = &CLASSES.0[new_class as usize];
+        let cls = &CLASSES[new_class as usize];
         panic!(
             "LOCK RECURSION: re-acquiring the same instance of {} ({}) @ {:#x}",
             cls.name(),
@@ -2301,7 +2285,7 @@ fn report_same_class_nesting(
         print_held(cpu, upto);
     }
     if let Action::Panic = action {
-        let cls = &CLASSES.0[new_class as usize];
+        let cls = &CLASSES[new_class as usize];
         panic!(
             "LOCK SAME-CLASS NESTING: acquiring {} ({}) @ {:#x} while instance {:#x} of the \
              same declaration is held — annotate the site LO_DUPOK if it orders its instances",
@@ -2336,7 +2320,7 @@ pub fn reserve_self_test_class(
     }
     let idx = (REGISTRABLE_CLASSES + slot) as u16;
     let id = key.id();
-    let cls = &CLASSES.0[idx as usize];
+    let cls = &CLASSES[idx as usize];
     let token = SelfTestClass { key, addr };
     let existing = cls.id.load(Ordering::Acquire);
     if existing == id {
@@ -2354,9 +2338,9 @@ pub fn reserve_self_test_class(
     cls.id.store(id, Ordering::Release);
     let bucket = class_bucket(id);
     loop {
-        let head = CLASS_HASH.0[bucket].load(Ordering::Relaxed);
+        let head = CLASS_HASH[bucket].load(Ordering::Relaxed);
         cls.next_in_bucket.store(head, Ordering::Relaxed);
-        if CLASS_HASH.0[bucket]
+        if CLASS_HASH[bucket]
             .compare_exchange_weak(head, idx, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
@@ -2453,25 +2437,25 @@ pub fn reset_for_test() {
     REPORT_PATH_LOCK.store(false, Relaxed);
     // All three pools are bump allocators, so a slot past the count has never
     // been written.
-    let classes = (CLASS_COUNT.load(Relaxed) as usize).min(CLASSES.0.len());
-    let edges = (EDGE_COUNT.load(Relaxed) as usize).min(EDGES.0.len());
-    let chains = (CHAIN_COUNT.load(Relaxed) as usize).min(CHAINS.0.len());
+    let classes = CLASS_COUNT.load(Relaxed) as usize;
+    let edges = EDGE_COUNT.load(Relaxed) as usize;
+    let chains = CHAIN_COUNT.load(Relaxed) as usize;
     CLASS_COUNT.store(0, Relaxed);
     EDGE_COUNT.store(0, Relaxed);
     CHAIN_COUNT.store(0, Relaxed);
-    for k in VIOLATION_KEYS.0.iter() {
+    for k in VIOLATION_KEYS.iter() {
         k.store(0, Relaxed);
     }
     for f in IN_REPORT.iter() {
         f.store(false, Relaxed);
     }
-    for b in CLASS_HASH.0.iter() {
+    for b in CLASS_HASH.iter() {
         b.store(NONE_IDX, Relaxed);
     }
-    for b in CHAIN_HASH.0.iter() {
+    for b in CHAIN_HASH.iter() {
         b.store(NONE_IDX, Relaxed);
     }
-    for c in CLASSES.0[..classes].iter() {
+    for c in CLASSES.iter().take(classes) {
         c.id.store(0, Relaxed);
         c.key.store(core::ptr::null_mut(), Relaxed);
         c.first_addr.store(0, Relaxed);
@@ -2483,11 +2467,11 @@ pub fn reset_for_test() {
         c.bfs_parent.store(NONE_IDX, Relaxed);
         c.usage_mask.store(0, Relaxed);
     }
-    for e in EDGES.0[..edges].iter() {
+    for e in EDGES.iter().take(edges) {
         e.target.store(NONE_IDX, Relaxed);
         e.next.store(NONE_IDX, Relaxed);
     }
-    for ch in CHAINS.0[..chains].iter() {
+    for ch in CHAINS.iter().take(chains) {
         ch.chain_key.store(0, Relaxed);
         ch.next_in_bucket.store(NONE_IDX, Relaxed);
     }

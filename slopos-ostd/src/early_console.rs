@@ -49,8 +49,11 @@ mod imp {
 mod imp {
     use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+    use crate::util::static_table::StaticTable;
+
     pub(super) const MOCK_CAP: usize = 4096;
-    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] = [const { AtomicU8::new(0) }; MOCK_CAP];
+    pub(super) static MOCK_BUFFER: StaticTable<AtomicU8, MOCK_CAP> =
+        StaticTable::new([const { AtomicU8::new(0) }; MOCK_CAP]);
     pub(super) static MOCK_LEN: AtomicUsize = AtomicUsize::new(0);
 
     pub fn write_byte(b: u8) {
@@ -101,9 +104,9 @@ pub fn flush() {
 pub fn take_recorded_bytes_for_tests() -> alloc::vec::Vec<u8> {
     use core::sync::atomic::Ordering;
     let len = imp::MOCK_LEN.swap(0, Ordering::AcqRel).min(imp::MOCK_CAP);
-    let mut out = alloc::vec::Vec::with_capacity(len);
-    for i in 0..len {
-        out.push(imp::MOCK_BUFFER[i].swap(0, Ordering::AcqRel));
-    }
-    out
+    imp::MOCK_BUFFER
+        .iter()
+        .take(len)
+        .map(|byte| byte.swap(0, Ordering::AcqRel))
+        .collect()
 }
