@@ -43,10 +43,11 @@ just check-miri     # adds the miri component and runs `miri setup` if needed
 ```
 
 `just check-miri` runs the full slopos-ostd unit + integration test
-suite under Miri with these flags:
+suite under Miri with isolation on, so the clock is virtual, runs replay
+bit for bit, and the caller's environment never reaches the tests (a
+`RUST_BACKTRACE=1` in a shell used to make every expected panic print an
+interpreted backtrace). One flag is added:
 
-- `-Zmiri-disable-isolation` — allow real time access so RCU's
-  `rdtsc`-backed clock makes progress.
 - `-Zmiri-ignore-leaks` — host scratch allocations in
   `tests/{vm_space,uframe_round_trip,dma,io_mem,ecam,user_mode,virtqueue}.rs`
   are intentionally permanent (the test backing store outlives the
@@ -65,6 +66,26 @@ Sharding per *test* instead (`cargo miri nextest run`) is measurably
 worse: a Miri process costs about a second to start and there are 643
 of them, which is more CPU than the whole suite's interpretation.
 
+## Keeping it fast
+
+Profile with `-Zmiri-disable-isolation` (so `--report-time` reports wall
+time) plus `-Zmiri-measureme=<dir>`, and read the result with measureme's
+`summarize`; `perf` on the interpreter shows which Miri subsystem pays.
+Three costs dominated and each has a structural answer:
+
+- **Naming a large array `static` borrows all of it.** Miri prices a
+  borrow by the extent and fields it covers, so a one-row lookup into the
+  1025-row account arena cost ~220 ms. A `static` indexed per row is a
+  `util::static_table::StaticTable`, which borrows one row at a time.
+- **Walks over the account arena stop at the highest slot ever created**
+  (`ROWS_IN_USE`), which is the peak process count, not the arena.
+- **A wildcard access costs a Tree Borrows tree walk.** Host tests back
+  physical memory with `mm::phys::init_phys_window`, so `phys_to_virt`
+  hands out pointers that carry the arena's provenance.
+
+Measured on a 4-core box, four shards in parallel: 19m16s -> 3m11s end to
+end, bounded by the Tree Borrows integration shard.
+
 Miri runs in its **default provenance mode**, which permits the
 `expose_provenance()` / `with_exposed_provenance[_mut]()` round-trip
 that OSTD's u64-typed phys-to-virt model relies on (see "Why not
@@ -72,9 +93,12 @@ strict provenance?" below).
 
 ## Provenance discipline (and why not `-Zmiri-strict-provenance`)
 
-The test setup files and a small set of OSTD primitives
-(`mm::phys::phys_to_virt`, `mm::io_mem::IoMem::{read,write}_volatile`,
-`boot::handoff::acpi`) use the explicit
+Host tests install their scratch arena with `mm::phys::init_phys_window`,
+so `phys_to_virt` derives pointers from the arena itself and Miri checks
+each access against a tag rather than resolving a wildcard. The window is
+still exposed, because a small set of OSTD primitives
+(`mm::io_mem::IoMem::{read,write}_volatile`, `boot::handoff::acpi`, the
+`Frame` byte views) round-trip an address through an integer with the explicit
 `core::ptr::with_exposed_provenance[_mut]` API together with a
 matching `.expose_provenance()` call on the backing allocation. That
 makes the intent of every integer-to-pointer round-trip auditable
@@ -128,7 +152,7 @@ CI (subject to runner-side cache misses extending the wall time).
 |---|---|---|
 | Host-vs-kernel impl pivot | `cfg(target_os = "none")` vs `cfg(not(target_os = "none"))` | Body-level fallbacks for `read_cr3`, `wrmsr`, port I/O, `cli`/`sti`, `invlpg`, etc. Miri uses the host triple, so the not-none branch is automatically chosen. |
 | Miri-only impl pivot | `cfg(miri)` (auto-set by cargo-miri) | A handful of test-support fns whose real impl is `unsafe { asm!(...) }` — `read_cs`, `sgdt`, `read_lsr`, etc. |
-| Miri-only test skip | `#[cfg_attr(miri, ignore)]` | Tests that exercise the heaviest naked-asm sites (`tests/user_mode.rs`, `panic_recovery.rs`, parts of `task_handles.rs`), the `__ostd_usercopy_start/_end` binary layout, and a handful of `extern static` lookups that Miri does not model. |
+| Miri-only test skip | `#[cfg_attr(miri, ignore)]` | Tests that exercise the heaviest naked-asm sites (`panic_recovery.rs`, parts of `task_handles.rs`), the `__ostd_usercopy_start/_end` binary layout, and a handful of `extern static` lookups that Miri does not model. |
 | Dev wiring | `test-helpers` feature, auto-enabled by `dev-dependencies` | Exposes test-only constructors. `cargo miri test` picks it up automatically; no `--features` flag needed. |
 
 We do **not** fork Miri. We do **not** ship a separate harness crate. The
@@ -145,10 +169,9 @@ stable part):
 
 | Test target | Ignored under Miri — why |
 |---|---|
-| `--lib` (in-tree `#[cfg(test)]`) | `user::copy::fault_range_*` (real fault-path asm) |
+| `--lib` (in-tree `#[cfg(test)]`) | `user::copy::fault_range_*` and `task::fpu::tests::xrstor_*` (real fault-path asm and its binary layout) |
 | `tests/extern_block.rs` | `unsafe extern static` resolution Miri does not model |
 | `tests/kernel_sync.rs` | `RefCell::borrow()` counter race demo |
-| `tests/user_mode.rs` | entire file — naked-asm user-mode entry path |
 
 ### About the doctests
 

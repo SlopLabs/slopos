@@ -553,7 +553,7 @@ check-miri:
     {{cargo}} +{{rust_channel}} miri setup
     pids=(); tags=()
     for model in stacked tree; do
-        flags="-Zmiri-disable-isolation -Zmiri-ignore-leaks"
+        flags="-Zmiri-ignore-leaks"
         if [ "$model" = tree ]; then
             flags="$flags -Zmiri-tree-borrows"
         fi
