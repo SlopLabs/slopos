@@ -11,7 +11,7 @@
 //! `MetaSlot` at the instant of release, so a run handed back before the
 //! per-frame lifecycle has reset the slots is caught by the recorded kind.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::PhysAddr;
@@ -22,7 +22,7 @@ use slopos_ostd::mm::frame::{
     FrameAlloc, FrameAllocOptions, MetaSlot, Paddr, SlotMetaKind, init_meta_slots, slot_snapshot,
 };
 use slopos_ostd::mm::frame_alloc::{self, register_frame_allocator};
-use slopos_ostd::mm::phys::init_phys_virt_offset;
+use slopos_ostd::mm::phys::init_phys_window;
 
 const N_PAGES: usize = 64;
 const PAGE_SIZE: usize = 4096;
@@ -67,9 +67,7 @@ impl FrameAlloc for BumpAlloc {
             // SAFETY: backing buffer covers `[0, N_PAGES * PAGE_SIZE)`;
             // the just-allocated range is unique.
             unsafe {
-                let base = BACKING_BASE.load(Ordering::Acquire) as usize;
-                let virt: *mut u8 =
-                    core::ptr::with_exposed_provenance_mut(base + paddr.as_u64() as usize);
+                let virt = BACKING.load(Ordering::Acquire).add(paddr.as_u64() as usize);
                 core::ptr::write_bytes(virt, 0, n as usize * PAGE_SIZE);
             }
         }
@@ -85,10 +83,7 @@ impl FrameAlloc for BumpAlloc {
     }
 }
 
-// BACKING_BASE holds the *exposed* address of the leaked scratch arena, so
-// every later `with_exposed_provenance_mut` against an address inside the arena
-// round-trips back to that provenance under strict provenance.
-static BACKING_BASE: AtomicU64 = AtomicU64::new(0);
+static BACKING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static BUMP_ALLOC: BumpAlloc = BumpAlloc {
     next_page: AtomicU64::new(0),
     poisoned: AtomicBool::new(false),
@@ -178,8 +173,7 @@ fn setup() -> MutexGuard<'static, ()> {
         // SAFETY: `layout.size() > 0`; standard allocator contract.
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null(), "backing alloc failed");
-        let backing_ptr = backing_ptr_real.expose_provenance() as u64;
-        BACKING_BASE.store(backing_ptr, Ordering::Release);
+        BACKING.store(backing_ptr_real, Ordering::Release);
 
         let mut slots: Vec<MetaSlot> = (0..N_PAGES).map(|_| MetaSlot::new_unused()).collect();
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
@@ -187,7 +181,7 @@ fn setup() -> MutexGuard<'static, ()> {
 
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_ptr);
+            init_phys_window(t, backing_ptr_real);
             register_frame_allocator(t, &BUMP_REF);
             register_iommu_mapper(t, &RECORDING_MAPPER_REF);
         });

@@ -6,7 +6,7 @@
 //! fault in a host process — so every case returns before the asm, using
 //! zero-length buffers or permissions that fail validation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -16,7 +16,7 @@ use slopos_ostd::mm::frame::{
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::mm::page_size::Size4Kb;
-use slopos_ostd::mm::phys::init_phys_virt_offset;
+use slopos_ostd::mm::phys::init_phys_window;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{VmSpace, register_kernel_master_pml4};
 use slopos_ostd::user::context::FpuStateRef;
@@ -42,9 +42,7 @@ impl FrameAlloc for BumpAlloc {
         let paddr = PhysAddr::new(page * PAGE_SIZE as u64);
         if opts.zeroing {
             unsafe {
-                let base = BACKING_BASE.load(Ordering::Acquire) as usize;
-                let virt: *mut u8 =
-                    core::ptr::with_exposed_provenance_mut(base + paddr.as_u64() as usize);
+                let virt = BACKING.load(Ordering::Acquire).add(paddr.as_u64() as usize);
                 core::ptr::write_bytes(virt, 0, PAGE_SIZE);
             }
         }
@@ -54,7 +52,7 @@ impl FrameAlloc for BumpAlloc {
     fn dealloc(&self, _paddr: Paddr, _size_pages: usize) {}
 }
 
-static BACKING_BASE: AtomicU64 = AtomicU64::new(0);
+static BACKING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static BUMP_ALLOC: BumpAlloc = BumpAlloc {
     next_page: AtomicU64::new(1),
 };
@@ -67,8 +65,7 @@ fn setup() -> MutexGuard<'static, ()> {
             .expect("backing layout");
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null());
-        let backing_ptr = backing_ptr_real.expose_provenance() as u64;
-        BACKING_BASE.store(backing_ptr, Ordering::Release);
+        BACKING.store(backing_ptr_real, Ordering::Release);
 
         let mut slots: Vec<MetaSlot> = (0..N_PAGES).map(|_| MetaSlot::new_unused()).collect();
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
@@ -76,7 +73,7 @@ fn setup() -> MutexGuard<'static, ()> {
 
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_ptr);
+            init_phys_window(t, backing_ptr_real);
             register_frame_allocator(t, &BUMP_REF);
             register_kernel_master_pml4(t, PhysAddr::new(0));
         });

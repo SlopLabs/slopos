@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use slopos_ostd::Pod as PodDerive;
 use slopos_ostd::dma::VirtqueueRegion;
 use slopos_ostd::mm::frame::{Frame, KernelMeta, MetaSlot, Paddr, init_meta_slots};
-use slopos_ostd::mm::phys::init_phys_virt_offset;
+use slopos_ostd::mm::phys::init_phys_window;
 
 const N_PAGES: usize = 8;
 const PAGE_SIZE: usize = 4096;
@@ -23,12 +23,9 @@ fn setup() -> MutexGuard<'static, ()> {
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
         Box::leak(slots.into_boxed_slice());
         let backing_ptr = backing.0.as_mut_ptr();
-        // `phys_to_virt` reconstructs pointers into this arena; exposing
-        // provenance keeps that sound under `-Zmiri-strict-provenance`.
-        let backing_addr = backing_ptr.expose_provenance() as u64;
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_addr);
+            init_phys_window(t, backing_ptr);
         });
         Mutex::new(())
     });
