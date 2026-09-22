@@ -4,7 +4,7 @@
 //! gate, which every test acquires so global OSTD state is serialised. Tests
 //! use disjoint `vaddr` ranges so they never see each other's mappings.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -17,7 +17,7 @@ use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::mm::page_size::{PageSize, Size2Mb, Size4Kb};
 use slopos_ostd::mm::page_table::{PageTableLevel, PteFlags};
-use slopos_ostd::mm::phys::init_phys_virt_offset;
+use slopos_ostd::mm::phys::init_phys_window;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{
     CursorUnmapHook, MapError, VmSpace, prepopulate_kernel_half, register_cursor_unmap_hook,
@@ -45,9 +45,7 @@ impl FrameAlloc for BumpAlloc {
             // SAFETY: backing buffer is valid for `[0, N_PAGES * PAGE_SIZE)`;
             // page index was just allocated and not handed to anyone else.
             unsafe {
-                let base = BACKING_BASE.load(Ordering::Acquire) as usize;
-                let virt: *mut u8 =
-                    core::ptr::with_exposed_provenance_mut(base + paddr.as_u64() as usize);
+                let virt = BACKING.load(Ordering::Acquire).add(paddr.as_u64() as usize);
                 core::ptr::write_bytes(virt, 0, PAGE_SIZE);
             }
         }
@@ -71,7 +69,7 @@ fn alloc_2mb_aligned_paddr() -> Paddr {
     PhysAddr::new(aligned * PAGE_SIZE as u64)
 }
 
-static BACKING_BASE: AtomicU64 = AtomicU64::new(0);
+static BACKING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static BUMP_ALLOC: BumpAlloc = BumpAlloc {
     next_page: AtomicU64::new(1), // page 0 reserved for the kernel-master PML4
 };
@@ -87,11 +85,7 @@ fn setup() -> MutexGuard<'static, ()> {
         // SAFETY: `layout.size() > 0`; standard allocator contract.
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null(), "backing alloc failed");
-        // Expose the allocation's provenance once so every later
-        // `with_exposed_provenance_mut` into the arena is sound under
-        // `-Zmiri-strict-provenance`.
-        let backing_ptr = backing_ptr_real.expose_provenance() as u64;
-        BACKING_BASE.store(backing_ptr, Ordering::Release);
+        BACKING.store(backing_ptr_real, Ordering::Release);
 
         let mut slots: Vec<MetaSlot> = (0..N_PAGES).map(|_| MetaSlot::new_unused()).collect();
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
@@ -99,7 +93,7 @@ fn setup() -> MutexGuard<'static, ()> {
 
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_ptr);
+            init_phys_window(t, backing_ptr_real);
             register_frame_allocator(t, &BUMP_REF);
             register_kernel_master_pml4(t, PhysAddr::new(0));
         });
@@ -708,15 +702,11 @@ fn pte_software_bits_round_trip_through_cursor() {
 /// through the test arena's HHDM. Used to install a 1 GiB leaf by hand, since
 /// no 1 GiB-aligned page fits the arena; that leaf's range is never dereferenced.
 fn arena_entry_ptr(table_phys: PhysAddr, index: usize) -> *mut u64 {
-    let base = BACKING_BASE.load(Ordering::Acquire) as usize;
-    // SAFETY: `table_phys` is a page inside the arena, whose provenance
-    // was exposed once in `setup`; `index < 512` keeps the offset inside
-    // the 4 KiB frame.
-    unsafe {
-        let virt: *mut u64 =
-            core::ptr::with_exposed_provenance_mut(base + table_phys.as_u64() as usize);
-        virt.add(index)
-    }
+    BACKING
+        .load(Ordering::Acquire)
+        .wrapping_add(table_phys.as_u64() as usize)
+        .cast::<u64>()
+        .wrapping_add(index)
 }
 
 fn resolve(space: &VmSpace, vaddr: VirtAddr) -> Option<Paddr> {

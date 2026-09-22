@@ -35,10 +35,32 @@ pub fn is_initialised() -> bool {
     PHYS_VIRT_OFFSET.load(Ordering::Acquire) != UNINIT
 }
 
+#[cfg(all(not(target_os = "none"), any(test, feature = "test-helpers")))]
+static PHYS_WINDOW: core::sync::atomic::AtomicPtr<u8> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Back physical address `0` with `window`, a host test's scratch arena.
+///
+/// [`phys_to_virt`] derives from `window` itself, so Miri checks an access
+/// against the arena's tag instead of resolving a wildcard, which is stricter
+/// and, under Tree Borrows, far cheaper. Still exposed for integer round trips.
+#[cfg(all(not(target_os = "none"), any(test, feature = "test-helpers")))]
+pub fn init_phys_window<'brand>(token: &BspToken<'brand>, window: *mut u8) {
+    init_phys_virt_offset(token, window.expose_provenance() as u64);
+    PHYS_WINDOW.store(window, Ordering::Release);
+}
+
 /// Callers must only pass frame paddrs they own, so the resulting pointer
 /// is non-aliasing within their byte window.
 #[inline]
 pub(crate) fn phys_to_virt(paddr: Paddr) -> *mut u8 {
+    #[cfg(all(not(target_os = "none"), any(test, feature = "test-helpers")))]
+    {
+        let window = PHYS_WINDOW.load(Ordering::Acquire);
+        if !window.is_null() {
+            return window.wrapping_add(paddr.as_u64() as usize);
+        }
+    }
     let off = PHYS_VIRT_OFFSET.load(Ordering::Acquire);
     debug_assert_ne!(
         off, UNINIT,
@@ -56,4 +78,6 @@ pub(crate) fn phys_to_virt(paddr: Paddr) -> *mut u8 {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     PHYS_VIRT_OFFSET.store(UNINIT, Ordering::Release);
+    #[cfg(not(target_os = "none"))]
+    PHYS_WINDOW.store(core::ptr::null_mut(), Ordering::Release);
 }

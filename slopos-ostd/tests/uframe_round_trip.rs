@@ -6,7 +6,7 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_ostd::mm::frame::{AnonymousMeta, MetaSlot, Paddr, init_meta_slots};
-use slopos_ostd::mm::phys::init_phys_virt_offset;
+use slopos_ostd::mm::phys::init_phys_window;
 use slopos_ostd::mm::uframe::{UFrame, UFrameError, USegment};
 
 const N_PAGES: usize = 8;
@@ -26,14 +26,9 @@ fn setup() -> MutexGuard<'static, ()> {
         // OSTD keeps a `'static` view of the slots.
         Box::leak(slots.into_boxed_slice());
         let backing_ptr = backing.0.as_mut_ptr();
-        // Expose provenance so `phys_to_virt`'s `with_exposed_provenance_mut`
-        // can soundly reconstruct pointers into this arena.
-        let backing_addr = backing_ptr.expose_provenance() as u64;
-        // The offset places paddr `0` at the start of the backing buffer, so
-        // paddrs in `[0, N_PAGES * 4096)` map into it.
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_addr);
+            init_phys_window(t, backing_ptr);
         });
         Mutex::new(())
     });

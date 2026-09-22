@@ -5,7 +5,7 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_ostd::mm::frame::{AnonymousMeta, MetaSlot, Paddr, init_meta_slots};
-use slopos_ostd::mm::phys::init_phys_virt_offset;
+use slopos_ostd::mm::phys::init_phys_window;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vmcursor::{VmReader, VmWriter};
 
@@ -25,10 +25,9 @@ fn setup() -> MutexGuard<'static, ()> {
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
         Box::leak(slots.into_boxed_slice());
         let backing_ptr = backing.0.as_mut_ptr();
-        let backing_addr = backing_ptr.expose_provenance() as u64;
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
-            init_phys_virt_offset(t, backing_addr);
+            init_phys_window(t, backing_ptr);
         });
         Mutex::new(())
     });
