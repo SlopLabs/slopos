@@ -765,7 +765,20 @@ stack-audit:
 
 [doc("Clean build artifacts")]
 clean:
-    {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # cargo refuses an explicit --target-dir with no CACHEDIR.TAG, and writes one
+    # only for a directory it created itself.
+    tag="{{cargo_target_dir}}/CACHEDIR.TAG"
+    if [ -d "{{cargo_target_dir}}" ]; then
+        rm -f "$tag"
+        printf '%s\n' \
+            'Signature: 8a477f597d28d172789f06886806bc55' \
+            '# This file is a cache directory tag created by cargo.' \
+            '# For information about cache directory tags see https://bford.info/cachedir/' \
+            > "$tag"
+    fi
+    {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}}
     rm -f {{build_dir}}/kernel-*.elf
     rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/cargo-fork {{build_dir}}/gates/bootstrap-config
 
