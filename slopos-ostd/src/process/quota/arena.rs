@@ -53,9 +53,9 @@ struct AccountRow {
     denials: [AtomicU32; KIND_COUNT],
     /// The account this one debits through: its arena slot and the low half
     /// of its generation, packed so a reader sees both or neither. A reissued
-    /// slot carries a new generation and so reads as no parent at all. Written
-    /// at creation and re-pointed only by the parent's own release, which
-    /// hands its children to their grandparent.
+    /// slot carries a new generation and so reads as the root, never as the
+    /// stranger holding it. Written at creation and re-pointed only by the
+    /// parent's own release, which hands its children to their grandparent.
     parent: AtomicU64,
     /// Live rows debiting through this one. A release with none — nearly
     /// every one — skips the scan that would find them.
@@ -120,8 +120,10 @@ const fn parent_generation_of(packed: u64) -> u32 {
     (packed >> 32) as u32
 }
 
-/// The parent `row` debits through, or `NONE` once that account is gone: the
-/// slot may hold a stranger by now, and a stranger's generation does not match.
+/// The parent `row` debits through. Only the root has none; a row whose
+/// recorded parent is gone — released before it could be handed on, or
+/// reissued to a stranger whose generation does not match — debits through
+/// the root, so no orphan ever escapes the ceiling.
 fn parent_of(row: &AccountRow) -> AccountId {
     let packed = row.parent.load(Ordering::Acquire);
     let slot = parent_slot_of(packed);
@@ -130,7 +132,7 @@ fn parent_of(row: &AccountRow) -> AccountId {
     }
     let parent = account_id_at(slot);
     if parent.is_none() || parent.generation() as u32 != parent_generation_of(packed) {
-        return AccountId::NONE;
+        return root_account();
     }
     parent
 }
@@ -1042,6 +1044,26 @@ mod tests {
         ACCOUNTS[id.slot() as usize]
             .children
             .load(StdOrdering::Acquire)
+    }
+
+    #[test]
+    fn an_orphan_debits_through_the_root() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        // The edge a release that never saw this child leaves behind.
+        adopt(
+            &ACCOUNTS[child.slot() as usize],
+            AccountId::from_parts(parent.slot(), parent.generation() + 1),
+        );
+        assert_eq!(parent_of(&ACCOUNTS[child.slot() as usize]), root());
+
+        let held = try_charge::<FdSlot>(child, 3).expect("charge");
+        assert_eq!((used(root()), used(parent), used(child)), (3, 0, 3));
+        set_limit(root(), ResourceKind::FdSlot, 4);
+        try_charge::<FdSlot>(child, 2).expect_err("the root ceiling still applies");
+        drop(held);
+        assert_eq!((used(root()), used(child)), (0, 0));
     }
 
     #[test]

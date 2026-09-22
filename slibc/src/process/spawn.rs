@@ -668,10 +668,15 @@ unsafe fn spawn_direct(
         while seg_end < path_len && *path_val.add(seg_end) != b':' {
             seg_end += 1;
         }
-        let dir_len = seg_end - seg_start;
+        // POSIX: an empty PATH element names the current directory.
+        let (dir, dir_len) = if seg_end == seg_start {
+            (b".".as_ptr(), 1)
+        } else {
+            (path_val.add(seg_start).cast_const(), seg_end - seg_start)
+        };
         let total = dir_len + 1 + file_len;
         if total < buf.len() {
-            ptr::copy_nonoverlapping(path_val.add(seg_start), buf.as_mut_ptr(), dir_len);
+            ptr::copy_nonoverlapping(dir, buf.as_mut_ptr(), dir_len);
             buf[dir_len] = b'/';
             ptr::copy_nonoverlapping(file, buf.as_mut_ptr().add(dir_len + 1), file_len);
             buf[total] = 0;

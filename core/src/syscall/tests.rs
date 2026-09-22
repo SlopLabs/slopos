@@ -3988,6 +3988,9 @@ pub fn test_fstat_on_a_pipe_reports_a_fifo() -> TestResult {
         );
         assert_eq_test!(st.st_size, 0, "an empty pipe has nothing buffered");
     }
+    let _ = file_close_fd(pid, write_fd);
+    let _ = file_close_fd(pid, read_fd);
+    task_terminate(task_id);
     TestResult::Pass
 }
 
@@ -4038,6 +4041,11 @@ pub fn test_dupfd_cloexec_sets_the_flag_on_the_new_number() -> TestResult {
         0,
         "F_DUPFD starts the new number clear"
     );
+    let _ = file_close_fd(pid, plain as i32);
+    let _ = file_close_fd(pid, dup_fd as i32);
+    let _ = file_close_fd(pid, write_fd);
+    let _ = file_close_fd(pid, read_fd);
+    task_terminate(task_id);
     TestResult::Pass
 }
 
