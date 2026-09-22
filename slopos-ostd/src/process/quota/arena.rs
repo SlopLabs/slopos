@@ -731,6 +731,25 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
         }
         let account = AccountId::from_parts(slot as u32, row.generation.load(Ordering::Acquire));
 
+        // Once for every kind rather than once per kind: the child edge does not
+        // depend on the kind, and the walk is `MAX_ACCOUNTS` rows wide.
+        let mut children = [0u32; KIND_COUNT];
+        for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+            if child_slot == slot || !child.live.load(Ordering::Acquire) {
+                continue;
+            }
+            if parent_of(child) != account {
+                continue;
+            }
+            for kind in ResourceKind::ALL {
+                let idx = kind.index();
+                // Saturating: several children can each exceed what a `u32`
+                // sum would hold.
+                children[idx] = children[idx]
+                    .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
+            }
+        }
+
         for kind in ResourceKind::ALL {
             let idx = kind.index();
             let usage = row.usage[idx].load(Ordering::Acquire);
@@ -758,25 +777,14 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             }
 
             // Every direct child debits through this row, so this row's `used`
-            // is at least their sum. Saturating: several children can each
-            // exceed what a `u32` sum would hold.
-            let mut children = 0u32;
-            for (child_slot, child) in ACCOUNTS.iter().enumerate() {
-                if child_slot == slot || !child.live.load(Ordering::Acquire) {
-                    continue;
-                }
-                if parent_of(child) == account {
-                    children = children
-                        .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
-                }
-            }
-            if used < children {
+            // is at least their sum.
+            if used < children[idx] {
                 faults += 1;
                 report(LedgerFault::AncestorUnderCount {
                     ancestor: account,
                     kind,
                     ancestor_used: used,
-                    children_used: children,
+                    children_used: children[idx],
                 });
             }
         }
@@ -884,6 +892,11 @@ pub(super) fn charge_raw_one_level_for_test(account: AccountId, kind: ResourceKi
 /// minted before a reset can never match the slot's next occupant.
 pub fn reset_for_test() {
     for row in ACCOUNTS.iter() {
+        // A row nothing created is still at its `.bss` value, and every mutation
+        // path reaches a row through a live, generation-matched id.
+        if !row.live.load(Ordering::Acquire) && row.generation.load(Ordering::Acquire) == 0 {
+            continue;
+        }
         row.live.store(false, Ordering::Release);
         row.generation.store(0, Ordering::Release);
         row.reset_counters();
@@ -930,6 +943,11 @@ mod tests {
         let leaf = account(1, root());
         let ancestor = root();
 
+        // Bounded under Miri, which interprets both threads on one core: an
+        // unbounded spin reader there takes nearly every scheduling slice.
+        const ROUNDS: u32 = if cfg!(miri) { 8 } else { 128 };
+        const SAMPLE_CAP: u64 = if cfg!(miri) { 64 } else { u64::MAX };
+
         let stop = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
@@ -949,7 +967,7 @@ mod tests {
                 }
                 samples += 1;
                 reader_started.store(true, StdOrdering::Release);
-                if reader_stop.load(StdOrdering::Acquire) {
+                if samples >= SAMPLE_CAP || reader_stop.load(StdOrdering::Acquire) {
                     return samples;
                 }
             }
@@ -958,7 +976,7 @@ mod tests {
         while !started.load(StdOrdering::Acquire) {
             core::hint::spin_loop();
         }
-        for round in 0..128u32 {
+        for round in 0..ROUNDS {
             let held = try_charge::<FdSlot>(leaf, 1 + round % 7).expect("charge");
             let also = try_charge::<FdSlot>(leaf, 2).expect("charge");
             drop(held);

@@ -4,6 +4,20 @@ set -euo pipefail
 # Ensure the pinned Rust nightly toolchain, its required components and
 # targets, and the owned `slopos` sysroot are all present.
 # Reads the channel from rust-toolchain.toml in the repository root.
+#
+# `--no-sysroot` stops before the owned sysroot, for a job that only ever builds
+# host-target crates. KernMiri is the one.
+
+WANT_SYSROOT=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-sysroot) WANT_SYSROOT=0 ;;
+        *)
+            echo "usage: ensure_toolchain.sh [--no-sysroot]" >&2
+            exit 2
+            ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -33,6 +47,10 @@ fi
 # install above only runs when the toolchain is absent entirely.
 if ! rustup component list --installed --toolchain "$RUST_CHANNEL" | grep -q "^rust-src"; then
     rustup component add rust-src --toolchain "$RUST_CHANNEL"
+fi
+
+if [ "$WANT_SYSROOT" -eq 0 ]; then
+    exit 0
 fi
 
 if ! rustup target list --toolchain "$RUST_CHANNEL" --installed | grep -q "^x86_64-unknown-none"; then

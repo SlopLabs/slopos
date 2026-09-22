@@ -2451,6 +2451,11 @@ pub fn reset_for_test() {
     PUSH_IRQ_STATE.store(PushIrqState::NotReached as u8, Relaxed);
     LOCKDEP_MODE.store(LockdepMode::Panic as u8, Relaxed);
     REPORT_PATH_LOCK.store(false, Relaxed);
+    // All three pools are bump allocators, so a slot past the count has never
+    // been written.
+    let classes = (CLASS_COUNT.load(Relaxed) as usize).min(CLASSES.0.len());
+    let edges = (EDGE_COUNT.load(Relaxed) as usize).min(EDGES.0.len());
+    let chains = (CHAIN_COUNT.load(Relaxed) as usize).min(CHAINS.0.len());
     CLASS_COUNT.store(0, Relaxed);
     EDGE_COUNT.store(0, Relaxed);
     CHAIN_COUNT.store(0, Relaxed);
@@ -2466,7 +2471,7 @@ pub fn reset_for_test() {
     for b in CHAIN_HASH.0.iter() {
         b.store(NONE_IDX, Relaxed);
     }
-    for c in CLASSES.0.iter() {
+    for c in CLASSES.0[..classes].iter() {
         c.id.store(0, Relaxed);
         c.key.store(core::ptr::null_mut(), Relaxed);
         c.first_addr.store(0, Relaxed);
@@ -2478,11 +2483,11 @@ pub fn reset_for_test() {
         c.bfs_parent.store(NONE_IDX, Relaxed);
         c.usage_mask.store(0, Relaxed);
     }
-    for e in EDGES.0.iter() {
+    for e in EDGES.0[..edges].iter() {
         e.target.store(NONE_IDX, Relaxed);
         e.next.store(NONE_IDX, Relaxed);
     }
-    for ch in CHAINS.0.iter() {
+    for ch in CHAINS.0[..chains].iter() {
         ch.chain_key.store(0, Relaxed);
         ch.next_in_bucket.store(NONE_IDX, Relaxed);
     }

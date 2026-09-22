@@ -52,6 +52,19 @@ suite under Miri with these flags:
   are intentionally permanent (the test backing store outlives the
   OSTD references into it); their leakage is not a finding.
 
+It runs as four concurrent `cargo miri test` processes — the two borrow
+models crossed with lib-vs-integration — because Miri interprets every
+thread of a process on one core, so libtest's thread pool buys nothing
+and two back-to-back invocations leave the machine idle. cargo
+serialises the four builds on the target-directory lock and releases it
+before running the tests, so they share one `builddir/target/miri`.
+Each shard's output lands in `builddir/kernmiri-<model>-<shard>.log`;
+a failing shard's `failures:` block is echoed to stderr.
+
+Sharding per *test* instead (`cargo miri nextest run`) is measurably
+worse: a Miri process costs about a second to start and there are 643
+of them, which is more CPU than the whole suite's interpretation.
+
 Miri runs in its **default provenance mode**, which permits the
 `expose_provenance()` / `with_exposed_provenance[_mut]()` round-trip
 that OSTD's u64-typed phys-to-virt model relies on (see "Why not
@@ -89,14 +102,16 @@ job that executes in parallel with the existing `Build, Format & Test`
 job. UB caught by Miri blocks merge to `develop` the same way a failed
 kernel build or test failure does.
 
-Three cache layers keep the CI job fast (~3 min on warm caches, ~10 min
-on the first run after a Rust toolchain bump):
+Two cache layers and a trimmed setup keep the CI job short. The job
+installs the pinned toolchain with `scripts/ensure_toolchain.sh
+--no-sysroot` and no Go: it builds one host-target crate and interprets
+it, so the owned `slopos` sysroot and the Go test wrapper are pure cost
+there.
 
 | Cache | Path | Key | Why |
 |---|---|---|---|
 | Miri sysroot | `~/.cache/miri/` | `hashFiles('rust-toolchain.toml')` | The expensive 5–10 min build; only re-runs when the pinned nightly changes. |
 | Cargo registry + Miri target dir | `~/.cargo/...` + `builddir/target/` | `Swatinem/rust-cache@v2` with `prefix-key: v0-miri` | Separate from the main `ci` job's cache so they don't conflict on `target/.rustc_info.json`. |
-| `miri` rustup component | toolchain dir | toolchain hash | `just setup` installs it via the `components` list in `rust-toolchain.toml`; rustup persists it. |
 
 Run locally to mirror what CI does:
 
@@ -134,37 +149,16 @@ stable part):
 | `tests/extern_block.rs` | `unsafe extern static` resolution Miri does not model |
 | `tests/kernel_sync.rs` | `RefCell::borrow()` counter race demo |
 | `tests/user_mode.rs` | entire file — naked-asm user-mode entry path |
-| Doctest binary | ` ```ignore ` doctests (see below); `compile_fail` doctests still run |
 
-### About the ignored doctests
+### About the doctests
 
-These are not bugs and not test gaps — they're documentation snippets
-fenced with ` ```ignore `. Each one shows the *syntax* of a macro or
-API usage but references symbols that don't exist at doctest scope
-(placeholder type names like `MyHandle` / `MyState`, kernel-only
-runtime context like `#[global_allocator]` / boot-init, or macro
-invocations that need surrounding scaffolding). They are:
-
-| Location | Kind |
-|---|---|
-| `arch/x86_64/cpuid.rs::XsaveFeatures` | "during boot" usage pattern |
-| `cpu/x86_64/control_regs.rs::stac` | tight `stac()` / user-page touch / `clac()` window |
-| `dev/mod.rs::FromRawPtr` | trait usage referencing user's `MyHandle` |
-| `ffi/mod.rs` (5×) | `extern_block!` / `limine_request!` / `extern_c_entry!` macro syntax |
-| `klog.rs` | driver-side `klog_register_backend` registration |
-| `mm/heap.rs::KernelHeap` | `#[global_allocator]` site (kernel `main.rs` is the only consumer) |
-| `mm/init.rs` (6×) | `write_field!` / `write_array_field!` / `write_init_field!` / `zero_field!` macro usage |
-| `mm/page_size.rs` | `cursor.map::<Size4Kb, _>(...)` invocation |
-| `numfmt.rs` | `NumBuf::format_u64` buffer-usage pattern |
-| `sync/cpu_local.rs` | `cpu_local!` macro syntax |
-| `test_support/hermetic/macros.rs` | `hermetic_state!` macro syntax |
-
-The same doctest binary also runs the **`compile_fail` doctests** that
-verify deliberate-misuse patterns are correctly rejected by the
-compiler (e.g., trying to leak a `UFrame`'s mutable view past its
-lifetime). Promoting any of the ignored doctests to `no_run` would
-require scaffolding (user-typed placeholders, boot/init mocks) without
-catching real bugs — net negative.
+The Miri run names its targets (`--lib`, `--test '*'`), which excludes
+the doctest target. Nothing is lost: OSTD's doctests are either
+` ```ignore ` snippets that show the *syntax* of a macro against
+placeholder types, or `compile_fail` snippets asserting that a
+deliberate misuse is rejected. Both are claims about the compiler, not
+about what the machine does at run time, and `just test-host` runs them
+natively in well under a second.
 
 ## Where `MIRI_FINDINGS.md` is
 

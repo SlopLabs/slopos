@@ -532,16 +532,55 @@ check-fs-throughput: _build-run-tests
 # two witnesses for one task may hold live pointers into the same field, and
 # whether that is legal is a raw-pointer retagging question — exactly where
 # Stacked and Tree Borrows differ.
+#
+# Four processes, because Miri interprets every thread of a process on one core:
+# libtest's thread pool buys nothing here, so two invocations back to back leave
+# the machine idle. cargo serialises the four builds on the target-directory
+# lock and releases it before running the tests, so they share one target dir.
+# `cargo miri nextest run` shards per *test* instead, which is measurably worse:
+# a Miri process costs about a second to start and there are 643 of them.
+#
+# Naming targets excludes the doctests. OSTD's are `ignore` or `compile_fail` —
+# claims about the compiler, not about the machine — and `just test-host` runs
+# them.
 [doc("Run slopos-ostd unit + integration tests under Miri to detect UB in the OSTD critical path, under both Stacked and Tree Borrows. See tools/kernmiri/README.md.")]
 check-miri:
-    @rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' || rustup component add miri --toolchain {{rust_channel}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{build_dir}}
+    rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' \
+        || rustup component add miri --toolchain {{rust_channel}}
     {{cargo}} +{{rust_channel}} miri setup
-    @echo "── KernMiri: Stacked Borrows ──"
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" \
-        {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
-    @echo "── KernMiri: Tree Borrows ──"
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-tree-borrows" \
-        {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
+    pids=(); tags=()
+    for model in stacked tree; do
+        flags="-Zmiri-disable-isolation -Zmiri-ignore-leaks"
+        if [ "$model" = tree ]; then
+            flags="$flags -Zmiri-tree-borrows"
+        fi
+        for shard in lib tests; do
+            if [ "$shard" = lib ]; then
+                sel=(--lib)
+            else
+                sel=(--test '*')
+            fi
+            tag="$model-$shard"
+            MIRIFLAGS="$flags" {{cargo}} +{{rust_channel}} miri test -p slopos-ostd \
+                "${sel[@]}" --no-fail-fast \
+                >"{{build_dir}}/kernmiri-$tag.log" 2>&1 &
+            pids+=($!); tags+=("$tag")
+        done
+    done
+    rc=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            echo "── KernMiri ${tags[$i]}: ok ──"
+        else
+            echo "── KernMiri ${tags[$i]}: FAILED ({{build_dir}}/kernmiri-${tags[$i]}.log) ──" >&2
+            sed -n '/^failures:/,$p' "{{build_dir}}/kernmiri-${tags[$i]}.log" >&2
+            rc=1
+        fi
+    done
+    exit "$rc"
 
 [doc("Print TCB ratio: unsafe lines in slopos-ostd / total kernel Rust LoC (target Phase 1 <= 1.5%, Phase 2 <= 1.0%)")]
 tcb-ratio:

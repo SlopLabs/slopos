@@ -594,16 +594,15 @@ mod tests {
     #[test]
     fn an_exhausted_id_space_refuses() {
         let _serial = crate::test_support::global_lock::lock_global_test_state();
-        let mut held: KVec<KArc<Process>> = KVec::new();
-        let mut drawn = 0usize;
-        while let Ok(process) = new_process(None, AccountId::NONE) {
-            drawn += 1;
-            if held.push(process).is_err() {
-                break;
-            }
+        // Drawn through the id allocator rather than by building a process per
+        // id: the claim is about the id space, not about what holds one.
+        let mut drawn: KVec<u32> = KVec::new();
+        while let Some(id) = alloc_process_id() {
+            drawn.push(id).expect("hold the drawn id");
         }
         assert_eq!(
-            drawn, MAX_PROCESSES,
+            drawn.len(),
+            MAX_PROCESSES,
             "the allocator must hand out exactly the id space, then refuse"
         );
         assert_eq!(
@@ -611,7 +610,9 @@ mod tests {
             Some(ProcessAllocError::IdExhausted)
         );
         // Give the space back, or every later test in this binary starves.
-        drop(held);
+        for id in drawn.iter() {
+            release_process_id(*id);
+        }
         assert!(new_process(None, AccountId::NONE).is_ok());
     }
 
