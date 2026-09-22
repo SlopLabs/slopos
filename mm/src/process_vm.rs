@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 use slopos_ostd::lock_class;
 
+use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError, PROCESS_VM_SLOT_BITS};
 use slopos_ostd::mm::KArc;
@@ -8,6 +9,7 @@ use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
+use slopos_ostd::process::quota::Reservation;
 use slopos_ostd::process::{Process, ProcessId};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -26,7 +28,9 @@ use crate::user_mappings::{
     ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
     ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
 };
-use crate::vma_region::{FileMapRef, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
+use crate::vma_region::{
+    Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion,
+};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// Per-process VM slot, protected by the per-slot lock in `PROCESS_VMS`.
@@ -423,6 +427,21 @@ pub fn process_vm_with_vm_space_and_region_by_handle<R>(
     .ok_or(HandleError::NoEntry)
 }
 
+/// The demand-fault hold: the address space, the covering [`VmaRegion`] and
+/// the map it is charged through, under one acquisition.
+pub fn process_vm_with_fault_context_by_handle<R>(
+    handle: Handle<ProcessVm>,
+    fault_addr: u64,
+    f: impl FnOnce(&mut KArc<VmSpace>, &mut VmaMap, VmaRegion) -> R,
+) -> Result<R, HandleError> {
+    process_vm_with_handle(handle, |proc| {
+        let region = proc.vma_map.find_containing(fault_addr)?.2.clone();
+        let vm_space = proc.vm_space.as_mut()?;
+        Some(f(vm_space, &mut proc.vma_map, region))
+    })?
+    .ok_or(HandleError::NoEntry)
+}
+
 /// [`process_vm_with_vm_space_and_region_by_handle`] with the covering VMA's
 /// extent too, which is what turns `fault_addr` into a file page index.
 pub fn process_vm_with_vm_space_and_area_by_handle<R>(
@@ -545,30 +564,28 @@ pub fn process_vm_with_vm_space<R>(
     Some(out)
 }
 
-/// Like [`process_vm_with_vm_space`] but also resolves the covering
-/// [`VmaRegion`] for `fault_addr` under the same lock: dropping and
+/// Like [`process_vm_with_vm_space`] but also hands out the map and the
+/// [`VmaRegion`] covering `fault_addr`, under the same lock: dropping and
 /// re-acquiring it would deadlock the recursive demand-fault path.
-pub fn process_vm_with_vm_space_and_region<R>(
+pub fn process_vm_with_fault_context<R>(
     process: ProcessId,
     fault_addr: u64,
-    f: impl FnOnce(&mut KArc<VmSpace>, VmaRegion) -> R,
+    f: impl FnOnce(&mut KArc<VmSpace>, &mut VmaMap, VmaRegion) -> R,
 ) -> Option<R> {
     let slot = find_slot_for_pid(process)?;
     let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process.id() {
         return None;
     }
-    let region = {
-        let (_rs, _re, region_ref) = guard.vma_map.find_containing(fault_addr)?;
-        region_ref.clone()
-    };
-    let vm_space = guard.vm_space.as_mut()?;
-    let out = f(vm_space, region);
+    let region = guard.vma_map.find_containing(fault_addr)?.2.clone();
+    let inner = &mut *guard;
+    let vm_space = inner.vm_space.as_mut()?;
+    let out = f(vm_space, &mut inner.vma_map, region);
     guard.sync_resident_charge();
     Some(out)
 }
 
-/// [`process_vm_with_vm_space_and_region`] with the covering VMA's extent too.
+/// [`process_vm_with_fault_context`] with the covering VMA's extent too.
 /// Test-only: the fault path resolves by handle, so the by-handle twin is the
 /// production one.
 #[cfg(feature = "test-hooks")]
@@ -673,20 +690,22 @@ fn add_vma_to_inner(inner: &mut ProcessVm, start: u64, end: u64, region: VmaRegi
     0
 }
 
-fn prot_to_region(prot: u64) -> VmaRegion {
+fn protection_from(prot: u64) -> Protection {
     use slopos_abi::syscall::{PROT_EXEC, PROT_READ, PROT_WRITE};
-    VmaRegion {
-        protection: Protection {
-            read: prot & PROT_READ != 0,
-            write: prot & PROT_WRITE != 0,
-            exec: prot & PROT_EXEC != 0,
-        },
-        backing: RegionBacking::Anonymous,
-        lazy: true,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::General,
+    Protection {
+        read: prot & PROT_READ != 0,
+        write: prot & PROT_WRITE != 0,
+        exec: prot & PROT_EXEC != 0,
     }
+}
+
+fn prot_to_region(prot: u64) -> VmaRegion {
+    VmaRegion::new(
+        protection_from(prot),
+        RegionBacking::Anonymous,
+        true,
+        RegionPurpose::General,
+    )
 }
 
 fn unmap_and_free_range_inner(
@@ -710,6 +729,65 @@ fn unmap_and_free_range_inner(
         addr += PAGE_SIZE_4KB;
     }
     Ok(freed)
+}
+
+/// Pages an exec places before its caller regains control: the image's
+/// segments, the interpreter's and the fresh stack. Charged before the old
+/// image is released, so a program that cannot fit is the caller's `ENOMEM`.
+pub fn exec_commit_pages(
+    header: &[u8],
+    file_len: u64,
+    interpreter: Option<(&[u8], u64)>,
+) -> Result<u32, ElfError> {
+    let mut pages = image_pages(
+        header,
+        file_len,
+        crate::memory_layout_defs::PROCESS_CODE_START_VA,
+    )?;
+    if let Some((header, len)) = interpreter {
+        // Any page-aligned base places the same number of pages.
+        pages = pages.saturating_add(image_pages(
+            header,
+            len,
+            crate::memory_layout_defs::PROCESS_MMAP_START_VA,
+        )?);
+    }
+    let stack = (crate::memory_layout_defs::PROCESS_STACK_SIZE_BYTES / PAGE_SIZE_4KB) as u32;
+    Ok(pages.saturating_add(stack))
+}
+
+fn image_pages(header: &[u8], file_len: u64, load_base: u64) -> Result<u32, ElfError> {
+    let validator = ElfValidator::new(header, file_len)?.with_load_base(load_base);
+    let mut segments = KVec::<ValidatedSegment>::zeroed(crate::elf::MAX_LOAD_SEGMENTS)
+        .map_err(|_| ElfError::OutOfMemory)?;
+    let count = validator.validate_load_segments_into(segments.as_mut_slice())?;
+    Ok(segments.as_slice()[..count]
+        .iter()
+        .map(segment_pages)
+        .fold(0u32, u32::saturating_add))
+}
+
+/// Advance `funds` to the loader: the frames the next image places draw on
+/// it before they draw on the ceiling.
+pub fn process_vm_prepay_commit(process: ProcessId, funds: Reservation<CommitPagesAxis>) {
+    let Some(slot) = find_slot_for_pid(process) else {
+        return;
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id == process.id() {
+        proc.vma_map.prepay(funds);
+    }
+}
+
+/// Return what the loader did not draw.
+pub fn process_vm_end_prepay(process: ProcessId) {
+    let Some(slot) = find_slot_for_pid(process) else {
+        return;
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id == process.id() {
+        proc.vma_map.end_prepay();
+    }
 }
 
 /// Sever every user mapping the old program image left behind, then re-seed
@@ -790,11 +868,10 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     inner.stack_start = layout.stack_top - layout.stack_size;
     inner.stack_end = layout.stack_top;
 
-    // The VMA is seeded but its pages are not mapped here: `do_exec` calls
-    // `process_vm_reset_stack` immediately after loading the image, which
-    // unmaps and remaps the whole extent. Mapping it twice charges 256 pages
-    // to the account for the window between the two.
-    let rc = seed_fresh_layout(inner, slot, false);
+    // The stack's pages are not mapped here: `do_exec` calls
+    // `process_vm_reset_stack` straight after loading the image, which maps
+    // the whole extent against a settled address space.
+    let rc = seed_fresh_layout(inner);
     abort_guard.disarm();
     drop(proc);
     // The per-process lock is gone, so the writeback the releases queued can
@@ -805,43 +882,37 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     rc
 }
 
-/// The initial VMAs and, with `map_stack`, the mapped stack.
+/// The initial VMAs; nothing is mapped.
 ///
 /// Not the only seeder: [`create_process_vm_for`] builds the same code, data
 /// and stack VMAs but no growth extent below the stack, because a VA charge is
 /// taken for a lazy region too. Any change to the three shared regions has to
 /// be made in both.
-fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_int {
+fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
     let code_s = inner.code_start;
     let data_s = inner.data_start;
     let heap_s = inner.heap_start;
     let stack_s = inner.stack_start;
     let stack_e = inner.stack_end;
 
-    let code_region = VmaRegion {
-        protection: Protection::RX,
-        backing: RegionBacking::Anonymous,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Code,
-    };
-    let data_region = VmaRegion {
-        protection: Protection::RW,
-        backing: RegionBacking::Anonymous,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Data,
-    };
-    let stack_region = VmaRegion {
-        protection: Protection::RW,
-        backing: RegionBacking::Anonymous,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Stack,
-    };
+    let code_region = VmaRegion::new(
+        Protection::RX,
+        RegionBacking::Anonymous,
+        false,
+        RegionPurpose::Code,
+    );
+    let data_region = VmaRegion::new(
+        Protection::RW,
+        RegionBacking::Anonymous,
+        false,
+        RegionPurpose::Data,
+    );
+    let stack_region = VmaRegion::new(
+        Protection::RW,
+        RegionBacking::Anonymous,
+        false,
+        RegionPurpose::Stack,
+    );
 
     if add_vma_to_inner(inner, code_s, data_s, code_region) != 0
         || add_vma_to_inner(inner, data_s, heap_s, data_region) != 0
@@ -856,42 +927,29 @@ fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_i
     // randomises, rather than to `PROCESS_STACK_LOW_VA`.
     let growth_low = stack_e.saturating_sub(crate::memory_layout_defs::PROCESS_STACK_MAX_BYTES);
     if growth_low < stack_s {
-        let growth_region = VmaRegion {
-            protection: Protection::RW,
-            backing: RegionBacking::Anonymous,
-            lazy: true,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::Stack,
-        };
+        let growth_region = VmaRegion::new(
+            Protection::RW,
+            RegionBacking::Anonymous,
+            true,
+            RegionPurpose::Stack,
+        );
         if add_vma_to_inner(inner, growth_low, stack_s, growth_region) != 0 {
             return -1;
         }
     }
 
-    let stack_flags_bits = VmaRegion {
-        protection: Protection::RW,
-        backing: RegionBacking::Anonymous,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Stack,
-    }
-    .to_page_flags()
-    .bits();
-
-    if map_stack {
-        let vm_space_for_map = match inner.vm_space.as_mut() {
-            Some(v) => v,
-            None => return -1,
-        };
-        if map_user_range(vm_space_for_map, stack_s, stack_e, stack_flags_bits).is_err() {
-            return -1;
-        }
-    }
-
-    let _ = slot;
     0
+}
+
+fn stack_page_flag_bits() -> u64 {
+    VmaRegion::new(
+        Protection::RW,
+        RegionBacking::Anonymous,
+        false,
+        RegionPurpose::Stack,
+    )
+    .to_page_flags()
+    .bits()
 }
 
 /// The caller drops the slot's `KArc<VmSpace>`; the shootdown issued here is
@@ -901,28 +959,32 @@ fn teardown_inner_mappings(inner: &mut ProcessVm, key: TlbProcessKey) {
     inner.vma_map.drain(|start, end, region| {
         let _ = dec_removed_shared_mapcount(start, end, region);
     });
+    inner.vma_map.sync_resident(0);
     inner.heap_end = inner.heap_start;
     inner.heap_break = inner.heap_start;
 }
 
 /// Unmap a range; each unmapped `UFrame` returns its buddy frame on drop.
+/// Returns how many leaves were present.
 fn unmap_and_free_range_dir(
     vm_space: &mut KArc<VmSpace>,
     start: u64,
     end: u64,
-) -> Result<u64, UnmapRegionError> {
+) -> Result<u32, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(start);
+        return Ok(0);
     }
+    let mut present = 0u32;
     let mut addr = start;
     while addr < end {
         match ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
-            Ok(true) | Ok(false) => {}
-            Err(err) => return Err(unmap_region_error(err, addr)),
+            Ok(true) => present += 1,
+            Ok(false) => {}
+            Err(err) => return Err(unmap_region_error(err, addr, present)),
         }
         addr += PAGE_SIZE_4KB;
     }
-    Ok(end)
+    Ok(present)
 }
 
 /// Unmap a SlopRing mapping range. Each page's PTE holds its own ref on the
@@ -933,9 +995,9 @@ fn unmap_ring_range_dir(
     key: TlbProcessKey,
     start: u64,
     end: u64,
-) -> Result<u64, UnmapRegionError> {
+) -> Result<u32, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(start);
+        return Ok(0);
     }
     let mut unmapped = 0u32;
     let mut addr = start;
@@ -947,7 +1009,7 @@ fn unmap_ring_range_dir(
                 if unmapped > 0 {
                     tlb::flush_all_for_process(key);
                 }
-                return Err(unmap_region_error(err, addr));
+                return Err(unmap_region_error(err, addr, unmapped));
             }
         }
         addr += PAGE_SIZE_4KB;
@@ -958,7 +1020,7 @@ fn unmap_ring_range_dir(
     if unmapped > 0 {
         tlb::flush_all_for_process(key);
     }
-    Ok(end)
+    Ok(unmapped)
 }
 
 /// Unmap shared-memfd pages. Each unmap drops only this mapping's MetaSlot
@@ -969,9 +1031,9 @@ fn unmap_range_nofree_dir(
     key: TlbProcessKey,
     start: u64,
     end: u64,
-) -> Result<u64, UnmapRegionError> {
+) -> Result<u32, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(start);
+        return Ok(0);
     }
     let mut unmapped = 0u32;
     let mut addr = start;
@@ -983,7 +1045,7 @@ fn unmap_range_nofree_dir(
                 if unmapped > 0 {
                     tlb::flush_all_for_process(key);
                 }
-                return Err(unmap_region_error(err, addr));
+                return Err(unmap_region_error(err, addr, unmapped));
             }
         }
         addr += PAGE_SIZE_4KB;
@@ -991,7 +1053,7 @@ fn unmap_range_nofree_dir(
     if unmapped > 0 {
         tlb::flush_all_for_process(key);
     }
-    Ok(end)
+    Ok(unmapped)
 }
 
 type VmaOverlap = (u64, u64, VmaRegion);
@@ -1001,10 +1063,16 @@ type VmaOverlap = (u64, u64, VmaRegion);
 struct UnmapRegionError {
     err: MapError,
     processed_end: u64,
+    /// Leaves already gone when the error struck.
+    present: u32,
 }
 
-fn unmap_region_error(err: MapError, processed_end: u64) -> UnmapRegionError {
-    UnmapRegionError { err, processed_end }
+fn unmap_region_error(err: MapError, processed_end: u64, present: u32) -> UnmapRegionError {
+    UnmapRegionError {
+        err,
+        processed_end,
+        present,
+    }
 }
 
 fn vma_page_count(start: u64, end: u64) -> u32 {
@@ -1042,13 +1110,14 @@ fn collect_overlapping_vmas(
     .map_err(|_| ())
 }
 
+/// Returns how many leaves the range had present.
 fn unmap_region_range_dir(
     vm_space: &mut KArc<VmSpace>,
     key: TlbProcessKey,
     start: u64,
     end: u64,
     region: &VmaRegion,
-) -> Result<u64, UnmapRegionError> {
+) -> Result<u32, UnmapRegionError> {
     if region.is_ring() {
         unmap_ring_range_dir(vm_space, key, start, end)
     } else if region.is_shared() {
@@ -1247,11 +1316,17 @@ fn place_interpreter(
             linked = segment.vaddr_end;
         }
 
+        let pages = segment_pages(segment);
+        inner
+            .vma_map
+            .charge_frames(pages)
+            .map_err(|_| ElfError::OutOfMemory)?;
         let vm_space_ref = inner
             .vm_space
             .as_mut()
             .expect("place_interpreter: vm_space present per segment");
-        map_segment_pages(vm_space_ref, segment, mapped)?;
+        let fresh = map_segment_pages(vm_space_ref, segment, mapped)?;
+        inner.vma_map.refund_frames(pages.saturating_sub(fresh));
     }
 
     drop(guard);
@@ -1263,18 +1338,16 @@ fn place_interpreter(
     })
 }
 fn interp_region(flags: u32) -> VmaRegion {
-    VmaRegion {
-        protection: Protection {
+    VmaRegion::new(
+        Protection {
             read: (flags & PF_R) != 0,
             write: (flags & PF_W) != 0,
             exec: (flags & PF_X) != 0,
         },
-        backing: RegionBacking::Anonymous,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Code,
-    }
+        RegionBacking::Anonymous,
+        false,
+        RegionPurpose::Code,
+    )
 }
 
 fn segment_extent(segments: &[ValidatedSegment]) -> (u64, u64) {
@@ -1336,15 +1409,23 @@ fn load_segments_and_tls(
             .vm_space
             .as_mut()
             .expect("load_segments_and_tls: vm_space present for live pid");
-        unmap_existing_code_region(vm_space_ref, code_base).map_err(|_| ElfError::NullPointer)?;
+        let present = unmap_existing_code_region(vm_space_ref, code_base)
+            .map_err(|_| ElfError::NullPointer)?;
+        guard.vma_map.refund_frames(present);
     }
 
     for segment in segments.iter() {
+        let pages = segment_pages(segment);
+        guard
+            .vma_map
+            .charge_frames(pages)
+            .map_err(|_| ElfError::OutOfMemory)?;
         let vm_space_ref = guard
             .vm_space
             .as_mut()
             .expect("load_segments_and_tls: vm_space present per segment");
-        map_segment_pages(vm_space_ref, segment, segments)?;
+        let fresh = map_segment_pages(vm_space_ref, segment, segments)?;
+        guard.vma_map.refund_frames(pages.saturating_sub(fresh));
     }
 
     let tls_tp = 0u64;
@@ -1395,15 +1476,15 @@ fn lowest_segment_vaddr(segments: &[ValidatedSegment]) -> u64 {
     segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0)
 }
 
+/// Returns how many leaves were present.
 fn unmap_existing_code_region(
     vm_space: &mut KArc<VmSpace>,
     code_base: u64,
-) -> Result<(), MapError> {
+) -> Result<u32, MapError> {
     // Exactly [code_start, data_start), so a neighbouring region is never
     // caught by the arithmetic.
     let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
-    unmap_user_range(vm_space, code_base, data_start)?;
-    Ok(())
+    unmap_user_range(vm_space, code_base, data_start)
 }
 
 /// `None` if the page is unmapped.
@@ -1507,11 +1588,23 @@ fn shared_page_flags(
     flags
 }
 
+fn segment_pages(segment: &ValidatedSegment) -> u32 {
+    u32::try_from(
+        segment
+            .vaddr_end
+            .saturating_sub(segment.vaddr_start)
+            .div_ceil(PAGE_SIZE_4KB),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+/// Returns how many of the segment's pages were fresh frames.
 fn map_segment_pages(
     vm_space: &mut KArc<VmSpace>,
     segment: &ValidatedSegment,
     neighbours: &[ValidatedSegment],
-) -> Result<(), ElfError> {
+) -> Result<u32, ElfError> {
+    let mut fresh_pages = 0u32;
     let mut dst = segment.vaddr_start;
     while dst < segment.vaddr_end {
         // From the segment's own `p_flags`, so a `PT_LOAD` that does not ask
@@ -1550,12 +1643,13 @@ fn map_segment_pages(
         // between segments would leak the last owner's bytes to userland.
         if fresh {
             let _ = hhdm_fill_bytes(dest_virt, 0, PAGE_SIZE_4KB as usize, 0);
+            fresh_pages += 1;
         }
 
         dst += PAGE_SIZE_4KB;
     }
 
-    Ok(())
+    Ok(fresh_pages)
 }
 
 pub fn create_process_vm() -> u32 {
@@ -1643,30 +1737,24 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
         // The same three regions `seed_fresh_layout` builds, minus its growth
         // extent; see that function's doc for why the two are not one call.
 
-        let code_region = VmaRegion {
-            protection: Protection::RX,
-            backing: RegionBacking::Anonymous,
-            lazy: false,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::Code,
-        };
-        let data_region = VmaRegion {
-            protection: Protection::RW,
-            backing: RegionBacking::Anonymous,
-            lazy: false,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::Data,
-        };
-        let stack_region = VmaRegion {
-            protection: Protection::RW,
-            backing: RegionBacking::Anonymous,
-            lazy: false,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::Stack,
-        };
+        let code_region = VmaRegion::new(
+            Protection::RX,
+            RegionBacking::Anonymous,
+            false,
+            RegionPurpose::Code,
+        );
+        let data_region = VmaRegion::new(
+            Protection::RW,
+            RegionBacking::Anonymous,
+            false,
+            RegionPurpose::Data,
+        );
+        let stack_region = VmaRegion::new(
+            Protection::RW,
+            RegionBacking::Anonymous,
+            false,
+            RegionPurpose::Stack,
+        );
 
         if add_vma_to_inner(&mut proc, code_s, data_s, code_region) != 0
             || add_vma_to_inner(&mut proc, data_s, heap_s, data_region) != 0
@@ -1686,24 +1774,29 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             return None;
         }
 
-        let stack_page_flags = VmaRegion {
-            protection: Protection::RW,
-            backing: RegionBacking::Anonymous,
-            lazy: false,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::Stack,
-        }
+        let stack_page_flags = VmaRegion::new(
+            Protection::RW,
+            RegionBacking::Anonymous,
+            false,
+            RegionPurpose::Stack,
+        )
         .to_page_flags();
 
         let stack_start = proc.stack_start;
         let stack_end = proc.stack_end;
         let stack_flags_bits = stack_page_flags.bits();
-        let vm_space_for_map = proc
-            .vm_space
-            .as_mut()
-            .expect("create_process_vm: vm_space present before stack map");
-        if map_user_range(vm_space_for_map, stack_start, stack_end, stack_flags_bits).is_err() {
+        let stack_pages = ((stack_end - stack_start) / PAGE_SIZE_4KB) as u32;
+        let stack_mapped = proc.vma_map.charge_frames(stack_pages).is_ok()
+            && map_user_range(
+                proc.vm_space
+                    .as_mut()
+                    .expect("create_process_vm: vm_space present before stack map"),
+                stack_start,
+                stack_end,
+                stack_flags_bits,
+            )
+            .is_ok();
+        if !stack_mapped {
             klog_info!("create_process_vm: Failed to map process stack");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
             proc.vm_space = None;
@@ -1796,18 +1889,16 @@ pub fn process_vm_alloc(process: ProcessId, size: u64, flags: u32) -> u64 {
         return 0;
     }
 
-    let heap_region = VmaRegion {
-        protection: Protection {
+    let heap_region = VmaRegion::new(
+        Protection {
             read: true,
             write: flags & PageFlags::WRITABLE.bits() as u32 != 0,
             exec: false,
         },
-        backing: RegionBacking::Anonymous,
-        lazy: true,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::Heap,
-    };
+        RegionBacking::Anonymous,
+        true,
+        RegionPurpose::Heap,
+    );
 
     if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
         klog_info!("process_vm_alloc: Failed to record VMA");
@@ -1953,6 +2044,28 @@ pub fn process_vm_get_stack_top(process: ProcessId) -> u64 {
     guard.stack_end
 }
 
+/// Take every present stack frame out of the page table into `gathered`.
+fn gather_stack_frames(
+    vm_space: &mut KArc<VmSpace>,
+    start: u64,
+    end: u64,
+    gathered: &mut KVec<UFrame<AnonymousMeta>>,
+) -> Result<(), ()> {
+    let mut addr = start;
+    while addr < end {
+        match crate::user_mappings::ostd_unmap_4kb_user_take(vm_space, VirtAddr::new(addr)) {
+            Ok(Some(frame)) => gathered.push(frame).map_err(|_| ())?,
+            Ok(None) => {}
+            Err(err) => {
+                klog_info!("process_vm_reset_stack: unmap failed: {:?}", err);
+                return Err(());
+            }
+        }
+        addr += PAGE_SIZE_4KB;
+    }
+    Ok(())
+}
+
 pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
@@ -1980,61 +2093,32 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
         let mut guard = PROCESS_VMS[slot].lock();
         if guard.process_id != process.id() {
             -1
-        } else if let Some(vm_space_ref) = guard.vm_space.as_mut() {
-            let mut addr = stack_start;
-            let mut ok = true;
-            while addr < stack_end {
-                match crate::user_mappings::ostd_unmap_4kb_user_take(
-                    vm_space_ref,
-                    VirtAddr::new(addr),
-                ) {
-                    Ok(Some(frame)) => {
-                        if gathered.push(frame).is_err() {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        klog_info!("process_vm_reset_stack: unmap failed: {:?}", err);
-                        ok = false;
-                        break;
-                    }
-                }
-                addr += PAGE_SIZE_4KB;
-            }
-
-            if !ok {
-                -1
-            } else {
-                let stack_page_flags = VmaRegion {
-                    protection: Protection::RW,
-                    backing: RegionBacking::Anonymous,
-                    lazy: false,
-                    cow: false,
-                    user: true,
-                    purpose: RegionPurpose::Stack,
-                }
-                .to_page_flags();
-                let vm_space_ref = guard
-                    .vm_space
-                    .as_mut()
-                    .expect("process_vm_reset_stack: vm_space still present after unmap");
-                if map_user_range(
-                    vm_space_ref,
-                    stack_start,
-                    stack_end,
-                    stack_page_flags.bits(),
-                )
-                .is_err()
-                {
-                    -1
-                } else {
-                    0
-                }
-            }
-        } else {
+        } else if guard.vma_map.charge_frames(page_count as u32).is_err() {
             -1
+        } else {
+            let inner = &mut *guard;
+            let remapped = match inner.vm_space.as_mut() {
+                Some(vm_space_ref) => {
+                    gather_stack_frames(vm_space_ref, stack_start, stack_end, &mut gathered).is_ok()
+                        && map_user_range(
+                            vm_space_ref,
+                            stack_start,
+                            stack_end,
+                            stack_page_flag_bits(),
+                        )
+                        .is_ok()
+                }
+                None => false,
+            };
+            if remapped {
+                inner.vma_map.refund_frames(gathered.len() as u32);
+                0
+            } else {
+                inner
+                    .vma_map
+                    .refund_frames((page_count as u32).saturating_add(gathered.len() as u32));
+                -1
+            }
         }
     };
 
@@ -2084,14 +2168,12 @@ pub fn process_vm_brk(process: ProcessId, new_brk: u64) -> u64 {
         // Lazy: a compiler's `brk` grows in hundreds of megabytes and touches a
         // fraction of it, and mapping the whole extent under this IRQs-off lock
         // is both the allocation cost and the latency.
-        let heap_region = VmaRegion {
-            protection: Protection::RW,
-            backing: RegionBacking::Anonymous,
-            lazy: true,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::Heap,
-        };
+        let heap_region = VmaRegion::new(
+            Protection::RW,
+            RegionBacking::Anonymous,
+            true,
+            RegionPurpose::Heap,
+        );
 
         if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
             return 0;
@@ -2197,14 +2279,12 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
     }
     let end_addr = start_addr + size;
 
-    let region = VmaRegion {
-        protection: Protection::RW,
-        backing: RegionBacking::Ring,
-        lazy: false,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::General,
-    };
+    let region = VmaRegion::new(
+        Protection::RW,
+        RegionBacking::Ring,
+        false,
+        RegionPurpose::General,
+    );
 
     let inner = &mut *proc;
     // Charged before a single PTE is written, so a refusal costs no rollback.
@@ -2242,7 +2322,7 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
 
     inner
         .vma_map
-        .insert_reserved(start_addr, end_addr, region, ring_pages);
+        .insert_unreserved(start_addr, end_addr, region, ring_pages);
 
     start_addr
 }
@@ -2307,8 +2387,15 @@ fn resolve_mmap_base(
             *overlap_end,
             region,
         ) {
-            Ok(_) => {}
+            Ok(present) => {
+                if region.commit == Commit::Frames {
+                    inner.vma_map.refund_frames(present);
+                }
+            }
             Err(err) => {
+                if region.commit == Commit::Frames {
+                    inner.vma_map.refund_frames(err.present);
+                }
                 if err.processed_end > addr_hint {
                     inner.vma_map.remove_range(
                         addr_hint,
@@ -2351,7 +2438,7 @@ fn process_vm_mmap_inner(
     offset: u64,
     memfd_handle: Option<crate::memfd::MemfdHandle>,
 ) -> u64 {
-    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED};
+    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED};
 
     let is_shared = flags_val & MAP_SHARED != 0;
     let is_anonymous = flags_val & MAP_ANONYMOUS != 0;
@@ -2428,20 +2515,14 @@ fn process_vm_mmap_inner(
         // above proved a memfd handle is present.
         let memfd_handle = memfd_handle.expect("shared mapping requires a memfd handle");
 
-        let shared_region = VmaRegion {
-            protection: Protection {
-                read: prot_to_region(prot).protection.read,
-                write: prot_to_region(prot).protection.write,
-                exec: prot_to_region(prot).protection.exec,
-            },
-            backing: RegionBacking::SharedMemfd {
+        let shared_region = VmaRegion::new(
+            protection_from(prot),
+            RegionBacking::SharedMemfd {
                 handle: memfd_handle,
             },
-            lazy: false,
-            cow: false,
-            user: true,
-            purpose: RegionPurpose::General,
-        };
+            false,
+            RegionPurpose::General,
+        );
 
         let inner = &mut *proc;
         let shared_pages = match inner.vma_map.reserve_pages(start_addr, end_addr) {
@@ -2491,13 +2572,17 @@ fn process_vm_mmap_inner(
 
         inner
             .vma_map
-            .insert_reserved(start_addr, end_addr, shared_region, shared_pages);
+            .insert_unreserved(start_addr, end_addr, shared_region, shared_pages);
 
         crate::memfd::memfd_inc_mapcount_by(memfd_handle, page_count);
 
         start_addr
     } else {
-        let region = prot_to_region(prot);
+        let region = if flags_val & MAP_NORESERVE != 0 {
+            prot_to_region(prot).noreserve()
+        } else {
+            prot_to_region(prot)
+        };
 
         if add_vma_to_inner(&mut proc, start_addr, end_addr, region) != 0 {
             klog_info!("process_vm_mmap: Failed to insert VMA");
@@ -2511,15 +2596,7 @@ fn process_vm_mmap_inner(
 /// The VMA a file mapping installs. Always `lazy`: the pages arrive from the
 /// device on the fault that touches them.
 fn file_region(prot: u64, backing: RegionBacking) -> VmaRegion {
-    let prot_bits = prot_to_region(prot);
-    VmaRegion {
-        protection: prot_bits.protection,
-        backing,
-        lazy: true,
-        cow: false,
-        user: true,
-        purpose: RegionPurpose::General,
-    }
+    VmaRegion::new(protection_from(prot), backing, true, RegionPurpose::General)
 }
 
 fn file_mmap_extent(length: u64) -> Option<u64> {
@@ -2699,8 +2776,15 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
             *overlap_end,
             region,
         ) {
-            Ok(_) => {}
+            Ok(present) => {
+                if region.commit == Commit::Frames {
+                    inner.vma_map.refund_frames(present);
+                }
+            }
             Err(err) => {
+                if region.commit == Commit::Frames {
+                    inner.vma_map.refund_frames(err.present);
+                }
                 if err.processed_end > addr {
                     inner.vma_map.remove_range(
                         addr,
@@ -2790,12 +2874,16 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
 
     // Splits at both ends, so a sub-range no longer rewrites the protection of
     // every page of its enclosing VMA.
-    if let Err(hole) = proc.vma_map.protect_range(addr, end, new_prot.protection) {
-        klog_info!(
-            "process_vm_mprotect: no VMA covers 0x{:x} in the requested range",
-            hole
-        );
-        return -1;
+    match proc.vma_map.protect_range(addr, end, new_prot.protection) {
+        Ok(()) => {}
+        Err(ProtectError::Hole(hole)) => {
+            klog_info!(
+                "process_vm_mprotect: no VMA covers 0x{:x} in the requested range",
+                hole
+            );
+            return -1;
+        }
+        Err(ProtectError::Commit(_)) => return slopos_abi::Errno::ENOMEM.raw(),
     }
     let new_page_flags = new_prot.to_page_flags();
 
@@ -3041,6 +3129,7 @@ fn clone_cow_populate_child(
             r
         };
 
+        let placed = child_region.commit == Commit::Frames;
         if child
             .vma_map
             .insert(vma_start, vma_end, child_region)
@@ -3048,6 +3137,15 @@ fn clone_cow_populate_child(
         {
             report_clone_page_ceiling(vma_start, vma_end);
             return Err(cow_pages);
+        }
+        if placed {
+            let pages = snapshot.iter().fold(0u32, |acc, chunk| {
+                acc.saturating_add(u32::try_from(chunk.len()).unwrap_or(u32::MAX))
+            });
+            if child.vma_map.charge_frames(pages).is_err() {
+                report_clone_page_ceiling(vma_start, vma_end);
+                return Err(cow_pages);
+            }
         }
         if let Some(memfd_handle) = parent_region.memfd_handle() {
             crate::memfd::memfd_inc_mapcount_by(memfd_handle, vma_page_count(vma_start, vma_end));

@@ -8,8 +8,9 @@ use slopos_abi::fs::{UserDirent64, UserFlock, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::MsgHdr;
 use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_WRLCK, FD_CLOEXEC,
-    O_CLOEXEC, O_NOCTTY, O_NONBLOCK, SCM_MAX_FDS, SEEK_CUR, SEEK_END, SEEK_SET,
+    F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW,
+    F_WRLCK, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK, SCM_MAX_FDS, SEEK_CUR, SEEK_END,
+    SEEK_SET,
 };
 use slopos_mm::user_msghdr::{
     msghdr_report_ctrunc, msghdr_write_out, put_scm_rights, scm_rights_fits,
@@ -860,10 +861,10 @@ pub fn file_pipe_create(
 }
 
 pub fn file_dup_fd(table: FdTable, old_fd: c_int) -> c_int {
-    file_dup_fd_min(table, old_fd, 0)
+    file_dup_fd_min(table, old_fd, 0, false)
 }
 
-fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
+fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize, cloexec: bool) -> c_int {
     let account = table.account();
     with_table_slot(table, |inner| {
         let Some(src) = get_fd_entry(inner, old_fd) else {
@@ -877,9 +878,9 @@ fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(mut alias) = src.try_alias(account) else {
             return Errno::EMFILE.raw() as _;
         };
-        // `cloexec` is a preference on the fd number, so a dup starts it clear;
-        // `close_on_fork` names the description and carries over.
-        alias.cloexec = false;
+        // `cloexec` is a preference on the fd number, so a dup starts it as
+        // the command says; `close_on_fork` names the description and carries over.
+        alias.cloexec = cloexec;
 
         let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
             return Errno::EMFILE.raw() as _;
@@ -981,7 +982,8 @@ fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3
 
 pub fn file_fcntl_fd(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> i64 {
     match cmd {
-        F_DUPFD => file_dup_fd_min(table, fd, arg as usize) as i64,
+        F_DUPFD => file_dup_fd_min(table, fd, arg as usize, false) as i64,
+        F_DUPFD_CLOEXEC => file_dup_fd_min(table, fd, arg as usize, true) as i64,
         F_GETFD => {
             let Some(inner) = lock_table_slot(table) else {
                 return Errno::ESRCH.raw() as i64;

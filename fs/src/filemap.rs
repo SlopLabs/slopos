@@ -64,12 +64,17 @@ use crate::vfs::{FileSystem, InodeId};
 const PAGE_SIZE: u64 = 4096;
 const PAGE_SIZE_USIZE: usize = 4096;
 
-/// Inodes that may hold a page set at once.
-pub(crate) const MAX_MAPPED_INODES: usize = 128;
+/// Inodes that may hold a page set at once: a `-j N` build's worth of rlibs,
+/// each mapped for the whole of a compilation, not one process's few files.
+pub(crate) const MAX_MAPPED_INODES: usize = 1024;
 
 /// The registry is `MAX_MAPPED_INODES` of these, so another field is a
-/// deliberate 128 bytes of BSS rather than an accident.
+/// deliberate kilobyte of BSS rather than an accident.
 const _: () = assert!(core::mem::size_of::<PageSet>() <= 96);
+
+/// Populated pages across every set, kept beside the sets so a fault's
+/// admission check is one load rather than a walk of the registry.
+static POPULATED_PAGES: AtomicU32 = AtomicU32::new(0);
 
 /// The fraction of usable physical memory the registry may pin, and the
 /// fraction of that ceiling one principal may hold.
@@ -117,6 +122,20 @@ pub(crate) fn derive_page_ceiling(usable_frames: u32) -> u32 {
 /// Populated pages one principal may hold.
 fn max_pages_per_account() -> u32 {
     max_mapped_pages() / MAPPED_PAGE_SHARE
+}
+
+/// Make the per-principal share the `PinnedBytes` default of every account
+/// row, so the ledger and the walk bound one number; the `abi` default was
+/// sized for an appliance, and a compiler's shared objects exceed it.
+pub fn install_pinned_default() -> u32 {
+    let pages = max_pages_per_account().max(slopos_abi::quota::default_process_limit(
+        slopos_abi::quota::ResourceKind::PinnedBytes,
+    ));
+    slopos_ostd::process::quota::set_derived_process_limit(
+        slopos_abi::quota::ResourceKind::PinnedBytes,
+        pages,
+    );
+    pages
 }
 
 /// Override the derived ceiling, so a test can reach a refusal without pinning
@@ -508,7 +527,6 @@ enum Install {
 /// Publish one frame into the set, charging it to the set's owner.
 fn install_page(map: FileMapRef, page_index: u64, pa: PhysAddr) -> Result<PhysAddr, FileMapError> {
     let ceiling = max_mapped_pages();
-    let per_account = max_pages_per_account();
     let verdict = {
         let mut sets = FILEMAP.lock();
         let resolved = match resolve(sets.as_mut_slice(), map) {
@@ -518,20 +536,13 @@ fn install_page(map: FileMapRef, page_index: u64, pa: PhysAddr) -> Result<PhysAd
         match resolved {
             None => Install::Refused(FileMapError::Stale),
             Some((owner, idx)) => {
-                let mut held = 0u32;
-                let mut owned = 0u32;
-                for entry in sets.iter() {
-                    held = held.saturating_add(entry.populated);
-                    if entry.fs.is_some() && !owner.is_none() && entry.owner == owner {
-                        owned = owned.saturating_add(entry.populated);
-                    }
-                }
+                let held = POPULATED_PAGES.load(Ordering::Relaxed);
                 let entry = &mut sets[map.slot as usize];
                 let taken = entry.pages[idx];
                 if !taken.is_null() {
                     entry.refs = entry.refs.saturating_add(1);
                     Install::Lost(taken)
-                } else if held >= ceiling || (!owner.is_none() && owned >= per_account) {
+                } else if held >= ceiling {
                     Install::Refused(FileMapError::TooManyPages)
                 } else {
                     match try_charge::<PinnedBytesAxis>(owner, 1) {
@@ -540,6 +551,7 @@ fn install_page(map: FileMapRef, page_index: u64, pa: PhysAddr) -> Result<PhysAd
                             entry.charge.grow(reservation);
                             entry.pages[idx] = pa;
                             entry.populated = entry.populated.saturating_add(1);
+                            POPULATED_PAGES.fetch_add(1, Ordering::Relaxed);
                             entry.refs = entry.refs.saturating_add(1);
                             Install::Took(pa)
                         }
@@ -745,6 +757,7 @@ fn drop_set(entry: &mut PageSet) {
         release_owned_anon_page(*pa);
     }
     entry.pages = KVec::new();
+    POPULATED_PAGES.fetch_sub(entry.populated, Ordering::Relaxed);
     entry.populated = 0;
     entry.fs = None;
     entry.dirtyable = false;

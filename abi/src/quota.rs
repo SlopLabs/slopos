@@ -34,10 +34,14 @@ pub enum ResourceKind {
     /// Pages a process has populated — RSS. [`ResourceKind::Pages`] counts what
     /// is *mapped*, which under demand paging is no evidence of memory held.
     ResidentPages = 9,
+    /// Pages of private memory the kernel has promised a frame for: a lazy
+    /// mapping's whole extent at creation, an eagerly placed page as it
+    /// lands. The root's ceiling is derived from usable RAM at boot.
+    CommitPages = 10,
 }
 
 /// Width of every per-kind array in an account row.
-pub const KIND_COUNT: usize = 10;
+pub const KIND_COUNT: usize = 11;
 
 impl ResourceKind {
     /// Discriminant order — the iteration order of every dump and every audit.
@@ -52,6 +56,7 @@ impl ResourceKind {
         ResourceKind::KernelMeta,
         ResourceKind::DiskBlocks,
         ResourceKind::ResidentPages,
+        ResourceKind::CommitPages,
     ];
 
     /// Row index into an account's per-kind arrays.
@@ -75,6 +80,7 @@ impl ResourceKind {
             ResourceKind::KernelMeta => "kernelmeta",
             ResourceKind::DiskBlocks => "diskblocks",
             ResourceKind::ResidentPages => "residentpages",
+            ResourceKind::CommitPages => "commitpages",
         }
     }
 
@@ -90,6 +96,7 @@ impl ResourceKind {
             // `u32`, and a sub-page pin still holds a whole frame against reclaim.
             ResourceKind::Pages
             | ResourceKind::ResidentPages
+            | ResourceKind::CommitPages
             | ResourceKind::KernelMeta
             | ResourceKind::PinnedBytes => Unit::Pages,
             ResourceKind::DiskBlocks => Unit::Blocks,
@@ -118,6 +125,7 @@ impl ResourceKind {
             ResourceKind::Task | ResourceKind::Process => Errno::EAGAIN,
             ResourceKind::Pages
             | ResourceKind::ResidentPages
+            | ResourceKind::CommitPages
             | ResourceKind::PinnedBytes
             | ResourceKind::KernelMeta => Errno::ENOMEM,
             ResourceKind::DiskBlocks => Errno::ENOSPC,
@@ -193,6 +201,9 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // No ceiling: the honest one is a fraction of usable RAM, which `abi`
         // cannot see. A number frozen here would refuse a workload that fits.
         ResourceKind::ResidentPages => NO_LIMIT_SENTINEL,
+        // The ceiling is the machine's, on the root row, derived from usable
+        // RAM at boot; per process, `RLIMIT_AS` already bounds what one can ask.
+        ResourceKind::CommitPages => NO_LIMIT_SENTINEL,
         // 32 MiB of blocks at 4 KiB, against a measured worst of 3875 (the
         // tests image's disk-reserve filler). Bounds a process's *outstanding*
         // allocations, not its footprint: ext2 records no owner, so the charge
@@ -301,6 +312,7 @@ axes! {
     KernelMetaAxis,
     DiskBlocksAxis,
     ResidentPagesAxis,
+    CommitPagesAxis,
 }
 
 #[cfg(test)]
@@ -335,6 +347,7 @@ mod tests {
         assert_eq!(ResourceKind::Pages.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::KernelMeta.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::ResidentPages.errno(), Errno::ENOMEM);
+        assert_eq!(ResourceKind::CommitPages.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::DiskBlocks.errno(), Errno::ENOSPC);
     }
 
@@ -349,11 +362,15 @@ mod tests {
         );
     }
 
-    /// Every kind but `ResidentPages`, which is unbounded on purpose.
+    /// Every kind but `ResidentPages`, which is unbounded on purpose, and
+    /// `CommitPages`, whose ceiling is the root's and derived at boot.
     #[test]
     fn every_kind_carries_a_ceiling() {
         for kind in ResourceKind::ALL {
-            if matches!(kind, ResourceKind::ResidentPages) {
+            if matches!(
+                kind,
+                ResourceKind::ResidentPages | ResourceKind::CommitPages
+            ) {
                 assert_eq!(default_process_limit(kind), NO_LIMIT_SENTINEL);
                 continue;
             }

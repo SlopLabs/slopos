@@ -12,7 +12,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
+use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::process::quota::try_charge;
 use slopos_ostd::{KArc, KBox, KVec};
 
 use slopos_abi::auxv::{AT_BASE, AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
@@ -33,8 +35,9 @@ use slopos_mm::elf::{
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
-    InterpreterImage, process_vm_get_stack_top, process_vm_get_vm_space, process_vm_map_elf_image,
-    process_vm_map_interpreter, process_vm_reset_for_exec, process_vm_reset_stack,
+    InterpreterImage, exec_commit_pages, process_vm_end_prepay, process_vm_get_stack_top,
+    process_vm_get_vm_space, process_vm_map_elf_image, process_vm_map_interpreter,
+    process_vm_prepay_commit, process_vm_reset_for_exec, process_vm_reset_stack,
     process_vm_write_user_bytes,
 };
 use slopos_ostd::klog_info;
@@ -137,8 +140,11 @@ pub enum FdAction {
 }
 
 impl From<ElfError> for ExecError {
-    fn from(_: ElfError) -> Self {
-        ExecError::NoExec
+    fn from(err: ElfError) -> Self {
+        match err {
+            ElfError::OutOfMemory => ExecError::NoMem,
+            _ => ExecError::NoExec,
+        }
     }
 }
 
@@ -559,6 +565,7 @@ pub fn do_exec(
     if process_vm_reset_stack(vm_process) != 0 {
         return Err(ExecError::NoMem);
     }
+    process_vm_end_prepay(vm_process);
 
     let stack_top = setup_user_stack(table, argv, envp, &exec_info)?;
     *stack_ptr_out = stack_top;
@@ -642,12 +649,26 @@ fn load_image(
         None => None,
     };
 
+    // Charged beside the old image, so a program that cannot fit is refused
+    // while the caller still has one to return to.
+    let pages = exec_commit_pages(
+        header.as_slice(),
+        file_size,
+        interp
+            .as_deref()
+            .map(|staged| (staged.header.as_slice(), staged.file_len)),
+    )
+    .map_err(ExecError::from)?;
+    let funds =
+        try_charge::<CommitPagesAxis>(process.account(), pages).map_err(|_| ExecError::NoMem)?;
+
     // The address-space boundary. Everything the old image mapped — heap,
     // mmap arena, shared memfds, rings — is severed here, before the new
     // image exists, so no mapping outlives the program that made it.
     if process_vm_reset_for_exec(process) != 0 {
         return Err(ExecError::NoMem);
     }
+    process_vm_prepay_commit(process, funds);
 
     install_images(
         &handle,

@@ -178,6 +178,8 @@ pub fn cmd_info(_argc: i32, _argv: &[&[u8]]) -> i32 {
     info_kv(b"  Total pages:      ", info.total_pages);
     info_kv(b"  Free pages:       ", info.free_pages);
     info_kv(b"  Allocated pages:  ", info.allocated_pages);
+    info_kv(b"  Committed pages:  ", info.committed_pages);
+    info_kv(b"  Commit limit:     ", info.commit_limit_pages);
 
     info_kv(b"  Total tasks:      ", info.total_tasks);
     info_kv(b"  Active tasks:     ", info.active_tasks);
@@ -257,6 +259,15 @@ pub fn cmd_free(_argc: i32, _argv: &[&[u8]]) -> i32 {
             total_kb / 1024,
             free_kb / 1024,
             used_kb / 1024
+        )
+        .as_bytes(),
+    );
+
+    shell_write_idx(b"Commit:  ", COLOR_COMMENT_GRAY);
+    shell_write(
+        format!(
+            "{:>10}{:>11}{:>11}\n",
+            info.commit_limit_pages, info.commit_headroom_pages, info.committed_pages
         )
         .as_bytes(),
     );

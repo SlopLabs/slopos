@@ -8,8 +8,8 @@
 //! make that claim true.
 
 use slopos_abi::quota::{
-    CustodyAxis, DiskBlocksAxis, FdSlot, KernelMetaAxis, ObjectRow, PagesAxis, PinnedBytesAxis,
-    ProcCount, Refund, ResidentPagesAxis, ResourceKind, TaskCount, Unit,
+    CommitPagesAxis, CustodyAxis, DiskBlocksAxis, FdSlot, KernelMetaAxis, ObjectRow, PagesAxis,
+    PinnedBytesAxis, ProcCount, Refund, ResidentPagesAxis, ResourceKind, TaskCount, Unit,
 };
 
 mod sealed {
@@ -57,6 +57,7 @@ impl_axis! {
     // The amount is the page / byte count, so one unit costs one.
     PagesAxis         => Pages,         cost = 1;
     ResidentPagesAxis => ResidentPages, cost = 1;
+    CommitPagesAxis   => CommitPages,   cost = 1;
     PinnedBytesAxis   => PinnedBytes,   cost = 1;
     KernelMetaAxis    => KernelMeta,    cost = 1;
     DiskBlocksAxis    => DiskBlocks,    cost = 1;
@@ -86,5 +87,6 @@ mod tests {
         check::<KernelMetaAxis>(ResourceKind::KernelMeta);
         check::<DiskBlocksAxis>(ResourceKind::DiskBlocks);
         check::<ResidentPagesAxis>(ResourceKind::ResidentPages);
+        check::<CommitPagesAxis>(ResourceKind::CommitPages);
     }
 }

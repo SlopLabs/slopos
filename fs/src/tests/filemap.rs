@@ -994,8 +994,8 @@ fn inode_share_probe(one: AccountId, two: AccountId) -> Result<(), &'static str>
     verdict
 }
 
-/// The frames a principal pins are charged to it and bounded by its share of
-/// the derived ceiling.
+/// The frames a principal pins are charged to it and bounded by its account's
+/// pinned-page ceiling, which boot derives from usable memory.
 pub fn test_filemap_page_share_bounds_one_principal() -> TestResult {
     if !ensure_mount() {
         return slopos_testing::fail!("could not build the fixture image");
@@ -1013,10 +1013,20 @@ pub fn test_filemap_page_share_bounds_one_principal() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    // A share of two pages: the ceiling's quarter, with the registry empty.
-    let previous = filemap::set_page_ceiling_for_test(8);
+    let previous =
+        slopos_ostd::process::quota::stats(account, slopos_abi::quota::ResourceKind::PinnedBytes)
+            .map_or(slopos_ostd::process::quota::NO_LIMIT, |s| s.limit);
+    slopos_ostd::process::quota::set_limit(
+        account,
+        slopos_abi::quota::ResourceKind::PinnedBytes,
+        2,
+    );
     let verdict = page_share_probe(inode, account);
-    filemap::set_page_ceiling_for_test(previous);
+    slopos_ostd::process::quota::set_limit(
+        account,
+        slopos_abi::quota::ResourceKind::PinnedBytes,
+        previous,
+    );
     filemap::drain_pending();
     let leaked = pinned_pages(account);
     drop_file(b"pageshare");

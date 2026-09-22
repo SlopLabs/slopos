@@ -3,6 +3,7 @@
 
 pub mod aslr;
 pub mod cache_census;
+pub mod commit;
 pub mod cow;
 pub mod demand;
 pub mod elf;

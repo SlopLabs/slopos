@@ -343,6 +343,12 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
     let pages = get_page_allocator_stats();
     let tasks = get_task_stats();
     let sched = get_scheduler_stats();
+    let commit = slopos_mm::commit::commit_stats();
+    let commit_headroom_pages = if commit.limit == u32::MAX {
+        u32::MAX
+    } else {
+        commit.limit.saturating_sub(commit.committed)
+    };
 
     let info = UserSysInfo {
         total_pages: pages.total,
@@ -358,7 +364,9 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
         schedule_calls: sched.schedule_calls,
         wl_balance: slopos_ostd::wl_currency::check_balance(),
         boot_flags: slopos_ostd::boot_flags::get_flags(),
-        _pad1: 0,
+        commit_headroom_pages,
+        commit_limit_pages: commit.limit,
+        committed_pages: commit.committed,
     };
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;

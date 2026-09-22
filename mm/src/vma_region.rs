@@ -7,7 +7,7 @@
 //! gaps between existing entries, and `insert` merges compatible adjacent
 //! regions automatically.
 
-use slopos_abi::quota::{PagesAxis, ResidentPagesAxis};
+use slopos_abi::quota::{CommitPagesAxis, PagesAxis, ResidentPagesAxis};
 use slopos_ostd::KBTreeMap;
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{ChargeSlot, Reservation, TryChargeError, try_charge};
@@ -96,6 +96,21 @@ pub enum RegionPurpose {
     Data,
 }
 
+/// How a region's private pages are promised against the commit ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Commit {
+    /// Costs nothing: the pages are owned elsewhere (a shared object, a file's
+    /// page set) or no access can populate them (`PROT_NONE`).
+    Unreserved,
+    /// The whole span was charged when the region was created; a fault in it
+    /// can therefore always find its frame accounted for.
+    Extent,
+    /// Each page is charged as it is placed — by the loader, by the stack
+    /// growth fault, by fork's snapshot — and a refusal there is the one
+    /// road that still ends in `SIGBUS`. Also what `MAP_NORESERVE` asks for.
+    Frames,
+}
+
 /// A virtual memory region with typed backing, protection, and purpose.
 #[derive(Clone, Debug)]
 pub struct VmaRegion {
@@ -108,9 +123,89 @@ pub struct VmaRegion {
     /// User-mode accessible (Ring 3).
     pub user: bool,
     pub purpose: RegionPurpose,
+    pub commit: Commit,
+    /// `MAP_NORESERVE`: access makes this region [`Commit::Frames`], never
+    /// [`Commit::Extent`], however its protection is later rewritten.
+    pub noreserve: bool,
 }
 
 impl VmaRegion {
+    /// A user region, its commit class derived from what can populate it.
+    pub fn new(
+        protection: Protection,
+        backing: RegionBacking,
+        lazy: bool,
+        purpose: RegionPurpose,
+    ) -> Self {
+        let commit = Self::classify(&protection, &backing, lazy, purpose, false);
+        Self {
+            protection,
+            backing,
+            lazy,
+            cow: false,
+            user: true,
+            purpose,
+            commit,
+            noreserve: false,
+        }
+    }
+
+    /// The caller declined a reservation (`MAP_NORESERVE`): the pages are
+    /// charged as they are touched and a shortfall is theirs to take.
+    pub fn noreserve(mut self) -> Self {
+        self.noreserve = true;
+        self.commit = Self::classify(
+            &self.protection,
+            &self.backing,
+            self.lazy,
+            self.purpose,
+            true,
+        );
+        self
+    }
+
+    fn classify(
+        protection: &Protection,
+        backing: &RegionBacking,
+        lazy: bool,
+        purpose: RegionPurpose,
+        noreserve: bool,
+    ) -> Commit {
+        let accessible = protection.read || protection.write || protection.exec;
+        match backing {
+            RegionBacking::SharedMemfd { .. }
+            | RegionBacking::Ring
+            | RegionBacking::File { private: false, .. } => Commit::Unreserved,
+            _ if !lazy => Commit::Frames,
+            RegionBacking::Anonymous if purpose == RegionPurpose::Stack => Commit::Frames,
+            RegionBacking::Anonymous if accessible && noreserve => Commit::Frames,
+            RegionBacking::Anonymous if accessible => Commit::Extent,
+            RegionBacking::File { private: true, .. } if protection.write => Commit::Extent,
+            _ => Commit::Unreserved,
+        }
+    }
+
+    /// The class the region holds once its protection is `prot`. A class is
+    /// never given back: only an unreserved region moves, the first time a
+    /// protection lets its pages be populated.
+    pub fn commit_under(&self, prot: Protection) -> Commit {
+        match self.commit {
+            Commit::Unreserved => Self::classify(
+                &prot,
+                &self.backing,
+                self.lazy,
+                self.purpose,
+                self.noreserve,
+            ),
+            held => held,
+        }
+    }
+
+    /// Whether `prot` is what first makes this region owe its span.
+    pub fn reserves_under(&self, prot: Protection) -> bool {
+        self.commit == Commit::Unreserved && self.commit_under(prot) == Commit::Extent
+    }
+
     /// Mergeable ignoring file position — every attribute but `first_page`.
     fn attributes_match(&self, other: &VmaRegion) -> bool {
         self.protection == other.protection
@@ -118,6 +213,8 @@ impl VmaRegion {
             && self.cow == other.cow
             && self.user == other.user
             && self.purpose == other.purpose
+            && self.commit == other.commit
+            && self.noreserve == other.noreserve
     }
 
     pub fn can_merge_with(&self, other: &VmaRegion) -> bool {
@@ -252,15 +349,24 @@ fn range_pages(start: u64, end: u64) -> u32 {
 /// [`unlink`](Self::unlink) are the only writers of both the tree and
 /// `mapped_pages`, so the charge cannot drift; [`audit`](Self::audit) checks
 /// that at runtime anyway.
+///
+/// The commit charge is the same shape over a different sum: the
+/// [`Commit::Extent`] spans, kept by `link`/`unlink`, plus the pages the
+/// [`Commit::Frames`] regions have placed, kept by `charge_frames`/`refund_frames`.
 pub struct VmaMap {
     map: KBTreeMap<u64, (u64, VmaRegion)>,
     /// Pages the tree currently spans. Maintained incrementally by
     /// `link`/`unlink` rather than recomputed, so a mutation stays O(log n).
     mapped_pages: u32,
+    extent_pages: u32,
+    frame_pages: u32,
+    /// Commit advanced to the loader ahead of the frames it will place.
+    prepaid: u32,
     /// The account [`mapped_pages`](Self::mapped_pages) is charged to, kept
     /// separately because an empty slot names no account.
     account: AccountId,
     charge: ChargeSlot<PagesAxis>,
+    commit: ChargeSlot<CommitPagesAxis>,
     /// Resident pages, synced from the address space's own leaf count: the
     /// cursor is the only place a user leaf appears, so a second count drifts.
     resident: ChargeSlot<ResidentPagesAxis>,
@@ -271,8 +377,12 @@ impl VmaMap {
         Self {
             map: KBTreeMap::new(),
             mapped_pages: 0,
+            extent_pages: 0,
+            prepaid: 0,
+            frame_pages: 0,
             account: AccountId::NONE,
             charge: ChargeSlot::empty(),
+            commit: ChargeSlot::empty(),
             resident: ChargeSlot::empty(),
         }
     }
@@ -286,12 +396,22 @@ impl VmaMap {
             return;
         }
         self.charge.take();
+        self.commit.take();
         self.resident.take();
         self.account = account;
         if self.mapped_pages != 0
             && let Ok(reservation) = try_charge::<PagesAxis>(account, self.mapped_pages)
         {
             self.charge.put(reservation);
+        }
+        let committed = self
+            .extent_pages
+            .saturating_add(self.frame_pages)
+            .saturating_add(self.prepaid);
+        if committed != 0
+            && let Ok(reservation) = try_charge::<CommitPagesAxis>(account, committed)
+        {
+            self.commit.put(reservation);
         }
     }
 
@@ -334,6 +454,54 @@ impl VmaMap {
         self.charge.amount()
     }
 
+    /// Pages promised against the commit ceiling.
+    #[inline]
+    pub fn committed_pages(&self) -> u32 {
+        self.commit.amount()
+    }
+
+    /// Promise `n` more pages for a [`Commit::Frames`] region, before they
+    /// are placed. A refusal leaves the ledger untouched.
+    pub fn charge_frames(&mut self, n: u32) -> Result<(), TryChargeError> {
+        let advanced = n.min(self.prepaid);
+        let rest = n - advanced;
+        if rest != 0 {
+            let reservation = try_charge::<CommitPagesAxis>(self.account, rest)?;
+            self.commit.grow(reservation);
+        }
+        self.prepaid -= advanced;
+        self.frame_pages = self.frame_pages.saturating_add(n);
+        Ok(())
+    }
+
+    /// Hold `funds` as an advance on frames about to be placed: a charge
+    /// taken while the previous image was still charged, so the loader that
+    /// follows cannot be refused what its caller was already promised.
+    pub fn prepay(&mut self, funds: Reservation<CommitPagesAxis>) {
+        debug_assert_eq!(
+            funds.account(),
+            self.account,
+            "VmaMap::prepay: an advance against another principal's row"
+        );
+        if funds.account() != self.account {
+            return;
+        }
+        self.prepaid = self.prepaid.saturating_add(funds.amount());
+        self.commit.grow(funds);
+    }
+
+    /// Give back whatever advance was not drawn.
+    pub fn end_prepay(&mut self) {
+        self.prepaid = 0;
+        self.settle();
+    }
+
+    /// Give back the promise for `n` placed pages that are gone.
+    pub fn refund_frames(&mut self, n: u32) {
+        self.frame_pages = self.frame_pages.saturating_sub(n);
+        self.settle();
+    }
+
     /// Recompute the tree's span and report it beside `mapped_pages` and the
     /// charge — the runtime form of "the charge equals the map".
     pub fn audit(&self) -> (u32, u32, u32) {
@@ -343,21 +511,29 @@ impl VmaMap {
         (walked, self.mapped_pages, self.charge.amount())
     }
 
-    /// Add one entry to the tree. Tracks the span; never touches the charge,
+    /// Add one entry to the tree. Tracks the spans; never touches a charge,
     /// which only [`settle`](Self::settle) and an `insert`'s reservation move.
     fn link(&mut self, start: u64, end: u64, region: VmaRegion) {
-        self.mapped_pages = self.mapped_pages.saturating_add(range_pages(start, end));
+        let pages = range_pages(start, end);
+        self.mapped_pages = self.mapped_pages.saturating_add(pages);
+        if region.commit == Commit::Extent {
+            self.extent_pages = self.extent_pages.saturating_add(pages);
+        }
         self.map.insert(start, (end, region));
     }
 
-    /// Remove one entry from the tree. Tracks the span; never touches the charge.
+    /// Remove one entry from the tree. Tracks the spans; never touches a charge.
     fn unlink(&mut self, start: u64) -> Option<(u64, VmaRegion)> {
         let (end, region) = self.map.remove(&start)?;
-        self.mapped_pages = self.mapped_pages.saturating_sub(range_pages(start, end));
+        let pages = range_pages(start, end);
+        self.mapped_pages = self.mapped_pages.saturating_sub(pages);
+        if region.commit == Commit::Extent {
+            self.extent_pages = self.extent_pages.saturating_sub(pages);
+        }
         Some((end, region))
     }
 
-    /// Give back whatever the charge holds above what the tree spans.
+    /// Give back whatever each charge holds above what the tree accounts for.
     ///
     /// Only ever a shrink, so it is infallible: growth is always pre-reserved
     /// by the caller that wanted it, and a `munmap` must not be refusable
@@ -365,6 +541,12 @@ impl VmaMap {
     fn settle(&mut self) {
         self.charge
             .shrink(self.charge.amount().saturating_sub(self.mapped_pages));
+        let committed = self
+            .extent_pages
+            .saturating_add(self.frame_pages)
+            .saturating_add(self.prepaid);
+        self.commit
+            .shrink(self.commit.amount().saturating_sub(committed));
     }
 
     pub fn len(&self) -> usize {
@@ -378,9 +560,10 @@ impl VmaMap {
     /// Insert a region, merging with compatible adjacent regions.
     ///
     /// Charges `[start, end)` against this map's account before touching the
-    /// tree, so a refusal leaves the address space exactly as it found it. A
-    /// merge absorbs entries whose pages are already charged and widens the
-    /// new entry by exactly as much, so the reservation taken here is the net
+    /// tree — its span, and its commit too when the region reserves one — so
+    /// a refusal leaves the address space exactly as it found it. A merge
+    /// absorbs entries whose pages are already charged and widens the new
+    /// entry by exactly as much, so the reservations taken here are the net
     /// growth however many neighbours merge.
     pub fn insert(
         &mut self,
@@ -389,8 +572,29 @@ impl VmaMap {
         region: VmaRegion,
     ) -> Result<(), TryChargeError> {
         let reserved = self.reserve_pages(start, end)?;
-        self.insert_reserved(start, end, region, reserved);
+        if region.commit == Commit::Extent {
+            let committed = try_charge::<CommitPagesAxis>(self.account, range_pages(start, end))?;
+            self.commit.grow(committed);
+        }
+        self.place(start, end, region, reserved);
         Ok(())
+    }
+
+    /// [`insert`](Self::insert) for a region that owes no span, with its page
+    /// charge already taken.
+    pub fn insert_unreserved(
+        &mut self,
+        start: u64,
+        end: u64,
+        region: VmaRegion,
+        reservation: Reservation<PagesAxis>,
+    ) {
+        debug_assert_ne!(
+            region.commit,
+            Commit::Extent,
+            "VmaMap::insert_unreserved: an extent region owes its span"
+        );
+        self.place(start, end, region, reservation);
     }
 
     /// Take the page charge for `[start, end)` without touching the tree.
@@ -405,9 +609,10 @@ impl VmaMap {
         try_charge::<PagesAxis>(self.account, range_pages(start, end))
     }
 
-    /// [`insert`](Self::insert) with the charge already taken.
-    #[allow(unused_mut)]
-    pub fn insert_reserved(
+    /// Link `region` over `[start, end)`, merging with compatible neighbours.
+    /// Every charge is already held: the pages by `reservation`, the span by
+    /// the commit slot.
+    fn place(
         &mut self,
         mut start: u64,
         mut end: u64,
@@ -470,6 +675,13 @@ impl VmaMap {
             self.mapped_pages,
             "VmaMap::insert left the page charge disagreeing with the tree"
         );
+        debug_assert_eq!(
+            self.commit.amount(),
+            self.extent_pages
+                .saturating_add(self.frame_pages)
+                .saturating_add(self.prepaid),
+            "VmaMap::insert left the commit charge disagreeing with the tree"
+        );
     }
 
     /// Find the region containing address `addr`.
@@ -529,29 +741,47 @@ impl VmaMap {
     ///
     /// Splits at both ends so a sub-range does not rewrite its whole enclosing
     /// region, then re-merges them so repeated calls cannot grow the tree
-    /// without bound. `Err` names the first address no region covers.
-    pub fn protect_range(&mut self, start: u64, end: u64, prot: Protection) -> Result<(), u64> {
+    /// without bound. A region that `prot` makes populatable for the first
+    /// time has its span committed here, before anything is rewritten, and
+    /// keeps that commit whatever a later `mprotect` narrows it to.
+    pub fn protect_range(
+        &mut self,
+        start: u64,
+        end: u64,
+        prot: Protection,
+    ) -> Result<(), ProtectError> {
         let mut cursor = start;
+        let mut owed = 0u32;
         while cursor < end {
-            let Some((_, vma_end, _)) = self.find_containing(cursor) else {
-                return Err(cursor);
+            let Some((vma_start, vma_end, region)) = self.find_containing(cursor) else {
+                return Err(ProtectError::Hole(cursor));
             };
+            if region.reserves_under(prot) {
+                owed = owed.saturating_add(range_pages(cursor.max(vma_start), vma_end.min(end)));
+            }
             cursor = vma_end;
+        }
+        if owed != 0 {
+            let commit =
+                try_charge::<CommitPagesAxis>(self.account, owed).map_err(ProtectError::Commit)?;
+            self.commit.grow(commit);
         }
 
         self.split_at(start);
         self.split_at(end);
 
         // Both ends are boundaries and the range is gap-free, so every cursor
-        // value below is a key.
+        // value below is a key; `settle` holds the charge to what was linked.
         let mut cursor = start;
-        while cursor < end {
-            let Some(entry) = self.map.get_mut(&cursor) else {
-                return Err(cursor);
-            };
-            entry.1.protection = prot;
-            cursor = entry.0;
+        while cursor < end
+            && let Some((vma_end, mut region)) = self.unlink(cursor)
+        {
+            region.commit = region.commit_under(prot);
+            region.protection = prot;
+            self.link(cursor, vma_end, region);
+            cursor = vma_end;
         }
+        self.settle();
 
         self.coalesce_at(start);
         self.coalesce_at(end);
@@ -685,6 +915,8 @@ impl VmaMap {
             };
             on_each(key, end, &region);
         }
+        self.frame_pages = 0;
+        self.prepaid = 0;
         self.settle();
     }
 
@@ -692,7 +924,20 @@ impl VmaMap {
     pub fn clear(&mut self) {
         self.map.clear();
         self.mapped_pages = 0;
+        self.extent_pages = 0;
+        self.frame_pages = 0;
+        self.prepaid = 0;
         self.charge.take();
+        self.commit.take();
         self.resident.take();
     }
+}
+
+/// Why [`VmaMap::protect_range`] left the map as it found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectError {
+    /// The first address in the range no region covers.
+    Hole(u64),
+    /// The span the new protection would commit was refused.
+    Commit(TryChargeError),
 }

@@ -12,7 +12,7 @@ use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
 use slopos_ostd::task::ops::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES, TASK_EXIT_CLEANUP_RESOURCES,
-    TASK_EXIT_CLEANUP_VM,
+    TASK_EXIT_CLEANUP_VM, TASK_EXIT_LAST_IN_PROCESS,
 };
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -378,19 +378,17 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
         return;
     };
 
-    if !task_leaves_process(task) {
-        return;
-    }
-
-    if let Some(handle) = process.handle() {
+    if task_leaves_process(task)
+        && let Some(handle) = process.handle()
+    {
         fileio_destroy_table_for_process(handle);
     }
     if matches!(mode, TaskProcessCleanupMode::DropVm)
+        && task.exit_cleanup_claimed(TASK_EXIT_LAST_IN_PROCESS)
         && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
+        && let Some(id) = ProcessId::of(&process)
     {
-        if let Some(id) = ProcessId::of(&process) {
-            destroy_process_vm(id);
-        }
+        destroy_process_vm(id);
     }
 }
 
@@ -399,7 +397,9 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
 /// Latched by `TASK_EXIT_CLEANUP_CHARGES`: exit cleanup runs from both an
 /// external `task_terminate` and the owning CPU's post-switch path, and a
 /// second decrement would report a live process as torn down — a second
-/// `destroy_process_vm` on an address space another task is running in.
+/// `destroy_process_vm` on an address space another task is running in. A
+/// `true` answer is kept in `TASK_EXIT_LAST_IN_PROCESS`, because the pass that
+/// hears it first is still running on the address space it entitles.
 ///
 /// A task whose process handle no longer resolves answers `false`; the process
 /// was already reaped.
@@ -417,6 +417,7 @@ fn task_leaves_process(task: &Task) -> bool {
         return false;
     }
     process.mark_exited();
+    task.exit_cleanup_mark(TASK_EXIT_LAST_IN_PROCESS);
     true
 }
 

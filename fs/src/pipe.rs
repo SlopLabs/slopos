@@ -22,8 +22,8 @@ pub(crate) use slopos_abi::event::MAX_PIPES;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
 
 /// Slot-index width in the packed handle encoding; the rest is generation.
-/// 8 bits cover MAX_PIPES (≤ 256) slots.
-const SLOT_BITS: u32 = 8;
+const SLOT_BITS: u32 = MAX_PIPES.trailing_zeros();
+const _: () = assert!(MAX_PIPES.is_power_of_two());
 
 /// Opaque handle identifying a kernel pipe.
 ///

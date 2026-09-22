@@ -17,7 +17,7 @@ use crate::tlb;
 use crate::user_mappings::{
     ostd_map_4kb_user, ostd_map_4kb_user_shared, ostd_virt_to_phys_4kb, vm_space_is_exclusive,
 };
-use crate::vma_region::{FileMapRef, VmaRegion};
+use crate::vma_region::{Commit, FileMapRef, VmaMap, VmaRegion};
 
 /// A demand-paging fault: the page is absent and `region` is lazily backed.
 /// The file arm is serviced in two lock holds by [`plan_file_fault`] /
@@ -75,6 +75,7 @@ pub fn can_satisfy_fault(error_code: u64, region: &VmaRegion) -> bool {
 
 pub fn handle_demand_fault(
     vm_space: &mut KArc<VmSpace>,
+    map: &mut VmaMap,
     fault_addr: u64,
     error_code: u64,
     region: &VmaRegion,
@@ -99,6 +100,22 @@ pub fn handle_demand_fault(
         return Err(MmError::Retry);
     }
 
+    let placed = region.commit == Commit::Frames;
+    if placed && map.charge_frames(1).is_err() {
+        return Err(MmError::NoMemory);
+    }
+    let outcome = place_fresh_page(vm_space, aligned_addr, region);
+    if placed && outcome.is_err() {
+        map.refund_frames(1);
+    }
+    outcome
+}
+
+fn place_fresh_page(
+    vm_space: &mut KArc<VmSpace>,
+    aligned_addr: u64,
+    region: &VmaRegion,
+) -> Result<(), MmError> {
     // One bounded reclaim-and-retry: a demand fault has no syscall return
     // path to back off on. Here and not inside `try_charge` — the account
     // arena takes no locks by construction, and a reclaim hook there would

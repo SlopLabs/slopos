@@ -99,8 +99,12 @@ pub const MAP_SHARED: u64 = 0x01;
 pub const MAP_PRIVATE: u64 = 0x02;
 pub const MAP_ANONYMOUS: u64 = 0x20;
 pub const MAP_FIXED: u64 = 0x10;
+/// The caller takes the fault-time refusal instead of a commit reservation.
+pub const MAP_NORESERVE: u64 = 0x4000;
 
 pub const F_DUPFD: u64 = 0;
+/// `F_DUPFD` with `FD_CLOEXEC` set on the new number, atomically.
+pub const F_DUPFD_CLOEXEC: u64 = 1030;
 pub const F_GETFD: u64 = 1;
 pub const F_SETFD: u64 = 2;
 pub const F_GETFL: u64 = 3;

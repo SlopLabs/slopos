@@ -39,7 +39,7 @@ needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
 *widening under proof*, not redesign, and the compiler bootstrap — the one
 exception this plan carried the longest — turned out to be mostly
-configuration. The sixteen sections between here and Phase 1 are what has
+configuration. The seventeen sections between here and Phase 1 are what has
 landed, each stating the constraints a later phase must not disturb.
 
 
@@ -1882,7 +1882,221 @@ What it rests on, in case a later phase disturbs it:
   nine third-party crates and a vendored workspace reaches none of that.
 - **No `cargo install`, no registry, no network.** The fork gives that up on
   purpose and the goal does not need it; a general dev machine does, and it
-  is the same TLS-shaped work Workstream 1.2 names.
+  is the same TLS-shaped work Workstream 1.1 names.
+
+---
+
+## The build loop holds
+
+The seventeenth thing this plan rests on, and what Workstream 1.1 was for:
+**a process that could never be backed is refused at `mmap`, `brk`,
+`mprotect` or `fork`, never killed at its first touch, and a compiler that
+spawns its linker pays no second copy of itself.** The six things the
+workstream listed each have a measured answer now, and one of them changed
+category on the way: `posix_spawn` was "a nicety" while `fork` cost nothing
+until a page was written, and it is load-bearing under a ledger that charges
+the child for every private page the parent holds. `buildloop_test` is the
+standing proof — ten cases, run in-guest, with `exit_stress_test` beside it
+for the teardown road: a jobserver's tokens cross `exec`
+and bound six workers to two, an empty jobserver blocks its reader until a
+token is written back, `std`'s file locks exclude a second process and share a
+read lock, an rlib maps private and read-only for no commit, a reservation
+past the ceiling is refused and a fit beside it is granted and touched, a
+`fork` from a process holding most of the headroom is refused where a
+`posix_spawn` from the same process succeeds, commit comes back when a child
+exits, a hundred pipes open at once, and forty-eight rlibs map at once.
+
+**The decision the open-decisions list carried.** Swap plus a victim policy,
+or a budget that makes overcommit not happen: the second, and not as a
+smaller version of the first. Swap here would be page-out with no reverse
+map, swap-entry PTEs, a fork that snapshots swap entries, an I/O on the
+fault path that already exists only for file pages, and a victim policy —
+the "policy subsystem that belongs with swap" the large-program section
+declined — for a machine whose RAM is a QEMU flag. The reference class
+says the same thing from three directions: Asterinas answers frame
+exhaustion at fault time with `SIGSEGV` and panics on a page-table frame,
+Redox's user fault path reaches `todo!("oom")`, and neither has swap or an
+OOM killer; the kernels that *do* refuse at allocation time — illumos's swap
+reservation, Windows's commit charge, Linux under `overcommit_memory=2` —
+are the ones whose builds fail with `ENOMEM` from `malloc` rather than with
+a signal from nowhere. rustc and LLVM both abort cleanly on a null from
+`malloc` ("memory allocation of N bytes failed"; "LLVM ERROR: out of
+memory"), so the refusal is attributable and lands in the process that
+asked, which is the whole of what a build loop needs from its kernel.
+
+What it rests on, in case a later phase disturbs it:
+
+- **The ledger is a quota kind, not a second mechanism.** `CommitPages` is
+  the eleventh `ResourceKind`, charged through the same lock-free arena as
+  `Pages`, refunded by the same tokens, reported on the same `QUOTA[...]`
+  lines and ratcheted by the same gate. The root row carries the ceiling —
+  `mem.commit=<percent>` of usable frames, installed by the `commit ledger`
+  boot step once the buddy is seeded, default 100, `0` measuring without
+  refusing — and per-process rows are unlimited because `RLIMIT_AS` already
+  bounds what one process can ask. `sys_info` reports the limit, the promised
+  total and the headroom, and the shell's `free` prints them, so a build
+  driver has a number to size `-j` against. The abi's own test that "every
+  kind carries a ceiling" exempts exactly two: `ResidentPages`, unbounded on
+  purpose, and this one, whose ceiling is the machine's.
+- **A region is charged one of two ways, and which is a field.**
+  `VmaRegion::commit` is `Extent`, `Frames` or `Unreserved`, chosen by the
+  constructor from the backing, the protection and the purpose, and
+  compared by the merge rule so a charged region never coalesces with an
+  uncharged one. An `Extent` region — a lazy private anonymous mapping with
+  any access, the `brk` heap, a private writable file mapping — owes its
+  whole span when it is created and gives it back when it is unlinked; the
+  `VmaMap` keeps that sum beside `mapped_pages`, by the same `link`/`unlink`
+  pair, and settles both charges together. A `Frames` region — the loader's
+  eager segments, the mapped stack, the stack's lazy growth extent, the
+  interpreter's segments, `MAP_NORESERVE` — is charged as pages are placed
+  (`charge_frames` before the frame lands, `refund_frames` per present leaf
+  when the range is unmapped) and a refusal there keeps the `UserOom`
+  road: `SIGBUS` at the fault, which is what stack growth does under Linux
+  mode 2 too. `mprotect` from `PROT_NONE` charges the span and the charge is
+  sticky, the way `VM_ACCOUNT` is; a narrowing never refunds. `fork`'s child
+  inserts the parent's regions and pays: the extent for an `Extent` region,
+  the snapshot's page count for a `Frames` one, so a fork that cannot be
+  paid for fails as a fork rather than as a child that dies on its first
+  write. `memfd` pages are charged at `ftruncate` to the sizer's account and
+  released with the object. `commit_under` is the one transition rule: a
+  class is never given back, and only an unreserved region moves, the first
+  time a protection lets its pages be populated — which is why
+  `MAP_NORESERVE` is an attribute of the region rather than a rewrite of its
+  class, so a `PROT_NONE` reservation made accessible later still takes the
+  fault-time road it asked for.
+- **An exec is charged beside the image it replaces.** The one road on which
+  a refusal used to land after the point of no return: the old image was
+  released, the new one's segments were charged as they were mapped, and a
+  refusal there was a process with no program, dead of `SIGSEGV` on return
+  to user mode. `exec_commit_pages` sizes the image, its interpreter and the
+  fresh stack from the ELF headers, the charge is taken while the old image
+  is still charged — Linux's shape, an `execve` that fails `ENOMEM` while
+  old plus new exceed the ceiling — and handed to the fresh address space as
+  an advance the loader draws before it draws on the ceiling; what it does
+  not draw comes back once the stack is placed.
+- **`MAP_NORESERVE` is honoured, and that is a deliberate deviation.** Linux
+  mode 2 ignores it; illumos honours it, and so does this kernel, because a
+  caller that says it will not touch the whole reservation is asking for the
+  fault-time road on purpose and a sparse gigabyte is what a runtime's
+  address-space reservation looks like. `bigprog_test`'s gigabyte still
+  maps, as a promise the caller made rather than one the machine did.
+- **`posix_spawn` is slibc over the kernel's `spawn`, not a syscall.** The
+  primitive already had argv, envp, fd actions, a `SETSIGDEF` mask and a
+  cwd; what slibc adds is the POSIX object model over it — glibc's public
+  layouts for `posix_spawnattr_t` and `posix_spawn_file_actions_t`, the
+  full attribute and file-action families — and the one non-obvious step:
+  the child's descriptor table is *computed in the parent*. Every open
+  number is read with `F_GETFD`, the file actions are applied to that
+  shadow in order (`addopen` opens in the parent, close-on-exec, and hands
+  the result down; `adddup2` clears the flag on its target as `dup2` does),
+  and what survives `exec` becomes the `CloneFd` list. An attribute the
+  primitive cannot express — a signal mask, a named process group, a new
+  session, a scheduling policy, a second `chdir`, a relative `addopen` after
+  a `chdir` — or a table wider than the primitive's sixty-four actions falls
+  back to `fork` and exec with the same actions applied by hand, so the
+  semantics never change, only the price. The std fork
+  takes the `posix_spawn` road for `Command::spawn` and falls back to
+  `fork` where std itself does: a `pre_exec` closure, a uid or gid, a
+  `setsid`. cargo's spawn of rustc *is* the `pre_exec` case — the
+  `jobserver` crate clears `FD_CLOEXEC` in the child — and that is fine,
+  because cargo is small; rustc's spawn of the linker is the one that
+  matters and it carries no closure.
+- **The jobserver runs in its `R,W` form, and two things stood in its way.**
+  The pinned `jobserver` 0.1.34 creates an anonymous pipe (`pipe` then
+  `FD_CLOEXEC`, never a fifo — `fifo:PATH` is something it can *join*, not
+  make), primes it with one byte per job, and a client proves its inherited
+  descriptors are pipes with `fstat` before `try_clone_to_owned` gives it a
+  private close-on-exec copy. `fstat` on a pipe failed outright — the pipe
+  file ops had no `stat`, so the client read "not a pipe" and every worker
+  exited before it took a token; they answer `S_IFIFO` now, with the bytes
+  buffered as the size. `F_DUPFD_CLOEXEC` answered `EINVAL`, which is what
+  `OwnedFd::try_clone` issues on every unix, so every `File::try_clone` on
+  this target failed with it. It is a command in the `fcntl` table now, and
+  kernel tests hold both: the flag lands on the new number and not the
+  source, and a pipe's `fstat` is a fifo. `MAX_PIPES` was 64 for the machine
+  — three or four pipes per compiler at `-j N` — and is 1024, the slot width
+  derived from it rather than restated.
+- **A process that exits gives its address space back, again.** The
+  "commit comes back" case was the first thing to watch a process's memory
+  after its exit, and it did not come back: since the task-to-task switch,
+  a task that ends itself runs its process cleanup twice — once in
+  `task_terminate`, still on the address space, and once from the successor
+  after the switch — and the first pass took the "last task left" latch the
+  second pass needed, so `destroy_process_vm` was never reached from an
+  `exit` and the process never retired. Every self-exiting process leaked
+  its page tables, its frames and a registry slot until the machine ran
+  out of the 1024; nothing in the suite spawns that many in one boot, which
+  is why it held. The verdict is a sticky bit on the task now
+  (`TASK_EXIT_LAST_IN_PROCESS`), taken by whichever pass hears it first and
+  read by the one that is off the address space.
+- **A released account no longer credits a stranger.** The second thing the
+  first fix made reachable: an account row named its parent by a bare arena
+  slot, and a released slot is reissued at once under a new generation. A
+  grandchild whose parent had exited and been replaced before the
+  grandchild's own deferred teardown ran handed its outstanding charges to
+  whoever held that slot now — an underflow on the stranger's row, a panic
+  in the tests kernel and a silently wrong ledger in a release one, and the
+  intermittent lockup two full-suite runs died of in `coreutils_test`. The
+  parent edge carries the parent's generation now, every walk resolves it
+  through one `parent_of`, and a row's release hands its live children to
+  the grandparent and moves up only its own share, so an orphan keeps
+  debiting through the root. `exit_stress_test` is the reproducer kept as a
+  regression test: three hundred spawned, forked and spawned-then-forking
+  children ending on four CPUs at once, which found the panic on its first
+  run.
+- **cargo locked nothing, silently.** The pinned cargo takes its target-dir
+  and package-cache locks through `std::fs::File::lock`, and std's `flock`
+  arm is a `cfg` allowlist this target was not on: `Unsupported`, which
+  cargo's `try_acquire` reads as "this filesystem cannot lock" and proceeds
+  without. The kernel's `flock` was complete and description-scoped all
+  along; the fix is one `target_os = "slopos"` per arm in the std patch,
+  and `buildloop_test` takes the lock from `std` and has a second process
+  refused by it.
+- **A compiler maps more files than the appliance allowed.** rustc maps every
+  rlib of every dependency for the whole of a compilation — thirty to sixty
+  inodes, before a proc-macro is `dlopen`ed — and the registry held 128 sets
+  machine-wide with 32 per principal, refusing the thirty-third with
+  `ENOMEM`. It is 1024 and 256; the admission check that walked every set on
+  every fault to sum what was populated is a running total, and the
+  per-principal page bound that walk enforced is the account's own
+  `PinnedBytes` ceiling, which boot now derives from usable memory (a
+  sixteenth of it, the share the file map already handed one owner) instead
+  of the 16 MiB `abi` froze — a compiler's 370 MB of shared objects would
+  have hit that before `main`.
+- **What the reference class was measured to need.** rustc's own perf suite
+  puts a large crate's `max-rss` at 2 GB (`cargo`, debug or opt) and a
+  typical one at 300–900 MB, with LLVM's threads inside that number; the
+  sizing case is therefore `available_parallelism()` times a gigabyte or
+  two, and the number a build driver can read is the headroom `sys_info`
+  reports. The test guest stays at 1 GiB with the ceiling at 100 %: in the
+  run that measured it, 198 722 usable pages (776 MiB) could be promised,
+  the whole suite's peak promise was 120 266 of them (470 MiB) and the
+  largest single address space 118 825, with the ledger refusing exactly
+  the requests the tests made past it.
+
+**What this deliberately did not do.**
+
+- **No swap and no victim.** The plan's own large-program section said
+  choosing a victim is a policy subsystem that belongs with swap; neither
+  landed, and the ledger is what makes their absence survivable rather than
+  fatal. The residual is stated: the ceiling bounds what user private
+  mappings may promise, not what the kernel's own consumers draw from the
+  same buddy — heap, page tables, the file map's pinned pages, ramfs, the
+  caches — so a fault in an `Extent` region can still find no frame when
+  those have taken the rest, and that is still `SIGBUS`. `mem.commit` is
+  the reserve, and it is a percentage rather than a derivation because
+  the non-user consumers are capped independently (a quarter, an eighth, an
+  eighth, a cache) and never all at once.
+- **No fifo.** `mkfifo` still answers `ENOSYS` and ext2 cannot create the
+  inode; the jobserver never needs one, and a `--jobserver-auth=fifo:PATH`
+  handed down by a make that does is a different plan.
+- **No `vfork`, no `CLONE_VFORK`.** `posix_spawn` over the kernel's spawn is
+  the cheaper road and the one std already prefers.
+- **cargo's `-j` is not memory-aware.** The kernel supplies the number and
+  refuses what does not fit; choosing the parallelism is the driver's.
+- **The disk number is still the first in-guest build's.** Nothing here
+  builds in-guest yet, and a host measurement of a single-variant target
+  directory would be a number about the host.
 
 ---
 
@@ -1912,44 +2126,20 @@ being paid for. `scripts/check_linker_script.sh` keeps its whole value as the
 ratchet that would notice `wild` becoming viable, which is now a reason to
 re-open a decision rather than a blocker to route around.
 
-**What the reversal costs.** Five of the landed sections above: the dynamic
+**What the reversal costs.** Six of the landed sections above: the dynamic
 loader, which was always owed; the C++ runtime, which was new; the libc
 surface underneath them, which was owed either way and which the LLVM decision
 promoted from off the critical path to load-bearing; the port of
 llvm-project itself, which was the phase's first real measurement and is the
-one that came back cheapest; and the cross-build, which is the one that turned
-out to be mostly configuration. The C99 frontend written
+one that came back cheapest; the cross-build, which is the one that turned
+out to be mostly configuration; and the commit ledger, which the Rust-hosted
+road could have deferred and an LLVM-sized peak could not. The C99 frontend written
 in Rust that the Rust-hosted road owed is **deleted** rather than deferred —
 clang arrives in the same monorepo pass that produces `libLLVM.so` and
 `rust-lld`, so the C compiler is a by-product of a decision taken for Rust's
 sake, and that is the only place this road is cheaper than the one it replaced.
 
-### Workstream 1.1 — The build loop holds (**M**)
-
-A toolchain that starts is not a toolchain that finishes. What the loop needs
-beyond the landed sections above, with the tree's current answer beside it:
-
-- **Memory, and this is the one that moves.** rustc with LLVM peaks far above
-  anything cranelift would have, and a build that overcommits currently dies at
-  the faulting task with a SIGBUS-coded exit. Swap was an open decision under
-  the Rust-hosted road; under this one it is a prerequisite of this phase, or
-  a per-build memory budget is, and "decide later" stops being available.
-- **Subprocesses.** rustc spawns the linker and cargo spawns rustc. `fork`,
-  `execve`, `execvp`, `waitpid` and `wait4` exist; `posix_spawn` does not, and
-  Rust's `Command` falls back to fork/exec without it, so it is a nicety.
-- **The jobserver**, which cargo and rustc use to share a parallelism budget
-  across processes — a pipe or a fifo, and a `poll`/`read` that blocks.
-- **File locking**, which cargo uses on the target directory and the registry.
-  `flock` exists.
-- **`mmap` of rlib metadata**, which rustc does for every dependency.
-  `MAP_PRIVATE` file mappings with demand paging exist.
-- **Disk, for the target directory.** `builddir/target` is 52 GB across 219,895
-  files on the host, but that is every variant, every test binary and every
-  doc artifact; a single-variant kernel build is a small fraction of it, and
-  the honest number is the one a first in-guest build measures rather than one
-  extrapolated here.
-
-### Workstream 1.2 — Getting code in and out (**S** for the goal, **M** beyond it)
+### Workstream 1.1 — Getting code in and out (**S** for the goal, **M** beyond it)
 
 Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
 entries of which only nine are third-party (`bitflags gimli libm limine paste
@@ -2096,12 +2286,6 @@ not been made at all.
       populated from the host with this repository and the pinned sysroot.
       What is left is the *workflow*: a host-built image refreshed per session,
       a 9p/virtiofs mount, or a plain TCP transfer once there is one.
-- [ ] **When does swap arrive, and what chooses the victim?** No longer
-      deferrable, which is what the LLVM decision changed: rustc with LLVM
-      peaks far above anything cranelift would have, and a build that
-      overcommits currently dies at the faulting task with a SIGBUS-coded
-      exit. Decide between swap plus a reclaim policy and a per-build memory
-      budget that makes overcommit not happen — before Workstream 1.1.
 
 **Decided.** C++ runtime: **LLVM's `libc++`, cross-built, libc++ and
 libc++abi linked into one `libc++.so`** — settled by building it, and by the
@@ -2125,7 +2309,13 @@ Phases 1–2, in QEMU. Identity: single-user, uid 0, permanently — so file
 ownership and a medium-resident quota ledger stay out of scope and `stat`'s
 uid/gid fields exist for layout only. Directory scaling: an in-memory name
 index, not an on-disk htree, so `e2fsck` stays the oracle for every image this
-kernel writes. Std platform layer: **unix family over a real libc** —
+kernel writes. Memory: **a commit ledger, not swap** — every private mapping is promised
+against a ceiling derived from usable RAM when it is created and refused
+there, illumos's and Windows's model and Linux's `overcommit_memory=2`,
+with `MAP_NORESERVE` honoured as the caller's explicit choice of the
+fault-time road; `posix_spawn` over the kernel's spawn primitive is what
+keeps a compiler's spawn of its linker from owing a second copy of the
+compiler. Std platform layer: **unix family over a real libc** —
 `target-family = ["unix"]`, `env = "slibc"`, a `libc/src/unix/slopos/` module,
 std riding its own `sys/pal/unix`, and `slibc/std_pal/` deleted rather than
 moved. The rejected alternative was a bespoke PAL over a crates.io ABI crate
@@ -2160,6 +2350,7 @@ compile.
 | Cargo fork | `toolchain/cargo/`, `scripts/make_rustc_src.sh`, `scripts/check_cargo_fork.sh`, `scripts/lib/toolchain_pin.sh` | *invariant* — the patch shares the compiler fork's tree and stamp, and `rusqlite` stays only while slibc keeps `strspn`, `strcspn` and `FILENAME_MAX` |
 | Cross-build | `scripts/bootstrap_slopos_toolchain.sh`, `scripts/check_bootstrap_config.sh`, `toolchain/compiler/000{2,3}-*.patch`, `toolchain/llvm/000{1,2}-*.patch`, `toolchain/llvm-rustc/`, `scripts/check_clang_driver.sh`, `Cargo.toml`'s `exclude` | *invariant* — the wrapper's two triples, and the workspace exclusion without which bootstrap does not build |
 | Dev disk | `scripts/build_devdisk.sh`, `scripts/qemu_run.sh`, `userland/src/bin/tests/devdisk_test.rs`, `core/src/exec/grants.rs` | *invariant* — the marker's sizes are read off the volume, not off the stage |
+| Build loop | `mm/src/{commit,vma_region,demand,process_vm,memfd}.rs`, `slopos-ostd/src/process/quota/{arena,axis}.rs`, `abi/src/quota.rs`, `slibc/src/process/spawn.rs`, `toolchain/{rust,libc}/*.patch`, `fs/src/{filemap,pipe}.rs`, `fs/src/fileio/fdops.rs`, `userland/src/bin/tests/buildloop_test.rs` | *invariant* — an `Extent` region owes its span from creation and a `Frames` region as pages land; the std `posix_spawn` arm and slibc's implementation are one contract |
 | C++ platform | `vendor/unwinding`, `slibc/{staticlib,cdylib,crt0,include}/`, `NOTICE.md` | work |
 | Phase 2 install | `scripts/qemu_run.sh`, `fs/src/devfs/mod.rs`, `fs/src/partition.rs` | work |
 | Execution boundary | `AGENTS.md` | Phase 2 needs a scoped exception |

@@ -116,6 +116,16 @@ fn run_memory(kc: &mut KConsole<'_>) {
         pages.allocated
     );
 
+    let commit = crate::commit::commit_stats();
+    kline!(
+        kc,
+        "commit: {} of {} pages promised (peak {}, {} refused)",
+        commit.committed,
+        commit.limit,
+        commit.peak,
+        commit.denials
+    );
+
     slopos_ostd::mm::reclaim::for_each_reclaimer(|name, pages| {
         kline!(kc, "reclaim: {:<18} {} pages", name, pages);
     });

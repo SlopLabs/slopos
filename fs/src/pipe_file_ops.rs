@@ -1,6 +1,7 @@
 use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, PipeSlot};
 use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::fs::{S_IFIFO, UserFsStat};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP};
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
@@ -152,9 +153,29 @@ fn pipe_release_writer(h: PipeHandle) {
     }
 }
 
+/// What `fstat` says about either end: a FIFO whose size is what is buffered.
+/// A jobserver client checks exactly this before trusting an inherited fd.
+fn pipe_stat(handle: usize, out: &mut UserFsStat) -> i32 {
+    let h = PipeHandle::from_usize(handle);
+    let Some(buffered) = pipe::with_pipe(h, |slot| slot.len) else {
+        return Errno::EBADF.raw();
+    };
+    *out = UserFsStat::default();
+    out.st_ino = handle as u64;
+    out.st_nlink = 1;
+    out.st_mode = S_IFIFO | 0o600;
+    out.st_size = buffered as i64;
+    out.st_blksize = pipe::PIPE_BUFFER_SIZE as i64;
+    0
+}
+
 impl FileOps for PipeReadOps {
     fn kind(&self) -> FileKind {
         FileKind::PipeRead
+    }
+
+    fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
+        pipe_stat(handle, out)
     }
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, flags: u32) -> isize {
@@ -275,6 +296,10 @@ impl FileOps for PipeReadOps {
 impl FileOps for PipeWriteOps {
     fn kind(&self) -> FileKind {
         FileKind::PipeWrite
+    }
+
+    fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {
+        pipe_stat(handle, out)
     }
 
     fn read(&self, _handle: usize, _buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {

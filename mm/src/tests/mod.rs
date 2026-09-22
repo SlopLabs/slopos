@@ -6,6 +6,7 @@ pub mod mmio_tests;
 pub mod quiesce_tests;
 pub mod test_fixtures;
 pub mod tests;
+pub mod tests_commit;
 pub mod tests_cow_edge;
 pub mod tests_demand;
 pub mod tests_exec_boundary;

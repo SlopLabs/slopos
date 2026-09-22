@@ -1400,13 +1400,16 @@ pub fn test_memfd_create_boundaries() -> TestResult {
     let result = slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root());
     assert_test!(result.is_some(), "memfd_create should succeed");
     if let Some((handle, _ops, backing)) = result {
-        let rc = slopos_mm::memfd::memfd_ftruncate(handle, 0);
+        let rc =
+            slopos_mm::memfd::memfd_ftruncate(handle, 0, slopos_ostd::process::AccountId::NONE);
         assert_test!(rc < 0, "ftruncate(0) should fail");
 
-        let rc = slopos_mm::memfd::memfd_ftruncate(handle, 4096);
+        let rc =
+            slopos_mm::memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
         assert_eq_test!(rc, 0, "ftruncate(4096) should succeed");
 
-        let rc = slopos_mm::memfd::memfd_ftruncate(handle, 8192);
+        let rc =
+            slopos_mm::memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
         assert_test!(rc < 0, "ftruncate twice should fail");
 
         drop(backing);
@@ -3948,6 +3951,96 @@ pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
     TestResult::Pass
 }
 
+/// A jobserver client trusts an inherited descriptor only after `fstat`
+/// says it is a FIFO.
+pub fn test_fstat_on_a_pipe_reports_a_fifo() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_guard = assert_some!(task_find_by_id(task_id));
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+    for fd in [read_fd, write_fd] {
+        let mut st = slopos_abi::fs::UserFsStat::default();
+        assert_eq_test!(
+            slopos_fs::fileio::file_fstat_fd(pid, fd, &mut st),
+            0,
+            "fstat on a pipe end failed"
+        );
+        assert_eq_test!(
+            st.st_mode & slopos_abi::fs::S_IFMT,
+            slopos_abi::fs::S_IFIFO,
+            "a pipe end must stat as a FIFO"
+        );
+        assert_eq_test!(st.st_size, 0, "an empty pipe has nothing buffered");
+    }
+    TestResult::Pass
+}
+
+/// `F_DUPFD_CLOEXEC` is what `OwnedFd::try_clone` issues, so a jobserver
+/// client's private copy of the token pipe has to arrive close-on-exec.
+pub fn test_dupfd_cloexec_sets_the_flag_on_the_new_number() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_guard = assert_some!(task_find_by_id(task_id));
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid, 0, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let floor = 12;
+    let dup_fd = file_fcntl_fd(pid, read_fd, slopos_abi::syscall::F_DUPFD_CLOEXEC, floor);
+    assert_test!(
+        dup_fd >= floor as i64,
+        "F_DUPFD_CLOEXEC must honour the floor"
+    );
+    assert_eq_test!(
+        file_fcntl_fd(pid, dup_fd as i32, slopos_abi::syscall::F_GETFD, 0),
+        FD_CLOEXEC as i64,
+        "the new number must be close-on-exec"
+    );
+    assert_eq_test!(
+        file_fcntl_fd(pid, read_fd, slopos_abi::syscall::F_GETFD, 0),
+        0,
+        "the source must keep its own flag"
+    );
+    let plain = file_fcntl_fd(pid, read_fd, slopos_abi::syscall::F_DUPFD, floor);
+    assert_test!(plain >= floor as i64, "F_DUPFD must honour the floor");
+    assert_eq_test!(
+        file_fcntl_fd(pid, plain as i32, slopos_abi::syscall::F_GETFD, 0),
+        0,
+        "F_DUPFD starts the new number clear"
+    );
+    TestResult::Pass
+}
+
 /// cloexec is per-fd-entry, not a property of the open file, so dup must not
 /// copy it.
 pub fn test_dup_does_not_copy_cloexec() -> TestResult {
@@ -4572,6 +4665,14 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_dup_does_not_copy_cloexec, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_dupfd_cloexec_sets_the_flag_on_the_new_number,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_fstat_on_a_pipe_reports_a_fifo,
+    suite = syscall_valid
+);
 slopos_testing::stest!(name = test_close_twice_is_safe, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_close_while_dup_keeps_object_alive,
@@ -6408,7 +6509,8 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     );
     assert_test!(mfd_fd >= 0, "memfd fd install failed");
     assert_test!(
-        slopos_mm::memfd::memfd_ftruncate(mfd_handle, 4096) == 0,
+        slopos_mm::memfd::memfd_ftruncate(mfd_handle, 4096, slopos_ostd::process::AccountId::NONE)
+            == 0,
         "ftruncate failed"
     );
 

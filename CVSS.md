@@ -48,6 +48,46 @@ caller's choosing. The rest of what the reviewers found was correctness
 (`std::stod("0e1")` throwing on a spurious `ERANGE`, a missing sentinel guard,
 a nonsense load-bias fallback), all closed in the same unreleased change.
 
+Swept 2026-09-21: the commit ledger and the build-loop plumbing — every
+charge point (`mmap`, `brk`, `mprotect`, `fork`, `exec`, `memfd` sizing, the
+demand and stack-growth faults), every refund road including the unmap error
+arms, `F_DUPFD_CLOEXEC`, the pipe `fstat`, the file map's admission change,
+slibc's `posix_spawn` over the spawn primitive with its parent-side descriptor
+plan, and the process exit path. Three reviewers, twenty-odd findings, all
+closed inside the same unreleased change and so none an entry: an `exec`
+refused after the point of no return (now sized and charged beside the old
+image), `MAP_NORESERVE` lost across a `PROT_NONE` reservation, refunds missing
+on the `munmap` and `MAP_FIXED` error roads and on a failed stack reset, and a
+`posix_spawn` that answered `E2BIG` where it should have fallen back to
+`fork`. The sweep also proved a **pre-existing** defect the ledger made
+visible by measuring it: since the task-to-task switch, a process that ended
+itself never had its address space destroyed or its registry entry retired —
+the first exit-cleanup pass consumed the "last task left" latch the second
+pass needed — so every self-exiting process leaked its frames, page tables and
+one of the 1024 process slots until shutdown. Any user reaches the exhaustion
+by exiting 1024 processes, but no boundary is crossed and nothing is read or
+written that should not be, so it would have been an availability entry at
+most; it is fixed here (`TASK_EXIT_LAST_IN_PROCESS`) with the build-loop
+test's "commit comes back when a process exits" as its durable record, and is
+therefore not an entry. Fixing it reached a second pre-existing defect:
+an account row named its parent by a bare arena slot, and a released slot is
+reissued under a new generation at once, so a process whose parent exited and
+was replaced before its own deferred teardown ran credited its outstanding
+charges to the stranger now in that slot — a row underflow that panics the
+tests kernel and silently corrupts the ledger in a release one. Any user
+reaches it with a fork-and-exit ordering (`exit_stress_test` finds it in
+seconds), so it is an availability defect at most; the parent edge carries
+the parent's generation now and a released row hands its children to the
+grandparent, so it is fixed here and not an entry. The stress test then
+reached a third, in the tests kernel only: the per-CPU klog capture ring took
+a bare spin flag with interrupts on, so a writer switched out mid-append left
+its CPU's next writer spinning forever, and a spinner holding an
+interrupt-masking lock stopped acking TLB shootdowns and wedged every CPU
+behind it. The shipped kernel registers no capture backend and so never
+takes that lock; the ring masks interrupts while held, acks shootdowns while
+it waits, and drops an append nested from an NMI, so it is fixed here and
+not an entry.
+
 The highest ID issued so far is **SLOPOS-2026-0056**. The next finding is
 `SLOPOS-2026-0057`.
 

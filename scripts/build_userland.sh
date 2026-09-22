@@ -162,6 +162,8 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin pty_flow_test \
         --bin mm_stress_test \
         --bin bigprog_test \
+        --bin buildloop_test \
+        --bin exit_stress_test \
         --bin spin_signal_test \
         --bin terminal_grid_test \
         --bin sysmon_selection_test \
@@ -254,6 +256,12 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/bigprog_test" ]; then
         cp "$RELEASE_DIR/bigprog_test" "$BUILD_DIR/bigprog_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/buildloop_test" ]; then
+        cp "$RELEASE_DIR/buildloop_test" "$BUILD_DIR/buildloop_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/exit_stress_test" ]; then
+        cp "$RELEASE_DIR/exit_stress_test" "$BUILD_DIR/exit_stress_test.elf"
     fi
     if [ -f "$RELEASE_DIR/sigwinch_default_test" ]; then
         cp "$RELEASE_DIR/sigwinch_default_test" "$BUILD_DIR/sigwinch_default_test.elf"

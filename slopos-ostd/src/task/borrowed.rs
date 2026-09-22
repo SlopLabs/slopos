@@ -126,6 +126,12 @@ impl<K, U> TaskInner<K, U> {
         bits & !previous
     }
 
+    /// Whether every bit of `bits` has been claimed.
+    #[inline]
+    pub fn exit_cleanup_claimed(&self, bits: u8) -> bool {
+        self.exit_cleanup_flags.load(Ordering::Acquire) & bits == bits
+    }
+
     #[inline]
     pub fn exit_info(&self) -> &crate::sync::AtomicCell<ExitInfo> {
         &self.exit_info

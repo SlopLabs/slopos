@@ -4,7 +4,7 @@
 //! backing wait queues live in the kernel's trusted core; the slot spaces are
 //! defined here.
 
-pub const MAX_PIPES: usize = 64;
+pub const MAX_PIPES: usize = 1024;
 
 pub const MAX_TTYS: usize = 32;
 

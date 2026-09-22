@@ -6,6 +6,15 @@
 # line, and fails if a required phase is missing, if a peak exceeds its
 # recorded cap, or if a denial was recorded where the gate expects none.
 #
+# A denial is a finding, with one exception the gate file has to name: a kind
+# whose *refusal* is a tested property. `commitpages` is the machine's commit
+# ceiling, and the suite proves it refuses at `mmap` and at `fork` by asking
+# for more than the machine has, so the root row records those refusals. An
+# `expect-denials <phase> <kind> <n>` line holds such a kind to exactly `n`,
+# in both directions -- a refusal that stopped happening and an undeclared one
+# that joined it both fail -- and is refused for any kind not in
+# `REFUSAL_TESTED_KINDS`, so an accidental denial elsewhere stays a finding.
+#
 # The numbers here are **measured, never chosen**. Deriving an enforced runtime
 # default from a boot-time observation is how Linux shipped limits that could
 # not subsequently be raised, so there are deliberately two numbers per kind in
@@ -38,10 +47,14 @@ while [ $# -gt 0 ]; do
         --emit-allowlist) EMIT=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
         --gate-data-dir) GATE_DATA_DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+# Kinds whose refusal the suite provokes on purpose. Only these may carry an
+# `expect-denials` line.
+REFUSAL_TESTED_KINDS=" commitpages "
 
 # The one line the whole gate reads, matched once and in full. A per-field
 # `sed` would echo its input unchanged when the pattern missed, so a renamed
@@ -156,6 +169,16 @@ emit_gate_data() {
     echo "# refused something — which is a finding, not a pass."
     echo "max-denials 0"
     echo
+    echo "# The refusals the suite provokes on purpose, held to their exact count:"
+    echo "# fewer means a test stopped refusing, more means something else was."
+    for key in $(printf '%s\n' "${!DENIALS[@]}" | sort); do
+        [ "${DENIALS[$key]}" -eq 0 ] && continue
+        case "$REFUSAL_TESTED_KINDS" in
+            *" ${key##*/} "*) printf 'expect-denials %s %s %s\n' "${key%%/*}" "${key##*/}" "${DENIALS[$key]}" ;;
+            *) echo "check_quota_headroom: not emitting $key's ${DENIALS[$key]} denial(s): its refusal is not a tested property" >&2 ;;
+        esac
+    done
+    echo
     for phase in $(printf '%s\n' "${!SEEN_PHASE[@]}" | sort); do
         echo "require-phase $phase"
     done
@@ -211,6 +234,7 @@ run_gate() {
     local MIN_KINDS=0 MAX_DENIALS=0
     local -a REQUIRED=()
     declare -A CAPS=()
+    declare -A EXPECT_DENIALS=()
     declare -A COST_FLOOR=()
     local DEPTH_RATIO_DEPTH=0 DEPTH_RATIO_CAP=0 MIN_REFERENCE=0
     declare -A MIN_KINDS_FOR=()
@@ -229,6 +253,15 @@ run_gate() {
             min-kinds-for)
                 MIN_KINDS_FOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
             max-denials)  MAX_DENIALS=$(awk '{print $2}' <<<"$line") ;;
+            expect-denials)
+                case "$REFUSAL_TESTED_KINDS" in
+                    *" $(awk '{print $3}' <<<"$line") "*) ;;
+                    *)
+                        echo "check_quota_headroom: $gate:$lineno: expect-denials names '$(awk '{print $3}' <<<"$line")', whose refusal is not a tested property" >&2
+                        return 2
+                        ;;
+                esac
+                EXPECT_DENIALS["$(awk '{print $2"/"$3}' <<<"$line")"]=$(awk '{print $4}' <<<"$line") ;;
             min-charge-over-reference)
                 COST_FLOOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
             min-reference-cycles)
@@ -277,7 +310,14 @@ run_gate() {
             echo "FAIL: $gkey peaked at 0 — the kind was never exercised, so a cap on it bounds nothing." >&2
             fail=1
         fi
-        if [ "${DENIALS[$gkey]:-0}" -gt "$MAX_DENIALS" ]; then
+        if [ -n "${EXPECT_DENIALS[$gkey]+x}" ]; then
+            if [ "${DENIALS[$gkey]:-0}" -ne "${EXPECT_DENIALS[$gkey]}" ]; then
+                echo "FAIL: $gkey recorded ${DENIALS[$gkey]:-0} denial(s), want exactly ${EXPECT_DENIALS[$gkey]}." >&2
+                echo "      Fewer: a deliberate refusal stopped happening. More: something refused that no test meant to." >&2
+                fail=1
+            fi
+            unset "EXPECT_DENIALS[$gkey]"
+        elif [ "${DENIALS[$gkey]:-0}" -gt "$MAX_DENIALS" ]; then
             echo "FAIL: $gkey recorded ${DENIALS[$gkey]} denial(s), over max-denials $MAX_DENIALS." >&2
             echo "      Under quota=warn these were granted; under quota=enforce they would refuse." >&2
             fail=1
@@ -349,6 +389,10 @@ run_gate() {
     # would silently keep passing after the kind it names stopped being charged.
     for gkey in "${!CAPS[@]}"; do
         echo "FAIL: gate entry '$gkey' matched no observed phase/kind — dead entry, delete it." >&2
+        fail=1
+    done
+    for gkey in "${!EXPECT_DENIALS[@]}"; do
+        echo "FAIL: gate entry 'expect-denials $gkey' matched no observed phase/kind — dead entry, delete it." >&2
         fail=1
     done
     # Same ratchet: a `min-kinds-for` naming a phase nothing reports is a floor
@@ -614,6 +658,66 @@ post-userland-tests	objectrow	257
     else
         printf '%s\n' "$out" > "$tmp/gates/$VARIANT.txt"
         _expect 0 "OK:" "$tmp/roundtrip.log" "emit round-trips"
+    fi
+
+    # 16. A refusal the suite provokes on purpose is held to its exact count.
+    {
+        cat "$clean"
+        _line post-userland-tests warn 0 commitpages 3 257 300 2
+    } > "$tmp/refused.log"
+    printf '%sexpect-denials post-userland-tests commitpages 2\npost-userland-tests\tcommitpages\t257\n' \
+        "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 0 "OK:" "$tmp/refused.log" "expected refusals accepted"
+
+    # 16a. One fewer: a test stopped refusing.
+    {
+        cat "$clean"
+        _line post-userland-tests warn 0 commitpages 3 257 300 1
+    } > "$tmp/underrefused.log"
+    _expect 1 "want exactly 2" "$tmp/underrefused.log" "a refusal that stopped happening rejected"
+
+    # 16b. One more: something refused that no test meant to.
+    {
+        cat "$clean"
+        _line post-userland-tests warn 0 commitpages 3 257 300 3
+    } > "$tmp/overrefused.log"
+    _expect 1 "want exactly 2" "$tmp/overrefused.log" "an undeclared refusal rejected"
+
+    # 16c. Only a kind whose refusal is a tested property may carry the line;
+    #      for any other kind a denial stays the finding max-denials makes it.
+    printf '%sexpect-denials post-userland-tests fdslot 4\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 2 "not a tested property" "$tmp/denied.log" "expect-denials on an untested kind refused"
+
+    # 16c'. The line for the listed kind leaves every other kind under
+    #       max-denials, so it cannot be used to wave an accidental denial
+    #       through.
+    {
+        cat "$tmp/denied.log"
+        _line post-userland-tests warn 0 commitpages 3 257 300 2
+    } > "$tmp/refused-and-denied.log"
+    printf '%sexpect-denials post-userland-tests commitpages 2\npost-userland-tests\tcommitpages\t257\n' \
+        "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "denial(s), over max-denials" "$tmp/refused-and-denied.log" \
+        "an expected refusal does not excuse another kind's denial"
+
+    # 16d. ...and an `expect-denials` naming what no run reports is dead.
+    printf '%sexpect-denials post-userland-tests commitpages 1\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "dead entry" "$clean" "dead expect-denials rejected"
+
+    # 16e. The emitter writes the line from the log, so the documented remedy
+    #      regenerates it.
+    set +e
+    out=$( "$0" --variant "$VARIANT" --gate-data-dir "$tmp/gates" \
+        --log "$tmp/refused.log" --emit-allowlist 2>&1 )
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] || ! grep -qx 'expect-denials post-userland-tests commitpages 2' <<<"$out"; then
+        echo "SELF-TEST FAIL [emit expect-denials]: exit $rc or line missing" >&2
+        sed 's/^/    /' <<<"$out" >&2
+        failures=$((failures + 1))
+    else
+        printf '%s\n' "$out" > "$tmp/gates/$VARIANT.txt"
+        _expect 0 "OK:" "$tmp/refused.log" "emit expect-denials round-trips"
     fi
 
     # 15. No gate data at all for the variant.
