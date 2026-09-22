@@ -16,10 +16,11 @@ use slopos_abi::quota::DiskBlocksAxis;
 use super::arena::{TryChargeError, try_charge};
 use super::token::ChargeSlot;
 use crate::process::account::{AccountId, MAX_ACCOUNTS};
+use crate::util::static_table::StaticTable;
 
 /// One row per account slot, so a charge is an index rather than a scan.
-static ROWS: [ChargeSlot<DiskBlocksAxis>; MAX_ACCOUNTS] =
-    [const { ChargeSlot::empty() }; MAX_ACCOUNTS];
+static ROWS: StaticTable<ChargeSlot<DiskBlocksAxis>, MAX_ACCOUNTS> =
+    StaticTable::new([const { ChargeSlot::empty() }; MAX_ACCOUNTS]);
 
 /// The row `account` owns, or `None` for an out-of-range slot or one a
 /// *different* account holds — the compare is what keeps a stale id from

@@ -9,3 +9,4 @@ pub mod cstr;
 pub mod fn_ptr;
 pub mod packed_view;
 pub mod ptr_buf;
+pub mod static_table;

@@ -21,6 +21,7 @@ use super::axis::Refundable;
 use super::token::Reservation;
 use crate::process::AccountId;
 use crate::process::account::{MAX_ACCOUNTS, ROOT_ACCOUNT_SLOT, root_account};
+use crate::util::static_table::StaticTable;
 
 /// Rows on the longest permitted root-to-leaf chain.
 ///
@@ -162,7 +163,20 @@ const fn usage_peak(packed: u64) -> u32 {
     (packed >> 32) as u32
 }
 
-static ACCOUNTS: [AccountRow; MAX_ACCOUNTS] = [const { AccountRow::new() }; MAX_ACCOUNTS];
+static ACCOUNTS: StaticTable<AccountRow, MAX_ACCOUNTS> =
+    StaticTable::new([const { AccountRow::new() }; MAX_ACCOUNTS]);
+
+/// One past the highest slot ever created: rows at or above it are untouched.
+/// Slots are process ids drawn lowest-free-first, so this is the peak process
+/// count, and a walk bounded by it does not pay for the whole arena.
+static ROWS_IN_USE: AtomicUsize = AtomicUsize::new(0);
+
+fn rows_in_use() -> impl Iterator<Item = (usize, &'static AccountRow)> {
+    ACCOUNTS
+        .iter()
+        .take(ROWS_IN_USE.load(Ordering::Acquire))
+        .enumerate()
+}
 
 /// Per-process ceilings derived from the machine rather than frozen in `abi`,
 /// one slot per kind; `set` marks the kinds boot has derived.
@@ -276,6 +290,7 @@ fn ensure_root() {
     if row.live.load(Ordering::Acquire) {
         return;
     }
+    ROWS_IN_USE.fetch_max(ROOT_ACCOUNT_SLOT as usize + 1, Ordering::Release);
     row.reset_counters();
     row.parent
         .store(pack_parent(NO_PARENT, 0), Ordering::Relaxed);
@@ -312,6 +327,7 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
         (Some(parent_row), parent.slot(), remaining - 1)
     };
 
+    ROWS_IN_USE.fetch_max(slot + 1, Ordering::Release);
     let row = &ACCOUNTS[slot];
     row.reset_counters();
     // The root is deliberately exempt from the per-kind process defaults: it is
@@ -362,7 +378,7 @@ pub fn account_release(id: AccountId) {
     let grandparent_row = row_for(grandparent);
     let mut children_used = [0u32; KIND_COUNT];
     if row.children.load(Ordering::Acquire) != 0 {
-        for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+        for (child_slot, child) in rows_in_use() {
             if child_slot as u32 == id.slot() || !child.live.load(Ordering::Acquire) {
                 continue;
             }
@@ -634,7 +650,7 @@ pub fn stats(id: AccountId, kind: ResourceKind) -> Option<KindStats> {
 /// top-down without sorting.
 pub fn for_each_account(mut f: impl FnMut(AccountId, AccountId)) {
     ensure_root();
-    for (slot, row) in ACCOUNTS.iter().enumerate() {
+    for (slot, row) in rows_in_use() {
         if !row.live.load(Ordering::Acquire) {
             continue;
         }
@@ -725,16 +741,14 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
     let enforcing = matches!(quota_mode(), QuotaMode::Enforce);
     let mut faults = 0usize;
 
-    for (slot, row) in ACCOUNTS.iter().enumerate() {
+    for (slot, row) in rows_in_use() {
         if !row.live.load(Ordering::Acquire) {
             continue;
         }
         let account = AccountId::from_parts(slot as u32, row.generation.load(Ordering::Acquire));
 
-        // Once for every kind rather than once per kind: the child edge does not
-        // depend on the kind, and the walk is `MAX_ACCOUNTS` rows wide.
         let mut children = [0u32; KIND_COUNT];
-        for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+        for (child_slot, child) in rows_in_use() {
             if child_slot == slot || !child.live.load(Ordering::Acquire) {
                 continue;
             }
@@ -799,7 +813,7 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
         // mismatch against the shared row. Re-driving the walk per account is
         // O(accounts x maps) but pays no stack; the alternative is a 257-entry
         // accumulator, and this runs inside the 2 KiB frame cap.
-        for (slot, row) in ACCOUNTS.iter().enumerate() {
+        for (slot, row) in rows_in_use() {
             if !row.live.load(Ordering::Acquire) {
                 continue;
             }
@@ -826,7 +840,7 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             let idx = ResourceKind::Pages.index();
             let used = usage_used(row.usage[idx].load(Ordering::Acquire));
             let mut descendants = 0u32;
-            for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+            for (child_slot, child) in rows_in_use() {
                 if child_slot == slot || !child.live.load(Ordering::Acquire) {
                     continue;
                 }
@@ -852,9 +866,8 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
 
 /// Live rows.
 pub fn account_count() -> usize {
-    ACCOUNTS
-        .iter()
-        .filter(|row| row.live.load(Ordering::Acquire))
+    rows_in_use()
+        .filter(|(_, row)| row.live.load(Ordering::Acquire))
         .count()
 }
 
@@ -891,7 +904,7 @@ pub(super) fn charge_raw_one_level_for_test(account: AccountId, kind: ResourceKi
 /// The generation counter in `account.rs` deliberately survives, so an id
 /// minted before a reset can never match the slot's next occupant.
 pub fn reset_for_test() {
-    for row in ACCOUNTS.iter() {
+    for (_, row) in rows_in_use() {
         // A row nothing created is still at its `.bss` value, and every mutation
         // path reaches a row through a live, generation-matched id.
         if !row.live.load(Ordering::Acquire) && row.generation.load(Ordering::Acquire) == 0 {
@@ -901,6 +914,7 @@ pub fn reset_for_test() {
         row.generation.store(0, Ordering::Release);
         row.reset_counters();
     }
+    ROWS_IN_USE.store(0, Ordering::Release);
     set_quota_mode(QuotaMode::Enforce);
 }
 
@@ -1055,6 +1069,42 @@ mod tests {
         );
         drop(held);
         drop(theirs);
+        assert_eq!(used(root()), 0);
+    }
+
+    #[test]
+    fn a_walk_reaches_a_row_created_above_every_other() {
+        let _f = fixture();
+        let low = account(1, root());
+        let high = account(64, low);
+        let held = try_charge::<FdSlot>(high, 2).expect("charge");
+
+        let mut seen = [false; 3];
+        for_each_account(|id, parent| {
+            seen[0] |= id == root();
+            seen[1] |= id == low;
+            seen[2] |= id == high && parent == low;
+        });
+        assert_eq!(seen, [true; 3]);
+        assert_eq!(account_count(), 3);
+
+        refund_raw_one_level_for_test(low, ResourceKind::FdSlot, 2);
+        let mut under_counted = None;
+        ledger_audit(|fault| {
+            if let LedgerFault::AncestorUnderCount { ancestor, .. } = fault {
+                under_counted = Some(ancestor);
+            }
+        });
+        assert_eq!(under_counted, Some(low), "the audit must find the child");
+        charge_raw_one_level_for_test(low, ResourceKind::FdSlot, 2);
+
+        account_release(low);
+        assert_eq!(
+            parent_of(&ACCOUNTS[high.slot() as usize]),
+            root(),
+            "the release must find the child"
+        );
+        drop(held);
         assert_eq!(used(root()), 0);
     }
 
