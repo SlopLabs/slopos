@@ -333,7 +333,7 @@ run_gate() {
 self_test() {
     local failed=0 scratch
     scratch="$(mktemp -d)"
-    trap 'rm -rf "$scratch"' EXIT INT TERM
+    trap "rm -rf '$scratch'" EXIT INT TERM
 
     if RUSTC_SRC_DIR="$scratch/absent" "$SCRIPT_DIR/$SELF.sh" >/dev/null 2>&1; then
         echo "  case no-source-tree: skipped rather than failed"
@@ -436,20 +436,26 @@ self_test() {
     printf 'int f(void) { return 0; }\n' >"$scratch/f.c"
     printf 'extern int f(void);\nint k(void) { return f(); }\n' >"$scratch/calls-f.c"
     printf 'extern int h(void);\nint k(void) { return h(); }\n' >"$scratch/calls-h.c"
-    printf 'extern __thread int v;\nint g(void) { return v; }\n' >"$scratch/tls.c"
-    $so -Wl,-soname,libc.so "$scratch/f.c" -o "$lib/libc.so"
-    $so -Wl,-soname,libstdc++.so.6 "$scratch/f.c" -o "$scratch/stub/libstdc++.so.6"
-    $so "$scratch/calls-f.c" -L"$lib" -l:libc.so -o "$lib/ok.so"
-    if grade_install "$scratch/install" 2>/dev/null; then
+    # Assembly, because clang takes `-mtls-dialect=gnu2` for x86-64 only from 19.
+    printf '%s\n' '.globl g' 'g:' 'leaq v@tlsdesc(%rip), %rax' 'call *v@tlscall(%rax)' 'ret' \
+        >"$scratch/tls.s"
+    if $so -Wl,-soname,libc.so "$scratch/f.c" -o "$lib/libc.so" &&
+        $so -Wl,-soname,libstdc++.so.6 "$scratch/f.c" -o "$scratch/stub/libstdc++.so.6" &&
+        $so "$scratch/calls-f.c" -L"$lib" -l:libc.so -o "$lib/ok.so" &&
+        grade_install "$scratch/install" 2>/dev/null; then
         echo "  case clean-install: accepted an object whose names libc.so defines"
     else
-        echo "$SELF --self-test: an object binding only to libc.so was rejected" >&2
+        echo "$SELF --self-test: an object binding only to libc.so was not built or was rejected" >&2
         failed=1
     fi
     install_case() {
         local name="$1" want="$2" object="$3"
         shift 3
-        $so "$@" -o "$lib/$object"
+        if ! $so "$@" -o "$lib/$object"; then
+            echo "$SELF --self-test: case $name: the fixture did not build" >&2
+            failed=1
+            return
+        fi
         why="$(grade_install "$scratch/install" 2>&1 || true)"
         rm "$lib/$object"
         if printf '%s\n' "$why" | grep -q "$want"; then
@@ -463,7 +469,7 @@ self_test() {
         "$scratch/f.c" -L"$scratch/stub" -l:libstdc++.so.6
     install_case unbound 'nothing it needs defines: h' unbound.so \
         "$scratch/calls-h.c" -L"$lib" -l:libc.so
-    install_case tlsdesc 'R_X86_64_TLSDESC' tls.so -O1 -mtls-dialect=gnu2 "$scratch/tls.c"
+    install_case tlsdesc 'R_X86_64_TLSDESC' tls.so "$scratch/tls.s"
 
     rm -rf "$scratch"
     trap - EXIT INT TERM
