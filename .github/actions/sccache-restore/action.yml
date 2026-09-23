@@ -1,0 +1,26 @@
+name: Restore the Rust compiler cache
+description: Put the pinned sccache on PATH and restore this job's cache of its output
+inputs:
+  job:
+    description: Cache key prefix; one per job, since each builds different crates
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        bin="$(scripts/ensure_sccache.sh)"
+        dirname "$bin" >> "$GITHUB_PATH"
+        # The default frame is smaller than `core`'s cached output, and a
+        # client that cannot receive a hit recompiles it locally.
+        {
+          echo "SCCACHE_DIR=$HOME/.cache/sccache"
+          echo "SCCACHE_CACHE_SIZE=2G"
+          echo "SCCACHE_IDLE_TIMEOUT=0"
+          echo "SCCACHE_MAX_FRAME_LENGTH=268435456"
+        } >> "$GITHUB_ENV"
+    - uses: actions/cache/restore@v6
+      with:
+        path: ~/.cache/sccache
+        key: sccache-${{ inputs.job }}-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: sccache-${{ inputs.job }}-${{ runner.os }}-

@@ -15,6 +15,7 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
+| `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 | `self-hosting.md` | SlopOS as a development machine: persistent dev loop, POSIX floor, native toolchain, install path |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 

@@ -1,0 +1,20 @@
+name: Save the Rust compiler cache
+description: Save this job's sccache output when a push compiled something the cache did not have
+inputs:
+  job:
+    description: Cache key prefix; the one the restore used
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: stats
+      if: always()
+      shell: bash
+      run: echo "misses=$(sccache --show-stats | awk '/^Cache misses +[0-9]/ { print $3 }')" >> "$GITHUB_OUTPUT"
+    # Pushes only: nearly every commit misses somewhere, and a pull request
+    # restores what develop saved.
+    - if: always() && github.event_name == 'push' && steps.stats.outputs.misses != '0'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/sccache
+        key: sccache-${{ inputs.job }}-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
