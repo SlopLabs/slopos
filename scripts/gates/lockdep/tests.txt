@@ -257,9 +257,20 @@ require-phase post-userland-tests
 #               pools moved within their existing bands (kernel edges
 #               172-173, chains 388-392; userland edges 204-205, chains
 #               429-433), so the bands are left as recorded.
+#   2026-09-23  kernel 206 -> 208, userland 214 -> 215: "Code gets in and
+#               out" in `plans/self-hosting.md`. Boot is unchanged at 71. Three
+#               new declaration sites — `DNS_QUERY_SLOT` and
+#               `DNS_QUERY_SLOT.waiters` (net/src/dns.rs, a lookup's slot and
+#               its wait queue, one class over the sixteen slots since no
+#               lookup holds two) and `TCP_CHUNK_CACHE` (net/src/tcp/chunk.rs,
+#               the freed-chunk cache) — replace `DNS_PENDING_QUERY` and
+#               `DNS_RX_BUF`. The kernel phase nets +2 rather than +1 because
+#               it never reached `DNS_RX_BUF`. 208/215 on both full runs of the
+#               change; every banded pool stayed inside its band (kernel edges
+#               181, chains 402; userland edges 226, chains 457).
 boot	classes	72
-post-kernel-tests	classes	206
-post-userland-tests	classes	214
+post-kernel-tests	classes	208
+post-userland-tests	classes	215
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

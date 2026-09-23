@@ -20,7 +20,6 @@ pub struct SynSentState {
     pub iss: SeqNum,
     pub snd_nxt: SeqNum,
     pub snd_wnd: u32,
-    pub rcv_wnd: u16,
     pub our_wscale: u8,
     pub peer_mss: u16,
     pub rto_ms: u32,
@@ -36,7 +35,6 @@ impl SynSentState {
             iss,
             snd_nxt: iss.wrapping_add(1),
             snd_wnd: 0,
-            rcv_wnd: DEFAULT_WINDOW_SIZE,
             our_wscale: 0,
             peer_mss: DEFAULT_MSS,
             rto_ms: 1000,
@@ -117,32 +115,38 @@ impl SynSentState {
 
         if ack_valid_for_our_syn {
             let ts_enabled = opts.timestamp.is_some();
-            // TODO(tech-debt): allocation failure panics here — it should
-            // surface as `TcpError::OutOfMemory` through `tcp::input`.
-            let mut data = slopos_ostd::KBox::try_init(DataState::init_new(
+            let Ok(mut data) = slopos_ostd::KBox::try_init(DataState::init_new(
                 iss,
                 irs,
                 snd_una,
                 snd_nxt, // snd_nxt carries over unchanged (SYN's +1 already counted)
                 rcv_nxt,
                 snd_wnd,
-                DEFAULT_WINDOW_SIZE,
+                u32::from(DEFAULT_WINDOW_SIZE),
                 peer_mss,
                 snd_wscale,
                 our_wscale,
                 wscale_enabled,
                 ts_enabled,
-            ))
-            .expect("DataState alloc failed");
+            )) else {
+                // No memory for the connection yet: the SYN timer resends and
+                // the peer answers again.
+                actions.push_timer(TimerOp::Schedule {
+                    kind: TimerKind::TcpRetransmit,
+                    key: 0,
+                    delay_ms: u64::from(rto_ms),
+                });
+                return actions;
+            };
             data.sack_permitted = opts.sack_permitted;
             let peer_tsval = opts.timestamp.map(|(tsval, _)| tsval).unwrap_or(0);
             if ts_enabled {
                 data.ts_recent = peer_tsval;
             }
+            let window = data.advertised();
             let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
-            let mut ack_seg =
-                SegmentBuilder::ack(tuple, snd_nxt.raw(), rcv_nxt.raw(), DEFAULT_WINDOW_SIZE);
+            let mut ack_seg = SegmentBuilder::ack(tuple, snd_nxt.raw(), rcv_nxt.raw(), window);
             if ts_enabled {
                 ack_seg.timestamp = Some((now_ms as u32, peer_tsval));
             }
@@ -192,10 +196,6 @@ impl SynSentState {
             self.snd_nxt,
             self.iss.wrapping_add(1),
             "SynSent: snd_nxt == iss + 1"
-        );
-        debug_assert!(
-            self.rcv_wnd as usize <= super::super::buffer::TCP_BUFFER_SIZE,
-            "rcv_wnd exceeds buffer"
         );
     }
 }

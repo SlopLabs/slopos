@@ -3,16 +3,17 @@
 use slopos_testing::{TestResult, assert_eq_test, assert_test, pass};
 
 use crate::tcp::actions::SocketNotify;
-use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpBufferPair};
 use crate::tcp::challenge_ack::{self, RstAction};
-use crate::tcp::header::{TCP_FLAG_ACK, TCP_FLAG_RST, TCP_FLAG_SYN, TcpHeader};
+use crate::tcp::header::{
+    DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_RST, TCP_FLAG_SYN, TcpHeader,
+};
 use crate::tcp::pcb::data::{ClosePhase, DataState};
 use crate::tcp::pcb::syn_recv::SynRecvState;
 use crate::tcp::pcb::time_wait::TimeWaitState;
 use crate::tcp::pcb::{Pcb, PcbState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::tuple::TcpTuple;
-use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
+use crate::tests::tcp_common::{self, LOCAL_IP, REMOTE_IP};
 
 const LOCAL_PORT: u16 = 49_152;
 const REMOTE_PORT: u16 = 80;
@@ -89,6 +90,7 @@ fn make_time_wait_pcb() -> Pcb {
             SeqNum::new(LAST_RCV_NXT),
             SeqNum::new(LAST_SND_NXT),
             32_768,
+            32_768,
             1000,
         )),
     )
@@ -159,7 +161,7 @@ pub fn test_classify_rst_wrapping_seq() -> TestResult {
 
 pub fn test_data_rst_exact_seq_tears_down() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let rcv_nxt = PEER_IRS + 1;
     let actions = DataState::on_segment(
         &mut pcb,
@@ -179,7 +181,7 @@ pub fn test_data_rst_exact_seq_tears_down() -> TestResult {
 
 pub fn test_data_rst_in_window_sends_challenge_ack() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let in_window_seq = (PEER_IRS + 1).wrapping_add(100);
     let actions = DataState::on_segment(
         &mut pcb,
@@ -201,7 +203,7 @@ pub fn test_data_rst_in_window_sends_challenge_ack() -> TestResult {
 
 pub fn test_data_rst_outside_window_dropped() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let outside_seq = (PEER_IRS + 1).wrapping_add(50_000);
     let actions = DataState::on_segment(
         &mut pcb,
@@ -228,7 +230,7 @@ pub fn test_data_rst_challenge_ack_each_close_phase() -> TestResult {
     let in_window_seq = (PEER_IRS + 1).wrapping_add(100);
     for (i, phase) in phases.iter().enumerate() {
         let mut pcb = make_data_pcb(*phase);
-        let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+        let mut bufs = tcp_common::test_bufs();
         let actions = DataState::on_segment(
             &mut pcb,
             &mut bufs,
@@ -256,7 +258,7 @@ pub fn test_data_rst_exact_seq_each_close_phase() -> TestResult {
     let rcv_nxt = PEER_IRS + 1;
     for (i, phase) in phases.iter().enumerate() {
         let mut pcb = make_data_pcb(*phase);
-        let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+        let mut bufs = tcp_common::test_bufs();
         let actions = DataState::on_segment(
             &mut pcb,
             &mut bufs,
@@ -285,7 +287,7 @@ pub fn test_syn_recv_rst_in_window_releases() -> TestResult {
 
 pub fn test_syn_recv_rst_outside_window_dropped() -> TestResult {
     let mut pcb = make_syn_recv_pcb();
-    let outside_seq = (PEER_IRS + 1).wrapping_add(50_000);
+    let outside_seq = (PEER_IRS + 1).wrapping_add(u32::from(DEFAULT_WINDOW_SIZE) + 1_000);
     let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, outside_seq, 0), 0);
     assert_test!(!actions.release, "out-of-window RST does not release");
     assert_eq_test!(actions.segments_len, 0, "no segments emitted");
@@ -295,15 +297,32 @@ pub fn test_syn_recv_rst_outside_window_dropped() -> TestResult {
 
 pub fn test_time_wait_rst_in_window_releases() -> TestResult {
     let mut pcb = make_time_wait_pcb();
-    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, LAST_RCV_NXT, 0), 2000);
+    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, LAST_RCV_NXT, 0), 0, 2000);
     assert_test!(actions.release, "in-window RST releases TimeWait");
+    pass!()
+}
+
+pub fn test_time_wait_rst_off_the_edge_is_challenged() -> TestResult {
+    let mut pcb = make_time_wait_pcb();
+    let actions = TimeWaitState::on_segment(
+        &mut pcb,
+        &hdr(TCP_FLAG_RST, LAST_RCV_NXT.wrapping_add(100), 0),
+        0,
+        2000,
+    );
+    assert_test!(!actions.release, "an off-edge RST does not release");
+    assert_eq_test!(actions.segments_len, 1, "a challenge ACK answers it");
+    assert_test!(
+        matches!(pcb.state, PcbState::TimeWait(_)),
+        "still TIME_WAIT"
+    );
     pass!()
 }
 
 pub fn test_time_wait_rst_outside_window_dropped() -> TestResult {
     let mut pcb = make_time_wait_pcb();
     let outside_seq = LAST_RCV_NXT.wrapping_add(50_000);
-    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, outside_seq, 0), 2000);
+    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, outside_seq, 0), 0, 2000);
     assert_test!(!actions.release, "out-of-window RST does not release");
     assert_eq_test!(actions.segments_len, 0, "no segments emitted");
     pass!()
@@ -345,7 +364,7 @@ pub fn test_challenge_ack_rate_resets_after_epoch() -> TestResult {
 /// with a challenge ACK, never a RST, and must not release the PCB.
 pub fn test_blind_syn_does_not_tear_down_connection() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let off_window_seq = (PEER_IRS + 1).wrapping_add(50_000);
     let actions = DataState::on_segment(
         &mut pcb,
@@ -372,7 +391,7 @@ pub fn test_blind_syn_does_not_tear_down_connection() -> TestResult {
 /// delivered to the socket.
 pub fn test_out_of_window_data_is_not_accepted() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let off_window_seq = (PEER_IRS + 1).wrapping_add(50_000);
     let payload = [0xAAu8; 4];
     let actions = DataState::on_segment(
@@ -514,6 +533,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_time_wait_rst_outside_window_dropped,
+    suite = tcp_rst_validation
+);
+slopos_testing::stest!(
+    name = test_time_wait_rst_off_the_edge_is_challenged,
     suite = tcp_rst_validation
 );
 slopos_testing::stest!(

@@ -75,6 +75,7 @@ fi
 
 CARGO_ARGS=(
     +"$RUST_CHANNEL" build
+    --locked
     -Zbuild-std=core,alloc
     -Zbuild-std-features=compiler-builtins-mem
     -Zunstable-options

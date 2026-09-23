@@ -5,6 +5,7 @@ pub mod actions;
 pub mod buffer;
 pub mod challenge_ack;
 pub mod checksum;
+pub mod chunk;
 pub use crate::clock;
 pub mod cong;
 pub mod header;
@@ -25,10 +26,10 @@ pub use tuple::{TcpError, TcpTuple};
 
 use buffer::SegmentSource;
 pub use buffer::{
-    DELAYED_ACK_MS, DELAYED_ACK_SEGMENTS, TCP_BUFFER_SIZE, TcpBuffer, TcpBufferPair, TcpRecvState,
-    TcpSendState, ZWP_INTERVAL_MS, ZcSource,
+    DELAYED_ACK_MS, DELAYED_ACK_SEGMENTS, TcpBufferPair, TcpRecvState, TcpSendState, ZcSource,
 };
 pub use checksum::{tcp_checksum, verify_checksum};
+pub use chunk::Spares;
 pub use header::{
     DEFAULT_MSS, DEFAULT_WINDOW_SIZE, ParsedTcpOptions, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH,
     TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TCP_HEADER_LEN, TCP_HEADER_MAX_LEN, TCP_OPT_END,
@@ -50,7 +51,7 @@ use crate::types::{Ipv4Addr, Port, SockAddr};
 
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::uframe::KeepaliveFrames;
-use slopos_ostd::{KVec, ZcNotifToken};
+use slopos_ostd::{KBox, KVec, ZcNotifToken};
 
 /// RFC 6298 recommends 1 s.
 pub const INITIAL_RTO_MS: u32 = 1000;
@@ -61,6 +62,9 @@ pub const MAX_RTO_MS: u32 = 60_000;
 pub const TIME_WAIT_MS: u64 = 60_000;
 
 pub const MAX_RETRANSMITS: u8 = 8;
+/// Zero-window probes a connection no socket owns may send before it is
+/// reset: Linux's `tcp_orphan_retries` default.
+pub const MAX_ORPHAN_PROBES: u8 = 8;
 
 /// SYN retransmissions on an active open before the attempt is abandoned.
 pub const ACTIVE_SYN_RETRIES_MAX: u8 = 5;
@@ -108,13 +112,12 @@ pub fn input(
     };
 
     if id.is_listener() {
-        let (mut actions, parent_sock) =
+        let (mut actions, parent) =
             input_process_listener(id, &incoming_tuple, hdr, options, now_ms);
         // Installing the child runs outside the listener's per-slot lock so it
         // can take the matching shard's write lock.
         if actions.accepted.is_some()
-            && let Some(child_id) =
-                install_accepted_child(&incoming_tuple, &actions, hdr, parent_sock)
+            && let Some(child_id) = install_accepted_child(&incoming_tuple, &actions, hdr, parent)
         {
             // The child's own SynRecv handler makes the Data transition, so
             // buffers and NEW_ESTABLISHED come from the normal segment path.
@@ -137,8 +140,14 @@ pub fn input(
     }
 }
 
-/// Run the listener state machine on `id` under its per-slot lock. The
-/// returned socket id is what wires a child PCB to the same socket.
+#[derive(Clone, Copy)]
+struct Parent {
+    socket: Option<pcb::SocketId>,
+    rcvbuf: u32,
+    sndbuf: u32,
+}
+
+/// Run the listener state machine on `id` under its per-slot lock.
 #[inline(never)]
 fn input_process_listener(
     id: ConnId,
@@ -146,13 +155,23 @@ fn input_process_listener(
     hdr: &TcpHeader,
     options: &[u8],
     now_ms: u64,
-) -> (Actions, Option<pcb::SocketId>) {
+) -> (Actions, Parent) {
+    let orphan = Parent {
+        socket: None,
+        rcvbuf: 0,
+        sndbuf: 0,
+    };
     table::with_pcb_mut(id, |pcb| {
         let mut actions = pcb.on_segment(None, incoming, hdr, options, &[], now_ms);
         actions.conn_id = Some(id);
-        (actions, pcb.socket_id)
+        let parent = Parent {
+            socket: pcb.socket_id,
+            rcvbuf: pcb.rcvbuf,
+            sndbuf: pcb.sndbuf,
+        };
+        (actions, parent)
     })
-    .unwrap_or_else(|| (Actions::new(), None))
+    .unwrap_or((Actions::new(), orphan))
 }
 
 /// Build a single-RST `Actions` for the no-matching-connection path. Separate
@@ -171,7 +190,7 @@ fn install_accepted_child(
     incoming_tuple: &TcpTuple,
     actions: &Actions,
     hdr: &TcpHeader,
-    parent_sock: Option<pcb::SocketId>,
+    parent: Parent,
 ) -> Option<ConnId> {
     let accepted = match &actions.accepted {
         Some(a) => a,
@@ -183,13 +202,20 @@ fn install_accepted_child(
     child_state.peer_mss = accepted.peer_mss;
     child_state.sack_permitted = accepted.sack_permitted;
     child_state.snd_wnd = hdr.window_size as u32;
+    if let Some(shift) = accepted.peer_wscale {
+        child_state.wscale_enabled = true;
+        child_state.snd_wscale = shift;
+        child_state.our_wscale = our_window_scale();
+    }
     if let Some(tsval) = accepted.peer_tsval {
         child_state.ts_enabled = true;
         child_state.peer_tsval = tsval;
     }
 
     table::install_established(*incoming_tuple, PcbState::SynRecv(child_state), |child| {
-        child.socket_id = parent_sock;
+        child.socket_id = parent.socket;
+        child.rcvbuf = parent.rcvbuf;
+        child.sndbuf = parent.sndbuf;
     })
     .ok()
 }
@@ -241,26 +267,45 @@ pub fn release_children_of(socket_id: pcb::SocketId) -> KVec<(TcpTuple, u32)> {
 
 /// Give `id` the send/receive rings its next transition assumes.
 ///
-/// The 2 x 32 KiB pair is allocated outside the PCB lock: a slab refill under
-/// the `TCP_PCB_SLOTS` cli-spinlock — a lock a remote peer drives — deadlocks.
+/// The pair is allocated outside the PCB lock: a slab refill under the
+/// `TCP_PCB_SLOTS` cli-spinlock — a lock a remote peer drives — deadlocks.
 /// A PCB never re-enters `SynRecv`, so a stale peek can only waste an
-/// allocation. `#[inline(never)]` keeps the `TcpBufferPair` rvalue off the
-/// state closures' frames, which the 2 KiB stack gate rejects.
-#[inline(never)]
+/// allocation.
 fn ensure_connection_buffer(id: ConnId) -> Result<(), TcpError> {
     let wanted = table::with_pcb_and_bufs(id, |pcb, buf| {
-        buf.is_none() && matches!(pcb.state, PcbState::SynRecv(_) | PcbState::SynSent(_))
+        (buf.is_none() && matches!(pcb.state, PcbState::SynRecv(_) | PcbState::SynSent(_)))
+            .then_some((pcb.rcvbuf, pcb.sndbuf))
     });
-    if wanted != Some(true) {
+    let Some(Some((rcvbuf, sndbuf))) = wanted else {
         return Ok(());
-    }
-    let pair = TcpBufferPair::new(buffer::TCP_BUFFER_SIZE)?;
+    };
+    let pair = TcpBufferPair::boxed(buffer_size(rcvbuf), buffer_size(sndbuf))?;
     table::with_pcb_and_bufs(id, |_, slot| {
         if slot.is_none() {
             *slot = Some(pair);
         }
     });
     Ok(())
+}
+
+/// A `TimeWait` connection keeps its rings only while its socket still has
+/// bytes to read: the peer's FIN can arrive before the reader catches up.
+fn release_time_wait_bufs(pcb: &Pcb, slot: &mut Option<KBox<TcpBufferPair>>) {
+    if matches!(pcb.state, PcbState::TimeWait(_))
+        && slot
+            .as_ref()
+            .is_some_and(|b| pcb.socket_id.is_none() || b.recv.available() == 0)
+    {
+        *slot = None;
+    }
+}
+
+fn buffer_size(requested: u32) -> usize {
+    if requested == 0 {
+        chunk::buffer_max()
+    } else {
+        (requested as usize).min(chunk::buffer_max())
+    }
 }
 
 /// Abandon a connection that reached `Data` with no rings to serve it: the
@@ -296,16 +341,38 @@ fn input_process_established(
     now_ms: u64,
 ) -> Actions {
     let _ = ensure_connection_buffer(id);
+    let held = table::with_pcb_and_bufs(id, |pcb, bufs| {
+        let ring = &bufs.as_ref()?.recv.buf;
+        let in_order = matches!(&pcb.state, PcbState::Data(d) if d.rcv_nxt.raw() == hdr.seq_num);
+        Some(if in_order {
+            ring.stream_chunks()
+        } else {
+            ring.chunks_held()
+        })
+    })
+    .flatten()
+    .unwrap_or(0);
+    let mut spares = Spares::for_bytes(payload.len(), held);
 
     let actions = table::with_pcb_and_bufs(id, |pcb, buffer_slot| {
+        if let Some(bufs) = buffer_slot.as_mut() {
+            core::mem::swap(&mut bufs.spares, &mut spares);
+        }
         let mut actions = pcb.on_segment(
-            buffer_slot.as_mut(),
+            buffer_slot.as_deref_mut(),
             incoming,
             hdr,
             options,
             payload,
             now_ms,
         );
+        if let Some(bufs) = buffer_slot.as_mut() {
+            core::mem::swap(&mut bufs.spares, &mut spares);
+            #[cfg(debug_assertions)]
+            if let PcbState::Data(d) = &pcb.state {
+                d.debug_assert_sendmap(&bufs.send.sendmap);
+            }
+        }
         actions.conn_id = Some(id);
 
         // State handlers emit `key: 0` as a sentinel; the real ConnId is
@@ -352,14 +419,12 @@ fn input_process_established(
             reset_for_no_buffer(&mut actions, &pcb.tuple, hdr);
         }
 
-        if matches!(pcb.state, PcbState::TimeWait(_)) && buffer_slot.is_some() {
-            *buffer_slot = None;
-        }
+        release_time_wait_bufs(pcb, buffer_slot);
 
         if !actions.release
-            && actions
-                .notify
-                .intersects(SocketNotify::RECV_WAKE | SocketNotify::SEND_WAKE)
+            && actions.notify.intersects(
+                SocketNotify::RECV_WAKE | SocketNotify::SEND_WAKE | SocketNotify::PEER_HEARD,
+            )
         {
             if let PcbState::Data(d) = &mut pcb.state {
                 if let Some((old_token, delay)) = d.reset_keepalive_on_activity() {
@@ -514,7 +579,11 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
         if matches!(pcb.state, PcbState::Listen(_) | PcbState::SynSent(_)) {
             return Ok(Outcome::Release(pcb.state.name()));
         }
-        if matches!(pcb.state, PcbState::TimeWait(_)) {
+        if let PcbState::TimeWait(tw) = &pcb.state {
+            if clock::now_ms().saturating_sub(tw.entry_ms) >= TIME_WAIT_MS {
+                return Ok(Outcome::Release("TIME_WAIT"));
+            }
+            release_time_wait_bufs(pcb, buffer_slot);
             klog_debug!("tcp: CLOSE id={} TIME_WAIT — no-op", id);
             return Ok(Outcome::NoOp);
         }
@@ -523,48 +592,13 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             return Err(TcpError::OutOfMemory);
         }
         match &mut pcb.state {
-            PcbState::SynRecv(_) => close_syn_recv_transition(pcb, id)
+            PcbState::SynRecv(_) => fin_from_syn_recv(pcb, id, "CLOSE")
                 .map(|s| s.map_or(Outcome::NoOp, Outcome::Segment)),
             PcbState::Data(d) => {
                 let tuple = pcb.tuple;
-                match d.close_phase {
-                    ClosePhase::Established => {
-                        let seq = d.snd_nxt.raw();
-                        d.snd_nxt = d.snd_nxt.wrapping_add(1);
-                        d.close_phase = ClosePhase::FinWait1;
-                        cancel_keepalive(d);
-                        let mut seg =
-                            SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
-                        seg.timestamp = d.ts_option(clock::now_ms());
-                        pcb.assert_invariants();
-                        klog_debug!(
-                            "tcp: CLOSE id={} ESTABLISHED -> FIN_WAIT_1, FIN seq={}",
-                            id,
-                            seq
-                        );
-                        Ok(Outcome::Segment(seg))
-                    }
-                    ClosePhase::CloseWait => {
-                        let seq = d.snd_nxt.raw();
-                        d.snd_nxt = d.snd_nxt.wrapping_add(1);
-                        d.close_phase = ClosePhase::LastAck;
-                        cancel_keepalive(d);
-                        let mut seg =
-                            SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
-                        seg.timestamp = d.ts_option(clock::now_ms());
-                        pcb.assert_invariants();
-                        klog_debug!(
-                            "tcp: CLOSE id={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
-                            id,
-                            seq
-                        );
-                        Ok(Outcome::Segment(seg))
-                    }
-                    _ => {
-                        klog_debug!("tcp: CLOSE id={} already closing ({:?})", id, d.close_phase);
-                        Ok(Outcome::NoOp)
-                    }
-                }
+                let fin = fin_or_queue(d, buffer_slot.as_deref(), tuple, id);
+                pcb.assert_invariants();
+                Ok(fin.map_or(Outcome::NoOp, Outcome::Segment))
             }
             _ => Err(TcpError::InvalidState),
         }
@@ -583,34 +617,39 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     }
 }
 
-/// `SynRecv → Data(FinWait1)` transition for `tcp::close`. `#[inline(never)]`:
-/// the `KBox::try_init(DataState::init_from_syn_recv)` closure frame otherwise
-/// inflates `close` past the stack-safety gate.
+/// SYN_RECEIVED → FIN_WAIT_1 on a close or a write shutdown. Out of line so
+/// the `DataState` initialiser's frame stays out of its callers', which the
+/// stack gate would refuse.
 #[inline(never)]
-fn close_syn_recv_transition(
+fn fin_from_syn_recv(
     pcb: &mut pcb::Pcb,
     id: ConnId,
+    what: &str,
 ) -> Result<Option<TcpOutSegment>, TcpError> {
     let s = match &pcb.state {
         PcbState::SynRecv(s) => s,
-        _ => unreachable!("close_syn_recv_transition called on non-SynRecv pcb"),
+        _ => unreachable!("fin_from_syn_recv called on non-SynRecv pcb"),
     };
     let tuple = pcb.tuple;
     let seq = s.snd_nxt.raw();
     let ack = s.rcv_nxt.raw();
-    let window = s.rcv_wnd;
     let now_ms = clock::now_ms();
     let ts_enabled = s.ts_enabled;
-    // The `Data` state arms its own RTO; left pending, this one fires against it.
     let handshake_timer = s.retransmit_token;
     let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
     ds.close_phase = ClosePhase::FinWait1;
     ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
+    ds.retransmit_token = Some(NET_TIMER_WHEEL.schedule(
+        (ds.rtt.rto_ms() as u64).max(1),
+        TimerKind::TcpRetransmit,
+        id.raw(),
+    ));
     let ts = if ts_enabled {
         Some((now_ms as u32, ds.ts_recent))
     } else {
         None
     };
+    let window = ds.advertised();
     pcb.state = PcbState::Data(ds);
     if let Some(token) = handshake_timer {
         NET_TIMER_WHEEL.cancel(token);
@@ -618,7 +657,7 @@ fn close_syn_recv_transition(
     pcb.assert_invariants();
     let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
     seg.timestamp = ts;
-    klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id);
+    klog_debug!("tcp: {} id={} SYN_RECV -> FIN_WAIT_1", what, id);
     Ok(Some(seg))
 }
 
@@ -666,42 +705,11 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             match &mut pcb.state {
                 PcbState::Data(d) => {
                     let tuple = pcb.tuple;
-                    match d.close_phase {
-                        ClosePhase::Established => {
-                            let seq = d.snd_nxt.raw();
-                            d.snd_nxt = d.snd_nxt.wrapping_add(1);
-                            d.close_phase = ClosePhase::FinWait1;
-                            cancel_keepalive(d);
-                            let mut seg =
-                                SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
-                            seg.timestamp = d.ts_option(clock::now_ms());
-                            pcb.assert_invariants();
-                            klog_debug!("tcp: SHUTDOWN_WR id={} ESTABLISHED -> FIN_WAIT_1", id);
-                            Ok(Some(seg))
-                        }
-                        ClosePhase::CloseWait => {
-                            let seq = d.snd_nxt.raw();
-                            d.snd_nxt = d.snd_nxt.wrapping_add(1);
-                            d.close_phase = ClosePhase::LastAck;
-                            cancel_keepalive(d);
-                            let mut seg =
-                                SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
-                            seg.timestamp = d.ts_option(clock::now_ms());
-                            pcb.assert_invariants();
-                            klog_debug!("tcp: SHUTDOWN_WR id={} CLOSE_WAIT -> LAST_ACK", id);
-                            Ok(Some(seg))
-                        }
-                        _ => {
-                            klog_debug!(
-                                "tcp: SHUTDOWN_WR id={} already closing ({:?})",
-                                id,
-                                d.close_phase
-                            );
-                            Ok(None)
-                        }
-                    }
+                    let fin = fin_or_queue(d, buffer_slot.as_deref(), tuple, id);
+                    pcb.assert_invariants();
+                    Ok(fin)
                 }
-                PcbState::SynRecv(_) => shutdown_write_syn_recv_transition(pcb, id),
+                PcbState::SynRecv(_) => fin_from_syn_recv(pcb, id, "SHUTDOWN_WR"),
                 _ => Err(TcpError::InvalidState),
             }
         },
@@ -713,44 +721,6 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     }
 }
 
-/// `SynRecv → Data(FinWait1)` transition for `tcp::shutdown_write`;
-/// `#[inline(never)]` for the same stack-frame reason as
-/// `close_syn_recv_transition`.
-#[inline(never)]
-fn shutdown_write_syn_recv_transition(
-    pcb: &mut pcb::Pcb,
-    id: ConnId,
-) -> Result<Option<TcpOutSegment>, TcpError> {
-    let s = match &pcb.state {
-        PcbState::SynRecv(s) => s,
-        _ => unreachable!(),
-    };
-    let tuple = pcb.tuple;
-    let seq = s.snd_nxt.raw();
-    let ack = s.rcv_nxt.raw();
-    let window = s.rcv_wnd;
-    let now_ms = clock::now_ms();
-    let ts_enabled = s.ts_enabled;
-    let handshake_timer = s.retransmit_token;
-    let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
-    ds.close_phase = ClosePhase::FinWait1;
-    ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-    let ts = if ts_enabled {
-        Some((now_ms as u32, ds.ts_recent))
-    } else {
-        None
-    };
-    pcb.state = PcbState::Data(ds);
-    if let Some(token) = handshake_timer {
-        NET_TIMER_WHEEL.cancel(token);
-    }
-    pcb.assert_invariants();
-    let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
-    seg.timestamp = ts;
-    klog_debug!("tcp: SHUTDOWN_WR id={} SYN_RECV -> FIN_WAIT_1", id);
-    Ok(Some(seg))
-}
-
 /// Discard all data in the receive buffer (for SHUT_RD).
 pub fn recv_discard(id: ConnId) {
     if id.is_listener() {
@@ -759,6 +729,7 @@ pub fn recv_discard(id: ConnId) {
     let cleared = table::with_pcb_and_bufs(id, |_pcb, buf| {
         if let Some(b) = buf.as_mut() {
             b.recv.clear();
+            b.ooo.clear();
             true
         } else {
             false
@@ -768,6 +739,48 @@ pub fn recv_discard(id: ConnId) {
     if cleared {
         klog_debug!("tcp: RECV_DISCARD id={} — recv buffer cleared", id);
     }
+}
+
+fn send_fin(d: &mut DataState, tuple: TcpTuple, id: ConnId) -> Option<TcpOutSegment> {
+    let next = match d.close_phase {
+        ClosePhase::Established => ClosePhase::FinWait1,
+        ClosePhase::CloseWait => ClosePhase::LastAck,
+        _ => return None,
+    };
+    let seq = d.snd_nxt.raw();
+    d.snd_nxt = d.snd_nxt.wrapping_add(1);
+    d.close_phase = next;
+    d.fin_queued = false;
+    cancel_keepalive(d);
+    if d.retransmit_token.is_none() {
+        d.retransmit_token = Some(NET_TIMER_WHEEL.schedule(
+            (d.rtt.rto_ms() as u64).max(1),
+            TimerKind::TcpRetransmit,
+            id.raw(),
+        ));
+    }
+    let mut seg = SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.advertised());
+    d.stamp(&mut seg, clock::now_ms());
+    klog_debug!("tcp: id={} -> {:?}, FIN seq={}", id, next, seq);
+    Some(seg)
+}
+
+/// Our FIN now, or once the send buffer drains: it takes the sequence number
+/// after the last byte, so it cannot overtake bytes still waiting to go.
+fn fin_or_queue(
+    d: &mut DataState,
+    bufs: Option<&TcpBufferPair>,
+    tuple: TcpTuple,
+    id: ConnId,
+) -> Option<TcpOutSegment> {
+    if bufs.is_some_and(|b| b.send.unsent_len() > 0) {
+        d.fin_queued = matches!(
+            d.close_phase,
+            ClosePhase::Established | ClosePhase::CloseWait
+        );
+        return None;
+    }
+    send_fin(d, tuple, id)
 }
 
 fn cancel_keepalive(d: &mut DataState) {
@@ -812,7 +825,7 @@ pub fn is_reset(id: ConnId) -> bool {
 }
 
 pub fn send_buffer_space(id: ConnId) -> usize {
-    table::with_bufs(id, |b| b.send.free_space()).unwrap_or(0)
+    table::with_bufs(id, |b| b.send.writable()).unwrap_or(0)
 }
 
 pub fn recv_available(id: ConnId) -> usize {
@@ -823,6 +836,16 @@ pub fn has_pending_data(id: ConnId) -> bool {
     table::with_bufs(id, |b| b.send.unsent_len() > 0).unwrap_or(false)
 }
 
+pub fn has_pending_output(id: ConnId) -> bool {
+    table::with_pcb_and_bufs(id, |pcb, buf| {
+        let fin = matches!(&pcb.state, PcbState::Data(d) if d.fin_queued);
+        fin || buf
+            .as_ref()
+            .is_some_and(|b| b.send.unsent_len() > 0 || b.send.sendmap.has_lost())
+    })
+    .unwrap_or(false)
+}
+
 pub fn with_pcb<T>(id: ConnId, f: impl FnOnce(&Pcb) -> T) -> Option<T> {
     table::with_pcb(id, f)
 }
@@ -831,24 +854,25 @@ pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
     table::with_pcb_mut(id, f)
 }
 
-/// Set the effective send buffer capacity (SO_SNDBUF).
-/// Values above TCP_BUFFER_SIZE are silently capped.
+/// Set SO_SNDBUF, capped at [`chunk::buffer_max`]; a connection whose buffers
+/// do not exist yet takes it when they are made.
 pub fn set_sndbuf(id: ConnId, bytes: usize) {
-    let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
-    table::with_pcb_and_bufs(id, |_pcb, buf| {
+    let size = buffer_size(bytes.min(u32::MAX as usize) as u32);
+    table::with_pcb_and_bufs(id, |pcb, buf| {
+        pcb.sndbuf = size as u32;
         if let Some(b) = buf.as_mut() {
-            b.send.effective_capacity = capped;
+            b.send.set_capacity(size);
         }
     });
 }
 
-/// Set the effective receive buffer capacity (SO_RCVBUF).
-/// Values above TCP_BUFFER_SIZE are silently capped.
+/// Set SO_RCVBUF, capped at [`chunk::buffer_max`]; see [`set_sndbuf`].
 pub fn set_rcvbuf(id: ConnId, bytes: usize) {
-    let capped = core::cmp::min(bytes, buffer::TCP_BUFFER_SIZE);
-    table::with_pcb_and_bufs(id, |_pcb, buf| {
+    let size = buffer_size(bytes.min(u32::MAX as usize) as u32);
+    table::with_pcb_and_bufs(id, |pcb, buf| {
+        pcb.rcvbuf = size as u32;
         if let Some(b) = buf.as_mut() {
-            b.recv.effective_capacity = capped;
+            b.recv.set_capacity(size);
         }
     });
 }
@@ -862,28 +886,52 @@ pub fn set_nodelay(id: ConnId, nodelay: bool) {
     });
 }
 
-pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
+fn send_spares(id: ConnId, len: usize) -> Spares {
+    let (held, writable) =
+        table::with_bufs(id, |b| (b.send.chunks_held(), b.send.writable())).unwrap_or((0, 0));
+    Spares::for_bytes(len.min(writable), held)
+}
+
+/// Retried once when no chunk was found, for room freed after the reservation
+/// was sized; a second miss is the heap's.
+fn send_reserved(
+    id: ConnId,
+    len: usize,
+    mut enqueue: impl FnMut(&mut TcpSendState, &mut Spares) -> usize,
+) -> Result<usize, TcpError> {
     if id.is_listener() {
         return Err(TcpError::InvalidState);
     }
-    let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<usize, TcpError> {
-        match &pcb.state {
-            PcbState::Data(d)
-                if matches!(
-                    d.close_phase,
-                    ClosePhase::Established | ClosePhase::CloseWait
-                ) => {}
-            _ => return Err(TcpError::InvalidState),
+    for _ in 0..2 {
+        let mut spares = send_spares(id, len);
+        let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<Option<usize>, TcpError> {
+            match &pcb.state {
+                PcbState::Data(d)
+                    if matches!(
+                        d.close_phase,
+                        ClosePhase::Established | ClosePhase::CloseWait
+                    ) => {}
+                _ => return Err(TcpError::InvalidState),
+            }
+            let Some(bufs) = buf.as_mut() else {
+                return Err(TcpError::InvalidState);
+            };
+            let wrote = enqueue(&mut bufs.send, &mut spares);
+            let found_no_chunk = wrote == 0 && len > 0 && bufs.send.writable() > 0;
+            Ok((!found_no_chunk).then_some(wrote))
+        });
+        match result {
+            None => return Err(TcpError::NotFound),
+            Some(Ok(Some(wrote))) => return Ok(wrote),
+            Some(Ok(None)) => {}
+            Some(Err(e)) => return Err(e),
         }
-        let Some(bufs) = buf.as_mut() else {
-            return Err(TcpError::InvalidState);
-        };
-        Ok(bufs.send.enqueue(data))
-    });
-    match result {
-        None => Err(TcpError::NotFound),
-        Some(r) => r,
     }
+    Err(TcpError::OutOfMemory)
+}
+
+pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
+    send_reserved(id, data.len(), |send, spares| send.enqueue(data, spares))
 }
 
 /// Single-direct-copy [`send`]: the payload goes from the pinned user pages
@@ -892,27 +940,8 @@ pub fn send_from(
     id: ConnId,
     reader: &mut slopos_ostd::mm::VmReader<'_>,
 ) -> Result<usize, TcpError> {
-    if id.is_listener() {
-        return Err(TcpError::InvalidState);
-    }
-    let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<usize, TcpError> {
-        match &pcb.state {
-            PcbState::Data(d)
-                if matches!(
-                    d.close_phase,
-                    ClosePhase::Established | ClosePhase::CloseWait
-                ) => {}
-            _ => return Err(TcpError::InvalidState),
-        }
-        let Some(bufs) = buf.as_mut() else {
-            return Err(TcpError::InvalidState);
-        };
-        Ok(bufs.send.enqueue_from(reader))
-    });
-    match result {
-        None => Err(TcpError::NotFound),
-        Some(r) => r,
-    }
+    let len = reader.remain();
+    send_reserved(id, len, |send, spares| send.enqueue_from(reader, spares))
 }
 
 pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
@@ -921,7 +950,10 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
     }
     let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<usize, TcpError> {
         let Some(bufs) = buf.as_mut() else {
-            return Err(TcpError::InvalidState);
+            return match pcb.state {
+                PcbState::TimeWait(_) => Ok(0),
+                _ => Err(TcpError::InvalidState),
+            };
         };
         let read = bufs.recv.dequeue(out);
         if read == 0 && bufs.recv.available() == 0 {
@@ -931,10 +963,7 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
                 }
             }
         }
-        let recv_window = bufs.recv.window();
-        if let PcbState::Data(d) = &mut pcb.state {
-            d.rcv_wnd = recv_window;
-        }
+        release_time_wait_bufs(pcb, buf);
         Ok(read)
     });
     match result {
@@ -944,8 +973,7 @@ pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
 }
 
 /// Single-direct-copy [`recv`]: received bytes go straight into the pinned
-/// user pages (via `writer`) in one volatile copy, no kernel scratch. Mirrors
-/// [`recv`]'s EOF / reset / window-update semantics.
+/// user pages (via `writer`) in one volatile copy, no kernel scratch.
 pub fn recv_into(
     id: ConnId,
     writer: &mut slopos_ostd::mm::VmWriter<'_>,
@@ -955,7 +983,10 @@ pub fn recv_into(
     }
     let result = table::with_pcb_and_bufs(id, |pcb, buf| -> Result<usize, TcpError> {
         let Some(bufs) = buf.as_mut() else {
-            return Err(TcpError::InvalidState);
+            return match pcb.state {
+                PcbState::TimeWait(_) => Ok(0),
+                _ => Err(TcpError::InvalidState),
+            };
         };
         let read = bufs.recv.dequeue_into(writer);
         if read == 0 && bufs.recv.available() == 0 {
@@ -965,10 +996,7 @@ pub fn recv_into(
                 }
             }
         }
-        let recv_window = bufs.recv.window();
-        if let PcbState::Data(d) = &mut pcb.state {
-            d.rcv_wnd = recv_window;
-        }
+        release_time_wait_bufs(pcb, buf);
         Ok(read)
     });
     match result {
@@ -977,10 +1005,38 @@ pub fn recv_into(
     }
 }
 
-/// Append a TCP `MSG_ZEROCOPY` chunk to the send queue: the NIC DMAs `len`
+/// The ACK announcing a window a read has reopened, once it is worth one:
+/// receiver-side silly window avoidance (RFC 1122 §4.2.3.3), as Linux shapes it.
+pub fn window_update(id: ConnId) -> Option<TcpOutSegment> {
+    if id.is_listener() {
+        return None;
+    }
+    table::with_pcb_and_bufs(id, |pcb, buf| {
+        let bufs = buf.as_mut()?;
+        let tuple = pcb.tuple;
+        let PcbState::Data(d) = &mut pcb.state else {
+            return None;
+        };
+        let old = d.rcv_wnd;
+        let new = bufs.recv.window();
+        let cap = bufs.recv.effective_capacity() as u32;
+        let worth_it = (2 * old).max((DEFAULT_MSS as u32).min(cap / 2));
+        if old > cap / 2 || new < worth_it {
+            return None;
+        }
+        let window = d.advertise(new);
+        let mut seg = SegmentBuilder::ack(tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window);
+        d.stamp(&mut seg, clock::now_ms());
+        bufs.recv.ack_sent();
+        Some(seg)
+    })
+    .flatten()
+}
+
+/// Append a TCP `MSG_ZEROCOPY` piece to the send queue: the NIC DMAs `len`
 /// bytes straight from the pinned pages `keepalive` (data at the pin's
 /// `base_off`), held across retransmits until they are cumulatively ACKed.
-/// `token` owns the chunk's notification reference; the ring posts `F_NOTIF`
+/// `token` owns the piece's notification reference; the ring posts `F_NOTIF`
 /// when it reaches zero. `None` drops `keepalive` and `token` here and leaves
 /// the caller the single-direct-copy leaf.
 pub fn enqueue_zerocopy(
@@ -1020,7 +1076,7 @@ pub fn enqueue_zerocopy(
 }
 
 /// Resolve the source of one segment at stream offset `off` (≤ `max_len` bytes,
-/// never crossing a chunk boundary): copy inline bytes into `payload_buf`, or
+/// never crossing a piece boundary): copy inline bytes into `payload_buf`, or
 /// carry a [`ZcSource`] the caller DMAs straight from the pinned pages. `None`
 /// = nothing buffered there. `#[inline(never)]` keeps its source temporaries
 /// off `poll_transmit`'s frame.
@@ -1058,9 +1114,18 @@ fn resolve_segment(
     }
 }
 
+fn arm_retransmit(d: &mut DataState, deadline_ms: &mut u64, id: ConnId, now_ms: u64) {
+    if d.retransmit_token.is_some() {
+        return;
+    }
+    let rto_ms = (d.rtt.rto_ms() as u64).max(1);
+    *deadline_ms = now_ms.saturating_add(rto_ms);
+    d.retransmit_token = Some(NET_TIMER_WHEEL.schedule(rto_ms, TimerKind::TcpRetransmit, id.raw()));
+}
+
 /// Generate the next outgoing data segment for a connection.
 ///
-/// When the bytes live in a zero-copy chunk the returned [`ZcSource`] is what
+/// When the bytes live in a zero-copy piece the returned [`ZcSource`] is what
 /// the caller DMAs from; a `None` source means the payload was copied into
 /// `payload_buf`.
 pub fn poll_transmit(
@@ -1082,59 +1147,58 @@ pub fn poll_transmit(
             // Project once through the KBox `DerefMut` so the borrow checker
             // can split the disjoint field borrows below.
             let d: &mut DataState = &mut **d;
-            if !matches!(
-                d.close_phase,
-                ClosePhase::Established | ClosePhase::CloseWait | ClosePhase::FinWait1
-            ) {
+            if d.close_phase == ClosePhase::FinWait2 {
                 return None;
             }
 
             let tuple = pcb.tuple;
-            let rto_ms = d.rtt.rto_ms() as u64;
             let peer_mss = d.peer_mss as usize;
             let snd_wnd = d.snd_wnd as usize;
 
-            // Window is against pipe (RFC 6675), not raw inflight.
-            let pipe = d.sendmap.pipe() as usize;
-            let wnd_avail = snd_wnd.saturating_sub(pipe);
+            // The congestion window is against pipe (RFC 6675); the peer's
+            // bounds the sequence range past `snd_una`, sent or lost alike.
+            let pipe = bufs.send.sendmap.pipe() as usize;
+            let outstanding = d.snd_una.distance_to(d.snd_nxt) as usize;
+            let wnd_avail = snd_wnd.saturating_sub(outstanding);
             let cwnd_avail = (d.cc.cwnd() as usize).saturating_sub(pipe);
             let effective_wnd = core::cmp::min(wnd_avail, cwnd_avail);
+            // A shut window with nothing in flight hears no ACK to reopen it
+            // unless it is asked (RFC 9293 §3.8.6.1).
+            let must_probe = snd_wnd == 0 && pipe == 0;
 
-            if let Some(lost) = d.sendmap.next_lost() {
+            if let Some(&lost) = bufs.send.sendmap.next_lost() {
                 let len = lost.len as usize;
-                if len <= effective_wnd && len <= payload_buf.len() {
-                    let offset = d.snd_una.distance_to(lost.seq) as usize;
+                let offset = d.snd_una.distance_to(lost.seq) as usize;
+                let fits = offset + len <= snd_wnd && len <= cwnd_avail;
+                if (fits || must_probe) && len <= payload_buf.len() {
                     let seq = lost.seq.raw();
                     if let Some((seg_len, zc)) =
                         resolve_segment(&bufs.send, offset, len, payload_buf)
                     {
-                        d.sendmap.mark_retransmitted(lost.seq);
-                        let window = bufs.recv.window();
+                        bufs.send.sendmap.mark_retransmitted(lost.seq);
+                        let window = d.advertise(bufs.recv.window());
                         let mut seg =
                             SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
-                        seg.timestamp = d.ts_option(now_ms);
-                        if bufs.send.rto_deadline_ms == 0 {
-                            bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
-                            if d.retransmit_token.is_none() {
-                                let token = NET_TIMER_WHEEL.schedule(
-                                    rto_ms.max(1),
-                                    TimerKind::TcpRetransmit,
-                                    id.raw(),
-                                );
-                                d.retransmit_token = Some(token);
-                            }
-                        }
+                        d.stamp(&mut seg, now_ms);
+                        arm_retransmit(d, &mut bufs.send.rto_deadline_ms, id, now_ms);
                         pcb.assert_invariants();
                         return Some((seg, seg_len, zc));
                     }
                 }
             }
 
-            if d.sendmap.capacity_remaining() == 0 {
+            if bufs.send.sendmap.capacity_remaining() == 0 {
                 return None;
             }
 
             let unsent = bufs.send.unsent_len();
+            if unsent == 0 && d.fin_queued {
+                return send_fin(d, tuple, id).map(|seg| (seg, 0, None));
+            }
+            if unsent > 0 && must_probe {
+                arm_retransmit(d, &mut bufs.send.rto_deadline_ms, id, now_ms);
+                return None;
+            }
             let mut max_send = core::cmp::min(unsent, peer_mss);
             max_send = core::cmp::min(max_send, effective_wnd);
             max_send = core::cmp::min(max_send, payload_buf.len());
@@ -1159,22 +1223,17 @@ pub fn poll_transmit(
             bufs.send.mark_sent(payload_len);
             d.snd_nxt = d.snd_nxt.wrapping_add(payload_len as u32);
 
-            let _ = d
+            let _ = bufs
+                .send
                 .sendmap
                 .push_sent(SeqNum::new(seq), payload_len as u32, now_ms);
+            arm_retransmit(d, &mut bufs.send.rto_deadline_ms, id, now_ms);
 
-            if bufs.send.rto_deadline_ms == 0 {
-                bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
-                if d.retransmit_token.is_none() {
-                    let token =
-                        NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, id.raw());
-                    d.retransmit_token = Some(token);
-                }
-            }
-
-            let window = bufs.recv.window();
+            let window = d.advertise(bufs.recv.window());
             let mut seg = SegmentBuilder::data_push(tuple, seq, d.rcv_nxt.raw(), window);
-            seg.timestamp = d.ts_option(now_ms);
+            d.stamp(&mut seg, now_ms);
+            #[cfg(debug_assertions)]
+            d.debug_assert_sendmap(&bufs.send.sendmap);
             pcb.assert_invariants();
 
             Some((seg, payload_len, zc))
@@ -1186,22 +1245,26 @@ pub fn poll_transmit(
 /// A retransmit timer fired on a half-open connection, in either direction.
 ///
 /// `None` means neither handshake state: fall through to the data path.
-/// `Some(Nothing)` means the attempt is exhausted and the PCB is gone.
+/// `Some(GaveUp(None))` means the attempt is exhausted and the PCB is gone.
 ///
 /// `SynRecv` is reached here only through a simultaneous open; a listener's
 /// half-open entries retransmit from `SynQueue` instead. One budget spans both
 /// arms, since a crossed SYN answers the SYN already sent.
-fn on_handshake_retransmit(id: ConnId) -> Option<RetransmitAction> {
+fn on_handshake_retransmit(id: ConnId, fired: Option<TimerToken>) -> Option<RetransmitAction> {
     enum SynOutcome {
         NotHandshake,
+        Stale,
         Exhausted(&'static str),
         Resend(TcpOutSegment),
     }
+    let stale = |armed: Option<TimerToken>| fired.is_some_and(|token| armed != Some(token));
 
     let outcome = table::with_pcb_mut(id, |pcb| {
         let tuple = pcb.tuple;
         let now_ms = clock::now_ms();
         match &mut pcb.state {
+            PcbState::SynSent(s) if stale(s.retransmit_token) => SynOutcome::Stale,
+            PcbState::SynRecv(s) if stale(s.retransmit_token) => SynOutcome::Stale,
             PcbState::SynSent(s) => {
                 s.retransmit_token = None;
                 if s.retransmits >= ACTIVE_SYN_RETRIES_MAX {
@@ -1237,6 +1300,7 @@ fn on_handshake_retransmit(id: ConnId) -> Option<RetransmitAction> {
 
     match outcome {
         SynOutcome::NotHandshake => None,
+        SynOutcome::Stale => Some(RetransmitAction::Nothing),
         SynOutcome::Exhausted(what) => {
             klog_debug!(
                 "tcp: {} retransmits exhausted id={} -> releasing",
@@ -1244,32 +1308,47 @@ fn on_handshake_retransmit(id: ConnId) -> Option<RetransmitAction> {
                 id.raw()
             );
             table::release(id);
-            Some(RetransmitAction::Nothing)
+            Some(RetransmitAction::GaveUp(None))
         }
         SynOutcome::Resend(seg) => Some(RetransmitAction::Segment(seg)),
     }
 }
 
-/// What a fired retransmit timer asks the caller to do.
+/// What a fired retransmit or keepalive timer asks the caller to do.
 pub enum RetransmitAction {
     Nothing,
     Data(ConnId),
     Segment(TcpOutSegment),
+    /// A timer gave up on the connection and released it; a segment here
+    /// resets it.
+    GaveUp(Option<TcpOutSegment>),
 }
 
 pub fn on_retransmit(conn_id: u32) -> RetransmitAction {
+    retransmit_fired(conn_id, None)
+}
+
+/// [`on_retransmit`] for the wheel's `token`, which an ACK may have replaced
+/// while it was being dispatched.
+pub fn on_retransmit_timer(conn_id: u32, token: TimerToken) -> RetransmitAction {
+    retransmit_fired(conn_id, Some(token))
+}
+
+fn retransmit_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction {
     let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return RetransmitAction::Nothing;
     }
 
-    if let Some(action) = on_handshake_retransmit(id) {
+    if let Some(action) = on_handshake_retransmit(id, fired) {
         return action;
     }
 
     enum Outcome {
         Released,
+        Reset(TcpOutSegment),
         Retransmitted,
+        Resend(TcpOutSegment),
         Skip,
     }
 
@@ -1277,32 +1356,67 @@ pub fn on_retransmit(conn_id: u32) -> RetransmitAction {
         let Some(bufs) = buf.as_mut() else {
             return Outcome::Skip;
         };
+        let orphan = pcb.socket_id.is_none();
+        let tuple = pcb.tuple;
         let PcbState::Data(d) = &mut pcb.state else {
             return Outcome::Skip;
         };
-        if d.sendmap.is_empty() {
+        let d: &mut DataState = &mut **d;
+        if fired.is_some_and(|token| d.retransmit_token != Some(token)) {
             return Outcome::Skip;
         }
-        if d.rtt.consecutive_timeouts >= MAX_RETRANSMITS {
-            return Outcome::Released;
-        }
-
-        let d: &mut DataState = &mut **d;
-
         d.retransmit_token = None;
-        d.cc.on_timeout(d.sendmap.pipe());
-        d.sendmap.mark_all_lost();
-        d.rtt.back_off();
-
-        let rto_ms = d.rtt.rto_ms() as u64;
-        let token = NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, conn_id);
-        d.retransmit_token = Some(token);
-
         let now_ms = clock::now_ms();
+
+        let (segment, rto_ms) = if !bufs.send.sendmap.is_empty() {
+            if d.rtt.consecutive_timeouts >= MAX_RETRANSMITS {
+                return Outcome::Released;
+            }
+            d.cc.on_timeout(bufs.send.sendmap.pipe());
+            bufs.send.sendmap.mark_all_lost();
+            d.rtt.back_off();
+            (None, d.rtt.rto_ms() as u64)
+        } else if d.snd_una != d.snd_nxt {
+            if d.rtt.consecutive_timeouts >= MAX_RETRANSMITS {
+                return Outcome::Released;
+            }
+            let fin_seq = d.snd_nxt.raw().wrapping_sub(1);
+            let mut fin = SegmentBuilder::fin_ack(tuple, fin_seq, d.rcv_nxt.raw(), d.advertised());
+            d.stamp(&mut fin, now_ms);
+            d.rtt.back_off();
+            (Some(fin), d.rtt.rto_ms() as u64)
+        } else if d.snd_wnd == 0 && bufs.send.unsent_len() > 0 {
+            if orphan {
+                d.orphan_probes = d.orphan_probes.saturating_add(1);
+            }
+            if d.persist_probes >= MAX_RETRANSMITS || d.orphan_probes > MAX_ORPHAN_PROBES {
+                return Outcome::Reset(SegmentBuilder::bare_rst(tuple, d.snd_nxt.raw()));
+            }
+            d.persist_probes = d.persist_probes.saturating_add(1);
+            d.persist_backoff = d.persist_backoff.saturating_add(1);
+            let mut probe = SegmentBuilder::keepalive_probe(
+                tuple,
+                d.snd_una.raw(),
+                d.rcv_nxt.raw(),
+                d.advertised(),
+            );
+            d.stamp(&mut probe, now_ms);
+            let interval = (d.rtt.rto_ms() as u64) << d.persist_backoff.min(16);
+            (Some(probe), interval.min(u64::from(MAX_RTO_MS)))
+        } else {
+            bufs.send.rto_deadline_ms = 0;
+            return Outcome::Skip;
+        };
+
+        d.retransmit_token =
+            Some(NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, conn_id));
         bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
         pcb.assert_invariants();
         klog_debug!("tcp: retransmit fired id={} rto_ms={}", conn_id, rto_ms);
-        Outcome::Retransmitted
+        match segment {
+            Some(seg) => Outcome::Resend(seg),
+            None => Outcome::Retransmitted,
+        }
     });
 
     match outcome {
@@ -1310,16 +1424,32 @@ pub fn on_retransmit(conn_id: u32) -> RetransmitAction {
         Some(Outcome::Released) => {
             klog_debug!("tcp: retransmit timeout id={} -> releasing", conn_id);
             table::release(id);
-            RetransmitAction::Nothing
+            RetransmitAction::GaveUp(None)
+        }
+        Some(Outcome::Reset(rst)) => {
+            klog_debug!("tcp: zero-window probes unanswered id={} -> reset", conn_id);
+            table::release(id);
+            RetransmitAction::GaveUp(Some(rst))
         }
         Some(Outcome::Retransmitted) => RetransmitAction::Data(id),
+        Some(Outcome::Resend(seg)) => RetransmitAction::Segment(seg),
     }
 }
 
-pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
+pub fn on_keepalive(conn_id: u32) -> RetransmitAction {
+    keepalive_fired(conn_id, None)
+}
+
+/// [`on_keepalive`] for the wheel's `token`, which a probe or a peer's
+/// activity may already have replaced.
+pub fn on_keepalive_timer(conn_id: u32, token: TimerToken) -> RetransmitAction {
+    keepalive_fired(conn_id, Some(token))
+}
+
+fn keepalive_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction {
     let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
-        return None;
+        return RetransmitAction::Nothing;
     }
 
     enum Outcome {
@@ -1332,16 +1462,22 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
         let PcbState::Data(d) = &mut pcb.state else {
             return Outcome::Skip;
         };
-        if d.close_phase != ClosePhase::Established {
+        if d.close_phase != ClosePhase::Established
+            || fired.is_some_and(|token| d.keepalive_token != Some(token))
+        {
             return Outcome::Skip;
         }
         d.keepalive_token = None;
         if d.keepalive_probes_sent >= TCP_KEEPALIVE_PROBES_MAX {
             return Outcome::Released;
         }
-        let mut probe_seg =
-            SegmentBuilder::keepalive_probe(pcb.tuple, d.snd_una.raw(), d.rcv_nxt.raw(), d.rcv_wnd);
-        probe_seg.timestamp = d.ts_option(clock::now_ms());
+        let mut probe_seg = SegmentBuilder::keepalive_probe(
+            pcb.tuple,
+            d.snd_una.raw(),
+            d.rcv_nxt.raw(),
+            d.advertised(),
+        );
+        d.stamp(&mut probe_seg, clock::now_ms());
 
         d.keepalive_probes_sent = d.keepalive_probes_sent.saturating_add(1);
         let token =
@@ -1351,43 +1487,75 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
     });
 
     match outcome {
-        None | Some(Outcome::Skip) => None,
+        None | Some(Outcome::Skip) => RetransmitAction::Nothing,
         Some(Outcome::Released) => {
             klog_debug!(
                 "tcp: keepalive max probes reached id={} -> releasing",
                 conn_id
             );
             table::release(id);
-            None
+            RetransmitAction::GaveUp(None)
         }
-        Some(Outcome::Probe(seg)) => Some(seg),
+        Some(Outcome::Probe(seg)) => RetransmitAction::Segment(seg),
     }
 }
 
+/// Release a TIME_WAIT slot `2 × MSL` after the peer's last FIN; one whose
+/// socket still has bytes to read re-arms, since nothing else releases it.
 pub fn on_time_wait_expire(conn_id: u32) {
     let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return;
     }
-    let is_time_wait =
-        table::with_pcb(id, |pcb| matches!(pcb.state, PcbState::TimeWait(_))).unwrap_or(false);
-    if is_time_wait {
+    let now_ms = clock::now_ms();
+    let expired = table::with_pcb_and_bufs(id, |pcb, bufs| {
+        let owed = pcb.socket_id.is_some() && bufs.as_ref().is_some_and(|b| b.recv.available() > 0);
+        let PcbState::TimeWait(tw) = &mut pcb.state else {
+            return false;
+        };
+        let waited = now_ms.saturating_sub(tw.entry_ms);
+        if waited >= TIME_WAIT_MS && !owed {
+            return true;
+        }
+        let delay_ms = match TIME_WAIT_MS.checked_sub(waited) {
+            Some(left) if left > 0 => left,
+            _ => TIME_WAIT_MS,
+        };
+        tw.expire_token = Some(NET_TIMER_WHEEL.schedule(delay_ms, TimerKind::TcpTimeWait, conn_id));
+        false
+    })
+    .unwrap_or(false);
+    if expired {
         klog_debug!("tcp: TIME_WAIT timer expired id={}", conn_id);
         table::release(id);
     }
 }
 
+/// Only an orphan is timed out of FIN_WAIT_2: a socket may still be reading
+/// the peer's half, so its timer waits for the close.
 pub fn on_fin_wait2_timeout(conn_id: u32) {
     let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return;
     }
-    let is_fw2 = table::with_pcb(id, |pcb| match &pcb.state {
-        PcbState::Data(d) => d.close_phase == ClosePhase::FinWait2,
-        _ => false,
-    })
-    .unwrap_or(false);
-    if is_fw2 {
+    let orphan = table::with_pcb_mut(id, |pcb| {
+        let orphan = pcb.socket_id.is_none();
+        let PcbState::Data(d) = &mut pcb.state else {
+            return false;
+        };
+        if d.close_phase != ClosePhase::FinWait2 {
+            return false;
+        }
+        if !orphan {
+            d.fin_wait2_token = Some(NET_TIMER_WHEEL.schedule(
+                FIN_WAIT2_TIMEOUT_MS,
+                TimerKind::TcpFinWait2,
+                conn_id,
+            ));
+        }
+        orphan
+    });
+    if orphan == Some(true) {
         klog_debug!("tcp: FIN_WAIT_2 timeout id={}", conn_id);
         table::release(id);
     }
@@ -1424,8 +1592,8 @@ pub fn retransmit_check(now_ms: u64) -> Option<ConnId> {
             if d.rtt.consecutive_timeouts >= MAX_RETRANSMITS {
                 return Outcome::Released;
             }
-            d.cc.on_timeout(d.sendmap.pipe());
-            d.sendmap.mark_all_lost();
+            d.cc.on_timeout(bufs.send.sendmap.pipe());
+            bufs.send.sendmap.mark_all_lost();
             d.rtt.back_off();
             bufs.send.rto_deadline_ms = now_ms.saturating_add(d.rtt.rto_ms() as u64);
             pcb.assert_invariants();
@@ -1451,10 +1619,11 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
         let Some(id) = *entry else { continue };
         if let Some(seg) = table::with_pcb_and_bufs(id, |pcb, buf| {
             let bufs = buf.as_mut()?;
-            let PcbState::Data(d) = &pcb.state else {
+            let tuple = pcb.tuple;
+            let PcbState::Data(d) = &mut pcb.state else {
                 return None;
             };
-            d.check_delayed_ack(pcb.tuple, bufs, now_ms)
+            d.check_delayed_ack(tuple, bufs, now_ms)
         })
         .flatten()
         {
@@ -1462,20 +1631,6 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
         }
     }
     None
-}
-
-pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
-    if id.is_listener() {
-        return None;
-    }
-    table::with_pcb_and_bufs(id, |pcb, buf| {
-        let bufs = buf.as_ref()?;
-        let PcbState::Data(d) = &pcb.state else {
-            return None;
-        };
-        d.check_zero_window_probe(pcb.tuple, bufs)
-    })
-    .flatten()
 }
 
 pub fn reset_all() {

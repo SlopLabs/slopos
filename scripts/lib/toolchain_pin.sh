@@ -45,6 +45,14 @@ TP_RUSTC_SRC_REL="third_party/slopos-rustc-src"
 TP_LLVM_RUSTC_OVERLAY_REL="toolchain/llvm-rustc"
 TP_LLVM_RUSTC_TREE_REL="src/llvm-project"
 
+# Print the vendored-sources directory named by `$1/.cargo/vendor.toml`, repo-relative.
+tp_vendor_rel() {
+    local rel
+    rel="$(sed -n 's/^directory[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$1/.cargo/vendor.toml" 2>/dev/null | head -n 1)"
+    [ -n "$rel" ] || return 1
+    printf '%s\n' "$rel"
+}
+
 tp_sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | awk '{ print $1 }'

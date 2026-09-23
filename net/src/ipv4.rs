@@ -171,6 +171,13 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: 
         let _ = socket::socket_send_tcp_segment(seg, &[]);
     }
     socket::socket_notify_tcp_activity(&actions);
+    // Unsent, Nagle-held and lost bytes all wait on an acknowledgement or a
+    // window update, which is what input carries.
+    if let Some(id) = actions.conn_id
+        && tcp::has_pending_output(id)
+    {
+        let _ = socket::tcp_drain_segments(id);
+    }
 }
 
 fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {

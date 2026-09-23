@@ -1,20 +1,18 @@
-//! Ring-driven, `async`/`await` I/O session for nc's TCP recv/send loop.
+//! Ring-driven, `async`/`await` I/O session for nc's connected recv/send loop.
 //!
 //! The established-connection loop races three leaf futures with
-//! [`slopfut::select3`]: an `OP_READ` on stdin, an `OP_READ` on the socket, and
-//! a periodic `OP_TIMEOUT` tick that bounds the wait so the inactivity timeout
-//! is enforced. Multiplexing is the kernel's caller-as-waiter harvest
-//! (SLOPRING § 7.1/§ 8.3).
+//! [`slopfut::select3`]: an `OP_READ` on stdin or the `OP_WRITE` sending what
+//! it read, an `OP_READ` on the socket, and a periodic `OP_TIMEOUT` tick that
+//! bounds the wait so the inactivity timeout is enforced. Multiplexing is the
+//! kernel's caller-as-waiter harvest (SLOPRING § 7.1/§ 8.3).
 //!
 //! `connect`/`listen`/`accept`/`shutdown` stay regular syscalls, outside the
 //! nine-opcode data plane (SLOPRING § 12).
 //!
-//! Buffer lifetime (no UAF): each `OP_READ`/`OP_WRITE` buffer is a `Vec`
-//! *owned by the reactor* while in flight, so a buffer the kernel might still
-//! write is never freed — even when `select3` drops the losing read and fires
-//! its `OP_CANCEL`.
+//! Each read stays in flight until it completes, across however many turns
+//! the other one wins: cancelling a read the kernel has already completed
+//! would drop the bytes it took.
 
-use std::io::Write;
 use std::time::Instant;
 
 use super::tcp::TcpConn;
@@ -22,50 +20,63 @@ use super::{NcConfig, StdinResult, verbose_bytes, verbose_msg};
 use crate::ring::{Ring, slopfut};
 
 const STDIN_FD: i32 = 0;
-/// stdin read buffer capacity (one keystroke burst at a time).
-const STDIN_CAP: usize = 64;
-const SOCK_CAP: usize = 2048;
+const TTY_CAP: usize = 64;
+const PIPE_CAP: usize = 64 * 1024;
+const SOCK_CAP: usize = 64 * 1024;
 /// Periodic timer tick (ns). Bounds an otherwise I/O-only `select` so the
 /// inactivity timeout is checked even while no data flows
 /// (SLOPRING § 12 OP_TIMEOUT note).
 const TIMER_TICK_NS: u64 = 200_000_000;
 
+pub(super) enum Ended {
+    /// The connection is over, with this exit status; a `-k` listener
+    /// accepts again.
+    Conn(u8),
+    /// The user quit or local I/O failed: nc exits with this status.
+    Quit(u8),
+}
+
+impl Ended {
+    pub(super) fn code(self) -> u8 {
+        match self {
+            Ended::Conn(code) | Ended::Quit(code) => code,
+        }
+    }
+}
+
 /// One ring-driven established-connection session.
-///
-/// `listen_mode` selects nc's accept-loop semantics: a normal remote close or
-/// timeout returns `None` so the listener accepts again, rather than the
-/// client's terminal exit code.
 pub(super) struct Session<'a> {
     config: &'a NcConfig,
     conn: &'a TcpConn,
-    listen_mode: bool,
+    datagram: bool,
 
     line_buf: [u8; 1024],
     line_pos: usize,
 
     stdin_closed: bool,
+    /// The peer half-closed while redirected stdin still had bytes for it.
+    sock_closed: bool,
 
     clock_start: Instant,
     last_activity_ms: u64,
 }
 
 impl<'a> Session<'a> {
-    pub(super) fn new(config: &'a NcConfig, conn: &'a TcpConn, listen_mode: bool) -> Self {
+    pub(super) fn new(config: &'a NcConfig, conn: &'a TcpConn, datagram: bool) -> Self {
         Self {
             config,
             conn,
-            listen_mode,
+            datagram,
             line_buf: [0u8; 1024],
             line_pos: 0,
             stdin_closed: false,
+            sock_closed: false,
             clock_start: Instant::now(),
             last_activity_ms: 0,
         }
     }
 
-    /// Drive the session to completion. Returns `Some(code)` to exit the
-    /// program, or `None` (listen mode only) to resume accepting.
-    pub(super) fn run(mut self) -> Option<u8> {
+    pub(super) fn run(mut self) -> Ended {
         // 16 SQ slots is comfortably more than the loop's peak in-flight count
         // (stdin + socket + one write + one timer).
         let ring = match Ring::setup(16) {
@@ -73,71 +84,89 @@ impl<'a> Session<'a> {
             Err(_) => {
                 eprintln!("nc: ring setup failed");
                 self.conn.shutdown_both();
-                return Some(1);
+                return Ended::Quit(1);
             }
         };
         self.last_activity_ms = self.clock_start.elapsed().as_millis() as u64;
         slopfut::block_on(ring, self.run_async())
     }
 
-    async fn run_async(mut self) -> Option<u8> {
+    async fn run_async(mut self) -> Ended {
         type DynBuf = core::pin::Pin<Box<dyn core::future::Future<Output = slopfut::BufResult>>>;
         type DynInt = core::pin::Pin<Box<dyn core::future::Future<Output = i32>>>;
 
-        // The winning read returns its buffer; a cancelled read keeps its buffer
-        // in the reactor until the cancellation lands, so the loser is handed a
-        // fresh one next turn.
-        let mut stdin_buf = vec![0u8; STDIN_CAP];
-        let mut sock_buf = vec![0u8; SOCK_CAP];
-
+        let stdin_cap = match (self.config.stdin_tty, self.datagram) {
+            (true, _) => TTY_CAP,
+            (false, true) => super::UNFRAGMENTED_DATAGRAM,
+            (false, false) => PIPE_CAP,
+        };
+        // The write races the socket read, so a peer that writes before it
+        // reads cannot deadlock against it.
+        let mut outbound: Option<DynBuf> = None;
+        let mut outbound_is_write = false;
+        let mut sock_read: Option<DynBuf> = None;
         loop {
+            let outbound_fut = outbound.get_or_insert_with(|| {
+                if self.stdin_closed {
+                    Box::pin(core::future::pending())
+                } else {
+                    Box::pin(slopfut::read(
+                        STDIN_FD,
+                        vec![0u8; stdin_cap],
+                        stdin_cap as u32,
+                    ))
+                }
+            });
             let fd_sock = self.conn.raw();
-            // A closed stdin or disabled timer becomes a never-resolving
-            // `pending()` so the `select3` shape stays fixed.
-            let f_stdin: DynBuf = if self.stdin_closed {
-                Box::pin(core::future::pending())
-            } else {
-                Box::pin(slopfut::read(
-                    STDIN_FD,
-                    core::mem::take(&mut stdin_buf),
-                    STDIN_CAP as u32,
-                ))
-            };
-            let f_sock: DynBuf = Box::pin(slopfut::read(
-                fd_sock,
-                core::mem::take(&mut sock_buf),
-                SOCK_CAP as u32,
-            ));
-            let f_timer: DynInt = if self.config.timeout_ms > 0 {
+            let sock = sock_read.get_or_insert_with(|| {
+                if self.sock_closed {
+                    Box::pin(core::future::pending())
+                } else {
+                    Box::pin(slopfut::read(fd_sock, vec![0u8; SOCK_CAP], SOCK_CAP as u32))
+                }
+            });
+            let timer: DynInt = if self.config.timeout_ms > 0 {
                 Box::pin(slopfut::timeout(TIMER_TICK_NS))
             } else {
                 Box::pin(core::future::pending())
             };
 
-            match slopfut::select3(f_stdin, f_sock, f_timer).await {
+            match slopfut::select3(outbound_fut, sock, timer).await {
+                slopfut::Either3::A(br) if outbound_is_write => {
+                    outbound = None;
+                    if br.res <= 0 {
+                        eprintln!("nc: send failed (broken pipe)");
+                        self.conn.shutdown_both();
+                        return Ended::Conn(1);
+                    }
+                    let sent = (br.res as usize).min(br.buf.len());
+                    verbose_bytes(self.config, "sent ", sent);
+                    self.touch();
+                    if sent < br.buf.len() {
+                        let rest = br.buf[sent..].to_vec();
+                        outbound = Some(Box::pin(slopfut::write(fd_sock, rest)));
+                    } else {
+                        outbound_is_write = false;
+                    }
+                }
+                slopfut::Either3::A(mut br) if !self.config.stdin_tty && br.res > 0 => {
+                    br.buf.truncate(br.res as usize);
+                    outbound = Some(Box::pin(slopfut::write(fd_sock, br.buf)));
+                    outbound_is_write = true;
+                }
                 slopfut::Either3::A(br) => {
-                    sock_buf = vec![0u8; SOCK_CAP];
-                    let outcome = self.on_stdin(br.res, &br.buf).await;
-                    stdin_buf = br.buf;
-                    if let Some(out) = outcome {
+                    outbound = None;
+                    if let Some(out) = self.on_stdin(br.res, &br.buf).await {
                         return out;
                     }
                 }
                 slopfut::Either3::B(br) => {
-                    if !self.stdin_closed {
-                        stdin_buf = vec![0u8; STDIN_CAP];
-                    }
-                    let outcome = self.on_sock(br.res, &br.buf);
-                    sock_buf = br.buf;
-                    if let Some(out) = outcome {
+                    sock_read = None;
+                    if let Some(out) = self.on_sock(br.res, &br.buf) {
                         return out;
                     }
                 }
                 slopfut::Either3::C(_) => {
-                    if !self.stdin_closed {
-                        stdin_buf = vec![0u8; STDIN_CAP];
-                    }
-                    sock_buf = vec![0u8; SOCK_CAP];
                     if let Some(out) = self.check_timeout() {
                         return out;
                     }
@@ -146,7 +175,7 @@ impl<'a> Session<'a> {
         }
     }
 
-    async fn on_stdin(&mut self, res: i32, buf: &[u8]) -> Option<Option<u8>> {
+    async fn on_stdin(&mut self, res: i32, buf: &[u8]) -> Option<Ended> {
         if res <= 0 {
             // EOF or a genuine error; would-block never reaches here, the kernel
             // keeps those in-flight. Re-arming on an error would busy-spin.
@@ -155,12 +184,20 @@ impl<'a> Session<'a> {
                 verbose_msg(self.config, "stdin EOF");
             }
             self.conn.shutdown_write();
+            if self.sock_closed {
+                self.conn.shutdown_both();
+                return Some(Ended::Conn(0));
+            }
             return None;
         }
         let n = (res as usize).min(buf.len());
         for &byte in &buf[..n] {
-            let result =
-                super::process_raw_stdin_char(byte, &mut self.line_buf, &mut self.line_pos);
+            let result = super::process_raw_stdin_char(
+                self.config,
+                byte,
+                &mut self.line_buf,
+                &mut self.line_pos,
+            );
             match result {
                 StdinResult::SendLine(len) => {
                     let line: Vec<u8> = self.line_buf[..len].to_vec();
@@ -170,13 +207,13 @@ impl<'a> Session<'a> {
                     } else {
                         eprintln!("nc: send failed (broken pipe)");
                         self.conn.shutdown_both();
-                        return Some(Some(1));
+                        return Some(Ended::Conn(1));
                     }
                     self.line_pos = 0;
                 }
                 StdinResult::Quit => {
                     self.conn.shutdown_both();
-                    return Some(Some(0));
+                    return Some(Ended::Quit(0));
                 }
                 StdinResult::Continue => {}
             }
@@ -199,27 +236,29 @@ impl<'a> Session<'a> {
         true
     }
 
-    fn on_sock(&mut self, res: i32, buf: &[u8]) -> Option<Option<u8>> {
+    fn on_sock(&mut self, res: i32, buf: &[u8]) -> Option<Ended> {
+        if res == 0 && self.datagram {
+            self.touch();
+            return None;
+        }
         if res == 0 {
             verbose_msg(self.config, "connection closed by remote");
-            self.conn.shutdown_both();
-            return Some(self.on_closed());
+            if self.stdin_closed || self.config.stdin_tty {
+                self.conn.shutdown_both();
+                return Some(Ended::Conn(0));
+            }
+            self.sock_closed = true;
+            return None;
         }
         if res < 0 {
-            // A reset peer surfaces here on every probe; treating it as
-            // transient would busy-spin.
-            verbose_msg(self.config, "connection error");
+            eprintln!("nc: connection error");
             self.conn.shutdown_both();
-            return Some(self.on_closed());
+            return Some(Ended::Conn(1));
         }
         let received = (res as usize).min(buf.len());
-        {
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(&buf[..received]);
-            if received > 0 && buf[received - 1] != b'\n' {
-                let _ = out.write_all(b"\n");
-            }
-            let _ = out.flush();
+        if !super::emit_received(self.config, &buf[..received]) {
+            self.conn.shutdown_both();
+            return Some(Ended::Quit(1));
         }
         verbose_bytes(self.config, "received ", received);
         self.touch();
@@ -230,7 +269,7 @@ impl<'a> Session<'a> {
         self.last_activity_ms = self.clock_start.elapsed().as_millis() as u64;
     }
 
-    fn check_timeout(&mut self) -> Option<Option<u8>> {
+    fn check_timeout(&mut self) -> Option<Ended> {
         if self.config.timeout_ms == 0 {
             return None;
         }
@@ -238,13 +277,8 @@ impl<'a> Session<'a> {
         if now.wrapping_sub(self.last_activity_ms) >= self.config.timeout_ms as u64 {
             eprintln!("nc: timeout");
             self.conn.shutdown_both();
-            return Some(if self.listen_mode { None } else { Some(1) });
+            return Some(Ended::Conn(1));
         }
         None
-    }
-
-    /// Terminal "connection finished" outcome, honoring listen vs client.
-    fn on_closed(&self) -> Option<u8> {
-        if self.listen_mode { None } else { Some(0) }
     }
 }

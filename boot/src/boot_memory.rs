@@ -147,6 +147,19 @@ fn boot_step_commit_ledger_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     );
 }
 
+/// Here rather than at network init: the limits are a share of the memory
+/// the page allocator has just been seeded with, and no connection exists yet.
+fn boot_step_tcp_buffer_limits_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    let pages = slopos_mm::page_alloc::get_page_allocator_stats();
+    let usable = pages.free.saturating_add(pages.allocated);
+    let (per_conn, total) = slopos_net::tcp::chunk::install_limits(usable);
+    klog_info!(
+        "tcp: {} KiB per connection and direction, {} MiB across all connections",
+        per_conn / 1024,
+        total / (1024 * 1024)
+    );
+}
+
 fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -283,4 +296,11 @@ crate::boot_init!(
     b"commit ledger\0",
     boot_step_commit_ledger_fn,
     flags = boot_init_priority(58)
+);
+crate::boot_init!(
+    BOOT_STEP_TCP_BUFFER_LIMITS,
+    memory,
+    b"tcp buffer limits\0",
+    boot_step_tcp_buffer_limits_fn,
+    flags = boot_init_priority(59)
 );

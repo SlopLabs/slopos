@@ -85,7 +85,7 @@ $CARGO +slopos clean \
     --target "$USERLAND_TARGET" >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-$CARGO +slopos rustc \
+$CARGO +slopos rustc --locked \
     -Zbuild-std=core \
     -Zunstable-options \
     -Zjson-target-spec \
@@ -106,7 +106,7 @@ done
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-$CARGO +slopos build \
+$CARGO +slopos build --locked \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
@@ -131,7 +131,7 @@ echo "Userland binaries built: $(for b in $BINS; do printf '%s/%s.elf ' "$BUILD_
 if [ "$TEST_MODE" = "--test" ]; then
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     RUSTFLAGS="$USERLAND_RUSTFLAGS" \
-    $CARGO +slopos build \
+    $CARGO +slopos build --locked \
         -Zbuild-std="$BUILD_STD" \
         -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options \
@@ -182,6 +182,8 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin session_smoke_test \
         --bin spawn_output_test \
         --bin dns_resolve_test \
+        --bin dns_concurrent_test \
+        --bin transfer_test \
         --bin persist_test \
         --bin libc_abi_test \
         --features testbins \
@@ -323,6 +325,12 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/dns_resolve_test" ]; then
         cp "$RELEASE_DIR/dns_resolve_test" "$BUILD_DIR/dns_resolve_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/dns_concurrent_test" ]; then
+        cp "$RELEASE_DIR/dns_concurrent_test" "$BUILD_DIR/dns_concurrent_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/transfer_test" ]; then
+        cp "$RELEASE_DIR/transfer_test" "$BUILD_DIR/transfer_test.elf"
+    fi
     if [ -f "$RELEASE_DIR/persist_test" ]; then
         cp "$RELEASE_DIR/persist_test" "$BUILD_DIR/persist_test.elf"
     fi
@@ -340,7 +348,7 @@ fi
 # why it lives in a wrapper package) rots unobserved.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS -C force-unwind-tables" \
-$CARGO +slopos build \
+$CARGO +slopos build --locked \
     -Zbuild-std="$BUILD_STD" \
     -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
@@ -381,7 +389,7 @@ SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-
 # images, so its relocations are the ones a `.so` may not carry.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="-C relocation-model=pic" \
-$CARGO +slopos build \
+$CARGO +slopos build --locked \
     -Zbuild-std=core \
     -Zunstable-options \
     -Zjson-target-spec \
@@ -398,7 +406,7 @@ cp "$RELEASE_DIR/libbuiltins.a" "$BUILD_DIR/libbuiltins.a"
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$SO_RUSTFLAGS -C link-arg=-Bsymbolic -C link-arg=-znow -C link-arg=--soname=libc.so -C link-arg=--entry=_dlstart" \
-$CARGO +slopos build \
+$CARGO +slopos build --locked \
     -Zbuild-std=core,alloc \
     -Zunstable-options \
     -Zjson-target-spec \
@@ -424,7 +432,7 @@ if [ "$TEST_MODE" = "--test" ]; then
     DL_LINK="-C link-arg=-L$RELEASE_DIR -C link-arg=-lc"
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     RUSTFLAGS="$SO_RUSTFLAGS -Z tls-model=global-dynamic $DL_LINK -C link-arg=-znow -C link-arg=--soname=libdltest.so" \
-    $CARGO +slopos build \
+    $CARGO +slopos build --locked \
         -Zbuild-std=core \
         -Zunstable-options \
         -Zjson-target-spec \
@@ -435,7 +443,7 @@ if [ "$TEST_MODE" = "--test" ]; then
 
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     RUSTFLAGS="-C relocation-model=static -C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
-    $CARGO +slopos build \
+    $CARGO +slopos build --locked \
         -Zbuild-std=core \
         -Zunstable-options \
         -Zjson-target-spec \

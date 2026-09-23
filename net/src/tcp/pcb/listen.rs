@@ -75,6 +75,7 @@ impl ListenState {
                 parsed.sack_permitted,
                 now_ms,
                 peer_tsval,
+                parsed.window_scale,
             ) {
                 actions.push_segment(syn_ack);
             }

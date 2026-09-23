@@ -119,6 +119,15 @@ impl SocketOptions {
         }
         Ok(size)
     }
+
+    /// Clamped to the ceiling TCP derives from memory rather than refused, as
+    /// Linux clamps to `rmem_max`: a program cannot know a machine's ceiling.
+    pub fn validate_stream_buf_size(size: usize) -> Result<usize, NetError> {
+        if size < Self::RECV_BUF_MIN {
+            return Err(NetError::InvalidArgument);
+        }
+        Ok(size.min(tcp::chunk::buffer_max()))
+    }
 }
 
 impl Default for SocketOptions {
@@ -500,6 +509,21 @@ impl EphemeralPortAllocator {
         Some(Port(candidate))
     }
 
+    /// Take `port` itself, if it is ephemeral and free.
+    pub fn claim(&mut self, port: Port) -> bool {
+        let p = port.0;
+        if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
+            return false;
+        }
+        let bit_idx = (p - Self::EPHEMERAL_PORT_START) as usize;
+        if self.bitmap.test(bit_idx) {
+            return false;
+        }
+        self.bitmap.set(bit_idx);
+        self.allocated_count += 1;
+        true
+    }
+
     pub fn release(&mut self, port: Port) {
         let p = port.0;
         if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
@@ -616,10 +640,10 @@ use slopos_abi::net::{
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 use slopos_abi::syscall::{
-    ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ, ERRNO_EINPROGRESS,
-    ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO, ERRNO_EISCONN, ERRNO_ENOMEM, ERRNO_ENOTCONN,
-    ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN,
-    POLLOUT,
+    ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ,
+    ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO, ERRNO_EISCONN, ERRNO_ENOMEM,
+    ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR,
+    POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_ostd::sync::{BUS, WaitAbort};
 
@@ -978,8 +1002,41 @@ fn socket_notify_accept_waiters() {
     }
 }
 
+fn socket_note_tcp_ended(conn_id: tcp::ConnId, why: NetError) {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    for sock in table.slots.iter_mut().flatten() {
+        if socket_tcp_conn_id(sock) == Some(conn_id) {
+            sock.pending_error = Some(match why {
+                NetError::ConnectionReset if sock.state == SocketState::Connecting => {
+                    NetError::ConnectionRefused
+                }
+                other => other,
+            });
+        }
+    }
+}
+
+/// A timer gave up on `conn_id` and released it: no segment will wake its
+/// socket's waiters, so this does.
+pub fn socket_notify_tcp_timed_out(conn_id: u32) {
+    let id = tcp::ConnId::from_raw(conn_id);
+    socket_note_tcp_ended(id, NetError::TimedOut);
+    socket_notify_tcp_idx_waiters(id);
+}
+
+fn tcp_end_reason_or(sock_idx: u32, clean: i64) -> i64 {
+    NEW_SOCKET_TABLE
+        .lock()
+        .get_mut(sock_idx as usize)
+        .and_then(Socket::take_pending_error)
+        .map_or(clean, |e| map_net_err(e) as i64)
+}
+
 pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
     if let Some(conn_id) = actions.conn_id {
+        if actions.notify.contains(tcp::SocketNotify::RESET_RECEIVED) {
+            socket_note_tcp_ended(conn_id, NetError::ConnectionReset);
+        }
         socket_notify_tcp_idx_waiters(conn_id);
 
         // The child PCB inherits the listener's socket_id at install time.
@@ -1001,6 +1058,7 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                             peer_mss: d.peer_mss,
                             sack_permitted: d.sack_permitted,
                             peer_tsval: None,
+                            peer_wscale: d.wscale_enabled.then_some(d.snd_wscale),
                         })
                     })
                     .flatten();
@@ -1182,6 +1240,10 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOw
     if let Some(sock) = table.get_mut(idx) {
         sock.recv_queue.clear();
         sock.set_nonblocking(false);
+        if matches!(sock.inner, SocketInner::Tcp(_)) {
+            sock.options.recv_buf_size = tcp::chunk::buffer_max();
+            sock.options.send_buf_size = tcp::chunk::buffer_max();
+        }
     }
     idx as i32
 }
@@ -1446,7 +1508,7 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
         return errno_i32(ERRNO_ENOTSOCK);
     };
 
-    let local = match sock.local_addr {
+    let mut local = match sock.local_addr {
         Some(addr) => addr,
         None => return errno_i32(ERRNO_EINVAL),
     };
@@ -1456,9 +1518,16 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
     if sock.state != SocketState::Bound {
         return errno_i32(ERRNO_EINVAL);
     }
+    if local.port.0 == 0 {
+        let Some(port) = tcp::table::alloc_ephemeral_port() else {
+            return errno_i32(ERRNO_EADDRINUSE);
+        };
+        local.port = Port(port);
+    }
 
     match tcp::listen(local.ip.0, local.port.0) {
         Ok(tcp_idx) => {
+            sock.local_addr = Some(local);
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
                 tcp_inner.conn_id = Some(tcp_idx);
                 let Some(listen_state) = tcp_listener::TcpListenState::new(backlog as usize, local)
@@ -1470,6 +1539,8 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
             sock.state = SocketState::Listening;
 
             tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
+            tcp::set_rcvbuf(tcp_idx, sock.options.recv_buf_size);
+            tcp::set_sndbuf(tcp_idx, sock.options.send_buf_size);
 
             0
         }
@@ -1652,7 +1723,10 @@ fn connect_initiate_tcp_locked(
                 tcp_inner.conn_id = Some(tcp_idx);
             }
             sock.state = SocketState::Connecting;
+            sock.pending_error = None;
             tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
+            tcp::set_rcvbuf(tcp_idx, sock.options.recv_buf_size);
+            tcp::set_sndbuf(tcp_idx, sock.options.send_buf_size);
             let nb = sock.is_nonblocking();
             Ok((tcp_idx, nb, syn))
         }
@@ -1710,29 +1784,9 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
 
         match tcp::get_state(tcp_idx) {
-            Some(TcpState::Established) => {
-                let mut table = NEW_SOCKET_TABLE.lock();
-                if let Some(sock) = table.get_mut(sock_idx as usize) {
-                    sock.state = SocketState::Connected;
-                }
-                return 0;
-            }
             // `SynReceived` here is a simultaneous open still in flight.
             Some(TcpState::SynSent | TcpState::SynReceived) => {}
-            None => {
-                let mut table = NEW_SOCKET_TABLE.lock();
-                if let Some(sock) = table.get_mut(sock_idx as usize) {
-                    sock.state = SocketState::Closed;
-                }
-                return errno_i32(ERRNO_ECONNREFUSED);
-            }
-            _ => {
-                let mut table = NEW_SOCKET_TABLE.lock();
-                if let Some(sock) = table.get_mut(sock_idx as usize) {
-                    sock.state = SocketState::Closed;
-                }
-                return errno_i32(ERRNO_ECONNREFUSED);
-            }
+            state => return connect_resolved(sock_idx, state),
         }
 
         if slopos_kernel_services::clock::uptime_ms() >= deadline_ms {
@@ -1801,23 +1855,26 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             errno_i32(ERRNO_EAGAIN)
         }
         Action::Poll(tcp_idx) => match tcp::get_state(tcp_idx) {
-            Some(TcpState::Established) => {
-                let mut table = NEW_SOCKET_TABLE.lock();
-                if let Some(sock) = table.get_mut(sock_idx as usize) {
-                    sock.state = SocketState::Connected;
-                }
-                0
-            }
             Some(TcpState::SynSent | TcpState::SynReceived) => errno_i32(ERRNO_EAGAIN),
-            _ => {
-                let mut table = NEW_SOCKET_TABLE.lock();
-                if let Some(sock) = table.get_mut(sock_idx as usize) {
-                    sock.state = SocketState::Closed;
-                }
-                errno_i32(ERRNO_ECONNREFUSED)
-            }
+            state => connect_resolved(sock_idx, state),
         },
     }
+}
+
+/// A peer whose FIN followed the handshake at once still leaves the socket
+/// connected.
+fn connect_resolved(sock_idx: u32, state: Option<TcpState>) -> i32 {
+    let mut table = NEW_SOCKET_TABLE.lock();
+    let Some(sock) = table.get_mut(sock_idx as usize) else {
+        return errno_i32(ERRNO_ENOTSOCK);
+    };
+    if matches!(state, Some(TcpState::Established | TcpState::CloseWait)) {
+        sock.state = SocketState::Connected;
+        return 0;
+    }
+    sock.state = SocketState::Closed;
+    sock.take_pending_error()
+        .map_or(errno_i32(ERRNO_ECONNREFUSED), map_net_err)
 }
 
 /// The resolved transport target of a send, after validation + UDP/ICMP
@@ -1979,6 +2036,9 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
         )
     };
 
+    if state == SocketState::Closed {
+        return Err(tcp_end_reason_or(sock_idx, errno_i32(ERRNO_EPIPE) as i64));
+    }
     if !matches!(state, SocketState::Connected) {
         return Err(errno_i32(ERRNO_ENOTCONN) as i64);
     }
@@ -1995,7 +2055,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
 /// Drain all currently-transmittable segments for `tcp_idx` to the wire.
 /// Returns `0` on success, or a negative errno (`i64`) on a segment-send or
 /// scratch-alloc failure.
-fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
+pub fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
     // Heap-allocate the per-segment scratch so the 1460 B buffer
     // doesn't pad this function's frame above the stack-sizes gate.
     let mut tx_payload_box = match slopos_ostd::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
@@ -2019,8 +2079,64 @@ fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
     0
 }
 
-/// TCP send loop, slice source: buffer `payload` (blocking on send-buffer space
-/// per the socket's nonblock/timeout), then drain segments to the wire.
+/// Until `tcp_idx` can take bytes or never will: an acknowledgement that frees
+/// send chunks publishes the send event, and so does the connection's end.
+fn wait_send_room(sock_idx: u32, tcp_idx: tcp::ConnId, timeout_ms: u64) -> SockWait {
+    wait_socket_event(
+        sock_send_ev(sock_idx),
+        || {
+            tcp::send_buffer_space(tcp_idx) > 0
+                || !matches!(
+                    tcp::get_state(tcp_idx),
+                    Some(TcpState::Established | TcpState::CloseWait)
+                )
+        },
+        timeout_ms,
+    )
+}
+
+/// `send_once` returns what one enqueue buffered, or `None` once the source is
+/// spent.
+fn tcp_send_loop(
+    sock_idx: u32,
+    tcp_idx: tcp::ConnId,
+    nonblocking: bool,
+    timeout_ms: u64,
+    mut send_once: impl FnMut() -> Option<Result<usize, TcpError>>,
+) -> i64 {
+    let mut total_wrote = 0usize;
+    while let Some(sent) = send_once() {
+        let wrote = match sent {
+            Ok(n) => n,
+            Err(_) if total_wrote > 0 => break,
+            Err(TcpError::NotFound) => {
+                return tcp_end_reason_or(sock_idx, errno_i32(ERRNO_EPIPE) as i64);
+            }
+            Err(e) => return map_tcp_err_i64(e),
+        };
+        total_wrote += wrote;
+        if wrote > 0 {
+            continue;
+        }
+        if total_wrote > 0 {
+            break;
+        }
+        if nonblocking {
+            return errno_i32(ERRNO_EAGAIN) as i64;
+        }
+        match wait_send_room(sock_idx, tcp_idx, timeout_ms) {
+            SockWait::Ready => {}
+            SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
+            SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
+        }
+    }
+
+    // The bytes are the connection's now: a segment the device refused is
+    // resent by the timer, and failing the call would have them written twice.
+    let _ = tcp_drain_segments(tcp_idx);
+    total_wrote as i64
+}
+
 fn socket_send_tcp_slice(
     sock_idx: u32,
     tcp_idx: tcp::ConnId,
@@ -2028,73 +2144,17 @@ fn socket_send_tcp_slice(
     timeout_ms: u64,
     payload: &[u8],
 ) -> i64 {
-    let mut total_wrote = 0usize;
-    while total_wrote < payload.len() {
-        let space = tcp::send_buffer_space(tcp_idx);
-        if space == 0 {
-            if total_wrote > 0 {
-                break;
-            }
-            if nonblocking {
-                return errno_i32(ERRNO_EAGAIN) as i64;
-            }
-            match wait_socket_event(
-                sock_send_ev(sock_idx),
-                || tcp::send_buffer_space(tcp_idx) > 0,
-                timeout_ms,
-            ) {
-                SockWait::Ready => {}
-                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
-                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
-            }
-            continue;
-        }
-
-        let remaining = payload.len() - total_wrote;
-        let chunk_len = cmp::min(space, remaining);
-        let chunk = &payload[total_wrote..total_wrote + chunk_len];
-        let wrote = match tcp::send(tcp_idx, chunk) {
-            Ok(n) => n,
-            Err(e) => {
-                if total_wrote > 0 {
-                    break;
-                }
-                return map_tcp_err_i64(e);
-            }
-        };
-
-        if wrote == 0 {
-            if total_wrote > 0 {
-                break;
-            }
-            if nonblocking {
-                return errno_i32(ERRNO_EAGAIN) as i64;
-            }
-            match wait_socket_event(
-                sock_send_ev(sock_idx),
-                || tcp::send_buffer_space(tcp_idx) > 0,
-                timeout_ms,
-            ) {
-                SockWait::Ready => {}
-                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
-                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
-            }
-            continue;
-        }
-        total_wrote += wrote;
-    }
-
-    let drain = tcp_drain_segments(tcp_idx);
-    if drain != 0 {
-        return drain;
-    }
-    total_wrote as i64
+    let mut sent = 0;
+    tcp_send_loop(sock_idx, tcp_idx, nonblocking, timeout_ms, || {
+        (sent < payload.len()).then(|| {
+            let n = tcp::send(tcp_idx, &payload[sent..])?;
+            sent += n;
+            Ok(n)
+        })
+    })
 }
 
-/// TCP send loop, single-direct-copy source: the same blocking/space/drain
-/// shape as [`socket_send_tcp_slice`], but each enqueue pulls bytes straight
-/// from the pinned user pages (via `reader`) into the send ring with one
-/// volatile copy — no kernel scratch.
+/// Enqueues straight from the pinned user pages, with no kernel scratch copy.
 fn socket_send_tcp_pinned(
     sock_idx: u32,
     tcp_idx: tcp::ConnId,
@@ -2102,64 +2162,9 @@ fn socket_send_tcp_pinned(
     timeout_ms: u64,
     reader: &mut VmReader<'_>,
 ) -> i64 {
-    let mut total_wrote = 0usize;
-    while reader.has_remain() {
-        let space = tcp::send_buffer_space(tcp_idx);
-        if space == 0 {
-            if total_wrote > 0 {
-                break;
-            }
-            if nonblocking {
-                return errno_i32(ERRNO_EAGAIN) as i64;
-            }
-            match wait_socket_event(
-                sock_send_ev(sock_idx),
-                || tcp::send_buffer_space(tcp_idx) > 0,
-                timeout_ms,
-            ) {
-                SockWait::Ready => {}
-                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
-                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
-            }
-            continue;
-        }
-
-        let wrote = match tcp::send_from(tcp_idx, reader) {
-            Ok(n) => n,
-            Err(e) => {
-                if total_wrote > 0 {
-                    break;
-                }
-                return map_tcp_err_i64(e);
-            }
-        };
-
-        if wrote == 0 {
-            if total_wrote > 0 {
-                break;
-            }
-            if nonblocking {
-                return errno_i32(ERRNO_EAGAIN) as i64;
-            }
-            match wait_socket_event(
-                sock_send_ev(sock_idx),
-                || tcp::send_buffer_space(tcp_idx) > 0,
-                timeout_ms,
-            ) {
-                SockWait::Ready => {}
-                SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
-                SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
-            }
-            continue;
-        }
-        total_wrote += wrote;
-    }
-
-    let drain = tcp_drain_segments(tcp_idx);
-    if drain != 0 {
-        return drain;
-    }
-    total_wrote as i64
+    tcp_send_loop(sock_idx, tcp_idx, nonblocking, timeout_ms, || {
+        reader.has_remain().then(|| tcp::send_from(tcp_idx, reader))
+    })
 }
 
 /// Send `payload` on a connected socket.
@@ -2399,12 +2404,20 @@ fn socket_recv_resolve(sock_idx: u32) -> Result<RecvKind, i64> {
         )
     };
 
-    if !matches!(state, SocketState::Connected | SocketState::Connecting) {
-        return Err(errno_i32(ERRNO_ENOTCONN) as i64);
-    }
     let Some(tcp_idx) = tcp_idx else {
         return Err(errno_i32(ERRNO_ENOTCONN) as i64);
     };
+    if state == SocketState::Closed && !tcp::is_peer_closed(tcp_idx) {
+        return match tcp_end_reason_or(sock_idx, 0) {
+            0 => Ok(RecvKind::Eof),
+            err => Err(err),
+        };
+    }
+    if !matches!(state, SocketState::Connected | SocketState::Connecting)
+        && !tcp::is_peer_closed(tcp_idx)
+    {
+        return Err(errno_i32(ERRNO_ENOTCONN) as i64);
+    }
     Ok(RecvKind::Tcp {
         tcp_idx,
         nonblocking,
@@ -2493,6 +2506,9 @@ fn tcp_recv_loop(
         match recv_once() {
             Ok(n) => {
                 if n > 0 {
+                    if let Some(update) = tcp::window_update(tcp_idx) {
+                        let _ = socket_send_tcp_segment(&update, &[]);
+                    }
                     return n as i64;
                 }
 
@@ -2538,6 +2554,7 @@ fn tcp_recv_loop(
                     SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
                 }
             }
+            Err(TcpError::NotFound) => return tcp_end_reason_or(sock_idx, 0),
             Err(e) => return map_tcp_err_i64(e),
         }
     }
@@ -2672,7 +2689,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    let (state, is_datagram, tcp_idx, has_dgram_data) = {
+    let (state, is_datagram, tcp_idx, has_dgram_data, failed) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return 0;
@@ -2683,6 +2700,7 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
             socket_is_udp(sock) || socket_is_icmp(sock),
             socket_tcp_conn_id(sock),
             !sock.recv_queue.is_empty(),
+            sock.pending_error.is_some(),
         )
     };
 
@@ -2739,8 +2757,11 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
         ) => {
             flags |= POLLHUP as u32;
         }
-        None => {
+        None if failed => {
             flags |= (POLLERR | POLLHUP) as u32;
+        }
+        None => {
+            flags |= (POLLIN | POLLHUP) as u32;
         }
         _ => {}
     }
@@ -3087,6 +3108,16 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
+                if let SocketInner::Tcp(tcp_inner) = &sock.inner {
+                    let Ok(size) = SocketOptions::validate_stream_buf_size(v) else {
+                        return errno_i32(ERRNO_EINVAL);
+                    };
+                    if let Some(conn_id) = tcp_inner.conn_id {
+                        tcp::set_rcvbuf(conn_id, size);
+                    }
+                    sock.options.recv_buf_size = size;
+                    return 0;
+                }
                 let Ok(size) = SocketOptions::validate_recv_buf_size(v) else {
                     return errno_i32(ERRNO_EINVAL);
                 };
@@ -3094,11 +3125,6 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_ENOMEM);
                 }
                 sock.options.recv_buf_size = size;
-                if let SocketInner::Tcp(tcp_inner) = &sock.inner {
-                    if let Some(conn_id) = tcp_inner.conn_id {
-                        tcp::set_rcvbuf(conn_id, size);
-                    }
-                }
                 0
             }
             SO_SNDBUF => {
@@ -3106,7 +3132,12 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                     return errno_i32(ERRNO_EINVAL);
                 }
                 let v = u32::from_ne_bytes([val[0], val[1], val[2], val[3]]) as usize;
-                let Ok(size) = SocketOptions::validate_send_buf_size(v) else {
+                let validated = if matches!(sock.inner, SocketInner::Tcp(_)) {
+                    SocketOptions::validate_stream_buf_size(v)
+                } else {
+                    SocketOptions::validate_send_buf_size(v)
+                };
+                let Ok(size) = validated else {
                     return errno_i32(ERRNO_EINVAL);
                 };
                 sock.options.send_buf_size = size;
@@ -3187,7 +3218,7 @@ pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]
                 if out.len() < 4 {
                     return errno_i32(ERRNO_EINVAL);
                 }
-                let err = sock.take_pending_error().map(map_net_err).unwrap_or(0);
+                let err = sock.take_pending_error().map_or(0, |e| -map_net_err(e));
                 out[..4].copy_from_slice(&err.to_ne_bytes());
                 4
             }
@@ -3304,30 +3335,10 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
 }
 
 pub fn socket_send_queued(sock_idx: u32) -> i32 {
-    let tcp_idx = match socket_lookup_tcp_idx(sock_idx) {
-        Some(i) => i,
-        None => return errno_i32(ERRNO_ENOTCONN),
-    };
-
-    let mut tx_payload_box = match slopos_ostd::KBox::<[u8; TCP_TX_MAX]>::zeroed() {
-        Ok(b) => b,
-        Err(_) => return errno_i32(ERRNO_ENOMEM),
-    };
-    let tx_payload: &mut [u8; TCP_TX_MAX] = &mut *tx_payload_box;
-    let now_ms = slopos_kernel_services::clock::uptime_ms();
-    loop {
-        let Some((seg, n, zc)) = tcp::poll_transmit(tcp_idx, &mut tx_payload[..], now_ms) else {
-            break;
-        };
-        let rc = match zc {
-            None => socket_send_tcp_segment(&seg, &tx_payload[..n]),
-            Some(z) => socket_send_tcp_segment_zerocopy(&seg, z, &mut tx_payload[..]),
-        };
-        if rc != 0 {
-            return rc;
-        }
+    match socket_lookup_tcp_idx(sock_idx) {
+        Some(tcp_idx) => tcp_drain_segments(tcp_idx) as i32,
+        None => errno_i32(ERRNO_ENOTCONN),
     }
-    0
 }
 
 pub fn socket_process_timers() {

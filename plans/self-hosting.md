@@ -39,7 +39,7 @@ needs those quantities derived from the medium (image size, RAM, file size)
 instead of frozen at values that fit a test fixture. The work is mostly
 *widening under proof*, not redesign, and the compiler bootstrap — the one
 exception this plan carried the longest — turned out to be mostly
-configuration. The seventeen sections between here and Phase 1 are what has
+configuration. The eighteen sections between here and Phase 1 are what has
 landed, each stating the constraints a later phase must not disturb.
 
 
@@ -854,8 +854,8 @@ What it rests on, in case a later phase disturbs it:
 **What this deliberately did not do.**
 
 - **The triple is a JSON spec here.** It is a built-in one in the compiler
-  fork, the last landed section below, which is what bootstrap's `--host`
-  resolves through. Being built in is not free of consequences for this file
+  fork, "The target is a built-in target" below, which is what bootstrap's
+  `--host` resolves through. Being built in is not free of consequences for this file
   — rustc holds a built-in target to rules it relaxes for a JSON one, and the
   section below says which — but tier 3 ships no artifacts either way, so
   `-Zbuild-std` stays mandatory until tier 2.
@@ -868,7 +868,7 @@ What it rests on, in case a later phase disturbs it:
   `invalid_output_for_target` rejects that outright when `!dynamic_linking`, so
   a static rustc that expands proc macros does not exist. The spec says
   `dynamic-linking: true` and the loader behind it exists; naming the triple
-  is the last landed section below.
+  is "The target is a built-in target" below.
 - **The three layouts std's unix PAL never reads stay divergent**: the
   truncated `ucontext_t`, the `termios2`-shaped `struct termios`, and `NSIG`
   at 32. They are binary-compatibility work, which is an open decision below.
@@ -942,7 +942,7 @@ What it rests on, in case a later phase disturbs it:
 - **No patch to cranelift, and no linker written here.** Soft-float in the x64
   backend is a lowering pass and a linker that honours this script is what
   `wild` has left; both are upstream-shaped work this plan does not pay for.
-  What this workstream owed was the answer, and the answer is re-taken on every
+  What this section owed was the answer, and the answer is re-taken on every
   CI run instead of believed.
 - **Userland is not gated, though it was measured.** cg_clif refuses slibc on
   variadics and hits the same `sym` wall in `slopos-ostd`, which every userland
@@ -1395,8 +1395,8 @@ What it rests on, in case a later phase disturbs it:
   POSIX requires that of neither family, and truncating a 600-digit number
   instead would be a wrong answer rather than a slow one.
 - **No wide stdio**, no `fwprintf`, no stream orientation, on the grounds that
-  nothing asked for one. libc++'s `std::wcin` does, which the section below
-  found out by building it.
+  nothing asked for one. libc++'s `std::wcin` does, which "LLVM builds for
+  this target" below found out by building it.
 - **The tests image gained a process.** `libc_abi_test` spawns the probe, so
   the post-userland `process` peak is 255 against a `MAX_PROCESSES` of 256.
   That is the first appliance-sized constant this plan has actually pressed
@@ -1531,9 +1531,9 @@ What it rests on, in case a later phase disturbs it:
   built-in spec alone, because the JSON one is what the system's own binaries
   are built with.
 - **No bootstrap invocation.** This section makes `--host=x86_64-unknown-slopos`
-  a triple rustc can resolve. Whether bootstrap then *finishes* is the first
-  workstream below, and it is the one that produces numbers rather than
-  patches.
+  a triple rustc can resolve. Whether bootstrap then *finishes* is "The
+  toolchain is cross-built and lands on a dev disk" below, and that is the
+  section that produces numbers rather than patches.
 
 ---
 
@@ -1554,13 +1554,12 @@ ten files; the clang half needs a clang, and the driver in it is graded
 separately by `scripts/check_clang_driver.sh`. 47 s cold on four cores, 1.5 s
 warm.
 
-The estimate this replaces is the one the workstream below carried, and it was
-wrong in the direction that mattered. It priced *localization* at 120 libc
-entry points and took that for the whole of it. Five libc++ options were off,
-LLVM reaches four of them, the C library underneath was missing four entire
-headers, and two of its existing declarations were wrong in a way only a C++
-compiler ever says out loud. The count came out at 120 exactly, over a
-different set.
+The plan's estimate for this port was wrong in the direction that mattered. It
+priced *localization* at 120 libc entry points and took that for the whole of
+it. Five libc++ options were off, LLVM reaches four of them, the C library
+underneath was missing four entire headers, and two of its existing
+declarations were wrong in a way only a C++ compiler ever says out loud. The
+count came out at 120 exactly, over a different set.
 
 What it rests on, in case a later phase disturbs it:
 
@@ -1648,11 +1647,10 @@ What it rests on, in case a later phase disturbs it:
 **What this deliberately did not do.**
 
 - **No bootstrap.** This section makes LLVM a library that compiles for
-  SlopOS. Building a *compiler* is the workstream below, and what stands
-  between the two is cargo rather than LLVM: bootstrap builds cargo before
-  anything for the host triple, and cargo's manifest pulls six `-sys` crates
-  that build C libraries, none of them optional. The workstream below takes
-  that as a fifth fork rather than five C ports.
+  SlopOS. Building a *compiler* is the cross-build section below, and what
+  stands between the two is cargo rather than LLVM: cargo's network road
+  links C libraries a target with no libcurl, libgit2 or OpenSSL cannot
+  build, and that section takes it as a fifth fork rather than as C ports.
 - **No clang driver.** The patch adds the target that predefines the macros;
   it adds no `ToolChains/SlopOS.cpp`, so a cross-built clang cannot yet be
   handed a bare `-o` and asked to find `crt0.o` and `-lc` by itself. Every
@@ -1743,16 +1741,17 @@ shared C++ object with the generated wrapper, grading the interpreter, the
 library and still compiling. `scripts/check_clang_driver.sh` drives a real
 `clang::driver::Driver` at the triple and grades the link job's argv against
 the line `build_userland.sh` writes by hand. `just test-devdisk` is the
-fourth: the guest mounts the volume, reads the staged inventory back and
-mounts it again.
+fourth: the guest mounts the volume, reads the staged inventory back, grades
+the source tree against its own vendor directory and mounts it again, and a
+volume the run created must export no changes.
 
-**Three things this workstream priced wrong, and the measurements that
-corrected them.** The estimate said bootstrap builds cargo before anything for
-the host triple; it does not — cargo is an *extended* tool, gated on
-`build.extended` and `build.tools`, and a stage2 rustc does not depend on it,
-so the fork is needed for the goal and not for the ordering. The estimate
-said six `-sys` crates, none optional; `openssl` and `openssl-src` were
-already `optional = true` upstream, the five that were not are `curl`,
+**Three things the plan's estimate for this cross-build priced wrong, and the
+measurements that corrected them.** The estimate said bootstrap builds cargo
+before anything for the host triple; it does not — cargo is an *extended*
+tool, gated on `build.extended` and `build.tools`, and a stage2 rustc does not
+depend on it, so the fork is needed for the goal and not for the ordering. The
+estimate said six `-sys` crates, none optional; `openssl` and `openssl-src`
+were already `optional = true` upstream, the five that were not are `curl`,
 `curl-sys`, `git2`, `git2-curl` and `libgit2-sys`, and there is a *seventh* C
 library the list missed — SQLite, through `rusqlite`'s `bundled` feature. And
 the cut was priced at seventeen of cargo's 260 source files; the patch is 23
@@ -1850,9 +1849,9 @@ What it rests on, in case a later phase disturbs it:
   of the image* rather than off the stage, because a preserved volume is
   refreshed in place and a stage-derived size then describes a file the
   volume does not hold — observed, and fixed by measuring the medium.
-  `devdisk_test` mounts, grades the inventory, unmounts and mounts again: the
-  second mount is the point, because a leaked write claim answers
-  `AlreadyClaimed` forever.
+  `devdisk_test` mounts, grades the inventory and the source tree, unmounts
+  and mounts again: the second mount is the point, because a leaked write
+  claim answers `AlreadyClaimed` forever.
 - **`MAX_PROCESSES` is 1024.** One `just test` reached 256 exactly, which was
   the appliance's ceiling, and the quota gate's own note had already said the
   next utest needed the constant raised rather than the cap. A slot costs
@@ -1878,33 +1877,36 @@ What it rests on, in case a later phase disturbs it:
 - **An offline cargo is a smaller cargo.** No `publish`, `yank`, `owner`,
   `login`, `logout`, `search` or `info`; no git or remote-registry sources;
   `cargo new --vcs git` refuses and `cargo fix`'s dirty check sees no VCS,
-  because without libgit2 there is no repository to see. `Cargo.lock` holds
-  nine third-party crates and a vendored workspace reaches none of that.
+  because without libgit2 there is no repository to see. `Cargo.lock` pins
+  eight registry crates, all vendored, and a vendored workspace reaches none
+  of that.
 - **No `cargo install`, no registry, no network.** The fork gives that up on
-  purpose and the goal does not need it; a general dev machine does, and it
-  is the same TLS-shaped work Workstream 1.1 names.
+  purpose and the goal does not need it; a general dev machine does, and TLS
+  is not what stands in its way — "Code gets in and out" below is a TLS stack
+  — but libcurl and libgit2, which cargo's network road links and the fork
+  cut.
 
 ---
 
 ## The build loop holds
 
-The seventeenth thing this plan rests on, and what Workstream 1.1 was for:
-**a process that could never be backed is refused at `mmap`, `brk`,
-`mprotect` or `fork`, never killed at its first touch, and a compiler that
-spawns its linker pays no second copy of itself.** The six things the
-workstream listed each have a measured answer now, and one of them changed
-category on the way: `posix_spawn` was "a nicety" while `fork` cost nothing
-until a page was written, and it is load-bearing under a ledger that charges
-the child for every private page the parent holds. `buildloop_test` is the
-standing proof — ten cases, run in-guest, with `exit_stress_test` beside it
-for the teardown road: a jobserver's tokens cross `exec`
-and bound six workers to two, an empty jobserver blocks its reader until a
-token is written back, `std`'s file locks exclude a second process and share a
-read lock, an rlib maps private and read-only for no commit, a reservation
-past the ceiling is refused and a fit beside it is granted and touched, a
-`fork` from a process holding most of the headroom is refused where a
-`posix_spawn` from the same process succeeds, commit comes back when a child
-exits, a hundred pipes open at once, and forty-eight rlibs map at once.
+The seventeenth thing this plan rests on: **a process that could never be
+backed is refused at `mmap`, `brk`, `mprotect` or `fork`, never killed at its
+first touch, and a compiler that spawns its linker pays no second copy of
+itself.** Every question between a toolchain and a loop that builds with it
+has a measured answer now, and one of them changed category on the way:
+`posix_spawn` was "a nicety" while `fork` cost nothing until a page was
+written, and it is load-bearing under a ledger that charges the child for
+every private page the parent holds. `buildloop_test` is the standing proof —
+ten cases, run in-guest, with `exit_stress_test` beside it for the teardown
+road: a jobserver's tokens cross `exec` and bound six workers to two, an empty
+jobserver blocks its reader until a token is written back, `std`'s file locks
+exclude a second process and share a read lock, an rlib maps private and
+read-only for no commit, a reservation past the ceiling is refused and a fit
+beside it is granted and touched, a `fork` from a process holding most of the
+headroom is refused where a `posix_spawn` from the same process succeeds,
+commit comes back when a child exits, a hundred pipes open at once, and
+forty-eight rlibs map at once.
 
 **The decision the open-decisions list carried.** Swap plus a victim policy,
 or a budget that makes overcommit not happen: the second, and not as a
@@ -2115,6 +2117,239 @@ What it rests on, in case a later phase disturbs it:
 
 ---
 
+## Code gets in and out
+
+The eighteenth thing this plan rests on: **a build of SlopOS inside SlopOS
+needs no network, and a guest that has one reaches the Web PKI over TLS 1.3,
+resolves names side by side and fills a window wider than 64 KiB.** The first
+half was the goal's; the second was comfort beyond it, and it landed with the
+first because the dev disk that carries the source is the same volume a
+fetched tarball lands on.
+
+**Vendored, tracked, and graded offline.** `Cargo.lock` is tracked, and it
+pins eight crates from the registry (`bitflags`, `libm`, `limine`, `paste`,
+`proc-macro2`, `quote`, `syn`, `unicode-ident`); `gimli` and `unwinding` are
+path dependencies under `vendor/`. That is not the whole of what a build
+fetches: `-Zbuild-std` resolves `std` against the sysroot's own
+`library/Cargo.lock`, thirty-one more crates, and nothing in the workspace can
+see them. `scripts/make_vendor.sh` fills one directory, `third_party/vendor`,
+from both lockfiles (thirty-nine packages, 26 MB), and `.cargo/vendor.toml`
+points `crates-io` at it with `net.offline` set. It is passed with `--config`
+rather than living in `.cargo/config.toml` because the same checkout drives
+cargo inside `third_party/`'s materialised toolchain trees, whose own
+dependencies are not here. `scripts/check_offline_build.sh` is the gate: its
+pins half holds every registry package in both lockfiles to the checksum its
+vendored copy records, wherever that directory exists; its build half checks
+the kernel and the userland from an empty `CARGO_HOME`, `--locked --offline`,
+where a crate the directory lacks fails the resolve rather than being
+fetched — in CI, where `just check-offline-build` runs it after the
+framekernel gates.
+
+**The source rides the dev disk.** `scripts/build_devdisk.sh` seeds
+`src/slopos` when it creates the volume: the committed `HEAD`, the vendored
+crates with std's lockfile beside them, a `.cargo/config.toml` that folds
+`vendor.toml` in — the guest has no registry to fall back on — and
+`.slopos-base`, the commit it was cut from. It refuses a `Cargo.lock`,
+`.cargo/` or toolchain pin that differs from `HEAD`, since the crates it
+vendors must be the ones the tree it seeds names. Like the sysroot it is
+seeded once, and from then on the tree is the guest's: the marker records
+only that it is there, and `devdisk_test` grades the copy that arrived, not
+the host's — every registry package either lockfile pins is vendored beside
+it with the checksum that lockfile names, and the cargo configuration reads
+the vendor directory. `just devdisk-export` is the way back out: `debugfs
+rdump` of the top-level entries the base commit tracks or the tree's own
+`.gitignore` keeps, so `builddir/` stays on the volume, diffed against the
+base commit through a throwaway index and git directory into a patch `git
+apply` takes on the host; nothing it writes lands in the dumped tree, so a
+symlink the guest planted there points nowhere it follows. It refuses a
+volume that is not clean, because debugfs reads home locations and knows
+nothing of `/.journal`, and one `e2fsck -fn` rejects, because `rdump` follows a
+symlink that shares a damaged directory with a same-named file; it trusts that
+the guest has shut down, since a mounted volume reads clean while it idles.
+
+**TLS 1.3, written here.** `tls-core` is a sans-I/O client — the record
+layer, the key schedule, the handshake, and every primitive under them — in
+`no_std` Rust with `forbid(unsafe_code)`: SHA-2, HMAC and HKDF; AES-128/256
+in GCM; ChaCha20-Poly1305; X25519; ECDSA verification on P-256, P-384 and
+P-521; RSA PKCS #1 v1.5 and PSS verification; and X.509 path building to a
+trust anchor with name, usage, basic- and name-constraint checks. Secret-
+dependent code is constant-time by construction rather than by tables: AES's
+S-box is the Boyar–Peralta circuit over bit planes, GHASH multiplies with one
+operand bit in five so no carry reaches a kept bit, and X25519 swaps with
+masks. The public-key half — every operand of which is public — is
+variable-time Montgomery arithmetic over `Vec<u64>`. `userland::tls` gives it
+the kernel's CSPRNG, the RTC's clock and a blocking `Read + Write` stream;
+`/etc/ssl/certs/ca-certificates.crt` is Mozilla's root store, 121 roots,
+committed under `assets/certs/` with its MPL-2.0 text and replaced by
+`scripts/update_ca_bundle.sh` against the checksum curl.se publishes.
+`curl` speaks `https://`, streams the body to stdout or `-o` with no size
+cap, follows redirects across schemes, takes `--cacert`, `-f` and combined
+short flags, and exits with curl's own status codes.
+
+The standing proof is three layers deep. Host tests hold every primitive to
+vectors pyca/cryptography generated, drive the client against an in-crate test
+server under every suite, in one-byte segments, through KeyUpdate and a
+CertificateRequest, and refuse a bad chain for every cause the verifier names
+— among them a wildcard or trailing-dot name that would slip past an excluded
+subtree, a constrained root whose own signature this code cannot check, a path
+past six intermediates, and a chain that would cost more than 64 signatures or
+250 000 name comparisons — while backing out of a decoy branch at the depth
+limit; interop tests run the client against `openssl s_server` with P-256,
+P-384, P-521 and RSA-2048 and -4096 keys, and `openssl s_client` against the
+test server under all three suites with verification on. A test holds every
+root in the shipped bundle to being usable, which is how the bundle's P-521
+root (e-Szigno TLS Root CA 2023) became a curve rather than a skipped anchor.
+In the guest, `transfer_test` fetches a megabyte over TLS on loopback, runs
+`curl https` into a file through a chunked body, watches `curl` refuse a root
+it does not trust with status 60, and pipes a quarter-megabyte of every byte
+value through `nc` against a peer that echoes as it reads.
+
+**Names resolve side by side.** The resolver held one query machine-wide —
+one pending ID, one reply buffer in the NIC driver, and a lookup that waited
+behind the slowest. It holds sixteen now, each with a source port reserved in
+the UDP demux so no socket can take it, its own reply buffer and its own wait
+queue, and replies are matched as RFC 5452 asks: the server asked, the port
+the query left from, the ID and the question section. Queries leave through
+the routing path, so a nameserver on loopback is as reachable as one across
+the NIC, which is what `dns_concurrent_test` uses: its stub withholds one
+name's reply until eight other lookups have returned, which a serialised
+resolver cannot pass, and answers another with forged replies ahead of the
+real one. The cache keys on the whole name; it used to key on a 32-bit hash,
+and `glbvs.example` and `yacxa.example` collide in it — on a machine-wide
+cache, a local user choosing where another user's connections go.
+`getaddrinfo` fills the service port and reports `EAI_AGAIN`, `EAI_FAIL` and
+`EAI_SERVICE` rather than `EAI_NONAME` for everything.
+
+**The window is as wide as memory allows.** The send and receive buffers were
+one fixed 32 KiB array each. They are rings of page-sized chunks that exist
+only while they hold bytes, sized per connection at 1/128 of usable memory
+between 256 KiB and 4 MiB, under a machine-wide ceiling of 1/16 (Linux's
+`tcp_rmem`/`tcp_mem` shape), and a window past 64 KiB is carried by RFC 7323
+window scaling, shift 7, negotiated on both opens. `SO_RCVBUF` and
+`SO_SNDBUF` resize them, before the connection exists or after. A chunk is a
+page less the heap's 32-byte header for large allocations, so it costs one
+page and not two. A spent pool slows a connection rather than stopping it:
+every stream keeps four chunks the ceiling cannot take, chunks holding only
+out-of-order bytes do not count against them, so the segment that fills a
+gap always finds its chunk, and out-of-order bytes may fill at most
+sixty-four chunks ahead of the stream, because a byte every chunk across a
+wide window otherwise pins a chunk per byte for as long as the gap before
+them stays open.
+
+Wider rings were not enough to move a megabyte. Four older faults sat on the
+path, each invisible while nothing sent more than one window and closed. A
+listener bound to port 0 listened on port 0. A tail Nagle held waited for an
+acknowledgement that had already arrived, because only a write drained the
+send queue; input drains it now. A `close` or `shutdown(SHUT_WR)` with bytes
+still queued sent its FIN at `snd_nxt`, ahead of them, which the send map's
+accounting caught as a kernel panic; the FIN now waits in `fin_queued` until
+the queue empties. And the side that half-closes first freed its receive ring
+on entering TIME_WAIT, with every byte its reader had not reached — `nc`
+returned one segment of a four-kilobyte echo. Four more are ones a wide window
+turns from rare into routine. A window update that acknowledged nothing new
+was ignored, and nothing probed a shut window, so a reader that fell behind
+and caught up left both sides waiting forever; RFC 9293's SND.WL1/SND.WL2 rule
+now takes the window from any newer segment, and the retransmission timer
+probes a shut window with nothing in flight. A lost FIN was never sent again,
+and bytes lost after our FIN never were either; the timer now runs while
+anything is unacknowledged, FIN included, and a connection no socket owns is
+reset after eight unanswered — or answered but still shut — probes. A FIN
+riding a segment the buffer cut short was taken anyway, one byte early. And a
+shrunken `SO_RCVBUF` joined out-of-order bytes past its own capacity, a kernel
+panic a peer could trigger. The rest were at the ends of connections. One a
+timer gave up on woke nobody, so a blocked `send` or `recv` slept until a
+signal; the socket now records why — `ETIMEDOUT`, or `ECONNRESET` for a reset
+— and wakes its waiters. The side that closed second dropped the bytes its
+reader had not reached once its FIN was acknowledged, keepalive gave up on a
+peer that answered every probe, and a retransmission overlapping bytes already
+taken was dropped whole, so a sender resending a partly accepted segment
+stalled. Each has a test that fails without its fix. The megabyte crosses
+loopback through a 64 KiB window the reader lets shut and reopens, in two to
+five seconds under TCG.
+
+What it rests on, in case a later phase disturbs it:
+
+- **No chunk is allocated under the connection lock.** A chunk is reserved
+  before the PCB lock is taken — `Spares` for the bytes a segment or a write
+  can land — and a ring that runs out of spares takes fewer bytes rather
+  than allocating: the buddy's reuse path drains TLBs across CPUs
+  synchronously, and a PCB lock is a cli-spinlock. Frees under it are the
+  accepted shape. Two older allocations remain under it: the `DataState` a
+  handshake's last segment builds, whose failure leaves the handshake to be
+  retried, and the growth of the timer wheel's entry list.
+- **The right edge never moves left.** `rcv_wnd` is the distance from
+  `rcv_nxt` to the edge last advertised, used up as bytes arrive and grown
+  only by an advertisement, so the receiver's acceptance test and the
+  sender's view agree; a scaled field is rounded up, a segment is accepted
+  up to the part of a unit an earlier rounding may have promised (RFC 7323
+  §2.4), and only a growth is recorded, or each ACK would carry the edge a
+  little further past the buffer. A read that opens the
+  window past the silly-window threshold sends the update (RFC 1122
+  §4.2.3.3).
+- **Whatever is unacknowledged keeps the timer running.** Data, our FIN, or
+  bytes a shut window holds back: the retransmission timer is what resends
+  the first two and probes for the third, and nothing else would.
+- **A connection's end reaches its socket.** A reset, or a timer that gives
+  up, records its error on every socket naming the connection and wakes
+  their waiters; the next call reports it once, a clean end reads as EOF,
+  and a write after either finds the pipe broken. Unread bytes outlive the
+  connection's last ACK in TIME_WAIT, and only a reset at exactly `rcv_nxt`
+  (RFC 5961 §3.2) takes them.
+- **The resolver's ports are the demux's.** A query slot's port is bound to
+  a sentinel owner no socket index can equal and taken from the ephemeral
+  allocator, so every `bind` to it — `SO_REUSEADDR` or a specific address
+  included — and every automatic bind is refused for as long as the query
+  waits, and a datagram from port 53 to a port no query holds is an ordinary
+  socket's.
+- **Secrets never select a branch or an index.** Every comparison of a MAC
+  or a Finished is `ct::eq`; a wrong tag leaves the buffer as it was. The
+  X25519 swap mask goes through `black_box` itself: given a mask it can prove
+  is one of two values, LLVM turns the swap into a select and the select into
+  a branch, which a disassembly of the shipped `curl` showed. Nothing holds
+  this but that code; a release build's `x25519` should show one conditional
+  jump, the ladder's own.
+- **Name constraints are enforced for DNS names and IPv4 addresses only.**
+  Those are the only forms a server name matches against, so a constraint on
+  another form cannot widen what a certificate is accepted for.
+
+**What this deliberately did not do.**
+
+- **Chunk memory is kept, not returned.** A freed chunk goes to a bounded
+  cache and then to the heap, whose large tier keeps pages on per-size
+  free lists rather than handing them back to the page allocator, so a
+  burst's peak stays the heap's. Returning pages would mean page work where
+  chunks are freed, under the connection lock.
+- **No guaranteed erasure.** Every type that holds key material wipes it
+  when dropped — digests, hash and HMAC state, the AEAD and GHASH keys, the
+  X25519 share and the key schedule's locals — but the compiler's copies in
+  registers and spilled temporaries are out of safe Rust's reach.
+- **No P-256 or P-384 key exchange.** Only X25519 is offered, against RFC
+  8446 §9.1, which makes secp256r1 the group a client must support. OpenSSL,
+  BoringSSL, rustls and Go's `crypto/tls` all negotiate X25519, and a
+  constant-time NIST ladder is a second one to write and prove. A server that
+  insists answers with a HelloRetryRequest this client refuses.
+- **No entropy beyond the CPU's.** The kernel's CSPRNG is seeded from
+  RDRAND and RDSEED; a CPU with neither seeds it from four TSC reads, which
+  an observer of the ClientHello's random can search, and the handshake's
+  key share comes from the same generator. Every x86-64 CPU of the last
+  decade has RDRAND, as does QEMU's `-cpu max`; nothing refuses a handshake
+  on one that does not.
+- **No resumption, no early data, no client certificates.** A
+  CertificateRequest is answered with an empty Certificate.
+- **No revocation.** No OCSP, no CRL, no stapling — the Web PKI's own
+  direction, with short-lived certificates, and Mozilla's CRLite is a
+  browser's machinery.
+- **No `git` in the guest.** The way out is a patch; history stays on the
+  host.
+- **No 9p or virtio-fs.** The guest owns its tree rather than viewing the
+  host's, which is what "developed on SlopOS" means; Redox and Asterinas
+  carry no 9p either.
+- **cargo still has no network.** The fork cut libcurl and libgit2, and TLS
+  here is not what cargo's network road links against; a vendored workspace
+  needs none, a `cargo install` would.
+
+---
+
 ## Phase 1 — The toolchain
 
 **Outcome:** `cargo build` runs on SlopOS and produces `kernel.elf`.
@@ -2154,17 +2389,6 @@ clang arrives in the same monorepo pass that produces `libLLVM.so` and
 `rust-lld`, so the C compiler is a by-product of a decision taken for Rust's
 sake, and that is the only place this road is cheaper than the one it replaced.
 
-### Workstream 1.1 — Getting code in and out (**S** for the goal, **M** beyond it)
-
-Off the critical path, and this is a real scope reduction: `Cargo.lock` holds 47
-entries of which only nine are third-party (`bitflags gimli libm limine paste
-proc-macro2 quote syn unicode-ident unwinding`). Vendoring that is trivial, so
-**building SlopOS on SlopOS needs no network at all** — no TLS, no crates.io, no
-`git`. Those remain wanted for a general dev machine (there is no TLS anywhere:
-`curl` rejects `https://` outright; DNS is one query at a time machine-wide; the
-TCP window is capped at 32 KiB by a fixed buffer), but they are comfort beyond
-the goal rather than a blocker for it.
-
 **Phase 1 exit criteria:** in-guest `cargo build` of this repository's kernel
 produces an ELF byte-identical in behaviour to the host build, verified by
 booting it.
@@ -2194,7 +2418,7 @@ it, reboot, and the boot log shows the new build — with rollback if it panics.
 
 ## Phase 3 — Bare metal (not committed)
 
-Out of scope for the current goal, which ends at Phase 1 in QEMU. Recorded so
+Out of scope for the current goal, which ends at Phase 2 in QEMU. Recorded so
 the cost is known: no NVMe and no AHCI (virtio-blk is the only storage driver,
 so a real machine has no disk); no USB at all, so a laptop without PS/2 has
 **no keyboard** (`plans/usb-xhci.md`); PCI is ECAM-only and *panics* without
@@ -2296,47 +2520,44 @@ not been made at all.
       building itself un-attests exactly the blocks it changes, and now keeps
       them un-attested across host rebuilds. Decide which paths stay verified
       and what `verity=require` asserts for a workbench.
-- [ ] **How does source get in?** The capability is done — `mount(2)` takes a
-      named device and `just test-capacity` already builds a 16 GiB volume
-      populated from the host with this repository and the pinned sysroot.
-      What is left is the *workflow*: a host-built image refreshed per session,
-      a 9p/virtiofs mount, or a plain TCP transfer once there is one.
 
-**Decided.** C++ runtime: **LLVM's `libc++`, cross-built, libc++ and
-libc++abi linked into one `libc++.so`** — settled by building it, and by the
-fact that `libstdc++` is not a library you cross-build but one a GCC
-cross-compiler emits, which is a second toolchain to pin and keep. The libc
-gap it needs is closed — `check_cxx_pin.sh` holds all 171 of its undefined
-symbols to `libc.so` — and the LLVM build against it is measured:
-`check_llvm_port.sh` compiles `LLVMSupport` for the target on every run. Syscall ABI: **Linux x86-64 numbering,
-one table, a private
-range at 1024, and a Linux number obliges the Linux signature.** Rust toolchain:
-**LLVM, cross-built from Linux, with the C++ runtime ported to SlopOS** — the
-Rust-hosted answer was decided first, then measured against this kernel and
-found not to reach it. C is *not* excluded and is now cheaper, because clang
-arrives in the same cross-build as `libLLVM.so`, which deletes the
-Rust-written C frontend this plan used to owe. cargo: **a pinned fork that
-puts curl, libgit2 and OpenSSL behind a `network` feature**, rather than
-Redox's road of porting the five C libraries as recipes or Motor OS's of
-shipping no cargo at all; SQLite stays, because three libc names were cheaper
-than a build-system port. Scope: the full in-guest loop,
-Phases 1–2, in QEMU. Identity: single-user, uid 0, permanently — so file
-ownership and a medium-resident quota ledger stay out of scope and `stat`'s
-uid/gid fields exist for layout only. Directory scaling: an in-memory name
-index, not an on-disk htree, so `e2fsck` stays the oracle for every image this
-kernel writes. Memory: **a commit ledger, not swap** — every private mapping is promised
-against a ceiling derived from usable RAM when it is created and refused
-there, illumos's and Windows's model and Linux's `overcommit_memory=2`,
-with `MAP_NORESERVE` honoured as the caller's explicit choice of the
-fault-time road; `posix_spawn` over the kernel's spawn primitive is what
-keeps a compiler's spawn of its linker from owing a second copy of the
-compiler. Std platform layer: **unix family over a real libc** —
-`target-family = ["unix"]`, `env = "slibc"`, a `libc/src/unix/slopos/` module,
-std riding its own `sys/pal/unix`, and `slibc/std_pal/` deleted rather than
-moved. The rejected alternative was a bespoke PAL over a crates.io ABI crate
-(Motor OS's shape), which costs six hard-breaking third-party crates —
-`libloading` among them, so an in-guest rustc could not be built at all — as
-permanent carve-outs.
+**Decided.** C++ runtime: **LLVM's `libc++`, cross-built, libc++ and libc++abi
+linked into one `libc++.so`** — settled by building it, and by the fact that
+`libstdc++` is not a library you cross-build but one a GCC cross-compiler
+emits, which is a second toolchain to pin and keep. The libc gap it needs is
+closed — `check_cxx_pin.sh` holds all 171 of its undefined symbols to
+`libc.so` — and the LLVM build against it is measured: `check_llvm_port.sh`
+compiles `LLVMSupport` for the target on every run. Syscall ABI: **Linux
+x86-64 numbering, one table, a private range at 1024, and a Linux number
+obliges the Linux signature.** Rust toolchain: **LLVM, cross-built from Linux,
+with the C++ runtime ported to SlopOS** — the Rust-hosted answer was decided
+first, then measured against this kernel and found not to reach it. C is *not*
+excluded and is now cheaper, because clang arrives in the same cross-build as
+`libLLVM.so`, which deletes the Rust-written C frontend this plan used to owe.
+cargo: **a pinned fork that puts curl, libgit2 and OpenSSL behind a `network`
+feature**, rather than Redox's road of porting the five C libraries as recipes
+or Motor OS's of shipping no cargo at all; SQLite stays, because three libc
+names were cheaper than a build-system port. Source: **seeded onto the dev
+disk from git `HEAD` with its vendored crates, and carried back out as a patch
+against the commit it was cut from** — the guest owns its tree rather than
+viewing the host's through 9p or virtio-fs, so no host share is on the path
+of a build. Scope: the full in-guest loop, Phases 1–2, in QEMU. Identity:
+single-user, uid 0, permanently — so file ownership and a medium-resident
+quota ledger stay out of scope and `stat`'s uid/gid fields exist for layout
+only. Directory scaling: an in-memory name index, not an on-disk htree, so
+`e2fsck` stays the oracle for every image this kernel writes. Memory: **a
+commit ledger, not swap** — every private mapping is promised against a
+ceiling derived from usable RAM when it is created and refused there,
+illumos's and Windows's model and Linux's `overcommit_memory=2`, with
+`MAP_NORESERVE` honoured as the caller's explicit choice of the fault-time
+road; `posix_spawn` over the kernel's spawn primitive is what keeps a
+compiler's spawn of its linker from owing a second copy of the compiler. Std
+platform layer: **unix family over a real libc** — `target-family = ["unix"]`,
+`env = "slibc"`, a `libc/src/unix/slopos/` module, std riding its own
+`sys/pal/unix`, and `slibc/std_pal/` deleted rather than moved. The rejected
+alternative was a bespoke PAL over a crates.io ABI crate (Motor OS's shape),
+which costs six hard-breaking third-party crates — `libloading` among them, so
+an in-guest rustc could not be built at all — as permanent carve-outs.
 
 ---
 
@@ -2364,8 +2585,9 @@ compile.
 | LLVM port | `toolchain/llvm/`, `toolchain/cxx/PIN`, `scripts/make_slopos_llvm_src.sh`, `scripts/check_llvm_port.sh`, `scripts/lib/toolchain_pin.sh`, `slibc/build/decls.rs`, `slibc/builtins/` | *invariant* — the patch is the port, and `libbuiltins.a` is where a shared object takes compiler-rt from |
 | Cargo fork | `toolchain/cargo/`, `scripts/make_rustc_src.sh`, `scripts/check_cargo_fork.sh`, `scripts/lib/toolchain_pin.sh` | *invariant* — the patch shares the compiler fork's tree and stamp, and `rusqlite` stays only while slibc keeps `strspn`, `strcspn` and `FILENAME_MAX` |
 | Cross-build | `scripts/bootstrap_slopos_toolchain.sh`, `scripts/check_bootstrap_config.sh`, `toolchain/compiler/000{2,3}-*.patch`, `toolchain/llvm/000{1,2}-*.patch`, `toolchain/llvm-rustc/`, `scripts/check_clang_driver.sh`, `Cargo.toml`'s `exclude` | *invariant* — the wrapper's two triples, and the workspace exclusion without which bootstrap does not build |
-| Dev disk | `scripts/build_devdisk.sh`, `scripts/qemu_run.sh`, `userland/src/bin/tests/devdisk_test.rs`, `core/src/exec/grants.rs` | *invariant* — the marker's sizes are read off the volume, not off the stage |
+| Dev disk | `scripts/build_devdisk.sh`, `scripts/export_devdisk.sh`, `scripts/qemu_run.sh`, `userland/src/bin/tests/devdisk_test.rs`, `core/src/exec/grants.rs` | *invariant* — the marker's sizes are read off the volume, not off the stage, and the source tree is seeded once and the guest's from then on |
 | Build loop | `mm/src/{commit,vma_region,demand,process_vm,memfd}.rs`, `slopos-ostd/src/process/quota/{arena,axis}.rs`, `abi/src/quota.rs`, `slibc/src/process/spawn.rs`, `toolchain/{rust,libc}/*.patch`, `fs/src/{filemap,pipe}.rs`, `fs/src/fileio/fdops.rs`, `userland/src/bin/tests/buildloop_test.rs` | *invariant* — an `Extent` region owes its span from creation and a `Frames` region as pages land; the std `posix_spawn` arm and slibc's implementation are one contract |
+| Code in and out | `.cargo/vendor.toml`, `Cargo.lock`, `scripts/{make_vendor,check_offline_build,update_ca_bundle,build_fs_image}.sh`, `scripts/gen_initramfs.py`, `tls-core/`, `http-core/`, `assets/certs/`, `userland/src/{tls.rs,apps/curl.rs,apps/nc/}`, `userland/src/bin/tests/{transfer_test,dns_concurrent_test,devdisk_test}.rs`, `net/src/{dns,udp,socket,timer,ipv4}.rs`, `net/src/tcp/`, `drivers/src/virtio_net.rs`, `mm/src/slab/large.rs`, `boot/src/boot_memory.rs`, `core/src/{exec/grants,syscall/net_handlers}.rs`, `slibc/src/net/`, `scripts/lib/toolchain_pin.sh`, `scripts/build_{kernel,userland}.sh`, `userland/Cargo.toml` | *invariant* — no chunk is allocated under a PCB lock, a FIN waits behind unsent bytes, TIME_WAIT keeps what its reader has not taken, a connection's end reaches its socket, secrets never choose a branch or an index, and nothing shipped enables `test-server` |
 | C++ platform | `vendor/unwinding`, `slibc/{staticlib,cdylib,crt0,include}/`, `NOTICE.md` | work |
 | Phase 2 install | `scripts/qemu_run.sh`, `fs/src/devfs/mod.rs`, `fs/src/partition.rs` | work |
 | Execution boundary | `AGENTS.md` | Phase 2 needs a scoped exception |

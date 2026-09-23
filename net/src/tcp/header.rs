@@ -9,8 +9,9 @@ pub const TCP_HEADER_MAX_LEN: usize = 60;
 /// Default Maximum Segment Size (Ethernet MTU 1500 − IP 20 − TCP 20).
 pub const DEFAULT_MSS: u16 = 1460;
 
-/// Default receive window size advertised in SYN (unscaled, fits in u16).
-pub const DEFAULT_WINDOW_SIZE: u16 = 32768;
+/// Advertised unscaled by a SYN or SYN-ACK (RFC 7323 §2.2); a smaller SO_RCVBUF
+/// drops what it cannot hold of the first flight, and the peer resends it.
+pub const DEFAULT_WINDOW_SIZE: u16 = u16::MAX;
 
 pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
@@ -251,11 +252,11 @@ pub fn ts_less_than(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
 }
 
-/// Compute our receive-side window scale shift count from `TCP_BUFFER_SIZE`.
-/// RFC 7323 §2.2: shift count = ceil(log2(buffer_size / 65535)).
-pub fn our_window_scale() -> u8 {
+/// The smallest shift fitting `TCP_BUFFER_CEILING`, not this machine's limit,
+/// in the window field (RFC 7323 §2.2): SO_RCVBUF may grow after the handshake.
+pub const fn our_window_scale() -> u8 {
     let mut shift = 0u8;
-    let mut size = super::TCP_BUFFER_SIZE;
+    let mut size = super::chunk::TCP_BUFFER_CEILING;
     while size > u16::MAX as usize && shift < 14 {
         size >>= 1;
         shift += 1;

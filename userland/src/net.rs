@@ -19,6 +19,7 @@ pub enum ResolveError {
     NoDnsServer,
     Transient,
     NameNotFound,
+    MalformedReply,
     Unknown(i32),
 }
 
@@ -29,6 +30,7 @@ impl From<SyscallError> for ResolveError {
             e if e == SyscallError::ENETUNREACH.errno() => Self::NoDnsServer,
             e if e == SyscallError::EAGAIN.errno() => Self::Transient,
             e if e == SyscallError::EHOSTUNREACH.errno() => Self::NameNotFound,
+            e if e == SyscallError::EIO.errno() => Self::MalformedReply,
             other => Self::Unknown(other),
         }
     }
@@ -39,8 +41,9 @@ impl fmt::Display for ResolveError {
         match self {
             Self::InvalidHostname => f.write_str("invalid hostname"),
             Self::NoDnsServer => f.write_str("no DNS server configured (network not ready)"),
-            Self::Transient => f.write_str("DNS query failed (timeout or transmit error)"),
+            Self::Transient => f.write_str("temporary failure in name resolution"),
             Self::NameNotFound => f.write_str("no address found for host"),
+            Self::MalformedReply => f.write_str("the DNS server's reply could not be parsed"),
             Self::Unknown(errno) => write!(f, "DNS resolve failed (errno {})", errno),
         }
     }
@@ -110,6 +113,10 @@ mod tests {
         assert_eq!(
             ResolveError::from(SyscallError::EHOSTUNREACH),
             ResolveError::NameNotFound
+        );
+        assert_eq!(
+            ResolveError::from(SyscallError::EIO),
+            ResolveError::MalformedReply
         );
         assert_eq!(
             ResolveError::from(SyscallError::from_errno(99)),

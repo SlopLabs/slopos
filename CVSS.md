@@ -99,6 +99,37 @@ load, an availability defect at most; the claim hands the current task
 back and the copy holds off preemption while it holds the reference, so
 they are fixed here and not entries.
 
+Swept 2026-09-23: the network path a self-hosted build fetches through — the
+TCP stack's chunked rings, window scaling, persist, retransmission and
+keepalive timers and the way a connection's end reaches its socket; the
+concurrent resolver; `tls-core`, whose record layer, handshake and certificate
+path read what a server chooses; `curl`, `nc` and `getaddrinfo`; and the dev
+disk's export, which reads a volume the guest wrote. Five review passes, each
+by fresh reviewers. What the change introduced was closed inside it, so none
+is an entry, and it fixed one **pre-existing** defect that would have reached
+the bar. The resolver's cache was keyed on a 32-bit FNV-1a hash of the name
+and compared nothing else, so two names whose hashes collide answered each
+other — `glbvs.example` and `yacxa.example` do — and anyone who could make the
+machine resolve a name of their choosing (a local process, or a server whose
+redirect `curl` follows) could plant an address under any other name for its
+TTL, the collision found offline in seconds. Plaintext protocols follow a
+planted address; TLS refuses it at the certificate. The cache now compares
+whole names, with `dns_tests`' collision case as the record, and a reply must
+also echo its question where the ID and port alone were taken before. The rest
+were availability defects, most of them a peer's to trigger: a `DataState`
+allocation `.expect` that a handshake's last segment under memory pressure
+turned into a kernel panic, a FIN sent ahead of queued bytes that the send
+map's accounting caught as a panic, a late retransmission timer that left two
+running, a shut window nothing probed, a lost FIN never resent, lost bytes
+that only a timeout would resend, a retransmission overlapping bytes already
+taken dropped whole, FIN_WAIT_1 held for good by a peer that only sent data,
+and TIME_WAIT, LAST_ACK and keepalive each ending connections a reader or an
+answering peer still needed; each has a test in `slopos_net::tests`. Below the
+bar (confidence about 60): the CSPRNG is seeded from four TSC reads on a CPU
+with neither RDRAND nor RDSEED, so a ClientHello's random lets an observer
+search the seed and with it the key share. Every x86-64 CPU of the last decade
+and QEMU's `-cpu max` have RDRAND, and the plan records it as a limit.
+
 The highest ID issued so far is **SLOPOS-2026-0056**. The next finding is
 `SLOPOS-2026-0057`.
 

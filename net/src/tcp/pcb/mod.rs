@@ -45,6 +45,11 @@ pub struct Pcb {
     pub socket_id: Option<SocketId>,
 
     pub state: PcbState,
+
+    /// SO_RCVBUF and SO_SNDBUF for buffers not yet allocated; zero is the
+    /// machine's default.
+    pub rcvbuf: u32,
+    pub sndbuf: u32,
 }
 
 impl Pcb {
@@ -53,6 +58,8 @@ impl Pcb {
             tuple,
             socket_id: None,
             state,
+            rcvbuf: 0,
+            sndbuf: 0,
         }
     }
 
@@ -82,7 +89,9 @@ impl Pcb {
                 let bufs = bufs.expect("Data state must have an allocated buffer");
                 data::DataState::on_segment(self, bufs, hdr, options, payload, now_ms)
             }
-            PcbState::TimeWait(_) => time_wait::TimeWaitState::on_segment(self, hdr, now_ms),
+            PcbState::TimeWait(_) => {
+                time_wait::TimeWaitState::on_segment(self, hdr, payload.len(), now_ms)
+            }
         };
         self.assert_invariants();
         actions
@@ -121,8 +130,8 @@ pub enum PcbState {
     /// `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`,
     /// `CLOSING`, and `LAST_ACK` — see [`data::ClosePhase`].
     ///
-    /// Boxed because `DataState` is ~3 KiB while the other variants are
-    /// ≤100 bytes, which would otherwise size every static table slot.
+    /// Boxed because `DataState` is more than twice the size of the other
+    /// variants, which would otherwise size every static table slot.
     /// Constructed via `KBox::try_init` from [`DataState::init_new`] /
     /// [`DataState::init_from_syn_recv`] so the rvalue never lands on a
     /// caller's stack.

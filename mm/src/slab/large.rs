@@ -1,7 +1,11 @@
 //! Large-allocation tier (> 2048 bytes → direct frame allocation).
 //!
 //! Regions come from the buddy as contiguous pages whose first page carries a
-//! `LargeAllocHeader`; the free list is threaded intrusively through it.
+//! `LargeAllocHeader`; the free lists are threaded intrusively through it,
+//! one per region size up to [`EXACT_PAGES`] and one for everything larger,
+//! so a burst of one-page frees is never walked by a larger request. A freed
+//! region stays on its list; its pages go back to the buddy only when the
+//! slab itself is torn down.
 //!
 //! There is no external tracking table: `kfree` discriminates on the page
 //! magic at the 4 KiB-aligned base (`super::page::page_kind_for`), which only
@@ -22,15 +26,48 @@ use crate::paging_defs::PAGE_SIZE_4KB;
 
 const SLAB_DEBUG: bool = false;
 
+const EXACT_PAGES: usize = 16;
+
 pub(crate) struct LargeInner {
-    free_list: RawLink<LargeAllocHeader>,
+    free_lists: [RawLink<LargeAllocHeader>; EXACT_PAGES + 1],
 }
 
 impl LargeInner {
     pub(crate) const fn new() -> Self {
         Self {
-            free_list: RawLink::null(),
+            free_lists: [const { RawLink::null() }; EXACT_PAGES + 1],
         }
+    }
+
+    fn list_for(pages: u32) -> usize {
+        (pages as usize).min(EXACT_PAGES + 1) - 1
+    }
+
+    fn take_first_fit(&self, pages: u32) -> Option<NonNull<LargeAllocHeader>> {
+        for list in &self.free_lists[Self::list_for(pages)..] {
+            let mut prev: Option<NonNull<LargeAllocHeader>> = None;
+            let mut current = list.load();
+            while let Some(curr) = current {
+                let (slab_pages, next) =
+                    RawLink::<LargeAllocHeader>::with_mut_at(Some(curr), |h| {
+                        (h.pages, h.next.load())
+                    })?;
+                if slab_pages >= pages {
+                    match prev {
+                        None => list.store(next),
+                        Some(p) => {
+                            RawLink::<LargeAllocHeader>::with_mut_at(Some(p), |h| {
+                                h.next.store(next)
+                            });
+                        }
+                    }
+                    return Some(curr);
+                }
+                prev = Some(curr);
+                current = next;
+            }
+        }
+        None
     }
 }
 
@@ -60,38 +97,15 @@ impl LargeAlloc {
             return None;
         }
 
-        {
-            let state = self.inner.lock();
-            let mut prev: Option<NonNull<LargeAllocHeader>> = None;
-            let mut current = state.free_list.load();
-            while let Some(curr) = current {
-                let snap = RawLink::<LargeAllocHeader>::with_mut_at(Some(curr), |h| {
-                    (h.pages, h.next.load())
-                });
-                let Some((slab_pages, next)) = snap else {
-                    break;
-                };
-                if slab_pages >= pages {
-                    match prev {
-                        None => state.free_list.store(next),
-                        Some(p) => {
-                            RawLink::<LargeAllocHeader>::with_mut_at(Some(p), |h| {
-                                h.next.store(next)
-                            });
-                        }
-                    }
-                    RawLink::<LargeAllocHeader>::with_mut_at(Some(curr), |h| {
-                        h.magic = LARGE_MAGIC;
-                        h.size = size as u32;
-                        h.next = RawLink::null();
-                    });
-                    self.total_bytes_allocated
-                        .fetch_add(size as u64, Ordering::Relaxed);
-                    return Some(LargeAllocHeader::body_ptr(curr));
-                }
-                prev = Some(curr);
-                current = next;
-            }
+        if let Some(curr) = self.inner.lock().take_first_fit(pages) {
+            RawLink::<LargeAllocHeader>::with_mut_at(Some(curr), |h| {
+                h.magic = LARGE_MAGIC;
+                h.size = size as u32;
+                h.next = RawLink::null();
+            });
+            self.total_bytes_allocated
+                .fetch_add(size as u64, Ordering::Relaxed);
+            return Some(LargeAllocHeader::body_ptr(curr));
         }
 
         let (base, _paddr) = alloc_large_pages(pages)?;
@@ -120,23 +134,20 @@ impl LargeAlloc {
         };
 
         let state = self.inner.lock();
-        let prev_head = state.free_list.load();
-
         let snap = RawLink::<LargeAllocHeader>::with_mut_at(Some(header_nn), |h| {
             if h.magic != LARGE_MAGIC {
                 return None;
             }
-            let pages = h.pages;
-            let size = h.size as u64;
+            let list = &state.free_lists[LargeInner::list_for(h.pages)];
             h.magic = LARGE_FREE_MAGIC;
-            h.next.store(prev_head);
-            Some((pages, size))
+            h.next.store(list.load());
+            list.store(Some(header_nn));
+            Some((h.pages, h.size as u64))
         })
         .flatten();
         let Some((pages, size)) = snap else {
             return;
         };
-        state.free_list.store(Some(header_nn));
         self.total_bytes_freed.fetch_add(size, Ordering::Relaxed);
 
         if SLAB_DEBUG {
@@ -149,8 +160,5 @@ impl LargeAlloc {
                 });
             }
         }
-        let _ = pages;
-        // Freed regions stay on the first-fit free list; the pages go back to
-        // the buddy only when the slab itself is torn down.
     }
 }

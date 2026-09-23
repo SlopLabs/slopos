@@ -9,6 +9,7 @@ pub use slopos_rt as ring;
 pub mod runtime;
 pub mod syscall;
 pub mod theme;
+pub mod tls;
 pub mod ui_utils;
 
 pub use slopos_slibc as slibc;

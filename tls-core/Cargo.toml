@@ -1,0 +1,19 @@
+[package]
+name = "slopos-tls-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TLS 1.3 client: record layer, key schedule, AEADs, X25519 and certificate path validation, sans-I/O and host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[features]
+# A TLS 1.3 server for tests: an ECDSA P-256 signer without constant-time
+# scalar multiplication, so nothing shipped may enable it.
+test-server = []

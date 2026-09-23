@@ -1,9 +1,8 @@
-//! The Phase 1 exit criterion: a hand-written build driver running in-guest.
+//! The build loop end to end: a hand-written build driver running in-guest.
 //!
 //! A build system is the thing that breaks first when a POSIX floor is
 //! incomplete, so the driver is written the way a real one is — relative
 //! paths, `mtime` comparison, child exit codes, a lock on its own metadata.
-//! Each case below names the Phase 1 workstream it proves.
 
 use slopos_userland as _;
 
@@ -149,8 +148,6 @@ fn build_pass() -> Option<Vec<String>> {
     Some(rebuilt)
 }
 
-/// 1.1/1.5. A source name past 32 bytes, and an include directory that reaches
-/// a shared header through a symlink.
 fn project_tree_is_created_with_long_names_and_a_symlink() -> bool {
     let _ = fs::remove_dir_all(PROJECT_ROOT);
     if fs::create_dir_all(PROJECT_ROOT).is_err() {
@@ -246,8 +243,7 @@ fn project_tree_is_created_with_long_names_and_a_symlink() -> bool {
     }
 }
 
-/// 1.2/1.3. Every source compiles, and every child's success is observed as a
-/// zero exit code rather than assumed.
+/// Each child's success is observed as a zero exit code, not assumed.
 fn a_cold_build_compiles_every_source() -> bool {
     let Some(rebuilt) = build_pass() else {
         return false;
@@ -263,8 +259,7 @@ fn a_cold_build_compiles_every_source() -> bool {
     true
 }
 
-/// 1.2. An `mtime` read back after a compile is the value the compile saw; a
-/// clock that does not advance, or a filesystem that restamps, fails here.
+/// Fails on a clock that does not advance or a filesystem that restamps.
 fn a_second_run_skips_every_unchanged_input() -> bool {
     let Some(rebuilt) = build_pass() else {
         return false;
@@ -276,7 +271,6 @@ fn a_second_run_skips_every_unchanged_input() -> bool {
     true
 }
 
-/// 1.2. A changed `mtime` is noticed, for exactly the input that changed.
 fn touching_one_input_recompiles_only_that_input() -> bool {
     let Some(before) = mtime_secs(MAIN_SOURCE) else {
         eprintln!("buildctl_test: {MAIN_SOURCE} has no mtime");
@@ -320,7 +314,6 @@ fn touching_one_input_recompiles_only_that_input() -> bool {
     true
 }
 
-/// 1.3. A failing child's own exit code, not a flattened zero.
 fn a_failing_compile_reports_its_nonzero_code() -> bool {
     if fs::write(BROKEN_SOURCE, b"#error deliberate\n").is_err() {
         eprintln!("buildctl_test: could not write {BROKEN_SOURCE}");
@@ -342,8 +335,7 @@ fn a_failing_compile_reports_its_nonzero_code() -> bool {
     true
 }
 
-/// 1.3/1.4. A death by signal is reported as a signal: `std` invents no exit
-/// code for it, and the raw wait status names the signal.
+/// `std` invents no exit code for it, and the raw wait status names the signal.
 fn a_child_killed_by_sigsegv_is_reported_as_signalled() -> bool {
     let status = Command::new(SELF_PATH)
         .arg("segv")
@@ -394,8 +386,8 @@ fn a_child_killed_by_sigsegv_is_reported_as_signalled() -> bool {
     true
 }
 
-/// 1.5. Two drivers must not share one output tree. The probe is a separate
-/// process because an advisory lock is only meaningful across them.
+/// The probe is a separate process because an advisory lock is only
+/// meaningful between processes.
 fn the_fingerprint_lock_excludes_a_second_driver() -> bool {
     let held = match File::open(FINGERPRINTS) {
         Ok(f) => f,

@@ -1131,6 +1131,10 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         grant_for(b"/bin/devdisk_test") == (slopos_abi::task::TASK_FLAG_MOUNT, None),
         "the dev-disk test must be granted MOUNT and nothing more"
     );
+    assert_test!(
+        grant_for(b"/bin/dns_concurrent_test") == (slopos_abi::task::TASK_FLAG_NET_ADMIN, None),
+        "the resolver test must be granted NET_ADMIN and nothing more"
+    );
 
     assert_test!(
         grant_for(INIT_PATH) == (0, None),

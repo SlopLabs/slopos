@@ -26,13 +26,19 @@ set -euo pipefail
 #
 # Environment:
 #   DEV_DISK_SIZE - volume size (default: 2G). A cross-built rustc plus cargo
-#                   is ~1 GB of `bin/` and `lib/rustlib/`, and the sysroot
-#                   below is ~19 MB.
+#                   is ~1 GB of `bin/` and `lib/rustlib/`, the sysroot below
+#                   ~19 MB and the seeded source ~51 MB.
 #   DEV_DISK_INODE_RATIO - bytes of volume per inode (default: 16384, the
 #                   mke2fs default). The C++ headers alone are ~1000 files.
 #   TOOLCHAIN_STAGE - a directory holding a cross-built toolchain, copied over
 #                   the staged sysroot. Unset stages the sysroot alone, which
 #                   is what a run before the toolchain exists wants.
+#
+# A new volume is also seeded with `src/slopos`: the committed HEAD, the
+# vendored crates, a `.cargo/config.toml` that reads them with no registry, and
+# `.slopos-base`, the commit `scripts/export_devdisk.sh` diffs the guest's
+# edits against. A preserved volume keeps the guest's tree, so the marker
+# records only that it is there.
 
 SELF="build_devdisk"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -103,6 +109,31 @@ cp -a "$CXX_DIR/include/c++/v1/." "$STAGE/include/c++/v1/"
     missing "$CXX_DIR/licenses" "scripts/make_slopos_cxx.sh '${RELEASE_DIR}'"
 cp -a "$CXX_DIR/licenses" "$STAGE/licenses"
 
+VENDOR_REL="$(. "$SCRIPT_DIR/lib/toolchain_pin.sh" && tp_vendor_rel "$REPO_ROOT")" ||
+    die ".cargo/vendor.toml names no vendored-sources directory"
+
+seed_source() {
+    local base src
+    base="$(git -C "$REPO_ROOT" rev-parse --verify HEAD 2>/dev/null)" ||
+        die "the dev disk seeds src/slopos from git HEAD, and $REPO_ROOT is not a git checkout"
+    git -C "$REPO_ROOT" diff --quiet HEAD -- Cargo.lock .cargo rust-toolchain.toml toolchain/PIN ||
+        die "Cargo.lock, .cargo/ or the toolchain pin differ from HEAD; commit or stash them, since the vendored crates must be the ones src/slopos names"
+    [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] ||
+        echo "$SELF: the working tree has uncommitted changes; src/slopos is cut from HEAD ($base) without them" >&2
+    "$SCRIPT_DIR/make_vendor.sh"
+    src="$STAGE/src/slopos"
+    mkdir -p "$src/.cargo" "$src/$(dirname "$VENDOR_REL")"
+    git -C "$REPO_ROOT" archive --format=tar "$base" | tar -x -C "$src"
+    cp -a "$REPO_ROOT/$VENDOR_REL" "$src/$VENDOR_REL"
+    {
+        git -C "$REPO_ROOT" show "$base:.cargo/config.toml"
+        echo
+        git -C "$REPO_ROOT" show "$base:.cargo/vendor.toml"
+    } >"$src/.cargo/config.toml"
+    echo "$base" >"$src/.slopos-base"
+}
+[ -f "$IMAGE_PATH" ] || seed_source
+
 if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
     [ -d "$TOOLCHAIN_STAGE" ] ||
         die "TOOLCHAIN_STAGE='$TOOLCHAIN_STAGE' is not a directory"
@@ -141,8 +172,8 @@ image_holds_dir() {
 stale() {
     echo "" >&2
     echo "$SELF: $IMAGE_PATH does not carry $1" >&2
-    echo "  It was preserved from an earlier build that staged a different" >&2
-    echo "  sysroot, so the marker cannot describe it." >&2
+    echo "  It was preserved from an earlier build that staged something else," >&2
+    echo "  so the marker cannot describe it." >&2
     echo "  Discard it: rm -f '$IMAGE_PATH' '$IMAGE_PATH.stamp'" >&2
     exit 1
 }
@@ -155,6 +186,11 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
         image_holds_dir "$rel" || stale "$rel"
         printf 'dir %s\n' "$rel"
     done
+    if image_holds_dir src/slopos; then
+        echo "source src/slopos"
+    else
+        echo "$SELF: $IMAGE_PATH predates the seeded source tree; a new volume carries one" >&2
+    fi
     # Subdirectories get a `dir` line rather than a recursive walk: a
     # `TOOLCHAIN_STAGE` lands `lib/rustlib`, which is most of the volume and
     # thousands of files, and one `debugfs` call each would cost more than

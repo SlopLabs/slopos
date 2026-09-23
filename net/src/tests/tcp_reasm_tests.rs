@@ -5,11 +5,23 @@ use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpRecvState};
+use crate::tcp::buffer::TcpRecvState;
+use crate::tcp::chunk::Spares;
 use crate::tcp::reasm::Assembler;
 
+const CAP: usize = 32768;
+
 fn fresh_recv() -> TcpRecvState {
-    TcpRecvState::new(TCP_BUFFER_SIZE).expect("alloc")
+    TcpRecvState::new(CAP, CAP).expect("alloc")
+}
+
+fn put(recv: &mut TcpRecvState, data: &[u8]) -> usize {
+    recv.enqueue(data, &mut Spares::for_bytes(data.len(), 0), 0)
+}
+
+fn put_at(recv: &mut TcpRecvState, offset: usize, data: &[u8]) -> usize {
+    recv.buf
+        .write_at(offset, data, &mut Spares::for_bytes(data.len(), 0))
 }
 
 fn fresh_asm() -> Assembler {
@@ -38,20 +50,20 @@ pub fn test_reasm_single_ooo_segment() -> TestResult {
     let payload = b"hello";
     let offset = seg_seq.wrapping_sub(rcv_nxt) as usize;
 
-    let wrote = recv.buf.write_at_offset(offset, payload);
+    let wrote = put_at(&mut recv, offset, payload);
     assert_eq_test!(wrote, 5, "wrote 5 bytes at offset");
     asm.insert(seg_seq, wrote);
 
     assert_eq_test!(asm.drain_contiguous(rcv_nxt), 0, "gap still open");
 
     let gap_data = [0xAAu8; 100];
-    let gap_wrote = recv.enqueue(&gap_data, 0);
+    let gap_wrote = put(&mut recv, &gap_data);
     assert_eq_test!(gap_wrote, 100, "gap fill wrote");
     let new_rcv_nxt = rcv_nxt.wrapping_add(gap_wrote as u32);
 
     let drained = asm.drain_contiguous(new_rcv_nxt);
     assert_eq_test!(drained, 5, "drained OOO segment");
-    recv.buf.advance_head(drained);
+    recv.buf.advance(drained);
     assert_test!(asm.is_empty(), "assembler empty after drain");
 
     let out = drain_to_vec(&mut recv);
@@ -64,17 +76,17 @@ pub fn test_reasm_non_contiguous_ranges() -> TestResult {
     let mut asm = fresh_asm();
     let mut recv = fresh_recv();
 
-    recv.buf.write_at_offset(100, b"aaa");
+    put_at(&mut recv, 100, b"aaa");
     asm.insert(100, 3);
-    recv.buf.write_at_offset(200, b"bbb");
+    put_at(&mut recv, 200, b"bbb");
     asm.insert(200, 3);
 
     assert_eq_test!(asm.range_count(), 2, "two disjoint ranges");
 
-    recv.enqueue(&[0u8; 100], 0);
+    put(&mut recv, &[0u8; 100]);
     let drained = asm.drain_contiguous(100);
     assert_eq_test!(drained, 3, "drained first range");
-    recv.buf.advance_head(drained);
+    recv.buf.advance(drained);
 
     assert_eq_test!(asm.range_count(), 1, "one range remains");
     assert_test!(!asm.is_empty(), "not empty");
@@ -117,16 +129,16 @@ pub fn test_reasm_drain_integration() -> TestResult {
 
     let ooo_data = [0xBBu8; 30];
     let offset = 1050u32.wrapping_sub(rcv_nxt) as usize;
-    recv.buf.write_at_offset(offset, &ooo_data);
+    put_at(&mut recv, offset, &ooo_data);
     asm.insert(1050, 30);
 
     let gap = [0xAAu8; 50];
-    recv.enqueue(&gap, 0);
+    put(&mut recv, &gap);
     let new_rcv_nxt = rcv_nxt + 50;
 
     let drained = asm.drain_contiguous(new_rcv_nxt);
     assert_eq_test!(drained, 30, "drained 30 OOO bytes");
-    recv.buf.advance_head(drained);
+    recv.buf.advance(drained);
 
     let out = drain_to_vec(&mut recv);
     assert_eq_test!(out.len(), 80, "50 gap + 30 OOO");
@@ -168,21 +180,23 @@ pub fn test_reasm_duplicate_is_noop() -> TestResult {
 pub fn test_reasm_write_at_offset_wrap() -> TestResult {
     let mut recv = fresh_recv();
 
-    // Fill then drain to put head near the end of the backing array, so the
-    // write at offset 700 wraps past it.
+    // Fill then drain to put the head 364 bytes short of the end of the
+    // slots' circular space, so the write at offset 700 wraps past it.
     let fill: KBox<[u8; 32000]> = KBox::zeroed().expect("alloc");
-    recv.enqueue(&*fill, 0);
     let mut discard: KBox<[u8; 32000]> = KBox::zeroed().expect("alloc");
+    put(&mut recv, &*fill);
     recv.dequeue(&mut *discard);
+    put(&mut recv, &fill[..4500]);
+    recv.dequeue(&mut discard[..4500]);
 
     let payload = [0xCCu8; 100];
-    let wrote = recv.buf.write_at_offset(700, &payload);
+    let wrote = put_at(&mut recv, 700, &payload);
     assert_eq_test!(wrote, 100, "wrote 100 bytes wrapping around");
 
     let mut gap: KBox<[u8; 700]> = KBox::zeroed().expect("alloc");
     gap.iter_mut().for_each(|b| *b = 0xAA);
-    recv.enqueue(&*gap, 0);
-    recv.buf.advance_head(100);
+    put(&mut recv, &*gap);
+    recv.buf.advance(100);
 
     let out = drain_to_vec(&mut recv);
     assert_eq_test!(out.len(), 800, "800 total bytes");
@@ -197,12 +211,12 @@ pub fn test_reasm_write_at_offset_capacity() -> TestResult {
     let mut recv = fresh_recv();
 
     let fill: KBox<[u8; 32668]> = KBox::zeroed().expect("alloc"); // 32768 - 100
-    recv.enqueue(&*fill, 0);
+    put(&mut recv, &*fill);
 
-    let wrote = recv.buf.write_at_offset(100, b"x");
+    let wrote = put_at(&mut recv, 100, b"x");
     assert_eq_test!(wrote, 0, "no room at offset=free_space");
 
-    let wrote = recv.buf.write_at_offset(50, &[0xFFu8; 100]);
+    let wrote = put_at(&mut recv, 50, &[0xFFu8; 100]);
     assert_eq_test!(wrote, 50, "capped at available space");
     pass!()
 }
@@ -228,18 +242,18 @@ pub fn test_reasm_drain_respects_capacity() -> TestResult {
     let mut recv = fresh_recv();
 
     let fill: KBox<[u8; 32718]> = KBox::zeroed().expect("alloc"); // 32768 - 50
-    recv.enqueue(&*fill, 0);
+    put(&mut recv, &*fill);
 
     let rcv_nxt: u32 = fill.len() as u32;
 
     let ooo = [0xDDu8; 100];
-    let wrote = recv.buf.write_at_offset(0, &ooo);
+    let wrote = put_at(&mut recv, 0, &ooo);
     assert_eq_test!(wrote, 50, "capped at free space");
     asm.insert(rcv_nxt, wrote);
 
     let drained = asm.drain_contiguous(rcv_nxt);
     assert_eq_test!(drained, 50, "drained what fit");
-    recv.buf.advance_head(drained);
+    recv.buf.advance(drained);
 
     assert_eq_test!(recv.buf.len(), 32768, "buffer now full");
     pass!()
@@ -303,11 +317,11 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
         for idx in order_a {
             let seq = BASE + (idx as u32) * CHUNK as u32;
             let offset = seq.wrapping_sub(BASE) as usize;
-            recv_a.buf.write_at_offset(offset, &payloads[idx]);
+            put_at(&mut recv_a, offset, &payloads[idx]);
             asm_a.insert(seq, CHUNK);
         }
         let drained_a = asm_a.drain_contiguous(BASE);
-        recv_a.buf.advance_head(drained_a);
+        recv_a.buf.advance(drained_a);
         let out_a = drain_to_vec(&mut recv_a);
 
         let mut asm_b = fresh_asm();
@@ -315,11 +329,11 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
         for idx in order_b {
             let seq = BASE + (idx as u32) * CHUNK as u32;
             let offset = seq.wrapping_sub(BASE) as usize;
-            recv_b.buf.write_at_offset(offset, &payloads[idx]);
+            put_at(&mut recv_b, offset, &payloads[idx]);
             asm_b.insert(seq, CHUNK);
         }
         let drained_b = asm_b.drain_contiguous(BASE);
-        recv_b.buf.advance_head(drained_b);
+        recv_b.buf.advance(drained_b);
         let out_b = drain_to_vec(&mut recv_b);
 
         if out_a != out_b {

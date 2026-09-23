@@ -238,6 +238,7 @@ pub fn test_dns_t5_cache() -> TestResult {
 
 /// Build a minimal valid DNS A-record response for transaction `id`: header,
 /// question (`example.com A IN`), one answer RR.
+#[inline(never)]
 fn build_a_reply(id: u16, addr: [u8; 4], ttl: u32) -> ([u8; 128], usize) {
     let mut packet = [0u8; 128];
     packet[0..2].copy_from_slice(&id.to_be_bytes());
@@ -273,25 +274,29 @@ fn build_a_reply(id: u16, addr: [u8; 4], ttl: u32) -> ([u8; 128], usize) {
     (packet, pos)
 }
 
-pub fn test_dns_t6_resolver_retry_then_success() -> TestResult {
+pub fn test_dns_t6_resolver_rotates_then_succeeds() -> TestResult {
     use dns::{DnsOutcome, DnsResolver, DnsStep};
 
-    let mut r = DnsResolver::new(b"example.com").expect("resolver builds");
-
+    let mut r = DnsResolver::new(b"example.com", 2, 2, 5000).expect("resolver builds");
     assert_eq_test!(
         r.step(DnsOutcome::Start),
-        DnsStep::Query { timeout_ms: 3000 },
-        "Start emits first query"
+        DnsStep::Query {
+            server: 0,
+            timeout_ms: 5000
+        },
+        "the first query goes to the first server"
     );
     let id1 = r.query_id();
-
     assert_eq_test!(
         r.step(DnsOutcome::Timeout),
-        DnsStep::Query { timeout_ms: 3000 },
-        "timeout triggers a retry query"
+        DnsStep::Query {
+            server: 1,
+            timeout_ms: 5000
+        },
+        "a timeout moves on to the next server"
     );
     let id2 = r.query_id();
-    assert_test!(id2 != id1, "retry uses a fresh transaction ID");
+    assert_test!(id2 != id1, "a retry draws a fresh transaction ID");
 
     let (reply, len) = build_a_reply(id2, [93, 184, 216, 34], 300);
     assert_eq_test!(
@@ -302,37 +307,33 @@ pub fn test_dns_t6_resolver_retry_then_success() -> TestResult {
         },
         "valid reply resolves to the A record"
     );
-
     pass!()
 }
 
 pub fn test_dns_t7_resolver_exhaustion() -> TestResult {
     use dns::{DnsOutcome, DnsResolveError, DnsResolver, DnsStep};
 
-    let mut r = DnsResolver::new(b"this-does-not-exist.invalid").expect("resolver builds");
-    assert_eq_test!(
-        r.step(DnsOutcome::Start),
-        DnsStep::Query { timeout_ms: 3000 },
-        "attempt 1"
-    );
-    assert_eq_test!(
-        r.step(DnsOutcome::Timeout),
-        DnsStep::Query { timeout_ms: 3000 },
-        "attempt 2 after timeout"
-    );
-    assert_eq_test!(
-        r.step(DnsOutcome::Timeout),
-        DnsStep::Query { timeout_ms: 3000 },
-        "attempt 3 after timeout"
-    );
+    let mut r = DnsResolver::new(b"example.com", 2, 2, 100).expect("resolver builds");
+    let mut servers = [0usize; 4];
+    for (i, server) in servers.iter_mut().enumerate() {
+        let outcome = if i == 0 {
+            DnsOutcome::Start
+        } else {
+            DnsOutcome::Timeout
+        };
+        match r.step(outcome) {
+            DnsStep::Query { server: s, .. } => *server = s,
+            other => return fail!("round {} gave {:?}", i, other),
+        }
+    }
+    assert_eq_test!(servers, [0, 1, 0, 1], "two rounds of two servers");
     assert_eq_test!(
         r.step(DnsOutcome::Timeout),
         DnsStep::Failed(DnsResolveError::Timeout),
-        "exhausted retries surface the last transient error"
+        "attempts times servers queries, then the last transient error"
     );
 
-    // Error precedence: transmit-fail, then timeout, then a garbage reply.
-    let mut r = DnsResolver::new(b"example.com").expect("resolver builds");
+    let mut r = DnsResolver::new(b"example.com", 1, 3, 100).expect("resolver builds");
     assert!(matches!(r.step(DnsOutcome::Start), DnsStep::Query { .. }));
     assert!(matches!(
         r.step(DnsOutcome::TransmitFailed),
@@ -346,13 +347,82 @@ pub fn test_dns_t7_resolver_exhaustion() -> TestResult {
         "last failure (parse) wins over earlier transient errors"
     );
 
-    // Rejected at construction, not after a query.
     assert_eq_test!(
-        DnsResolver::new(b"example..com").err(),
+        DnsResolver::new(b"example..com", 1, 1, 100).err(),
         Some(DnsResolveError::InvalidHostname),
         "double-dot hostname rejected as InvalidHostname"
     );
+    pass!()
+}
 
+#[inline(never)]
+fn set_rcode(packet: &mut [u8], rcode: dns::DnsRcode) {
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    packet[2..4].copy_from_slice(&((flags & 0xFFF0) | rcode as u16).to_be_bytes());
+}
+
+#[inline(never)]
+fn answer(r: &mut dns::DnsResolver, rcode: dns::DnsRcode) -> dns::DnsStep {
+    let (mut reply, len) = build_a_reply(r.query_id(), [1, 2, 3, 4], 60);
+    set_rcode(&mut reply, rcode);
+    r.step(dns::DnsOutcome::Reply(&reply[..len]))
+}
+
+#[inline(never)]
+fn answer_with_no_records(r: &mut dns::DnsResolver, rcode: dns::DnsRcode) -> dns::DnsStep {
+    let (mut reply, _) = build_a_reply(r.query_id(), [1, 2, 3, 4], 60);
+    set_rcode(&mut reply, rcode);
+    reply[6..8].copy_from_slice(&0u16.to_be_bytes());
+    r.step(dns::DnsOutcome::Reply(&reply[..12 + 13 + 4]))
+}
+
+/// NXDOMAIN is the answer, not a failure to get one; SERVFAIL and REFUSED are
+/// one server's failure, and the next server may do better.
+pub fn test_dns_t11_rcode_policy() -> TestResult {
+    use dns::{DnsOutcome, DnsRcode, DnsResolveError, DnsResolver, DnsStep};
+
+    let mut r = DnsResolver::new(b"example.com", 2, 2, 100).expect("resolver builds");
+    let _ = r.step(DnsOutcome::Start);
+    assert_eq_test!(
+        answer(&mut r, DnsRcode::NXDomain),
+        DnsStep::Failed(DnsResolveError::NameNotFound),
+        "NXDOMAIN ends the lookup at once"
+    );
+
+    let mut r = DnsResolver::new(b"example.com", 2, 1, 100).expect("resolver builds");
+    let _ = r.step(DnsOutcome::Start);
+    assert_eq_test!(
+        answer(&mut r, DnsRcode::ServFail),
+        DnsStep::Query {
+            server: 1,
+            timeout_ms: 100
+        },
+        "SERVFAIL asks the next server"
+    );
+    assert_eq_test!(
+        answer(&mut r, DnsRcode::Refused),
+        DnsStep::Failed(DnsResolveError::ServerFailure),
+        "every server refusing is a server failure"
+    );
+
+    let mut r = DnsResolver::new(b"example.com", 1, 2, 100).expect("resolver builds");
+    let _ = r.step(DnsOutcome::Start);
+    assert_eq_test!(
+        answer_with_no_records(&mut r, DnsRcode::NoError),
+        DnsStep::Failed(DnsResolveError::NameNotFound),
+        "NOERROR with no A record is a name without an address"
+    );
+
+    let mut r = DnsResolver::new(b"example.com", 1, 1, 100).expect("resolver builds");
+    let _ = r.step(DnsOutcome::Start);
+    let (mut reply, _) = build_a_reply(r.query_id(), [1, 2, 3, 4], 60);
+    reply[2] |= 0x02;
+    reply[6..8].copy_from_slice(&0u16.to_be_bytes());
+    assert_eq_test!(
+        r.step(DnsOutcome::Reply(&reply[..12 + 13 + 4])),
+        DnsStep::Failed(DnsResolveError::ServerFailure),
+        "a truncated reply with no A record says nothing about the name"
+    );
     pass!()
 }
 
@@ -392,52 +462,211 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
 /// carry entropy independent of it.
 pub fn test_dns_t9_query_entropy() -> TestResult {
     let mut ids = [0u16; 8];
-    for slot in ids.iter_mut() {
-        let r = dns::DnsResolver::new(b"example.com").expect("resolver");
-        *slot = r.query_id();
+    let mut ports = [0u16; 8];
+    for (id, port) in ids.iter_mut().zip(ports.iter_mut()) {
+        *id = dns::DnsResolver::new(b"example.com", 1, 1, 100)
+            .expect("resolver")
+            .query_id();
+        *port = dns::Inflight::claim().expect("slot").port();
     }
-
     assert_test!(
         ids.iter().any(|&id| id != ids[0]),
         "transaction IDs must not be a fixed constant"
     );
     assert_test!(
-        ids.iter().any(|&id| id != 0x4242),
-        "transaction IDs must not be the old boot constant"
+        ports.iter().any(|&p| p != ports[0]),
+        "source ports must not be a fixed constant"
+    );
+    assert_test!(
+        ports.iter().all(|&p| p >= 49_152),
+        "source ports come from the ephemeral range"
     );
     pass!()
 }
 
-/// A response from a host that is not the configured server, or to a port the
-/// query did not leave from, must not reach the resolver.
+#[inline(never)]
+fn query_for(id: u16, name: &[u8]) -> ([u8; 128], usize) {
+    let mut q = [0u8; 128];
+    let n = dns::dns_build_query(id, name, dns::DnsType::A, &mut q).expect("query");
+    (q, n)
+}
+
+#[inline(never)]
+fn udp_rx(src_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
+    let mut pkt = crate::packetbuf::PacketBuf::alloc().expect("packet");
+    let mut hdr = [0u8; 8];
+    hdr[0..2].copy_from_slice(&src_port.to_be_bytes());
+    hdr[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    hdr[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    pkt.append(&hdr).expect("header");
+    pkt.append(payload).expect("payload");
+    crate::udp::handle_rx(src_ip, [10, 0, 2, 15], &pkt);
+}
+
+#[inline(never)]
+fn answered(inflight: &dns::Inflight) -> Option<usize> {
+    let mut out = [0u8; 128];
+    inflight.wait(0, &mut out).ok()
+}
+
+/// RFC 5452 §9.1: a reply counts only if it comes from the server asked, to
+/// the port the query left from, carrying the query's ID and its question.
 pub fn test_dns_t10_response_provenance() -> TestResult {
     const SERVER_A: [u8; 4] = [192, 0, 2, 53];
     const SERVER_B: [u8; 4] = [198, 51, 100, 53];
-    const EPHEMERAL: u16 = 49_152;
+
+    let inflight = dns::Inflight::claim().expect("slot");
+    let port = inflight.port();
+    let (query, qlen) = query_for(0x1234, b"example.com");
+    inflight.arm(SERVER_A, &query[..qlen]);
+
+    let (reply, rlen) = build_a_reply(0x1234, [93, 184, 216, 34], 300);
+    let reply = &reply[..rlen];
+
+    udp_rx(SERVER_B, dns::DNS_PORT, port, reply);
+    assert_eq_test!(answered(&inflight), None, "another host's reply is dropped");
+
+    let (wrong_id, _) = build_a_reply(0x1235, [6, 6, 6, 6], 300);
+    udp_rx(SERVER_A, dns::DNS_PORT, port, &wrong_id[..rlen]);
+    assert_eq_test!(
+        answered(&inflight),
+        None,
+        "a reply to another ID is dropped"
+    );
+
+    let mut other_question = [0u8; 128];
+    other_question[..rlen].copy_from_slice(reply);
+    other_question[13] = b'X';
+    other_question[14] = b'Y';
+    udp_rx(SERVER_A, dns::DNS_PORT, port, &other_question[..rlen]);
+    assert_eq_test!(
+        answered(&inflight),
+        None,
+        "a reply to another question is dropped"
+    );
+
+    let mut mixed_case = [0u8; 128];
+    mixed_case[..rlen].copy_from_slice(reply);
+    mixed_case[13] = b'E';
+    udp_rx(SERVER_A, dns::DNS_PORT, port, &mixed_case[..rlen]);
+    assert_eq_test!(
+        answered(&inflight),
+        Some(rlen),
+        "the question echoed in another case is still the question"
+    );
+
+    udp_rx(SERVER_A, dns::DNS_PORT, port, reply);
+    let mut out = [0u8; 128];
+    let n = inflight.wait(0, &mut out).unwrap_or(0);
+    assert_eq_test!(
+        &out[..n],
+        &mixed_case[..rlen],
+        "the first genuine reply is kept; a second does not overwrite it"
+    );
 
     assert_test!(
-        !dns::response_is_expected(SERVER_A, dns::DNS_PORT),
-        "a datagram addressed to port 53 left no query behind"
-    );
-    assert_test!(
-        !dns::response_is_expected(SERVER_A, EPHEMERAL - 1),
-        "nor one addressed below the ephemeral range"
-    );
-
-    // RFC 5452 §9: the ID check alone would accept a datagram from any host.
-    let from_a = dns::response_is_expected(SERVER_A, EPHEMERAL);
-    let from_b = dns::response_is_expected(SERVER_B, EPHEMERAL);
-    assert_test!(
-        !(from_a && from_b),
-        "one port accepts replies from at most one server"
-    );
-
-    let other_port = dns::response_is_expected(SERVER_A, EPHEMERAL + 1);
-    assert_test!(
-        !(from_a && other_port),
-        "one server is answered on at most one source port"
+        !dns::deliver(SERVER_A, dns::DNS_PORT, reply),
+        "a port the resolver does not hold is not the resolver's"
     );
     pass!()
+}
+
+/// These two names share an FNV-1a-32 hash, which is what the cache once keyed on.
+pub fn test_dns_t12_cache_keys_whole_names() -> TestResult {
+    dns::dns_cache_flush();
+    dns::dns_cache_insert(b"glbvs.example", [203, 0, 113, 66], 3600);
+    assert_eq_test!(
+        dns::dns_cache_lookup(b"yacxa.example"),
+        None,
+        "a colliding name does not read another name's entry"
+    );
+    assert_eq_test!(
+        dns::dns_cache_lookup(b"GLBVS.Example."),
+        Some([203, 0, 113, 66]),
+        "case and a trailing dot name the same host"
+    );
+    dns::dns_cache_flush();
+    pass!()
+}
+
+/// Each lookup has its own slot, port and wait queue; a full table refuses, and
+/// a port the resolver holds is closed to every socket's bind.
+pub fn test_dns_t13_inflight_slots() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    const SERVER: [u8; 4] = [192, 0, 2, 53];
+
+    let mut held: [Option<dns::Inflight>; dns::MAX_INFLIGHT] = [const { None }; dns::MAX_INFLIGHT];
+    for (i, slot) in held.iter_mut().enumerate() {
+        let inflight = match dns::Inflight::claim() {
+            Ok(f) => f,
+            Err(e) => return fail!("slot {} refused: {:?}", i, e),
+        };
+        let (query, qlen) = query_for(0x1000 + i as u16, b"example.com");
+        inflight.arm(SERVER, &query[..qlen]);
+        *slot = Some(inflight);
+    }
+    assert_eq_test!(
+        dns::Inflight::claim().err(),
+        Some(dns::DnsResolveError::Busy),
+        "a full table refuses"
+    );
+
+    let (reply, rlen) = build_a_reply(0x1000 + 5, [10, 9, 8, 7], 60);
+    let port5 = held[5].as_ref().map_or(0, |f| f.port());
+    udp_rx(SERVER, dns::DNS_PORT, port5, &reply[..rlen]);
+    for (i, slot) in held.iter().enumerate() {
+        let got = slot.as_ref().and_then(answered);
+        if (i == 5) != got.is_some() {
+            return fail!("slot {} answered={:?} after a reply to slot 5", i, got);
+        }
+    }
+
+    assert_test!(
+        port_closed_to_every_bind(port5),
+        "a socket cannot bind a port a query is waiting on"
+    );
+    held[5] = None;
+    assert_test!(
+        dns::Inflight::claim().is_ok(),
+        "a released slot is claimable"
+    );
+    assert_test!(
+        udp_port_bindable(port5, [0, 0, 0, 0], false),
+        "and its port is free again"
+    );
+    pass!()
+}
+
+#[inline(never)]
+fn port_closed_to_every_bind(port: u16) -> bool {
+    [
+        ([0, 0, 0, 0], false),
+        ([0, 0, 0, 0], true),
+        ([127, 0, 0, 1], true),
+    ]
+    .into_iter()
+    .all(|(addr, reuse)| !udp_port_bindable(port, addr, reuse))
+}
+
+#[inline(never)]
+fn udp_port_bindable(port: u16, addr: [u8; 4], reuse: bool) -> bool {
+    use crate::socket::*;
+    use slopos_abi::net::{AF_INET, SOCK_DGRAM};
+    use slopos_abi::syscall::{SO_REUSEADDR, SOL_SOCKET};
+
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    if sock < 0 {
+        return false;
+    }
+    if reuse {
+        let _ = socket_setsockopt(sock as u32, SOL_SOCKET, SO_REUSEADDR, &1i32.to_ne_bytes());
+    }
+    let bound = socket_bind(sock as u32, addr, port) == 0;
+    let _ = socket_close(sock as u32);
+    bound
 }
 
 slopos_testing::stest!(name = test_dns_t1_name_encoding, suite = dns);
@@ -445,8 +674,14 @@ slopos_testing::stest!(name = test_dns_t2_query_construction, suite = dns);
 slopos_testing::stest!(name = test_dns_t3_name_decoding, suite = dns);
 slopos_testing::stest!(name = test_dns_t4_response_parsing, suite = dns);
 slopos_testing::stest!(name = test_dns_t5_cache, suite = dns);
-slopos_testing::stest!(name = test_dns_t6_resolver_retry_then_success, suite = dns);
+slopos_testing::stest!(
+    name = test_dns_t6_resolver_rotates_then_succeeds,
+    suite = dns
+);
 slopos_testing::stest!(name = test_dns_t7_resolver_exhaustion, suite = dns);
 slopos_testing::stest!(name = test_dns_t8_regression_network_stack, suite = dns);
 slopos_testing::stest!(name = test_dns_t9_query_entropy, suite = dns);
 slopos_testing::stest!(name = test_dns_t10_response_provenance, suite = dns);
+slopos_testing::stest!(name = test_dns_t11_rcode_policy, suite = dns);
+slopos_testing::stest!(name = test_dns_t12_cache_keys_whole_names, suite = dns);
+slopos_testing::stest!(name = test_dns_t13_inflight_slots, suite = dns);

@@ -148,8 +148,7 @@ impl Actions {
 }
 
 bitflags! {
-    /// Wake-up / event flags the glue layer feeds into the socket layer
-    /// after every `Pcb::on_segment` invocation.
+    /// Events the glue layer acts on after every `Pcb::on_segment` invocation.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct SocketNotify: u8 {
         /// Wake waiters blocked on `recv()` / `POLLIN`.
@@ -166,6 +165,9 @@ bitflags! {
         /// Handshake completed: the glue layer allocates a buffer and wires
         /// the child into the listener's accept queue.
         const NEW_ESTABLISHED = 1 << 5;
+        /// An acceptable segment arrived, keepalive ACKs included: the
+        /// connection is not idle.
+        const PEER_HEARD      = 1 << 6;
     }
 }
 

@@ -21,7 +21,8 @@ const MOUNT_POINT_C: &[u8] = b"/tmp/devdisk\0";
 
 /// Written by `scripts/build_devdisk.sh` at the volume root. Line 1 is the
 /// magic and a format version; `file <bytes> <path>` and `dir <path>` lines
-/// are the inventory this test grades the volume against.
+/// are the inventory this test grades the volume against, and a `source
+/// <path>` line names the guest's source tree.
 const MARKER: &str = "SLOPOS-DEVDISK";
 
 fn mount_dev_disk(device: &str, flags: u32) -> Result<(), SyscallError> {
@@ -191,9 +192,141 @@ fn devdisk_remounts_after_umount() -> bool {
     true
 }
 
+fn vendor_directory(config: &str) -> Option<&str> {
+    config.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("directory")?
+            .trim_start()
+            .strip_prefix('=')?
+            .trim()
+            .strip_prefix('"')?
+            .strip_suffix('"')
+    })
+}
+
+/// `(name, version, checksum)` for each registry package `lock` names.
+fn registry_packages(lock: &str) -> Vec<(&str, &str, &str)> {
+    let mut out = Vec::new();
+    for block in lock.split("[[package]]").skip(1) {
+        let field = |key: &str| {
+            block.lines().find_map(|l| {
+                l.strip_prefix(key)
+                    .and_then(|rest| rest.trim().strip_prefix('='))
+                    .map(|v| v.trim().trim_matches('"'))
+            })
+        };
+        if let (Some(name), Some(version), Some(checksum)) =
+            (field("name"), field("version"), field("checksum"))
+        {
+            out.push((name, version, checksum));
+        }
+    }
+    out
+}
+
+/// The copy of the source tree that reached the guest needs no registry: its
+/// config reads a vendor directory holding every locked crate by checksum.
+fn devdisk_source_is_vendored() -> bool {
+    let Some(device) = dev_disk_or_skip() else {
+        return true;
+    };
+    if let Err(e) = mount_dev_disk(device, MS_RDONLY) {
+        note(&format!("mount of /dev/{device} failed: {e}"));
+        return false;
+    }
+    let outcome = match fs::read_to_string(marker_path()) {
+        Ok(text) => match text.lines().find_map(|l| l.strip_prefix("source ")) {
+            Some(source) => grade_source(device, source),
+            None => {
+                note(&format!(
+                    "/dev/{device}: carries no source tree; it predates the seeding"
+                ));
+                true
+            }
+        },
+        Err(e) => {
+            note(&format!("/dev/{device}: reading {MARKER} back: {e}"));
+            false
+        }
+    };
+    if let Err(e) = umount_dev_disk() {
+        note(&format!("/dev/{device}: umount failed: {e}"));
+        return false;
+    }
+    outcome
+}
+
+fn grade_source(device: &str, source: &str) -> bool {
+    let root = format!("{MOUNT_POINT}/{source}");
+    let config = match fs::read_to_string(format!("{root}/.cargo/config.toml")) {
+        Ok(config) => config,
+        Err(e) => {
+            note(&format!("/dev/{device}: {source}/.cargo/config.toml: {e}"));
+            return false;
+        }
+    };
+    let vendor = match vendor_directory(&config) {
+        Some(dir) if config.contains("replace-with = \"vendored-sources\"") => dir,
+        _ => {
+            note(&format!(
+                "/dev/{device}: {source}/.cargo/config.toml reads no vendored sources"
+            ));
+            return false;
+        }
+    };
+    let (lock, std_lock) = match (
+        fs::read_to_string(format!("{root}/Cargo.lock")),
+        fs::read_to_string(format!("{root}/{vendor}/library.lock")),
+    ) {
+        (Ok(l), Ok(s)) => (l, s),
+        (l, s) => {
+            note(&format!(
+                "/dev/{device}: {source} lacks a lockfile: {:?} {:?}",
+                l.err(),
+                s.err()
+            ));
+            return false;
+        }
+    };
+    let (workspace, std) = (registry_packages(&lock), registry_packages(&std_lock));
+    if workspace.is_empty() || std.is_empty() {
+        note(&format!(
+            "/dev/{device}: a lockfile names no registry package ({} and {})",
+            workspace.len(),
+            std.len()
+        ));
+        return false;
+    }
+    let packages: Vec<_> = workspace.into_iter().chain(std).collect();
+    for (name, version, checksum) in &packages {
+        let manifest = format!("{root}/{vendor}/{name}-{version}/.cargo-checksum.json");
+        match fs::read_to_string(&manifest) {
+            Ok(json) if json.contains(&format!("\"package\":\"{checksum}\"")) => {}
+            Ok(_) => {
+                note(&format!(
+                    "/dev/{device}: {name} {version} is vendored with another checksum"
+                ));
+                return false;
+            }
+            Err(e) => {
+                note(&format!(
+                    "/dev/{device}: {name} {version} is not vendored: {e}"
+                ));
+                return false;
+            }
+        }
+    }
+    note(&format!(
+        "/dev/{device}: {} vendored packages match both lockfiles",
+        packages.len()
+    ));
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("devdisk_inventory_reads_back", devdisk_inventory_reads_back),
+        ("devdisk_source_is_vendored", devdisk_source_is_vendored),
         (
             "devdisk_remounts_after_umount",
             devdisk_remounts_after_umount,

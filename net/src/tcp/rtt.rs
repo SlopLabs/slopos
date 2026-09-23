@@ -29,8 +29,7 @@ pub struct RttEstimator {
     rttvar_ms: u32,
     rto_ms: u32,
     has_sample: bool,
-    /// Number of consecutive retransmit timeouts without a fresh sample.
-    /// Reset to 0 on each successful RTT sample.
+    /// Retransmit timeouts since the connection last made progress.
     pub consecutive_timeouts: u8,
 }
 

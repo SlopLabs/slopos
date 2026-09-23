@@ -356,6 +356,358 @@ fn test_loopback_wildcard_handshake_completes() -> TestResult {
     pass!()
 }
 
+fn pattern_byte(i: usize) -> u8 {
+    (i.wrapping_mul(131) ^ (i >> 9)) as u8
+}
+
+struct Sock(u32);
+
+impl Drop for Sock {
+    fn drop(&mut self) {
+        let _ = socket::socket_close(self.0);
+    }
+}
+
+fn stream_socket() -> Result<Sock, TestResult> {
+    use slopos_abi::net::{AF_INET, SOCK_STREAM};
+    let fd = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
+    if fd < 0 {
+        return Err(fail!("socket_create: {}", fd));
+    }
+    Ok(Sock(fd as u32))
+}
+
+/// Fields drop in declaration order, so the listener closes last.
+struct Loopback {
+    server: Sock,
+    client: Sock,
+    _listener: Sock,
+}
+
+fn loopback_pair() -> Result<Loopback, TestResult> {
+    let listener = stream_socket()?;
+    let client = stream_socket()?;
+    if socket::socket_bind(listener.0, [127, 0, 0, 1], 0) != 0
+        || socket::socket_listen(listener.0, 4) != 0
+    {
+        return Err(fail!("listen on 127.0.0.1:0 failed"));
+    }
+    let port = socket::socket_get_local_addr(listener.0).map_or(0, |a| a.port.0);
+    if port < 49_152 {
+        return Err(fail!(
+            "a listener bound to port 0 reports port {}, not an ephemeral one",
+            port
+        ));
+    }
+    let _ = socket::socket_set_nonblocking(client.0, true);
+    let _ = socket::socket_connect(client.0, [127, 0, 0, 1], port);
+    let Some((server, _)) = await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        let rc = socket::socket_accept(listener.0, core::ptr::null_mut(), core::ptr::null_mut());
+        (rc >= 0).then_some(Sock(rc as u32))
+    }) else {
+        return Err(fail!("the loopback connection was never accepted"));
+    };
+    let _ = socket::socket_set_nonblocking(server.0, true);
+    Ok(Loopback {
+        server,
+        client,
+        _listener: listener,
+    })
+}
+
+/// More than an unscaled window carries, and the reader holds off until the
+/// sender stalls, so the window update that reopens the send must be heard.
+fn test_loopback_bulk_transfer() -> TestResult {
+    use slopos_abi::syscall::{SO_RCVBUF, SO_SNDBUF, SOL_SOCKET};
+    use slopos_ostd::KVec;
+
+    const TOTAL: usize = 1 << 20;
+    const STALL_MS: u64 = 5_000;
+    const BUF: usize = 64 * 1024;
+    const HOLD_MS: u64 = 200;
+
+    let Loopback {
+        server,
+        client,
+        _listener,
+    } = match loopback_pair() {
+        Ok(pair) => pair,
+        Err(result) => return result,
+    };
+    let (Ok(mut out), Ok(mut inbox)) =
+        (KVec::<u8>::zeroed(16 * 1024), KVec::<u8>::zeroed(64 * 1024))
+    else {
+        return fail!("test buffers");
+    };
+    let buf = (BUF as i32).to_ne_bytes();
+    let _ = socket::socket_setsockopt(server.0, SOL_SOCKET, SO_RCVBUF, &buf);
+    let _ = socket::socket_setsockopt(client.0, SOL_SOCKET, SO_SNDBUF, &buf);
+    let (mut sent, mut received) = (0usize, 0usize);
+    let mut last_progress = slopos_kernel_services::clock::uptime_ms();
+    let mut last_send = last_progress;
+    let mut held_at = None;
+    let mut corrupt = None;
+    let finished = await_env(60_000, POLL_INTERVAL_MS, || {
+        let before = (sent, received);
+        let now = slopos_kernel_services::clock::uptime_ms();
+        if sent < TOTAL {
+            let n = (TOTAL - sent).min(out.len());
+            for (i, b) in out.as_mut_slice()[..n].iter_mut().enumerate() {
+                *b = pattern_byte(sent + i);
+            }
+            let rc = socket::socket_send(client.0, &out.as_slice()[..n]);
+            if rc > 0 {
+                sent += rc as usize;
+                last_send = now;
+            }
+        }
+        if held_at.is_none() {
+            if now - last_send < HOLD_MS {
+                return None;
+            }
+            held_at = Some(sent);
+        }
+        loop {
+            let rc = socket::socket_recv(server.0, inbox.as_mut_slice());
+            if rc <= 0 {
+                break;
+            }
+            for (i, b) in inbox.as_slice()[..rc as usize].iter().enumerate() {
+                if corrupt.is_none() && *b != pattern_byte(received + i) {
+                    corrupt = Some(received + i);
+                }
+            }
+            received += rc as usize;
+        }
+        if (sent, received) != before {
+            last_progress = now;
+        }
+        (received >= TOTAL || corrupt.is_some() || now - last_progress > STALL_MS).then_some(())
+    });
+    if held_at.is_none_or(|at| at >= TOTAL) {
+        return fail!("the sender never stalled on a shut window: {:?}", held_at);
+    }
+    let client_tcp = socket::socket_lookup_tcp_idx(client.0);
+    let server_tcp = socket::socket_lookup_tcp_idx(server.0);
+    let diag = (
+        client_tcp.map(tcp::send_buffer_space),
+        client_tcp.and_then(tcp::get_state),
+        server_tcp.map(tcp::recv_available),
+        crate::tcp::chunk::live_chunks(),
+    );
+    if let Some(at) = corrupt {
+        return fail!("byte {} arrived altered", at);
+    }
+    if finished.is_none() || received < TOTAL {
+        return fail!(
+            "the transfer stalled: sent {} received {} of {}; client send space, state, server unread, live chunks = {:?}",
+            sent,
+            received,
+            TOTAL,
+            diag
+        );
+    }
+    pass!()
+}
+
+fn test_time_wait_keeps_unread_bytes() -> TestResult {
+    use slopos_abi::syscall::SHUT_WR;
+    use slopos_ostd::KVec;
+
+    const TOTAL: usize = 4096;
+
+    let Loopback {
+        server,
+        client,
+        _listener,
+    } = match loopback_pair() {
+        Ok(pair) => pair,
+        Err(result) => return result,
+    };
+    let Some(client_tcp) = socket::socket_lookup_tcp_idx(client.0) else {
+        return fail!("the client has no connection");
+    };
+    let (Ok(mut payload), Ok(mut got)) = (KVec::<u8>::zeroed(TOTAL), KVec::<u8>::zeroed(TOTAL))
+    else {
+        return fail!("test buffers");
+    };
+    for (i, b) in payload.as_mut_slice().iter_mut().enumerate() {
+        *b = pattern_byte(i);
+    }
+    if socket::socket_shutdown(client.0, SHUT_WR) != 0 {
+        return fail!("shutdown(SHUT_WR) failed");
+    }
+    let mut probe = [0u8; 16];
+    if await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        (socket::socket_recv(server.0, &mut probe) == 0).then_some(())
+    })
+    .is_none()
+    {
+        return fail!("the server never read the client's FIN");
+    }
+    if socket::socket_send(server.0, payload.as_slice()) != TOTAL as i64 {
+        return fail!("the server could not queue {} bytes", TOTAL);
+    }
+    drop(server);
+    if await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        (tcp::get_state(client_tcp) == Some(tcp::TcpState::TimeWait)).then_some(())
+    })
+    .is_none()
+    {
+        return fail!(
+            "the client never reached TIME_WAIT: {:?}",
+            tcp::get_state(client_tcp)
+        );
+    }
+    let mut received = 0usize;
+    while received < TOTAL {
+        let rc = socket::socket_recv(client.0, &mut got.as_mut_slice()[received..]);
+        if rc <= 0 {
+            break;
+        }
+        received += rc as usize;
+    }
+    assert_eq_test!(received, TOTAL, "bytes read after the FIN");
+    assert_test!(
+        got.as_slice() == payload.as_slice(),
+        "the bytes arrived altered"
+    );
+    assert_eq_test!(
+        socket::socket_recv(client.0, &mut probe),
+        0,
+        "a drained TIME_WAIT socket reads EOF"
+    );
+    pass!()
+}
+
+fn test_last_ack_keeps_unread_bytes() -> TestResult {
+    use slopos_abi::syscall::SHUT_WR;
+
+    const PAYLOAD: &[u8] = b"the reply the server sent before its FIN";
+
+    let Loopback {
+        server,
+        client,
+        _listener,
+    } = match loopback_pair() {
+        Ok(pair) => pair,
+        Err(result) => return result,
+    };
+    let Some(client_tcp) = socket::socket_lookup_tcp_idx(client.0) else {
+        return fail!("the client has no connection");
+    };
+    if socket::socket_send(server.0, PAYLOAD) != PAYLOAD.len() as i64
+        || socket::socket_shutdown(server.0, SHUT_WR) != 0
+    {
+        return fail!("the server could not send and half-close");
+    }
+    if await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        tcp::is_peer_closed(client_tcp).then_some(())
+    })
+    .is_none()
+    {
+        return fail!("the server's FIN never arrived");
+    }
+    if socket::socket_shutdown(client.0, SHUT_WR) != 0 {
+        return fail!("the client could not half-close");
+    }
+    if await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        (tcp::get_state(client_tcp) != Some(tcp::TcpState::LastAck)).then_some(())
+    })
+    .is_none()
+    {
+        return fail!("the client's FIN was never acknowledged");
+    }
+    tcp::on_time_wait_expire(client_tcp.raw());
+    assert_test!(
+        tcp::with_pcb(client_tcp, |pcb| {
+            matches!(&pcb.state, tcp::PcbState::TimeWait(tw) if tw.expire_token.is_some())
+        }) == Some(true),
+        "the expiry is armed again while the reader is owed bytes"
+    );
+    let mut got = [0u8; 64];
+    let rc = socket::socket_recv(client.0, &mut got);
+    assert_eq_test!(rc, PAYLOAD.len() as i64, "the unread reply survived");
+    assert_test!(
+        &got[..PAYLOAD.len()] == PAYLOAD,
+        "the reply arrived altered"
+    );
+    assert_eq_test!(socket::socket_recv(client.0, &mut got), 0, "then EOF");
+    pass!()
+}
+
+fn timed_out_pair() -> Result<Loopback, TestResult> {
+    let pair = loopback_pair()?;
+    let Some(client_tcp) = socket::socket_lookup_tcp_idx(pair.client.0) else {
+        return Err(fail!("the client has no connection"));
+    };
+    tcp::with_pcb_mut(client_tcp, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.keepalive_probes_sent = u8::MAX;
+        }
+    });
+    match tcp::on_keepalive(client_tcp.raw()) {
+        action @ tcp::RetransmitAction::GaveUp(None) => {
+            crate::timer::dispatch_retransmit_action(client_tcp.raw(), action)
+        }
+        _ => return Err(fail!("keepalive did not give up on an unanswered peer")),
+    }
+    Ok(pair)
+}
+
+fn test_a_connection_timers_give_up_on_reports_etimedout() -> TestResult {
+    use slopos_abi::syscall::{ERRNO_EPIPE, ERRNO_ETIMEDOUT};
+
+    let Loopback {
+        server: _server,
+        client,
+        _listener,
+    } = match timed_out_pair() {
+        Ok(pair) => pair,
+        Err(result) => return result,
+    };
+    let mut buf = [0u8; 8];
+    assert_eq_test!(
+        socket::socket_recv(client.0, &mut buf),
+        ERRNO_ETIMEDOUT as i64,
+        "the first call reports the timeout"
+    );
+    assert_eq_test!(
+        socket::socket_send(client.0, b"x"),
+        ERRNO_EPIPE as i64,
+        "and only the first; a write then finds the pipe broken"
+    );
+    assert_eq_test!(
+        socket::socket_recv(client.0, &mut buf),
+        0,
+        "and a read finds the end"
+    );
+    pass!()
+}
+
+/// `SO_ERROR` is a positive errno, as POSIX has it, and is taken by the read.
+fn test_so_error_reports_the_timeout_once() -> TestResult {
+    use slopos_abi::syscall::{ERRNO_ETIMEDOUT, SO_ERROR, SOL_SOCKET};
+
+    let Loopback {
+        server: _server,
+        client,
+        _listener,
+    } = match timed_out_pair() {
+        Ok(pair) => pair,
+        Err(result) => return result,
+    };
+    let mut err = [0u8; 4];
+    assert_eq_test!(
+        socket::socket_getsockopt(client.0, SOL_SOCKET, SO_ERROR, &mut err),
+        4
+    );
+    assert_eq_test!(i32::from_ne_bytes(err), -(ERRNO_ETIMEDOUT as i32));
+    let _ = socket::socket_getsockopt(client.0, SOL_SOCKET, SO_ERROR, &mut err);
+    assert_eq_test!(i32::from_ne_bytes(err), 0, "and a second read finds none");
+    pass!()
+}
+
 slopos_testing::stest!(name = test_route_table_has_default, suite = tcp_live);
 slopos_testing::stest!(name = test_iface_has_ipv4, suite = tcp_live);
 slopos_testing::stest!(name = test_arp_resolve_gateway, suite = tcp_live);
@@ -374,5 +726,16 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_loopback_wildcard_handshake_completes,
+    suite = tcp_live
+);
+slopos_testing::stest!(name = test_loopback_bulk_transfer, suite = tcp_live);
+slopos_testing::stest!(name = test_time_wait_keeps_unread_bytes, suite = tcp_live);
+slopos_testing::stest!(name = test_last_ack_keeps_unread_bytes, suite = tcp_live);
+slopos_testing::stest!(
+    name = test_a_connection_timers_give_up_on_reports_etimedout,
+    suite = tcp_live
+);
+slopos_testing::stest!(
+    name = test_so_error_reports_the_timeout_once,
     suite = tcp_live
 );

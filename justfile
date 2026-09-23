@@ -109,14 +109,14 @@ coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp 
 # they are libraries, not programs, and out of the shipped image entirely.
 test_shared_objects := "libdltest.so libc++.so libcxxtest.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test libc_abi_test devdisk_test buildloop_test exit_stress_test"
+test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test buildloop_test exit_stress_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
     scripts/ensure_toolchain.sh
     scripts/ensure_go.sh
     mkdir -p {{build_dir}}
-    CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --format-version 1 >/dev/null
+    CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --locked --format-version 1 >/dev/null
 
 # Not the pinned rustup channel: the userland target builds on the owned
 # `slopos` sysroot (scripts/make_slopos_sysroot.sh), which carries the pinned
@@ -202,6 +202,10 @@ _fs-image-capacity:
 _fs-image-devdisk: _build-userland-tests
     DEV_DISK_SIZE={{dev_disk_size}} DEV_DISK_INODE_RATIO={{dev_disk_inode_ratio}} \
         scripts/build_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}"
+
+[doc("Write the guest's edits to the dev disk's src/slopos as a patch against the commit it was seeded from")]
+devdisk-export:
+    scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/devdisk.patch"
 
 _initramfs: _build-userland
     COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
@@ -483,10 +487,13 @@ test-capacity: _build-run-tests _fs-image-capacity
 
 # Separate from `just test` because the volume is opt-in; `just test` runs the
 # same utest with nothing attached and it passes by saying so.
-[doc("Dev-disk check: mount the cross-built toolchain volume in the guest, read its inventory back, remount it")]
-test-devdisk: _build-run-tests _fs-image-devdisk
+[doc("Dev-disk check: mount the cross-built toolchain volume in the guest, read its inventory back, grade its source tree and remount it; a volume this run created must export no changes")]
+test-devdisk: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
+    fresh=0
+    [ -e "{{fs_image_devdisk}}" ] || fresh=1
+    just _fs-image-devdisk
     TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" \
@@ -495,10 +502,14 @@ test-devdisk: _build-run-tests _fs-image-devdisk
     tail -n 30 {{build_dir}}/devdisk.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the dev-disk boot exited $rc — full log in {{build_dir}}/devdisk.log" >&2; exit 1; }
     scripts/check_fs_image.sh "{{fs_image_devdisk}}"
+    [ "$fresh" -eq 1 ] || exit 0
+    scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/devdisk-check.patch"
+    [ ! -s "{{build_dir}}/devdisk-check.patch" ] ||
+        { echo "FAIL: the source tree seeded this run exports as changed — see {{build_dir}}/devdisk-check.patch" >&2; exit 1; }
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, chrome-core, slibc-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:
@@ -590,6 +601,14 @@ tcb-ratio:
 ensure-verus:
     scripts/ensure_verus.sh >/dev/null
 
+[doc("Materialise third_party/vendor: every crates.io package the workspace and -Zbuild-std compile, pinned by the two lockfiles")]
+vendor:
+    scripts/make_vendor.sh
+
+[doc("Hold the tree to building with no registry: the vendored directory against both lockfiles, then a kernel and userland check from an empty CARGO_HOME, offline")]
+check-offline-build: vendor
+    scripts/check_offline_build.sh --require
+
 [doc("Materialise the pinned rustc source tree with the SlopOS target patch under third_party/slopos-rustc-src (fetches 265 MB)")]
 rustc-src:
     scripts/make_rustc_src.sh
@@ -669,7 +688,9 @@ check-framekernel-gates:
     scripts/check_bootstrap_config.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
+    scripts/check_offline_build.sh --self-test
     scripts/check_vendor_pin.sh
+    scripts/check_offline_build.sh --pins-only
     scripts/check_toolchain_pin.sh
     scripts/check_rustc_target.sh
     scripts/check_cxx_pin.sh
@@ -780,10 +801,10 @@ clean:
     fi
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}}
     rm -f {{build_dir}}/kernel-*.elf
-    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/cargo-fork {{build_dir}}/gates/bootstrap-config
+    rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/cargo-fork {{build_dir}}/gates/bootstrap-config {{build_dir}}/gates/offline-build
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean
     rm -rf {{build_dir}} {{iso}} {{iso_notests}} {{iso_tests}} {{log_file}}
     rm -f {{fs_image}} {{fs_image_tests}} {{initramfs}} {{initramfs_tests}}
-    rm -rf third_party/llvm-project-*.src third_party/slopos-rustc-src
+    rm -rf third_party/llvm-project-*.src third_party/slopos-rustc-src third_party/vendor

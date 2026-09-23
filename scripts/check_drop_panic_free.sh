@@ -27,7 +27,7 @@ gate_parse_args check_drop_panic_free "$@"
 # Userland crates are out of the kernel framekernel discipline. The pinned
 # TCB annexes are covered by scripts/check_vendor_pin.sh instead of this
 # first-party destructor-policy scan.
-OUT_OF_SCOPE_RE='^(userland|terminal-core|editor-core|slibc|slop-protocol|appkit|image|slopos-rt|vendor/unwinding|vendor/gimli)/'
+OUT_OF_SCOPE_RE='^(userland|terminal-core|editor-core|http-core|tls-core|slibc|slop-protocol|appkit|image|slopos-rt|vendor/unwinding|vendor/gimli)/'
 
 filter_files() {
     local path

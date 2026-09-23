@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Instant;
 
@@ -8,9 +7,8 @@ use crate::ring::{Ring, slopfut};
 
 use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv};
 
-/// `connect()` on a datagram socket only pins `remote_addr`, after which the
-/// socket carries the connected `recv`/`send` semantics a TCP socket does, so
-/// the loop is the same [`Session`](super::ring_io) the TCP path uses.
+/// A connected datagram socket runs the TCP path's [`Session`](super::ring_io),
+/// which reads an empty datagram as data rather than as a close.
 pub(super) fn udp_client(config: &NcConfig) -> u8 {
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
@@ -51,14 +49,14 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
     );
     verbose_msg(config, "protocol: udp");
 
-    super::ring_io::Session::new(config, &conn, false)
+    super::ring_io::Session::new(config, &conn, true)
         .run()
-        .unwrap_or(0)
+        .code()
 }
 
 /// Listen mode must learn each datagram's source address to reply, which is
-/// what `OP_RECVFROM` (SLOPRING § 12) returns alongside the data. Replies to
-/// `last_peer` go out as a connected `OP_SEND` after a per-line `connect`.
+/// what `OP_RECVFROM` (SLOPRING § 12) returns alongside the data. Replies go
+/// to the last peer heard from, and stdin is not read until there is one.
 pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
@@ -81,9 +79,10 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
         return 1;
     }
 
-    if config.verbose {
-        println!("nc: listening on 0.0.0.0:{} (udp)", config.local_port);
-    }
+    verbose_msg(
+        config,
+        &format!("listening on 0.0.0.0:{} (udp)", config.local_port),
+    );
 
     let ring = match Ring::setup(16) {
         Ok(r) => r,
@@ -97,8 +96,8 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     slopfut::block_on(ring, listen_async(config, sock_fd))
 }
 
-const STDIN_CAP: usize = 64;
-const RECV_CAP: usize = 2048;
+const TTY_CAP: usize = 64;
+const RECV_CAP: usize = 64 * 1024;
 /// Bounds the otherwise I/O-only `select` so the inactivity timeout is checked
 /// even while no data flows.
 const TIMER_TICK_NS: u64 = 200_000_000;
@@ -114,36 +113,38 @@ async fn listen_async(config: &NcConfig, sock_fd: i32) -> u8 {
     let mut stdin_closed = false;
     let clock_start = Instant::now();
     let mut last_activity_ms = clock_start.elapsed().as_millis() as u64;
+    let stdin_cap = if config.stdin_tty {
+        TTY_CAP
+    } else {
+        super::UNFRAGMENTED_DATAGRAM
+    };
 
-    // The select winner returns its buffer; a cancelled loser keeps its buffer
-    // in the reactor until the cancel lands, so the loser gets a fresh one.
-    let mut stdin_buf = vec![0u8; STDIN_CAP];
-    let mut recv_buf = vec![0u8; RECV_CAP];
-
+    let mut stdin_read: Option<DynStdin> = None;
+    let mut recv_read: Option<DynRecv> = None;
     loop {
-        let f_stdin: DynStdin = if stdin_closed {
-            Box::pin(core::future::pending())
-        } else {
-            Box::pin(slopfut::read(
-                0,
-                core::mem::take(&mut stdin_buf),
-                STDIN_CAP as u32,
+        let stdin = stdin_read.get_or_insert_with(|| {
+            if stdin_closed || last_peer.is_none() {
+                Box::pin(core::future::pending())
+            } else {
+                Box::pin(slopfut::read(0, vec![0u8; stdin_cap], stdin_cap as u32))
+            }
+        });
+        let recv = recv_read.get_or_insert_with(|| {
+            Box::pin(slopfut::recvfrom(
+                sock_fd,
+                vec![0u8; RECV_CAP],
+                RECV_CAP as u32,
             ))
-        };
-        let f_recv: DynRecv = Box::pin(slopfut::recvfrom(
-            sock_fd,
-            core::mem::take(&mut recv_buf),
-            RECV_CAP as u32,
-        ));
-        let f_timer: DynInt = if config.timeout_ms > 0 {
+        });
+        let timer: DynInt = if config.timeout_ms > 0 {
             Box::pin(slopfut::timeout(TIMER_TICK_NS))
         } else {
             Box::pin(core::future::pending())
         };
 
-        match slopfut::select3(f_stdin, f_recv, f_timer).await {
+        match slopfut::select3(stdin, recv, timer).await {
             slopfut::Either3::A(br) => {
-                recv_buf = vec![0u8; RECV_CAP];
+                stdin_read = None;
                 match on_stdin(
                     config,
                     sock_fd,
@@ -165,35 +166,25 @@ async fn listen_async(config: &NcConfig, sock_fd: i32) -> u8 {
                     }
                     StdinAction::Continue => {}
                 }
-                stdin_buf = br.buf;
             }
             slopfut::Either3::B(rr) => {
-                if !stdin_closed {
-                    stdin_buf = vec![0u8; STDIN_CAP];
-                }
+                recv_read = None;
                 if rr.res > 0 {
                     let received = (rr.res as usize).min(rr.buf.len());
-                    {
-                        let mut out = std::io::stdout().lock();
-                        let _ = out.write_all(&rr.buf[..received]);
-                        if received > 0 && rr.buf[received - 1] != b'\n' {
-                            let _ = out.write_all(b"\n");
-                        }
-                        let _ = out.flush();
+                    if !super::emit_received(config, &rr.buf[..received]) {
+                        return 1;
                     }
                     let ip = rr.src.addr;
                     let port = u16::from_be(rr.src.port);
                     verbose_recv(config, received, ip, port);
+                    if last_peer.is_none() {
+                        stdin_read = None;
+                    }
                     last_peer = Some(SocketAddrV4::new(Ipv4Addr::from(ip), port));
                     last_activity_ms = clock_start.elapsed().as_millis() as u64;
                 }
-                recv_buf = rr.buf;
             }
             slopfut::Either3::C(_) => {
-                if !stdin_closed {
-                    stdin_buf = vec![0u8; STDIN_CAP];
-                }
-                recv_buf = vec![0u8; RECV_CAP];
                 if config.timeout_ms > 0 {
                     let now = clock_start.elapsed().as_millis() as u64;
                     if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
@@ -213,7 +204,6 @@ enum StdinAction {
     Quit,
 }
 
-/// A line with no known peer to reply to is dropped.
 async fn on_stdin(
     config: &NcConfig,
     sock_fd: i32,
@@ -231,9 +221,15 @@ async fn on_stdin(
         return StdinAction::Eof;
     }
     let n = (res as usize).min(buf.len());
+    if !config.stdin_tty {
+        return match last_peer {
+            Some(peer) if send_to_peer(config, sock_fd, peer, &buf[..n]).await => StdinAction::Sent,
+            _ => StdinAction::Continue,
+        };
+    }
     let mut sent_any = false;
     for &byte in &buf[..n] {
-        match super::process_raw_stdin_char(byte, line_buf, line_pos) {
+        match super::process_raw_stdin_char(config, byte, line_buf, line_pos) {
             StdinResult::SendLine(len) => {
                 if let Some(peer) = last_peer {
                     let line: Vec<u8> = line_buf[..len].to_vec();

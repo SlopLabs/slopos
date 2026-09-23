@@ -280,11 +280,13 @@ impl ListenerIndex {
     }
 }
 
-/// PCB + its lazy receive/send buffer. Only Data-phase connections
-/// carry a `Some(buffer)`; all other states keep it `None`.
+/// PCB + its lazy receive/send buffer, present from the handshake until the
+/// connection is released or TIME_WAIT has nothing left to read.
 pub struct PcbSlot {
     pub pcb: Pcb,
-    pub buffer: Option<TcpBufferPair>,
+    /// Boxed, so installing and releasing a slot moves a pointer rather than
+    /// both rings' bookkeeping through the caller's frame.
+    pub buffer: Option<KBox<TcpBufferPair>>,
     /// Copy of the index's generation for this slot, so a lookup holding the
     /// slot lock can reject a stale id without reading the RCU index.
     pub generation: u16,
@@ -615,7 +617,7 @@ pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
 /// writing through it has no observable effect.
 pub fn with_pcb_and_bufs<T>(
     id: ConnId,
-    f: impl FnOnce(&mut Pcb, &mut Option<TcpBufferPair>) -> T,
+    f: impl FnOnce(&mut Pcb, &mut Option<KBox<TcpBufferPair>>) -> T,
 ) -> Option<T> {
     if !id.is_well_formed() {
         return None;
@@ -626,7 +628,7 @@ pub fn with_pcb_and_bufs<T>(
             .as_mut()
             .filter(|s| generation_matches(id, s.generation))
             .map(|s| {
-                let mut none_buf: Option<TcpBufferPair> = None;
+                let mut none_buf: Option<KBox<TcpBufferPair>> = None;
                 f(&mut s.pcb, &mut none_buf)
             })
     } else {
@@ -646,7 +648,7 @@ pub fn with_bufs<T>(id: ConnId, f: impl FnOnce(&TcpBufferPair) -> T) -> Option<T
     guard
         .as_ref()
         .filter(|s| generation_matches(id, s.generation))
-        .and_then(|s| s.buffer.as_ref().map(f))
+        .and_then(|s| s.buffer.as_deref().map(f))
 }
 
 pub fn has_buffer(id: ConnId) -> bool {

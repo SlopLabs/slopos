@@ -153,6 +153,16 @@ def main() -> None:
         dest = b"/usr/share/slopos/wallpapers/default.png"
         entries.append((dest, MODE_DATA, read_file(logo)))
 
+    certs_dir = os.path.join(repo_root, "assets", "certs")
+    bundle = os.path.join(certs_dir, "ca-certificates.crt")
+    if os.path.isfile(bundle):
+        entries.append((b"/etc/ssl/certs/ca-certificates.crt", MODE_DATA, read_file(bundle)))
+        entries.append((
+            b"/usr/share/licenses/ca-certificates/MPL-2.0.txt",
+            MODE_DATA,
+            read_file(os.path.join(certs_dir, "MPL-2.0.txt")),
+        ))
+
     keymaps_dir = os.path.join(repo_root, "assets", "keymaps")
     if os.path.isdir(keymaps_dir):
         for fname in sorted(os.listdir(keymaps_dir)):

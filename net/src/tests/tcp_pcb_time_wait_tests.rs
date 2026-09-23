@@ -29,6 +29,7 @@ fn make_pcb() -> Pcb {
             SeqNum::new(LAST_RCV_NXT),
             SeqNum::new(LAST_SND_NXT),
             32_768,
+            32_768,
             1000,
         )),
     )
@@ -51,7 +52,7 @@ fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {
 /// Per RFC 5961 the RST is accepted only in window; `last_rcv_nxt` is the edge.
 pub fn test_time_wait_rst_releases() -> TestResult {
     let mut pcb = make_pcb();
-    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, LAST_RCV_NXT, 0), 2000);
+    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, LAST_RCV_NXT, 0), 0, 2000);
     assert_test!(actions.release, "release");
     assert_test!(
         actions.notify.contains(SocketNotify::RESET_RECEIVED),
@@ -62,8 +63,8 @@ pub fn test_time_wait_rst_releases() -> TestResult {
 
 pub fn test_time_wait_fin_re_acks() -> TestResult {
     let mut pcb = make_pcb();
-    let actions =
-        TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0), 5_000);
+    let resent_fin = hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, LAST_RCV_NXT - 1, 0);
+    let actions = TimeWaitState::on_segment(&mut pcb, &resent_fin, 0, 5_000);
     assert_eq_test!(actions.segments_len, 1, "one ACK emitted");
     let ack = actions.segments[0].as_ref().unwrap();
     assert_eq_test!(ack.seq_num, LAST_SND_NXT, "frozen snd_nxt");
@@ -76,10 +77,22 @@ pub fn test_time_wait_fin_re_acks() -> TestResult {
     pass!()
 }
 
+/// A FIN other than the peer's own is answered but does not hold the slot.
+pub fn test_time_wait_stray_fin_keeps_its_deadline() -> TestResult {
+    let mut pcb = make_pcb();
+    let stray = hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, LAST_RCV_NXT + 100, 0);
+    let actions = TimeWaitState::on_segment(&mut pcb, &stray, 0, 5_000);
+    assert_eq_test!(actions.segments_len, 1, "one ACK emitted");
+    if let PcbState::TimeWait(s) = &pcb.state {
+        assert_eq_test!(s.entry_ms, 1000, "entry_ms kept");
+    }
+    pass!()
+}
+
 pub fn test_time_wait_data_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions =
-        TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_PSH | TCP_FLAG_ACK, 0, 0), 2000);
+        TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_PSH | TCP_FLAG_ACK, 0, 0), 0, 2000);
     assert_eq_test!(actions.segments_len, 0, "no response");
     assert_test!(!actions.release, "not released");
     pass!()
@@ -87,22 +100,23 @@ pub fn test_time_wait_data_dropped() -> TestResult {
 
 pub fn test_time_wait_syn_dropped() -> TestResult {
     let mut pcb = make_pcb();
-    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_SYN, 0, 0), 2000);
+    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_SYN, 0, 0), 0, 2000);
     assert_eq_test!(actions.segments_len, 0, "no response");
     pass!()
 }
 
 pub fn test_time_wait_empty_dropped() -> TestResult {
     let mut pcb = make_pcb();
-    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(0, 0, 0), 2000);
+    let actions = TimeWaitState::on_segment(&mut pcb, &hdr(0, 0, 0), 0, 2000);
     assert_eq_test!(actions.segments_len, 0, "no response");
     pass!()
 }
 
 pub fn test_time_wait_fin_refreshes_entry_ms_every_call() -> TestResult {
     let mut pcb = make_pcb();
-    let _ = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0), 500);
-    let _ = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0), 900);
+    let resent_fin = hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, LAST_RCV_NXT - 1, 0);
+    let _ = TimeWaitState::on_segment(&mut pcb, &resent_fin, 0, 500);
+    let _ = TimeWaitState::on_segment(&mut pcb, &resent_fin, 0, 900);
     if let PcbState::TimeWait(s) = &pcb.state {
         assert_eq_test!(s.entry_ms, 900, "entry_ms tracks latest FIN");
     }
@@ -114,6 +128,10 @@ slopos_testing::stest!(
     suite = tcp_pcb_time_wait
 );
 slopos_testing::stest!(name = test_time_wait_fin_re_acks, suite = tcp_pcb_time_wait);
+slopos_testing::stest!(
+    name = test_time_wait_stray_fin_keeps_its_deadline,
+    suite = tcp_pcb_time_wait
+);
 slopos_testing::stest!(
     name = test_time_wait_data_dropped,
     suite = tcp_pcb_time_wait

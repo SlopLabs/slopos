@@ -8,19 +8,17 @@
 
 use core::mem;
 
-use slopos_ostd::{
-    AllocError, Init, Initialised, SlotPtr, init_struct_with, write_field, zero_field,
-};
+use slopos_ostd::{AllocError, Init, Initialised, SlotPtr, init_struct_with, write_field};
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
-use super::super::buffer::TcpBufferPair;
+use super::super::buffer::{TcpBufferPair, TcpSendState};
 use super::super::challenge_ack;
 use super::super::cong::{CcAlgo, CongestionControl};
 use super::super::header::{DEFAULT_MSS, TcpHeader};
-use super::super::retx::SendMap;
 use super::super::rtt::RttEstimator;
-use super::super::segment::SegmentBuilder;
-use super::super::seq::{SeqNum, seq_gt, seq_le};
+use super::super::segment::{SegmentBuilder, TcpOutSegment};
+use super::super::seq::{SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
+use super::super::tuple::TcpTuple;
 use super::time_wait::{TIME_WAIT_MS, TimeWaitState};
 use super::{Pcb, PcbState};
 use crate::timer::{TimerKind, TimerToken};
@@ -54,8 +52,14 @@ pub struct DataState {
     pub snd_una: SeqNum,
     pub snd_nxt: SeqNum,
     pub snd_wnd: u32,
+    /// SND.WL1 and SND.WL2 (RFC 9293 §3.10.7.4): the segment that last set
+    /// `snd_wnd`, so a late older one cannot put an old window back.
+    pub snd_wl1: SeqNum,
+    pub snd_wl2: SeqNum,
     pub rcv_nxt: SeqNum,
-    pub rcv_wnd: u16,
+    /// Bytes from `rcv_nxt` to the right edge last advertised; arrivals use it
+    /// up, and an advertisement never moves the edge left (RFC 7323 §2.4).
+    pub rcv_wnd: u32,
 
     pub peer_mss: u16,
     pub rcv_wscale: u8,
@@ -65,12 +69,23 @@ pub struct DataState {
     pub nagle_enabled: bool,
 
     pub close_phase: ClosePhase,
+    /// Our FIN waits for the bytes ahead of it to be sent; `close_phase`
+    /// moves when it goes.
+    pub fin_queued: bool,
 
     pub rtt: RttEstimator,
     pub cc: CcAlgo,
 
-    pub sendmap: SendMap,
+    /// The retransmission timer, which also paces zero-window probes.
     pub retransmit_token: Option<TimerToken>,
+    /// Zero-window probes since the peer last answered one.
+    pub persist_probes: u8,
+    /// Zero-window probes since the window last opened: their interval
+    /// doubles with each, answered or not.
+    pub persist_backoff: u8,
+    /// Zero-window probes sent while no socket owns the connection. Never reset:
+    /// a peer answering each with a shut window would pin the send ring forever.
+    pub orphan_probes: u8,
 
     pub keepalive_token: Option<TimerToken>,
     pub keepalive_probes_sent: u8,
@@ -91,8 +106,8 @@ pub struct DataState {
 impl DataState {
     /// Heap-direct initialiser for a freshly-established `DataState`.
     ///
-    /// Returns an [`Init`] recipe rather than a `Self` rvalue so the 3 KiB
-    /// struct never materialises on the caller's stack, and is hand-written
+    /// Returns an [`Init`] recipe rather than a `Self` rvalue so the struct
+    /// never materialises on the caller's stack, and is hand-written
     /// rather than macro-expanded so the closure's own frame stays inside the
     /// stack-safety gate.
     #[allow(clippy::too_many_arguments)]
@@ -103,7 +118,7 @@ impl DataState {
         snd_nxt: SeqNum,
         rcv_nxt: SeqNum,
         snd_wnd: u32,
-        rcv_wnd: u16,
+        rcv_wnd: u32,
         peer_mss: u16,
         snd_wscale: u8,
         rcv_wscale: u8,
@@ -118,6 +133,8 @@ impl DataState {
                 write_field!(slot, snd_una, snd_una);
                 write_field!(slot, snd_nxt, snd_nxt);
                 write_field!(slot, snd_wnd, snd_wnd);
+                write_field!(slot, snd_wl1, irs);
+                write_field!(slot, snd_wl2, snd_una);
                 write_field!(slot, rcv_nxt, rcv_nxt);
                 write_field!(slot, rcv_wnd, rcv_wnd);
                 write_field!(slot, peer_mss, peer_mss);
@@ -127,11 +144,13 @@ impl DataState {
                 write_field!(slot, sack_permitted, false);
                 write_field!(slot, nagle_enabled, true);
                 write_field!(slot, close_phase, ClosePhase::Established);
+                write_field!(slot, fin_queued, false);
                 write_field!(slot, rtt, RttEstimator::new());
                 write_field!(slot, cc, CcAlgo::cubic(cc_mss));
-                // `SendMap` is all-zero-valid (see `SendMap::zero_init_slot`).
-                zero_field!(slot, sendmap);
                 write_field!(slot, retransmit_token, None);
+                write_field!(slot, persist_probes, 0u8);
+                write_field!(slot, persist_backoff, 0u8);
+                write_field!(slot, orphan_probes, 0u8);
                 write_field!(slot, keepalive_token, None);
                 write_field!(slot, keepalive_probes_sent, 0u8);
                 write_field!(slot, last_activity_tick, 0u64);
@@ -152,7 +171,7 @@ impl DataState {
     }
 
     /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED` transition;
-    /// builds in place so the 3 KiB struct never lands on a caller's stack.
+    /// builds in place so the struct never lands on a caller's stack.
     pub fn init_from_syn_recv(
         s: &super::syn_recv::SynRecvState,
     ) -> impl Init<Self, AllocError> + '_ {
@@ -164,7 +183,7 @@ impl DataState {
         let snd_nxt = s.snd_nxt;
         let rcv_nxt = s.rcv_nxt;
         let snd_wnd = s.snd_wnd;
-        let rcv_wnd = s.rcv_wnd;
+        let rcv_wnd = u32::from(s.rcv_wnd);
         let peer_mss = s.peer_mss;
         let rcv_wscale = s.our_wscale;
         let snd_wscale = s.snd_wscale;
@@ -178,6 +197,8 @@ impl DataState {
                 write_field!(slot, snd_una, snd_una);
                 write_field!(slot, snd_nxt, snd_nxt);
                 write_field!(slot, snd_wnd, snd_wnd);
+                write_field!(slot, snd_wl1, irs);
+                write_field!(slot, snd_wl2, snd_una);
                 write_field!(slot, rcv_nxt, rcv_nxt);
                 write_field!(slot, rcv_wnd, rcv_wnd);
                 write_field!(slot, peer_mss, peer_mss);
@@ -187,10 +208,13 @@ impl DataState {
                 write_field!(slot, sack_permitted, sack_permitted);
                 write_field!(slot, nagle_enabled, true);
                 write_field!(slot, close_phase, ClosePhase::Established);
+                write_field!(slot, fin_queued, false);
                 write_field!(slot, rtt, RttEstimator::new());
                 write_field!(slot, cc, CcAlgo::cubic(cc_mss));
-                zero_field!(slot, sendmap);
                 write_field!(slot, retransmit_token, None);
+                write_field!(slot, persist_probes, 0u8);
+                write_field!(slot, persist_backoff, 0u8);
+                write_field!(slot, orphan_probes, 0u8);
                 write_field!(slot, keepalive_token, None);
                 write_field!(slot, keepalive_probes_sent, 0u8);
                 write_field!(slot, last_activity_tick, 0u64);
@@ -222,7 +246,7 @@ impl DataState {
         snd_nxt: SeqNum,
         rcv_nxt: SeqNum,
         snd_wnd: u32,
-        rcv_wnd: u16,
+        rcv_wnd: u32,
         peer_mss: u16,
         snd_wscale: u8,
         rcv_wscale: u8,
@@ -235,6 +259,8 @@ impl DataState {
             snd_una,
             snd_nxt,
             snd_wnd,
+            snd_wl1: irs,
+            snd_wl2: snd_una,
             rcv_nxt,
             rcv_wnd,
             peer_mss,
@@ -244,10 +270,13 @@ impl DataState {
             sack_permitted: false,
             nagle_enabled: true,
             close_phase: ClosePhase::Established,
+            fin_queued: false,
             rtt: RttEstimator::new(),
             cc: CcAlgo::cubic(peer_mss.max(DEFAULT_MSS) as u32),
-            sendmap: SendMap::new(),
             retransmit_token: None,
+            persist_probes: 0,
+            persist_backoff: 0,
+            orphan_probes: 0,
             keepalive_token: None,
             keepalive_probes_sent: 0,
             last_activity_tick: 0,
@@ -261,6 +290,39 @@ impl DataState {
         }
     }
 
+    fn window_unit(&self) -> u32 {
+        if self.wscale_enabled {
+            1 << self.rcv_wscale
+        } else {
+            1
+        }
+    }
+
+    /// The header field for `rcv_wnd`, rounded up.
+    pub fn advertised(&self) -> u16 {
+        self.rcv_wnd
+            .div_ceil(self.window_unit())
+            .min(u32::from(u16::MAX)) as u16
+    }
+
+    /// Bytes past `rcv_nxt` the peer may believe it can send, counting the unit
+    /// an earlier field rounded up (RFC 7323 §2.4).
+    pub fn granted(&self) -> u32 {
+        let unit = self.window_unit();
+        u32::from(self.advertised()) * unit + (unit - 1)
+    }
+
+    /// Offer room for `bytes`, rounded down so ACKs cannot creep the edge past
+    /// the buffer, and never pulling it back; returns the header field.
+    pub fn advertise(&mut self, bytes: u32) -> u16 {
+        let unit = self.window_unit();
+        let offered = (bytes / unit).min(u32::from(u16::MAX)) * unit;
+        if offered > self.rcv_wnd {
+            self.rcv_wnd = offered;
+        }
+        self.advertised()
+    }
+
     /// Timestamp option for outgoing segments, `None` if not negotiated.
     #[inline]
     pub fn ts_option(&self, now_ms: u64) -> Option<(u32, u32)> {
@@ -269,6 +331,13 @@ impl DataState {
         } else {
             None
         }
+    }
+
+    /// Our timestamp on `seg`, whose ACK becomes the last one sent (RFC 7323
+    /// §4.3).
+    pub fn stamp(&mut self, seg: &mut TcpOutSegment, now_ms: u64) {
+        seg.timestamp = self.ts_option(now_ms);
+        self.last_ack_sent = seg.ack_num;
     }
 
     /// Apply an incoming segment to a Data PCB.
@@ -326,22 +395,45 @@ impl DataState {
             let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
-            data.process_ack(tuple, hdr, options, now_ms, &mut actions)
+            data.process_ack(tuple, hdr, options, now_ms, &mut bufs.send, &mut actions)
         };
         if acked > 0 {
             bufs.send.process_ack(acked as usize);
         }
 
+        let was_fin_wait_1 =
+            matches!(&pcb.state, PcbState::Data(d) if d.close_phase == ClosePhase::FinWait1);
         let transition =
             Self::process_payload_fin_and_ack(pcb, bufs, hdr, payload, now_ms, &mut actions);
+        if was_fin_wait_1
+            && transition == NextTransition::StayInData
+            && matches!(&pcb.state, PcbState::Data(d) if d.close_phase == ClosePhase::FinWait2)
+        {
+            actions.push_timer(TimerOp::Schedule {
+                kind: TimerKind::TcpFinWait2,
+                key: 0,
+                delay_ms: super::super::FIN_WAIT2_TIMEOUT_MS,
+            });
+        }
 
         match transition {
             NextTransition::StayInData => {}
-            NextTransition::ToTimeWait => {
+            NextTransition::ReleaseNow if pcb.socket_id.is_none() || bufs.recv.available() == 0 => {
+                actions.release = true;
+            }
+            // A LAST_ACK socket still owed bytes waits in TIME_WAIT, which
+            // keeps the rings until they are read.
+            NextTransition::ToTimeWait | NextTransition::ReleaseNow => {
                 let PcbState::Data(data) = &pcb.state else {
                     unreachable!()
                 };
-                let tw = TimeWaitState::new(data.rcv_nxt, data.snd_nxt, data.rcv_wnd, now_ms);
+                let tw = TimeWaitState::new(
+                    data.rcv_nxt,
+                    data.snd_nxt,
+                    data.granted(),
+                    data.advertised(),
+                    now_ms,
+                );
                 // Deferred through `Actions` so the glue layer installs the
                 // 2×MSL timer after the lock drops; `key: 0` is a sentinel it
                 // replaces with the real slot index.
@@ -351,9 +443,6 @@ impl DataState {
                     delay_ms: TIME_WAIT_MS,
                 });
                 let _old = mem::replace(&mut pcb.state, PcbState::TimeWait(tw));
-            }
-            NextTransition::ReleaseNow => {
-                actions.release = true;
             }
         }
 
@@ -383,10 +472,10 @@ impl DataState {
         };
         let snd_nxt = data.snd_nxt.raw();
         let rcv_nxt = data.rcv_nxt.raw();
-        let rcv_wnd = data.rcv_wnd;
+        let window = data.advertised();
         let ts_opt = data.ts_option(now_ms);
         if data.challenge_budget.try_consume(now_ms) {
-            let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd);
+            let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, window);
             ack.timestamp = ts_opt;
             actions.push_segment(ack);
         }
@@ -401,6 +490,7 @@ impl DataState {
         hdr: &TcpHeader,
         options: &[u8],
         now_ms: u64,
+        send: &mut TcpSendState,
         actions: &mut Actions,
     ) -> u32 {
         let old_snd_una = self.snd_una;
@@ -422,16 +512,41 @@ impl DataState {
             ([(0, 0); 4], 0)
         };
 
-        // RFC 793 §3.4: an ACK is acceptable only in (snd_una, snd_nxt].
-        let acked = if seq_gt(ack, old_snd_una.raw()) && seq_le(ack, self.snd_nxt.raw()) {
+        // RFC 9293 §3.10.7.4: a window rides any acceptable ACK, duplicates
+        // included, unless an older segment than the one that set it.
+        let acceptable = seq_ge(ack, old_snd_una.raw()) && seq_le(ack, self.snd_nxt.raw());
+        if acceptable {
+            actions.notify |= SocketNotify::PEER_HEARD;
+            self.persist_probes = 0;
+            let newer = seq_lt(self.snd_wl1.raw(), hdr.seq_num)
+                || (self.snd_wl1.raw() == hdr.seq_num && seq_le(self.snd_wl2.raw(), ack));
+            if newer {
+                let wnd = if self.wscale_enabled {
+                    (hdr.window_size as u32) << self.snd_wscale
+                } else {
+                    hdr.window_size as u32
+                };
+                // The timer running with nothing in flight is the persist
+                // timer; new data arms a fresh RTO once it is gone.
+                if self.snd_wnd == 0 && wnd > 0 && self.snd_una == self.snd_nxt {
+                    if let Some(token) = self.retransmit_token.take() {
+                        actions.push_timer(TimerOp::Cancel { token });
+                    }
+                    send.rto_deadline_ms = 0;
+                }
+                if wnd > 0 {
+                    self.persist_backoff = 0;
+                }
+                self.snd_wnd = wnd;
+                self.snd_wl1 = SeqNum::new(hdr.seq_num);
+                self.snd_wl2 = SeqNum::new(ack);
+            }
+        }
+
+        let acked = if acceptable && ack != old_snd_una.raw() {
             self.snd_una = SeqNum::new(ack);
-            self.snd_wnd = if self.wscale_enabled {
-                (hdr.window_size as u32) << self.snd_wscale
-            } else {
-                hdr.window_size as u32
-            };
             let acked = ack.wrapping_sub(old_snd_una.raw());
-            let outcome = self.sendmap.on_cumulative_ack(self.snd_una);
+            let outcome = send.sendmap.on_cumulative_ack(self.snd_una);
 
             // RTT measurement: prefer RTTM (timestamps) over Karn.
             let rtt_sample = if self.ts_enabled {
@@ -453,6 +568,9 @@ impl DataState {
             if let Some(rtt_ms) = rtt_sample {
                 self.rtt.sample(rtt_ms);
             }
+            // RFC 1122 §4.2.3.5 counts retransmissions of one segment, so
+            // progress restarts the count even where Karn's rule takes no sample.
+            self.rtt.consecutive_timeouts = 0;
             self.cc.on_ack(
                 outcome.bytes_freed,
                 rtt_sample,
@@ -463,8 +581,11 @@ impl DataState {
             if let Some(token) = self.retransmit_token.take() {
                 actions.push_timer(TimerOp::Cancel { token });
             }
-            if !self.sendmap.is_empty() {
+            send.rto_deadline_ms = 0;
+            // Armed while anything is unacknowledged, our FIN included.
+            if self.snd_una != self.snd_nxt {
                 let delay_ms = (self.rtt.rto_ms() as u64).max(1);
+                send.rto_deadline_ms = now_ms.saturating_add(delay_ms);
                 actions.push_timer(TimerOp::Schedule {
                     kind: TimerKind::TcpRetransmit,
                     key: 0,
@@ -479,16 +600,73 @@ impl DataState {
 
         // SACK blocks feed RFC 6675 loss detection on duplicate ACKs too.
         if sack_count > 0 {
-            let new_losses = self
+            let new_losses = send
                 .sendmap
                 .apply_sack_blocks(&sack_blocks[..sack_count as usize], sack_count);
             if new_losses && !self.cc.in_recovery() {
                 self.cc
-                    .on_fast_retransmit(self.sendmap.pipe(), self.snd_nxt.raw());
+                    .on_fast_retransmit(send.sendmap.pipe(), self.snd_nxt.raw());
             }
         }
 
         acked
+    }
+
+    #[inline(never)]
+    fn push_ack(&mut self, tuple: TcpTuple, free: u32, now_ms: u64, actions: &mut Actions) {
+        let window = self.advertise(free);
+        let mut ack = SegmentBuilder::ack(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
+        self.stamp(&mut ack, now_ms);
+        actions.push_segment(ack);
+    }
+
+    /// Buffers the segment and ACKs at once, so the peer retransmits the gap.
+    #[inline(never)]
+    fn queue_out_of_order(
+        pcb: &mut Pcb,
+        bufs: &mut TcpBufferPair,
+        hdr: &TcpHeader,
+        payload: &[u8],
+        now_ms: u64,
+        actions: &mut Actions,
+    ) {
+        let tuple = pcb.tuple;
+        let PcbState::Data(d) = &mut pcb.state else {
+            unreachable!()
+        };
+        let expected_seq = d.rcv_nxt;
+        if seq_gt(hdr.seq_num, expected_seq.raw()) {
+            let offset = hdr.seq_num.wrapping_sub(expected_seq.raw()) as usize;
+            let wrote = bufs.recv.buf.write_at(offset, payload, &mut bufs.spares);
+            if wrote > 0 {
+                bufs.ooo.insert(hdr.seq_num, wrote);
+            }
+        }
+        let window = d.advertise(bufs.recv.window());
+        let mut ack = SegmentBuilder::ack(tuple, d.snd_nxt.raw(), expected_seq.raw(), window);
+        if d.sack_permitted {
+            let (ooo_blocks, ooo_count) = bufs.ooo.sack_blocks();
+            let seg_end = hdr.seq_num.wrapping_add(payload.len() as u32);
+
+            // DSACK (RFC 2883): a duplicate range goes in the first SACK block
+            // so the peer can detect spurious retransmits.
+            if seq_lt(hdr.seq_num, expected_seq.raw()) {
+                let dsack_right = if seq_gt(seg_end, expected_seq.raw()) {
+                    expected_seq.raw()
+                } else {
+                    seg_end
+                };
+                ack.sack_blocks[0] = (hdr.seq_num, dsack_right);
+                let more = (ooo_count as usize).min(ack.sack_blocks.len() - 1);
+                ack.sack_blocks[1..=more].copy_from_slice(&ooo_blocks[..more]);
+                ack.sack_block_count = 1 + more as u8;
+            } else {
+                ack.sack_blocks = ooo_blocks;
+                ack.sack_block_count = ooo_count;
+            }
+        }
+        d.stamp(&mut ack, now_ms);
+        actions.push_segment(ack);
     }
 
     /// Payload, FIN and post-ACK transitions share mutable access to both
@@ -504,7 +682,6 @@ impl DataState {
     ) -> NextTransition {
         let tuple = pcb.tuple;
 
-        let mut accepted_len: usize = 0;
         let PcbState::Data(d) = &pcb.state else {
             unreachable!()
         };
@@ -516,57 +693,40 @@ impl DataState {
                 | ClosePhase::FinWait2
         );
 
+        let PcbState::Data(data) = &mut pcb.state else {
+            unreachable!()
+        };
+        let fin_acked = hdr.ack_num == data.snd_nxt.raw();
+        match data.close_phase {
+            ClosePhase::FinWait1 if fin_acked => data.close_phase = ClosePhase::FinWait2,
+            ClosePhase::Closing if fin_acked => return NextTransition::ToTimeWait,
+            ClosePhase::LastAck if fin_acked => return NextTransition::ReleaseNow,
+            _ => {}
+        }
+
         if !payload.is_empty() && data_is_open {
             let PcbState::Data(d) = &pcb.state else {
                 unreachable!()
             };
             let expected_seq = d.rcv_nxt;
-            if hdr.seq_num != expected_seq.raw() {
-                // Buffer ahead of rcv_nxt and duplicate-ACK so the peer
-                // retransmits the gap.
-                if seq_gt(hdr.seq_num, expected_seq.raw()) {
-                    let offset = hdr.seq_num.wrapping_sub(expected_seq.raw()) as usize;
-                    let wrote_ooo = bufs.recv.buf.write_at_offset(offset, payload);
-                    if wrote_ooo > 0 {
-                        bufs.ooo.insert(hdr.seq_num, wrote_ooo);
-                    }
-                }
-                let window = bufs.recv.window();
-                let mut ack_seg =
-                    SegmentBuilder::ack(tuple, d.snd_nxt.raw(), d.rcv_nxt.raw(), window);
-                if d.sack_permitted {
-                    let (ooo_blocks, ooo_count) = bufs.ooo.sack_blocks();
-                    let seg_end = hdr.seq_num.wrapping_add(payload.len() as u32);
-
-                    // DSACK (RFC 2883): a duplicate range goes in the first
-                    // SACK block so the peer can detect spurious retransmits.
-                    if super::super::seq::seq_lt(hdr.seq_num, expected_seq.raw()) {
-                        let dsack_right = if seq_gt(seg_end, expected_seq.raw()) {
-                            expected_seq.raw()
-                        } else {
-                            seg_end
-                        };
-                        ack_seg.sack_blocks[0] = (hdr.seq_num, dsack_right);
-                        let mut total = 1u8;
-                        for i in 0..ooo_count as usize {
-                            if total >= 4 {
-                                break;
-                            }
-                            ack_seg.sack_blocks[total as usize] = ooo_blocks[i];
-                            total += 1;
-                        }
-                        ack_seg.sack_block_count = total;
-                    } else {
-                        ack_seg.sack_blocks = ooo_blocks;
-                        ack_seg.sack_block_count = ooo_count;
-                    }
-                }
-                ack_seg.timestamp = d.ts_option(now_ms);
-                actions.push_segment(ack_seg);
+            // A retransmission overlapping bytes already taken carries new
+            // ones past them (RFC 9293 §3.10.7.4 trims it to the window).
+            let taken = expected_seq.raw().wrapping_sub(hdr.seq_num) as usize;
+            let (seq, payload) = if seq_lt(hdr.seq_num, expected_seq.raw()) && taken < payload.len()
+            {
+                (expected_seq.raw(), &payload[taken..])
+            } else {
+                (hdr.seq_num, payload)
+            };
+            if seq != expected_seq.raw() {
+                Self::queue_out_of_order(pcb, bufs, hdr, payload, now_ms, actions);
                 return NextTransition::StayInData;
             }
-            let wrote = bufs.recv.enqueue(payload, now_ms);
-            accepted_len = wrote;
+            let wrote = bufs.recv.enqueue(payload, &mut bufs.spares, now_ms);
+            // Bytes with nowhere to go are answered at once, so the peer
+            // learns the window rather than waiting out its RTO.
+            let dropped = wrote < payload.len();
+            let mut accepted_len = wrote;
             let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
@@ -577,8 +737,8 @@ impl DataState {
                 };
                 let rcv_nxt = d.rcv_nxt;
                 let drained = bufs.ooo.drain_contiguous(rcv_nxt.raw());
+                let drained = bufs.recv.buf.advance(drained);
                 if drained > 0 {
-                    bufs.recv.buf.advance_head(drained);
                     bufs.recv.ack_pending = true;
                     bufs.recv.segments_since_ack = bufs.recv.segments_since_ack.saturating_add(1);
                     if bufs.recv.segments_since_ack == 1 {
@@ -592,27 +752,18 @@ impl DataState {
                     data.rcv_nxt = data.rcv_nxt.wrapping_add(drained as u32);
                 }
             }
-            let window = bufs.recv.window();
             let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
-            data.rcv_wnd = window;
+            data.rcv_wnd = data.rcv_wnd.saturating_sub(accepted_len as u32);
             if accepted_len > 0 {
                 actions.notify |= SocketNotify::RECV_WAKE;
             }
-            if bufs.recv.should_ack_now(now_ms) {
+            if dropped || bufs.recv.should_ack_now(now_ms) {
                 let PcbState::Data(data) = &mut pcb.state else {
                     unreachable!()
                 };
-                let mut ack = SegmentBuilder::ack(
-                    tuple,
-                    data.snd_nxt.raw(),
-                    data.rcv_nxt.raw(),
-                    data.rcv_wnd,
-                );
-                ack.timestamp = data.ts_option(now_ms);
-                data.last_ack_sent = ack.ack_num;
-                actions.push_segment(ack);
+                data.push_ack(tuple, bufs.recv.window(), now_ms, actions);
                 bufs.recv.ack_sent();
                 if !hdr.is_fin() {
                     return NextTransition::StayInData;
@@ -622,101 +773,35 @@ impl DataState {
             }
         }
 
-        let ack = hdr.ack_num;
-        {
-            let PcbState::Data(data) = &mut pcb.state else {
-                unreachable!()
-            };
-            match data.close_phase {
-                ClosePhase::FinWait1 => {
-                    if ack == data.snd_nxt.raw() {
-                        if hdr.is_fin() {
-                            // Simultaneous close: handled below.
-                        } else {
-                            data.close_phase = ClosePhase::FinWait2;
-                            // The FIN_WAIT_2 timeout releases stale
-                            // half-closed connections.
-                            actions.push_timer(TimerOp::Schedule {
-                                kind: TimerKind::TcpFinWait2,
-                                key: 0,
-                                delay_ms: super::super::FIN_WAIT2_TIMEOUT_MS,
-                            });
-                        }
-                    }
-                }
-                ClosePhase::Closing => {
-                    if ack == data.snd_nxt.raw() {
-                        return NextTransition::ToTimeWait;
-                    }
-                }
-                ClosePhase::LastAck => {
-                    if ack == data.snd_nxt.raw() {
-                        return NextTransition::ReleaseNow;
-                    }
-                }
-                _ => {}
-            }
-        }
-
         if hdr.is_fin() {
-            let tuple = pcb.tuple;
             let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
             };
-            let fin_seq = hdr.seq_num.wrapping_add(accepted_len as u32);
+            // The FIN counts only where the stream ends: not after a segment
+            // cut short, nor before out-of-order bytes that joined past it.
+            let fin_seq = hdr.seq_num.wrapping_add(payload.len() as u32);
             if fin_seq != data.rcv_nxt.raw() {
-                let mut ack = SegmentBuilder::ack(
-                    tuple,
-                    data.snd_nxt.raw(),
-                    data.rcv_nxt.raw(),
-                    data.rcv_wnd,
-                );
-                ack.timestamp = data.ts_option(now_ms);
-                actions.push_segment(ack);
+                data.push_ack(tuple, bufs.recv.window(), now_ms, actions);
                 return NextTransition::StayInData;
             }
             data.rcv_nxt = data.rcv_nxt.wrapping_add(1);
             data.peer_closed = true;
             let new_phase = match data.close_phase {
                 ClosePhase::Established => ClosePhase::CloseWait,
-                ClosePhase::FinWait1 => {
-                    if hdr.ack_num == data.snd_nxt.raw() {
-                        data.close_phase = ClosePhase::Closing;
-                        let mut ack = SegmentBuilder::ack(
-                            tuple,
-                            data.snd_nxt.raw(),
-                            data.rcv_nxt.raw(),
-                            data.rcv_wnd,
-                        );
-                        ack.timestamp = data.ts_option(now_ms);
-                        actions.push_segment(ack);
-                        return NextTransition::ToTimeWait;
-                    }
-                    ClosePhase::Closing
-                }
+                ClosePhase::FinWait1 => ClosePhase::Closing,
                 ClosePhase::FinWait2 => {
                     if let Some(token) = data.fin_wait2_token.take() {
                         actions.push_timer(TimerOp::Cancel { token });
                     }
                     data.close_phase = ClosePhase::Closing;
-                    let mut ack = SegmentBuilder::ack(
-                        tuple,
-                        data.snd_nxt.raw(),
-                        data.rcv_nxt.raw(),
-                        data.rcv_wnd,
-                    );
-                    ack.timestamp = data.ts_option(now_ms);
-                    actions.push_segment(ack);
+                    data.push_ack(tuple, bufs.recv.window(), now_ms, actions);
                     return NextTransition::ToTimeWait;
                 }
                 other => other,
             };
             data.close_phase = new_phase;
             actions.notify |= SocketNotify::PEER_CLOSED | SocketNotify::RECV_WAKE;
-            let mut ack =
-                SegmentBuilder::ack(tuple, data.snd_nxt.raw(), data.rcv_nxt.raw(), data.rcv_wnd);
-            ack.timestamp = data.ts_option(now_ms);
-            actions.push_segment(ack);
+            data.push_ack(tuple, bufs.recv.window(), now_ms, actions);
         }
 
         NextTransition::StayInData
@@ -746,42 +831,21 @@ impl DataState {
     /// The ACK segment if a delayed ACK is now due, marking it sent on the
     /// receive buffer.
     pub fn check_delayed_ack(
-        &self,
+        &mut self,
         tuple: super::super::tuple::TcpTuple,
         bufs: &mut TcpBufferPair,
         now_ms: u64,
     ) -> Option<super::super::segment::TcpOutSegment> {
         if bufs.recv.should_ack_now(now_ms) {
-            let window = bufs.recv.window();
+            let window = self.advertise(bufs.recv.window());
             let mut seg =
                 SegmentBuilder::ack(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
-            seg.timestamp = self.ts_option(now_ms);
+            self.stamp(&mut seg, now_ms);
             bufs.recv.ack_sent();
             Some(seg)
         } else {
             None
         }
-    }
-
-    /// Generate a zero-window probe if `snd_wnd == 0` and there is
-    /// buffered data to send.
-    pub fn check_zero_window_probe(
-        &self,
-        tuple: super::super::tuple::TcpTuple,
-        bufs: &super::super::buffer::TcpBufferPair,
-    ) -> Option<super::super::segment::TcpOutSegment> {
-        if self.snd_wnd != 0 || bufs.send.buffered_len() == 0 {
-            return None;
-        }
-        let mut byte = [0u8; 1];
-        if bufs.send.peek_unsent(&mut byte) == 0 {
-            return None;
-        }
-        let window = bufs.recv.window();
-        let mut seg =
-            SegmentBuilder::data_push(tuple, self.snd_nxt.raw(), self.rcv_nxt.raw(), window);
-        seg.timestamp = self.ts_option(super::super::clock::now_ms());
-        Some(seg)
     }
 
     #[cfg(debug_assertions)]
@@ -804,6 +868,11 @@ impl DataState {
                 debug_assert!(self.peer_closed, "Closing/LastAck implies peer_closed");
             }
         }
+    }
+
+    /// The send map covers exactly the data bytes in flight.
+    #[cfg(debug_assertions)]
+    pub fn debug_assert_sendmap(&self, sendmap: &super::super::retx::SendMap) {
         // FIN consumes one sequence byte but the send map covers data
         // segments only.
         let fin_offset = match self.close_phase {
@@ -824,10 +893,10 @@ impl DataState {
             .saturating_sub(fin_offset)
             .saturating_sub(syn_offset);
         debug_assert_eq!(
-            self.sendmap.total_bytes(),
+            sendmap.total_bytes(),
             expected,
             "sendmap total_bytes ({}) != snd_nxt - snd_una - fin_offset ({})",
-            self.sendmap.total_bytes(),
+            sendmap.total_bytes(),
             expected,
         );
     }
@@ -845,14 +914,10 @@ fn handle_data_rst(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
     let PcbState::Data(data) = &pcb.state else {
         unreachable!()
     };
-    let effective_wnd = if data.wscale_enabled {
-        (data.rcv_wnd as u32) << data.rcv_wscale
-    } else {
-        data.rcv_wnd as u32
-    };
+    let effective_wnd = data.granted();
     let rcv_nxt = data.rcv_nxt.raw();
     let snd_nxt = data.snd_nxt.raw();
-    let rcv_wnd = data.rcv_wnd;
+    let rcv_wnd = data.advertised();
     let ts_opt = data.ts_option(now_ms);
     match challenge_ack::classify_rst(hdr.seq_num, rcv_nxt, effective_wnd) {
         challenge_ack::RstAction::Accept => DataState::on_rst(pcb, actions),
@@ -878,13 +943,8 @@ fn data_segment_acceptable(pcb: &Pcb, hdr: &TcpHeader, payload_len: usize) -> bo
     let PcbState::Data(data) = &pcb.state else {
         return false;
     };
-    let effective_wnd = if data.wscale_enabled {
-        (data.rcv_wnd as u32) << data.rcv_wscale
-    } else {
-        data.rcv_wnd as u32
-    };
     let seg_len = payload_len as u32 + u32::from(hdr.is_fin());
-    challenge_ack::segment_acceptable(hdr.seq_num, seg_len, data.rcv_nxt.raw(), effective_wnd)
+    challenge_ack::segment_acceptable(hdr.seq_num, seg_len, data.rcv_nxt.raw(), data.granted())
 }
 
 /// RFC 793 §3.9: an unacceptable segment is dropped, and unless it carried a
@@ -898,7 +958,7 @@ fn unacceptable_segment_ack(pcb: &Pcb, now_ms: u64, mut actions: Actions) -> Act
         pcb.tuple,
         data.snd_nxt.raw(),
         data.rcv_nxt.raw(),
-        data.rcv_wnd,
+        data.advertised(),
     );
     ack.timestamp = data.ts_option(now_ms);
     actions.push_segment(ack);
@@ -932,7 +992,7 @@ fn paws_drop_ack(pcb: &Pcb, now_ms: u64) -> Actions {
         pcb.tuple,
         data.snd_nxt.raw(),
         data.rcv_nxt.raw(),
-        data.rcv_wnd,
+        data.advertised(),
     );
     ack.timestamp = data.ts_option(now_ms);
     actions.push_segment(ack);
