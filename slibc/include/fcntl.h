@@ -28,6 +28,14 @@ struct flock {
 #define AT_REMOVEDIR (0x200)
 #define AT_SYMLINK_FOLLOW (0x400)
 #define AT_SYMLINK_NOFOLLOW (0x100)
+#define FALLOC_FL_COLLAPSE_RANGE (0x08)
+#define FALLOC_FL_INSERT_RANGE (0x20)
+#define FALLOC_FL_KEEP_SIZE (0x01)
+#define FALLOC_FL_NO_HIDE_STALE (0x04)
+#define FALLOC_FL_PUNCH_HOLE (0x02)
+#define FALLOC_FL_UNSHARE_RANGE (0x40)
+#define FALLOC_FL_ZERO_RANGE (0x10)
+#define FD_CLOEXEC (1)
 #define F_DUPFD (0)
 #define F_DUPFD_CLOEXEC (1030)
 #define F_GETFD (1)
@@ -42,6 +50,7 @@ struct flock {
 #define F_WRLCK (1)
 #define O_ACCMODE (3)
 #define O_APPEND (02000)
+#define O_ASYNC (020000)
 #define O_CLOEXEC (02000000)
 #define O_CREAT (0100)
 #define O_DIRECT (040000)
@@ -62,11 +71,19 @@ struct flock {
 #define O_TMPFILE (020200000)
 #define O_TRUNC (01000)
 #define O_WRONLY (1)
+#define POSIX_FADV_DONTNEED (4)
+#define POSIX_FADV_NOREUSE (5)
+#define POSIX_FADV_NORMAL (0)
+#define POSIX_FADV_RANDOM (1)
+#define POSIX_FADV_SEQUENTIAL (2)
+#define POSIX_FADV_WILLNEED (3)
 
 int open(const char *path, int oflag, ...);
 int openat(int dirfd, const char *path, int oflag, ...);
 int creat(const char *path, mode_t mode);
 int fcntl(int fd, int cmd, ...);
+int posix_fadvise(int fd, off_t offset, off_t len, int advice);
+int posix_fallocate(int fd, off_t offset, off_t len);
 
 #ifdef __cplusplus
 }

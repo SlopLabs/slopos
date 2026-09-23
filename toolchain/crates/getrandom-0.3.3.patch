@@ -1,0 +1,65 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index f4f2f6c..47f52aa 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -105,7 +105,7 @@ default-features = false
+ version = "5.1"
+ default-features = false
+ 
+-[target.'cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "hurd", target_os = "illumos", target_os = "cygwin", all(target_os = "horizon", target_arch = "arm")))'.dependencies.libc]
++[target.'cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "hurd", target_os = "illumos", target_os = "cygwin", target_os = "slopos", all(target_os = "horizon", target_arch = "arm")))'.dependencies.libc]
+ version = "0.2.154"
+ default-features = false
+ 
+@@ -144,4 +144,5 @@ check-cfg = [
+     "cfg(getrandom_test_linux_without_fallback)",
+     "cfg(getrandom_test_netbsd_fallback)",
+     'cfg(target_os, values("cygwin"))',
++    'cfg(target_os, values("slopos"))',
+ ]
+diff --git a/Cargo.toml.orig b/Cargo.toml.orig
+index 371bc81..c316841 100644
+--- a/Cargo.toml.orig
++++ b/Cargo.toml.orig
+@@ -49,7 +49,7 @@ r-efi = { version = "5.1", default-features = false }
+ libc = { version = "0.2.154", default-features = false }
+ 
+ # getrandom
+-[target.'cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "hurd", target_os = "illumos", target_os = "cygwin", all(target_os = "horizon", target_arch = "arm")))'.dependencies]
++[target.'cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "hurd", target_os = "illumos", target_os = "cygwin", target_os = "slopos", all(target_os = "horizon", target_arch = "arm")))'.dependencies]
+ libc = { version = "0.2.154", default-features = false }
+ 
+ # netbsd
+@@ -90,6 +90,7 @@ check-cfg = [
+   'cfg(getrandom_test_linux_without_fallback)',
+   'cfg(getrandom_test_netbsd_fallback)',
+   'cfg(target_os, values("cygwin"))', # TODO(MSRV 1.86): Remove this.
++  'cfg(target_os, values("slopos"))',
+ ]
+ 
+ [package.metadata.docs.rs]
+diff --git a/src/backends.rs b/src/backends.rs
+index 2c539df..3dcadcd 100644
+--- a/src/backends.rs
++++ b/src/backends.rs
+@@ -108,6 +108,7 @@ cfg_if! {
+         target_os = "hurd",
+         target_os = "illumos",
+         target_os = "cygwin",
++        target_os = "slopos",
+         // Check for target_arch = "arm" to only include the 3DS. Does not
+         // include the Nintendo Switch (which is target_arch = "aarch64").
+         all(target_os = "horizon", target_arch = "arm"),
+diff --git a/src/util_libc.rs b/src/util_libc.rs
+index 24c53c0..9b93059 100644
+--- a/src/util_libc.rs
++++ b/src/util_libc.rs
+@@ -4,7 +4,7 @@ use core::mem::MaybeUninit;
+ cfg_if! {
+     if #[cfg(any(target_os = "netbsd", target_os = "openbsd", target_os = "android", target_os = "cygwin"))] {
+         use libc::__errno as errno_location;
+-    } else if #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "hurd", target_os = "redox", target_os = "dragonfly"))] {
++    } else if #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "hurd", target_os = "redox", target_os = "dragonfly", target_os = "slopos"))] {
+         use libc::__errno_location as errno_location;
+     } else if #[cfg(any(target_os = "solaris", target_os = "illumos"))] {
+         use libc::___errno as errno_location;

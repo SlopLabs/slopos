@@ -162,10 +162,8 @@ pub const SI_STATUS_OFFSET: usize = 24;
 /// The union is a word array behind an accessor rather than a Rust `union`:
 /// this crate is `#![forbid(unsafe_code)]`, and reading a union field is
 /// `unsafe`. Word 0 is the overlap that matters — `si_addr` for a fault
-/// signal, `si_pid`/`si_uid` for a `kill`-originated one. This kernel records
-/// no sender, so those two always read 0 and only
-/// [`si_addr`](Self::si_addr) is ever populated; the rest of the union stays
-/// zero, as Linux's tail padding is.
+/// signal, `si_pid`/`si_uid` for a `kill`-originated one. The rest of the
+/// union stays zero, as Linux's tail padding is.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserSiginfo {
@@ -191,6 +189,19 @@ impl UserSiginfo {
             _pad0: 0,
             _sifields: sifields,
         }
+    }
+
+    /// The `siginfo` for a signal process `si_pid` sent: `si_pid` and `si_uid`
+    /// share the union's first word, low half and high half.
+    #[inline]
+    pub const fn sent(si_signo: i32, si_code: i32, si_pid: u32, si_uid: u32) -> Self {
+        Self::new(si_signo, si_code, (si_pid as u64) | ((si_uid as u64) << 32))
+    }
+
+    /// The sending process of a `kill`-originated signal.
+    #[inline]
+    pub const fn si_pid(&self) -> u32 {
+        self._sifields[0] as u32
     }
 
     /// The faulting address a `SIGSEGV`/`SIGBUS`/`SIGILL` handler reads.

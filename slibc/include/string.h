@@ -41,6 +41,9 @@ size_t strxfrm_l(char *dst, const char *src, size_t n, locale_t loc);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);
 char *strsignal(int sig);
+char *strpbrk(const char *s, const char *accept);
+char *strtok(char *s, const char *delim);
+char *strtok_r(char *s, const char *delim, char **save);
 
 #ifdef __cplusplus
 }

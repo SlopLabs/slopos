@@ -132,6 +132,12 @@ pub fn task_kill_and_wake<K, U>(task: &TaskInner<K, U>) -> bool {
 /// then wake/unblock the target); `false` when it was dropped or the
 /// arguments were invalid.
 pub fn task_signal_post<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
+    task_signal_post_from(task, signum, 0)
+}
+
+/// [`task_signal_post`] for a signal a process sent: `sender` is its
+/// thread-group id, which delivery reports as `si_pid`. 0 means the kernel.
+pub fn task_signal_post_from<K, U>(task: &TaskInner<K, U>, signum: u8, sender: u32) -> bool {
     let bit = slopos_abi::signal::sig_bit(signum);
     if bit == 0 {
         return false;
@@ -153,6 +159,7 @@ pub fn task_signal_post<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
             return false;
         }
     }
+    task.set_signal_sender(signum, sender);
     task_signal_raise(task, bit);
     true
 }

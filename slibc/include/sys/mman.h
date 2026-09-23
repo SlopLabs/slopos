@@ -16,6 +16,9 @@ extern "C" {
 #define MADV_DONTNEED (4)
 #define MADV_FREE (8)
 #define MADV_NORMAL (0)
+#define MADV_RANDOM (1)
+#define MADV_SEQUENTIAL (2)
+#define MADV_WILLNEED (3)
 #define MAP_ANON (0x0020)
 #define MAP_ANONYMOUS (MAP_ANON)
 #define MAP_FAILED (((void *)((void *)~0)))
@@ -37,6 +40,8 @@ int munmap(void *addr, size_t len);
 int mprotect(void *addr, size_t len, int prot);
 int madvise(void *addr, size_t len, int advice);
 int msync(void *addr, size_t len, int flags);
+int shm_open(const char *name, int oflag, mode_t mode);
+int shm_unlink(const char *name);
 
 #ifdef __cplusplus
 }

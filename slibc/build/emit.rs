@@ -342,6 +342,7 @@ impl World<'_> {
             TypeDef::Opaque(name) => {
                 let _ = writeln!(out, "typedef struct _slibc_{} {name};", name.to_lowercase());
             }
+            TypeDef::Struct(item) if item.name == SIGVAL => out.push_str(SIGVAL_UNION),
             TypeDef::Struct(item) => {
                 if let Some(field) = item
                     .fields
@@ -355,6 +356,9 @@ impl World<'_> {
                     ));
                 }
                 let typedef = Types::is_typedef_shaped(&item.name);
+                if item.name == "siginfo_t" {
+                    out.push_str(SIGINFO_KILL);
+                }
                 if typedef {
                     let _ = writeln!(out, "typedef struct {{");
                 } else {
@@ -364,13 +368,34 @@ impl World<'_> {
                 // that no field would otherwise force; C has no such field, so
                 // it becomes an attribute on the type.
                 let mut align = None;
-                for field in &item.fields {
+                let mut fields = item.fields.iter().peekable();
+                while let Some(field) = fields.next() {
                     if let Some(bytes) = zero_length_array(&field.ty, &self.types) {
                         align = Some(bytes);
                         continue;
                     }
                     if field.ty.ends_with("sighandler_t") {
                         out.push_str(HANDLER_SLOT);
+                        continue;
+                    }
+                    if item.name == "siginfo_t" && field.name == "_pad" {
+                        out.push_str(SIGINFO_PAYLOAD);
+                        continue;
+                    }
+                    if field.ty.ends_with(SIGVAL) {
+                        let _ = writeln!(out, "    union {SIGVAL} {};", field.name);
+                        continue;
+                    }
+                    // Linux's Rust spelling of a stat time is two fields,
+                    // `st_mtime` and `st_mtime_nsec`; C's is one `timespec`,
+                    // `st_mtim`, with `st_mtime` a macro for its seconds.
+                    if let Some(stem) = field.name.strip_suffix("time")
+                        && fields
+                            .peek()
+                            .is_some_and(|next| next.name == format!("{}_nsec", field.name))
+                    {
+                        fields.next();
+                        let _ = writeln!(out, "    struct timespec {stem}tim;");
                         continue;
                     }
                     let declaration = self
@@ -387,6 +412,9 @@ impl World<'_> {
                     let _ = writeln!(out, "}}{align} {};", item.name);
                 } else {
                     let _ = writeln!(out, "}}{align};");
+                }
+                if item.name == "siginfo_t" {
+                    out.push_str(SIGINFO_MEMBERS);
                 }
             }
         }
@@ -588,6 +616,38 @@ const HANDLER_SLOT: &str = "    union {
         sighandler_t sa_handler;
         void (*sa_sigaction)(int, siginfo_t *, void *);
     };
+";
+
+/// `siginfo_t`'s payload is 29 opaque ints in the contract, which is the
+/// `libc` crate's shape; the Rust side reads it through accessor methods. C
+/// names the fields, so the header overlays them on the same bytes, at Linux's
+/// offsets: the union behind the three header ints starts at 16, one int into
+/// `_pad`. A tagged struct declared outside the union, and macros for the
+/// member names as glibc has them, keep this standard C++ as well as C.
+const SIGINFO_KILL: &str = "struct __slibc_siginfo_kill {
+    int __si_fill;
+    pid_t __si_pid;
+    uid_t __si_uid;
+    int __si_status;
+};
+";
+const SIGINFO_PAYLOAD: &str = "    union {
+        int _pad[29];
+        struct __slibc_siginfo_kill __si_fields;
+    };
+";
+const SIGINFO_MEMBERS: &str = "#define si_pid __si_fields.__si_pid
+#define si_uid __si_fields.__si_uid
+#define si_status __si_fields.__si_status
+";
+
+/// POSIX's `union sigval`. The contract has the pointer arm only, as the
+/// `libc` crate does; `sival_int` is the other arm of the same eight bytes.
+const SIGVAL: &str = "sigval";
+const SIGVAL_UNION: &str = "union sigval {
+    int sival_int;
+    void *sival_ptr;
+};
 ";
 
 /// Builds the `name -> TypeDef` index from the contract and the shared table.

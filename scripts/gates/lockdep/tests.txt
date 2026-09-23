@@ -268,9 +268,17 @@ require-phase post-userland-tests
 #               it never reached `DNS_RX_BUF`. 208/215 on both full runs of the
 #               change; every banded pool stayed inside its band (kernel edges
 #               181, chains 402; userland edges 226, chains 457).
+#   2026-09-23  userland 215 -> 216: the in-guest toolchain's `shm_open`.
+#               One new declaration site, `RAMFS_SHM` (fs/src/vfs/init.rs,
+#               the ramfs boot mounts at `/dev/shm` for `shm_open`), with a
+#               class of its own for the reason `RAMFS_POOL_0..3` have theirs.
+#               Boot is unchanged at 71 and the kernel phase at 208: nothing
+#               opens a file under `/dev/shm` before the userland tests do.
+#               Every banded pool stayed inside its band (kernel edges 175,
+#               chains 397; userland edges 226, chains 458).
 boot	classes	72
 post-kernel-tests	classes	208
-post-userland-tests	classes	215
+post-userland-tests	classes	216
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the

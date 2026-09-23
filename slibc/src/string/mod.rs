@@ -417,6 +417,54 @@ unsafe fn member(set: *const u8, ch: u8) -> bool {
     }
 }
 
+/// # Safety
+/// Both arguments are NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strpbrk(s: *const u8, accept: *const u8) -> *mut u8 {
+    let n = span(s, accept, false);
+    if s.is_null() || *s.add(n) == 0 {
+        core::ptr::null_mut()
+    } else {
+        s.add(n) as *mut u8
+    }
+}
+
+/// `strtok_r(3)`: `*save` carries the scan position between calls.
+///
+/// # Safety
+/// `s` (or, when `s` is null, `*save`) and `delim` are NUL-terminated C
+/// strings; `save` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtok_r(s: *mut u8, delim: *const u8, save: *mut *mut u8) -> *mut u8 {
+    let mut s = if s.is_null() { *save } else { s };
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    s = s.add(span(s, delim, true));
+    if *s == 0 {
+        *save = core::ptr::null_mut();
+        return core::ptr::null_mut();
+    }
+    let end = s.add(span(s, delim, false));
+    if *end == 0 {
+        *save = core::ptr::null_mut();
+    } else {
+        *end = 0;
+        *save = end.add(1);
+    }
+    s
+}
+
+/// `strtok(3)`, over one process-wide position as C specifies.
+///
+/// # Safety
+/// As [`strtok_r`]; C gives no thread safety here and neither does this.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
+    static mut SAVE: *mut u8 = core::ptr::null_mut();
+    strtok_r(s, delim, &raw mut SAVE)
+}
+
 /// `strcoll(3)`. Byte order is collation order in the C locale, so this is
 /// `strcmp`.
 ///

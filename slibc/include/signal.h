@@ -17,12 +17,24 @@ typedef void (*sighandler_t)(int);
 typedef struct {
     unsigned long __val[16];
 } sigset_t;
+struct __slibc_siginfo_kill {
+    int __si_fill;
+    pid_t __si_pid;
+    uid_t __si_uid;
+    int __si_status;
+};
 typedef struct {
     int si_signo;
     int si_errno;
     int si_code;
-    int _pad[29];
+    union {
+        int _pad[29];
+        struct __slibc_siginfo_kill __si_fields;
+    };
 } __slibc_aligned(8) siginfo_t;
+#define si_pid __si_fields.__si_pid
+#define si_uid __si_fields.__si_uid
+#define si_status __si_fields.__si_status
 struct sigaction {
     union {
         sighandler_t sa_handler;
@@ -37,6 +49,17 @@ typedef struct {
     int ss_flags;
     size_t ss_size;
 } stack_t;
+union sigval {
+    int sival_int;
+    void *sival_ptr;
+};
+struct sigevent {
+    union sigval sigev_value;
+    int sigev_signo;
+    int sigev_notify;
+    int sigev_notify_thread_id;
+    int __unused1[11];
+};
 
 #define BUS_ADRALN (1)
 #define BUS_ADRERR (2)
@@ -66,6 +89,10 @@ typedef struct {
 #define SIGBUS (7)
 #define SIGCHLD (17)
 #define SIGCONT (18)
+#define SIGEV_NONE (1)
+#define SIGEV_SIGNAL (0)
+#define SIGEV_THREAD (2)
+#define SIGEV_THREAD_ID (4)
 #define SIGFPE (8)
 #define SIGHUP (1)
 #define SIGILL (4)
@@ -105,6 +132,7 @@ typedef struct {
 #define SI_KERNEL (0x80)
 #define SI_QUEUE (-1)
 #define SI_TIMER (-2)
+#define SI_TKILL (-6)
 #define SI_USER (0)
 #define SS_DISABLE (2)
 #define SS_ONSTACK (1)

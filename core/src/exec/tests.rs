@@ -1,6 +1,8 @@
 //! exec() ELF loader tests.
 
-use slopos_abi::auxv::{AT_BASE, AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
+use slopos_abi::auxv::{
+    AT_BASE, AT_ENTRY, AT_EXECFN, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_SECURE,
+};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -561,7 +563,14 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
     let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
         return TestResult::Fail;
     };
-    let result = super::setup_user_stack(table, Some(&args), Some(&envs), &exec_info);
+    let result = super::setup_user_stack(
+        table,
+        Some(&args),
+        Some(&envs),
+        &exec_info,
+        b"/sbin/init",
+        false,
+    );
     let sp = match result {
         Ok(v) => v,
         Err(_) => {
@@ -630,7 +639,14 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
     let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
         return TestResult::Fail;
     };
-    let sp = match super::setup_user_stack(table, Some(&args), Some(&envs), &exec_info) {
+    let sp = match super::setup_user_stack(
+        table,
+        Some(&args),
+        Some(&envs),
+        &exec_info,
+        b"/bin/auxv_probe",
+        true,
+    ) {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack returned error in auxv test");
@@ -660,6 +676,8 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
     let mut saw_base = false;
     let mut saw_entry = false;
     let mut saw_null = false;
+    let mut secure = u64::MAX;
+    let mut execfn = 0u64;
 
     for _ in 0..16 {
         let key = read_user_u64(pid, cursor).unwrap_or(u64::MAX);
@@ -676,6 +694,10 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
             saw_base = true;
         } else if key == AT_ENTRY && val == exec_info.entry {
             saw_entry = true;
+        } else if key == AT_SECURE {
+            secure = val;
+        } else if key == AT_EXECFN {
+            execfn = val;
         } else if key == AT_NULL && val == 0 {
             saw_null = true;
             break;
@@ -683,7 +705,18 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         cursor = cursor.wrapping_add(16);
     }
 
+    let execfn_ok = execfn != 0
+        && read_user_cstr(pid, execfn, 32).is_some_and(|s| s.as_slice() == b"/bin/auxv_probe");
     process_vm::destroy_process_vm(resolve_pid(pid));
+    if secure != 1 || !execfn_ok {
+        klog_info!(
+            "EXEC_TEST: AT_SECURE={} (want 1), AT_EXECFN={:#x} names the image={}",
+            secure,
+            execfn,
+            execfn_ok
+        );
+        return TestResult::Fail;
+    }
     if !(saw_phdr && saw_phent && saw_phnum && saw_pagesz && saw_base && saw_entry && saw_null) {
         klog_info!(
             "EXEC_TEST: auxv missing entries phdr={} phent={} phnum={} pagesz={} base={} entry={} null={}",
@@ -728,7 +761,14 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
     let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
         return TestResult::Fail;
     };
-    let sp = match super::setup_user_stack(table, Some(&args), Some(&envs), &exec_info) {
+    let sp = match super::setup_user_stack(
+        table,
+        Some(&args),
+        Some(&envs),
+        &exec_info,
+        b"/sbin/init",
+        false,
+    ) {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack failed in argv string test");
@@ -838,14 +878,14 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
 pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
     const BUDGET: usize = EXEC_MAX_ARG_BYTES;
     const LONG_LEN: usize = EXEC_MAX_ARG_STRLEN - 1;
-    const LONG_COUNT: usize = 31;
-    // What 31 maximum-length strings leave, spent to the last byte by one more:
+    const LONG_COUNT: usize = 30;
+    // What 30 maximum-length strings leave, spent to the last byte by one more:
     // its cost is the padded `len + 1` plus its 8-byte pointer.
     const TAIL_COST: usize =
         BUDGET - super::EXEC_ARG_STACK_FIXED - LONG_COUNT * (EXEC_MAX_ARG_STRLEN + 8);
     const TAIL_LEN: usize = TAIL_COST - 8 - 1;
 
-    // Heap-backed: 32 `&[u8]` slots is 512 bytes against the 2 KiB stack gate.
+    // Heap-backed: 31 `&[u8]` slots is 496 bytes against the 2 KiB stack gate.
     let mut args = match slopos_ostd::KVec::<&[u8]>::with_capacity(LONG_COUNT + 1) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
@@ -883,7 +923,14 @@ pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
         tls_tp: 0,
     };
 
-    match super::setup_user_stack(table, Some(args.as_slice()), None, &exec_info) {
+    match super::setup_user_stack(
+        table,
+        Some(args.as_slice()),
+        None,
+        &exec_info,
+        b"/bin/x",
+        false,
+    ) {
         Err(ExecError::TooManyArgs) => {}
         other => {
             klog_info!(
@@ -896,7 +943,14 @@ pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
     }
 
     args[LONG_COUNT] = &ARG_FILLER[..TAIL_LEN];
-    let sp = match super::setup_user_stack(table, Some(args.as_slice()), None, &exec_info) {
+    let sp = match super::setup_user_stack(
+        table,
+        Some(args.as_slice()),
+        None,
+        &exec_info,
+        b"/bin/x",
+        false,
+    ) {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: argv exactly at the byte budget was refused");
@@ -971,7 +1025,14 @@ pub fn test_setup_user_stack_high_argument_count() -> TestResult {
         tls_tp: 0,
     };
 
-    let sp = match super::setup_user_stack(table, Some(args.as_slice()), None, &exec_info) {
+    let sp = match super::setup_user_stack(
+        table,
+        Some(args.as_slice()),
+        None,
+        &exec_info,
+        b"/bin/x",
+        false,
+    ) {
         Ok(v) => v,
         Err(_) => {
             klog_info!(

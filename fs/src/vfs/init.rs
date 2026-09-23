@@ -5,7 +5,7 @@ use slopos_ostd::sync::{InitFlag, OnceLock};
 use slopos_ostd::{KArc, KBox, lock_class};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
-use crate::devfs::{DevFs, devfs_block_device_by_name};
+use crate::devfs::{DEV_NAME_MAX, DevFs, devfs_block_device_by_name, devfs_block_name_by_label};
 use crate::ext2_vfs::{Ext2Mount, Ext2MountInfo};
 use crate::ramfs::RamFs;
 use crate::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
@@ -17,6 +17,7 @@ static VFS_INIT: InitFlag = InitFlag::new();
 
 static RAMFS_ROOT_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_ROOT", LOCK_LEVEL_RESOURCE));
 static RAMFS_TMP_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_TMP", LOCK_LEVEL_RESOURCE));
+static RAMFS_SHM_STATIC: RamFs = RamFs::new_const(lock_class!("RAMFS_SHM", LOCK_LEVEL_RESOURCE));
 static DEVFS_STATIC: DevFs = DevFs::new();
 
 /// How many ramfs instances `mount(2)` may have outstanding at once.
@@ -307,8 +308,13 @@ fn read_only_block_device(name: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Send 
     Ok(boxed)
 }
 
+/// What a `mount` source spells an ext2 volume by its label with.
+const LABEL_PREFIX: &[u8] = b"LABEL=";
+
 /// Attach the block device `source` names to a pooled ext2 instance and mount
-/// it at `target`.
+/// it at `target`. `source` is a device name, or `LABEL=<volume label>` for
+/// the first registered device whose superblock carries that label — disk
+/// letters are probe order, so the label is the stable spelling.
 ///
 /// `read_only` is the caller's *intent*, and an `MS_RDONLY` mount needs both
 /// halves of it: the write-refusing device view, and the instance's own
@@ -318,6 +324,15 @@ pub fn vfs_ext2_mount_named(
     target: &[u8],
     read_only: bool,
 ) -> VfsResult<Ext2MountInfo> {
+    let mut by_label = [0u8; DEV_NAME_MAX];
+    let source = match source.strip_prefix(LABEL_PREFIX) {
+        Some(b"") => return Err(VfsError::InvalidArgument),
+        Some(label) => {
+            let len = devfs_block_name_by_label(label, &mut by_label).ok_or(VfsError::NotFound)?;
+            &by_label[..len]
+        }
+        None => source,
+    };
     // The slot first, the device only once one is held: a slot retired by a
     // lazy unmount still owns its device claim and *claiming* a slot is what
     // sweeps it, so resolving the device first meets that stale claim and
@@ -392,7 +407,7 @@ pub enum RootBacking {
     Ext2(&'static Ext2Mount),
 }
 
-/// The one-shot mount of `/`, `/tmp` and `/dev`. Later calls are no-ops
+/// The one-shot mount of `/`, `/tmp`, `/dev` and `/dev/shm`. Later calls are no-ops
 /// whatever `root` they pass: the kernel-test phase reaches this first with
 /// ramfs, and the boot step re-mounts `/` itself when it wants the disk.
 pub fn vfs_init_builtin_filesystems_with(root: RootBacking) -> VfsResult<()> {
@@ -410,6 +425,8 @@ pub fn vfs_init_builtin_filesystems_with(root: RootBacking) -> VfsResult<()> {
 
     mount(b"/tmp", &RAMFS_TMP_STATIC, 0)?;
     mount(b"/dev", &DEVFS_STATIC, 0)?;
+    // Where `shm_open` puts its objects, as glibc does.
+    mount(b"/dev/shm", &RAMFS_SHM_STATIC, 0)?;
 
     Ok(())
 }

@@ -202,6 +202,25 @@ pub fn reserved_blocks_of(data: &[u8]) -> u32 {
     le32(data, 8)
 }
 
+/// `s_volume_name`: 16 bytes, NUL-padded, defined from revision 1 on.
+const S_VOLUME_NAME_OFF: usize = 120;
+const S_VOLUME_NAME_LEN: usize = 16;
+
+/// How much of the superblock [`volume_label_of`] reads.
+pub const SUPERBLOCK_LABEL_SPAN: usize = S_VOLUME_NAME_OFF + S_VOLUME_NAME_LEN;
+
+/// The volume label `mke2fs -L`/`e2label` wrote, trailing NULs dropped. `None`
+/// when `data` (the superblock's first [`SUPERBLOCK_LABEL_SPAN`] bytes) is not
+/// ext2 or predates the field.
+pub fn volume_label_of(data: &[u8; SUPERBLOCK_LABEL_SPAN]) -> Option<&[u8]> {
+    if le16(data, 56) != EXT2_MAGIC || le32(data, 76) < 1 {
+        return None;
+    }
+    let name = &data[S_VOLUME_NAME_OFF..SUPERBLOCK_LABEL_SPAN];
+    let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    Some(&name[..len])
+}
+
 impl Superblock {
     pub fn parse(data: &[u8]) -> Result<Self, Ext2Error> {
         if data.len() < 1024 {

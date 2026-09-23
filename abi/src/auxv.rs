@@ -39,8 +39,13 @@ pub const AT_GID: u64 = 13;
 
 pub const AT_EGID: u64 = 14;
 
-/// Secure mode boolean (0 = normal).
+/// 1 when the exec conferred a program-identity grant, else 0. The loader
+/// then ignores `LD_LIBRARY_PATH` and `$ORIGIN`, as for a setuid program.
 pub const AT_SECURE: u64 = 23;
 
 /// Address of 16 kernel-supplied random bytes.
 pub const AT_RANDOM: u64 = 25;
+
+/// Pointer to the NUL-terminated absolute path of the executable the kernel
+/// opened.
+pub const AT_EXECFN: u64 = 31;

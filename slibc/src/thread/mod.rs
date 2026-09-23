@@ -8,6 +8,7 @@ pub mod keys;
 pub mod mutex;
 pub mod once;
 pub mod rwlock;
+pub mod semaphore;
 #[allow(dead_code)]
 pub(crate) mod shim;
 pub mod tcb;

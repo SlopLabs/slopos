@@ -53,11 +53,14 @@ impl DlError {
     }
 }
 
-/// Where a bare `DT_NEEDED`/`dlopen` name is looked for, in order.
-const SEARCH_DIRS: [&[u8]; 2] = [b"/lib/", b"/usr/lib/"];
+/// Where a bare `DT_NEEDED`/`dlopen` name is looked for last, in order.
+const SEARCH_DIRS: [&[u8]; 2] = [b"/lib", b"/usr/lib"];
 
 /// Longest path the loader will build. Matches the kernel's `PATH_MAX`.
 const DL_PATH_MAX: usize = 4096;
+
+/// The executable's table index: [`start::link_program`] adopts it first.
+const EXE: u16 = 0;
 
 pub struct Loader {
     objects: [Dso; DL_MAX_OBJECTS],
@@ -65,13 +68,23 @@ pub struct Loader {
     /// Search order for an undefined symbol, nearest first.
     global: [u16; DL_MAX_OBJECTS],
     global_count: usize,
+    /// `LD_LIBRARY_PATH` as the process started with it, or null. Read once,
+    /// as glibc does, and never under `AT_SECURE`.
+    library_path: *const u8,
+    /// `AT_SECURE`: no `$ORIGIN` and no relative directory is searched.
+    secure: bool,
 }
+
+// SAFETY: every access goes through [`lock`].
+unsafe impl Sync for Loader {}
 
 static LOADER: SyncUnsafeCell<Loader> = SyncUnsafeCell::new(Loader {
     objects: [Dso::empty(); DL_MAX_OBJECTS],
     count: 0,
     global: [0; DL_MAX_OBJECTS],
     global_count: 0,
+    library_path: ptr::null(),
+    secure: false,
 });
 
 static LOCK: AtomicBool = AtomicBool::new(false);
@@ -312,6 +325,8 @@ impl Loader {
     }
 
     /// Load `name` and everything its `DT_NEEDED` closure reaches.
+    /// `requester` is the object that asked, whose search paths a bare name
+    /// is looked for in.
     ///
     /// `group` receives every object the call touched, root first, in
     /// breadth-first order — which is the order `dlsym` on the returned
@@ -322,6 +337,7 @@ impl Loader {
     pub unsafe fn load_closure(
         &mut self,
         name: *const u8,
+        requester: u16,
         dlopened: bool,
         group: &mut [u16; DL_MAX_OBJECTS],
     ) -> Result<usize, DlError> {
@@ -329,7 +345,7 @@ impl Loader {
         // An already-loaded root therefore takes one reference for this call
         // and its closure is left alone: its dependencies' references belong
         // to it, were taken when it was loaded, and are released with it.
-        let (root, fresh) = self.load_one(name, dlopened)?;
+        let (root, fresh) = self.load_one(name, requester, dlopened)?;
         group[0] = root;
         let mut count = 1usize;
         if !fresh {
@@ -365,7 +381,7 @@ impl Loader {
                 if dep_name.is_null() {
                     continue;
                 }
-                let (dep, dep_fresh) = self.load_one(dep_name, dlopened)?;
+                let (dep, dep_fresh) = self.load_one(dep_name, index as u16, dlopened)?;
                 self.objects[index].needed[n] = dep;
                 if dep_fresh && !group[..*count].contains(&dep) {
                     group[*count] = dep;
@@ -377,14 +393,20 @@ impl Loader {
     }
 
     /// Map one object, or answer the already-loaded one of that name.
-    unsafe fn load_one(&mut self, name: *const u8, dlopened: bool) -> Result<(u16, bool), DlError> {
+    /// `requester` is whose `DT_NEEDED` or `dlopen` call names it.
+    unsafe fn load_one(
+        &mut self,
+        name: *const u8,
+        requester: u16,
+        dlopened: bool,
+    ) -> Result<(u16, bool), DlError> {
         if let Some(index) = self.find_by_name(basename(name)) {
             self.objects[index as usize].refs += 1;
             return Ok((index, false));
         }
 
         let mut path = [0u8; DL_PATH_MAX];
-        let resolved = resolve_path(name, &mut path)?;
+        let resolved = self.resolve_path(name, requester, &mut path)?;
         let mut window = [0u8; load::HEADER_WINDOW];
         let mapped = load::map_object(resolved, &mut window).map_err(|e| match e {
             load::LoadError::NotFound => DlError::NotFound,
@@ -414,6 +436,7 @@ impl Loader {
         dso.map_start = mapped.span_start;
         dso.map_len = mapped.span_len;
         dso.path = owned;
+        dso.loader = requester;
         dso.scan_phdrs(mapped.phdr, mapped.phnum);
         dso.parse_dynamic();
         if dso.name.is_null() {
@@ -432,18 +455,18 @@ impl Loader {
         slot: usize,
         name: *const u8,
     ) -> Result<u16, DlError> {
-        let (dep, _) = self.load_one(name, false)?;
+        let (dep, _) = self.load_one(name, parent as u16, false)?;
         self.objects[parent].needed[slot] = dep;
         Ok(dep)
     }
 
     /// Relocate `group` deepest dependency first, against the global scope
     /// widened by the group itself, then give each object its final page
-    /// protections.
+    /// protections. Answers how many relocations were applied.
     ///
     /// # Safety
     /// Caller holds [`lock`]; every object in `group` is mapped and parsed.
-    pub unsafe fn relocate_group(&mut self, group: &[u16]) -> Result<(), DlError> {
+    pub unsafe fn relocate_group(&mut self, group: &[u16]) -> Result<usize, DlError> {
         let mut scope = [0u16; DL_MAX_OBJECTS];
         let mut scope_len = 0usize;
         for slot in self.global[..self.global_count].iter() {
@@ -457,12 +480,13 @@ impl Loader {
             }
         }
 
+        let mut applied = 0usize;
         for slot in group.iter().rev() {
             let index = *slot as usize;
             if self.objects[index].flags & DSO_RELOCATED != 0 {
                 continue;
             }
-            reloc::relocate(&self.objects, index, &scope[..scope_len])
+            applied += reloc::relocate(&self.objects, index, &scope[..scope_len])
                 .map_err(|_| DlError::Relocation)?;
             self.objects[index].flags |= DSO_RELOCATED;
             if self.objects[index].map_len != 0 {
@@ -470,7 +494,7 @@ impl Loader {
             }
             load::protect_relro(&self.objects[index]).map_err(|_| DlError::NoMemory)?;
         }
-        Ok(())
+        Ok(applied)
     }
 
     /// Give every TLS-carrying object in `group` a module id.
@@ -581,10 +605,150 @@ impl Loader {
             if dso.map_len != 0 {
                 let _ = Sys::munmap(dso.map_start as *mut u8, dso.map_len);
             }
+            // `plan_into` never condemns an image the kernel mapped, so this
+            // is the loader's own allocation, never the executable's borrowed
+            // `AT_EXECFN`.
             if !dso.path.is_null() {
                 crate::mem::malloc::dealloc(dso.path.cast());
             }
         }
+    }
+
+    /// Record what the search order depends on, before the first load.
+    /// `execfn` is `AT_EXECFN`: the executable's `$ORIGIN` and its `dladdr`
+    /// name.
+    pub fn configure_search(&mut self, execfn: *const u8, library_path: *const u8, secure: bool) {
+        self.objects[EXE as usize].path = execfn as *mut u8;
+        self.library_path = if secure { ptr::null() } else { library_path };
+        self.secure = secure;
+    }
+
+    /// Expand a `DT_NEEDED`/`dlopen` name into a path that exists.
+    ///
+    /// A name with a slash in it is used as written, as every loader does. A
+    /// bare one is looked for in `LD_LIBRARY_PATH`; then, when `requester`
+    /// has no `DT_RUNPATH`, in the `DT_RPATH` of `requester`, of each object
+    /// up its `loader` chain and of the executable (glibc's order); otherwise
+    /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`].
+    fn resolve_path(
+        &self,
+        name: *const u8,
+        requester: u16,
+        out: &mut [u8; DL_PATH_MAX],
+    ) -> Result<*const u8, DlError> {
+        let len = strlen(name);
+        if len == 0 || len >= DL_PATH_MAX {
+            return Err(DlError::NotFound);
+        }
+        // SAFETY: `name` is NUL-terminated at `len`.
+        let bare = unsafe { core::slice::from_raw_parts(name, len) };
+        if bare.contains(&b'/') {
+            return Ok(name);
+        }
+
+        let found = (!self.library_path.is_null()
+            && self.search_list(cstr_bytes(self.library_path), EXE, bare, out))
+            || match self.objects.get(requester as usize) {
+                Some(dso) if self.is_mapped(requester as usize) && !dso.runpath.is_null() => {
+                    self.search_list(cstr_bytes(dso.runpath), requester, bare, out)
+                }
+                _ => self.search_rpaths(requester, bare, out),
+            }
+            || SEARCH_DIRS
+                .iter()
+                .any(|dir| self.compose(dir, EXE, bare, out) && exists(out));
+        if found {
+            Ok(out.as_ptr())
+        } else {
+            Err(DlError::NotFound)
+        }
+    }
+
+    /// `DT_RPATH` from `requester` up its `loader` chain, then the
+    /// executable's if the chain did not pass through it. An object that also
+    /// carries `DT_RUNPATH` contributes no `DT_RPATH`.
+    fn search_rpaths(&self, requester: u16, name: &[u8], out: &mut [u8; DL_PATH_MAX]) -> bool {
+        let mut at = requester;
+        let mut saw_exe = false;
+        // Bounded by the table: a `loader` link always points at an older
+        // slot, but a slot is not trusted to be the proof of that.
+        for _ in 0..DL_MAX_OBJECTS {
+            if !self.is_mapped(at as usize) {
+                break;
+            }
+            saw_exe |= at == EXE;
+            if self.search_rpath_of(at, name, out) {
+                return true;
+            }
+            at = self.objects[at as usize].loader;
+        }
+        !saw_exe && self.is_mapped(EXE as usize) && self.search_rpath_of(EXE, name, out)
+    }
+
+    fn search_rpath_of(&self, index: u16, name: &[u8], out: &mut [u8; DL_PATH_MAX]) -> bool {
+        let dso = &self.objects[index as usize];
+        dso.runpath.is_null()
+            && !dso.rpath.is_null()
+            && self.search_list(cstr_bytes(dso.rpath), index, name, out)
+    }
+
+    /// Try each `:`-separated directory of `list`, with `$ORIGIN` meaning
+    /// `owner`'s directory.
+    fn search_list(
+        &self,
+        list: &[u8],
+        owner: u16,
+        name: &[u8],
+        out: &mut [u8; DL_PATH_MAX],
+    ) -> bool {
+        list.split(|b| *b == b':')
+            .any(|dir| self.compose(dir, owner, name, out) && exists(out))
+    }
+
+    /// Write `dir/name` into `out`, NUL-terminated, expanding `$ORIGIN` and
+    /// `${ORIGIN}` in `dir`. False for an empty or overlong result, and under
+    /// `AT_SECURE` for any `$ORIGIN` or relative directory.
+    fn compose(&self, dir: &[u8], owner: u16, name: &[u8], out: &mut [u8; DL_PATH_MAX]) -> bool {
+        if dir.is_empty() {
+            return false;
+        }
+        let mut at = 0usize;
+        let mut i = 0usize;
+        while i < dir.len() {
+            let token = origin_token(&dir[i..]);
+            if token == 0 {
+                if !push(out, &mut at, &dir[i..i + 1]) {
+                    return false;
+                }
+                i += 1;
+                continue;
+            }
+            if self.secure {
+                return false;
+            }
+            let Some(origin) = self.origin_of(owner) else {
+                return false;
+            };
+            if !push(out, &mut at, origin) {
+                return false;
+            }
+            i += token;
+        }
+        if self.secure && out[0] != b'/' {
+            return false;
+        }
+        push(out, &mut at, b"/") && push(out, &mut at, name) && push(out, &mut at, b"\0")
+    }
+
+    /// The directory of the file `index` was opened by.
+    fn origin_of(&self, index: u16) -> Option<&[u8]> {
+        let path = self.objects.get(index as usize)?.path;
+        if path.is_null() {
+            return None;
+        }
+        let path = cstr_bytes(path);
+        let slash = path.iter().rposition(|b| *b == b'/')?;
+        Some(&path[..slash.max(1)])
     }
 }
 
@@ -640,28 +804,38 @@ pub(crate) unsafe fn call_hook(addr: usize) {
     hook();
 }
 
-/// Expand a `DT_NEEDED`/`dlopen` name into a path that exists.
-///
-/// A name with a slash in it is used as written, as every loader does; a bare
-/// one is searched for in [`SEARCH_DIRS`].
-fn resolve_path(name: *const u8, out: &mut [u8; DL_PATH_MAX]) -> Result<*const u8, DlError> {
-    let len = strlen(name);
-    if len == 0 || len >= DL_PATH_MAX {
-        return Err(DlError::NotFound);
+/// The length of a `$ORIGIN` or `${ORIGIN}` token at the start of `s`, or 0.
+/// The bare form ends where an identifier would, as glibc's does:
+/// `$ORIGINAL` is not one.
+fn origin_token(s: &[u8]) -> usize {
+    if s.starts_with(b"${ORIGIN}") {
+        return 9;
     }
-    if (0..len).any(|i| unsafe { *name.add(i) } == b'/') {
-        return Ok(name);
+    if s.starts_with(b"$ORIGIN")
+        && s.get(7)
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_')
+    {
+        return 7;
     }
-    for dir in SEARCH_DIRS.iter() {
-        if dir.len() + len >= DL_PATH_MAX {
-            continue;
-        }
-        out[..dir.len()].copy_from_slice(dir);
-        unsafe { ptr::copy_nonoverlapping(name, out.as_mut_ptr().add(dir.len()), len) };
-        out[dir.len() + len] = 0;
-        if Sys::access(out.as_ptr(), 0).is_ok() {
-            return Ok(out.as_ptr());
-        }
+    0
+}
+
+fn push(out: &mut [u8; DL_PATH_MAX], at: &mut usize, bytes: &[u8]) -> bool {
+    let end = *at + bytes.len();
+    if end > DL_PATH_MAX {
+        return false;
     }
-    Err(DlError::NotFound)
+    out[*at..end].copy_from_slice(bytes);
+    *at = end;
+    true
+}
+
+fn exists(path: &[u8; DL_PATH_MAX]) -> bool {
+    Sys::access(path.as_ptr(), 0).is_ok()
+}
+
+fn cstr_bytes<'a>(s: *const u8) -> &'a [u8] {
+    // SAFETY: every caller passes a NUL-terminated string that outlives the
+    // process: a string table, the entry stack, or a loader allocation.
+    unsafe { core::slice::from_raw_parts(s, strlen(s)) }
 }

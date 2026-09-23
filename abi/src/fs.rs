@@ -48,6 +48,7 @@ pub const O_APPEND: u32 = 0x400;
 pub const O_DSYNC: u32 = 0x1000;
 pub const O_SYNC: u32 = 0x101000;
 pub const O_DIRECTORY: u32 = 0o200_000;
+pub const O_NOFOLLOW: u32 = 0o400_000;
 
 /// Directory entry returned by the fs_list syscall.
 ///

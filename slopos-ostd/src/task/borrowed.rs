@@ -440,6 +440,24 @@ impl<K, U> TaskInner<K, U> {
         self.fault_signo.store(0, Ordering::Release);
     }
 
+    /// Record who made `signum` pending. Relaxed: the pending bit's release
+    /// store that follows publishes it to the claim that reads it.
+    #[inline]
+    pub fn set_signal_sender(&self, signum: u8, sender: u32) {
+        if let Some(slot) = self.signal_sender.get((signum as usize).wrapping_sub(1)) {
+            slot.store(sender, Ordering::Relaxed);
+        }
+    }
+
+    /// The sender of a pending `signum`, emptying the slot. 0 for a signal the
+    /// kernel raised.
+    #[inline]
+    pub fn take_signal_sender(&self, signum: u8) -> u32 {
+        self.signal_sender
+            .get((signum as usize).wrapping_sub(1))
+            .map_or(0, |slot| slot.swap(0, Ordering::Relaxed))
+    }
+
     // Relaxed throughout: nothing is ordered against these, and `fetch_add`
     // wrapping at 2^32 is immaterial for a tally of yields or migrations.
 

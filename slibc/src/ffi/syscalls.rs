@@ -864,20 +864,33 @@ pub unsafe extern "C" fn mkfifo(_path: *const c_char, _mode: mode_t) -> c_int {
     fail(ENOSYS, -1)
 }
 
-/// Only the regular-file case, which POSIX defines as equivalent to `creat`,
-/// is expressible: there is no syscall that makes a device node or a FIFO.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mknod(path: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
-    let kind = mode & slopos_abi::fs::S_IFMT;
-    if kind != 0 && kind != slopos_abi::fs::S_IFREG {
-        return fail(ENOSYS, -1);
-    }
-    if dev != 0 {
-        return fail(EINVAL, -1);
+    mknodat(AT_FDCWD, path, mode, dev)
+}
+
+/// Only the regular-file case, which POSIX defines as equivalent to `creat`,
+/// is expressible, and `dev` means nothing to it. A device node is refused as
+/// Linux refuses one to a caller without `CAP_MKNOD`, since there is no
+/// syscall that makes one; no filesystem here has a FIFO or socket kind; any
+/// other type is not a node at all.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mknodat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: mode_t,
+    _dev: dev_t,
+) -> c_int {
+    use slopos_abi::fs::{S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSOCK};
+    match mode & S_IFMT {
+        0 | S_IFREG => {}
+        S_IFCHR | S_IFBLK => return fail(EPERM, -1),
+        S_IFIFO | S_IFSOCK => return fail(ENOSYS, -1),
+        _ => return fail(EINVAL, -1),
     }
     let flags =
         (slopos_abi::fs::O_WRONLY | slopos_abi::fs::O_CREAT | slopos_abi::fs::O_EXCL) as c_int;
-    match Sys::open(path as *const u8, flags, mode & !slopos_abi::fs::S_IFMT) {
+    match Sys::openat(dirfd, path as *const u8, flags, mode & !S_IFMT) {
         Ok(fd) => {
             let _ = Sys::close(fd);
             0
@@ -1114,8 +1127,28 @@ const _: () = assert!(size_of::<off_t>() == 8);
 /// `struct timeval`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn utimes(path: *const c_char, times: *const crate::types::timeval) -> c_int {
+    utimes_at(path, times, 0)
+}
+
+/// `lutimes(3)`: [`utimes`] on a symlink itself rather than its target.
+///
+/// # Safety
+/// As [`utimes`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lutimes(
+    path: *const c_char,
+    times: *const crate::types::timeval,
+) -> c_int {
+    utimes_at(path, times, AT_SYMLINK_NOFOLLOW as c_int)
+}
+
+unsafe fn utimes_at(
+    path: *const c_char,
+    times: *const crate::types::timeval,
+    flags: c_int,
+) -> c_int {
     if times.is_null() {
-        return utimensat(AT_FDCWD, path, core::ptr::null(), 0);
+        return utimensat(AT_FDCWD, path, core::ptr::null(), flags);
     }
     for index in 0..2 {
         if !(0..1_000_000).contains(&(*times.add(index)).tv_usec) {
@@ -1132,5 +1165,153 @@ pub unsafe extern "C" fn utimes(path: *const c_char, times: *const crate::types:
             tv_nsec: (*times.add(1)).tv_usec * 1000,
         },
     ];
-    utimensat(AT_FDCWD, path, widened.as_ptr(), 0)
+    utimensat(AT_FDCWD, path, widened.as_ptr(), flags)
 }
+
+const POSIX_FADV_NOREUSE: c_int = 5;
+
+/// `posix_fadvise(2)`. The kernel keeps no per-file access-pattern state, so
+/// advice changes nothing; what POSIX makes observable — a bad descriptor, a
+/// pipe, an unknown advice value, a negative length — is still answered.
+/// Returns the error number rather than setting `errno`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn posix_fadvise(
+    fd: c_int,
+    _offset: off_t,
+    len: off_t,
+    advice: c_int,
+) -> c_int {
+    let mut st = Stat::default();
+    if let Err(e) = Sys::fstat(fd, &raw mut st as *mut u8) {
+        return e.raw();
+    }
+    if st.st_mode & slopos_abi::fs::S_IFMT == slopos_abi::fs::S_IFIFO {
+        return crate::errno::ESPIPE.raw();
+    }
+    if len < 0 || !(0..=POSIX_FADV_NOREUSE).contains(&advice) {
+        return EINVAL.raw();
+    }
+    0
+}
+
+/// `posix_fallocate(3)`: after success, every byte of `[offset, offset+len)`
+/// is backed and the file is at least `offset + len` long. There is no
+/// `fallocate` syscall, so each block in the range is written: a zero byte
+/// where the block reads as zero (it may be a hole) or lies past the end,
+/// and nothing where it already holds data. Returns the error number rather
+/// than setting `errno`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn posix_fallocate(fd: c_int, offset: off_t, len: off_t) -> c_int {
+    if offset < 0 || len <= 0 {
+        return EINVAL.raw();
+    }
+    let Some(end) = offset.checked_add(len) else {
+        return crate::errno::EFBIG.raw();
+    };
+    let mut st = Stat::default();
+    if let Err(e) = Sys::fstat(fd, &raw mut st as *mut u8) {
+        return e.raw();
+    }
+    match st.st_mode & slopos_abi::fs::S_IFMT {
+        slopos_abi::fs::S_IFREG => {}
+        slopos_abi::fs::S_IFIFO => return crate::errno::ESPIPE.raw(),
+        _ => return crate::errno::ENODEV.raw(),
+    }
+    let block = if st.st_blksize > 0 {
+        st.st_blksize
+    } else {
+        4096
+    };
+    let size = st.st_size;
+    let mut at = offset;
+    while at < end {
+        let mut byte = 0u8;
+        let present = at < size
+            && match Sys::pread64(fd, &raw mut byte, 1, at) {
+                Ok(n) => n == 1,
+                Err(e) => return e.raw(),
+            };
+        if !present || byte == 0 {
+            let zero = 0u8;
+            if let Err(e) = Sys::pwrite64(fd, &raw const zero, 1, at) {
+                return e.raw();
+            }
+        }
+        at = (at / block + 1) * block;
+    }
+    if end > size {
+        let zero = 0u8;
+        if let Err(e) = Sys::pwrite64(fd, &raw const zero, 1, end - 1) {
+            return e.raw();
+        }
+    }
+    0
+}
+
+/// Where `shm_open` objects live: a ramfs the kernel mounts at boot.
+const SHM_DIR: &[u8] = b"/dev/shm/";
+const SHM_NAME_MAX: usize = 255;
+
+/// `/dev/shm/<name>` for a POSIX shared-memory name, with glibc's rules: any
+/// leading `/` is dropped, and what remains must be a single nonempty path
+/// component other than `.` and `..`, at most `NAME_MAX` bytes.
+unsafe fn shm_path(
+    name: *const c_char,
+    out: &mut [u8; SHM_DIR.len() + SHM_NAME_MAX + 1],
+) -> Result<(), crate::errno::Errno> {
+    if name.is_null() {
+        return Err(EINVAL);
+    }
+    let mut name = name as *const u8;
+    while *name == b'/' {
+        name = name.add(1);
+    }
+    let len = u_strlen(name);
+    let component = core::slice::from_raw_parts(name, len);
+    if len == 0 || component.contains(&b'/') || component == b"." || component == b".." {
+        return Err(EINVAL);
+    }
+    if len > SHM_NAME_MAX {
+        return Err(crate::errno::ENAMETOOLONG);
+    }
+    out[..SHM_DIR.len()].copy_from_slice(SHM_DIR);
+    out[SHM_DIR.len()..SHM_DIR.len() + len].copy_from_slice(component);
+    out[SHM_DIR.len() + len] = 0;
+    Ok(())
+}
+
+/// `shm_open(3)`: `open` under `/dev/shm`, close-on-exec, never following a
+/// final symlink and never blocking.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shm_open(name: *const c_char, oflag: c_int, mode: mode_t) -> c_int {
+    let mut path = [0u8; SHM_DIR.len() + SHM_NAME_MAX + 1];
+    if let Err(e) = shm_path(name, &mut path) {
+        return fail(e, -1);
+    }
+    let flags = oflag | O_NOFOLLOW | crate::ffi::O_CLOEXEC | crate::ffi::O_NONBLOCK;
+    match Sys::open(path.as_ptr(), flags, mode) {
+        Ok(fd) => fd,
+        Err(e) => fail(e, -1),
+    }
+}
+
+/// `shm_unlink(3)`.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shm_unlink(name: *const c_char) -> c_int {
+    let mut path = [0u8; SHM_DIR.len() + SHM_NAME_MAX + 1];
+    if let Err(e) = shm_path(name, &mut path) {
+        return fail(e, -1);
+    }
+    match Sys::unlink(path.as_ptr()) {
+        Ok(()) => 0,
+        Err(e) => fail(e, -1),
+    }
+}
+
+const O_NOFOLLOW: c_int = 0o400_000;

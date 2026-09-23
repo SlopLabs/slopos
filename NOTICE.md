@@ -197,6 +197,32 @@ data on this system to answer from — and with localization, wide characters,
 the filesystem library and the random device on, because LLVM's own sources
 reach all four.
 
+## The self-hosted toolchain
+
+`just toolchain` cross-builds rustc, cargo, LLVM, clang and lld from the pinned
+rustc source tarball, and `scripts/build_devdisk.sh` stages the result on the
+dev disk (`fs/assets/ext2-devdisk.img`), a volume built for development and not
+distributed. Each keeps its upstream licence: rustc and cargo `MIT OR
+Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
+
+Beyond the forks above, that build applies patches of the same shape, each
+written to be contributed upstream and licensed as the project it patches: the
+cargo fork (`toolchain/cargo/`, `MIT OR Apache-2.0`), rustc's own llvm-project
+port (`toolchain/llvm-rustc/`, `Apache-2.0 WITH LLVM-exception`), and
+`target_os = "slopos"` ports of crates the compiler and cargo depend on
+(`toolchain/crates/`): `getrandom`, `errno` and `stacker` (`MIT OR
+Apache-2.0`), `libloading` (ISC), `nix` (MIT) and `rustix` (`Apache-2.0 WITH
+LLVM-exception OR Apache-2.0 OR MIT`). Every added line is © 2025–2026 The
+SlopOS Authors; the crates themselves remain © their authors, and none is
+vendored into this repository.
+
+`tools/kallsyms`, which builds the kernel's symbol table on the host and in
+the guest, carries a Rust v0 symbol demangler derived from LLVM's
+`llvm/lib/Demangle/RustDemangle.cpp`, and its test data is LLVM's
+`llvm/test/Demangle/rust.test`, copied unmodified: © the llvm-project
+contributors, `Apache-2.0 WITH LLVM-exception`, notice as in the C++ runtime
+section above. The tool runs at build time and is linked into no SlopOS image.
+
 ## Components distributed on the SlopOS ISO
 
 ### Limine bootloader

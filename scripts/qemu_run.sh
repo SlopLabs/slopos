@@ -233,9 +233,9 @@ if [ -n "${CAPACITY_IMG:-}" ] && [ -f "$CAPACITY_IMG" ]; then
 fi
 # The dev disk (virtio-disk4), attached in every mode when DEV_DISK_IMG names
 # an existing file: a cross-built toolchain's workbench volume, which an
-# interactive boot wants as much as a graded run does. Last, because the guest
-# names a virtio device by its position among the attached ones rather than by
-# the id here, so anything earlier would move CAPACITY_IMG's letter.
+# interactive boot wants as much as a graded run does. The guest finds it by
+# its `slopos-dev` label (`mount=LABEL=slopos-dev:/devel`), since it names a
+# virtio device by position; last, so it moves no other disk's letter.
 ADD_DEV_DISK=0
 if [ -n "${DEV_DISK_IMG:-}" ] && [ -f "$DEV_DISK_IMG" ]; then
     ADD_DEV_DISK=1

@@ -34,6 +34,9 @@ struct Dir {
     filled: usize,
     /// Read cursor into `buf`.
     pos: usize,
+    /// The `telldir` answer: the `lseek` cookie that resumes the stream at
+    /// the entry the next `readdir` returns.
+    tell: i64,
     /// The record the last `readdir` handed out. It has to live in the `DIR`
     /// rather than on the stack because the caller keeps the pointer.
     entry: dirent,
@@ -53,6 +56,7 @@ unsafe fn dir_from_fd(fd: c_int) -> *mut DIR {
     (*raw).fd = fd;
     (*raw).filled = 0;
     (*raw).pos = 0;
+    (*raw).tell = 0;
     (*raw).entry = dirent::zeroed();
     // The record buffer is written before it is read, so it is left
     // uninitialised rather than page-zeroed on every `opendir`.
@@ -150,6 +154,7 @@ pub unsafe extern "C" fn readdir(dirp: *mut DIR) -> *mut dirent {
             )
         };
         (*dir).pos += consumed;
+        (*dir).tell = d_off;
 
         let entry = &raw mut (*dir).entry;
         (*entry).d_ino = d_ino;
@@ -195,17 +200,39 @@ pub unsafe extern "C" fn closedir(dirp: *mut DIR) -> c_int {
     }
 }
 
-/// Seek back to the start. The buffered records are dropped rather than
-/// re-walked: the kernel's own cursor is what `lseek` moved.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rewinddir(dirp: *mut DIR) {
     let dir = dirp as *mut Dir;
     if dir.is_null() {
         return;
     }
-    let _ = Sys::lseek((*dir).fd, 0, slopos_abi::syscall::SEEK_SET as i32);
+    seekdir(dirp, 0);
+}
+
+/// `telldir(3)`: the position [`seekdir`] returns to, which is the `d_off`
+/// cookie of the entry last read.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn telldir(dirp: *mut DIR) -> core::ffi::c_long {
+    let dir = dirp as *mut Dir;
+    if dir.is_null() {
+        errno_set(EBADF.raw());
+        return -1;
+    }
+    (*dir).tell
+}
+
+/// `seekdir(3)`. The buffered records are dropped rather than re-walked: the
+/// kernel's own cursor is what `lseek` moved.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seekdir(dirp: *mut DIR, loc: core::ffi::c_long) {
+    let dir = dirp as *mut Dir;
+    if dir.is_null() {
+        return;
+    }
+    let _ = Sys::lseek((*dir).fd, loc, slopos_abi::syscall::SEEK_SET as i32);
     (*dir).filled = 0;
     (*dir).pos = 0;
+    (*dir).tell = loc;
 }
 
 #[unsafe(no_mangle)]

@@ -504,7 +504,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                         );
                     }
                     klog_info!(
-                        "VFS: mounted / (ext2, {}), /tmp (ramfs), /dev (devfs)",
+                        "VFS: mounted / (ext2, {}), /tmp (ramfs), /dev (devfs), /dev/shm (ramfs)",
                         if flags & MOUNT_RDONLY != 0 {
                             "read-only"
                         } else {
@@ -518,7 +518,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                 }
             }
         } else {
-            klog_info!("VFS: mounted /tmp (ramfs), /dev (devfs)");
+            klog_info!("VFS: mounted /tmp (ramfs), /dev (devfs), /dev/shm (ramfs)");
         }
     } else {
         klog_info!("VFS: failed to mount builtin filesystems");
@@ -526,6 +526,55 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     }
 
     0
+}
+
+/// `mount=<source>:<path>`, repeatable and applied in cmdline order, so a later
+/// entry may mount inside an earlier one. Each is an ext2 mount through the
+/// same path `mount(2)` takes; a failure is one line and the boot goes on, as
+/// an absent `root=` device does.
+fn boot_step_cmdline_mounts_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    let Some(cmdline) =
+        slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(crate::early_init::boot_get_cmdline())
+    else {
+        return;
+    };
+    for token in cmdline.split_ascii_whitespace() {
+        if let Some(spec) = token.strip_prefix("mount=") {
+            apply_cmdline_mount(spec);
+        }
+    }
+}
+
+#[inline(never)]
+fn apply_cmdline_mount(spec: &str) {
+    let Some((source, path)) = crate::early_init::parse_mount_option(spec) else {
+        klog_info!(
+            "MOUNT: mount={} ignored (want <device>|LABEL=<label>:/<path>)",
+            spec
+        );
+        return;
+    };
+    match slopos_core::syscall::fs::mount_handlers::mount_apply_at(
+        source.as_bytes(),
+        path.as_bytes(),
+        b"/",
+        b"ext2",
+        0,
+    ) {
+        Ok(()) => {
+            let read_only = slopos_fs::vfs::canon::canonicalise(path.as_bytes())
+                .ok()
+                .and_then(|canon| slopos_fs::vfs::mount_at(canon.as_bytes()))
+                .is_some_and(|m| m.read_only());
+            klog_info!(
+                "MOUNT: {} at {} (ext2, {})",
+                source,
+                path,
+                if read_only { "read-only" } else { "read-write" }
+            );
+        }
+        Err(e) => klog_info!("MOUNT: mount={} failed ({:?}); continuing", spec, e),
+    }
 }
 
 fn boot_step_init_launch(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
@@ -580,6 +629,13 @@ crate::boot_init!(
     boot_step_fs_init,
     fallible,
     flags = boot_init_priority(55)
+);
+crate::boot_init!(
+    BOOT_STEP_CMDLINE_MOUNTS,
+    services,
+    b"cmdline mounts\0",
+    boot_step_cmdline_mounts_fn,
+    flags = boot_init_priority(56)
 );
 crate::boot_init!(
     BOOT_STEP_INIT_LAUNCH,

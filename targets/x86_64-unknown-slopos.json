@@ -10,20 +10,19 @@
   "env": "slibc",
   "executables": true,
   "features": "-mmx,+xsave,+avx,+avx2",
-  "has-rpath": false,
+  "has-rpath": true,
   "has-thread-local": true,
-  "linker": "rust-lld",
-  "linker-flavor": "ld.lld",
+  "linker-flavor": "gnu-cc",
   "llvm-target": "x86_64-unknown-none-elf",
   "max-atomic-width": 64,
   "metadata": {
     "description": "SlopOS",
-    "host_tools": false,
+    "host_tools": true,
     "std": true,
     "tier": 3
   },
+  "no-default-libraries": false,
   "os": "slopos",
-  "panic-strategy": "abort",
   "relocation-model": "pic",
   "stack-probes": {
     "kind": "inline"

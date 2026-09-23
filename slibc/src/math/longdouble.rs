@@ -37,14 +37,15 @@
 //! `long double` crosses text at `double` precision.
 //!
 //! A task starts with FCW `0x037F`, so the x87 rounds to nearest-even at
-//! extended precision and Tier A really is 64 significand bits wide. slibc
-//! offers no `<fenv.h>`, so that mode never changes and `rintl` and
-//! `nearbyintl` answer alike, as `rint` and `nearbyint` already do.
+//! extended precision and Tier A really is 64 significand bits wide.
+//! `fesetround` changes the x87 rounding field along with the MXCSR's, and
+//! `rintl` follows it; `nearbyintl` is `rintl`, so it raises the inexact flag
+//! C says it must not, as `nearbyint` does.
 //!
 //! No body quiets a signalling NaN — `fld tbyte` does not — so an sNaN
-//! argument comes back as itself where C17 F.10 p11 asks for the quiet form.
-//! With no `<fenv.h>` the invalid flag is unobservable, and an sNaN can only
-//! reach here from punned bits.
+//! argument comes back as itself where C17 F.10 p11 asks for the quiet form,
+//! and without raising `FE_INVALID`. An sNaN can only reach here from punned
+//! bits.
 //!
 //! `lrintl`, `llrintl`, `lroundl` and `llroundl` hand back the x87's integer
 //! indefinite, `LONG_MIN`, when the rounded value does not fit; C leaves that

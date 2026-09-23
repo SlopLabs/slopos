@@ -1,0 +1,32 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index ff3dfa9..6106e7a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -64,4 +64,4 @@ features = [
+ [lints.rust.unexpected_cfgs]
+ level = "warn"
+ priority = 0
+-check-cfg = ['cfg(target_os, values("cygwin"))']
++check-cfg = ['cfg(target_os, values("cygwin"))', 'cfg(target_os, values("slopos"))']
+diff --git a/Cargo.toml.orig b/Cargo.toml.orig
+index f3f5ce0..4c58e3b 100644
+--- a/Cargo.toml.orig
++++ b/Cargo.toml.orig
+@@ -36,4 +36,4 @@ std = ["libc/std"]
+ # https://github.com/rust-lang/rust/pull/134999
+ [lints.rust.unexpected_cfgs]
+ level = "warn"
+-check-cfg = ['cfg(target_os, values("cygwin"))']
++check-cfg = ['cfg(target_os, values("cygwin"))', 'cfg(target_os, values("slopos"))']
+diff --git a/src/unix.rs b/src/unix.rs
+index 5536eef..ce89941 100644
+--- a/src/unix.rs
++++ b/src/unix.rs
+@@ -95,6 +95,7 @@ extern "C" {
+             target_os = "redox",
+             target_os = "dragonfly",
+             target_os = "emscripten",
++            target_os = "slopos",
+         ),
+         link_name = "__errno_location"
+     )]

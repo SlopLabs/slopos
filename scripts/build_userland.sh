@@ -35,6 +35,17 @@ BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 # Install the pinned channel and materialise the owned `slopos` sysroot.
 "$SCRIPT_DIR/ensure_toolchain.sh"
 
+# Cargo fingerprints `-Zbuild-std` units by compiler version, not by the
+# sysroot sources, so a fork edit restaged into the owned sysroot would leave
+# the previous std in place.
+SYSROOT_STAMP="$(. "$SCRIPT_DIR/lib/toolchain_pin.sh" && cat "$REPO_ROOT/$TP_SYSROOT_REL/$TP_STAMP_NAME")"
+STD_STAMP="$CARGO_TARGET_DIR/$USERLAND_TRIPLE/.slopos-sysroot-stamp"
+if [ "$(cat "$STD_STAMP" 2>/dev/null)" != "$SYSROOT_STAMP" ]; then
+    rm -rf "${CARGO_TARGET_DIR:?}/$USERLAND_TRIPLE"
+    mkdir -p "$CARGO_TARGET_DIR/$USERLAND_TRIPLE"
+    printf '%s\n' "$SYSROOT_STAMP" >"$STD_STAMP"
+fi
+
 # The C++ runtime's host toolchain, resolved before any Rust builds: a host
 # with no usable LLVM would otherwise learn about it a whole userland later.
 # The probes are then compiled by the toolchain that built the runtime they
@@ -69,7 +80,12 @@ CRT0_OBJ="$(cd "$BUILD_DIR" && pwd)/crt0.o"
 # rejected by rustc's own builtin-target consistency check, and `libc.so` needs
 # the permission. Everything built with these flags is a non-PIE image at a
 # fixed address; the shared objects pin `pic` on their own build line.
-USERLAND_RUSTFLAGS="-C relocation-model=static -C link-arg=$CRT0_OBJ -C link-arg=-Tuserland/userland.ld -C link-arg=--emit-relocs"
+#
+# The target links through `cc`, which is what a program built *on* SlopOS
+# wants. The system's own artifacts carry a hand-written link line instead,
+# so they name the linker, and they keep `panic = abort`.
+SYSTEM_RUSTFLAGS="-C linker=rust-lld -C linker-flavor=ld.lld -C panic=abort"
+USERLAND_RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=static -C link-arg=$CRT0_OBJ -C link-arg=-Tuserland/userland.ld -C link-arg=--emit-relocs"
 
 rm -f "$CRT0_OBJ"
 # `--emit=obj` is a side effect of *compiling*, so a warm fingerprint makes
@@ -175,6 +191,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin seat_test \
         --bin mount_test \
         --bin devdisk_test \
+        --bin selfhost_test \
         --bin shell_script_test \
         --bin stdio_stream_test \
         --bin ip_e2e_test \
@@ -301,6 +318,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/devdisk_test" ]; then
         cp "$RELEASE_DIR/devdisk_test" "$BUILD_DIR/devdisk_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/selfhost_test" ]; then
+        cp "$RELEASE_DIR/selfhost_test" "$BUILD_DIR/selfhost_test.elf"
+    fi
     if [ -f "$RELEASE_DIR/stdio_stream_test" ]; then
         cp "$RELEASE_DIR/stdio_stream_test" "$BUILD_DIR/stdio_stream_test.elf"
     fi
@@ -382,13 +402,13 @@ echo "C archive built: $RELEASE_DIR/libc.a"
 # A `panic = abort` Rust artifact emits no `.eh_frame` at all, and without
 # these an exception ends at frame zero with `_URC_END_OF_STACK` — measured,
 # and indistinguishable from a program with no handler.
-SO_RUSTFLAGS="-C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-tables"
+SO_RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-tables"
 
 # compiler-rt, position independent, for the shared objects. `libc.a` has the
 # same routines and cannot supply them: it is built for the fixed-address
 # images, so its relocations are the ones a `.so` may not carry.
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-RUSTFLAGS="-C relocation-model=pic" \
+RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=pic" \
 $CARGO +slopos build --locked \
     -Zbuild-std=core \
     -Zunstable-options \
@@ -442,7 +462,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --release
 
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    RUSTFLAGS="-C relocation-model=static -C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
+    RUSTFLAGS="$SYSTEM_RUSTFLAGS -C relocation-model=static -C link-arg=$CRT0_OBJ $DL_LINK -C link-arg=--image-base=0x400000 -C link-arg=--dynamic-linker=/lib/ld-slopos.so.1 -C link-arg=--export-dynamic -C link-arg=-znow" \
     $CARGO +slopos build --locked \
         -Zbuild-std=core \
         -Zunstable-options \
@@ -462,6 +482,37 @@ if [ "$TEST_MODE" = "--test" ]; then
     cp "$RELEASE_DIR/dl_probe" "$BUILD_DIR/dl_probe.elf"
 
     echo "Dynamic probe built: $BUILD_DIR/dl_probe.elf $BUILD_DIR/libdltest.so"
+
+    # The library-search probes. One C program linked four ways, so each
+    # carries the DT_RPATH or DT_RUNPATH a dl_test case needs; dl_test lays
+    # copies out under /tmp. `libdlsearch.so` ships as
+    # `libdlsearch-fixture.so` so the /lib fallback can never find it by name:
+    # a case passes only through the path it is about.
+    DLS_CC=("$CLANG" "--target=${USERLAND_TRIPLE}" -nostdlibinc
+        -isystem "${REPO_ROOT}/slibc/include" -std=c11 -O2 -Wall -Wextra -Werror)
+    DLS_FIXTURE="$BUILD_DIR/libdlsearch-fixture.so"
+    "${DLS_CC[@]}" -fPIC -c "${REPO_ROOT}/userland/dltest/search_lib.c" -o "$BUILD_DIR/dlsearch-lib.o"
+    "${DLS_CC[@]}" -fPIC -c "${REPO_ROOT}/userland/dltest/search_dep.c" -o "$BUILD_DIR/dlsearch-dep.o"
+    "${DLS_CC[@]}" -c "${REPO_ROOT}/userland/dltest/search_probe.c" -o "$BUILD_DIR/dlsearch-probe.o"
+    "$LD_LLD" -shared -znow -o "$DLS_FIXTURE" "$BUILD_DIR/dlsearch-lib.o" --soname=libdlsearch.so
+    "$LD_LLD" -shared -znow -o "$BUILD_DIR/libdlrunpath.so" "$BUILD_DIR/dlsearch-dep.o" \
+        --soname=libdlrunpath.so "$DLS_FIXTURE" --enable-new-dtags -rpath '$ORIGIN'
+    "$LD_LLD" -shared -znow -o "$BUILD_DIR/libdlplain.so" "$BUILD_DIR/dlsearch-dep.o" \
+        --soname=libdlplain.so "$DLS_FIXTURE"
+    DLS_LINK=("$CRT0_OBJ" "$BUILD_DIR/dlsearch-probe.o" --eh-frame-hdr -znow
+        --image-base=0x400000 --dynamic-linker=/lib/ld-slopos.so.1
+        -L "$RELEASE_DIR" -lc "$RELEASE_DIR/libbuiltins.a")
+    "$LD_LLD" -o "$BUILD_DIR/dl_search_origin.elf" "${DLS_LINK[@]}" "$DLS_FIXTURE" \
+        --enable-new-dtags -rpath '$ORIGIN/../lib'
+    "$LD_LLD" -o "$BUILD_DIR/dl_search_rpath.elf" "${DLS_LINK[@]}" \
+        --disable-new-dtags -rpath '${ORIGIN}/rpath'
+    "$LD_LLD" -o "$BUILD_DIR/dl_search_runpath.elf" "${DLS_LINK[@]}" \
+        --enable-new-dtags -rpath '$ORIGIN/runpath'
+    # Granted in core/src/exec/grants.rs, so it runs with AT_SECURE: both
+    # entries it would honour otherwise point at a copy it must not load.
+    "$LD_LLD" -o "$BUILD_DIR/dl_secure_probe.elf" "${DLS_LINK[@]}" \
+        --enable-new-dtags -rpath '$ORIGIN/../tmp/dl_secure:/tmp/dl_secure_abs'
+    echo "Search probes built: dl_search_{origin,rpath,runpath} dl_secure_probe"
 
     # The C library's own surface, compiled from C against the generated
     # headers, so a header that disagrees with its export fails here at

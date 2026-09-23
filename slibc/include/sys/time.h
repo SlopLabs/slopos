@@ -20,6 +20,7 @@ struct timeval {
 };
 
 int gettimeofday(struct timeval *tp, void *tz);
+int lutimes(const char *path, const struct timeval *times);
 
 #ifdef __cplusplus
 }

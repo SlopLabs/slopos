@@ -13,7 +13,8 @@ pub const DL_MAX_OBJECTS: usize = 128;
 /// release a subtree.
 pub const DL_MAX_NEEDED: usize = 32;
 
-/// A `DT_NEEDED` slot no dependency has landed in yet.
+/// A `DT_NEEDED` slot no dependency has landed in yet, and the `loader` of an
+/// object nothing loaded (the executable, the interpreter).
 pub const NEEDED_UNRESOLVED: u16 = u16::MAX;
 
 pub const DSO_USED: u32 = 1 << 0;
@@ -42,7 +43,8 @@ pub struct Dso {
     pub map_start: usize,
     pub map_len: usize,
 
-    /// Owned NUL-terminated absolute path, or null for the executable.
+    /// Owned NUL-terminated path the object was opened by. For the executable
+    /// it is the kernel's `AT_EXECFN` string, borrowed; null if there was none.
     pub path: *mut u8,
     /// `DT_SONAME`, else the basename of `path`. Borrowed.
     pub name: *const u8,
@@ -89,6 +91,13 @@ pub struct Dso {
     /// zero is a real index — the executable's.
     pub needed: [u16; DL_MAX_NEEDED],
     pub needed_count: u16,
+
+    /// `DT_RPATH` and `DT_RUNPATH` out of the string table, or null.
+    pub rpath: *const u8,
+    pub runpath: *const u8,
+    /// The object whose `DT_NEEDED` or `dlopen` call loaded this one: a search
+    /// from this one falls back to its `DT_RPATH`.
+    pub loader: u16,
 }
 
 unsafe impl Send for Dso {}
@@ -136,6 +145,9 @@ impl Dso {
             relro_end: 0,
             needed: [NEEDED_UNRESOLVED; DL_MAX_NEEDED],
             needed_count: 0,
+            rpath: ptr::null(),
+            runpath: ptr::null(),
+            loader: NEEDED_UNRESOLVED,
         }
     }
 
@@ -207,6 +219,8 @@ impl Dso {
         let mut pltrelsz = 0usize;
         let mut relrsz = 0usize;
         let mut soname = u32::MAX;
+        let mut rpath = u32::MAX;
+        let mut runpath = u32::MAX;
         let mut flags = 0u64;
 
         let mut p = self.dynamic;
@@ -236,6 +250,8 @@ impl Dso {
                 DT_PREINIT_ARRAY => self.preinit_array = addr as *const usize,
                 DT_PREINIT_ARRAYSZ => self.preinit_count = d.d_val as usize / 8,
                 DT_SONAME => soname = d.d_val as u32,
+                DT_RPATH => rpath = d.d_val as u32,
+                DT_RUNPATH => runpath = d.d_val as u32,
                 DT_FLAGS => flags = d.d_val,
                 DT_SYMBOLIC => self.flags |= DSO_SYMBOLIC,
                 _ => {}
@@ -251,6 +267,12 @@ impl Dso {
         self.relr_count = relrsz / size_of::<usize>();
         if !self.strtab.is_null() && soname != u32::MAX {
             self.name = self.str_at(soname);
+        }
+        if !self.strtab.is_null() && rpath != u32::MAX {
+            self.rpath = self.str_at(rpath);
+        }
+        if !self.strtab.is_null() && runpath != u32::MAX {
+            self.runpath = self.str_at(runpath);
         }
         self.nsyms = self.count_syms();
         self.needed_count = self.count_needed();

@@ -209,6 +209,39 @@ pub unsafe extern "C" fn getpwnam_r(
     getpwuid_r(0, pwd, buf, buflen, result)
 }
 
+static mut PW_ROW: passwd = passwd {
+    pw_name: core::ptr::null_mut(),
+    pw_passwd: core::ptr::null_mut(),
+    pw_uid: 0,
+    pw_gid: 0,
+    pw_gecos: core::ptr::null_mut(),
+    pw_dir: core::ptr::null_mut(),
+    pw_shell: core::ptr::null_mut(),
+};
+static mut PW_ROW_BUF: [u8; PASSWD_BUF_MIN] = [0; PASSWD_BUF_MIN];
+
+/// `getpwnam(3)`: [`getpwnam_r`] into static storage, which POSIX lets the
+/// next call overwrite. A name with no row is `NULL` with `errno` untouched.
+///
+/// # Safety
+/// `name` is a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut passwd {
+    let mut result = core::ptr::null_mut();
+    let rc = getpwnam_r(
+        name,
+        &raw mut PW_ROW,
+        (&raw mut PW_ROW_BUF).cast(),
+        PASSWD_BUF_MIN,
+        &mut result,
+    );
+    if rc != 0 {
+        crate::errno::errno_set(rc);
+        return core::ptr::null_mut();
+    }
+    result
+}
+
 /// `getentropy(3)`. POSIX caps one call at 256 bytes, and the kernel's
 /// generator never blocks, so a short read is a failure rather than a retry.
 ///

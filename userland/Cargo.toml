@@ -225,6 +225,10 @@ name = "devdisk_test"
 path = "src/bin/tests/devdisk_test.rs"
 
 [[bin]]
+name = "selfhost_test"
+path = "src/bin/tests/selfhost_test.rs"
+
+[[bin]]
 name = "buildloop_test"
 path = "src/bin/tests/buildloop_test.rs"
 

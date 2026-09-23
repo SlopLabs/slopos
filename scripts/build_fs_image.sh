@@ -24,6 +24,9 @@ set -euo pipefail
 #                   image holds whatever the guest wrote and is never
 #                   repopulated. The directories and files this script installs
 #                   afterwards are created over that tree.
+#   FS_LABEL      - ext2 volume label (`mke2fs -L`); a preserved image is
+#                   relabelled with `tune2fs -L`. `mount=LABEL=<label>:<path>`
+#                   on the kernel cmdline and `mount(2)` find a volume by it.
 #   VERITY        - `on` (default) appends a v1 integrity trailer, which makes
 #                   the kernel mount the image read-only; `rw` appends a v2
 #                   trailer, which leaves the image writable (a write
@@ -64,6 +67,13 @@ case "$VERITY" in
     on|off|rw) ;;
     *) echo "build_fs_image: VERITY must be 'on', 'off' or 'rw', got '$VERITY'" >&2; exit 2 ;;
 esac
+FS_LABEL="${FS_LABEL:-}"
+
+# Created on every root rather than left to the first writer: the ext2 root
+# does not auto-create parents the way ramfs does, and both roots must agree
+# about whether a path is writable. `/devel` is where the boot mounts the dev
+# disk (`mount=LABEL=slopos-dev:/devel`). Mirrors gen_initramfs.py's EMPTY_DIRS.
+ROOT_DIRS=(/etc /var /home /devel)
 
 # macOS: extend PATH to find e2fsprogs tools installed via Homebrew
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -97,6 +107,7 @@ STAMP_PATH="${IMAGE_PATH}.stamp"
 # image already carries these binaries and assets, so it needs no work.
 build_stamp() {
     echo "size=$FS_IMAGE_SIZE verity=$VERITY journal=$FS_JOURNAL_SIZE links=${COREUTILS_LINKS:-}"
+    echo "label=$FS_LABEL dirs=${ROOT_DIRS[*]}"
     for bin in "${BINS[@]}"; do
         printf '%s ' "$bin"
         sha256sum "${BUILD_DIR}/${bin}.elf" 2>/dev/null | cut -d' ' -f1 || echo missing
@@ -252,11 +263,15 @@ if [ "$PRESERVE_FS_IMAGE" = "1" ] && [ -f "$IMAGE_PATH" ]; then
     # reports an image missing a binary as current.
     rm -f "$STAMP_PATH"
     REFRESHED_BINARIES=1
+    if [ -n "$FS_LABEL" ]; then
+        tune2fs -L "$FS_LABEL" "$IMAGE_PATH" >/dev/null
+    fi
 else
     echo "Rebuilding ext2 image at $IMAGE_PATH ($FS_IMAGE_SIZE)"
     rm -f "$IMAGE_PATH" "$STAMP_PATH"
     truncate -s "$FS_IMAGE_SIZE" "$IMAGE_PATH"
     MKFS_ARGS=(-F -b 4096)
+    [ -z "$FS_LABEL" ] || MKFS_ARGS+=(-L "$FS_LABEL")
     [ -z "${FS_INODE_RATIO:-}" ] || MKFS_ARGS+=(-i "$FS_INODE_RATIO")
     if [ -n "${FS_POPULATE_DIR:-}" ]; then
         if [ ! -d "$FS_POPULATE_DIR" ]; then
@@ -271,12 +286,9 @@ fi
 
 mkdir_p /bin
 mkdir_p /sbin
-# Created here rather than left to the first writer: the ext2 root does not
-# auto-create parents the way ramfs does, and both roots must agree about
-# whether a path is writable. Mirrors gen_initramfs.py's EMPTY_DIRS.
-mkdir_p /etc
-mkdir_p /var
-mkdir_p /home
+for dir in "${ROOT_DIRS[@]}"; do
+    mkdir_p "$dir"
+done
 
 # The metadata log (fs/src/ext2/journal.rs). A plain preallocated file, so
 # `e2fsck` sees a file and the format carries no feature bit; the seal is what

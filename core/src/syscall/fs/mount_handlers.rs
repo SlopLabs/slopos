@@ -2,9 +2,9 @@
 //!
 //! `mount(2)` cannot conjure a `&'static dyn FileSystem`, so the mountable
 //! set is closed: a pooled ramfs instance, the devfs singleton, or a pooled
-//! ext2 instance over a named block device. Anything else is `ENODEV`, and
-//! since no member of that set reads mount options, a non-null `data` is
-//! `EINVAL`.
+//! ext2 instance over a block device named directly or by `LABEL=<volume
+//! label>`. Anything else is `ENODEV`, and since no member of that set reads
+//! mount options, a non-null `data` is `EINVAL`.
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{MNT_DETACH, MOUNT_FSTYPE_MAX, MS_RDONLY};
@@ -59,8 +59,10 @@ fn vfs_errno(e: VfsError) -> Errno {
     e.to_errno()
 }
 
+/// The whole of `mount(2)` after its capability check; the boot step that
+/// applies `mount=` goes through here too, so both refuse the same targets.
 #[inline(never)]
-pub(crate) fn mount_apply_at(
+pub fn mount_apply_at(
     source: &[u8],
     target: &[u8],
     cwd: &[u8],

@@ -16,6 +16,7 @@
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fenv.h>
 #include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>

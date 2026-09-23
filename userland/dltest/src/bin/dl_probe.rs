@@ -1,5 +1,4 @@
-//! `/bin/dl_probe` — a dynamically linked program, and the only one in the
-//! tree.
+//! `/bin/dl_probe` — a dynamically linked Rust program.
 //!
 //! It reaches the C library exclusively through `libc.so`: no `slopos-slibc`
 //! rlib, no `std`, nothing but `extern "C"` declarations and `crt0.o`. That

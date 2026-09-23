@@ -107,8 +107,10 @@ pub fn vfs_open_flags_at(
                 return Err(VfsError::AlreadyExists);
             }
             let stat = resolved.fs.stat(resolved.inode)?;
-            if stat.file_type == FileType::Directory {
-                return Err(VfsError::IsDirectory);
+            match stat.file_type {
+                FileType::Directory => return Err(VfsError::IsDirectory),
+                FileType::Symlink => return Err(VfsError::TooManySymlinks),
+                _ => {}
             }
             // Refused at open, not at the first write: a descriptor obtained
             // before the check is a descriptor that outlives it.

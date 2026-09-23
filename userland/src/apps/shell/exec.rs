@@ -353,7 +353,7 @@ fn run_list(list: &List) -> Outcome {
             super::set_last_exit_code(status);
             continue;
         }
-        let outcome = run_and_or(&item.andor);
+        let (outcome, errexit_applies) = run_and_or(&item.andor);
         status = outcome.status;
         super::set_last_exit_code(status);
         if outcome.flow != Flow::Normal {
@@ -368,7 +368,11 @@ fn run_list(list: &List) -> Outcome {
                 flow: Flow::Exit,
             };
         }
-        if funcs::errexit() && status != 0 && COND_DEPTH.load(Ordering::Relaxed) == 0 {
+        if funcs::errexit()
+            && errexit_applies
+            && status != 0
+            && COND_DEPTH.load(Ordering::Relaxed) == 0
+        {
             return Outcome {
                 status,
                 flow: Flow::Exit,
@@ -378,10 +382,13 @@ fn run_list(list: &List) -> Outcome {
     Outcome::normal(status)
 }
 
-fn run_and_or(and_or: &AndOr) -> Outcome {
+/// The outcome, and whether `set -e` may act on its status: POSIX exempts
+/// every command of an and-or list but the last, and a `!` pipeline.
+fn run_and_or(and_or: &AndOr) -> (Outcome, bool) {
     let mut outcome = run_pipeline_cond(&and_or.first, !and_or.rest.is_empty());
+    let mut errexit_applies = and_or.rest.is_empty() && !and_or.first.negate;
     if outcome.flow != Flow::Normal {
-        return outcome;
+        return (outcome, errexit_applies);
     }
     for (index, (op, pipeline)) in and_or.rest.iter().enumerate() {
         let should_run = match op {
@@ -393,11 +400,12 @@ fn run_and_or(and_or: &AndOr) -> Outcome {
         }
         let last = index + 1 == and_or.rest.len();
         outcome = run_pipeline_cond(pipeline, !last);
+        errexit_applies = last && !pipeline.negate;
         if outcome.flow != Flow::Normal {
-            return outcome;
+            return (outcome, errexit_applies);
         }
     }
-    outcome
+    (outcome, errexit_applies)
 }
 
 /// A pipeline whose status another operator is about to judge is a condition,

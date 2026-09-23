@@ -5,8 +5,8 @@ use core::ptr;
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{
-    O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_WRONLY, S_IFLNK, S_IFMT, S_IFREG, UIO_MAXIOV,
-    USER_PATH_MAX, UserFsStat, UserIovec,
+    O_CREAT, O_DIRECTORY, O_NOFOLLOW, O_RDONLY, O_RDWR, O_WRONLY, S_IFLNK, S_IFMT, S_IFREG,
+    UIO_MAXIOV, USER_PATH_MAX, UserFsStat, UserIovec,
 };
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
 use slopos_abi::syscall::{LOCK_EX, LOCK_NB, LOCK_UN, SEEK_CUR, SEEK_SET};
@@ -358,6 +358,48 @@ pub fn test_fstatat_nofollow_reports_the_link() -> TestResult {
 
 slopos_testing::stest!(
     name = test_fstatat_nofollow_reports_the_link,
+    suite = syscall_fs_phase1
+);
+
+/// `O_NOFOLLOW` refuses a final symlink with `ELOOP` and still opens the file
+/// it would have named, which is what keeps `shm_open` from being redirected
+/// by a link planted in `/dev/shm`.
+pub fn test_open_nofollow_refuses_a_final_symlink() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not build the fixture");
+    };
+    let table = scratch.table;
+    let Some(target) = make_file(table, b"nofollow_target", b"hello") else {
+        return fail!("could not create the link target");
+    };
+    let link = join(b"nofollow_link");
+    let _ = file_unlink_at(&link, b"/");
+    if file_symlink_at(&target, &link, b"/") != 0 {
+        return fail!("this filesystem refused a symlink");
+    }
+
+    let through_link =
+        crate::syscall::fs::at_handlers::open_at(table, &link, b"/", O_RDONLY | O_NOFOLLOW, 0);
+    let direct =
+        crate::syscall::fs::at_handlers::open_at(table, &target, b"/", O_RDONLY | O_NOFOLLOW, 0);
+    if let Ok(fd) = direct {
+        let _ = file_close_fd(table, fd as i32);
+    }
+    let _ = file_unlink_at(&link, b"/");
+    let _ = file_unlink_at(&target, b"/");
+
+    assert_eq_test!(
+        through_link.err(),
+        Some(Errno::ELOOP),
+        "O_NOFOLLOW followed a final symlink"
+    );
+    assert_test!(direct.is_ok(), "O_NOFOLLOW refused a regular file");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_open_nofollow_refuses_a_final_symlink,
     suite = syscall_fs_phase1
 );
 

@@ -12,6 +12,7 @@
 //! wrappers: a `long double` prototype lives in `math.h`'s `raw:` block,
 //! which that check cannot see either way, so the macro trades nothing.
 
+pub mod fenv;
 pub mod longdouble;
 
 use core::ffi::{c_char, c_int, c_long, c_longlong};
@@ -549,9 +550,9 @@ pub extern "C" fn scalblnf(x: f32, n: c_long) -> f32 {
     libm::scalbnf(x, saturate_exponent(n))
 }
 
-/// slibc offers no `<fenv.h>`, so the rounding direction is always the
-/// default one and `nearbyint` and `rint` answer alike. The two differ only
-/// in whether the inexact exception is raised, which nothing here can read.
+/// `rint`, which follows the rounding mode `fesetround` sets: `libm`'s
+/// add-and-subtract runs in whatever mode the MXCSR holds. C also asks
+/// `nearbyint` not to raise `FE_INEXACT`, which this one does.
 #[unsafe(no_mangle)]
 pub extern "C" fn nearbyint(x: f64) -> f64 {
     libm::rint(x)

@@ -26,8 +26,8 @@ use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
-    task_find_by_id, task_for_each_active, task_group_signal, task_group_stop, task_kill_and_wake,
-    task_resume_if_stopped, task_signal_post, task_terminate,
+    task_find_by_id, task_for_each_active, task_group_signal_from, task_group_stop,
+    task_kill_and_wake, task_resume_if_stopped, task_signal_post_from, task_terminate,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -259,6 +259,11 @@ define_syscall!(syscall_kill
     -> SyscallResult
 {
     let caller_id = ctx.task_id();
+    // `si_pid` names the sending process, as `getpid` would.
+    let sender = match ctx.task().tgid {
+        INVALID_TASK_ID => caller_id,
+        tgid => tgid,
+    };
 
     if raw_pid_arg < i32::MIN as i64 || raw_pid_arg > i32::MAX as i64 {
         return SyscallResult::Err(Errno::ESRCH);
@@ -291,7 +296,7 @@ define_syscall!(syscall_kill
         // POSIX `kill(pid)` names a *process*: the signal reaches every thread
         // in the group. The permission relation is answered once, on the named
         // task — a thread-group fan-out crosses no session.
-        if task_group_signal(target.id(), signum) == 0 {
+        if task_group_signal_from(target.id(), signum, sender) == 0 {
             return SyscallResult::Err(Errno::ESRCH);
         }
         return SyscallResult::Ok(0);
@@ -360,7 +365,7 @@ define_syscall!(syscall_kill
         };
 
         if job_control {
-            if task_group_signal(*target_id, signum) != 0 {
+            if task_group_signal_from(*target_id, signum, sender) != 0 {
                 signaled += 1;
             }
             continue;
@@ -371,7 +376,7 @@ define_syscall!(syscall_kill
             // refuses a handler, so SIGKILL is always deliverable. The kill
             // flag is what a target parked in a blocking primitive sees: it
             // unwinds by returning rather than being abandoned mid-stack.
-            let _ = task_signal_post(&target, SIGKILL);
+            let _ = task_signal_post_from(&target, SIGKILL, sender);
             task_kill_and_wake(&target);
             // A stopped target reaches no boundary at which to act on the kill
             // flag until something resumes it.
@@ -381,7 +386,7 @@ define_syscall!(syscall_kill
         }
 
         // POSIX: kill() succeeds even when the disposition discards the signal.
-        if task_signal_post(&target, signum) {
+        if task_signal_post_from(&target, signum, sender) {
             let _ = unblock_task(&target);
         }
         signaled += 1;
@@ -716,6 +721,8 @@ enum SignalDisposition {
         saved_mask: SigSet,
         si_code: i32,
         si_addr: u64,
+        /// The sending process for `si_pid`, or 0 when the kernel raised it.
+        sender: u32,
     },
 }
 
@@ -738,6 +745,9 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
 
     let signum = (deliverable.trailing_zeros() + 1) as u8;
     let bit = sig_bit(signum);
+    // Taken before the bit clears: a post finds the bit still set and drops
+    // its signal, so the sender read here belongs to this delivery.
+    let sender = task_ref.take_signal_sender(signum);
     task_ref.signal_pending.fetch_and(!bit, Ordering::AcqRel);
 
     let idx = (signum - 1) as usize;
@@ -786,6 +796,7 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
         saved_mask: task_ref.signal_blocked(),
         si_code,
         si_addr,
+        sender,
     }
 }
 
@@ -794,11 +805,15 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
 /// `#[inline(never)]`: 128 bytes of `siginfo` must materialise in *this*
 /// frame, not in a delivery frame already near the 2 KiB ceiling.
 #[inline(never)]
-fn push_siginfo(addr: u64, signum: u8, si_code: i32, si_addr: u64) -> bool {
+fn push_siginfo(addr: u64, signum: u8, si_code: i32, si_addr: u64, sender: u32) -> bool {
     let Ok(ptr) = MmUserPtr::<UserSiginfo>::try_new(addr) else {
         return false;
     };
-    let info = UserSiginfo::new(signum as i32, si_code, si_addr);
+    let info = if si_code == SI_USER {
+        UserSiginfo::sent(signum as i32, si_code, sender, 0)
+    } else {
+        UserSiginfo::new(signum as i32, si_code, si_addr)
+    };
     copy_to_user(ptr, &info).is_ok()
 }
 
@@ -921,41 +936,43 @@ fn deliver_pending_signal_core(
 ) {
     let task_ref = current.task();
 
-    let (signum, bit, action, saved_mask, si_code, si_addr) = match claim_pending_signal(task_ref) {
-        SignalDisposition::Done => {
-            // A task marked for death leaves here rather than returning to
-            // userland; the mark is deliberately not a signal. This frame
-            // returns to CPL3 off an exception stack and owns no Rust value,
-            // so abandoning it across the switch leaks nothing.
-            if task_ref.is_killed() {
-                let task_id = task_ref.task_id;
+    let (signum, bit, action, saved_mask, si_code, si_addr, sender) =
+        match claim_pending_signal(task_ref) {
+            SignalDisposition::Done => {
+                // A task marked for death leaves here rather than returning to
+                // userland; the mark is deliberately not a signal. This frame
+                // returns to CPL3 off an exception stack and owns no Rust value,
+                // so abandoning it across the switch leaks nothing.
+                if task_ref.is_killed() {
+                    let task_id = task_ref.task_id;
+                    if task_terminate(task_id) == 0 {
+                        schedule();
+                    }
+                }
+                return;
+            }
+            SignalDisposition::Terminate(task_id) => {
                 if task_terminate(task_id) == 0 {
                     schedule();
                 }
+                return;
             }
-            return;
-        }
-        SignalDisposition::Terminate(task_id) => {
-            if task_terminate(task_id) == 0 {
-                schedule();
+            SignalDisposition::Stop { signum } => {
+                // Parks this task's whole thread group, this task last, and does
+                // not return until a `SIGCONT` resumes it.
+                let _ = task_group_stop(task_ref.task_id, signum);
+                return;
             }
-            return;
-        }
-        SignalDisposition::Stop { signum } => {
-            // Parks this task's whole thread group, this task last, and does
-            // not return until a `SIGCONT` resumes it.
-            let _ = task_group_stop(task_ref.task_id, signum);
-            return;
-        }
-        SignalDisposition::Handle {
-            signum,
-            bit,
-            action,
-            saved_mask,
-            si_code,
-            si_addr,
-        } => (signum, bit, action, saved_mask, si_code, si_addr),
-    };
+            SignalDisposition::Handle {
+                signum,
+                bit,
+                action,
+                saved_mask,
+                si_code,
+                si_addr,
+                sender,
+            } => (signum, bit, action, saved_mask, si_code, si_addr, sender),
+        };
 
     let regs_snapshot = regs.snapshot();
     let fault_signal = task_ref.fault_siginfo_for(signum).is_some();
@@ -973,6 +990,7 @@ fn deliver_pending_signal_core(
             force_death_on_frame_fault(task_ref);
             return;
         }
+        task_ref.set_signal_sender(signum, sender);
         task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
     };
 
@@ -1007,6 +1025,7 @@ fn deliver_pending_signal_core(
             signum,
             si_code,
             si_addr,
+            sender,
         ) || !push_ucontext(
             sigframe_ucontext_addr(sigframe_addr),
             &regs_snapshot,

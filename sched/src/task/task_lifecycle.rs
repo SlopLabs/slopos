@@ -2042,7 +2042,7 @@ fn has_user_handler(member: &Task, signum: u8) -> bool {
 ///
 /// The `WUNTRACED` report is published once per stop, by the last member the
 /// stop has to park.
-fn task_group_stop_members(tid: u32, stop_signal: u8) -> usize {
+fn task_group_stop_members(tid: u32, stop_signal: u8, sender: u32) -> usize {
     let bit = slopos_abi::signal::sig_bit(stop_signal);
     if bit == 0 {
         return 0;
@@ -2070,7 +2070,7 @@ fn task_group_stop_members(tid: u32, stop_signal: u8) -> usize {
         let _ = member.take_continue_report();
 
         if catchable && has_user_handler(member, stop_signal) {
-            if slopos_ostd::task::ops::task_signal_post(member, stop_signal) {
+            if slopos_ostd::task::ops::task_signal_post_from(member, stop_signal, sender) {
                 let _ = scheduler::unblock_task(member);
             }
             acted += 1;
@@ -2147,7 +2147,7 @@ fn task_group_stop_members(tid: u32, stop_signal: u8) -> usize {
 /// Job control. Idempotent; see [`task_group_stop_members`] for the mechanics
 /// and the caller-parks-last rule.
 pub fn task_group_stop(tid: u32, stop_signal: u8) -> bool {
-    task_group_stop_members(tid, stop_signal) != 0
+    task_group_stop_members(tid, stop_signal, 0) != 0
 }
 
 /// Resume every stopped member of `tid`'s thread group, and retire any pending
@@ -2199,13 +2199,21 @@ pub fn task_group_continue(tid: u32) -> bool {
 /// here rather than at a delivery point: a stopped task reaches no delivery
 /// point, so a `SIGCONT` that only pended could never resume it.
 pub fn task_group_signal(tid: u32, signum: u8) -> usize {
+    task_group_signal_from(tid, signum, 0)
+}
+
+/// [`task_group_signal`] for a signal a process sent; `sender` is its
+/// thread-group id, reported to a handler as `si_pid`.
+pub fn task_group_signal_from(tid: u32, signum: u8, sender: u32) -> usize {
     if slopos_abi::signal::sig_bit(signum) == 0 {
         return 0;
     }
     let tgid = thread_group_of(tid);
 
     match slopos_abi::signal::sig_default_action(signum) {
-        slopos_abi::signal::SigDefault::Stop => return task_group_stop_members(tid, signum),
+        slopos_abi::signal::SigDefault::Stop => {
+            return task_group_stop_members(tid, signum, sender);
+        }
         slopos_abi::signal::SigDefault::Continue => {
             let _ = task_group_continue(tid);
         }
@@ -2220,7 +2228,7 @@ pub fn task_group_signal(tid: u32, signum: u8) -> usize {
         if signum == slopos_abi::signal::SIGKILL {
             // Always deliverable: `SIG_UNCATCHABLE` is stripped from every
             // mask and refused by `rt_sigaction`.
-            let _ = slopos_ostd::task::ops::task_signal_post(member, signum);
+            let _ = slopos_ostd::task::ops::task_signal_post_from(member, signum, sender);
             slopos_ostd::task::ops::task_kill_and_wake(member);
             // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume
             // a stopped process, and a stopped task reaches no delivery point
@@ -2229,7 +2237,7 @@ pub fn task_group_signal(tid: u32, signum: u8) -> usize {
             signaled += 1;
             return;
         }
-        if slopos_ostd::task::ops::task_signal_post(member, signum) {
+        if slopos_ostd::task::ops::task_signal_post_from(member, signum, sender) {
             let _ = scheduler::unblock_task(member);
         }
         // POSIX: `kill` succeeds even when the disposition discards the signal.

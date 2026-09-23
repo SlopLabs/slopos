@@ -127,7 +127,13 @@ struct EntryStack {
     phnum: usize,
     phent: usize,
     entry: usize,
+    execfn: *const u8,
+    secure: bool,
     envp: *const *const core::ffi::c_char,
+    /// The value of `LD_LIBRARY_PATH`, or null.
+    library_path: *const u8,
+    /// `LD_DEBUG` names `statistics`.
+    statistics: bool,
 }
 
 unsafe fn read_auxv(stack: *const usize) -> EntryStack {
@@ -149,8 +155,24 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
         phnum: 0,
         phent: 0,
         entry: 0,
+        execfn: ptr::null(),
+        secure: false,
         envp: envp as *const *const core::ffi::c_char,
+        library_path: ptr::null(),
+        statistics: false,
     };
+    let mut e = envp;
+    while *e != 0 {
+        let var = *e as *const u8;
+        if let Some(value) = env_value(var, b"LD_LIBRARY_PATH=") {
+            out.library_path = value;
+        } else if let Some(value) = env_value(var, b"LD_DEBUG=") {
+            out.statistics = super::cstr_bytes(value)
+                .split(|c| matches!(c, b',' | b':' | b' '))
+                .any(|opt| opt == b"statistics");
+        }
+        e = e.add(1);
+    }
     loop {
         let tag = *p as u64;
         let val = *p.add(1);
@@ -162,6 +184,8 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
             slopos_abi::auxv::AT_PHNUM => out.phnum = val,
             slopos_abi::auxv::AT_PHENT => out.phent = val,
             slopos_abi::auxv::AT_ENTRY => out.entry = val,
+            slopos_abi::auxv::AT_EXECFN => out.execfn = val as *const u8,
+            slopos_abi::auxv::AT_SECURE => out.secure = val != 0,
             _ => {}
         }
         p = p.add(2);
@@ -173,6 +197,16 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
 /// already mapped, so the dependency is satisfied by this object rather than
 /// by a second copy of it.
 const LIBC_SONAME: &[u8] = b"libc.so\0";
+
+/// The value of `var` if it is `key` (which includes the `=`).
+unsafe fn env_value(var: *const u8, key: &[u8]) -> Option<*const u8> {
+    for (i, k) in key.iter().enumerate() {
+        if *var.add(i) != *k {
+            return None;
+        }
+    }
+    Some(var.add(key.len()))
+}
 
 unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlError> {
     let aux = read_auxv(stack);
@@ -197,6 +231,7 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
     let exe = dl
         .adopt(exe_base, exe_phdr, aux.phnum, ptr::null(), false)
         .ok_or(DlError::TooManyObjects)?;
+    dl.configure_search(aux.execfn, aux.library_path, aux.secure);
 
     let self_ehdr = base as *const Ehdr;
     dl.adopt(
@@ -237,7 +272,10 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
     // below the thread pointer, and that distance is what registration
     // assigns.
     dl.assign_tls(&group[..count], true)?;
-    dl.relocate_group(&group[..count])?;
+    let applied = dl.relocate_group(&group[..count])?;
+    if aux.statistics && !aux.secure {
+        report_statistics(applied, count);
+    }
 
     let (tls_base, tcb) = crate::thread::tls::alloc_thread_tls();
     if tcb.is_null() {
@@ -261,6 +299,49 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
     super::run_init(&group[..count]);
 
     Ok(aux.entry)
+}
+
+/// `LD_DEBUG=statistics`, in glibc's spirit: what binding the startup set
+/// cost, since every relocation is bound eagerly before `main`.
+fn report_statistics(relocations: usize, objects: usize) {
+    let mut line = [0u8; 96];
+    let mut at = 0usize;
+    for part in [
+        Stat::Text(b"ld.so: "),
+        Stat::Number(relocations),
+        Stat::Text(b" relocations bound in "),
+        Stat::Number(objects),
+        Stat::Text(b" objects\n"),
+    ] {
+        match part {
+            Stat::Text(text) => {
+                line[at..at + text.len()].copy_from_slice(text);
+                at += text.len();
+            }
+            Stat::Number(mut n) => {
+                let mut digits = [0u8; 20];
+                let mut len = 0usize;
+                loop {
+                    digits[len] = b'0' + (n % 10) as u8;
+                    len += 1;
+                    n /= 10;
+                    if n == 0 {
+                        break;
+                    }
+                }
+                for d in digits[..len].iter().rev() {
+                    line[at] = *d;
+                    at += 1;
+                }
+            }
+        }
+    }
+    let _ = Sys::write(2, line.as_ptr(), at);
+}
+
+enum Stat {
+    Text(&'static [u8]),
+    Number(usize),
 }
 
 /// Report and die. The program has no interpreter, so there is nothing to

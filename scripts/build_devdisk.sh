@@ -6,11 +6,11 @@ set -euo pipefail
 # Usage: build_devdisk.sh <image_path> <build_dir>
 #
 # The layout is a target sysroot — `lib/`, `include/`, `include/c++/v1/`,
-# `licenses/` — with whatever `TOOLCHAIN_STAGE` holds copied over the top, so a
-# `bin/` carrying rustc, cargo, clang and rust-lld lands beside the libraries
-# those programs link against. A guest that mounts this volume has everything
-# `x86_64-unknown-slopos` needs to compile and link a program, which the ISO's
-# read-only appliance root deliberately does not carry.
+# `licenses/` — plus, on a new volume, `src/slopos` with the toolchain
+# `TOOLCHAIN_STAGE` holds at `src/slopos/third_party/rust-slopos`. A guest
+# that mounts this volume has everything `x86_64-unknown-slopos` needs to
+# compile and link a program, which the ISO's read-only appliance root
+# deliberately does not carry.
 #
 # The image is `VERITY=off PRESERVE_FS_IMAGE=1`, which is the whole difference
 # between this and the shipped root: a dev disk is a workbench, so the guest
@@ -25,20 +25,25 @@ set -euo pipefail
 # in the guest.
 #
 # Environment:
-#   DEV_DISK_SIZE - volume size (default: 2G). A cross-built rustc plus cargo
-#                   is ~1 GB of `bin/` and `lib/rustlib/`, the sysroot below
-#                   ~19 MB and the seeded source ~51 MB.
+#   DEV_DISK_SIZE - volume size (default: 4G). A cross-built toolchain with
+#                   clang is ~0.9 GB, the seeded source ~0.05 GB, and each
+#                   kernel variant built in the guest ~0.41 GB. A preserved
+#                   smaller volume is grown in place with `resize2fs`.
 #   DEV_DISK_INODE_RATIO - bytes of volume per inode (default: 16384, the
 #                   mke2fs default). The C++ headers alone are ~1000 files.
-#   TOOLCHAIN_STAGE - a directory holding a cross-built toolchain, copied over
-#                   the staged sysroot. Unset stages the sysroot alone, which
-#                   is what a run before the toolchain exists wants.
+#   TOOLCHAIN_STAGE - a cross-built toolchain prefix, staged on a new volume
+#                   and graded against a preserved one. Unset stages the
+#                   sysroot alone, which is what a run before the toolchain
+#                   exists wants.
 #
 # A new volume is also seeded with `src/slopos`: the committed HEAD, the
 # vendored crates, a `.cargo/config.toml` that reads them with no registry, and
 # `.slopos-base`, the commit `scripts/export_devdisk.sh` diffs the guest's
 # edits against. A preserved volume keeps the guest's tree, so the marker
 # records only that it is there.
+#
+# The volume is labelled `slopos-dev`: the guest's disk letters are probe
+# order, so the boot finds it with `mount=LABEL=slopos-dev:/devel`.
 
 SELF="build_devdisk"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +52,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_PATH="${1:?Usage: build_devdisk.sh <image_path> <build_dir>}"
 BUILD_DIR="${2:?Usage: build_devdisk.sh <image_path> <build_dir>}"
 
-DEV_DISK_SIZE="${DEV_DISK_SIZE:-2G}"
+DEV_DISK_SIZE="${DEV_DISK_SIZE:-4G}"
+DEV_DISK_LABEL="slopos-dev"
 DEV_DISK_INODE_RATIO="${DEV_DISK_INODE_RATIO:-16384}"
 
 USERLAND_TARGET="${USERLAND_TARGET:-x86_64-unknown-slopos}"
@@ -134,19 +140,23 @@ seed_source() {
 }
 [ -f "$IMAGE_PATH" ] || seed_source
 
-if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
+# Where the host keeps its owned sysroot: cargo hashes a path source inside the
+# workspace by its workspace-relative path, so std's crates get the same
+# identity on both machines only if they sit at the same place in both trees.
+TOOLCHAIN_REL="src/slopos/third_party/rust-slopos"
+if [ -n "${TOOLCHAIN_STAGE:-}" ] && [ ! -f "$IMAGE_PATH" ]; then
     [ -d "$TOOLCHAIN_STAGE" ] ||
         die "TOOLCHAIN_STAGE='$TOOLCHAIN_STAGE' is not a directory"
-    # Hardlinks when the stage shares a filesystem with the build directory: a
-    # cross-built toolchain is ~1 GB and this runs on every dev-disk build.
-    cp -alf "$TOOLCHAIN_STAGE/." "$STAGE/" 2>/dev/null ||
-        cp -af "$TOOLCHAIN_STAGE/." "$STAGE/"
+    mkdir -p "$STAGE/$TOOLCHAIN_REL"
+    cp -alf "$TOOLCHAIN_STAGE/." "$STAGE/$TOOLCHAIN_REL/" 2>/dev/null ||
+        cp -af "$TOOLCHAIN_STAGE/." "$STAGE/$TOOLCHAIN_REL/"
 fi
 
 echo "$SELF: staged $(du -sh "$STAGE" | cut -f1) for $IMAGE_PATH"
 
 FS_IMAGE_SIZE="$DEV_DISK_SIZE" \
 FS_INODE_RATIO="$DEV_DISK_INODE_RATIO" \
+FS_LABEL="$DEV_DISK_LABEL" \
 VERITY=off \
 PRESERVE_FS_IMAGE=1 \
 FS_POPULATE_DIR="$STAGE" \
@@ -178,6 +188,32 @@ stale() {
     exit 1
 }
 
+# Subdirectories get a `dir` line rather than a recursive walk: `lib/rustlib`
+# is thousands of files, and one `debugfs` call each would cost more than the
+# image build. Symlinks are skipped, since the guest's stat follows them. A
+# toolchain entry whose size differs from the one staged this run is a
+# preserved volume carrying an older toolchain.
+inventory() {
+    local rel_dir="$1" local_dir="$2" check_size="$3" entry rel size
+    [ -d "$local_dir" ] || return 0
+    for entry in "$local_dir"/*; do
+        [ -L "$entry" ] && continue
+        rel="$rel_dir/$(basename "$entry")"
+        if [ -d "$entry" ]; then
+            image_holds_dir "$rel" || stale "$rel"
+            printf 'dir %s\n' "$rel"
+            continue
+        fi
+        [ -f "$entry" ] || continue
+        size="$(image_size "$rel")"
+        [ -n "$size" ] || stale "$rel"
+        if [ "$check_size" -eq 1 ] && [ "$size" != "$(stat -c %s "$entry")" ]; then
+            stale "the toolchain staged at $TOOLCHAIN_STAGE ($rel differs)"
+        fi
+        printf 'file %s %s\n' "$size" "$rel"
+    done
+}
+
 MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
 {
     echo "$MARKER 1"
@@ -191,26 +227,13 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
     else
         echo "$SELF: $IMAGE_PATH predates the seeded source tree; a new volume carries one" >&2
     fi
-    # Subdirectories get a `dir` line rather than a recursive walk: a
-    # `TOOLCHAIN_STAGE` lands `lib/rustlib`, which is most of the volume and
-    # thousands of files, and one `debugfs` call each would cost more than
-    # the image build. Without the line a dev disk whose toolchain never
-    # arrived passes every structural check.
-    for dir in lib bin; do
-        [ -d "$STAGE/$dir" ] || continue
-        for entry in "$STAGE/$dir"/*; do
-            rel="$dir/$(basename "$entry")"
-            if [ -d "$entry" ]; then
-                image_holds_dir "$rel" || stale "$rel"
-                printf 'dir %s\n' "$rel"
-                continue
-            fi
-            [ -f "$entry" ] || continue
-            size="$(image_size "$rel")"
-            [ -n "$size" ] || stale "$rel"
-            printf 'file %s %s\n' "$size" "$rel"
-        done
-    done
+    inventory lib "$STAGE/lib" 0
+    if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
+        image_holds_dir "$TOOLCHAIN_REL" || stale "$TOOLCHAIN_REL"
+        echo "toolchain $TOOLCHAIN_REL"
+        inventory "$TOOLCHAIN_REL/bin" "$TOOLCHAIN_STAGE/bin" 1
+        inventory "$TOOLCHAIN_REL/lib" "$TOOLCHAIN_STAGE/lib" 1
+    fi
 } >"$MARKER_FILE"
 
 debugfs -w -R "rm /$MARKER" "$IMAGE_PATH" >/dev/null 2>&1 || true

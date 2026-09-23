@@ -139,7 +139,7 @@ jobs:
       # second boot could disagree with the one that was actually graded.
       # The tests kernel is the only variant whose allowlist carries
       # `run_userland_tests` — it powers the machine off to end the run. Gated
-      # here rather than from `build_kernel.sh` because the walk disassembles
+      # here rather than from `check_kernel_elf_gates.sh` because the walk disassembles
       # the whole ELF (~8 s), which does not belong on the interactive loop.
       - name: Authority reachability ratchet (tests kernel)
         run: scripts/check_authority_reachability.sh --variant tests builddir/kernel-tests.elf
@@ -248,7 +248,7 @@ jobs:
 
       # Release inlines away roughly seven eighths of the dev kernel's
       # functions, so it is the only place small frames fused into one
-      # oversized frame can show up. build_kernel.sh runs the stack and
+      # oversized frame can show up. `just build-kernel-only` runs the stack and
       # soft-float gates on the ELF it produces; every self-test here ran with
       # the gates above.
       - name: Build and gate the release kernel

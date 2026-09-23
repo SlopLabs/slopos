@@ -2,6 +2,7 @@ use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
 use slopos_ostd::{KArc, KVec, klog_info, lock_class};
 
 use crate::blockdev::BlockDevice;
+use crate::ext2::ondisk::{SUPERBLOCK_LABEL_SPAN, volume_label_of};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_kernel_services::driver_runtime::current_task_is_privileged;
 
@@ -19,7 +20,7 @@ const MAX_BLOCK_NODES: usize = 16;
 
 /// devfs's own name ceiling, independent of the VFS's 255: every name here is
 /// kernel-registered and short, and `block_node_at` answers one by value.
-const DEV_NAME_MAX: usize = 32;
+pub const DEV_NAME_MAX: usize = 32;
 
 /// What a `mount` source argument spells a device with.
 const DEV_PATH_PREFIX: &[u8] = b"/dev/";
@@ -147,6 +148,32 @@ pub fn devfs_block_device_by_name(name: &str) -> Option<KArc<dyn BlockDevice + S
         .map(|n| KArc::clone(&n.device));
     drop(table);
     device
+}
+
+/// The first registered block node — whole device or partition, in
+/// registration order — whose ext2 volume label is `label`. Its name is copied
+/// into `out`; the answer is the name's length.
+pub fn devfs_block_name_by_label(label: &[u8], out: &mut [u8; DEV_NAME_MAX]) -> Option<usize> {
+    if label.is_empty() {
+        return None;
+    }
+    let mut index = 0;
+    loop {
+        let table = BLOCK_NODES.read();
+        let node = table.get(index)?;
+        let (name, name_len, device) = (node.name, node.name_len, KArc::clone(&node.device));
+        drop(table);
+        index += 1;
+
+        let mut head = [0u8; SUPERBLOCK_LABEL_SPAN];
+        if device.read_at(1024, &mut head).is_err() {
+            continue;
+        }
+        if volume_label_of(&head) == Some(label) {
+            *out = name;
+            return Some(name_len);
+        }
+    }
 }
 
 fn block_inode_for(name: &[u8]) -> Option<InodeId> {

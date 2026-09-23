@@ -22,17 +22,19 @@ pub enum RelocError {
     CopySizeMismatch,
 }
 
-/// Apply `DT_RELR`, `.rela.dyn` and `.rela.plt` for `table[index]`.
+/// Apply `DT_RELR`, `.rela.dyn` and `.rela.plt` for `table[index]`, and
+/// answer how many relocations that was.
 ///
 /// `scope` is the search order for undefined symbols, nearest first.
 ///
 /// # Safety
 /// Every object in `scope` must be parsed, and `table[index]`'s writable
 /// segments must still be writable — RELRO is applied after this.
-pub unsafe fn relocate(table: &[Dso], index: usize, scope: &[u16]) -> Result<(), RelocError> {
+pub unsafe fn relocate(table: &[Dso], index: usize, scope: &[u16]) -> Result<usize, RelocError> {
     let dso = table[index];
+    let mut applied = dso.rela_count + dso.jmprel_count;
     if dso.flags & DSO_BOOTSTRAPPED == 0 {
-        apply_relr(&dso);
+        applied += apply_relr(&dso);
     }
     for i in 0..dso.rela_count {
         apply_one(
@@ -52,12 +54,13 @@ pub unsafe fn relocate(table: &[Dso], index: usize, scope: &[u16]) -> Result<(),
             ptr::read_unaligned(dso.jmprel.add(i)),
         )?;
     }
-    Ok(())
+    Ok(applied)
 }
 
 /// `DT_RELR`: relative relocations packed as an address word followed by
 /// bitmaps, each covering the next 63 slots.
-unsafe fn apply_relr(dso: &Dso) {
+unsafe fn apply_relr(dso: &Dso) -> usize {
+    let mut applied = 0usize;
     let mut cursor = 0usize;
     for i in 0..dso.relr_count {
         let entry = ptr::read_unaligned(dso.relr.add(i));
@@ -65,8 +68,10 @@ unsafe fn apply_relr(dso: &Dso) {
             cursor = dso.base.wrapping_add(entry);
             *(cursor as *mut usize) += dso.base;
             cursor += size_of::<usize>();
+            applied += 1;
             continue;
         }
+        applied += (entry >> 1).count_ones() as usize;
         let mut bits = entry >> 1;
         let mut slot = cursor;
         while bits != 0 {
@@ -78,6 +83,7 @@ unsafe fn apply_relr(dso: &Dso) {
         }
         cursor += (usize::BITS as usize - 1) * size_of::<usize>();
     }
+    applied
 }
 
 unsafe fn apply_one(

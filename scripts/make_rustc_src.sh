@@ -21,13 +21,17 @@ set -euo pipefail
 #                     separately in toolchain/cxx/PIN, and a bootstrap run
 #                     takes LLVM from `download-ci-llvm` or from that tarball.
 #
-# The tree carries two forks: `toolchain/compiler/` and, in `src/tools/cargo`,
-# `toolchain/cargo/`. See toolchain/cargo/PIN for what the second one is for.
+# The tree carries three forks: `toolchain/compiler/`; in `src/tools/cargo`,
+# `toolchain/cargo/` (see toolchain/cargo/PIN for what that one is for); and
+# `toolchain/crates/`, ports of crates.io crates both workspaces depend on,
+# unpacked from their pinned `.crate` files into `slopos-crates/` beside a
+# copy of the libc fork, and wired into both workspaces by the
+# `[patch.crates-io]` in `toolchain/crates/wiring/`. See toolchain/crates/PIN.
 #
 # Idempotent: the stamp at third_party/slopos-rustc-src/.slopos-stamp records
-# the hash of toolchain/{compiler,cargo}/, of this script — its --exclude set
-# decides what the tree holds — and of toolchain/PIN's channel, so a second
-# run with unchanged inputs exits immediately.
+# the hash of toolchain/{compiler,cargo,crates,libc}/, of this script — its
+# --exclude set decides what the tree holds — and of toolchain/PIN's channel
+# and libc lines, so a second run with unchanged inputs exits immediately.
 #
 # Usage: make_rustc_src.sh
 #
@@ -53,11 +57,13 @@ die() {
 PIN="$REPO_ROOT/$TP_PIN_REL"
 COMPILER_PIN="$REPO_ROOT/$TP_COMPILER_PIN_REL"
 CARGO_PIN="$REPO_ROOT/$TP_CARGO_PIN_REL"
+CRATES_PIN="$REPO_ROOT/$TP_CRATES_PIN_REL"
 SRC="$REPO_ROOT/$TP_RUSTC_SRC_REL"
 STAMP="$SRC/$TP_STAMP_NAME"
 
 [ -f "$COMPILER_PIN" ] || die "missing $TP_COMPILER_PIN_REL — the compiler fork (PIN + patch) is tracked in-repo"
 [ -f "$CARGO_PIN" ] || die "missing $TP_CARGO_PIN_REL — the cargo fork (PIN + patch) is tracked in-repo"
+[ -f "$CRATES_PIN" ] || die "missing $TP_CRATES_PIN_REL — the crate ports (PIN + patches) are tracked in-repo"
 
 STAMP_WANT="$(tp_rustc_stamp "$REPO_ROOT")"
 if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$STAMP_WANT" ]; then
@@ -132,6 +138,43 @@ if [ "$CARGO_PATCHES" = "0" ]; then
     die "no patches under $TP_CARGO_OVERLAY_REL/ — an unpatched cargo has no offline build"
 fi
 
+# The crate ports, each unpacked from the `.crate` its patch is cut against,
+# and the libc fork beside them: the compiler and cargo resolve crates.io
+# `libc`, and bootstrap's own `library/libc` exists only once a bootstrap run
+# has staged it.
+CRATES_DIR="$SRC/$TP_CRATES_TREE_REL"
+mkdir -p "$CRATES_DIR"
+PORTS=0
+while read -r name version sha; do
+    [ -n "$name" ] || continue
+    [ -f "$REPO_ROOT/$TP_CRATES_OVERLAY_REL/$name-$version.patch" ] ||
+        die "$TP_CRATES_PIN_REL pins $name $version, which has no $TP_CRATES_OVERLAY_REL/$name-$version.patch"
+    tp_unpack_crate "$name" "$version" "$sha" "$CRATES_DIR/$name-$version" "$TP_CRATES_PIN_REL" ||
+        die "could not stage $name $version"
+    PORTS=$((PORTS + 1))
+done <<EOF
+$(tp_pin_crates "$CRATES_PIN")
+EOF
+for rel in $(tp_patch_files "$REPO_ROOT"); do
+    case "$rel" in
+        "$TP_CRATES_WIRING_REL/"*) ;;
+        "$TP_CRATES_OVERLAY_REL/"*)
+            [ -d "$REPO_ROOT/$(tp_patch_apply_dir "$rel")" ] ||
+                die "$rel has no \`crate=\` line in $TP_CRATES_PIN_REL naming the crate it is cut against"
+            ;;
+    esac
+done
+tp_unpack_libc_crate "$REPO_ROOT" "$CRATES_DIR/libc" ||
+    die "could not stage the pinned libc crate into $TP_RUSTC_SRC_REL/$TP_CRATES_TREE_REL"
+LIBC_PATCHES="$(tp_apply_patches "$REPO_ROOT" "$TP_OVERLAY_REL/libc/" "$TP_RUSTC_SRC_REL/$TP_CRATES_TREE_REL")" ||
+    die "the libc fork did not apply to $TP_RUSTC_SRC_REL/$TP_CRATES_TREE_REL/libc"
+[ "$LIBC_PATCHES" != "0" ] ||
+    die "no patches under $TP_OVERLAY_REL/libc/ — an unpatched libc has no slopos module"
+CRATE_PATCHES="$(tp_apply_patches "$REPO_ROOT" "$TP_CRATES_OVERLAY_REL/")" ||
+    die "the crate ports did not apply"
+[ "$CRATE_PATCHES" -gt "$PORTS" ] ||
+    die "no patches under $TP_CRATES_WIRING_REL/ — nothing points either workspace at the ports"
+
 # The second LLVM port is applied by a bootstrap run, in a subtree this tree
 # does not carry, so nothing else would notice it ceasing to apply until
 # hours into one. Only the files it *edits* are unpacked — one `tar` pass,
@@ -158,4 +201,4 @@ trap - EXIT INT TERM
 
 printf '%s\n' "$STAMP_WANT" > "$STAMP"
 
-echo "$SELF: materialised $TP_RUSTC_SRC_REL from $CHANNEL — $PATCHES compiler, $CARGO_PATCHES cargo patch(es) (stamp $STAMP_WANT)"
+echo "$SELF: materialised $TP_RUSTC_SRC_REL from $CHANNEL — $PATCHES compiler, $CARGO_PATCHES cargo, $CRATE_PATCHES crate-port patch(es) (stamp $STAMP_WANT)"

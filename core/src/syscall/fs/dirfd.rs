@@ -5,7 +5,7 @@
 //! need `..` answerable from an inode alone, which no filesystem here can do.
 
 use slopos_abi::Errno;
-use slopos_abi::fs::{AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_DIRECTORY};
+use slopos_abi::fs::{AT_FDCWD, AT_SYMLINK_NOFOLLOW, O_DIRECTORY, O_NOFOLLOW};
 use slopos_fs::fileio::{FdTable, with_fd_dir_path};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, RESOLVE_MUST_BE_DIR, RESOLVE_NOFOLLOW_FINAL};
 
@@ -59,6 +59,8 @@ pub fn resolve_flags_from(at_flags: u32, path: &[u8]) -> u32 {
 pub fn open_resolve_flags(open_flags: u32, path: &[u8]) -> u32 {
     if open_flags & O_DIRECTORY != 0 {
         RESOLVE_MUST_BE_DIR
+    } else if open_flags & O_NOFOLLOW != 0 {
+        resolve_flags_from(AT_SYMLINK_NOFOLLOW, path)
     } else {
         resolve_flags_from(0, path)
     }

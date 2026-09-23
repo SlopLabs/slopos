@@ -64,6 +64,10 @@ SRC="${RUSTC_SRC_DIR:-$REPO_ROOT/$TP_RUSTC_SRC_REL}"
 GATE="$BUILD_DIR/gates/bootstrap-config"
 WRAPPER="$GATE/bin/$TARGET-clang"
 WRAPPER_CXX="$GATE/bin/$TARGET-clang++"
+INSTALL="${SLOPOS_TOOLCHAIN_INSTALL:-$BUILD_DIR/slopos-toolchain/install}"
+# Every library an installed object may need. Anything else is a host library
+# the cross link reached, which the guest does not have.
+ALLOWED_NEEDED='^(libc\.so|libc\+\+\.so|libLLVM[-.].*|libclang-cpp\.so.*|librustc_driver-[0-9a-f]+\.so|libstd-[0-9a-f]+\.so)$'
 
 # Each step the cross-build exists to produce, as bootstrap spells it. The
 # triple is on the right of the arrow because these are the steps built *for*
@@ -191,6 +195,112 @@ PROBE
     return "$bad"
 }
 
+needed_of() {
+    readelf -d "$1" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'
+}
+
+# `readelf --dyn-syms` columns: Num Value Size Type Bind Vis Ndx Name.
+dynsyms() {
+    readelf --dyn-syms -W "$1" | awk -v want="$2" '
+        NF >= 8 && $1 ~ /:$/ {
+            name = $8; sub(/@.*/, "", name)
+            if (name == "") next
+            if (want == "defined" && $7 != "UND") print name
+            if (want == "undefined" && $7 == "UND" && $5 != "WEAK") print name
+        }' | sort -u
+}
+
+# Where the loader finds `$2` for the object at `$1`: its DT_RUNPATH or
+# DT_RPATH with `$ORIGIN` expanded, as the guest has no LD_LIBRARY_PATH and
+# no toolchain library in /lib. `libc.so` is the interpreter, already mapped.
+resolve_needed() {
+    local object="$1" name="$2" origin entry
+    if [ "$name" = libc.so ]; then
+        printf '%s\n' "$INSTALL_ROOT/lib/libc.so"
+        return 0
+    fi
+    origin="$(dirname "$object")"
+    for entry in $(readelf -d "$object" |
+        sed -n 's/.*Library r\(un\)\{0,1\}path: \[\(.*\)\]/\2/p' | tr ':' ' '); do
+        entry="${entry//\$\{ORIGIN\}/$origin}"
+        entry="${entry//\$ORIGIN/$origin}"
+        if [ -f "$entry/$name" ]; then
+            printf '%s\n' "$entry/$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The names an object may bind to: its own and those of everything in its
+# DT_NEEDED closure. A name the object's search path cannot find is written
+# to `$cache/unfound`.
+closure_defined() {
+    local cache="$1" queue="$2" seen path name found key
+    seen=" "
+    while :; do
+        # shellcheck disable=SC2086
+        set -- $queue
+        [ $# -gt 0 ] || break
+        path="$1"
+        shift
+        queue="$*"
+        case "$seen" in *" $path "*) continue ;; esac
+        seen="$seen$path "
+        key="$cache/$(printf '%s' "$path" | tr '/' '_').def"
+        [ -f "$key" ] || dynsyms "$path" defined >"$key"
+        cat "$key"
+        for name in $(needed_of "$path"); do
+            if found="$(resolve_needed "$path" "$name")"; then
+                queue="$queue $found"
+            else
+                printf '%s needs %s\n' "${path#"$INSTALL_ROOT"/}" "$name" >>"$cache/unfound"
+            fi
+        done
+    done | sort -u
+}
+
+# The loader binds `DTPMOD64`/`DTPOFF64` and startup `TPOFF64` and nothing
+# else for TLS, so a `TLSDESC` relocation is a program that dies at startup.
+# It also binds every symbol before `main` and nothing here links with
+# `-z defs`, so a library the search path misses, or a name nothing in the
+# closure defines, is a program that does not start.
+grade_install() {
+    local dir="$1" bad=0 file needed lib cache unbound
+    INSTALL_ROOT="$dir"
+    cache="$(mktemp -d)"
+    while IFS= read -r file; do
+        [ "$(od -An -c -N4 "$file" | tr -d ' ')" = '177ELF' ] || continue
+        readelf -h "$file" 2>/dev/null | grep -Eq 'Type: +(EXEC|DYN)' || continue
+        needed="$(needed_of "$file")"
+        for lib in $needed; do
+            printf '%s\n' "$lib" | grep -Eq "$ALLOWED_NEEDED" || {
+                echo "  ${file#"$dir"/} needs $lib, which no SlopOS toolchain ships" >&2
+                bad=1
+            }
+        done
+        if readelf -rW "$file" | grep 'R_X86_64_TLSDESC' >/dev/null; then
+            echo "  ${file#"$dir"/} carries R_X86_64_TLSDESC, which the loader does not bind" >&2
+            bad=1
+        fi
+        [ -n "$needed" ] || continue
+        rm -f "$cache/unfound"
+        unbound="$(dynsyms "$file" undefined |
+            comm -23 - <(closure_defined "$cache" "$file") | head -n 5 | tr '\n' ' ')"
+        if [ -s "$cache/unfound" ]; then
+            sed 's/^/  /; s/$/, which its search path does not find/' "$cache/unfound" | sort -u >&2
+            bad=1
+        elif [ -n "$unbound" ]; then
+            echo "  ${file#"$dir"/} binds names nothing it needs defines: $unbound" >&2
+            bad=1
+        fi
+    done <<EOF
+$(find "$dir" -type f)
+EOF
+    rm -rf "$cache"
+    return "$bad"
+}
+
 # The dry run writes a sysroot and a wrapper, so it is pointed at the gate's
 # own directory: a `just toolchain` in progress is compiling against the
 # shared ones and executing the shared wrapper.
@@ -211,7 +321,13 @@ run_gate() {
     grade_plan "$GATE/plan.log" || die "the cross-build plan does not produce the toolchain"
     grade_wrapper "$GATE" || die "the compiler wrapper does not produce SlopOS binaries"
 
-    echo "$SELF: bootstrap plans $(grep -c '^Building\|^Creating' "$GATE/plan.log") steps for $TARGET, and the wrapper links for it"
+    local installed=""
+    if [ -d "$INSTALL" ]; then
+        grade_install "$INSTALL" || die "the toolchain installed at $INSTALL does not run on SlopOS"
+        installed=", and the installed toolchain needs nothing SlopOS lacks"
+    fi
+
+    echo "$SELF: bootstrap plans $(grep -c '^Building\|^Creating' "$GATE/plan.log") steps for $TARGET, and the wrapper links for it$installed"
 }
 
 self_test() {
@@ -308,6 +424,46 @@ self_test() {
     else
         echo "  cases real-plan, host-wrapper: skipped — $SKIP_REASON"
     fi
+
+    # The install grader, against shared objects built to each shape: one
+    # whose every name binds, one a host C++ library leaked into, one that
+    # names a function nothing it needs defines, and one whose TLS the loader
+    # cannot bind.
+    eval "$("$SCRIPT_DIR/cxx_host_tools.sh")"
+    local so="$CLANG --target=x86_64-unknown-linux-gnu -fuse-ld=lld -shared -fPIC -nostdlib"
+    local lib="$scratch/install/lib"
+    mkdir -p "$scratch/stub" "$lib"
+    printf 'int f(void) { return 0; }\n' >"$scratch/f.c"
+    printf 'extern int f(void);\nint k(void) { return f(); }\n' >"$scratch/calls-f.c"
+    printf 'extern int h(void);\nint k(void) { return h(); }\n' >"$scratch/calls-h.c"
+    printf 'extern __thread int v;\nint g(void) { return v; }\n' >"$scratch/tls.c"
+    $so -Wl,-soname,libc.so "$scratch/f.c" -o "$lib/libc.so"
+    $so -Wl,-soname,libstdc++.so.6 "$scratch/f.c" -o "$scratch/stub/libstdc++.so.6"
+    $so "$scratch/calls-f.c" -L"$lib" -l:libc.so -o "$lib/ok.so"
+    if grade_install "$scratch/install" 2>/dev/null; then
+        echo "  case clean-install: accepted an object whose names libc.so defines"
+    else
+        echo "$SELF --self-test: an object binding only to libc.so was rejected" >&2
+        failed=1
+    fi
+    install_case() {
+        local name="$1" want="$2" object="$3"
+        shift 3
+        $so "$@" -o "$lib/$object"
+        why="$(grade_install "$scratch/install" 2>&1 || true)"
+        rm "$lib/$object"
+        if printf '%s\n' "$why" | grep -q "$want"; then
+            echo "  case $name: rejected for '$want'"
+        else
+            echo "$SELF --self-test: case $name was not rejected for '$want'" >&2
+            failed=1
+        fi
+    }
+    install_case host-library 'needs libstdc++.so.6' host.so \
+        "$scratch/f.c" -L"$scratch/stub" -l:libstdc++.so.6
+    install_case unbound 'nothing it needs defines: h' unbound.so \
+        "$scratch/calls-h.c" -L"$lib" -l:libc.so
+    install_case tlsdesc 'R_X86_64_TLSDESC' tls.so -O1 -mtls-dialect=gnu2 "$scratch/tls.c"
 
     rm -rf "$scratch"
     trap - EXIT INT TERM

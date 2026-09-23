@@ -192,6 +192,70 @@ fn mount_over_bin_refused() -> bool {
     }
 }
 
+/// `LABEL=` resolves against the volume labels of the attached devices; one
+/// no device carries is `ENOENT`, as an absent device name is, and an empty
+/// label names nothing at all.
+fn label_source_resolution() -> bool {
+    let _ = fs::create_dir(MOUNT_POINT);
+    let mut ok = true;
+    for (source, want) in [
+        (&b"LABEL=no-such-volume"[..], SyscallError::ENOENT),
+        (&b"LABEL="[..], SyscallError::EINVAL),
+    ] {
+        match fs_syscall::mount(source, MOUNT_POINT.as_bytes(), b"ext2", 0) {
+            Err(e) if e == want => {}
+            Err(e) => {
+                println!(
+                    "mount_test: {} gave {e}, want {want}",
+                    String::from_utf8_lossy(source)
+                );
+                ok = false;
+            }
+            Ok(()) => {
+                println!("mount_test: {} mounted", String::from_utf8_lossy(source));
+                umount_mount_point();
+                ok = false;
+            }
+        }
+    }
+    let _ = fs::remove_dir(MOUNT_POINT);
+    ok
+}
+
+/// `/dev/shm` is the ramfs boot mounts for `shm_open`: a file there can be
+/// created, sized, read back and unlinked.
+fn dev_shm_is_writable() -> bool {
+    const PATH: &str = "/dev/shm/mount_test_shm";
+    let outcome = (|| -> std::io::Result<()> {
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(PATH)?;
+        file.set_len(8192)?;
+        file.write_all(b"shm")?;
+        if fs::metadata(PATH)?.len() != 8192 {
+            return Err(std::io::Error::other("ftruncate did not size the object"));
+        }
+        let mut back = [0u8; 3];
+        File::open(PATH)?.read_exact(&mut back)?;
+        if &back != b"shm" {
+            return Err(std::io::Error::other("the object read back wrong"));
+        }
+        fs::remove_file(PATH)?;
+        if fs::metadata(PATH).is_ok() {
+            return Err(std::io::Error::other("the object outlived its unlink"));
+        }
+        Ok(())
+    })();
+    if let Err(e) = outcome {
+        println!("mount_test: /dev/shm: {e}");
+        let _ = fs::remove_file(PATH);
+        return false;
+    }
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("ramfs_mount_roundtrip", ramfs_mount_roundtrip),
@@ -202,5 +266,7 @@ fn main() {
             long_name_refused_on_the_root,
         ),
         ("mount_over_bin_refused", mount_over_bin_refused),
+        ("label_source_resolution", label_source_resolution),
+        ("dev_shm_is_writable", dev_shm_is_writable),
     ]);
 }

@@ -505,6 +505,17 @@ fn parse_root_block_spec(spec: &str) -> Option<(u16, u8)> {
     Some((index, partition))
 }
 
+/// `mount=<source>:<path>`'s value split into its source and path, at the first
+/// `:/`: the path must be absolute, and a label may then hold a colon.
+pub(crate) fn parse_mount_option(spec: &str) -> Option<(&str, &str)> {
+    let at = spec.find(":/")?;
+    let (source, path) = (&spec[..at], &spec[at + 1..]);
+    if source.is_empty() || source == "LABEL=" {
+        return None;
+    }
+    Some((source, path))
+}
+
 /// The unset default is `root=auto`: a writable ext2 disk when there is one,
 /// otherwise the initramfs. See `boot_services::boot_step_rootfs_init`.
 ///

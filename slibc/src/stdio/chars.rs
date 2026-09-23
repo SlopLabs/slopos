@@ -207,6 +207,25 @@ pub unsafe extern "C" fn fputs(s: *const u8, stream: *mut FILE) -> i32 {
     r
 }
 
+/// `perror(3)`: `"<s>: <strerror(errno)>\n"` on `stderr`, or the message
+/// alone when `s` is null or empty, written under one lock so it is one line.
+///
+/// # Safety
+/// `s` is null or a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perror(s: *const u8) {
+    let message = crate::error::SyscallError::from_errno(crate::errno::errno_get()).as_str();
+    let stream = super::streams::stderr_file();
+    (*stream).lock.lock();
+    if !s.is_null() && *s != 0 {
+        fputs_unlocked(s, stream);
+        super::file::fwrite_unlocked(b": ".as_ptr(), 1, 2, stream);
+    }
+    super::file::fwrite_unlocked(message.as_ptr(), 1, message.len(), stream);
+    fputc_unlocked(b'\n' as i32, stream);
+    (*stream).lock.unlock();
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ungetc(c: i32, stream: *mut FILE) -> i32 {
     if stream.is_null() {

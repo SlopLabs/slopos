@@ -797,6 +797,51 @@ fn rdonly_mount_body() -> Result<(), &'static str> {
     Ok(())
 }
 
+const LABEL_MP: &[u8] = b"/tmp/ext2_label";
+const LABEL_PROBE: &[u8] = b"labelprobe0";
+const LABEL: &[u8] = b"stest-label";
+
+/// A fixture carrying [`LABEL`] in `s_volume_name`, published in devfs.
+fn register_label_probe() -> bool {
+    let Some(image) = fixture_image(IMAGE_BLOCKS) else {
+        return false;
+    };
+    image.with_buffer_mut(|buf| buf[1024 + 120..1024 + 120 + LABEL.len()].copy_from_slice(LABEL));
+    let Ok(device) = KArc::try_new(image) else {
+        return false;
+    };
+    let device: KArc<dyn BlockDevice + Send + Sync> = device;
+    matches!(
+        devfs_register_block_device(LABEL_PROBE, device),
+        Ok(_) | Err(VfsError::AlreadyExists)
+    )
+}
+
+/// `LABEL=` names the device whose superblock carries exactly that label: a
+/// prefix of it names none.
+pub fn test_ext2_mount_by_label() -> TestResult {
+    if !ready() || !ensure_dir(LABEL_MP) {
+        return slopos_testing::fail!("the /tmp fixture directory is unavailable");
+    }
+    if !register_label_probe() {
+        return TestResult::Skipped;
+    }
+
+    let prefix = vfs_ext2_mount_named(b"LABEL=stest-labe", LABEL_MP, true).err();
+    let mounted = vfs_ext2_mount_named(b"LABEL=stest-label", LABEL_MP, true).is_ok()
+        && mount_at(LABEL_MP).is_some();
+
+    let _ = vfs_ext2_unmount_named(LABEL_MP);
+    let _ = vfs_rmdir(LABEL_MP);
+    if prefix != Some(VfsError::NotFound) {
+        return slopos_testing::fail!("a label prefix resolved: {:?}", prefix);
+    }
+    if !mounted {
+        return slopos_testing::fail!("the labelled fixture did not mount by LABEL=");
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_mount_id_is_never_reused, suite = fs);
 slopos_testing::stest!(name = test_mount_table_child_queries, suite = fs);
 slopos_testing::stest!(
@@ -821,3 +866,4 @@ slopos_testing::stest!(
     name = test_ext2_readonly_mount_refuses_a_writable_device,
     suite = fs
 );
+slopos_testing::stest!(name = test_ext2_mount_by_label, suite = fs);

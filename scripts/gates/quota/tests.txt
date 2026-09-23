@@ -17,9 +17,10 @@
 # The process row fell from 256 to 20 because an exited process is now torn
 # down and retired instead of leaking until shutdown. The commitpages row
 # after userland is the build-loop tests reserving six tenths of the
-# headroom, which moves with usable memory by tens of pages between boots:
-# three captures measured 120 266, 120 318 and 120 319, and the cap is the
-# largest of them. The expected refusals are the kernel stest that lowers the
+# headroom, which moves with usable memory and with what else holds a
+# promise at that moment: three captures measured 120 266, 120 318 and
+# 120 319, then two captures of the in-guest toolchain work 120 602 each, and
+# the cap is the largest. The expected refusals are the kernel stest that lowers the
 # root ceiling and over-asks once, then the build-loop utest: its over-ask is
 # refused twice, because the mmap handler reclaims and retries a refused
 # request once, and its fork past the ceiling is refused once.
@@ -55,7 +56,7 @@ post-kernel-tests	pinnedbytes	4
 post-kernel-tests	process	14
 post-kernel-tests	residentpages	772
 post-kernel-tests	task	8
-post-userland-tests	commitpages	120319
+post-userland-tests	commitpages	120602
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256

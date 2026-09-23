@@ -37,6 +37,17 @@ diff --git a/compiler/rustc_target/src/spec/mod.rs b/compiler/rustc_target/src/s
          P1 = "p1",
          P2 = "p2",
          P3 = "p3",
+diff --git a/compiler/rustc_llvm/build.rs b/compiler/rustc_llvm/build.rs
+--- a/compiler/rustc_llvm/build.rs
++++ b/compiler/rustc_llvm/build.rs
+@@ -491,6 +491,7 @@
+         || target.contains("windows-gnullvm")
+         || target.contains("aix")
+         || target.contains("ohos")
++        || target.contains("slopos")
+     {
+         "c++"
+     } else if target.contains("netbsd") && llvm_static_stdcpp.is_some() {
 diff --git a/src/bootstrap/src/core/sanity.rs b/src/bootstrap/src/core/sanity.rs
 --- a/src/bootstrap/src/core/sanity.rs
 +++ b/src/bootstrap/src/core/sanity.rs
@@ -66,7 +77,7 @@ diff --git a/src/doc/rustc/src/platform-support.md b/src/doc/rustc/src/platform-
  [`x86_64-unknown-managarm-mlibc`](platform-support/managarm.md) | ? |  | x86_64 Managarm
  [`x86_64-unknown-motor`](platform-support/motor.md) | ✓ |  | x86_64 Motor OS
  [`x86_64-unknown-openbsd`](platform-support/openbsd.md) | ✓ | ✓ | 64-bit OpenBSD
-+[`x86_64-unknown-slopos`](platform-support/slopos.md) | ? |  | x86_64 SlopOS
++[`x86_64-unknown-slopos`](platform-support/slopos.md) | ? | ✓ | x86_64 SlopOS
  [`x86_64-unknown-trusty`](platform-support/trusty.md) | ✓ |  |
  `x86_64-uwp-windows-gnu` | ✓ |  |
  [`x86_64-uwp-windows-msvc`](platform-support/uwp-windows-msvc.md) | ✓ |  |
@@ -148,8 +159,8 @@ diff --git a/compiler/rustc_target/src/spec/base/slopos.rs b/compiler/rustc_targ
 new file mode 100644
 --- /dev/null
 +++ b/compiler/rustc_target/src/spec/base/slopos.rs
-@@ -0,0 +1,16 @@
-+use crate::spec::{Env, Os, PanicStrategy, TargetOptions, cvs};
+@@ -0,0 +1,14 @@
++use crate::spec::{Env, Os, TargetOptions, cvs};
 +
 +pub(crate) fn opts() -> TargetOptions {
 +    TargetOptions {
@@ -157,11 +168,9 @@ new file mode 100644
 +        env: Env::Slibc,
 +        families: cvs!["unix"],
 +        dynamic_linking: true,
++        has_rpath: true,
 +        has_thread_local: true,
-+        // SlopOS binaries do not unwind: the system's static executables are
-+        // linked with a script that discards `.eh_frame`, and the unwinder
-+        // the C library exports serves C++ rather than Rust.
-+        panic_strategy: PanicStrategy::Abort,
++        no_default_libraries: false,
 +        ..Default::default()
 +    }
 +}
@@ -169,10 +178,8 @@ diff --git a/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs b/c
 new file mode 100644
 --- /dev/null
 +++ b/compiler/rustc_target/src/spec/targets/x86_64_unknown_slopos.rs
-@@ -0,0 +1,33 @@
-+use crate::spec::{
-+    Arch, Cc, CodeModel, LinkerFlavor, Lld, StackProbeType, Target, TargetMetadata, base,
-+};
+@@ -0,0 +1,29 @@
++use crate::spec::{Arch, CodeModel, StackProbeType, Target, TargetMetadata, base};
 +
 +pub(crate) fn target() -> Target {
 +    let mut base = base::slopos::opts();
@@ -180,8 +187,6 @@ new file mode 100644
 +    base.max_atomic_width = Some(64);
 +    base.code_model = Some(CodeModel::Small);
 +    base.features = "-mmx,+xsave,+avx,+avx2".into();
-+    base.linker_flavor = LinkerFlavor::Gnu(Cc::No, Lld::Yes);
-+    base.linker = Some("rust-lld".into());
 +    base.stack_probes = StackProbeType::Inline;
 +    // A SlopOS signal frame is written at the interrupted `rsp`, so a leaf
 +    // function's red zone does not survive signal delivery.
@@ -193,7 +198,7 @@ new file mode 100644
 +        metadata: TargetMetadata {
 +            description: Some("SlopOS".into()),
 +            tier: Some(3),
-+            host_tools: Some(false),
++            host_tools: Some(true),
 +            std: Some(true),
 +        },
 +        pointer_width: 64,
@@ -207,7 +212,7 @@ diff --git a/src/doc/rustc/src/platform-support/slopos.md b/src/doc/rustc/src/pl
 new file mode 100644
 --- /dev/null
 +++ b/src/doc/rustc/src/platform-support/slopos.md
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,50 @@
 +# `x86_64-unknown-slopos`
 +
 +**Tier: 3**
@@ -221,8 +226,9 @@ new file mode 100644
 +
 +## Requirements
 +
-+The target supports `std` and cross-compilation only; it ships no host
-+tools. The `std` port is a separate change (see "Building the target").
++The target supports `std` and host tools: rustc, cargo and clang cross-built
++for it run on SlopOS. The `std` port is a separate change (see "Building the
++target").
 +
 +Binaries are ELF and link against `slibc`, which supplies the C library, the
 +`pthread` primitives `std` builds its synchronisation on, and the Itanium
@@ -231,9 +237,10 @@ new file mode 100644
 +`dlopen` both work. The baseline is x86-64 with `xsave`, `avx` and `avx2`;
 +`mmx` is off.
 +
-+`extern "C"` is the System V AMD64 calling convention. The target is
-+`panic = "abort"`: nothing in the Rust standard library unwinds here, and the
-+unwinder `libc.so` exports serves C++.
++`extern "C"` is the System V AMD64 calling convention. Panics unwind through
++the unwinder `libc.so` exports. Programs link through `cc`, a clang carrying
++the SlopOS toolchain, which supplies `crt0.o`, the interpreter, `-lc` and
++compiler-rt.
 +
 +## Building the target
 +

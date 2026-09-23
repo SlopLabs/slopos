@@ -1,0 +1,56 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 6099e85..1efad85 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -91,4 +91,5 @@ priority = 0
+ check-cfg = [
+     "cfg(libloading_docs)",
+     'cfg(target_os, values("cygwin"))',
++    'cfg(target_os, values("slopos"))',
+ ]
+diff --git a/Cargo.toml.orig b/Cargo.toml.orig
+index 1cd7b7b..c8ee1dc 100644
+--- a/Cargo.toml.orig
++++ b/Cargo.toml.orig
+@@ -41,4 +41,5 @@ rustdoc-args = ["--cfg", "libloading_docs"]
+ unexpected_cfgs = { level = "warn", check-cfg = [
+     'cfg(libloading_docs)',
+     'cfg(target_os, values("cygwin"))',
++    'cfg(target_os, values("slopos"))',
+ ] }
+diff --git a/src/os/unix/consts.rs b/src/os/unix/consts.rs
+index 46fd1a1..dd36d1f 100644
+--- a/src/os/unix/consts.rs
++++ b/src/os/unix/consts.rs
+@@ -87,6 +87,7 @@ mod posix {
+             target_os = "redox",
+             target_os = "nto",
+             target_os = "hurd",
++            target_os = "slopos",
+             target_os = "cygwin",
+         ))] {
+             pub(super) const RTLD_LAZY: c_int = 1;
+@@ -127,6 +128,7 @@ mod posix {
+             target_os = "redox",
+             target_os = "nto",
+             target_os = "hurd",
++            target_os = "slopos",
+             target_os = "cygwin",
+         ))] {
+             pub(super) const RTLD_NOW: c_int = 2;
+@@ -181,6 +183,7 @@ mod posix {
+             target_os = "redox",
+             target_os = "nto",
+             target_os = "hurd",
++            target_os = "slopos",
+         ))] {
+             pub(super) const RTLD_GLOBAL: c_int = 0x100;
+         } else {
+@@ -226,6 +229,7 @@ mod posix {
+             target_os = "fuchsia",
+             target_os = "redox",
+             target_os = "hurd",
++            target_os = "slopos",
+             target_os = "cygwin",
+         ))] {
+             pub(super) const RTLD_LOCAL: c_int = 0;

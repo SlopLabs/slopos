@@ -559,12 +559,13 @@ fn variables_and_unset() -> bool {
 }
 
 /// `set -e` ends the script at the first failure, and does not fire on a
-/// command whose status is being tested.
+/// command whose status is being tested: a condition, any command of an
+/// and-or list but the last, or a `!` pipeline.
 fn errexit_stops_at_the_first_failure() -> bool {
     expect_output(
         "errexit_stops_at_the_first_failure",
-        b"set -e\nif false; then echo no; fi\nfalse || echo tolerated\nfalse\necho unreachable\n",
-        b"tolerated\n",
+        b"set -e\nif false; then echo no; fi\nfalse || echo tolerated\nfalse && echo no\n! true\necho survived\ntrue && false\necho unreachable\n",
+        b"tolerated\nsurvived\n",
     )
 }
 

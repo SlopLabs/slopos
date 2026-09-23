@@ -84,6 +84,7 @@ BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/builddir}"
 SRC="$REPO_ROOT/$TP_RUSTC_SRC_REL"
 OUT="${SLOPOS_TOOLCHAIN_OUT:-$BUILD_DIR/slopos-toolchain}"
 SYSROOT="${SLOPOS_SYSROOT:-$BUILD_DIR/slopos-sysroot}"
+RUSTC_BUILD="$BUILD_DIR/slopos-rustc-build"
 CXX_DIR="$REPO_ROOT/third_party/slopos-cxx"
 JOBS="${BOOTSTRAP_JOBS:-$(nproc)}"
 
@@ -348,7 +349,7 @@ done
 # Objects ahead of \`-l\` and \`.a\`: archive resolution is order-sensitive, and
 # a \`try_compile\` with \`CMAKE_REQUIRED_LIBRARIES\` is one source plus one
 # \`-l\`.
-set -- --target=$HOST_TRIPLE --sysroot="\$sysroot" -fuse-ld=lld -nostdlib \\
+set -- --target=$HOST_TRIPLE --sysroot="\$sysroot" --gcc-toolchain="\$sysroot" -fuse-ld=lld -nostdlib \\
     -Wno-unused-command-line-argument -L"\$sysroot/lib" \\
     \$objects \$link_args -o "\$output" -Wl,--eh-frame-hdr
 if [ "\$shared" -eq 0 ]; then
@@ -390,6 +391,7 @@ cat >"$CONFIG" <<CONFIG_END
 change-id = "ignore"
 [build]
 build = "$HOST_TRIPLE"
+build-dir = "$RUSTC_BUILD"
 host = ["$TARGET"]
 target = ["$HOST_TRIPLE", "$TARGET"]
 extended = true
@@ -418,6 +420,7 @@ build-config = { CMAKE_FIND_ROOT_PATH = "$OUT/find-root", CMAKE_FIND_ROOT_PATH_M
 [rust]
 channel = "nightly"
 lld = true
+rpath = true
 # The pinned libc fork is upstream's release plus one module, and a newer
 # rustc lints it; denying would make that fork's warnings this build's
 # problem.
@@ -430,7 +433,6 @@ ar = "$LLVM_AR"
 ranlib = "$LLVM_AR"
 linker = "$WRAPPER_DIR/$TARGET-clang"
 crt-static = false
-rpath = false
 
 [install]
 # Both, and both under the build directory: bootstrap asserts it can write
@@ -446,13 +448,39 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+PREFIX="$OUT/install"
+rm -rf "$PREFIX"
 (cd "$SRC" && python3 x.py install --config "$CONFIG" --jobs "$JOBS" "${XPY_ARGS[@]}")
+
+# `x.py install` ships no clang, and a Linux std a SlopOS-hosted compiler has
+# no use for. The target sysroot goes into the same prefix, so the clang
+# config can name `<CFGDIR>/..` and the tree carries one sysroot, not two.
+LLVM_DIR="$RUSTC_BUILD/$TARGET/llvm"
+CLANG_BIN="$(cd "$LLVM_DIR/bin" && ls clang-[0-9]*)" ||
+    die "no clang in $LLVM_DIR/bin — was llvm.clang dropped from the config?"
+rm -rf "$PREFIX/lib/rustlib/$HOST_TRIPLE"
+cp -a "$LLVM_DIR/bin/$CLANG_BIN" "$PREFIX/bin/"
+cp -a "$LLVM_DIR"/lib/libclang-cpp.so* "$PREFIX/lib/"
+cp -a "$LLVM_DIR/lib/clang" "$PREFIX/lib/"
+cp -a "$SYSROOT/lib/." "$PREFIX/lib/"
+cp -a "$SYSROOT/include" "$PREFIX/"
+ln -sfn "$CLANG_BIN" "$PREFIX/bin/clang"
+ln -sfn clang "$PREFIX/bin/clang++"
+ln -sfn clang "$PREFIX/bin/cc"
+ln -sfn clang++ "$PREFIX/bin/c++"
+# rust-lld and llvm-tools find their own copy of libLLVM through
+# `$ORIGIN/../lib`, and it needs the C++ runtime from the same directory.
+ln -sfn ../../../libc++.so "$PREFIX/lib/rustlib/$TARGET/lib/libc++.so"
+ln -sfn "../lib/rustlib/$TARGET/bin/rust-lld" "$PREFIX/bin/ld.lld"
+printf '%s\n' '--sysroot=<CFGDIR>/..' >"$PREFIX/bin/$TARGET.cfg"
+printf '%s\n' "@$TARGET.cfg" >"$PREFIX/bin/$TARGET-clang.cfg"
+printf '%s\n' "@$TARGET.cfg" $CXX_ABI_FLAGS >"$PREFIX/bin/$TARGET-clang++.cfg"
 
 if [ -n "$STAGE" ]; then
     rm -rf "$STAGE"
     mkdir -p "$STAGE"
-    cp -a "$OUT/install/." "$STAGE/"
+    cp -a "$PREFIX/." "$STAGE/"
     echo "$SELF: staged the toolchain at $STAGE — pass it as TOOLCHAIN_STAGE to scripts/build_devdisk.sh"
 fi
 
-echo "$SELF: built the $TARGET toolchain into $OUT/install"
+echo "$SELF: built the $TARGET toolchain into $PREFIX"

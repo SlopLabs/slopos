@@ -1,0 +1,40 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 1e8347a..6d0df03 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -285,4 +285,5 @@ check-cfg = [
+     "cfg(wasip2)",
+     'cfg(target_arch, values("xtensa"))',
+     'cfg(target_os, values("cygwin"))',
++    'cfg(target_os, values("slopos"))',
+ ]
+diff --git a/Cargo.toml.orig b/Cargo.toml.orig
+index 18579fc..819e7fe 100644
+--- a/Cargo.toml.orig
++++ b/Cargo.toml.orig
+@@ -274,4 +274,5 @@ check-cfg = [
+     'cfg(wasip2)',
+     'cfg(target_arch, values("xtensa"))',
+     'cfg(target_os, values("cygwin"))',
++    'cfg(target_os, values("slopos"))',
+ ]
+diff --git a/src/ioctl/mod.rs b/src/ioctl/mod.rs
+index 4beed11..9dc4cd0 100644
+--- a/src/ioctl/mod.rs
++++ b/src/ioctl/mod.rs
+@@ -313,13 +313,14 @@ type _Opcode = c::c_int;
+ #[cfg(all(not(linux_raw), target_os = "android"))]
+ type _Opcode = c::c_int;
+ 
+-// BSD, Haiku, Hurd, Redox, and Vita use `unsigned long`.
++// BSD, Haiku, Hurd, Redox, SlopOS, and Vita use `unsigned long`.
+ #[cfg(any(
+     bsd,
+     target_os = "redox",
+     target_os = "haiku",
+     target_os = "horizon",
+     target_os = "hurd",
++    target_os = "slopos",
+     target_os = "vita"
+ ))]
+ type _Opcode = c::c_ulong;

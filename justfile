@@ -49,8 +49,14 @@ capacity_stage        := build_dir / "capacity-stage"
 # The dev disk: the workbench volume a cross-built toolchain lands on.
 # Preserved, because what the guest wrote to a workbench survives a rebuild.
 fs_image_devdisk      := fs_image_dir / "ext2-devdisk.img"
-dev_disk_size         := env("DEV_DISK_SIZE", "2G")
+dev_disk_size         := env("DEV_DISK_SIZE", "4G")
+# A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
+# file map's per-process cap is usable memory / 16 — 256 MiB at 4G, under what
+# one rustc maps below 2G.
+dev_qemu_mem          := env("DEV_QEMU_MEM", "4G")
+dev_disk_mount        := "mount=LABEL=slopos-dev:/devel"
 dev_disk_inode_ratio  := env("DEV_DISK_INODE_RATIO", "16384")
+toolchain_install     := build_dir / "slopos-toolchain/install"
 persist_qemu_mem   := env("PERSIST_QEMU_MEM", "2G")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
@@ -59,12 +65,17 @@ initramfs_tests  := build_dir / "initramfs-tests.cpio"
 # for all three — to the gates, to gdb, to the ISO.
 kernel_release   := env("KERNEL_RELEASE", "0")
 kernel_variant   := if kernel_release == "1" { "release" } else { "dev" }
+kernel_variant_tests := if kernel_release == "1" { "release-tests" } else { "tests" }
 kernel_elf       := build_dir / ("kernel-" + kernel_variant + ".elf")
-kernel_elf_tests := build_dir / "kernel-tests.elf"
+kernel_elf_tests := build_dir / ("kernel-" + kernel_variant_tests + ".elf")
+kernel_features_tests := "slopos-testing/qemu-exit kernel/tests"
 
 iso          := build_dir / "slop.iso"
 iso_notests  := build_dir / "slop-notests.iso"
 iso_tests    := build_dir / "slop-tests.iso"
+# `boot-elf`/`test-elf`: a kernel built elsewhere, never the build's own ISOs.
+iso_elf       := build_dir / "slop-elf.iso"
+iso_elf_tests := build_dir / "slop-elf-tests.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
 ports        := ""
@@ -107,9 +118,9 @@ userland_bins      := "init shell coreutils terminal compositor roulette halt ed
 coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less"
 # Shared objects the suite dlopens. Kept out of `userland_bins`' shape because
 # they are libraries, not programs, and out of the shipped image entirely.
-test_shared_objects := "libdltest.so libc++.so libcxxtest.so"
+test_shared_objects := "libdltest.so libc++.so libcxxtest.so libdlsearch-fixture.so libdlrunpath.so libdlplain.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test buildloop_test exit_stress_test"
+test_userland_bins := userland_bins + " dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test selfhost_test buildloop_test exit_stress_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -198,8 +209,10 @@ _fs-image-capacity:
         scripts/build_fs_image.sh "{{fs_image_capacity}}" "{{build_dir}}"
 
 # `_build-userland-tests` rather than `_build-userland`: the volume carries
-# `libc++.so` and `libc++.a`, which only the tests build stages.
+# `libc++.so` and `libc++.a`, which only the tests build stages. The toolchain
+# `just toolchain` installed is staged unless `TOOLCHAIN_STAGE` names another.
 _fs-image-devdisk: _build-userland-tests
+    TOOLCHAIN_STAGE="${TOOLCHAIN_STAGE:-$([ -d {{toolchain_install}} ] && echo "$PWD/{{toolchain_install}}" || true)}" \
     DEV_DISK_SIZE={{dev_disk_size}} DEV_DISK_INODE_RATIO={{dev_disk_inode_ratio}} \
         scripts/build_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}"
 
@@ -207,25 +220,50 @@ _fs-image-devdisk: _build-userland-tests
 devdisk-export:
     scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/devdisk.patch"
 
+# Parsed here: after the recipe name, just passes `NAME=value` through as a
+# literal argument rather than setting anything.
+[positional-arguments]
+[doc("Copy one file off the dev disk: just devdisk-export-file PATH=/src/slopos/builddir/kernel-tests.elf OUT=builddir/guest-tests.elf")]
+devdisk-export-file +ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    file="" out=""
+    for arg in "$@"; do
+        case "$arg" in
+            PATH=*) file="${arg#PATH=}" ;;
+            OUT=*) out="${arg#OUT=}" ;;
+            *) file="" out=""; break ;;
+        esac
+    done
+    if [ -z "$file" ] || [ -z "$out" ]; then
+        echo "usage: just devdisk-export-file PATH=<path on the volume> OUT=<host path>" >&2
+        exit 2
+    fi
+    scripts/export_devdisk.sh --file "$file" "{{fs_image_devdisk}}" "$out"
+
 _initramfs: _build-userland
     COREUTILS_LINKS="{{coreutils_tools}}" scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs-tests: _build-userland-tests
     COREUTILS_LINKS="{{coreutils_tools}}" EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
+# The host's half of a kernel build around scripts/build_kernel.sh, which the
+# guest runs alone: the toolchain before, the ELF gates after. `+slopos`, the
+# owned sysroot inside the checkout, so std's sources sit at the same
+# workspace-relative path here and in the guest.
+_kernel variant features='':
+    scripts/ensure_toolchain.sh
+    CARGO="{{cargo}} +slopos" RUST_TARGET={{rust_target}} KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
+        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" "{{features}}"
+    scripts/check_kernel_elf_gates.sh "{{build_dir}}" "{{variant}}"
+
 [doc("Build the kernel (implies fs-image)")]
-build: _fs-image
-    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
-    KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
-        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}"
+build: _fs-image (_kernel kernel_variant)
 
 # No `_fs-image` dependency: building the userland binaries is most of the wall
 # clock, and a gate-only job has no use for them.
 [doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
-build-kernel-only:
-    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
-    KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
-        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}"
+build-kernel-only: (_kernel kernel_variant)
 
 [doc("Build default ISO (honors BOOT_CMDLINE, e.g. BOOT_CMDLINE='tests=off tp.debug=on')")]
 iso: build _initramfs
@@ -243,11 +281,7 @@ _iso-notests: build _initramfs
         scripts/build_iso.sh "{{iso_notests}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
 # `_fs-image`: the harness attaches the shipped image as a snapshot disk.
-_iso-tests: _fs-image _fs-image-tests _initramfs-tests
-    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
-    KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
-        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
-            "slopos-testing/qemu-exit kernel/tests"
+_iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -256,11 +290,7 @@ _iso-tests: _fs-image _fs-image-tests _initramfs-tests
 
 # `tests.run=__userland_only__` is a glob that deliberately matches no kernel
 # test, leaving the userland phase as the only thing exercised.
-_iso-tests-userland-only: _fs-image-tests _initramfs-tests
-    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
-    KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
-        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
-            "slopos-testing/qemu-exit kernel/tests"
+_iso-tests-userland-only: _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -313,6 +343,16 @@ boot-persist-reset:
     echo "boot-persist-reset: discarded {{fs_image_persist}}"
     just boot-persist
 
+[doc("Boot the persistent root with the dev disk mounted at /devel from the cmdline, and 4G of RAM")]
+boot-dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BOOT_CMDLINE="tests=off roulette=skip {{dev_disk_mount}}" just _iso-notests
+    just _fs-image-persist
+    just _fs-image-devdisk
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+        just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
 [doc("Boot SlopOS with release-optimized kernel (production build)")]
 boot-prod:
     BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" KERNEL_RELEASE=1 just _iso-notests
@@ -322,6 +362,18 @@ boot-prod:
 boot-headless:
     just _iso-notests
     just _qemu-boot "interactive" "0" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
+# `ELF=` is optional sugar, stripped: after the recipe name just passes
+# `NAME=value` through literally. No dependency builds a kernel — `build`
+# deletes the variant's ELF first — so the ELF staged is exactly the one named.
+[doc("Boot a kernel ELF built elsewhere, e.g. by the guest, without building one: just boot-elf ELF=builddir/guest-dev.elf")]
+boot-elf ELF: _fs-image _initramfs
+    KERNEL_ELF="{{ trim_start_match(ELF, 'ELF=') }}" LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+        scripts/build_iso.sh "{{iso_elf}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
+    just _qemu-boot "interactive" "1" {{iso_elf}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
@@ -439,6 +491,16 @@ test-json PATH: _build-run-tests
 test-userland-only: _iso-tests-userland-only _build-run-tests
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
+[doc("Run the suite on a tests kernel built elsewhere, e.g. by the guest, without building one: just test-elf ELF=builddir/guest-tests.elf ['glob']")]
+test-elf ELF FILTER='': _fs-image _fs-image-tests _initramfs-tests _build-run-tests
+    KERNEL_ELF="{{ trim_start_match(ELF, 'ELF=') }}" LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+        scripts/build_iso.sh "{{iso_elf_tests}}" "{{build_dir}}" \
+            "{{test_cmdline_effective}}{{ if FILTER != '' { ' tests.run=' + FILTER } else { '' } }}"
+    {{build_dir}}/run_tests --no-build --iso "{{iso_elf_tests}}" --fs-image "{{fs_image_tests}}"
+
 # In the body, not a dependency: `_iso-tests` rebuilds the fs image, which must not happen between the boots.
 [doc("Two-boot persistence check: write+fsync, power down, boot the same image, read the payload back")]
 test-persist: _build-run-tests
@@ -487,18 +549,18 @@ test-capacity: _build-run-tests _fs-image-capacity
 
 # Separate from `just test` because the volume is opt-in; `just test` runs the
 # same utest with nothing attached and it passes by saying so.
-[doc("Dev-disk check: mount the cross-built toolchain volume in the guest, read its inventory back, grade its source tree and remount it; a volume this run created must export no changes")]
+[doc("Dev-disk check at 4G: boot with the toolchain volume mounted at /devel by label from the cmdline, read its inventory back, grade its source tree, remount it, and climb the toolchain ladder (rustc, rustc+cc, cargo with a build script and a proc macro, clang); a volume this run created must export no changes")]
 test-devdisk: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     fresh=0
     [ -e "{{fs_image_devdisk}}" ] || fresh=1
     just _fs-image-devdisk
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
     rc=0
-    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" \
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
-        --raw --no-color > {{build_dir}}/devdisk.log 2>&1 || rc=$?
+        --timeout-secs 3600 --silence-secs 1800 --raw --no-color > {{build_dir}}/devdisk.log 2>&1 || rc=$?
     tail -n 30 {{build_dir}}/devdisk.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the dev-disk boot exited $rc — full log in {{build_dir}}/devdisk.log" >&2; exit 1; }
     scripts/check_fs_image.sh "{{fs_image_devdisk}}"
@@ -507,9 +569,43 @@ test-devdisk: _build-run-tests
     [ ! -s "{{build_dir}}/devdisk-check.patch" ] ||
         { echo "FAIL: the source tree seeded this run exports as changed — see {{build_dir}}/devdisk-check.patch" >&2; exit 1; }
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+# The whole self-hosting loop: the guest builds both kernels with the staged
+# toolchain, and the host grades what came out. Identity is against a host
+# build, so the guest's tree and the host's must be one commit.
+[doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host runs the ELF gates on both, the kernel suite on the tests kernel, and compares the dev kernel with its own build of the same commit")]
+test-selfhost: _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    git diff --quiet HEAD || { echo "FAIL: the host builds its working tree and the guest builds HEAD; commit or stash first" >&2; exit 1; }
+    just _fs-image-devdisk
+    base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null)"
+    [ "$base" = "$(git rev-parse HEAD)" ] ||
+        { echo "FAIL: the dev disk was seeded from ${base:-nothing}, not HEAD; export its edits, then discard it" >&2; exit 1; }
+    scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/selfhost-edits.patch"
+    [ ! -s "{{build_dir}}/selfhost-edits.patch" ] ||
+        { echo "FAIL: the guest's tree carries edits HEAD lacks — see {{build_dir}}/selfhost-edits.patch" >&2; exit 1; }
+    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    rc=0
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+        {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
+        --timeout-secs 14400 --silence-secs 0 --raw --no-color > {{build_dir}}/selfhost.log 2>&1 || rc=$?
+    tail -n 30 {{build_dir}}/selfhost.log
+    [ "$rc" -eq 0 ] || { echo "FAIL: the self-hosting boot exited $rc — full log in {{build_dir}}/selfhost.log" >&2; exit 1; }
+    guest="{{build_dir}}/guest"
+    mkdir -p "$guest"
+    for variant in dev tests; do
+        scripts/export_devdisk.sh --file "src/slopos/builddir/kernel-$variant.elf" \
+            "{{fs_image_devdisk}}" "$guest/kernel-$variant.elf"
+        scripts/check_kernel_elf_gates.sh "$guest" "$variant"
+    done
+    KERNEL_RELEASE=0 just build-kernel-only
+    scripts/compare_kernel_elf.sh "{{build_dir}}/kernel-dev.elf" "$guest/kernel-dev.elf"
+    just test-elf "ELF=$guest/kernel-tests.elf"
+
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

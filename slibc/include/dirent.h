@@ -36,6 +36,8 @@ struct dirent64 *readdir64(DIR *dirp);
 int closedir(DIR *dirp);
 void rewinddir(DIR *dirp);
 int dirfd(DIR *dirp);
+long telldir(DIR *dirp);
+void seekdir(DIR *dirp, long loc);
 
 #ifdef __cplusplus
 }

@@ -211,8 +211,8 @@ SYSROOT="$(rustc +"$CHANNEL" --print sysroot 2>/dev/null)" ||
 LIBRARY_LOCK="$SYSROOT/$TP_LIBRARY_REL/Cargo.lock"
 [ -f "$LIBRARY_LOCK" ] || skip_or_die "$LIBRARY_LOCK is missing (the rust-src component)"
 
-# The userland's std resolves against the owned sysroot's lockfile, the
-# kernel's against the toolchain's.
+# The kernel and the userland both build on the owned sysroot, so their std
+# resolves against its lockfile, which must be the toolchain's.
 OWNED_LOCK="$REPO_ROOT/$TP_SYSROOT_REL/$TP_LIBRARY_REL/Cargo.lock"
 if [ -f "$OWNED_LOCK" ] && ! cmp -s "$OWNED_LOCK" "$LIBRARY_LOCK"; then
     echo "$SELF: FAIL — $TP_SYSROOT_REL's std lockfile is not $CHANNEL's; one vendored directory cannot pin both" >&2
@@ -241,21 +241,22 @@ TARGET_DIR="$REPO_ROOT/builddir/gates/offline-build"
 CONFIG="$REPO_ROOT/.cargo/vendor.toml"
 
 offline_check() {
-    local toolchain="$1"
-    shift
+    local toolchain="$1" rustflags="$2"
+    shift 2
     (cd "$REPO_ROOT" &&
-        env -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+        env -u CARGO_BUILD_RUSTFLAGS RUSTFLAGS="$rustflags" \
             CARGO_HOME="$HOME_DIR" CARGO_TARGET_DIR="$TARGET_DIR" \
             "$CARGO" +"$toolchain" check --locked --offline --quiet \
             --config "$CONFIG" -Zunstable-options "$@")
 }
 
-offline_check "$CHANNEL" \
+offline_check "$TP_TOOLCHAIN_NAME" "" \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --target targets/x86_64-slos.json --package kernel --bin kernel ||
     { echo "$SELF: FAIL — the kernel does not build from $VENDOR_REL alone" >&2; exit 1; }
 
-offline_check "$TP_TOOLCHAIN_NAME" -Zjson-target-spec \
+# The target unwinds; the system's own binaries pin abort, as build_userland.sh does.
+offline_check "$TP_TOOLCHAIN_NAME" "-C panic=abort" -Zjson-target-spec \
     -Zbuild-std=core,alloc,std,panic_abort -Zbuild-std-features=compiler-builtins-mem \
     --target targets/x86_64-unknown-slopos.json --package slopos-userland --bins \
     --no-default-features --features testbins ||

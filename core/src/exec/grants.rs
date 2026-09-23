@@ -122,6 +122,14 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_NET_ADMIN,
         priority: None,
     },
+    // A dynamically linked program that runs with `AT_SECURE`, so dl_test can
+    // show the loader refusing `LD_LIBRARY_PATH` and `$ORIGIN` to it.
+    // `PROC_ADMIN` confers read-only enumeration and no mutating class.
+    ProgramGrant {
+        path: b"/bin/dl_secure_probe",
+        flags: TASK_FLAG_PROC_ADMIN,
+        priority: None,
+    },
 ];
 
 /// The flags and tier the kernel adds for `path`; `(0, None)` for any program

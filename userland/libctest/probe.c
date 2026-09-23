@@ -7,20 +7,31 @@
 // that failed.
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <fenv.h>
 #include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <setjmp.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -1311,6 +1322,413 @@ static int absent_posix(void) {
     return 1;
 }
 
+#pragma STDC FENV_ACCESS ON
+
+// Both units: `double` arithmetic runs on SSE and `long double` on the x87,
+// and a C program sees one set of flags and one rounding mode.
+static int floating_env(void) {
+    volatile double one = 1.0, zero = 0.0, quarter = 1.25, half = -0.5;
+    volatile long double lone = 1.0L, lzero = 0.0L;
+
+    if (fesetenv(FE_DFL_ENV) != 0 || fegetround() != FE_TONEAREST ||
+        fetestexcept(FE_ALL_EXCEPT) != 0) {
+        return fail("FE_DFL_ENV is not round-to-nearest with no flag raised");
+    }
+    if (fesetround(FE_UPWARD) != 0 || fegetround() != FE_UPWARD) {
+        return fail("fesetround(FE_UPWARD) did not take");
+    }
+    if (rint(quarter) != 2.0 || rintl((long double)quarter) != 2.0L) {
+        return fail("rint/rintl ignored FE_UPWARD");
+    }
+    if (fesetround(FE_DOWNWARD) != 0 || rint(half) != -1.0) {
+        return fail("rint ignored FE_DOWNWARD");
+    }
+    if (fesetround(0x123) == 0 || fegetround() != FE_DOWNWARD) {
+        return fail("fesetround accepted a mode that is not one of the four");
+    }
+    fesetround(FE_TONEAREST);
+
+    feclearexcept(FE_ALL_EXCEPT);
+    volatile double inf = one / zero;
+    (void)inf;
+    if (fetestexcept(FE_ALL_EXCEPT) != FE_DIVBYZERO) {
+        return fail("1.0/0.0 did not raise exactly FE_DIVBYZERO");
+    }
+    feclearexcept(FE_DIVBYZERO);
+    if (fetestexcept(FE_ALL_EXCEPT) != 0) {
+        return fail("feclearexcept left FE_DIVBYZERO raised");
+    }
+    volatile long double linf = lone / lzero;
+    (void)linf;
+    if (fetestexcept(FE_DIVBYZERO) != FE_DIVBYZERO) {
+        return fail("an x87 division by zero is not a raised flag");
+    }
+    feclearexcept(FE_ALL_EXCEPT);
+    if (fetestexcept(FE_ALL_EXCEPT) != 0) {
+        return fail("feclearexcept left an x87 flag raised");
+    }
+
+    fexcept_t saved;
+    feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+    if (fegetexceptflag(&saved, FE_OVERFLOW) != 0) {
+        return fail("fegetexceptflag failed");
+    }
+    feclearexcept(FE_ALL_EXCEPT);
+    fesetexceptflag(&saved, FE_OVERFLOW | FE_INEXACT);
+    if (fetestexcept(FE_ALL_EXCEPT) != FE_OVERFLOW) {
+        return fail("fesetexceptflag did not restore exactly the saved flag");
+    }
+
+    fenv_t env;
+    fesetround(FE_TOWARDZERO);
+    if (feholdexcept(&env) != 0 || fetestexcept(FE_ALL_EXCEPT) != 0) {
+        return fail("feholdexcept did not clear the flags");
+    }
+    fesetround(FE_UPWARD);
+    inf = one / zero;
+    if (feupdateenv(&env) != 0 || fegetround() != FE_TOWARDZERO ||
+        fetestexcept(FE_ALL_EXCEPT) != (FE_OVERFLOW | FE_DIVBYZERO)) {
+        return fail("feupdateenv did not restore the mode and merge the flags");
+    }
+    fegetenv(&env);
+    fesetenv(FE_DFL_ENV);
+    if (fesetenv(&env) != 0 || fegetround() != FE_TOWARDZERO ||
+        fetestexcept(FE_ALL_EXCEPT) != (FE_OVERFLOW | FE_DIVBYZERO)) {
+        return fail("fegetenv/fesetenv did not round-trip");
+    }
+    fesetenv(FE_DFL_ENV);
+    return 1;
+}
+
+#pragma STDC FENV_ACCESS OFF
+
+// `stderr` pointed at a scratch file for the length of one `perror`.
+static int perror_says(const char *prefix, int err, const char *want) {
+    const char *path = "/tmp/libc_probe_perror";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    int saved = dup(STDERR_FILENO);
+    if (fd < 0 || saved < 0) {
+        return 0;
+    }
+    fflush(stderr);
+    dup2(fd, STDERR_FILENO);
+    errno = err;
+    perror(prefix);
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    char got[128] = {0};
+    ssize_t n = pread(fd, got, sizeof got - 1, 0);
+    close(fd);
+    unlink(path);
+    return n == (ssize_t)strlen(want) && strcmp(got, want) == 0;
+}
+
+// What LLVM's own sources name from the C library, beyond C itself.
+static int llvm_surface(void) {
+    char text[] = "  a,,bc; d";
+    const char *want[] = {"a", "bc", "d"};
+    char *token = strtok(text, " ,;");
+    for (size_t i = 0; i < 3; i++) {
+        if (token == NULL || strcmp(token, want[i]) != 0) {
+            return fail("strtok split the string wrongly");
+        }
+        token = strtok(NULL, " ,;");
+    }
+    if (token != NULL || strtok(NULL, " ,;") != NULL) {
+        return fail("strtok did not end at the last token");
+    }
+    char outer[] = "k=v&x=y", *outer_at = NULL, *inner_at = NULL;
+    char *pair = strtok_r(outer, "&", &outer_at);
+    char *key = strtok_r(pair, "=", &inner_at);
+    char *value = strtok_r(NULL, "=", &inner_at);
+    char *next = strtok_r(NULL, "&", &outer_at);
+    if (strcmp(key, "k") != 0 || strcmp(value, "v") != 0 || next == NULL ||
+        strcmp(next, "x=y") != 0) {
+        return fail("interleaved strtok_r scans disturbed each other");
+    }
+    const char *hello = "hello world";
+    if (strpbrk(hello, "wo") != hello + 4 || strpbrk(hello, "xyz") != NULL ||
+        strpbrk(hello, "") != NULL) {
+        return fail("strpbrk did not find the first byte of the set");
+    }
+
+    if (!perror_says("probe", ENOENT, "probe: No such file or directory\n") ||
+        !perror_says(NULL, EHWPOISON, "Memory page has hardware error\n") ||
+        !perror_says("", ECHRNG, "Channel number out of range\n")) {
+        return fail("perror did not write \"<s>: <strerror(errno)>\\n\" to stderr");
+    }
+
+    if (getauxval(AT_PAGESZ) != (unsigned long)sysconf(_SC_PAGESIZE)) {
+        return fail("getauxval(AT_PAGESZ) is not the page size");
+    }
+    if (sysconf(_SC_ARG_MAX) < _POSIX_ARG_MAX) {
+        return fail("sysconf(_SC_ARG_MAX) is below POSIX's floor");
+    }
+
+    const char *shm = "/libc_probe_shm";
+    shm_unlink(shm);
+    int fd = shm_open(shm, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+        return fail("shm_open could not create an object");
+    }
+    if (!(fcntl(fd, F_GETFD) & FD_CLOEXEC)) {
+        close(fd);
+        return fail("shm_open's descriptor is not close-on-exec");
+    }
+    struct winsize size;
+    if (ioctl(fd, TIOCGWINSZ, &size) != -1 || errno != ENOTTY) {
+        close(fd);
+        return fail("TIOCGWINSZ answered for a descriptor that is no terminal");
+    }
+    if (ftruncate(fd, 4096) != 0) {
+        close(fd);
+        return fail("ftruncate on a shm object failed");
+    }
+    char *map = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) {
+        return fail("a shm object could not be mapped");
+    }
+    if (madvise(map, 4096, MADV_WILLNEED) != 0 || madvise(map, 4096, MADV_SEQUENTIAL) != 0 ||
+        madvise(map, 4096, MADV_RANDOM) != 0) {
+        munmap(map, 4096);
+        return fail("madvise refused an advisory hint");
+    }
+    memcpy(map, "shm!", 4);
+    munmap(map, 4096);
+    char seen[4] = {0};
+    fd = shm_open("libc_probe_shm", O_RDONLY, 0);
+    if (fd < 0 || pread(fd, seen, 4, 0) != 4 || memcmp(seen, "shm!", 4) != 0) {
+        if (fd >= 0) {
+            close(fd);
+        }
+        return fail("a second shm_open of the name did not see the mapping's store");
+    }
+    close(fd);
+    if (shm_unlink(shm) != 0 || shm_open(shm, O_RDONLY, 0) != -1 || errno != ENOENT) {
+        return fail("shm_unlink did not remove the object");
+    }
+    errno = 0;
+    if (shm_open("/a/b", O_RDWR | O_CREAT, 0600) != -1 || errno != EINVAL ||
+        shm_open("/", O_RDWR | O_CREAT, 0600) != -1 || errno != EINVAL ||
+        shm_unlink("..") != -1 || errno != EINVAL) {
+        return fail("shm_open accepted a name that is not one path component");
+    }
+
+    struct passwd *root = getpwnam("root");
+    if (root == NULL || root->pw_uid != 0 || root->pw_gid != 0 ||
+        strcmp(root->pw_name, "root") != 0 || strcmp(root->pw_dir, "/") != 0) {
+        return fail("getpwnam(\"root\") is not the uid-0 row");
+    }
+    if (getpwnam("nobody") != NULL) {
+        return fail("getpwnam found a user that does not exist");
+    }
+    return 1;
+}
+
+// The file calls Rust's `libc` fork declares for rustix, filetime and cargo.
+static int files_for_rust(void) {
+    const char *path = "/tmp/libc_probe_falloc";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || pwrite(fd, "abc", 3, 0) != 3) {
+        return fail("could not write a scratch file");
+    }
+    struct stat st;
+    char tail = 'x', head[3];
+    if (posix_fallocate(fd, 0, 10000) != 0 || fstat(fd, &st) != 0 || st.st_size != 10000 ||
+        pread(fd, head, 3, 0) != 3 || memcmp(head, "abc", 3) != 0 ||
+        pread(fd, &tail, 1, 9999) != 1 || tail != 0) {
+        close(fd);
+        return fail("posix_fallocate did not grow the file around its data");
+    }
+    if (posix_fallocate(fd, 0, 100) != 0 || fstat(fd, &st) != 0 || st.st_size != 10000) {
+        close(fd);
+        return fail("posix_fallocate inside the file changed its size");
+    }
+    if (posix_fallocate(fd, -1, 1) != EINVAL || posix_fallocate(fd, 0, 0) != EINVAL) {
+        close(fd);
+        return fail("posix_fallocate accepted an empty or negative range");
+    }
+    if (posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL) != 0 ||
+        posix_fadvise(fd, 0, 0, POSIX_FADV_NOREUSE + 1) != EINVAL ||
+        posix_fadvise(-1, 0, 0, POSIX_FADV_NORMAL) != EBADF) {
+        close(fd);
+        return fail("posix_fadvise did not validate as POSIX says");
+    }
+    close(fd);
+    unlink(path);
+
+    const char *node = "/tmp/libc_probe_node";
+    unlink(node);
+    if (mknodat(AT_FDCWD, node, S_IFREG | 0600, 0) != 0 || stat(node, &st) != 0 ||
+        !S_ISREG(st.st_mode)) {
+        return fail("mknodat(S_IFREG) did not create a regular file");
+    }
+    unlink(node);
+    if (mknodat(AT_FDCWD, node, S_IFCHR | 0600, 0) != -1 || errno != EPERM ||
+        mknod(node, S_IFIFO | 0600, 0) != -1 || errno != ENOSYS) {
+        return fail("mknod made a node kind nothing here can hold");
+    }
+
+    const char *target = "/tmp/libc_probe_lt_target", *link = "/tmp/libc_probe_lt_link";
+    unlink(link);
+    fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        return fail("could not create the lutimes target");
+    }
+    close(fd);
+    struct timeval old[2] = {{1000000, 0}, {1000000, 0}};
+    struct timeval stamp[2] = {{2000000, 5}, {2000000, 7}};
+    struct stat of_link, of_target;
+    if (utimes(target, old) != 0 || symlink(target, link) != 0 || lutimes(link, stamp) != 0 ||
+        lstat(link, &of_link) != 0 || stat(target, &of_target) != 0) {
+        return fail("lutimes on a symlink failed");
+    }
+    // Whole seconds: the filesystems here keep no finer stamp.
+    if (of_link.st_mtime != 2000000) {
+        return fail("lutimes did not stamp the link itself");
+    }
+    if (of_target.st_mtime != 1000000) {
+        return fail("lutimes changed the link's target");
+    }
+    unlink(link);
+    unlink(target);
+
+    const char *dir = "/tmp/libc_probe_dir";
+    mkdir(dir, 0700);
+    const char *names[] = {"/tmp/libc_probe_dir/a", "/tmp/libc_probe_dir/b",
+                           "/tmp/libc_probe_dir/c"};
+    for (size_t i = 0; i < 3; i++) {
+        close(open(names[i], O_WRONLY | O_CREAT, 0600));
+    }
+    DIR *d = opendir(dir);
+    if (d == NULL || readdir(d) == NULL) {
+        return fail("could not read the scratch directory");
+    }
+    long mark = telldir(d);
+    struct dirent *after = readdir(d);
+    char expect[256];
+    if (after == NULL) {
+        closedir(d);
+        return fail("the scratch directory ended early");
+    }
+    strcpy(expect, after->d_name);
+    while (readdir(d) != NULL) {
+    }
+    seekdir(d, mark);
+    after = readdir(d);
+    int resumed = after != NULL && strcmp(after->d_name, expect) == 0 && telldir(d) != mark;
+    rewinddir(d);
+    int rewound = telldir(d) == 0;
+    closedir(d);
+    for (size_t i = 0; i < 3; i++) {
+        unlink(names[i]);
+    }
+    rmdir(dir);
+    if (!resumed || !rewound) {
+        return fail("seekdir(telldir()) did not resume at the same entry");
+    }
+    return 1;
+}
+
+static volatile int sent_seen, sent_code;
+static volatile pid_t sent_by;
+
+static void on_sent(int sig, siginfo_t *info, void *uc) {
+    (void)sig;
+    (void)uc;
+    sent_by = info->si_pid;
+    sent_code = info->si_code;
+    sent_seen++;
+}
+
+// A handler reads who sent its signal, as LLVM's does to tell a `kill` from a
+// fault: another process's pid, or its own for `raise`.
+static int signal_sender(void) {
+    struct sigaction act;
+    memset(&act, 0, sizeof act);
+    act.sa_sigaction = on_sent;
+    act.sa_flags = SA_SIGINFO;
+    sigemptyset(&act.sa_mask);
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR2);
+    if (sigaction(SIGUSR2, &act, NULL) != 0 || sigprocmask(SIG_BLOCK, &block, &old) != 0) {
+        return fail("could not catch SIGUSR2");
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
+    }
+    int status = -1;
+    if (child < 0 || waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        return fail("the child could not signal its parent");
+    }
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    if (sent_seen != 1 || sent_by != child || sent_code != SI_USER) {
+        return fail("si_pid of a signal from a child is not the child's pid");
+    }
+    if (raise(SIGUSR2) != 0 || sent_seen != 2 || sent_by != getpid()) {
+        return fail("si_pid of a raised signal is not the caller's own pid");
+    }
+    signal(SIGUSR2, SIG_DFL);
+    return 1;
+}
+
+static sem_t handler_sem;
+
+static void on_post(int sig) {
+    (void)sig;
+    sem_post(&handler_sem);
+}
+
+static void *post_later(void *arg) {
+    struct timespec pause = {0, 20 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+    sem_post((sem_t *)arg);
+    return NULL;
+}
+
+// A signal handler posts and a thread waits: how a Ctrl-C handler hands the
+// signal to a thread that may block, which the `ctrlc` crate rustc links does.
+static int semaphores(void) {
+    sem_t sem;
+    int value = -1;
+    if (sem_init(&sem, 1, 0) == 0 || errno != ENOSYS) {
+        return fail("a process-shared semaphore was accepted over private futexes");
+    }
+    if (sem_init(&sem, 0, 1) != 0 || sem_getvalue(&sem, &value) != 0 || value != 1) {
+        return fail("sem_init did not set the value");
+    }
+    if (sem_trywait(&sem) != 0 || sem_trywait(&sem) == 0 || errno != EAGAIN) {
+        return fail("sem_trywait did not take exactly one unit");
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 10 * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    if (sem_timedwait(&sem, &deadline) == 0 || errno != ETIMEDOUT) {
+        return fail("sem_timedwait on a zero semaphore did not time out");
+    }
+    pthread_t poster;
+    if (pthread_create(&poster, NULL, post_later, &sem) != 0 || sem_wait(&sem) != 0 ||
+        pthread_join(poster, NULL) != 0) {
+        return fail("sem_wait did not wake on another thread's post");
+    }
+    if (sem_init(&handler_sem, 0, 0) != 0 || signal(SIGUSR1, on_post) == SIG_ERR ||
+        raise(SIGUSR1) != 0 || sem_wait(&handler_sem) != 0) {
+        return fail("a post from a signal handler was lost");
+    }
+    signal(SIGUSR1, SIG_DFL);
+    sem_destroy(&handler_sem);
+    return sem_destroy(&sem) == 0 ? 1 : fail("sem_destroy failed");
+}
+
 static int run(void) {
     static int (*const checks[])(void) = {
         jumps,           mask_jumps,          calendar,
@@ -1320,7 +1738,9 @@ static int run(void) {
         wide,            bulk_conversion,     wide_numbers,
         long_doubles,    locale_objects,      wide_classification,
         wide_stdio,      widest_integers,     scan_conversions,
-        absent_posix,    entry_points,
+        absent_posix,    entry_points,        floating_env,
+        llvm_surface,    files_for_rust,      signal_sender,
+        semaphores,
     };
     for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         check = (int)i + 1;

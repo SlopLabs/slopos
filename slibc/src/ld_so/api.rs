@@ -87,10 +87,19 @@ unsafe fn handle_index(handle: *mut c_void) -> Option<usize> {
 /// `RTLD_LAZY` and `RTLD_NOW` name the same thing here: binding is eager, so
 /// a missing symbol is reported by `dlopen` whichever was asked for.
 ///
+/// A bare name is searched for with the calling object's `DT_RUNPATH` or
+/// `DT_RPATH`, as glibc does, so the return address is read before any
+/// prologue can move it.
+///
 /// # Safety
 /// `path` is a NUL-terminated C string or null.
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {open}", open = sym dlopen_from)
+}
+
+unsafe extern "C" fn dlopen_from(path: *const c_char, flags: c_int, caller: usize) -> *mut c_void {
     clear();
     if path.is_null() {
         // The main program's handle: a lookup against the global scope. It
@@ -113,7 +122,8 @@ pub unsafe extern "C" fn dlopen(path: *const c_char, flags: c_int) -> *mut c_voi
             };
             return dl.get(index as usize) as *const Dso as *mut c_void;
         }
-        let count = match dl.load_closure(path.cast::<u8>(), true, &mut group) {
+        let requester = dl.owner_of(caller).unwrap_or(0);
+        let count = match dl.load_closure(path.cast::<u8>(), requester, true, &mut group) {
             Ok(count) => count,
             Err(err) => {
                 record(err);
@@ -124,7 +134,7 @@ pub unsafe extern "C" fn dlopen(path: *const c_char, flags: c_int) -> *mut c_voi
         // was sized before any thread existed.
         let linked = dl
             .assign_tls(&group[..count], false)
-            .and_then(|()| dl.relocate_group(&group[..count]));
+            .and_then(|()| dl.relocate_group(&group[..count]).map(|_| ()));
         if let Err(err) = linked {
             // Nothing can reach these objects: no handle was returned, so
             // leaving them mapped would consume table slots for good.
@@ -327,7 +337,8 @@ pub unsafe extern "C" fn dl_iterate_phdr(
         let dso = dl.get(i);
         let mut info = DlPhdrInfo {
             dlpi_addr: dso.base,
-            dlpi_name: if dso.path.is_null() {
+            // Empty for the executable, glibc's convention for "the program".
+            dlpi_name: if i == 0 || dso.path.is_null() {
                 EMPTY_NAME.as_ptr().cast()
             } else {
                 dso.path.cast()

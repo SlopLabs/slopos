@@ -87,6 +87,7 @@ int vscanf(const char *fmt, va_list ap);
 int vsscanf(const char *buf, const char *fmt, va_list ap);
 int asprintf(char **strp, const char *fmt, ...);
 int vasprintf(char **strp, const char *fmt, va_list ap);
+void perror(const char *s);
 
 #ifdef __cplusplus
 }

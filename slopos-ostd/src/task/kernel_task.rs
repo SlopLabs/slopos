@@ -628,6 +628,11 @@ pub struct TaskInner<K, U> {
     pub(crate) fault_signo: AtomicU8,
     pub(crate) fault_si_code: AtomicU32,
     pub(crate) fault_si_addr: AtomicU64,
+    /// Per signal, the thread-group id of the process whose `kill` made it
+    /// pending, or 0 when the kernel raised it. Written only by the post that
+    /// takes the pending bit from clear to set, taken by the claim that
+    /// clears it, so a signal's `si_pid` is its first sender's as on Linux.
+    pub(crate) signal_sender: [AtomicU32; NSIG],
     pub switch_ctx: TaskOwnCell<SwitchContext>,
     /// Set while a CPU is physically executing this task.
     pub on_cpu: AtomicBool,
@@ -1362,6 +1367,7 @@ impl<K, U> TaskInner<K, U> {
             fault_signo: AtomicU8::new(0),
             fault_si_code: AtomicU32::new(0),
             fault_si_addr: AtomicU64::new(0),
+            signal_sender: [const { AtomicU32::new(0) }; NSIG],
             switch_ctx: TaskOwnCell::new(SwitchContext::zero()),
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
@@ -1767,6 +1773,7 @@ impl<K, U> TaskInner<K, U> {
         self.fault_signo = AtomicU8::new(0);
         self.fault_si_code = AtomicU32::new(0);
         self.fault_si_addr = AtomicU64::new(0);
+        self.signal_sender = [const { AtomicU32::new(0) }; NSIG];
         self.futex_bitset = AtomicU32::new(0);
     }
 }

@@ -1,0 +1,31 @@
+diff --git a/src/backends/mod.rs b/src/backends/mod.rs
+index 8da895d..d4b521d 100644
+--- a/src/backends/mod.rs
++++ b/src/backends/mod.rs
+@@ -11,7 +11,8 @@ cfg_if! {
+         target_os = "netbsd",
+         target_os = "freebsd",
+         target_os = "dragonfly",
+-        target_os = "illumos"
++        target_os = "illumos",
++        target_os = "slopos"
+     ))] {
+         mod unix;
+         pub use unix::guess_os_stack_limit;
+diff --git a/src/backends/unix.rs b/src/backends/unix.rs
+index 97ef209..89fd36c 100644
+--- a/src/backends/unix.rs
++++ b/src/backends/unix.rs
+@@ -1,6 +1,11 @@
+ #[cfg(any(target_os = "freebsd", target_os = "dragonfly", target_os = "illumos"))]
+ use libc::pthread_attr_get_np as get_attr;
+-#[cfg(any(target_os = "linux", target_os = "solaris", target_os = "netbsd"))]
++#[cfg(any(
++    target_os = "linux",
++    target_os = "solaris",
++    target_os = "netbsd",
++    target_os = "slopos"
++))]
+ use libc::pthread_getattr_np as get_attr;
+ 
+ pub unsafe fn guess_os_stack_limit() -> Option<usize> {

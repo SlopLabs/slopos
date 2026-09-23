@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Carry the guest's edits to SlopOS's source out of the dev disk as a patch.
+# Carry the guest's edits to SlopOS's source out of the dev disk as a patch,
+# or one file — a kernel the guest built — out as itself.
 #
 # Usage: export_devdisk.sh <image_path> <patch_out>
+#        export_devdisk.sh --file <path_on_volume> <image_path> <out>
 #
 # Diffs the top-level entries of `src/slopos` that its base commit tracks or
 # its `.gitignore` keeps (so not `builddir/` or `third_party/`) against the
@@ -15,8 +17,14 @@ set -euo pipefail
 
 SELF="export_devdisk"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${1:?usage: export_devdisk.sh <image_path> <patch_out>}"
-OUT="${2:?usage: export_devdisk.sh <image_path> <patch_out>}"
+USAGE="usage: export_devdisk.sh [--file <path_on_volume>] <image_path> <out>"
+FILE=""
+if [ "${1:-}" = "--file" ]; then
+    FILE="${2:?$USAGE}"
+    shift 2
+fi
+IMAGE="${1:?$USAGE}"
+OUT="${2:?$USAGE}"
 
 die() {
     echo "$SELF: $*" >&2
@@ -49,6 +57,17 @@ debugfs_run() {
 $(grep -v '^debugfs [0-9]' "$TMP/debugfs.log")"
     fi
 }
+
+if [ -n "$FILE" ]; then
+    case "$FILE" in /*) ;; *) FILE="/$FILE" ;; esac
+    case "$FILE" in *'"'*) die "$FILE: a name with a double quote cannot be dumped" ;; esac
+    debugfs_run "stat \"$FILE\"" "$TMP/stat"
+    grep -q 'Type: regular' "$TMP/stat" || die "$FILE on $IMAGE is not a regular file"
+    debugfs_run "dump \"$FILE\" \"$TMP/file\""
+    mv -f "$TMP/file" "$OUT"
+    echo "$SELF: wrote $OUT ($(wc -c <"$OUT") bytes) from $FILE"
+    exit 0
+fi
 
 debugfs -R "dump /src/slopos/.slopos-base \"$TMP/base\"" "$IMAGE" 2>/dev/null
 [ -s "$TMP/base" ] ||

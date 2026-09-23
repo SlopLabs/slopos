@@ -1,0 +1,16 @@
+[package]
+name = "slopos-kallsyms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The kernel's embedded symbol table, generated from its ELF on whichever machine builds it"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kallsyms"
+path = "src/main.rs"
+
+[dependencies]

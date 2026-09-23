@@ -17,7 +17,9 @@ use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::process::quota::try_charge;
 use slopos_ostd::{KArc, KBox, KVec};
 
-use slopos_abi::auxv::{AT_BASE, AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
+use slopos_abi::auxv::{
+    AT_BASE, AT_ENTRY, AT_EXECFN, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_SECURE,
+};
 use slopos_abi::fs::USER_PATH_MAX;
 use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
 use slopos_fs::VfsError;
@@ -70,9 +72,12 @@ pub const EXEC_READ_CHUNK: usize = 64 * 1024;
 pub const INIT_PATH: &[u8] = b"/sbin/init";
 
 /// What `setup_user_stack` spends whatever the argument count: red zone, two
-/// realignments, the odd-slot pad, seven auxv pairs, argc and the two NULL
-/// sentinels — plus the word `setup_user_stack` drops before any of it.
-const EXEC_ARG_STACK_FIXED: usize = 8 + 128 + 16 + 16 + 8 + 7 * 16 + 3 * 8;
+/// realignments, the odd-slot pad, nine auxv pairs, argc and the two NULL
+/// sentinels, the `AT_EXECFN` string at its longest — plus the word
+/// `setup_user_stack` drops before any of it. The path is charged at its
+/// ceiling so `execve` can be refused before it resolves what it opens.
+const EXEC_ARG_STACK_FIXED: usize =
+    8 + 128 + 16 + 16 + 8 + 9 * 16 + 3 * 8 + (USER_PATH_MAX + 1).next_multiple_of(8);
 
 /// Whether `argv` + `envp` fit the budget, counting exactly what
 /// [`setup_user_stack`] will push.
@@ -401,11 +406,12 @@ pub fn spawn_program_with_cwd(
             return Err(ExecError::NoMem);
         }
 
-        do_exec(
+        exec_image(
             child_table,
             &program,
             argv,
             envp,
+            granted_flags != 0,
             &mut entry,
             &mut stack_ptr,
             &mut tls_tp,
@@ -550,11 +556,39 @@ pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, ExecError> 
 /// `program` is [`resolve_program`]'s output, not a caller's spelling: the
 /// type is what stops a relative path reaching the loader, which resolves
 /// against `/`.
+///
+/// `execve`'s road: it can only narrow the caller's authority, so it never
+/// confers a grant and the image never runs `AT_SECURE`.
 pub fn do_exec(
     table: FdTable,
     program: &CanonPath,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
+    entry_out: &mut u64,
+    stack_ptr_out: &mut u64,
+    tls_tp_out: &mut u64,
+) -> Result<(), ExecError> {
+    exec_image(
+        table,
+        program,
+        argv,
+        envp,
+        false,
+        entry_out,
+        stack_ptr_out,
+        tls_tp_out,
+    )
+}
+
+/// `secure` is whether this exec conferred a grant, which is what the image
+/// finds as `AT_SECURE`.
+#[allow(clippy::too_many_arguments)]
+fn exec_image(
+    table: FdTable,
+    program: &CanonPath,
+    argv: Option<&[&[u8]]>,
+    envp: Option<&[&[u8]]>,
+    secure: bool,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
@@ -567,7 +601,7 @@ pub fn do_exec(
     }
     process_vm_end_prepay(vm_process);
 
-    let stack_top = setup_user_stack(table, argv, envp, &exec_info)?;
+    let stack_top = setup_user_stack(table, argv, envp, &exec_info, program.as_bytes(), secure)?;
     *stack_ptr_out = stack_top;
     *tls_tp_out = exec_info.tls_tp;
 
@@ -831,11 +865,15 @@ fn stream_segments(
     Ok(())
 }
 
+/// `execfn` is the canonical path of the image, pushed above the argument
+/// strings for `AT_EXECFN`.
 fn setup_user_stack(
     table: FdTable,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     exec_info: &ElfExecInfo,
+    execfn: &[u8],
+    secure: bool,
 ) -> Result<u64, ExecError> {
     let vm_process = table.process().ok_or(ExecError::Fault)?;
     let stack_top_raw = process_vm_get_stack_top(vm_process);
@@ -852,10 +890,20 @@ fn setup_user_stack(
     if !exec_arg_bytes_fit(argv, envp) {
         return Err(ExecError::TooManyArgs);
     }
+    let execfn = trim_nul_bytes(execfn);
+    if execfn.len() > USER_PATH_MAX {
+        return Err(ExecError::NameTooLong);
+    }
 
     let mut sp = stack_top;
     sp = sp.wrapping_sub(128);
     sp &= !0xF;
+
+    sp = sp.wrapping_sub(execfn.len() as u64 + 1);
+    sp &= !0x7;
+    write_to_user_stack(&vm_space, sp, execfn)?;
+    write_byte_to_user_stack(&vm_space, sp + execfn.len() as u64, 0)?;
+    let execfn_ptr = sp;
 
     let mut string_ptrs: KVec<u64> =
         KVec::<u64>::with_capacity(argc + envc + 2).map_err(|_| ExecError::NoMem)?;
@@ -887,30 +935,13 @@ fn setup_user_stack(
     sp &= !0xF;
 
     // SysV ABI: rsp must be 16-byte aligned at _start with argc at [rsp].
-    let total_slots = argc + envc + 17; // 14 auxv + 3 sentinel/argc
+    let total_slots = argc + envc + 3 + 2 * AUXV_PAIRS;
     if total_slots % 2 != 0 {
         sp = sp.wrapping_sub(8);
     }
 
-    // `AT_BASE` is emitted even for a static image, where it reads 0, because
-    // a fixed-size vector is what the two constants above can be stated
-    // against. Linux does the same.
-    let auxv = [
-        (AT_PHDR, exec_info.phdr_addr),
-        (AT_PHENT, exec_info.phent_size as u64),
-        (AT_PHNUM, exec_info.phnum as u64),
-        (AT_PAGESZ, PAGE_SIZE_4KB),
-        (AT_BASE, exec_info.interp_base),
-        (AT_ENTRY, exec_info.entry),
-        (AT_NULL, 0),
-    ];
-    let aux_size = auxv.len() * (2 * core::mem::size_of::<u64>());
-    sp = sp.wrapping_sub(aux_size as u64);
-    for (idx, (a_type, a_val)) in auxv.iter().enumerate() {
-        let slot = sp + (idx as u64) * 16;
-        write_u64_to_user_stack(&vm_space, slot, *a_type)?;
-        write_u64_to_user_stack(&vm_space, slot + 8, *a_val)?;
-    }
+    sp = sp.wrapping_sub((AUXV_PAIRS * 16) as u64);
+    write_auxv(&vm_space, sp, exec_info, execfn_ptr, secure)?;
 
     sp = sp.wrapping_sub(8);
     write_u64_to_user_stack(&vm_space, sp, 0)?;
@@ -953,4 +984,40 @@ fn write_u64_to_user_stack(
 ) -> Result<(), ExecError> {
     let bytes = value.to_le_bytes();
     write_to_user_stack(vm_space, addr, &bytes)
+}
+
+/// Pairs [`write_auxv`] emits, `AT_NULL` included.
+const AUXV_PAIRS: usize = 9;
+
+/// Out of line so the vector stays off [`setup_user_stack`]'s frame, which is
+/// measured against the 2 KiB stack gate.
+///
+/// `AT_BASE` is emitted even for a static image, where it reads 0, because a
+/// fixed-size vector is what the budget above can be stated against. Linux
+/// does the same.
+#[inline(never)]
+fn write_auxv(
+    vm_space: &KArc<VmSpace>,
+    at: u64,
+    exec_info: &ElfExecInfo,
+    execfn: u64,
+    secure: bool,
+) -> Result<(), ExecError> {
+    let auxv: [(u64, u64); AUXV_PAIRS] = [
+        (AT_PHDR, exec_info.phdr_addr),
+        (AT_PHENT, exec_info.phent_size as u64),
+        (AT_PHNUM, exec_info.phnum as u64),
+        (AT_PAGESZ, PAGE_SIZE_4KB),
+        (AT_BASE, exec_info.interp_base),
+        (AT_ENTRY, exec_info.entry),
+        (AT_SECURE, secure as u64),
+        (AT_EXECFN, execfn),
+        (AT_NULL, 0),
+    ];
+    let mut bytes = [0u8; AUXV_PAIRS * 16];
+    for (pair, (a_type, a_val)) in bytes.chunks_exact_mut(16).zip(auxv.iter()) {
+        pair[..8].copy_from_slice(&a_type.to_le_bytes());
+        pair[8..].copy_from_slice(&a_val.to_le_bytes());
+    }
+    write_to_user_stack(vm_space, at, &bytes)
 }
