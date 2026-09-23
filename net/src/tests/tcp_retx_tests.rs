@@ -10,7 +10,7 @@ use crate::tcp::retx::{SENDMAP_CAPACITY, SendMap};
 use crate::tcp::seq::SeqNum;
 
 pub fn test_sendmap_empty_is_empty() -> TestResult {
-    let q = SendMap::new();
+    let q = SendMap::boxed().expect("alloc");
     assert_test!(q.is_empty(), "fresh map is empty");
     assert_eq_test!(q.len(), 0, "len 0");
     assert_eq_test!(q.total_bytes(), 0, "no bytes tracked");
@@ -21,7 +21,7 @@ pub fn test_sendmap_empty_is_empty() -> TestResult {
 }
 
 pub fn test_sendmap_push_single_segment() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     q.push_sent(SeqNum::new(100), 10, 50).expect("room");
     assert_eq_test!(q.len(), 1, "one entry");
     assert_eq_test!(q.total_bytes(), 10, "10 bytes tracked");
@@ -31,7 +31,7 @@ pub fn test_sendmap_push_single_segment() -> TestResult {
 }
 
 pub fn test_sendmap_full_ack_frees_entry_and_reports_rtt_origin() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     q.push_sent(SeqNum::new(100), 10, 50).unwrap();
     let out = q.on_cumulative_ack(SeqNum::new(110));
     assert_eq_test!(out.bytes_freed, 10, "freed 10 bytes");
@@ -43,7 +43,7 @@ pub fn test_sendmap_full_ack_frees_entry_and_reports_rtt_origin() -> TestResult 
 }
 
 pub fn test_sendmap_partial_ack_shrinks_head() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     q.push_sent(SeqNum::new(100), 20, 50).unwrap();
     let out = q.on_cumulative_ack(SeqNum::new(105));
     assert_eq_test!(out.bytes_freed, 5, "freed 5 bytes");
@@ -56,7 +56,7 @@ pub fn test_sendmap_partial_ack_shrinks_head() -> TestResult {
 }
 
 pub fn test_sendmap_cumulative_ack_across_entries() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     q.push_sent(SeqNum::new(100), 10, 10).unwrap();
     q.push_sent(SeqNum::new(110), 10, 20).unwrap();
     q.push_sent(SeqNum::new(120), 10, 30).unwrap();
@@ -73,7 +73,7 @@ pub fn test_sendmap_cumulative_ack_across_entries() -> TestResult {
 }
 
 pub fn test_sendmap_karn_suppresses_rtt_on_retransmit() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     q.push_sent(SeqNum::new(100), 10, 50).unwrap();
     q.mark_all_lost();
     assert_test!(q.has_lost(), "entry is Lost after mark_all_lost");
@@ -86,7 +86,7 @@ pub fn test_sendmap_karn_suppresses_rtt_on_retransmit() -> TestResult {
 }
 
 pub fn test_sendmap_push_fails_when_full() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     for i in 0..SENDMAP_CAPACITY {
         let seq = SeqNum::new(100 + (i as u32) * 10);
         q.push_sent(seq, 10, 0).unwrap();
@@ -108,7 +108,7 @@ pub fn test_sendmap_push_fails_when_full() -> TestResult {
 /// SACK-confirming it suppresses the sample even though the second entry was
 /// InFlight.
 pub fn test_sendmap_sack_confirmed_no_rtt_sample() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     // [100..110) ts=10, [110..120) ts=20
     q.push_sent(SeqNum::new(100), 10, 10).unwrap();
     q.push_sent(SeqNum::new(110), 10, 20).unwrap();
@@ -129,7 +129,7 @@ pub fn test_sendmap_sack_confirmed_no_rtt_sample() -> TestResult {
 
 /// total_bytes counts every entry; pipe counts only InFlight + Retransmitted.
 pub fn test_sendmap_total_bytes_vs_pipe() -> TestResult {
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     for i in 0..6u32 {
         let seq = SeqNum::new(100 + i * 10);
         q.push_sent(seq, 10, i as u64).unwrap();
@@ -176,7 +176,7 @@ fn splitmix32(state: &mut u64) -> u32 {
 /// mix of push/ack/sack/mark_lost/retransmit operations.
 pub fn test_sendmap_invariant_fuzz() -> TestResult {
     let mut rng = 0xDEAD_BEEF_CAFE_BABE_u64;
-    let mut q = SendMap::new();
+    let mut q = SendMap::boxed().expect("alloc");
     let mut next_seq: u32 = 1000;
 
     for _ in 0..2_048 {
@@ -193,13 +193,10 @@ pub fn test_sendmap_invariant_fuzz() -> TestResult {
             1 => {
                 // full cumulative ack of head entry
                 if !q.is_empty() {
-                    let out = q.on_cumulative_ack(SeqNum::new(
-                        next_seq.wrapping_sub(
-                            q.total_bytes()
-                                .saturating_sub(splitmix32(&mut rng) % q.total_bytes().max(1)),
-                        ),
-                    ));
-                    let _ = out;
+                    let total = q.total_bytes();
+                    let up_to = next_seq
+                        .wrapping_sub(total.saturating_sub(splitmix32(&mut rng) % total.max(1)));
+                    let _ = q.on_cumulative_ack(SeqNum::new(up_to));
                 }
             }
             2 => {
@@ -234,6 +231,13 @@ pub fn test_sendmap_invariant_fuzz() -> TestResult {
             }
         }
 
+        if q.totals() != q.recount() {
+            return fail!(
+                "running totals drifted: (total, pipe, lost) {:?} vs recounted {:?}",
+                q.totals(),
+                q.recount()
+            );
+        }
         if q.total_bytes() > 1_000_000 {
             return fail!("total_bytes ran away");
         }
@@ -244,7 +248,42 @@ pub fn test_sendmap_invariant_fuzz() -> TestResult {
     pass!()
 }
 
+/// The running totals match a recount while the ring wraps past its storage.
+pub fn test_sendmap_ring_wraps() -> TestResult {
+    let mut q = SendMap::boxed().expect("alloc");
+    let mut next = 0u32;
+    let mut acked = 0u32;
+    for round in 0..3 {
+        while q.capacity_remaining() > 0 {
+            q.push_sent(SeqNum::new(next), 1000, round).unwrap();
+            next += 1000;
+        }
+        let blocks = [(next - 5000, next)];
+        q.apply_sack_blocks(&blocks, 1);
+        let (total, pipe, _) = q.recount();
+        if (total, pipe) != (q.total_bytes(), q.pipe()) {
+            return fail!("totals drifted after a SACK in round {}", round);
+        }
+        acked += 900 * 1000;
+        let out = q.on_cumulative_ack(SeqNum::new(acked));
+        assert_eq_test!(out.entries_removed, 900, "the oldest nine hundred retire");
+        let (total, pipe, _) = q.recount();
+        assert_eq_test!(q.total_bytes(), total, "total after the ack");
+        assert_eq_test!(q.pipe(), pipe, "pipe after the ack");
+    }
+    q.mark_all_lost();
+    assert_eq_test!(q.pipe(), 0, "an RTO empties the pipe");
+    let first = q.next_lost().map(|e| e.seq);
+    assert_eq_test!(
+        first,
+        Some(SeqNum::new(acked)),
+        "the oldest unacknowledged is resent first"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_sendmap_empty_is_empty, suite = tcp_retx);
+slopos_testing::stest!(name = test_sendmap_ring_wraps, suite = tcp_retx);
 slopos_testing::stest!(name = test_sendmap_push_single_segment, suite = tcp_retx);
 slopos_testing::stest!(
     name = test_sendmap_full_ack_frees_entry_and_reports_rtt_origin,

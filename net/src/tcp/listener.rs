@@ -9,6 +9,7 @@ use slopos_ostd::{AllocError, KVec, KVecDeque};
 
 use crate::tcp::{
     self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpOutSegment, TcpTuple,
+    our_window_scale,
 };
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 use crate::types::{Ipv4Addr, Port, SockAddr};
@@ -92,6 +93,7 @@ pub struct SynRecvEntry {
     pub sack_permitted: bool,
     pub key: u32,
     pub peer_tsval: Option<u32>,
+    pub peer_wscale: Option<u8>,
 }
 
 impl core::fmt::Debug for SynRecvEntry {
@@ -115,6 +117,7 @@ pub struct AcceptedConn {
     pub peer_mss: u16,
     pub sack_permitted: bool,
     pub peer_tsval: Option<u32>,
+    pub peer_wscale: Option<u8>,
 }
 
 /// The half-open connections of one listening socket.
@@ -178,6 +181,7 @@ impl SynQueue {
         sack_permitted: bool,
         timestamp: u64,
         peer_tsval: Option<u32>,
+        peer_wscale: Option<u8>,
     ) -> Option<TcpOutSegment> {
         let four_tuple = self.four_tuple(local, remote);
 
@@ -214,6 +218,7 @@ impl SynQueue {
             sack_permitted,
             key,
             peer_tsval,
+            peer_wscale,
         };
 
         let syn_ack = build_syn_ack_from(&entry, &four_tuple);
@@ -267,6 +272,7 @@ impl SynQueue {
             peer_mss: entry.peer_mss,
             sack_permitted: entry.sack_permitted,
             peer_tsval: entry.peer_tsval,
+            peer_wscale: entry.peer_wscale,
         })
     }
 
@@ -431,7 +437,7 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: DEFAULT_WINDOW_SIZE,
         mss: Some(DEFAULT_MSS),
-        wscale: None,
+        wscale: entry.peer_wscale.map(|_| our_window_scale()),
         sack_permitted: entry.sack_permitted,
         sack_blocks: [(0, 0); 4],
         sack_block_count: 0,

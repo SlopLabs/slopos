@@ -13,7 +13,7 @@ use super::super::seq::{SeqNum, seq_gt, seq_lt};
 use super::super::tuple::TcpTuple;
 use super::data::DataState;
 use super::{Pcb, PcbState};
-use crate::timer::TimerToken;
+use crate::timer::{TimerKind, TimerToken};
 
 /// Which open brought the connection into `SYN_RECEIVED`.
 ///
@@ -35,6 +35,7 @@ pub struct SynRecvState {
     pub snd_nxt: SeqNum,
     pub rcv_nxt: SeqNum,
     pub snd_wnd: u32,
+    /// Unscaled: the SYN-ACK is what advertises it.
     pub rcv_wnd: u16,
     pub our_wscale: u8,
     pub snd_wscale: u8,
@@ -114,11 +115,16 @@ impl SynRecvState {
                     return actions;
                 }
                 challenge_ack::RstAction::ChallengeAck => {
+                    let window = if s.wscale_enabled {
+                        s.rcv_wnd.div_ceil(1 << s.our_wscale)
+                    } else {
+                        s.rcv_wnd
+                    };
                     actions.push_segment(SegmentBuilder::ack(
                         tuple,
                         s.snd_nxt.raw(),
                         s.rcv_nxt.raw(),
-                        s.rcv_wnd,
+                        window,
                     ));
                     return actions;
                 }
@@ -146,14 +152,21 @@ impl SynRecvState {
         };
         s.rcv_wnd = DEFAULT_WINDOW_SIZE;
 
+        // With no memory for the connection the handshake stays where it is
+        // and its timer resends the SYN-ACK, whose answer tries again.
+        let Ok(data) = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s)) else {
+            if s.retransmit_token.is_none() {
+                actions.push_timer(TimerOp::Schedule {
+                    kind: TimerKind::TcpRetransmit,
+                    key: 0,
+                    delay_ms: u64::from(s.rto_ms),
+                });
+            }
+            return actions;
+        };
         // Unowned once the variant is replaced: `cancel_pcb_timers` would no
         // longer find it, and it would fire against the `Data` state's own RTO.
         let handshake_timer = s.retransmit_token.take();
-
-        // TODO(tech-debt): `.expect` on OOM kills the connection — thread
-        // `Result<KBox<Actions>, _>` out once the dispatcher takes an out-param.
-        let data = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))
-            .expect("DataState alloc failed");
         let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
         if let Some(token) = handshake_timer {

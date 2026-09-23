@@ -67,11 +67,30 @@ a PR to rust-lang/cargo and the others are PRs to rust-lang/rust. What it
 does is put `curl`, `git2`, `git2-curl`, `libgit2-sys` and the pure-Rust
 crates only their code paths reach behind a `network` feature that is on by
 default. Without it cargo resolves path, directory and local-registry
-sources — a vendored workspace build, which is what `Cargo.lock`'s nine
-third-party crates need and all a target with no libcurl, libgit2 or OpenSSL
+sources — a vendored workspace build, which is how this tree builds on
+the dev disk (below) and all a target with no libcurl, libgit2 or OpenSSL
 can offer. Six C libraries leave the closure; `rusqlite` stays, because
 SQLite is one amalgamated C file with no build system and it cross-compiles
 against slibc's headers. `scripts/check_cargo_fork.sh` holds the cut.
+
+**A build can read no registry.** `Cargo.lock` is tracked, and
+`scripts/make_vendor.sh` (`just vendor`) fills `third_party/vendor` with every
+crates.io package it pins *and* the ones `-Zbuild-std` resolves from the
+sysroot's own `library/Cargo.lock`, which nothing in the workspace can see.
+`.cargo/vendor.toml` points `crates-io` at that directory with `net.offline`
+set, and is passed with `--config` rather than folded into
+`.cargo/config.toml` because the same checkout drives cargo inside
+`third_party/`'s materialised toolchain trees, whose dependencies are not
+vendored here — so a host build still reads crates.io as it always did, and
+the vendored road is the one the dev disk and the offline gate take.
+`scripts/check_offline_build.sh` holds it: `--pins-only`, from
+`check-framekernel-gates`, holds every registry package in both lockfiles to
+the checksum its vendored copy records wherever `third_party/vendor` exists,
+which is a developer's tree and not CI's gates step; `just
+check-offline-build`, in CI, checks the kernel and the userland from an empty
+`CARGO_HOME`, `--locked --offline`, where a warm registry cache cannot answer
+for a missing crate. A new dependency is a `Cargo.lock` diff, a `just vendor`
+and a `NOTICE.md` entry.
 
 **The C++ runtime is cross-built and test-only.** `x86_64-unknown-slopos` has
 a C++ standard library: LLVM's `libc++` and `libc++abi`, cross-built from the
@@ -177,8 +196,31 @@ attached by `DEV_DISK_IMG` as **virtio-disk4**, after the capacity disk, so
 `just test-devdisk` attaches no capacity image and the volume comes up at
 `vdd`. The marker file at the volume root records every staged path's size
 read back *out of the image*, and `devdisk_test` mounts the device, grades
-the inventory, unmounts and mounts again — the second mount is the point,
-because a leaked write claim answers `AlreadyClaimed` forever.
+the inventory and the source tree, unmounts and mounts again — the second
+mount is the point, because a leaked write claim answers `AlreadyClaimed`
+forever.
+
+**The source rides the same volume.** A new dev disk is seeded with
+`src/slopos`: the committed `HEAD`, the vendored crates, a
+`.cargo/config.toml` with `vendor.toml` folded in, and `.slopos-base`, the
+commit it was cut from. It is seeded once; from then on the tree is the
+guest's, so the marker records only that it is there, and `devdisk_test`
+grades the copy that arrived — its lockfile against its own vendor directory
+— not the host's. A volume preserved from before the seeding carries none and
+says so. `just devdisk-export` is the way back: the top-level entries the
+base commit tracks or the tree's own `.gitignore` keeps, read out with
+`debugfs`, diffed against the base commit through a throwaway index and git
+directory, into `builddir/devdisk.patch` for `git apply`.
+
+**The guest speaks TLS 1.3.** `tls-core` is a sans-I/O client with every
+primitive under it written here, `no_std` and `forbid(unsafe_code)`;
+`userland::tls` wraps it in a blocking stream, and `curl` is its user. It
+trusts `/etc/ssl/certs/ca-certificates.crt`, Mozilla's root store committed
+under `assets/certs/` and replaced only by `scripts/update_ca_bundle.sh`,
+which checks the digest curl.se publishes. `tls-core` and `http-core` are host
+crates under `just test-host` because no userland unit test runs anywhere;
+`tls-core`'s interop tests drive `openssl s_server` and `s_client` and need
+`openssl` on PATH.
 
 **The unwinder is not test-only.** `libc.so` and `libc.a` supply the Level-1
 Itanium unwinder (`vendor/unwinding`, seventeen `_Unwind_*` entry points) on
@@ -342,6 +384,7 @@ The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-re
 - **`scripts/check_clang_driver.sh`** — builds `clangDriver` and `clangBasic` out of the pinned tree for the *host*, drives a `clang::driver::Driver` at `x86_64-unknown-slopos` and grades the link job's argv. `toolchains::SlopOS` is a second copy of what `build_userland.sh` writes by hand — `crt0.o` first, `--image-base=0x400000`, `--dynamic-linker=/lib/ld-slopos.so.1`, `--eh-frame-hdr`, `-z now`, `-L<sysroot>/lib -lc`, `libbuiltins.a` last — and a driver that disagrees with it is not a compile error: it links on the host and produces a binary that dies at `execve`, with no interpreter, no `crt0.o` and no `PT_GNU_EH_FRAME`, at a load address the loader does not map. Fifty-four assertions over the four shapes of link (static, dynamic, shared, C++) plus the toolchain's own answers: `ld.lld`, the integrated assembler, no PIC or PIE default, asynchronous unwind tables, libc++, compiler-rt, and `<sysroot>/include/c++/v1` ahead of `<sysroot>/include` — the order libc++'s `#include_next` needs. `skipped` without a materialised source tree; the self-test's rejection is the same probe at a triple the port does not name, which is the `Generic_ELF` a missing dispatch hunk leaves behind. 2 min 29 s cold on 20 cores and 219 MB of build directory, ~4 s warm.
 - **`scripts/check_cargo_fork.sh`** — holds `toolchain/cargo/`'s `network` cut to dropping every C library and still compiling. Two silent failures: a rebase onto a newer cargo re-introduces one of those crates on the offline path — a new dependency, or an existing one losing its `optional = true` — and the Linux build stays green while the slopos build stops at a C compiler it does not have, hours into a bootstrap run; and the `#[cfg(feature = "network")]` cut stops compiling, which every default build also hides. So the gate reads the dependency closure on both sides of the feature and then compiles the offline side. `libsqlite3-sys` is asserted *present* rather than forbidden: SQLite is one amalgamated C file and it cross-compiles against slibc, and dropping it would make `toolchain/cargo/PIN` say something untrue. ~27 s cold, 0.6 s warm.
 - **`scripts/check_bootstrap_config.sh`** — holds the cross-build configuration to the toolchain it claims to produce, by running bootstrap's own dry run and then compiling and linking with the generated wrapper. Three silent failures: the step graph quietly loses an artifact — `cargo` is an *extended* tool and a stage2 rustc does not depend on it, so a config that stops naming it still builds a compiler and the dev disk arrives with no cargo on it; `toolchain/compiler/0003-bootstrap-cmake-system-name.patch` goes away, and an unrecognised triple prints a note, sets `CMAKE_SYSTEM_NAME=Generic` and exits 0, losing `LLVM_ON_UNIX` and every `Unix/*.inc` file the port patches; and the wrapper stops producing SlopOS binaries, which it does by naming two triples and would regress by naming one. ~1.4 s warm, after a first run that downloads bootstrap's stage0 (~200 MB).
+- **`scripts/check_offline_build.sh`** — holds the tree to building with no registry. Two silent failures: `Cargo.lock` moves and the vendored copy no longer describes it, which every host build survives because the host has a registry, and the dev disk arrives with a tree its own cargo cannot resolve; and `-Zbuild-std` needs std's crates.io dependencies, which cargo resolves from a lockfile the workspace never reads, so a directory holding only the workspace's crates passes every check but a build. The pins half also fails on a vendored package no lockfile names, since that is a pin nobody reviews, and on a vendored `library.lock` that is not std's, since that copy is what a dev disk's guest grades its tree against. `--self-test` grades six fixtures, five of them rejections. The build half is 63 s cold on four cores and ~30 s warm; `skipped` without `third_party/vendor`, `--require` in CI.
 - **`scripts/check_codegen_backend.sh`** — holds a rustc codegen backend to seven of the capabilities `targets/x86_64-slos.json` depends on: an ELF object format, soft-float, `.stack_sizes`, safestack instrumentation through `__safestack_pointer_address`, `#[unsafe(link_section)]`, `#[unsafe(naked)]`, and `sym` operands in `asm!`. Two of those are flags a backend can *accept and ignore* — `-Zemit-stack-sizes` and `-Zsanitizer=safestack` — so a backend swap can leave the build green with S-5 and the dual-stack split enforced by nothing. Tracked verdicts live in `scripts/gates/codegen/<backend>.txt` and a mismatch fails **in either direction**: a `lacks` the probe finds present is the signal that the self-hosting question in `plans/self-hosting.md` needs re-deciding. `disable-redzone` and the `unwind` panic strategy are stated as residual rather than probed — the gate's header says why. Cold it costs ~60 s and ~460 MB for `llvm` / ~310 MB for `cranelift` under `builddir/gates/codegen-probe/` (which `just clean` removes); warm it is ~1 s. `llvm` is graded on every `just check-framekernel-gates`; `cranelift` reports `skipped` when the rustup component is absent, and CI installs it in a job of its own so the answer is re-taken rather than assumed.
 - **`scripts/check_linker_script.sh`** — holds a linker to the eighteen linker-script constructs `link.ld` uses, from `. = KERNEL_VIRT_BASE` through `PHDRS`, `(NOLOAD)`, all three spellings of `ALIGN`, `KEEP` under `--gc-sections` and the four page-table reservations past `_bss_end`. Each probe's script carries the construct under test and nothing else a probe grades — a script that scaffolds itself with an `ALIGN` reports the linker's `ALIGN` support under whatever name that probe carries — with one deliberate exception, `composed-layout`, which links a `link.ld`-shaped script because a linker can take every construct alone and compose them differently. That exception is what the gate is built around: wild 0.10.0 refuses `link.ld` on its location-counter assignment, and given the shape it does accept it keeps the script's section order and still starts the image 0x13e8 past the base it was given. A second, self-maintaining half compares the constructs probed against the keywords `link.ld` actually uses, so a construct added to the script with no probe fails the gate and a probe whose construct left the script fails as a dead entry. `scripts/gates/linker/<linker>.txt`; `lld` is graded on every `just check-framekernel-gates`, `wild` reports `skipped` when it is not installed and is pinned in the CI job that installs it.
 - **`scripts/tcb_ratio.sh`** (via `just tcb-ratio`) — a hard gate at `--max 1.0` from both `just check-framekernel-gates` and `KERNEL_BUILD_GATES=1` builds. Prints lines of `unsafe` in `slopos-ostd/` divided by total kernel Rust LoC. Read it as a trend, not as a TCB fraction comparable to other projects': the denominator is raw LoC including the 41 kLoC vendored DWARF reader, and published comparators measure post-LTO linked code size.
@@ -379,6 +422,11 @@ distributed entirely under this license") in direct conflict with GPLv3 §5(c)
 `include_bytes!` sites in `font/src/` are `#[cfg(test)]`-gated and must stay
 that way. Each font's license text ships beside it, in `assets/fonts/` and on
 the installed images.
+
+**The CA bundle is data, loaded at runtime, like a font.** It is MPL-2.0 and
+ships as its own file with its license text beside it in
+`/usr/share/licenses/ca-certificates/`; nothing compiles it in, and only a host
+test reads it from the tree.
 
 New third-party code linked into a shipped binary needs an entry in
 `NOTICE.md`; `MIT OR Apache-2.0` crates elect MIT there.
@@ -454,7 +502,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just check-fs-image` — hold the image the suite just wrote to `e2fsck -fn` and a clean superblock. Runs in CI after the test capture; an image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
-- `just test-devdisk` — the dev-disk check: build (once, then preserve) the 2 GiB volume a cross-built toolchain lands on, attach it as `virtio-disk4`, and let the userland suite mount it by device name, read the staged inventory back and mount it a second time. Separate from `just test` for the reason `test-capacity` is: the volume is opt-in, and the same utest under `just test` passes by reporting that no dev disk is attached. `DEV_DISK_SIZE` overrides the size.
+- `just test-devdisk` — the dev-disk check: build (once, then preserve) the 2 GiB volume a cross-built toolchain lands on, attach it as `virtio-disk4`, and let the userland suite mount it by device name, read the staged inventory back, grade the source tree against its own vendor directory and mount it a second time; on a volume this run created, `devdisk-export` must then find nothing to export, since nobody has edited that tree. Separate from `just test` for the reason `test-capacity` is: the volume is opt-in, and the same utest under `just test` passes by reporting that no dev disk is attached. `DEV_DISK_SIZE` overrides the size.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
 - `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and stays inside the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and an entry matching nothing fails as a dead entry. The three pools are not graded alike. Class counts are deterministic — a class registers on the first acquire of a declaration site, and three runs of one pinned ISO measured boot at 71 every time — so they carry **exact caps**. Boot's edge and chain counts carry caps rather than bands for the same reason, though the recorded values still hold the old convention's slack until they are re-measured onto the observed 43/110. The two test phases' edge and chain counts measure which orderings a run *happened to observe* and move between runs of identical code, so they carry **bands** (`band <phase> <pool> <lo> <hi>`) instead: leaving one prints `DRIFT` on stderr and the run still passes. Be clear about what that gives up — a banded pool has no upper failure of its own, so growth up to `max-fill-pct` (~3.5x observed) reaches you only as that DRIFT line; an *inverted* order is caught by the cycle detector and still fails. `min-classes` / `min-edges` / `min-chains` are the floors that stop a validator which quietly stopped recording from reading as maximally healthy. `--emit-allowlist` writes a fresh baseline (and accepts several `--log`s to merge), a single `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives its crafted logs through the parser — proving both that the gate rejects and that it stays silent on the forms it deliberately accepts.
@@ -560,6 +608,7 @@ just fmt                              # CI: Check formatting
 just test-host                        # CI: Host-side unit tests
 just build                            # CI: Build kernel
 just check-framekernel-gates          # CI: Framekernel gates (self-tests + vendor/toolchain pins + all source/ELF scans)
+just check-offline-build              # CI: Offline build from vendored sources
 
 # CI: Run tests — one raw capture, which the ratchets then parse.
 just _build-run-tests

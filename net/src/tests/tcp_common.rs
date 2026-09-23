@@ -17,6 +17,18 @@ pub const REMOTE_PORT: u16 = 80;
 /// compute expected `rcv_nxt` values.
 pub const PEER_ISS: u32 = 7000;
 
+/// Well under the machine default, so a test fills a buffer in a few dozen
+/// writes.
+pub const TEST_BUFFER: usize = 32 * 1024;
+
+/// Pre-stocked with spares, so the state machine buffers a test's payloads
+/// without reserving its own.
+pub fn test_bufs() -> tcp::TcpBufferPair {
+    let mut bufs = tcp::TcpBufferPair::new(TEST_BUFFER, TEST_BUFFER).expect("alloc");
+    bufs.spares.reserve(tcp::chunk::SPARES_MAX, 0);
+    bufs
+}
+
 /// Canonical "between-tests" reset.
 ///
 /// Socket table first: it holds TCP indices. Use it at the top of every test

@@ -43,6 +43,12 @@ impl UdpDemuxBucket {
         sock_idx: u32,
         reuse_addr: bool,
     ) -> Result<(), NetError> {
+        let resolver = super::dns::RESOLVER_SOCKET;
+        if self.entries.iter().flatten().any(|entry| {
+            entry.local_port == local_port && (entry.sock_idx == resolver || sock_idx == resolver)
+        }) {
+            return Err(NetError::AddressInUse);
+        }
         for slot in &mut self.entries {
             if let Some(entry) = slot
                 && entry.local_ip == local_ip
@@ -241,13 +247,8 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
         return;
     };
 
-    // RFC 5452: a reply is only a candidate if it came from the server the
-    // query went to and landed on the port it left from. Without this, any
-    // host that can guess the ID poisons the resolver cache.
-    if src_port == super::dns::DNS_PORT && super::dns::response_is_expected(src_ip, dst_port) {
-        if let Some(d) = crate::net_driver_service::net_driver() {
-            (d.dns_intercept_response)(udp_payload);
-        }
+    if src_port == super::dns::DNS_PORT && super::dns::deliver(src_ip, dst_port, udp_payload) {
+        return;
     }
 
     if let Some(listener) = port_listener(dst_port) {

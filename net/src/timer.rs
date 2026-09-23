@@ -64,14 +64,11 @@ impl TimerToken {
     pub const INVALID: Self = Self(0);
 }
 
-/// A single pending timer; fires unless `cancelled` once
-/// `crate::clock::now_ms()` reaches `deadline_ms`.
 struct TimerEntry {
     deadline_ms: u64,
     kind: TimerKind,
     key: u32,
     token: TimerToken,
-    cancelled: bool,
 }
 
 /// A timer that has expired and needs dispatching to its subsystem.
@@ -82,6 +79,9 @@ pub struct FiredTimer {
     /// subsystem must validate it still names a live resource: the original
     /// entry may have been closed or freed before the timer fires.
     pub key: u32,
+    /// What `schedule` returned, for a subsystem that re-arms to tell this
+    /// firing from its current one.
+    pub token: TimerToken,
 }
 
 #[derive(slopos_ostd::SlotFields)]
@@ -180,30 +180,28 @@ impl NetTimerWheel {
             kind,
             key,
             token,
-            cancelled: false,
         });
         token
     }
 
-    /// Cancel a previously scheduled timer: the entry is marked, then skipped
-    /// and reclaimed when the pending list is next drained. `false` means it
-    /// had already fired or was not found.
+    /// Removed at once, so a connection that re-arms fast cannot grow the list.
+    /// `false` means it had already fired or was not found.
     pub fn cancel(&self, token: TimerToken) -> bool {
         if token == TimerToken::INVALID {
             return false;
         }
         let mut inner = self.inner.lock();
-        for entry in inner.entries.iter_mut() {
-            if entry.token == token && !entry.cancelled {
-                entry.cancelled = true;
-                return true;
+        match inner.entries.iter().position(|e| e.token == token) {
+            Some(idx) => {
+                inner.entries.swap_remove(idx);
+                true
             }
+            None => false,
         }
-        false
     }
 
-    /// Fire every non-cancelled entry whose `deadline_ms` has been reached as
-    /// of `crate::clock::now_ms()`, earliest deadline first. At most
+    /// Fire every entry whose `deadline_ms` has been reached as of
+    /// `crate::clock::now_ms()`, earliest deadline first. At most
     /// [`MAX_TIMERS_PER_PROCESS`] fire per call; the rest wait for the next.
     /// The internal lock is released before returning, so dispatch handlers
     /// may freely schedule or cancel timers.
@@ -211,15 +209,6 @@ impl NetTimerWheel {
         let now = crate::clock::now_ms();
         let mut fired = KVec::new();
         let mut inner = self.inner.lock();
-
-        let mut i = 0;
-        while i < inner.entries.len() {
-            if inner.entries[i].cancelled {
-                inner.entries.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
 
         // Selecting the minimum deadline each round keeps dispatch order
         // deterministic without sorting the whole list.
@@ -234,10 +223,10 @@ impl NetTimerWheel {
             }
             match best {
                 Some(idx) => {
-                    let kind = inner.entries[idx].kind;
-                    let key = inner.entries[idx].key;
-                    inner.entries.swap_remove(idx);
-                    let _ = fired.push(FiredTimer { kind, key });
+                    let TimerEntry {
+                        kind, key, token, ..
+                    } = inner.entries.swap_remove(idx);
+                    let _ = fired.push(FiredTimer { kind, key, token });
                 }
                 None => break,
             }
@@ -253,21 +242,11 @@ impl NetTimerWheel {
         let mut fired = KVec::new();
         let mut inner = self.inner.lock();
 
-        let mut i = 0;
-        while i < inner.entries.len() {
-            if inner.entries[i].cancelled && inner.entries[i].kind == kind {
-                inner.entries.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-
         while fired.len() < MAX_TIMERS_PER_PROCESS {
             let mut best: Option<usize> = None;
             let mut best_deadline = u64::MAX;
             for (idx, entry) in inner.entries.iter().enumerate() {
                 if entry.kind == kind
-                    && !entry.cancelled
                     && entry.deadline_ms <= now
                     && entry.deadline_ms < best_deadline
                 {
@@ -277,9 +256,8 @@ impl NetTimerWheel {
             }
             match best {
                 Some(idx) => {
-                    let key = inner.entries[idx].key;
-                    inner.entries.swap_remove(idx);
-                    let _ = fired.push(FiredTimer { kind, key });
+                    let TimerEntry { key, token, .. } = inner.entries.swap_remove(idx);
+                    let _ = fired.push(FiredTimer { kind, key, token });
                 }
                 None => break,
             }
@@ -293,10 +271,9 @@ impl NetTimerWheel {
         self.inner.lock().entries.clear();
     }
 
-    /// Total number of pending (non-cancelled) timers (diagnostic).
+    /// Total number of pending timers (diagnostic).
     pub fn pending_count(&self) -> usize {
-        let inner = self.inner.lock();
-        inner.entries.iter().filter(|e| !e.cancelled).count()
+        self.inner.lock().entries.len()
     }
 }
 
@@ -392,13 +369,10 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);
-            match super::tcp::on_retransmit(timer.key) {
-                super::tcp::RetransmitAction::Data(idx) => dispatch_tcp_retransmit_send(idx),
-                super::tcp::RetransmitAction::Segment(seg) => {
-                    let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
-                }
-                super::tcp::RetransmitAction::Nothing => {}
-            }
+            dispatch_retransmit_action(
+                timer.key,
+                super::tcp::on_retransmit_timer(timer.key, timer.token),
+            );
         }
         TimerKind::TcpSynAck => {
             klog_debug!("net_timer: SYN-ACK retransmit fired, key={}", timer.key);
@@ -418,9 +392,10 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpKeepalive => {
             klog_debug!("net_timer: TCP keepalive fired, key={}", timer.key);
-            if let Some(probe_seg) = super::tcp::on_keepalive(timer.key) {
-                let _ = super::socket::socket_send_tcp_segment(&probe_seg, &[]);
-            }
+            dispatch_retransmit_action(
+                timer.key,
+                super::tcp::on_keepalive_timer(timer.key, timer.token),
+            );
         }
         TimerKind::TcpFinWait2 => {
             klog_debug!("net_timer: TCP FIN_WAIT_2 timeout, key={}", timer.key);
@@ -450,10 +425,25 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
     }
 }
 
-fn dispatch_tcp_retransmit_send(id: super::tcp::ConnId) {
-    use super::socket;
-
-    if let Some(sock_idx) = socket::socket_from_tcp_idx_pub(id) {
-        let _ = socket::socket_send_queued(sock_idx);
+pub(crate) fn dispatch_retransmit_action(key: u32, action: super::tcp::RetransmitAction) {
+    use super::tcp::RetransmitAction;
+    match action {
+        RetransmitAction::Data(idx) => dispatch_tcp_retransmit_send(idx),
+        RetransmitAction::Segment(seg) => {
+            let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
+        }
+        RetransmitAction::GaveUp(rst) => {
+            if let Some(rst) = rst {
+                let _ = super::socket::socket_send_tcp_segment(&rst, &[]);
+            }
+            super::socket::socket_notify_tcp_timed_out(key);
+        }
+        RetransmitAction::Nothing => {}
     }
+}
+
+/// Keyed by connection rather than socket: an orphan whose socket closed
+/// with bytes still queued retransmits too.
+fn dispatch_tcp_retransmit_send(id: super::tcp::ConnId) {
+    let _ = super::socket::tcp_drain_segments(id);
 }

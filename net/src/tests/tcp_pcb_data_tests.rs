@@ -5,7 +5,6 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::tcp::actions::SocketNotify;
-use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpBufferPair};
 use crate::tcp::header::{
     TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TcpHeader,
 };
@@ -13,7 +12,7 @@ use crate::tcp::pcb::data::{ClosePhase, DataState};
 use crate::tcp::pcb::{Pcb, PcbState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::tuple::TcpTuple;
-use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
+use crate::tests::tcp_common::{self, LOCAL_IP, REMOTE_IP};
 
 const LOCAL_PORT: u16 = 49_152;
 const REMOTE_PORT: u16 = 80;
@@ -75,7 +74,7 @@ fn data_ref(pcb: &Pcb) -> &DataState {
 
 pub fn test_data_rst_releases_and_notifies() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     // RFC 5961: RST must have seq == rcv_nxt to be accepted.
     let rcv_nxt = PEER_IRS + 1;
     let actions = DataState::on_segment(
@@ -103,7 +102,7 @@ pub fn test_data_rst_releases_and_notifies() -> TestResult {
 /// vector the mitigation exists to close.
 pub fn test_data_unexpected_syn_draws_challenge_ack() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_SYN, 0, 0), &[], &[], 0);
     assert_eq_test!(actions.segments_len, 1, "one challenge ACK emitted");
     let ack = actions.segments[0].as_ref().unwrap();
@@ -115,7 +114,7 @@ pub fn test_data_unexpected_syn_draws_challenge_ack() -> TestResult {
 
 pub fn test_data_in_order_payload_accepted() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let _ = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -132,7 +131,7 @@ pub fn test_data_in_order_payload_accepted() -> TestResult {
 
 pub fn test_data_in_order_payload_sets_recv_wake() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let actions = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -150,7 +149,7 @@ pub fn test_data_in_order_payload_sets_recv_wake() -> TestResult {
 
 pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     // Gap at PEER_IRS+1..PEER_IRS+5; segment starts at PEER_IRS+5.
     let actions = DataState::on_segment(
         &mut pcb,
@@ -169,7 +168,7 @@ pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
 
 pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let actions = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -192,7 +191,7 @@ pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
 
 pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     // ack_num below snd_nxt: the peer has not acked our FIN.
     let actions = DataState::on_segment(
         &mut pcb,
@@ -212,7 +211,7 @@ pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
 
 pub fn test_data_fin_ack_in_fin_wait_1_simultaneous_close() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     // snd_nxt in this test harness is OUR_ISS+1, so our FIN sits at OUR_ISS+1.
     let _actions = DataState::on_segment(
         &mut pcb,
@@ -231,7 +230,7 @@ pub fn test_data_fin_ack_in_fin_wait_1_simultaneous_close() -> TestResult {
 
 pub fn test_data_fin_in_fin_wait_2_goes_time_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait2);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let actions = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -250,7 +249,7 @@ pub fn test_data_fin_in_fin_wait_2_goes_time_wait() -> TestResult {
 
 pub fn test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     // Pretend our FIN was sent at snd_nxt = OUR_ISS+1 (set by make_pcb).
     let _ = DataState::on_segment(
         &mut pcb,
@@ -269,7 +268,7 @@ pub fn test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2() -> TestResult {
 
 pub fn test_data_ack_in_closing_transitions_to_time_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Closing);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let _ = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -287,7 +286,7 @@ pub fn test_data_ack_in_closing_transitions_to_time_wait() -> TestResult {
 
 pub fn test_data_ack_in_last_ack_releases() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::LastAck);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let actions = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -302,11 +301,11 @@ pub fn test_data_ack_in_last_ack_releases() -> TestResult {
 
 pub fn test_data_ack_advances_snd_una() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
         // sendmap.total_bytes must match snd_nxt - snd_una for the invariant.
-        let _ = d.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
+        let _ = bufs.send.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
     }
     let actions = DataState::on_segment(
         &mut pcb,
@@ -327,7 +326,7 @@ pub fn test_data_ack_advances_snd_una() -> TestResult {
 
 pub fn test_data_stale_ack_ignored() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     let _ = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -343,10 +342,10 @@ pub fn test_data_stale_ack_ignored() -> TestResult {
 
 pub fn test_data_duplicate_ack_does_not_advance_snd_una() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
-    let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
+    let mut bufs = tcp_common::test_bufs();
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
-        let _ = d.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
+        let _ = bufs.send.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
     }
     let _ = DataState::on_segment(
         &mut pcb,

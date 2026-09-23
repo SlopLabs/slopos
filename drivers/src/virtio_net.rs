@@ -13,8 +13,8 @@ use slopos_ostd::{klog_debug, klog_info};
 use crate::pci::BoundDevice;
 use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
-    self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
-    VirtioMmioCaps, VirtioMsixState,
+    self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
+    VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
         set_driver_ok, setup_interrupts,
@@ -168,12 +168,6 @@ static TIMER_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::
     lock_class!("NET_TIMER_WAKER.waiters", LOCK_LEVEL_RESOURCE),
 );
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
-static DNS_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
-/// Buffer for the most recent DNS response payload (UDP body only).
-static DNS_RX_BUF: SpinLock<DnsRxBuf> = SpinLock::new(
-    DnsRxBuf::new(),
-    lock_class!("DNS_RX_BUF", LOCK_LEVEL_RESOURCE),
-);
 
 static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -196,20 +190,6 @@ fn set_device_handle(handle: DeviceHandle) {
     let boxed = KBox::try_new(handle).expect("virtio_net: device handle alloc");
     let ptr = KBox::into_raw(boxed);
     DEVICE_HANDLE_PTR.store(ptr, Ordering::Release);
-}
-
-struct DnsRxBuf {
-    data: [u8; 512],
-    len: usize,
-}
-
-impl DnsRxBuf {
-    const fn new() -> Self {
-        Self {
-            data: [0; 512],
-            len: 0,
-        }
-    }
 }
 
 /// Relaxed atomics rather than fields on `VirtioNetState`: `stats()` answers a
@@ -457,15 +437,6 @@ fn poll_carrier() {
         return;
     };
     let _ = slopos_net::iface::set_carrier(handle.index(), up);
-}
-
-pub fn dns_intercept_response(payload: &[u8]) {
-    let copy_len = payload.len().min(512);
-    let mut dns_buf = DNS_RX_BUF.lock();
-    dns_buf.data[..copy_len].copy_from_slice(&payload[..copy_len]);
-    dns_buf.len = copy_len;
-    drop(dns_buf);
-    DNS_RX_EVENT.signal();
 }
 
 fn read_mac(caps: &VirtioMmioCaps, negotiated_features: u64) -> [u8; 6] {
@@ -1187,14 +1158,9 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     slopos_net::napi::register_wake_napi(virtnet_wake_napi);
     static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
         virtio_net_ipv4_addr,
-        virtio_net_dns,
-        dns_rx_clear,
         transmit_udp_packet,
-        dns_rx_wait,
-        dns_rx_read,
         virtio_net_mac,
         get_device_handle,
-        dns_intercept_response,
         virtio_net_is_ready,
         virtio_net_transmit,
         virtnet_force_napi_poll,
@@ -1316,34 +1282,6 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
         counters::bump(&counters::TX_DROPPED, 1);
         false
     }
-}
-
-/// Return the DHCP-provided DNS server address, or `None` if not configured.
-pub fn virtio_net_dns() -> Option<[u8; 4]> {
-    let state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready {
-        return None;
-    }
-    slopos_net::resolver::primary().map(|ip| ip.0)
-}
-
-pub fn dns_rx_clear() {
-    DNS_RX_EVENT.try_consume();
-    let mut buf = DNS_RX_BUF.lock();
-    buf.len = 0;
-}
-
-/// The edge is latched by `dns_intercept_response` on the netpoll kthread's own
-/// drain, so this needs no drain of its own.
-pub fn dns_rx_wait(timeout_ms: u32) -> bool {
-    DNS_RX_EVENT.wait_timeout_ms(timeout_ms)
-}
-
-pub fn dns_rx_read(out: &mut [u8]) -> usize {
-    let buf = DNS_RX_BUF.lock();
-    let copy_len = buf.len.min(out.len());
-    out[..copy_len].copy_from_slice(&buf.data[..copy_len]);
-    copy_len
 }
 
 /// Snapshot of the MSI-X state, or `None` if the device was not probed or fell

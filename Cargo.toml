@@ -33,6 +33,8 @@ members = [
   "keymap-core",
   "chrome-core",
   "net-core",
+  "tls-core",
+  "http-core",
   "shell-core",
   "editor-core",
   "video",
@@ -107,6 +109,8 @@ slopos-terminal-core = { path = "terminal-core" }
 slopos-keymap-core = { path = "keymap-core" }
 slopos-chrome-core = { path = "chrome-core" }
 slopos-net-core = { path = "net-core" }
+slopos-tls-core = { path = "tls-core" }
+slopos-http-core = { path = "http-core" }
 slopos-shell-core = { path = "shell-core" }
 slopos-editor-core = { path = "editor-core" }
 slopos-protocol = { path = "slop-protocol" }

@@ -1063,6 +1063,7 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
     tcp::input(REMOTE_IP, LOCAL_IP, &server_fin, &[], &[], 1000);
     assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
 
+    let _clock = crate::clock::MockClockGuard::install_at(1000 + tcp::TIME_WAIT_MS);
     tcp::on_time_wait_expire(id.raw());
     assert_eq_test!(tcp::get_state(id), None, "released");
     assert_eq_test!(tcp::active_count(), 0, "released");
@@ -1152,6 +1153,7 @@ pub fn test_tcp_retransmit_timer() -> TestResult {
                     tcp::RetransmitAction::Segment(_) => "the SYN path",
                     tcp::RetransmitAction::Data(_) => unreachable!(),
                     tcp::RetransmitAction::Nothing => "nothing",
+                    tcp::RetransmitAction::GaveUp(_) => "a give-up",
                 }
             );
         }
@@ -1199,6 +1201,7 @@ pub fn test_tcp_time_wait_timer() -> TestResult {
 
     assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "in TIME_WAIT");
 
+    let _clock = crate::clock::MockClockGuard::install_at(1000 + tcp::TIME_WAIT_MS);
     tcp::on_time_wait_expire(id.raw());
 
     assert_eq_test!(tcp::get_state(id), None, "connection released");

@@ -17,6 +17,11 @@ crate::utest!(
 );
 crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");
 crate::utest!(name = utest_dns_resolve, bin = "/bin/dns_resolve_test");
+crate::utest!(
+    name = utest_dns_concurrent,
+    bin = "/bin/dns_concurrent_test"
+);
+crate::utest!(name = utest_https_transfer, bin = "/bin/transfer_test");
 crate::utest!(name = utest_cd, bin = "/bin/cd_test");
 crate::utest!(name = utest_buildctl, bin = "/bin/buildctl_test");
 crate::utest!(name = utest_coreutils, bin = "/bin/coreutils_test");
@@ -82,8 +87,9 @@ crate::utest!(name = utest_persist, bin = "/bin/persist_test");
 // where exercising unix sockets leaves UDP dead for the rest of the run (see
 // `dns_resolve_test`'s header), so it has to follow every network case. It
 // does, by name: `utest_curl_e2e`, `utest_curl_recv_repro`,
-// `utest_dns_resolve` and `utest_ip_e2e` all sort before `utest_libc_abi`. A
-// network case named past `l` breaks that and has to be renamed.
+// `utest_dns_concurrent`, `utest_dns_resolve`, `utest_https_transfer` and
+// `utest_ip_e2e` all sort before `utest_libc_abi`. A network case named past
+// `l` breaks that and has to be renamed.
 crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test");
 
 // Not last, and deliberately not renamed to be: `utest_s…` sorts ahead of

@@ -48,7 +48,7 @@ I²C and GPIO drivers. The slop has escaped the sandbox.
 
 ## Get It Running
 
-> **You need:** QEMU, xorriso, e2fsprogs, [`just`](https://github.com/casey/just) — plus Go ≥ 1.22 if you want `just test`
+> **You need:** QEMU, xorriso, e2fsprogs, [`just`](https://github.com/casey/just) — plus Go ≥ 1.22 if you want `just test`, and `openssl` for `just test-host`'s TLS interop tests
 
 ```bash
 # macOS

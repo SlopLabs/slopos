@@ -265,6 +265,15 @@ name = "dns_resolve_test"
 path = "src/bin/tests/dns_resolve_test.rs"
 
 [[bin]]
+name = "dns_concurrent_test"
+path = "src/bin/tests/dns_concurrent_test.rs"
+
+[[bin]]
+name = "transfer_test"
+path = "src/bin/tests/transfer_test.rs"
+required-features = ["testbins"]
+
+[[bin]]
 name = "libc_abi_test"
 path = "src/bin/tests/libc_abi_test.rs"
 
@@ -278,7 +287,7 @@ path = "src/bin/tests/cxx_test.rs"
 
 [features]
 default = []
-testbins = []
+testbins = ["slopos-tls-core/test-server"]
 
 [dependencies]
 slopos-abi = { workspace = true }
@@ -286,6 +295,7 @@ slopos-appkit = { workspace = true }
 slopos-editor-core = { workspace = true }
 slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
+slopos-http-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }
@@ -296,5 +306,6 @@ slopos-shell-core = { workspace = true }
 slopos-slibc = { workspace = true }
 slopos-slibc-core = { workspace = true }
 slopos-terminal-core = { workspace = true }
+slopos-tls-core = { workspace = true }
 slopos-vt = { workspace = true }
 slopos-windowing = { workspace = true }

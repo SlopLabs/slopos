@@ -109,7 +109,7 @@ build_stamp() {
         sha256sum "${BUILD_DIR}/${so}" 2>/dev/null | cut -d' ' -f1 || echo missing
     done
     for asset in "${REPO_ROOT}/assets/fonts"/* "${REPO_ROOT}/assets/keymaps"/* \
-                 "${REPO_ROOT}/assets/logo.png"; do
+                 "${REPO_ROOT}/assets/certs"/* "${REPO_ROOT}/assets/logo.png"; do
         [ -f "$asset" ] || continue
         sha256sum "$asset" | cut -d' ' -f1
     done
@@ -468,6 +468,17 @@ fi
 if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
     install_file "${REPO_ROOT}/assets/logo.png" /usr/share/slopos/wallpapers/default.png
     echo "Installed wallpaper: /usr/share/slopos/wallpapers/default.png"
+fi
+
+CERTS_DIR="${REPO_ROOT}/assets/certs"
+if [ -f "$CERTS_DIR/ca-certificates.crt" ]; then
+    mkdir_p /etc/ssl
+    mkdir_p /etc/ssl/certs
+    install_file "$CERTS_DIR/ca-certificates.crt" /etc/ssl/certs/ca-certificates.crt
+    mkdir_p /usr/share/licenses
+    mkdir_p /usr/share/licenses/ca-certificates
+    install_file "$CERTS_DIR/MPL-2.0.txt" /usr/share/licenses/ca-certificates/MPL-2.0.txt
+    echo "Installed CA bundle: /etc/ssl/certs/ca-certificates.crt"
 fi
 
 # Install keyboard layout files into /usr/share/keymaps/

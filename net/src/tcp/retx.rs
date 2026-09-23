@@ -4,14 +4,16 @@
 //! entries, DupThresh confirmations past a hole declare it `Lost`, and an RTO
 //! marks everything `Lost` rather than rewinding `snd_nxt`.
 //!
-//! Storage is an inline `[SendMapEntry; 32]` — 32 × MSS ≈ 46 KB in flight,
-//! sized for a 64 KB send window. A full map blocks new sends until a
-//! cumulative ACK frees the oldest slot.
+//! One entry per segment in flight, so the capacity bounds the send window
+//! (1024 full-sized segments, ~1.5 MB). Running totals answer every transmit's
+//! pipe query without a scan; only loss recovery walks the entries.
+
+use slopos_ostd::{AllocError, KBox};
 
 use crate::tcp::seq::SeqNum;
 
 /// Maximum number of in-flight entries tracked per connection.
-pub const SENDMAP_CAPACITY: usize = 32;
+pub const SENDMAP_CAPACITY: usize = 1024;
 
 /// DupThresh: number of SACKed entries past a hole to declare it lost.
 const DUP_THRESH: usize = 3;
@@ -33,6 +35,12 @@ pub enum SegmentState {
     Retransmitted = 3,
 }
 
+impl SegmentState {
+    fn in_pipe(self) -> bool {
+        matches!(self, Self::InFlight | Self::Retransmitted)
+    }
+}
+
 impl Default for SegmentState {
     fn default() -> Self {
         Self::InFlight
@@ -52,44 +60,54 @@ pub struct SendMapEntry {
     pub state: SegmentState,
 }
 
-impl Default for SendMapEntry {
-    fn default() -> Self {
-        Self {
-            seq: SeqNum::ZERO,
-            len: 0,
-            first_send_ms: 0,
-            state: SegmentState::InFlight,
-        }
-    }
-}
-
-/// Per-connection send map tracking every unacknowledged segment.
-///
-/// Invariant: entries are stored in emit order (== sequence order) from index
-/// `0` to `len-1`; removing the head shifts the remainder down.
-#[derive(Clone, Copy, Debug, slopos_ostd::Zeroable)]
+/// Per-connection send map tracking every unacknowledged segment, in emit
+/// order (== sequence order) from `head`.
+#[derive(Debug, slopos_ostd::Zeroable)]
 pub struct SendMap {
     entries: [SendMapEntry; SENDMAP_CAPACITY],
-    len: u8,
-}
-
-impl Default for SendMap {
-    fn default() -> Self {
-        Self::new()
-    }
+    head: u16,
+    len: u16,
+    total: u32,
+    pipe: u32,
+    lost: u16,
 }
 
 impl SendMap {
-    pub const fn new() -> Self {
-        Self {
-            entries: [SendMapEntry {
-                seq: SeqNum::ZERO,
-                len: 0,
-                first_send_ms: 0,
-                state: SegmentState::InFlight,
-            }; SENDMAP_CAPACITY],
-            len: 0,
+    pub fn boxed() -> Result<KBox<Self>, AllocError> {
+        KBox::zeroed()
+    }
+
+    fn at(&self, i: usize) -> &SendMapEntry {
+        &self.entries[(self.head as usize + i) % SENDMAP_CAPACITY]
+    }
+
+    fn at_mut(&mut self, i: usize) -> &mut SendMapEntry {
+        &mut self.entries[(self.head as usize + i) % SENDMAP_CAPACITY]
+    }
+
+    fn count(&mut self, e: SendMapEntry) {
+        if e.state.in_pipe() {
+            self.pipe += e.len;
         }
+        if e.state == SegmentState::Lost {
+            self.lost += 1;
+        }
+    }
+
+    fn uncount(&mut self, e: SendMapEntry) {
+        if e.state.in_pipe() {
+            self.pipe -= e.len;
+        }
+        if e.state == SegmentState::Lost {
+            self.lost -= 1;
+        }
+    }
+
+    fn set_state(&mut self, i: usize, state: SegmentState) {
+        let before = *self.at(i);
+        self.uncount(before);
+        self.at_mut(i).state = state;
+        self.count(SendMapEntry { state, ..before });
     }
 
     #[inline]
@@ -110,44 +128,26 @@ impl SendMap {
     /// Sum of ALL entry lengths regardless of state.
     /// Invariant target: `total_bytes() == snd_nxt - snd_una - fin_offset`.
     pub fn total_bytes(&self) -> u32 {
-        let mut total = 0u32;
-        for i in 0..self.len as usize {
-            total = total.saturating_add(self.entries[i].len);
-        }
-        total
+        self.total
     }
 
-    /// RFC 6675 "pipe" estimate: bytes believed to be in the network. Counts
-    /// only `InFlight` and `Retransmitted` entries.
+    /// RFC 6675 "pipe" estimate: bytes believed to be in the network, the
+    /// `InFlight` and `Retransmitted` entries.
     pub fn pipe(&self) -> u32 {
-        let mut p = 0u32;
-        for i in 0..self.len as usize {
-            match self.entries[i].state {
-                SegmentState::InFlight | SegmentState::Retransmitted => {
-                    p = p.saturating_add(self.entries[i].len);
-                }
-                _ => {}
-            }
-        }
-        p
+        self.pipe
     }
 
     pub fn has_lost(&self) -> bool {
-        for i in 0..self.len as usize {
-            if self.entries[i].state == SegmentState::Lost {
-                return true;
-            }
-        }
-        false
+        self.lost > 0
     }
 
     pub fn next_lost(&self) -> Option<&SendMapEntry> {
-        for i in 0..self.len as usize {
-            if self.entries[i].state == SegmentState::Lost {
-                return Some(&self.entries[i]);
-            }
+        if self.lost == 0 {
+            return None;
         }
-        None
+        (0..self.len())
+            .map(|i| self.at(i))
+            .find(|e| e.state == SegmentState::Lost)
     }
 
     /// Record a segment put on the wire. Returns `Err(())` if the map is full.
@@ -155,14 +155,16 @@ impl SendMap {
         if self.len as usize >= SENDMAP_CAPACITY {
             return Err(());
         }
-        let idx = self.len as usize;
-        self.entries[idx] = SendMapEntry {
+        let i = self.len as usize;
+        *self.at_mut(i) = SendMapEntry {
             seq,
             len,
             first_send_ms: now_ms,
             state: SegmentState::InFlight,
         };
         self.len += 1;
+        self.total += len;
+        self.pipe += len;
         Ok(())
     }
 
@@ -172,50 +174,36 @@ impl SendMap {
     /// RTT samples are only taken from `InFlight` entries — retransmitted,
     /// SACK-confirmed and lost entries are ineligible.
     pub fn on_cumulative_ack(&mut self, up_to: SeqNum) -> AckOutcome {
-        if self.len == 0 {
-            return AckOutcome::default();
-        }
-
-        let mut bytes_freed = 0u32;
-        let mut rtt_sample_origin: Option<u64> = None;
-        let mut drop_count = 0usize;
-
-        for i in 0..self.len as usize {
-            let e = &self.entries[i];
+        let mut outcome = AckOutcome::default();
+        while self.len > 0 {
+            let e = *self.at(0);
             let end = e.seq + e.len;
             if up_to >= end {
-                bytes_freed = bytes_freed.saturating_add(e.len);
-                if drop_count == 0 && e.state == SegmentState::InFlight {
-                    rtt_sample_origin = Some(e.first_send_ms);
+                if outcome.entries_removed == 0 && e.state == SegmentState::InFlight {
+                    outcome.rtt_sample_origin_ms = Some(e.first_send_ms);
                 }
-                drop_count += 1;
-            } else if up_to > e.seq {
-                debug_assert!(i == drop_count, "partial ACK outside queue head");
-                if i == drop_count {
-                    let delta = up_to - e.seq;
-                    let e_mut = &mut self.entries[i];
-                    e_mut.seq = e_mut.seq + delta;
-                    e_mut.len -= delta;
-                    bytes_freed = bytes_freed.saturating_add(delta);
-                }
-                break;
+                self.uncount(e);
+                self.total -= e.len;
+                self.head = ((self.head as usize + 1) % SENDMAP_CAPACITY) as u16;
+                self.len -= 1;
+                outcome.bytes_freed = outcome.bytes_freed.saturating_add(e.len);
+                outcome.entries_removed += 1;
             } else {
+                if up_to > e.seq {
+                    let delta = up_to - e.seq;
+                    if e.state.in_pipe() {
+                        self.pipe -= delta;
+                    }
+                    self.total -= delta;
+                    let head = self.at_mut(0);
+                    head.seq = head.seq + delta;
+                    head.len -= delta;
+                    outcome.bytes_freed = outcome.bytes_freed.saturating_add(delta);
+                }
                 break;
             }
         }
-
-        if drop_count > 0 {
-            for i in 0..(self.len as usize - drop_count) {
-                self.entries[i] = self.entries[i + drop_count];
-            }
-            self.len -= drop_count as u8;
-        }
-
-        AckOutcome {
-            bytes_freed,
-            rtt_sample_origin_ms: rtt_sample_origin,
-            entries_removed: drop_count as u8,
-        }
+        outcome
     }
 
     /// Apply SACK blocks from the peer, then run loss detection.
@@ -229,37 +217,32 @@ impl SendMap {
             return false;
         }
 
-        for bi in 0..n {
-            let (left, right) = blocks[bi];
+        for &(left, right) in &blocks[..n] {
             if right <= left {
                 continue;
             }
-            for i in 0..self.len as usize {
-                let e = &self.entries[i];
+            for i in 0..self.len() {
+                let e = *self.at(i);
                 if e.state == SegmentState::SackConfirmed || e.state == SegmentState::Lost {
                     continue;
                 }
                 let e_end = (e.seq + e.len).raw();
                 if seq_le(left, e.seq.raw()) && seq_ge(right, e_end) {
-                    self.entries[i].state = SegmentState::SackConfirmed;
+                    self.set_state(i, SegmentState::SackConfirmed);
                 }
             }
         }
 
         let mut any_new_loss = false;
-        for i in 0..self.len as usize {
-            if self.entries[i].state != SegmentState::InFlight {
-                continue;
-            }
-            let mut sack_count = 0usize;
-            for j in (i + 1)..self.len as usize {
-                if self.entries[j].state == SegmentState::SackConfirmed {
-                    sack_count += 1;
+        let mut sacked_after = 0usize;
+        for i in (0..self.len()).rev() {
+            match self.at(i).state {
+                SegmentState::SackConfirmed => sacked_after += 1,
+                SegmentState::InFlight if sacked_after >= DUP_THRESH => {
+                    self.set_state(i, SegmentState::Lost);
+                    any_new_loss = true;
                 }
-            }
-            if sack_count >= DUP_THRESH {
-                self.entries[i].state = SegmentState::Lost;
-                any_new_loss = true;
+                _ => {}
             }
         }
 
@@ -269,22 +252,49 @@ impl SendMap {
     /// RTO path: mark every entry as `Lost` so the transmit loop re-sends them
     /// selectively instead of doing go-back-N.
     pub fn mark_all_lost(&mut self) {
-        for i in 0..self.len as usize {
-            self.entries[i].state = SegmentState::Lost;
+        for i in 0..self.len() {
+            self.at_mut(i).state = SegmentState::Lost;
         }
+        self.pipe = 0;
+        self.lost = self.len;
     }
 
     pub fn mark_retransmitted(&mut self, seq: SeqNum) {
-        for i in 0..self.len as usize {
-            if self.entries[i].seq == seq && self.entries[i].state == SegmentState::Lost {
-                self.entries[i].state = SegmentState::Retransmitted;
-                return;
-            }
+        if let Some(i) = (0..self.len())
+            .find(|&i| self.at(i).seq == seq && self.at(i).state == SegmentState::Lost)
+        {
+            self.set_state(i, SegmentState::Retransmitted);
         }
     }
 
+    /// The running `(total, pipe, lost)`.
+    #[cfg(feature = "test-hooks")]
+    pub fn totals(&self) -> (u32, u32, u16) {
+        (self.total_bytes(), self.pipe(), self.lost)
+    }
+
+    /// [`totals`](Self::totals) recomputed from the entries.
+    #[cfg(feature = "test-hooks")]
+    pub fn recount(&self) -> (u32, u32, u16) {
+        let (mut total, mut pipe, mut lost) = (0u32, 0u32, 0u16);
+        for e in (0..self.len()).map(|i| self.at(i)) {
+            total += e.len;
+            if e.state.in_pipe() {
+                pipe += e.len;
+            }
+            if e.state == SegmentState::Lost {
+                lost += 1;
+            }
+        }
+        (total, pipe, lost)
+    }
+
     pub fn clear(&mut self) {
+        self.head = 0;
         self.len = 0;
+        self.total = 0;
+        self.pipe = 0;
+        self.lost = 0;
     }
 }
 
@@ -305,5 +315,5 @@ pub struct AckOutcome {
     /// First transmission of the oldest-freed `InFlight` entry, or `None` if no
     /// eligible entry was freed.
     pub rtt_sample_origin_ms: Option<u64>,
-    pub entries_removed: u8,
+    pub entries_removed: u16,
 }

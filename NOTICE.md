@@ -32,6 +32,14 @@ numbers, `errno` values, ioctl codes, struct layouts, hardware register
 offsets) are reproduced where compatibility requires it; those are interface
 facts rather than authorship.
 
+The TLS stack in [`tls-core/`](tls-core/) is written from the specifications it
+implements — RFC 8446, 8439, 7748, 8017, 5280 and 6125, FIPS 180-4, 186-5 and
+197, NIST SP 800-38D and SEC 1. Its AES S-box is the Boolean circuit Boyar and
+Peralta published in "A new combinational logic minimization technique with
+applications to cryptology" (2010). Its test vectors were generated with
+pyca/cryptography, and its interop tests run it against OpenSSL's `s_server`
+and `s_client`; no code from either is incorporated.
+
 ## Pinned Rust standard library, `libc` and compiler forks
 
 SlopOS's userland target `x86_64-unknown-slopos` is built against three pinned
@@ -92,14 +100,16 @@ once at the end of this section and applies to every entry.
 
 | Component | Version | Copyright |
 |---|---|---|
-| [`bitflags`](https://github.com/bitflags/bitflags) | 2.11.0 | Copyright (c) 2014 The Rust Project Developers |
+| [`bitflags`](https://github.com/bitflags/bitflags) | 2.13.2 | Copyright (c) 2014 The Rust Project Developers |
 | [`libc`](https://github.com/rust-lang/libc) | 0.2.189, forked | Copyright (c) 2014 The Rust Project Developers |
 | [`libm`](https://github.com/rust-lang/libm) | 0.2.16 | **MIT only** — see the note below |
-| [`limine`](https://github.com/limine-bootloader/limine-rs) | 0.6.3 | Copyright © 2026 Julian Scheffers |
+| [`limine`](https://github.com/limine-bootloader/limine-rs) | 0.6.5 | Copyright © 2026 Julian Scheffers |
 | [`paste`](https://github.com/dtolnay/paste) | 1.0.15 | David Tolnay (upstream ships no copyright line) |
 | [`gimli`](https://github.com/gimli-rs/gimli) | 0.33.0 | Copyright (c) 2015 The Rust Project Developers |
 | [`unwinding`](https://github.com/nbdd0121/unwinding/) | 0.2.9 | Gary Guo (upstream ships no copyright line) |
 | Rust `core`, `alloc`, `std` | pinned nightly, `std` forked | Copyright © The Rust Project Contributors |
+| [`hashbrown`](https://github.com/rust-lang/hashbrown), linked by `std` | 0.17.1 | Copyright (c) 2016 Amanieu d'Antras |
+| [`rustc-demangle`](https://github.com/rust-lang/rustc-demangle), linked by `std` | 0.1.28 | Copyright (c) 2014 Alex Crichton |
 
 `gimli` and `unwinding` are vendored verbatim under [`vendor/`](vendor/); each
 directory retains its upstream `LICENSE-MIT` and `LICENSE-APACHE`.
@@ -220,6 +230,20 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+### Mozilla CA certificate bundle
+
+[`assets/certs/ca-certificates.crt`](assets/certs/ca-certificates.crt),
+installed as `/etc/ssl/certs/ca-certificates.crt`, is the root certificate
+list of the Mozilla CA Certificate Program, as extracted from NSS's
+`certdata.txt` by curl's `mk-ca-bundle.pl` and published at
+<https://curl.se/docs/caextract.html> (the extraction named in the file's own
+header, checked against the digest curl.se publishes by
+`scripts/update_ca_bundle.sh`, which is the only thing that replaces it). It is
+data aggregated alongside SlopOS, not part of it, and is distributed unmodified
+under the Mozilla Public License 2.0, whose full text travels with it in
+[`assets/certs/MPL-2.0.txt`](assets/certs/MPL-2.0.txt) and on the installed
+images at `/usr/share/licenses/ca-certificates/MPL-2.0.txt`.
 
 ### Fonts
 

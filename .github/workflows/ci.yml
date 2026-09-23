@@ -125,6 +125,12 @@ jobs:
       - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
         run: just check-framekernel-gates
 
+      # The gates step above skips the pins because nothing has vendored yet;
+      # this step vendors, then builds from an empty CARGO_HOME so the
+      # runner's registry cache cannot answer for a missing crate.
+      - name: Offline build from vendored sources
+        run: just check-offline-build
+
       # `--raw` rather than `just test`: the progress-bar renderer only surfaces
       # klog on failure, so a green run's log carries no `LOCKDEP[...]` lines for
       # the ratchets below to read. The verdict is unchanged — `ClassifyRun` sets

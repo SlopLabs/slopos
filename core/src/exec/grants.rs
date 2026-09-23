@@ -116,6 +116,12 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_MOUNT,
         priority: None,
     },
+    // Points the resolver at a nameserver it runs on loopback.
+    ProgramGrant {
+        path: b"/bin/dns_concurrent_test",
+        flags: TASK_FLAG_NET_ADMIN,
+        priority: None,
+    },
 ];
 
 /// The flags and tier the kernel adds for `path`; `(0, None)` for any program

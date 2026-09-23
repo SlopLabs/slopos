@@ -1,4 +1,4 @@
-//! Phase 1.1's standing proof: the utilities are executables.
+//! The standing proof that the utilities are executables.
 //!
 //! Every case here spawns `/bin/<tool>` from a program that is not the shell
 //! and reads what it produced — the thing that answered `ENOENT` before, and
@@ -118,8 +118,6 @@ fn installed_names_match_the_binarys_table() -> bool {
     true
 }
 
-/// The workstream in one line: a process that is not the shell spawns a
-/// utility by path and reads its output.
 fn a_spawned_utility_produces_output() -> bool {
     setup() && expect("echo", &["hello", "world"], "hello world\n")
 }
@@ -270,8 +268,6 @@ fn trees_are_created_copied_and_removed() -> bool {
     true
 }
 
-/// The named Phase 1.1 deliverable: `diff` produces a patch and `patch`
-/// applies it. The builtin could only print `<`/`>` markers.
 fn diff_produces_a_patch_that_applies() -> bool {
     if !setup() {
         return false;

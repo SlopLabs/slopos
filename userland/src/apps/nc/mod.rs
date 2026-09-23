@@ -1,7 +1,7 @@
 //! nc -- SlopOS network Swiss army knife (UDP + TCP)
 //!
-//! UDP client and listen modes with half-duplex I/O, TCP client and listen
-//! (with `-k` keep-listening); defaults to TCP.
+//! TCP client and listen (with `-k` keep-listening) and UDP client and listen
+//! modes; defaults to TCP.
 
 pub(super) mod ring_io;
 pub mod tcp;
@@ -35,6 +35,11 @@ struct NcConfig {
     verbose: bool,
     timeout_ms: u32,
     keep_listen: bool,
+    /// When false, stdin's bytes go to the peer as read, with no line editing.
+    stdin_tty: bool,
+    /// When false, stdout carries exactly the bytes that arrived, and echo and
+    /// verbose output go to stderr.
+    stdout_tty: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,14 +58,21 @@ pub(super) enum StdinResult {
     Quit,
 }
 
+const UNFRAGMENTED_DATAGRAM: usize = 1500 - 20 - 8;
+
 /// Processes one raw stdin byte; the caller performs the network send on
 /// `SendLine` and the cleanup on `Quit`.
-pub(super) fn process_raw_stdin_char(
+fn process_raw_stdin_char(
+    config: &NcConfig,
     c: u8,
     line_buf: &mut [u8; 1024],
     line_pos: &mut usize,
 ) -> StdinResult {
-    let mut out = std::io::stdout().lock();
+    let mut out: Box<dyn Write> = if config.stdout_tty {
+        Box::new(std::io::stdout().lock())
+    } else {
+        Box::new(std::io::stderr().lock())
+    };
     match c {
         // Ctrl+C / Ctrl+D
         0x03 => {
@@ -108,37 +120,51 @@ pub(super) fn process_raw_stdin_char(
     }
 }
 
-/// Verbose output goes to stdout, not stderr, so the shell can capture it.
-fn verbose_msg(config: &NcConfig, msg: &str) {
+/// `false` once stdout is gone, which ends nc as it ends any filter.
+fn emit_received(config: &NcConfig, bytes: &[u8]) -> bool {
+    let mut out = std::io::stdout().lock();
+    let wrote = out.write_all(bytes).and_then(|()| {
+        if config.stdout_tty && bytes.last().is_some_and(|&b| b != b'\n') {
+            out.write_all(b"\n")?;
+        }
+        out.flush()
+    });
+    if let Err(e) = &wrote {
+        eprintln!("nc: writing stdout failed: {e}");
+    }
+    wrote.is_ok()
+}
+
+fn verbose(config: &NcConfig, what: core::fmt::Arguments<'_>) {
     if !config.verbose {
         return;
     }
-    println!("nc: {msg}");
+    if config.stdout_tty {
+        println!("nc: {what}");
+    } else {
+        eprintln!("nc: {what}");
+    }
+}
+
+fn verbose_msg(config: &NcConfig, msg: &str) {
+    verbose(config, format_args!("{msg}"));
 }
 
 fn verbose_addr(config: &NcConfig, prefix: &str, ip: [u8; 4], port: u16) {
-    if !config.verbose {
-        return;
-    }
-    println!("nc: {}{}:{}", prefix, Ipv4Addr::from(ip), port);
+    verbose(
+        config,
+        format_args!("{prefix}{}:{port}", Ipv4Addr::from(ip)),
+    );
 }
 
 fn verbose_bytes(config: &NcConfig, prefix: &str, count: usize) {
-    if !config.verbose {
-        return;
-    }
-    println!("nc: {prefix}{count} bytes");
+    verbose(config, format_args!("{prefix}{count} bytes"));
 }
 
 fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
-    if !config.verbose {
-        return;
-    }
-    println!(
-        "nc: received {} bytes from {}:{}",
-        count,
-        Ipv4Addr::from(ip),
-        port
+    verbose(
+        config,
+        format_args!("received {count} bytes from {}:{port}", Ipv4Addr::from(ip)),
     );
 }
 
@@ -292,6 +318,8 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
                 verbose,
                 timeout_ms: timeout_secs * 1000,
                 keep_listen,
+                stdin_tty: false,
+                stdout_tty: false,
             })
         }
         NcMode::Client => {
@@ -315,6 +343,8 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
                 verbose,
                 timeout_ms: timeout_secs * 1000,
                 keep_listen,
+                stdin_tty: false,
+                stdout_tty: false,
             })
         }
     }
@@ -329,7 +359,7 @@ pub fn nc_main(args: Vec<String>) -> ! {
     let byte_args: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
     let slices: Vec<&[u8]> = byte_args.iter().map(|a| a.as_slice()).collect();
 
-    let config = match parse_args_from_slices(&slices) {
+    let mut config = match parse_args_from_slices(&slices) {
         Ok(c) => c,
         Err(e) => {
             print_error(e);
@@ -339,6 +369,8 @@ pub fn nc_main(args: Vec<String>) -> ! {
     };
 
     process::ignore_signal(slopos_abi::signal::SIGPIPE);
+    config.stdin_tty = fs::isatty(0);
+    config.stdout_tty = fs::isatty(1);
 
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {

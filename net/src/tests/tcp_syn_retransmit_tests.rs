@@ -39,7 +39,7 @@ pub fn test_syn_is_retransmitted_with_the_original_iss() -> TestResult {
         RetransmitAction::Data(_) => {
             return fail!("a SynSent PCB was routed to the data retransmit path");
         }
-        RetransmitAction::Nothing => {
+        RetransmitAction::Nothing | RetransmitAction::GaveUp(_) => {
             return fail!("the SYN was not retransmitted -- connect sends it exactly once");
         }
     }
@@ -69,14 +69,19 @@ pub fn test_syn_retransmits_are_bounded_and_release_the_pcb() -> TestResult {
     }
 
     match tcp::on_retransmit(id.raw()) {
-        RetransmitAction::Nothing => {}
+        RetransmitAction::GaveUp(None) => {}
         RetransmitAction::Segment(_) => {
             return fail!(
                 "a {}th retransmit was sent -- the attempt is unbounded",
                 ACTIVE_SYN_RETRIES_MAX as u32 + 1
             );
         }
-        RetransmitAction::Data(_) => return fail!("routed to the data retransmit path"),
+        RetransmitAction::Nothing => {
+            return fail!("giving up told the socket nothing");
+        }
+        RetransmitAction::Data(_) | RetransmitAction::GaveUp(Some(_)) => {
+            return fail!("routed to the data retransmit path");
+        }
     }
     assert_test!(
         !pcb_is_live(id),

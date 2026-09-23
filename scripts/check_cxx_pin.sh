@@ -17,9 +17,7 @@
 #      library is linked without `-z defs`, because an undefined symbol in a
 #      shared object is legal and the loader resolves it at load time — so a
 #      libc gap that would have been a link error here is instead a `dlopen`
-#      that fails on a machine, at the point the runtime is first needed. This
-#      is the measurement Workstream 1.1 produced, kept as a check: every
-#      symbol the C++ runtime needs from the C library, still there.
+#      that fails on a machine, at the point the runtime is first needed.
 #
 # The first is unconditional. The other two need the runtime to have been
 # cross-built here, which the staged `builddir/libc++.so` says and

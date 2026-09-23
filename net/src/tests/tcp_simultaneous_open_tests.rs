@@ -98,7 +98,7 @@ pub fn test_retransmitted_syn_ack_carries_the_original_iss() -> TestResult {
         RetransmitAction::Data(_) => {
             return fail!("a SynRecv PCB was routed to the data retransmit path");
         }
-        RetransmitAction::Nothing => {
+        RetransmitAction::Nothing | RetransmitAction::GaveUp(_) => {
             return fail!("the SYN-ACK was not retransmitted");
         }
     }
@@ -131,14 +131,17 @@ pub fn test_syn_ack_retransmits_are_bounded_and_release_the_pcb() -> TestResult 
     }
 
     match tcp::on_retransmit(c.id.raw()) {
-        RetransmitAction::Nothing => {}
+        RetransmitAction::GaveUp(None) => {}
         RetransmitAction::Segment(_) => {
             return fail!(
                 "a {}th retransmit was sent -- the attempt is unbounded",
                 ACTIVE_SYN_RETRIES_MAX as u32 + 1
             );
         }
-        RetransmitAction::Data(_) => return fail!("routed to the data retransmit path"),
+        RetransmitAction::Nothing => return fail!("giving up told the socket nothing"),
+        RetransmitAction::Data(_) | RetransmitAction::GaveUp(Some(_)) => {
+            return fail!("routed to the data retransmit path");
+        }
     }
     assert_test!(
         !pcb_is_live(c.id),
@@ -192,7 +195,7 @@ pub fn test_the_cross_does_not_refill_the_retransmit_budget() -> TestResult {
         }
     }
     match tcp::on_retransmit(id.raw()) {
-        RetransmitAction::Nothing => {}
+        RetransmitAction::GaveUp(None) => {}
         _ => {
             return fail!(
                 "the cross refilled the budget -- more than {} total attempts were granted",

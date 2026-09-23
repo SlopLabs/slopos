@@ -568,10 +568,15 @@ define_syscall!(syscall_resolve
         Ok(addr) => addr,
         Err(dns::DnsResolveError::InvalidHostname) => return Err(Errno::EINVAL),
         Err(dns::DnsResolveError::NoDnsServer) => return Err(Errno::ENETUNREACH),
-        Err(dns::DnsResolveError::Timeout | dns::DnsResolveError::TransmitFailed) => {
-            return Err(Errno::EAGAIN);
-        }
-        Err(dns::DnsResolveError::ParseFailed) => return Err(Errno::EHOSTUNREACH),
+        Err(
+            dns::DnsResolveError::Timeout
+            | dns::DnsResolveError::TransmitFailed
+            | dns::DnsResolveError::ServerFailure
+            | dns::DnsResolveError::Busy,
+        ) => return Err(Errno::EAGAIN),
+        Err(dns::DnsResolveError::NameNotFound) => return Err(Errno::EHOSTUNREACH),
+        Err(dns::DnsResolveError::ParseFailed) => return Err(Errno::EIO),
+        Err(dns::DnsResolveError::Interrupted) => return Err(Errno::EINTR),
     };
 
     let user_result = MmUserBytes::try_new(result_ptr, 4).map_err(|_| Errno::EFAULT)?;

@@ -147,6 +147,28 @@ pub fn test_so_rcvbuf_validation() -> TestResult {
     pass!()
 }
 
+pub fn test_so_rcvbuf_stream_clamps_to_the_ceiling() -> TestResult {
+    reset();
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
+    if idx < 0 {
+        return fail!("socket_create failed");
+    }
+    let sock_idx = idx as u32;
+    let huge = (1u32 << 30).to_ne_bytes();
+    let set = socket_setsockopt(sock_idx, SOL_SOCKET, SO_RCVBUF, &huge);
+    let mut got = [0u8; 4];
+    let read = socket_getsockopt(sock_idx, SOL_SOCKET, SO_RCVBUF, &mut got);
+    let _ = socket_close(sock_idx);
+    assert_eq_test!(set, 0, "an oversized SO_RCVBUF is taken");
+    assert_eq_test!(read, 4, "and reads back");
+    assert_eq_test!(
+        i32::from_ne_bytes(got) as usize,
+        crate::tcp::chunk::buffer_max(),
+        "as the ceiling"
+    );
+    pass!()
+}
+
 pub fn test_so_error_clear_on_read() -> TestResult {
     reset();
     let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
@@ -230,6 +252,10 @@ pub fn test_unknown_option_returns_einval() -> TestResult {
 slopos_testing::stest!(name = test_so_reuseaddr_roundtrip, suite = socket_option);
 slopos_testing::stest!(name = test_socket_option_roundtrips, suite = socket_option);
 slopos_testing::stest!(name = test_so_rcvbuf_validation, suite = socket_option);
+slopos_testing::stest!(
+    name = test_so_rcvbuf_stream_clamps_to_the_ceiling,
+    suite = socket_option
+);
 slopos_testing::stest!(name = test_so_error_clear_on_read, suite = socket_option);
 slopos_testing::stest!(name = test_shutdown_read, suite = socket_option);
 slopos_testing::stest!(name = test_shutdown_write, suite = socket_option);

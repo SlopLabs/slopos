@@ -1,0 +1,14 @@
+# Vendored crates.io sources for the workspace and `-Zbuild-std`, filled by
+# `scripts/make_vendor.sh` and held to both lockfiles by
+# `scripts/check_offline_build.sh`. Passed with `--config` rather than folded
+# into config.toml because cargo also runs in `third_party/`'s materialised
+# toolchain trees, whose dependencies are not vendored here.
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "third_party/vendor"
+
+[net]
+offline = true

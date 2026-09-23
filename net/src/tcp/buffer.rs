@@ -1,18 +1,17 @@
 //! Per-connection send and receive buffers.
-//!
-//! Buffers are lazily allocated as `Option<TcpBufferPair>` in the parallel
-//! array inside [`super::table::PcbTable`]: only Data-phase connections have
-//! one; Listen, SynSent, SynRecv and TimeWait keep `None`.
-//!
-//! The 32 KiB rings live behind `KBox<TcpBuffer>`, whose `zeroed()` path routes
-//! to `alloc_zeroed` with no stack temporary, so no function along the
-//! allocation chain ever reserves 32 KiB on its frame.
 
-use slopos_ostd::RingBuffer;
 use slopos_ostd::mm::uframe::{KeepaliveFrames, copy_out_frames};
-use slopos_ostd::{AllocError, KBox, KVecDeque, ZcNotifToken};
+use slopos_ostd::{
+    AllocError, Init, Initialised, KBox, KVecDeque, SlotPtr, ZcNotifToken, init_struct_with,
+    write_field,
+};
 
-pub const TCP_BUFFER_SIZE: usize = 32768;
+use super::chunk::{self, ChunkRing, Spares};
+use super::retx::SendMap;
+
+/// Allocated up front and never grown, since the piece queue is pushed to
+/// under the PCB lock.
+const SEND_PIECES: usize = 64;
 
 /// Delayed ACK timeout in milliseconds (RFC 1122 §4.2.3.2).
 pub const DELAYED_ACK_MS: u64 = 200;
@@ -20,25 +19,20 @@ pub const DELAYED_ACK_MS: u64 = 200;
 /// Send ACK after this many unacknowledged data segments.
 pub const DELAYED_ACK_SEGMENTS: u8 = 2;
 
-/// Zero-window probe interval in milliseconds.
-pub const ZWP_INTERVAL_MS: u64 = 5000;
-
-pub type TcpBuffer = RingBuffer<u8, TCP_BUFFER_SIZE>;
-
 /// One segment of the send byte-stream, in stream order.
 ///
-/// The concatenation, in queue order, of all `Inline` chunks' bytes *is* the
+/// The concatenation, in queue order, of all `Inline` pieces' bytes *is* the
 /// ring's contents. `Zerocopy` data lives in pinned user pages the NIC DMAs
-/// straight from (TCP `MSG_ZEROCOPY`): the chunk holds an owning ref on every
+/// straight from (TCP `MSG_ZEROCOPY`): the piece holds an owning ref on every
 /// backing page until cumulative ACK, and a refcounted [`ZcNotifToken`] gating
 /// the buffer-reusable notification.
-enum SendChunk {
+enum SendPiece {
     Inline {
         len: u32,
     },
     Zerocopy {
         keepalive: KeepaliveFrames,
-        /// In-page byte offset within `keepalive[0]`; advances as the chunk is
+        /// In-page byte offset within `keepalive[0]`; advances as the piece is
         /// partially acked.
         base_off: usize,
         len: u32,
@@ -46,10 +40,10 @@ enum SendChunk {
     },
 }
 
-impl SendChunk {
+impl SendPiece {
     fn len(&self) -> usize {
         match self {
-            SendChunk::Inline { len } | SendChunk::Zerocopy { len, .. } => *len as usize,
+            SendPiece::Inline { len } | SendPiece::Zerocopy { len, .. } => *len as usize,
         }
     }
 }
@@ -68,7 +62,7 @@ pub struct ZcSource {
 }
 
 /// Where the bytes of one outgoing segment come from — the result of locating a
-/// stream offset in the chunk queue (see [`TcpSendState::segment_source`]).
+/// stream offset in the piece queue (see [`TcpSendState::segment_source`]).
 pub(crate) enum SegmentSource {
     /// No data buffered at the requested offset.
     Empty,
@@ -86,61 +80,66 @@ pub(crate) enum SegmentSource {
 }
 
 pub struct TcpSendState {
-    /// Inline (copied) bytes, FIFO in stream order; zero-copy chunks reference
+    /// Inline (copied) bytes, FIFO in stream order; zero-copy pieces reference
     /// pinned pages, not this ring.
-    pub(crate) ring: KBox<TcpBuffer>,
-    /// Chunks in send order, boxed so `TcpSendState` stays within its size
+    pub(crate) ring: ChunkRing,
+    /// Pieces in send order, boxed so `TcpSendState` stays within its size
     /// tripwire.
-    chunks: KBox<KVecDeque<SendChunk>>,
+    pieces: KBox<KVecDeque<SendPiece>>,
+    /// Here rather than in the PCB state: this pair is allocated outside the
+    /// PCB lock, and the map is a page allocation.
+    pub(crate) sendmap: KBox<SendMap>,
     /// Bytes sent but not yet acked — a stream offset measured from the queue
     /// head (`snd_una`).
     pub(crate) inflight: usize,
-    /// Total stream bytes buffered (sum of all chunk lengths).
+    /// Total stream bytes buffered (sum of all piece lengths).
     buffered: usize,
     pub(crate) rto_deadline_ms: u64,
-    /// Soft cap on usable buffer capacity (SO_SNDBUF); values above
-    /// `TCP_BUFFER_SIZE` are silently capped by the caller.
+    /// SO_SNDBUF, which counts zero-copy bytes as well as the ring's.
     pub(crate) effective_capacity: usize,
 }
 
 impl TcpSendState {
-    /// `cap` becomes the initial `effective_capacity`; every caller passes
-    /// `TCP_BUFFER_SIZE` today, the parameter being the hook for future
-    /// per-connection SO_SNDBUF sizing.
-    pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+    pub(crate) fn new(max: usize, cap: usize) -> Result<Self, AllocError> {
         Ok(Self {
-            ring: KBox::<TcpBuffer>::zeroed()?,
-            chunks: KBox::try_new(KVecDeque::with_capacity(4)?)?,
+            ring: ChunkRing::new(max, max)?,
+            pieces: KBox::try_new(KVecDeque::with_capacity(SEND_PIECES)?)?,
+            sendmap: SendMap::boxed()?,
             inflight: 0,
             buffered: 0,
             rto_deadline_ms: 0,
-            effective_capacity: cap,
+            effective_capacity: cap.min(max),
         })
     }
 
-    /// Ensure the tail chunk is `Inline`; `false` if a new one is needed but
+    pub(crate) fn set_capacity(&mut self, cap: usize) {
+        self.effective_capacity = cap.min(self.ring.max_capacity());
+    }
+
+    /// Ensure the tail piece is `Inline`; `false` if a new one is needed but
     /// cannot be allocated.
     fn ensure_inline_tail(&mut self) -> bool {
-        if matches!(self.chunks.back(), Some(SendChunk::Inline { .. })) {
+        if matches!(self.pieces.back(), Some(SendPiece::Inline { .. })) {
             return true;
         }
-        self.chunks.push_back(SendChunk::Inline { len: 0 }).is_ok()
+        self.pieces.len() < SEND_PIECES
+            && self.pieces.push_back(SendPiece::Inline { len: 0 }).is_ok()
     }
 
     fn extend_inline_tail(&mut self, n: usize) {
-        if let Some(SendChunk::Inline { len }) = self.chunks.back_mut() {
+        if let Some(SendPiece::Inline { len }) = self.pieces.back_mut() {
             *len += n as u32;
         }
         self.buffered += n;
     }
 
-    pub fn enqueue(&mut self, data: &[u8]) -> usize {
+    pub fn enqueue(&mut self, data: &[u8], spares: &mut Spares) -> usize {
         let avail = self.free_space();
         let n = core::cmp::min(data.len(), avail);
         if n == 0 || !self.ensure_inline_tail() {
             return 0;
         }
-        let wrote = self.ring.write(&data[..n]);
+        let wrote = self.ring.write(&data[..n], spares);
         self.extend_inline_tail(wrote);
         wrote
     }
@@ -149,20 +148,24 @@ impl TcpSendState {
     /// `min(free_space, reader.remain())` bytes straight from the pinned user
     /// pages into the send ring, with no kernel scratch. Returns the number of
     /// bytes buffered.
-    pub fn enqueue_from(&mut self, reader: &mut slopos_ostd::mm::VmReader<'_>) -> usize {
+    pub fn enqueue_from(
+        &mut self,
+        reader: &mut slopos_ostd::mm::VmReader<'_>,
+        spares: &mut Spares,
+    ) -> usize {
         let avail = self.free_space();
         if avail == 0 || !self.ensure_inline_tail() {
             return 0;
         }
-        let wrote = self.ring.write_from(reader, avail);
+        let wrote = self.ring.write_from(reader, avail, spares);
         self.extend_inline_tail(wrote);
         wrote
     }
 
-    /// Append a zero-copy chunk: the NIC will DMA `len` bytes straight from the
+    /// Append a zero-copy piece: the NIC will DMA `len` bytes straight from the
     /// pinned pages `keepalive` (whose data begins at `base_off`), held until
-    /// the bytes are cumulatively ACKed. Returns `false` if the chunk store
-    /// cannot grow. Does **not** check `free_space`; the caller
+    /// the bytes are cumulatively ACKed. Returns `false` if the piece queue
+    /// is full. Does **not** check `free_space`; the caller
     /// (`socket_send_zerocopy`) gates against SO_SNDBUF.
     pub(crate) fn enqueue_zerocopy(
         &mut self,
@@ -171,15 +174,16 @@ impl TcpSendState {
         len: u32,
         token: ZcNotifToken,
     ) -> bool {
-        if self
-            .chunks
-            .push_back(SendChunk::Zerocopy {
-                keepalive,
-                base_off,
-                len,
-                token,
-            })
-            .is_err()
+        if self.pieces.len() == SEND_PIECES
+            || self
+                .pieces
+                .push_back(SendPiece::Zerocopy {
+                    keepalive,
+                    base_off,
+                    len,
+                    token,
+                })
+                .is_err()
         {
             return false;
         }
@@ -202,28 +206,44 @@ impl TcpSendState {
         core::cmp::min(raw, cap_limit)
     }
 
+    /// What a copying write can take now: the free space, as far as chunks
+    /// and a piece exist to hold it.
+    pub fn writable(&self) -> usize {
+        let inline_tail_available = matches!(self.pieces.back(), Some(SendPiece::Inline { .. }))
+            || self.pieces.len() < SEND_PIECES;
+        if !inline_tail_available {
+            return 0;
+        }
+        self.free_space()
+            .min(self.ring.tail_room() + self.ring.backed_room())
+    }
+
+    pub fn chunks_held(&self) -> usize {
+        self.ring.chunks_held()
+    }
+
     /// SO_SNDBUF headroom for a zero-copy enqueue (no ring involved).
     pub(crate) fn zc_free_space(&self) -> usize {
         self.effective_capacity.saturating_sub(self.buffered)
     }
 
     /// Copy up to `out.len()` bytes of the send stream from stream offset `off`
-    /// into `out`, clamped to the covering chunk's boundary. Zero-copy chunks
+    /// into `out`, clamped to the covering piece's boundary. Zero-copy pieces
     /// are read volatilely from the pinned pages. Returns the count.
     fn peek_at_stream(&self, off: usize, out: &mut [u8]) -> usize {
         let mut acc = 0usize;
         let mut ring_acc = 0usize;
-        for chunk in self.chunks.iter() {
-            let len = chunk.len();
+        for piece in self.pieces.iter() {
+            let len = piece.len();
             if off < acc + len {
                 let intra = off - acc;
                 let n = core::cmp::min(out.len(), len - intra);
                 if n == 0 {
                     return 0;
                 }
-                return match chunk {
-                    SendChunk::Inline { .. } => self.ring.peek_at(ring_acc + intra, &mut out[..n]),
-                    SendChunk::Zerocopy {
+                return match piece {
+                    SendPiece::Inline { .. } => self.ring.peek_at(ring_acc + intra, &mut out[..n]),
+                    SendPiece::Zerocopy {
                         keepalive,
                         base_off,
                         ..
@@ -237,7 +257,7 @@ impl TcpSendState {
                 };
             }
             acc += len;
-            if let SendChunk::Inline { .. } = chunk {
+            if let SendPiece::Inline { .. } = piece {
                 ring_acc += len;
             }
         }
@@ -254,20 +274,20 @@ impl TcpSendState {
     }
 
     /// Resolve the source of one outgoing segment at stream offset `off`, taking
-    /// at most `max_len` bytes and never crossing a chunk boundary.
+    /// at most `max_len` bytes and never crossing a piece boundary.
     pub(crate) fn segment_source(&self, off: usize, max_len: usize) -> SegmentSource {
         let mut acc = 0usize;
-        for chunk in self.chunks.iter() {
-            let len = chunk.len();
+        for piece in self.pieces.iter() {
+            let len = piece.len();
             if off < acc + len {
                 let intra = off - acc;
                 let n = core::cmp::min(max_len, len - intra);
                 if n == 0 {
                     return SegmentSource::Empty;
                 }
-                return match chunk {
-                    SendChunk::Inline { .. } => SegmentSource::Inline { len: n },
-                    SendChunk::Zerocopy {
+                return match piece {
+                    SendPiece::Inline { .. } => SegmentSource::Inline { len: n },
+                    SendPiece::Zerocopy {
                         keepalive,
                         base_off,
                         token,
@@ -305,26 +325,26 @@ impl TcpSendState {
         let consumed = core::cmp::min(acked, self.buffered);
         let mut left = consumed;
         while left > 0 {
-            let Some(front) = self.chunks.front_mut() else {
+            let Some(front) = self.pieces.front_mut() else {
                 break;
             };
             let clen = front.len();
             if clen <= left {
                 left -= clen;
-                match self.chunks.pop_front() {
-                    Some(SendChunk::Inline { len }) => self.ring.consume(len as usize),
-                    // Whole chunk acked: retire its token reference; the buffer
+                match self.pieces.pop_front() {
+                    Some(SendPiece::Inline { len }) => self.ring.consume(len as usize),
+                    // Whole piece acked: retire its token reference; the buffer
                     // becomes reusable once every in-flight DMA is reclaimed.
-                    Some(SendChunk::Zerocopy { token, .. }) => token.mark_acked_and_release(),
+                    Some(SendPiece::Zerocopy { token, .. }) => token.mark_acked_and_release(),
                     None => break,
                 }
             } else {
                 match front {
-                    SendChunk::Inline { len } => {
+                    SendPiece::Inline { len } => {
                         self.ring.consume(left);
                         *len -= left as u32;
                     }
-                    SendChunk::Zerocopy { base_off, len, .. } => {
+                    SendPiece::Zerocopy { base_off, len, .. } => {
                         *base_off += left;
                         *len -= left as u32;
                     }
@@ -340,15 +360,16 @@ impl TcpSendState {
     }
 
     pub fn clear(&mut self) {
-        // Retire in-flight zero-copy chunks so their notification tokens make
+        // Retire in-flight zero-copy pieces so their notification tokens make
         // progress on teardown; the driver's independent keepalive keeps any
         // in-flight DMA's pages alive.
-        while let Some(chunk) = self.chunks.pop_front() {
-            if let SendChunk::Zerocopy { token, .. } = chunk {
+        while let Some(piece) = self.pieces.pop_front() {
+            if let SendPiece::Zerocopy { token, .. } = piece {
                 token.mark_acked_and_release();
             }
         }
         self.ring.reset();
+        self.sendmap.clear();
         self.inflight = 0;
         self.buffered = 0;
         self.rto_deadline_ms = 0;
@@ -372,31 +393,32 @@ impl TcpSendState {
 }
 
 pub struct TcpRecvState {
-    pub(crate) buf: KBox<TcpBuffer>,
+    pub(crate) buf: ChunkRing,
     pub(crate) segments_since_ack: u8,
     pub(crate) ack_pending: bool,
     pub(crate) delayed_ack_deadline_ms: u64,
-    /// Soft cap on usable buffer capacity (SO_RCVBUF).
-    pub(crate) effective_capacity: usize,
 }
 
 impl TcpRecvState {
-    pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+    pub(crate) fn new(max: usize, cap: usize) -> Result<Self, AllocError> {
         Ok(Self {
-            buf: KBox::<TcpBuffer>::zeroed()?,
+            buf: ChunkRing::new(max, cap)?,
             segments_since_ack: 0,
             ack_pending: false,
             delayed_ack_deadline_ms: 0,
-            effective_capacity: cap,
         })
     }
 
-    pub fn enqueue(&mut self, data: &[u8], now_ms: u64) -> usize {
+    pub(crate) fn set_capacity(&mut self, cap: usize) {
+        self.buf.set_capacity(cap);
+    }
+
+    pub fn enqueue(&mut self, data: &[u8], spares: &mut Spares, now_ms: u64) -> usize {
         if data.is_empty() {
             return 0;
         }
 
-        let wrote = self.buf.write(data);
+        let wrote = self.buf.write(data, spares);
         if wrote > 0 {
             self.ack_pending = true;
             self.segments_since_ack = self.segments_since_ack.saturating_add(1);
@@ -423,10 +445,10 @@ impl TcpRecvState {
         self.buf.len()
     }
 
-    pub fn window(&self) -> u16 {
-        let raw_free = self.buf.free_space();
-        let cap_limit = self.effective_capacity.saturating_sub(self.buf.len());
-        core::cmp::min(core::cmp::min(raw_free, cap_limit), u16::MAX as usize) as u16
+    /// In bytes, unscaled. Bounded by the chunks that can still be found: a
+    /// window the allocator cannot back invites bytes the receive path drops.
+    pub fn window(&self) -> u32 {
+        self.buf.free_space().min(self.buf.backed_room()) as u32
     }
 
     pub fn should_ack_now(&self, now_ms: u64) -> bool {
@@ -461,14 +483,18 @@ impl TcpRecvState {
     }
 
     pub fn effective_capacity(&self) -> usize {
-        self.effective_capacity
+        self.buf.capacity()
     }
 }
 
+#[derive(slopos_ostd::SlotFields)]
 pub struct TcpBufferPair {
     pub(crate) send: TcpSendState,
     pub(crate) recv: TcpRecvState,
     pub(crate) ooo: super::reasm::Assembler,
+    /// What the receive path may draw on under the PCB lock; filled before it
+    /// is taken and emptied after.
+    pub(crate) spares: Spares,
 }
 
 /// Connection-buffer allocations still owed a synthetic failure.
@@ -494,16 +520,43 @@ fn take_injected_alloc_failure() -> bool {
 }
 
 impl TcpBufferPair {
-    pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+    /// By value, for a test that drives the state machine with no table.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn new(rcv_cap: usize, snd_cap: usize) -> Result<Self, AllocError> {
+        let max = chunk::buffer_max();
+        Ok(Self {
+            send: TcpSendState::new(max, snd_cap)?,
+            recv: TcpRecvState::new(max, rcv_cap)?,
+            ooo: super::reasm::Assembler::new(),
+            spares: Spares::new(),
+        })
+    }
+
+    /// Built field by field in its heap slot: the whole pair as one rvalue is
+    /// past the 2 KiB stack gate once `Box` has copied it about.
+    pub(crate) fn boxed(rcv_cap: usize, snd_cap: usize) -> Result<KBox<Self>, AllocError> {
         #[cfg(feature = "test-hooks")]
         if take_injected_alloc_failure() {
             return Err(AllocError);
         }
-        Ok(Self {
-            send: TcpSendState::new(cap)?,
-            recv: TcpRecvState::new(cap)?,
-            ooo: super::reasm::Assembler::new(),
-        })
+        KBox::try_init(Self::init(rcv_cap, snd_cap))
+    }
+
+    fn init(rcv_cap: usize, snd_cap: usize) -> impl Init<Self, AllocError> {
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                let max = chunk::buffer_max();
+                // Both before either is written: a field already in the slot
+                // is not dropped when a later one fails.
+                let send = TcpSendState::new(max, snd_cap)?;
+                let recv = TcpRecvState::new(max, rcv_cap)?;
+                write_field!(slot, send, send);
+                write_field!(slot, recv, recv);
+                write_field!(slot, ooo, super::reasm::Assembler::new());
+                write_field!(slot, spares, Spares::new());
+                Ok(slot.finish())
+            },
+        )
     }
 
     pub fn clear(&mut self) {
@@ -539,6 +592,6 @@ impl TcpBufferPair {
 
 // Size tripwires: these state types stay small so every function along the
 // buffer-allocation chain keeps a tiny frame.
-const _: () = assert!(core::mem::size_of::<TcpSendState>() <= 64);
-const _: () = assert!(core::mem::size_of::<TcpRecvState>() <= 64);
-const _: () = assert!(core::mem::size_of::<TcpBufferPair>() <= 256);
+const _: () = assert!(core::mem::size_of::<TcpSendState>() <= 128);
+const _: () = assert!(core::mem::size_of::<TcpRecvState>() <= 128);
+const _: () = assert!(core::mem::size_of::<TcpBufferPair>() <= 512);

@@ -67,7 +67,10 @@ fn dispatch_next_keepalive_for_conn(
 
     let mut ours = None;
     for timer in scope.dispatch_due(TimerKind::TcpKeepalive) {
-        let probe = tcp::on_keepalive(timer.key);
+        let probe = match tcp::on_keepalive(timer.key) {
+            tcp::RetransmitAction::Segment(seg) => Some(seg),
+            _ => None,
+        };
         if timer.key == key {
             ours = Some(probe);
         }
@@ -208,6 +211,25 @@ pub fn test_keepalive_reset_on_data() -> TestResult {
     pass!()
 }
 
+pub fn test_keepalive_reset_by_an_answered_probe() -> TestResult {
+    let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let (_sock, tcp_id) = match connect_and_establish(&scope, true) {
+        Ok(v) => v,
+        Err(e) => return fail!("{}", e),
+    };
+    let fired = dispatch_next_keepalive_for_conn(&scope, tcp_id, IDLE_ADVANCE_MS);
+    assert_test!(fired.flatten().is_some(), "the idle keepalive probes");
+    inject_inbound_data(tcp_id, &[]);
+    with_data_state!(tcp_id, |d| {
+        assert_eq_test!(d.keepalive_probes_sent, 0, "the answer resets the count");
+        assert_test!(d.keepalive_token.is_some(), "and the timer stays armed");
+    });
+    pass!()
+}
+
 pub fn test_keepalive_max_probes_rst() -> TestResult {
     let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
         Ok(s) => s,
@@ -324,6 +346,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_keepalive_reset_on_data, suite = tcp_keepalive);
 slopos_testing::stest!(name = test_keepalive_max_probes_rst, suite = tcp_keepalive);
+slopos_testing::stest!(
+    name = test_keepalive_reset_by_an_answered_probe,
+    suite = tcp_keepalive
+);
 slopos_testing::stest!(
     name = test_keepalive_disabled_no_timer,
     suite = tcp_keepalive

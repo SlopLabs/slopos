@@ -15,11 +15,13 @@ use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 
 use crate::tcp::cong::CongestionControl;
 use crate::tcp::{
-    self, ConnId, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
-    TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpSendState, TcpState,
+    self, ConnId, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, Spares, TCP_FLAG_ACK, TCP_FLAG_FIN,
+    TCP_FLAG_PSH, TCP_FLAG_RST, TcpError, TcpHeader, TcpSendState, TcpState,
 };
 use crate::tests::net_scope::{NetTestScope, ScopeError};
-use crate::tests::tcp_common::{self, LOCAL_IP, REMOTE_IP, REMOTE_PORT, reset_all as reset};
+use crate::tests::tcp_common::{
+    self, LOCAL_IP, REMOTE_IP, REMOTE_PORT, TEST_BUFFER, reset_all as reset,
+};
 use crate::with_data_state;
 
 #[cold]
@@ -30,7 +32,13 @@ fn scope_error(e: ScopeError) -> TestResult {
 
 fn establish_connection() -> (ConnId, u32, u16) {
     let c = tcp_common::establish_connection();
+    tcp::set_sndbuf(c.id, TEST_BUFFER);
+    tcp::set_rcvbuf(c.id, TEST_BUFFER);
     (c.id, c.peer_iss, c.local_port)
+}
+
+fn sendmap<T>(id: ConnId, f: impl FnOnce(&tcp::retx::SendMap) -> T) -> T {
+    tcp::table::with_bufs(id, |b| f(&b.send.sendmap)).expect("connection has buffers")
 }
 
 fn inject_data_segment(
@@ -60,7 +68,7 @@ fn inject_data_segment(
 pub fn test_ring_buffer_new_empty() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
-    assert_eq_test!(tcp::send_buffer_space(id), TCP_BUFFER_SIZE, "capacity");
+    assert_eq_test!(tcp::send_buffer_space(id), TEST_BUFFER, "capacity");
     assert_eq_test!(tcp::recv_available(id), 0, "new len");
     assert_test!(!tcp::has_pending_data(id), "new is empty");
     pass!()
@@ -87,7 +95,7 @@ pub fn test_ring_buffer_write_full() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
     let chunk = [0xABu8; 512];
-    let mut remaining = TCP_BUFFER_SIZE;
+    let mut remaining = TEST_BUFFER;
     while remaining > 0 {
         let to_write = core::cmp::min(remaining, chunk.len());
         let wrote = tcp::send(id, &chunk[..to_write]).unwrap();
@@ -111,7 +119,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let mut seq = server_iss.wrapping_add(1);
-    let half = TCP_BUFFER_SIZE / 2;
+    let half = TEST_BUFFER / 2;
     let mut first: KBox<[u8; 256]> = KBox::zeroed().expect("alloc");
     first.iter_mut().for_each(|b| *b = 1);
     let mut injected = 0usize;
@@ -200,7 +208,7 @@ pub fn test_ring_buffer_peek_offset() -> TestResult {
     assert_test!(&third[..3] == b"fgh", "remaining chunk content");
     assert_eq_test!(
         tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE - 8,
+        TEST_BUFFER - 8,
         "peek does not consume"
     );
 
@@ -218,7 +226,7 @@ pub fn test_ring_buffer_peek_offset() -> TestResult {
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &ack, &[], &[], 2);
     assert_eq_test!(
         tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE,
+        TEST_BUFFER,
         "full data preserved"
     );
     pass!()
@@ -249,13 +257,17 @@ pub fn test_ring_buffer_consume() -> TestResult {
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &ack, &[], &[], 1);
     assert_eq_test!(
         tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE - 4,
+        TEST_BUFFER - 4,
         "len after consume"
     );
 
-    assert_eq_test!(tcp::retransmit_check(1000), Some(id), "trigger retransmit");
+    assert_eq_test!(
+        tcp::retransmit_check(1001),
+        Some(id),
+        "the timer the ACK restarted fires"
+    );
     let mut out = [0u8; 8];
-    let (_, r, _) = tcp::poll_transmit(id, &mut out, 1001).unwrap();
+    let (_, r, _) = tcp::poll_transmit(id, &mut out, 1002).unwrap();
     assert_eq_test!(r, 4, "read remaining");
     assert_test!(&out[..4] == b"cdef", "remaining content");
     pass!()
@@ -265,20 +277,12 @@ pub fn test_ring_buffer_clear() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
     let _ = tcp::send(id, b"data").unwrap();
-    assert_eq_test!(
-        tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE - 4,
-        "wrote data"
-    );
+    assert_eq_test!(tcp::send_buffer_space(id), TEST_BUFFER - 4, "wrote data");
 
     reset();
     let (id2, _, _) = establish_connection();
     assert_eq_test!(tcp::recv_available(id2), 0, "len after clear");
-    assert_eq_test!(
-        tcp::send_buffer_space(id2),
-        TCP_BUFFER_SIZE,
-        "free after clear"
-    );
+    assert_eq_test!(tcp::send_buffer_space(id2), TEST_BUFFER, "free after clear");
     pass!()
 }
 
@@ -286,7 +290,7 @@ pub fn test_ring_buffer_partial_write() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
     let chunk = [7u8; 512];
-    let mut remaining = TCP_BUFFER_SIZE - 4;
+    let mut remaining = TEST_BUFFER - 4;
     while remaining > 0 {
         let to_write = core::cmp::min(remaining, chunk.len());
         let wrote = tcp::send(id, &chunk[..to_write]).unwrap();
@@ -343,7 +347,7 @@ pub fn test_send_mark_sent_and_ack() -> TestResult {
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &ack, &[], &[], 1);
     assert_eq_test!(
         tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE,
+        TEST_BUFFER,
         "buffer empty after ack"
     );
     pass!()
@@ -404,16 +408,20 @@ pub fn test_send_partial_ack() -> TestResult {
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &ack, &[], &[], 1);
     assert_eq_test!(
         tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE - 500,
+        TEST_BUFFER - 500,
         "buffered after partial ack"
     );
 
+    assert_test!(
+        tcp::retransmit_check(1000).is_none(),
+        "a partial ACK restarts the timer"
+    );
     assert_eq_test!(
-        tcp::retransmit_check(1000),
+        tcp::retransmit_check(1001),
         Some(id),
         "inflight after partial ack"
     );
-    let (_, retransmit_len, _) = tcp::poll_transmit(id, &mut *payload, 1001).unwrap();
+    let (_, retransmit_len, _) = tcp::poll_transmit(id, &mut *payload, 1002).unwrap();
     assert_eq_test!(retransmit_len, 500, "remaining bytes retransmit");
     pass!()
 }
@@ -496,10 +504,20 @@ pub fn test_recv_window_decreases() -> TestResult {
     let after_enqueue = with_data_state!(id, |d| d.rcv_wnd);
     assert_test!(after_enqueue < before, "window shrinks after enqueue");
 
+    let offered = tcp::table::with_bufs(id, |b| b.recv.window()).expect("buffers");
     let mut out = [0u8; 256];
     let _ = tcp::recv(id, &mut out).unwrap();
-    let after_dequeue = with_data_state!(id, |d| d.rcv_wnd);
-    assert_test!(after_dequeue > after_enqueue, "window grows after dequeue");
+    let reopened = tcp::table::with_bufs(id, |b| b.recv.window()).expect("buffers");
+    assert_test!(
+        reopened > offered,
+        "the buffer's window grows after dequeue"
+    );
+    let advertised = with_data_state!(id, |d| d.rcv_wnd);
+    assert_eq_test!(
+        advertised,
+        after_enqueue,
+        "the advertised window moves only when a segment carries it"
+    );
     pass!()
 }
 
@@ -678,6 +696,53 @@ pub fn test_tcp_poll_transmit_mss_segmentation() -> TestResult {
     pass!()
 }
 
+pub fn test_tcp_fin_waits_for_queued_data() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, _, _) = establish_connection();
+    tcp::set_nodelay(id, true);
+    let Ok(data) = KVec::<u8>::zeroed(3000) else {
+        return fail!("alloc");
+    };
+    let queued = tcp::send(id, data.as_slice()).unwrap();
+    let first = with_data_state!(id, |d| d.snd_nxt.raw());
+
+    assert_test!(
+        matches!(tcp::shutdown_write(id), Ok(None)),
+        "nothing goes while bytes are queued"
+    );
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::Established),
+        "the FIN is queued, not sent"
+    );
+
+    let mut payload: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
+    let mut sent = 0usize;
+    let mut fin = None;
+    while let Some((seg, n, _)) = tcp::poll_transmit(id, &mut *payload, 0) {
+        if seg.flags & TCP_FLAG_FIN != 0 {
+            fin = Some(seg.seq_num);
+            break;
+        }
+        sent += n;
+    }
+    assert_eq_test!(sent, queued, "every queued byte went first");
+    assert_eq_test!(
+        fin,
+        Some(first.wrapping_add(queued as u32)),
+        "then the FIN, numbered after the last byte"
+    );
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::FinWait1),
+        "and the FIN moved the state"
+    );
+    pass!()
+}
+
 pub fn test_tcp_poll_transmit_none_when_empty() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
@@ -712,7 +777,7 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     assert_test!(!tcp::has_pending_data(id), "no pending data after ack");
     assert_eq_test!(
         tcp::send_buffer_space(id),
-        TCP_BUFFER_SIZE,
+        TEST_BUFFER,
         "send buffer reclaimed"
     );
     pass!()
@@ -755,7 +820,8 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
     };
     let after = with_data_state!(id, |d| d.rcv_wnd);
     assert_test!(after < before, "receive window decreased");
-    assert_eq_test!(ack.window_size, after, "ack advertises updated window");
+    let field = with_data_state!(id, |d| d.advertised());
+    assert_eq_test!(ack.window_size, field, "ack advertises updated window");
     pass!()
 }
 
@@ -862,7 +928,7 @@ pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let _ = tcp::poll_transmit(c.id, &mut *buf, 0).unwrap();
 
-    let (total, entries) = with_data_state!(c.id, |d| (d.sendmap.total_bytes(), d.sendmap.len()));
+    let (total, entries) = sendmap(c.id, |m| (m.total_bytes(), m.len()));
     assert_eq_test!(total, 100, "sendmap tracks 100 bytes");
     assert_eq_test!(entries, 1, "one sendmap entry");
     pass!()
@@ -969,11 +1035,9 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     // Three SACKed entries past seg 1 declare seg 1 Lost.
     inject_sack_dup_ack(&c, snd_una, &segs);
 
-    let (snd_nxt_after, in_recovery, has_lost) = with_data_state!(id, |d| (
-        d.snd_nxt.raw(),
-        d.cc.in_recovery(),
-        d.sendmap.has_lost()
-    ));
+    let (snd_nxt_after, in_recovery) =
+        with_data_state!(id, |d| (d.snd_nxt.raw(), d.cc.in_recovery()));
+    let has_lost = sendmap(id, |m| m.has_lost());
     assert_eq_test!(snd_nxt_after, snd_nxt_before, "snd_nxt not rewound");
     assert_test!(in_recovery, "entered fast recovery");
     assert_test!(has_lost, "segment marked Lost");
@@ -1008,7 +1072,7 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
-    let total = with_data_state!(id, |d| d.sendmap.total_bytes());
+    let total = sendmap(id, |m| m.total_bytes());
     assert_eq_test!(total, 4 * DEFAULT_MSS as u32, "4 MSS in flight");
 
     // CUBIC reduces on cwnd, not pipe: cwnd = ssthresh = IW 14600 * 0.7.
@@ -1133,7 +1197,7 @@ pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
     let _ = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     assert_eq_test!(
-        with_data_state!(id, |d| d.sendmap.total_bytes()),
+        sendmap(id, |m| m.total_bytes()),
         100,
         "sendmap total before RTO"
     );
@@ -1142,15 +1206,9 @@ pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
 
     let cwnd = with_data_state!(id, |d| d.cc.cwnd());
     assert_eq_test!(cwnd, DEFAULT_MSS as u32, "cwnd reset to MSS");
-    assert_test!(
-        !with_data_state!(id, |d| d.sendmap.is_empty()),
-        "sendmap not cleared"
-    );
-    assert_test!(
-        with_data_state!(id, |d| d.sendmap.has_lost()),
-        "entries marked Lost"
-    );
-    assert_eq_test!(with_data_state!(id, |d| d.sendmap.pipe()), 0, "pipe zero");
+    assert_test!(!sendmap(id, |m| m.is_empty()), "sendmap not cleared");
+    assert_test!(sendmap(id, |m| m.has_lost()), "entries marked Lost");
+    assert_eq_test!(sendmap(id, |m| m.pipe()), 0, "pipe zero");
     pass!()
 }
 
@@ -1290,7 +1348,7 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
     );
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &ack, &[], &[], 1);
 
-    let empty = with_data_state!(id, |d| d.sendmap.is_empty());
+    let empty = sendmap(id, |m| m.is_empty());
     assert_test!(empty, "sendmap cleared after forward ACK");
     pass!()
 }
@@ -1456,34 +1514,303 @@ pub fn test_tcp_zero_window_blocks_send() -> TestResult {
     pass!()
 }
 
-pub fn test_tcp_zero_window_probe() -> TestResult {
-    reset();
+#[inline(never)]
+fn deliver(hdr: &TcpHeader, payload: &[u8], now_ms: u64) {
+    let _ = tcp::input(REMOTE_IP, tcp_common::LOCAL_IP, hdr, &[], payload, now_ms);
+}
+
+pub fn test_tcp_an_overlapping_retransmission_adds_its_new_bytes() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    let una = with_data_state!(id, |d| d.snd_nxt.raw());
+    let seq = server_iss.wrapping_add(1);
+    let hdr = tcp_common::make_header(REMOTE_PORT, client_port, seq, una, TCP_FLAG_ACK, 32768);
+    deliver(&hdr, b"hello", 1);
+    deliver(&hdr, b"hello world", 2);
+    let mut out = [0u8; 32];
+    let n = tcp::recv(id, &mut out).unwrap_or(0);
+    assert_test!(&out[..n] == b"hello world", "read {:?}", &out[..n]);
+    pass!()
+}
+
+#[inline(never)]
+fn persist_probe_seq(id: u32) -> Option<u32> {
+    match tcp::on_retransmit(id) {
+        tcp::RetransmitAction::Segment(probe) => Some(probe.seq_num),
+        _ => None,
+    }
+}
+
+pub fn test_tcp_zero_window_is_probed_and_reopened() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, server_iss, client_port) = establish_connection();
     let _ = tcp::send(id, b"abcde").unwrap();
     let mut payload = [0u8; 128];
     let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let una = seg.seq_num.wrapping_add(len as u32);
+    let peer_seq = server_iss.wrapping_add(1);
+    let shut = tcp_common::make_header(REMOTE_PORT, client_port, peer_seq, una, TCP_FLAG_ACK, 0);
+    deliver(&shut, &[], 1);
 
-    let zero_wnd = TcpHeader {
-        src_port: REMOTE_PORT,
-        dst_port: client_port,
-        seq_num: server_iss.wrapping_add(1),
-        ack_num: seg.seq_num.wrapping_add(len as u32),
-        data_offset: 5,
-        flags: TCP_FLAG_ACK,
-        window_size: 0,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let _ = tcp::input(REMOTE_IP, LOCAL_IP, &zero_wnd, &[], &[], 1);
-
-    // The probe needs unsent data, enqueued after the window closed.
     let _ = tcp::send(id, b"more").unwrap();
+    assert_test!(
+        tcp::poll_transmit(id, &mut payload, 2).is_none(),
+        "the shut window holds the bytes"
+    );
+    assert_test!(
+        with_data_state!(id, |d| d.retransmit_token.is_some()),
+        "and arms the timer that will probe it"
+    );
+    let Some(probe_seq) = persist_probe_seq(id.raw()) else {
+        return fail!("the timer did not probe the shut window");
+    };
+    assert_eq_test!(
+        probe_seq,
+        una.wrapping_sub(1),
+        "a probe carries a sequence number the peer must answer"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| d.rtt.consecutive_timeouts),
+        0,
+        "a probe is not a retransmission timeout"
+    );
+    deliver(&shut, &[], 3);
+    if persist_probe_seq(id.raw()).is_none() {
+        return fail!("an answered probe was not followed by another");
+    }
+    assert_eq_test!(
+        with_data_state!(id, |d| (d.persist_probes, d.persist_backoff)),
+        (1, 2),
+        "an answer restarts the give-up count but not the backoff"
+    );
 
-    let before = with_data_state!(id, |d| d.snd_nxt.raw());
-    let probe = tcp::zero_window_probe(id, 2);
-    assert_test!(probe.is_some(), "probe generated");
-    let after = with_data_state!(id, |d| d.snd_nxt.raw());
-    assert_eq_test!(before, after, "probe does not advance snd_nxt");
+    let reopened =
+        tcp_common::make_header(REMOTE_PORT, client_port, peer_seq, una, TCP_FLAG_ACK, 1000);
+    deliver(&reopened, &[], 3);
+    assert_test!(
+        with_data_state!(id, |d| d.retransmit_token.is_none()
+            && d.persist_backoff == 0),
+        "reopening the window stops the persist timer and its backoff"
+    );
+    match tcp::poll_transmit(id, &mut payload, 4) {
+        Some((_, sent, _)) => assert_eq_test!(sent, 4, "the queued bytes go"),
+        None => return fail!("a window update acknowledging nothing new was ignored"),
+    }
+    pass!()
+}
+
+pub fn test_tcp_a_replaced_retransmit_timer_is_ignored() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, _, _) = establish_connection();
+    let _ = tcp::send(id, b"abcde").unwrap();
+    let mut payload = [0u8; 128];
+    let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let Some(live) = with_data_state!(id, |d| d.retransmit_token) else {
+        return fail!("sending armed no timer");
+    };
+    let stale = crate::timer::TimerToken::INVALID;
+    assert_test!(
+        matches!(
+            tcp::on_retransmit_timer(id.raw(), stale),
+            tcp::RetransmitAction::Nothing
+        ),
+        "the replaced timer does nothing"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| (d.retransmit_token, d.rtt.consecutive_timeouts)),
+        (Some(live), 0),
+        "and leaves the live one armed"
+    );
+    assert_test!(
+        matches!(
+            tcp::on_retransmit_timer(id.raw(), live),
+            tcp::RetransmitAction::Data(_)
+        ),
+        "the live one retransmits"
+    );
+    pass!()
+}
+
+pub fn test_tcp_rto_behind_a_shut_window_resends_the_head() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abcde").unwrap();
+    let mut payload = [0u8; 128];
+    let (seg, _, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let shut = tcp_common::make_header(
+        REMOTE_PORT,
+        client_port,
+        server_iss.wrapping_add(1),
+        seg.seq_num,
+        TCP_FLAG_ACK,
+        0,
+    );
+    deliver(&shut, &[], 1);
+    match tcp::on_retransmit(id.raw()) {
+        tcp::RetransmitAction::Data(_) => {}
+        _ => return fail!("the timeout did not mark the flight lost"),
+    }
+    match tcp::poll_transmit(id, &mut payload, 2) {
+        Some((probe, len, _)) => {
+            assert_eq_test!(probe.seq_num, seg.seq_num, "the head goes again");
+            assert_eq_test!(len, 5, "whole");
+        }
+        None => return fail!("a shut window left the lost head unsent"),
+    }
+    pass!()
+}
+
+/// Bounded even though the peer answers every probe with a shut window.
+pub fn test_tcp_orphan_behind_a_shut_window_is_reset() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::send(id, b"abc").unwrap();
+    let mut payload = [0u8; 128];
+    let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
+    let una = seg.seq_num.wrapping_add(len as u32);
+    let shut = tcp_common::make_header(
+        REMOTE_PORT,
+        client_port,
+        server_iss.wrapping_add(1),
+        una,
+        TCP_FLAG_ACK,
+        0,
+    );
+    deliver(&shut, &[], 1);
+    let _ = tcp::send(id, b"more").unwrap();
+    let _ = tcp::poll_transmit(id, &mut payload, 2);
+
+    for probe in 0..=tcp::MAX_ORPHAN_PROBES {
+        match tcp::on_retransmit(id.raw()) {
+            tcp::RetransmitAction::GaveUp(Some(seg)) if seg.flags & TCP_FLAG_RST != 0 => {
+                assert_eq_test!(
+                    probe,
+                    tcp::MAX_ORPHAN_PROBES,
+                    "reset after the orphan's probes"
+                );
+                assert_eq_test!(tcp::get_state(id), None, "and released");
+                return pass!();
+            }
+            tcp::RetransmitAction::Segment(_) => deliver(&shut, &[], 3),
+            _ => return fail!("probe {} was not sent", probe),
+        }
+    }
+    fail!("an answered orphan was probed forever")
+}
+
+pub fn test_tcp_lost_fin_is_resent() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, _, _) = establish_connection();
+    let Ok(Some(fin)) = tcp::shutdown_write(id) else {
+        return fail!("shutdown_write sent no FIN");
+    };
+    assert_test!(
+        with_data_state!(id, |d| d.retransmit_token.is_some()),
+        "a FIN in flight arms the timer"
+    );
+    match tcp::on_retransmit(id.raw()) {
+        tcp::RetransmitAction::Segment(again) => {
+            assert_test!(
+                again.flags & TCP_FLAG_FIN != 0,
+                "the resent segment is a FIN"
+            );
+            assert_eq_test!(
+                again.seq_num,
+                fin.seq_num,
+                "at the FIN's own sequence number"
+            );
+        }
+        _ => return fail!("the timer did not resend the FIN"),
+    }
+    pass!()
+}
+
+pub fn test_tcp_data_lost_after_our_fin_is_resent() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    let our_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
+    let peer_fin = tcp_common::make_header(
+        REMOTE_PORT,
+        client_port,
+        server_iss.wrapping_add(1),
+        our_nxt,
+        TCP_FLAG_ACK | TCP_FLAG_FIN,
+        u16::MAX,
+    );
+    deliver(&peer_fin, &[], 1);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::CloseWait));
+
+    tcp::set_nodelay(id, true);
+    let _ = tcp::send(id, &[9u8; 1000]).unwrap();
+    let _ = tcp::close(id);
+    let mut payload: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
+    let mut sent = 0usize;
+    while let Some((_, n, _)) = tcp::poll_transmit(id, &mut *payload, 2) {
+        sent += n;
+    }
+    assert_eq_test!(sent, 1000);
+    assert_eq_test!(tcp::get_state(id), Some(TcpState::LastAck));
+
+    assert_test!(matches!(
+        tcp::on_retransmit(id.raw()),
+        tcp::RetransmitAction::Data(_)
+    ));
+    match tcp::poll_transmit(id, &mut *payload, 3) {
+        Some((seg, n, _)) => {
+            assert_eq_test!(n, 1000, "the lost bytes go again");
+            assert_eq_test!(seg.seq_num, our_nxt);
+        }
+        None => return fail!("nothing is retransmitted once our FIN is out"),
+    }
+    pass!()
+}
+
+pub fn test_tcp_fin_on_a_cut_short_segment_waits() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    tcp::set_rcvbuf(id, 1000);
+    let our_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
+    let seg = tcp_common::make_header(
+        REMOTE_PORT,
+        client_port,
+        server_iss.wrapping_add(1),
+        our_nxt,
+        TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN,
+        u16::MAX,
+    );
+    deliver(&seg, &[7u8; 1400], 1);
+    let rcv_nxt = with_data_state!(id, |d| d.rcv_nxt.raw());
+    let took = rcv_nxt.wrapping_sub(server_iss.wrapping_add(1));
+    assert_test!(took < 1400, "the buffer took {} of 1400 bytes", took);
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::Established),
+        "the FIN behind the missing bytes is not taken"
+    );
     pass!()
 }
 
@@ -1642,7 +1969,7 @@ fn alloc_test_frames(n: usize) -> Option<KeepaliveFrames> {
 /// cumulative ACK (the pin stays held), and releases its notification-token
 /// reference only when **fully** cumulatively ACKed.
 pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
-    let mut send = match TcpSendState::new(TCP_BUFFER_SIZE) {
+    let mut send = match TcpSendState::new(TEST_BUFFER, TEST_BUFFER) {
         Ok(s) => s,
         Err(_) => return fail!("send state alloc"),
     };
@@ -1695,11 +2022,15 @@ pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
 /// A zero-copy chunk after an inline chunk: a segment never straddles the
 /// boundary — `segment_source`/`peek` clamp at the inline chunk's end.
 pub fn test_tcp_zerocopy_no_chunk_straddle() -> TestResult {
-    let mut send = match TcpSendState::new(TCP_BUFFER_SIZE) {
+    let mut send = match TcpSendState::new(TEST_BUFFER, TEST_BUFFER) {
         Ok(s) => s,
         Err(_) => return fail!("send state alloc"),
     };
-    assert_eq_test!(send.enqueue(&[7u8; 30]), 30, "inline enqueue");
+    assert_eq_test!(
+        send.enqueue(&[7u8; 30], &mut Spares::for_bytes(64, 0)),
+        30,
+        "inline enqueue"
+    );
     let Some(frames) = alloc_test_frames(1) else {
         return fail!("frame alloc");
     };
@@ -1718,6 +2049,125 @@ pub fn test_tcp_zerocopy_no_chunk_straddle() -> TestResult {
     assert_test!(
         out[..30].iter().all(|&b| b == 7),
         "inline bytes read from the ring"
+    );
+    pass!()
+}
+
+pub fn test_tcp_data_acking_our_fin_leaves_fin_wait_1() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::close(id);
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::FinWait1),
+        "closing sent our FIN"
+    );
+    let fin_acked = with_data_state!(id, |d| d.snd_nxt.raw());
+    let reply = tcp_common::make_header(
+        REMOTE_PORT,
+        client_port,
+        server_iss.wrapping_add(1),
+        fin_acked,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
+        u16::MAX,
+    );
+    deliver(&reply, b"a late reply", 1);
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::FinWait2),
+        "the data acknowledged the FIN"
+    );
+    pass!()
+}
+
+/// The segment's own FIN lies past a gap, so only its ACK of ours is taken.
+pub fn test_tcp_an_early_fin_that_acks_ours_leaves_fin_wait_1() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, server_iss, client_port) = establish_connection();
+    let _ = tcp::close(id);
+    let fin_acked = with_data_state!(id, |d| d.snd_nxt.raw());
+    let early_fin = tcp_common::make_header(
+        REMOTE_PORT,
+        client_port,
+        server_iss.wrapping_add(2),
+        fin_acked,
+        TCP_FLAG_ACK | TCP_FLAG_FIN,
+        u16::MAX,
+    );
+    deliver(&early_fin, &[], 1);
+    assert_eq_test!(
+        tcp::get_state(id),
+        Some(TcpState::FinWait2),
+        "the ACK of our FIN counts"
+    );
+    assert_test!(
+        with_data_state!(id, |d| d.fin_wait2_token.is_some()),
+        "and a timer owns the half-closed slot"
+    );
+    pass!()
+}
+
+pub fn test_tcp_lost_bytes_are_pending_output() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, _, _) = establish_connection();
+    tcp::set_nodelay(id, true);
+    let _ = tcp::send(id, &[7u8; 3000]).unwrap();
+    let mut payload: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
+    while tcp::poll_transmit(id, &mut *payload, 0).is_some() {}
+    assert_test!(!tcp::has_pending_output(id), "everything is in flight");
+    let _ = tcp::on_retransmit(id.raw());
+    assert_test!(
+        tcp::has_pending_output(id),
+        "what the timeout marked lost is owed output"
+    );
+    pass!()
+}
+
+#[inline(never)]
+fn keepalive_outcome(id: u32, token: crate::timer::TimerToken) -> &'static str {
+    match tcp::on_keepalive_timer(id, token) {
+        tcp::RetransmitAction::Nothing => "nothing",
+        tcp::RetransmitAction::Segment(_) => "probe",
+        _ => "other",
+    }
+}
+
+pub fn test_tcp_a_replaced_keepalive_timer_is_ignored() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, _, _) = establish_connection();
+    let live =
+        crate::timer::wheel().schedule(1_000, crate::timer::TimerKind::TcpKeepalive, id.raw());
+    tcp::with_pcb_mut(id, |pcb| {
+        if let tcp::PcbState::Data(d) = &mut pcb.state {
+            d.keepalive_token = Some(live);
+        }
+    });
+    assert_eq_test!(
+        keepalive_outcome(id.raw(), crate::timer::TimerToken::INVALID),
+        "nothing",
+        "the replaced timer does nothing"
+    );
+    assert_eq_test!(
+        with_data_state!(id, |d| (d.keepalive_token, d.keepalive_probes_sent)),
+        (Some(live), 0),
+        "and leaves the live one armed"
+    );
+    assert_eq_test!(
+        keepalive_outcome(id.raw(), live),
+        "probe",
+        "the live one probes"
     );
     pass!()
 }
@@ -1808,7 +2258,35 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_tcp_nodelay_disables_nagle, suite = tcp_data);
 slopos_testing::stest!(name = test_tcp_respects_peer_window, suite = tcp_data);
 slopos_testing::stest!(name = test_tcp_zero_window_blocks_send, suite = tcp_data);
-slopos_testing::stest!(name = test_tcp_zero_window_probe, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_tcp_zero_window_is_probed_and_reopened,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_an_overlapping_retransmission_adds_its_new_bytes,
+    suite = tcp_data
+);
+slopos_testing::stest!(name = test_tcp_lost_fin_is_resent, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_tcp_rto_behind_a_shut_window_resends_the_head,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_a_replaced_retransmit_timer_is_ignored,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_orphan_behind_a_shut_window_is_reset,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_data_lost_after_our_fin_is_resent,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_fin_on_a_cut_short_segment_waits,
+    suite = tcp_data
+);
 slopos_testing::stest!(name = test_tcp_window_update_resumes_send, suite = tcp_data);
 slopos_testing::stest!(
     name = test_tcp_delayed_ack_after_two_segments,
@@ -1818,3 +2296,20 @@ slopos_testing::stest!(name = test_tcp_delayed_ack_timeout, suite = tcp_data);
 slopos_testing::stest!(name = test_tcp_immediate_ack_for_fin, suite = tcp_data);
 slopos_testing::stest!(name = test_tcp_zerocopy_chunk_lifecycle, suite = tcp_data);
 slopos_testing::stest!(name = test_tcp_zerocopy_no_chunk_straddle, suite = tcp_data);
+slopos_testing::stest!(name = test_tcp_fin_waits_for_queued_data, suite = tcp_data);
+slopos_testing::stest!(
+    name = test_tcp_data_acking_our_fin_leaves_fin_wait_1,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_lost_bytes_are_pending_output,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_a_replaced_keepalive_timer_is_ignored,
+    suite = tcp_data
+);
+slopos_testing::stest!(
+    name = test_tcp_an_early_fin_that_acks_ours_leaves_fin_wait_1,
+    suite = tcp_data
+);

@@ -1,917 +1,584 @@
-use std::io::{self, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream};
-use std::os::fd::AsRawFd;
+//! curl: one URL over HTTP/1.1, in the clear or over TLS 1.3, with the body
+//! streamed to stdout or a file as it arrives. Exit codes follow curl's own.
+
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use std::time::Duration;
+
+use slopos_http_core::{self as http, Chunked, Head, HeadError, Scheme, Url, UrlError};
 
 use crate::net::ResolveError;
-use crate::ring::{Ring, slopfut};
 use crate::syscall::process;
+use crate::tls::{self, CipherSuite, ClientConfig, ConnectError, TlsStream, TrustStore};
 
-const MAX_HEADERS: usize = 8;
 const MAX_REDIRECTS: usize = 10;
-const MAX_RESPONSE_SIZE: usize = 1024 * 1024;
-const IO_TIMEOUT_MS: i64 = 5000;
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy)]
-struct ParsedUrl {
-    host: [u8; 256],
-    host_len: usize,
-    ip: [u8; 4],
-    port: u16,
-    path: [u8; 512],
-    path_len: usize,
+const USAGE: &str =
+    "usage: curl [-vLfsS] [-o file] [-X method] [-H header] [-d data] [--cacert file] <url>";
+
+struct Failure {
+    code: i32,
+    msg: String,
 }
 
-struct CurlConfig {
+fn fail<T>(code: i32, msg: impl Into<String>) -> Result<T, Failure> {
+    Err(Failure {
+        code,
+        msg: msg.into(),
+    })
+}
+
+mod exit {
+    pub const UNSUPPORTED_PROTOCOL: i32 = 1;
+    pub const USAGE: i32 = 2;
+    pub const MALFORMED_URL: i32 = 3;
+    pub const RESOLVE: i32 = 6;
+    pub const CONNECT: i32 = 7;
+    pub const WEIRD_SERVER_REPLY: i32 = 8;
+    pub const PARTIAL_FILE: i32 = 18;
+    pub const HTTP_ERROR: i32 = 22;
+    pub const WRITE: i32 = 23;
+    pub const TIMEOUT: i32 = 28;
+    pub const TLS_CONNECT: i32 = 35;
+    pub const TOO_MANY_REDIRECTS: i32 = 47;
+    pub const EMPTY_REPLY: i32 = 52;
+    pub const SEND: i32 = 55;
+    pub const RECV: i32 = 56;
+    pub const PEER_UNVERIFIED: i32 = 60;
+    pub const CA_FILE: i32 = 77;
+}
+
+struct Config {
     verbose: bool,
-    follow_redirects: bool,
+    silent: bool,
+    show_error: bool,
+    follow: bool,
+    fail_on_http_error: bool,
     method: Option<String>,
-    #[allow(dead_code)] // parsed but not yet implemented
-    output_file: Option<String>,
+    output: Option<String>,
     headers: Vec<String>,
     data: Option<Vec<u8>>,
+    cacert: Option<String>,
     url: String,
 }
 
-struct ParsedResponseHeaders {
-    status_code: u16,
-    content_length: Option<usize>,
-    chunked: bool,
-    location: Option<Vec<u8>>,
-}
-
-enum BodyKind {
-    ContentLength(usize),
-    Chunked,
-    UntilClose,
-}
-
-enum ChunkState {
-    Size,
-    Data(usize),
-    Trailer,
-}
-
-struct ChunkDecoder {
-    state: ChunkState,
-    cursor: usize,
-    done: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-enum CurlError {
-    Usage,
-    InvalidFlag,
-    MissingValue,
-    TooManyHeaders,
-    InvalidMethod,
-    InvalidUrl,
-    UnsupportedScheme,
-    InvalidHost,
-    InvalidPort,
-    InvalidPath,
-    Resolve(ResolveError),
-    SocketFailed,
-    ConnectFailed,
-    SendFailed,
-    Timeout,
-    RecvFailed,
-    ResponseTooLarge,
-    InvalidResponse,
-    InvalidChunkedEncoding,
-    RedirectWithoutLocation,
-    RedirectLimit,
-}
-
-fn print_usage() {
-    println!("usage: curl [-v] [-L] [-o output] [-X method] [-H header] [-d data] <url>");
-}
-
-fn print_error(err: CurlError) {
-    if let CurlError::Resolve(reason) = err {
-        eprintln!("curl: {}", reason);
-        return;
-    }
-    let msg = match err {
-        CurlError::Usage => "curl: invalid usage",
-        CurlError::InvalidFlag => "curl: invalid flag",
-        CurlError::MissingValue => "curl: missing flag value",
-        CurlError::TooManyHeaders => "curl: too many custom headers (max 8)",
-        CurlError::InvalidMethod => "curl: invalid HTTP method",
-        CurlError::InvalidUrl => "curl: invalid URL",
-        CurlError::UnsupportedScheme => "curl: only http:// URLs are supported",
-        CurlError::InvalidHost => "curl: invalid host",
-        CurlError::InvalidPort => "curl: invalid port",
-        CurlError::InvalidPath => "curl: invalid path",
-        CurlError::Resolve(_) => unreachable!("handled above"),
-        CurlError::SocketFailed => "curl: socket creation failed",
-        CurlError::ConnectFailed => "curl: connect failed",
-        CurlError::SendFailed => "curl: send failed",
-        CurlError::Timeout => "curl: network timeout",
-        CurlError::RecvFailed => "curl: receive failed",
-        CurlError::ResponseTooLarge => "curl: response too large (limit 1 MiB)",
-        CurlError::InvalidResponse => "curl: invalid HTTP response",
-        CurlError::InvalidChunkedEncoding => "curl: invalid chunked response",
-        CurlError::RedirectWithoutLocation => "curl: redirect without Location header",
-        CurlError::RedirectLimit => "curl: too many redirects",
+fn parse_args(args: &[String]) -> Result<Config, Failure> {
+    let mut cfg = Config {
+        verbose: false,
+        silent: false,
+        show_error: false,
+        follow: false,
+        fail_on_http_error: false,
+        method: None,
+        output: None,
+        headers: Vec::new(),
+        data: None,
+        cacert: None,
+        url: String::new(),
     };
-    eprintln!("{msg}");
-}
-
-fn parse_args(args: Vec<String>) -> Result<CurlConfig, CurlError> {
-    if args.len() <= 1 {
-        return Err(CurlError::Usage);
-    }
-
-    let mut verbose = false;
-    let mut follow_redirects = false;
-    let mut method: Option<String> = None;
-    let mut output_file: Option<String> = None;
-    let mut headers: Vec<String> = Vec::new();
-    let mut data: Option<Vec<u8>> = None;
-    let mut url: Option<String> = None;
-
-    let mut i = 1usize;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        match arg {
+    let mut url = None;
+    let mut it = args.iter().skip(1);
+    while let Some(arg) = it.next() {
+        let (flags, glued): (Vec<char>, Option<String>) = match arg.as_str() {
             "-h" | "--help" => {
-                print_usage();
+                println!("{USAGE}");
                 std::process::exit(0);
             }
-            "-v" => {
-                verbose = true;
-                i += 1;
+            "--output" => (vec!['o'], None),
+            "--request" => (vec!['X'], None),
+            "--header" => (vec!['H'], None),
+            "--data" => (vec!['d'], None),
+            "--verbose" => (vec!['v'], None),
+            "--location" => (vec!['L'], None),
+            "--fail" => (vec!['f'], None),
+            "--silent" => (vec!['s'], None),
+            "--show-error" => (vec!['S'], None),
+            "--cacert" => {
+                let path = it.next().ok_or_else(|| Failure {
+                    code: exit::USAGE,
+                    msg: "option --cacert needs a value".into(),
+                })?;
+                cfg.cacert = Some(path.clone());
+                continue;
             }
-            "-L" => {
-                follow_redirects = true;
-                i += 1;
+            cluster
+                if cluster.len() > 1 && cluster.starts_with('-') && !cluster.starts_with("--") =>
+            {
+                let body = &cluster[1..];
+                match body.find(['o', 'X', 'H', 'd']) {
+                    Some(at) => (
+                        body[..=at].chars().collect(),
+                        Some(body[at + 1..].to_string()).filter(|v| !v.is_empty()),
+                    ),
+                    None => (body.chars().collect(), None),
+                }
             }
-            "-o" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CurlError::MissingValue);
-                }
-                output_file = Some(args[i].clone());
-                i += 1;
+            other if other.starts_with('-') && other != "-" => {
+                return fail(exit::USAGE, format!("unknown option {other}"));
             }
-            "-X" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CurlError::MissingValue);
+            other => {
+                if url.replace(other.to_string()).is_some() {
+                    return fail(exit::USAGE, "only one URL may be given");
                 }
-                if args[i].is_empty() {
-                    return Err(CurlError::InvalidMethod);
-                }
-                method = Some(args[i].clone());
-                i += 1;
+                continue;
             }
-            "-H" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CurlError::MissingValue);
-                }
-                if headers.len() >= MAX_HEADERS {
-                    return Err(CurlError::TooManyHeaders);
-                }
-                headers.push(args[i].clone());
-                i += 1;
-            }
-            "-d" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CurlError::MissingValue);
-                }
-                data = Some(args[i].as_bytes().to_vec());
-                i += 1;
-            }
-            _ if arg.starts_with('-') => return Err(CurlError::InvalidFlag),
-            _ => {
-                if url.is_some() {
-                    return Err(CurlError::Usage);
-                }
-                url = Some(args[i].clone());
-                i += 1;
-            }
-        }
-    }
-
-    let url = url.ok_or(CurlError::Usage)?;
-    Ok(CurlConfig {
-        verbose,
-        follow_redirects,
-        method,
-        output_file,
-        headers,
-        data,
-        url,
-    })
-}
-
-fn parse_port(bytes: &[u8]) -> Option<u16> {
-    if bytes.is_empty() || bytes.len() > 5 {
-        return None;
-    }
-    let mut acc: u32 = 0;
-    for b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        acc = acc.saturating_mul(10).saturating_add((b - b'0') as u32);
-        if acc > u16::MAX as u32 {
-            return None;
-        }
-    }
-    if acc == 0 {
-        return None;
-    }
-    Some(acc as u16)
-}
-
-fn parse_url(url: &[u8]) -> Result<ParsedUrl, CurlError> {
-    let prefix = b"http://";
-    if !url.starts_with(prefix) {
-        if url.starts_with(b"https://") {
-            return Err(CurlError::UnsupportedScheme);
-        }
-        return Err(CurlError::InvalidUrl);
-    }
-
-    let rest = &url[prefix.len()..];
-    if rest.is_empty() {
-        return Err(CurlError::InvalidHost);
-    }
-
-    let mut slash_pos = rest.len();
-    for (idx, b) in rest.iter().enumerate() {
-        if *b == b'/' {
-            slash_pos = idx;
-            break;
-        }
-    }
-
-    let host_port = &rest[..slash_pos];
-    if host_port.is_empty() {
-        return Err(CurlError::InvalidHost);
-    }
-
-    let path_bytes = if slash_pos < rest.len() {
-        &rest[slash_pos..]
-    } else {
-        b"/"
-    };
-
-    if path_bytes.len() > 512 {
-        return Err(CurlError::InvalidPath);
-    }
-
-    let mut host = [0u8; 256];
-    let mut host_len = host_port.len();
-    let mut port = 80u16;
-
-    let mut colon_pos = None;
-    for (idx, b) in host_port.iter().enumerate() {
-        if *b == b':' {
-            colon_pos = Some(idx);
-            break;
-        }
-    }
-
-    if let Some(cp) = colon_pos {
-        let host_part = &host_port[..cp];
-        let port_part = &host_port[cp + 1..];
-        if host_part.is_empty() {
-            return Err(CurlError::InvalidHost);
-        }
-        port = parse_port(port_part).ok_or(CurlError::InvalidPort)?;
-        host_len = host_part.len();
-        if host_len > host.len() {
-            return Err(CurlError::InvalidHost);
-        }
-        host[..host_len].copy_from_slice(host_part);
-    } else {
-        if host_len > host.len() {
-            return Err(CurlError::InvalidHost);
-        }
-        host[..host_len].copy_from_slice(host_port);
-    }
-
-    let mut path = [0u8; 512];
-    path[..path_bytes.len()].copy_from_slice(path_bytes);
-
-    Ok(ParsedUrl {
-        host,
-        host_len,
-        ip: [0; 4],
-        port,
-        path,
-        path_len: path_bytes.len(),
-    })
-}
-
-fn resolve_host(parsed: &mut ParsedUrl) -> Result<(), CurlError> {
-    let host = &parsed.host[..parsed.host_len];
-    let host_str = core::str::from_utf8(host)
-        .map_err(|_| CurlError::Resolve(ResolveError::InvalidHostname))?;
-    let addr = crate::net::resolve_host(host_str).map_err(CurlError::Resolve)?;
-    parsed.ip = addr.octets();
-    Ok(())
-}
-
-fn choose_method(config: &CurlConfig) -> &str {
-    if let Some(ref method) = config.method {
-        method.as_str()
-    } else if config.data.is_some() {
-        "POST"
-    } else {
-        "GET"
-    }
-}
-
-fn build_request(config: &CurlConfig, parsed: &ParsedUrl) -> Result<Vec<u8>, CurlError> {
-    let method = choose_method(config);
-    if method.is_empty() {
-        return Err(CurlError::InvalidMethod);
-    }
-    let path = &parsed.path[..parsed.path_len];
-    let host = &parsed.host[..parsed.host_len];
-    let body = config.data.as_deref().unwrap_or(&[]);
-
-    let mut req = Vec::with_capacity(1024 + body.len());
-    req.extend_from_slice(method.as_bytes());
-    req.extend_from_slice(b" ");
-    req.extend_from_slice(path);
-    req.extend_from_slice(b" HTTP/1.1\r\n");
-    req.extend_from_slice(b"Host: ");
-    req.extend_from_slice(host);
-    req.extend_from_slice(b"\r\n");
-    req.extend_from_slice(b"User-Agent: SlopOS-curl/1.0\r\n");
-    req.extend_from_slice(b"Accept: */*\r\n");
-    req.extend_from_slice(b"Connection: close\r\n");
-
-    if !body.is_empty() {
-        req.extend_from_slice(b"Content-Length: ");
-        req.extend_from_slice(format!("{}", body.len()).as_bytes());
-        req.extend_from_slice(b"\r\n");
-    }
-
-    for header in &config.headers {
-        req.extend_from_slice(header.as_bytes());
-        req.extend_from_slice(b"\r\n");
-    }
-
-    req.extend_from_slice(b"\r\n");
-    if !body.is_empty() {
-        req.extend_from_slice(body);
-    }
-
-    Ok(req)
-}
-
-fn starts_with_case_insensitive(haystack: &[u8], needle_lower: &[u8]) -> bool {
-    if haystack.len() < needle_lower.len() {
-        return false;
-    }
-    for i in 0..needle_lower.len() {
-        if haystack[i].to_ascii_lowercase() != needle_lower[i] {
-            return false;
-        }
-    }
-    true
-}
-
-fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
-    while !bytes.is_empty() && bytes[0].is_ascii_whitespace() {
-        bytes = &bytes[1..];
-    }
-    while !bytes.is_empty() && bytes[bytes.len() - 1].is_ascii_whitespace() {
-        bytes = &bytes[..bytes.len() - 1];
-    }
-    bytes
-}
-
-fn find_crlf(data: &[u8], start: usize) -> Option<usize> {
-    if data.len() < 2 || start >= data.len().saturating_sub(1) {
-        return None;
-    }
-    let mut i = start;
-    while i + 1 < data.len() {
-        if data[i] == b'\r' && data[i + 1] == b'\n' {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-fn find_header_terminator(data: &[u8]) -> Option<usize> {
-    if data.len() < 4 {
-        return None;
-    }
-    let mut i = 0usize;
-    while i + 3 < data.len() {
-        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n'
-        {
-            return Some(i + 4);
-        }
-        i += 1;
-    }
-    None
-}
-
-fn parse_status_code(status_line: &[u8]) -> Option<u16> {
-    let first_space = status_line.iter().position(|b| *b == b' ')?;
-    let after_proto = &status_line[first_space + 1..];
-    let second_space = after_proto
-        .iter()
-        .position(|b| *b == b' ')
-        .unwrap_or(after_proto.len());
-    let code_bytes = &after_proto[..second_space];
-    if code_bytes.len() != 3 {
-        return None;
-    }
-    let mut code: u16 = 0;
-    for b in code_bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        code = code.saturating_mul(10).saturating_add((b - b'0') as u16);
-    }
-    Some(code)
-}
-
-fn parse_response_headers(header_block: &[u8]) -> Result<ParsedResponseHeaders, CurlError> {
-    let mut pos = 0usize;
-    let status_end = find_crlf(header_block, pos).ok_or(CurlError::InvalidResponse)?;
-    let status_line = &header_block[pos..status_end];
-    if !starts_with_case_insensitive(status_line, b"http/") {
-        return Err(CurlError::InvalidResponse);
-    }
-    let status_code = parse_status_code(status_line).ok_or(CurlError::InvalidResponse)?;
-    pos = status_end + 2;
-
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-    let mut location: Option<Vec<u8>> = None;
-
-    while pos < header_block.len() {
-        let line_end = find_crlf(header_block, pos).ok_or(CurlError::InvalidResponse)?;
-        if line_end == pos {
-            break;
-        }
-        let line = &header_block[pos..line_end];
-        if let Some(colon) = line.iter().position(|b| *b == b':') {
-            let name = trim_ascii(&line[..colon]);
-            let value = trim_ascii(&line[colon + 1..]);
-
-            if starts_with_case_insensitive(name, b"content-length") {
-                if let Ok(value_str) = core::str::from_utf8(value)
-                    && let Ok(parsed) = value_str.parse::<usize>()
-                {
-                    content_length = Some(parsed);
-                }
-            } else if starts_with_case_insensitive(name, b"transfer-encoding") {
-                let mut lower = [0u8; 64];
-                let n = value.len().min(lower.len());
-                for i in 0..n {
-                    lower[i] = value[i].to_ascii_lowercase();
-                }
-                if n >= 7 {
-                    let mut i = 0usize;
-                    while i + 6 < n {
-                        if &lower[i..i + 7] == b"chunked" {
-                            chunked = true;
-                            break;
+        };
+        let mut glued = glued;
+        for f in flags {
+            let mut value = || {
+                glued
+                    .take()
+                    .or_else(|| it.next().cloned())
+                    .ok_or_else(|| Failure {
+                        code: exit::USAGE,
+                        msg: format!("option -{f} needs a value"),
+                    })
+            };
+            match f {
+                'v' => cfg.verbose = true,
+                's' => cfg.silent = true,
+                'S' => cfg.show_error = true,
+                'L' => cfg.follow = true,
+                'f' => cfg.fail_on_http_error = true,
+                'o' => cfg.output = Some(value()?).filter(|o| o != "-"),
+                'X' => cfg.method = Some(value()?),
+                'H' => cfg.headers.push(value()?),
+                'd' => {
+                    let more = value()?.into_bytes();
+                    cfg.data = Some(match cfg.data.take() {
+                        Some(mut data) => {
+                            data.push(b'&');
+                            data.extend(more);
+                            data
                         }
-                        i += 1;
-                    }
+                        None => more,
+                    });
                 }
-            } else if starts_with_case_insensitive(name, b"location") {
-                location = Some(value.to_vec());
-            }
-        }
-
-        pos = line_end + 2;
-    }
-
-    Ok(ParsedResponseHeaders {
-        status_code,
-        content_length,
-        chunked,
-        location,
-    })
-}
-
-fn is_redirect_status(status: u16) -> bool {
-    match status {
-        301 | 302 | 303 | 307 | 308 => true,
-        _ => false,
-    }
-}
-
-fn send_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), CurlError> {
-    stream.write_all(data).map_err(|_| CurlError::SendFailed)
-}
-
-fn verbose_emit_prefixed(prefix: u8, block: &[u8]) {
-    let mut err = io::stderr().lock();
-    let mut start = 0usize;
-    while start < block.len() {
-        let mut end = start;
-        while end + 1 < block.len() {
-            if block[end] == b'\r' && block[end + 1] == b'\n' {
-                break;
-            }
-            end += 1;
-        }
-
-        if end + 1 >= block.len() {
-            break;
-        }
-
-        let line = &block[start..end];
-        if line.is_empty() {
-            break;
-        }
-
-        let _ = err.write_all(&[prefix, b' ']);
-        let _ = err.write_all(line);
-        let _ = err.write_all(b"\n");
-
-        start = end + 2;
-    }
-    let _ = err.flush();
-}
-
-fn append_limited(dst: &mut Vec<u8>, src: &[u8]) -> Result<(), CurlError> {
-    if dst.len().saturating_add(src.len()) > MAX_RESPONSE_SIZE {
-        return Err(CurlError::ResponseTooLarge);
-    }
-    dst.extend_from_slice(src);
-    Ok(())
-}
-
-impl ChunkDecoder {
-    fn new() -> Self {
-        Self {
-            state: ChunkState::Size,
-            cursor: 0,
-            done: false,
-        }
-    }
-
-    fn decode_from(&mut self, raw: &[u8], decoded: &mut Vec<u8>) -> Result<(), CurlError> {
-        loop {
-            if self.done {
-                return Ok(());
-            }
-
-            match self.state {
-                ChunkState::Size => {
-                    let line_end = match find_crlf(raw, self.cursor) {
-                        Some(v) => v,
-                        _ => return Ok(()),
-                    };
-                    let mut size_field = &raw[self.cursor..line_end];
-                    if let Some(semi) = size_field.iter().position(|b| *b == b';') {
-                        size_field = &size_field[..semi];
-                    }
-                    size_field = trim_ascii(size_field);
-                    if size_field.is_empty() {
-                        return Err(CurlError::InvalidChunkedEncoding);
-                    }
-                    let size_str = core::str::from_utf8(size_field)
-                        .map_err(|_| CurlError::InvalidChunkedEncoding)?;
-                    let size = usize::from_str_radix(size_str, 16)
-                        .map_err(|_| CurlError::InvalidChunkedEncoding)?;
-                    self.cursor = line_end + 2;
-                    if size == 0 {
-                        self.state = ChunkState::Trailer;
-                    } else {
-                        self.state = ChunkState::Data(size);
-                    }
-                }
-                ChunkState::Data(size) => {
-                    if raw.len() < self.cursor.saturating_add(size).saturating_add(2) {
-                        return Ok(());
-                    }
-                    append_limited(decoded, &raw[self.cursor..self.cursor + size])?;
-                    self.cursor += size;
-                    if raw[self.cursor] != b'\r' || raw[self.cursor + 1] != b'\n' {
-                        return Err(CurlError::InvalidChunkedEncoding);
-                    }
-                    self.cursor += 2;
-                    self.state = ChunkState::Size;
-                }
-                ChunkState::Trailer => {
-                    if raw.len() < self.cursor + 2 {
-                        return Ok(());
-                    }
-                    if raw[self.cursor] == b'\r' && raw[self.cursor + 1] == b'\n' {
-                        self.cursor += 2;
-                        self.done = true;
-                        return Ok(());
-                    }
-
-                    let trailer_end = match find_header_terminator(&raw[self.cursor..]) {
-                        Some(v) => self.cursor + v,
-                        _ => return Ok(()),
-                    };
-                    self.cursor = trailer_end;
-                    self.done = true;
-                    return Ok(());
-                }
+                _ => return fail(exit::USAGE, format!("unknown option -{f}")),
             }
         }
     }
+    if cfg.method.as_deref() == Some("") {
+        return fail(exit::USAGE, "the request method is empty");
+    }
+    cfg.url = url.ok_or(Failure {
+        code: exit::USAGE,
+        msg: "no URL given".into(),
+    })?;
+    Ok(cfg)
 }
 
-const RECV_CAP: u32 = 4096;
+fn url_failure(e: UrlError, url: &str) -> Failure {
+    let (code, why) = match e {
+        UrlError::UnsupportedScheme(s) => (
+            exit::UNSUPPORTED_PROTOCOL,
+            format!("protocol \"{s}\" not supported"),
+        ),
+        UrlError::NoScheme => (exit::MALFORMED_URL, "no scheme".into()),
+        UrlError::Credentials => (
+            exit::MALFORMED_URL,
+            "credentials in a URL are not supported".into(),
+        ),
+        UrlError::Ipv6 => (
+            exit::MALFORMED_URL,
+            "IPv6 addresses are not supported".into(),
+        ),
+        UrlError::BadPort => (exit::MALFORMED_URL, "bad port".into()),
+        UrlError::BadHost => (exit::MALFORMED_URL, "bad host".into()),
+        UrlError::BadTarget => (
+            exit::MALFORMED_URL,
+            "whitespace or a control character in the path".into(),
+        ),
+    };
+    Failure {
+        code,
+        msg: format!("{why}: {url}"),
+    }
+}
 
-async fn receive_http_response_async(
-    sock_fd: i32,
+enum Conn<'a> {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<'a, TcpStream>>),
+}
+
+impl Read for Conn<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.read(buf),
+            Conn::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Conn<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.write(buf),
+            Conn::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Conn::Plain(s) => s.flush(),
+            Conn::Tls(s) => s.flush(),
+        }
+    }
+}
+
+fn io_failure(e: io::Error, code: i32, what: &str) -> Failure {
+    match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Failure {
+            code: exit::TIMEOUT,
+            msg: format!("{what} timed out after {} seconds", IO_TIMEOUT.as_secs()),
+        },
+        _ => Failure {
+            code,
+            msg: format!("{what} failed: {e}"),
+        },
+    }
+}
+
+fn connect<'a>(
+    url: &'a Url,
+    trust: Option<&'a TrustStore>,
     verbose: bool,
-) -> Result<(ParsedResponseHeaders, Vec<u8>), CurlError> {
-    let mut raw: Vec<u8> = Vec::new();
-    let mut decoded_body = Vec::new();
-    let mut headers: Option<ParsedResponseHeaders> = None;
-    let mut header_end = 0usize;
-    let mut body_kind = BodyKind::UntilClose;
-    let mut chunk_decoder = ChunkDecoder::new();
-    let mut read_buf = vec![0u8; RECV_CAP as usize];
-
-    loop {
-        // `OP_READ` keeps would-block in-flight, so only a stalled peer can
-        // leave a read unresolved; the timeout is the sole bound on it.
-        let br = match slopfut::time::timeout(
-            IO_TIMEOUT_MS as u64,
-            slopfut::read(sock_fd, core::mem::take(&mut read_buf), RECV_CAP),
-        )
-        .await
-        {
-            Ok(br) => br,
-            Err(_) => return Err(CurlError::Timeout),
-        };
-        read_buf = br.buf;
-        let read_result: io::Result<usize> = if br.res < 0 {
-            Err(io::Error::from(io::ErrorKind::Other))
-        } else {
-            Ok(br.res as usize)
-        };
-        let recv_buf = &read_buf;
-        match read_result {
-            Ok(0) => {
-                if headers.is_none() {
-                    return Err(CurlError::InvalidResponse);
-                }
-                match body_kind {
-                    BodyKind::UntilClose => {
-                        let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                        return Ok((parsed, decoded_body));
-                    }
-                    BodyKind::ContentLength(expected) => {
-                        if decoded_body.len() == expected {
-                            let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                            return Ok((parsed, decoded_body));
-                        }
-                        return Err(CurlError::InvalidResponse);
-                    }
-                    BodyKind::Chunked => {
-                        if chunk_decoder.done {
-                            let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                            return Ok((parsed, decoded_body));
-                        }
-                        return Err(CurlError::InvalidChunkedEncoding);
-                    }
-                }
-            }
-            Ok(n) => {
-                append_limited(&mut raw, &recv_buf[..n])?;
-
-                if headers.is_none() {
-                    if let Some(end) = find_header_terminator(&raw) {
-                        header_end = end;
-                        let parsed = parse_response_headers(&raw[..header_end])?;
-                        if verbose {
-                            verbose_emit_prefixed(b'<', &raw[..header_end]);
-                        }
-
-                        body_kind = if parsed.chunked {
-                            BodyKind::Chunked
-                        } else if let Some(len) = parsed.content_length {
-                            BodyKind::ContentLength(len)
-                        } else {
-                            BodyKind::UntilClose
-                        };
-
-                        headers = Some(parsed);
-
-                        let body_part = raw.get(header_end..).ok_or(CurlError::InvalidResponse)?;
-                        match body_kind {
-                            BodyKind::Chunked => {
-                                chunk_decoder.decode_from(body_part, &mut decoded_body)?;
-                                if chunk_decoder.done {
-                                    let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                                    return Ok((parsed, decoded_body));
-                                }
-                            }
-                            BodyKind::ContentLength(expected) => {
-                                let take = body_part.len().min(expected);
-                                append_limited(&mut decoded_body, &body_part[..take])?;
-                                if decoded_body.len() == expected {
-                                    let parsed = headers.ok_or(CurlError::InvalidResponse)?;
-                                    return Ok((parsed, decoded_body));
-                                }
-                            }
-                            BodyKind::UntilClose => {
-                                append_limited(&mut decoded_body, body_part)?;
-                            }
-                        }
-                    }
-                } else {
-                    let parsed = headers.as_ref().ok_or(CurlError::InvalidResponse)?;
-                    let body_part = raw.get(header_end..).ok_or(CurlError::InvalidResponse)?;
-                    match body_kind {
-                        BodyKind::Chunked => {
-                            chunk_decoder.decode_from(body_part, &mut decoded_body)?;
-                            if chunk_decoder.done {
-                                return Ok((
-                                    ParsedResponseHeaders {
-                                        status_code: parsed.status_code,
-                                        content_length: parsed.content_length,
-                                        chunked: parsed.chunked,
-                                        location: parsed.location.clone(),
-                                    },
-                                    decoded_body,
-                                ));
-                            }
-                        }
-                        BodyKind::ContentLength(expected) => {
-                            if decoded_body.len() < expected {
-                                let needed = expected - decoded_body.len();
-                                let available = body_part.len().saturating_sub(decoded_body.len());
-                                if available > 0 {
-                                    let start = body_part.len() - available;
-                                    let take = needed.min(available);
-                                    append_limited(
-                                        &mut decoded_body,
-                                        &body_part[start..start + take],
-                                    )?;
-                                }
-                            }
-                            if decoded_body.len() == expected {
-                                return Ok((
-                                    ParsedResponseHeaders {
-                                        status_code: parsed.status_code,
-                                        content_length: parsed.content_length,
-                                        chunked: parsed.chunked,
-                                        location: parsed.location.clone(),
-                                    },
-                                    decoded_body,
-                                ));
-                            }
-                        }
-                        BodyKind::UntilClose => {
-                            let already = decoded_body.len();
-                            let total = body_part.len();
-                            if total > already {
-                                append_limited(&mut decoded_body, &body_part[already..])?;
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => return Err(CurlError::RecvFailed),
-        }
+) -> Result<Conn<'a>, Failure> {
+    let ip = crate::net::resolve_host(&url.host).map_err(|e| Failure {
+        code: exit::RESOLVE,
+        msg: match e {
+            ResolveError::NameNotFound => format!("could not resolve host: {}", url.host),
+            other => format!("could not resolve host {}: {other}", url.host),
+        },
+    })?;
+    let addr = SocketAddrV4::new(Ipv4Addr::from(ip.octets()), url.port);
+    let tcp = TcpStream::connect(addr).map_err(|e| Failure {
+        code: exit::CONNECT,
+        msg: format!("failed to connect to {} port {}: {e}", url.host, url.port),
+    })?;
+    let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
+    if verbose {
+        eprintln!("* Connected to {} ({addr})", url.host);
     }
-}
-
-fn set_path(target: &mut ParsedUrl, path: &[u8]) -> Result<(), CurlError> {
-    if path.is_empty() || path.len() > target.path.len() {
-        return Err(CurlError::InvalidPath);
+    if url.scheme == Scheme::Http {
+        return Ok(Conn::Plain(tcp));
     }
-    target.path = [0; 512];
-    target.path[..path.len()].copy_from_slice(path);
-    target.path_len = path.len();
-    Ok(())
-}
-
-fn resolve_redirect(base: &ParsedUrl, location: &[u8]) -> Result<ParsedUrl, CurlError> {
-    let location = trim_ascii(location);
-    if location.starts_with(b"http://") {
-        let mut parsed = parse_url(location)?;
-        resolve_host(&mut parsed)?;
-        return Ok(parsed);
-    }
-
-    let mut next = *base;
-    if location.starts_with(b"/") {
-        set_path(&mut next, location)?;
-        return Ok(next);
-    }
-
-    let base_path = &base.path[..base.path_len];
-    let mut split = base_path.len();
-    while split > 0 {
-        if base_path[split - 1] == b'/' {
-            break;
-        }
-        split -= 1;
-    }
-
-    let mut merged = Vec::with_capacity(base_path.len() + location.len() + 1);
-    if split == 0 {
-        merged.extend_from_slice(b"/");
-    } else {
-        merged.extend_from_slice(&base_path[..split]);
-    }
-    merged.extend_from_slice(location);
-    set_path(&mut next, &merged)?;
-    Ok(next)
-}
-
-fn execute_request(
-    config: &CurlConfig,
-    parsed: &ParsedUrl,
-) -> Result<(ParsedResponseHeaders, Vec<u8>), CurlError> {
-    let addr = SocketAddrV4::new(Ipv4Addr::from(parsed.ip), parsed.port);
-
-    let mut stream = TcpStream::connect(addr).map_err(|_| CurlError::ConnectFailed)?;
-
-    let req = build_request(config, parsed)?;
-    if config.verbose {
-        if let Some(end) = find_header_terminator(&req) {
-            verbose_emit_prefixed(b'>', &req[..end]);
-        }
-    }
-
-    if send_all(&mut stream, &req).is_err() {
-        let _ = stream.shutdown(Shutdown::Both);
-        return Err(CurlError::SendFailed);
-    }
-
-    // Only the raw fd is handed to `OP_READ`, so the stream must outlive
-    // `block_on`.
-    let sock_fd = stream.as_raw_fd();
-    let result = match Ring::setup(8) {
-        Ok(ring) => slopfut::block_on(ring, receive_http_response_async(sock_fd, config.verbose)),
-        Err(_) => Err(CurlError::RecvFailed),
+    let cfg = ClientConfig {
+        server_name: &url.host,
+        trust: trust.expect("trust store for https"),
+        now: tls::unix_now(),
+        alpn: &[b"http/1.1"],
+        suites: &CipherSuite::ALL,
     };
-    let _ = stream.shutdown(Shutdown::Both);
-    result
+    let stream = TlsStream::connect(tcp, cfg).map_err(|e| match e {
+        ConnectError::Tls(tls::Error::Certificate(_)) => Failure {
+            code: exit::PEER_UNVERIFIED,
+            msg: format!("TLS: {e}"),
+        },
+        ConnectError::Io(io) => io_failure(io, exit::TLS_CONNECT, "TLS handshake"),
+        ConnectError::Tls(_) => Failure {
+            code: exit::TLS_CONNECT,
+            msg: format!("TLS: {e}"),
+        },
+    })?;
+    if verbose {
+        let suite = stream.suite().map_or("?", CipherSuite::name);
+        eprintln!("* TLS 1.3 connection using {suite}");
+    }
+    Ok(Conn::Tls(Box::new(stream)))
 }
 
-fn run_curl(config: &CurlConfig) -> Result<(), CurlError> {
-    let mut current = parse_url(config.url.as_bytes())?;
-    resolve_host(&mut current)?;
-
-    let mut redirects = 0usize;
-
-    loop {
-        let (headers, body) = execute_request(config, &current)?;
-        if config.follow_redirects && is_redirect_status(headers.status_code) {
-            let location = headers.location.ok_or(CurlError::RedirectWithoutLocation)?;
-            redirects += 1;
-            if redirects > MAX_REDIRECTS {
-                return Err(CurlError::RedirectLimit);
-            }
-            current = resolve_redirect(&current, &location)?;
-            if current.ip == [0; 4] {
-                resolve_host(&mut current)?;
-            }
-            continue;
+/// curl's default headers, each replaced by a user header of that name;
+/// `Name:` removes one, `Name;` sends it empty, and a header with neither is dropped.
+fn build_request(
+    cfg: &Config,
+    url: &Url,
+    method: &str,
+    body: Option<&[u8]>,
+    headers: &[String],
+) -> Vec<u8> {
+    let mut defaults = vec![
+        ("Host", url.host_header()),
+        ("User-Agent", "SlopOS-curl/2.0".to_string()),
+        ("Accept", "*/*".to_string()),
+        ("Connection", "close".to_string()),
+    ];
+    if let Some(body) = body {
+        defaults.push(("Content-Length", body.len().to_string()));
+        defaults.push((
+            "Content-Type",
+            "application/x-www-form-urlencoded".to_string(),
+        ));
+    }
+    let mut head = format!("{method} {} HTTP/1.1\r\n", url.target);
+    for (name, value) in defaults {
+        if !headers.iter().any(|h| header_named(h, name)) {
+            head += &format!("{name}: {value}\r\n");
         }
+    }
+    for h in headers {
+        match (h.split_once(':'), h.strip_suffix(';')) {
+            (Some((_, value)), _) if value.trim().is_empty() => {}
+            (Some(_), _) => head += &format!("{h}\r\n"),
+            (None, Some(name)) => head += &format!("{name}:\r\n"),
+            (None, None) => {}
+        }
+    }
+    head += "\r\n";
+    if cfg.verbose {
+        for line in head.lines().filter(|l| !l.is_empty()) {
+            eprintln!("> {line}");
+        }
+    }
+    let mut req = head.into_bytes();
+    req.extend_from_slice(body.unwrap_or(&[]));
+    req
+}
 
+fn header_named(line: &str, name: &str) -> bool {
+    line.split_once(':')
+        .map(|(n, _)| n)
+        .or_else(|| line.strip_suffix(';'))
+        .is_some_and(|n| n.trim().eq_ignore_ascii_case(name))
+}
+
+/// `raw` is what has already arrived; returns the head and the bytes after it.
+fn read_head(
+    conn: &mut Conn<'_>,
+    mut raw: Vec<u8>,
+    verbose: bool,
+) -> Result<(Head, Vec<u8>), Failure> {
+    let mut buf = [0u8; 4096];
+    let end = loop {
+        if let Some(end) = http::head_end(&raw) {
+            break end;
+        }
+        if raw.len() > MAX_HEAD_BYTES {
+            return fail(exit::RECV, "the response head is too large");
+        }
+        let n = conn
+            .read(&mut buf)
+            .map_err(|e| io_failure(e, exit::RECV, "receiving"))?;
+        if n == 0 {
+            return if raw.is_empty() {
+                fail(exit::EMPTY_REPLY, "empty reply from server")
+            } else {
+                fail(exit::RECV, "the connection closed inside the response head")
+            };
+        }
+        raw.extend_from_slice(&buf[..n]);
+    };
+    let rest = raw.split_off(end);
+    if verbose {
+        for line in String::from_utf8_lossy(&raw)
+            .split("\r\n")
+            .filter(|l| !l.is_empty())
         {
-            let mut out = io::stdout().lock();
-            let _ = out.write_all(&body);
-            let _ = out.flush();
+            eprintln!("< {line}");
+        }
+    }
+    let head = Head::parse(&raw).map_err(|e| Failure {
+        code: match e {
+            HeadError::NotHttp => exit::UNSUPPORTED_PROTOCOL,
+            HeadError::BadContentLength => exit::WEIRD_SERVER_REPLY,
+        },
+        msg: match e {
+            HeadError::NotHttp => "the reply is not HTTP".into(),
+            HeadError::BadContentLength => "the reply's Content-Length is malformed".into(),
+        },
+    })?;
+    Ok((head, rest))
+}
+
+fn stream_body(
+    conn: &mut Conn<'_>,
+    head: &Head,
+    early: Vec<u8>,
+    sink: &mut dyn FnMut(&[u8]) -> Result<(), Failure>,
+) -> Result<(), Failure> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let recv = |conn: &mut Conn<'_>, buf: &mut [u8]| {
+        conn.read(buf)
+            .map_err(|e| io_failure(e, exit::RECV, "receiving"))
+    };
+    if head.chunked {
+        let malformed = || Failure {
+            code: exit::RECV,
+            msg: "malformed chunked encoding".into(),
+        };
+        let mut chunked = Chunked::new();
+        let mut input = &early[..];
+        while let Some(data) = chunked.next(&mut input).map_err(|_| malformed())? {
+            sink(data)?;
+        }
+        while !chunked.done() {
+            let n = recv(conn, &mut buf)?;
+            if n == 0 {
+                return fail(
+                    exit::PARTIAL_FILE,
+                    "the connection closed inside a chunked body",
+                );
+            }
+            let mut input = &buf[..n];
+            while let Some(data) = chunked.next(&mut input).map_err(|_| malformed())? {
+                sink(data)?;
+            }
         }
         return Ok(());
     }
+    if let Some(len) = head.content_length {
+        let mut left = len;
+        let first = (early.len() as u64).min(left) as usize;
+        sink(&early[..first])?;
+        left -= first as u64;
+        while left > 0 {
+            let n = recv(conn, &mut buf)?;
+            if n == 0 {
+                return fail(
+                    exit::PARTIAL_FILE,
+                    format!("the connection closed with {left} bytes of the body unsent"),
+                );
+            }
+            let take = (n as u64).min(left) as usize;
+            sink(&buf[..take])?;
+            left -= take as u64;
+        }
+        return Ok(());
+    }
+    sink(&early)?;
+    loop {
+        let n = recv(conn, &mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        sink(&buf[..n])?;
+    }
+}
+
+fn open_output(cfg: &Config) -> Result<Box<dyn Write>, Failure> {
+    match &cfg.output {
+        Some(path) => {
+            let file = File::create(path).map_err(|e| Failure {
+                code: exit::WRITE,
+                msg: format!("cannot create {path}: {e}"),
+            })?;
+            Ok(Box::new(BufWriter::with_capacity(64 * 1024, file)))
+        }
+        None => Ok(Box::new(BufWriter::with_capacity(64 * 1024, io::stdout()))),
+    }
+}
+
+fn load_trust(cfg: &Config) -> Result<TrustStore, Failure> {
+    let path = cfg.cacert.as_deref().unwrap_or(tls::SYSTEM_BUNDLE);
+    tls::load_trust(path).map_err(|e| Failure {
+        code: exit::CA_FILE,
+        msg: format!("cannot load CA certificates from {path}: {e}"),
+    })
+}
+
+fn run(cfg: &Config) -> Result<(), Failure> {
+    let mut url = Url::parse(&cfg.url).map_err(|e| url_failure(e, &cfg.url))?;
+    let mut method = cfg
+        .method
+        .clone()
+        .unwrap_or_else(|| if cfg.data.is_some() { "POST" } else { "GET" }.into());
+    let mut body = cfg.data.as_deref();
+    let mut headers = cfg.headers.clone();
+    let mut trust = None;
+    let first_host = url.host.clone();
+
+    for _ in 0..=MAX_REDIRECTS {
+        if url.scheme == Scheme::Https && trust.is_none() {
+            trust = Some(load_trust(cfg)?);
+        }
+        let mut conn = connect(&url, trust.as_ref(), cfg.verbose)?;
+        let req = build_request(cfg, &url, &method, body, &headers);
+        conn.write_all(&req)
+            .and_then(|()| conn.flush())
+            .map_err(|e| io_failure(e, exit::SEND, "sending the request"))?;
+        let mut carried = Vec::new();
+        let (head, early) = loop {
+            let (head, rest) = read_head(&mut conn, carried, cfg.verbose)?;
+            if !head.is_interim() {
+                break (head, rest);
+            }
+            carried = rest;
+        };
+
+        if cfg.follow
+            && head.is_redirect()
+            && let Some(location) = &head.location
+        {
+            let next = url.join(location).map_err(|e| url_failure(e, location))?;
+            if cfg.verbose {
+                eprintln!("* Following redirect to {location}");
+            }
+            if matches!(head.status, 301..=303) && method == "POST" {
+                method = "GET".into();
+                body = None;
+            }
+            if !next.same_origin(&url) {
+                headers.retain(|h| !header_named(h, "authorization") && !header_named(h, "cookie"));
+            }
+            if next.host != first_host {
+                headers.retain(|h| !header_named(h, "host"));
+            }
+            url = next;
+            continue;
+        }
+        if cfg.fail_on_http_error && head.status >= 400 {
+            return fail(
+                exit::HTTP_ERROR,
+                format!("the requested URL returned error: {}", head.status),
+            );
+        }
+        let mut out = open_output(cfg)?;
+        if !head.has_body(&method) {
+            return out.flush().map_err(|e| Failure {
+                code: exit::WRITE,
+                msg: format!("writing the body failed: {e}"),
+            });
+        }
+        let mut sink = |bytes: &[u8]| {
+            out.write_all(bytes).map_err(|e| Failure {
+                code: exit::WRITE,
+                msg: format!("writing the body failed: {e}"),
+            })
+        };
+        stream_body(&mut conn, &head, early, &mut sink)?;
+        if let Conn::Tls(tls) = &mut conn {
+            let _ = tls.close();
+        }
+        return out.flush().map_err(|e| Failure {
+            code: exit::WRITE,
+            msg: format!("writing the body failed: {e}"),
+        });
+    }
+    fail(
+        exit::TOO_MANY_REDIRECTS,
+        format!("more than {MAX_REDIRECTS} redirects"),
+    )
+}
+
+fn exit_with(f: Failure, report: bool) -> ! {
+    if report {
+        eprintln!("curl: ({}) {}", f.code, f.msg);
+        if f.code == exit::USAGE {
+            eprintln!("{USAGE}");
+        }
+    }
+    std::process::exit(f.code);
 }
 
 pub fn curl_main(args: Vec<String>) -> ! {
     process::ignore_signal(slopos_abi::signal::SIGPIPE);
-
-    let config = match parse_args(args) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            print_error(err);
-            print_usage();
-            std::process::exit(1);
-        }
-    };
-
-    if config.verbose {
-        eprintln!("* SlopOS curl HTTP/1.1");
-    }
-
-    match run_curl(&config) {
-        Ok(_) => std::process::exit(0),
-        Err(err) => {
-            print_error(err);
-            std::process::exit(1);
-        }
+    let cfg = parse_args(&args).unwrap_or_else(|f| exit_with(f, true));
+    match run(&cfg) {
+        Ok(()) => std::process::exit(0),
+        Err(f) => exit_with(f, !cfg.silent || cfg.show_error),
     }
 }

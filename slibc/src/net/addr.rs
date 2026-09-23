@@ -71,11 +71,16 @@ pub extern "C" fn ntohl(x: u32) -> u32 {
 }
 
 /// Parse dotted-decimal IPv4 into a network-byte-order `u32`, or
-/// `INADDR_NONE` if the string does not parse.
+/// `INADDR_NONE` if the string does not parse, which 255.255.255.255 also is.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
+    parse_ipv4(cp).unwrap_or(INADDR_NONE)
+}
+
+/// Dotted-decimal IPv4 as a network-byte-order `u32`.
+pub(crate) unsafe fn parse_ipv4(cp: *const u8) -> Option<u32> {
     if cp.is_null() {
-        return INADDR_NONE;
+        return None;
     }
 
     let mut octets = [0u8; 4];
@@ -87,8 +92,8 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
     loop {
         let ch = *ptr;
         if ch == b'.' || ch == 0 {
-            if !has_digit || cur_val > 255 || octet_idx >= 4 {
-                return INADDR_NONE;
+            if !has_digit || octet_idx >= 4 {
+                return None;
             }
             octets[octet_idx] = cur_val as u8;
             octet_idx += 1;
@@ -99,19 +104,22 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
             }
         } else if ch.is_ascii_digit() {
             cur_val = cur_val * 10 + (ch - b'0') as u32;
+            if cur_val > 255 {
+                return None;
+            }
             has_digit = true;
         } else {
-            return INADDR_NONE;
+            return None;
         }
         ptr = ptr.add(1);
     }
 
     if octet_idx != 4 {
-        return INADDR_NONE;
+        return None;
     }
 
     // The octets are already in network order, so no swap.
-    u32::from_ne_bytes(octets)
+    Some(u32::from_ne_bytes(octets))
 }
 
 static mut INET_NTOA_BUF: [u8; 16] = [0u8; 16];

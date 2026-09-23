@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use crate::syscall::net;
 use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
 
+use super::ring_io::Ended;
 use super::{NcConfig, verbose_addr, verbose_msg};
 
 pub(super) fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
@@ -101,7 +102,7 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
 fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
     super::ring_io::Session::new(config, conn, false)
         .run()
-        .unwrap_or(0)
+        .code()
 }
 
 pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
@@ -132,9 +133,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
         return 1;
     }
 
-    if config.verbose {
-        println!("nc: listening on {listen_addr} (tcp)");
-    }
+    super::verbose_msg(config, &format!("listening on {listen_addr} (tcp)"));
 
     let accept_start = Instant::now();
 
@@ -169,23 +168,15 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
             continue;
         }
 
-        let exit_code = run_listen_session(config, &client);
-
-        if let Some(code) = exit_code {
-            return code;
-        }
-
-        if !config.keep_listen {
-            verbose_msg(config, "exiting (single connection mode)");
-            return 0;
+        match super::ring_io::Session::new(config, &client, false).run() {
+            Ended::Quit(code) => return code,
+            Ended::Conn(code) if !config.keep_listen => {
+                verbose_msg(config, "exiting (single connection mode)");
+                return code;
+            }
+            Ended::Conn(_) => {}
         }
 
         verbose_msg(config, "waiting for next connection");
     }
-}
-
-/// Returns `Some(code)` to exit immediately, `None` to keep accepting.
-/// The `accept` that produced `client` stayed a regular syscall (SLOPRING § 12).
-fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
-    super::ring_io::Session::new(config, client, true).run()
 }
