@@ -20,14 +20,12 @@ env:
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
 jobs:
+  # Only what reads the tests build or its boot capture: this job is the wall
+  # clock, and anything else runs beside it.
   ci:
     name: Build, Format & Test
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # 70 rather than 35 since the clang driver joined: that gate builds
-    # `clangDriver`, `clangBasic` and the LLVM libraries under them for the
-    # host — about 42 CPU-minutes, which is a quarter of an hour on four
-    # vCPUs — and the dev-disk check adds a 2 GiB image and one more boot.
-    timeout-minutes: 70
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -104,82 +102,37 @@ jobs:
           cache-directories: |
             third_party/limine
             third_party/ovmf
-            third_party/slopos-cxx
-            third_party/llvm-project-*.src.tar.xz
-            third_party/rustc-src-*.tar.xz
           cache-on-failure: true
 
-      - name: Host-side unit tests (fast fail — same tests KernMiri interprets, minus UB detection)
-        run: just test-host
+      # The key only finds a tree; `make_slopos_cxx.sh`'s stamp still decides
+      # whether it is rebuilt.
+      - name: Key the C++ runtime cache
+        id: cxx
+        run: echo "compiler=$(clang++-18 --version | head -n 1 | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
-      - name: Build kernel
-        run: just build
+      - name: Cache the C++ runtime
+        uses: actions/cache@v6
+        with:
+          path: third_party/slopos-cxx
+          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/PIN', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
+          restore-keys: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-
 
-      # Delegates to the justfile so the gate list has one home. This
-      # step used to inline the list and had already drifted — it was
-      # missing check_wait_predicate_purity.sh, which `check-framekernel`
-      # has run for some time. `check-framekernel-gates` is the scripts
-      # only; the fmt / KernMiri / Verus steps that `check-framekernel`
-      # also runs are covered by the `Check formatting` step above and by
-      # the separate `miri` and `verify` jobs below.
-      - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
-        run: just check-framekernel-gates
-
-      # The gates step above skips the pins because nothing has vendored yet;
-      # this step vendors, then builds from an empty CARGO_HOME so the
-      # runner's registry cache cannot answer for a missing crate.
-      - name: Offline build from vendored sources
-        run: just check-offline-build
+      - name: Restore the Rust compiler cache
+        uses: ./.github/actions/sccache-restore
+        with:
+          job: ci
 
       # `--raw` rather than `just test`: the progress-bar renderer only surfaces
       # klog on failure, so a green run's log carries no `LOCKDEP[...]` lines for
       # the ratchets below to read. The verdict is unchanged — `ClassifyRun` sets
       # the exit code independently of which renderer ran.
       - name: Run tests
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
           set -o pipefail
           just _build-run-tests
           builddir/run_tests --raw --no-color 2>&1 | tee ci-test.log
-
-      # Again, and this time with the cross-built runtime staged: the tests
-      # build above is the only one that refreshes `third_party/slopos-cxx`,
-      # so the gates step grades the pin alone and the stamp and symbol
-      # halves are graded here.
-      - name: C++ runtime against the C library it links
-        run: scripts/check_cxx_pin.sh
-
-      # Here rather than in a job of its own: the gate needs a staged C++
-      # runtime and a `builddir/libbuiltins.a`, which is the tests userland
-      # the step above has already built, and a job that rebuilt those to ask
-      # one more question would cost more than the 1.5 GB extraction does.
-      # The 132 MB tarball is cached; the extracted tree deliberately is not,
-      # because it is what `--require` grades.
-      # `--self-test` here rather than in the gates step above: that step runs
-      # before the tree is materialised, where the self-test's rejection cases
-      # can only report themselves skipped — a gate CI has never seen reject.
-      - name: LLVM port against slibc and libc++
-        run: |
-          scripts/make_slopos_llvm_src.sh
-          scripts/check_llvm_port.sh --self-test
-          scripts/check_llvm_port.sh --require
-
-      # The clang half of the port, which the step above deliberately does
-      # not reach: a driver only exists once clang itself is built. Same
-      # tree, this time a host build.
-      - name: Clang driver link line
-        run: |
-          scripts/check_clang_driver.sh --self-test
-          scripts/check_clang_driver.sh --require
-
-      # The cross-build configuration, which needs the staged target sysroot
-      # the tests userland build above produced and a source tree this step
-      # materialises for itself. Bootstrap's own dry run plus the compiler
-      # wrapper; the build it plans is hours and is not run here.
-      - name: Cross-build plan and compiler wrapper
-        run: |
-          scripts/make_rustc_src.sh
-          scripts/check_bootstrap_config.sh --self-test
-          scripts/check_bootstrap_config.sh --require
 
       # Both boot-based ratchets parse the capture above rather than booting
       # again: three QEMU boots for one question each is two boots wasted, and a
@@ -227,6 +180,12 @@ jobs:
       - name: Dev-disk check
         run: just test-devdisk
 
+      - name: Save the Rust compiler cache
+        if: always()
+        uses: ./.github/actions/sccache-save
+        with:
+          job: ci
+
       - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -234,15 +193,10 @@ jobs:
           name: ci-test-log
           path: ci-test.log
 
-  # The `ci` job gates the opt-level-0 dev kernel. Release codegen inlines
-  # away roughly seven eighths of its functions, so the two images fail in
-  # opposite directions: dev verifies ~31k frames against ~3.8k here, and
-  # release is the only place an inlining decision that fuses small frames
-  # into one oversized frame can show up.
-  release-gates:
-    name: Release kernel ELF gates
+  gates:
+    name: Host tests and framekernel gates
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -254,21 +208,54 @@ jobs:
       - name: Setup Rust toolchain
         run: scripts/ensure_toolchain.sh
 
+      # Not ~/.cargo/bin: a cached wild would be on PATH for the gates, which
+      # grade the shipping pair only.
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> builddir/target"
-          prefix-key: "v0-release"
+          cache-bin: false
           cache-on-failure: true
 
-      # The stack and soft-float gates run from build_kernel.sh itself, on
-      # the ELF it just produced.
+      - name: Restore the Rust compiler cache
+        uses: ./.github/actions/sccache-restore
+        with:
+          job: gates
+
+      - name: Host-side unit tests (fast fail — same tests KernMiri interprets, minus UB detection)
+        run: just test-host
+
+      - name: Build the dev kernel
+        env:
+          RUSTC_WRAPPER: sccache
+        run: just build-kernel-only
+
+      # Delegates to the justfile so the gate list has one home. This
+      # step used to inline the list and had already drifted — it was
+      # missing check_wait_predicate_purity.sh, which `check-framekernel`
+      # has run for some time. `check-framekernel-gates` is the scripts
+      # only; the fmt / KernMiri / Verus steps that `check-framekernel`
+      # also runs are covered by the `Check formatting` step of the boot lane
+      # and by the `ostd-verify` job below.
+      - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
+        run: just check-framekernel-gates
+
+      # The gates step above skips the pins because nothing has vendored yet;
+      # this step vendors, then builds from an empty CARGO_HOME so the
+      # runner's registry cache cannot answer for a missing crate.
+      - name: Offline build from vendored sources
+        run: just check-offline-build
+
+      # Release inlines away roughly seven eighths of the dev kernel's
+      # functions, so it is the only place small frames fused into one
+      # oversized frame can show up. build_kernel.sh runs the stack and
+      # soft-float gates on the ELF it produces; every self-test here ran with
+      # the gates above.
       - name: Build and gate the release kernel
+        if: ${{ !cancelled() }}
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
-          scripts/check_stack_sizes.sh --self-test
-          scripts/check_kernel_softfloat.sh --self-test
-          scripts/check_registry_sections.sh --self-test
-          scripts/check_authority_reachability.sh --self-test
           KERNEL_RELEASE=1 just build-kernel-only
           scripts/check_registry_sections.sh builddir/kernel-release.elf
           # The variant that ships. Its allowlist is shorter than dev's only
@@ -277,101 +264,52 @@ jobs:
           # reaching power by a path the dev build does not have.
           scripts/check_authority_reachability.sh --variant release builddir/kernel-release.elf
 
-  # The `ci` job grades the shipping pair through `check-framekernel-gates`,
-  # where both candidates report `skipped`. This job installs them and grades
-  # the candidates only — re-asking whether a Rust-hosted toolchain can build
-  # this kernel yet (plans/self-hosting.md, Phase 1). wild is pinned so the
-  # answer moves when someone bumps it, not underneath a run.
-  toolchain-coverage:
-    name: Codegen backend + linker coverage
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Setup Rust toolchain
-        run: scripts/ensure_toolchain.sh
-
-      # The probe target directories under builddir/gates/ are deliberately not
-      # cached: a stale one would be a cached answer to the question this job
-      # exists to re-ask.
+      # After the gates, so they grade the shipping pair with neither candidate
+      # on PATH. The probe directories under builddir/gates/ are not cached: a
+      # stale one would be a cached answer to the question the next step asks.
       - name: Cache the pinned wild binary
+        if: ${{ !cancelled() }}
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/wild
           key: wild-linker-0.10.0-${{ runner.os }}
 
-      # `-preview` components go missing from individual nightlies, and a day
-      # cg_clif did not build upstream must not be a red job with no
-      # SlopOS-side remedy. The pinned wild install fails loudly by contrast.
-      - name: Install the candidate backend and linker
+      # The gates above grade the shipping pair, where both candidates report
+      # `skipped`. This installs them and grades the candidates only —
+      # re-asking whether a Rust-hosted toolchain can build this kernel yet
+      # (plans/self-hosting.md, Phase 1). wild is pinned so the answer moves
+      # when someone bumps it, not underneath a run. `-preview` components go
+      # missing from individual nightlies, and a day cg_clif did not build
+      # upstream must not be a red run with no SlopOS-side remedy; the pinned
+      # wild install fails loudly by contrast, and `--require` on it because a
+      # skip would mean CI stopped asking.
+      - name: Codegen backend and linker coverage
+        if: ${{ !cancelled() }}
         run: |
           channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
           rustup component add rustc-codegen-cranelift-preview --toolchain "$channel" \
             || echo "::warning::cranelift is not published for $channel — the gate will skip it"
           command -v wild >/dev/null || cargo install wild-linker --locked --version 0.10.0
-
-      # `--require` on wild only: it is installed unconditionally here, so a
-      # skip would mean the job stopped asking.
-      - name: Codegen backend and linker coverage
-        run: |
-          scripts/check_codegen_backend.sh --self-test
-          scripts/check_linker_script.sh --self-test
           scripts/check_codegen_backend.sh --backend cranelift
           scripts/check_linker_script.sh --linker wild --require
 
-  # The `ci` job's gates step runs `check_rustc_target.sh` and
-  # `check_cargo_fork.sh` where both report `skipped`; it materialises the
-  # source tree later, for the cross-build configuration, because that gate
-  # needs the staged target sysroot only that job has. Both forks live in
-  # that one tree, so this job is where they are asked for real.
-  rustc-target:
-    name: Built-in x86_64-unknown-slopos target and the cargo fork
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 25
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      # The pinned channel and nothing else: everything this job runs is
-      # `cargo +<channel>`, so materialising the `slopos` sysroot would add a
-      # crates.io fetch and a second fork's failure modes to the one job whose
-      # red means the built-in target spec drifted.
-      - name: Setup Rust toolchain
-        run: rustup toolchain install "$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
-
-      # The tarball only: the unpacked tree and the probe's target directory
-      # are what the gate is grading, and a cached one would be a cached
-      # answer.
-      - name: Cache the pinned rustc source tarball
-        uses: actions/cache@v6
+      - name: Save the Rust compiler cache
+        if: always()
+        uses: ./.github/actions/sccache-save
         with:
-          path: third_party/rustc-src-*.tar.xz
-          key: rustc-src-${{ hashFiles('rust-toolchain.toml') }}
+          job: gates
 
-      - name: Materialise the compiler fork
-        run: scripts/make_rustc_src.sh
-
-      - name: Built-in target against the JSON spec
-        run: |
-          scripts/check_rustc_target.sh --self-test
-          scripts/check_rustc_target.sh --require
-
-      # The other fork in the same tree. `--require` because this job is the
-      # one that has it; the compile half is ~30 s warm and pulls cargo's own
-      # dependencies, which is why it is not in the `ci` job.
-      - name: Cargo fork against its `network` cut
-        run: |
-          scripts/check_cargo_fork.sh --self-test
-          scripts/check_cargo_fork.sh --require
-
-  miri:
-    name: KernMiri (OSTD UB detection)
+  # Builds the tests userland itself rather than waiting on the boot lane's:
+  # that build costs less than the boot lane queueing these checks.
+  toolchain:
+    name: Toolchain port
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
+    # A cold compiler cache puts ~42 CPU-minutes of clang back in this job.
+    timeout-minutes: 40
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 1G
 
     steps:
       - name: Checkout repository
@@ -380,10 +318,167 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v4
 
-      # Not `just setup`: this job builds one host-target crate and interprets
+      - name: Setup Rust toolchain
+        run: scripts/ensure_toolchain.sh
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 lld-18 llvm-18 cmake ninja-build ccache
+          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 ccache; do
+            command -v "$tool" >/dev/null || { echo "::error::$tool not installed"; exit 1; }
+          done
+          {
+            echo "CLANG=clang-18"
+            echo "CLANGXX=clang++-18"
+            echo "LD_LLD=ld.lld-18"
+            echo "LLVM_AR=llvm-ar-18"
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_COMPILERCHECK=string:$(clang-18 --version | head -n 1)"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> builddir/target"
+          cache-on-failure: true
+
+      - name: Key the C++ runtime cache
+        id: cxx
+        run: echo "compiler=$(clang++-18 --version | head -n 1 | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the C++ runtime
+        uses: actions/cache@v6
+        with:
+          path: third_party/slopos-cxx
+          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/PIN', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
+          restore-keys: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-
+
+      # Tarballs only: the unpacked trees and the probes' build directories are
+      # what the gates grade, and a cached one would be a cached answer.
+      - name: Cache the pinned llvm-project tarball
+        uses: actions/cache@v6
+        with:
+          path: third_party/llvm-project-*.src.tar.xz
+          key: llvm-project-src-${{ hashFiles('toolchain/cxx/PIN') }}
+
+      - name: Cache the pinned rustc source tarball
+        uses: actions/cache@v6
+        with:
+          path: third_party/rustc-src-*.tar.xz
+          key: rustc-src-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-toolchain-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-toolchain-${{ runner.os }}-
+
+      - name: Zero the compiler cache statistics
+        run: ccache --zero-stats
+
+      - name: Restore the Rust compiler cache
+        uses: ./.github/actions/sccache-restore
+        with:
+          job: toolchain
+
+      - name: Materialise the llvm-project sources
+        id: llvm-src
+        run: scripts/make_slopos_llvm_src.sh
+
+      - name: Build the tests userland
+        id: userland
+        env:
+          RUSTC_WRAPPER: sccache
+        run: just _build-userland-tests
+
+      - name: Materialise the compiler fork
+        id: rustc-src
+        run: scripts/make_rustc_src.sh
+
+      # Each check below names the inputs it reads, so a red one does not hide
+      # the rest. ccache makes an unchanged translation unit of the clang build
+      # a lookup; the libraries are still linked and the probe still runs.
+      - name: Clang driver link line
+        if: ${{ !cancelled() && steps.llvm-src.outcome == 'success' }}
+        run: |
+          scripts/check_clang_driver.sh --self-test
+          scripts/check_clang_driver.sh --require
+
+      - name: C++ runtime against the C library it links
+        if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
+        run: scripts/check_cxx_pin.sh
+
+      # `--self-test` here rather than in the gates job: that job has no tree,
+      # where the self-test's rejection cases can only report themselves
+      # skipped — a gate CI has never seen reject.
+      - name: LLVM port against slibc and libc++
+        if: ${{ !cancelled() && steps.userland.outcome == 'success' && steps.llvm-src.outcome == 'success' }}
+        run: |
+          scripts/check_llvm_port.sh --self-test
+          scripts/check_llvm_port.sh --require
+
+      # Bootstrap's own dry run plus the compiler wrapper; the build it plans
+      # is hours and is not run here.
+      - name: Cross-build plan and compiler wrapper
+        if: ${{ !cancelled() && steps.userland.outcome == 'success' && steps.rustc-src.outcome == 'success' }}
+        run: |
+          scripts/check_bootstrap_config.sh --self-test
+          scripts/check_bootstrap_config.sh --require
+
+      - name: Built-in target against the JSON spec
+        if: ${{ !cancelled() && steps.rustc-src.outcome == 'success' }}
+        run: |
+          scripts/check_rustc_target.sh --self-test
+          scripts/check_rustc_target.sh --require
+
+      - name: Cargo fork against its `network` cut
+        if: ${{ !cancelled() && steps.rustc-src.outcome == 'success' }}
+        run: |
+          scripts/check_cargo_fork.sh --self-test
+          scripts/check_cargo_fork.sh --require
+
+      - name: Count compiler cache misses
+        id: ccache
+        if: always()
+        run: echo "misses=$(ccache --print-stats | awk '$1 == "cache_miss" { print $2 }')" >> "$GITHUB_OUTPUT"
+
+      - name: Save the compiler cache
+        if: always() && steps.ccache.outputs.misses != '0'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-toolchain-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save the Rust compiler cache
+        if: always()
+        uses: ./.github/actions/sccache-save
+        with:
+          job: toolchain
+
+  ostd-verify:
+    name: OSTD verification (KernMiri + Verus)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      # Not `just setup`: KernMiri builds one host-target crate and interprets
       # it, so the owned `slopos` sysroot and Go are pure cost here.
       - name: Setup Rust toolchain
         run: scripts/ensure_toolchain.sh --no-sysroot
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unzip
 
       - name: Cache Miri sysroot
         uses: actions/cache@v6
@@ -398,33 +493,17 @@ jobs:
           prefix-key: "v0-miri"
           cache-on-failure: true
 
-      - name: Run KernMiri suite
-        run: just check-miri
-
-  verify:
-    name: Verus (OSTD critical-path proofs)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 25
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install just
-        uses: extractions/setup-just@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends unzip
-
       - name: Cache pinned Verus toolchain
         uses: actions/cache@v6
         with:
           path: third_party/verus
           key: verus-${{ runner.os }}-${{ hashFiles('verification/verus.toml') }}
 
+      - name: Run KernMiri suite
+        run: just check-miri
+
       - name: Run Verus proofs
+        if: ${{ !cancelled() }}
         # Any PR touching slopos-ostd/ must pass `just verify`. It
         # resolves + pins Verus via scripts/ensure_verus.sh, then checks
         # every proof under verification/proofs/.
