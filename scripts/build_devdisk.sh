@@ -214,6 +214,13 @@ inventory() {
     done
 }
 
+# The guest's compiler must name itself as the host's does, since a kernel it
+# builds matches a host build only then; `devdisk_test` compares the two.
+if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
+    HOST_RUSTC_VERSION="$(rustc +slopos --version)" ||
+        die "no slopos toolchain registered — run scripts/make_slopos_sysroot.sh"
+fi
+
 MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
 {
     echo "$MARKER 1"
@@ -231,6 +238,7 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
     if [ -n "${TOOLCHAIN_STAGE:-}" ]; then
         image_holds_dir "$TOOLCHAIN_REL" || stale "$TOOLCHAIN_REL"
         echo "toolchain $TOOLCHAIN_REL"
+        echo "rustc-version $HOST_RUSTC_VERSION"
         inventory "$TOOLCHAIN_REL/bin" "$TOOLCHAIN_STAGE/bin" 1
         inventory "$TOOLCHAIN_REL/lib" "$TOOLCHAIN_STAGE/lib" 1
     fi

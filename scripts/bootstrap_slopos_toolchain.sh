@@ -398,6 +398,10 @@ extended = true
 tools = ["cargo", "src"]
 docs = false
 submodules = false
+# Empty rather than bootstrap's "built from a source tarball": the version
+# string is hashed into every crate's StableCrateId, so a kernel this compiler
+# builds matches the host's only if both name themselves alike.
+description = ""
 vendor = false
 # jemalloc is a C library nobody has ported here, and it is the default
 # allocator for a unix host.

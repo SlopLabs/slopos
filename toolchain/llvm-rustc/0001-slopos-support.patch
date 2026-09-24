@@ -181,7 +181,7 @@
 +#endif // LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_SLOPOS_H
 --- /dev/null
 +++ b/clang/lib/Driver/ToolChains/SlopOS.cpp
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,161 @@
 +//===--- SlopOS.cpp - SlopOS ToolChain Implementations ----------*- C++ -*-===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -222,6 +222,9 @@
 +  // and for "clang -w foo.o -o foo". Other warning options are already
 +  // handled somewhere else.
 +  Args.ClaimAllArgs(options::OPT_w);
++  // and for rustc's "-no-pie", which asks for the only kind of executable
++  // there is here.
++  Args.ClaimAllArgs(options::OPT_no_pie);
 +
 +  if (!D.SysRoot.empty())
 +    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));

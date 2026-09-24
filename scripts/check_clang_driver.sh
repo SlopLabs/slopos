@@ -87,9 +87,9 @@ inputs_ready() {
 }
 
 # The probe: a `Driver` over the port's own toolchain, asked for the link jobs
-# the four shapes of SlopOS binary produce, grading each one's argv against
-# what `build_userland.sh` writes by hand. It is the gate — the shell around
-# it only arranges for it to compile.
+# the four shapes of SlopOS binary produce and the line rustc hands `cc`,
+# grading each one's argv against what `build_userland.sh` writes by hand. It
+# is the gate — the shell around it only arranges for it to compile.
 write_probe() {
     cat >"$BUILD/probe.cpp" <<'EOF'
 #include "clang/Basic/Diagnostic.h"
@@ -157,6 +157,7 @@ struct Shape {
   bool CXX;
   bool Crt0;
   bool DynamicLinker;
+  const char *Extra = "";
 };
 
 void grade(const Shape &S, const std::string &Triple,
@@ -171,6 +172,8 @@ void grade(const Shape &S, const std::string &Triple,
   Args.push_back("--sysroot=" + SysRoot);
   if (*S.Mode)
     Args.push_back(S.Mode);
+  if (*S.Extra)
+    Args.push_back(S.Extra);
   Args.push_back(Object);
   Args.push_back("-o");
   Args.push_back(Output);
@@ -189,6 +192,8 @@ void grade(const Shape &S, const std::string &Triple,
     check(false, "one link job");
     return;
   }
+  check(Consumer.getNumWarnings() == 0 && Consumer.getNumErrors() == 0,
+        "the driver takes the line without a diagnostic");
 
   const Command &Cmd = *C->getJobs().begin();
   const llvm::opt::ArgStringList &A = Cmd.getArguments();
@@ -298,6 +303,8 @@ int main(int argc, char **argv) {
       {"dynamic executable", "", false, true, true},
       {"shared object", "-shared", false, false, false},
       {"C++ executable", "", true, true, true},
+      // rustc passes `-no-pie` for every executable it links through `cc`.
+      {"rustc executable", "", false, true, true, "-no-pie"},
   };
   for (const Shape &S : Shapes)
     grade(S, Triple, SysRoot, Object, Output, &S == &Shapes[1]);

@@ -34,4 +34,4 @@ clang_major_tested=18 22
 # make `__slopos__` a macro a cross-built compiler predefines. Upstream-shaped
 # and upstream-sized — it is the diff a tier-3 OS port PR carries.
 patch_sha256=toolchain/llvm/0001-slopos-support.patch:9027a833fafa9cdeeb4f2268e153498856733f0898a14e9de311e248e01055fb
-patch_sha256=toolchain/llvm/0002-slopos-clang-driver.patch:4da079ce1261670ce1f56acfd88f59a83a208b85dabbc0c8d1f556b950f83ef4
+patch_sha256=toolchain/llvm/0002-slopos-clang-driver.patch:610f94c724fd5c8cf17e0c3adb28e951af1d427b494d3de9e726782cc1bdc924

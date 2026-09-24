@@ -387,7 +387,9 @@ fn prefix() -> Result<String, bool> {
 
 /// Rung 1. Every startup binds every relocation of rustc, `librustc_driver`,
 /// `libLLVM` and `libstd` before `main`, so this is where eager binding's cost
-/// at compiler scale shows.
+/// at compiler scale shows. The version must be the host's: it is hashed into
+/// every crate's `StableCrateId`, so a differing one renames every symbol of a
+/// guest-built kernel.
 fn toolchain_starts() -> bool {
     let prefix = match prefix() {
         Ok(p) => p,
@@ -402,28 +404,37 @@ fn toolchain_starts() -> bool {
     ) else {
         return false;
     };
-    if !rustc.ok("rustc --version") || !rustc.stdout.starts_with("rustc ") {
+    if !rustc.ok("rustc --version") {
+        return false;
+    }
+    let version = rustc.stdout.trim_end();
+    let host = fs::read_to_string(marker_path()).ok().and_then(|text| {
+        text.lines()
+            .find_map(|l| l.strip_prefix("rustc-version "))
+            .map(str::to_owned)
+    });
+    if host.as_deref() != Some(version) {
+        note(&format!("guest {version:?}, host {host:?}"));
         return false;
     }
     let bound = rustc
         .stderr
         .lines()
-        .find(|l| l.starts_with("ld.so: "))
-        .unwrap_or("ld.so: no statistics");
+        .find_map(|l| l.strip_prefix("ld.so: "))
+        .unwrap_or("no statistics");
     note(&format!(
-        "{} in {} ms; {bound}",
-        rustc.stdout.trim_end(),
+        "{version} in {} ms; {bound}",
         rustc.took.as_millis()
     ));
-    ["cargo", "clang"].iter().all(|tool| {
-        run(
-            &prefix,
-            "/",
-            &format!("{prefix}/bin/{tool}"),
-            &["--version"],
-            &[],
-        )
-        .is_some_and(|r| r.ok(&format!("{tool} --version")))
+    let rust_lld = format!("{prefix}/lib/rustlib/x86_64-unknown-slopos/bin/rust-lld");
+    let tools: [(String, &[&str]); 4] = [
+        (format!("{prefix}/bin/cargo"), &["--version"]),
+        (format!("{prefix}/bin/clang"), &["--version"]),
+        (format!("{prefix}/bin/ld.lld"), &["--version"]),
+        (rust_lld, &["-flavor", "gnu", "--version"]),
+    ];
+    tools.iter().all(|(tool, args)| {
+        run(&prefix, "/", tool, args, &[]).is_some_and(|r| r.ok(&format!("{tool} --version")))
     })
 }
 
