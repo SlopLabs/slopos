@@ -160,7 +160,7 @@ pub struct Journal {
     /// multiplicative mix, because a mask over the low ones puts every group
     /// bitmap of the volume in one bucket.
     bucket_shift: u32,
-    /// Blocks freed by the open operation, awaiting a `REVOKE` record.
+    /// Blocks the open operation freed or wrote home, awaiting a `REVOKE`.
     revokes: KVec<u32>,
     /// Mappings a `REVOKE` cleared, so an abort can put them back.
     revoke_undo: KVec<(u32, u32)>,
@@ -454,9 +454,7 @@ impl Journal {
         out: &mut [u8],
     ) -> Result<(), Ext2Error> {
         let offset = self.slot_offset(slot)?;
-        device
-            .read_at(offset, out)
-            .map_err(|_| Ext2Error::DeviceError)
+        device.read_at(offset, out).map_err(Ext2Error::from)
     }
 
     pub fn begin_op(&mut self) {
@@ -506,6 +504,18 @@ impl Journal {
             self.flush_revokes(device)?;
         }
         Ok(())
+    }
+
+    /// `block`'s home is being written with contents newer than its records
+    /// here. Neither a miss, a check point nor a replay may then take the
+    /// older copy over it, so the mappings go now and a `REVOKE` joins the
+    /// operation's commit.
+    pub fn supersede(&mut self, block: u32, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        if self.resident_slot(block).is_none() {
+            return Ok(());
+        }
+        self.clear_mappings(block, true)?;
+        self.note_revoke(block, device)
     }
 
     /// Emit the queued revokes. Called before any payload record, so a block
@@ -634,7 +644,7 @@ impl Journal {
             }
             device
                 .write_vectored(offset, &segs[..n])
-                .map_err(|_| Ext2Error::DeviceError)?;
+                .map_err(Ext2Error::from)?;
             let mut crc = self.crc;
             for seg in &segs[..n] {
                 crc = crc32_feed(crc, seg);
@@ -694,7 +704,7 @@ impl Journal {
         let offset = self.slot_offset(slot)?;
         device
             .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.writes += 1;
         stats::note_commit();
         self.seq = self.seq.wrapping_add(1);
@@ -741,7 +751,7 @@ impl Journal {
                     from,
                     &mut self.transfer.as_mut_slice()[got * bs..(got + take) * bs],
                 )
-                .map_err(|_| Ext2Error::DeviceError)?;
+                .map_err(Ext2Error::from)?;
             got += take;
         }
         device
@@ -749,7 +759,7 @@ impl Journal {
                 block as u64 * self.block_size as u64,
                 &self.transfer.as_slice()[..n * bs],
             )
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.writes += n;
         Ok(())
     }
@@ -793,7 +803,7 @@ impl Journal {
         let offset = self.slot_offset(0)?;
         device
             .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.writes += 1;
         self.head = 1;
         self.op_head = 1;
@@ -834,7 +844,7 @@ impl Journal {
         let offset = self.slot_offset(slot)?;
         device
             .write_at(offset, &self.header.as_slice()[..bs])
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.crc = crc32_feed(self.crc, &self.header.as_slice()[..bs]);
         self.writes += 1;
         Ok(())
@@ -851,7 +861,7 @@ impl Journal {
         let offset = self.slot_offset(0)?;
         device
             .read_at(offset, &mut self.header.as_mut_slice()[..bs])
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         let identity = self.identity();
         let data = self.header.as_slice();
         if le32(data, 0) != SB_MAGIC || le32(data, 4) != FORMAT_VERSION {
@@ -892,7 +902,7 @@ impl Journal {
         let offset = self.slot_offset(slot)?;
         device
             .read_at(offset, &mut self.header.as_mut_slice()[..bs])
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         let data = self.header.as_slice();
         if le32(data, 0) != REC_MAGIC || le32(data, 4) != expect {
             return Ok(None);
@@ -925,7 +935,7 @@ impl Journal {
         }
         self.build_disposition(end, first_seq, device)?;
         let blocks = self.write_home(end, device)?;
-        device.flush().map_err(|_| Ext2Error::DeviceError)?;
+        device.flush().map_err(Ext2Error::from)?;
         self.seq = expect;
         self.head = end;
         Ok(JournalRecovery {
@@ -985,7 +995,7 @@ impl Journal {
                         let offset = self.slot_offset(slot + 1 + i)?;
                         device
                             .read_at(offset, &mut self.transfer.as_mut_slice()[..bs])
-                            .map_err(|_| Ext2Error::DeviceError)?;
+                            .map_err(Ext2Error::from)?;
                         crc = crc32_feed(crc, &self.transfer.as_slice()[..bs]);
                     }
                     slot += 1 + count;

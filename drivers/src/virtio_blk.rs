@@ -90,6 +90,7 @@ enum BlkError {
     BadRequest,
     Busy,
     Timeout,
+    Interrupted,
     /// `retry` is set when the device left the status byte untouched — a lost
     /// or truncated completion, unlike a reported media error.
     DeviceFault {
@@ -105,6 +106,14 @@ impl BlkError {
     }
 }
 
+/// Why a waiter gave up on a chain the device may still own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Abandon {
+    Timeout,
+    /// The requester was killed: nothing is known about the device.
+    Killed,
+}
+
 impl From<BlkError> for BlockDeviceError {
     fn from(err: BlkError) -> Self {
         match err {
@@ -112,6 +121,7 @@ impl From<BlkError> for BlockDeviceError {
             BlkError::BadRequest => BlockDeviceError::InvalidBuffer,
             BlkError::Busy => BlockDeviceError::Busy,
             BlkError::Timeout => BlockDeviceError::Timeout,
+            BlkError::Interrupted => BlockDeviceError::Interrupted,
             BlkError::NotReady | BlkError::DeviceFault { .. } => BlockDeviceError::DeviceFault,
             BlkError::Unsupported => BlockDeviceError::Unsupported,
             BlkError::OutOfMemory => BlockDeviceError::OutOfMemory,
@@ -630,6 +640,7 @@ impl VirtioBlkInner {
                     SLOT_WAIT_MS as u32,
                 );
             }
+            Err(WaitAbort::Killed) => return Err(BlkError::Interrupted),
             Err(_) => return Err(BlkError::Busy),
         }
         self.state
@@ -752,22 +763,27 @@ impl VirtioBlkInner {
                     },
                     REQUEST_TIMEOUT_MS,
                 );
-                self.finish_or_quarantine(slot_idx)
+                self.finish_or_quarantine(slot_idx, Abandon::Timeout)
             }
             // A killed or signalled requester must not free a chain the device
             // may still be writing into; quarantine it as a timeout does.
-            Err(_) => self.finish_or_quarantine(slot_idx),
+            Err(WaitAbort::Killed) => self.finish_or_quarantine(slot_idx, Abandon::Killed),
+            Err(_) => self.finish_or_quarantine(slot_idx, Abandon::Timeout),
         }
     }
 
     /// Timeout epilogue: one final harvest (which recovers a completion whose
     /// interrupt was lost), else move the chain out of the slot's way.
     #[inline(never)]
-    fn finish_or_quarantine(&self, slot_idx: usize) -> Result<RequestPages, BlkError> {
+    fn finish_or_quarantine(
+        &self,
+        slot_idx: usize,
+        why: Abandon,
+    ) -> Result<RequestPages, BlkError> {
         if let Some(pages) = self.final_harvest(slot_idx) {
             return Ok(pages);
         }
-        self.quarantine_after_timeout(slot_idx)
+        self.quarantine_after_timeout(slot_idx, why)
     }
 
     fn final_harvest(&self, slot_idx: usize) -> Option<RequestPages> {
@@ -781,7 +797,11 @@ impl VirtioBlkInner {
     }
 
     #[inline(never)]
-    fn quarantine_after_timeout(&self, slot_idx: usize) -> Result<RequestPages, BlkError> {
+    fn quarantine_after_timeout(
+        &self,
+        slot_idx: usize,
+        why: Abandon,
+    ) -> Result<RequestPages, BlkError> {
         // Allocated before the lock is taken: the slot's own pages stay with
         // the device, and a frame allocation must not run under the lock.
         let replacement = RequestPages::allocate();
@@ -804,12 +824,14 @@ impl VirtioBlkInner {
             SlotOutcome::Withheld => false,
         };
 
-        klog_info!(
-            "virtio-blk: request timeout, chain head {} quarantined, slot {} {}",
-            head,
-            slot_idx,
-            if recycled { "recycled" } else { "withheld" }
-        );
+        if why == Abandon::Timeout {
+            klog_info!(
+                "virtio-blk: request timeout, chain head {} quarantined, slot {} {}",
+                head,
+                slot_idx,
+                if recycled { "recycled" } else { "withheld" }
+            );
+        }
         if wedged {
             klog_info!(
                 "virtio-blk: all {} request slots quarantined — the device is not completing requests",
@@ -823,10 +845,10 @@ impl VirtioBlkInner {
         // A quarantine the replacement allocation could not cover costs the
         // slot until the device returns it, so the caller is told to retry
         // rather than that its request timed out.
-        if had_replacement {
-            Err(BlkError::Timeout)
-        } else {
-            Err(BlkError::Busy)
+        match why {
+            Abandon::Killed => Err(BlkError::Interrupted),
+            Abandon::Timeout if had_replacement => Err(BlkError::Timeout),
+            Abandon::Timeout => Err(BlkError::Busy),
         }
     }
 
@@ -1111,7 +1133,7 @@ impl VirtioBlkInner {
             return Err(BlkError::Timeout);
         }
 
-        let pages = self.quarantine_after_timeout(idx)?;
+        let pages = self.quarantine_after_timeout(idx, Abandon::Timeout)?;
         let status = pages.status();
         let drained = status == VIRTIO_BLK_S_OK && unstage_read(&pages, dst);
         self.release_slot(idx, pages);

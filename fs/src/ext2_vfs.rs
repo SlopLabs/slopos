@@ -1170,6 +1170,7 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
         Ext2Error::OutOfMemory => VfsError::IoError,
         Ext2Error::Immutable => VfsError::PermissionDenied,
         Ext2Error::InvalidPath => VfsError::InvalidPath,
+        Ext2Error::Interrupted => VfsError::Interrupted,
     }
 }
 

@@ -17,7 +17,7 @@ use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use crate::ext2::journal::{Journal, JournalRecovery, LogExtent, MAX_LOG_SLOTS};
-use crate::ext2::{Ext2Fs, JOURNAL_PATH, ReadOnlyReason};
+use crate::ext2::{Ext2Error, Ext2Fs, JOURNAL_PATH, ReadOnlyReason};
 
 /// Comfortably above `journal::MIN_LOG_SLOTS`, and small enough to leave the
 /// fixture room to allocate.
@@ -40,8 +40,10 @@ static PROBE_FLUSHES: AtomicUsize = AtomicUsize::new(0);
 /// assert on write *order* and not only on volume.
 static PROBE_FIRST: AtomicU64 = AtomicU64::new(u64::MAX);
 static PROBE_REFUSES: AtomicBool = AtomicBool::new(false);
+static PROBE_INTERRUPTS: AtomicBool = AtomicBool::new(false);
 
-/// Counts writes and can be made to refuse them part-way through a test.
+/// Counts writes, and can be made to refuse them or to abandon reads part-way
+/// through a test.
 /// Refusing only once armed is what the retraction test needs: the log must
 /// attach before the failure it is measuring.
 struct ProbeDevice {
@@ -54,12 +56,16 @@ impl ProbeDevice {
         PROBE_FLUSHES.store(0, Ordering::Relaxed);
         PROBE_FIRST.store(u64::MAX, Ordering::Relaxed);
         PROBE_REFUSES.store(false, Ordering::Relaxed);
+        PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
         Self { inner }
     }
 }
 
 impl BlockDevice for ProbeDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        if PROBE_INTERRUPTS.load(Ordering::Relaxed) {
+            return Err(BlockDeviceError::Interrupted);
+        }
         self.inner.read_at(offset, buffer)
     }
 
@@ -220,6 +226,47 @@ fn retract_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     }
     if fs.resolve_path(b"/doomed.txt").is_ok() {
         return Err("the retracted name is still resolvable");
+    }
+    Ok(())
+}
+
+/// A read abandoned because its requester was killed says nothing about the
+/// image: the operation fails and the mount stays writable.
+///
+/// The path that broke: every device error read as damage, so the guest
+/// build's linker, killed with a read in flight, took `/devel` read-only.
+pub fn test_ext2_killed_read_is_not_damage() -> TestResult {
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    match with_log(&device, killed_read_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let ino = fs.create_file(2, b"killed.txt").map_err(|_| "create")?;
+    fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
+    fs.sync().map_err(|_| "sync")?;
+    fs.cache_drop_clean_for_test();
+    let mut buf = [0u8; 64];
+    PROBE_INTERRUPTS.store(true, Ordering::Relaxed);
+    let read = fs.read_file(ino, 0, &mut buf);
+    let read = fs.note_result(read);
+    PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
+    if read != Err(Ext2Error::Interrupted) {
+        return Err("the abandoned read did not answer Interrupted");
+    }
+    if fs.corruption_seen() {
+        return Err("an abandoned read latched the mount as damaged");
+    }
+    let n = fs
+        .read_file(ino, 0, &mut buf)
+        .map_err(|_| "read after the kill")?;
+    if &buf[..n] != PAYLOAD {
+        return Err("the reread holds the wrong bytes");
     }
     Ok(())
 }
@@ -420,6 +467,7 @@ slopos_testing::stest!(
     name = test_ext2_journal_retracts_a_failed_commit,
     suite = fs
 );
+slopos_testing::stest!(name = test_ext2_killed_read_is_not_damage, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_journal_checkpoints_a_block_read_back_from_the_log,
     suite = fs
@@ -1017,6 +1065,117 @@ fn extent_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 slopos_testing::stest!(
     name = test_ext2_journal_write_extent_coalesces_its_requests,
+    suite = fs
+);
+
+/// Logged by a small write, then written home by one too large to log: the home
+/// copy is newer, and a cache miss and a check point must both answer it.
+///
+/// The path that broke: the log kept its mapping, so a miss read the logged
+/// copy back and the check point wrote it home. In the guest build every rlib
+/// member began with the zeros its archive header's small write had logged.
+pub fn test_ext2_journal_home_write_outranks_an_older_logged_copy() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, relog_then_reread) {
+        return fail!("{}", msg);
+    }
+    match with_log(&device, relog_verify) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("after the check point: {}", msg),
+    }
+}
+
+/// The same two writes, committed and never check-pointed: the replay must not
+/// put the logged copy back over the home write that superseded it.
+pub fn test_ext2_journal_replay_keeps_a_home_write_over_an_older_logged_copy() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, relog_unsynced) {
+        return fail!("{}", msg);
+    }
+    match with_log(&device, relog_replay) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("after the replay: {}", msg),
+    }
+}
+
+const RELOG_SMALL: &[u8] = b"a small write the log takes whole";
+
+fn relog_writes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let ino = fs.create_file(2, b"relog.bin").map_err(|_| "create")?;
+    fs.write_file(ino, 0, RELOG_SMALL)
+        .map_err(|_| "small write")?;
+    let len = fs.block_size() as usize * EXTENT_BLOCKS as usize;
+    let mut buffer = KVec::<u8>::zeroed(len).map_err(|_| "buffer")?;
+    for (i, byte) in buffer.as_mut_slice().iter_mut().enumerate() {
+        *byte = extent_byte(i);
+    }
+    if fs
+        .write_file(ino, 0, buffer.as_slice())
+        .map_err(|_| "large write")?
+        != len
+    {
+        return Err("the large write was short");
+    }
+    Ok(())
+}
+
+fn relog_matches(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let ino = fs.resolve_path(b"/relog.bin").map_err(|_| "resolve")?;
+    let len = fs.block_size() as usize * EXTENT_BLOCKS as usize;
+    let mut buffer = KVec::<u8>::zeroed(len).map_err(|_| "buffer")?;
+    if fs
+        .read_file(ino, 0, buffer.as_mut_slice())
+        .map_err(|_| "read")?
+        != len
+    {
+        return Err("the file read back short");
+    }
+    for (i, byte) in buffer.as_slice().iter().enumerate() {
+        if *byte != extent_byte(i) {
+            return Err("the file reads back the logged copy, not the home write");
+        }
+    }
+    Ok(())
+}
+
+fn relog_then_reread(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    relog_writes(fs)?;
+    fs.cache_drop_clean_for_test();
+    relog_matches(fs)?;
+    fs.cache_drop_clean_for_test();
+    fs.sync().map_err(|_| "sync")?;
+    fs.mark_clean().map_err(|_| "clean")
+}
+
+fn relog_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    relog_matches(fs)
+}
+
+fn relog_unsynced(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
+    attach(fs)?;
+    relog_writes(fs)
+}
+
+fn relog_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    match fs.attach_journal() {
+        Ok(Some(recovery)) if recovery.replayed() => relog_matches(fs),
+        Ok(_) => Err("the log held committed transactions and replayed none"),
+        Err(_) => Err("attach failed on the remount"),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_home_write_outranks_an_older_logged_copy,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_journal_replay_keeps_a_home_write_over_an_older_logged_copy,
     suite = fs
 );
 

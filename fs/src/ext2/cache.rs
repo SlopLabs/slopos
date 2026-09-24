@@ -442,6 +442,33 @@ impl BlockCache {
         result
     }
 
+    /// The open operation is writing `block` home ahead of the log.
+    fn supersede_logged(
+        &mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+    ) -> Result<(), Ext2Error> {
+        let Some(mut journal) = self.journal.take() else {
+            return Ok(());
+        };
+        let result = journal.supersede(block.raw(), device);
+        self.unbarriered += journal.take_writes();
+        self.journal = Some(journal);
+        result
+    }
+
+    /// Supersede the log's copies of every data block this commit writes home,
+    /// before the log's room for the commit is measured.
+    fn supersede_op_data(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        for k in 0..self.op_touched_slots.len() {
+            let slot = self.op_touched_slots.as_slice()[k] as usize;
+            if Self::goes_home(&self.entries[slot]) {
+                self.supersede_logged(self.entries[slot].block, device)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The epoch a writeback pass should fix. Blocks dirtied after it are a
     /// later operation's and are left for the next pass.
     pub fn writeback_epoch(&self) -> u64 {
@@ -696,6 +723,9 @@ impl BlockCache {
         // ran out of log room afterwards would retract the metadata with the
         // data already on the medium.
         let log_data = self.count_op_data() <= DATA_LOG_LIMIT;
+        if !log_data {
+            self.supersede_op_data(device)?;
+        }
         self.stage_blocks(log_data)?;
         let needed = self.log_slots_needed();
         if self
@@ -724,7 +754,7 @@ impl BlockCache {
             }
         }
         if wrote_data {
-            device.flush().map_err(|_| Ext2Error::DeviceError)?;
+            device.flush().map_err(Ext2Error::from)?;
             self.unbarriered = 0;
         }
 
@@ -798,7 +828,7 @@ impl BlockCache {
             }
             device
                 .write_vectored(offset, &segs[..len])
-                .map_err(|_| Ext2Error::DeviceError)?;
+                .map_err(Ext2Error::from)?;
         }
         for k in 0..len {
             self.entries[run[k] as usize].frame.set_dirty(false);
@@ -1076,9 +1106,7 @@ impl BlockCache {
             let buffer = &mut entry.frame.as_bytes_mut()[..bs];
             match (logged, staged.as_ref()) {
                 (Some(log_slot), Some(journal)) => journal.read_slot(log_slot, device, buffer),
-                _ => device
-                    .read_at(home, buffer)
-                    .map_err(|_| Ext2Error::DeviceError),
+                _ => device.read_at(home, buffer).map_err(Ext2Error::from),
             }
         };
         self.journal = staged;
@@ -1207,7 +1235,7 @@ impl BlockCache {
         let bs = self.block_size as usize;
         device
             .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         entry.frame.set_dirty(false);
         self.unbarriered += 1;
         Ok(true)
@@ -1264,10 +1292,8 @@ impl BlockCache {
             });
             match outcome {
                 Ok(len) => written += len,
-                Err(_) => {
-                    if first_err.is_none() {
-                        first_err = Some(Ext2Error::DeviceError);
-                    }
+                Err(e) => {
+                    first_err.get_or_insert(e);
                 }
             }
             slot += 1;
@@ -1683,12 +1709,18 @@ impl BlockCache {
                 };
                 outcome?;
             } else {
-                let offset = self.entries[slot].block.to_disk_offset(self.block_size);
+                let block = self.entries[slot].block;
+                let op_data =
+                    self.entries[slot].op_touched && self.entries[slot].kind == BlockKind::Data;
+                if op_data {
+                    self.supersede_logged(block, device)?;
+                }
+                let offset = block.to_disk_offset(self.block_size);
                 device
                     .write_at(offset.raw(), &self.entries[slot].frame.as_bytes()[..bs])
-                    .map_err(|_| Ext2Error::DeviceError)?;
+                    .map_err(Ext2Error::from)?;
                 self.unbarriered += 1;
-                if self.entries[slot].op_touched && self.entries[slot].kind == BlockKind::Data {
+                if op_data {
                     self.op_data_evicted = true;
                 }
             }

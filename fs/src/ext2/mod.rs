@@ -23,7 +23,7 @@ use ondisk::{
 };
 use types::{BlockNum, FileBlock, GroupIdx, InodeNum};
 
-use crate::blockdev::BlockDevice;
+use crate::blockdev::{BlockDevice, BlockDeviceError};
 use slopos_ostd::{KVec, klog_info};
 
 pub use ondisk::EXT2_MAX_BLOCK_SIZE;
@@ -70,6 +70,17 @@ pub enum Ext2Error {
     /// A rename would splice a directory into its own subtree, detaching it
     /// and everything under it from the root.
     InvalidPath,
+    /// A device request was abandoned because its requester was killed.
+    Interrupted,
+}
+
+impl From<BlockDeviceError> for Ext2Error {
+    fn from(err: BlockDeviceError) -> Self {
+        match err {
+            BlockDeviceError::Interrupted => Self::Interrupted,
+            _ => Self::DeviceError,
+        }
+    }
 }
 
 impl Ext2Error {
@@ -341,9 +352,7 @@ impl<'a> Ext2Fs<'a> {
     #[inline(never)]
     pub fn mount_params(device: &dyn BlockDevice) -> Result<(Superblock, u32, u16), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
-        device
-            .read_at(1024, &mut sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+        device.read_at(1024, &mut sb_buf).map_err(Ext2Error::from)?;
         let superblock = Superblock::parse(&sb_buf)?;
         let block_size = superblock.block_size()?;
         let inode_size = superblock.effective_inode_size();
@@ -366,9 +375,7 @@ impl<'a> Ext2Fs<'a> {
     #[inline(never)]
     pub fn read_block_reserve(device: &dyn BlockDevice) -> Result<u32, Ext2Error> {
         let mut sb_buf = [0u8; 1024];
-        device
-            .read_at(1024, &mut sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+        device.read_at(1024, &mut sb_buf).map_err(Ext2Error::from)?;
         Ok(ondisk::reserved_blocks_of(&sb_buf))
     }
 
@@ -581,7 +588,7 @@ impl<'a> Ext2Fs<'a> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         Ok(ondisk::SuperblockBookkeeping::parse(&sb_buf))
     }
 
@@ -595,7 +602,7 @@ impl<'a> Ext2Fs<'a> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.superblock.encode_mutable_fields(&mut sb_buf);
         sb_buf[58..60].copy_from_slice(&self.superblock.state.to_le_bytes());
         let now = time::now_unix_opt();
@@ -606,7 +613,7 @@ impl<'a> Ext2Fs<'a> {
         }
         self.device
             .write_at(1024, &sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.superblock_dirty = false;
         self.device_barrier()
     }
@@ -648,6 +655,12 @@ impl<'a> Ext2Fs<'a> {
         self.cache
             .flush_where(self.device, |kind, _| kind == cache::BlockKind::Data)
             .map(|_| ())
+    }
+
+    /// Drop every clean cached block, so the next read of one is a miss.
+    #[cfg(feature = "tests")]
+    pub fn cache_drop_clean_for_test(&mut self) -> u32 {
+        self.cache.shrink_clean(u32::MAX)
     }
 
     /// Commit one inode: its data blocks, the allocation state that makes them
@@ -986,7 +999,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     fn device_barrier(&mut self) -> Result<(), Ext2Error> {
-        self.device.flush().map_err(|_| Ext2Error::DeviceError)?;
+        self.device.flush().map_err(Ext2Error::from)?;
         self.cache.note_barrier();
         Ok(())
     }
@@ -2025,12 +2038,12 @@ impl<'a> Ext2Fs<'a> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         sb_buf[S_LAST_ORPHAN_OFF..S_LAST_ORPHAN_OFF + 4]
             .copy_from_slice(&self.superblock.last_orphan.to_le_bytes());
         self.device
             .write_at(1024, &sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.device_barrier()
     }
 
@@ -2457,12 +2470,12 @@ impl<'a> Ext2Fs<'a> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         self.superblock.encode_mutable_fields(&mut sb_buf);
         ondisk::SuperblockBookkeeping::stamp_write(&mut sb_buf, time::now_unix_opt());
         self.device
             .write_at(1024, &sb_buf)
-            .map_err(|_| Ext2Error::DeviceError)?;
+            .map_err(Ext2Error::from)?;
         Ok(())
     }
 }

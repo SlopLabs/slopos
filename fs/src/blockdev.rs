@@ -14,6 +14,9 @@ pub enum BlockDeviceError {
     /// the same request is expected to succeed once an in-flight one retires.
     Busy,
     Timeout,
+    /// The requesting task was killed while it waited. Says nothing about the
+    /// device: the request may still complete, and a write may still land.
+    Interrupted,
     /// The device completed the request but reported a failure.
     DeviceFault,
     Unsupported,
