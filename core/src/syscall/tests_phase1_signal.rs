@@ -1161,6 +1161,38 @@ pub fn test_a_reaped_leader_does_not_strand_its_threads() -> TestResult {
     pass!()
 }
 
+/// A sibling acts on a group exit's kill at its next delivery point, where a
+/// signal it had pending must neither restamp the group's code nor be handled.
+pub fn test_a_group_exit_outranks_a_signal_the_sibling_had_pending() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    let thread = assert_some!(task_find_by_id(thread_id), "thread lookup failed");
+    let _ = task::task_signal_post(&thread, SIGTERM);
+
+    assert_test!(
+        task_group_exit(leader_id, 3) != 0,
+        "exit_group must end the group"
+    );
+    assert_test!(thread.is_killed(), "the sibling must be killed");
+    assert_test!(
+        !crate::syscall::signal::claim_pending_signal_for_test(&thread),
+        "delivery acted on a signal pending past the group exit"
+    );
+    assert_eq_test!(
+        thread.exit_code.load(Ordering::Acquire),
+        3,
+        "the pending signal restamped the group's exit code"
+    );
+
+    drop(thread);
+    task_terminate(thread_id);
+    task_terminate(leader_id);
+    pass!()
+}
+
 /// The kill flag is only acted on at a delivery point a *running* task
 /// reaches, so a task left Stopped with it pending never dies.
 pub fn test_a_completed_kill_is_not_parked_by_a_group_stop() -> TestResult {
@@ -1618,6 +1650,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_a_reaped_leader_does_not_strand_its_threads,
+    suite = syscall_signal_phase1
+);
+slopos_testing::stest!(
+    name = test_a_group_exit_outranks_a_signal_the_sibling_had_pending,
     suite = syscall_signal_phase1
 );
 slopos_testing::stest!(
