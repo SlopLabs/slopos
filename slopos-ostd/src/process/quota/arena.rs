@@ -15,7 +15,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use slopos_abi::quota::{KIND_COUNT, QuotaMode, ResourceKind};
+use slopos_abi::quota::{KIND_COUNT, QuotaMode, ResourceKind, Scope};
 
 use super::axis::Refundable;
 use super::token::Reservation;
@@ -50,6 +50,9 @@ struct AccountRow {
     /// `used` in the low half, `peak` in the high half: one compare-exchange
     /// installs both, so no reader can observe `used > peak`.
     usage: [AtomicU64; KIND_COUNT],
+    /// This row's own process's share of `used`: what a [`Scope::Principal`]
+    /// ceiling is compared against, since `used` also counts descendants.
+    own: [AtomicU32; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
     /// The account this one debits through: its arena slot and the low half
@@ -72,6 +75,7 @@ impl AccountRow {
     const fn new() -> Self {
         Self {
             usage: [const { AtomicU64::new(0) }; KIND_COUNT],
+            own: [const { AtomicU32::new(0) }; KIND_COUNT],
             limit: [const { AtomicU32::new(NO_LIMIT) }; KIND_COUNT],
             denials: [const { AtomicU32::new(0) }; KIND_COUNT],
             parent: AtomicU64::new(pack_parent(NO_PARENT, 0)),
@@ -87,6 +91,7 @@ impl AccountRow {
     fn reset_counters(&self) {
         for kind in 0..KIND_COUNT {
             self.usage[kind].store(0, Ordering::Relaxed);
+            self.own[kind].store(0, Ordering::Relaxed);
             self.limit[kind].store(NO_LIMIT, Ordering::Relaxed);
             self.denials[kind].store(0, Ordering::Relaxed);
         }
@@ -411,7 +416,7 @@ pub fn account_release(id: AccountId) {
             let own = usage_used(row.usage[idx].load(Ordering::Acquire))
                 .saturating_sub(children_used[idx]);
             if own != 0 {
-                refund_raw(grandparent, kind, own);
+                credit_chain(grandparent, kind, own);
             }
         }
     }
@@ -477,16 +482,31 @@ pub fn try_charge<A: Refundable>(
 ) -> Result<Reservation<A>, TryChargeError> {
     let kind = A::KIND;
     let mode = quota_mode();
+    let subtree = kind.scope() == Scope::Subtree;
     let mut charged: [AccountId; MAX_ACCOUNT_DEPTH as usize] =
         [AccountId::NONE; MAX_ACCOUNT_DEPTH as usize];
     let mut depth = 0usize;
+
+    let leaf = row_for(account);
+    if let Some(leaf) = leaf
+        && charge_own(leaf, kind, n, mode, !subtree).is_err()
+    {
+        return Err(TryChargeError {
+            refused_by: account,
+            kind,
+            errno: kind.errno(),
+        });
+    }
 
     let mut current = account;
     while depth < MAX_ACCOUNT_DEPTH as usize {
         let Some(row) = row_for(current) else {
             break;
         };
-        if let Err(()) = charge_row(row, kind, n, mode) {
+        if let Err(()) = charge_row(row, kind, n, mode, subtree) {
+            if let Some(leaf) = leaf {
+                release_own(leaf, kind, n);
+            }
             unwind(&charged[..depth], kind, n);
             return Err(TryChargeError {
                 refused_by: current,
@@ -515,7 +535,16 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
     if n == 0 {
         return;
     }
-    let mut current = account;
+    if let Some(row) = row_for(account) {
+        release_own(row, kind, n);
+    }
+    credit_chain(account, kind, n);
+}
+
+/// Credit `used` on `from` and every ancestor, leaving every `own` alone: the
+/// charge being credited was not `from`'s own.
+fn credit_chain(from: AccountId, kind: ResourceKind, n: u32) {
+    let mut current = from;
     let mut depth = 0usize;
     while depth < MAX_ACCOUNT_DEPTH as usize {
         let Some(row) = row_for(current) else {
@@ -550,27 +579,22 @@ fn account_id_at(slot: u32) -> AccountId {
 /// A compare-exchange loop rather than `fetch_add`-then-check: an add that
 /// overshoots and is corrected afterwards is observable, and the ceiling has to
 /// hold at every instant or it is not the property it claims.
-fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> Result<(), ()> {
+fn charge_row(
+    row: &AccountRow,
+    kind: ResourceKind,
+    n: u32,
+    mode: QuotaMode,
+    bounded: bool,
+) -> Result<(), ()> {
     let idx = kind.index();
-    // `Off` consults no ceiling and so records no denial: a count that moved
-    // under `quota=off` would report refusals on a tier that refuses nothing.
-    let limit = match mode {
-        QuotaMode::Off => NO_LIMIT,
-        _ => row.limit[idx].load(Ordering::Acquire),
-    };
+    let limit = ceiling(row, idx, mode, bounded);
     let mut packed = row.usage[idx].load(Ordering::Relaxed);
-    let mut over_limit;
     loop {
-        let used = usage_used(packed);
-        let Some(next) = used.checked_add(n) else {
-            row.denials[idx].fetch_add(1, Ordering::Relaxed);
+        let Some(over_limit) = admit(row, idx, usage_used(packed).checked_add(n), limit, mode)
+        else {
             return Err(());
         };
-        over_limit = limit != NO_LIMIT && next > limit;
-        if over_limit && matches!(mode, QuotaMode::Enforce) {
-            row.denials[idx].fetch_add(1, Ordering::Relaxed);
-            return Err(());
-        }
+        let next = usage_used(packed) + n;
         let peak = usage_peak(packed).max(next);
         match row.usage[idx].compare_exchange_weak(
             packed,
@@ -579,16 +603,81 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
             Ordering::Relaxed,
         ) {
             Ok(_) => {
-                // Counted even though the charge was granted: `quota=warn`
-                // exists to measure what enforcement *would* have refused.
-                if over_limit {
-                    row.denials[idx].fetch_add(1, Ordering::Relaxed);
-                }
+                granted(row, idx, over_limit);
                 return Ok(());
             }
             Err(observed) => packed = observed,
         }
     }
+}
+
+/// Debit a row's own share, against its ceiling when that bounds the process.
+fn charge_own(
+    row: &AccountRow,
+    kind: ResourceKind,
+    n: u32,
+    mode: QuotaMode,
+    bounded: bool,
+) -> Result<(), ()> {
+    let idx = kind.index();
+    let limit = ceiling(row, idx, mode, bounded);
+    let mut own = row.own[idx].load(Ordering::Relaxed);
+    loop {
+        let Some(over_limit) = admit(row, idx, own.checked_add(n), limit, mode) else {
+            return Err(());
+        };
+        match row.own[idx].compare_exchange_weak(own, own + n, Ordering::Release, Ordering::Relaxed)
+        {
+            Ok(_) => {
+                granted(row, idx, over_limit);
+                return Ok(());
+            }
+            Err(observed) => own = observed,
+        }
+    }
+}
+
+/// The ceiling a debit is held to. `Off` consults none and so records no
+/// denial: a count that moved under `quota=off` would report refusals on a
+/// tier that refuses nothing.
+fn ceiling(row: &AccountRow, idx: usize, mode: QuotaMode, bounded: bool) -> u32 {
+    if !bounded || matches!(mode, QuotaMode::Off) {
+        return NO_LIMIT;
+    }
+    row.limit[idx].load(Ordering::Acquire)
+}
+
+/// Whether a debit reaching `next` may land, and whether it lands over the
+/// ceiling; a refusal is counted here.
+fn admit(
+    row: &AccountRow,
+    idx: usize,
+    next: Option<u32>,
+    limit: u32,
+    mode: QuotaMode,
+) -> Option<bool> {
+    let over_limit = next.is_none_or(|next| limit != NO_LIMIT && next > limit);
+    if next.is_none() || (over_limit && matches!(mode, QuotaMode::Enforce)) {
+        row.denials[idx].fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    Some(over_limit)
+}
+
+/// Counted even though the charge was granted: `quota=warn` exists to measure
+/// what enforcement *would* have refused.
+fn granted(row: &AccountRow, idx: usize, over_limit: bool) {
+    if over_limit {
+        row.denials[idx].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn release_own(row: &AccountRow, kind: ResourceKind, n: u32) {
+    let idx = kind.index();
+    let _ = row.own[idx].try_update(Ordering::Release, Ordering::Relaxed, |own| {
+        debug_assert!(own >= n, "account own-share underflow on {}", kind.name());
+        Some(own.saturating_sub(n))
+    });
 }
 
 /// Credit one row. Saturating rather than wrapping: an under-run is a
@@ -770,6 +859,10 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             let used = usage_used(usage);
             let peak = usage_peak(usage);
             let limit = row.limit[idx].load(Ordering::Acquire);
+            let bounded = match kind.scope() {
+                Scope::Principal => row.own[idx].load(Ordering::Acquire),
+                Scope::Subtree => used,
+            };
 
             if used > peak {
                 faults += 1;
@@ -780,12 +873,12 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
                     peak,
                 });
             }
-            if enforcing && limit != NO_LIMIT && used > limit {
+            if enforcing && limit != NO_LIMIT && bounded > limit {
                 faults += 1;
                 report(LedgerFault::OverLimit {
                     account,
                     kind,
-                    used,
+                    used: bounded,
                     limit,
                 });
             }
@@ -835,21 +928,7 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             if !seen {
                 continue;
             }
-            // Descendants debit through this row too, so `used` is the maps'
-            // own total only after their contribution is taken out.
-            let idx = ResourceKind::Pages.index();
-            let used = usage_used(row.usage[idx].load(Ordering::Acquire));
-            let mut descendants = 0u32;
-            for (child_slot, child) in rows_in_use() {
-                if child_slot == slot || !child.live.load(Ordering::Acquire) {
-                    continue;
-                }
-                if parent_of(child) == account {
-                    descendants = descendants
-                        .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
-                }
-            }
-            let own = used.saturating_sub(descendants);
+            let own = row.own[ResourceKind::Pages.index()].load(Ordering::Acquire);
             if mapped != charged || own != charged {
                 faults += 1;
                 report(LedgerFault::PagesMismatch {
@@ -928,7 +1007,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
     use std::thread;
 
-    use slopos_abi::quota::FdSlot;
+    use slopos_abi::quota::{FdSlot, ProcCount};
 
     use crate::process::account::alloc_generation_for_test;
     use crate::test_support::global_lock::{GlobalTestStateGuard, lock_global_test_state};
@@ -1007,14 +1086,14 @@ mod tests {
         let _f = fixture();
         let parent = account(1, root());
         let leaf = account(2, parent);
-        set_limit(parent, ResourceKind::FdSlot, 2);
+        set_limit(parent, ResourceKind::Process, 2);
 
-        try_charge::<FdSlot>(leaf, 5).expect_err("the parent ceiling refuses");
+        try_charge::<ProcCount>(leaf, 5).expect_err("the parent ceiling refuses");
 
-        let held = stats(leaf, ResourceKind::FdSlot).expect("row");
+        let held = stats(leaf, ResourceKind::Process).expect("row");
         assert_eq!(held.used, 0, "a refused batch must leave no debit");
         assert_eq!(held.peak, 5, "but the leaf did hold it");
-        let refused = stats(parent, ResourceKind::FdSlot).expect("row");
+        let refused = stats(parent, ResourceKind::Process).expect("row");
         assert_eq!(
             refused.peak, 0,
             "the refusing row never held the amount, so its peak must not move"
@@ -1128,8 +1207,10 @@ mod tests {
 
         let held = try_charge::<FdSlot>(child, 3).expect("charge");
         assert_eq!((used(root()), used(parent), used(child)), (3, 0, 3));
-        set_limit(root(), ResourceKind::FdSlot, 4);
-        try_charge::<FdSlot>(child, 2).expect_err("the root ceiling still applies");
+        set_limit(root(), ResourceKind::Process, 4);
+        let tree = try_charge::<ProcCount>(child, 3).expect("under the root ceiling");
+        try_charge::<ProcCount>(child, 2).expect_err("the root ceiling still applies");
+        drop(tree);
         drop(held);
         assert_eq!((used(root()), used(child)), (0, 0));
     }

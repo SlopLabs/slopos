@@ -114,6 +114,19 @@ impl ResourceKind {
         }
     }
 
+    /// What a row's ceiling for this kind bounds.
+    #[inline]
+    pub const fn scope(self) -> Scope {
+        match self {
+            // A fork bomb is a tree: a ceiling on one process's own children
+            // bounds nothing a grandchild cannot take.
+            ResourceKind::Process => Scope::Subtree,
+            // The machine's ceiling sits on the root, and must see every promise.
+            ResourceKind::CommitPages => Scope::Subtree,
+            _ => Scope::Principal,
+        }
+    }
+
     /// The errno a refused charge is reported as — always the code the call site
     /// already returns on its own capacity failure, so enforcement mints no new
     /// code at the ABI boundary.
@@ -131,6 +144,17 @@ impl ResourceKind {
             ResourceKind::DiskBlocks => Errno::ENOSPC,
         }
     }
+}
+
+/// Which holdings a row's ceiling is compared against. Every charge is counted
+/// on every ancestor either way; the scope decides only what a limit bounds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope {
+    /// What the row's own process holds — an `RLIMIT_*`, which a child does
+    /// not spend from its parent's.
+    Principal,
+    /// Everything charged through the row, its descendants' holdings included.
+    Subtree,
 }
 
 /// What one unit of a kind measures. Display only — the arena counts `u32`s
@@ -204,12 +228,12 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // The ceiling is the machine's, on the root row, derived from usable
         // RAM at boot; per process, `RLIMIT_AS` already bounds what one can ask.
         ResourceKind::CommitPages => NO_LIMIT_SENTINEL,
-        // 32 MiB of blocks at 4 KiB, against a measured worst of 3875 (the
-        // tests image's disk-reserve filler). Bounds a process's *outstanding*
-        // allocations, not its footprint: ext2 records no owner, so the charge
-        // is released when the process is retired and a file it leaves behind
-        // costs a later one nothing.
-        ResourceKind::DiskBlocks => 8192,
+        // 256 MiB of blocks at 4 KiB, against a measured worst of 22989: the
+        // linker writing the 94 MB tests kernel on the dev disk. Bounds a
+        // process's *outstanding* allocations, not its footprint: ext2 records
+        // no owner, so the charge is released when the process is retired and
+        // a file it leaves behind costs a later one nothing.
+        ResourceKind::DiskBlocks => 65536,
     }
 }
 
