@@ -29,7 +29,9 @@ fn workspace() -> Result<(String, String), bool> {
 }
 
 /// `scripts/build_kernel.sh` run by `/bin/shell` over the dev disk's tree,
-/// with nothing on `PATH` but the staged toolchain and the coreutils.
+/// with nothing on `PATH` but the staged toolchain and the coreutils. Its
+/// output streams to the console: the build takes hours under emulation, and
+/// the last crate cargo named is where a stuck one stopped.
 fn guest_builds(variant: &str, features: &[&str]) -> bool {
     let (root, prefix) = match workspace() {
         Ok(w) => w,
@@ -38,7 +40,7 @@ fn guest_builds(variant: &str, features: &[&str]) -> bool {
     let elf = format!("{root}/builddir/kernel-{variant}.elf");
     let _ = fs::remove_file(&elf);
     let started = Instant::now();
-    let out = Command::new("/bin/shell")
+    let status = Command::new("/bin/shell")
         .args(["scripts/build_kernel.sh", "builddir", "builddir/target"])
         .args(features)
         .current_dir(&root)
@@ -46,21 +48,16 @@ fn guest_builds(variant: &str, features: &[&str]) -> bool {
         .env("CARGO_HOME", format!("{DEVEL}/cargo-home"))
         .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
-        .output();
-    let out = match out {
-        Ok(out) => out,
+        .status();
+    let status = match status {
+        Ok(status) => status,
         Err(e) => {
             note(&format!("spawning /bin/shell: {e}"));
             return false;
         }
     };
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<_> = stderr.lines().rev().take(30).collect();
-        for line in tail.iter().rev() {
-            note(line);
-        }
-        note(&format!("build_kernel.sh exited {:?}", out.status.code()));
+    if !status.success() {
+        note(&format!("build_kernel.sh exited {:?}", status.code()));
         return false;
     }
     match fs::metadata(&elf) {
