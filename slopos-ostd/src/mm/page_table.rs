@@ -309,6 +309,15 @@ pub(crate) fn refund_page_table_frame() {
     PAGE_TABLE_PAGES.shrink(1);
 }
 
+#[cfg(feature = "test-helpers")]
+static WALKS: AtomicU64 = AtomicU64::new(0);
+
+/// Page-table walks begun since boot, on every CPU.
+#[cfg(feature = "test-helpers")]
+pub fn walks_for_test() -> u64 {
+    WALKS.load(Ordering::Relaxed)
+}
+
 pub(crate) fn walk_to_leaf(
     pml4_phys: Paddr,
     vaddr: VirtAddr,
@@ -316,6 +325,8 @@ pub(crate) fn walk_to_leaf(
     mode: WalkMode,
     target_level: PageTableLevel,
 ) -> Result<WalkOutcome, WalkError> {
+    #[cfg(feature = "test-helpers")]
+    WALKS.fetch_add(1, Ordering::Relaxed);
     debug_assert!(
         target_level != PageTableLevel::Four,
         "walk_to_leaf target_level cannot be Four — PML4 entries are never leaves"

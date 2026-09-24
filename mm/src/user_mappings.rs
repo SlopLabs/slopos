@@ -502,6 +502,37 @@ pub fn ostd_is_user_accessible_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> bo
         && cur.property.user
 }
 
+/// The first present 4 KiB leaf in `[from, to)`: its address, frame and flags.
+/// An empty subtree is stepped over whole, so a sparse range costs what it
+/// maps rather than its span; a huge leaf is stepped over like an empty one.
+pub fn ostd_next_leaf_4kb(
+    vm_space: &KArc<VmSpace>,
+    from: VirtAddr,
+    to: VirtAddr,
+) -> Option<(VirtAddr, PhysAddr, PageFlags)> {
+    let mut cursor = vm_space.cursor(from..to).ok()?;
+    loop {
+        let entry = cursor.query().ok()?;
+        match entry.paddr {
+            Some(paddr) if entry.level == slopos_ostd::mm::page_table::PageTableLevel::One => {
+                return Some((
+                    entry.vaddr,
+                    PhysAddr::new(paddr.as_u64()),
+                    property_to_page_flags(entry.property),
+                ));
+            }
+            _ => {
+                let next = (entry.vaddr.as_u64() & entry.level.align_mask())
+                    .checked_add(entry.level.entry_size())?;
+                if next >= to.as_u64() {
+                    return None;
+                }
+                cursor.seek(VirtAddr::new(next)).ok()?;
+            }
+        }
+    }
+}
+
 /// Physical address backing the 4 KiB user leaf at `va`, or `PhysAddr::null()`
 /// if no 4 KiB leaf is present — a huge leaf reads as null too.
 pub fn ostd_virt_to_phys_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> PhysAddr {

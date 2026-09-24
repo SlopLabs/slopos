@@ -25,8 +25,8 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::tlb::TlbProcessKey;
 use crate::user_mappings::{
-    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared,
-    ostd_mark_cow_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
+    ostd_map_4kb_user, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
+    ostd_next_leaf_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user,
 };
 use crate::vma_region::{
     Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion,
@@ -713,15 +713,29 @@ fn unmap_and_free_range_inner(
         .vm_space
         .as_mut()
         .expect("unmap_and_free_range_inner: vm_space present for live process");
-    let mut freed = 0u32;
-    let mut addr = start;
-    while addr < end {
-        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
-            freed += 1;
+    unmap_present_leaves(vm_space, start, end, ostd_unmap_4kb_user).map_err(|e| e.err)
+}
+
+/// Unmap each present 4 KiB leaf of `[start, end)` with `unmap`, stepping over
+/// empty subtrees, and count the leaves `unmap` found.
+fn unmap_present_leaves(
+    vm_space: &mut KArc<VmSpace>,
+    start: u64,
+    end: u64,
+    unmap: fn(&mut KArc<VmSpace>, VirtAddr) -> Result<bool, MapError>,
+) -> Result<u32, UnmapRegionError> {
+    let end = VirtAddr::new(end);
+    let mut from = VirtAddr::new(start);
+    let mut unmapped = 0u32;
+    while let Some((va, _, _)) = ostd_next_leaf_4kb(vm_space, from, end) {
+        from = VirtAddr::new(va.as_u64() + PAGE_SIZE_4KB);
+        match unmap(vm_space, va) {
+            Ok(true) => unmapped += 1,
+            Ok(false) => {}
+            Err(err) => return Err(unmap_region_error(err, va.as_u64(), unmapped)),
         }
-        addr += PAGE_SIZE_4KB;
     }
-    Ok(freed)
+    Ok(unmapped)
 }
 
 /// Pages an exec places before its caller regains control: the image's
@@ -937,17 +951,7 @@ fn unmap_and_free_range_dir(
     if !vma_range_valid(start, end) {
         return Ok(0);
     }
-    let mut present = 0u32;
-    let mut addr = start;
-    while addr < end {
-        match ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
-            Ok(true) => present += 1,
-            Ok(false) => {}
-            Err(err) => return Err(unmap_region_error(err, addr, present)),
-        }
-        addr += PAGE_SIZE_4KB;
-    }
-    Ok(present)
+    unmap_present_leaves(vm_space, start, end, ostd_unmap_4kb_user)
 }
 
 /// Unmap a SlopRing mapping range. Each page's PTE holds its own ref on the
@@ -962,28 +966,32 @@ fn unmap_ring_range_dir(
     if !vma_range_valid(start, end) {
         return Ok(0);
     }
-    let mut unmapped = 0u32;
-    let mut addr = start;
-    while addr < end {
-        match crate::user_mappings::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr)) {
-            Ok(true) => unmapped += 1,
-            Ok(false) => {}
-            Err(err) => {
-                if unmapped > 0 {
-                    tlb::flush_all_for_process(key);
-                }
-                return Err(unmap_region_error(err, addr, unmapped));
-            }
-        }
-        addr += PAGE_SIZE_4KB;
-    }
     // The cursor-unmap issues only a local INVLPG, and a ring region is
     // routinely re-created at the same VA, so a migrated task could read the
     // prior ring's stale translation without a process-wide shootdown.
-    if unmapped > 0 {
+    flushed_after(
+        key,
+        unmap_present_leaves(
+            vm_space,
+            start,
+            end,
+            crate::user_mappings::ostd_unmap_ring_4kb_user,
+        ),
+    )
+}
+
+fn flushed_after(
+    key: TlbProcessKey,
+    unmapped: Result<u32, UnmapRegionError>,
+) -> Result<u32, UnmapRegionError> {
+    let any = match &unmapped {
+        Ok(n) => *n,
+        Err(e) => e.present,
+    };
+    if any > 0 {
         tlb::flush_all_for_process(key);
     }
-    Ok(unmapped)
+    unmapped
 }
 
 /// Unmap shared-memfd pages. Each unmap drops only this mapping's MetaSlot
@@ -998,25 +1006,10 @@ fn unmap_range_nofree_dir(
     if !vma_range_valid(start, end) {
         return Ok(0);
     }
-    let mut unmapped = 0u32;
-    let mut addr = start;
-    while addr < end {
-        match ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr)) {
-            Ok(true) => unmapped += 1,
-            Ok(false) => {}
-            Err(err) => {
-                if unmapped > 0 {
-                    tlb::flush_all_for_process(key);
-                }
-                return Err(unmap_region_error(err, addr, unmapped));
-            }
-        }
-        addr += PAGE_SIZE_4KB;
-    }
-    if unmapped > 0 {
-        tlb::flush_all_for_process(key);
-    }
-    Ok(unmapped)
+    flushed_after(
+        key,
+        unmap_present_leaves(vm_space, start, end, ostd_unmap_4kb_user),
+    )
 }
 
 type VmaOverlap = (u64, u64, VmaRegion);
@@ -2930,44 +2923,31 @@ fn clone_cow_snapshot_parent(
         }
         let mut snapshot: ClonePageChunks = KVec::new();
         let is_shared = region.is_shared();
-        let mut addr = vma_start;
-        while addr < vma_end {
-            let vaddr = VirtAddr::new(addr);
-            let phys = ostd_virt_to_phys_4kb(parent_vm_space_ref, vaddr);
-            if !phys.is_null() {
-                if let Some(flags) = ostd_get_pte_flags_4kb(parent_vm_space_ref, vaddr) {
-                    let keep = is_shared || flags.contains(PageFlags::USER);
-                    if keep {
-                        let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(
-                            phys.as_u64(),
-                        )) {
-                            Ok(frame) => frame,
-                            Err(err) => {
-                                klog_info!(
-                                    "process_vm_clone_cow: parent page {:#x} has no live frame: {:?}",
-                                    addr,
-                                    err
-                                );
-                                return None;
-                            }
-                        };
-                        push_clone_snapshot(&mut snapshot, (addr, frame, flags.bits())).ok()?;
-                        if !is_shared
-                            && flags.contains(PageFlags::USER)
-                            && flags.contains(PageFlags::WRITABLE)
-                        {
-                            if let Err(err) = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr) {
-                                klog_info!(
-                                    "process_vm_clone_cow: parent COW mark failed: {:?}",
-                                    err
-                                );
-                                return None;
-                            }
-                        }
-                    }
+        let end = VirtAddr::new(vma_end);
+        let mut from = VirtAddr::new(vma_start);
+        while let Some((vaddr, phys, flags)) = ostd_next_leaf_4kb(parent_vm_space_ref, from, end) {
+            from = VirtAddr::new(vaddr.as_u64() + PAGE_SIZE_4KB);
+            if !is_shared && !flags.contains(PageFlags::USER) {
+                continue;
+            }
+            let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(phys.as_u64())) {
+                Ok(frame) => frame,
+                Err(err) => {
+                    klog_info!(
+                        "process_vm_clone_cow: parent page {:#x} has no live frame: {:?}",
+                        vaddr.as_u64(),
+                        err
+                    );
+                    return None;
+                }
+            };
+            push_clone_snapshot(&mut snapshot, (vaddr.as_u64(), frame, flags.bits())).ok()?;
+            if !is_shared && flags.contains(PageFlags::WRITABLE) {
+                if let Err(err) = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr) {
+                    klog_info!("process_vm_clone_cow: parent COW mark failed: {:?}", err);
+                    return None;
                 }
             }
-            addr += PAGE_SIZE_4KB;
         }
         vmas.push((vma_start, vma_end, region.clone(), snapshot))
             .ok()?;

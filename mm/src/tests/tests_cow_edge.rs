@@ -324,6 +324,54 @@ pub fn test_cow_clone_survives_a_sibling_unmap() -> TestResult {
     pass!()
 }
 
+/// Fork and exec walk the pages a process maps, not the span it reserved: an
+/// empty subtree of the page table is one step, however much of it a VMA covers.
+pub fn test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved() -> TestResult {
+    use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_NORESERVE, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+    use slopos_ostd::mm::page_table::walks_for_test;
+    const SPAN: u64 = 1 << 30;
+    const BOUND: u64 = SPAN / PAGE_SIZE_4KB / 64;
+
+    let Some(parent) = ProcessVmGuard::new() else {
+        return fail!("create parent VM");
+    };
+    let addr = crate::process_vm::process_vm_mmap(
+        parent.process,
+        0,
+        SPAN,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+        -1,
+        0,
+    );
+    assert_test!(addr != 0, "the reservation was refused");
+
+    let before = walks_for_test();
+    let child = parent.clone_cow();
+    let forked = walks_for_test() - before;
+    let Some(child) = child else {
+        return fail!("the fork failed");
+    };
+    let before = walks_for_test();
+    let reset = crate::process_vm::process_vm_reset_for_exec(child.process);
+    let execed = walks_for_test() - before;
+
+    assert_test!(reset == 0, "resetting the child for exec failed");
+    assert_test!(
+        forked < BOUND,
+        "forking a {} MiB reservation took {} page-table walks",
+        SPAN >> 20,
+        forked
+    );
+    assert_test!(
+        execed < BOUND,
+        "resetting a {} MiB reservation for exec took {} page-table walks",
+        SPAN >> 20,
+        execed
+    );
+    pass!()
+}
+
 pub fn test_cow_multiple_clones() -> TestResult {
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
@@ -485,6 +533,10 @@ pub fn test_write_fault_on_a_read_only_page_stays_fatal() -> TestResult {
 slopos_testing::stest!(name = test_cow_read_not_cow_fault, suite = cow_edge);
 slopos_testing::stest!(
     name = test_cow_clone_survives_a_sibling_unmap,
+    suite = cow_edge
+);
+slopos_testing::stest!(
+    name = test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved,
     suite = cow_edge
 );
 slopos_testing::stest!(name = test_cow_not_present_not_cow, suite = cow_edge);
