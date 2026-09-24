@@ -12,7 +12,7 @@ use super::per_cpu::{
 use super::task::TaskRef;
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
-use slopos_ostd::kdiag_timestamp;
+use slopos_ostd::{kdiag_timestamp, klog_info};
 
 /// Minimum load difference between victim and thief before a task is moved. At
 /// a 1-task difference the move creates a reverse imbalance → ping-pong.
@@ -143,7 +143,13 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<TaskRef> {
 /// releases the reference; the task keeps its other owners and the rescue sweep
 /// re-publishes it.
 fn return_to_victim(victim: usize, task: TaskRef) {
-    let _ = enqueue_task_on_cpu(victim, &task);
+    if enqueue_task_on_cpu(victim, &task) < 0 {
+        klog_info!(
+            "SCHED: CPU {} refused migrating task {} back",
+            victim,
+            task.task_id
+        );
+    }
     crate::task::task_put(task);
 }
 

@@ -2137,11 +2137,21 @@ pub(crate) fn rescue_stranded_ready_tasks() {
     {
         return;
     }
+    rescue_sweep();
+}
+
+fn rescue_sweep() {
     let seq = RESCUE_SWEEP_SEQ
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     CURRENT_RESCUE_SWEEP.store(seq, Ordering::Relaxed);
     super::task::task_for_each_active(rescue_check_task);
+}
+
+/// One rescue sweep, without the cooldown that spaces the idle loop's.
+#[cfg(feature = "test-hooks")]
+pub fn rescue_sweep_now_for_test() {
+    rescue_sweep();
 }
 
 /// Consecutive-sweep strike tracking: normal creation and wake/dispatch paths
@@ -2239,7 +2249,9 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
         return;
     }
     let placement = t.sched_placement();
-    if placement_is_durable_owner(placement) {
+    // `Migrating` owns a task only while a thief carries it, which is one
+    // steal's length: unlinked everywhere across consecutive sweeps, it was dropped.
+    if placement_is_durable_owner(placement) && placement != SchedPlacement::Migrating {
         return;
     }
     if !rescue_strike(t.task_id) {
@@ -2249,12 +2261,10 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
     // that already lost the normal enqueue. A leaked `Waking` reservation is
     // completed as `Waking`; Ready+Waking is not a durable scheduler owner.
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let enqueue_status = per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        if placement == SchedPlacement::Waking {
-            sched.enqueue_waking(guard)
-        } else {
-            sched.enqueue_local_with_status(guard)
-        }
+    let enqueue_status = per_cpu::with_cpu_scheduler(cpu_id, |sched| match placement {
+        SchedPlacement::Waking => sched.enqueue_waking(guard),
+        SchedPlacement::Migrating => sched.enqueue_migrated_borrowed(guard),
+        _ => sched.enqueue_local_with_status(guard),
     })
     .unwrap_or(-1);
     if enqueue_status == 0 {

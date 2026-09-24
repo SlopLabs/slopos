@@ -301,6 +301,51 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A task left `Migrating` with no thief carrying it and no queue holding it is
+/// republished once consecutive rescue sweeps agree, instead of never running.
+pub fn test_rescue_sweep_republishes_an_orphaned_migrating_task() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"OrphanMigrant\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Low.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return slopos_testing::fail!("could not create the task");
+    }
+    let Some(task) = task_find_by_id(task_id) else {
+        return slopos_testing::fail!("task lookup failed");
+    };
+    let orphaned = task_set_state(task_id, TaskStatus::Ready) == 0
+        && task.sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::Migrating);
+    if !orphaned {
+        drop(task);
+        let _ = task_terminate(task_id);
+        return slopos_testing::fail!("could not leave the task Ready and Migrating");
+    }
+
+    for _ in 0..4 {
+        scheduler::rescue_sweep_now_for_test();
+    }
+    let placement = task.sched_placement();
+    drop(task);
+    let _ = task_terminate(task_id);
+
+    slopos_testing::assert_test!(
+        placement != SchedPlacement::Migrating,
+        "the orphaned task is still Migrating after four sweeps"
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_rescue_sweep_republishes_an_orphaned_migrating_task,
+    suite = sched_core
+);
+
 /// A CPU publishes the priority of the task it dispatches, and returns to the
 /// "nothing schedulable" sentinel when it parks on a bootstrap stub.
 ///
