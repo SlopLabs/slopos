@@ -194,6 +194,54 @@ fn test_segment_release() -> bool {
     after.arena_size < peak.arena_size
 }
 
+fn test_free_chunks_are_reused_before_the_arena_grows() -> bool {
+    use slopos_slibc::mem::malloc::heap_stats;
+
+    const BIG: usize = 48 * 1024;
+    const REQUEST: usize = 40 * 1024;
+
+    // Keepers between the chunks stop any two frees from coalescing.
+    let mut keepers = Vec::new();
+    let mut bigs = Vec::new();
+    for _ in 0..4 {
+        let (Some(big), Some(keeper)) = (RawBuffer::new(BIG), RawBuffer::new(64)) else {
+            return false;
+        };
+        bigs.push(big);
+        keepers.push(keeper);
+    }
+    let mut smalls = Vec::new();
+    for _ in 0..64 {
+        let (Some(small), Some(keeper)) = (RawBuffer::new(512), RawBuffer::new(64)) else {
+            return false;
+        };
+        smalls.push(small);
+        keepers.push(keeper);
+    }
+    // Nothing free may fit the request but the big chunks about to be freed.
+    let mut plugs = Vec::new();
+    while heap_stats().largest_free >= REQUEST {
+        let Some(plug) = RawBuffer::new(REQUEST - 4 * 1024) else {
+            return false;
+        };
+        plugs.push(plug);
+    }
+
+    // Freed last, the small chunks are what a bounded sort of the unsorted
+    // list reaches first; the big ones sit past it.
+    drop(bigs);
+    drop(smalls);
+    let before = heap_stats().arena_size;
+    let Some(served) = RawBuffer::new(REQUEST) else {
+        return false;
+    };
+    let grew = heap_stats().arena_size != before;
+    drop(served);
+    drop(plugs);
+    drop(keepers);
+    !grew
+}
+
 fn test_direct_registry() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
@@ -227,6 +275,10 @@ fn main() {
         ("small_recycling", test_small_recycling),
         ("mass_free_then_realloc", test_mass_free_then_realloc),
         ("segment_release", test_segment_release),
+        (
+            "free_chunks_are_reused_before_the_arena_grows",
+            test_free_chunks_are_reused_before_the_arena_grows,
+        ),
         ("direct_registry", test_direct_registry),
         (
             "simd_fill_survives_demand_fault",
