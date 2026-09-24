@@ -85,8 +85,8 @@ fn a_link_that_left_its_wait_breaks_the_cycle() {
 
 #[test]
 fn an_edge_being_republished_is_not_believed() {
-    const A: usize = 40;
-    const B: usize = 41;
+    const A: usize = 42;
+    const B: usize = 43;
     reset_slot(A);
     reset_slot(B);
 
