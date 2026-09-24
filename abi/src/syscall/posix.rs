@@ -82,12 +82,10 @@ impl Timeval {
 
 /// Linux x86-64's `struct rusage`, as `wait4` reports a child's.
 ///
-/// `ru_utime` carries all of the child's CPU time, because the kernel does not
-/// tell user time from system time: its own, and that of every thread that
-/// had exited when it did. `ru_maxrss` is the most it had resident at once, in
-/// KiB. Neither counts the child's own reaped children, which Linux's do.
-/// Every other field is one SlopOS does not maintain and reads zero, as the
-/// ones Linux does not maintain do there.
+/// `ru_utime` holds all of the child's CPU time, since the kernel does not
+/// split user from system time, including threads that exited before it;
+/// `ru_maxrss` is its resident peak up to then, in KiB. Neither includes the
+/// child's reaped children, as Linux's do, and every other field reads zero.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rusage {

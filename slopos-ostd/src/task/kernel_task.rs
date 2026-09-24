@@ -1746,8 +1746,7 @@ impl<K, U> TaskInner<K, U> {
         self.parked_wait_queue = AtomicPtr::new(ptr::null_mut());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
-        // The parent's round trip would aim the child's first dispatch's trap
-        // stack at the parent's kernel stack; a child has none until it runs.
+        // The parent's round trip lives on the parent's kernel stack.
         self.saved_user_ctx_ptr = AtomicPtr::new(ptr::null_mut());
         self.saved_kernel_return_ctx = TaskOwnCell::new(KernelReturnContext::default());
         // Authority copies — the child is the same principal — but written

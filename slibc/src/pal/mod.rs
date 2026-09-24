@@ -108,8 +108,7 @@ pub trait Pal {
     fn fork() -> Result<i32, Errno>;
     fn exec(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> Result<(), Errno>;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> Result<i32, Errno>;
-    /// `wait4(2)`. `rusage` is a [`crate::types::rusage`] or null; this kernel
-    /// accounts none of it, so a non-null one is refused rather than zeroed.
+    /// `wait4(2)`. `rusage` is a [`crate::types::rusage`] or null.
     fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut u8) -> Result<i32, Errno>;
     fn exit(code: i32) -> !;
     fn getpid() -> i32;

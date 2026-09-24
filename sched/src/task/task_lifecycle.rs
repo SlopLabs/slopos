@@ -427,13 +427,8 @@ fn task_leaves_process(task: &Task) -> bool {
 /// written the user-mode register state to `task.user_ctx`.
 ///
 /// The slot sits 16 bytes below the top so that, once `ret` pops it, RSP is
-/// `8 mod 16` as the SystemV ABI requires at function entry.
-///
-/// # Safety
-/// Caller must ensure that the slot is writable, properly aligned, and not
-/// concurrently accessed. This is upheld by the surrounding `task_create` /
-/// `task_fork` / `task_clone` paths, where the kernel stack was just allocated
-/// and no other CPU can observe it.
+/// `8 mod 16` as the SystemV ABI requires at function entry. The stack must be
+/// one just allocated for the task, which no other CPU can observe yet.
 pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
     let entry = slopos_ostd::task::user_task_entry_addr();
     let ret_addr_slot = kernel_stack_top - 16;

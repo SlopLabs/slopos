@@ -302,7 +302,7 @@ pub fn test_cow_clone_survives_a_sibling_unmap() -> TestResult {
 
     RACED_PARENT.store(parent.pid(), Ordering::Relaxed);
     RACED_ADDR.store(addr, Ordering::Relaxed);
-    crate::process_vm::set_clone_window_hook(Some(unmap_the_raced_page));
+    crate::process_vm::set_clone_window_hook(Some((parent.pid(), unmap_the_raced_page)));
     let child = parent.clone_cow();
     crate::process_vm::set_clone_window_hook(None);
 

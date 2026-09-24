@@ -2101,7 +2101,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "catclose(catd: *mut c_void) -> c_int",
         ],
         variables: &[],
-        // POSIX names the handle type, and the contract has no reason to.
+        // POSIX's name for the handle, which the contract spells `*mut c_void`.
         raw: &["typedef void *nl_catd;"],
         raw_unguarded: &[],
     },
