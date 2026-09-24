@@ -52,7 +52,7 @@ mod tests {
     use crate::process::AccountId;
     use crate::process::account::alloc_generation_for_test;
     use crate::test_support::global_lock::{GlobalTestStateGuard, lock_global_test_state};
-    use slopos_abi::quota::{FdSlot, ObjectRow, QuotaMode, ResourceKind};
+    use slopos_abi::quota::{FdSlot, ObjectRow, ProcCount, QuotaMode, ResourceKind};
 
     /// A fresh account on `slot`, debiting through `parent`. The generation
     /// comes from the global counter, so no two accounts in a run share one
@@ -114,24 +114,71 @@ mod tests {
         let _f = fixture();
         let parent = account(1, root());
         let child = account(2, parent);
-        set_limit(parent, ResourceKind::FdSlot, 4);
+        set_limit(parent, ResourceKind::Process, 4);
 
-        let held = Charge::commit(try_charge::<FdSlot>(child, 4).expect("fill the parent"));
-        assert_eq!(used(child, ResourceKind::FdSlot), 4);
+        let held = Charge::commit(try_charge::<ProcCount>(child, 4).expect("fill the parent"));
+        assert_eq!(used(child, ResourceKind::Process), 4);
 
-        let refused = try_charge::<FdSlot>(child, 1).expect_err("the parent is full");
+        let refused = try_charge::<ProcCount>(child, 1).expect_err("the parent is full");
         assert_eq!(refused.refused_by, parent, "the refusing level is named");
-        assert_eq!(refused.errno, slopos_abi::Errno::EMFILE);
+        assert_eq!(refused.errno, slopos_abi::Errno::EAGAIN);
         assert_eq!(
-            used(child, ResourceKind::FdSlot),
+            used(child, ResourceKind::Process),
             4,
             "the leaf debit must be unwound, not left behind"
         );
-        assert_eq!(used(parent, ResourceKind::FdSlot), 4);
+        assert_eq!(used(parent, ResourceKind::Process), 4);
 
         drop(held);
-        assert_eq!(used(child, ResourceKind::FdSlot), 0);
+        assert_eq!(used(child, ResourceKind::Process), 0);
+        assert_eq!(used(parent, ResourceKind::Process), 0);
+    }
+
+    /// A per-process ceiling is an `RLIMIT_*`: what a child holds is its own,
+    /// and never spends the parent's.
+    #[test]
+    fn a_principal_ceiling_bounds_the_process_not_its_descendants() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        set_limit(parent, ResourceKind::FdSlot, 4);
+
+        let childs = Charge::commit(try_charge::<FdSlot>(child, 10).expect("the child's own"));
+        assert_eq!(
+            used(parent, ResourceKind::FdSlot),
+            10,
+            "still counted above"
+        );
+        let parents = Charge::commit(try_charge::<FdSlot>(parent, 4).expect("the parent's own"));
+        let refused = try_charge::<FdSlot>(parent, 1).expect_err("the parent's own is full");
+        assert_eq!(refused.refused_by, parent);
+        assert_eq!(used(parent, ResourceKind::FdSlot), 14);
+
+        drop(parents);
+        let refilled = Charge::commit(try_charge::<FdSlot>(parent, 4).expect("refunded own"));
+        drop(refilled);
+        drop(childs);
         assert_eq!(used(parent, ResourceKind::FdSlot), 0);
+    }
+
+    /// The share a released child hands up is its own, not the ancestor's, so
+    /// it leaves the ancestor's per-process headroom where it was.
+    #[test]
+    fn a_released_childs_share_does_not_spend_the_parents_own() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        set_limit(parent, ResourceKind::FdSlot, 2);
+
+        let parents = Charge::commit(try_charge::<FdSlot>(parent, 2).expect("the parent's own"));
+        let outlives = Charge::commit(try_charge::<FdSlot>(child, 3).expect("the child's own"));
+        account_release(child);
+        assert_eq!(used(parent, ResourceKind::FdSlot), 2);
+
+        drop(outlives);
+        drop(parents);
+        let refilled = Charge::commit(try_charge::<FdSlot>(parent, 2).expect("own intact"));
+        drop(refilled);
     }
 
     /// L2 as a step property: no successful charge leaves `used > limit`.
