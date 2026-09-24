@@ -766,6 +766,13 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
             SigDefault::Ignore | SigDefault::Continue => SignalDisposition::Done,
             SigDefault::Stop => SignalDisposition::Stop { signum },
             SigDefault::Terminate => {
+                slopos_ostd::klog_info!(
+                    "SIGNAL: task {} of process {} dies of signal {} from task {}",
+                    task_ref.task_id,
+                    task_ref.tgid,
+                    signum,
+                    sender
+                );
                 task_ref
                     .exit_reason
                     .store(TaskExitReason::Signalled.as_u16(), Ordering::Release);
