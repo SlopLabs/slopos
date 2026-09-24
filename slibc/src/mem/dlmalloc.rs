@@ -314,6 +314,31 @@ impl DlMalloc {
     }
 
     fn arena_alloc(&mut self, request_size: usize) -> *mut c_void {
+        let fit = self.arena_fit(request_size, UNSORTED_DRAIN_LIMIT);
+        if !fit.is_null() {
+            return fit;
+        }
+
+        // A chunk the bounded drain left unsorted is invisible to every fit, so
+        // growing here would map a segment while that memory sits free: the
+        // arena grows only once nothing already free can serve the request.
+        if !self.bins.unsorted_is_empty() {
+            let fit = self.arena_fit(request_size, usize::MAX);
+            if !fit.is_null() {
+                return fit;
+            }
+        }
+
+        let fresh = self.allocate_segment(request_size);
+        if fresh.is_null() {
+            return ptr::null_mut();
+        }
+        unsafe { self.allocate_from_chunk(fresh, request_size) }
+    }
+
+    /// Serve `request_size` from free chunks, sorting at most `drain_limit`
+    /// unsorted ones first; null if nothing sorted by then fits.
+    fn arena_fit(&mut self, request_size: usize, drain_limit: usize) -> *mut c_void {
         if let Some(bin_idx) = bins::size_to_small_bin(request_size)
             && !self.bins.is_empty(bin_idx)
         {
@@ -323,7 +348,7 @@ impl DlMalloc {
             }
         }
 
-        let unsorted_match = unsafe { self.drain_unsorted(request_size) };
+        let unsorted_match = unsafe { self.drain_unsorted(request_size, drain_limit) };
         if !unsorted_match.is_null() {
             return unsorted_match;
         }
@@ -342,12 +367,7 @@ impl DlMalloc {
         if !large_fit.is_null() {
             return unsafe { self.allocate_from_chunk(large_fit, request_size) };
         }
-
-        let fresh = self.allocate_segment(request_size);
-        if fresh.is_null() {
-            return ptr::null_mut();
-        }
-        unsafe { self.allocate_from_chunk(fresh, request_size) }
+        ptr::null_mut()
     }
 
     /// Map a fresh arena segment sized to serve `request_size`, format it as
@@ -554,9 +574,9 @@ impl DlMalloc {
         unsafe { chunk::data_ptr(chunk_ptr).cast::<c_void>() }
     }
 
-    unsafe fn drain_unsorted(&mut self, request_size: usize) -> *mut c_void {
+    unsafe fn drain_unsorted(&mut self, request_size: usize, limit: usize) -> *mut c_void {
         let mut drained = 0usize;
-        while drained < UNSORTED_DRAIN_LIMIT && !self.bins.unsorted_is_empty() {
+        while drained < limit && !self.bins.unsorted_is_empty() {
             let chunk_ptr = unsafe { self.bins.pop_unsorted_front() };
             if chunk_ptr.is_null() {
                 break;
