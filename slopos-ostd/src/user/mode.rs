@@ -331,13 +331,14 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
         "mov gs:[{krc} + {krc_r14}], r14",
         "mov gs:[{krc} + {krc_r15}], r15",
 
-        // The return address cannot stay on the kernel stack across the iretq:
-        // any interrupt that fires from user mode reuses `TSS.RSP0` (the
-        // per-task kernel stack top) and the ISR's pushes overwrite this
-        // region.
+        // A trap from user mode pushes from `TSS.RSP0`, which is this RSP: its
+        // chain grows away from the caller's frames rather than towards them,
+        // and it overwrites the return address, so that is kept in the PCR.
         "pop rax",
         "mov gs:[{krc} + {krc_rip}], rax",
         "mov gs:[{krc} + {krc_rsp}], rsp",
+        "mov gs:[{kernel_rsp}], rsp",
+        "mov gs:[{tss_rsp0}], rsp",
 
         // IRETQ frame order, top-of-stack last: SS, RSP, RFLAGS, CS, RIP.
         "push {sel_user_data}",
@@ -370,6 +371,8 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
         "iretq",
 
         krc = const crate::cpu::x86_64::pcr::offsets::KERNEL_RETURN_CTX,
+        kernel_rsp = const crate::cpu::x86_64::pcr::offsets::KERNEL_RSP,
+        tss_rsp0 = const crate::cpu::x86_64::pcr::offsets::TSS_RSP0,
         krc_rbx = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rbx),
         krc_rbp = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rbp),
         krc_r12 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r12),

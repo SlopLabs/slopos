@@ -31,12 +31,15 @@ pub fn gdt_init_for_cpu(cpu_id: usize) {
 
     klog_debug!("GDT: Initialized with TSS loaded for CPU {}", cpu_id);
 }
+/// The round trip owns `RSP0` once a task runs; this is the gdt tests' probe.
+#[cfg(feature = "test-hooks")]
 pub fn gdt_set_kernel_rsp0(rsp0: u64) {
     let cpu_id = get_current_cpu();
     gdt_set_kernel_rsp0_for_cpu(cpu_id, rsp0);
 }
 
-pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
+#[cfg(feature = "test-hooks")]
+fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
     if cpu_id >= MAX_CPUS {
         return;
     }

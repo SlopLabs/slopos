@@ -80,6 +80,37 @@ impl Timeval {
     }
 }
 
+/// Linux x86-64's `struct rusage`, as `wait4` reports a child's.
+///
+/// `ru_utime` carries all of the child's CPU time, because the kernel does not
+/// tell user time from system time: its own, and that of every thread that
+/// had exited when it did. `ru_maxrss` is the most it had resident at once, in
+/// KiB. Neither counts the child's own reaped children, which Linux's do.
+/// Every other field is one SlopOS does not maintain and reads zero, as the
+/// ones Linux does not maintain do there.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rusage {
+    pub ru_utime: Timeval,
+    pub ru_stime: Timeval,
+    pub ru_maxrss: i64,
+    pub ru_ixrss: i64,
+    pub ru_idrss: i64,
+    pub ru_isrss: i64,
+    pub ru_minflt: i64,
+    pub ru_majflt: i64,
+    pub ru_nswap: i64,
+    pub ru_inblock: i64,
+    pub ru_oublock: i64,
+    pub ru_msgsnd: i64,
+    pub ru_msgrcv: i64,
+    pub ru_nsignals: i64,
+    pub ru_nvcsw: i64,
+    pub ru_nivcsw: i64,
+}
+
+const _: () = assert!(core::mem::size_of::<Rusage>() == 144);
+
 /// Disable Nagle's algorithm (TCP only).
 pub const TCP_NODELAY: i32 = 1;
 

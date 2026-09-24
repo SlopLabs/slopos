@@ -56,8 +56,7 @@ const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 /// over a batch rather than paying per free. 1024 frames is 4 MiB held.
 const QUARANTINE_ADVANCE_FRAMES: u32 = 1024;
 
-/// Coalescing scans a free list to find the buddy, so bound how long one
-/// release pass holds the allocator's cli-lock.
+/// Bounds how long one release pass holds the allocator's cli-lock.
 const QUARANTINE_RELEASE_BATCH: u32 = 64;
 
 /// Release budget charged against every quarantining free, in pages not blocks.
@@ -111,6 +110,8 @@ pub(super) struct PageFrame {
     pub(super) order: u16,
     pub(super) region_id: u16,
     pub(super) next_free: u32,
+    /// The free list's back link, which is what makes a buddy's removal O(1).
+    pub(super) prev_free: u32,
 }
 
 #[derive(Default)]
@@ -220,48 +221,58 @@ impl BuddyInner {
     }
 
     fn free_list_push(&mut self, table: &RawTable<PageFrame>, order: u32, frame_num: u32) {
+        if !self.is_valid_frame(frame_num) {
+            return;
+        }
         let head = self.free_lists[order as usize];
+        if let Some(old_head) = self.frame_desc_mut(table, head) {
+            old_head.prev_free = frame_num;
+        }
         if let Some(frame) = self.frame_desc_mut(table, frame_num) {
             frame.next_free = head;
+            frame.prev_free = INVALID_PAGE_FRAME;
             frame.order = order as u16;
             frame.state = PAGE_FRAME_FREE;
             frame.flags = 0;
-            self.free_lists[order as usize] = frame_num;
         }
+        self.free_lists[order as usize] = frame_num;
     }
 
-    fn free_list_detach(
+    /// Take `frame_num` off the order-`order` list; `false` if it is not on
+    /// it, as the stale descriptor of a block merged into a larger one is not.
+    fn free_list_unlink(
         &mut self,
         table: &RawTable<PageFrame>,
         order: u32,
-        target_frame: u32,
+        frame_num: u32,
     ) -> bool {
-        let mut prev = INVALID_PAGE_FRAME;
-        let mut current = self.free_lists[order as usize];
-
-        while current != INVALID_PAGE_FRAME {
-            if current == target_frame {
-                let next = self
-                    .frame_desc_mut(table, current)
-                    .map(|f| f.next_free)
-                    .unwrap_or(INVALID_PAGE_FRAME);
-                if prev == INVALID_PAGE_FRAME {
-                    self.free_lists[order as usize] = next;
-                } else if let Some(prev_desc) = self.frame_desc_mut(table, prev) {
-                    prev_desc.next_free = next;
-                }
-                if let Some(curr_desc) = self.frame_desc_mut(table, current) {
-                    curr_desc.next_free = INVALID_PAGE_FRAME;
-                }
-                return true;
-            }
-            prev = current;
-            current = self
-                .frame_desc_mut(table, current)
-                .map(|f| f.next_free)
-                .unwrap_or(INVALID_PAGE_FRAME);
+        let Some((prev, next)) = self
+            .frame_desc_mut(table, frame_num)
+            .map(|f| (f.prev_free, f.next_free))
+        else {
+            return false;
+        };
+        let linked = match self.frame_desc_mut(table, prev) {
+            Some(prev_desc) => prev_desc.next_free == frame_num,
+            None => self.free_lists[order as usize] == frame_num,
+        } && self
+            .frame_desc_mut(table, next)
+            .is_none_or(|next_desc| next_desc.prev_free == frame_num);
+        if !linked {
+            return false;
         }
-        false
+        match self.frame_desc_mut(table, prev) {
+            Some(prev_desc) => prev_desc.next_free = next,
+            None => self.free_lists[order as usize] = next,
+        }
+        if let Some(next_desc) = self.frame_desc_mut(table, next) {
+            next_desc.prev_free = prev;
+        }
+        if let Some(frame) = self.frame_desc_mut(table, frame_num) {
+            frame.next_free = INVALID_PAGE_FRAME;
+            frame.prev_free = INVALID_PAGE_FRAME;
+        }
+        true
     }
 
     fn block_meets_flags(&self, frame_num: u32, order: u32, flags: u32) -> bool {
@@ -279,30 +290,18 @@ impl BuddyInner {
         order: u32,
         flags: u32,
     ) -> u32 {
-        let mut prev = INVALID_PAGE_FRAME;
         let mut current = self.free_lists[order as usize];
 
         while current != INVALID_PAGE_FRAME {
             if self.block_meets_flags(current, order, flags) {
-                let next = self
-                    .frame_desc_mut(table, current)
-                    .map(|f| f.next_free)
-                    .unwrap_or(INVALID_PAGE_FRAME);
-                if prev == INVALID_PAGE_FRAME {
-                    self.free_lists[order as usize] = next;
-                } else if let Some(prev_desc) = self.frame_desc_mut(table, prev) {
-                    prev_desc.next_free = next;
-                }
-                if let Some(curr_desc) = self.frame_desc_mut(table, current) {
-                    curr_desc.next_free = INVALID_PAGE_FRAME;
-                }
+                let unlinked = self.free_list_unlink(table, order, current);
+                assert!(unlinked, "a free-list walk reached an unlinked frame");
                 let pages = Self::order_block_pages(order);
                 if self.free_frames >= pages {
                     self.free_frames -= pages;
                 }
                 return current;
             }
-            prev = current;
             current = self
                 .frame_desc_mut(table, current)
                 .map(|f| f.next_free)
@@ -354,8 +353,8 @@ impl BuddyInner {
     /// Close one epoch: `draining` joins the releasable backlog, `incoming`
     /// takes its place.
     ///
-    /// Splices nothing — a splice is O(blocks × free-list length), and this
-    /// runs from whichever CPU's timer interrupt observes the last ack.
+    /// Splices nothing — a splice coalesces every block, and this runs from
+    /// whichever CPU's timer interrupt observes the last ack.
     fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) -> u32 {
         let free_before = self.free_frames;
         let releasable = Self::quarantine_concat(
@@ -436,7 +435,7 @@ impl BuddyInner {
                 break;
             }
 
-            if !self.free_list_detach(table, curr_order, buddy) {
+            if !self.free_list_unlink(table, curr_order, buddy) {
                 break;
             }
 
@@ -702,6 +701,7 @@ impl BuddyAllocator {
                 frame.order = 0;
                 frame.region_id = INVALID_REGION_ID;
                 frame.next_free = INVALID_PAGE_FRAME;
+                frame.prev_free = INVALID_PAGE_FRAME;
             }
         }
 

@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_int, c_void};
 
-use crate::{early_init, gdt, idt, limine_protocol, shutdown};
+use crate::{early_init, idt, limine_protocol, shutdown};
 use slopos_drivers::{apic, hpet, ioapic, random, serial};
 use slopos_kernel_services::platform::{PlatformServices, register_platform_services};
 
@@ -58,7 +58,6 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     },
     console_write_serialized: serial::serial_locked_write_bytes,
     rng_next: || random::random_next(),
-    gdt_set_kernel_rsp0: gdt::gdt_set_kernel_rsp0,
     kernel_shutdown: kernel_shutdown_fn,
     kernel_reboot: kernel_reboot_fn,
     is_rsdp_available: is_rsdp_available_fn,

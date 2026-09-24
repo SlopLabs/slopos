@@ -11,6 +11,7 @@
 use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::sync::InitFlag;
 
+use crate::page_fault::FileIo;
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError};
 
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
@@ -76,15 +77,30 @@ fn populate_inner(access: Access, addr: u64, len: usize) -> Option<()> {
     let handle = crate::process_vm::process_vm_handle(process)?;
     let packed = crate::process_vm::pack_process_vm_handle(handle);
     let task_id = slopos_arch::pcr::current_task_id();
+    let io = file_io();
     let ok = match access {
         Access::Read => {
-            crate::page_fault::populate_user_range_for_read(packed, addr, len as u64, task_id)
+            crate::page_fault::populate_user_range_for_read(packed, addr, len as u64, task_id, io)
         }
         Access::Write => {
-            crate::page_fault::populate_user_range_for_write(packed, addr, len as u64, task_id)
+            crate::page_fault::populate_user_range_for_write(packed, addr, len as u64, task_id, io)
         }
     };
     ok.then_some(())
+}
+
+/// A copy may wait for a file page wherever its caller could block. Filesystem
+/// code stages user data outside its own locks, so a caller here holds none a
+/// file read takes.
+fn file_io() -> FileIo {
+    if slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled()
+        && !slopos_ostd::cpu::x86_64::pcr::in_interrupt_context()
+        && !PreemptGuard::is_active()
+    {
+        FileIo::Read
+    } else {
+        FileIo::Refuse
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -9,7 +9,7 @@ use slopos_abi::fs::{
     UIO_MAXIOV, USER_PATH_MAX, UserFsStat, UserIovec,
 };
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
-use slopos_abi::syscall::{LOCK_EX, LOCK_NB, LOCK_UN, SEEK_CUR, SEEK_SET};
+use slopos_abi::syscall::{LOCK_EX, LOCK_NB, LOCK_UN, MAP_PRIVATE, PROT_READ, SEEK_CUR, SEEK_SET};
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 
 use slopos_fs::fileio::{
@@ -1380,5 +1380,147 @@ pub fn test_getdents64_keeps_its_cursor_when_the_copy_out_faults() -> TestResult
 
 slopos_testing::stest!(
     name = test_getdents64_keeps_its_cursor_when_the_copy_out_faults,
+    suite = syscall_fs_phase1
+);
+
+/// `write(fd, NULL, 0)` writes nothing and succeeds, as on Linux; a count at
+/// NULL still faults.
+pub fn test_a_zero_byte_transfer_at_null_is_not_a_fault() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not build the fixture");
+    };
+    let table = scratch.table;
+    let Some(task) = task_find_by_id(scratch.task_id) else {
+        return fail!("the fixture task vanished");
+    };
+    let Some(path) = make_file(table, b"zero_at_null", b"x") else {
+        return fail!("could not create the file");
+    };
+    let fd = file_open_at(table, &path, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    assert_test!(fd >= 0, "the file could not be opened");
+    let fd = fd as u32 as u64;
+
+    let call = |handler, count| call_syscall(table, &task, handler, [fd, 0, count, 0, 0, 0]);
+    let wrote = call(crate::syscall::fs::path_handlers::syscall_write, 0);
+    let read = call(crate::syscall::fs::path_handlers::syscall_read, 0);
+    let faulted = call(crate::syscall::fs::path_handlers::syscall_write, 1);
+    let _ = file_close_fd(table, fd as i32);
+    let _ = file_unlink_at(&path, b"/");
+    drop(task);
+
+    assert_eq_test!(
+        wrote,
+        Some(0),
+        "write(fd, NULL, 0) did not write zero bytes"
+    );
+    assert_eq_test!(read, Some(0), "read(fd, NULL, 0) did not read zero bytes");
+    assert_eq_test!(
+        faulted,
+        Some(Errno::EFAULT.raw() as i64),
+        "write(fd, NULL, 1) did not fault"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_a_zero_byte_transfer_at_null_is_not_a_fault,
+    suite = syscall_fs_phase1
+);
+
+/// The kernel suite runs before boot publishes the page-set registry.
+struct PageSetRegistry(Option<&'static dyn slopos_mm::filemap_hook::FileMapOps>);
+
+impl PageSetRegistry {
+    fn publish() -> Self {
+        Self(slopos_mm::filemap_hook::filemap_swap_ops(Some(
+            slopos_fs::filemap::filemap_ops(),
+        )))
+    }
+}
+
+impl Drop for PageSetRegistry {
+    fn drop(&mut self) {
+        slopos_mm::filemap_hook::filemap_swap_ops(self.0);
+    }
+}
+
+/// The strings clang writes to stderr sit in pages of `libclang-cpp.so` that
+/// nothing has loaded from, so the copy has to read the page in itself.
+pub fn test_a_write_from_an_untouched_file_mapping_reads_it_in() -> TestResult {
+    const CONTENTS: &[u8] = b"read in by the copy, not by a load";
+    let _fixture = SyscallFixture::new();
+    let _registry = PageSetRegistry::publish();
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not build the fixture");
+    };
+    let table = scratch.table;
+    let Some(task) = task_find_by_id(scratch.task_id) else {
+        return fail!("the fixture task vanished");
+    };
+    let (Some(source), Some(sink)) = (
+        make_file(table, b"mapped_source", CONTENTS),
+        make_file(table, b"mapped_sink", b""),
+    ) else {
+        return fail!("could not create the files");
+    };
+    let source_fd = file_open_at(table, &source, b"/", O_RDONLY, RESOLVE_FOLLOW, None);
+    let sink_fd = file_open_at(table, &sink, b"/", O_RDWR, RESOLVE_FOLLOW, None);
+    assert_test!(
+        source_fd >= 0 && sink_fd >= 0,
+        "the files could not be opened"
+    );
+
+    let mapped = call_syscall(
+        table,
+        &task,
+        crate::syscall::memory_handlers::syscall_mmap,
+        [0, 4096, PROT_READ, MAP_PRIVATE, source_fd as u32 as u64, 0],
+    )
+    .filter(|&addr| addr > 0);
+    let wrote = mapped.and_then(|addr| {
+        call_syscall(
+            table,
+            &task,
+            crate::syscall::fs::path_handlers::syscall_write,
+            [
+                sink_fd as u32 as u64,
+                addr as u64,
+                CONTENTS.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    });
+    let mut back = [0u8; CONTENTS.len()];
+    let read_back = file_pread_fd(table, sink_fd, &mut KernelIoBuf::new(&mut back), 0);
+    if let Some(addr) = mapped {
+        let _ = call_syscall(
+            table,
+            &task,
+            crate::syscall::memory_handlers::syscall_munmap,
+            [addr as u64, 4096, 0, 0, 0, 0],
+        );
+    }
+    let _ = file_close_fd(table, source_fd);
+    let _ = file_close_fd(table, sink_fd);
+    let _ = file_unlink_at(&source, b"/");
+    let _ = file_unlink_at(&sink, b"/");
+    drop(task);
+
+    assert_test!(mapped.is_some(), "the file could not be mapped");
+    assert_eq_test!(
+        wrote,
+        Some(CONTENTS.len() as i64),
+        "a write from an untouched file mapping did not transfer"
+    );
+    assert_eq_test!(read_back, CONTENTS.len() as isize, "the sink is short");
+    assert_eq_test!(&back, CONTENTS, "the sink holds other bytes");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_a_write_from_an_untouched_file_mapping_reads_it_in,
     suite = syscall_fs_phase1
 );

@@ -370,6 +370,8 @@ pub struct VmaMap {
     /// Resident pages, synced from the address space's own leaf count: the
     /// cursor is the only place a user leaf appears, so a second count drifts.
     resident: ChargeSlot<ResidentPagesAxis>,
+    /// The most leaves this process has held at once, across `execve`.
+    peak_resident: u32,
 }
 
 impl VmaMap {
@@ -384,6 +386,7 @@ impl VmaMap {
             charge: ChargeSlot::empty(),
             commit: ChargeSlot::empty(),
             resident: ChargeSlot::empty(),
+            peak_resident: 0,
         }
     }
 
@@ -432,6 +435,7 @@ impl VmaMap {
     /// mapping change by at most one hold. The axis is unlimited by default: a
     /// report of what is held, not a second ceiling on top of `Pages`.
     pub fn sync_resident(&mut self, resident: u32) {
+        self.peak_resident = self.peak_resident.max(resident);
         let held = self.resident.amount();
         if resident > held {
             if let Ok(reservation) = try_charge::<ResidentPagesAxis>(self.account, resident - held)
@@ -446,6 +450,11 @@ impl VmaMap {
     #[inline]
     pub fn resident_pages(&self) -> u32 {
         self.resident.amount()
+    }
+
+    #[inline]
+    pub fn peak_resident_pages(&self) -> u32 {
+        self.peak_resident
     }
 
     /// Pages the charge token currently holds.
@@ -930,6 +939,7 @@ impl VmaMap {
         self.charge.take();
         self.commit.take();
         self.resident.take();
+        self.peak_resident = 0;
     }
 }
 

@@ -185,7 +185,7 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         let name = core::str::from_utf8(name_slice).unwrap_or("<non-utf8>");
         let msg = core::str::from_utf8(msg_slice).unwrap_or("");
         match r.status {
-            0 => ktap::emit_subtest_ok(sub_idx, name),
+            0 => ktap::emit_subtest_ok(sub_idx, name, msg),
             1 => {
                 sub_failed += 1;
                 ktap::emit_subtest_not_ok(sub_idx, name, msg);

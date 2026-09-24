@@ -129,7 +129,6 @@ use slopos_ostd::handle::HandleError;
 use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
 use slopos_ostd::task::switch::switch_context;
 
-use super::ffi_boundary::kernel_stack_top;
 use crate::task_struct::{Current, Idle};
 
 fn get_default_time_slice() -> u64 {
@@ -308,8 +307,8 @@ fn prepare_switch_to(
         tlb::enter_lazy_tlb(cpu_id);
     }
 
-    // Both are read only on a ring-3 → ring-0 transition, which cannot happen
-    // while a kernel-mode task is current, and the next user switch writes them.
+    // Read only in ring 3, which a kernel-mode task never enters, and the next
+    // user switch writes it.
     if is_user_mode {
         let raw = next.fs_base();
         let fs = if raw == 0 || slopos_abi::addr::VirtAddr::is_canonical(raw) {
@@ -318,12 +317,6 @@ fn prepare_switch_to(
             0
         };
         slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
-
-        let kernel_rsp = match next.kernel_stack_top {
-            kst if kst != 0 => kst,
-            _ => kernel_stack_top() as u64,
-        };
-        platform::gdt_set_kernel_rsp0(kernel_rsp);
     }
 
     let _ = cpu_id;

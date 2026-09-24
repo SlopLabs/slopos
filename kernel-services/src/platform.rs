@@ -28,8 +28,6 @@ slopos_service_core::define_service! {
 
         rng_next() -> u64;
 
-        gdt_set_kernel_rsp0(rsp0: u64);
-
         @no_wrapper kernel_shutdown(reason: *const c_char) -> !;
         @no_wrapper kernel_reboot(reason: *const c_char) -> !;
 

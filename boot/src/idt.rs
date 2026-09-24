@@ -418,6 +418,11 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     let mut irq_nest = IrqNestHold::enter();
     ist_stacks::ist_record_usage(vector, frame as u64);
 
+    #[cfg(feature = "test-hooks")]
+    if in_user(frame_ref) && !slopos_ostd::irq::vector_uses_ist(vector) {
+        crate::tests::user_trap_stack_tests::on_user_trap();
+    }
+
     if vector == SYSCALL_VECTOR {
         answer_legacy_syscall(frame_ref);
         return;
@@ -704,9 +709,9 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
     };
 
     // Interrupts stay off across the resolution: it is the deep part of the
-    // chain, and an IRQ nesting under it stacks two worst cases on the
-    // supervisor reserve. Only the arm that reaches the device needs a window,
-    // and the plan phase has unwound by then.
+    // chain, and an IRQ nesting under it stacks two worst cases on one kernel
+    // stack. Only the arm that reaches the device needs a window, and the plan
+    // phase has unwound by then.
     let mut outcome =
         slopos_mm::page_fault::try_resolve_user_fault(fault_addr, error_code, vm_handle, tid);
 

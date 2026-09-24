@@ -571,7 +571,10 @@ test-devdisk: _build-run-tests
 
 # The whole self-hosting loop: the guest builds both kernels with the staged
 # toolchain, and the host grades what came out. Identity is against a host
-# build, so the guest's tree and the host's must be one commit.
+# build, so the guest's tree and the host's must be one commit, and the host's
+# cargo must hash as the guest's does: the fork's, from vendored sources, into
+# a target directory as empty as the guest's was, with none of the kernel knobs
+# the guest's environment lacks.
 [doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host runs the ELF gates on both, the kernel suite on the tests kernel, and compares the dev kernel with its own build of the same commit")]
 test-selfhost: _build-run-tests
     #!/usr/bin/env bash
@@ -599,8 +602,19 @@ test-selfhost: _build-run-tests
             "{{fs_image_devdisk}}" "$guest/kernel-$variant.elf"
         scripts/check_kernel_elf_gates.sh "$guest" "$variant"
     done
-    KERNEL_RELEASE=0 just build-kernel-only
-    scripts/compare_kernel_elf.sh "{{build_dir}}/kernel-dev.elf" "$guest/kernel-dev.elf"
+    scripts/ensure_toolchain.sh
+    scripts/make_host_cargo.sh
+    reference="$PWD/{{build_dir}}/selfhost-reference"
+    rm -rf "$reference"
+    mkdir -p "$reference/cargo-home"
+    # A config file, as the guest's is: a `--config` ahead of the subcommand is
+    # dropped once build_kernel.sh passes its own after it.
+    sed "s|^directory = \"|directory = \"$PWD/|" .cargo/vendor.toml >"$reference/cargo-home/config.toml"
+    env -u KERNEL_RELEASE -u KERNEL_SAFESTACK -u KERNEL_RUSTFLAGS \
+        CARGO="$PWD/{{build_dir}}/host-cargo/cargo" CARGO_HOME="$reference/cargo-home" \
+        RUSTC="$(rustup which --toolchain slopos rustc)" RUST_TARGET={{rust_target}} \
+        scripts/build_kernel.sh "$reference" "$reference/target"
+    scripts/compare_kernel_elf.sh "$reference/kernel-dev.elf" "$guest/kernel-dev.elf"
     just test-elf "ELF=$guest/kernel-tests.elf"
 
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]

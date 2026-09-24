@@ -30,8 +30,10 @@ pub enum UserPtrError {
 pub struct UserVirtAddr(VirtAddr);
 
 impl UserVirtAddr {
+    /// A range with no bytes is valid at any user address, null included, as
+    /// Linux's `access_ok` has it: `write(fd, NULL, 0)` is a zero-byte write.
     pub fn try_new(addr: u64, len: usize) -> Result<Self, UserPtrError> {
-        if addr == 0 {
+        if addr == 0 && len != 0 {
             return Err(UserPtrError::Null);
         }
         if !VirtAddr::is_canonical(addr) {
@@ -150,6 +152,12 @@ mod tests {
     #[test]
     fn null_rejected() {
         assert_eq!(UserVirtAddr::try_new(0, 1), Err(UserPtrError::Null));
+    }
+
+    #[test]
+    fn empty_range_at_null_accepted() {
+        assert!(UserVirtAddr::try_new(0, 0).is_ok());
+        assert!(UserBytes::try_new(0, 0).is_ok());
     }
 
     #[test]

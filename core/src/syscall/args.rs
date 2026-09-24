@@ -261,7 +261,8 @@ impl<T> SyscallArg for Option<UserPtr<T>> {
 }
 
 /// Typed user-space slice argument. Two registers: `base`, `count`. A null base
-/// must be declared as `Option<UserSlice<T>>`, which maps `base == 0` to `None`.
+/// is accepted only with a zero count; `Option<UserSlice<T>>` maps any null
+/// base to `None`.
 #[derive(Clone, Copy)]
 pub struct UserSlice<T> {
     inner: MmUserSlice<T>,

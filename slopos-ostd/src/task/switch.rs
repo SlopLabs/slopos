@@ -130,7 +130,8 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
 }
 
 /// Mirror the per-CPU user-mode round-trip slots across a context switch:
-/// save the PCR's onto `prev`, then load `next`'s into the PCR.
+/// save the PCR's onto `prev`, then load `next`'s into the PCR, and point
+/// `TSS.RSP0` below `next`'s round trip as its entry to user mode did.
 ///
 /// `pcr.user_ctx_ptr` and `pcr.kernel_return_ctx` are written by
 /// [`crate::user::mode`]'s round-trip trampoline before `iretq` and read by
@@ -186,12 +187,20 @@ pub fn pcr_round_trip_swap<K, U>(
         Ordering::Release,
     );
     // SAFETY: as above, with the direction reversed.
-    unsafe {
+    let round_trip_rsp = unsafe {
         core::ptr::copy_nonoverlapping(
             task.saved_kernel_return_ctx.get_ptr(next).cast_const(),
             pcr.kernel_return_ctx.get(),
             1,
         );
+        (*pcr.kernel_return_ctx.get()).rsp
+    };
+    let trap_stack_top = match round_trip_rsp {
+        0 => task.kernel_stack_top,
+        rsp => rsp,
+    };
+    if trap_stack_top != 0 {
+        pcr::set_trap_stack_top(trap_stack_top);
     }
 }
 

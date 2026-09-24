@@ -40,7 +40,7 @@ define_syscall!(syscall_sched_yield (ctx) cap(NoneSelf)
 });
 
 /// Consumed CPU time in TSC ticks, the slice in progress included.
-fn task_cpu_ticks(task: &slopos_sched::task_struct::Task, now: u64) -> u64 {
+pub(crate) fn task_cpu_ticks(task: &slopos_sched::task_struct::Task, now: u64) -> u64 {
     let mut ticks = task.total_runtime();
     let last = task.last_run_timestamp();
     if last != 0 && now > last {
@@ -302,8 +302,8 @@ define_syscall!(syscall_exit_group (ctx, code: u32) cap(NoneSelf)
 // harness's KTAP framing.
 define_syscall!(syscall_klog_write (ctx, buf: UserBytes) cap(ConsoleIo)
     -> Result<u64, Errno> {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
+    if buf.is_empty() {
+        return Ok(0);
     }
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let write_len = syscall_bounded_from_user(

@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
 use super::tests::resolve_pid;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
@@ -262,6 +264,66 @@ pub fn test_cow_clone_modify_both() -> TestResult {
     pass!()
 }
 
+static RACED_PARENT: AtomicU32 = AtomicU32::new(INVALID_PROCESS_ID);
+static RACED_ADDR: AtomicU64 = AtomicU64::new(0);
+
+fn unmap_the_raced_page() {
+    if let Some(parent) =
+        slopos_ostd::process::ProcessId::resolve(RACED_PARENT.load(Ordering::Relaxed))
+    {
+        let _ = crate::process_vm::process_vm_munmap(
+            parent,
+            RACED_ADDR.load(Ordering::Relaxed),
+            PAGE_SIZE_4KB,
+        );
+    }
+}
+
+/// A sibling thread unmapping the page between the fork's snapshot and the
+/// child's mapping must not free the frame the child is about to map.
+pub fn test_cow_clone_survives_a_sibling_unmap() -> TestResult {
+    use crate::process_vm::process_vm_alloc;
+
+    let Some(parent) = ProcessVmGuard::new() else {
+        return fail!("create parent VM");
+    };
+    let addr = process_vm_alloc(
+        parent.process,
+        PAGE_SIZE_4KB,
+        PageFlags::WRITABLE.bits() as u32,
+    );
+    assert_test!(addr != 0, "process_vm_alloc failed");
+    let Some(phys) = parent.map_test_page(addr, PageFlags::USER_RW.bits()) else {
+        return fail!("map test page");
+    };
+    if let Some(virt) = phys.to_virt_checked() {
+        page_io::fill_pattern(virt.as_mut_ptr::<u8>(), 0xA5, PAGE_SIZE_4KB as usize);
+    }
+
+    RACED_PARENT.store(parent.pid(), Ordering::Relaxed);
+    RACED_ADDR.store(addr, Ordering::Relaxed);
+    crate::process_vm::set_clone_window_hook(Some(unmap_the_raced_page));
+    let child = parent.clone_cow();
+    crate::process_vm::set_clone_window_hook(None);
+
+    let Some(child) = child else {
+        return fail!("the fork failed across a sibling's munmap");
+    };
+    assert_test!(
+        parent.virt_to_phys(addr).is_null(),
+        "the parent still maps the page it unmapped"
+    );
+    let byte = child
+        .virt_to_phys(addr)
+        .to_virt_checked()
+        .map(|virt| page_io::read_byte(virt.as_ptr::<u8>(), 0));
+    assert_test!(
+        byte == Some(0xA5),
+        "the child does not map the parent's page"
+    );
+    pass!()
+}
+
 pub fn test_cow_multiple_clones() -> TestResult {
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
@@ -421,6 +483,10 @@ pub fn test_write_fault_on_a_read_only_page_stays_fatal() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_cow_read_not_cow_fault, suite = cow_edge);
+slopos_testing::stest!(
+    name = test_cow_clone_survives_a_sibling_unmap,
+    suite = cow_edge
+);
 slopos_testing::stest!(name = test_cow_not_present_not_cow, suite = cow_edge);
 slopos_testing::stest!(
     name = test_cow_dispatch_absent_for_a_reaped_process,

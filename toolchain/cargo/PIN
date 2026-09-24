@@ -9,10 +9,18 @@
 # materialised tree and one stamp. They do not share a PIN, because this patch
 # is a PR to rust-lang/cargo and that one is a PR to rust-lang/rust.
 #
-# What the fork does: puts curl, libgit2, OpenSSL and the pure-Rust crates
-# only their code paths reach behind a `network` feature, on by default.
-# Without it cargo resolves path, directory and local-registry sources — a
-# vendored workspace build — which is what `x86_64-unknown-slopos` can offer
-# and all that building SlopOS on SlopOS needs. `rusqlite` stays: SQLite is
-# one amalgamated C file and it cross-compiles against slibc.
+# What the fork does:
+#
+#   0001 puts curl, libgit2, OpenSSL and the pure-Rust crates only their code
+#        paths reach behind a `network` feature, on by default. Without it
+#        cargo resolves path, directory and local-registry sources — a
+#        vendored workspace build — which is what `x86_64-unknown-slopos` can
+#        offer and all that building SlopOS on SlopOS needs. `rusqlite` stays:
+#        SQLite is one amalgamated C file and it cross-compiles against slibc.
+#   0002 leaves the host triple out of a unit's `-C metadata`. A build script's
+#        or proc macro's metadata reaches every crate that depends on it, so
+#        with the host in it no crate built on SlopOS can share a symbol name
+#        with the same crate built on Linux. `test-selfhost` compares against
+#        a Linux build made by this same cargo.
 patch_sha256=toolchain/cargo/0001-slopos-cargo.patch:327eff3b990b5c28268c9ea3366dc4232fcbcec23797e423db3acf8c0a9e9ff0
+patch_sha256=toolchain/cargo/0002-host-independent-metadata.patch:3c2d078732c14ce55c0289f491c40db40a89ab289e4cdf33928a18e2c5255577

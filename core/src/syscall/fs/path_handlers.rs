@@ -41,9 +41,6 @@ define_syscall!(syscall_read
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
-    }
     let count = buf.len();
     let mut io_buf = UserWriteBuf::new(buf.base_u64(), count).ok_or(Errno::EFAULT)?;
     let bytes = file_read_fd(pid, fd.raw(), &mut io_buf);
@@ -62,9 +59,6 @@ define_syscall!(syscall_write
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
-    }
     let count = buf.len();
     let io_buf = UserReadBuf::new(buf.base_u64(), count).ok_or(Errno::EFAULT)?;
     let bytes = file_write_fd(pid, fd.raw(), &io_buf);
@@ -170,8 +164,8 @@ define_syscall!(syscall_readlink
     (ctx, path: UserPath, buf: UserBytes) cap(NoneFd)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
+    if buf.is_empty() {
+        return Err(Errno::EINVAL);
     }
     let len = buf.len().min(USER_PATH_MAX);
     let n = with_cwd_base(ctx, |cwd| {
@@ -189,9 +183,6 @@ pub(crate) fn readlink_at_into_user(
     user_buf: u64,
     len: usize,
 ) -> Result<usize, Errno> {
-    if len == 0 {
-        return Ok(0);
-    }
     let mut staging = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     let rc = file_readlink_at(path, cwd, &mut staging[..len]);
     if rc < 0 {

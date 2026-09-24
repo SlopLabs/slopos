@@ -7,16 +7,21 @@
 //! 8 KiB per ring across `MAX_CPUS = 256` costs 2 MiB of `.bss`.
 
 use core::fmt;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_arch::pcr::{current_cpu_id, MAX_CPUS};
 use slopos_ostd::sync::append_log::AppendLog;
-use slopos_ostd::{klog_swap_backend, KlogBackend};
+use slopos_ostd::util::fn_ptr::fn_ptr_decode_opt;
+use slopos_ostd::{klog_info, klog_swap_backend, KlogBackend};
 
 const PER_CPU_RING_BYTES: usize = 8 * 1024;
 
 type RingSlot = AppendLog<PER_CPU_RING_BYTES>;
 
 static RINGS: [RingSlot; MAX_CPUS] = [const { RingSlot::new() }; MAX_CPUS];
+
+/// The backend the open capture displaced; null while none is open.
+static CONSOLE: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 struct RingWriter {
     cpu: usize,
@@ -43,6 +48,7 @@ pub struct CaptureGuard {
 
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
+        CONSOLE.store(core::ptr::null_mut(), Ordering::Release);
         let _ = klog_swap_backend(self.prev);
     }
 }
@@ -55,7 +61,20 @@ pub fn begin() -> CaptureGuard {
         RINGS[i].reset();
     }
     let prev = klog_swap_backend(Some(buffering_backend as KlogBackend));
+    CONSOLE.store(
+        prev.map_or(core::ptr::null_mut(), |backend| backend as *mut ()),
+        Ordering::Release,
+    );
     CaptureGuard { prev }
+}
+
+/// Write one line past the open capture: a subtest verdict is a result, not
+/// log, and a chatty test overflows its ring long before it reports one.
+pub fn write_through(args: fmt::Arguments<'_>) {
+    match fn_ptr_decode_opt::<KlogBackend>(CONSOLE.load(Ordering::Acquire)) {
+        Some(console) => console(args),
+        None => klog_info!("{}", args),
+    }
 }
 
 /// Read CPU0's ring under its lock. `f` must not klog into the same ring.

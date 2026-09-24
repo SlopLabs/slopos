@@ -7,6 +7,7 @@
 //! `FOO=bar` leaking into every child is how a stray assignment changes what a
 //! configure script decides.
 
+use std::os::unix::ffi::OsStrExt;
 use std::sync::Mutex;
 
 struct Var {
@@ -101,7 +102,26 @@ pub fn unset(name: &[u8]) -> bool {
     })
 }
 
-pub fn initialize_defaults() {
+pub fn is_name(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// The inherited environment, exported, and a default for each of these names
+/// it leaves unset.
+pub fn initialize() {
+    for (name, value) in std::env::vars_os() {
+        let name = name.as_bytes();
+        // An inherited `IFS` would change how this shell splits every word it
+        // expands, and this shell's `cd` maintains no `PWD`, so an inherited
+        // one would go stale at the first `cd`.
+        if is_name(name) && !matches!(name, b"IFS" | b"PWD" | b"OLDPWD") {
+            set_exported(name, value.as_bytes());
+        }
+    }
     for (name, value) in [
         (b"PATH".as_slice(), b"/bin:/sbin".as_slice()),
         (b"SHELL", b"/bin/shell"),
@@ -109,13 +129,19 @@ pub fn initialize_defaults() {
         (b"USER", b"root"),
         (b"TERM", b"slopos"),
     ] {
-        set_exported(name, value);
+        if !is_set(name) {
+            set_exported(name, value);
+        }
     }
-    // Not exported: an inherited `IFS` changes how a child shell splits every
-    // word it expands.
     set(b"IFS", b" \t\n");
-    set(b"PS1", b"\\u@\\h:\\w\\$ ");
-    set(b"PS2", b"> ");
+    for (name, value) in [
+        (b"PS1".as_slice(), b"\\u@\\h:\\w\\$ ".as_slice()),
+        (b"PS2", b"> "),
+    ] {
+        if !is_set(name) {
+            set(name, value);
+        }
+    }
 }
 
 /// Every variable, exported or not — what `set` with no arguments lists.
