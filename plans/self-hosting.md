@@ -123,11 +123,11 @@ has landed. **Phase 1 closes when Phase 1.1's exit criteria hold.**
 
 ## Phase 1.1 — The toolchain runs, and builds the kernel
 
-**Where it starts.** The first boot with the toolchain volume attached mounts
-it at `/devel` and then panics as `devdisk_test` starts, before any toolchain
-process has run: a kernel General Protection Fault in `UserContext::rax`
-(`slopos-ostd/src/user/context.rs:347`), reached from `execute_round_trip`
-(`slopos-ostd/src/user/mode.rs:194`).
+**Where it stands.** Under KVM the ladder passes and the guest builds both
+kernels from the dev disk: the dev kernel in about 600 s and the tests kernel
+in about 600 s, at four vCPUs against 20 s + 9 s for the dev kernel's two
+passes on the host at `-j4`. The guest image then fails `e2fsck -fn` (open
+item 1), which is where the run stops.
 
 **Exit criteria** (these close Phase 1):
 
@@ -140,25 +140,57 @@ process has run: a kernel General Protection Fault in `UserContext::rax`
 4. The guest-built dev kernel's loadable image and symbol table are
    byte-identical to a host build of the same commit.
 
-### 1.1.1 The guest survives the dev-disk test
+### Done so far
 
-Find and fix the fault above. It is kernel-side, so the fix carries a kernel
-test that fails without it.
+- The GPF in `UserContext::rax` was the trap stack overwriting the round
+  trip's frames. `test_deep_user_trap_spares_the_round_trip` covers it; that it
+  fails without the fix is not yet shown.
+- The ladder: `rustc --version` 1.48 s, 206 012 relocations bound in 5
+  objects; `rustc hello.rs` 6.7 s; the cargo rung 21 s. Rung 1 also runs
+  `ld.lld` and `rust-lld`, and holds the guest `rustc --version` to the host's
+  — bootstrap appended "(built from a source tarball)", and the version string
+  is hashed into every `StableCrateId`.
+- `stacker`: the pinned nightly no longer uses it; the compiler runs on a
+  17 MiB thread, and `libc_abi_test` proves a requested stack reaches the
+  thread.
+- The file map at 4G: 256 sets per process refused the archive step of a
+  256-codegen-unit crate, and a sixteenth of memory refused the kernel link's
+  pages. The registry is 4096 sets, 1024 per principal, and a principal may pin
+  an eighth of usable memory.
+- ext2: a block logged by a small write and then written home by a large one
+  kept its log mapping, so a miss, a check point and a replay all brought the
+  older copy back (every rlib member began with zeroes). A home write now
+  supersedes the log's copies with a `REVOKE`.
+- A killed task's abandoned block request read as device damage and latched
+  `/devel` read-only; it is now `Interrupted`.
+- `utest_selfhost` streams klog live; both clang driver ports take rustc's
+  `-no-pie`.
 
-### 1.1.2 The ladder passes
+### Open, in order
 
-`devdisk_test`'s rungs are in place: `rustc --version` under
-`LD_DEBUG=statistics`, rustc linking through `cc`, cargo with a build script and
-a proc macro, clang on C and C++. Record rustc's startup time and relocation
-count, and measure — fixing only what makes the build impractical — the global
-`malloc` lock (`slibc/src/mem/dlmalloc.rs:77`), `stacker`'s stack-limit answer,
-and the file map's per-process cap at 4G.
+1. **Link counts after a guest build.** `e2fsck -fn` finds 16–20 `.rcgu.o`
+   objects with three names and a link count of two: the name rustc unlinked
+   from a crate's `out/` after archiving is back on disk in the directory block
+   as it was before that unlink, while the link count kept the decrement.
+   Instrumented runs ruled out a home write ahead of the newest log copy, a
+   rollback dropping committed content, and hash-chain order in the log index;
+   a four-process link/unlink churn on the tests image does not reproduce it.
+   Left to test: a killed requester's quarantined write landing after a newer
+   write of the same block, and two cache slots for one block. Until it is
+   fixed `export_devdisk.sh` refuses the image, which blocks criteria 3 and 4.
+2. Criterion 4, once the image exports: the recipe's host reference build
+   succeeds; the comparison has not run.
+3. Criterion 3.
+4. Criterion 1 from a clean tree: the `-no-pie` claim changed the LLVM port,
+   so the toolchain has to be rebuilt anyway, and the dev disk restaged.
+5. The global `malloc` lock (`slibc/src/mem/dlmalloc.rs:77`) only spins; the
+   guest build is about 22× the host's at the same `-j`. Measure its share.
+6. One full-speed run failed `exec` and an archive `write` with `EFAULT`; not
+   seen again in three runs.
 
-### 1.1.3 The kernel builds, and matches
-
-`just test-selfhost` runs criteria 2–4 in one go; it needs a clean working tree
-and a dev disk seeded from `HEAD`. A difference between the host rustc and the
-cross-built one is a finding to explain, not a tolerance to set.
+`just test-selfhost` needs a clean working tree and a dev disk seeded from
+`HEAD`. A difference between the host rustc and the cross-built one is a
+finding to explain, not a tolerance to set.
 
 ---
 
