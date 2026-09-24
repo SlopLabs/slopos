@@ -319,8 +319,9 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
     let raw_outcome;
     let time_ms;
     let log_cpu;
+    let captured = desc.flags & crate::registry::FLAG_UNCAPTURED == 0;
     {
-        let _g = crate::capture::begin();
+        let _g = captured.then(crate::capture::begin);
         let t0 = monotonic_ns();
         raw_outcome = (desc.run)();
         time_ms = elapsed_ms_since(t0);
@@ -358,7 +359,7 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
             if !suppress_pass {
                 crate::ktap::emit_ok(idx, desc, time_ms, pass_suffix);
             }
-            if matches!(cfg.verbosity, Verbosity::Verbose) {
+            if captured && matches!(cfg.verbosity, Verbosity::Verbose) {
                 emit_verbose_log(log_cpu, truncated);
             }
         }
@@ -369,7 +370,9 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
         }
         TestResult::Fail | TestResult::Panic => {
             crate::ktap::emit_not_ok(idx, desc, time_ms, final_outcome);
-            emit_log_block(log_cpu, truncated);
+            if captured {
+                emit_log_block(log_cpu, truncated);
+            }
         }
     }
 

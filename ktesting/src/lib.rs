@@ -33,7 +33,7 @@ pub use harness::{
     tests_request_shutdown, tests_reset_panic_state, tests_run_all, tests_run_userland,
     TestRunSummary,
 };
-pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC};
+pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC, FLAG_UNCAPTURED};
 pub use result::{TestOutcome, TestResult};
 pub use runner::execute_test;
 pub use slopos_service_core::paste;

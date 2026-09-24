@@ -36,6 +36,11 @@ pub struct TestDesc {
 /// `EXPECTED_PANIC` suffix.
 pub const FLAG_EXPECTED_PANIC: u32 = 0x1;
 
+/// `flags` bit: the test's klog reaches the console as it is written. The
+/// capture rings keep a test's first kilobytes, which for one that runs for
+/// hours is none of what explains its failure.
+pub const FLAG_UNCAPTURED: u32 = 0x2;
+
 impl slopos_ostd::ffi::registry::RegistryEntry for TestDesc {
     const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
         &[slopos_ostd::ffi::registry::RegistryId::Tests];

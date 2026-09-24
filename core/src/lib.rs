@@ -28,14 +28,23 @@ pub mod utests;
 ///     bin = "/bin/foo",
 ///     argv = &["foo", "--flag"],
 /// );
+/// slopos_core::utest!(name = utest_hours_long, bin = "/bin/bar", uncaptured);
 /// ```
 #[macro_export]
 macro_rules! utest {
     (name = $ident:ident, bin = $bin:literal) => {
-        $crate::utest!(name = $ident, bin = $bin, argv = &[$bin]);
+        $crate::utest!(@desc $ident, $bin, &[$bin], 0);
+    };
+
+    (name = $ident:ident, bin = $bin:literal, uncaptured) => {
+        $crate::utest!(@desc $ident, $bin, &[$bin], $crate::__testing::FLAG_UNCAPTURED);
     };
 
     (name = $ident:ident, bin = $bin:literal, argv = &[$($arg:literal),* $(,)?]) => {
+        $crate::utest!(@desc $ident, $bin, &[$($arg),*], 0);
+    };
+
+    (@desc $ident:ident, $bin:literal, $argv:expr, $flags:expr) => {
         $crate::__paste::paste! {
             fn [<__utest_thunk_ $ident>]() -> $crate::__testing::TestResult {
                 $crate::exec::utest::run_thunk(&[<TEST_DESC_ $ident>])
@@ -52,9 +61,9 @@ macro_rules! utest {
                         line: line!(),
                         run: [<__utest_thunk_ $ident>],
                         kind: $crate::__testing::TestKind::Userland,
-                        flags: 0,
+                        flags: $flags,
                         bin: ::core::option::Option::Some($bin),
-                        argv: &[$($arg),*],
+                        argv: $argv,
                     };
             }
         }
