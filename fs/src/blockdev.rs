@@ -13,9 +13,10 @@ pub enum BlockDeviceError {
     /// Every request slot or descriptor the device has is taken. Transient:
     /// the same request is expected to succeed once an in-flight one retires.
     Busy,
+    /// The device did not answer in time. A write may still land, so the
+    /// device takes no other request until it has.
     Timeout,
-    /// The requesting task was killed while it waited. Says nothing about the
-    /// device: the request may still complete, and a write may still land.
+    /// The requesting task was killed before its request reached the device.
     Interrupted,
     /// The device completed the request but reported a failure.
     DeviceFault,

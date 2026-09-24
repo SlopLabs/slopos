@@ -599,6 +599,7 @@ test-selfhost: _build-run-tests
         --timeout-secs 28800 --silence-secs 0 --raw --no-color > {{build_dir}}/selfhost.log 2>&1 || rc=$?
     tail -n 30 {{build_dir}}/selfhost.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the self-hosting boot exited $rc — full log in {{build_dir}}/selfhost.log" >&2; exit 1; }
+    scripts/check_fs_image.sh "{{fs_image_devdisk}}"
     guest="{{build_dir}}/guest"
     mkdir -p "$guest"
     for variant in dev tests; do

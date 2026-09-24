@@ -106,14 +106,6 @@ impl BlkError {
     }
 }
 
-/// Why a waiter gave up on a chain the device may still own.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Abandon {
-    Timeout,
-    /// The requester was killed: nothing is known about the device.
-    Killed,
-}
-
 impl From<BlkError> for BlockDeviceError {
     fn from(err: BlkError) -> Self {
         match err {
@@ -198,6 +190,7 @@ struct RequestSlot {
     head: u16,
     descs: [u16; MAX_CHAIN_DESCS],
     desc_count: u8,
+    writes_medium: bool,
     /// `None` exactly while a caller holds them, or while a post-timeout
     /// replacement set has not landed yet.
     pages: Option<RequestPages>,
@@ -209,6 +202,7 @@ impl RequestSlot {
         head: 0,
         descs: [0; MAX_CHAIN_DESCS],
         desc_count: 0,
+        writes_medium: false,
         pages: None,
     };
 
@@ -224,6 +218,7 @@ struct Quarantined {
     head: u16,
     descs: [u16; MAX_CHAIN_DESCS],
     desc_count: u8,
+    writes_medium: bool,
     done: bool,
     pages: RequestPages,
 }
@@ -414,6 +409,7 @@ impl VirtioBlkState {
                             head: self.slots[idx].head,
                             descs: self.slots[idx].descs,
                             desc_count: self.slots[idx].desc_count,
+                            writes_medium: self.slots[idx].writes_medium,
                             done: false,
                             pages,
                         });
@@ -479,6 +475,17 @@ impl VirtioBlkState {
         self.slots
             .iter()
             .all(|s| matches!(s.state, SlotState::Quarantined | SlotState::QuarantineDone))
+    }
+
+    fn owes_abandoned_write(&self) -> bool {
+        self.quarantine
+            .iter()
+            .flatten()
+            .any(|q| q.writes_medium && !q.done)
+            || self
+                .slots
+                .iter()
+                .any(|s| s.writes_medium && s.state == SlotState::Quarantined)
     }
 }
 
@@ -554,7 +561,7 @@ impl VirtioBlkInner {
         }
         if harvest.reapable {
             self.quarantine_dirty.store(true, Ordering::Release);
-            let _ = self.free_waiters.wake_one();
+            let _ = self.free_waiters.wake_all();
         }
     }
 
@@ -649,6 +656,34 @@ impl VirtioBlkInner {
             .ok_or(BlkError::Busy)
     }
 
+    /// Hold every request behind a write a timeout abandoned: the device may
+    /// still perform it, after anything sent in the meantime.
+    fn await_abandoned_writes(&self) -> Result<(), BlkError> {
+        let settled = || {
+            let (owed, harvest) = {
+                let mut state = self.state.lock();
+                let harvest = state.harvest_used();
+                (state.owes_abandoned_write(), harvest)
+            };
+            self.publish_harvest(harvest, NUM_REQUEST_SLOTS);
+            !owed
+        };
+        if settled() {
+            return Ok(());
+        }
+        match self
+            .free_waiters
+            .wait_event_timeout(settled, REQUEST_TIMEOUT_MS as u64)
+        {
+            Ok(()) => Ok(()),
+            Err(WaitAbort::NoRuntime) if virtio::hpet_poll_wait(&settled, REQUEST_TIMEOUT_MS) => {
+                Ok(())
+            }
+            Err(WaitAbort::Killed) => Err(BlkError::Interrupted),
+            Err(_) => Err(BlkError::Timeout),
+        }
+    }
+
     fn release_slot(&self, idx: usize, pages: RequestPages) {
         self.state.lock().put_slot(idx, Some(pages));
         let _ = self.free_waiters.wake_one();
@@ -723,6 +758,7 @@ impl VirtioBlkInner {
         state.slots[slot_idx].head = descs[0];
         state.slots[slot_idx].descs = descs;
         state.slots[slot_idx].desc_count = desc_count as u8;
+        state.slots[slot_idx].writes_medium = type_ == VIRTIO_BLK_T_OUT;
         state.slots[slot_idx].pages = Some(pages);
 
         state.queue.submit(descs[0]);
@@ -748,8 +784,10 @@ impl VirtioBlkInner {
             pages
         };
 
+        // Uninterruptible: a write abandoned to a kill may land after a later
+        // write to the same sectors.
         match self.slot_waiters[slot_idx]
-            .wait_event_timeout_until(collect, REQUEST_TIMEOUT_MS as u64)
+            .wait_event_uninterruptible_timeout_until(collect, REQUEST_TIMEOUT_MS as u64)
         {
             Ok(pages) => Ok(pages),
             // Pre-scheduler context (probe / early boot): poll the used ring
@@ -763,27 +801,20 @@ impl VirtioBlkInner {
                     },
                     REQUEST_TIMEOUT_MS,
                 );
-                self.finish_or_quarantine(slot_idx, Abandon::Timeout)
+                self.finish_or_quarantine(slot_idx)
             }
-            // A killed or signalled requester must not free a chain the device
-            // may still be writing into; quarantine it as a timeout does.
-            Err(WaitAbort::Killed) => self.finish_or_quarantine(slot_idx, Abandon::Killed),
-            Err(_) => self.finish_or_quarantine(slot_idx, Abandon::Timeout),
+            Err(_) => self.finish_or_quarantine(slot_idx),
         }
     }
 
     /// Timeout epilogue: one final harvest (which recovers a completion whose
     /// interrupt was lost), else move the chain out of the slot's way.
     #[inline(never)]
-    fn finish_or_quarantine(
-        &self,
-        slot_idx: usize,
-        why: Abandon,
-    ) -> Result<RequestPages, BlkError> {
+    fn finish_or_quarantine(&self, slot_idx: usize) -> Result<RequestPages, BlkError> {
         if let Some(pages) = self.final_harvest(slot_idx) {
             return Ok(pages);
         }
-        self.quarantine_after_timeout(slot_idx, why)
+        self.quarantine_after_timeout(slot_idx)
     }
 
     fn final_harvest(&self, slot_idx: usize) -> Option<RequestPages> {
@@ -797,11 +828,7 @@ impl VirtioBlkInner {
     }
 
     #[inline(never)]
-    fn quarantine_after_timeout(
-        &self,
-        slot_idx: usize,
-        why: Abandon,
-    ) -> Result<RequestPages, BlkError> {
+    fn quarantine_after_timeout(&self, slot_idx: usize) -> Result<RequestPages, BlkError> {
         // Allocated before the lock is taken: the slot's own pages stay with
         // the device, and a frame allocation must not run under the lock.
         let replacement = RequestPages::allocate();
@@ -824,14 +851,12 @@ impl VirtioBlkInner {
             SlotOutcome::Withheld => false,
         };
 
-        if why == Abandon::Timeout {
-            klog_info!(
-                "virtio-blk: request timeout, chain head {} quarantined, slot {} {}",
-                head,
-                slot_idx,
-                if recycled { "recycled" } else { "withheld" }
-            );
-        }
+        klog_info!(
+            "virtio-blk: request timeout, chain head {} quarantined, slot {} {}",
+            head,
+            slot_idx,
+            if recycled { "recycled" } else { "withheld" }
+        );
         if wedged {
             klog_info!(
                 "virtio-blk: all {} request slots quarantined — the device is not completing requests",
@@ -845,10 +870,10 @@ impl VirtioBlkInner {
         // A quarantine the replacement allocation could not cover costs the
         // slot until the device returns it, so the caller is told to retry
         // rather than that its request timed out.
-        match why {
-            Abandon::Killed => Err(BlkError::Interrupted),
-            Abandon::Timeout if had_replacement => Err(BlkError::Timeout),
-            Abandon::Timeout => Err(BlkError::Busy),
+        if had_replacement {
+            Err(BlkError::Timeout)
+        } else {
+            Err(BlkError::Busy)
         }
     }
 
@@ -864,6 +889,7 @@ impl VirtioBlkInner {
         drain: &mut dyn FnMut(&RequestPages) -> bool,
     ) -> Result<(), BlkError> {
         self.reap_quarantine();
+        self.await_abandoned_writes()?;
 
         let (idx, pages) = self.acquire_slot()?;
 
@@ -1133,7 +1159,7 @@ impl VirtioBlkInner {
             return Err(BlkError::Timeout);
         }
 
-        let pages = self.quarantine_after_timeout(idx, Abandon::Timeout)?;
+        let pages = self.quarantine_after_timeout(idx)?;
         let status = pages.status();
         let drained = status == VIRTIO_BLK_S_OK && unstage_read(&pages, dst);
         self.release_slot(idx, pages);
@@ -1156,6 +1182,47 @@ impl VirtioBlkInner {
             .iter()
             .filter(|s| s.available())
             .count()
+    }
+
+    /// Quarantine a write chain the device never saw, which therefore stays
+    /// outstanding until [`Self::return_abandoned_write`] retires it.
+    #[cfg(feature = "test-hooks")]
+    fn stage_abandoned_write(&self) -> Option<u16> {
+        let pages = RequestPages::allocate()?;
+        let mut state = self.state.lock();
+        let free = state.quarantine.iter().position(Option::is_none);
+        let descs = free.and_then(|_| state.alloc_chain(1));
+        let (Some(free), Some(descs)) = (free, descs) else {
+            drop(state);
+            drop(pages);
+            return None;
+        };
+        state.quarantine[free] = Some(Quarantined {
+            head: descs[0],
+            descs,
+            desc_count: 1,
+            writes_medium: true,
+            done: false,
+            pages,
+        });
+        Some(descs[0])
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn return_abandoned_write(&self, head: u16) {
+        {
+            let mut state = self.state.lock();
+            if let Some(entry) = state
+                .quarantine
+                .iter_mut()
+                .flatten()
+                .find(|q| q.head == head)
+            {
+                entry.done = true;
+            }
+        }
+        self.quarantine_dirty.store(true, Ordering::Release);
+        let _ = self.free_waiters.wake_all();
     }
 }
 
@@ -1386,6 +1453,20 @@ pub fn blk_read_completing_in_replacement_window(
 #[cfg(feature = "test-hooks")]
 pub fn blk_available_slots(handle: DevHandle) -> usize {
     clone_inner(handle).map_or(0, |inner| inner.available_slots())
+}
+
+/// Leave the device owning a write it will never perform, as a timeout that
+/// abandoned one does. The head names it to [`blk_return_abandoned_write`].
+#[cfg(feature = "test-hooks")]
+pub fn blk_stage_abandoned_write(handle: DevHandle) -> Option<u16> {
+    clone_inner(handle)?.stage_abandoned_write()
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn blk_return_abandoned_write(handle: DevHandle, head: u16) {
+    if let Some(inner) = clone_inner(handle) {
+        inner.return_abandoned_write(head);
+    }
 }
 
 /// Acquire the exclusive write capability. A second `open_writer` on the same

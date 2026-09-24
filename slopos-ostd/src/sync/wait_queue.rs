@@ -87,6 +87,10 @@ impl AbortMask {
         on_kill: true,
         on_signal: true,
     };
+    const UNINTERRUPTIBLE: Self = Self {
+        on_kill: false,
+        on_signal: false,
+    };
 
     #[inline]
     fn probe(self, bk: &dyn WaitQueueBackend) -> Option<WaitAbort> {
@@ -591,6 +595,23 @@ impl WaitQueue {
         F: FnMut() -> Option<R>,
     {
         self.wait_core(condition, Some(timeout_ms), AbortMask::KILLABLE)
+    }
+
+    /// Block until `condition()` returns `Some(R)` or the deadline elapses,
+    /// ignoring a kill.
+    ///
+    /// For work a dying task cannot abandon, such as a request a device still
+    /// owns. Deadline-only, so a kill delays the exit by at most `timeout_ms`.
+    #[inline]
+    pub fn wait_event_uninterruptible_timeout_until<F, R>(
+        &self,
+        condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.wait_core(condition, Some(timeout_ms), AbortMask::UNINTERRUPTIBLE)
     }
 
     /// Block until `condition()` returns `true`, aborting on a kill or on any
