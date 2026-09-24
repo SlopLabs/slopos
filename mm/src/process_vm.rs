@@ -1778,6 +1778,7 @@ pub fn destroy_process_vm(process: ProcessId) -> c_int {
     }
     klog_info!("Destroying process VM space for PID {}", process.id());
     let released: Option<KArc<Process>>;
+    let space: Option<KArc<VmSpace>>;
 
     {
         let mut proc = PROCESS_VMS[slot].lock();
@@ -1791,10 +1792,7 @@ pub fn destroy_process_vm(process: ProcessId) -> c_int {
         // landed: otherwise the next occupant inherits this one's CPU set and
         // shoots down CPUs that never mapped it.
         tlb::unregister_process_tlb(slot_tlb_key(slot));
-        proc.vm_space = None;
-        klog_debug!("destroy_process_vm({}): page table cleanup done", process);
-
-        proc.vm_space = None;
+        space = proc.vm_space.take();
 
         proc.process_id = INVALID_PROCESS_ID;
         proc.generation = 0;
@@ -1804,6 +1802,11 @@ pub fn destroy_process_vm(process: ProcessId) -> c_int {
         // covers.
         released = proc.process.take();
     }
+
+    // Off the slot lock, which masks interrupts: the last reference frees every
+    // frame and page table, and a compiler's are a gigabyte.
+    drop(space);
+    klog_debug!("destroy_process_vm({}): page table cleanup done", process);
 
     // Retired after the unbind, so the id outlives every translation to the
     // address space it named.
@@ -3254,17 +3257,18 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
 
     if clone_failed {
         klog_info!("process_vm_clone_cow: Clone failed, cleaning up");
-        {
+        let partial = {
             // One acquisition: a slot still bound to `child_id` must never be
             // observable with its address space released. `reset` clears
             // `process`, which `teardown_inner_mappings` needs, so it is last.
             let mut child = PROCESS_VMS[child_slot].lock();
-            // Dropping the child's VmSpace reclaims the partial COW tree.
-            let _ = child.vm_space.take();
+            let partial = child.vm_space.take();
             teardown_inner_mappings(&mut child, slot_tlb_key(child_slot));
             tlb::unregister_process_tlb(slot_tlb_key(child_slot));
             child.reset();
-        }
+            partial
+        };
+        drop(partial);
         drop(reservation);
         return None;
     }
