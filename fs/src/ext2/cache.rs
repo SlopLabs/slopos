@@ -1444,6 +1444,11 @@ impl BlockCache {
         self.journal.as_ref().is_none_or(|j| j.is_empty())
     }
 
+    #[cfg(feature = "tests")]
+    pub fn kind_of(&self, block: BlockNum) -> Option<BlockKind> {
+        self.index.get(&block).map(|&slot| self.entries[slot].kind)
+    }
+
     pub fn dirty_count(&self) -> usize {
         self.entries
             .iter()
