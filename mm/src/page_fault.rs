@@ -19,6 +19,9 @@ pub enum FaultOutcome {
     Resolved,
     /// Exclusive access was unavailable; nothing changed and the instruction re-faults.
     Retry,
+    /// The file read was abandoned because the task is being killed; the
+    /// instruction re-faults, if the task gets that far.
+    Interrupted,
     /// A file-backed page that must be read from the device. The caller opens
     /// the blocking window and finishes through [`complete_file_fault`], by
     /// which point the deep plan phase has unwound off the trap frame.
@@ -272,8 +275,7 @@ pub fn complete_file_fault(
     let cached = match filemap_hook::filemap_fault_page(plan.map, plan.page_index) {
         Ok(phys) => phys,
         Err(errno) if errno == slopos_abi::Errno::EINTR.raw() => {
-            // The instruction re-executes; the signal is delivered on the way out.
-            return FaultOutcome::Retry;
+            return FaultOutcome::Interrupted;
         }
         Err(errno) => {
             klog_info!(
@@ -339,7 +341,7 @@ fn resolve_for_populate(
             complete_file_fault(process_vm_handle, &plan, page, task_id),
             FaultOutcome::Resolved | FaultOutcome::Retry
         ),
-        FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => false,
+        FaultOutcome::NeedsIo(_) | FaultOutcome::Interrupted | FaultOutcome::Fatal(_) => false,
     }
 }
 

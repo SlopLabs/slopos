@@ -474,7 +474,9 @@ fn child_rusage(child: &Task) -> Rusage {
     let handle = child.process_handle_raw();
     let mut ticks = process.exited_cpu_ticks();
     slopos_sched::task::task_for_each_active(|member| {
-        if member.process_handle_raw() == handle && !member.exit_info_is_set() {
+        if member.process_handle_raw() == handle
+            && !member.exit_cleanup_claimed(slopos_ostd::task::ops::TASK_EXIT_CPU_BANKED)
+        {
             ticks =
                 ticks.saturating_add(crate::syscall::core_handlers::task_cpu_ticks(member, now));
         }

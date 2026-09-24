@@ -8,7 +8,7 @@
 #
 # wild is the Rust-written ELF linker plans/self-hosting.md named as the
 # candidate for a toolchain with no C++ in it. That decision went the other
-# way — see "The backend is measured, and it is still LLVM" — so this gate's
+# way — see the plan's "Decided" — so this gate's
 # job now is to notice the day the answer changes. Measured against
 # wild 0.10.0, it takes twelve of the eighteen constructs link.ld uses.
 #

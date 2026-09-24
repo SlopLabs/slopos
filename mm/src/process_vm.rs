@@ -872,24 +872,22 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     rc
 }
 
-/// A new image's stack VMAs; nothing is mapped. The image's own segments get
-/// theirs from the loader, since only its headers say where they end.
-///
-/// [`create_process_vm_for`] seeds a process with no image yet, with fixed
-/// code and data VMAs and no growth extent below the stack, because a VA
-/// charge is taken for a lazy region too. A change to the stack VMA has to be
-/// made in both.
-fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
-    let stack_s = inner.stack_start;
-    let stack_e = inner.stack_end;
-
-    let stack_region = VmaRegion::new(
+fn stack_region() -> VmaRegion {
+    VmaRegion::new(
         Protection::RW,
         RegionBacking::Anonymous,
         false,
         RegionPurpose::Stack,
-    );
-    if add_vma_to_inner(inner, stack_s, stack_e, stack_region) != 0 {
+    )
+}
+
+/// A new image's stack VMAs; nothing is mapped. The image's own segments get
+/// theirs from the loader, since only its headers say where they end.
+fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
+    let stack_s = inner.stack_start;
+    let stack_e = inner.stack_end;
+
+    if add_vma_to_inner(inner, stack_s, stack_e, stack_region()) != 0 {
         return -1;
     }
 
@@ -914,14 +912,7 @@ fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
 }
 
 fn stack_page_flag_bits() -> u64 {
-    VmaRegion::new(
-        Protection::RW,
-        RegionBacking::Anonymous,
-        false,
-        RegionPurpose::Stack,
-    )
-    .to_page_flags()
-    .bits()
+    stack_region().to_page_flags().bits()
 }
 
 /// The caller drops the slot's `KArc<VmSpace>`; the shootdown issued here is
@@ -1406,7 +1397,8 @@ fn load_segments_and_tls(
                 .heap_start
                 .saturating_sub(DEFAULT_PROCESS_LAYOUT.heap_start),
         )
-        .next_multiple_of(PAGE_SIZE_4KB);
+        .next_multiple_of(PAGE_SIZE_4KB)
+        .min(heap_max);
     if heap_floor > inner.heap_start {
         inner.heap_start = heap_floor;
         inner.heap_end = heap_floor;
@@ -1708,9 +1700,9 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
         let heap_s = proc.heap_start;
         let stack_s = proc.stack_start;
         let stack_e = proc.stack_end;
-        // Code and data regions for a process that never execs: an exec swaps
-        // them for its image's segments.
-
+        // Code and data regions for a process that never execs, which an exec
+        // swaps for its image's segments; no stack growth extent, because a
+        // lazy region is charged too.
         let code_region = VmaRegion::new(
             Protection::RX,
             RegionBacking::Anonymous,
@@ -1723,16 +1715,10 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             false,
             RegionPurpose::Data,
         );
-        let stack_region = VmaRegion::new(
-            Protection::RW,
-            RegionBacking::Anonymous,
-            false,
-            RegionPurpose::Stack,
-        );
 
         if add_vma_to_inner(&mut proc, code_s, data_s, code_region) != 0
             || add_vma_to_inner(&mut proc, data_s, heap_s, data_region) != 0
-            || add_vma_to_inner(&mut proc, stack_s, stack_e, stack_region) != 0
+            || add_vma_to_inner(&mut proc, stack_s, stack_e, stack_region()) != 0
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
@@ -1748,13 +1734,7 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             return None;
         }
 
-        let stack_page_flags = VmaRegion::new(
-            Protection::RW,
-            RegionBacking::Anonymous,
-            false,
-            RegionPurpose::Stack,
-        )
-        .to_page_flags();
+        let stack_page_flags = stack_region().to_page_flags();
 
         let stack_start = proc.stack_start;
         let stack_end = proc.stack_end;
@@ -3163,18 +3143,28 @@ fn clone_cow_populate_child(
     Ok(cow_pages)
 }
 
-/// Run between a fork's snapshot of the parent and the child's first mapping:
-/// the window a sibling thread of the parent runs in.
+#[cfg(feature = "test-hooks")]
+static CLONE_WINDOW_PARENT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(INVALID_PROCESS_ID);
 #[cfg(feature = "test-hooks")]
 static CLONE_WINDOW_HOOK: core::sync::atomic::AtomicPtr<()> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+/// Runs the hook between a fork of `parent` and the child's first mapping:
+/// the window a sibling thread of the parent runs in.
 #[cfg(feature = "test-hooks")]
-pub fn set_clone_window_hook(hook: Option<fn()>) {
+pub fn set_clone_window_hook(hook: Option<(u32, fn())>) {
+    use core::sync::atomic::Ordering::Release;
+    CLONE_WINDOW_PARENT.store(INVALID_PROCESS_ID, Release);
     CLONE_WINDOW_HOOK.store(
-        hook.map_or(core::ptr::null_mut(), slopos_ostd::util::fn_ptr::encode),
-        core::sync::atomic::Ordering::Release,
+        hook.map_or(core::ptr::null_mut(), |(_, f)| {
+            slopos_ostd::util::fn_ptr::encode(f)
+        }),
+        Release,
     );
+    if let Some((parent, _)) = hook {
+        CLONE_WINDOW_PARENT.store(parent, Release);
+    }
 }
 
 pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Option<ProcessVmRef> {
@@ -3205,10 +3195,12 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
     };
 
     #[cfg(feature = "test-hooks")]
-    if let Some(hook) = slopos_ostd::util::fn_ptr::decode(
-        CLONE_WINDOW_HOOK.load(core::sync::atomic::Ordering::Acquire),
-    ) {
-        hook();
+    if CLONE_WINDOW_PARENT.load(core::sync::atomic::Ordering::Acquire) == parent.id() {
+        if let Some(hook) = slopos_ostd::util::fn_ptr::decode(
+            CLONE_WINDOW_HOOK.load(core::sync::atomic::Ordering::Acquire),
+        ) {
+            hook();
+        }
     }
 
     let Some(reservation) = VmReservation::claim(child) else {

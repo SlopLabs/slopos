@@ -102,6 +102,11 @@ pub fn emit_bail(reason: &str) {
 // Subtest lines reach the wire *before* their parent's `ok`/`not ok` line; the
 // two-space indent is what keys the host parser into nested mode.
 
+/// A note's first line: a newline inside one would end the KTAP line early.
+fn first_line(note: &str) -> &str {
+    note.split(['\n', '\r']).next().unwrap_or("")
+}
+
 /// Pass subtest line. `sub_idx` is the 1-based position within the parent;
 /// a note rides after `#`, which the host parser reads as a pass unless it is
 /// `SKIP`.
@@ -109,6 +114,7 @@ pub fn emit_subtest_ok(sub_idx: u32, name: &str, note: &str) {
     if crate::kernel_phase_summary::quiet() {
         return;
     }
+    let note = first_line(note);
     if note.is_empty() {
         write_through(format_args!("KTAP\t  ok {} - {}", sub_idx, name));
     } else {
@@ -117,6 +123,7 @@ pub fn emit_subtest_ok(sub_idx: u32, name: &str, note: &str) {
 }
 
 pub fn emit_subtest_not_ok(sub_idx: u32, name: &str, msg: &str) {
+    let msg = first_line(msg);
     if msg.is_empty() {
         write_through(format_args!("KTAP\t  not ok {} - {}", sub_idx, name));
     } else {

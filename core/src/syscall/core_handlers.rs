@@ -322,8 +322,8 @@ define_syscall!(syscall_klog_write (ctx, buf: UserBytes) cap(ConsoleIo)
 // rather than the operator's console — `ENXIO`, as opening `/dev/tty` answers.
 define_syscall!(syscall_ctty_read (ctx, buf: UserBytes) cap(NoneSelf)
     -> Result<u64, Errno> {
-    if buf.base_u64() == 0 || buf.len() == 0 {
-        return Err(Errno::EFAULT);
+    if buf.len() == 0 {
+        return Ok(0);
     }
     let tty_idx = ctx.task().controlling_tty().ok_or(Errno::ENXIO)?;
     let mut tmp = [0u8; USER_IO_MAX_BYTES];

@@ -126,12 +126,3 @@ fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
         cpu_data_ptr
     );
 }
-
-pub fn syscall_update_kernel_rsp(rsp: u64) {
-    let cpu_id = get_current_cpu();
-    syscall_update_kernel_rsp_for_cpu(cpu_id, rsp);
-}
-
-pub fn syscall_update_kernel_rsp_for_cpu(cpu_id: usize, rsp: u64) {
-    per_cpu_gdt::set_syscall_kernel_rsp(cpu_id, rsp);
-}

@@ -198,7 +198,6 @@ pub fn wait_status(status: i32) -> WaitStatus {
     }
 }
 
-/// `rusage` is null: the kernel keeps no per-task accounting to report.
 #[inline(always)]
 pub fn waitpid_raw(pid: i32, status: &mut i32, options: u32) -> i64 {
     unsafe {

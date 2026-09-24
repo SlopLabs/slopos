@@ -727,7 +727,8 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
     match outcome {
         slopos_mm::page_fault::FaultOutcome::Resolved => {}
         // #PF is a fault, so the instruction re-executes on IRET.
-        slopos_mm::page_fault::FaultOutcome::Retry => {
+        slopos_mm::page_fault::FaultOutcome::Retry
+        | slopos_mm::page_fault::FaultOutcome::Interrupted => {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
         // `complete_file_fault` never answers one, and the arm above is the

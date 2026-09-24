@@ -258,10 +258,8 @@ pub fn test_segment_budget_is_shared_across_images() -> TestResult {
     TestResult::Pass
 }
 
-/// An executable's segments are its VMAs however far its image reaches: one
-/// larger than a small program keeps a data segment `mprotect` can seal, as a
-/// loader sealing RELRO does, a heap that starts above it, and no page the
-/// next `execve` leaves mapped.
+/// A large image's segments are its VMAs: its data segment can be sealed as
+/// RELRO is, its heap starts above it, and the next `execve` unmaps it all.
 pub fn test_a_large_image_owns_its_segments_and_the_heap_clears_it() -> TestResult {
     const DATA_VA: u64 = 0x1a0_0000;
     let _scope = KernelTestScope::enter();

@@ -133,8 +133,8 @@ and QEMU's `-cpu max` have RDRAND, and the plan records it as a limit.
 Swept 2026-09-24: the toolchain running in the guest and building the kernel
 — the user-mode trap stack, `wait4`'s usage report, the executable's segment
 VMAs, zero-length user ranges, user copies that read a file-backed page in,
-the buddy allocator's free lists, and the KTAP subtest path. Two review
-passes so far, each by a fresh reviewer.
+the buddy allocator's free lists, and the KTAP subtest path. Three review
+passes, each by a fresh reviewer; the third found nothing above a nit.
 What the change introduced was closed inside it, and it fixed four
 **pre-existing** defects. A trap from user mode pushed from `TSS.RSP0`, which
 sat a fixed 12 KiB above the frames of the round trip that entered user mode,

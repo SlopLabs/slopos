@@ -277,7 +277,7 @@ jobs:
       # The gates above grade the shipping pair, where both candidates report
       # `skipped`. This installs them and grades the candidates only —
       # re-asking whether a Rust-hosted toolchain can build this kernel yet
-      # (plans/self-hosting.md, Phase 1). wild is pinned so the answer moves
+      # (plans/self-hosting.md, "Decided"). wild is pinned so the answer moves
       # when someone bumps it, not underneath a run. `-preview` components go
       # missing from individual nightlies, and a day cg_clif did not build
       # upstream must not be a red run with no SlopOS-side remedy; the pinned

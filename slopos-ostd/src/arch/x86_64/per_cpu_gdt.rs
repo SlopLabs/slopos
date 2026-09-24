@@ -124,8 +124,7 @@ pub fn rsp0(cpu_id: usize) -> u64 {
     unsafe { (*PER_CPU_TSS.get())[cpu_id].rsp0 }
 }
 
-/// Update only the syscall-data `kernel_rsp` half, for the per-task
-/// kernel-stack swap on `task_first_run`.
+/// Seeds the syscall-data `kernel_rsp` until the first round trip sets it.
 pub fn set_syscall_kernel_rsp(cpu_id: usize, rsp: u64) {
     if cpu_id >= MAX_CPUS {
         return;

@@ -15,7 +15,7 @@ use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_in
 use slopos_sched::task_struct::Current;
 use slopos_testing::{TestResult, assert_test};
 
-/// Past the round trip's frames, were a chain to start at `kernel_stack_top`.
+/// Deep enough to reach the round trip's frames from `kernel_stack_top`.
 const CHAIN_DEPTH: u64 = 16 * 1024;
 /// Left clear below the hook for the frames of the fill itself.
 const FILL_GAP: u64 = 4 * 1024;
