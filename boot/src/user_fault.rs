@@ -8,7 +8,7 @@ use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
 use slopos_sched::scheduler::schedule;
 use slopos_sched::task::TaskRef;
 use slopos_sched::task::task_find_by_cr3;
-use slopos_sched::task::task_terminate;
+use slopos_sched::task::{task_group_fatal_signal, task_terminate};
 
 use crate::panic::set_panic_cpu_state;
 
@@ -23,6 +23,7 @@ use crate::panic::set_panic_cpu_state;
 /// This function never returns.
 fn retire_faulted_cpu(task_ref: TaskRef, reason: TaskFaultReason, on_ist: bool) -> ! {
     let tid = task_ref.record_user_fault_exit(reason);
+    let _ = task_group_fatal_signal(tid, task_ref.exit_signal());
     task_terminate(tid);
     // Release the registry upgrade before the diverging switch tail.
     drop(task_ref);

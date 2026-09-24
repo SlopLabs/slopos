@@ -2249,48 +2249,73 @@ pub fn task_resume_if_stopped(task: &TaskRef) -> bool {
     true
 }
 
-fn stamp_group_exit(task: &Task, code: u32) {
-    task.exit_reason
-        .store(TaskExitReason::Normal.as_u16(), Ordering::Release);
+/// The status a whole thread group ends with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupEnd {
+    /// `exit_group(code)`.
+    Exit(u32),
+    /// A fatal signal one member took: it ends every member, as POSIX has it.
+    Signal(u8),
+}
+
+fn stamp_group_end(task: &Task, end: GroupEnd) {
+    let (reason, code, signal) = match end {
+        GroupEnd::Exit(code) => (TaskExitReason::Normal, code, 0),
+        GroupEnd::Signal(signum) => (TaskExitReason::Signalled, 128 + signum as u32, signum),
+    };
+    task.exit_reason.store(reason.as_u16(), Ordering::Release);
     task.fault_reason
         .store(TaskFaultReason::None.as_u16(), Ordering::Release);
     task.exit_code.store(code, Ordering::Release);
-    task.set_exit_signal(0);
+    task.set_exit_signal(signal);
+}
+
+/// Stamp `end` on every live member of `tgid` but the calling task and kill
+/// each, so it exits from its own context (I8): one mid-syscall holds kernel
+/// locks on its own stack, and ending it there leaves them held. Returns how
+/// many were killed, and the caller's id when it is a member.
+fn kill_group_but_caller(tgid: u32, end: GroupEnd) -> (usize, Option<u32>) {
+    let current_addr = TaskAddr::current();
+    let mut caller = None;
+    let mut killed = 0usize;
+    for_each_group_member(tgid, |member| {
+        if member.is_exited() {
+            return;
+        }
+        if current_addr == Some(TaskAddr::of(member)) {
+            caller = Some(member.task_id);
+            return;
+        }
+        stamp_group_end(member, end);
+        slopos_ostd::task::ops::task_kill_and_wake(member);
+        task_resume_if_stopped(member);
+        killed += 1;
+    });
+    (killed, caller)
 }
 
 /// End every task in `group_leader_tid`'s thread group with `code`, and
 /// return how many were ended.
 ///
 /// Keyed on the group id, not on a lookup of the leader: a reaped leader's
-/// registration is gone while its threads keep running. Every other member is
-/// killed rather than terminated, and exits from its own context (I8): one
-/// mid-syscall holds kernel locks on its own stack, and ending it there leaves
-/// them held. The caller is terminated here, and must then `schedule()` and
-/// report `NoReturn`.
+/// registration is gone while its threads keep running. The caller is
+/// terminated here, and must then `schedule()` and report `NoReturn`.
 pub fn task_group_exit(group_leader_tid: u32, code: u32) -> usize {
-    let tgid = thread_group_of(group_leader_tid);
-    let current_addr = TaskAddr::current();
-    let mut self_id: Option<u32> = None;
-    let mut ended = 0usize;
-
-    for_each_group_member(tgid, |member| {
-        if member.is_exited() {
-            return;
+    let (mut ended, caller) =
+        kill_group_but_caller(thread_group_of(group_leader_tid), GroupEnd::Exit(code));
+    if let Some(id) = caller {
+        if let Some(task) = task_find_by_id(id) {
+            stamp_group_end(&task, GroupEnd::Exit(code));
         }
-        stamp_group_exit(member, code);
-        if current_addr == Some(TaskAddr::of(member)) {
-            self_id = Some(member.task_id);
-        } else {
-            slopos_ostd::task::ops::task_kill_and_wake(member);
-            task_resume_if_stopped(member);
+        if task_terminate(id) == 0 {
             ended += 1;
         }
-    });
-
-    if let Some(id) = self_id
-        && task_terminate(id) == 0
-    {
-        ended += 1;
     }
     ended
+}
+
+/// End the rest of `tid`'s thread group for the fatal signal `tid` took; `tid`
+/// itself is its caller's to terminate. Returns how many were killed.
+pub fn task_group_fatal_signal(tid: u32, signum: u8) -> usize {
+    kill_group_but_caller(thread_group_of(tid), GroupEnd::Signal(signum)).0
 }

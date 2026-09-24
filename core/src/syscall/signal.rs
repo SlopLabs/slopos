@@ -26,8 +26,9 @@ use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
-    task_find_by_id, task_for_each_active, task_group_signal_from, task_group_stop,
-    task_kill_and_wake, task_resume_if_stopped, task_signal_post_from, task_terminate,
+    task_find_by_id, task_for_each_active, task_group_fatal_signal, task_group_signal_from,
+    task_group_stop, task_kill_and_wake, task_resume_if_stopped, task_signal_post_from,
+    task_terminate,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -974,6 +975,7 @@ fn deliver_pending_signal_core(
                 return;
             }
             SignalDisposition::Terminate(task_id) => {
+                let _ = task_group_fatal_signal(task_id, task_ref.exit_signal());
                 if task_terminate(task_id) == 0 {
                     schedule();
                 }
