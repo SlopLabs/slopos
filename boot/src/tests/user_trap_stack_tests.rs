@@ -150,3 +150,36 @@ slopos_testing::stest!(
     name = test_deep_user_trap_spares_the_round_trip,
     suite = user_trap_stack
 );
+
+/// The outbound leg publishes the context before anything can move the task:
+/// with interrupts on, a preemption between reading this CPU's PCR and writing
+/// it sent the publish to the CPU the task had left, and the task running there
+/// saved its next SYSCALL into this one's registers.
+pub fn test_round_trip_publishes_its_context_with_interrupts_off() -> TestResult {
+    const CLI: u8 = 0xfa;
+    let [a, b, c, d] = (slopos_ostd::cpu::x86_64::pcr::offsets::USER_CTX_PTR as u32).to_le_bytes();
+    // `mov gs:[disp32], rdi`
+    let publish = [0x65, 0x48, 0x89, 0x3c, 0x25, a, b, c, d];
+    let entry = slopos_ostd::user::mode::user_mode_round_trip_asm as *const u8;
+    let head = slopos_ostd::util::ptr_buf::with_buf(entry, 1 + publish.len(), |code| {
+        let mut head = [0u8; 10];
+        head.copy_from_slice(code);
+        head
+    });
+    assert_test!(
+        head[0] == CLI,
+        "the leg opens with {:#04x}, not cli",
+        head[0]
+    );
+    assert_test!(
+        head[1..] == publish,
+        "the leg's first store is not the gs-relative publish: {:02x?}",
+        &head[1..]
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_round_trip_publishes_its_context_with_interrupts_off,
+    suite = user_trap_stack
+);

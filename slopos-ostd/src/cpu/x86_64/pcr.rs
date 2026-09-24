@@ -87,9 +87,9 @@ pub struct ProcessorControlRegion {
 
     _pad3: [u8; 4], // offset 92-95
 
-    /// Per-CPU active `UserContext` pointer.  Set by
-    /// `PcrUserModeBackend::execute_round_trip` before iretq into user
-    /// mode; consumed by `__ostd_user_return` to write user state back.
+    /// Per-CPU active `UserContext` pointer. Published by
+    /// `user_mode_round_trip_asm` with interrupts off before its iretq;
+    /// consumed by `__ostd_user_return` to write user state back.
     pub user_ctx_ptr: AtomicPtr<UserContext>, // offset 96
 
     /// Saved kernel callee-save snapshot used by `__ostd_user_return`

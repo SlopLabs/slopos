@@ -156,35 +156,32 @@ pub struct PcrUserModeBackend;
 pub static DEFAULT_USER_MODE_BACKEND: PcrUserModeBackend = PcrUserModeBackend;
 
 // SAFETY: `PcrUserModeBackend` carries no per-instance state. The outbound leg
-// reads the running CPU's PCR through `current_pcr()` with IRQs off, and the
-// window between the `user_ctx_ptr.store` and the iretq is serialised on that
-// CPU. The return reason is read from the per-task `UserContext`, which travels
-// with the task, so a preempt-and-migrate in the trampoline's post-`sti` tail
-// cannot misattribute it.
+// publishes the context and the return snapshot `gs`-relative with interrupts
+// off, so both land in the PCR of the CPU that executes the iretq. The return
+// reason is read from the per-task `UserContext`, which travels with the task,
+// so a preempt-and-migrate in the trampoline's post-`sti` tail cannot
+// misattribute it.
 #[cfg(all(target_arch = "x86_64", not(test)))]
 unsafe impl UserModeBackend for PcrUserModeBackend {
     unsafe fn execute_round_trip(&self, ctx: &UserContext, _space: &VmSpace) -> ReturnReason {
-        use crate::cpu::x86_64::pcr::current_pcr;
-
-        // Released before the iretq so the trampoline's `mov gs:…` sees the
-        // publish. Writing through this shared borrow is sound because `regs`
-        // sits at offset zero, so every `UR_*` displacement the trampoline
-        // uses lands inside the cell holding the register file.
-        //
-        // SAFETY: `current_pcr()` is callable because GS_BASE was
-        // installed at PCR setup; the slot is per-CPU and the CPU is
-        // the sole writer in this scope.
-        let pcr = unsafe { current_pcr() };
-        pcr.user_ctx_ptr
-            .store(core::ptr::from_ref(ctx).cast_mut(), Ordering::Release);
-
-        // SAFETY: `ctx` is borrowed for the duration of the round trip;
-        // the helper consumes the regs pointer before iretq, and the
-        // trampoline writes the new user state back through
-        // `pcr.user_ctx_ptr` — not through this regs pointer.
+        // SAFETY: `ctx` is borrowed for the duration of the round trip, and its
+        // register file sits at offset zero, so the pointer the helper
+        // publishes is the context the trampoline writes the next user state
+        // into.
         unsafe {
             user_mode_round_trip_asm(ctx.regs_ptr());
         }
+
+        // A SYSCALL made while another task's context was published saved its
+        // registers there, and that task would resume on them.
+        // SAFETY: GS_BASE names this CPU's PCR from PCR setup onward.
+        let published = unsafe { crate::cpu::x86_64::pcr::current_pcr() }
+            .user_ctx_ptr
+            .load(Ordering::Acquire);
+        assert!(
+            core::ptr::eq(published, ctx),
+            "user round trip returned with another context published"
+        );
 
         // The only path back here is the SYSCALL trampoline, which saves the
         // user GPRs into the per-task `UserContext` before returning:
@@ -297,15 +294,16 @@ pub fn user_return_trampoline_addr() -> u64 {
 }
 
 // `user_mode_round_trip_asm` is the entry-side complement to
-// `__ostd_user_return`: it saves the kernel callee-saves and its own return
-// RIP/RSP into `pcr.kernel_return_ctx`, builds the IRETQ frame from the
-// supplied `UserRegs`, and `swapgs; iretq`s into user mode. It has *no*
-// epilogue — the trampoline `jmp`s straight to `kernel_return_ctx.rip`, so
-// control never returns to its body.
+// `__ostd_user_return`: it publishes the context in `pcr.user_ctx_ptr`, saves
+// the kernel callee-saves and its own return RIP/RSP into
+// `pcr.kernel_return_ctx`, builds the IRETQ frame from the supplied `UserRegs`,
+// and `swapgs; iretq`s into user mode. It has *no* epilogue — the trampoline
+// `jmp`s straight to `kernel_return_ctx.rip`, so control never returns to its
+// body.
 //
-// SAFETY: the caller must have stashed the matching `UserContext` pointer in
-// `pcr.user_ctx_ptr` before invocation; without that the trampoline
-// dereferences a stale pointer on the next user→kernel transition.
+// SAFETY: `RDI` must point at the register file of a `UserContext`, at its
+// offset zero, that outlives the round trip: the trampoline writes the next
+// user state through it.
 
 #[cfg(all(target_arch = "x86_64", not(test)))]
 const SEL_USER_CODE_RPL3: u64 = 0x23;
@@ -324,6 +322,11 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
     // RDI = pointer to UserRegs; every other GPR is read from `[rdi + …]`
     // rather than treated as a live input.
     core::arch::naked_asm!(
+        // Off until the iretq, whose user RFLAGS turn them back on: a
+        // preemption anywhere below could move the task to another CPU between
+        // two of these `gs:` stores, or take an interrupt on the user GS base.
+        "cli",
+        "mov gs:[{user_ctx}], rdi",
         "mov gs:[{krc} + {krc_rbx}], rbx",
         "mov gs:[{krc} + {krc_rbp}], rbp",
         "mov gs:[{krc} + {krc_r12}], r12",
@@ -370,6 +373,7 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
         "swapgs",
         "iretq",
 
+        user_ctx = const crate::cpu::x86_64::pcr::offsets::USER_CTX_PTR,
         krc = const crate::cpu::x86_64::pcr::offsets::KERNEL_RETURN_CTX,
         kernel_rsp = const crate::cpu::x86_64::pcr::offsets::KERNEL_RSP,
         tss_rsp0 = const crate::cpu::x86_64::pcr::offsets::TSS_RSP0,
