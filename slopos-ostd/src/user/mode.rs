@@ -79,10 +79,12 @@ impl<'a> UserMode<'a> {
 
 /// Trusted-side hook that drives a single user-mode round trip.
 ///
-/// An implementation stashes `ctx` in the current CPU's PCR slot for the
+/// An implementation publishes `ctx` in the current CPU's PCR slot for the
 /// `__ostd_user_return` trampoline, activates `space`, saves the kernel
 /// callee-saves, restores the user GPRs from `ctx.regs_ptr()`, and
-/// `swapgs; iretq`s. It must derive the [`ReturnReason`] from the per-task
+/// `swapgs; iretq`s. The publish must be `gs`-relative with interrupts off
+/// until the iretq, so it lands on the CPU that enters user mode. It must
+/// derive the [`ReturnReason`] from the per-task
 /// `UserContext` the trampoline wrote, never from a per-CPU slot, which a
 /// preemption in the trampoline-return tail could misdirect to another CPU.
 ///
@@ -174,12 +176,8 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
 
         // A SYSCALL made while another task's context was published saved its
         // registers there, and that task would resume on them.
-        // SAFETY: GS_BASE names this CPU's PCR from PCR setup onward.
-        let published = unsafe { crate::cpu::x86_64::pcr::current_pcr() }
-            .user_ctx_ptr
-            .load(Ordering::Acquire);
         assert!(
-            core::ptr::eq(published, ctx),
+            core::ptr::eq(crate::cpu::x86_64::pcr::published_user_ctx(), ctx),
             "user round trip returned with another context published"
         );
 
