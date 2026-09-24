@@ -10,7 +10,7 @@
 #   - User RSP intact; user GS intact (SWAPGS not yet performed).
 #
 # The trampoline saves user state into the per-task `UserContext`
-# stashed by `PcrUserModeBackend::execute_round_trip`, then unwinds back
+# published by `user_mode_round_trip_asm`, then unwinds back
 # to the caller of `execute_round_trip` by restoring the saved kernel
 # callee-save snapshot from `pcr.kernel_return_ctx` and `jmp`ing to the
 # saved RIP.  The return reason is derived from that per-task
@@ -89,8 +89,8 @@ __ostd_user_return:
     movq %rsp, %gs:PCR_USER_RSP_TMP
     movq %gs:PCR_KERNEL_RSP, %rsp
 
-    # If `execute_round_trip` did its job, this is non-null; otherwise we
-    # fault here, which surfaces a configuration error immediately.
+    # Non-null once a round trip has published it; a null here faults at
+    # once, which surfaces a configuration error immediately.
     movq %gs:PCR_USER_CTX_PTR, %rax
 
     # Save user GPRs (RAX comes from PCR scratch slot below).

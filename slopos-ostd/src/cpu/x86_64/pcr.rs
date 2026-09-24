@@ -1436,6 +1436,25 @@ pub fn get_current_task() -> *mut () {
     task
 }
 
+/// The user context this CPU has published, in one `gs`-relative load: a
+/// reference to the PCR taken first would read whichever CPU a preemption in
+/// between had left.
+#[inline]
+pub fn published_user_ctx() -> *const UserContext {
+    let ctx: *const UserContext;
+    // SAFETY: a single gs-relative load from this CPU's PCR field; GS_BASE is
+    // installed before any task can reach user mode.
+    unsafe {
+        core::arch::asm!(
+            "mov {ctx}, gs:[{off}]",
+            off = const offsets::USER_CTX_PTR,
+            ctx = out(reg) ctx,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    ctx
+}
+
 /// Move one outgoing-task ownership reference into this CPU's deferred slot.
 ///
 /// Returns `Err(task)` if the previous reference has not yet been taken. The
