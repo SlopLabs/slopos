@@ -591,6 +591,8 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `kconsole.arm_ms` | integer | how long the keyboard chord stays armed; default 3000 |
 | `kconsole.max_lines` | integer | per-command line budget; default 512 |
 | `kconsole.probe_ms` | integer | per-CPU answer budget for the all-CPU probe; default 250 |
+| `watchdog.miss_threshold` | integer | consecutive heartbeat samples a CPU may miss before the watchdog reports it; default 100, `0` refused |
+| `watchdog.panic` | `on` / `off` | whether a stall five thresholds long is fatal; default on bare metal only, since under a hypervisor a descheduled vCPU looks the same |
 | `mem.commit` | integer | percent of usable frames the commit ledger may promise to private mappings; default 100, capped at 400, `0` measures without a ceiling |
 
 `lockdep=warn` reports each distinct finding once (deduped per class pair) and

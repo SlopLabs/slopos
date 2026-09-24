@@ -56,7 +56,8 @@ dev_disk_size         := env("DEV_DISK_SIZE", "4G")
 dev_qemu_mem          := env("DEV_QEMU_MEM", "4G")
 dev_disk_mount        := "mount=LABEL=slopos-dev:/devel"
 # The toolchain's execs and forks hold interrupts masked for seconds under TCG,
-# which runs that work far slower than the timer, and five misses are fatal.
+# which runs that work far slower than the timer; at the default threshold each
+# is an NMI report on the serial console of an hours-long build.
 dev_watchdog          := "watchdog.miss_threshold=300"
 dev_disk_inode_ratio  := env("DEV_DISK_INODE_RATIO", "16384")
 toolchain_install     := build_dir / "slopos-toolchain/install"
