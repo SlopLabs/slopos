@@ -119,6 +119,7 @@ pub enum ExecError {
     BadFd = -9,
     NoMem = -12,
     Fault = -14,
+    TooManyFiles = -24,
     NameTooLong = -36,
 }
 
@@ -227,7 +228,8 @@ pub(crate) fn apply_fd_actions(
                 Some(Errno::EBADF) => ExecError::BadFd,
                 Some(Errno::ENOENT) => ExecError::NoEntry,
                 Some(Errno::ENOMEM) => ExecError::NoMem,
-                _ => ExecError::Fault,
+                Some(Errno::EMFILE) => ExecError::TooManyFiles,
+                _ => ExecError::IoError,
             });
         }
     }

@@ -109,19 +109,19 @@ enum Access {
     Write,
 }
 
-/// Run `copy` against the current address space; only if it fails for the one
-/// reason a page fault would have fixed, populate `[addr, addr + len)` and run
-/// it once more.
+/// Run `copy` against the current address space; only if it fails the way a
+/// page fault would have fixed, populate `[addr, addr + len)` and run it once
+/// more.
 ///
 /// Copy first, not populate first: the pages are already present on all but
 /// the first touch, and populating unconditionally charged that majority a
 /// second pid resolve, a slot lock and a per-page table walk before OSTD
-/// walked the same leaves again — and, when a sibling thread merely held a
-/// reference to the space, a spin to the populate path's own retry bound that
-/// ended in the same `EFAULT`. Every failure populate can repair — absent
+/// walked the same leaves again. Every failure populate can repair — absent
 /// leaf, non-user leaf, present-but-COW leaf refused to a write — arrives as
-/// [`UserPtrError::NotMapped`]; a fault taken mid-`movsb` is `CopyFailed` and
-/// means a concurrent unmap, which a second attempt would only race again.
+/// [`UserPtrError::NotMapped`]. A fault taken mid-`movsb` is `CopyFailed`, and
+/// is retried too: a peer that made a page writable flushed only its own TLB,
+/// and the fault retired this CPU's stale entry. A concurrent unmap fails
+/// again.
 ///
 /// The `KArc<VmSpace>` is dropped before `populate` and re-taken after, and
 /// that ordering is load-bearing: the demand path refuses to install a page
@@ -146,7 +146,7 @@ fn copy_then_populate<T>(
         let _pinned = PreemptGuard::new();
         let space = current_vm_space()?;
         match copy(&space) {
-            Err(UserPtrError::NotMapped) => {}
+            Err(UserPtrError::NotMapped | UserPtrError::CopyFailed) => {}
             result => return result,
         }
     }
