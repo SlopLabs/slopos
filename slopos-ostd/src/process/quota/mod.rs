@@ -161,6 +161,22 @@ mod tests {
         assert_eq!(used(parent, ResourceKind::FdSlot), 0);
     }
 
+    /// The root's ceilings are the machine's: they bound every principal's
+    /// holdings together, whatever the kind's per-process scope.
+    #[test]
+    fn a_root_ceiling_bounds_every_kind_across_the_tree() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        set_limit(root(), ResourceKind::FdSlot, 4);
+
+        let held = Charge::commit(try_charge::<FdSlot>(child, 3).expect("under the root"));
+        let refused = try_charge::<FdSlot>(parent, 2).expect_err("the machine is full");
+        assert_eq!(refused.refused_by, root());
+        assert_eq!(used(parent, ResourceKind::FdSlot), 3, "the refusal unwound");
+        drop(held);
+    }
+
     /// The share a released child hands up is its own, not the ancestor's, so
     /// it leaves the ancestor's per-process headroom where it was.
     #[test]
@@ -174,6 +190,7 @@ mod tests {
         let outlives = Charge::commit(try_charge::<FdSlot>(child, 3).expect("the child's own"));
         account_release(child);
         assert_eq!(used(parent, ResourceKind::FdSlot), 2);
+        try_charge::<FdSlot>(parent, 1).expect_err("the parent's own is still full");
 
         drop(outlives);
         drop(parents);
