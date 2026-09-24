@@ -504,11 +504,14 @@ fn rename_resolved(
     // displaced name was that inode's last, and freeing it hands a live
     // reader's blocks away. A destination that names nothing, or nothing open,
     // takes the plain path.
-    let displaced = new_parent.fs.lookup(new_parent.inode, new_name).ok();
-    let Some(displaced) = displaced else {
-        return old_parent
-            .fs
-            .rename(old_parent.inode, old_name, new_parent.inode, new_name);
+    let displaced = match new_parent.fs.lookup(new_parent.inode, new_name) {
+        Ok(displaced) => displaced,
+        Err(VfsError::NotFound) => {
+            return old_parent
+                .fs
+                .rename(old_parent.inode, old_name, new_parent.inode, new_name);
+        }
+        Err(e) => return Err(e),
     };
 
     let linked = detach_unless_linked(new_parent.fs, displaced);

@@ -1,5 +1,6 @@
 //! Holding a second `KArc<VmSpace>` reproduces the contention
-//! single-threaded — no SMP, no timing.
+//! single-threaded — no SMP, no timing — except where the thing under test is
+//! a wait, which needs a task to do it and a clock to outlast.
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -345,6 +346,10 @@ pub fn test_blocking_populate_outlasts_a_long_reader() -> TestResult {
         core::hint::spin_loop();
     }
 
+    assert_test!(
+        early != POPULATE_PENDING,
+        "the populating thread never started"
+    );
     assert_test!(
         early == POPULATE_STARTED,
         "the populate settled while the reader still held the space"

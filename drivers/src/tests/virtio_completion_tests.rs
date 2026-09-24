@@ -2,10 +2,11 @@
 //! `Mutex`, virtqueue descriptor free-list invariants, HPET `period_fs()`, and
 //! live virtio-blk I/O after probe.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use slopos_abi::task::TaskPriority;
 use slopos_core::tests::helpers::mark_current_killed;
+use slopos_kernel_services::clock::uptime_ms;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
@@ -632,12 +633,15 @@ pub fn test_virtio_blk_late_completion_keeps_slot() -> TestResult {
     pass!()
 }
 
-const KILLED_SECTOR: u64 = 7168;
-const KILLED_PATTERN: [u8; 512] = [0x6B; 512];
+const KILLED_SECTOR: u64 = 12288;
+/// Enough writes that, abandoned rather than waited out, one would still be in
+/// the device when its waiter gave up.
+const KILLED_WRITES: u64 = 64;
+static KILLED_PATTERN: [u8; 4096] = [0x6B; 4096];
 
 const KILLED_PENDING: u8 = 0;
 const KILLED_LANDED: u8 = 1;
-const KILLED_ABANDONED: u8 = 2;
+const KILLED_INTERRUPTED: u8 = 2;
 const KILLED_FAILED: u8 = 3;
 const KILLED_UNMARKED: u8 = 4;
 
@@ -657,17 +661,18 @@ fn killed_write() -> u8 {
     if !mark_current_killed(true) {
         return KILLED_UNMARKED;
     }
-    let wrote = token.write_at(KILLED_SECTOR * 512, &KILLED_PATTERN);
+    let wrote = (0..KILLED_WRITES)
+        .try_for_each(|i| token.write_at((KILLED_SECTOR + i * 8) * 512, &KILLED_PATTERN));
     mark_current_killed(false);
     match wrote {
         Ok(()) => KILLED_LANDED,
-        Err(BlockDeviceError::Interrupted) => KILLED_ABANDONED,
+        Err(BlockDeviceError::Interrupted) => KILLED_INTERRUPTED,
         Err(_) => KILLED_FAILED,
     }
 }
 
-/// A requester killed with its write in flight waits the write out. Abandoned,
-/// the write could land after a later one to the same sectors — which is how a
+/// A requester killed with its writes in flight waits each one out. Abandoned,
+/// a write could land after a later one to the same sectors — which is how a
 /// directory block came back as it was before an `unlink`.
 pub fn test_virtio_blk_killed_write_is_waited_out() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
@@ -686,7 +691,11 @@ pub fn test_virtio_blk_killed_write_is_waited_out() -> TestResult {
     assert_test!(finished, "the killed writer never finished");
     match KILLED_OUTCOME.load(Ordering::Acquire) {
         KILLED_LANDED => {}
-        KILLED_ABANDONED => return fail!("a killed requester abandoned its write"),
+        KILLED_INTERRUPTED => {
+            return fail!(
+                "the killed requester's write answered Interrupted, not the device's verdict"
+            );
+        }
         KILLED_UNMARKED => return fail!("the writer thread could not mark itself killed"),
         _ => return fail!("the killed requester's write failed"),
     }
@@ -700,16 +709,33 @@ pub fn test_virtio_blk_killed_write_is_waited_out() -> TestResult {
         Ok(t) => t,
         Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
     };
-    let mut readback = [0u8; 512];
+    let mut readback = assert_ok!(KVec::<u8>::zeroed(KILLED_PATTERN.len()), "readback buffer");
+    let last = (KILLED_SECTOR + (KILLED_WRITES - 1) * 8) * 512;
     assert_test!(
-        token.read_at(KILLED_SECTOR * 512, &mut readback).is_ok() && readback == KILLED_PATTERN,
-        "the killed requester's write must be on the device"
+        token.read_at(last, &mut readback).is_ok() && readback[..] == KILLED_PATTERN[..],
+        "the killed requester's writes must be on the device"
     );
     pass!()
 }
 
-/// A write a timeout abandoned may still land, so nothing reaches the device
-/// until the device has returned it.
+const FENCED_SECTOR: u64 = 7176;
+const FENCED_OLDER: [u8; 512] = [0x3C; 512];
+const FENCED_NEWER: [u8; 512] = [0xC3; 512];
+const FENCE_HOLD_MS: u32 = 200;
+
+static FENCE_HEAD: AtomicU32 = AtomicU32::new(u32::MAX);
+
+fn return_abandoned_write_later() {
+    crate::virtio::hpet_poll_wait(&|| false, FENCE_HOLD_MS);
+    if let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) {
+        virtio_blk::blk_return_abandoned_write(handle, FENCE_HEAD.load(Ordering::Acquire) as u16);
+    }
+    FENCE_HEAD.store(u32::MAX, Ordering::Release);
+}
+
+/// A write a timeout abandoned may still land, so a later write waits until
+/// the device has returned it; a read, which cannot reorder the medium, does
+/// not.
 pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -718,33 +744,51 @@ pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
         Ok(t) => t,
         Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
     };
-
-    const SECTOR: u64 = 7176;
-    let older = [0x3Cu8; 512];
-    let newer = [0xC3u8; 512];
     assert_test!(
-        token.write_at(SECTOR * 512, &older).is_ok(),
+        token.write_at(FENCED_SECTOR * 512, &FENCED_OLDER).is_ok(),
         "seeding the sector must succeed"
     );
 
     let Some(head) = virtio_blk::blk_stage_abandoned_write(handle) else {
         return fail!("could not stage an abandoned write");
     };
-    let fenced = token.write_at(SECTOR * 512, &newer);
-    virtio_blk::blk_return_abandoned_write(handle, head);
+    FENCE_HEAD.store(u32::from(head), Ordering::Release);
+    if slopos_ostd::task::spawn(
+        "abandon-return",
+        return_abandoned_write_later,
+        TaskPriority::Normal,
+    )
+    .is_err()
+    {
+        virtio_blk::blk_return_abandoned_write(handle, head);
+        return fail!("could not spawn the thread that returns the write");
+    }
 
-    assert_eq_test!(
-        fenced,
-        Err(BlockDeviceError::Timeout),
-        "a write must not reach the device while an earlier one may still land"
-    );
-    assert_test!(
-        token.write_at(SECTOR * 512, &newer).is_ok(),
-        "the device must take writes again once the abandoned one is returned"
-    );
+    let started = uptime_ms();
     let mut readback = [0u8; 512];
+    let read = token.read_at(FENCED_SECTOR * 512, &mut readback);
+    let read_ms = uptime_ms() - started;
+    let wrote = token.write_at(FENCED_SECTOR * 512, &FENCED_NEWER);
+    let write_ms = uptime_ms() - started;
+    let returned =
+        crate::virtio::hpet_poll_wait(&|| FENCE_HEAD.load(Ordering::Acquire) == u32::MAX, 10_000);
+
+    assert_test!(returned, "the thread never returned the abandoned write");
     assert_test!(
-        token.read_at(SECTOR * 512, &mut readback).is_ok() && readback == newer,
+        read.is_ok() && read_ms < u64::from(FENCE_HOLD_MS),
+        "a read waited behind an abandoned write"
+    );
+    assert_eq_test!(
+        wrote,
+        Ok(()),
+        "the fenced write must go through once the device returns the abandoned one"
+    );
+    assert_test!(
+        write_ms >= u64::from(FENCE_HOLD_MS / 2),
+        "a write reached the device while an earlier one could still land"
+    );
+    assert_test!(
+        token.read_at(FENCED_SECTOR * 512, &mut readback).is_ok() && readback == FENCED_NEWER,
         "the later write must be what the sector holds"
     );
     pass!()

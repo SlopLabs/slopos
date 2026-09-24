@@ -5414,6 +5414,76 @@ pub fn test_wait_event_timeout_until_does_not_return_ready_on_none() -> TestResu
     }
 }
 
+const KILLED_WAIT_PENDING: u8 = 0;
+const KILLED_WAIT_PASS: u8 = 1;
+const KILLED_WAIT_ENDED_BY_KILL: u8 = 2;
+const KILLED_WAIT_KILL_IGNORED: u8 = 3;
+const KILLED_WAIT_NO_TASK: u8 = 4;
+
+static KILLED_WAIT_VERDICT: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(KILLED_WAIT_PENDING);
+
+fn mark_current_killed(on: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    let Some(current) = crate::task_struct::Current::get() else {
+        return false;
+    };
+    let pending = &current.task().signal_pending;
+    if on {
+        pending.fetch_or(slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
+    } else {
+        pending.fetch_and(!slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
+    }
+    true
+}
+
+/// A kernel thread, because the harness runs on a stub with no task to kill.
+fn killed_waiter() {
+    let verdict = if mark_current_killed(true) {
+        let wq = WaitQueue::new(lock_class!("test.wq_killed", LOCK_LEVEL_RESOURCE));
+        let held = wq.wait_event_uninterruptible_timeout_until(|| None::<()>, 20);
+        let killable = wq.wait_event_timeout(|| false, 20);
+        mark_current_killed(false);
+        match (held, killable) {
+            (Err(WaitAbort::Timeout), Err(WaitAbort::Killed)) => KILLED_WAIT_PASS,
+            (Err(WaitAbort::Timeout), _) => KILLED_WAIT_KILL_IGNORED,
+            _ => KILLED_WAIT_ENDED_BY_KILL,
+        }
+    } else {
+        KILLED_WAIT_NO_TASK
+    };
+    KILLED_WAIT_VERDICT.store(verdict, core::sync::atomic::Ordering::Release);
+}
+
+/// The uninterruptible tier ends on its deadline whether or not the task is
+/// killed; the killable tier beside it, in the same task, ends on the kill.
+pub fn test_uninterruptible_wait_outlasts_a_kill() -> TestResult {
+    use core::sync::atomic::Ordering;
+    KILLED_WAIT_VERDICT.store(KILLED_WAIT_PENDING, Ordering::Release);
+    if slopos_ostd::task::spawn(
+        "killed-waiter",
+        killed_waiter,
+        slopos_abi::task::TaskPriority::Normal,
+    )
+    .is_err()
+    {
+        return slopos_testing::fail!("could not spawn the waiting thread");
+    }
+    let deadline = slopos_kernel_services::clock::uptime_ms() + 10_000;
+    while KILLED_WAIT_VERDICT.load(Ordering::Acquire) == KILLED_WAIT_PENDING
+        && slopos_kernel_services::clock::uptime_ms() < deadline
+    {
+        core::hint::spin_loop();
+    }
+    match KILLED_WAIT_VERDICT.load(Ordering::Acquire) {
+        KILLED_WAIT_PASS => TestResult::Pass,
+        KILLED_WAIT_PENDING => slopos_testing::fail!("the waiting thread never finished"),
+        KILLED_WAIT_NO_TASK => slopos_testing::fail!("the waiting thread had no current task"),
+        KILLED_WAIT_KILL_IGNORED => slopos_testing::fail!("the killable wait ignored the kill"),
+        _ => slopos_testing::fail!("a kill ended the uninterruptible wait"),
+    }
+}
+
 /// `wait_event` succeeds on the pre-check fast path.
 pub fn test_wait_event_bool_wrapper_pre_check_true() -> TestResult {
     let _fixture = SchedFixture::new();
@@ -5502,6 +5572,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_wait_event_timeout_until_pre_check_ready,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_uninterruptible_wait_outlasts_a_kill,
     suite = sched_core
 );
 slopos_testing::stest!(

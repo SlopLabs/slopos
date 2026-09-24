@@ -20,7 +20,7 @@ pub enum FaultOutcome {
     Resolved,
     /// Exclusive access was unavailable; nothing changed and the instruction re-faults.
     Retry,
-    /// The file read was abandoned because the task is being killed; the
+    /// The task is being killed and stopped waiting for the file read; the
     /// instruction re-faults, if the task gets that far.
     Interrupted,
     /// A file-backed page that must be read from the device. The caller opens
@@ -318,13 +318,14 @@ pub fn complete_file_fault(
     }
 }
 
-/// Whether a populate may read a file-backed page in, which blocks.
+/// Whether a populate may block: to read a file-backed page in, or to nap
+/// while a peer holds the address space.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileIo {
-    /// Leave such a page absent, and the range unpopulated.
+    /// Leave a file-backed page absent, and spin rather than nap.
     Refuse,
-    /// Read it as the user fault would: the caller can block, holds no
-    /// spinning lock and no lock the filesystem read takes.
+    /// Block as the user fault would: the caller holds no spinning lock and no
+    /// lock the filesystem read takes.
     Read,
 }
 
@@ -361,12 +362,12 @@ fn resolve_for_populate(
 /// Nothing wakes it: a populate that may block naps here between retries.
 static POPULATE_NAP: WaitQueue = WaitQueue::new(lock_class!("POPULATE_NAP", LOCK_LEVEL_RESOURCE));
 
-/// How long a populate that may block keeps retrying a page a peer holds.
+/// How long a populate that may block keeps retrying pages a peer holds.
 const POPULATE_WAIT_MS: u64 = 5000;
 
-/// Budget for one page's retries. Sibling threads' copies take and drop the
-/// address space back to back, and a spin can fall entirely inside one that a
-/// descheduled vCPU stretches; a caller that may block naps instead.
+/// Budget for one populate's retries. Sibling threads' copies take and drop
+/// the address space back to back, and a spin can fall entirely inside one
+/// that a descheduled vCPU stretches; a caller that may block naps instead.
 struct RetryBudget {
     io: FileIo,
     spins: u32,
@@ -382,6 +383,10 @@ impl RetryBudget {
         }
     }
 
+    fn next_page(&mut self) {
+        self.spins = 0;
+    }
+
     fn step(&mut self, step: PopulateStep) -> bool {
         match step {
             PopulateStep::GiveUp => false,
@@ -390,14 +395,22 @@ impl RetryBudget {
                 let deadline = *self
                     .deadline_ms
                     .get_or_insert(now.saturating_add(POPULATE_WAIT_MS));
-                now < deadline
-                    && POPULATE_NAP.wait_event_timeout(|| false, 1) == Err(WaitAbort::Timeout)
+                if now >= deadline {
+                    return false;
+                }
+                match POPULATE_NAP.wait_event_timeout(|| false, 1) {
+                    Err(WaitAbort::Timeout) => true,
+                    Err(WaitAbort::NoRuntime) => self.spin(),
+                    _ => false,
+                }
             }
-            PopulateStep::Resolved | PopulateStep::Retry => {
-                self.spins += 1;
-                self.spins < POPULATE_SPINS
-            }
+            PopulateStep::Resolved | PopulateStep::Retry => self.spin(),
         }
+    }
+
+    fn spin(&mut self) -> bool {
+        self.spins += 1;
+        self.spins < POPULATE_SPINS
     }
 }
 
@@ -467,8 +480,9 @@ pub fn populate_user_range_for_write(
     };
     let page_size = crate::paging_defs::PAGE_SIZE_4KB;
     let mut page = addr & !(page_size - 1);
+    let mut budget = RetryBudget::new(io);
     while page < end {
-        let mut budget = RetryBudget::new(io);
+        budget.next_page();
         loop {
             let error_code = match page_write_state(handle, page) {
                 Some(PageWriteState::Writable) => break,
@@ -505,8 +519,9 @@ pub fn populate_user_range_for_read(
     };
     let page_size = crate::paging_defs::PAGE_SIZE_4KB;
     let mut page = addr & !(page_size - 1);
+    let mut budget = RetryBudget::new(io);
     while page < end {
-        let mut budget = RetryBudget::new(io);
+        budget.next_page();
         loop {
             match page_write_state(handle, page) {
                 Some(PageWriteState::Writable | PageWriteState::Present) => break,

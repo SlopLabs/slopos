@@ -127,8 +127,8 @@ fn lock_state_contended(state: &AtomicI32) {
     }
 }
 
-/// Spin while the holder is running and nobody is parked, since a short
-/// critical section is over sooner than a futex round trip.
+/// Spin a bounded while the lock is held and nobody is parked: a short critical
+/// section is over sooner than a futex round trip.
 fn spin_while_held(state: &AtomicI32) -> i32 {
     let mut budget = 100;
     loop {
