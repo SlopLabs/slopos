@@ -7007,6 +7007,67 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A wake can queue a task here while another CPU is still switching it out.
+/// A claim made for this CPU's own task must hand it back rather than wait:
+/// that CPU's claim may be waiting on ours, both with interrupts off. Without
+/// the guard this test hangs the run rather than failing.
+pub fn test_a_task_claim_does_not_wait_on_a_switch_out_elsewhere() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let task_id = task_create(
+        b"ClaimProbe\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::High.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(task_ref) = task_find_by_id(task_id) else {
+        return TestResult::Fail;
+    };
+    if !scheduler::clear_nascent_for_test(task_id) {
+        drop(task_ref);
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let mut outcome = TestResult::Pass;
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        task_ref.set_on_cpu(true);
+        let queued = task_set_state(task_id, TaskStatus::Ready) == 0
+            && super::per_cpu::with_cpu_scheduler(cpu, |sched| sched.enqueue_local(&task_ref))
+                == Some(0);
+        if !queued {
+            klog_info!("SCHED_TEST: could not queue the probe");
+            outcome = TestResult::Fail;
+        } else if let Some(claimed) = scheduler::claim_next_task_for_test(cpu, false) {
+            klog_info!(
+                "SCHED_TEST: a task claim took task {} still on a CPU",
+                claimed
+            );
+            outcome = TestResult::Fail;
+        } else if !task_ref.is_ready() || task_ref.sched_placement() != SchedPlacement::ReadyQueue {
+            klog_info!(
+                "SCHED_TEST: the declined probe was not handed back: {:?} {:?}",
+                task_ref.status(),
+                task_ref.sched_placement()
+            );
+            outcome = TestResult::Fail;
+        }
+        task_ref.set_on_cpu(false);
+    });
+    drop(task_ref);
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_a_task_claim_does_not_wait_on_a_switch_out_elsewhere,
+    suite = sched_core
+);
+
 /// A task that goes terminal while parked is not restored to Running.
 ///
 /// The wait protocol's cancel of its own `Running -> Blocked` commit is a

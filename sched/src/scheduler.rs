@@ -1056,11 +1056,15 @@ fn execute_task(
 
 /// Dequeue and claim the highest-priority ready task for `cpu_id`.
 ///
+/// Only idle may wait out another CPU's switch-out of the task: a claim made
+/// for a task still on this CPU may be what that CPU's own claim is waiting
+/// on, and with both spinning interrupts-off neither switch-out ever runs.
+///
 /// On success the returned reference carries the CPU's exclusive dispatch
 /// claim: the task is `Running`, `on_cpu`, and `executing_task` is set. On
 /// failure every one of those is unwound and the reference released, so a
 /// caller that gets `None` owes nothing.
-fn claim_next_task(cpu_id: usize) -> Option<TaskRef> {
+fn claim_next_task(cpu_id: usize, from_idle: bool) -> Option<TaskRef> {
     // Drain cross-core wakes before the pick: a just-pushed remote wake is not
     // yet visible in the ready queues. `cpu_id` is the owning CPU, which is
     // `drain_remote_inbox`'s single-consumer contract.
@@ -1097,11 +1101,11 @@ fn claim_next_task(cpu_id: usize) -> Option<TaskRef> {
         return None;
     }
 
-    // A wake that raced the current task's block lands it in its own CPU's
-    // queue; its `on_cpu` clears only in the switch-out tail this claim is
-    // part of, so waiting on it here is waiting on ourselves. Back on the
-    // queue, and the idle switch below hands it to `finish_switch`.
-    if TaskAddr::current() == Some(TaskAddr::of(next_task)) {
+    // A wake that raced a block queues the task while it is still on a CPU.
+    // On this one its `on_cpu` clears only in the switch-out tail this claim is
+    // part of; on another, see above. Back on the queue: the idle switch below
+    // completes this CPU's switch-out, and idle may wait for the other's.
+    if TaskAddr::current() == Some(TaskAddr::of(next_task)) || (!from_idle && next_task.on_cpu()) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             let _ = sched.enqueue_from_on_cpu(&dispatch_ref);
             sched.set_executing_task(false);
@@ -1147,6 +1151,16 @@ fn claim_next_task(cpu_id: usize) -> Option<TaskRef> {
     Some(dispatch_ref)
 }
 
+/// Test-only [`claim_next_task`]: the id it claimed, with the claim abandoned
+/// again so the task goes back where it was.
+#[cfg(feature = "test-hooks")]
+pub fn claim_next_task_for_test(cpu_id: usize, from_idle: bool) -> Option<u32> {
+    let claimed = claim_next_task(cpu_id, from_idle)?;
+    let id = claimed.task_id;
+    abandon_claim(cpu_id, claimed);
+    Some(id)
+}
+
 /// Release a dispatch claim taken by [`claim_next_task`] for a switch that did
 /// not happen, putting the task back where a later dispatch can find it.
 fn abandon_claim(cpu_id: usize, dispatch_ref: TaskRef) {
@@ -1175,7 +1189,7 @@ fn abandon_claim(cpu_id: usize, dispatch_ref: TaskRef) {
 }
 
 pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool {
-    let Some(dispatch_ref) = claim_next_task(cpu_id) else {
+    let Some(dispatch_ref) = claim_next_task(cpu_id, true) else {
         return false;
     };
     // Idle owns no reference of its own — it is pinned by
@@ -1436,7 +1450,7 @@ fn schedule_internal() {
     // third dispatch that going through idle would cost. A failed claim falls
     // through to the idle switch below.
     if let Some(current_ref) = current.as_ref() {
-        if let Some(next_ref) = claim_next_task(cpu_id) {
+        if let Some(next_ref) = claim_next_task(cpu_id, false) {
             let next: &Task = &next_ref;
             if next.task_id != current_ref.id() {
                 switch_to_claimed_task(cpu_id, current_ref.task(), next_ref);
