@@ -55,6 +55,9 @@ dev_disk_size         := env("DEV_DISK_SIZE", "4G")
 # one rustc maps below 2G.
 dev_qemu_mem          := env("DEV_QEMU_MEM", "4G")
 dev_disk_mount        := "mount=LABEL=slopos-dev:/devel"
+# The toolchain's execs and forks hold interrupts masked for seconds under TCG,
+# which runs that work far slower than the timer, and five misses are fatal.
+dev_watchdog          := "watchdog.miss_threshold=300"
 dev_disk_inode_ratio  := env("DEV_DISK_INODE_RATIO", "16384")
 toolchain_install     := build_dir / "slopos-toolchain/install"
 persist_qemu_mem   := env("PERSIST_QEMU_MEM", "2G")
@@ -556,7 +559,7 @@ test-devdisk: _build-run-tests
     fresh=0
     [ -e "{{fs_image_devdisk}}" ] || fresh=1
     just _fs-image-devdisk
-    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
@@ -588,7 +591,7 @@ test-selfhost: _build-run-tests
     scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/selfhost-edits.patch"
     [ ! -s "{{build_dir}}/selfhost-edits.patch" ] ||
         { echo "FAIL: the guest's tree carries edits HEAD lacks — see {{build_dir}}/selfhost-edits.patch" >&2; exit 1; }
-    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
