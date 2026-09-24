@@ -1,16 +1,21 @@
 //! Holding a second `KArc<VmSpace>` reproduces the contention
 //! single-threaded — no SMP, no timing.
 
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use slopos_abi::addr::PhysAddr;
+use slopos_abi::task::TaskPriority;
+use slopos_kernel_services::clock::uptime_ms;
 use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr};
 use slopos_ostd::sync::PreemptGuard;
 
 use crate::error::MmError;
 use crate::page_fault::{
-    FaultOutcome, RETRY_WARN_MS, RetryEpisode, note_retry, try_resolve_user_fault,
+    FaultOutcome, FileIo, RETRY_WARN_MS, RetryEpisode, note_retry, populate_user_range_for_read,
+    try_resolve_user_fault,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{
@@ -272,6 +277,89 @@ pub fn test_map_user_range_leaves_nothing_mapped_on_would_block() -> TestResult 
     pass!()
 }
 
+const POPULATE_PENDING: u8 = 0;
+const POPULATE_STARTED: u8 = 1;
+const POPULATE_DONE: u8 = 2;
+const POPULATE_REFUSED: u8 = 3;
+
+static POPULATE_TARGET: AtomicU64 = AtomicU64::new(0);
+static POPULATE_HANDLE: AtomicU64 = AtomicU64::new(0);
+static POPULATE_OUTCOME: AtomicU8 = AtomicU8::new(POPULATE_PENDING);
+
+/// A kernel thread, since only a task can nap between attempts.
+fn populate_from_a_task() {
+    POPULATE_OUTCOME.store(POPULATE_STARTED, Ordering::Release);
+    let populated = populate_user_range_for_read(
+        POPULATE_HANDLE.load(Ordering::Acquire),
+        POPULATE_TARGET.load(Ordering::Acquire),
+        PAGE_SIZE_4KB,
+        slopos_arch::pcr::current_task_id(),
+        FileIo::Read,
+    );
+    let outcome = if populated {
+        POPULATE_DONE
+    } else {
+        POPULATE_REFUSED
+    };
+    POPULATE_OUTCOME.store(outcome, Ordering::Release);
+}
+
+/// A populate that may block outlasts a reader's hold on the address space.
+/// A spin gave the range up inside one long copy by a sibling thread, and the
+/// copy it served answered `EFAULT` for memory that was valid.
+pub fn test_blocking_populate_outlasts_a_long_reader() -> TestResult {
+    const HOLD_MS: u64 = 2000;
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("create VM");
+    };
+    let Some(addr) = lazy_anon_page(&vm) else {
+        return fail!("process_vm_alloc failed");
+    };
+    let Some(handle) = process_vm_handle(vm.process) else {
+        return fail!("no handle for the process");
+    };
+    let Some(reader) = process_vm_get_vm_space(vm.process) else {
+        return fail!("clone the address space");
+    };
+
+    POPULATE_TARGET.store(addr, Ordering::Release);
+    POPULATE_HANDLE.store(pack_process_vm_handle(handle), Ordering::Release);
+    POPULATE_OUTCOME.store(POPULATE_PENDING, Ordering::Release);
+    if slopos_ostd::task::spawn("populate-nap", populate_from_a_task, TaskPriority::Normal).is_err()
+    {
+        drop(reader);
+        return fail!("could not spawn the populating thread");
+    }
+    let started_by = uptime_ms() + 5_000;
+    while POPULATE_OUTCOME.load(Ordering::Acquire) == POPULATE_PENDING && uptime_ms() < started_by {
+        core::hint::spin_loop();
+    }
+    let released_at = uptime_ms() + HOLD_MS;
+    while uptime_ms() < released_at {
+        core::hint::spin_loop();
+    }
+    let early = POPULATE_OUTCOME.load(Ordering::Acquire);
+    drop(reader);
+    let deadline = uptime_ms() + 10_000;
+    while POPULATE_OUTCOME.load(Ordering::Acquire) == POPULATE_STARTED && uptime_ms() < deadline {
+        core::hint::spin_loop();
+    }
+
+    assert_test!(
+        early == POPULATE_STARTED,
+        "the populate settled while the reader still held the space"
+    );
+    assert_test!(
+        POPULATE_OUTCOME.load(Ordering::Acquire) == POPULATE_DONE,
+        "the populate gave the page up rather than wait out the reader"
+    );
+    assert_test!(
+        !vm.virt_to_phys(addr).is_null(),
+        "the populate reported success without a mapping"
+    );
+    pass!()
+}
+
 pub fn test_retry_episode_warns_once_after_the_budget() -> TestResult {
     let mut ep = RetryEpisode::IDLE;
     assert_test!(
@@ -340,6 +428,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_demand_fault_resolves_after_the_reader_drops,
+    suite = vm_contention
+);
+slopos_testing::stest!(
+    name = test_blocking_populate_outlasts_a_long_reader,
     suite = vm_contention
 );
 slopos_testing::stest!(

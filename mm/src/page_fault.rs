@@ -3,7 +3,8 @@ use slopos_abi::task::TaskFaultReason;
 use slopos_ostd::handle::HandleError;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
-use slopos_ostd::{klog_info, klog_warn};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, WaitAbort, WaitQueue};
+use slopos_ostd::{klog_info, klog_warn, lock_class};
 
 use crate::error::MmError;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
@@ -327,21 +328,76 @@ pub enum FileIo {
     Read,
 }
 
-/// One step of a populate loop; `false` gives the range up.
+enum PopulateStep {
+    Resolved,
+    /// A peer holds the address space; the same step may succeed once it lets
+    /// go.
+    Retry,
+    GiveUp,
+}
+
 fn resolve_for_populate(
     page: u64,
     error_code: u64,
     process_vm_handle: u64,
     task_id: u32,
     io: FileIo,
-) -> bool {
-    match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
-        FaultOutcome::Resolved | FaultOutcome::Retry => true,
-        FaultOutcome::NeedsIo(plan) if io == FileIo::Read => matches!(
-            complete_file_fault(process_vm_handle, &plan, page, task_id),
-            FaultOutcome::Resolved | FaultOutcome::Retry
-        ),
-        FaultOutcome::NeedsIo(_) | FaultOutcome::Interrupted | FaultOutcome::Fatal(_) => false,
+) -> PopulateStep {
+    let outcome = match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
+        FaultOutcome::NeedsIo(plan) if io == FileIo::Read => {
+            complete_file_fault(process_vm_handle, &plan, page, task_id)
+        }
+        outcome => outcome,
+    };
+    match outcome {
+        FaultOutcome::Resolved => PopulateStep::Resolved,
+        FaultOutcome::Retry => PopulateStep::Retry,
+        FaultOutcome::NeedsIo(_) | FaultOutcome::Interrupted | FaultOutcome::Fatal(_) => {
+            PopulateStep::GiveUp
+        }
+    }
+}
+
+/// Nothing wakes it: a populate that may block naps here between retries.
+static POPULATE_NAP: WaitQueue = WaitQueue::new(lock_class!("POPULATE_NAP", LOCK_LEVEL_RESOURCE));
+
+/// How long a populate that may block keeps retrying a page a peer holds.
+const POPULATE_WAIT_MS: u64 = 5000;
+
+/// Budget for one page's retries. Sibling threads' copies take and drop the
+/// address space back to back, and a spin can fall entirely inside one that a
+/// descheduled vCPU stretches; a caller that may block naps instead.
+struct RetryBudget {
+    io: FileIo,
+    spins: u32,
+    deadline_ms: Option<u64>,
+}
+
+impl RetryBudget {
+    fn new(io: FileIo) -> Self {
+        Self {
+            io,
+            spins: 0,
+            deadline_ms: None,
+        }
+    }
+
+    fn step(&mut self, step: PopulateStep) -> bool {
+        match step {
+            PopulateStep::GiveUp => false,
+            PopulateStep::Retry if self.io == FileIo::Read => {
+                let now = slopos_kernel_services::clock::uptime_ms();
+                let deadline = *self
+                    .deadline_ms
+                    .get_or_insert(now.saturating_add(POPULATE_WAIT_MS));
+                now < deadline
+                    && POPULATE_NAP.wait_event_timeout(|| false, 1) == Err(WaitAbort::Timeout)
+            }
+            PopulateStep::Resolved | PopulateStep::Retry => {
+                self.spins += 1;
+                self.spins < POPULATE_SPINS
+            }
+        }
     }
 }
 
@@ -352,12 +408,10 @@ const USER_WRITE_ABSENT: u64 = 0x06;
 const USER_READ_ABSENT: u64 = 0x04;
 const USER_WRITE_PRESENT: u64 = 0x07;
 
-/// `Retry` means a peer holds the address space for a bounded window, so the
-/// bound is generous; a stuck retry is a defect, not a reason to spin forever.
-/// Kept generous rather than trimmed now that the user-copy path reaches here
-/// only after a copy has already failed: exhausting the bound is a spurious
-/// `EFAULT` handed to userland, so the cost of spinning too long is latency in
-/// a rare case and the cost of spinning too little is a wrong answer.
+/// Attempts per page for a caller that cannot block, and for a page that keeps
+/// resolving without becoming accessible. Exhausting it hands userland a
+/// spurious `EFAULT`, so it is generous; a stuck retry is still a defect, not a
+/// reason to spin forever.
 const POPULATE_SPINS: u32 = 4096;
 
 #[derive(Clone, Copy)]
@@ -414,7 +468,7 @@ pub fn populate_user_range_for_write(
     let page_size = crate::paging_defs::PAGE_SIZE_4KB;
     let mut page = addr & !(page_size - 1);
     while page < end {
-        let mut spins = 0u32;
+        let mut budget = RetryBudget::new(io);
         loop {
             let error_code = match page_write_state(handle, page) {
                 Some(PageWriteState::Writable) => break,
@@ -422,11 +476,8 @@ pub fn populate_user_range_for_write(
                 Some(PageWriteState::Absent) => USER_WRITE_ABSENT,
                 None => return false,
             };
-            if !resolve_for_populate(page, error_code, process_vm_handle, task_id, io) {
-                return false;
-            }
-            spins += 1;
-            if spins == POPULATE_SPINS {
+            let step = resolve_for_populate(page, error_code, process_vm_handle, task_id, io);
+            if !budget.step(step) {
                 return false;
             }
         }
@@ -455,18 +506,15 @@ pub fn populate_user_range_for_read(
     let page_size = crate::paging_defs::PAGE_SIZE_4KB;
     let mut page = addr & !(page_size - 1);
     while page < end {
-        let mut spins = 0u32;
+        let mut budget = RetryBudget::new(io);
         loop {
             match page_write_state(handle, page) {
                 Some(PageWriteState::Writable | PageWriteState::Present) => break,
                 Some(PageWriteState::Absent) => {}
                 None => return false,
             }
-            if !resolve_for_populate(page, USER_READ_ABSENT, process_vm_handle, task_id, io) {
-                return false;
-            }
-            spins += 1;
-            if spins == POPULATE_SPINS {
+            let step = resolve_for_populate(page, USER_READ_ABSENT, process_vm_handle, task_id, io);
+            if !budget.step(step) {
                 return false;
             }
         }
