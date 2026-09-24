@@ -391,6 +391,59 @@ fn mmap_shared_file_is_coherent_with_read() -> bool {
     true
 }
 
+/// A file that keeps a name stays mapped after losing another, including the
+/// pages nobody had touched yet: rustc's incremental cache hard-links a
+/// session's files and deletes the old names while the new ones are mapped.
+fn mmap_survives_losing_one_of_two_names() -> bool {
+    const BODY: &[u8] = b"mmap-linked-original-contents-klmnopqrst";
+
+    let path = unique_probe_path("mmap-linked");
+    let second = unique_probe_path("mmap-linked-second");
+    if let Err(e) = fs::write(&path, BODY) {
+        println!("MMAP: create failed: {e}");
+        return false;
+    }
+    let mut path_z = path.clone();
+    path_z.push('\0');
+    let Ok(fd) = fs_syscall::open_path(path_z.as_ptr() as *const c_char, O_RDONLY) else {
+        println!("MMAP: open failed");
+        let _ = fs::remove_file(&path);
+        return false;
+    };
+    let base = memory::mmap(
+        0,
+        BODY.len() as u64,
+        PROT_READ,
+        MAP_PRIVATE,
+        fd.raw() as i64,
+        0,
+    );
+    let _ = fs_syscall::close_fd(fd);
+    if base == 0 || (base as i64) < 0 {
+        println!("MMAP: MAP_PRIVATE of a regular file was refused ({base:#x})");
+        let _ = fs::remove_file(&path);
+        return false;
+    }
+
+    let relinked = fs::hard_link(&path, &second).and_then(|()| fs::remove_file(&path));
+    let seen = relinked.is_ok().then(|| read_mapping(base, BODY.len()));
+    let _ = memory::munmap(base, BODY.len() as u64);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&second);
+
+    match seen {
+        Some(bytes) if bytes == BODY => true,
+        Some(_) => {
+            println!("MMAP: the mapping lost the file's bytes with its first name");
+            false
+        }
+        None => {
+            println!("MMAP: link then unlink failed: {:?}", relinked.err());
+            false
+        }
+    }
+}
+
 /// A `MAP_PRIVATE` mapping is populated from the same authority, and a store
 /// through it never reaches the file.
 fn mmap_private_file_keeps_its_store_private() -> bool {
@@ -644,6 +697,10 @@ fn main() {
         (
             "mmap_private_file_keeps_its_store_private",
             mmap_private_file_keeps_its_store_private,
+        ),
+        (
+            "mmap_survives_losing_one_of_two_names",
+            mmap_survives_losing_one_of_two_names,
         ),
         (
             "mmap_shared_write_needs_a_writable_descriptor",

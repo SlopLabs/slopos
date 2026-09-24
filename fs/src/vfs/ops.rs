@@ -334,18 +334,17 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
         return Err(VfsError::IsDirectory);
     }
 
-    // Before the removal: the flush is only safe while the inode's blocks are
-    // still its own, and the forget must land before the inode number can be
-    // reallocated.
-    crate::filemap::detach_inode(parent.fs, inode);
+    let linked = detach_unless_linked(parent.fs, inode);
 
     if begin_removal(parent.fs, inode) == DetachPlan::FreeNow {
         let result = parent.fs.unlink(parent.inode, name);
         let _ = end_removal(parent.fs, inode, RemovalOutcome::Nothing);
+        forget_if_freed(parent.fs, inode, linked);
         return result;
     }
 
     let result = parent.fs.detach(parent.inode, name);
+    forget_if_freed(parent.fs, inode, linked);
     let outcome = match result {
         Ok(Some(_)) => RemovalOutcome::Deferred,
         _ => RemovalOutcome::Nothing,
@@ -356,6 +355,28 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
         crate::vfs::orphan::drain_or_wake(parent.fs);
     }
     result.map(|_| ())
+}
+
+/// Unkey `inode`'s page set ahead of a removal that takes its last name, and
+/// answer whether another name kept it keyed instead. The flush is only safe
+/// while the blocks are still the inode's, and the forget must land before its
+/// number can be reallocated; a name among several changes neither, and
+/// forgetting then would strand every mapping of a file that lives on.
+fn detach_unless_linked(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId) -> bool {
+    if fs.stat(inode).is_ok_and(|stat| stat.nlink > 1) {
+        return true;
+    }
+    crate::filemap::detach_inode(fs, inode);
+    false
+}
+
+/// A removal racing for the other name may have taken the last one from an
+/// inode whose set was left keyed. Forget only: once no name holds the inode,
+/// its blocks are not its own to flush into for long.
+fn forget_if_freed(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId, linked: bool) {
+    if linked && !fs.stat(inode).is_ok_and(|stat| stat.nlink > 0) {
+        crate::filemap::forget_inode(fs, inode);
+    }
 }
 
 #[inline(never)]
@@ -490,13 +511,14 @@ fn rename_resolved(
             .rename(old_parent.inode, old_name, new_parent.inode, new_name);
     };
 
-    crate::filemap::detach_inode(new_parent.fs, displaced);
+    let linked = detach_unless_linked(new_parent.fs, displaced);
 
     if begin_removal(new_parent.fs, displaced) == DetachPlan::FreeNow {
         let result = old_parent
             .fs
             .rename(old_parent.inode, old_name, new_parent.inode, new_name);
         let _ = end_removal(new_parent.fs, displaced, RemovalOutcome::Nothing);
+        forget_if_freed(new_parent.fs, displaced, linked);
         return result;
     }
 
@@ -504,6 +526,7 @@ fn rename_resolved(
         old_parent
             .fs
             .rename_detaching(old_parent.inode, old_name, new_parent.inode, new_name);
+    forget_if_freed(new_parent.fs, displaced, linked);
     let outcome = match result {
         Ok(Some(_)) => RemovalOutcome::Deferred,
         _ => RemovalOutcome::Nothing,
