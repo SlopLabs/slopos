@@ -319,8 +319,9 @@ pub fn test_rescue_sweep_republishes_an_orphaned_migrating_task() -> TestResult 
     let Some(task) = task_find_by_id(task_id) else {
         return slopos_testing::fail!("task lookup failed");
     };
+    let fresh = task.sched_placement();
     let orphaned = task_set_state(task_id, TaskStatus::Ready) == 0
-        && task.sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::Migrating);
+        && task.sched_placement_compare_exchange(fresh, SchedPlacement::Migrating);
     if !orphaned {
         drop(task);
         let _ = task_terminate(task_id);
