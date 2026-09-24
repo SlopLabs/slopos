@@ -52,6 +52,7 @@ struct AccountRow {
     usage: [AtomicU64; KIND_COUNT],
     /// This row's own process's share of `used`: what a [`Scope::Principal`]
     /// ceiling is compared against, since `used` also counts descendants.
+    /// Kept for those kinds only.
     own: [AtomicU32; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
@@ -487,9 +488,9 @@ pub fn try_charge<A: Refundable>(
         [AccountId::NONE; MAX_ACCOUNT_DEPTH as usize];
     let mut depth = 0usize;
 
-    let leaf = row_for(account);
+    let leaf = row_for(account).filter(|_| !subtree);
     if let Some(leaf) = leaf
-        && charge_own(leaf, kind, n, mode, !subtree).is_err()
+        && charge_own(leaf, kind, n, mode, true).is_err()
     {
         return Err(TryChargeError {
             refused_by: account,
@@ -503,7 +504,9 @@ pub fn try_charge<A: Refundable>(
         let Some(row) = row_for(current) else {
             break;
         };
-        if let Err(()) = charge_row(row, kind, n, mode, subtree) {
+        // The root's ceilings are the machine's, and bound everything charged.
+        let bounded = subtree || current.slot() == ROOT_ACCOUNT_SLOT;
+        if let Err(()) = charge_row(row, kind, n, mode, bounded) {
             if let Some(leaf) = leaf {
                 release_own(leaf, kind, n);
             }
@@ -535,7 +538,9 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
     if n == 0 {
         return;
     }
-    if let Some(row) = row_for(account) {
+    if kind.scope() == Scope::Principal
+        && let Some(row) = row_for(account)
+    {
         release_own(row, kind, n);
     }
     credit_chain(account, kind, n);
@@ -794,7 +799,7 @@ pub enum LedgerFault {
         mapped: u32,
         /// Pages their tokens claim.
         charged: u32,
-        /// What the row says, including every descendant's debit.
+        /// The row's own share, without its descendants' debits.
         used: u32,
     },
 }
@@ -860,8 +865,10 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             let peak = usage_peak(usage);
             let limit = row.limit[idx].load(Ordering::Acquire);
             let bounded = match kind.scope() {
-                Scope::Principal => row.own[idx].load(Ordering::Acquire),
-                Scope::Subtree => used,
+                Scope::Principal if slot != ROOT_ACCOUNT_SLOT as usize => {
+                    row.own[idx].load(Ordering::Acquire)
+                }
+                _ => used,
             };
 
             if used > peak {
