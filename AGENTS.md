@@ -522,15 +522,15 @@ The invariants the gate protects:
 - **I7** `KArc` is fallible everywhere and saturates on refcount overflow.
 - **I8** **A task only ever exits from its own context.** Kill is a flag:
   `task_kill_and_wake` marks the target and wakes it, every blocking primitive
-  returns `Err(WaitAbort::Killed)`, and the task unwinds by *returning*, so
-  destructors run on its own stack at a point it chose. An owning task handle
-  may therefore live in a stack frame that blocks. The one wait a kill does not
-  end is `wait_event_uninterruptible_timeout_until`, which takes a deadline
-  and serves a block request the device already owns: abandoned, a write could
-  land after a later one to the same sectors. The residual is a kernel
-  loop that reaches no blocking primitive at all: nothing can stop one, and
-  `task_terminate`'s remote branch survives only as the bounded shutdown
-  fallback and the IRQ-exit self-kill.
+  but one returns `Err(WaitAbort::Killed)`, and the task unwinds by
+  *returning*, so destructors run on its own stack at a point it chose. An
+  owning task handle may therefore live in a stack frame that blocks. The one
+  is `wait_event_uninterruptible_timeout_until`, deadline-only, for a block
+  request the device already owns: abandoned, a write could land after a later
+  one to the same sectors. A new caller owes the same kind of reason. The
+  residual is a kernel loop that reaches no blocking primitive at all: nothing
+  can stop one, and `task_terminate`'s remote branch survives only as the
+  bounded shutdown fallback and the IRQ-exit self-kill.
 
 I1–I7 above are the tree's naming for this discipline. The proof in
 `verification/proofs/task_ownership.rs` checks a model of it under the names

@@ -316,21 +316,69 @@ fn unreadable_target_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
         return Err("the rename went ahead without knowing whether the target existed");
     }
 
+    if sole_holder(fs, dir, b"b")? != Some(target) {
+        return Err("the target directory no longer holds exactly its own entry");
+    }
+    if fs.resolve_path(b"/a") != Ok(source) {
+        return Err("the failed rename moved its source");
+    }
+    Ok(())
+}
+
+/// The inode `name` names in `dir`, or `None` unless exactly one record
+/// carries it.
+fn sole_holder(fs: &mut Ext2Fs<'_>, dir: u32, name: &[u8]) -> Result<Option<u32>, &'static str> {
     let mut names = 0;
     let mut holder = 0;
     fs.for_each_dir_entry(dir, |entry| {
-        if entry.name == b"b" {
+        if entry.name == name {
             names += 1;
             holder = entry.inode.raw();
         }
         true
     })
     .map_err(|_| "walk")?;
-    if names != 1 || holder != target {
-        return Err("the target directory no longer holds exactly its own entry");
+    Ok((names == 1).then_some(holder))
+}
+
+/// A create or link whose lookup of the name fails must fail rather than write
+/// a second record of it.
+pub fn test_ext2_create_and_link_fail_when_the_lookup_does() -> TestResult {
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    match with_log(&device, unreadable_name_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
     }
-    if fs.resolve_path(b"/a") != Ok(source) {
-        return Err("the failed rename moved its source");
+}
+
+fn unreadable_name_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
+    let taken = fs.create_file(dir, b"b").map_err(|_| "create")?;
+    let other = fs.create_file(2, b"o").map_err(|_| "create other")?;
+    fs.sync().map_err(|_| "sync")?;
+    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0];
+    let home = u64::from(block.raw()) * u64::from(fs.block_size());
+
+    fs.cache_drop_clean_for_test();
+    PROBE_REFUSE_READ_AT.store(home, Ordering::Relaxed);
+    let created = fs.create_file(dir, b"b");
+    fs.cache_drop_clean_for_test();
+    PROBE_REFUSE_READ_AT.store(home, Ordering::Relaxed);
+    let linked = fs.link_entry(dir, b"b", other);
+    PROBE_REFUSE_READ_AT.store(u64::MAX, Ordering::Relaxed);
+
+    if created.is_ok() {
+        return Err("a create went ahead without knowing whether the name was taken");
+    }
+    if linked.is_ok() {
+        return Err("a link went ahead without knowing whether the name was taken");
+    }
+    if sole_holder(fs, dir, b"b")? != Some(taken) {
+        return Err("the directory no longer holds exactly one record of the name");
     }
     Ok(())
 }
@@ -562,6 +610,10 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_ext2_killed_read_is_not_damage, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_rename_fails_when_the_target_lookup_does,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_create_and_link_fail_when_the_lookup_does,
     suite = fs
 );
 slopos_testing::stest!(name = test_ext2_new_directory_block_is_metadata, suite = fs);

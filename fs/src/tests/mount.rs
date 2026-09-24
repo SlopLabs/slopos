@@ -1,7 +1,7 @@
 //! Mount identity, the mount table's child queries, and the paged listing's
 //! mount pass.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use slopos_abi::fs::{FS_TYPE_DIRECTORY, UserFsEntry};
 use slopos_ostd::lock_class;
@@ -19,7 +19,7 @@ use crate::vfs::init::{
     vfs_claim_block_device, vfs_ext2_mount_named, vfs_ext2_pool_claim, vfs_ext2_pool_release,
     vfs_ext2_unmount_named,
 };
-use crate::vfs::traits::{FileSystem, FileType, same_filesystem};
+use crate::vfs::traits::{FileStat, FileSystem, FileType, InodeId, VfsResult, same_filesystem};
 use crate::vfs::{
     ListCursor, VfsError, mount, mount_at, unmount, vfs_init_builtin_filesystems, vfs_list_from,
     vfs_mkdir, vfs_open, vfs_rmdir, vfs_stat, vfs_statfs, with_mount_table,
@@ -351,6 +351,119 @@ pub fn test_ramfs_mount_pool_exhausts_and_recovers() -> TestResult {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!(msg),
     }
+}
+
+/// Delegates to a ramfs, but fails the `n`th lookup of [`FLAKY_NAME`] once
+/// armed with `n` — the transient refusal a killed task's device read answers
+/// with.
+struct FlakyLookup {
+    inner: &'static RamFs,
+    fail_in: AtomicU32,
+}
+
+const FLAKY_NAME: &[u8] = b"displaced";
+
+impl FileSystem for FlakyLookup {
+    fn name(&self) -> &'static str {
+        "flaky"
+    }
+    fn root_inode(&self) -> InodeId {
+        self.inner.root_inode()
+    }
+    fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
+        if name == FLAKY_NAME
+            && self
+                .fail_in
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                == Ok(1)
+        {
+            return Err(VfsError::Interrupted);
+        }
+        self.inner.lookup(parent, name)
+    }
+    fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
+        self.inner.stat(inode)
+    }
+    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+        self.inner.read(inode, offset, buf)
+    }
+    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+        self.inner.write(inode, offset, buf)
+    }
+    fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
+        self.inner.create(parent, name, file_type)
+    }
+    fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
+        self.inner.unlink(parent, name)
+    }
+    fn readdir(
+        &self,
+        inode: InodeId,
+        offset: usize,
+        callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
+    ) -> VfsResult<usize> {
+        self.inner.readdir(inode, offset, callback)
+    }
+    fn rename(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+    ) -> VfsResult<()> {
+        self.inner
+            .rename(old_parent, old_name, new_parent, new_name)
+    }
+}
+
+static FLAKY_FS: FlakyLookup = FlakyLookup {
+    inner: &FIXTURE_FS[3],
+    fail_in: AtomicU32::new(0),
+};
+
+const FLAKY_MP: &[u8] = b"/tmp/flaky_rename";
+const FLAKY_SOURCE: &[u8] = b"/tmp/flaky_rename/source";
+const FLAKY_TARGET: &[u8] = b"/tmp/flaky_rename/displaced";
+
+/// A rename whose lookup of the name it would displace fails must fail. Taken
+/// for "nothing there", it skipped the protection an open displaced file is
+/// owed, and the filesystem's own lookup then displaced it anyway.
+pub fn test_rename_fails_when_the_displaced_lookup_does() -> TestResult {
+    if !ready() || !ensure_dir(FLAKY_MP) {
+        return slopos_testing::fail!("the /tmp fixture directory is unavailable");
+    }
+    let outcome = flaky_rename_body();
+    FLAKY_FS.fail_in.store(0, Ordering::Release);
+    let _ = crate::vfs::vfs_unlink(FLAKY_SOURCE);
+    let _ = crate::vfs::vfs_unlink(FLAKY_TARGET);
+    let _ = unmount(FLAKY_MP);
+    let _ = vfs_rmdir(FLAKY_MP);
+    match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!(msg),
+    }
+}
+
+#[inline(never)]
+fn flaky_rename_body() -> Result<(), &'static str> {
+    mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
+    vfs_open(FLAKY_SOURCE, true).map_err(|_| "could not create the source")?;
+    vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the target")?;
+
+    // The sealed-path check looks the name up first; the second lookup is the
+    // one that decides what the rename displaces.
+    FLAKY_FS.fail_in.store(2, Ordering::Release);
+    let renamed = crate::vfs::vfs_rename(FLAKY_SOURCE, FLAKY_TARGET);
+    if FLAKY_FS.fail_in.swap(0, Ordering::AcqRel) != 0 {
+        return Err("the rename never looked up the name it would displace");
+    }
+    if renamed.is_ok() {
+        return Err("the rename went ahead without knowing what it displaced");
+    }
+    if vfs_stat(FLAKY_SOURCE).is_err() || vfs_stat(FLAKY_TARGET).is_err() {
+        return Err("a refused rename moved a name");
+    }
+    Ok(())
 }
 
 /// Blocks in the fixture images these tests attach: 512 KiB at the builder's
@@ -867,3 +980,7 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(name = test_ext2_mount_by_label, suite = fs);
+slopos_testing::stest!(
+    name = test_rename_fails_when_the_displaced_lookup_does,
+    suite = fs
+);

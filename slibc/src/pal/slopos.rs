@@ -503,7 +503,8 @@ impl Pal for Sys {
 
     fn fork() -> Result<i32, Errno> {
         // Held across the fork, so the child's copy is never left locked by a
-        // thread the child does not have.
+        // thread the child does not have. As under glibc, a fork from a signal
+        // handler that interrupted malloc therefore deadlocks.
         let allocator = crate::mem::dlmalloc::ALLOCATOR.lock();
         let ret = unsafe { syscall0(SYSCALL_FORK) };
         drop(allocator);

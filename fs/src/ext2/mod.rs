@@ -70,7 +70,7 @@ pub enum Ext2Error {
     /// A rename would splice a directory into its own subtree, detaching it
     /// and everything under it from the root.
     InvalidPath,
-    /// The requester was killed before a device request was sent.
+    /// The requester was killed while it waited to hand the device a request.
     Interrupted,
 }
 
@@ -1304,7 +1304,7 @@ impl<'a> Ext2Fs<'a> {
             if parent_inode.is_immutable() {
                 return Err(Ext2Error::Immutable);
             }
-            if dir::lookup_child(
+            name_is_free(dir::lookup_child(
                 &parent_inode,
                 name,
                 &mut *fs.cache,
@@ -1312,11 +1312,7 @@ impl<'a> Ext2Fs<'a> {
                 &fs.geom,
                 fs.block_size,
                 BlockOwner::File(parent_num.raw()),
-            )
-            .is_ok()
-            {
-                return Err(Ext2Error::AlreadyExists);
-            }
+            ))?;
             fs.deindex_directory(parent_num, &mut parent_inode)?;
 
             let ft = dir_file_type(&target_inode);
@@ -1552,7 +1548,7 @@ impl<'a> Ext2Fs<'a> {
         // Without this a second create writes a second record under the same
         // name: lookup answers whichever comes first and the other inode is
         // unreachable to every ext2 implementation.
-        if dir::lookup_child(
+        name_is_free(dir::lookup_child(
             &parent,
             name,
             &mut *self.cache,
@@ -1560,11 +1556,7 @@ impl<'a> Ext2Fs<'a> {
             &self.geom,
             self.block_size,
             BlockOwner::File(parent_num.raw()),
-        )
-        .is_ok()
-        {
-            return Err(Ext2Error::AlreadyExists);
-        }
+        ))?;
         self.deindex_directory(parent_num, &mut parent)?;
 
         let parent_group = self
@@ -2485,5 +2477,15 @@ impl<'a> Ext2Fs<'a> {
             .write_at(1024, &sb_buf)
             .map_err(Ext2Error::from)?;
         Ok(())
+    }
+}
+
+/// A name is free only when a lookup proved it absent: any other failure says
+/// nothing, and treating it as absence writes a second record of the name.
+fn name_is_free(lookup: Result<InodeNum, Ext2Error>) -> Result<(), Ext2Error> {
+    match lookup {
+        Ok(_) => Err(Ext2Error::AlreadyExists),
+        Err(Ext2Error::PathNotFound) => Ok(()),
+        Err(e) => Err(e),
     }
 }

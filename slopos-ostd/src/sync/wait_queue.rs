@@ -601,7 +601,8 @@ impl WaitQueue {
     /// ignoring a kill.
     ///
     /// For work a dying task cannot abandon, such as a request a device still
-    /// owns. Deadline-only, so a kill delays the exit by at most `timeout_ms`.
+    /// owns. Deadline-only, so each such wait delays a killed task's exit by
+    /// at most `timeout_ms`.
     #[inline]
     pub fn wait_event_uninterruptible_timeout_until<F, R>(
         &self,
@@ -664,7 +665,7 @@ impl WaitQueue {
 
     /// The one wait loop. `timeout: None` is the unbounded flavour.
     ///
-    /// The abort probe runs before the predicate, so a dying task never
+    /// The abort probe runs before the predicate, so a task an abort ends never
     /// re-enters the caller's closure. The deadline is fixed on the first pass,
     /// so a wait that loops does not silently extend itself. `Running ->
     /// Blocked` is committed under the queue lock, and the recheck outside it

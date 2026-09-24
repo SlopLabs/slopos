@@ -501,6 +501,11 @@ struct VirtioBlkInner {
     /// that chain instead of every in-flight requester.
     slot_waiters: [WaitQueue; NUM_REQUEST_SLOTS],
     free_waiters: WaitQueue,
+    /// Writes and flushes waiting for the device to return an abandoned write.
+    abandon_waiters: WaitQueue,
+    /// Set with the state lock held whenever a write is quarantined, cleared
+    /// under it once none is owed, so an unfenced request reads one atomic.
+    write_abandoned: AtomicBool,
     /// Flagged by the harvest, consumed by the next task-context reap: the IRQ
     /// side must not free frames, and the steady state must not pay for the
     /// scan.
@@ -533,6 +538,15 @@ impl VirtioBlkInner {
                     free_waiters,
                     WaitQueue::new(lock_class!("VirtioBlk.free_waiters", LOCK_LEVEL_RESOURCE))
                 );
+                write_field!(
+                    slot,
+                    abandon_waiters,
+                    WaitQueue::new(lock_class!(
+                        "VirtioBlk.abandon_waiters",
+                        LOCK_LEVEL_RESOURCE
+                    ))
+                );
+                write_field!(slot, write_abandoned, AtomicBool::new(false));
                 write_field!(slot, quarantine_dirty, AtomicBool::new(false));
                 write_field!(slot, capacity, AtomicU64::new(0));
                 write_field!(slot, ready, AtomicBool::new(false));
@@ -561,7 +575,8 @@ impl VirtioBlkInner {
         }
         if harvest.reapable {
             self.quarantine_dirty.store(true, Ordering::Release);
-            let _ = self.free_waiters.wake_all();
+            let _ = self.free_waiters.wake_one();
+            let _ = self.abandon_waiters.wake_all();
         }
     }
 
@@ -656,23 +671,27 @@ impl VirtioBlkInner {
             .ok_or(BlkError::Busy)
     }
 
-    /// Hold every request behind a write a timeout abandoned: the device may
-    /// still perform it, after anything sent in the meantime.
+    /// Hold a write or flush behind a write a timeout abandoned: the device
+    /// may still perform it, after anything sent in the meantime.
     fn await_abandoned_writes(&self) -> Result<(), BlkError> {
+        if !self.write_abandoned.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let settled = || {
             let (owed, harvest) = {
                 let mut state = self.state.lock();
                 let harvest = state.harvest_used();
-                (state.owes_abandoned_write(), harvest)
+                let owed = state.owes_abandoned_write();
+                if !owed {
+                    self.write_abandoned.store(false, Ordering::Release);
+                }
+                (owed, harvest)
             };
             self.publish_harvest(harvest, NUM_REQUEST_SLOTS);
             !owed
         };
-        if settled() {
-            return Ok(());
-        }
-        match self
-            .free_waiters
+        let settled = match self
+            .abandon_waiters
             .wait_event_timeout(settled, REQUEST_TIMEOUT_MS as u64)
         {
             Ok(()) => Ok(()),
@@ -681,7 +700,9 @@ impl VirtioBlkInner {
             }
             Err(WaitAbort::Killed) => Err(BlkError::Interrupted),
             Err(_) => Err(BlkError::Timeout),
-        }
+        };
+        self.reap_quarantine();
+        settled
     }
 
     fn release_slot(&self, idx: usize, pages: RequestPages) {
@@ -708,6 +729,10 @@ impl VirtioBlkInner {
         if !state.queue.is_ready() {
             drop(state);
             return Err((BlkError::NotReady, pages));
+        }
+        if type_ != VIRTIO_BLK_T_IN && state.owes_abandoned_write() {
+            drop(state);
+            return Err((BlkError::Busy, pages));
         }
 
         let Some(descs) = state.alloc_chain(desc_count) else {
@@ -785,7 +810,8 @@ impl VirtioBlkInner {
         };
 
         // Uninterruptible: a write abandoned to a kill may land after a later
-        // write to the same sectors.
+        // write to the same sectors, and any abandoned chain holds one of the
+        // two quarantine places until the device returns it.
         match self.slot_waiters[slot_idx]
             .wait_event_uninterruptible_timeout_until(collect, REQUEST_TIMEOUT_MS as u64)
         {
@@ -837,6 +863,9 @@ impl VirtioBlkInner {
         let (outcome, unused, head, wedged) = {
             let mut state = self.state.lock();
             let (outcome, unused) = state.quarantine_slot(slot_idx, replacement);
+            if state.owes_abandoned_write() {
+                self.write_abandoned.store(true, Ordering::Release);
+            }
             let head = state.slots[slot_idx].head;
             let wedged = state.all_slots_quarantined();
             (outcome, unused, head, wedged)
@@ -889,7 +918,9 @@ impl VirtioBlkInner {
         drain: &mut dyn FnMut(&RequestPages) -> bool,
     ) -> Result<(), BlkError> {
         self.reap_quarantine();
-        self.await_abandoned_writes()?;
+        if type_ != VIRTIO_BLK_T_IN {
+            self.await_abandoned_writes()?;
+        }
 
         let (idx, pages) = self.acquire_slot()?;
 
@@ -1205,6 +1236,7 @@ impl VirtioBlkInner {
             done: false,
             pages,
         });
+        self.write_abandoned.store(true, Ordering::Release);
         Some(descs[0])
     }
 
@@ -1222,7 +1254,7 @@ impl VirtioBlkInner {
             }
         }
         self.quarantine_dirty.store(true, Ordering::Release);
-        let _ = self.free_waiters.wake_all();
+        let _ = self.abandon_waiters.wake_all();
     }
 }
 
@@ -1455,8 +1487,8 @@ pub fn blk_available_slots(handle: DevHandle) -> usize {
     clone_inner(handle).map_or(0, |inner| inner.available_slots())
 }
 
-/// Leave the device owning a write it will never perform, as a timeout that
-/// abandoned one does. The head names it to [`blk_return_abandoned_write`].
+/// Leave the device owning a write it will never perform, the state a timeout
+/// leaves behind. The head names it to [`blk_return_abandoned_write`].
 #[cfg(feature = "test-hooks")]
 pub fn blk_stage_abandoned_write(handle: DevHandle) -> Option<u16> {
     clone_inner(handle)?.stage_abandoned_write()
