@@ -2258,17 +2258,20 @@ fn stamp_group_exit(task: &Task, code: u32) {
     task.set_exit_signal(0);
 }
 
-/// Terminate every task in `group_leader_tid`'s thread group with `code`.
+/// End every task in `group_leader_tid`'s thread group with `code`, and
+/// return how many were ended.
 ///
 /// Keyed on the group id, not on a lookup of the leader: a reaped leader's
-/// registration is gone while its threads keep running. The caller is
-/// terminated last, because its kernel stack is the one executing, and must
-/// then `schedule()` and report `NoReturn`.
+/// registration is gone while its threads keep running. Every other member is
+/// killed rather than terminated, and exits from its own context (I8): one
+/// mid-syscall holds kernel locks on its own stack, and ending it there leaves
+/// them held. The caller is terminated here, and must then `schedule()` and
+/// report `NoReturn`.
 pub fn task_group_exit(group_leader_tid: u32, code: u32) -> usize {
     let tgid = thread_group_of(group_leader_tid);
     let current_addr = TaskAddr::current();
     let mut self_id: Option<u32> = None;
-    let mut others = slopos_ostd::KVec::<u32>::new();
+    let mut ended = 0usize;
 
     for_each_group_member(tgid, |member| {
         if member.is_exited() {
@@ -2278,20 +2281,16 @@ pub fn task_group_exit(group_leader_tid: u32, code: u32) -> usize {
         if current_addr == Some(TaskAddr::of(member)) {
             self_id = Some(member.task_id);
         } else {
-            let _ = others.push(member.task_id);
+            slopos_ostd::task::ops::task_kill_and_wake(member);
+            task_resume_if_stopped(member);
+            ended += 1;
         }
     });
 
-    let mut terminated = 0usize;
-    for id in others.iter() {
-        if task_terminate(*id) == 0 {
-            terminated += 1;
-        }
-    }
     if let Some(id) = self_id
         && task_terminate(id) == 0
     {
-        terminated += 1;
+        ended += 1;
     }
-    terminated
+    ended
 }
