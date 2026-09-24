@@ -51,8 +51,8 @@ capacity_stage        := build_dir / "capacity-stage"
 fs_image_devdisk      := fs_image_dir / "ext2-devdisk.img"
 dev_disk_size         := env("DEV_DISK_SIZE", "4G")
 # A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
-# file map's per-process cap is usable memory / 16 — 256 MiB at 4G, under what
-# one rustc maps below 2G.
+# file map's per-process cap is usable memory / 8 — 512 MiB at 4G, which the
+# kernel's link needs and 2G does not give.
 dev_qemu_mem          := env("DEV_QEMU_MEM", "4G")
 dev_disk_mount        := "mount=LABEL=slopos-dev:/devel"
 # The toolchain's execs and forks hold interrupts masked for seconds under TCG,

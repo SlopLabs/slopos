@@ -64,21 +64,25 @@ use crate::vfs::{FileSystem, InodeId};
 const PAGE_SIZE: u64 = 4096;
 const PAGE_SIZE_USIZE: usize = 4096;
 
-/// Inodes that may hold a page set at once: a `-j N` build's worth of rlibs,
-/// each mapped for the whole of a compilation, not one process's few files.
-pub(crate) const MAX_MAPPED_INODES: usize = 1024;
+/// Inodes that may hold a page set at once. `rustc` maps every codegen unit's
+/// object to archive a crate, 256 of them for an incremental one, and a `-j4`
+/// build can be archiving four crates while the rest map rlibs.
+pub(crate) const MAX_MAPPED_INODES: usize = 4096;
 
-/// The registry is `MAX_MAPPED_INODES` of these, so another field is a
-/// deliberate kilobyte of BSS rather than an accident.
+/// The registry is `MAX_MAPPED_INODES` of these, so each byte of one is 4 KiB
+/// of BSS.
 const _: () = assert!(core::mem::size_of::<PageSet>() <= 96);
 
 /// Populated pages across every set, kept beside the sets so a fault's
 /// admission check is one load rather than a walk of the registry.
 static POPULATED_PAGES: AtomicU32 = AtomicU32::new(0);
 
-/// The fraction of usable physical memory the registry may pin, and the
-/// fraction of that ceiling one principal may hold.
+/// The fraction of usable physical memory the registry may pin.
 const MAPPED_PAGE_SHARE: u32 = 4;
+
+/// The fraction of the registry's ceiling one principal may hold: a linker
+/// maps every rlib of the kernel and its own output at once.
+const PRINCIPAL_PAGE_SHARE: u32 = 2;
 
 /// Floor for a machine whose usable memory is not known yet — the 4 MiB this
 /// registry was fixed at before the ceiling was derived.
@@ -91,7 +95,7 @@ const MAX_SET_PAGES: u32 = 65536;
 
 /// Slots one principal may hold. Kernel work (`AccountId::NONE`) is outside
 /// the share, as it is outside ext2's block reserve: it is not a principal.
-pub(crate) const MAX_INODES_PER_ACCOUNT: usize = MAX_MAPPED_INODES / MAPPED_PAGE_SHARE as usize;
+pub(crate) const MAX_INODES_PER_ACCOUNT: usize = MAX_MAPPED_INODES / 4;
 
 /// Derived once from the page allocator, then cached. Zero is "not derived
 /// yet": an unseeded allocator gets the floor and is asked again next time.
@@ -121,7 +125,7 @@ pub(crate) fn derive_page_ceiling(usable_frames: u32) -> u32 {
 
 /// Populated pages one principal may hold.
 fn max_pages_per_account() -> u32 {
-    max_mapped_pages() / MAPPED_PAGE_SHARE
+    max_mapped_pages() / PRINCIPAL_PAGE_SHARE
 }
 
 /// Make the per-principal share the `PinnedBytes` default of every account

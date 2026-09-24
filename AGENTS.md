@@ -362,10 +362,10 @@ killed at its first page fault. The ledger is the `CommitPages` quota kind on
 the root account, its limit `mem.commit=<percent>` of usable frames (default
 100; `0` records without refusing) installed by the `commit ledger` boot step,
 and `sys_info` reports the limit, the promised total and the headroom left. The
-same boot step derives the per-process `PinnedBytes` default — a sixteenth of
+same boot step derives the per-process `PinnedBytes` default — an eighth of
 usable memory, the share the file map hands one owner — since the `abi`
-default was sized for an appliance and a compiler's shared objects exceed it
-before `main`. A region is charged one of two ways, and `VmaRegion::commit` says which: an
+default was sized for an appliance, a compiler's shared objects exceed it
+before `main`, and a linker maps every rlib of the kernel at once. A region is charged one of two ways, and `VmaRegion::commit` says which: an
 `Extent` region owes its whole span when it is created, so a fault in it never
 finds itself unaccounted for; a `Frames` region — the loader's eager segments,
 the mapped stack, the stack's lazy growth extent, `MAP_NORESERVE` — is charged
