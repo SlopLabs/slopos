@@ -727,7 +727,9 @@ fn unmap_present_leaves(
     let end = VirtAddr::new(end);
     let mut from = VirtAddr::new(start);
     let mut unmapped = 0u32;
-    while let Some((va, _, _)) = ostd_next_leaf_4kb(vm_space, from, end) {
+    while let Some((va, _, _)) = ostd_next_leaf_4kb(vm_space, from, end)
+        .map_err(|err| unmap_region_error(err, from.as_u64(), unmapped))?
+    {
         from = VirtAddr::new(va.as_u64() + PAGE_SIZE_4KB);
         match unmap(vm_space, va) {
             Ok(true) => unmapped += 1,
@@ -2928,7 +2930,9 @@ fn clone_cow_snapshot_parent(
         let is_shared = region.is_shared();
         let end = VirtAddr::new(vma_end);
         let mut from = VirtAddr::new(vma_start);
-        while let Some((vaddr, phys, flags)) = ostd_next_leaf_4kb(parent_vm_space_ref, from, end) {
+        while let Some((vaddr, phys, flags)) =
+            ostd_next_leaf_4kb(parent_vm_space_ref, from, end).ok()?
+        {
             from = VirtAddr::new(vaddr.as_u64() + PAGE_SIZE_4KB);
             if !is_shared && !flags.contains(PageFlags::USER) {
                 continue;
