@@ -509,25 +509,29 @@ pub fn ostd_next_leaf_4kb(
     vm_space: &KArc<VmSpace>,
     from: VirtAddr,
     to: VirtAddr,
-) -> Option<(VirtAddr, PhysAddr, PageFlags)> {
-    let mut cursor = vm_space.cursor(from..to).ok()?;
+) -> Result<Option<(VirtAddr, PhysAddr, PageFlags)>, MapError> {
+    if from >= to {
+        return Ok(None);
+    }
+    let mut cursor = vm_space.cursor(from..to)?;
     loop {
-        let entry = cursor.query().ok()?;
+        let entry = cursor.query()?;
         match entry.paddr {
             Some(paddr) if entry.level == slopos_ostd::mm::page_table::PageTableLevel::One => {
-                return Some((
+                return Ok(Some((
                     entry.vaddr,
                     PhysAddr::new(paddr.as_u64()),
                     property_to_page_flags(entry.property),
-                ));
+                )));
             }
             _ => {
-                let next = (entry.vaddr.as_u64() & entry.level.align_mask())
-                    .checked_add(entry.level.entry_size())?;
-                if next >= to.as_u64() {
-                    return None;
-                }
-                cursor.seek(VirtAddr::new(next)).ok()?;
+                let Some(next) = (entry.vaddr.as_u64() & entry.level.align_mask())
+                    .checked_add(entry.level.entry_size())
+                    .filter(|next| *next < to.as_u64())
+                else {
+                    return Ok(None);
+                };
+                cursor.seek(VirtAddr::new(next))?;
             }
         }
     }
