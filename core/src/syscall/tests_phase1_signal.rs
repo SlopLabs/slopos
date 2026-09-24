@@ -1161,6 +1161,40 @@ pub fn test_a_reaped_leader_does_not_strand_its_threads() -> TestResult {
     pass!()
 }
 
+/// A fatal signal one thread takes ends its whole group with that signal, so
+/// the leader a parent waits on reports it rather than living on.
+pub fn test_a_fatal_signal_ends_the_whole_group() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let Some((leader_id, thread_id)) = spawn_thread_group() else {
+        return TestResult::Fail;
+    };
+    assert_test!(
+        task::task_group_fatal_signal(thread_id, SIGSEGV) != 0,
+        "the fatal signal ended nobody"
+    );
+    let leader = assert_some!(task_find_by_id(leader_id), "leader lookup failed");
+    assert_test!(
+        leader.is_killed(),
+        "the leader outlived its thread's fatal signal"
+    );
+    assert_eq_test!(
+        leader.exit_signal(),
+        SIGSEGV,
+        "the leader must report the signal its thread died of"
+    );
+    assert_eq_test!(
+        TaskExitReason::from_u16(leader.exit_reason.load(Ordering::Acquire)),
+        TaskExitReason::Signalled,
+        "the leader's death must read as a signal"
+    );
+
+    drop(leader);
+    task_terminate(thread_id);
+    task_terminate(leader_id);
+    pass!()
+}
+
 /// A sibling acts on a group exit's kill at its next delivery point, where a
 /// signal it had pending must neither restamp the group's code nor be handled.
 pub fn test_a_group_exit_outranks_a_signal_the_sibling_had_pending() -> TestResult {
@@ -1650,6 +1684,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_a_reaped_leader_does_not_strand_its_threads,
+    suite = syscall_signal_phase1
+);
+slopos_testing::stest!(
+    name = test_a_fatal_signal_ends_the_whole_group,
     suite = syscall_signal_phase1
 );
 slopos_testing::stest!(
