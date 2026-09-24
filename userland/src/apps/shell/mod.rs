@@ -1,3 +1,4 @@
+use std::os::unix::ffi::OsStringExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
@@ -282,8 +283,10 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
             && crate::syscall::fs::isatty(2));
     INTERACTIVE.store(interactive, Ordering::Relaxed);
 
-    cwd_set(b"/");
-    env::initialize_defaults();
+    let cwd = std::env::current_dir()
+        .map_or_else(|_| b"/".to_vec(), |dir| dir.into_os_string().into_vec());
+    cwd_set(&cwd);
+    env::initialize();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     exec::initialize_job_control();
 

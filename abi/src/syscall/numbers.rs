@@ -210,8 +210,8 @@ pub const SYSCALL_EXIT: u64 = 60;
 
 /// `wait4(pid, status: *mut i32, options, rusage: *mut Rusage) -> reaped pid`.
 ///
-/// `status` is written `(code << 8) | sig`. A non-null `rusage` is `EINVAL`:
-/// there is no per-task resource accounting to report yet. Process-group waits
+/// `status` is written `(code << 8) | sig`, and a non-null `rusage` the child's
+/// usage as [`crate::syscall::posix::Rusage`] describes it. Process-group waits
 /// (`pid == 0`, `pid < -1`) are `ESRCH`.
 pub const SYSCALL_WAIT4: u64 = 61;
 

@@ -2085,6 +2085,27 @@ pub const HEADERS: &[HeaderSpec] = &[
         raw_unguarded: &[],
     },
     HeaderSpec {
+        path: "nl_types.h",
+        summary: "message catalogs",
+        // `nl_item` is `locale.h`'s, as it is for `langinfo.h`.
+        includes: &["locale.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &["NL_SETD", "NL_CAT_LOCALE"],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "catopen(name: *const c_char, flag: c_int) -> *mut c_void",
+            "catgets(catd: *mut c_void, set: c_int, number: c_int, message: *const c_char) \
+             -> *mut c_char",
+            "catclose(catd: *mut c_void) -> c_int",
+        ],
+        variables: &[],
+        // POSIX names the handle type, and the contract has no reason to.
+        raw: &["typedef void *nl_catd;"],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
         path: "langinfo.h",
         summary: "locale data items",
         // `nl_item` is `locale.h`'s; POSIX lets a program reach it from either.

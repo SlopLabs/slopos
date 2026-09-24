@@ -97,6 +97,9 @@ pub struct Process {
     /// Live tasks sharing this process.
     task_count: AtomicU32,
 
+    /// CPU time, in TSC ticks, of the tasks that have left this process.
+    exited_cpu_ticks: AtomicU64,
+
     /// Set once the last task has exited. The id stays allocated and the
     /// registry entry stays resolvable until the process is reaped, so a
     /// `waitpid` that arrives after the exit still finds something to answer
@@ -132,6 +135,7 @@ impl Process {
             account,
             account_parent,
             task_count: AtomicU32::new(0),
+            exited_cpu_ticks: AtomicU64::new(0),
             exited: AtomicBool::new(false),
             proc_charge: slot,
         }
@@ -188,6 +192,18 @@ impl Process {
     pub fn set_parent(&self, parent: Option<Handle<Process>>) {
         let packed = parent.map_or(PROCESS_HANDLE_NONE, pack_process_handle);
         self.parent.store(packed, Ordering::Release);
+    }
+
+    /// Bank an exiting task's CPU time, for `wait4` to report once the task
+    /// is gone.
+    #[inline]
+    pub fn add_exited_cpu_ticks(&self, ticks: u64) {
+        self.exited_cpu_ticks.fetch_add(ticks, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn exited_cpu_ticks(&self) -> u64 {
+        self.exited_cpu_ticks.load(Ordering::Relaxed)
     }
 
     #[inline]

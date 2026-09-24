@@ -8,7 +8,7 @@ fn test_fork_pipe_echo_tee() -> bool {
     eprintln!("fork_test: pipeline repro start");
 
     shell::cwd_set(b"/");
-    shell::env::initialize_defaults();
+    shell::env::initialize();
     shell::exec::initialize_job_control();
 
     let _ = fs::remove_file("/tmp/tee.txt");

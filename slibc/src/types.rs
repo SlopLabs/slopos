@@ -217,8 +217,8 @@ pub struct timeval {
     pub tv_usec: i64,
 }
 
-/// `struct rusage`. Linux x86-64's 144-byte shape. This kernel accounts none
-/// of it, so [`crate::process::getrusage`] fails rather than answering zeros.
+/// `struct rusage`. Linux x86-64's 144-byte shape, which `wait4` fills as
+/// `slopos_abi::syscall::Rusage` describes.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct rusage {

@@ -174,7 +174,7 @@ jobs:
       - name: Two-boot persistence check
         run: just test-persist
 
-      # One boot with a 2 GiB toolchain volume on virtio-disk4. Cannot ride
+      # One boot with the 4 GiB dev disk on virtio-disk4. Cannot ride
       # the capture above: that run attaches no dev disk, and the utest
       # passes there by reporting there is none.
       - name: Dev-disk check

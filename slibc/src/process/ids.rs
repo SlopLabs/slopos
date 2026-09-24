@@ -94,11 +94,8 @@ pub unsafe extern "C" fn getpgrp() -> pid_t {
     }
 }
 
-/// `wait4(2)`.
-///
-/// A non-null `usage` is `EINVAL`: the kernel keeps no per-task accounting,
-/// and answering with a zeroed struct would be a lie a caller cannot detect.
-/// `wait4(pid, status, options, NULL)` is the full-strength call.
+/// `wait4(2)`. The kernel writes `usage` as `slopos_abi::syscall::Rusage`
+/// says: the child's CPU time and its peak resident set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wait4(
     pid: pid_t,
@@ -106,11 +103,7 @@ pub unsafe extern "C" fn wait4(
     options: c_int,
     usage: *mut rusage,
 ) -> pid_t {
-    if !usage.is_null() {
-        errno_set(EINVAL.raw());
-        return -1;
-    }
-    match Sys::wait4(pid, status, options, core::ptr::null_mut()) {
+    match Sys::wait4(pid, status, options, usage.cast()) {
         Ok(child) => child,
         Err(e) => {
             errno_set(e.raw());
@@ -160,7 +153,8 @@ pub unsafe extern "C" fn setrlimit(resource: c_int, rlim: *const rlimit) -> c_in
 pub const RUSAGE_SELF: c_int = 0;
 pub const RUSAGE_CHILDREN: c_int = -1;
 
-/// No per-task accounting exists to report, and a zeroed `struct rusage` is
+/// A reaped child's usage is `wait4`'s to report; the kernel has no call that
+/// answers for a live process, and a zeroed `struct rusage` is
 /// indistinguishable from a process that has used no time at all.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrusage(_who: c_int, _usage: *mut rusage) -> c_int {

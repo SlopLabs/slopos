@@ -16,7 +16,8 @@ Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `vi
 (`targets/x86_64-unknown-slopos.json`) are both built by `cargo +slopos`
 against an *owned* sysroot at `third_party/rust-slopos` — the kernel too, so
 that `core`'s sources sit at the same workspace-relative path on the host and
-on the dev disk, which is what gives a guest build the same crate hashes. That
+on the dev disk: `trim-paths` makes a path inside the workspace relative, and
+the panic locations a kernel carries are the paths of its sources. That
 sysroot is a
 hardlink clone of the pinned rustup toolchain whose `lib/rustlib/src` is a
 real copy carrying two pinned forks — `rust-lang/rust`'s `library/` and
@@ -75,6 +76,10 @@ the dev disk (below) and all a target with no libcurl, libgit2 or OpenSSL
 can offer. Six C libraries leave the closure; `rusqlite` stays, because
 SQLite is one amalgamated C file with no build system and it cross-compiles
 against slibc's headers. `scripts/check_cargo_fork.sh` holds the cut.
+`0002-host-independent-metadata.patch` leaves the host triple out of a
+unit's `-C metadata`: upstream hashes it into every build script and proc
+macro, and from there into every crate that depends on one, so a kernel built
+on SlopOS could share no symbol name with the same commit built on Linux.
 
 **A build can read no registry.** `Cargo.lock` is tracked, and
 `scripts/make_vendor.sh` (`just vendor`) fills `third_party/vendor` with every
@@ -215,9 +220,9 @@ _fs-image-devdisk`) builds `fs/assets/ext2-devdisk.img`, a preserved,
 trailer-less 4 GiB volume labelled `slopos-dev`, carrying the target sysroot
 and, on a new volume, the prefix `just toolchain` installed, at
 `src/slopos/third_party/rust-slopos` — where the host keeps its owned sysroot,
-because cargo hashes a path source inside the workspace by its
-workspace-relative path, so std's crates hash alike on both machines only if
-they sit at one place in both trees. A preserved volume whose toolchain
+because the kernel carries the source paths of `core` and `alloc` in its panic
+locations, so the two machines build one image only if those sources sit at
+one place in both trees. A preserved volume whose toolchain
 differs from the installed one fails the build and names the fix. It is
 attached by `DEV_DISK_IMG` as **virtio-disk4** and mounted by the kernel from
 its command line: `mount=LABEL=slopos-dev:/devel`, since the guest's disk
@@ -256,8 +261,10 @@ is the whole loop: the guest builds the dev and tests kernels
 (`selfhost_test`), the host exports both, grades them with the ELF gates, runs
 the kernel suite on the tests kernel (`just test-elf`) and compares the dev
 kernel with its own build of the same commit (`scripts/compare_kernel_elf.sh`:
-the loadable image and the symbol table). `just boot-elf` boots a kernel built
-elsewhere.
+the loadable image and the symbol table). That reference is built the way the
+guest builds: by the cargo fork (`scripts/make_host_cargo.sh` builds it for the
+host), from the vendored sources, into an empty target directory. `just
+boot-elf` boots a kernel built elsewhere.
 
 **The guest speaks TLS 1.3.** `tls-core` is a sans-I/O client with every
 primitive under it written here, `no_std` and `forbid(unsafe_code)`;
@@ -550,7 +557,7 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-persist` — two boots of one image with no rebuild between: write + `fsync` under `/var` on the disk root, power off, read back. In CI after `check-fs-image`. Needs its own boots and cannot reuse the shared capture.
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-devdisk` — the dev-disk check: build (once, then preserve) the 4 GiB volume a cross-built toolchain lands on, attach it as `virtio-disk4`, boot with it mounted at `/devel` by `mount=LABEL=slopos-dev:/devel` and 4G of RAM, and let `devdisk_test` read the staged inventory back, grade the source tree against its own vendor directory, mount the volume a second time, and — when the volume carries a toolchain — climb the toolchain ladder; on a volume this run created, `devdisk-export` must then find nothing to export, since nobody has edited that tree. Separate from `just test` for the reason `test-capacity` is: the volume is opt-in, and the same utest under `just test` passes by reporting that no dev disk is attached. `DEV_DISK_SIZE` overrides the size.
-- `just test-selfhost` — the self-hosting check: needs `just toolchain`, a clean working tree and a dev disk seeded from `HEAD`. The guest builds the dev and tests kernels with `scripts/build_kernel.sh` (`selfhost_test`); the host exports both, runs the ELF gates on them, runs the kernel suite on the tests kernel, and compares the dev kernel's loadable image and symbol table with its own build.
+- `just test-selfhost` — the self-hosting check: needs `just toolchain`, a clean working tree and a dev disk seeded from `HEAD`. The guest builds the dev and tests kernels with `scripts/build_kernel.sh` (`selfhost_test`); the host exports both, runs the ELF gates on them, runs the kernel suite on the tests kernel, and compares the dev kernel's loadable image and symbol table with a build of its own made by the cargo fork from the vendored sources.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
 - `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and stays inside the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and an entry matching nothing fails as a dead entry. The three pools are not graded alike. Class counts are deterministic — a class registers on the first acquire of a declaration site, and three runs of one pinned ISO measured boot at 71 every time — so they carry **exact caps**. Boot's edge and chain counts carry caps rather than bands for the same reason, though the recorded values still hold the old convention's slack until they are re-measured onto the observed 43/110. The two test phases' edge and chain counts measure which orderings a run *happened to observe* and move between runs of identical code, so they carry **bands** (`band <phase> <pool> <lo> <hi>`) instead: leaving one prints `DRIFT` on stderr and the run still passes. Be clear about what that gives up — a banded pool has no upper failure of its own, so growth up to `max-fill-pct` (~3.5x observed) reaches you only as that DRIFT line; an *inverted* order is caught by the cycle detector and still fails. `min-classes` / `min-edges` / `min-chains` are the floors that stop a validator which quietly stopped recording from reading as maximally healthy. `--emit-allowlist` writes a fresh baseline (and accepts several `--log`s to merge), a single `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives its crafted logs through the parser — proving both that the gate rejects and that it stays silent on the forms it deliberately accepts.
@@ -632,6 +639,8 @@ their bit, which the default does not: boot `kconsole=0x3` to enable them.
 
 ### Output format and JSONL events
 The public KTAP docs describe the wire grammar and the JSONL event schema. The wire format is stable; the JSONL schema is a strict superset suitable for downstream JUnit XML conversion or test-history regression detection.
+
+A utest's cases reach the wire as subtest lines ahead of its own result line, written past the per-test klog capture: a long utest overflows that ring, and a verdict lost with it leaves a failure with no name. A passing case's note follows `#` on its line, which is where the dev-disk ladder records rustc's startup time and each build's wall time.
 
 ## Commit & Pull Request Guidelines
 Subjects are `<area>: <imperative summary>` (e.g., `mm: tighten buddy free path`), ≤72 chars. Add a body for rationale, boot implications, or follow-ups. For PRs include: motivation, testing artifacts (command + result), issue references, and serial excerpts or screenshots when boot flow or visible output changes. Flag breaking changes and downstream-script coordination.

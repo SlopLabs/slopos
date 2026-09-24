@@ -392,7 +392,7 @@ fn the_shell_pipes_one_utility_into_another() -> bool {
     }
 
     shell::cwd_set(WORK.as_bytes());
-    shell::env::initialize_defaults();
+    shell::env::initialize();
     shell::exec::initialize_job_control();
 
     let mut tokens = shell::buffers::ParsedTokens::new();

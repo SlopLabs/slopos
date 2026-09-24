@@ -5,7 +5,7 @@ use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError, PROCESS_VM_SLOT_BITS};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
@@ -25,8 +25,8 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::tlb::TlbProcessKey;
 use crate::user_mappings::{
-    ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
-    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
+    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared,
+    ostd_mark_cow_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
 };
 use crate::vma_region::{
     Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion,
@@ -238,25 +238,6 @@ fn rollback_range(
     }
     let _ = start_addr;
     Ok(())
-}
-
-fn unmap_user_range(
-    vm_space: &mut KArc<VmSpace>,
-    start_addr: u64,
-    end_addr: u64,
-) -> Result<u32, MapError> {
-    if end_addr <= start_addr {
-        return Ok(0);
-    }
-    let mut addr = start_addr;
-    let mut unmapped = 0u32;
-    while addr < end_addr {
-        if ostd_unmap_4kb_user(vm_space, VirtAddr::new(addr))? {
-            unmapped += 1;
-        }
-        addr += PAGE_SIZE_4KB;
-    }
-    Ok(unmapped)
 }
 
 /// The field must be naturally aligned, per `SpinLock::read_atomic_field`.
@@ -490,6 +471,18 @@ pub fn process_vm_get_vm_space(
         return None;
     }
     guard.vm_space.as_ref().cloned()
+}
+
+/// The most pages the process has had resident at once, `ru_maxrss`'s source.
+pub fn process_vm_peak_resident_pages(process: ProcessId) -> u32 {
+    let Some(slot) = find_slot_for_pid(process) else {
+        return 0;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process.id() {
+        return 0;
+    }
+    guard.vma_map.peak_resident_pages()
 }
 
 /// Is `va` mapped AND user-accessible in `process`'s address space?
@@ -807,12 +800,9 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
         None => return -1,
     };
 
-    // Stack and heap are re-randomised; `code_start` is **not**.
+    // Stack and heap are re-randomised; `code_start` is **not**:
     // `process_vm_map_elf_image` loads every image at the fixed
-    // `PROCESS_CODE_START_VA`, so a re-randomised `code_start` would describe
-    // a code VMA the loader never writes into — the mapping and the pages
-    // would disagree, and the new image would fault on its first instruction
-    // or run against a stale window.
+    // `PROCESS_CODE_START_VA`.
     let mut layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
     layout.code_start = DEFAULT_PROCESS_LAYOUT.code_start;
     layout.data_start = DEFAULT_PROCESS_LAYOUT.data_start;
@@ -882,42 +872,24 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     rc
 }
 
-/// The initial VMAs; nothing is mapped.
+/// A new image's stack VMAs; nothing is mapped. The image's own segments get
+/// theirs from the loader, since only its headers say where they end.
 ///
-/// Not the only seeder: [`create_process_vm_for`] builds the same code, data
-/// and stack VMAs but no growth extent below the stack, because a VA charge is
-/// taken for a lazy region too. Any change to the three shared regions has to
-/// be made in both.
+/// [`create_process_vm_for`] seeds a process with no image yet, with fixed
+/// code and data VMAs and no growth extent below the stack, because a VA
+/// charge is taken for a lazy region too. A change to the stack VMA has to be
+/// made in both.
 fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
-    let code_s = inner.code_start;
-    let data_s = inner.data_start;
-    let heap_s = inner.heap_start;
     let stack_s = inner.stack_start;
     let stack_e = inner.stack_end;
 
-    let code_region = VmaRegion::new(
-        Protection::RX,
-        RegionBacking::Anonymous,
-        false,
-        RegionPurpose::Code,
-    );
-    let data_region = VmaRegion::new(
-        Protection::RW,
-        RegionBacking::Anonymous,
-        false,
-        RegionPurpose::Data,
-    );
     let stack_region = VmaRegion::new(
         Protection::RW,
         RegionBacking::Anonymous,
         false,
         RegionPurpose::Stack,
     );
-
-    if add_vma_to_inner(inner, code_s, data_s, code_region) != 0
-        || add_vma_to_inner(inner, data_s, heap_s, data_region) != 0
-        || add_vma_to_inner(inner, stack_s, stack_e, stack_region) != 0
-    {
+    if add_vma_to_inner(inner, stack_s, stack_e, stack_region) != 0 {
         return -1;
     }
 
@@ -1275,8 +1247,21 @@ fn place_interpreter(
     let count = validator.validate_load_segments_into(segments_out)?;
     let entry = validator.validate_entry_point(&segments_out[..count])?;
 
-    let mapped: &[ValidatedSegment] = &segments_out[..count];
-    let mut linked = base;
+    install_segments(inner, &segments_out[..count])?;
+
+    drop(guard);
+
+    Ok(InterpreterImage {
+        base,
+        entry,
+        segment_count: count,
+    })
+}
+
+/// Give every segment of a validated image its VMA and its pages, in table
+/// order.
+fn install_segments(inner: &mut ProcessVm, mapped: &[ValidatedSegment]) -> Result<(), ElfError> {
+    let mut linked = 0u64;
     for segment in mapped.iter() {
         // Two segments share a page whenever one ends mid-page, and the VMA
         // tree rejects an overlap. The validator requires the segments
@@ -1289,7 +1274,7 @@ fn place_interpreter(
             // so the VMA describing it takes the same union — this segment's
             // flags alone would record a page as non-executable that the leaf
             // still executes.
-            let mut merged = interp_region(segment.flags).protection;
+            let mut merged = segment_region(segment.flags).protection;
             if let Some((_, _, existing)) = inner.vma_map.find_containing(segment.vaddr_start) {
                 merged.read |= existing.protection.read;
                 merged.write |= existing.protection.write;
@@ -1308,7 +1293,7 @@ fn place_interpreter(
                 inner,
                 start,
                 segment.vaddr_end,
-                interp_region(segment.flags),
+                segment_region(segment.flags),
             ) != 0
             {
                 return Err(ElfError::NullPointer);
@@ -1324,29 +1309,28 @@ fn place_interpreter(
         let vm_space_ref = inner
             .vm_space
             .as_mut()
-            .expect("place_interpreter: vm_space present per segment");
+            .expect("install_segments: vm_space present per segment");
         let fresh = map_segment_pages(vm_space_ref, segment, mapped)?;
         inner.vma_map.refund_frames(pages.saturating_sub(fresh));
     }
-
-    drop(guard);
-
-    Ok(InterpreterImage {
-        base,
-        entry,
-        segment_count: count,
-    })
+    Ok(())
 }
-fn interp_region(flags: u32) -> VmaRegion {
+
+fn segment_region(flags: u32) -> VmaRegion {
+    let write = (flags & PF_W) != 0;
     VmaRegion::new(
         Protection {
             read: (flags & PF_R) != 0,
-            write: (flags & PF_W) != 0,
+            write,
             exec: (flags & PF_X) != 0,
         },
         RegionBacking::Anonymous,
         false,
-        RegionPurpose::Code,
+        if write {
+            RegionPurpose::Data
+        } else {
+            RegionPurpose::Code
+        },
     )
 }
 
@@ -1404,28 +1388,29 @@ fn load_segments_and_tls(
         return Err(ElfError::NullPointer);
     }
 
-    {
-        let vm_space_ref = guard
-            .vm_space
-            .as_mut()
-            .expect("load_segments_and_tls: vm_space present for live pid");
-        let present = unmap_existing_code_region(vm_space_ref, code_base)
-            .map_err(|_| ElfError::NullPointer)?;
-        guard.vma_map.refund_frames(present);
-    }
-
-    for segment in segments.iter() {
-        let pages = segment_pages(segment);
-        guard
-            .vma_map
-            .charge_frames(pages)
-            .map_err(|_| ElfError::OutOfMemory)?;
-        let vm_space_ref = guard
-            .vm_space
-            .as_mut()
-            .expect("load_segments_and_tls: vm_space present per segment");
-        let fresh = map_segment_pages(vm_space_ref, segment, segments)?;
-        guard.vma_map.refund_frames(pages.saturating_sub(fresh));
+    let inner = &mut *guard;
+    install_segments(inner, segments)?;
+    // `brk` grows from `heap_start`, so it sits above the image by the offset
+    // ASLR chose, however large the image; a segment past the heap's reach
+    // does not move it.
+    let heap_max = DEFAULT_PROCESS_LAYOUT.heap_max;
+    let image_below_heap_max = segments
+        .iter()
+        .filter(|segment| segment.vaddr_start < heap_max)
+        .map(|segment| segment.vaddr_end)
+        .max()
+        .unwrap_or_default();
+    let heap_floor = image_below_heap_max
+        .saturating_add(
+            inner
+                .heap_start
+                .saturating_sub(DEFAULT_PROCESS_LAYOUT.heap_start),
+        )
+        .next_multiple_of(PAGE_SIZE_4KB);
+    if heap_floor > inner.heap_start {
+        inner.heap_start = heap_floor;
+        inner.heap_end = heap_floor;
+        inner.heap_break = heap_floor;
     }
 
     let tls_tp = 0u64;
@@ -1474,17 +1459,6 @@ fn compute_phdr_user_addr(
 
 fn lowest_segment_vaddr(segments: &[ValidatedSegment]) -> u64 {
     segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0)
-}
-
-/// Returns how many leaves were present.
-fn unmap_existing_code_region(
-    vm_space: &mut KArc<VmSpace>,
-    code_base: u64,
-) -> Result<u32, MapError> {
-    // Exactly [code_start, data_start), so a neighbouring region is never
-    // caught by the arithmetic.
-    let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
-    unmap_user_range(vm_space, code_base, data_start)
 }
 
 /// `None` if the page is unmapped.
@@ -1610,7 +1584,7 @@ fn map_segment_pages(
         // From the segment's own `p_flags`, so a `PT_LOAD` that does not ask
         // to be executed is not: the VMA the interpreter loader installs says
         // so, and a leaf that disagreed would make that statement false.
-        let map_flags = interp_region(shared_page_flags(segment, neighbours, dst))
+        let map_flags = segment_region(shared_page_flags(segment, neighbours, dst))
             .to_page_flags()
             .bits();
 
@@ -1734,8 +1708,8 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
         let heap_s = proc.heap_start;
         let stack_s = proc.stack_start;
         let stack_e = proc.stack_end;
-        // The same three regions `seed_fresh_layout` builds, minus its growth
-        // extent; see that function's doc for why the two are not one call.
+        // Code and data regions for a process that never execs: an exec swaps
+        // them for its image's segments.
 
         let code_region = VmaRegion::new(
             Protection::RX,
@@ -2911,9 +2885,11 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
     0
 }
 
-/// `(vaddr, paddr, PageFlags bits)`, captured under the parent's per-process
-/// lock so the walkers never re-read the parent's PML4 with that lock dropped.
-type ClonePageSnapshot = (u64, PhysAddr, u64);
+/// `(vaddr, a reference on the page's frame, PageFlags bits)`, captured under
+/// the parent's per-process lock. The reference is what the child maps: taken
+/// once the lock is dropped, a sibling thread's `munmap` could free the frame
+/// first, and its write could find the page unshared and land in the child.
+type ClonePageSnapshot = (u64, UFrame<AnonymousMeta>, u64);
 
 /// Snapshot entries per chunk. The walk is O(resident pages), so a single
 /// `KVec` passes the slab's 1 MiB ceiling once the parent holds ~40 MiB;
@@ -2936,10 +2912,6 @@ fn push_clone_snapshot(chunks: &mut ClonePageChunks, entry: ClonePageSnapshot) -
         chunks.push(chunk).map_err(|_| ())?;
     }
     chunks.last_mut().ok_or(())?.push(entry).map_err(|_| ())
-}
-
-fn clone_snapshot_iter(chunks: &ClonePageChunks) -> impl Iterator<Item = ClonePageSnapshot> + '_ {
-    chunks.iter().flat_map(|chunk| chunk.iter().copied())
 }
 
 /// Under the parent's per-process lock: snapshot its scalars and VMAs, and
@@ -2986,7 +2958,20 @@ fn clone_cow_snapshot_parent(
                 if let Some(flags) = ostd_get_pte_flags_4kb(parent_vm_space_ref, vaddr) {
                     let keep = is_shared || flags.contains(PageFlags::USER);
                     if keep {
-                        push_clone_snapshot(&mut snapshot, (addr, phys, flags.bits())).ok()?;
+                        let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(
+                            phys.as_u64(),
+                        )) {
+                            Ok(frame) => frame,
+                            Err(err) => {
+                                klog_info!(
+                                    "process_vm_clone_cow: parent page {:#x} has no live frame: {:?}",
+                                    addr,
+                                    err
+                                );
+                                return None;
+                            }
+                        };
+                        push_clone_snapshot(&mut snapshot, (addr, frame, flags.bits())).ok()?;
                         if !is_shared
                             && flags.contains(PageFlags::USER)
                             && flags.contains(PageFlags::WRITABLE)
@@ -3026,12 +3011,12 @@ fn clone_cow_snapshot_parent(
 #[inline(never)]
 fn clone_cow_walk_shared_vma(
     child_vm_space: &mut KArc<VmSpace>,
-    snapshot: &ClonePageChunks,
+    snapshot: ClonePageChunks,
 ) -> Result<u32, ()> {
     let mut cow_pages: u32 = 0;
-    for (addr, phys, flags_bits) in clone_snapshot_iter(snapshot) {
+    for (addr, frame, flags_bits) in snapshot.into_iter().flatten() {
         let vaddr = VirtAddr::new(addr);
-        if let Err(err) = ostd_map_4kb_user_shared(child_vm_space, vaddr, phys, flags_bits) {
+        if let Err((_, err)) = ostd_map_4kb_user(child_vm_space, vaddr, frame, flags_bits) {
             klog_info!("clone_cow shared: OSTD child map failed: {:?}", err);
             return Err(());
         }
@@ -3046,10 +3031,10 @@ fn clone_cow_walk_shared_vma(
 #[inline(never)]
 fn clone_cow_walk_anon_vma(
     child_vm_space: &mut KArc<VmSpace>,
-    snapshot: &ClonePageChunks,
+    snapshot: ClonePageChunks,
 ) -> Result<u32, ()> {
     let mut cow_pages: u32 = 0;
-    for (addr, phys, flags_bits) in clone_snapshot_iter(snapshot) {
+    for (addr, frame, flags_bits) in snapshot.into_iter().flatten() {
         let vaddr = VirtAddr::new(addr);
         let parent_flags = PageFlags::from_bits_truncate(flags_bits);
         if !parent_flags.contains(PageFlags::USER) {
@@ -3061,9 +3046,7 @@ fn clone_cow_walk_anon_vma(
             | PageFlags::USER.bits()
             | PageFlags::PRESENT.bits();
 
-        // The parent's live PTE is the other holder; the child's mapping adds
-        // a ref rather than claiming a page it does not own.
-        if let Err(err) = ostd_map_4kb_user_shared(child_vm_space, vaddr, phys, child_flags) {
+        if let Err((_, err)) = ostd_map_4kb_user(child_vm_space, vaddr, frame, child_flags) {
             klog_info!("clone_cow anon: OSTD child map failed: {:?}", err);
             return Err(());
         }
@@ -3110,12 +3093,10 @@ fn report_clone_page_ceiling(start: u64, end: u64) {
 #[inline(never)]
 fn clone_cow_populate_child(
     child: &mut ProcessVm,
-    parent_vmas: &[CloneVmaEntry],
+    parent_vmas: KVec<CloneVmaEntry>,
 ) -> Result<u32, u32> {
     let mut cow_pages = 0u32;
-    for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
-        let vma_start = *vma_start;
-        let vma_end = *vma_end;
+    for (vma_start, vma_end, parent_region, snapshot) in parent_vmas {
         if parent_region.is_ring() {
             continue;
         }
@@ -3182,6 +3163,20 @@ fn clone_cow_populate_child(
     Ok(cow_pages)
 }
 
+/// Run between a fork's snapshot of the parent and the child's first mapping:
+/// the window a sibling thread of the parent runs in.
+#[cfg(feature = "test-hooks")]
+static CLONE_WINDOW_HOOK: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+#[cfg(feature = "test-hooks")]
+pub fn set_clone_window_hook(hook: Option<fn()>) {
+    CLONE_WINDOW_HOOK.store(
+        hook.map_or(core::ptr::null_mut(), slopos_ostd::util::fn_ptr::encode),
+        core::sync::atomic::Ordering::Release,
+    );
+}
+
 pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Option<ProcessVmRef> {
     let parent_slot = match find_slot_for_pid(parent) {
         Some(s) => s,
@@ -3208,6 +3203,13 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         Some(t) => t,
         None => return None,
     };
+
+    #[cfg(feature = "test-hooks")]
+    if let Some(hook) = slopos_ostd::util::fn_ptr::decode(
+        CLONE_WINDOW_HOOK.load(core::sync::atomic::Ordering::Acquire),
+    ) {
+        hook();
+    }
 
     let Some(reservation) = VmReservation::claim(child) else {
         klog_info!("process_vm_clone_cow: could not claim the child's VM slot");
@@ -3264,7 +3266,7 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         child.stack_end = parent_stack_end;
         child.flags = parent_flags;
 
-        match clone_cow_populate_child(&mut child, parent_vmas.as_slice()) {
+        match clone_cow_populate_child(&mut child, parent_vmas) {
             Ok(n) => cow_pages = n,
             Err(n) => {
                 cow_pages = n;

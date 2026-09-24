@@ -1,11 +1,5 @@
 //! Kernel-side wrapper that drives the OSTD `UserMode::execute()` round-trip on
 //! every user task.
-//!
-//! [`user_task_loop`]'s frame must survive every iretq → user → SYSCALL round
-//! trip, but `TSS.RSP0` points at the same per-task kernel stack, so IRQ pushes
-//! from user mode land on it. Task creation therefore seeds
-//! `SwitchContext::rsp` `SUPERVISOR_RESERVE` bytes below `kernel_stack_top`,
-//! reserving the top region for the IRQ chain.
 
 use slopos_ostd::KArc;
 use slopos_ostd::klog_info;

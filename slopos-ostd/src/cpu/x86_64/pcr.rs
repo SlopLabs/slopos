@@ -425,6 +425,8 @@ pub mod offsets {
     pub const USER_CTX_PTR: usize = 96;
     pub const KERNEL_RETURN_CTX: usize = 104;
     pub const USER_RAX_TMP: usize = 168;
+    pub const TSS_RSP0: usize = core::mem::offset_of!(super::ProcessorControlRegion, tss)
+        + core::mem::offset_of!(crate::arch::x86_64::gdt::Tss64, rsp0);
     /// Computed rather than a literal: the field is appended after the 64 KiB
     /// embedded kernel stack to keep the asm-critical offsets (`<= 184`)
     /// byte-identical.
@@ -816,6 +818,23 @@ pub(crate) fn preempt_count_set(count: u32) {
             "mov gs:[{off}], {count:e}",
             off = const offsets::PREEMPT_COUNT,
             count = in(reg) count,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Point this CPU's ring-3 → ring-0 stack at `top`: `TSS.RSP0` and the
+/// `kernel_rsp` the SYSCALL entry loads.
+#[inline(always)]
+pub(crate) fn set_trap_stack_top(top: u64) {
+    // SAFETY: two gs-relative stores to this CPU's PCR fields.
+    unsafe {
+        core::arch::asm!(
+            "mov gs:[{rsp}], {top}",
+            "mov gs:[{rsp0}], {top}",
+            rsp = const offsets::KERNEL_RSP,
+            rsp0 = const offsets::TSS_RSP0,
+            top = in(reg) top,
             options(nostack, preserves_flags),
         );
     }

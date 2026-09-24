@@ -2,7 +2,7 @@ use slopos_userland::apps::shell;
 
 fn ensure_shell_initialized() {
     shell::cwd_set(b"/");
-    shell::env::initialize_defaults();
+    shell::env::initialize();
     shell::exec::initialize_job_control();
 }
 

@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
+#include <nl_types.h>
 #include <pthread.h>
 #include <pwd.h>
 #include <setjmp.h>
@@ -428,6 +429,14 @@ static int locale(void) {
         strcmp(nl_langinfo(THOUSEP), "") != 0 ||
         strcmp(nl_langinfo(0x70000), "") != 0) {
         return fail("nl_langinfo answered the wrong item");
+    }
+    nl_catd catalog = catopen("probe", NL_CAT_LOCALE);
+    if (catalog != (nl_catd)-1 || errno != ENOENT) {
+        return fail("catopen opened a catalog that is not installed");
+    }
+    if (strcmp(catgets(catalog, NL_SETD, 1, "default"), "default") != 0 ||
+        catclose(catalog) != -1) {
+        return fail("a failed catalog answered other than its defaults");
     }
     return 1;
 }

@@ -438,7 +438,7 @@ crt-static = false
 # Both, and both under the build directory: bootstrap asserts it can write
 # sysconfdir as well as prefix, and that one defaults to an absolute /etc no
 # ordinary user owns.
-prefix = "$OUT/install"
+prefix = "$OUT/install.partial"
 sysconfdir = "etc"
 CONFIG_END
 
@@ -448,7 +448,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-PREFIX="$OUT/install"
+# Completed under another name and renamed last: a build that stops part way
+# must not leave a prefix the dev disk would take for a toolchain.
+PREFIX="$OUT/install.partial"
 rm -rf "$PREFIX"
 (cd "$SRC" && python3 x.py install --config "$CONFIG" --jobs "$JOBS" "${XPY_ARGS[@]}")
 
@@ -475,6 +477,10 @@ ln -sfn "../lib/rustlib/$TARGET/bin/rust-lld" "$PREFIX/bin/ld.lld"
 printf '%s\n' '--sysroot=<CFGDIR>/..' >"$PREFIX/bin/$TARGET.cfg"
 printf '%s\n' "@$TARGET.cfg" >"$PREFIX/bin/$TARGET-clang.cfg"
 printf '%s\n' "@$TARGET.cfg" $CXX_ABI_FLAGS >"$PREFIX/bin/$TARGET-clang++.cfg"
+
+rm -rf "$OUT/install"
+mv "$PREFIX" "$OUT/install"
+PREFIX="$OUT/install"
 
 if [ -n "$STAGE" ]; then
     rm -rf "$STAGE"

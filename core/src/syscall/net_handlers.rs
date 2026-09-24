@@ -339,10 +339,6 @@ define_syscall!(syscall_sendto
     check_msg_flags(flags)?;
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
-    if buf.base_u64() == 0 && buf.len() != 0 {
-        return Err(Errno::EFAULT);
-    }
-
     let len = buf.len().min(4096);
     let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
     let copied = if len > 0 {
@@ -392,9 +388,6 @@ define_syscall!(syscall_recvfrom
     check_msg_flags(flags)?;
     let sock_fd = socket_fd_for(process_id, fd.raw())?;
 
-    if buf.base_u64() == 0 && buf.len() != 0 {
-        return Err(Errno::EFAULT);
-    }
     // `srclen` is in/out, as in `accept`: a null `src` declines the sender's
     // address, a non-null one with no length to read is a fault.
     if src_ptr != 0 && srclen_ptr == 0 {
@@ -475,10 +468,6 @@ define_syscall!(syscall_setsockopt
         SocketFd::Inet(idx) => idx,
         SocketFd::Unix(_) => return Err(Errno::ENOTSOCK),
     };
-
-    if optval.base_u64() == 0 && optval.len() > 0 {
-        return Err(Errno::EFAULT);
-    }
 
     let optlen = optval.len().min(64);
     let mut scratch = [0u8; 64];

@@ -12,7 +12,7 @@ use slopos_abi::signal::{
 use slopos_abi::syscall::{
     CLOCK_MONOTONIC, CLOCK_REALTIME, CLOCK_THREAD_CPUTIME_ID, CLONE_SIGHAND, CLONE_THREAD,
     CLONE_VM, FUTEX_BITSET_MATCH_ANY, FUTEX_CLOCK_REALTIME, FUTEX_PRIVATE_FLAG, FUTEX_WAIT,
-    FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, Timespec, UserUtsname,
+    FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, Rusage, Timespec, UserUtsname,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority,
@@ -258,6 +258,60 @@ pub fn test_waitpid_returns_the_pid_and_writes_an_exited_status() -> TestResult 
         status,
         Some(wait_status_exited(7) as i32),
         "the child's exit code did not reach the status word"
+    );
+    pass!()
+}
+
+/// The CPU time a reaped child ran, and its peak resident set, reach the
+/// caller's `rusage`.
+pub fn test_wait4_reports_the_reaped_childs_usage() -> TestResult {
+    const RAN: u64 = 1 << 34;
+    let _fixture = SyscallFixture::new();
+    let Some(fx) = build_wait_fixture() else {
+        return fail!("could not build the wait fixture");
+    };
+    let Some(usage_addr) = map_user_rw_page(fx.table) else {
+        fx.teardown();
+        return fail!("could not map the rusage page");
+    };
+    let child = task_find_by_id(fx.child_id);
+    let resident = child.as_ref().and_then(table_of).and_then(map_user_rw_page);
+    let peak = child
+        .as_ref()
+        .and_then(|child| child.process())
+        .and_then(|process| slopos_ostd::process::ProcessId::of(&process))
+        .map(slopos_mm::process_vm::process_vm_peak_resident_pages);
+    if let Some(child) = child {
+        child.add_total_runtime(RAN);
+    }
+
+    exit_child_normally(fx.child_id, 0);
+    let rc = invoke(
+        syscall_wait4,
+        &fx.parent,
+        fx.table,
+        [fx.child_id as u64, fx.status_addr, 0, usage_addr, 0, 0],
+    );
+    let child_id = fx.child_id;
+    let usage = user_copy_in::<Rusage>(fx.table, usage_addr);
+    fx.teardown();
+
+    assert_eq_test!(rc, child_id as u64, "wait4 with a usage pointer must reap");
+    assert_test!(
+        resident.is_some() && peak.is_some_and(|pages| pages > 0),
+        "the child held no resident page to report"
+    );
+    let usage = assert_some!(usage, "the usage page could not be read back");
+    let micros = usage.ru_utime.tv_sec as u64 * 1_000_000 + usage.ru_utime.tv_usec as u64;
+    assert_test!(
+        micros >= slopos_kernel_services::clock::ticks_to_microseconds(RAN),
+        "ru_utime {} us is less than the child ran",
+        micros
+    );
+    assert_eq_test!(
+        Some(usage.ru_maxrss),
+        peak.map(|pages| i64::from(pages) * 4),
+        "ru_maxrss is not the child's peak resident set in KiB"
     );
     pass!()
 }
@@ -1438,6 +1492,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_waitpid_reports_a_signal_death_in_the_low_seven_bits,
+    suite = syscall_proc_phase1
+);
+slopos_testing::stest!(
+    name = test_wait4_reports_the_reaped_childs_usage,
     suite = syscall_proc_phase1
 );
 slopos_testing::stest!(

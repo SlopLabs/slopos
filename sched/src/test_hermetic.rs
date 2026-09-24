@@ -148,9 +148,9 @@ hermetic_state! {
     }
 }
 
-// `prepare_switch_to` resets RSP0 on every dispatch but never touches IST, so
-// a bogus IST entry left by a gdt test survives until the next `#PF` loads RSP
-// from it and either triple-faults or smashes hot-path code.
+// Every dispatch resets RSP0 but none touches IST, so a bogus IST entry left by
+// a gdt test survives until the next `#PF` loads RSP from it and either
+// triple-faults or smashes hot-path code.
 hermetic_state! {
     pub TssIstShadow {
         type Snapshot = [u64; 7];

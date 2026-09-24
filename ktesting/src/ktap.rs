@@ -5,6 +5,7 @@
 
 use slopos_ostd::klog_info;
 
+use crate::capture::write_through;
 use crate::registry::TestDesc;
 use crate::result::TestResult;
 
@@ -101,20 +102,35 @@ pub fn emit_bail(reason: &str) {
 // Subtest lines reach the wire *before* their parent's `ok`/`not ok` line; the
 // two-space indent is what keys the host parser into nested mode.
 
-/// Pass subtest line. `sub_idx` is the 1-based position within the parent.
-pub fn emit_subtest_ok(sub_idx: u32, name: &str) {
-    klog_info!("KTAP\t  ok {} - {}", sub_idx, name);
+/// Pass subtest line. `sub_idx` is the 1-based position within the parent;
+/// a note rides after `#`, which the host parser reads as a pass unless it is
+/// `SKIP`.
+pub fn emit_subtest_ok(sub_idx: u32, name: &str, note: &str) {
+    if crate::kernel_phase_summary::quiet() {
+        return;
+    }
+    if note.is_empty() {
+        write_through(format_args!("KTAP\t  ok {} - {}", sub_idx, name));
+    } else {
+        write_through(format_args!("KTAP\t  ok {} - {} # {}", sub_idx, name, note));
+    }
 }
 
 pub fn emit_subtest_not_ok(sub_idx: u32, name: &str, msg: &str) {
     if msg.is_empty() {
-        klog_info!("KTAP\t  not ok {} - {}", sub_idx, name);
+        write_through(format_args!("KTAP\t  not ok {} - {}", sub_idx, name));
     } else {
-        klog_info!("KTAP\t  not ok {} - {} # {}", sub_idx, name, msg);
+        write_through(format_args!(
+            "KTAP\t  not ok {} - {} # {}",
+            sub_idx, name, msg
+        ));
     }
 }
 
 /// Skip subtest line. KTAP encodes skips as `ok` with a `# SKIP` suffix.
 pub fn emit_subtest_skip(sub_idx: u32, name: &str) {
-    klog_info!("KTAP\t  ok {} - {} # SKIP", sub_idx, name);
+    if crate::kernel_phase_summary::quiet() {
+        return;
+    }
+    write_through(format_args!("KTAP\t  ok {} - {} # SKIP", sub_idx, name));
 }

@@ -195,8 +195,8 @@ define_syscall!(syscall_readlinkat
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
+    if buf.is_empty() {
+        return Err(Errno::EINVAL);
     }
     let len = buf.len().min(USER_PATH_MAX);
     let base = buf.base_u64();

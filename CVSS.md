@@ -130,48 +130,70 @@ with neither RDRAND nor RDSEED, so a ClientHello's random lets an observer
 search the seed and with it the key share. Every x86-64 CPU of the last decade
 and QEMU's `-cpu max` have RDRAND, and the plan records it as a limit.
 
-The highest ID issued so far is **SLOPOS-2026-0056**. The next finding is
-`SLOPOS-2026-0057`.
+Swept 2026-09-24: the toolchain running in the guest and building the kernel
+— the user-mode trap stack, `wait4`'s usage report, the executable's segment
+VMAs, zero-length user ranges, user copies that read a file-backed page in,
+the buddy allocator's free lists, and the KTAP subtest path. Two review
+passes so far, each by a fresh reviewer.
+What the change introduced was closed inside it, and it fixed four
+**pre-existing** defects. A trap from user mode pushed from `TSS.RSP0`, which
+sat a fixed 12 KiB above the frames of the round trip that entered user mode,
+so a chain deeper than that wrote over those frames and the kernel took a
+general protection fault returning through them; `devdisk_test` reached it as
+it started, on the unoptimized tests kernel. That is kernel stack corruption
+from user mode, fixed here by
+starting every trap at the round trip's own RSP, with
+`test_deep_user_trap_spares_the_round_trip` as the record. SLOPOS-2026-0056,
+the executable's segments mapped with no VMA, is fixed by giving them the
+per-segment VMAs the interpreter already had
+(`test_a_large_image_owns_its_segments_and_the_heap_clears_it`); its adjacent
+half, the paths that drop `NO_EXECUTE`, is carried forward as
+SLOPOS-2026-0057. The buddy allocator walked a free list to take a buddy off
+it, so freeing a large address space held its interrupt-masking lock for a
+time proportional to the list and stalled every CPU behind it; any process
+reaches it by exiting after a large allocation, an availability defect at
+most, and the lists are doubly linked now. The worst was `fork`: the clone
+recorded the parent's frames under the parent's lock but took the child's
+references to them only after dropping it, so a sibling thread's `munmap` in
+that window freed a frame the child then mapped — and, reallocated in time, a
+frame of another process. Any multithreaded process that forks while another
+of its threads unmaps reaches it; cargo does on every build, which is how the
+guest found it, where the frame's metadata had already been released and the
+fork failed. A read or write of another process's memory would have put it
+above the bar; the snapshot now holds a reference on every frame it records
+(`test_cow_clone_survives_a_sibling_unmap`), so it is fixed here and not an
+entry.
+
+The highest ID issued so far is **SLOPOS-2026-0057**. The next finding is
+`SLOPOS-2026-0058`.
 
 ## Open findings
 
-### SLOPOS-2026-0056 — the executable's `PT_LOAD` pages are mapped with no VMA
+### SLOPOS-2026-0057 — three user mapping paths drop `NO_EXECUTE`
 
 - **Status:** `open`
-- **Confidence:** 92 (evidence 40 — every line read directly; exploitability 26
-  — a deterministic crafted-ELF path that stays inside the attacker's own
-  process, since `execve` can only narrow authority; reproducibility 26 — a
-  hand-built ELF with a second `PT_LOAD` above the seeded data region)
-- **CVSS:** `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H` — **6.1 MEDIUM**
-- **Evidence:** `mm/src/process_vm.rs:1289-1382` (`load_segments_and_tls` maps
-  every segment and inserts no VMA), `:1309-1311` (the only positional check is
-  on the *lowest* segment), `:844-851` (`seed_fresh_layout`'s two pre-seeded
-  regions, which the loader silently relies on), `:718-760`
-  (`process_vm_reset_for_exec` walks the VMA tree, so an orphan survives an
-  `exec`), `:1487-1497` (an already-present leaf is adopted without being
-  zeroed), `mm/src/vma_region.rs:385-393` (`PagesAxis` is charged only on a VMA
-  insert), `mm/src/elf.rs:639-645` (`validate_segment` permits any `p_vaddr`
-  below `USER_SPACE_END_VA`).
-- **Why it is open rather than fixed:** pre-existing and outside the change that
-  found it. The fix is to give the executable the per-segment VMAs
-  `place_interpreter` now installs and stop relying on the seeded code/data
-  regions, which is a change to the load path of every process on the machine.
-  `RegionPurpose::Code`/`Data` are written and never read, so nothing depends on
-  the two seeded regions being one entry each.
-- **Adjacent, same follow-up:** the eager mapping path chose raw
-  `PageFlags::USER_RW`/`USER_RO`, neither of which carries `NO_EXECUTE`, so
-  every eagerly mapped user page was executable. `map_segment_pages` now
-  derives its flags from the segment's own `p_flags`, but the eager anonymous
-  `mmap` (`mm/src/process_vm.rs:2433-2437`), the ring path (`:2196`) and COW
-  resolution (`mm/src/cow.rs:96`) still use the raw constants and still drop
-  the `NO_EXECUTE` the VMA-driven paths apply.
-- **Repro:** build an ELF whose `PT_LOAD[0]` is at `0x400000` (so
-  `min_vaddr == code_base` passes) and whose `PT_LOAD[1]` is at
-  `0x5_0000_0000`; `execve` it, then `execve` something else in the same
-  process. The second image's interpreter is placed by the gap finder at
-  `PROCESS_MMAP_START_VA`, finds the first image's leaves still present, and
-  adopts them un-zeroed — `map_segment_pages` zeroes only a frame it just
-  allocated. The pages are also absent from the `Pages` quota throughout.
+- **Confidence:** 80 (evidence 40 — each path read directly against the
+  VMA-driven flags; exploitability 10 — it removes a mitigation rather than
+  crossing a boundary, so it needs a second, memory-corruption defect in the
+  victim process to matter; reproducibility 30 — a write fault after `fork`
+  deterministically leaves an executable page)
+- **CVSS:** `CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N` — **3.6 LOW**
+- **Impact:** a page the process mapped without `PROT_EXEC` executes. A
+  memory-corruption bug in a SlopOS program — `curl` parsing a server's reply,
+  say — can then run injected bytes where W^X would have stopped it.
+- **Evidence:** `mm/src/cow.rs:96` (COW resolution installs the copy with
+  `PageFlags::USER_RW`, whatever the VMA's protection), `mm/src/process_vm.rs:2277`
+  (the ring mapping, `USER_RW`), `:2514-2519` (a shared `memfd` mapping,
+  `USER_RW` or `USER_RO`), against `mm/src/vma_region.rs:316-330`
+  (`to_page_flags`, which every demand path uses and which sets `NO_EXECUTE`
+  for a region without `exec`).
+- **Repro:** `mmap(PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS)`, write
+  a `ret` into it, `fork`, write to the page again in the child so COW copies
+  it, then call it: the child returns where it should take `SIGSEGV`.
+- **Remediation:** derive each of the three from the covering VMA's
+  `to_page_flags()` — the COW path from the region the fault resolved against,
+  the other two from the region they just inserted — so no user leaf is written
+  with raw flags.
 
 ## Cadence
 

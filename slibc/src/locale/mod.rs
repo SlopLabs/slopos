@@ -12,6 +12,7 @@
 
 #![allow(non_camel_case_types)]
 
+pub mod catalog;
 pub mod object;
 
 use core::cell::SyncUnsafeCell;

@@ -26,6 +26,7 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <nl_types.h>
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>

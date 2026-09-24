@@ -3,6 +3,7 @@
 use slopos_abi::auxv::{
     AT_BASE, AT_ENTRY, AT_EXECFN, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_SECURE,
 };
+use slopos_abi::syscall::PROT_READ;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -86,6 +87,40 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf[104..112].copy_from_slice(&memsz.to_le_bytes()); // p_memsz
     elf[112..120].copy_from_slice(&0x1000u64.to_le_bytes()); // p_align
 
+    elf
+}
+
+/// A static `ET_EXEC` whose one-page data segment sits at `data_va`, far above
+/// its text: the shape of a large program's image.
+fn create_exec_with_distant_data(data_va: u64) -> [u8; 176] {
+    let mut elf = [0u8; 176];
+    elf[0..4].copy_from_slice(&ELF_MAGIC);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    elf[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type: ET_EXEC
+    elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    elf[24..32].copy_from_slice(&(PROCESS_CODE_START_VA + 176).to_le_bytes()); // e_entry
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    elf[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+
+    let segments = [
+        (5u32, PROCESS_CODE_START_VA, 176u64, 176u64), // PF_R | PF_X, the whole file
+        (6, data_va, 0, PAGE_SIZE_4KB),                // PF_R | PF_W, zero-filled
+    ];
+    for (index, (flags, vaddr, filesz, memsz)) in segments.iter().enumerate() {
+        let at = 64 + index * 56;
+        elf[at..at + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        elf[at + 4..at + 8].copy_from_slice(&flags.to_le_bytes());
+        elf[at + 16..at + 24].copy_from_slice(&vaddr.to_le_bytes());
+        elf[at + 24..at + 32].copy_from_slice(&vaddr.to_le_bytes());
+        elf[at + 32..at + 40].copy_from_slice(&filesz.to_le_bytes());
+        elf[at + 40..at + 48].copy_from_slice(&memsz.to_le_bytes());
+        elf[at + 48..at + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+    }
     elf
 }
 
@@ -218,6 +253,64 @@ pub fn test_segment_budget_is_shared_across_images() -> TestResult {
         .validate_load_segments_into(out.as_mut_slice());
     if refused.is_ok() {
         klog_info!("EXEC_TEST: BUG - an image was accepted past the remaining budget");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// An executable's segments are its VMAs however far its image reaches: one
+/// larger than a small program keeps a data segment `mprotect` can seal, as a
+/// loader sealing RELRO does, a heap that starts above it, and no page the
+/// next `execve` leaves mapped.
+pub fn test_a_large_image_owns_its_segments_and_the_heap_clears_it() -> TestResult {
+    const DATA_VA: u64 = 0x1a0_0000;
+    let _scope = KernelTestScope::enter();
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+    let process = resolve_pid(pid);
+    let elf = create_exec_with_distant_data(DATA_VA);
+    let mut segments = slopos_ostd::KVec::<slopos_mm::elf::ValidatedSegment>::zeroed(
+        slopos_mm::elf::MAX_LOAD_SEGMENTS,
+    )
+    .expect("test alloc");
+    let mut entry = 0;
+    let mapped = process_vm::process_vm_reset_for_exec(process) == 0
+        && process_vm::process_vm_map_elf_image(
+            process,
+            &elf,
+            elf.len() as u64,
+            segments.as_mut_slice(),
+            &mut entry,
+        )
+        .is_ok();
+    let sealed = process_vm::process_vm_mprotect(process, DATA_VA, PAGE_SIZE_4KB, PROT_READ);
+    let heap = process_vm::process_vm_brk(process, 0);
+    let outlived_exec = process_vm::process_vm_reset_for_exec(process) == 0
+        && process_vm::process_vm_user_va_is_user_accessible(process, DATA_VA);
+    process_vm::destroy_process_vm(process);
+
+    if !mapped {
+        klog_info!("EXEC_TEST: the image with a distant data segment did not load");
+        return TestResult::Fail;
+    }
+    if sealed != 0 {
+        klog_info!(
+            "EXEC_TEST: mprotect of the data segment answered {}",
+            sealed
+        );
+        return TestResult::Fail;
+    }
+    if heap < DATA_VA + PAGE_SIZE_4KB {
+        klog_info!(
+            "EXEC_TEST: the heap starts at {:#x}, inside the image",
+            heap
+        );
+        return TestResult::Fail;
+    }
+    if outlived_exec {
+        klog_info!("EXEC_TEST: the data segment's page outlived the next execve");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -1116,6 +1209,10 @@ slopos_testing::stest!(name = test_init_path_is_absolute, suite = exec);
 slopos_testing::stest!(name = test_init_path_within_exec_limit, suite = exec);
 slopos_testing::stest!(name = test_setup_user_stack_contract_layout, suite = exec);
 slopos_testing::stest!(name = test_elf_refuses_unsorted_load_segments, suite = exec);
+slopos_testing::stest!(
+    name = test_a_large_image_owns_its_segments_and_the_heap_clears_it,
+    suite = exec
+);
 slopos_testing::stest!(
     name = test_elf_refuses_entry_outside_every_segment,
     suite = exec

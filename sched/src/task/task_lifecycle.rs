@@ -12,7 +12,7 @@ use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
 use slopos_ostd::task::ops::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES, TASK_EXIT_CLEANUP_RESOURCES,
-    TASK_EXIT_CLEANUP_VM, TASK_EXIT_LAST_IN_PROCESS,
+    TASK_EXIT_CLEANUP_VM, TASK_EXIT_CPU_BANKED, TASK_EXIT_LAST_IN_PROCESS,
 };
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -421,49 +421,22 @@ fn task_leaves_process(task: &Task) -> bool {
     true
 }
 
-/// Bytes reserved at the top of every user task's per-task kernel stack for
-/// the interrupt/exception chain that arrives from user mode.
+/// Build a user-task entry frame: one return-address slot at the top of the
+/// kernel stack holding the OSTD user-task entry, so `switch_registers`' `ret`
+/// enters the `UserMode::execute()` round trip. The caller must already have
+/// written the user-mode register state to `task.user_ctx`.
 ///
-/// `TSS.RSP0` and `pcr.kernel_rsp` point at `kernel_stack_top`, so IRQ pushes
-/// land there and grow downward while `user_task_loop` holds a frame on the
-/// same stack; the supervisor's RSP sits at `kernel_stack_top -
-/// SUPERVISOR_RESERVE` so those pushes cannot reach it.
-///
-/// 12 KiB, not the 8 KiB an IRQ chain alone needs (~2 KiB observed): #PF has
-/// no IST, so a user fault runs here too and its chain is the deepest — the
-/// resolution walks the region tree and the page tables, and the tail hands
-/// off to the scheduler and may deliver a signal. An overrun corrupts
-/// `user_task_loop`'s own frame and surfaces as a wild kernel fault in
-/// unrelated code, so the resolution also keeps interrupts off rather than
-/// letting an IRQ chain nest under its deepest frame.
-const SUPERVISOR_RESERVE: u64 = 0x3000;
-
-const _: () = {
-    // SystemV ABI: after `ret` pops the synthetic return address, RSP is
-    // `mod 16 == 8` only if this is a multiple of 16.
-    assert!(SUPERVISOR_RESERVE % 16 == 0);
-    // Cap at half the stack, so the supervisor plus every syscall-dispatch
-    // chain keeps the rest.
-    assert!(SUPERVISOR_RESERVE < TASK_KERNEL_STACK_SIZE / 2);
-    // Floor: the worst-case IRQ chain through the scheduler's context switch.
-    assert!(SUPERVISOR_RESERVE >= 0x1000);
-};
-
-/// Build a user-task entry frame: a single return-address slot at
-/// `kernel_stack_top - SUPERVISOR_RESERVE` holding the OSTD user-task entry,
-/// so `switch_registers`' `ret` enters the `UserMode::execute()` round trip.
-/// The caller must already have written the user-mode register state to
-/// `task.user_ctx`.
+/// The slot sits 16 bytes below the top so that, once `ret` pops it, RSP is
+/// `8 mod 16` as the SystemV ABI requires at function entry.
 ///
 /// # Safety
-/// Caller must ensure that the slot at `kernel_stack_top -
-/// SUPERVISOR_RESERVE` is writable, properly aligned, and not
-/// concurrently accessed. This is upheld by the surrounding
-/// `task_create` / `task_fork` / `task_clone` paths, where the
-/// kernel stack was just allocated and no other CPU can observe it.
+/// Caller must ensure that the slot is writable, properly aligned, and not
+/// concurrently accessed. This is upheld by the surrounding `task_create` /
+/// `task_fork` / `task_clone` paths, where the kernel stack was just allocated
+/// and no other CPU can observe it.
 pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
     let entry = slopos_ostd::task::user_task_entry_addr();
-    let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
+    let ret_addr_slot = kernel_stack_top - 16;
     slopos_ostd::util::ptr_buf::write_kernel_va::<u64>(ret_addr_slot, entry);
     SwitchContext {
         rbx: 0,
@@ -958,6 +931,22 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
             .store(TaskExitReason::Kernel.as_u16(), Ordering::Release);
     }
 
+    // Captured here: the process is retired at cleanup, before any `wait4`.
+    let process = task.process();
+    let cpu_ticks = match process.as_deref() {
+        Some(process) => {
+            if task.exit_cleanup_mark(TASK_EXIT_CPU_BANKED) != 0 {
+                process.add_exited_cpu_ticks(task.total_runtime());
+            }
+            process.exited_cpu_ticks()
+        }
+        None => task.total_runtime(),
+    };
+    let peak_resident_pages = process
+        .as_deref()
+        .and_then(ProcessId::of)
+        .map_or(0, slopos_mm::process_vm::process_vm_peak_resident_pages);
+
     // Published before the status transition: `task_consume_zombie` keys on
     // `status == Zombie` and then reads `exit_info`, so Zombie+empty would make
     // it spin or drop the exit code. The Acquire loads pair with the Release
@@ -969,6 +958,8 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
         fault_reason: TaskFaultReason::from_u16(task.fault_reason.load(Ordering::Acquire)),
         signal: task.exit_signal(),
         exit_time_ms: now,
+        cpu_ticks,
+        peak_resident_pages,
     };
     let _ = task.exit_info.try_set(info);
 

@@ -927,6 +927,7 @@ fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
         frame_addr,
         SIGFRAME_TOTAL,
         task_ref.task_id,
+        slopos_mm::page_fault::FileIo::Refuse,
     )
 }
 

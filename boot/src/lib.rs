@@ -11,7 +11,7 @@ pub mod early_init;
 pub mod exception;
 pub mod ffi_boundary;
 pub mod gdt;
-pub use gdt::{gdt_set_kernel_rsp0, syscall_msr_init, syscall_update_kernel_rsp};
+pub use gdt::{syscall_msr_init, syscall_update_kernel_rsp};
 pub mod idt;
 pub mod ist_stacks;
 pub mod kconsole;

@@ -45,6 +45,9 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Whether `tests=on` was set on the boot command line.
 static TESTS_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Whether `tests.verbosity=quiet` keeps pass lines off the wire.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
 /// Called once from the boot init pipeline after `tests_run_all` returns;
 /// later calls overwrite.
 pub fn store_kernel_phase(summary: &TestRunSummary, rc: i32, cfg: &TestConfig) {
@@ -53,6 +56,7 @@ pub fn store_kernel_phase(summary: &TestRunSummary, rc: i32, cfg: &TestConfig) {
     KERNEL_RC.store(rc, Ordering::Release);
     TESTS_ENABLED.store(cfg.enabled, Ordering::Release);
     SHUTDOWN_REQUESTED.store(cfg.shutdown, Ordering::Release);
+    QUIET.store(matches!(cfg.verbosity, Verbosity::Quiet), Ordering::Release);
 }
 
 pub fn load_kernel_phase() -> (TestRunSummary, i32) {
@@ -71,4 +75,8 @@ pub fn tests_enabled() -> bool {
 
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+}
+
+pub fn quiet() -> bool {
+    QUIET.load(Ordering::Acquire)
 }

@@ -1,5 +1,4 @@
 use core::sync::atomic::Ordering;
-use slopos_abi::Errno;
 use slopos_abi::signal::{
     WAIT_OPTIONS_MASK, WAIT_STATUS_CONTINUED, WCONTINUED, WNOHANG, WUNTRACED, wait_status_exited,
     wait_status_signalled, wait_status_stopped,
@@ -7,12 +6,14 @@ use slopos_abi::signal::{
 use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE,
-    FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, Timespec,
+    FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, Rusage, Timespec,
+    Timeval,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, SPAWN_PRIVILEGED, SPAWN_RESERVED, SPAWN_USER_SETTABLE, TASK_FLAG_KERNEL_MODE,
     TaskExitReason, TaskPriority, TaskStatus,
 };
+use slopos_abi::{Errno, PAGE_SIZE};
 use slopos_fs::fileio::FdTable;
 use slopos_fs::vfs::canon::{CanonPath, canonicalise_at};
 use slopos_fs::vfs::path::RESOLVE_MUST_BE_DIR;
@@ -446,13 +447,61 @@ fn scan_children(
     child_report(&child, wuntraced, wcontinued)
 }
 
-/// The status word lands first, then the child pays. An `EFAULT` here leaves
-/// the zombie unreaped and the stop or continue report still pending, so the
-/// caller's retry sees exactly the same event. The only place the status
-/// pointer is touched, which is where Linux checks `wstatus` too.
-fn finish_wait(report: WaitReport, status: Option<UserPtr<i32>>) -> Result<u64, Errno> {
+fn rusage_of(cpu_ticks: u64, peak_resident_pages: u32) -> Rusage {
+    let micros = slopos_kernel_services::clock::ticks_to_microseconds(cpu_ticks);
+    Rusage {
+        ru_utime: Timeval {
+            tv_sec: (micros / 1_000_000) as i64,
+            tv_usec: (micros % 1_000_000) as i64,
+        },
+        ru_maxrss: i64::from(peak_resident_pages) * (PAGE_SIZE / 1024) as i64,
+        ..Rusage::default()
+    }
+}
+
+/// An exited child's usage is the one its exit recorded; a stopped or
+/// continued one's is its process's so far: the CPU time its departed tasks
+/// banked, what its live ones have run, and its resident peak.
+#[inline(never)]
+fn child_rusage(child: &Task) -> Rusage {
+    if let Some(info) = task_peek_exit_info(child.task_id) {
+        return rusage_of(info.cpu_ticks, info.peak_resident_pages);
+    }
+    let Some(process) = child.process() else {
+        return Rusage::default();
+    };
+    let now = slopos_ostd::kdiag_timestamp();
+    let handle = child.process_handle_raw();
+    let mut ticks = process.exited_cpu_ticks();
+    slopos_sched::task::task_for_each_active(|member| {
+        if member.process_handle_raw() == handle && !member.exit_info_is_set() {
+            ticks =
+                ticks.saturating_add(crate::syscall::core_handlers::task_cpu_ticks(member, now));
+        }
+    });
+    let peak = slopos_ostd::process::ProcessId::of(&process)
+        .map_or(0, slopos_mm::process_vm::process_vm_peak_resident_pages);
+    rusage_of(ticks, peak)
+}
+
+/// The status word and the usage land first, then the child pays. An `EFAULT`
+/// here leaves the zombie unreaped and the stop or continue report still
+/// pending, so the caller's retry sees exactly the same event. The only place
+/// either pointer is touched, which is where Linux checks them too.
+fn finish_wait(
+    report: WaitReport,
+    status: Option<UserPtr<i32>>,
+    rusage: Option<UserPtr<Rusage>>,
+) -> Result<u64, Errno> {
     if let Some(out) = status {
         copy_to_user(out.inner(), &(report.status as i32)).map_err(|_| Errno::EFAULT)?;
+    }
+    if let Some(out) = rusage {
+        let usage = match task_find_by_id(report.child_id) {
+            Some(child) => child_rusage(&child),
+            None => Rusage::default(),
+        };
+        copy_to_user(out.inner(), &usage).map_err(|_| Errno::EFAULT)?;
     }
     match report.commit {
         WaitCommit::Reap => {
@@ -473,16 +522,11 @@ fn finish_wait(report: WaitReport, status: Option<UserPtr<i32>>) -> Result<u64, 
 }
 
 define_syscall!(syscall_wait4
-    (ctx, pid: i32, status: Option<UserPtr<i32>>, options: u32, rusage: u64)
+    (ctx, pid: i32, status: Option<UserPtr<i32>>, options: u32, rusage: Option<UserPtr<Rusage>>)
     cap(NoneRelation)
     -> Result<u64, Errno>
 {
     if options & !WAIT_OPTIONS_MASK != 0 {
-        return Err(Errno::EINVAL);
-    }
-    // There is no per-task resource accounting to report, and a zeroed
-    // `struct rusage` would be a lie the caller cannot detect.
-    if rusage != 0 {
         return Err(Errno::EINVAL);
     }
     // `0` and `< -1` name a process group, and SlopOS implements no group
@@ -497,7 +541,7 @@ define_syscall!(syscall_wait4
     let wcontinued = options & WCONTINUED != 0;
 
     if let Some(report) = scan_children(caller_id, target, wuntraced, wcontinued) {
-        return finish_wait(report, status);
+        return finish_wait(report, status, rusage);
     }
 
     // Reaping is the parent's alone: `task_consume_zombie` drops the parent's
@@ -534,7 +578,7 @@ define_syscall!(syscall_wait4
     // Latch first: a predicate pass that found an event and then lost the race
     // with a signal must still deliver it rather than answer EINTR.
     match latched {
-        Some(report) => finish_wait(report, status),
+        Some(report) => finish_wait(report, status, rusage),
         None if waited.is_err() => Err(Errno::EINTR),
         None => Err(Errno::ECHILD),
     }
@@ -998,9 +1042,6 @@ define_syscall!(syscall_getcwd
     (ctx, buf: UserBytes) cap(NoneSelf)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
-    }
     let current = Current::get().ok_or(Errno::EINVAL)?;
     current.task().with_cwd(&current, |cwd| {
         if buf.len() < cwd.len() {

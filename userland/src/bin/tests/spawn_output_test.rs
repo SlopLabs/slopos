@@ -14,7 +14,7 @@ use std::fs;
 
 fn shell_ready() {
     shell::cwd_set(b"/");
-    shell::env::initialize_defaults();
+    shell::env::initialize();
     shell::exec::initialize_job_control();
 }
 

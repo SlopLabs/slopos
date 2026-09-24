@@ -315,6 +315,34 @@ pub fn complete_file_fault(
     }
 }
 
+/// Whether a populate may read a file-backed page in, which blocks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileIo {
+    /// Leave such a page absent, and the range unpopulated.
+    Refuse,
+    /// Read it as the user fault would: the caller can block, holds no
+    /// spinning lock and no lock the filesystem read takes.
+    Read,
+}
+
+/// One step of a populate loop; `false` gives the range up.
+fn resolve_for_populate(
+    page: u64,
+    error_code: u64,
+    process_vm_handle: u64,
+    task_id: u32,
+    io: FileIo,
+) -> bool {
+    match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
+        FaultOutcome::Resolved | FaultOutcome::Retry => true,
+        FaultOutcome::NeedsIo(plan) if io == FileIo::Read => matches!(
+            complete_file_fault(process_vm_handle, &plan, page, task_id),
+            FaultOutcome::Resolved | FaultOutcome::Retry
+        ),
+        FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => false,
+    }
+}
+
 /// x86-64 `#PF` error-code shapes a user write takes: against an absent page
 /// (the demand-paging shape) and against a present one (the COW shape).
 const USER_WRITE_ABSENT: u64 = 0x06;
@@ -367,14 +395,13 @@ fn page_write_state(handle: Handle<ProcessVm>, page: u64) -> Option<PageWriteSta
 /// COW, and [`crate::user_copy`], which comes here after a copy has already
 /// refused.
 ///
-/// Non-blocking, exactly as the read twin below is: a `NeedsIo` plan answers
-/// `false` rather than reading, so a write into a not-yet-faulted
-/// `MAP_PRIVATE` file mapping still ends in `EFAULT`.
+/// A page that must be read from its file is read only under [`FileIo::Read`].
 pub fn populate_user_range_for_write(
     process_vm_handle: u64,
     addr: u64,
     len: u64,
     task_id: u32,
+    io: FileIo,
 ) -> bool {
     let Some(handle) = process_vm::unpack_process_vm_handle(process_vm_handle) else {
         return false;
@@ -393,10 +420,8 @@ pub fn populate_user_range_for_write(
                 Some(PageWriteState::Absent) => USER_WRITE_ABSENT,
                 None => return false,
             };
-            match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
-                FaultOutcome::Resolved | FaultOutcome::Retry => {}
-                // A file read must not run from the delivery path.
-                FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => return false,
+            if !resolve_for_populate(page, error_code, process_vm_handle, task_id, io) {
+                return false;
             }
             spins += 1;
             if spins == POPULATE_SPINS {
@@ -411,14 +436,13 @@ pub fn populate_user_range_for_write(
 /// Make every page of `[addr, addr + len)` present, as a user *read* would.
 ///
 /// The write twin above breaks COW because a write must; a read must not, or
-/// a reader would be handed a private copy nobody wrote to. A file-backed
-/// page that needs I/O is left absent: this runs on paths that must not
-/// block, and the copy that follows then answers what it answered before.
+/// a reader would be handed a private copy nobody wrote to.
 pub fn populate_user_range_for_read(
     process_vm_handle: u64,
     addr: u64,
     len: u64,
     task_id: u32,
+    io: FileIo,
 ) -> bool {
     let Some(handle) = process_vm::unpack_process_vm_handle(process_vm_handle) else {
         return false;
@@ -436,9 +460,8 @@ pub fn populate_user_range_for_read(
                 Some(PageWriteState::Absent) => {}
                 None => return false,
             }
-            match try_resolve_user_fault(page, USER_READ_ABSENT, process_vm_handle, task_id) {
-                FaultOutcome::Resolved | FaultOutcome::Retry => {}
-                FaultOutcome::NeedsIo(_) | FaultOutcome::Fatal(_) => return false,
+            if !resolve_for_populate(page, USER_READ_ABSENT, process_vm_handle, task_id, io) {
+                return false;
             }
             spins += 1;
             if spins == POPULATE_SPINS {

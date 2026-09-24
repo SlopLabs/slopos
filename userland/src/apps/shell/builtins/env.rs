@@ -6,14 +6,6 @@ fn find_eq(data: &[u8]) -> Option<usize> {
     data.iter().position(|&b| b == b'=')
 }
 
-fn is_name(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
-        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
-}
-
 pub fn cmd_export(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         env::for_each_exported(|key, value| {
@@ -32,7 +24,7 @@ pub fn cmd_export(argc: i32, argv: &[&[u8]]) -> i32 {
         match find_eq(bytes) {
             Some(eq) => {
                 let (key, value) = (&bytes[..eq], &bytes[eq + 1..]);
-                if !is_name(key) {
+                if !env::is_name(key) {
                     shell_write_idx(b"export: invalid identifier\n", COLOR_ERROR_RED);
                     return 1;
                 }
@@ -40,7 +32,7 @@ pub fn cmd_export(argc: i32, argv: &[&[u8]]) -> i32 {
             }
             // POSIX: this is how a later assignment's value gets exported.
             None => {
-                if !is_name(bytes) {
+                if !env::is_name(bytes) {
                     shell_write_idx(b"export: invalid identifier\n", COLOR_ERROR_RED);
                     return 1;
                 }
@@ -166,7 +158,7 @@ pub fn cmd_set(argc: i32, argv: &[&[u8]]) -> i32 {
     if find_eq(argv[index]).is_some() {
         for bytes in argv.iter().take(argc).skip(index) {
             match find_eq(bytes) {
-                Some(eq) if is_name(&bytes[..eq]) => env::set(&bytes[..eq], &bytes[eq + 1..]),
+                Some(eq) if env::is_name(&bytes[..eq]) => env::set(&bytes[..eq], &bytes[eq + 1..]),
                 _ => {
                     shell_write_idx(b"set: invalid identifier\n", COLOR_ERROR_RED);
                     return 1;

@@ -29,9 +29,6 @@ define_syscall!(syscall_pread64
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
-    }
     let mut io_buf = UserWriteBuf::new(buf.base_u64(), buf.len()).ok_or(Errno::EFAULT)?;
     let bytes = file_pread_fd(pid, fd.raw(), &mut io_buf, offset);
     if bytes < 0 {
@@ -47,9 +44,6 @@ define_syscall!(syscall_pwrite64
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
-    }
     let io_buf = UserReadBuf::new(buf.base_u64(), buf.len()).ok_or(Errno::EFAULT)?;
     let bytes = file_pwrite_fd(pid, fd.raw(), &io_buf, offset);
     if bytes < 0 {
@@ -106,9 +100,6 @@ define_syscall!(syscall_getdents64
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if buf.base_u64() == 0 {
-        return Err(Errno::EFAULT);
-    }
     let len = buf.len().min(GETDENTS_STAGING_MAX);
     if len == 0 {
         return Err(Errno::EINVAL);
