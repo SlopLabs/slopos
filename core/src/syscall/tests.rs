@@ -100,7 +100,7 @@ fn deliver_pending_signal_as_current(task_id: u32, table: FdTable, ctx: &UserCon
     park_bootstrap_on_current_cpu();
 }
 
-use crate::tests::helpers::dummy_task_entry;
+use crate::tests::helpers::{dummy_task_entry, mark_current_killed};
 
 fn create_test_kernel_task() -> u32 {
     task_create(
@@ -9586,25 +9586,6 @@ static DYING_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 static DYING_RELEASED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static DYING_DEVICE_DROPPED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
-
-/// Set or clear the current task's kill flag, answering whether it took.
-/// [`SIGNAL_KILLED`](slopos_abi::signal::SIGNAL_KILLED) is outside
-/// `SIGNAL_MASK`, so the raw field is the only way back out of the state.
-fn mark_current_killed(on: bool) -> bool {
-    use core::sync::atomic::Ordering;
-    let Some(current) = Current::get() else {
-        return false;
-    };
-    let task = current.task();
-    if on {
-        task.signal_pending
-            .fetch_or(slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
-    } else {
-        task.signal_pending
-            .fetch_and(!slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
-    }
-    task.is_killed() == on
-}
 
 /// A device that, once, runs the pool release from a task marked for death
 /// while the mount lock is held over its own I/O — the state `Mutex::lock`

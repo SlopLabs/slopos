@@ -2,6 +2,10 @@
 //! `Mutex`, virtqueue descriptor free-list invariants, HPET `period_fs()`, and
 //! live virtio-blk I/O after probe.
 
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use slopos_abi::task::TaskPriority;
+use slopos_core::tests::helpers::mark_current_killed;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
@@ -628,6 +632,124 @@ pub fn test_virtio_blk_late_completion_keeps_slot() -> TestResult {
     pass!()
 }
 
+const KILLED_SECTOR: u64 = 7168;
+const KILLED_PATTERN: [u8; 512] = [0x6B; 512];
+
+const KILLED_PENDING: u8 = 0;
+const KILLED_LANDED: u8 = 1;
+const KILLED_ABANDONED: u8 = 2;
+const KILLED_FAILED: u8 = 3;
+const KILLED_UNMARKED: u8 = 4;
+
+static KILLED_OUTCOME: AtomicU8 = AtomicU8::new(KILLED_PENDING);
+
+/// A kernel thread, because the harness runs on a stub with no task to kill.
+fn killed_writer() {
+    KILLED_OUTCOME.store(killed_write(), Ordering::Release);
+}
+
+fn killed_write() -> u8 {
+    let Some(token) =
+        virtio_blk::blk_device_by_index(SCRATCH).and_then(|h| virtio_blk::open_writer(h).ok())
+    else {
+        return KILLED_FAILED;
+    };
+    if !mark_current_killed(true) {
+        return KILLED_UNMARKED;
+    }
+    let wrote = token.write_at(KILLED_SECTOR * 512, &KILLED_PATTERN);
+    mark_current_killed(false);
+    match wrote {
+        Ok(()) => KILLED_LANDED,
+        Err(BlockDeviceError::Interrupted) => KILLED_ABANDONED,
+        Err(_) => KILLED_FAILED,
+    }
+}
+
+/// A requester killed with its write in flight waits the write out. Abandoned,
+/// the write could land after a later one to the same sectors — which is how a
+/// directory block came back as it was before an `unlink`.
+pub fn test_virtio_blk_killed_write_is_waited_out() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let slots = virtio_blk::blk_available_slots(handle);
+
+    KILLED_OUTCOME.store(KILLED_PENDING, Ordering::Release);
+    if slopos_ostd::task::spawn("killed-writer", killed_writer, TaskPriority::Normal).is_err() {
+        return fail!("could not spawn the writer thread");
+    }
+    let finished = crate::virtio::hpet_poll_wait(
+        &|| KILLED_OUTCOME.load(Ordering::Acquire) != KILLED_PENDING,
+        20_000,
+    );
+    assert_test!(finished, "the killed writer never finished");
+    match KILLED_OUTCOME.load(Ordering::Acquire) {
+        KILLED_LANDED => {}
+        KILLED_ABANDONED => return fail!("a killed requester abandoned its write"),
+        KILLED_UNMARKED => return fail!("the writer thread could not mark itself killed"),
+        _ => return fail!("the killed requester's write failed"),
+    }
+
+    assert_eq_test!(
+        virtio_blk::blk_available_slots(handle),
+        slots,
+        "a waited-out write must leave no chain quarantined"
+    );
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+    let mut readback = [0u8; 512];
+    assert_test!(
+        token.read_at(KILLED_SECTOR * 512, &mut readback).is_ok() && readback == KILLED_PATTERN,
+        "the killed requester's write must be on the device"
+    );
+    pass!()
+}
+
+/// A write a timeout abandoned may still land, so nothing reaches the device
+/// until the device has returned it.
+pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
+    let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
+        return fail!("scratch block device (disk1) not present");
+    };
+    let token = match virtio_blk::open_writer(handle) {
+        Ok(t) => t,
+        Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
+    };
+
+    const SECTOR: u64 = 7176;
+    let older = [0x3Cu8; 512];
+    let newer = [0xC3u8; 512];
+    assert_test!(
+        token.write_at(SECTOR * 512, &older).is_ok(),
+        "seeding the sector must succeed"
+    );
+
+    let Some(head) = virtio_blk::blk_stage_abandoned_write(handle) else {
+        return fail!("could not stage an abandoned write");
+    };
+    let fenced = token.write_at(SECTOR * 512, &newer);
+    virtio_blk::blk_return_abandoned_write(handle, head);
+
+    assert_eq_test!(
+        fenced,
+        Err(BlockDeviceError::Timeout),
+        "a write must not reach the device while an earlier one may still land"
+    );
+    assert_test!(
+        token.write_at(SECTOR * 512, &newer).is_ok(),
+        "the device must take writes again once the abandoned one is returned"
+    );
+    let mut readback = [0u8; 512];
+    assert_test!(
+        token.read_at(SECTOR * 512, &mut readback).is_ok() && readback == newer,
+        "the later write must be what the sector holds"
+    );
+    pass!()
+}
+
 /// One count is one device request: the counters live inside the chain loop,
 /// so a span wider than 32 KiB costs more than one write and a sub-sector
 /// write pays for its read-modify-write pair. Counted at the `BlockDevice`
@@ -788,5 +910,13 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_virtio_blk_counters_are_per_device_request,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_killed_write_is_waited_out,
+    suite = virtio_completion
+);
+slopos_testing::stest!(
+    name = test_virtio_blk_waits_out_an_abandoned_write,
     suite = virtio_completion
 );
