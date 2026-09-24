@@ -16,10 +16,9 @@
 use core::cell::SyncUnsafeCell;
 use core::cmp;
 use core::ffi::c_void;
-use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicI32;
 
 use slopos_abi::alignment::align_up_usize;
 use slopos_abi::syscall::{
@@ -29,6 +28,7 @@ use slopos_abi::syscall::{
 use super::bins::{self, BIN_COUNT, BinArray, LARGE_BIN_COUNT, SMALL_BIN_COUNT};
 use super::chunk::{self, ChunkPtr};
 use crate::pal::raw::{syscall2, syscall6};
+use crate::thread::mutex::{lock_state, unlock_state};
 
 const PAGE_SIZE: usize = 4096;
 const UNSORTED_DRAIN_LIMIT: usize = 10;
@@ -55,36 +55,29 @@ struct SyncDlMalloc(DlMalloc);
 unsafe impl Sync for SyncDlMalloc {}
 
 pub struct AllocatorHandle {
-    locked: AtomicBool,
+    state: AtomicI32,
     inner: SyncUnsafeCell<SyncDlMalloc>,
 }
 
 unsafe impl Sync for AllocatorHandle {}
 
 pub struct DlMallocGuard<'a> {
-    lock: &'a AtomicBool,
+    lock: &'a AtomicI32,
     allocator: &'a mut DlMalloc,
 }
 
 impl AllocatorHandle {
     pub const fn new() -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            state: AtomicI32::new(0),
             inner: SyncUnsafeCell::new(SyncDlMalloc(DlMalloc::new())),
         }
     }
 
     pub fn lock(&self) -> DlMallocGuard<'_> {
-        while self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            spin_loop();
-        }
-
+        lock_state(&self.state);
         DlMallocGuard {
-            lock: &self.locked,
+            lock: &self.state,
             allocator: unsafe { &mut (*self.inner.get()).0 },
         }
     }
@@ -106,7 +99,7 @@ impl DerefMut for DlMallocGuard<'_> {
 
 impl Drop for DlMallocGuard<'_> {
     fn drop(&mut self) {
-        self.lock.store(false, Ordering::Release);
+        unlock_state(self.lock);
     }
 }
 

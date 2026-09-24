@@ -264,6 +264,58 @@ fn test_direct_registry() -> bool {
     heap_stats().direct_count == base
 }
 
+/// A child forked while another thread is inside the allocator can allocate.
+fn test_fork_while_another_thread_allocates() -> bool {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const FORKS: usize = 64;
+    let stop = Arc::new(AtomicBool::new(false));
+    let churn = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut n = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                let v: Vec<u8> = Vec::with_capacity(64 + n % 1024);
+                core::hint::black_box(&v);
+                n = n.wrapping_add(1);
+            }
+        })
+    };
+    let ok = (0..FORKS).all(|_| fork_and_allocate());
+    stop.store(true, Ordering::Relaxed);
+    churn.join().is_ok() && ok
+}
+
+/// Fork a child that allocates and exits, and reap it within a deadline; a
+/// child stuck on an inherited allocator lock is killed and counts as failure.
+fn fork_and_allocate() -> bool {
+    use slopos_slibc::process::wait::WNOHANG;
+    use slopos_slibc::process::{WEXITSTATUS, WIFEXITED, shim, waitpid};
+
+    let pid = shim::fork();
+    if pid == 0 {
+        let v = vec![7u8; 4096];
+        shim::_exit(i32::from(v[4095] != 7));
+    }
+    if pid < 0 {
+        return false;
+    }
+    let mut status = 0;
+    for _ in 0..10_000 {
+        match unsafe { waitpid(pid, &mut status, WNOHANG) } {
+            0 => std::thread::sleep(std::time::Duration::from_millis(1)),
+            reaped if reaped == pid => return WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            _ => return false,
+        }
+    }
+    unsafe {
+        slopos_slibc::signal::kill(pid, 9);
+        waitpid(pid, &mut status, 0);
+    }
+    false
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("alloc_dealloc_basic", test_alloc_dealloc_basic),
@@ -283,6 +335,10 @@ fn main() {
         (
             "simd_fill_survives_demand_fault",
             test_simd_fill_survives_demand_fault,
+        ),
+        (
+            "fork_while_another_thread_allocates",
+            test_fork_while_another_thread_allocates,
         ),
     ]);
 }
