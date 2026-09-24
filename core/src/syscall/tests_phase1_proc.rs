@@ -627,7 +627,8 @@ pub fn test_waitpid_rejects_unknown_option_bits() -> TestResult {
     pass!()
 }
 
-/// The handler adds only the caller's own `schedule()` on top of the fan-out.
+/// Every member is killed with the group's code and left to exit from its own
+/// context; the handler adds only the caller's own exit on top of the fan-out.
 pub fn test_exit_group_terminates_every_thread_of_the_group() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -653,31 +654,30 @@ pub fn test_exit_group_terminates_every_thread_of_the_group() -> TestResult {
     drop(leader);
     drop(thread);
 
-    let terminated = task_group_exit(tgid, 4);
-    let thread_state = task_find_by_id(thread_id).map(|t| t.status());
-    let leader_state = task_find_by_id(leader_id).map(|t| t.status());
+    let ended = task_group_exit(tgid, 4);
+    let marked = |id: u32| {
+        task_find_by_id(id).is_some_and(|t| {
+            t.is_killed() && t.exit_code.load(core::sync::atomic::Ordering::Acquire) == 4
+        })
+    };
+    let thread_marked = marked(thread_id);
+    let leader_marked = marked(leader_id);
 
     task_terminate(thread_id);
     task_terminate(leader_id);
 
     assert_test!(joined_group, "the clone did not join the leader's group");
     assert_test!(
-        terminated >= 2,
+        ended >= 2,
         "exit_group reported fewer than both group members"
     );
     assert_test!(
-        !matches!(
-            thread_state,
-            Some(TaskStatus::Ready) | Some(TaskStatus::Blocked) | Some(TaskStatus::Running)
-        ),
-        "the sibling thread survived exit_group"
+        thread_marked,
+        "the sibling thread was not killed with the group's code"
     );
     assert_test!(
-        !matches!(
-            leader_state,
-            Some(TaskStatus::Ready) | Some(TaskStatus::Blocked) | Some(TaskStatus::Running)
-        ),
-        "the group leader survived exit_group"
+        leader_marked,
+        "the group leader was not killed with the group's code"
     );
     pass!()
 }

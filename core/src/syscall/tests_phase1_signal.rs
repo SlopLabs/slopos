@@ -489,6 +489,8 @@ pub fn test_exit_info_reports_the_killing_signal() -> TestResult {
         task_group_exit(exited_id, 128 + SIGTERM as u32) != 0,
         "exit_group must terminate its group"
     );
+    // The member acting on its kill, from its own context.
+    task_terminate(exited_id);
     let exited_info = assert_some!(
         task_peek_exit_info(exited_id),
         "an exited task must publish exit info"
@@ -1149,10 +1151,9 @@ pub fn test_a_reaped_leader_does_not_strand_its_threads() -> TestResult {
         task_group_exit(leader_id, 3) != 0,
         "exit_group must terminate a group whose leader was reaped"
     );
-    let status = task_find_by_id(thread_id).map(|thread| thread.status());
     assert_test!(
-        !matches!(status, Some(TaskStatus::Ready | TaskStatus::Running)),
-        "exit_group must terminate its caller's group, not return having done nothing"
+        task_find_by_id(thread_id).is_some_and(|thread| thread.is_killed()),
+        "exit_group must kill its caller's group, not return having done nothing"
     );
 
     task_terminate(thread_id);
