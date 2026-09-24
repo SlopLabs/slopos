@@ -70,7 +70,7 @@ pub enum Ext2Error {
     /// A rename would splice a directory into its own subtree, detaching it
     /// and everything under it from the root.
     InvalidPath,
-    /// A device request was abandoned because its requester was killed.
+    /// The requester was killed before a device request was sent.
     Interrupted,
 }
 
@@ -661,6 +661,11 @@ impl<'a> Ext2Fs<'a> {
     #[cfg(feature = "tests")]
     pub fn cache_drop_clean_for_test(&mut self) -> u32 {
         self.cache.shrink_clean(u32::MAX)
+    }
+
+    #[cfg(feature = "tests")]
+    pub fn cached_kind_for_test(&self, block: u32) -> Option<cache::BlockKind> {
+        self.cache.kind_of(BlockNum(block))
     }
 
     /// Commit one inode: its data blocks, the allocation state that makes them
@@ -1674,7 +1679,7 @@ impl<'a> Ext2Fs<'a> {
             BlockOwner::File(new_ino.raw()),
         )?;
         {
-            let mut blk = self.cache.get_zero_data(
+            let mut blk = self.cache.get_zero_owned(
                 first_block,
                 self.device,
                 BlockOwner::File(new_ino.raw()),
@@ -2260,7 +2265,7 @@ impl<'a> Ext2Fs<'a> {
         if parent_inode.is_immutable() {
             return Err(Ext2Error::Immutable);
         }
-        Ok(dir::lookup_child(
+        match dir::lookup_child(
             &parent_inode,
             name,
             &mut *self.cache,
@@ -2268,8 +2273,11 @@ impl<'a> Ext2Fs<'a> {
             &self.geom,
             self.block_size,
             BlockOwner::File(parent.raw()),
-        )
-        .ok())
+        ) {
+            Ok(found) => Ok(Some(found)),
+            Err(Ext2Error::PathNotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Write the new entry. Deliberately before the old one is removed: a

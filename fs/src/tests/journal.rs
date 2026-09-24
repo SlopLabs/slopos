@@ -15,7 +15,7 @@ use slopos_testing::{TestResult, fail};
 
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
-use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext2::cache::{BlockCache, BlockKind, CACHE_ENTRIES_MIN};
 use crate::ext2::journal::{Journal, JournalRecovery, LogExtent, MAX_LOG_SLOTS};
 use crate::ext2::{Ext2Error, Ext2Fs, JOURNAL_PATH, ReadOnlyReason};
 
@@ -41,9 +41,11 @@ static PROBE_FLUSHES: AtomicUsize = AtomicUsize::new(0);
 static PROBE_FIRST: AtomicU64 = AtomicU64::new(u64::MAX);
 static PROBE_REFUSES: AtomicBool = AtomicBool::new(false);
 static PROBE_INTERRUPTS: AtomicBool = AtomicBool::new(false);
+/// A read covering this offset is refused once, then the probe disarms.
+static PROBE_REFUSE_READ_AT: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Counts writes, and can be made to refuse them or to abandon reads part-way
-/// through a test.
+/// Counts writes, and can be made to refuse writes or reads part-way through a
+/// test.
 /// Refusing only once armed is what the retraction test needs: the log must
 /// attach before the failure it is measuring.
 struct ProbeDevice {
@@ -57,6 +59,7 @@ impl ProbeDevice {
         PROBE_FIRST.store(u64::MAX, Ordering::Relaxed);
         PROBE_REFUSES.store(false, Ordering::Relaxed);
         PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
+        PROBE_REFUSE_READ_AT.store(u64::MAX, Ordering::Relaxed);
         Self { inner }
     }
 }
@@ -64,6 +67,14 @@ impl ProbeDevice {
 impl BlockDevice for ProbeDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
         if PROBE_INTERRUPTS.load(Ordering::Relaxed) {
+            return Err(BlockDeviceError::Interrupted);
+        }
+        let armed = PROBE_REFUSE_READ_AT.load(Ordering::Relaxed);
+        if (offset..offset + buffer.len() as u64).contains(&armed)
+            && PROBE_REFUSE_READ_AT
+                .compare_exchange(armed, u64::MAX, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
             return Err(BlockDeviceError::Interrupted);
         }
         self.inner.read_at(offset, buffer)
@@ -230,11 +241,12 @@ fn retract_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A read abandoned because its requester was killed says nothing about the
+/// A read refused because its requester was killed says nothing about the
 /// image: the operation fails and the mount stays writable.
 ///
 /// The path that broke: every device error read as damage, so the guest
-/// build's linker, killed with a read in flight, took `/devel` read-only.
+/// build's linker, killed while it waited on the device, took `/devel`
+/// read-only.
 pub fn test_ext2_killed_read_is_not_damage() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
@@ -257,16 +269,96 @@ fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let read = fs.note_result(read);
     PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
     if read != Err(Ext2Error::Interrupted) {
-        return Err("the abandoned read did not answer Interrupted");
+        return Err("the refused read did not answer Interrupted");
     }
     if fs.corruption_seen() {
-        return Err("an abandoned read latched the mount as damaged");
+        return Err("a refused read latched the mount as damaged");
     }
     let n = fs
         .read_file(ino, 0, &mut buf)
         .map_err(|_| "read after the kill")?;
     if &buf[..n] != PAYLOAD {
         return Err("the reread holds the wrong bytes");
+    }
+    Ok(())
+}
+
+/// A rename whose lookup of the target name fails must fail. Read as "no
+/// such name", the rename appended a second entry beside the one it was to
+/// replace.
+pub fn test_ext2_rename_fails_when_the_target_lookup_does() -> TestResult {
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    match with_log(&device, unreadable_target_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn unreadable_target_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
+    let target = fs.create_file(dir, b"b").map_err(|_| "create target")?;
+    let source = fs.create_file(2, b"a").map_err(|_| "create source")?;
+    fs.sync().map_err(|_| "sync")?;
+    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0];
+    fs.cache_drop_clean_for_test();
+
+    PROBE_REFUSE_READ_AT.store(
+        u64::from(block.raw()) * u64::from(fs.block_size()),
+        Ordering::Relaxed,
+    );
+    let renamed = fs.rename_entry(2, b"a", dir, b"b");
+    PROBE_REFUSE_READ_AT.store(u64::MAX, Ordering::Relaxed);
+    if renamed.is_ok() {
+        return Err("the rename went ahead without knowing whether the target existed");
+    }
+
+    let mut names = 0;
+    let mut holder = 0;
+    fs.for_each_dir_entry(dir, |entry| {
+        if entry.name == b"b" {
+            names += 1;
+            holder = entry.inode.raw();
+        }
+        true
+    })
+    .map_err(|_| "walk")?;
+    if names != 1 || holder != target {
+        return Err("the target directory no longer holds exactly its own entry");
+    }
+    if fs.resolve_path(b"/a") != Ok(source) {
+        return Err("the failed rename moved its source");
+    }
+    Ok(())
+}
+
+/// A directory's blocks are metadata from the moment it exists. Cached as file
+/// data, the first one went home on an eviction rather than into the log, so a
+/// rollback could no longer retract an edit to it.
+pub fn test_ext2_new_directory_block_is_metadata() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    match with_log(&device, new_directory_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn new_directory_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    let dir = fs.create_directory(2, b"fresh").map_err(|_| "mkdir")?;
+    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0];
+    if fs.cached_kind_for_test(block.raw()) != Some(BlockKind::Metadata) {
+        return Err("a new directory's first block is cached as file data");
+    }
+    fs.create_file(dir, b"inside")
+        .map_err(|_| "create inside")?;
+    if fs.cached_kind_for_test(block.raw()) != Some(BlockKind::Metadata) {
+        return Err("an insert left the directory block cached as file data");
     }
     Ok(())
 }
@@ -468,6 +560,11 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(name = test_ext2_killed_read_is_not_damage, suite = fs);
+slopos_testing::stest!(
+    name = test_ext2_rename_fails_when_the_target_lookup_does,
+    suite = fs
+);
+slopos_testing::stest!(name = test_ext2_new_directory_block_is_metadata, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_journal_checkpoints_a_block_read_back_from_the_log,
     suite = fs
