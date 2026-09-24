@@ -707,6 +707,12 @@ impl UserRegView for InterruptFrameRegs<'_> {
 }
 
 /// What [`claim_pending_signal`] decided, for a caller holding no borrow.
+/// Whether delivery would act on a pending signal of `task`, claiming it.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn claim_pending_signal_for_test(task: &Task) -> bool {
+    !matches!(claim_pending_signal(task), SignalDisposition::Done)
+}
+
 enum SignalDisposition {
     /// Nothing deliverable, or the disposition needs no further work.
     Done,
@@ -734,6 +740,14 @@ enum SignalDisposition {
 /// context-switches.
 fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     if (task_ref.flags & TASK_FLAG_USER_MODE) == 0 {
+        return SignalDisposition::Done;
+    }
+    // A group exit already stamped how this task ends: a signal pending since
+    // must neither restamp it nor run a handler past the exit.
+    if task_ref.is_killed()
+        && TaskExitReason::from_u16(task_ref.exit_reason.load(Ordering::Acquire))
+            != TaskExitReason::None
+    {
         return SignalDisposition::Done;
     }
 
