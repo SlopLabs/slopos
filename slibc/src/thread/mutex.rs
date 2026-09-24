@@ -97,19 +97,54 @@ unsafe fn held_by_caller(mutex: *const pthread_mutex_t, tid: i32) -> bool {
 
 /// Futex-based lock: 0=unlocked, 1=locked, 2=locked+waiters.
 #[inline]
-fn lock_state(state: &AtomicI32) {
+pub(crate) fn lock_state(state: &AtomicI32) {
     if state
         .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
     {
         return;
     }
+    lock_state_contended(state);
+}
 
+#[cold]
+fn lock_state_contended(state: &AtomicI32) {
+    let mut seen = spin_while_held(state);
+    if seen == 0 {
+        match state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(now) => seen = now,
+        }
+    }
     loop {
-        if state.swap(2, Ordering::Acquire) == 0 {
+        // A waiter that takes the lock takes it as contended: it cannot know
+        // whether it was the last one parked.
+        if seen != 2 && state.swap(2, Ordering::Acquire) == 0 {
             return;
         }
         super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, 2);
+        seen = spin_while_held(state);
+    }
+}
+
+/// Spin while the holder is running and nobody is parked, since a short
+/// critical section is over sooner than a futex round trip.
+fn spin_while_held(state: &AtomicI32) -> i32 {
+    let mut budget = 100;
+    loop {
+        let seen = state.load(Ordering::Relaxed);
+        if seen != 1 || budget == 0 {
+            return seen;
+        }
+        core::hint::spin_loop();
+        budget -= 1;
+    }
+}
+
+#[inline]
+pub(crate) fn unlock_state(state: &AtomicI32) {
+    if state.swap(0, Ordering::Release) == 2 {
+        let _ = Sys::futex_wake(state.as_ptr() as *const u32, 1);
     }
 }
 
@@ -201,10 +236,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> c_
         (*mutex).owner_tid.store(0, Ordering::Relaxed);
     }
 
-    let state = &(*mutex).state;
-    if state.swap(0, Ordering::Release) == 2 {
-        let _ = Sys::futex_wake(state.as_ptr() as *const u32, 1);
-    }
+    unlock_state(&(*mutex).state);
     0
 }
 
