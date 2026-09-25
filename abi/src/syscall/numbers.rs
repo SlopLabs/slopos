@@ -510,7 +510,7 @@ pub const SYSCALL_CPU_INFO: u64 = SYSCALL_PRIVATE_BASE + 4;
 pub const SYSCALL_PERCPU_STATS: u64 = SYSCALL_PRIVATE_BASE + 5;
 
 /// `spawn_path(path: *const u8, path_len, argv: *const *const u8, argc,
-/// attrs: *const SpawnAttrs) -> task id`, or a negative `ExecError`.
+/// attrs: *const SpawnAttrs) -> task id`, or a negated errno.
 ///
 /// The child begins with an empty fd table; the `SpawnAttrs` action list
 /// installs exactly the descriptors it inherits (`posix_spawn` file-actions).

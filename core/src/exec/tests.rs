@@ -13,7 +13,9 @@ use slopos_ostd::klog_info;
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 
-use super::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_STRLEN, ExecError, INIT_PATH};
+use slopos_abi::Errno;
+
+use super::{EXEC_MAX_ARG_BYTES, EXEC_MAX_ARG_STRLEN, INIT_PATH};
 
 static ARG_FILLER: [u8; EXEC_MAX_ARG_STRLEN] = [b'x'; EXEC_MAX_ARG_STRLEN];
 
@@ -496,7 +498,7 @@ pub fn test_program_path_over_the_limit_is_refused() -> TestResult {
         return TestResult::Fail;
     };
     match crate::exec::resolve_program(long.as_slice(), b"/") {
-        Err(ExecError::NameTooLong) => {}
+        Err(Errno::ENAMETOOLONG) => {}
         other => {
             klog_info!(
                 "EXEC_TEST: BUG - a path past the limit gave {:?}",
@@ -506,7 +508,7 @@ pub fn test_program_path_over_the_limit_is_refused() -> TestResult {
         }
     }
     match crate::exec::resolve_program(b"", b"/") {
-        Err(ExecError::NameTooLong) => TestResult::Pass,
+        Err(Errno::ENAMETOOLONG) => TestResult::Pass,
         other => {
             klog_info!("EXEC_TEST: BUG - an empty path gave {:?}", other.is_ok());
             TestResult::Fail
@@ -546,7 +548,7 @@ pub fn test_program_path_resolves_against_the_cwd() -> TestResult {
     }
 
     match crate::exec::resolve_program(b"prog", b"/") {
-        Err(ExecError::NoEntry) => TestResult::Pass,
+        Err(Errno::ENOENT) => TestResult::Pass,
         other => {
             klog_info!(
                 "EXEC_TEST: BUG - a relative program resolved against the root: {:?}",
@@ -1022,7 +1024,7 @@ pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
         b"/bin/x",
         false,
     ) {
-        Err(ExecError::TooManyArgs) => {}
+        Err(Errno::E2BIG) => {}
         other => {
             klog_info!(
                 "EXEC_TEST: over-budget argv not refused: ok={}",
@@ -1175,23 +1177,26 @@ pub fn test_setup_user_stack_high_argument_count() -> TestResult {
     TestResult::Pass
 }
 
-/// A spawn file action's failure is the table's, never the spawner's memory:
-/// reported as `EFAULT`, a full descriptor table read as a bad pointer.
-pub fn test_spawn_fd_action_errors_are_not_faults() -> TestResult {
-    use slopos_abi::Errno;
-    if super::fd_action_error(Errno::EMFILE.raw()) != ExecError::TooManyFiles {
-        klog_info!("EXEC_TEST: EMFILE from a file action is not reported as EMFILE");
-        return TestResult::Fail;
-    }
-    if super::fd_action_error(Errno::ESRCH.raw()) == ExecError::Fault {
-        klog_info!("EXEC_TEST: a vanished child table is reported as EFAULT");
-        return TestResult::Fail;
+/// A failed spawn file action reports its own errno, as `posix_spawn` does:
+/// `cmd > /dir` is `EISDIR`, and a full descriptor table is `EMFILE`, never a
+/// bad pointer.
+pub fn test_spawn_fd_action_reports_its_own_errno() -> TestResult {
+    for errno in [Errno::EISDIR, Errno::EMFILE, Errno::EACCES] {
+        let reported = super::fd_action_error(errno.raw());
+        if reported != errno {
+            klog_info!(
+                "EXEC_TEST: a file action's {:?} was reported as {:?}",
+                errno,
+                reported
+            );
+            return TestResult::Fail;
+        }
     }
     TestResult::Pass
 }
 
 slopos_testing::stest!(
-    name = test_spawn_fd_action_errors_are_not_faults,
+    name = test_spawn_fd_action_reports_its_own_errno,
     suite = exec
 );
 slopos_testing::stest!(name = test_elf_invalid_magic, suite = exec);

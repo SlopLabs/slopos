@@ -142,7 +142,7 @@ pub fn for_each_entry_from(
             FileBlock(u32::try_from(offset / bs).map_err(|_| Ext2Error::InvalidRange)?);
         let phys = blockmap::map_block(inode, file_block, geom, cache, device, owner)?;
         if !phys.is_valid() {
-            break;
+            return Err(Ext2Error::DirectoryFormat);
         }
         let block = cache.get_owned(phys, device, owner)?;
         let data = block.data();
@@ -296,8 +296,8 @@ fn scan_for_child(
         },
     );
 
-    // Complete only when the walk truly ran off the end: an early stop, an
-    // error, or a hole in the block map all leave records the table never saw.
+    // Complete only when the walk truly ran off the end: an early stop or an
+    // error leaves records the table never saw.
     if recording && found.is_none() && walked.is_ok_and(|reached| reached >= parent.size) {
         index.finish_build(ino);
     }

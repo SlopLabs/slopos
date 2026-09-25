@@ -4704,6 +4704,53 @@ fn orphan_drain_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     }
 }
 
+/// A hole in a directory's block map is damage: a walk that stopped there
+/// would call every name past it absent, and a create would write a second
+/// record of one.
+pub fn test_ext2_directory_hole_is_damage_not_absence() -> TestResult {
+    let Some(device) = phase3_image(b"x.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    let outcome = with_mounted(&device, punch_directory_hole)
+        .and_then(|()| with_mounted(&device, create_past_the_hole));
+    match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+/// Four names this long fill more than one 1 KiB directory block.
+fn hole_name(i: u8) -> [u8; 250] {
+    let mut name = [b'n'; 250];
+    name[0] = b'0' + i;
+    name
+}
+
+#[inline(never)]
+fn punch_directory_hole(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    use crate::ext2::types::BlockNum;
+    let dir = fs.create_directory(2, b"holey").map_err(|_| "mkdir")?;
+    for i in 0..5 {
+        fs.create_file(dir, &hole_name(i)).map_err(|_| "create")?;
+    }
+    let mut inode = fs.read_inode(dir).map_err(|_| "read the directory")?;
+    if inode.size < 2 * u64::from(fs.block_size()) {
+        return Err("the directory never grew a second block");
+    }
+    inode.block[0] = BlockNum(0);
+    fs.write_inode_for_test(dir, &inode).map_err(|_| "punch")?;
+    fs.sync().map_err(|_| "sync")
+}
+
+#[inline(never)]
+fn create_past_the_hole(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let dir = fs.resolve_path(b"/holey").map_err(|_| "resolve")?;
+    match fs.create_file(dir, &hole_name(4)) {
+        Ok(_) => Err("a create wrote a second record of a name past the hole"),
+        Err(_) => Ok(()),
+    }
+}
+
 /// The corruption classification is what `errors=remount-ro` keys on, so its
 /// two directions both matter: a damaged structure latches the mount, and an
 /// error a caller can produce on demand does not.
@@ -4799,6 +4846,10 @@ slopos_testing::stest!(name = test_ext2_check_overdue_rules, suite = fs);
 slopos_testing::stest!(name = test_ext2_orphan_list_roundtrips_on_disk, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_orphan_drain_reclaims_a_crashed_boot,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_directory_hole_is_damage_not_absence,
     suite = fs
 );
 slopos_testing::stest!(

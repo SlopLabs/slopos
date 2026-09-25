@@ -1,4 +1,4 @@
-//! Coverage for the Phase 1 filesystem syscall surface.
+//! Coverage for the filesystem syscall surface a build system needs.
 
 use core::ffi::c_char;
 use core::ptr;
@@ -36,14 +36,14 @@ type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 
 /// Where every fixture in this file lives: `/tmp` is not guaranteed to exist
 /// on a boot whose root is the initramfs.
-const ROOT: &[u8] = b"/phase1_fs";
+const ROOT: &[u8] = b"/build_floor_fs";
 
 fn create_user_task() -> u32 {
     let entry = slopos_sched::task::task_entry_from_kernel_va(
         slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA as u64,
     );
     task_create(
-        b"Phase1Fs\0".as_ptr() as *const c_char,
+        b"BuildFloorFs\0".as_ptr() as *const c_char,
         entry,
         ptr::null_mut(),
         1,
@@ -210,7 +210,7 @@ pub fn test_user_path_over_max_is_refused_not_truncated() -> TestResult {
 
 slopos_testing::stest!(
     name = test_user_path_over_max_is_refused_not_truncated,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 pub fn test_openat_resolves_against_cwd_and_dirfd() -> TestResult {
@@ -261,7 +261,7 @@ pub fn test_openat_resolves_against_cwd_and_dirfd() -> TestResult {
 
 slopos_testing::stest!(
     name = test_openat_resolves_against_cwd_and_dirfd,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The errnos are pinned because they are the whole answer a caller acts on:
@@ -306,7 +306,7 @@ pub fn test_unlinkat_removedir_separates_file_from_directory() -> TestResult {
 
 slopos_testing::stest!(
     name = test_unlinkat_removedir_separates_file_from_directory,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// Reporting the target for both forms is what makes a symlink invisible to
@@ -358,7 +358,7 @@ pub fn test_fstatat_nofollow_reports_the_link() -> TestResult {
 
 slopos_testing::stest!(
     name = test_fstatat_nofollow_reports_the_link,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// `O_NOFOLLOW` refuses a final symlink with `ELOOP` and still opens the file
@@ -400,7 +400,7 @@ pub fn test_open_nofollow_refuses_a_final_symlink() -> TestResult {
 
 slopos_testing::stest!(
     name = test_open_nofollow_refuses_a_final_symlink,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The bug the widened `struct stat` fixes: `FileType as u8` landed in the
@@ -446,7 +446,7 @@ pub fn test_stat_reports_a_regular_file_as_s_ifreg() -> TestResult {
 
 slopos_testing::stest!(
     name = test_stat_reports_a_regular_file_as_s_ifreg,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 fn collect_dirents(buf: &[u8], names: &mut KVec<KVec<u8>>) -> bool {
@@ -585,7 +585,7 @@ pub fn test_getdents64_resumes_across_calls() -> TestResult {
 
 slopos_testing::stest!(
     name = test_getdents64_resumes_across_calls,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// Answering `0` would read as end-of-directory and silently lose every
@@ -612,7 +612,7 @@ pub fn test_getdents64_rejects_a_buffer_below_one_record() -> TestResult {
 
 slopos_testing::stest!(
     name = test_getdents64_rejects_a_buffer_below_one_record,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 pub fn test_pread_leaves_the_position_where_read_moves_it() -> TestResult {
@@ -672,7 +672,7 @@ pub fn test_pread_leaves_the_position_where_read_moves_it() -> TestResult {
 
 slopos_testing::stest!(
     name = test_pread_leaves_the_position_where_read_moves_it,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 pub fn test_vectored_io_spans_segments_and_the_staging_bound() -> TestResult {
@@ -767,7 +767,7 @@ pub fn test_vectored_io_spans_segments_and_the_staging_bound() -> TestResult {
 
 slopos_testing::stest!(
     name = test_vectored_io_spans_segments_and_the_staging_bound,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The count is refused before any of the array is read.
@@ -787,7 +787,7 @@ pub fn test_iovcnt_above_uio_maxiov_is_refused() -> TestResult {
 
 slopos_testing::stest!(
     name = test_iovcnt_above_uio_maxiov_is_refused,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 pub fn test_flock_exclusive_conflict_is_eagain() -> TestResult {
@@ -833,7 +833,7 @@ pub fn test_flock_exclusive_conflict_is_eagain() -> TestResult {
 
 slopos_testing::stest!(
     name = test_flock_exclusive_conflict_is_eagain,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The lock belongs to the description, not to the descriptor number, so it
@@ -885,7 +885,7 @@ pub fn test_flock_survives_dup_and_dies_with_the_last_close() -> TestResult {
 
 slopos_testing::stest!(
     name = test_flock_survives_dup_and_dies_with_the_last_close,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The 256-byte cap is on the CSPRNG's lock hold, not on the request.
@@ -934,7 +934,7 @@ pub fn test_getrandom_serves_a_four_kilobyte_request() -> TestResult {
 
 slopos_testing::stest!(
     name = test_getrandom_serves_a_four_kilobyte_request,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 // These go through `dispatch_handler` rather than the `file_*` layer: every
@@ -1048,7 +1048,10 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
     );
 
     // A directory takes both spellings, or the check is just a refusal.
-    assert_test!(stage_cstr(table, base, b"/phase1_fs/"), "could not stage");
+    assert_test!(
+        stage_cstr(table, base, b"/build_floor_fs/"),
+        "could not stage"
+    );
     let dirfd = call_syscall(
         table,
         &task,
@@ -1070,7 +1073,7 @@ pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
 
 slopos_testing::stest!(
     name = test_a_trailing_slash_requires_a_directory,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// Linux's `path_init` never touches `dfd` for an absolute path, which is why
@@ -1150,14 +1153,14 @@ pub fn test_openat_ignores_the_dirfd_for_an_absolute_path() -> TestResult {
 
 slopos_testing::stest!(
     name = test_openat_ignores_the_dirfd_for_an_absolute_path,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// Applying the mode by re-resolving the path is a second walk with a
 /// different answer: a mount shadowing the name lands it on the *mounted*
 /// filesystem's root, and the `let _ =` on that chmod hid its failure.
 pub fn test_mkdirat_modes_the_directory_it_created() -> TestResult {
-    const SHADOW: &[u8] = b"/phase1_fs/mkdir_shadow";
+    const SHADOW: &[u8] = b"/build_floor_fs/mkdir_shadow";
     let _fixture = SyscallFixture::new();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
@@ -1214,7 +1217,7 @@ pub fn test_mkdirat_modes_the_directory_it_created() -> TestResult {
 
 slopos_testing::stest!(
     name = test_mkdirat_modes_the_directory_it_created,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The all-`UTIME_OMIT` short-circuit used to answer 0 before the descriptor
@@ -1248,7 +1251,7 @@ pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
     let at_fdcwd = (slopos_abi::fs::AT_FDCWD as i64) as u64;
 
     assert_test!(
-        stage_cstr(table, base, b"/phase1_fs/utimens_absent"),
+        stage_cstr(table, base, b"/build_floor_fs/utimens_absent"),
         "could not stage the path"
     );
     assert_eq_test!(
@@ -1317,7 +1320,7 @@ pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
 
 slopos_testing::stest!(
     name = test_utimensat_validates_before_it_no_ops,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// A `getdents64` batch is not re-readable: whatever the read consumed is
@@ -1380,7 +1383,7 @@ pub fn test_getdents64_keeps_its_cursor_when_the_copy_out_faults() -> TestResult
 
 slopos_testing::stest!(
     name = test_getdents64_keeps_its_cursor_when_the_copy_out_faults,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// `write(fd, NULL, 0)` writes nothing and succeeds, as on Linux; a count at
@@ -1425,7 +1428,7 @@ pub fn test_a_zero_byte_transfer_at_null_is_not_a_fault() -> TestResult {
 
 slopos_testing::stest!(
     name = test_a_zero_byte_transfer_at_null_is_not_a_fault,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );
 
 /// The kernel suite runs before boot publishes the page-set registry.
@@ -1522,5 +1525,5 @@ pub fn test_a_write_from_an_untouched_file_mapping_reads_it_in() -> TestResult {
 
 slopos_testing::stest!(
     name = test_a_write_from_an_untouched_file_mapping_reads_it_in,
-    suite = syscall_fs_phase1
+    suite = syscall_fs_build_floor
 );

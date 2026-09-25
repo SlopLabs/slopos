@@ -1,4 +1,4 @@
-//! Coverage for the Phase 1 signal surface.
+//! Coverage for the signal surface a build system needs.
 
 use core::ffi::c_char;
 use core::ptr;
@@ -1628,95 +1628,95 @@ pub fn test_sigreturn_cannot_set_a_kernel_private_mask_bit() -> TestResult {
 
 slopos_testing::stest!(
     name = test_group_stop_parks_every_thread_and_continue_resumes,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_stop_report_is_consumed_once,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_catchable_stop_signal_handler_wins_over_stop,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_kill_reaches_a_non_leader_thread,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_exit_info_reports_the_killing_signal,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_fault_signal_delivers_siginfo_with_fault_address,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_fault_signal_with_unpushable_frame_terminates,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_sigaltstack_bounds_and_onstack_delivery,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_sa_resethand_restores_default_after_one_delivery,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_clone_sighand_shares_the_action_table,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_stopped_parent_still_parents_its_children,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_clone_from_releases_the_slots_own_signal_table,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_tty_hangup_continue_resumes_a_stopped_group,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_clock_settime_requires_the_clock_capability,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_reaped_leader_does_not_strand_its_threads,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_fatal_signal_ends_the_whole_group,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_group_exit_outranks_a_signal_the_sibling_had_pending,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_completed_kill_is_not_parked_by_a_group_stop,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_one_stop_publishes_one_report,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_nested_sigreturn_keeps_the_outer_frame,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_refused_frame_push_keeps_the_handler_then_terminates,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_a_thread_is_not_its_creators_child,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
     name = test_sigreturn_cannot_set_a_kernel_private_mask_bit,
-    suite = syscall_signal_phase1
+    suite = syscall_signal_build_floor
 );
 
 #[allow(dead_code)]

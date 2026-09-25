@@ -104,13 +104,14 @@ fn file_io() -> FileIo {
 }
 
 #[cfg(feature = "test-hooks")]
-static FAULT_NEXT_COPY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static FAULT_NEXT_COPY: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(slopos_abi::task::INVALID_PROCESS_ID);
 
-/// Report the next copy's first attempt as faulted midway, as a stale TLB
-/// entry makes it.
+/// Report the first attempt of `pid`'s next copy as faulted midway, as a
+/// stale TLB entry makes it.
 #[cfg(feature = "test-hooks")]
-pub fn fault_next_copy_for_test() {
-    FAULT_NEXT_COPY.store(true, core::sync::atomic::Ordering::Release);
+pub fn fault_next_copy_for_test(pid: u32) {
+    FAULT_NEXT_COPY.store(pid, core::sync::atomic::Ordering::Release);
 }
 
 #[derive(Clone, Copy)]
@@ -156,9 +157,18 @@ fn copy_then_populate<T>(
         let space = current_vm_space()?;
         let first = copy(&space);
         #[cfg(feature = "test-hooks")]
-        let first = match FAULT_NEXT_COPY.swap(false, core::sync::atomic::Ordering::AcqRel) {
-            true => Err(UserPtrError::CopyFailed),
-            false => first,
+        #[cfg(feature = "test-hooks")]
+        let faulted = FAULT_NEXT_COPY.compare_exchange(
+            current_process_id(),
+            slopos_abi::task::INVALID_PROCESS_ID,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        );
+        #[cfg(feature = "test-hooks")]
+        let first = if faulted.is_ok() {
+            Err(UserPtrError::CopyFailed)
+        } else {
+            first
         };
         match first {
             Err(UserPtrError::NotMapped | UserPtrError::CopyFailed) => {}

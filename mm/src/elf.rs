@@ -114,6 +114,15 @@ pub enum ElfError {
     OutOfMemory,
 }
 
+impl From<ElfError> for slopos_abi::Errno {
+    fn from(err: ElfError) -> Self {
+        match err {
+            ElfError::OutOfMemory => Self::ENOMEM,
+            _ => Self::ENOEXEC,
+        }
+    }
+}
+
 impl fmt::Display for ElfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

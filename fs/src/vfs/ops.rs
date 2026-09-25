@@ -335,7 +335,7 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
         return Err(VfsError::IsDirectory);
     }
 
-    let linked = detach_unless_linked(parent.fs, inode);
+    let linked = detach_unless_linked(parent.fs, inode)?;
 
     if begin_removal(parent.fs, inode) == DetachPlan::FreeNow {
         let result = parent.fs.unlink(parent.inode, name);
@@ -363,12 +363,15 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
 /// while the blocks are still the inode's, and the forget must land before its
 /// number can be reallocated; a name among several changes neither, and
 /// forgetting then would strand every mapping of a file that lives on.
-fn detach_unless_linked(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId) -> bool {
-    if fs.stat(inode).is_ok_and(|stat| stat.nlink > 1) {
-        return true;
+fn detach_unless_linked(
+    fs: &'static dyn crate::vfs::FileSystem,
+    inode: InodeId,
+) -> VfsResult<bool> {
+    if fs.stat(inode)?.nlink > 1 {
+        return Ok(true);
     }
     crate::filemap::detach_inode(fs, inode);
-    false
+    Ok(false)
 }
 
 /// A removal racing for the other name may have taken the last one from an
@@ -521,7 +524,7 @@ fn rename_resolved(
         Err(e) => return Err(e),
     };
 
-    let linked = detach_unless_linked(new_parent.fs, displaced);
+    let linked = detach_unless_linked(new_parent.fs, displaced)?;
 
     if begin_removal(new_parent.fs, displaced) == DetachPlan::FreeNow {
         let result = old_parent

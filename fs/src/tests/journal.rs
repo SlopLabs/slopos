@@ -1508,3 +1508,46 @@ slopos_testing::stest!(
     name = test_ext2_journal_record_count_is_clamped_for_the_cursor_too,
     suite = fs
 );
+
+/// A drain that cannot read a member leaves the list for the next mount:
+/// clearing it would leak every orphan on it until `e2fsck`.
+pub fn test_ext2_orphan_drain_keeps_a_list_it_could_not_read() -> TestResult {
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    match with_log(&device, unreadable_orphan_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn unreadable_orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    let ino = fs.create_file(2, b"o").map_err(|_| "create")?;
+    fs.write_file(ino, 0, b"x").map_err(|_| "write")?;
+    if fs.detach_entry(2, b"o").map_err(|_| "detach")?.is_none() {
+        return Err("detaching a fresh file left no orphan");
+    }
+    fs.sync().map_err(|_| "sync")?;
+    fs.cache_drop_clean_for_test();
+
+    PROBE_INTERRUPTS.store(true, Ordering::Relaxed);
+    let drained = fs.drain_orphans();
+    PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
+    if drained.is_ok() {
+        return Err("a drain that could not read its head succeeded");
+    }
+    if fs.orphan_head() != ino {
+        return Err("a drain that could not read its head dropped the list");
+    }
+    match fs.drain_orphans() {
+        Ok(1) => Ok(()),
+        _ => Err("the list did not drain once it could be read"),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_ext2_orphan_drain_keeps_a_list_it_could_not_read,
+    suite = fs
+);

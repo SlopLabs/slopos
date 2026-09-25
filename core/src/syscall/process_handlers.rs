@@ -326,7 +326,7 @@ define_syscall!(syscall_spawn_path
         child_cwd.as_bytes(),
     ) {
         Ok(task_id) => Ok(task_id as u64),
-        Err(err) => Ok((err as i32) as u64),
+        Err(err) => Ok(err.raw() as u64),
     }
 });
 
@@ -601,7 +601,7 @@ define_syscall!(syscall_execve
     let program = match ctx.with_cwd(|cwd| exec::resolve_program(path.as_bytes(), cwd)) {
         Ok(program) => program,
         Err(e) => {
-            return SyscallResult::Err(Errno::from_raw(e as i32).unwrap_or(Errno::EINVAL));
+            return SyscallResult::Err(e);
         }
     };
 
@@ -752,7 +752,7 @@ define_syscall!(syscall_execve
             });
             SyscallResult::NoReturn
         }
-        Err(e) => SyscallResult::Err(Errno::from_raw(e as i32).unwrap_or(Errno::EINVAL)),
+        Err(e) => SyscallResult::Err(e),
     }
 });
 

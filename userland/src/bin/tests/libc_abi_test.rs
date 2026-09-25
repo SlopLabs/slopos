@@ -658,7 +658,7 @@ extern "C" fn on_segv(_sig: i32, info: *mut UserSiginfo, _uc: *mut c_void) {
 /// `si_addr` moved from offset 24 to Linux's 16 because std's unix PAL reads
 /// it; a regression makes std's own stack-overflow report read zero and say
 /// nothing. The kernel side is checked against the raw frame in
-/// `core/src/syscall/tests_phase1_signal.rs`; this is the other end — a real
+/// `core/src/syscall/tests_build_floor_signal.rs`; this is the other end — a real
 /// userland `SA_SIGINFO` handler reading the field through the `siginfo_t`
 /// slibc and `libc` both declare.
 fn sigsegv_handler_reads_the_faulting_address() -> bool {

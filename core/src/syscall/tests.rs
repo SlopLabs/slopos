@@ -3407,8 +3407,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, &task_guard, &mut frame_ok)
     });
-    // ExecError::NoEntry = -2.
-    let exec_no_entry = (-2i32) as u64;
+    let exec_no_entry = slopos_abi::Errno::ENOENT.raw() as u64;
     assert_eq_test!(
         frame_ok.rax(),
         exec_no_entry,
@@ -9595,7 +9594,7 @@ pub fn test_user_copy_retries_a_copy_that_faulted_midway() -> TestResult {
     let Some(addr) = map_user_rw_page(table) else {
         return fail!("could not map a user page");
     };
-    slopos_mm::user_copy::fault_next_copy_for_test();
+    slopos_mm::user_copy::fault_next_copy_for_test(table.id());
     let wrote = user_copy_out(table, addr, &0x5EED_u64);
     assert_test!(wrote, "a copy that faulted once was not retried");
     assert_eq_test!(

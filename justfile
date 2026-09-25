@@ -33,11 +33,11 @@ fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "80M")
 # is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
 # which the mount refuses past rather than discovering.
 persist_image_size := env("PERSIST_IMAGE_SIZE", "512M")
-# The capacity volume `just test-capacity` measures. 16 GiB is the plan's
-# target: two orders of magnitude past the appliance root, which is what puts
-# every mount-time allocation and every metadata cache decision past the size
-# they were chosen at. 1 GiB is no longer the ceiling — the verity hash array
-# is chunked — and this image carries no trailer at all.
+# The capacity volume `just test-capacity` measures: 16 GiB, two orders of
+# magnitude past the appliance root, which is what puts every mount-time
+# allocation and every metadata cache decision past the size they were chosen
+# at. 1 GiB is no longer the ceiling — the verity hash array is chunked — and
+# this image carries no trailer at all.
 fs_image_capacity     := fs_image_dir / "ext2-capacity.img"
 capacity_image_size   := env("CAPACITY_IMAGE_SIZE", "16G")
 capacity_inode_ratio  := env("CAPACITY_INODE_RATIO", "16384")
@@ -579,7 +579,7 @@ test-devdisk: _build-run-tests
 # cargo must hash as the guest's does: the fork's, from vendored sources, into
 # a target directory as empty as the guest's was, with none of the kernel knobs
 # the guest's environment lacks.
-[doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host runs the ELF gates on both, the kernel suite on the tests kernel, and compares the dev kernel with its own build of the same commit")]
+[doc("Self-hosting check: the guest builds the dev and tests kernels off the dev disk; the host holds the volume to e2fsck, runs the ELF gates on both, the kernel suite on the tests kernel, and compares the dev kernel with its own build of the same commit")]
 test-selfhost: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail

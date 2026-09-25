@@ -1,4 +1,4 @@
-//! Coverage for the Phase 1 process-result and futex surface.
+//! Coverage for the process-result and futex surface a build system needs.
 
 use core::ffi::c_char;
 use core::ptr;
@@ -65,7 +65,7 @@ fn make_task_current(task_id: u32) -> bool {
 fn create_user_task() -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     task_create(
-        b"Phase1Proc\0".as_ptr() as *const c_char,
+        b"BuildFloorProc\0".as_ptr() as *const c_char,
         user_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -75,7 +75,7 @@ fn create_user_task() -> u32 {
 
 fn create_kernel_task() -> u32 {
     task_create(
-        b"Phase1Kern\0".as_ptr() as *const c_char,
+        b"BuildFloorKern\0".as_ptr() as *const c_char,
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1410,7 +1410,7 @@ pub fn test_chdir_validates_and_canonicalises() -> TestResult {
     fx.teardown();
 
     if &start[..start_len] != b"/" {
-        klog_info!("PHASE1_PROC: a fresh task's cwd is not \"/\"");
+        klog_info!("BUILD_FLOOR_PROC: a fresh task's cwd is not \"/\"");
         return TestResult::Fail;
     }
     assert_eq_test!(
@@ -1421,7 +1421,7 @@ pub fn test_chdir_validates_and_canonicalises() -> TestResult {
     assert_eq_test!(ok, Some(0), "chdir into /dev failed");
     if &stored[..stored_len] != b"/dev" {
         klog_info!(
-            "PHASE1_PROC: chdir stored {} bytes that are not \"/dev\"",
+            "BUILD_FLOOR_PROC: chdir stored {} bytes that are not \"/dev\"",
             stored_len
         );
         return TestResult::Fail;
@@ -1478,7 +1478,7 @@ pub fn test_chdir_stores_the_walked_path_not_the_lexical_one() -> TestResult {
     assert_eq_test!(rc, Some(0), "chdir through a directory symlink failed");
     if &stored[..stored_len] != b"/tmp/cd_real" {
         klog_info!(
-            "PHASE1_PROC: chdir stored a lexical parent, {} bytes, not \"/tmp/cd_real\"",
+            "BUILD_FLOOR_PROC: chdir stored a lexical parent, {} bytes, not \"/tmp/cd_real\"",
             stored_len
         );
         return TestResult::Fail;
@@ -1488,109 +1488,109 @@ pub fn test_chdir_stores_the_walked_path_not_the_lexical_one() -> TestResult {
 
 slopos_testing::stest!(
     name = test_waitpid_returns_the_pid_and_writes_an_exited_status,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_reports_a_signal_death_in_the_low_seven_bits,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_wait4_reports_the_reaped_childs_usage,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_wnohang_on_a_live_child_returns_zero,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_without_children_is_echild,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_wuntraced_reports_a_stop_exactly_once,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_stop_report_survives_a_faulting_status_pointer,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_wcontinued_reports_a_resume,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_accepts_a_null_status_pointer,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_bad_status_pointer_faults_without_reaping,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_waitpid_rejects_unknown_option_bits,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_exit_group_terminates_every_thread_of_the_group,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_getpid_is_the_tgid_and_gettid_is_the_task_id,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_getppid_is_the_group_parent_for_every_thread,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_exit_group_terminates_the_caller_when_the_fanout_misses,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_private_flag_is_not_enosys,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_clock_realtime_needs_an_absolute_timeout,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_zero_bitset_is_einval,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_wait_bitset_past_absolute_deadline_times_out,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_wake_bitset_wakes_only_the_intersecting_waiter,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_requeue_moves_the_surplus_to_the_second_word,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_futex_key_carries_the_address_space,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_thread_cputime_is_nondecreasing,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_clock_settime_refuses_unsettable_clocks,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_uname_reports_a_nul_terminated_identity,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_chdir_validates_and_canonicalises,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(
     name = test_chdir_stores_the_walked_path_not_the_lexical_one,
-    suite = syscall_proc_phase1
+    suite = syscall_proc_build_floor
 );
