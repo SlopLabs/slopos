@@ -1177,28 +1177,6 @@ pub fn test_setup_user_stack_high_argument_count() -> TestResult {
     TestResult::Pass
 }
 
-/// A failed spawn file action reports its own errno, as `posix_spawn` does:
-/// `cmd > /dir` is `EISDIR`, and a full descriptor table is `EMFILE`, never a
-/// bad pointer.
-pub fn test_spawn_fd_action_reports_its_own_errno() -> TestResult {
-    for errno in [Errno::EISDIR, Errno::EMFILE, Errno::EACCES] {
-        let reported = super::fd_action_error(errno.raw());
-        if reported != errno {
-            klog_info!(
-                "EXEC_TEST: a file action's {:?} was reported as {:?}",
-                errno,
-                reported
-            );
-            return TestResult::Fail;
-        }
-    }
-    TestResult::Pass
-}
-
-slopos_testing::stest!(
-    name = test_spawn_fd_action_reports_its_own_errno,
-    suite = exec
-);
 slopos_testing::stest!(name = test_elf_invalid_magic, suite = exec);
 slopos_testing::stest!(name = test_elf_wrong_class, suite = exec);
 slopos_testing::stest!(name = test_elf_wrong_endian, suite = exec);

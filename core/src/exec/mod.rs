@@ -109,13 +109,7 @@ pub fn exec_arg_bytes_fit(argv: Option<&[&[u8]]>, envp: Option<&[&[u8]]>) -> boo
     true
 }
 
-/// A failed spawn file action reports its own errno, as `posix_spawn` does.
-pub(crate) fn fd_action_error(rc: i32) -> Errno {
-    Errno::from_raw(rc).unwrap_or(Errno::EIO)
-}
-
-/// A decoded spawn file action; `Open` paths are already copied out of user
-/// memory by the syscall handler.
+/// A decoded spawn file action.
 pub enum FdAction {
     /// Share the parent's `src_fd` description into the child's `target_fd`.
     Clone {
@@ -206,7 +200,7 @@ pub(crate) fn apply_fd_actions(
             }
         };
         if rc < 0 {
-            return Err(fd_action_error(rc));
+            return Err(Errno::from_raw(rc).unwrap_or(Errno::EIO));
         }
     }
     // The identity match skips a slot the parent concurrently closed or repopulated.

@@ -330,7 +330,7 @@ pub fn remove_dir_entry(
         );
         let phys = blockmap::map_block(parent, file_block, geom, cache, device, owner)?;
         if !phys.is_valid() {
-            break;
+            return Err(Ext2Error::DirectoryFormat);
         }
         let mut block = cache.get_owned(phys, device, owner)?;
         let data = block.data_mut();
@@ -542,7 +542,7 @@ fn place_in_range(
         let file_block = FileBlock(u32::try_from(index).map_err(|_| Ext2Error::InvalidBlock)?);
         let phys = blockmap::map_block(parent_inode, file_block, geom, cache, device, owner)?;
         if !phys.is_valid() {
-            continue;
+            return Err(Ext2Error::DirectoryFormat);
         }
         let mut block = cache.get_owned(phys, device, owner)?;
         let data = block.data_mut();

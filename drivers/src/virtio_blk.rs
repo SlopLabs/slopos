@@ -939,16 +939,20 @@ impl VirtioBlkInner {
             return Err(err);
         }
         #[cfg(feature = "test-hooks")]
-        if KILL_AFTER_SUBMIT
-            .compare_exchange(
-                slopos_arch::pcr::current_task_id(),
-                slopos_abi::task::INVALID_TASK_ID,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
         {
-            slopos_core::tests::helpers::mark_current_killed(true);
+            let me = slopos_arch::pcr::current_task_id();
+            if me != slopos_abi::task::INVALID_TASK_ID
+                && KILL_AFTER_SUBMIT
+                    .compare_exchange(
+                        me,
+                        slopos_abi::task::INVALID_TASK_ID,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                slopos_core::tests::helpers::mark_current_killed(true);
+            }
         }
 
         let pages = self.wait_for_completion(idx)?;
@@ -1057,9 +1061,6 @@ impl VirtioBlkInner {
         dst: &mut [u8],
     ) -> Result<(), BlkError> {
         let mut sector_buf = [0u8; SECTOR_SIZE as usize];
-        // The read is half of a write: taken past an abandoned write, it would
-        // put the sector's older bytes back once that write lands.
-        self.await_abandoned_writes()?;
         self.request_read(sector, &mut sector_buf)?;
         dst.copy_from_slice(&sector_buf[within..within + dst.len()]);
         Ok(())
@@ -1112,6 +1113,13 @@ impl VirtioBlkInner {
         cur: &mut SegCursor<'_>,
     ) -> Result<(), BlkError> {
         let mut sector_buf = [0u8; SECTOR_SIZE as usize];
+        // The read is half of a write: taken past an abandoned write, it would
+        // put the sector's older bytes back once that write lands.
+        self.await_abandoned_writes()?;
+        #[cfg(feature = "test-hooks")]
+        if self.write_abandoned.load(Ordering::Acquire) {
+            RMW_READ_PAST_FENCE.store(true, Ordering::Release);
+        }
         self.request_read(sector, &mut sector_buf)?;
         if !cur.copy_out(&mut sector_buf[within..within + n]) {
             return Err(BlkError::BadRequest);
@@ -1511,6 +1519,16 @@ pub fn blk_available_slots(handle: DevHandle) -> usize {
 #[cfg(feature = "test-hooks")]
 static KILL_AFTER_SUBMIT: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(slopos_abi::task::INVALID_TASK_ID);
+
+#[cfg(feature = "test-hooks")]
+static RMW_READ_PAST_FENCE: AtomicBool = AtomicBool::new(false);
+
+/// Whether a read-modify-write has read a sector while an abandoned write was
+/// still owed, since the last call.
+#[cfg(feature = "test-hooks")]
+pub fn blk_take_rmw_read_past_fence() -> bool {
+    RMW_READ_PAST_FENCE.swap(false, Ordering::AcqRel)
+}
 
 /// Mark the calling task killed once its next request is in the device.
 #[cfg(feature = "test-hooks")]

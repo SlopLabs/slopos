@@ -4746,8 +4746,9 @@ fn punch_directory_hole(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 fn create_past_the_hole(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let dir = fs.resolve_path(b"/holey").map_err(|_| "resolve")?;
     match fs.create_file(dir, &hole_name(4)) {
+        Err(Ext2Error::DirectoryFormat) => Ok(()),
         Ok(_) => Err("a create wrote a second record of a name past the hole"),
-        Err(_) => Ok(()),
+        Err(_) => Err("the create failed for a reason other than the hole"),
     }
 }
 
