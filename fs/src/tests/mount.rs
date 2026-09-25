@@ -417,6 +417,9 @@ impl FileSystem for FlakyLookup {
         self.inner
             .rename(old_parent, old_name, new_parent, new_name)
     }
+    fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
+        self.inner.set_mode(inode, mode)
+    }
 }
 
 static FLAKY_FS: FlakyLookup = FlakyLookup {
@@ -492,6 +495,57 @@ fn flaky_removal_body() -> Result<(), &'static str> {
         refuses_at_every_failure(failing, rmdir, &[FLAKY_TARGET])?;
     }
     Ok(())
+}
+
+/// `O_CREAT` sets the mode only on a file it created: a stat that fails is
+/// not an absent file.
+pub fn test_create_open_keeps_the_mode_of_a_file_it_found() -> TestResult {
+    if !ready() || !ensure_dir(FLAKY_MP) {
+        return slopos_testing::fail!("the /tmp fixture directory is unavailable");
+    }
+    let outcome = flaky_create_open_body();
+    FLAKY_FS.fail_stat_in.store(0, Ordering::Release);
+    let _ = crate::vfs::vfs_unlink(FLAKY_TARGET);
+    let _ = unmount(FLAKY_MP);
+    let _ = vfs_rmdir(FLAKY_MP);
+    match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!(msg),
+    }
+}
+
+#[inline(never)]
+fn flaky_create_open_body() -> Result<(), &'static str> {
+    use slopos_abi::fs::{O_CREAT, O_RDWR};
+    let Some(process) = super::ScratchProcess::new() else {
+        return Err("could not register a process to own the descriptor");
+    };
+    let table = process.table();
+    mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
+    vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the file")?;
+    let mode = vfs_stat(FLAKY_TARGET).map_err(|_| "stat")?.mode;
+    for n in 1..=16 {
+        FLAKY_FS.fail_stat_in.store(n, Ordering::Release);
+        let fd = crate::fileio::file_open_at(
+            table,
+            FLAKY_TARGET,
+            b"/",
+            O_RDWR | O_CREAT,
+            crate::vfs::path::RESOLVE_FOLLOW,
+            Some(mode ^ 0o077),
+        );
+        let reached = FLAKY_FS.fail_stat_in.swap(0, Ordering::AcqRel) == 0;
+        if fd >= 0 {
+            let _ = crate::fileio::file_close_fd(table, fd);
+        }
+        if vfs_stat(FLAKY_TARGET).map_err(|_| "stat")?.mode != mode {
+            return Err("an open that found the file changed its mode");
+        }
+        if !reached {
+            return Ok(());
+        }
+    }
+    Err("the open failed at every attempt")
 }
 
 fn errno_of(result: VfsResult<()>) -> i32 {
@@ -1047,3 +1101,7 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(name = test_removal_fails_when_a_lookup_does, suite = fs);
+slopos_testing::stest!(
+    name = test_create_open_keeps_the_mode_of_a_file_it_found,
+    suite = fs
+);

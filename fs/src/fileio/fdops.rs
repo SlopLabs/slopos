@@ -209,7 +209,11 @@ pub fn file_open_at(
     };
     let existed = create_mode.is_none()
         || !create
-        || crate::vfs::vfs_stat_at(path, cwd, RESOLVE_FOLLOW).is_ok();
+        || match crate::vfs::vfs_stat_at(path, cwd, RESOLVE_FOLLOW) {
+            Ok(_) => true,
+            Err(VfsError::NotFound) => false,
+            Err(e) => return e.to_errno().raw() as _,
+        };
     let directory_only = resolve_flags & RESOLVE_MUST_BE_DIR != 0;
     let vfs_handle = if directory_only {
         None
