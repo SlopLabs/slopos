@@ -1175,6 +1175,25 @@ pub fn test_setup_user_stack_high_argument_count() -> TestResult {
     TestResult::Pass
 }
 
+/// A spawn file action's failure is the table's, never the spawner's memory:
+/// reported as `EFAULT`, a full descriptor table read as a bad pointer.
+pub fn test_spawn_fd_action_errors_are_not_faults() -> TestResult {
+    use slopos_abi::Errno;
+    if super::fd_action_error(Errno::EMFILE.raw()) != ExecError::TooManyFiles {
+        klog_info!("EXEC_TEST: EMFILE from a file action is not reported as EMFILE");
+        return TestResult::Fail;
+    }
+    if super::fd_action_error(Errno::ESRCH.raw()) == ExecError::Fault {
+        klog_info!("EXEC_TEST: a vanished child table is reported as EFAULT");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_spawn_fd_action_errors_are_not_faults,
+    suite = exec
+);
 slopos_testing::stest!(name = test_elf_invalid_magic, suite = exec);
 slopos_testing::stest!(name = test_elf_wrong_class, suite = exec);
 slopos_testing::stest!(name = test_elf_wrong_endian, suite = exec);

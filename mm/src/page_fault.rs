@@ -362,7 +362,7 @@ fn resolve_for_populate(
 /// Nothing wakes it: a populate that may block naps here between retries.
 static POPULATE_NAP: WaitQueue = WaitQueue::new(lock_class!("POPULATE_NAP", LOCK_LEVEL_RESOURCE));
 
-/// How long a populate that may block keeps retrying pages a peer holds.
+/// How long a populate that may block naps, in all, for pages a peer holds.
 const POPULATE_WAIT_MS: u64 = 5000;
 
 /// Budget for one populate's retries. Sibling threads' copies take and drop
@@ -371,7 +371,7 @@ const POPULATE_WAIT_MS: u64 = 5000;
 struct RetryBudget {
     io: FileIo,
     spins: u32,
-    deadline_ms: Option<u64>,
+    napped_ms: u64,
 }
 
 impl RetryBudget {
@@ -379,7 +379,7 @@ impl RetryBudget {
         Self {
             io,
             spins: 0,
-            deadline_ms: None,
+            napped_ms: 0,
         }
     }
 
@@ -391,15 +391,17 @@ impl RetryBudget {
         match step {
             PopulateStep::GiveUp => false,
             PopulateStep::Retry if self.io == FileIo::Read => {
-                let now = slopos_kernel_services::clock::uptime_ms();
-                let deadline = *self
-                    .deadline_ms
-                    .get_or_insert(now.saturating_add(POPULATE_WAIT_MS));
-                if now >= deadline {
+                if self.napped_ms >= POPULATE_WAIT_MS {
                     return false;
                 }
+                let before = slopos_kernel_services::clock::uptime_ms();
                 match POPULATE_NAP.wait_event_timeout(|| false, 1) {
-                    Err(WaitAbort::Timeout) => true,
+                    Err(WaitAbort::Timeout) => {
+                        let napped =
+                            slopos_kernel_services::clock::uptime_ms().saturating_sub(before);
+                        self.napped_ms += napped.max(1);
+                        true
+                    }
                     Err(WaitAbort::NoRuntime) => self.spin(),
                     _ => false,
                 }

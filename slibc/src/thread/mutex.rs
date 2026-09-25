@@ -116,15 +116,15 @@ fn lock_state_contended(state: &AtomicI32) {
             Err(now) => seen = now,
         }
     }
-    loop {
-        // A waiter that takes the lock takes it as contended: it cannot know
-        // whether it was the last one parked.
-        if seen != 2 && state.swap(2, Ordering::Acquire) == 0 {
-            return;
-        }
+    // The futex calls report through errno, and `free` must not move it.
+    let saved = crate::errno::errno_get();
+    // A waiter that takes the lock takes it as contended: it cannot know
+    // whether it was the last one parked.
+    while seen == 2 || state.swap(2, Ordering::Acquire) != 0 {
         super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, 2);
         seen = spin_while_held(state);
     }
+    crate::errno::errno_set(saved);
 }
 
 /// Spin a bounded while the lock is held and nobody is parked: a short critical
@@ -144,7 +144,9 @@ fn spin_while_held(state: &AtomicI32) -> i32 {
 #[inline]
 pub(crate) fn unlock_state(state: &AtomicI32) {
     if state.swap(0, Ordering::Release) == 2 {
+        let saved = crate::errno::errno_get();
         let _ = Sys::futex_wake(state.as_ptr() as *const u32, 1);
+        crate::errno::errno_set(saved);
     }
 }
 

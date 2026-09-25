@@ -287,6 +287,39 @@ fn test_fork_while_another_thread_allocates() -> bool {
     churn.join().is_ok() && ok
 }
 
+/// `free` leaves errno alone however contended the allocator is: the lock's
+/// futex calls report through errno, and C code reads it after a free.
+fn test_contended_free_preserves_errno() -> bool {
+    use slopos_slibc::{errno_get, errno_set};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const SENTINEL: i32 = 0x5105;
+    let stop = Arc::new(AtomicBool::new(false));
+    let churners: Vec<_> = (0..3)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    core::hint::black_box(Vec::<u8>::with_capacity(512));
+                }
+            })
+        })
+        .collect();
+    let mut kept = true;
+    for _ in 0..20_000 {
+        let p = slopos_slibc::alloc(64);
+        errno_set(SENTINEL);
+        slopos_slibc::dealloc(p);
+        if errno_get() != SENTINEL {
+            kept = false;
+            break;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    churners.into_iter().all(|h| h.join().is_ok()) && kept
+}
+
 /// Fork a child that allocates and exits, and reap it within a deadline; a
 /// child stuck on an inherited allocator lock is killed and counts as failure.
 fn fork_and_allocate() -> bool {
@@ -302,7 +335,8 @@ fn fork_and_allocate() -> bool {
         return false;
     }
     let mut status = 0;
-    for _ in 0..10_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         match unsafe { waitpid(pid, &mut status, WNOHANG) } {
             0 => std::thread::sleep(std::time::Duration::from_millis(1)),
             reaped if reaped == pid => return WIFEXITED(status) && WEXITSTATUS(status) == 0,
@@ -339,6 +373,10 @@ fn main() {
         (
             "fork_while_another_thread_allocates",
             test_fork_while_another_thread_allocates,
+        ),
+        (
+            "contended_free_preserves_errno",
+            test_contended_free_preserves_errno,
         ),
     ]);
 }

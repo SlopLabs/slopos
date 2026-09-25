@@ -1304,15 +1304,9 @@ impl<'a> Ext2Fs<'a> {
             if parent_inode.is_immutable() {
                 return Err(Ext2Error::Immutable);
             }
-            name_is_free(dir::lookup_child(
-                &parent_inode,
-                name,
-                &mut *fs.cache,
-                fs.device,
-                &fs.geom,
-                fs.block_size,
-                BlockOwner::File(parent_num.raw()),
-            ))?;
+            if fs.find_child(parent_num, &parent_inode, name)?.is_some() {
+                return Err(Ext2Error::AlreadyExists);
+            }
             fs.deindex_directory(parent_num, &mut parent_inode)?;
 
             let ft = dir_file_type(&target_inode);
@@ -1548,15 +1542,9 @@ impl<'a> Ext2Fs<'a> {
         // Without this a second create writes a second record under the same
         // name: lookup answers whichever comes first and the other inode is
         // unreachable to every ext2 implementation.
-        name_is_free(dir::lookup_child(
-            &parent,
-            name,
-            &mut *self.cache,
-            self.device,
-            &self.geom,
-            self.block_size,
-            BlockOwner::File(parent_num.raw()),
-        ))?;
+        if self.find_child(parent_num, &parent, name)?.is_some() {
+            return Err(Ext2Error::AlreadyExists);
+        }
         self.deindex_directory(parent_num, &mut parent)?;
 
         let parent_group = self
@@ -2257,8 +2245,19 @@ impl<'a> Ext2Fs<'a> {
         if parent_inode.is_immutable() {
             return Err(Ext2Error::Immutable);
         }
+        self.find_child(parent, &parent_inode, name)
+    }
+
+    /// `None` only when the lookup proved the name absent: any other failure
+    /// says nothing, and taking it for absence writes a second record.
+    fn find_child(
+        &mut self,
+        parent: InodeNum,
+        parent_inode: &Inode,
+        name: &[u8],
+    ) -> Result<Option<InodeNum>, Ext2Error> {
         match dir::lookup_child(
-            &parent_inode,
+            parent_inode,
             name,
             &mut *self.cache,
             self.device,
@@ -2477,15 +2476,5 @@ impl<'a> Ext2Fs<'a> {
             .write_at(1024, &sb_buf)
             .map_err(Ext2Error::from)?;
         Ok(())
-    }
-}
-
-/// A name is free only when a lookup proved it absent: any other failure says
-/// nothing, and treating it as absence writes a second record of the name.
-fn name_is_free(lookup: Result<InodeNum, Ext2Error>) -> Result<(), Ext2Error> {
-    match lookup {
-        Ok(_) => Err(Ext2Error::AlreadyExists),
-        Err(Ext2Error::PathNotFound) => Ok(()),
-        Err(e) => Err(e),
     }
 }

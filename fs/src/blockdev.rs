@@ -15,9 +15,9 @@ pub enum BlockDeviceError {
     Busy,
     /// The device did not answer in time; what it was asked may still happen.
     Timeout,
-    /// The requesting task was killed while it waited to hand the device a
-    /// request. Nothing is left in flight on its behalf, though an earlier
-    /// part of a request that spanned several may have landed.
+    /// The requesting task was killed before the device was handed the
+    /// request, so none of it will land; an earlier part of a request split
+    /// across several may have.
     Interrupted,
     /// The device completed the request but reported a failure.
     DeviceFault,

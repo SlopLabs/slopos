@@ -103,6 +103,16 @@ fn file_io() -> FileIo {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+static FAULT_NEXT_COPY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Report the next copy's first attempt as faulted midway, as a stale TLB
+/// entry makes it.
+#[cfg(feature = "test-hooks")]
+pub fn fault_next_copy_for_test() {
+    FAULT_NEXT_COPY.store(true, core::sync::atomic::Ordering::Release);
+}
+
 #[derive(Clone, Copy)]
 enum Access {
     Read,
@@ -126,9 +136,8 @@ enum Access {
 /// The `KArc<VmSpace>` is dropped before `populate` and re-taken after, and
 /// that ordering is load-bearing: the demand path refuses to install a page
 /// while any other reference to the space is live, so populating with the
-/// copy's own handle held would spin until its bound and then give up — and
-/// would make the faulting task's own retries look like an address-space
-/// reader that is not draining.
+/// copy's own handle held could never succeed — and would make the faulting
+/// task's own retries look like an address-space reader that is not draining.
 ///
 /// Preemption is held off while the handle is held, and that is load-bearing
 /// too: a holder switched out mid-copy pins the reference until it runs
@@ -145,7 +154,13 @@ fn copy_then_populate<T>(
     {
         let _pinned = PreemptGuard::new();
         let space = current_vm_space()?;
-        match copy(&space) {
+        let first = copy(&space);
+        #[cfg(feature = "test-hooks")]
+        let first = match FAULT_NEXT_COPY.swap(false, core::sync::atomic::Ordering::AcqRel) {
+            true => Err(UserPtrError::CopyFailed),
+            false => first,
+        };
+        match first {
             Err(UserPtrError::NotMapped | UserPtrError::CopyFailed) => {}
             result => return result,
         }
