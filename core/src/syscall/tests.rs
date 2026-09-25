@@ -9582,6 +9582,30 @@ fn umount_release_body(
     Ok(())
 }
 
+/// A copy that faults midway is retried: a peer that made the page writable
+/// flushed only its own TLB, and the fault retired this CPU's stale entry.
+pub fn test_user_copy_retries_a_copy_that_faulted_midway() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create a user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(table) = task.process().as_deref().and_then(FdTable::of) else {
+        return fail!("the task has no descriptor table");
+    };
+    let Some(addr) = map_user_rw_page(table) else {
+        return fail!("could not map a user page");
+    };
+    slopos_mm::user_copy::fault_next_copy_for_test();
+    let wrote = user_copy_out(table, addr, &0x5EED_u64);
+    assert_test!(wrote, "a copy that faulted once was not retried");
+    assert_eq_test!(
+        user_copy_in::<u64>(table, addr),
+        Some(0x5EED),
+        "the retried copy did not land"
+    );
+    pass!()
+}
+
 static DYING_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static DYING_RELEASED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static DYING_DEVICE_DROPPED: core::sync::atomic::AtomicBool =
@@ -9749,5 +9773,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_ext2_release_retries_a_teardown_that_could_not_run,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_user_copy_retries_a_copy_that_faulted_midway,
     suite = syscall_core
 );

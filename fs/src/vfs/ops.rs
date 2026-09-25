@@ -321,11 +321,12 @@ pub fn vfs_unlink_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
     let name = name.as_bytes();
     parent.check_writable()?;
 
-    // A name that resolves to nothing cannot be holding an inode open, and a
-    // filesystem that reports its own `ENOENT` gives a better error than a
+    // A filesystem that reports its own `ENOENT` gives a better error than a
     // lookup here would.
-    let Ok(inode) = parent.fs.lookup(parent.inode, name) else {
-        return parent.fs.unlink(parent.inode, name);
+    let inode = match parent.fs.lookup(parent.inode, name) {
+        Ok(inode) => inode,
+        Err(VfsError::NotFound) => return parent.fs.unlink(parent.inode, name),
+        Err(e) => return Err(e),
     };
 
     // `FileSystem::rmdir` defaults to `unlink`, so a filesystem drawing no
@@ -398,20 +399,26 @@ pub fn vfs_rmdir_at(path: &[u8], cwd: &[u8]) -> VfsResult<()> {
     // Keyed on the path the walk ends on, not a lexical canonicalisation: `..`
     // after a symlink names a different directory, and the mount table is
     // keyed on the real one.
-    if let Ok((_, canon)) = resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL)
-        && crate::vfs::mount::mount_at(canon.as_bytes()).is_some()
-    {
-        return Err(VfsError::Busy);
+    match resolve_path_canon_at(path, cwd, RESOLVE_NOFOLLOW_FINAL) {
+        Ok((_, canon)) if crate::vfs::mount::mount_at(canon.as_bytes()).is_some() => {
+            return Err(VfsError::Busy);
+        }
+        Ok(_) | Err(VfsError::NotFound) => {}
+        Err(e) => return Err(e),
     }
     let (parent, name) = resolve_parent_at(path, cwd)?;
     parent.check_writable()?;
     // Only a regular file can carry a page set while `mmap` refuses every
     // other type, and that is not a rule to leave load-bearing.
-    if let Ok(inode) = parent.fs.lookup(parent.inode, name.as_bytes()) {
-        if !inode_is_directory(parent.fs, inode)? {
-            return Err(VfsError::NotDirectory);
+    match parent.fs.lookup(parent.inode, name.as_bytes()) {
+        Ok(inode) => {
+            if !inode_is_directory(parent.fs, inode)? {
+                return Err(VfsError::NotDirectory);
+            }
+            crate::filemap::detach_inode(parent.fs, inode);
         }
-        crate::filemap::detach_inode(parent.fs, inode);
+        Err(VfsError::NotFound) => {}
+        Err(e) => return Err(e),
     }
     parent.fs.rmdir(parent.inode, name.as_bytes())
 }

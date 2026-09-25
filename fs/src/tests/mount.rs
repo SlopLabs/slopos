@@ -466,6 +466,56 @@ fn flaky_rename_body() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// `unlink` and `rmdir` refuse, and remove nothing, whichever of their
+/// lookups fails: an error is not an absent name.
+pub fn test_removal_fails_when_a_lookup_does() -> TestResult {
+    if !ready() || !ensure_dir(FLAKY_MP) {
+        return slopos_testing::fail!("the /tmp fixture directory is unavailable");
+    }
+    let outcome = flaky_removal_body();
+    FLAKY_FS.fail_in.store(0, Ordering::Release);
+    let _ = crate::vfs::vfs_unlink(FLAKY_TARGET);
+    let _ = vfs_rmdir(FLAKY_TARGET);
+    let _ = unmount(FLAKY_MP);
+    let _ = vfs_rmdir(FLAKY_MP);
+    match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!(msg),
+    }
+}
+
+#[inline(never)]
+fn flaky_removal_body() -> Result<(), &'static str> {
+    mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
+    vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the file")?;
+    refuses_at_every_lookup(|| crate::vfs::vfs_unlink(FLAKY_TARGET))?;
+
+    vfs_mkdir(FLAKY_TARGET).map_err(|_| "could not create the directory")?;
+    refuses_at_every_lookup(|| vfs_rmdir(FLAKY_TARGET))?;
+    Ok(())
+}
+
+fn refuses_at_every_lookup(remove: impl Fn() -> VfsResult<()>) -> Result<(), &'static str> {
+    for n in 1..=8 {
+        FLAKY_FS.fail_in.store(n, Ordering::Release);
+        let removed = remove();
+        if FLAKY_FS.fail_in.swap(0, Ordering::AcqRel) != 0 {
+            return match (n, removed) {
+                (1, _) => Err("the removal never looked the name up"),
+                (_, Ok(())) => Ok(()),
+                (_, Err(_)) => Err("a removal with every lookup answered failed"),
+            };
+        }
+        if removed.is_ok() {
+            return Err("a removal went ahead past a failed lookup");
+        }
+        if vfs_stat(FLAKY_TARGET).is_err() {
+            return Err("a refused removal took the name");
+        }
+    }
+    Err("the removal failed at every attempt")
+}
+
 /// Blocks in the fixture images these tests attach: 512 KiB at the builder's
 /// 1 KiB block size, a handful of device writes to copy onto a scratch device.
 const IMAGE_BLOCKS: u32 = 512;
@@ -984,3 +1034,4 @@ slopos_testing::stest!(
     name = test_rename_fails_when_the_displaced_lookup_does,
     suite = fs
 );
+slopos_testing::stest!(name = test_removal_fails_when_a_lookup_does, suite = fs);

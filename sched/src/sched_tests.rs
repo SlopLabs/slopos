@@ -21,7 +21,7 @@ use super::task::{
     task_live_cap_rejects_for_test, task_resolve_handle, task_set_state,
     task_set_state_with_reason, task_slot_census, task_terminate, task_waiter_count,
 };
-use super::test_fixture::KernelTestScope;
+use super::test_fixture::{KernelTestScope, mark_current_killed};
 use slopos_abi::task::BlockReason;
 use slopos_arch::MAX_CPUS;
 use slopos_arch::arch::gdt::SegmentSelector;
@@ -5422,20 +5422,6 @@ const KILLED_WAIT_NO_TASK: u8 = 4;
 
 static KILLED_WAIT_VERDICT: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(KILLED_WAIT_PENDING);
-
-fn mark_current_killed(on: bool) -> bool {
-    use core::sync::atomic::Ordering;
-    let Some(current) = crate::task_struct::Current::get() else {
-        return false;
-    };
-    let pending = &current.task().signal_pending;
-    if on {
-        pending.fetch_or(slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
-    } else {
-        pending.fetch_and(!slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
-    }
-    true
-}
 
 /// A kernel thread, because the harness runs on a stub with no task to kill.
 fn killed_waiter() {

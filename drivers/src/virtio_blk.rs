@@ -12,6 +12,7 @@ use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::WaitAbort;
+use slopos_ostd::sync::wait_queue::current_task_is_killed;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, WaitQueue};
 use slopos_ostd::{klog_debug, klog_info, write_array_field, write_field, write_init_field};
 
@@ -917,6 +918,9 @@ impl VirtioBlkInner {
         fill: &mut dyn FnMut(&RequestPages) -> bool,
         drain: &mut dyn FnMut(&RequestPages) -> bool,
     ) -> Result<(), BlkError> {
+        if current_task_is_killed() {
+            return Err(BlkError::Interrupted);
+        }
         self.reap_quarantine();
         if type_ != VIRTIO_BLK_T_IN {
             self.await_abandoned_writes()?;
@@ -932,6 +936,10 @@ impl VirtioBlkInner {
         if let Err((err, pages)) = self.submit_chain(idx, pages, type_, len) {
             self.release_slot(idx, pages);
             return Err(err);
+        }
+        #[cfg(feature = "test-hooks")]
+        if KILL_AFTER_SUBMIT.swap(false, Ordering::AcqRel) {
+            slopos_core::tests::helpers::mark_current_killed(true);
         }
 
         let pages = self.wait_for_completion(idx)?;
@@ -1487,8 +1495,23 @@ pub fn blk_available_slots(handle: DevHandle) -> usize {
     clone_inner(handle).map_or(0, |inner| inner.available_slots())
 }
 
-/// Leave the device owning a write it will never perform, the state a timeout
-/// leaves behind. The head names it to [`blk_return_abandoned_write`].
+/// Mark the requester killed once its next chain is in the device.
+#[cfg(feature = "test-hooks")]
+static KILL_AFTER_SUBMIT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "test-hooks")]
+pub fn blk_kill_after_next_submit() {
+    KILL_AFTER_SUBMIT.store(true, Ordering::Release);
+}
+
+/// Chains the device holds that no requester is waiting for.
+#[cfg(feature = "test-hooks")]
+pub fn blk_quarantine_count(handle: DevHandle) -> usize {
+    clone_inner(handle).map_or(0, |inner| inner.state.lock().quarantine_count())
+}
+
+/// Quarantine a write the device never saw, the state a timeout leaves behind.
+/// The head names it to [`blk_return_abandoned_write`].
 #[cfg(feature = "test-hooks")]
 pub fn blk_stage_abandoned_write(handle: DevHandle) -> Option<u16> {
     clone_inner(handle)?.stage_abandoned_write()

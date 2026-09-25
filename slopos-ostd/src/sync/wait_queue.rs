@@ -108,6 +108,9 @@ impl AbortMask {
 /// wake costs a bounded delay rather than the whole remaining budget.
 const TIMEOUT_CHUNK_MS: u64 = 500;
 
+/// The longest one uninterruptible wait holds off a kill.
+pub const UNINTERRUPTIBLE_MAX_MS: u64 = 10_000;
+
 /// Hooks the wait queue uses to talk to the kernel's task runtime.
 ///
 /// Registered exactly once at boot via [`register_wait_queue_backend`].
@@ -383,6 +386,12 @@ pub(crate) fn backend() -> &'static dyn WaitQueueBackend {
     unsafe { (*BACKEND_SLOT.0.get()).assume_init_ref() }
 }
 
+/// Whether the current task is marked for death: work it has yet to start is
+/// work a kill should stop.
+pub fn current_task_is_killed() -> bool {
+    backend().current_task_is_killed()
+}
+
 /// Wake a task by id through the registered wait-queue backend.
 ///
 /// Crate-visible so the kill path can issue the wake half of a kill without a
@@ -601,8 +610,8 @@ impl WaitQueue {
     /// ignoring a kill.
     ///
     /// For work a dying task cannot abandon, such as a request a device still
-    /// owns. Deadline-only, so each such wait delays a killed task's exit by
-    /// at most `timeout_ms`.
+    /// owns. The deadline is capped at [`UNINTERRUPTIBLE_MAX_MS`], so no such
+    /// wait delays a killed task's exit by more.
     #[inline]
     pub fn wait_event_uninterruptible_timeout_until<F, R>(
         &self,
@@ -612,6 +621,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<R>,
     {
+        let timeout_ms = timeout_ms.min(UNINTERRUPTIBLE_MAX_MS);
         self.wait_core(condition, Some(timeout_ms), AbortMask::UNINTERRUPTIBLE)
     }
 

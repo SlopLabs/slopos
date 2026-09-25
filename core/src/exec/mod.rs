@@ -123,6 +123,18 @@ pub enum ExecError {
     NameTooLong = -36,
 }
 
+/// What a failed file action tells the spawner. Never `Fault`: the actions
+/// were copied in before any ran, so no failure here is about its memory.
+pub(crate) fn fd_action_error(rc: i32) -> ExecError {
+    match Errno::from_raw(rc) {
+        Some(Errno::EBADF) => ExecError::BadFd,
+        Some(Errno::ENOENT) => ExecError::NoEntry,
+        Some(Errno::ENOMEM) => ExecError::NoMem,
+        Some(Errno::EMFILE) => ExecError::TooManyFiles,
+        _ => ExecError::IoError,
+    }
+}
+
 /// A decoded spawn file action; `Open` paths are already copied out of user
 /// memory by the syscall handler.
 pub enum FdAction {
@@ -224,13 +236,7 @@ pub(crate) fn apply_fd_actions(
             }
         };
         if rc < 0 {
-            return Err(match Errno::from_raw(rc) {
-                Some(Errno::EBADF) => ExecError::BadFd,
-                Some(Errno::ENOENT) => ExecError::NoEntry,
-                Some(Errno::ENOMEM) => ExecError::NoMem,
-                Some(Errno::EMFILE) => ExecError::TooManyFiles,
-                _ => ExecError::IoError,
-            });
+            return Err(fd_action_error(rc));
         }
     }
     // The identity match skips a slot the parent concurrently closed or repopulated.
