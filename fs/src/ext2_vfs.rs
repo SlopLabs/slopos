@@ -4,7 +4,7 @@ use slopos_ostd::sync::lock_tracking::{LOCK_LEVEL_RESOURCE, LockClassKey};
 
 use crate::blockdev::BlockDevice;
 use crate::ext2::cache::{BlockCache, cache_entries_for};
-use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason};
+use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason, SyncPass};
 use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult, orphan};
 use slopos_kernel_services::driver_runtime::{current_task_account, current_task_is_privileged};
@@ -38,6 +38,29 @@ struct CachedExt2 {
     /// against the disk state the mount stamp then overwrites, and
     /// `ErrorsRemountRo` is a runtime verdict.
     read_only: bool,
+    writeback: Writeback,
+}
+
+/// The mount's one writeback pass, which every caller that needs one drives:
+/// the flusher, `sync`, and a writer short of log room. Passes that each
+/// opened their own would repeat the check point's copies and barriers.
+#[derive(Default)]
+struct Writeback {
+    open: Option<SyncPass>,
+    /// Passes opened on this mount; the open one, if any, is the latest.
+    opened: u64,
+    /// The latest pass that ran to its end.
+    finished: u64,
+}
+
+/// What a caller of [`Ext2Mount::writeback`] waits for.
+#[derive(Clone, Copy)]
+enum Want {
+    /// Everything dirty when the caller arrived is on the medium: a pass
+    /// opened after it did has finished.
+    Durable,
+    /// The log has room for an ordinary operation.
+    LogRoom,
 }
 
 /// How the device came up at mount, for the boot log and the mounter.
@@ -135,7 +158,7 @@ impl Ext2Mount {
             drop(guard);
             // Best-effort: a failure here leaves `transaction`'s own fallback
             // to try again and report it.
-            let _ = self.sync_fs();
+            let _ = self.writeback(Want::LogRoom);
             guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
         }
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
@@ -837,6 +860,7 @@ impl Ext2Mount {
             superblock_dirty: false,
             journal_inode: None,
             read_only,
+            writeback: Writeback::default(),
         });
         if let Some(cached) = guard.as_mut() {
             stamp_not_clean(cached);
@@ -920,72 +944,122 @@ fn verity_error_to_vfs(e: VerityError) -> VfsError {
 /// round trips, large enough that the extra acquisitions are noise.
 pub(crate) const WRITEBACK_CHUNK: usize = 32;
 
-/// Steps one pass may take before it gives up. A pass advances a phase or
+/// Steps one caller may take before it gives up. A pass advances a phase or
 /// writes a block on every step, so this bounds a livelock rather than the
 /// work: reaching it means the device is failing every write.
 const WRITEBACK_MAX_STEPS: usize = 4096;
 
+/// What one call of [`Ext2Mount::writeback_step`] did.
+enum Progress {
+    /// The caller's [`Want`] holds, so it is done.
+    Met,
+    /// The mount's pass advanced by one step.
+    Stepped,
+}
+
 impl Ext2Mount {
     /// Takes the FS lock, so the caller must hold none.
     ///
-    /// Every caller drives a pass of its own, interleaved step by step with
-    /// any other. The wait is bounded: the pass releases the mount lock every
-    /// [`WRITEBACK_CHUNK`] writes, and the epoch it fixed keeps the ordered
-    /// phases ordered across those gaps.
+    /// Waits for a pass opened after the call, which the caller drives step by
+    /// step with every other caller of the mount's one pass. The wait is
+    /// bounded: the pass releases the mount lock every [`WRITEBACK_CHUNK`]
+    /// writes, and the epoch it fixed keeps the ordered phases ordered across
+    /// those gaps.
     pub fn sync_fs(&self) -> VfsResult<()> {
         self.sync_pass().0
     }
 
-    /// [`Self::sync_fs`], plus how many [`Ext2Fs::sync_step`] calls it took —
-    /// the count that bounds the wait behind a pass, since every step gave the
+    /// [`Self::sync_fs`], plus how many [`Ext2Fs::sync_step`] calls this
+    /// caller made — the count that bounds its wait, since every step gave the
     /// mount lock back.
     pub(crate) fn sync_pass(&self) -> (VfsResult<()>, usize) {
+        self.writeback(Want::Durable)
+    }
+
+    fn writeback(&self, want: Want) -> (VfsResult<()>, usize) {
         if !self.init.is_set() {
             return (Ok(()), 0);
         }
-        let mut pass = {
-            let Ok(mut guard) = self.cached.lock() else {
-                return (Err(VfsError::Interrupted), 0);
-            };
-            let Some(cached) = guard.as_mut() else {
-                return (Ok(()), 0);
-            };
-            // Skip the device barriers rather than issue no-op flushes every
-            // tick. Read state, not a completion epoch: an op that *failed*
-            // leaves its dirtied blocks cached, so "a sync already ran" is not
-            // evidence that there is nothing left to write.
-            let pending =
-                match self.with_cached_fs(cached, |fs| Ok((fs.sync_pending(), fs.begin_sync()))) {
-                    Ok(pending) => pending,
-                    Err(e) => return (Err(e), 0),
-                };
-            if !pending.0 {
-                self.dirty_pending.store(0, Ordering::Relaxed);
-                return (Ok(()), 0);
-            }
-            pending.1
-        };
-
-        let mut result = Ok(());
+        let mut target = None;
         let mut steps = 0usize;
         for _ in 0..WRITEBACK_MAX_STEPS {
-            let Ok(mut guard) = self.cached.lock() else {
-                return (Err(VfsError::Interrupted), steps);
-            };
-            let Some(cached) = guard.as_mut() else {
-                return (Ok(()), steps);
-            };
-            result = self.with_cached_fs(cached, |fs| fs.sync_step(&mut pass, WRITEBACK_CHUNK));
-            steps += 1;
-            self.dirty_pending
-                .store(cached.cache.dirty_count(), Ordering::Relaxed);
-            drop(guard);
-            self.report_remount_ro_if_pending();
-            if result.is_err() || pass.is_done() {
-                break;
+            match self.writeback_step(want, &mut target) {
+                Ok(Progress::Met) => return (Ok(()), steps),
+                Ok(Progress::Stepped) => steps += 1,
+                Err(e) => return (Err(e), steps),
             }
         }
-        (result, steps)
+        (Ok(()), steps)
+    }
+
+    /// One hold of the mount lock: answer whether `want` holds, or advance the
+    /// mount's pass by a step, opening one if none is open. `target` is the
+    /// first pass a [`Want::Durable`] caller can count, fixed on its first
+    /// call.
+    fn writeback_step(&self, want: Want, target: &mut Option<u64>) -> VfsResult<Progress> {
+        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let Some(cached) = guard.as_mut() else {
+            return Ok(Progress::Met);
+        };
+        let target = *target.get_or_insert(cached.writeback.opened + 1);
+        let met = match want {
+            Want::Durable => cached.writeback.finished >= target,
+            Want::LogRoom => cached.cache.journal_has_headroom(),
+        };
+        if met {
+            return Ok(Progress::Met);
+        }
+        let mut pass = match cached.writeback.open {
+            Some(pass) => pass,
+            None => {
+                // Read state, not a completion count: an op that *failed*
+                // leaves its dirtied blocks cached, so a finished pass is not
+                // evidence that there is nothing left to write.
+                match self
+                    .with_cached_fs(cached, |fs| Ok(fs.sync_pending().then(|| fs.begin_sync())))?
+                {
+                    Some(pass) => {
+                        cached.writeback.opened += 1;
+                        pass
+                    }
+                    None => {
+                        self.dirty_pending.store(0, Ordering::Relaxed);
+                        return Ok(Progress::Met);
+                    }
+                }
+            }
+        };
+        let result = self.with_cached_fs(cached, |fs| fs.sync_step(&mut pass, WRITEBACK_CHUNK));
+        cached.writeback.open = match result {
+            Ok(()) if pass.is_done() => {
+                cached.writeback.finished = cached.writeback.opened;
+                None
+            }
+            Ok(()) => Some(pass),
+            Err(_) => None,
+        };
+        self.dirty_pending
+            .store(cached.cache.dirty_count(), Ordering::Relaxed);
+        drop(guard);
+        self.report_remount_ro_if_pending();
+        result.map(|()| Progress::Stepped)
+    }
+
+    /// Open the mount's pass if none is, and advance it by one step.
+    #[cfg(feature = "tests")]
+    pub(crate) fn writeback_step_for_test(&self) -> VfsResult<()> {
+        self.writeback_step(Want::Durable, &mut None).map(|_| ())
+    }
+
+    /// Passes opened on this mount and the latest that finished.
+    #[cfg(feature = "tests")]
+    pub(crate) fn writeback_passes_for_test(&self) -> (u64, u64) {
+        let Ok(guard) = self.cached.lock() else {
+            return (0, 0);
+        };
+        guard.as_ref().map_or((0, 0), |cached| {
+            (cached.writeback.opened, cached.writeback.finished)
+        })
     }
 
     /// Whether the log has room for an ordinary operation without a check

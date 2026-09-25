@@ -951,6 +951,67 @@ fn headroom_body(
     Ok(())
 }
 
+const SHARED_PASS_MP: &[u8] = b"/tmp/ext2_shared_pass";
+
+/// A sync that arrives while the mount's writeback pass is open finishes that
+/// pass instead of opening one of its own, so two callers pay for one pass.
+pub fn test_ext2_sync_finishes_the_open_pass_instead_of_opening_one() -> TestResult {
+    if !ready() || !ensure_dir(SHARED_PASS_MP) {
+        return slopos_testing::fail!("the /tmp fixture directory is unavailable");
+    }
+    let Some(image) = super::journal::journal_image() else {
+        return TestResult::Skipped;
+    };
+    let Some(device) = boxed_device_counting(image) else {
+        return TestResult::Skipped;
+    };
+    let Some(fs) = vfs_ext2_pool_claim() else {
+        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    };
+
+    let outcome = shared_pass_body(fs, device);
+
+    let _ = unmount(SHARED_PASS_MP);
+    vfs_ext2_pool_release(fs, false);
+    let _ = vfs_rmdir(SHARED_PASS_MP);
+    match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!(msg),
+    }
+}
+
+#[inline(never)]
+fn shared_pass_body(
+    fs: &'static Ext2Mount,
+    device: KBox<dyn BlockDevice + Send + Sync>,
+) -> Result<(), &'static str> {
+    fs.attach(device, false)
+        .map_err(|_| "the log-carrying fixture would not attach")?;
+    if fs.is_read_only() {
+        return Err("the fixture mounted read-only, so nothing can dirty it");
+    }
+    mount(SHARED_PASS_MP, fs, 0).map_err(|_| "the mount failed")?;
+    fs.sync_fs()
+        .map_err(|_| "the sync after the mount failed")?;
+    vfs_open(b"/tmp/ext2_shared_pass/f", true)
+        .map_err(|_| "the create failed")?
+        .write(0, b"dirty")
+        .map_err(|_| "the write failed")?;
+
+    let (opened, finished) = fs.writeback_passes_for_test();
+    fs.writeback_step_for_test()
+        .map_err(|_| "the first caller's step failed")?;
+    if fs.writeback_passes_for_test() != (opened + 1, finished) {
+        return Err("the first caller's step left no pass open");
+    }
+    fs.sync_fs()
+        .map_err(|_| "the sync behind the open pass failed")?;
+    if fs.writeback_passes_for_test() != (opened + 1, opened + 1) {
+        return Err("the sync opened a pass of its own beside the open one");
+    }
+    Ok(())
+}
+
 const RDONLY_MP: &[u8] = b"/tmp/ext2_rdonly";
 const RDONLY_FILE: &[u8] = b"/tmp/ext2_rdonly/denied";
 /// A device of this test's own, published through a handle that takes writes —
@@ -1084,6 +1145,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_ext2_journal_headroom_is_restored_off_the_mount_lock,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_sync_finishes_the_open_pass_instead_of_opening_one,
     suite = fs
 );
 slopos_testing::stest!(name = test_mount_shadowed_name_lists_once, suite = fs);

@@ -1556,9 +1556,10 @@ slopos_testing::stest!(
     suite = fs
 );
 
-/// Two writeback passes interleave, as every writer's drain and the flusher's
-/// do: the one opened first must not check point a logged copy of a block the
-/// later one has already put home a newer copy of, then emptied the log behind.
+/// Two writeback passes interleave, as a transaction's own last-resort check
+/// point and the mount's pass can: the one opened first must not check point a
+/// logged copy of a block the later one has already put home a newer copy of,
+/// then emptied the log behind.
 pub fn test_ext2_lagging_pass_never_puts_an_older_copy_home() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;

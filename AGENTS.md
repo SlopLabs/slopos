@@ -344,15 +344,18 @@ its blocks hold copies of bitmaps, inode tables and directory blocks, so a
 reader of it would see the metadata of every recently changed file. The default
 image is 32M rather than 16M because the log takes 4M of it.
 
-**A writeback pass is bounded.** `sync(2)` and the flusher drive
-`Ext2Fs::sync_step` in chunks of `WRITEBACK_CHUNK` device writes, releasing the
-mount lock between them, so a path walk or an `exec` queued behind a pass waits
-for a chunk rather than for the whole pass. A pass fixes a *dirty epoch* and the
-log's head and generation when it opens, which is what keeps the ordered phases
-ordered across those gaps: an operation that runs in one is entirely outside the
-pass. Mutations remain serialised per mount — the plan's per-inode locking is
-deliberately not what landed, because the wait, not the lock count, is what G5
-was about.
+**A writeback pass is bounded, and a mount has one.** `sync(2)`, the flusher
+and a writer short of log room all drive the mount's one open pass through
+`Ext2Fs::sync_step`, in chunks of `WRITEBACK_CHUNK` device writes, releasing
+the mount lock between them, so a path walk or an `exec` queued behind a pass
+waits for a chunk rather than for the whole pass, and a burst of callers pays
+for one pass rather than one each. A pass fixes a *dirty epoch* and the log's
+head and generation when it opens, which is what keeps the ordered phases
+ordered across those gaps: an operation that runs in one is entirely outside
+the pass — so a `sync` that finds a pass open drives it to its end and then
+the next one, the way a jbd2 commit waiter does. Mutations remain serialised
+per mount — the plan's per-inode locking is deliberately not what landed,
+because the wait, not the lock count, is what G5 was about.
 
 **Memory is promised before it is touched.** Every private mapping is charged
 against a *commit* ceiling when it is created — `mmap`, `brk`, an `mprotect`
