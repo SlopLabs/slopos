@@ -1096,10 +1096,7 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(name = test_ext2_mount_by_label, suite = fs);
-slopos_testing::stest!(
-    name = test_rename_fails_when_a_lookup_does,
-    suite = fs
-);
+slopos_testing::stest!(name = test_rename_fails_when_a_lookup_does, suite = fs);
 slopos_testing::stest!(name = test_removal_fails_when_a_lookup_does, suite = fs);
 slopos_testing::stest!(
     name = test_create_open_keeps_the_mode_of_a_file_it_found,
