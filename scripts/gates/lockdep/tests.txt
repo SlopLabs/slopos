@@ -205,9 +205,10 @@ require-phase post-userland-tests
 #               `STATFS_RDONLY_PROBE`. Only a site that is actually acquired
 #               registers, which is why fifteen declarations add eleven
 #               classes. Measured 199/209 on all three runs of one pinned ISO.
-#   2026-09-13  kernel 199 -> 203, userland 209 -> 212: Phase 1 of
-#               `plans/self-hosting.md`. Boot is unchanged at 72, so none of
-#               these is on the boot path. The named new declaration sites are
+#   2026-09-13  kernel 199 -> 203, userland 209 -> 212: "A build
+#               system's floor" in `plans/self-hosting.md`. Boot is unchanged
+#               at 72, so none of these is on the boot path. The named new
+#               declaration sites are
 #               `FILE_LOCK_ROWS` and `FILE_LOCK_WAITERS` (the advisory-lock
 #               row table and its wait queue, `fs/src/fileio/flock.rs`, which
 #               `flock(2)` and `fcntl(2)` record locks share because they

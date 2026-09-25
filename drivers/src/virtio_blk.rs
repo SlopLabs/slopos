@@ -918,9 +918,6 @@ impl VirtioBlkInner {
         fill: &mut dyn FnMut(&RequestPages) -> bool,
         drain: &mut dyn FnMut(&RequestPages) -> bool,
     ) -> Result<(), BlkError> {
-        if current_task_is_killed() {
-            return Err(BlkError::Interrupted);
-        }
         self.reap_quarantine();
         if type_ != VIRTIO_BLK_T_IN {
             self.await_abandoned_writes()?;
@@ -928,6 +925,10 @@ impl VirtioBlkInner {
 
         let (idx, pages) = self.acquire_slot()?;
 
+        if current_task_is_killed() {
+            self.release_slot(idx, pages);
+            return Err(BlkError::Interrupted);
+        }
         if !pages.write_header(type_, sector) || !fill(&pages) {
             self.release_slot(idx, pages);
             return Err(BlkError::BadRequest);
@@ -938,7 +939,15 @@ impl VirtioBlkInner {
             return Err(err);
         }
         #[cfg(feature = "test-hooks")]
-        if KILL_AFTER_SUBMIT.swap(false, Ordering::AcqRel) {
+        if KILL_AFTER_SUBMIT
+            .compare_exchange(
+                slopos_arch::pcr::current_task_id(),
+                slopos_abi::task::INVALID_TASK_ID,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
             slopos_core::tests::helpers::mark_current_killed(true);
         }
 
@@ -1048,6 +1057,9 @@ impl VirtioBlkInner {
         dst: &mut [u8],
     ) -> Result<(), BlkError> {
         let mut sector_buf = [0u8; SECTOR_SIZE as usize];
+        // The read is half of a write: taken past an abandoned write, it would
+        // put the sector's older bytes back once that write lands.
+        self.await_abandoned_writes()?;
         self.request_read(sector, &mut sector_buf)?;
         dst.copy_from_slice(&sector_buf[within..within + dst.len()]);
         Ok(())
@@ -1497,11 +1509,13 @@ pub fn blk_available_slots(handle: DevHandle) -> usize {
 
 /// Mark the requester killed once its next chain is in the device.
 #[cfg(feature = "test-hooks")]
-static KILL_AFTER_SUBMIT: AtomicBool = AtomicBool::new(false);
+static KILL_AFTER_SUBMIT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(slopos_abi::task::INVALID_TASK_ID);
 
+/// Mark the calling task killed once its next request is in the device.
 #[cfg(feature = "test-hooks")]
 pub fn blk_kill_after_next_submit() {
-    KILL_AFTER_SUBMIT.store(true, Ordering::Release);
+    KILL_AFTER_SUBMIT.store(slopos_arch::pcr::current_task_id(), Ordering::Release);
 }
 
 /// Chains the device holds that no requester is waiting for.

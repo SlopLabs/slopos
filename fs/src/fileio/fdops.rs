@@ -541,13 +541,7 @@ pub fn file_get_size_fd(table: FdTable, fd: c_int) -> usize {
 }
 
 pub fn file_unlink_at(path: &[u8], cwd: &[u8]) -> c_int {
-    match vfs_unlink_at(path, cwd) {
-        Ok(()) => 0,
-        Err(VfsError::ReadOnly) => Errno::EROFS.raw() as _,
-        Err(VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
-        Err(VfsError::IsDirectory) => Errno::EISDIR.raw() as _,
-        Err(_) => Errno::ENOENT.raw() as _,
-    }
+    errno_of(vfs_unlink_at(path, cwd))
 }
 
 pub fn file_rmdir_at(path: &[u8], cwd: &[u8]) -> c_int {

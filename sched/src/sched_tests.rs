@@ -5419,52 +5419,85 @@ const KILLED_WAIT_PASS: u8 = 1;
 const KILLED_WAIT_ENDED_BY_KILL: u8 = 2;
 const KILLED_WAIT_KILL_IGNORED: u8 = 3;
 const KILLED_WAIT_NO_TASK: u8 = 4;
+const KILLED_WAIT_NEVER_KILLED: u8 = 5;
+const KILLED_WAIT_UNCAPPED: u8 = 6;
 
 static KILLED_WAIT_VERDICT: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(KILLED_WAIT_PENDING);
+static KILLED_WAITER: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(INVALID_TASK_ID);
 
 /// A kernel thread, because the harness runs on a stub with no task to kill.
 fn killed_waiter() {
-    let verdict = if mark_current_killed(true) {
-        let wq = WaitQueue::new(lock_class!("test.wq_killed", LOCK_LEVEL_RESOURCE));
-        let held = wq.wait_event_uninterruptible_timeout_until(|| None::<()>, 20);
-        let killable = wq.wait_event_timeout(|| false, 20);
-        mark_current_killed(false);
-        match (held, killable) {
-            (Err(WaitAbort::Timeout), Err(WaitAbort::Killed)) => KILLED_WAIT_PASS,
-            (Err(WaitAbort::Timeout), _) => KILLED_WAIT_KILL_IGNORED,
-            _ => KILLED_WAIT_ENDED_BY_KILL,
-        }
-    } else {
-        KILLED_WAIT_NO_TASK
+    use core::sync::atomic::Ordering;
+    use slopos_ostd::sync::wait_queue::UNINTERRUPTIBLE_MAX_MS;
+    let Some(current) = crate::task_struct::Current::get() else {
+        KILLED_WAIT_VERDICT.store(KILLED_WAIT_NO_TASK, Ordering::Release);
+        return;
     };
-    KILLED_WAIT_VERDICT.store(verdict, core::sync::atomic::Ordering::Release);
+    let wq = WaitQueue::new(lock_class!("test.wq_killed", LOCK_LEVEL_RESOURCE));
+    let started = slopos_kernel_services::clock::uptime_ms();
+    KILLED_WAITER.store(current.task().task_id, Ordering::Release);
+    let held = wq.wait_event_uninterruptible_timeout_until(|| None::<()>, u64::MAX);
+    let waited = slopos_kernel_services::clock::uptime_ms() - started;
+    let killed = current.task().is_killed();
+    let killable = wq.wait_event_timeout(|| false, 20);
+    mark_current_killed(false);
+    let verdict = match (held, killable) {
+        (Err(WaitAbort::Timeout), _) if !killed => KILLED_WAIT_NEVER_KILLED,
+        (Err(WaitAbort::Timeout), _) if waited > 3 * UNINTERRUPTIBLE_MAX_MS => KILLED_WAIT_UNCAPPED,
+        (Err(WaitAbort::Timeout), Err(WaitAbort::Killed)) => KILLED_WAIT_PASS,
+        (Err(WaitAbort::Timeout), _) => KILLED_WAIT_KILL_IGNORED,
+        _ => KILLED_WAIT_ENDED_BY_KILL,
+    };
+    KILLED_WAIT_VERDICT.store(verdict, Ordering::Release);
 }
 
-/// The uninterruptible tier ends on its deadline whether or not the task is
-/// killed; the killable tier beside it, in the same task, ends on the kill.
+/// A kill that lands while a task is parked in the uninterruptible tier does
+/// not end the wait, and the tier's cap ends it however long was asked for;
+/// the killable tier after it, in the same task, ends on the kill.
 pub fn test_uninterruptible_wait_outlasts_a_kill() -> TestResult {
     use core::sync::atomic::Ordering;
+    use slopos_kernel_services::clock::uptime_ms;
+    use slopos_ostd::sync::wait_queue::UNINTERRUPTIBLE_MAX_MS;
     KILLED_WAIT_VERDICT.store(KILLED_WAIT_PENDING, Ordering::Release);
-    if slopos_ostd::task::spawn(
-        "killed-waiter",
-        killed_waiter,
-        slopos_abi::task::TaskPriority::Normal,
-    )
-    .is_err()
-    {
+    KILLED_WAITER.store(INVALID_TASK_ID, Ordering::Release);
+    if slopos_ostd::task::spawn("killed-waiter", killed_waiter, TaskPriority::Normal).is_err() {
         return slopos_testing::fail!("could not spawn the waiting thread");
     }
-    let deadline = slopos_kernel_services::clock::uptime_ms() + 10_000;
+    let deadline = uptime_ms() + 4 * UNINTERRUPTIBLE_MAX_MS;
+    let waiter = loop {
+        let id = KILLED_WAITER.load(Ordering::Acquire);
+        if id != INVALID_TASK_ID {
+            break id;
+        }
+        if KILLED_WAIT_VERDICT.load(Ordering::Acquire) != KILLED_WAIT_PENDING
+            || uptime_ms() > deadline
+        {
+            return slopos_testing::fail!("the waiting thread never began to wait");
+        }
+        core::hint::spin_loop();
+    };
+    let parked = uptime_ms() + 100;
+    while uptime_ms() < parked {
+        core::hint::spin_loop();
+    }
+    let Some(task) = task_find_by_id(waiter) else {
+        return slopos_testing::fail!("the waiting thread is gone");
+    };
+    slopos_ostd::task::ops::task_kill_and_wake(&*task);
+    drop(task);
     while KILLED_WAIT_VERDICT.load(Ordering::Acquire) == KILLED_WAIT_PENDING
-        && slopos_kernel_services::clock::uptime_ms() < deadline
+        && uptime_ms() < deadline
     {
         core::hint::spin_loop();
     }
     match KILLED_WAIT_VERDICT.load(Ordering::Acquire) {
         KILLED_WAIT_PASS => TestResult::Pass,
-        KILLED_WAIT_PENDING => slopos_testing::fail!("the waiting thread never finished"),
+        KILLED_WAIT_PENDING => slopos_testing::fail!("the uninterruptible wait was never capped"),
         KILLED_WAIT_NO_TASK => slopos_testing::fail!("the waiting thread had no current task"),
+        KILLED_WAIT_NEVER_KILLED => slopos_testing::fail!("the kill never reached the waiter"),
+        KILLED_WAIT_UNCAPPED => slopos_testing::fail!("the wait outran its cap"),
         KILLED_WAIT_KILL_IGNORED => slopos_testing::fail!("the killable wait ignored the kill"),
         _ => slopos_testing::fail!("a kill ended the uninterruptible wait"),
     }

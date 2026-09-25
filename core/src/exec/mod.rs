@@ -31,7 +31,7 @@ use slopos_fs::vfs::CanonPath;
 use slopos_fs::vfs::ops::{VfsHandle, vfs_open};
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, resolve_path_canon_at};
 use slopos_mm::elf::{
-    ELF_HEADER_WINDOW, ElfError, ElfExecInfo, MAX_LOAD_SEGMENTS, SegmentBudget, ValidatedSegment,
+    ELF_HEADER_WINDOW, ElfExecInfo, MAX_LOAD_SEGMENTS, SegmentBudget, ValidatedSegment,
     interpreter_extent,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -109,30 +109,9 @@ pub fn exec_arg_bytes_fit(argv: Option<&[&[u8]]>, envp: Option<&[&[u8]]>) -> boo
     true
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum ExecError {
-    NoEntry = -2,
-    IoError = -5,
-    TooManyArgs = -7,
-    NoExec = -8,
-    BadFd = -9,
-    NoMem = -12,
-    Fault = -14,
-    TooManyFiles = -24,
-    NameTooLong = -36,
-}
-
-/// What a failed file action tells the spawner. Never `Fault`: the actions
-/// were copied in before any ran, so no failure here is about its memory.
-pub(crate) fn fd_action_error(rc: i32) -> ExecError {
-    match Errno::from_raw(rc) {
-        Some(Errno::EBADF) => ExecError::BadFd,
-        Some(Errno::ENOENT) => ExecError::NoEntry,
-        Some(Errno::ENOMEM) => ExecError::NoMem,
-        Some(Errno::EMFILE) => ExecError::TooManyFiles,
-        _ => ExecError::IoError,
-    }
+/// A failed spawn file action reports its own errno, as `posix_spawn` does.
+pub(crate) fn fd_action_error(rc: i32) -> Errno {
+    Errno::from_raw(rc).unwrap_or(Errno::EIO)
 }
 
 /// A decoded spawn file action; `Open` paths are already copied out of user
@@ -157,15 +136,6 @@ pub enum FdAction {
     // replacement and cannot exceed the spawner's own authority.
 }
 
-impl From<ElfError> for ExecError {
-    fn from(err: ElfError) -> Self {
-        match err {
-            ElfError::OutOfMemory => ExecError::NoMem,
-            _ => ExecError::NoExec,
-        }
-    }
-}
-
 fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     &bytes[..len]
@@ -181,7 +151,7 @@ pub fn init_task_id() -> u32 {
     INIT_TASK_ID.load(Ordering::Acquire)
 }
 
-pub fn launch_init() -> Result<u32, ExecError> {
+pub fn launch_init() -> Result<u32, Errno> {
     let task_id = spawn_program_with_attrs(
         INIT_PATH,
         None,
@@ -205,9 +175,9 @@ pub(crate) fn apply_fd_actions(
     parent_table: FdTable,
     child_table: FdTable,
     actions: &[FdAction],
-) -> Result<(), ExecError> {
+) -> Result<(), Errno> {
     let mut transfers: KVec<(i32, FileRef)> =
-        KVec::with_capacity(actions.len()).map_err(|_| ExecError::NoMem)?;
+        KVec::with_capacity(actions.len()).map_err(|_| Errno::ENOMEM)?;
     for action in actions {
         let rc: c_int = match action {
             FdAction::Clone { src_fd, target_fd } => {
@@ -222,7 +192,7 @@ pub(crate) fn apply_fd_actions(
                         let moved = file.alias();
                         let rc = fileio_install_file_ref_at(child_table, *target_fd, file, false);
                         if rc >= 0 && transfers.push((*src_fd, moved)).is_err() {
-                            return Err(ExecError::NoMem);
+                            return Err(Errno::ENOMEM);
                         }
                         rc
                     }
@@ -246,10 +216,10 @@ pub(crate) fn apply_fd_actions(
     Ok(())
 }
 
-fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError> {
+fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], Errno> {
     let trimmed = trim_nul_bytes(path);
     if trimmed.is_empty() {
-        return Err(ExecError::NameTooLong);
+        return Err(Errno::ENAMETOOLONG);
     }
 
     let basename_start = trimmed
@@ -259,7 +229,7 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError
     let basename = &trimmed[basename_start..];
 
     if basename.is_empty() || basename.len() >= TASK_NAME_MAX_LEN {
-        return Err(ExecError::NameTooLong);
+        return Err(Errno::ENAMETOOLONG);
     }
 
     let mut name = [0u8; TASK_NAME_MAX_LEN];
@@ -309,7 +279,7 @@ pub fn spawn_program_with_attrs(
     sigdefault_mask: u64,
     parent_table: Option<FdTable>,
     parent_task_id: u32,
-) -> Result<u32, ExecError> {
+) -> Result<u32, Errno> {
     spawn_program_with_cwd(
         path,
         argv,
@@ -338,7 +308,7 @@ pub fn spawn_program_with_cwd(
     parent_table: Option<FdTable>,
     parent_task_id: u32,
     cwd: &[u8],
-) -> Result<u32, ExecError> {
+) -> Result<u32, Errno> {
     let result = (|| {
         // Resolved once, here: the grant table, the task name and the loader
         // must all agree on which file this is.
@@ -365,7 +335,7 @@ pub fn spawn_program_with_cwd(
                 None => true,
             };
             if !spawner_may_launch {
-                return Err(ExecError::NoExec);
+                return Err(Errno::ENOEXEC);
             }
         }
 
@@ -387,7 +357,7 @@ pub fn spawn_program_with_cwd(
             priority.as_u8(),
             flags,
         ) else {
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         };
         // Nothing else can find the orphan, so every exit from here — `?`, a
         // panic, a kill aborting the blocking calls — must release it here.
@@ -401,17 +371,17 @@ pub fn spawn_program_with_cwd(
         // Refused rather than defaulted: a child with no table of its own must
         // not be exec'd against the kernel's, which every kernel task shares.
         let Some(child_table) = spawn.child_table() else {
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         };
 
         // Before the fd actions: a path-taking action resolves against it.
         // The `_exclusive` form because `set_cwd`'s witness names the
         // spawner, not this not-yet-published child.
         let Some(cwd_stored) = spawn.with_child(|child| child.set_cwd_exclusive(cwd)) else {
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         };
         if !cwd_stored {
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         }
 
         exec_image(
@@ -431,11 +401,11 @@ pub fn spawn_program_with_cwd(
             // Taken from the guard rather than re-resolved: the id could have
             // been returned to the allocator between the two lookups.
             let Some(FdTable::Process(child_process)) = spawn.child_table() else {
-                return Err(ExecError::NoMem);
+                return Err(Errno::ENOMEM);
             };
             fileio_destroy_table_for_process(child_process.handle());
             if fileio_create_empty_table_for_process(child_process.handle()) != 0 {
-                return Err(ExecError::NoMem);
+                return Err(Errno::ENOMEM);
             }
             apply_fd_actions(parent_table, FdTable::Process(child_process), actions)?;
         }
@@ -494,14 +464,14 @@ pub fn spawn_program_with_cwd(
                 .map(|ctty| (ctty, inherited.pgid, inherited.sid));
             (fg, displaced)
         }) else {
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         };
         drop(displaced_group);
 
         // Findable from here but still not runnable: `publish_new_task` below
         // is the sole schedulable edge.
         let Some(registered) = spawn.commit() else {
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         };
 
         // Only after `commit`: the edge must point at a live registry entry.
@@ -525,7 +495,7 @@ pub fn spawn_program_with_cwd(
         // above visible to the CPU that runs this task.
         if publish_new_task(&registered) != 0 {
             task_terminate(task_id);
-            return Err(ExecError::NoMem);
+            return Err(Errno::ENOMEM);
         }
 
         Ok(task_id)
@@ -544,19 +514,19 @@ pub fn spawn_program_with_cwd(
 /// `#[inline(never)]` keeps the walk off the frame of a caller already
 /// holding a `SpawnGuard`.
 #[inline(never)]
-pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, ExecError> {
+pub fn resolve_program(path: &[u8], cwd: &[u8]) -> Result<CanonPath, Errno> {
     let trimmed = trim_nul_bytes(path);
     if trimmed.is_empty() || trimmed.len() > USER_PATH_MAX {
-        return Err(ExecError::NameTooLong);
+        return Err(Errno::ENAMETOOLONG);
     }
     let (_, canon) = resolve_path_canon_at(trimmed, cwd, RESOLVE_FOLLOW).map_err(|e| match e {
-        VfsError::NotFound | VfsError::NotDirectory => ExecError::NoEntry,
-        VfsError::NameTooLong => ExecError::NameTooLong,
+        VfsError::NotFound | VfsError::NotDirectory => Errno::ENOENT,
+        VfsError::NameTooLong => Errno::ENAMETOOLONG,
         VfsError::IsDirectory
         | VfsError::PermissionDenied
         | VfsError::TooManySymlinks
-        | VfsError::InvalidPath => ExecError::NoExec,
-        _ => ExecError::IoError,
+        | VfsError::InvalidPath => Errno::ENOEXEC,
+        _ => Errno::EIO,
     })?;
     Ok(canon)
 }
@@ -575,7 +545,7 @@ pub fn do_exec(
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
-) -> Result<(), ExecError> {
+) -> Result<(), Errno> {
     exec_image(
         table,
         program,
@@ -600,12 +570,12 @@ fn exec_image(
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
     tls_tp_out: &mut u64,
-) -> Result<(), ExecError> {
-    let vm_process = table.process().ok_or(ExecError::NoMem)?;
+) -> Result<(), Errno> {
+    let vm_process = table.process().ok_or(Errno::ENOMEM)?;
     let exec_info = load_image(program.as_bytes(), vm_process, entry_out)?;
 
     if process_vm_reset_stack(vm_process) != 0 {
-        return Err(ExecError::NoMem);
+        return Err(Errno::ENOMEM);
     }
     process_vm_end_prepay(vm_process);
 
@@ -632,23 +602,20 @@ fn exec_image(
 /// Out of line because [`FileStat`](slopos_fs::FileStat) is large enough to
 /// push its caller over the 2 KiB stack gate.
 #[inline(never)]
-fn open_executable(path: &[u8]) -> Result<(VfsHandle, u64), ExecError> {
+fn open_executable(path: &[u8]) -> Result<(VfsHandle, u64), Errno> {
     let handle = vfs_open(path, false).map_err(|e| match e {
-        slopos_fs::VfsError::NotFound => ExecError::NoEntry,
-        slopos_fs::VfsError::IsDirectory => ExecError::NoExec,
-        slopos_fs::VfsError::PermissionDenied => ExecError::NoExec,
-        _ => ExecError::IoError,
+        slopos_fs::VfsError::NotFound => Errno::ENOENT,
+        slopos_fs::VfsError::IsDirectory => Errno::ENOEXEC,
+        slopos_fs::VfsError::PermissionDenied => Errno::ENOEXEC,
+        _ => Errno::EIO,
     })?;
 
-    let stat = handle
-        .fs
-        .stat(handle.inode)
-        .map_err(|_| ExecError::IoError)?;
+    let stat = handle.fs.stat(handle.inode).map_err(|_| Errno::EIO)?;
     if (stat.mode & 0o111) == 0 {
-        return Err(ExecError::NoExec);
+        return Err(Errno::ENOEXEC);
     }
     if stat.size == 0 || stat.size > EXEC_MAX_ELF_SIZE as u64 {
-        return Err(ExecError::NoExec);
+        return Err(Errno::ENOEXEC);
     }
     Ok((handle, stat.size))
 }
@@ -677,16 +644,16 @@ fn load_image(
     path: &[u8],
     process: slopos_ostd::process::ProcessId,
     entry_out: &mut u64,
-) -> Result<ElfExecInfo, ExecError> {
+) -> Result<ElfExecInfo, Errno> {
     let (handle, file_size) = open_executable(path)?;
 
     // Only the header window is staged; the rest goes from the file straight
     // into the mapping, so the image may exceed the 1 MiB slab ceiling.
     let window_len = (file_size as usize).min(ELF_HEADER_WINDOW);
-    let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| ExecError::NoMem)?;
+    let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(&handle, 0, header.as_mut_slice())?;
 
-    let interp = match interpreter_extent(header.as_slice(), file_size).map_err(ExecError::from)? {
+    let interp = match interpreter_extent(header.as_slice(), file_size).map_err(Errno::from)? {
         Some((offset, len)) => Some(stage_interpreter(&handle, offset, len)?),
         None => None,
     };
@@ -700,15 +667,15 @@ fn load_image(
             .as_deref()
             .map(|staged| (staged.header.as_slice(), staged.file_len)),
     )
-    .map_err(ExecError::from)?;
+    .map_err(Errno::from)?;
     let funds =
-        try_charge::<CommitPagesAxis>(process.account(), pages).map_err(|_| ExecError::NoMem)?;
+        try_charge::<CommitPagesAxis>(process.account(), pages).map_err(|_| Errno::ENOMEM)?;
 
     // The address-space boundary. Everything the old image mapped — heap,
     // mmap arena, shared memfds, rings — is severed here, before the new
     // image exists, so no mapping outlives the program that made it.
     if process_vm_reset_for_exec(process) != 0 {
-        return Err(ExecError::NoMem);
+        return Err(Errno::ENOMEM);
     }
     process_vm_prepay_commit(process, funds);
 
@@ -739,9 +706,9 @@ fn install_images(
     interp: Option<&StagedInterpreter>,
     process: slopos_ostd::process::ProcessId,
     entry_out: &mut u64,
-) -> Result<ElfExecInfo, ExecError> {
+) -> Result<ElfExecInfo, Errno> {
     let mut segments =
-        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| ExecError::NoMem)?;
+        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| Errno::ENOMEM)?;
     let (mut exec_info, segment_count) = process_vm_map_elf_image(
         process,
         header,
@@ -749,7 +716,7 @@ fn install_images(
         segments.as_mut_slice(),
         entry_out,
     )
-    .map_err(ExecError::from)?;
+    .map_err(Errno::from)?;
 
     if let Some(staged) = interp {
         let image = map_interpreter(staged, process, &segments.as_slice()[..segment_count])?;
@@ -758,7 +725,7 @@ fn install_images(
         *entry_out = image.entry;
     }
 
-    let vm_space = process_vm_get_vm_space(process).ok_or(ExecError::Fault)?;
+    let vm_space = process_vm_get_vm_space(process).ok_or(Errno::EFAULT)?;
     stream_segments(handle, &vm_space, &segments.as_slice()[..segment_count])?;
     Ok(exec_info)
 }
@@ -772,20 +739,20 @@ fn stage_interpreter(
     image: &VfsHandle,
     offset: u64,
     len: u64,
-) -> Result<KBox<StagedInterpreter>, ExecError> {
-    let mut path: KVec<u8> = KVec::<u8>::zeroed(len as usize).map_err(|_| ExecError::NoMem)?;
+) -> Result<KBox<StagedInterpreter>, Errno> {
+    let mut path: KVec<u8> = KVec::<u8>::zeroed(len as usize).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(image, offset, path.as_mut_slice())?;
     let name = trim_nul_bytes(path.as_slice());
     // Resolved against `/`, never against the caller's cwd: the interpreter
     // is part of the program's identity, and a relative one would name a
     // different file per caller.
     if name.is_empty() || name[0] != b'/' {
-        return Err(ExecError::NoExec);
+        return Err(Errno::ENOEXEC);
     }
 
     let (handle, file_len) = open_executable(name)?;
     let window_len = (file_len as usize).min(ELF_HEADER_WINDOW);
-    let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| ExecError::NoMem)?;
+    let mut header: KVec<u8> = KVec::<u8>::zeroed(window_len).map_err(|_| Errno::ENOMEM)?;
     read_exact_at(&handle, 0, header.as_mut_slice())?;
     // Boxed: `load_image`'s frame is measured against the 2 KiB stack gate
     // and an open handle plus a header window does not fit in it.
@@ -794,7 +761,7 @@ fn stage_interpreter(
         header,
         file_len,
     })
-    .map_err(|_| ExecError::NoMem)
+    .map_err(|_| Errno::ENOMEM)
 }
 
 /// Place the staged interpreter and stream it in.
@@ -810,9 +777,9 @@ fn map_interpreter(
     staged: &StagedInterpreter,
     process: slopos_ostd::process::ProcessId,
     mapped: &[ValidatedSegment],
-) -> Result<InterpreterImage, ExecError> {
+) -> Result<InterpreterImage, Errno> {
     let mut segments =
-        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| ExecError::NoMem)?;
+        KVec::<ValidatedSegment>::zeroed(MAX_LOAD_SEGMENTS).map_err(|_| Errno::ENOMEM)?;
     let image = process_vm_map_interpreter(
         process,
         staged.header.as_slice(),
@@ -820,9 +787,9 @@ fn map_interpreter(
         SegmentBudget::FULL.less(mapped),
         segments.as_mut_slice(),
     )
-    .map_err(ExecError::from)?;
+    .map_err(Errno::from)?;
 
-    let vm_space = process_vm_get_vm_space(process).ok_or(ExecError::Fault)?;
+    let vm_space = process_vm_get_vm_space(process).ok_or(Errno::EFAULT)?;
     stream_segments(
         &staged.handle,
         &vm_space,
@@ -833,14 +800,14 @@ fn map_interpreter(
 
 /// Fill `buf` from `offset`. A short read fails the load rather than leaving
 /// the tail as whatever the buffer held.
-fn read_exact_at(handle: &VfsHandle, offset: u64, buf: &mut [u8]) -> Result<(), ExecError> {
+fn read_exact_at(handle: &VfsHandle, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
     let mut done = 0usize;
     while done < buf.len() {
         let read = handle
             .read(offset + done as u64, &mut buf[done..])
-            .map_err(|_| ExecError::IoError)?;
+            .map_err(|_| Errno::EIO)?;
         if read == 0 {
-            return Err(ExecError::NoExec);
+            return Err(Errno::ENOEXEC);
         }
         done += read;
     }
@@ -855,9 +822,8 @@ fn stream_segments(
     handle: &VfsHandle,
     vm_space: &KArc<VmSpace>,
     segments: &[ValidatedSegment],
-) -> Result<(), ExecError> {
-    let mut staging: KVec<u8> =
-        KVec::<u8>::zeroed(EXEC_READ_CHUNK).map_err(|_| ExecError::NoMem)?;
+) -> Result<(), Errno> {
+    let mut staging: KVec<u8> = KVec::<u8>::zeroed(EXEC_READ_CHUNK).map_err(|_| Errno::ENOMEM)?;
 
     for segment in segments.iter() {
         let mut done = 0u64;
@@ -866,7 +832,7 @@ fn stream_segments(
             let buf = &mut staging.as_mut_slice()[..chunk];
             read_exact_at(handle, segment.file_offset + done, buf)?;
             process_vm_write_user_bytes(vm_space, segment.original_vaddr + done, buf)
-                .map_err(|_| ExecError::Fault)?;
+                .map_err(|_| Errno::EFAULT)?;
             done += chunk as u64;
         }
     }
@@ -882,25 +848,25 @@ fn setup_user_stack(
     exec_info: &ElfExecInfo,
     execfn: &[u8],
     secure: bool,
-) -> Result<u64, ExecError> {
-    let vm_process = table.process().ok_or(ExecError::Fault)?;
+) -> Result<u64, Errno> {
+    let vm_process = table.process().ok_or(Errno::EFAULT)?;
     let stack_top_raw = process_vm_get_stack_top(vm_process);
     if stack_top_raw == 0 {
-        return Err(ExecError::Fault);
+        return Err(Errno::EFAULT);
     }
     // Resolved once, or every string and pointer below re-takes the slot lock.
-    let vm_space = process_vm_get_vm_space(vm_process).ok_or(ExecError::Fault)?;
+    let vm_space = process_vm_get_vm_space(vm_process).ok_or(Errno::EFAULT)?;
     let stack_top = stack_top_raw.wrapping_sub(8);
 
     let argc = argv.map(|a| a.len()).unwrap_or(0);
     let envc = envp.map(|e| e.len()).unwrap_or(0);
 
     if !exec_arg_bytes_fit(argv, envp) {
-        return Err(ExecError::TooManyArgs);
+        return Err(Errno::E2BIG);
     }
     let execfn = trim_nul_bytes(execfn);
     if execfn.len() > USER_PATH_MAX {
-        return Err(ExecError::NameTooLong);
+        return Err(Errno::ENAMETOOLONG);
     }
 
     let mut sp = stack_top;
@@ -914,7 +880,7 @@ fn setup_user_stack(
     let execfn_ptr = sp;
 
     let mut string_ptrs: KVec<u64> =
-        KVec::<u64>::with_capacity(argc + envc + 2).map_err(|_| ExecError::NoMem)?;
+        KVec::<u64>::with_capacity(argc + envc + 2).map_err(|_| Errno::ENOMEM)?;
 
     if let Some(args) = argv {
         for arg in args.iter() {
@@ -923,7 +889,7 @@ fn setup_user_stack(
             sp &= !0x7;
             write_to_user_stack(&vm_space, sp, arg)?;
             write_byte_to_user_stack(&vm_space, sp + arg.len() as u64, 0)?;
-            string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
+            string_ptrs.push(sp).map_err(|_| Errno::ENOMEM)?;
         }
     }
 
@@ -936,7 +902,7 @@ fn setup_user_stack(
             sp &= !0x7;
             write_to_user_stack(&vm_space, sp, env)?;
             write_byte_to_user_stack(&vm_space, sp + env.len() as u64, 0)?;
-            string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
+            string_ptrs.push(sp).map_err(|_| Errno::ENOMEM)?;
         }
     }
 
@@ -973,23 +939,15 @@ fn setup_user_stack(
     Ok(sp)
 }
 
-fn write_to_user_stack(vm_space: &KArc<VmSpace>, addr: u64, data: &[u8]) -> Result<(), ExecError> {
-    process_vm_write_user_bytes(vm_space, addr, data).map_err(|_| ExecError::Fault)
+fn write_to_user_stack(vm_space: &KArc<VmSpace>, addr: u64, data: &[u8]) -> Result<(), Errno> {
+    process_vm_write_user_bytes(vm_space, addr, data).map_err(|_| Errno::EFAULT)
 }
 
-fn write_byte_to_user_stack(
-    vm_space: &KArc<VmSpace>,
-    addr: u64,
-    byte: u8,
-) -> Result<(), ExecError> {
+fn write_byte_to_user_stack(vm_space: &KArc<VmSpace>, addr: u64, byte: u8) -> Result<(), Errno> {
     write_to_user_stack(vm_space, addr, &[byte])
 }
 
-fn write_u64_to_user_stack(
-    vm_space: &KArc<VmSpace>,
-    addr: u64,
-    value: u64,
-) -> Result<(), ExecError> {
+fn write_u64_to_user_stack(vm_space: &KArc<VmSpace>, addr: u64, value: u64) -> Result<(), Errno> {
     let bytes = value.to_le_bytes();
     write_to_user_stack(vm_space, addr, &bytes)
 }
@@ -1010,7 +968,7 @@ fn write_auxv(
     exec_info: &ElfExecInfo,
     execfn: u64,
     secure: bool,
-) -> Result<(), ExecError> {
+) -> Result<(), Errno> {
     let auxv: [(u64, u64); AUXV_PAIRS] = [
         (AT_PHDR, exec_info.phdr_addr),
         (AT_PHENT, exec_info.phent_size as u64),

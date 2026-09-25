@@ -353,12 +353,17 @@ pub fn test_ramfs_mount_pool_exhausts_and_recovers() -> TestResult {
     }
 }
 
-/// Delegates to a ramfs, but fails the `n`th lookup of [`FLAKY_NAME`] once
-/// armed with `n` — the transient refusal a killed task's device read answers
-/// with.
+/// Delegates to a ramfs, but fails the `n`th lookup of [`FLAKY_NAME`], or the
+/// `n`th stat, once armed with `n` — the transient refusal a killed task's
+/// device read answers with.
 struct FlakyLookup {
     inner: &'static RamFs,
     fail_in: AtomicU32,
+    fail_stat_in: AtomicU32,
+}
+
+fn countdown_hits(counter: &AtomicU32) -> bool {
+    counter.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)) == Ok(1)
 }
 
 const FLAKY_NAME: &[u8] = b"displaced";
@@ -371,17 +376,15 @@ impl FileSystem for FlakyLookup {
         self.inner.root_inode()
     }
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
-        if name == FLAKY_NAME
-            && self
-                .fail_in
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-                == Ok(1)
-        {
+        if name == FLAKY_NAME && countdown_hits(&self.fail_in) {
             return Err(VfsError::Interrupted);
         }
         self.inner.lookup(parent, name)
     }
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
+        if countdown_hits(&self.fail_stat_in) {
+            return Err(VfsError::Interrupted);
+        }
         self.inner.stat(inode)
     }
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
@@ -419,6 +422,7 @@ impl FileSystem for FlakyLookup {
 static FLAKY_FS: FlakyLookup = FlakyLookup {
     inner: &FIXTURE_FS[3],
     fail_in: AtomicU32::new(0),
+    fail_stat_in: AtomicU32::new(0),
 };
 
 const FLAKY_MP: &[u8] = b"/tmp/flaky_rename";
@@ -466,14 +470,16 @@ fn flaky_rename_body() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// `unlink` and `rmdir` refuse, and remove nothing, whichever of their
-/// lookups fails: an error is not an absent name.
+/// `unlink(2)` and `rmdir(2)` refuse, and remove nothing, whichever of their
+/// lookups or stats fails, and never answer `ENOENT` for it: an error is not
+/// an absent name, and not a last one.
 pub fn test_removal_fails_when_a_lookup_does() -> TestResult {
     if !ready() || !ensure_dir(FLAKY_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
     let outcome = flaky_removal_body();
     FLAKY_FS.fail_in.store(0, Ordering::Release);
+    FLAKY_FS.fail_stat_in.store(0, Ordering::Release);
     let _ = crate::vfs::vfs_unlink(FLAKY_TARGET);
     let _ = vfs_rmdir(FLAKY_TARGET);
     let _ = unmount(FLAKY_MP);
@@ -486,28 +492,38 @@ pub fn test_removal_fails_when_a_lookup_does() -> TestResult {
 
 #[inline(never)]
 fn flaky_removal_body() -> Result<(), &'static str> {
+    let unlink = || crate::fileio::file_unlink_at(FLAKY_TARGET, b"/");
+    let rmdir = || crate::fileio::file_rmdir_at(FLAKY_TARGET, b"/");
+    let file = || vfs_open(FLAKY_TARGET, true).map(|_| ());
     mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
-    vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the file")?;
-    refuses_at_every_lookup(|| crate::vfs::vfs_unlink(FLAKY_TARGET))?;
-
-    vfs_mkdir(FLAKY_TARGET).map_err(|_| "could not create the directory")?;
-    refuses_at_every_lookup(|| vfs_rmdir(FLAKY_TARGET))?;
+    for failing in [&FLAKY_FS.fail_in, &FLAKY_FS.fail_stat_in] {
+        file().map_err(|_| "could not create the file")?;
+        refuses_at_every_failure(failing, unlink)?;
+        vfs_mkdir(FLAKY_TARGET).map_err(|_| "could not create the directory")?;
+        refuses_at_every_failure(failing, rmdir)?;
+    }
     Ok(())
 }
 
-fn refuses_at_every_lookup(remove: impl Fn() -> VfsResult<()>) -> Result<(), &'static str> {
-    for n in 1..=8 {
-        FLAKY_FS.fail_in.store(n, Ordering::Release);
-        let removed = remove();
-        if FLAKY_FS.fail_in.swap(0, Ordering::AcqRel) != 0 {
-            return match (n, removed) {
-                (1, _) => Err("the removal never looked the name up"),
-                (_, Ok(())) => Ok(()),
-                (_, Err(_)) => Err("a removal with every lookup answered failed"),
+fn refuses_at_every_failure(
+    failing: &AtomicU32,
+    remove: impl Fn() -> i32,
+) -> Result<(), &'static str> {
+    for n in 1..=16 {
+        failing.store(n, Ordering::Release);
+        let rc = remove();
+        if failing.swap(0, Ordering::AcqRel) != 0 {
+            return match (n, rc) {
+                (1, _) => Err("the removal never failed where it was told to"),
+                (_, 0) => Ok(()),
+                _ => Err("a removal with every call answered failed"),
             };
         }
-        if removed.is_ok() {
-            return Err("a removal went ahead past a failed lookup");
+        if rc == 0 {
+            return Err("a removal went ahead past a failed call");
+        }
+        if rc == slopos_abi::Errno::ENOENT.raw() {
+            return Err("a failed call was reported as an absent name");
         }
         if vfs_stat(FLAKY_TARGET).is_err() {
             return Err("a refused removal took the name");

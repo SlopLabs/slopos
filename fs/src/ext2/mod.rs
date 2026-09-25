@@ -70,7 +70,7 @@ pub enum Ext2Error {
     /// A rename would splice a directory into its own subtree, detaching it
     /// and everything under it from the root.
     InvalidPath,
-    /// The requester was killed while it waited to hand the device a request.
+    /// The requester was killed before the device was handed its request.
     Interrupted,
 }
 
@@ -2039,7 +2039,7 @@ impl<'a> Ext2Fs<'a> {
     /// open left its blocks reachable from nowhere but this list. Bounded by
     /// the inode count, stopping at the first member that no longer looks like
     /// an orphan, so a damaged list leaks space rather than freeing a live
-    /// file.
+    /// file. A member it cannot read leaves the list for the next mount.
     #[inline(never)]
     pub fn drain_orphans(&mut self) -> Result<u32, Ext2Error> {
         if self.read_only || self.superblock.last_orphan == 0 {
@@ -2049,10 +2049,10 @@ impl<'a> Ext2Fs<'a> {
         let limit = self.geom.inodes_count();
         while self.superblock.last_orphan != 0 && freed <= limit {
             let ino = InodeNum(self.superblock.last_orphan);
-            let Ok(inode) = self.read_inode_num(ino) else {
-                // An unreadable head cannot be walked past, and guessing would
-                // free whatever the rest of the chain happens to name.
-                break;
+            let inode = match self.read_inode_num(ino) {
+                Ok(inode) => inode,
+                Err(Ext2Error::InvalidInode) => break,
+                Err(e) => return Err(e),
             };
             if inode.links_count != 0 || inode.mode == 0 {
                 break;
