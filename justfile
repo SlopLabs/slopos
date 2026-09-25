@@ -334,8 +334,7 @@ boot-persist:
     # No `verity=require`: this disk's v2 trailer keeps it writable, and the
     # knob is `just boot`'s assertion about the shipped image, not this one.
     # `roulette=skip` as `boot-fast` does.
-    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
-    just _fs-image-persist
+    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests _fs-image-persist
     QEMU_MEM="${QEMU_MEM:-{{persist_qemu_mem}}}" \
         just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
@@ -351,9 +350,7 @@ boot-persist-reset:
 boot-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    BOOT_CMDLINE="tests=off roulette=skip {{dev_disk_mount}}" just _iso-notests
-    just _fs-image-persist
-    just _fs-image-devdisk
+    BOOT_CMDLINE="tests=off roulette=skip {{dev_disk_mount}}" just _iso-notests _fs-image-persist _fs-image-devdisk
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 

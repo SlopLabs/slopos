@@ -50,7 +50,6 @@ download_firmware() {
     local have
     have="$(sha256_of "${dest}")"
     if [ "${have}" = "${want}" ]; then
-      echo "OVMF artifact already present: ${dest}" >&2
       return
     fi
     # ci.yml caches third_party/ovmf, so without this a stale copy is served
@@ -87,5 +86,3 @@ fi
 
 download_firmware "${OVMF_BASE_URL}/RELEASEX64_OVMF_CODE.fd" "${OVMF_CODE}" "${OVMF_CODE_SHA256}"
 download_firmware "${OVMF_BASE_URL}/RELEASEX64_OVMF_VARS.fd" "${OVMF_VARS}" "${OVMF_VARS_SHA256}"
-
-echo "OVMF firmware ready in ${OVMF_DIR}" >&2

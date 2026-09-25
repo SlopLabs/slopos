@@ -93,12 +93,12 @@ rm -f "$CRT0_OBJ"
 # not enough to get it back. Cleaning just this package forces the one
 # compilation that emits it (~1 s; `core` stays cached).
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-$CARGO +slopos clean \
+$CARGO +slopos clean --quiet \
     --package slopos-crt0 \
     --release \
     -Zunstable-options \
     -Zjson-target-spec \
-    --target "$USERLAND_TARGET" >/dev/null
+    --target "$USERLAND_TARGET"
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="$USERLAND_RUSTFLAGS" \
 $CARGO +slopos rustc --locked \

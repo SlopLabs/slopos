@@ -83,7 +83,7 @@ cp "$REPO_ROOT/NOTICE.md" "$ISO_ROOT/boot/NOTICE.md"
 ISO_DIR="$(dirname "$OUTPUT")"
 mkdir -p "$ISO_DIR"
 
-xorriso -as mkisofs \
+xorriso -as mkisofs -quiet \
     -R -r -J \
     -V 'SLOPOS' \
     -b boot/limine-bios-cd.bin \

@@ -85,6 +85,8 @@ KALLSYMS="$CARGO_TARGET_DIR/release/kallsyms"
 
 # trim-paths so no absolute path of this checkout or its sysroot reaches the
 # image: two checkouts, or the host and the guest, then build the same bytes.
+# The future-incompat notice is core's stdarch enabling `sse` on this soft-float
+# target (rust#117938): upstream's to fix, and repeated on every build.
 build_kernel_once() {
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
         SLOPOS_KSYMS_RS="$KSYMS_RS" \
@@ -96,6 +98,7 @@ build_kernel_once() {
         -Ztrim-paths \
         --config 'profile.dev.trim-paths="all"' \
         --config 'profile.release.trim-paths="all"' \
+        --config 'future-incompat-report.frequency="never"' \
         --target "$RUST_TARGET" \
         --package kernel \
         --bin kernel \

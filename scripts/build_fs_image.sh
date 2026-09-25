@@ -91,6 +91,11 @@ if ! command -v debugfs >/dev/null 2>&1; then
     exit 1
 fi
 
+# debugfs prints its version banner on stderr on every run; drop only that line.
+debugfs() {
+    { command debugfs "$@" 2>&1 1>&3 3>&- | sed '/^debugfs [0-9][0-9.]* (/d' >&2; } 3>&1
+}
+
 IMAGE_DIR="$(dirname "$IMAGE_PATH")"
 mkdir -p "$IMAGE_DIR"
 
