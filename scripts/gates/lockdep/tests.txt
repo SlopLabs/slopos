@@ -277,9 +277,20 @@ require-phase post-userland-tests
 #               opens a file under `/dev/shm` before the userland tests do.
 #               Every banded pool stayed inside its band (kernel edges 175,
 #               chains 397; userland edges 226, chains 458).
+#   2026-09-25  kernel 208 -> 212, userland 216 -> 220: the guest kernel
+#               build's storage and fault fixes. Boot is unchanged at 71.
+#               Three new declaration sites — `VirtioBlk.abandon_waiters`
+#               (drivers/src/virtio_blk.rs, where writes wait behind one a
+#               timeout abandoned), `POPULATE_NAP` (mm/src/page_fault.rs,
+#               where a populate on a kernel copy's behalf naps instead of
+#               failing) and the test-only `test.wq_killed` — and the first
+#               acquire of `RAMFS_MOUNT_TEST_3`, the fixture instance under
+#               the flaky-lookup filesystem. 212/220 on both full runs of the
+#               change; every banded pool stayed inside its band (kernel edges
+#               182, chains 410; userland edges 225, chains 463).
 boot	classes	72
-post-kernel-tests	classes	208
-post-userland-tests	classes	216
+post-kernel-tests	classes	212
+post-userland-tests	classes	220
 
 # Boot edges and chains — exact, because boot has no test scheduling in it.
 # Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
