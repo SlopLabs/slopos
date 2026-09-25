@@ -36,17 +36,13 @@ struct Registration {
 static mut REGISTRATIONS: [Option<Registration>; CXA_MAX] = [None; CXA_MAX];
 static mut NEXT_SEQ: u64 = 0;
 
-/// A spin lock and not a `pthread_mutex_t`, because this one is held across a
-/// `fork`. A mutex the child inherits locked parks it on a futex nobody will
-/// ever wake, in `exit`, where the parent is already waiting for it; the
-/// bounded scans below are short enough that spinning costs nothing and
-/// [`reset_after_fork`] can put the word back.
+/// A spin lock: the scans under it are bounded and short.
 static LOCK: AtomicBool = AtomicBool::new(false);
 
-struct Guard;
+pub(crate) struct Guard;
 
 impl Guard {
-    fn take() -> Self {
+    pub(crate) fn take() -> Self {
         while LOCK
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
@@ -61,13 +57,6 @@ impl Drop for Guard {
     fn drop(&mut self) {
         LOCK.store(false, Ordering::Release);
     }
-}
-
-/// Release the lock in a child that inherited it held. A forked child may only
-/// call async-signal-safe code until it execs, and `exit` is not that, but it
-/// is what a Rust child does when `exec` fails — and it takes this lock.
-pub(crate) fn reset_after_fork() {
-    LOCK.store(false, Ordering::Release);
 }
 
 fn slots() -> *mut Option<Registration> {

@@ -502,17 +502,17 @@ impl Pal for Sys {
     }
 
     fn fork() -> Result<i32, Errno> {
-        // Held across the fork, so the child's copy is never left locked by a
-        // thread the child does not have. As under glibc, a fork from a signal
-        // handler that interrupted malloc therefore deadlocks.
+        // Outermost first, as libc nests them: the child then inherits each
+        // lock held by its own thread, not one it lacks. A fork from a signal
+        // handler that interrupted a holder deadlocks, as under glibc.
+        let loader = crate::ld_so::lock();
+        let tls = crate::thread::tls::lock_layout();
+        let atexit = crate::cxa::Guard::take();
+        let streams = crate::stdio::registry::ListGuard::take();
         let allocator = crate::mem::dlmalloc::ALLOCATOR.lock();
         let ret = unsafe { syscall0(SYSCALL_FORK) };
-        drop(allocator);
-        let val = to_result(ret)?;
-        if val == 0 {
-            crate::cxa::reset_after_fork();
-        }
-        Ok(val as i32)
+        drop((allocator, streams, atexit, tls, loader));
+        Ok(to_result(ret)? as i32)
     }
 
     fn exec(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> Result<(), Errno> {

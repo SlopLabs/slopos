@@ -36,16 +36,23 @@ const BEST_EFFORT_ATTEMPTS: u32 = 16;
 static mut OPEN_STREAMS: *mut FILE = ptr::null_mut();
 static mut LIST_LOCK: pthread_mutex_t = PTHREAD_MUTEX_INITIALIZER;
 
-fn list_lock() {
-    // SAFETY: `LIST_LOCK` is a process-wide futex word with static lifetime.
-    unsafe {
-        pthread_mutex_lock(&raw mut LIST_LOCK);
+pub(crate) struct ListGuard;
+
+impl ListGuard {
+    pub(crate) fn take() -> Self {
+        // SAFETY: `LIST_LOCK` is a process-wide futex word with static lifetime.
+        unsafe {
+            pthread_mutex_lock(&raw mut LIST_LOCK);
+        }
+        Self
     }
 }
 
-fn list_unlock() {
-    unsafe {
-        pthread_mutex_unlock(&raw mut LIST_LOCK);
+impl Drop for ListGuard {
+    fn drop(&mut self) {
+        unsafe {
+            pthread_mutex_unlock(&raw mut LIST_LOCK);
+        }
     }
 }
 
@@ -58,14 +65,13 @@ pub unsafe fn link(stream: *mut FILE) {
     if stream.is_null() {
         return;
     }
-    list_lock();
+    let _list = ListGuard::take();
     let f = &mut *stream;
     if f.flags & FILE_FLAG_LINKED == 0 {
         f.flags |= FILE_FLAG_LINKED;
         f.next = OPEN_STREAMS;
         OPEN_STREAMS = stream;
     }
-    list_unlock();
 }
 
 /// # Safety
@@ -74,7 +80,7 @@ pub unsafe fn unlink(stream: *mut FILE) {
     if stream.is_null() {
         return;
     }
-    list_lock();
+    let _list = ListGuard::take();
     let mut cursor = &raw mut OPEN_STREAMS;
     while !(*cursor).is_null() {
         let node = *cursor;
@@ -86,7 +92,6 @@ pub unsafe fn unlink(stream: *mut FILE) {
         }
         cursor = &raw mut (*node).next;
     }
-    list_unlock();
 }
 
 /// Take `stream`'s lock according to `mode`. Returns `false` only when a
@@ -115,7 +120,7 @@ fn acquire(stream: &FILE, mode: WalkMode) -> bool {
 /// [`EOF`] if any stream reported a write error.
 pub fn flush_all(mode: WalkMode) -> i32 {
     let mut ret = 0i32;
-    list_lock();
+    let _list = ListGuard::take();
     // SAFETY: the list lock is held, so every reachable node is live — an
     // `fclose` racing this walk blocks on the same lock before it frees.
     unsafe {
@@ -134,6 +139,5 @@ pub fn flush_all(mode: WalkMode) -> i32 {
             node = next;
         }
     }
-    list_unlock();
     ret
 }

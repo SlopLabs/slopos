@@ -37,7 +37,7 @@ static mut TLS_READY: bool = false;
 /// second acquire of a non-reentrant flag is a hang.
 static LAYOUT_LOCK: AtomicBool = AtomicBool::new(false);
 
-struct LayoutGuard;
+pub(crate) struct LayoutGuard;
 
 impl Drop for LayoutGuard {
     fn drop(&mut self) {
@@ -45,7 +45,7 @@ impl Drop for LayoutGuard {
     }
 }
 
-fn lock_layout() -> LayoutGuard {
+pub(crate) fn lock_layout() -> LayoutGuard {
     while LAYOUT_LOCK
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()

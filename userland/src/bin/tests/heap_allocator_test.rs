@@ -266,25 +266,88 @@ fn test_direct_registry() -> bool {
 
 /// A child forked while another thread is inside the allocator can allocate.
 fn test_fork_while_another_thread_allocates() -> bool {
+    fork_during(
+        |n| {
+            let v: Vec<u8> = Vec::with_capacity(64 + n % 1024);
+            core::hint::black_box(&v);
+        },
+        || {
+            let v = vec![7u8; 4096];
+            v[4095] == 7
+        },
+    )
+}
+
+/// A child forked while another thread is inside the loader can walk the
+/// loaded objects, as its unwinder does.
+fn test_fork_while_another_thread_holds_the_loader() -> bool {
+    unsafe extern "C" fn visit(
+        _: *mut slopos_slibc::ld_so::api::DlPhdrInfo,
+        _: usize,
+        _: *mut core::ffi::c_void,
+    ) -> i32 {
+        0
+    }
+    fork_during(
+        |_| {
+            let loader = slopos_slibc::ld_so::lock();
+            spin(2000);
+            drop(loader);
+            spin(200);
+        },
+        || unsafe {
+            slopos_slibc::ld_so::api::dl_iterate_phdr(Some(visit), core::ptr::null_mut()) == 0
+        },
+    )
+}
+
+/// A child forked while another thread is starting threads can start one.
+fn test_fork_while_another_thread_starts_threads() -> bool {
+    fork_during(
+        |_| {
+            let _ = std::thread::spawn(|| {}).join();
+        },
+        || std::thread::spawn(|| {}).join().is_ok(),
+    )
+}
+
+/// A child forked while another thread flushes every stream can flush them.
+fn test_fork_while_another_thread_flushes_streams() -> bool {
+    fork_during(
+        |_| unsafe {
+            slopos_slibc::stdio::file::fflush(core::ptr::null_mut());
+        },
+        || unsafe { slopos_slibc::stdio::file::fflush(core::ptr::null_mut()) == 0 },
+    )
+}
+
+fn spin(iterations: u32) {
+    for _ in 0..iterations {
+        core::hint::spin_loop();
+    }
+}
+
+/// Fork repeatedly while another thread runs `churn` in a loop, and require
+/// every child to pass `child`.
+fn fork_during(churn: fn(usize), child: fn() -> bool) -> bool {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const FORKS: usize = 64;
     let stop = Arc::new(AtomicBool::new(false));
-    let churn = {
+    let churner = {
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut n = 0usize;
             while !stop.load(Ordering::Relaxed) {
-                let v: Vec<u8> = Vec::with_capacity(64 + n % 1024);
-                core::hint::black_box(&v);
+                churn(n);
                 n = n.wrapping_add(1);
             }
         })
     };
-    let ok = (0..FORKS).all(|_| fork_and_allocate());
+    let ok = (0..FORKS).all(|_| fork_and_run(child));
     stop.store(true, Ordering::Relaxed);
-    churn.join().is_ok() && ok
+    churner.join().is_ok() && ok
 }
 
 /// `free` leaves errno alone however contended the allocator is: the lock's
@@ -320,16 +383,15 @@ fn test_contended_free_preserves_errno() -> bool {
     churners.into_iter().all(|h| h.join().is_ok()) && kept
 }
 
-/// Fork a child that allocates and exits, and reap it within a deadline; a
-/// child stuck on an inherited allocator lock is killed and counts as failure.
-fn fork_and_allocate() -> bool {
+/// Fork a child that runs `child` and exits, and reap it within a deadline; a
+/// child stuck on a lock it inherited held is killed and counts as failure.
+fn fork_and_run(child: fn() -> bool) -> bool {
     use slopos_slibc::process::wait::WNOHANG;
     use slopos_slibc::process::{WEXITSTATUS, WIFEXITED, shim, waitpid};
 
     let pid = shim::fork();
     if pid == 0 {
-        let v = vec![7u8; 4096];
-        shim::_exit(i32::from(v[4095] != 7));
+        shim::_exit(i32::from(!child()));
     }
     if pid < 0 {
         return false;
@@ -373,6 +435,18 @@ fn main() {
         (
             "fork_while_another_thread_allocates",
             test_fork_while_another_thread_allocates,
+        ),
+        (
+            "fork_while_another_thread_holds_the_loader",
+            test_fork_while_another_thread_holds_the_loader,
+        ),
+        (
+            "fork_while_another_thread_starts_threads",
+            test_fork_while_another_thread_starts_threads,
+        ),
+        (
+            "fork_while_another_thread_flushes_streams",
+            test_fork_while_another_thread_flushes_streams,
         ),
         (
             "contended_free_preserves_errno",
