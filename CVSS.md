@@ -126,7 +126,7 @@ taken dropped whole, FIN_WAIT_1 held for good by a peer that only sent data,
 and TIME_WAIT, LAST_ACK and keepalive each ending connections a reader or an
 answering peer still needed; each has a test in `slopos_net::tests`. Below the
 bar (confidence about 60): the CSPRNG is seeded from four TSC reads on a CPU
-with neither RDRAND nor RDSEED, so a ClientHello's random lets an observer
+without RDRAND, so a ClientHello's random lets an observer
 search the seed and with it the key share. Every x86-64 CPU of the last decade
 and QEMU's `-cpu max` have RDRAND, and the plan records it as a limit.
 

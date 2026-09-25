@@ -502,7 +502,8 @@ struct VirtioBlkInner {
     /// that chain instead of every in-flight requester.
     slot_waiters: [WaitQueue; NUM_REQUEST_SLOTS],
     free_waiters: WaitQueue,
-    /// Writes and flushes waiting for the device to return an abandoned write.
+    /// Requests that could reorder the medium, waiting for the device to
+    /// return an abandoned write.
     abandon_waiters: WaitQueue,
     /// Set with the state lock held whenever a write is quarantined, cleared
     /// under it once none is owed, so an unfenced request reads one atomic.
@@ -672,8 +673,8 @@ impl VirtioBlkInner {
             .ok_or(BlkError::Busy)
     }
 
-    /// Hold a write or flush behind a write a timeout abandoned: the device
-    /// may still perform it, after anything sent in the meantime.
+    /// Hold a request that could reorder the medium behind a write a timeout
+    /// abandoned: the device may still perform it, after anything sent since.
     fn await_abandoned_writes(&self) -> Result<(), BlkError> {
         if !self.write_abandoned.load(Ordering::Acquire) {
             return Ok(());
