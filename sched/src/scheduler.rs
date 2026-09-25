@@ -1409,8 +1409,10 @@ pub(crate) fn drain_deferred_task_reclaim() {
 }
 
 fn schedule_internal() {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    // Masked first: a caller with preemption enabled can be switched out and
+    // resumed on another CPU between the two reads otherwise.
     let irq_flags = cpu::save_flags_cli();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
         cpu::restore_flags(irq_flags);
