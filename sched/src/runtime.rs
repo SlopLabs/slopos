@@ -480,6 +480,7 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         // Sited where this CPU is fully idle, so the registry walk costs idle
         // time only.
         crate::scheduler::rescue_stranded_ready_tasks();
+        crate::profile::sample_park_sites();
 
         // Before the bottom half, and unconditionally: reaching here proves
         // this CPU holds no read-side section, and the bottom half can loop for
@@ -497,7 +498,9 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         crate::scheduler::arm_tickless_idle_if_due();
 
         slopos_ostd::sync::rcu_note_cpu_idle_enter();
+        crate::profile::halt_begin(cpu_id);
         slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
+        crate::profile::halt_end(cpu_id);
         slopos_ostd::sync::rcu_note_cpu_idle_exit();
     }
 }

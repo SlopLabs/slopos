@@ -712,10 +712,13 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
     // chain, and an IRQ nesting under it stacks two worst cases on one kernel
     // stack. Only the arm that reaches the device needs a window, and the plan
     // phase has unwound by then.
+    let began = slopos_sched::profile::stamp();
     let mut outcome =
         slopos_mm::page_fault::try_resolve_user_fault(fault_addr, error_code, vm_handle, tid);
 
+    let mut kind = slopos_sched::profile::FaultKind::Inline;
     if let slopos_mm::page_fault::FaultOutcome::NeedsIo(plan) = outcome {
+        kind = slopos_sched::profile::FaultKind::File;
         // Nesting left first, so a task blocking here is not in-interrupt.
         irq_nest.leave();
         cpu::enable_interrupts();
@@ -723,6 +726,7 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
         cpu::disable_interrupts();
         irq_nest.reenter();
     }
+    slopos_sched::profile::note_fault(kind, began);
 
     match outcome {
         slopos_mm::page_fault::FaultOutcome::Resolved => {}

@@ -88,7 +88,9 @@ pub fn syscall_handle(user_ctx: &UserContext) {
                 return;
             }
             let ctx = SyscallContext::from_current(&current, user_ctx);
+            let began = slopos_sched::profile::stamp();
             let result = func(&ctx);
+            slopos_sched::profile::note_syscall(sysno, began);
             ctx.write_result(result);
 
             // Must precede `deliver_pending_signal` so the signal frame

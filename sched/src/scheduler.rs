@@ -1189,6 +1189,9 @@ fn abandon_claim(cpu_id: usize, dispatch_ref: TaskRef) {
 }
 
 pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool {
+    // A wake IRQ's trap exit dispatches from here while the halt it
+    // interrupted has not returned; the halt ends now, not when idle resumes.
+    crate::profile::halt_end(cpu_id);
     let Some(dispatch_ref) = claim_next_task(cpu_id, true) else {
         return false;
     };

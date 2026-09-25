@@ -550,6 +550,16 @@ fn apply_root_option(cmdline: &str) {
     }
 }
 
+/// `prof=on`: sample where the machine's time goes, reported at the end of
+/// a test run.
+#[inline(never)]
+fn apply_prof_option(cmdline: &str) {
+    if cmdline.split_whitespace().any(|t| t == "prof=on") {
+        slopos_sched::profile::enable();
+        boot_info(b"Boot option: prof=on\0");
+    }
+}
+
 /// Out of line so the boot-config step's frame stays under the 2 KiB gate.
 #[inline(never)]
 fn apply_mem_commit_option(cmdline: &str) {
@@ -744,6 +754,8 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     }
 
     apply_root_option(cmdline);
+
+    apply_prof_option(cmdline);
 
     if cmdline.split_whitespace().any(|t| t == "verity=require") {
         crate::boot_services::set_verity_required(true);

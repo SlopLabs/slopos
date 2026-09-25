@@ -603,6 +603,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `watchdog.miss_threshold` | integer | consecutive heartbeat samples a CPU may miss before the watchdog reports it; default 100, `0` refused |
 | `watchdog.panic` | `on` / `off` | whether a stall five thresholds long is fatal; default on bare metal only, since under a hypervisor a descheduled vCPU looks the same |
 | `mem.commit` | integer | percent of usable frames the commit ledger may promise to private mappings; default 100, capped at 400, `0` measures without a ceiling |
+| `prof` | `on` | sample where the time goes — per-CPU user/kernel/idle ticks and halted time, the hottest kernel RIPs, user ticks by task name, and the kernel stacks blocked user tasks are parked on whenever a CPU idles — printed as `PROF[post-userland-tests]:` lines; off by default. `TEST_CMDLINE_EXTRA=prof=on just test-selfhost` profiles the guest's build |
 
 `lockdep=warn` reports each distinct finding once (deduped per class pair) and
 keeps booting, so one boot enumerates every ordering finding in the tree instead

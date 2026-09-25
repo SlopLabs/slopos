@@ -55,6 +55,12 @@ pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
     slopos_ostd::watchdog::tick();
     slopos_mm::mmu::quiesce::tick();
     slopos_ostd::kconsole::poll_from_timer();
+    if crate::profile::enabled() {
+        let anchor = ();
+        if let Some(frame_ref) = InterruptFrame::from_ptr(&anchor, frame) {
+            crate::profile::note_tick(frame_ref.rip, frame_ref.cs);
+        }
+    }
     save_preempt_context(frame);
     scheduler_timer_tick();
 }
