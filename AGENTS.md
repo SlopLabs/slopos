@@ -42,7 +42,7 @@ six of them behind):
 ```sh
 ch="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
 rustup component remove rust-src --toolchain "$ch" && rustup component add rust-src --toolchain "$ch"
-find "$(rustc +"$ch" --print sysroot)/lib/rustlib/src" -name '*slopos*' -delete
+find "$(rustc +"$ch" --print sysroot)/lib/rustlib/src" -name '*slopos*' -prune -exec rm -rf -- {} +
 ```
 
 **The compiler itself is forked too, and it is a different tree.** A JSON

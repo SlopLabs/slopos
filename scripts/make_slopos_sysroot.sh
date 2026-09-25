@@ -141,7 +141,7 @@ $(printf '%s\n' "$POLLUTED" | sed 's/^/         /')
        a remove/add untouched (measured, not assumed).
          rustup component remove rust-src --toolchain $CHANNEL && \\
            rustup component add rust-src --toolchain $CHANNEL
-         find '$RUSTUP_SRC' -name '*slopos*' -delete
+         find '$RUSTUP_SRC' -name '*slopos*' -prune -exec rm -rf -- {} +
        then re-run this script."
 fi
 
