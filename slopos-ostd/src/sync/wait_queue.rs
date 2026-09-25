@@ -109,7 +109,7 @@ impl AbortMask {
 const TIMEOUT_CHUNK_MS: u64 = 500;
 
 /// The longest one uninterruptible wait holds off a kill.
-pub const UNINTERRUPTIBLE_MAX_MS: u64 = 10_000;
+pub const UNINTERRUPTIBLE_MAX_MS: u64 = 5_000;
 
 /// Hooks the wait queue uses to talk to the kernel's task runtime.
 ///

@@ -82,9 +82,10 @@ pub const fn sig_bit(signum: u8) -> SigSet {
 pub const SIGNAL_MASK: SigSet = (1u64 << NSIG) - 1;
 
 /// Kernel-private: the task is marked for death and every blocking primitive
-/// must abort rather than park. Outside [`SIGNAL_MASK`] deliberately, so it is
-/// invisible to `kill`, `sigprocmask`, `sigaction`, `signalfd` and delivery, and
-/// unreachable from userland — [`sig_bit`] cannot produce it.
+/// but the bounded uninterruptible tier aborts rather than parks. Outside
+/// [`SIGNAL_MASK`] deliberately, so it is invisible to `kill`, `sigprocmask`,
+/// `sigaction`, `signalfd` and delivery, and unreachable from userland —
+/// [`sig_bit`] cannot produce it.
 pub const SIGNAL_KILLED: SigSet = 1u64 << NSIG;
 
 const _: () = assert!(SIGNAL_KILLED & SIGNAL_MASK == 0);

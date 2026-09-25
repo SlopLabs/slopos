@@ -3194,6 +3194,57 @@ pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
     TestResult::Pass
 }
 
+/// A failed spawn file action's errno reaches the spawner unchanged.
+pub fn test_spawn_fd_action_reports_its_own_errno() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+    let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
+    let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
+    let (Some(parent), Some(child)) = (
+        p1_guard.process().as_deref().and_then(FdTable::of),
+        p2_guard.process().as_deref().and_then(FdTable::of),
+    ) else {
+        return fail!("a task has no descriptor table");
+    };
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(parent, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let past_the_table = [FdAction::Clone {
+        src_fd: write_fd,
+        target_fd: i32::MAX,
+    }];
+    let past = apply_fd_actions(parent, child, &past_the_table);
+    fileio_destroy_table_for_process(child.handle().expect("a user process"));
+    let into_nothing = [FdAction::Clone {
+        src_fd: write_fd,
+        target_fd: 1,
+    }];
+    let gone = apply_fd_actions(parent, child, &into_nothing);
+
+    let _ = file_close_fd(parent, read_fd);
+    let _ = file_close_fd(parent, write_fd);
+    task_terminate(t1);
+    task_terminate(t2);
+    assert_eq_test!(
+        past,
+        Err(slopos_abi::Errno::EBADF),
+        "a target past the table"
+    );
+    assert_eq_test!(gone, Err(slopos_abi::Errno::ESRCH), "a child with no table");
+    TestResult::Pass
+}
+
 pub fn test_spawn_transfer_fd_moves() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -4664,6 +4715,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_spawn_clone_fd_shares_backing,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_spawn_fd_action_reports_its_own_errno,
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_spawn_transfer_fd_moves, suite = syscall_valid);
@@ -9596,6 +9651,10 @@ pub fn test_user_copy_retries_a_copy_that_faulted_midway() -> TestResult {
     };
     slopos_mm::user_copy::fault_next_copy_for_test(table.id());
     let wrote = user_copy_out(table, addr, &0x5EED_u64);
+    assert_test!(
+        slopos_mm::user_copy::copy_fault_taken_for_test(),
+        "the copy never faulted"
+    );
     assert_test!(wrote, "a copy that faulted once was not retried");
     assert_eq_test!(
         user_copy_in::<u64>(table, addr),

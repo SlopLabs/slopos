@@ -114,6 +114,15 @@ pub fn fault_next_copy_for_test(pid: u32) {
     FAULT_NEXT_COPY.store(pid, core::sync::atomic::Ordering::Release);
 }
 
+/// Disarm [`fault_next_copy_for_test`], answering whether a copy took it.
+#[cfg(feature = "test-hooks")]
+pub fn copy_fault_taken_for_test() -> bool {
+    FAULT_NEXT_COPY.swap(
+        slopos_abi::task::INVALID_PROCESS_ID,
+        core::sync::atomic::Ordering::AcqRel,
+    ) == slopos_abi::task::INVALID_PROCESS_ID
+}
+
 #[derive(Clone, Copy)]
 enum Access {
     Read,
@@ -157,18 +166,14 @@ fn copy_then_populate<T>(
         let space = current_vm_space()?;
         let first = copy(&space);
         #[cfg(feature = "test-hooks")]
-        #[cfg(feature = "test-hooks")]
-        let faulted = FAULT_NEXT_COPY.compare_exchange(
+        let first = match FAULT_NEXT_COPY.compare_exchange(
             current_process_id(),
             slopos_abi::task::INVALID_PROCESS_ID,
             core::sync::atomic::Ordering::AcqRel,
             core::sync::atomic::Ordering::Acquire,
-        );
-        #[cfg(feature = "test-hooks")]
-        let first = if faulted.is_ok() {
-            Err(UserPtrError::CopyFailed)
-        } else {
-            first
+        ) {
+            Ok(_) => Err(UserPtrError::CopyFailed),
+            Err(_) => first,
         };
         match first {
             Err(UserPtrError::NotMapped | UserPtrError::CopyFailed) => {}

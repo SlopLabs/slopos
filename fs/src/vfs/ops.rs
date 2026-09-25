@@ -376,7 +376,8 @@ fn detach_unless_linked(
 
 /// A removal racing for the other name may have taken the last one from an
 /// inode whose set was left keyed. Forget only: once no name holds the inode,
-/// its blocks are not its own to flush into for long.
+/// its blocks are not its own to flush into for long. A stat that fails counts
+/// as freed, since a set left keyed on a freed number attaches to its reuse.
 fn forget_if_freed(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId, linked: bool) {
     if linked && !fs.stat(inode).is_ok_and(|stat| stat.nlink > 0) {
         crate::filemap::forget_inode(fs, inode);

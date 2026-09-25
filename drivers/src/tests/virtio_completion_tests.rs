@@ -746,6 +746,8 @@ pub fn test_virtio_blk_killed_write_is_waited_out() -> TestResult {
 const FENCED_SECTOR: u64 = 7176;
 const FENCED_OLDER: [u8; 512] = [0x3C; 512];
 const FENCED_NEWER: [u8; 512] = [0xC3; 512];
+/// The writer's span: inside one sector, so the write is a read-modify-write.
+const FENCED_SPAN: core::ops::Range<usize> = 128..384;
 /// Long enough for an unfenced write to have landed.
 const FENCE_HOLD_MS: u32 = 100;
 
@@ -780,7 +782,8 @@ fn fenced_writer() {
     {
         Some(token) => {
             FENCED_STARTED.store(true, Ordering::Release);
-            match token.write_at(FENCED_SECTOR * 512, &FENCED_NEWER) {
+            let offset = FENCED_SECTOR * 512 + FENCED_SPAN.start as u64;
+            match token.write_at(offset, &FENCED_NEWER[FENCED_SPAN]) {
                 Ok(()) if FENCE_RETURNED.load(Ordering::Acquire) => FENCED_AFTER_RETURN,
                 Ok(()) => FENCED_BEFORE_RETURN,
                 Err(BlockDeviceError::Interrupted) => FENCED_INTERRUPTED,
@@ -806,8 +809,8 @@ fn fenced_write(kill: bool) -> Result<u8, &'static str> {
     let started = writer.is_ok()
         && crate::virtio::hpet_poll_wait(&|| FENCED_STARTED.load(Ordering::Acquire), 10_000);
     crate::virtio::hpet_poll_wait(&|| false, FENCE_HOLD_MS);
-    let mut readback = [0u8; 512];
-    let read = virtio_blk::blk_read(handle, FENCED_SECTOR * 512, &mut readback);
+    let mut readback = [0u8; 100];
+    let read = virtio_blk::blk_read(handle, FENCED_SECTOR * 512 + 1, &mut readback);
     if kill && let Ok(id) = writer {
         kill_task(id.as_u32());
     }
@@ -829,8 +832,9 @@ fn fenced_write(kill: bool) -> Result<u8, &'static str> {
 }
 
 /// A write a timeout abandoned may still land, so a later write waits until
-/// the device has returned it, a killed one gives up without sending, and a
-/// read, which cannot reorder the medium, does not wait at all.
+/// the device has returned it — a sub-sector one before it reads the sector it
+/// will write back — a killed one gives up without sending, and a read, which
+/// cannot reorder the medium, does not wait at all.
 pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -846,6 +850,7 @@ pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
         );
     }
 
+    let _ = virtio_blk::blk_take_rmw_read_past_fence();
     match fenced_write(true) {
         Ok(FENCED_INTERRUPTED) => {}
         Ok(FENCED_AFTER_RETURN | FENCED_BEFORE_RETURN) => {
@@ -870,8 +875,14 @@ pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
         Err(msg) => return fail!("{}", msg),
     }
     assert_test!(
+        !virtio_blk::blk_take_rmw_read_past_fence(),
+        "a read-modify-write read its sector while an abandoned write could still land"
+    );
+    let mut expected = FENCED_OLDER;
+    expected[FENCED_SPAN].copy_from_slice(&FENCED_NEWER[FENCED_SPAN]);
+    assert_test!(
         virtio_blk::blk_read(handle, FENCED_SECTOR * 512, &mut readback).is_ok()
-            && readback == FENCED_NEWER,
+            && readback == expected,
         "the later write must be what the sector holds"
     );
     pass!()

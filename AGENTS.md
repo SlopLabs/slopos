@@ -525,12 +525,13 @@ The invariants the gate protects:
   but one returns `Err(WaitAbort::Killed)`, and the task unwinds by
   *returning*, so destructors run on its own stack at a point it chose. An
   owning task handle may therefore live in a stack frame that blocks. The one
-  is `wait_event_uninterruptible_timeout_until`, deadline-only, for a block
-  request the device already owns: abandoned, a write could land after a later
-  one to the same sectors. A new caller owes the same kind of reason. The
-  residual is a kernel loop that reaches no blocking primitive at all: nothing
-  can stop one, and `task_terminate`'s remote branch survives only as the
-  bounded shutdown fallback and the IRQ-exit self-kill.
+  is `wait_event_uninterruptible_timeout_until`, deadline-only and capped at
+  `UNINTERRUPTIBLE_MAX_MS`, for a block request the device already owns:
+  abandoned, a write could land after a later one to the same sectors. A new
+  caller owes the same kind of reason. The residual is a kernel loop that
+  reaches no blocking primitive at all: nothing can stop one, and
+  `task_terminate`'s remote branch survives only as the bounded shutdown
+  fallback and the IRQ-exit self-kill.
 
 I1–I7 above are the tree's naming for this discipline. The proof in
 `verification/proofs/task_ownership.rs` checks a model of it under the names
