@@ -65,12 +65,14 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 | Utilities, a POSIX shell, a terminal and an editor | `coreutils_test`, `shell_script_test`, `terminal_grid_test`, `editor_test` | `userland/src/apps/`, `shell-core/`, `terminal-core/`, `editor-core/` |
 | The target is a hosted, built-in target | `scripts/check_rustc_target.sh`, `libc_abi_test` | `targets/x86_64-unknown-slopos.json`, `toolchain/{compiler,rust,libc}/` |
 | The libc surface LLVM 23.1 and rustc's crates need | `libc_probe`, `heap_allocator_test`, `slibc-core` host tests | `slibc/`, `userland/libctest/` |
+| A forked child inherits no libc lock held by a thread it lacks | `heap_allocator_test`'s `fork_while_another_thread_{allocates,holds_the_loader,starts_threads,flushes_streams}` | `slibc/src/pal/slopos.rs` |
 | C++ runtime and LLVM ports | `cxx_test`, `scripts/check_{cxx_pin,llvm_port,clang_driver}.sh` | `toolchain/{cxx,llvm,llvm-rustc}/`, `scripts/make_slopos_cxx.sh` |
 | The loader searches like glibc and musl | `dl_test` | `slibc/src/ld_so/`, `core/src/exec/` |
 | The toolchain is cross-built into one prefix | `scripts/check_bootstrap_config.sh`, `scripts/check_cargo_fork.sh`, `scripts/check_toolchain_pin.sh` | `scripts/bootstrap_slopos_toolchain.sh`, `toolchain/crates/` |
 | The dev disk carries it, mounts at boot, and runs it | `just test-devdisk` (inventory, source, remount, the toolchain ladder), `mount_test` | `scripts/build_devdisk.sh`, `boot/src/early_init.rs`, `fs/src/vfs/init.rs` |
 | The kernel build needs no host tool | `just build`; `slopos-kallsyms` tests; two checkouts build identical ELFs | `scripts/build_kernel.sh`, `tools/kallsyms/`, `scripts/compare_kernel_elf.sh` |
-| The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway` | `mm/src/{commit,vma_region,page_fault,user_copy}.rs`, `slibc/src/process/spawn.rs` |
+| The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway`; the guest builds both kernels | `mm/src/{commit,vma_region,page_fault,user_copy,user_mappings}.rs`, `slibc/src/process/spawn.rs` |
+| A mount has one writeback pass | `test_ext2_sync_finishes_the_open_pass_instead_of_opening_one`, `test_ext2_journal_headroom_is_restored_off_the_mount_lock` | `fs/src/ext2_vfs.rs` |
 | Code gets in and out | `scripts/check_offline_build.sh`, `transfer_test` | `.cargo/vendor.toml`, `scripts/{make_vendor,export_devdisk}.sh`, `tls-core/` |
 
 ### What Phase 1 builds on
@@ -118,8 +120,10 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
   `struct termios` and a 16-byte `signalfd_siginfo`.
 - **Processes.** The cwd is per-thread. Futexes are private-only, so a
   process-shared semaphore is refused. `si_pid` comes from `kill` only — there
-  is no `tgkill` or `sigqueue`. `fork` holds the allocator lock, so a `fork`
-  from a signal handler that interrupted `malloc` deadlocks, as under glibc.
+  is no `tgkill` or `sigqueue`. `fork` holds libc's process-wide locks, so a
+  `fork` from a signal handler that interrupted a holder deadlocks, as under
+  glibc; a stdio stream another thread holds at the `fork` stays held in the
+  child.
 - **Files.** `posix_fallocate` and `posix_fadvise` are libc-side; no htree;
   mutations serialise per mount; single user, uid 0.
 - **Entropy.** The kernel's CSPRNG is seeded from RDRAND and RDSEED; a CPU
@@ -134,13 +138,11 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 
 **Outcome:** one `just test-selfhost` run passes every step on one tree.
 
-**Where it stands.** A guest build's dev kernel has matched the host's build
-of the same commit in both its loadable image and its symbol table. No run
-has yet passed all five steps. That run's image failed `e2fsck` on
-resurrected `out/*.rcgu.o` names. The cause was interleaved writeback passes
-copying an older logged block over a newer home. The check point has since
-been changed to copy only a block's newest record, and a test reproduces the
-interleaving.
+**Where it stands.** The guest builds both kernels under KVM at four vCPUs:
+the dev kernel in 714 s (cargo passes 6 min 47 s and 4 min 34 s) and the tests
+kernel in 756 s. The dev disk then fails `e2fsck -fn`, which is where the run
+stops. An earlier run matched the host's dev kernel in both its loadable image
+and its symbol table; no run has yet passed all five steps.
 
 1. `just test-selfhost` green end to end:
    - the guest builds both kernels
@@ -148,18 +150,37 @@ interleaving.
    - `check_kernel_elf_gates.sh` passes on both kernels
    - the kernel suite passes on the guest's tests kernel
    - the dev kernel is identical to the host's build
+
+   The blocker is 16 inodes with three names and a link count of two. Each
+   extra name is an `out/*.rcgu.o` that rustc's first pass unlinked after
+   archiving: the object's two incremental-session names are right, and the
+   `out/` entry is back. Its neighbours in the same directory block stayed
+   deleted, and the second pass's later changes to that block persisted. So
+   one unlink's entry removal was lost while its link-count decrement was not;
+   the whole block was not reverted. Copying only a block's newest record at
+   the check point did not fix it. Next: reproduce it without the guest — an
+   `Ext2Fs`-level loop of create, link into a session directory, unlink in
+   random order, with passes interleaved and clean entries dropped, checked
+   against the medium after each full sync.
 2. The C allocator's lock: measure what the futex lock bought. Time the dev
-   kernel's first pass in the guest with a `libc.so` built on the old
-   spinning lock, installed as `/lib/libc.so` on the tests image, against the
-   futex lock's 136 min under TCG, on one tree.
-3. `fork` and slibc's other process-wide locks. The TLS layout lock
-   (`slibc/src/thread/tls.rs`) and the loader's lock (`slibc/src/ld_so/mod.rs`)
-   can be inherited held by a thread the child does not have. Hold each across
-   `fork` in a fixed order, as the allocator's is, with a test beside
-   `heap_allocator_test`'s `fork_while_another_thread_allocates`.
-4. One writeback pass per mount. Every writer short of log room drives a pass
-   of its own, as does the flusher, so a burst repeats the check point's copies
-   and barriers. Sharing the open pass would bound that.
+   kernel's first pass in the guest with a `libc.so` built on the old spinning
+   lock, installed as `/lib/libc.so` on the tests image, against the futex
+   lock, from one fresh dev disk each, on one tree. Not yet taken: the only
+   spinning-lock timing (5 min 55 s first pass) is from an older tree and an
+   older kernel.
+3. The slowdown. The guest build is about 22× the host's at the same `-j`,
+   and the guest is mostly waiting, not computing: over the last full run the
+   four CPUs were idle 27, 54, 73 and 83% of their ticks. Two causes are fixed:
+   a page fault used to bounce back to user mode whenever a sibling thread was
+   mid-copy, so multi-threaded rustc re-faulted in a loop and a copy's
+   populate eventually answered `EFAULT`; and `schedule_internal` read the CPU
+   id before masking interrupts, so a task preempted in between could dispatch
+   off another CPU's run queue. What is left: compare `cargo --timings`
+   per unit, guest against host, to find whether the rest is uniform or
+   concentrated, and account for the idle time — the remaining candidates are
+   the one global C allocator lock every LLVM thread shares, the per-mount lock
+   serialising every filesystem operation, and wakeups stranded until the
+   100 ms rescue sweep.
 
 ---
 
@@ -235,6 +256,19 @@ Neither Redox nor Asterinas rebuilds its own compiler.
 - **The C allocator's lock** is the futex mutex `pthread_mutex_t` uses: a
   contended `malloc` sleeps, as under glibc and musl, after a short spin, as
   under musl.
+- **`fork` and libc's locks.** Held across the `fork`, outermost first — loader,
+  TLS layout, `atexit` list, stream list, allocator — as musl does, so both
+  sides release them. glibc re-initialises its loader locks in the child
+  instead, which leaves the table a concurrent `dlopen` was editing half-done.
+- **Writeback.** One pass per mount, driven by every caller that needs one. A
+  `sync` that finds a pass open drives it to the end and then the next, as a
+  jbd2 commit waiter does, because the open pass's epoch predates the caller's
+  writes.
+- **Page faults against user copies.** A fault waits, holding the per-process
+  lock, for the copies in flight to drop their reference to the address space;
+  copies run with preemption off and none can start while that lock is held.
+  Linux faults under a shared `mmap_lock` with page-table locks, and Asterinas
+  locks page-table nodes; this is the coarse form of the same exclusion.
 - **Dev disk.** Mounted from the command line, trailer-less, seeded from `HEAD`
   and carried back out as a patch; no host share on the build path.
 - **Kernel build.** One POSIX `sh` driver and one Rust symbol-table tool, on
