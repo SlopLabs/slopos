@@ -3,6 +3,7 @@ use core::ptr;
 
 use super::chunk;
 use super::dlmalloc::ALLOCATOR;
+use super::tcache;
 
 pub const ALIGNMENT: usize = chunk::ALIGNMENT;
 
@@ -14,10 +15,20 @@ pub struct HeapStats {
 }
 
 pub fn alloc(size: usize) -> *mut c_void {
+    if let Some(cached) = tcache::take(size) {
+        return cached;
+    }
     ALLOCATOR.lock().alloc(size)
 }
 
 pub fn dealloc(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `free`'s contract: `ptr` is a live allocation of this heap.
+    if unsafe { tcache::put(ptr) } {
+        return;
+    }
     ALLOCATOR.lock().dealloc(ptr)
 }
 
@@ -31,7 +42,7 @@ pub fn calloc(nmemb: usize, size: usize) -> *mut c_void {
         None => return ptr::null_mut(),
     };
 
-    let ptr = ALLOCATOR.lock().alloc(total);
+    let ptr = alloc(total);
     if !ptr.is_null() {
         unsafe {
             ptr::write_bytes(ptr as *mut u8, 0, total);

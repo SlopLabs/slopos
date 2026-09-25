@@ -793,7 +793,7 @@ impl DlMalloc {
         let _ = unsafe { syscall2(SYSCALL_MUNMAP, base as u64, len as u64) };
     }
 
-    fn request_size(size: usize) -> Option<usize> {
+    pub(crate) fn request_size(size: usize) -> Option<usize> {
         let with_header = size.checked_add(chunk::HEADER_SIZE)?;
         let aligned = align_up_usize(with_header, chunk::ALIGNMENT);
         if aligned < with_header {

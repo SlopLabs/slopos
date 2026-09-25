@@ -44,6 +44,8 @@ pub struct Tcb {
     pub tls_block: *mut u8,
     /// This thread's `uselocale` handle; null is the global locale.
     pub locale: crate::locale::object::locale_t,
+    /// Small chunks this thread freed, handed back without the arena lock.
+    pub tcache: crate::mem::tcache::Tcache,
 }
 
 unsafe impl Send for Tcb {}
@@ -70,6 +72,7 @@ impl Tcb {
             dtv: ptr::null_mut(),
             tls_block: ptr::null_mut(),
             locale: ptr::null_mut(),
+            tcache: crate::mem::tcache::Tcache::new(),
         }
     }
 

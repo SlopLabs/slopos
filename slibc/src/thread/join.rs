@@ -78,6 +78,7 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut u8) -> ! {
         (*tcb).retval = retval;
         crate::cxa::run_thread_destructors();
         super::keys::run_key_destructors(tcb);
+        crate::mem::tcache::release(tcb);
     }
     Sys::exit(0)
 }

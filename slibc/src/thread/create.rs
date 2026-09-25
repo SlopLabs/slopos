@@ -43,6 +43,7 @@ unsafe extern "C" fn thread_trampoline(tcb_raw: *mut u8) -> ! {
 
     crate::cxa::run_thread_destructors();
     run_key_destructors(tcb);
+    crate::mem::tcache::release(tcb);
     Sys::exit(0)
 }
 

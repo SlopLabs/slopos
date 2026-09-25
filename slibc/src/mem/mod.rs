@@ -7,5 +7,6 @@ pub mod bins;
 pub mod chunk;
 pub mod dlmalloc;
 pub mod malloc;
+pub mod tcache;
 
 pub use malloc::{alloc, calloc, dealloc, memalign, realloc};
