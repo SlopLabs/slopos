@@ -141,6 +141,9 @@ if [ "$DRY_RUN" -eq 0 ]; then
         [ "$LLVM_PATCHES" != "0" ] ||
             die "no patches under $TP_LLVM_RUSTC_OVERLAY_REL/ — an unported LLVM has no SlopOS triple"
         printf '%s\n' "$LLVM_STAMP_WANT" >"$LLVM_STAMP"
+        # Bootstrap keys its LLVM stamp on the llvm-project commit, which a
+        # tarball does not carry, so it would never rebuild a changed port.
+        rm -f "$RUSTC_BUILD"/*/llvm/.llvm-stamp
     fi
 
     if [ "$(cat "$LIBRARY_STAMP" 2>/dev/null)" != "$STD_STAMP_WANT" ]; then
