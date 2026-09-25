@@ -429,15 +429,15 @@ const FLAKY_MP: &[u8] = b"/tmp/flaky_rename";
 const FLAKY_SOURCE: &[u8] = b"/tmp/flaky_rename/source";
 const FLAKY_TARGET: &[u8] = b"/tmp/flaky_rename/displaced";
 
-/// A rename whose lookup of the name it would displace fails must fail. Taken
-/// for "nothing there", it skipped the protection an open displaced file is
-/// owed, and the filesystem's own lookup then displaced it anyway.
-pub fn test_rename_fails_when_the_displaced_lookup_does() -> TestResult {
+/// A rename refuses, and moves nothing, whichever of its lookups or stats
+/// fails.
+pub fn test_rename_fails_when_a_lookup_does() -> TestResult {
     if !ready() || !ensure_dir(FLAKY_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
     let outcome = flaky_rename_body();
     FLAKY_FS.fail_in.store(0, Ordering::Release);
+    FLAKY_FS.fail_stat_in.store(0, Ordering::Release);
     let _ = crate::vfs::vfs_unlink(FLAKY_SOURCE);
     let _ = crate::vfs::vfs_unlink(FLAKY_TARGET);
     let _ = unmount(FLAKY_MP);
@@ -450,22 +450,12 @@ pub fn test_rename_fails_when_the_displaced_lookup_does() -> TestResult {
 
 #[inline(never)]
 fn flaky_rename_body() -> Result<(), &'static str> {
+    let rename = || errno_of(crate::vfs::vfs_rename(FLAKY_SOURCE, FLAKY_TARGET));
     mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
-    vfs_open(FLAKY_SOURCE, true).map_err(|_| "could not create the source")?;
-    vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the target")?;
-
-    // The sealed-path check looks the name up first; the second lookup is the
-    // one that decides what the rename displaces.
-    FLAKY_FS.fail_in.store(2, Ordering::Release);
-    let renamed = crate::vfs::vfs_rename(FLAKY_SOURCE, FLAKY_TARGET);
-    if FLAKY_FS.fail_in.swap(0, Ordering::AcqRel) != 0 {
-        return Err("the rename never looked up the name it would displace");
-    }
-    if renamed.is_ok() {
-        return Err("the rename went ahead without knowing what it displaced");
-    }
-    if vfs_stat(FLAKY_SOURCE).is_err() || vfs_stat(FLAKY_TARGET).is_err() {
-        return Err("a refused rename moved a name");
+    for failing in [&FLAKY_FS.fail_in, &FLAKY_FS.fail_stat_in] {
+        vfs_open(FLAKY_SOURCE, true).map_err(|_| "could not create the source")?;
+        vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the target")?;
+        refuses_at_every_failure(failing, rename, &[FLAKY_SOURCE, FLAKY_TARGET])?;
     }
     Ok(())
 }
@@ -494,42 +484,48 @@ pub fn test_removal_fails_when_a_lookup_does() -> TestResult {
 fn flaky_removal_body() -> Result<(), &'static str> {
     let unlink = || crate::fileio::file_unlink_at(FLAKY_TARGET, b"/");
     let rmdir = || crate::fileio::file_rmdir_at(FLAKY_TARGET, b"/");
-    let file = || vfs_open(FLAKY_TARGET, true).map(|_| ());
     mount(FLAKY_MP, &FLAKY_FS, 0).map_err(|_| "mount failed")?;
     for failing in [&FLAKY_FS.fail_in, &FLAKY_FS.fail_stat_in] {
-        file().map_err(|_| "could not create the file")?;
-        refuses_at_every_failure(failing, unlink)?;
+        vfs_open(FLAKY_TARGET, true).map_err(|_| "could not create the file")?;
+        refuses_at_every_failure(failing, unlink, &[FLAKY_TARGET])?;
         vfs_mkdir(FLAKY_TARGET).map_err(|_| "could not create the directory")?;
-        refuses_at_every_failure(failing, rmdir)?;
+        refuses_at_every_failure(failing, rmdir, &[FLAKY_TARGET])?;
     }
     Ok(())
 }
 
+fn errno_of(result: VfsResult<()>) -> i32 {
+    result.map_or_else(|e| e.to_errno().raw(), |()| 0)
+}
+
+/// Fail the `n`th call `failing` counts, for every `n` the operation reaches:
+/// each must refuse, not as `ENOENT`, and leave every path in `intact`.
 fn refuses_at_every_failure(
     failing: &AtomicU32,
-    remove: impl Fn() -> i32,
+    act: impl Fn() -> i32,
+    intact: &[&[u8]],
 ) -> Result<(), &'static str> {
     for n in 1..=16 {
         failing.store(n, Ordering::Release);
-        let rc = remove();
+        let rc = act();
         if failing.swap(0, Ordering::AcqRel) != 0 {
             return match (n, rc) {
-                (1, _) => Err("the removal never failed where it was told to"),
+                (1, _) => Err("the operation never failed where it was told to"),
                 (_, 0) => Ok(()),
-                _ => Err("a removal with every call answered failed"),
+                _ => Err("an operation with every call answered failed"),
             };
         }
         if rc == 0 {
-            return Err("a removal went ahead past a failed call");
+            return Err("an operation went ahead past a failed call");
         }
         if rc == slopos_abi::Errno::ENOENT.raw() {
             return Err("a failed call was reported as an absent name");
         }
-        if vfs_stat(FLAKY_TARGET).is_err() {
-            return Err("a refused removal took the name");
+        if intact.iter().any(|path| vfs_stat(path).is_err()) {
+            return Err("a refused operation took a name");
         }
     }
-    Err("the removal failed at every attempt")
+    Err("the operation failed at every attempt")
 }
 
 /// Blocks in the fixture images these tests attach: 512 KiB at the builder's
@@ -1047,7 +1043,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_ext2_mount_by_label, suite = fs);
 slopos_testing::stest!(
-    name = test_rename_fails_when_the_displaced_lookup_does,
+    name = test_rename_fails_when_a_lookup_does,
     suite = fs
 );
 slopos_testing::stest!(name = test_removal_fails_when_a_lookup_does, suite = fs);

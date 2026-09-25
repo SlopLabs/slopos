@@ -305,9 +305,6 @@ fn populate_from_a_task() {
     POPULATE_OUTCOME.store(outcome, Ordering::Release);
 }
 
-/// A populate that may block outlasts a reader's hold on the address space.
-/// A spin gave the range up inside one long copy by a sibling thread, and the
-/// copy it served answered `EFAULT` for memory that was valid.
 pub fn test_blocking_populate_outlasts_a_long_reader() -> TestResult {
     const HOLD_MS: u64 = 2000;
     let Some(vm) = ProcessVmGuard::new() else {

@@ -1515,7 +1515,6 @@ pub fn blk_available_slots(handle: DevHandle) -> usize {
     clone_inner(handle).map_or(0, |inner| inner.available_slots())
 }
 
-/// Mark the requester killed once its next chain is in the device.
 #[cfg(feature = "test-hooks")]
 static KILL_AFTER_SUBMIT: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(slopos_abi::task::INVALID_TASK_ID);

@@ -2,7 +2,7 @@
 //! `Mutex`, virtqueue descriptor free-list invariants, HPET `period_fs()`, and
 //! live virtio-blk I/O after probe.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use slopos_abi::task::TaskPriority;
 use slopos_core::tests::helpers::{kill_task, mark_current_killed};
@@ -634,8 +634,6 @@ pub fn test_virtio_blk_late_completion_keeps_slot() -> TestResult {
 }
 
 const KILLED_SECTOR: u64 = 12288;
-/// Enough writes that, abandoned rather than waited out, one would still be in
-/// the device when its waiter gave up.
 const KILLED_WRITES: u64 = 64;
 static KILLED_PATTERN: [u8; 4096] = [0x6B; 4096];
 const REFUSED_SECTOR: u64 = KILLED_SECTOR + KILLED_WRITES * 8;
@@ -693,9 +691,7 @@ fn killed_writes() -> u8 {
 }
 
 /// A requester killed with a write in the device waits it out, and one killed
-/// before a write reaches the device sends nothing. Abandoned, a write could
-/// land after a later one to the same sectors — which is how a directory block
-/// came back as it was before an `unlink`.
+/// before a write reaches the device sends nothing.
 pub fn test_virtio_blk_killed_write_is_waited_out() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -757,23 +753,9 @@ const FENCED_BEFORE_RETURN: u8 = 2;
 const FENCED_INTERRUPTED: u8 = 3;
 const FENCED_FAILED: u8 = 4;
 
-static FENCE_HEAD: AtomicU32 = AtomicU32::new(u32::MAX);
 static FENCE_RETURNED: AtomicBool = AtomicBool::new(false);
 static FENCED_STARTED: AtomicBool = AtomicBool::new(false);
 static FENCED_OUTCOME: AtomicU8 = AtomicU8::new(FENCED_PENDING);
-
-/// Hand the staged write back to the device model. Whoever swaps the head out
-/// owns it, so it is returned exactly once on every path.
-fn return_abandoned_write() {
-    let head = FENCE_HEAD.swap(u32::MAX, Ordering::AcqRel);
-    if head == u32::MAX {
-        return;
-    }
-    FENCE_RETURNED.store(true, Ordering::Release);
-    if let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) {
-        virtio_blk::blk_return_abandoned_write(handle, head as u16);
-    }
-}
 
 /// A kernel thread, so the write parks on the fence rather than polling it.
 fn fenced_writer() {
@@ -795,15 +777,14 @@ fn fenced_writer() {
     FENCED_OUTCOME.store(outcome, Ordering::Release);
 }
 
-/// Run [`fenced_writer`] against a freshly staged abandoned write, `kill` it
-/// once it is waiting if asked, then return the abandoned write.
+/// Stage an abandoned write, run [`fenced_writer`] behind it, `kill` the writer
+/// if asked, then return the staged write.
 fn fenced_write(kill: bool) -> Result<u8, &'static str> {
     let handle = virtio_blk::blk_device_by_index(SCRATCH).ok_or("scratch device absent")?;
     let head = virtio_blk::blk_stage_abandoned_write(handle).ok_or("could not stage")?;
     FENCE_RETURNED.store(false, Ordering::Release);
     FENCED_STARTED.store(false, Ordering::Release);
     FENCED_OUTCOME.store(FENCED_PENDING, Ordering::Release);
-    FENCE_HEAD.store(u32::from(head), Ordering::Release);
 
     let writer = slopos_ostd::task::spawn("fenced-writer", fenced_writer, TaskPriority::Normal);
     let started = writer.is_ok()
@@ -814,7 +795,8 @@ fn fenced_write(kill: bool) -> Result<u8, &'static str> {
     if kill && let Ok(id) = writer {
         kill_task(id.as_u32());
     }
-    return_abandoned_write();
+    FENCE_RETURNED.store(true, Ordering::Release);
+    virtio_blk::blk_return_abandoned_write(handle, head);
 
     if !started {
         return Err("the writer thread never started");
@@ -831,10 +813,8 @@ fn fenced_write(kill: bool) -> Result<u8, &'static str> {
     Ok(FENCED_OUTCOME.load(Ordering::Acquire))
 }
 
-/// A write a timeout abandoned may still land, so a later write waits until
-/// the device has returned it — a sub-sector one before it reads the sector it
-/// will write back — a killed one gives up without sending, and a read, which
-/// cannot reorder the medium, does not wait at all.
+/// A write waits until an abandoned one is returned — a sub-sector one before
+/// it reads its sector — a killed one sends nothing, and a read never waits.
 pub fn test_virtio_blk_waits_out_an_abandoned_write() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");

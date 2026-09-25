@@ -331,8 +331,7 @@ pub enum FileIo {
 
 enum PopulateStep {
     Resolved,
-    /// A peer holds the address space; the same step may succeed once it lets
-    /// go.
+    /// A peer holds the address space; the step may succeed once it lets go.
     Retry,
     GiveUp,
 }
@@ -359,10 +358,9 @@ fn resolve_for_populate(
     }
 }
 
-/// Nothing wakes it: a populate that may block naps here between retries.
 static POPULATE_NAP: WaitQueue = WaitQueue::new(lock_class!("POPULATE_NAP", LOCK_LEVEL_RESOURCE));
 
-/// How long a populate that may block naps, in all, for pages a peer holds.
+/// What one populate that may block naps in total.
 const POPULATE_WAIT_MS: u64 = 5000;
 
 /// Budget for one populate's retries. Sibling threads' copies take and drop
@@ -423,10 +421,8 @@ const USER_WRITE_ABSENT: u64 = 0x06;
 const USER_READ_ABSENT: u64 = 0x04;
 const USER_WRITE_PRESENT: u64 = 0x07;
 
-/// Attempts per page for a caller that cannot block, and for a page that keeps
-/// resolving without becoming accessible. Exhausting it hands userland a
-/// spurious `EFAULT`, so it is generous; a stuck retry is still a defect, not a
-/// reason to spin forever.
+/// Attempts per page for a caller that cannot block. Exhausting it hands
+/// userland a spurious `EFAULT`, so it is generous, but finite.
 const POPULATE_SPINS: u32 = 4096;
 
 #[derive(Clone, Copy)]

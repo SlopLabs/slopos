@@ -243,10 +243,6 @@ fn retract_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// A read refused because its requester was killed says nothing about the
 /// image: the operation fails and the mount stays writable.
-///
-/// The path that broke: every device error read as damage, so the guest
-/// build's linker, killed while it waited on the device, took `/devel`
-/// read-only.
 pub fn test_ext2_killed_read_is_not_damage() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
@@ -283,9 +279,6 @@ fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A rename whose lookup of the target name fails must fail. Read as "no
-/// such name", the rename appended a second entry beside the one it was to
-/// replace.
 pub fn test_ext2_rename_fails_when_the_target_lookup_does() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
@@ -341,8 +334,6 @@ fn sole_holder(fs: &mut Ext2Fs<'_>, dir: u32, name: &[u8]) -> Result<Option<u32>
     Ok((names == 1).then_some(holder))
 }
 
-/// A create or link whose lookup of the name fails must fail rather than write
-/// a second record of it.
 pub fn test_ext2_create_and_link_fail_when_the_lookup_does() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
@@ -383,9 +374,8 @@ fn unreadable_name_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A directory's blocks are metadata from the moment it exists. Cached as file
-/// data, the first one went home on an eviction rather than into the log, so a
-/// rollback could no longer retract an edit to it.
+/// Cached as file data, a new directory block goes home on an eviction rather
+/// than into the log, and a rollback can no longer retract an edit to it.
 pub fn test_ext2_new_directory_block_is_metadata() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
@@ -1509,8 +1499,8 @@ slopos_testing::stest!(
     suite = fs
 );
 
-/// A drain that cannot read a member leaves the list for the next mount:
-/// clearing it would leak every orphan on it until `e2fsck`.
+/// Clearing a list the drain could not read would leak its orphans until
+/// `e2fsck`.
 pub fn test_ext2_orphan_drain_keeps_a_list_it_could_not_read() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
