@@ -46,6 +46,7 @@ fn guest_builds(variant: &str, features: &[&str]) -> bool {
         .current_dir(&root)
         .env("PATH", format!("{prefix}/bin:/bin"))
         .env("CARGO_HOME", format!("{DEVEL}/cargo-home"))
+        .env("KERNEL_CARGO_TIMINGS", "1")
         .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
         .status();

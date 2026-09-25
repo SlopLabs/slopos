@@ -108,6 +108,8 @@ test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.deb
 # `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
 # into the ISO at build time.
 test_cmdline_effective := env("TEST_CMDLINE", test_cmdline)
+# Appended to the dev-disk and self-hosting boots, e.g. `prof=on`.
+test_cmdline_extra := env("TEST_CMDLINE_EXTRA", "")
 
 debug         := env("DEBUG", "0")
 debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
@@ -350,7 +352,9 @@ boot-persist-reset:
 boot-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    BOOT_CMDLINE="tests=off roulette=skip {{dev_disk_mount}}" just _iso-notests _fs-image-persist _fs-image-devdisk
+    # Optimized: this machine's job is to run a compiler, and a dev-profile
+    # kernel spends ten times as long in every syscall and page fault.
+    KERNEL_RELEASE=1 BOOT_CMDLINE="tests=off roulette=skip {{dev_disk_mount}}" just _iso-notests _fs-image-persist _fs-image-devdisk
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
@@ -557,7 +561,7 @@ test-devdisk: _build-run-tests
     fresh=0
     [ -e "{{fs_image_devdisk}}" ] || fresh=1
     just _fs-image-devdisk
-    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
@@ -589,7 +593,9 @@ test-selfhost: _build-run-tests
     scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/selfhost-edits.patch"
     [ ! -s "{{build_dir}}/selfhost-edits.patch" ] ||
         { echo "FAIL: the guest's tree carries edits HEAD lacks — see {{build_dir}}/selfhost-edits.patch" >&2; exit 1; }
-    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    # The machine running the build boots the optimized tests kernel: a
+    # dev-profile one spends ten times as long in every syscall and fault.
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \

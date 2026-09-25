@@ -14,6 +14,8 @@
 #   KERNEL_RUSTFLAGS  - extra RUSTFLAGS (default: -C force-frame-pointers=yes)
 #   KERNEL_RELEASE    - 1 for an optimized kernel
 #   KERNEL_SAFESTACK  - 0 to build without the SafeStack sanitizer
+#   KERNEL_CARGO_TIMINGS - 1 to leave cargo's per-unit timing report under
+#                       <cargo_target_dir>/cargo-timings
 set -eu
 
 if [ $# -lt 2 ]; then
@@ -36,6 +38,10 @@ KERNEL_RUSTFLAGS="${KERNEL_RUSTFLAGS:--C force-frame-pointers=yes}"
 
 release=
 VARIANT=dev
+timings=
+if [ "${KERNEL_CARGO_TIMINGS:-0}" = 1 ]; then
+    timings=--timings
+fi
 case "$FEATURES" in
 *kernel/tests*) VARIANT=tests ;;
 esac
@@ -91,7 +97,7 @@ build_kernel_once() {
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
         SLOPOS_KSYMS_RS="$KSYMS_RS" \
         RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS -Zunstable-options -Zemit-stack-sizes" \
-        $CARGO build --locked $release \
+        $CARGO build --locked $release $timings \
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options \

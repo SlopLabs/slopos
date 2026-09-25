@@ -1,0 +1,53 @@
+# check_kernel_softfloat allowlist — variant: release-tests
+#
+# Instructions touching XCR0-managed state (XMM/YMM/ZMM, x87, MMX, and the
+# xsave/xrstor pair) that are permitted, each capped at its measured
+# occurrence count in the named symbol.
+#
+#     scripts/check_kernel_softfloat.sh --variant release-tests --emit-allowlist builddir/kernel-release-tests.elf
+#
+# Every entry must match at least one hit. A dead entry fails the gate.
+#
+# The optimized tests kernel `just test-selfhost` boots. At opt-level 3 the
+# `slopos_ostd::test_support::cpu_state` and `task::fpu` helpers the tests
+# kernel's dev-profile list names by symbol are inlined into the test bodies
+# that call them, so the conformance tests are named one by one here.
+
+# Liveness floors, half the measured 2026-09-25 decode of 9668 returns /
+# 13274 symbols.
+min-returns 4834
+min-symbols 6637
+
+expect-test-registry many
+
+# <max-hits> <TAB> <class-or-mnemonic> <TAB> <glob over the symbol>
+
+# The sanctioned FPU save, one entry per site the wrapper inlines into.
+2	xsave	*11slopos_core7syscall6signal20save_fpu_to_sigframe*
+2	xsave	*12slopos_sched4task14task_lifecycle9task_fork*
+2	xsave	*12slopos_sched4task14task_lifecycle10task_clone*
+2	xsave	*12slopos_sched9scheduler17prepare_switch_to*
+1	xrstor64	__ostd_fpu_xrstor*
+1	fxsave64	*detect_mxcsr_feature_mask*
+1	fninit	_*start
+
+# The xsave and FPU-isolation conformance tests.
+24	vec	*14slopos_testing11xsave_tests33test_sse_multi_register_isolation*
+2	xsave	*14slopos_testing11xsave_tests33test_sse_multi_register_isolation*
+12	vec	*14slopos_testing11xsave_tests31test_sse_xsave_xrstor_roundtrip*
+2	xsave	*14slopos_testing11xsave_tests31test_sse_xsave_xrstor_roundtrip*
+12	vec	*14slopos_testing11xsave_tests31test_avx_xsave_xrstor_roundtrip*
+2	xsave	*14slopos_testing11xsave_tests31test_avx_xsave_xrstor_roundtrip*
+1	xsave	*14slopos_testing11xsave_tests41test_validate_rejects_poisoned_live_image*
+1	xsave	*14slopos_testing11xsave_tests38test_validate_accepts_live_xsave_image*
+4	vec	*14slopos_testing9fpu_tests26fpu_xrstor_gp_is_recovered*
+1	xsave	*14slopos_testing9fpu_tests26fpu_xrstor_gp_is_recovered*
+4	vec	*14slopos_testing9fpu_tests19fpu_xmm_roundtrip_a*
+2	vec	*14slopos_testing9fpu_tests19fpu_xmm_roundtrip_b*
+20	vec	*12slopos_sched13context_tests44test_fpu_switch_saves_prev_and_restores_next*
+5	xsave	*12slopos_sched13context_tests44test_fpu_switch_saves_prev_and_restores_next*
+20	vec	*12slopos_sched13context_tests32test_fpu_per_task_slot_isolation*
+5	xsave	*12slopos_sched13context_tests32test_fpu_per_task_slot_isolation*
+14	vec	*12slopos_sched13context_tests43test_fpu_avx_upper_halves_survive_task_slot*
+3	xsave	*12slopos_sched13context_tests43test_fpu_avx_upper_halves_survive_task_slot*
+1	xsave	*12slopos_sched13context_tests34test_fpu_poisoned_slot_is_repaired*
