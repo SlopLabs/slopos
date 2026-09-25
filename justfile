@@ -596,7 +596,7 @@ test-selfhost: _build-run-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
-        --timeout-secs 28800 --silence-secs 0 --raw --no-color > {{build_dir}}/selfhost.log 2>&1 || rc=$?
+        --timeout-secs "${SELFHOST_TIMEOUT_SECS:-28800}" --silence-secs 0 --raw --no-color > {{build_dir}}/selfhost.log 2>&1 || rc=$?
     tail -n 30 {{build_dir}}/selfhost.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the self-hosting boot exited $rc — full log in {{build_dir}}/selfhost.log" >&2; exit 1; }
     scripts/check_fs_image.sh "{{fs_image_devdisk}}"
