@@ -43,6 +43,9 @@ static PROBE_REFUSES: AtomicBool = AtomicBool::new(false);
 static PROBE_INTERRUPTS: AtomicBool = AtomicBool::new(false);
 /// A read covering this offset is refused once, then the probe disarms.
 static PROBE_REFUSE_READ_AT: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Writes allowed before every later one is refused, as a killed requester's
+/// are; `usize::MAX` disarms it.
+static PROBE_WRITES_LEFT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Counts writes, and can be made to refuse writes or reads part-way through a
 /// test.
@@ -60,6 +63,7 @@ impl ProbeDevice {
         PROBE_REFUSES.store(false, Ordering::Relaxed);
         PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
         PROBE_REFUSE_READ_AT.store(u64::MAX, Ordering::Relaxed);
+        PROBE_WRITES_LEFT.store(usize::MAX, Ordering::Relaxed);
         Self { inner }
     }
 }
@@ -83,6 +87,16 @@ impl BlockDevice for ProbeDevice {
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         if PROBE_REFUSES.load(Ordering::Relaxed) {
             return Err(BlockDeviceError::InvalidBuffer);
+        }
+        if PROBE_WRITES_LEFT
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| match n {
+                usize::MAX => Some(n),
+                0 => None,
+                n => Some(n - 1),
+            })
+            .is_err()
+        {
+            return Err(BlockDeviceError::Interrupted);
         }
         PROBE_WRITES.fetch_add(1, Ordering::Relaxed);
         let _ =
@@ -1572,8 +1586,13 @@ fn interleave_two_passes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
         fs.sync_step(&mut early, usize::MAX)
             .map_err(|_| "early pass")?;
     }
+    let opened = fs.journal_head();
     fs.unlink_entry(dir, RESURRECTED).map_err(|_| "unlink")?;
+    let unlinked = fs.journal_head();
     fs.create_file(2, b"later").map_err(|_| "create later")?;
+    if !(opened < unlinked && unlinked < fs.journal_head()) {
+        return Err("the log was emptied under the early pass");
+    }
     let newest = fs
         .journal_newest_slot_for_test(block)
         .ok_or("the directory block is not in the log")?;
@@ -1605,6 +1624,9 @@ fn interleave_two_passes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 fn unlinked_name_stays_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    if fs.resolve_path(b"/d").is_err() || fs.resolve_path(b"/later").is_err() {
+        return Err("the passes lost a name that was never removed");
+    }
     match fs.resolve_path(b"/d/resurrected") {
         Err(Ext2Error::PathNotFound) => Ok(()),
         Ok(_) => Err("an unlinked name came back on the medium"),
@@ -1614,5 +1636,84 @@ fn unlinked_name_stays_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 slopos_testing::stest!(
     name = test_ext2_lagging_pass_never_puts_an_older_copy_home,
+    suite = fs
+);
+
+/// A large write whose commit fails has already put its data home, and its
+/// abort gives the block back its logged copy. A pass whose cursor passed that
+/// copy before the abort must not empty the log, or the failed write's data
+/// replaces the committed contents once the copy is gone.
+pub fn test_ext2_aborted_home_write_does_not_outlive_the_log() -> TestResult {
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    if let Err(msg) = with_log(&device, abort_behind_a_pass) {
+        return fail!("{}", msg);
+    }
+    match with_log(&device, committed_block_survives) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+const WIDE_BLOCKS: usize = 20;
+const COMMITTED: u8 = 0x22;
+
+fn abort_behind_a_pass(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    let bs = fs.block_size() as usize;
+    let mut wide = KVec::<u8>::zeroed(bs * WIDE_BLOCKS).map_err(|_| "buffer")?;
+    wide.as_mut_slice().fill(0x11);
+    let file = fs.create_file(2, b"x").map_err(|_| "create")?;
+    fs.write_file(file, 0, wide.as_slice())
+        .map_err(|_| "wide write")?;
+    fs.sync().map_err(|_| "sync")?;
+    wide.as_mut_slice()[..bs].fill(COMMITTED);
+    fs.write_file(file, 0, &wide.as_slice()[..bs])
+        .map_err(|_| "narrow write")?;
+    fs.create_file(2, b"after").map_err(|_| "create after")?;
+    let block = fs.read_inode(file).map_err(|_| "read")?.block[0].raw();
+    let logged = fs
+        .journal_newest_slot_for_test(block)
+        .ok_or("the narrow write was not logged")?;
+
+    let mut pass = fs.begin_sync();
+    while !pass.checkpointing_for_test() {
+        fs.sync_step(&mut pass, usize::MAX).map_err(|_| "pass")?;
+    }
+    fs.cache_drop_clean_for_test();
+    while pass.cursor_for_test() <= logged {
+        if pass.is_done() {
+            return Err("the pass finished before the write could fail");
+        }
+        fs.sync_step(&mut pass, 1).map_err(|_| "step")?;
+    }
+
+    wide.as_mut_slice().fill(0x33);
+    PROBE_WRITES_LEFT.store(WIDE_BLOCKS, Ordering::Release);
+    let failed = fs.write_file(file, 0, wide.as_slice());
+    let left = PROBE_WRITES_LEFT.swap(usize::MAX, Ordering::AcqRel);
+    if failed.is_ok() || left != 0 {
+        return Err("the wide write did not fail at its log record");
+    }
+    while !pass.is_done() {
+        fs.sync_step(&mut pass, usize::MAX).map_err(|_| "finish")?;
+    }
+    fs.sync().map_err(|_| "sync")
+}
+
+fn committed_block_survives(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let file = fs.resolve_path(b"/x").map_err(|_| "resolve")?;
+    let mut first = [0u8; 16];
+    fs.read_file(file, 0, &mut first).map_err(|_| "read")?;
+    if first != [COMMITTED; 16] {
+        return Err("a failed write's data replaced the committed contents");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_aborted_home_write_does_not_outlive_the_log,
     suite = fs
 );

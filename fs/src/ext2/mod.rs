@@ -215,6 +215,7 @@ pub struct SyncPass {
     /// reset and refill it between two steps, after which those indices name
     /// someone else's records.
     generation: u32,
+    restores: u32,
 }
 
 impl SyncPass {
@@ -801,6 +802,7 @@ impl<'a> Ext2Fs<'a> {
             cursor: 1,
             limit: self.cache.journal_head(),
             generation: self.cache.journal_generation(),
+            restores: self.cache.journal_restores(),
         }
     }
 
@@ -853,8 +855,11 @@ impl<'a> Ext2Fs<'a> {
                         self.device_barrier()?;
                     }
                     // Only when nothing was appended behind the pass: half an
-                    // emptied log is not a state the format can express.
-                    if self.cache.journal_head() == pass.limit {
+                    // emptied log is not a state the format can express. Nor
+                    // after an abort put back a slot the cursor had passed.
+                    if self.cache.journal_head() == pass.limit
+                        && self.cache.journal_restores() == pass.restores
+                    {
                         self.cache.journal_reset(self.device)?;
                     }
                     pass.phase = SyncPhase::Superblock;

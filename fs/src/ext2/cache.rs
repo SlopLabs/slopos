@@ -1321,8 +1321,8 @@ impl BlockCache {
         Ok(data + meta)
     }
 
-    /// Copy home every logged block the cache no longer holds, from `cursor`
-    /// onwards, and answer where to resume.
+    /// Copy home the newest record of every logged block the cache does not
+    /// hold clean, from `cursor` onwards, and answer where to resume.
     ///
     /// The cache-resident half of the check point is an ordinary metadata
     /// flush; this is the remainder — blocks a rollback dropped or an eviction
@@ -1340,6 +1340,7 @@ impl BlockCache {
                 more: false,
             });
         };
+        debug_assert!(self.op_depth == 0, "a check point inside an operation");
         let end = limit.min(journal.head());
         let mut slot = cursor.max(1);
         let mut written = 0usize;
@@ -1349,15 +1350,10 @@ impl BlockCache {
                 break;
             }
             let block = journal.slot_block_at(slot);
-            // Only a block's newest record goes home. An older one may be
-            // older than the home already is: another pass, interleaved with
-            // this one, can have put the newer copy there and been free to
-            // empty the log once its own cursor passed it. A clean entry says
-            // the home matches; a dirty one may be newer, but nothing says
-            // the metadata phase has run for its epoch, so the committed copy
-            // goes home regardless.
-            if block == 0 || journal.resident_slot(block) != Some(slot) || self.home_matches(block)
-            {
+            // Only a block's newest record: an interleaved pass may have put a
+            // newer copy home already. A dirty entry still sends it home, since
+            // nothing says the metadata phase has run for its epoch.
+            if journal.resident_slot(block) != Some(slot) || self.home_matches(block) {
                 slot += 1;
                 continue;
             }
@@ -1417,6 +1413,11 @@ impl BlockCache {
     /// its own indices for the new generation's.
     pub fn journal_generation(&self) -> u32 {
         self.journal.as_ref().map_or(0, |j| j.generation())
+    }
+
+    /// How many aborts have put log mappings back. See [`Journal::abort_op`].
+    pub fn journal_restores(&self) -> u32 {
+        self.journal.as_ref().map_or(0, |j| j.restores())
     }
 
     /// Drop every clean entry.
