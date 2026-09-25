@@ -5716,3 +5716,57 @@ slopos_testing::stest!(
     name = test_ext2_removal_after_a_reused_free_record_takes_the_name,
     suite = fs
 );
+
+/// A read long enough to go to the device in one request still returns a block
+/// the cache holds newer than its home.
+pub fn test_ext2_long_read_takes_a_newer_cached_block() -> TestResult {
+    let Some(image) = journal::journal_image() else {
+        return TestResult::Skipped;
+    };
+    match with_mounted(&image, long_read_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+const LONG_READ_BLOCKS: usize = 16;
+const REWRITTEN_BLOCK: usize = 5;
+
+#[inline(never)]
+fn long_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    match fs.attach_journal() {
+        Ok(Some(_)) => {}
+        _ => return Err("the fixture's log did not attach"),
+    }
+    let bs = fs.block_size() as usize;
+    let len = bs * LONG_READ_BLOCKS;
+    let mut data = KVec::<u8>::zeroed(len).map_err(|_| "buffer")?;
+    for (i, byte) in data.as_mut_slice().iter_mut().enumerate() {
+        *byte = (i / bs) as u8;
+    }
+    let ino = fs.create_file(2, b"long").map_err(|_| "create")?;
+    fs.write_file(ino, 0, data.as_slice())
+        .map_err(|_| "write")?;
+    fs.sync().map_err(|_| "sync")?;
+    fs.cache_drop_clean_for_test();
+
+    let rewrite = [0xEEu8; 64];
+    let at = REWRITTEN_BLOCK * bs + 100;
+    fs.write_file(ino, at as u64, &rewrite)
+        .map_err(|_| "rewrite")?;
+    data.as_mut_slice()[at..at + rewrite.len()].copy_from_slice(&rewrite);
+
+    let mut back = KVec::<u8>::zeroed(len).map_err(|_| "buffer")?;
+    if fs.read_file(ino, 0, back.as_mut_slice()) != Ok(len) {
+        return Err("the long read came back short");
+    }
+    if back.as_slice() != data.as_slice() {
+        return Err("a long read missed a block the cache holds newer than its home");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_long_read_takes_a_newer_cached_block,
+    suite = fs
+);

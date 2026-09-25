@@ -7,6 +7,13 @@ use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
 use core::cmp;
 
+/// Blocks a read may take off the device in one request, bypassing the cache.
+const DIRECT_RUN_MAX: u32 = 64;
+
+/// The shortest run worth a direct read. Below it the blocks go through the
+/// cache, so a small file read again and again stays resident.
+const DIRECT_RUN_MIN: u32 = 4;
+
 pub fn read_file(
     inode: &Inode,
     offset: u64,
@@ -34,6 +41,22 @@ pub fn read_file(
         let to_copy = cmp::min(max_len - read_total, block_size as usize - block_off);
 
         let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
+        if phys.is_valid() && block_off == 0 {
+            let whole = ((max_len - read_total) / block_size as usize) as u32;
+            let run = direct_run(inode, fb, phys, whole, cache, device, geom, owner)?;
+            if run > 0 {
+                let len = run as usize * block_size as usize;
+                device
+                    .read_at(
+                        phys.to_disk_offset(block_size).raw(),
+                        &mut buffer[read_total..read_total + len],
+                    )
+                    .map_err(Ext2Error::from)?;
+                read_total += len;
+                file_offset += len as u64;
+                continue;
+            }
+        }
         if phys.is_valid() {
             let blk = cache.get_data(phys, device, owner)?;
             buffer[read_total..read_total + to_copy]
@@ -46,6 +69,38 @@ pub fn read_file(
         file_offset += to_copy as u64;
     }
     Ok(read_total)
+}
+
+/// How many whole blocks from `first` a read may take off the device in one
+/// request: consecutive on the device, none cached, none newer in the log.
+/// Zero when the run would be shorter than [`DIRECT_RUN_MIN`].
+#[allow(clippy::too_many_arguments)]
+fn direct_run(
+    inode: &Inode,
+    first: FileBlock,
+    phys: BlockNum,
+    whole: u32,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext2Geometry,
+    owner: BlockOwner,
+) -> Result<u32, Ext2Error> {
+    let limit = whole.min(DIRECT_RUN_MAX);
+    if limit < DIRECT_RUN_MIN || !cache.home_is_current(phys) {
+        return Ok(0);
+    }
+    let mut run = 1u32;
+    while run < limit {
+        let Some(index) = first.0.checked_add(run) else {
+            break;
+        };
+        let next = blockmap::map_block(inode, FileBlock(index), geom, cache, device, owner)?;
+        if phys.raw().checked_add(run) != Some(next.raw()) || !cache.home_is_current(next) {
+            break;
+        }
+        run += 1;
+    }
+    Ok(if run >= DIRECT_RUN_MIN { run } else { 0 })
 }
 
 pub fn write_file(

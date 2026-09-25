@@ -1397,6 +1397,16 @@ impl BlockCache {
             .is_some_and(|&slot| self.entries[slot].valid && !self.entries[slot].frame.dirty())
     }
 
+    /// Whether `block`'s home location holds its newest contents and the cache
+    /// holds no copy of it: what a read may take straight off the device.
+    pub fn home_is_current(&self, block: BlockNum) -> bool {
+        !self.index.contains_key(&block)
+            && self
+                .journal
+                .as_ref()
+                .is_none_or(|j| j.resident_slot(block.raw()).is_none())
+    }
+
     /// The log slot holding `block`'s newest committed content, if any.
     #[cfg(feature = "tests")]
     pub fn journal_newest_slot(&self, block: u32) -> Option<u32> {

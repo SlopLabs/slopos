@@ -475,6 +475,11 @@ fn revive(entry: &mut PageSet) {
 /// blocks may already belong to another file.
 pub fn fault_page_in_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, FileMapError> {
     drain_pending();
+    // A populated page needs no read, so it is answered without queueing
+    // behind whichever fault or writeback holds the I/O mutex.
+    if let FaultProbe::Present(pa) = probe_fault(map, page_index)? {
+        return Ok(pa);
+    }
     let _io = io_lock()?;
     let (fs, inode) = match probe_fault(map, page_index)? {
         FaultProbe::Present(pa) => return Ok(pa),
