@@ -309,6 +309,13 @@ fn scan_for_child(
 /// Remove a directory entry by name. Per ext2: extend the predecessor's
 /// `rec_len` to absorb the deleted entry; for the first entry in a block, zero
 /// the inode field instead.
+///
+/// The predecessor is the record immediately before, live or free. A free
+/// record can sit mid-block on an image an earlier writer left, and merging
+/// into a live record further back by the two lengths would stop the chain
+/// short of the removed one, leaving it in place. Only the block holding the
+/// name is dirtied, so a removal logs one directory block rather than every
+/// block it read.
 pub fn remove_dir_entry(
     parent: &Inode,
     name: &[u8],
@@ -333,41 +340,21 @@ pub fn remove_dir_entry(
             return Err(Ext2Error::DirectoryFormat);
         }
         let mut block = cache.get_owned(phys, device, owner)?;
-        let data = block.data_mut();
-
-        let mut cursor = 0usize;
-        let mut prev_cursor: Option<usize> = None;
-
-        while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
-            let record = parse_record(data, cursor, bs)?;
-            let rec_len = record.rec_len;
-
-            if record.inode != 0 {
-                let name_start = cursor + DIR_ENTRY_HEADER_SIZE;
-                let name_end =
-                    name_start + cmp::min(record.name_len, rec_len - DIR_ENTRY_HEADER_SIZE);
-                if &data[name_start..name_end] == name {
-                    match prev_cursor {
-                        Some(prev) => {
-                            let prev_rec =
-                                u16::from_le_bytes([data[prev + 4], data[prev + 5]]) as usize;
-                            let merged = prev_rec + rec_len;
-                            // A merged record must still fit the block; a
-                            // u16 truncation here would corrupt the chain.
-                            let new_rec =
-                                u16::try_from(merged).map_err(|_| Ext2Error::DirectoryFormat)?;
-                            data[prev + 4..prev + 6].copy_from_slice(&new_rec.to_le_bytes());
-                        }
-                        None => {
-                            data[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes());
-                        }
-                    }
-                    removed = Some(offset + cursor as u64);
-                    break;
+        if let Some((cursor, prev, rec_len)) = find_record(block.data(), name, bs)? {
+            let data = block.data_mut();
+            match prev {
+                Some(prev) => {
+                    // A merged record must still fit the block; a u16
+                    // truncation here would corrupt the chain.
+                    let merged = u16::try_from(cursor + rec_len - prev)
+                        .map_err(|_| Ext2Error::DirectoryFormat)?;
+                    data[prev + 4..prev + 6].copy_from_slice(&merged.to_le_bytes());
                 }
-                prev_cursor = Some(cursor);
+                None => {
+                    data[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes());
+                }
             }
-            cursor += rec_len;
+            removed = Some(offset + cursor as u64);
         }
         offset += block_size as u64;
     }
@@ -383,6 +370,31 @@ pub fn remove_dir_entry(
         cache.lower_dir_free_hint(ino, block);
     }
     Ok(())
+}
+
+/// The live record named `name` in one directory block: its offset, the
+/// offset of the record immediately before it, and its `rec_len`.
+fn find_record(
+    data: &[u8],
+    name: &[u8],
+    bs: usize,
+) -> Result<Option<(usize, Option<usize>, usize)>, Ext2Error> {
+    let mut cursor = 0usize;
+    let mut prev: Option<usize> = None;
+    while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
+        let record = parse_record(data, cursor, bs)?;
+        let rec_len = record.rec_len;
+        if record.inode != 0 {
+            let name_start = cursor + DIR_ENTRY_HEADER_SIZE;
+            let name_end = name_start + cmp::min(record.name_len, rec_len - DIR_ENTRY_HEADER_SIZE);
+            if &data[name_start..name_end] == name {
+                return Ok(Some((cursor, prev, rec_len)));
+            }
+        }
+        prev = Some(cursor);
+        cursor += rec_len;
+    }
+    Ok(None)
 }
 
 /// Check if a directory is empty (only contains . and ..).
@@ -545,41 +557,52 @@ fn place_in_range(
             return Err(Ext2Error::DirectoryFormat);
         }
         let mut block = cache.get_owned(phys, device, owner)?;
+        let Some((cursor, record)) = find_slack(block.data(), req.needed, bs)? else {
+            continue;
+        };
         let data = block.data_mut();
-        let mut cursor = 0usize;
-
-        while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
-            let record = parse_record(data, cursor, bs)?;
-            let rec_len = record.rec_len;
+        let rec_len = record.rec_len;
+        if record.inode != 0 {
             let actual_size = record.actual_size;
-            let slack = rec_len - actual_size;
-
-            if slack >= req.needed {
-                if record.inode != 0 {
-                    data[cursor + 4..cursor + 6]
-                        .copy_from_slice(&(actual_size as u16).to_le_bytes());
-                    let new_cursor = cursor + actual_size;
-                    let new_rec_len = rec_len - actual_size;
-                    write_dir_entry(
-                        &mut data[new_cursor..new_cursor + new_rec_len],
-                        req.child,
-                        req.name,
-                        req.file_type,
-                        new_rec_len,
-                    );
-                    return Ok(Some(offset + new_cursor as u64));
-                }
-                write_dir_entry(
-                    &mut data[cursor..cursor + rec_len],
-                    req.child,
-                    req.name,
-                    req.file_type,
-                    rec_len,
-                );
-                return Ok(Some(offset + cursor as u64));
-            }
-            cursor += rec_len;
+            data[cursor + 4..cursor + 6].copy_from_slice(&(actual_size as u16).to_le_bytes());
+            let new_cursor = cursor + actual_size;
+            let new_rec_len = rec_len - actual_size;
+            write_dir_entry(
+                &mut data[new_cursor..new_cursor + new_rec_len],
+                req.child,
+                req.name,
+                req.file_type,
+                new_rec_len,
+            );
+            return Ok(Some(offset + new_cursor as u64));
         }
+        write_dir_entry(
+            &mut data[cursor..cursor + rec_len],
+            req.child,
+            req.name,
+            req.file_type,
+            rec_len,
+        );
+        return Ok(Some(offset + cursor as u64));
+    }
+    Ok(None)
+}
+
+/// The first record in one directory block with `needed` bytes of slack, read
+/// without dirtying the block: an insert logs the block it writes, not every
+/// block it looked at.
+fn find_slack(
+    data: &[u8],
+    needed: usize,
+    bs: usize,
+) -> Result<Option<(usize, DirRecord)>, Ext2Error> {
+    let mut cursor = 0usize;
+    while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
+        let record = parse_record(data, cursor, bs)?;
+        if record.rec_len - record.actual_size >= needed {
+            return Ok(Some((cursor, record)));
+        }
+        cursor += record.rec_len;
     }
     Ok(None)
 }

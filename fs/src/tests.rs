@@ -1,3 +1,4 @@
+pub mod dirchurn;
 pub mod dquota;
 pub mod filemap;
 pub mod fsperf;
@@ -5636,3 +5637,82 @@ fn hint_reuse_body(fs: &mut Ext2Fs<'_>) -> TestResult {
 }
 
 slopos_testing::stest!(name = test_ext2_dir_hint_reuses_a_freed_record, suite = fs);
+
+/// A removal merges into the record *immediately* before it, free or live:
+/// here a free first record, reused by an insert, precedes the removed name.
+/// Merging into a live record further back by the two lengths — what a walk
+/// that skipped free records did — stops the chain at the removed name, so it
+/// survives on the medium with its link count already dropped.
+pub fn test_ext2_removal_after_a_reused_free_record_takes_the_name() -> TestResult {
+    let Some(image) = phase3_image(b"seed.txt", b"x") else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_mounted(&image, free_record_churn) {
+        return slopos_testing::fail!("{}", msg);
+    }
+    match with_mounted(&image, removed_name_is_gone) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+/// 200 bytes, so four fill a 1 KiB directory block after `.` and `..`, and the
+/// next four open a second block.
+fn churn_name(i: u8) -> [u8; 200] {
+    let mut name = [b'n'; 200];
+    name[199] = b'0' + i;
+    name
+}
+
+/// Too long for the first block's slack, short enough for a freed 208-byte
+/// record in the second.
+const CHURN_REUSE: [u8; 170] = [b'm'; 170];
+
+#[inline(never)]
+fn free_record_churn(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let target = fs.lookup_child(2, b"seed.txt").map_err(|_| "no seed.txt")?;
+    let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
+    for i in 0..8 {
+        fs.link_entry(dir, &churn_name(i), target.raw())
+            .map_err(|_| "link")?;
+    }
+    // The second block's first two records: the first zeroed in place, the
+    // second behind it.
+    fs.unlink_entry(dir, &churn_name(4))
+        .map_err(|_| "unlink 4")?;
+    fs.unlink_entry(dir, &churn_name(5))
+        .map_err(|_| "unlink 5")?;
+    fs.link_entry(dir, &CHURN_REUSE, target.raw())
+        .map_err(|_| "reuse link")?;
+    fs.unlink_entry(dir, &churn_name(6))
+        .map_err(|_| "unlink 6")?;
+    fs.sync().map_err(|_| "sync")
+}
+
+#[inline(never)]
+fn removed_name_is_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let dir = fs.resolve_path(b"/d").map_err(|_| "resolve /d")?;
+    let target = fs.resolve_path(b"/seed.txt").map_err(|_| "resolve seed")?;
+    if scan_lookup(fs, dir, &churn_name(6)).is_some() {
+        return Err("a removed name is still in the directory on the medium");
+    }
+    for keep in [0u8, 1, 2, 3, 7] {
+        if scan_lookup(fs, dir, &churn_name(keep)).is_none() {
+            return Err("a name that was never removed is gone");
+        }
+    }
+    if scan_lookup(fs, dir, &CHURN_REUSE).is_none() {
+        return Err("the name placed in the reused record is gone");
+    }
+    // seed.txt, five survivors and the reused name.
+    let links = fs.read_inode(target).map_err(|_| "read seed")?.links_count;
+    if links != 7 || count_dir_entries(fs, dir) != 8 {
+        return Err("the link count and the names that reach the inode disagree");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_removal_after_a_reused_free_record_takes_the_name,
+    suite = fs
+);
