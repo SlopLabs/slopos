@@ -11,7 +11,6 @@ use slopos_abi::addr::PhysAddr;
 use slopos_abi::task::TaskPriority;
 use slopos_kernel_services::clock::uptime_ms;
 use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr};
-use slopos_ostd::sync::PreemptGuard;
 
 use crate::error::MmError;
 use crate::page_fault::{
@@ -23,7 +22,6 @@ use crate::process_vm::{
     pack_process_vm_handle, process_vm_alloc, process_vm_get_vm_space, process_vm_handle,
 };
 use crate::tests::test_fixtures::ProcessVmGuard;
-use crate::user_mappings::vm_space_mut_spins_taken;
 
 const WRITE_USER_ABSENT: u64 = 0x06;
 
@@ -128,43 +126,6 @@ pub fn test_cow_fault_retries_while_a_reader_holds_the_space() -> TestResult {
         Err(MmError::Retry) => pass!(),
         other => fail!("expected Retry, got {:?}", other),
     }
-}
-
-/// Both a probed and an unprobed dispatch end in `Retry`; only the spin count
-/// separates them.
-pub fn test_cow_fault_with_one_reference_does_not_spin_under_contention() -> TestResult {
-    let Some(vm) = ProcessVmGuard::new() else {
-        return fail!("create VM");
-    };
-    if cow_page(&vm).is_none() {
-        return fail!("map and mark a COW page");
-    }
-
-    let Some(reader) = process_vm_get_vm_space(vm.process) else {
-        return fail!("clone the address space");
-    };
-
-    // The counter is per-CPU, so a migration would difference two slots.
-    let guard = PreemptGuard::new();
-    let cpu = slopos_arch::pcr::get_current_cpu();
-    let before = vm_space_mut_spins_taken(cpu);
-    let result = vm.handle_cow_fault(0x5000);
-    let spins = vm_space_mut_spins_taken(cpu).wrapping_sub(before);
-    drop(guard);
-    drop(reader);
-
-    assert_test!(
-        result == Err(MmError::Retry),
-        "expected Retry from the single-reference arm, got {:?}",
-        result
-    );
-    assert_test!(
-        spins == 0,
-        "the fault spun {} times before giving up -- the exclusivity probe did \
-         not run ahead of the dispatch",
-        spins
-    );
-    pass!()
 }
 
 pub fn test_cow_retry_leaves_the_page_mapped_and_cow() -> TestResult {
@@ -442,10 +403,6 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_cow_retry_leaves_the_page_mapped_and_cow,
-    suite = vm_contention
-);
-slopos_testing::stest!(
-    name = test_cow_fault_with_one_reference_does_not_spin_under_contention,
     suite = vm_contention
 );
 slopos_testing::stest!(

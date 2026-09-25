@@ -11,7 +11,7 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::user_mappings::{
     ostd_get_pte_flags_4kb, ostd_replace_4kb_user, ostd_resolve_cow_4kb, ostd_virt_to_phys_4kb,
-    vm_space_is_exclusive,
+    wait_vm_space_exclusive,
 };
 
 /// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
@@ -35,8 +35,7 @@ pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result
         return Err(MmError::InvalidAddress);
     }
 
-    // Both arms end in a bounded spin taken under the per-process lock, IRQs masked.
-    if !vm_space_is_exclusive(vm_space) {
+    if !wait_vm_space_exclusive(vm_space) {
         return Err(MmError::Retry);
     }
 

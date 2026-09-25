@@ -15,7 +15,7 @@ use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
 use crate::user_mappings::{
-    ostd_map_4kb_user, ostd_map_4kb_user_shared, ostd_virt_to_phys_4kb, vm_space_is_exclusive,
+    ostd_map_4kb_user, ostd_map_4kb_user_shared, ostd_virt_to_phys_4kb, wait_vm_space_exclusive,
 };
 use crate::vma_region::{Commit, FileMapRef, VmaMap, VmaRegion};
 
@@ -95,8 +95,8 @@ pub fn handle_demand_fault(
         return Ok(());
     }
 
-    // Before the allocation: a retry storm past it would churn the buddy and reclaim.
-    if !vm_space_is_exclusive(vm_space) {
+    // Before the allocation, so a wait that runs out frees nothing.
+    if !wait_vm_space_exclusive(vm_space) {
         return Err(MmError::Retry);
     }
 
@@ -234,7 +234,7 @@ pub fn install_file_page(
     if !ostd_virt_to_phys_4kb(vm_space, va).is_null() {
         return Ok(());
     }
-    if !vm_space_is_exclusive(vm_space) {
+    if !wait_vm_space_exclusive(vm_space) {
         return Err(MmError::Retry);
     }
 

@@ -22,9 +22,9 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 /// Bit shift for the AVL software-bits field (PTE bits 9..=11); legacy
 /// [`PageFlags::COW`] sits at bit 9, the low bit of `PageProperty::software`.
 const SOFTWARE_BITS_SHIFT: u32 = 9;
-/// Only the fault paths can retry a `WouldBlock`; for syscalls the spin is all there is.
-/// The holder is usually a fault on another CPU, and its flush waits on this
-/// CPU's ack, so the spin services shootdowns or the two wait each other out.
+/// Bound on waiting out the readers of an address space. The readers are user
+/// copies with preemption off, and a holder whose TLB flush waits on this
+/// CPU's ack is served by the wait's own shootdown polling.
 const VM_SPACE_MUT_SPINS: usize = 1_000_000;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD
@@ -83,45 +83,26 @@ pub(crate) fn vm_space_is_exclusive(vm_space: &KArc<VmSpace>) -> bool {
     KArc::strong_count(vm_space) == 1 && KArc::weak_count(vm_space) == 0
 }
 
-#[cfg(feature = "test-hooks")]
-static VM_SPACE_MUT_SPINS_TAKEN: [core::sync::atomic::AtomicU64; slopos_arch::pcr::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; slopos_arch::pcr::MAX_CPUS];
-
-#[cfg(feature = "test-hooks")]
-pub(crate) fn vm_space_mut_spins_taken(cpu: usize) -> u64 {
-    VM_SPACE_MUT_SPINS_TAKEN
-        .get(cpu)
-        .map_or(0, |c| c.load(core::sync::atomic::Ordering::Relaxed))
+/// Wait, under the per-process lock, for the readers holding `vm_space` to let
+/// go. No reader can start meanwhile: taking a reference takes that lock.
+/// `false` when the bound ran out first.
+pub(crate) fn wait_vm_space_exclusive(vm_space: &KArc<VmSpace>) -> bool {
+    for _ in 0..VM_SPACE_MUT_SPINS {
+        if vm_space_is_exclusive(vm_space) {
+            return true;
+        }
+        slopos_ostd::sync::spin_relax();
+        core::hint::spin_loop();
+    }
+    vm_space_is_exclusive(vm_space)
 }
 
 #[inline]
 fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapError> {
-    let mut spins = 0usize;
-    while !vm_space_is_exclusive(vm_space) {
-        if spins == VM_SPACE_MUT_SPINS {
-            #[cfg(feature = "test-hooks")]
-            record_spins(spins);
-            return Err(MapError::WouldBlock);
-        }
-        spins += 1;
-        slopos_ostd::sync::spin_relax();
-        core::hint::spin_loop();
+    if !wait_vm_space_exclusive(vm_space) {
+        return Err(MapError::WouldBlock);
     }
-    #[cfg(feature = "test-hooks")]
-    record_spins(spins);
     KArc::get_mut(vm_space).ok_or(MapError::WouldBlock)
-}
-
-#[cfg(feature = "test-hooks")]
-#[inline]
-fn record_spins(spins: usize) {
-    if spins == 0 {
-        return;
-    }
-    let cpu = slopos_arch::pcr::get_current_cpu();
-    if let Some(counter) = VM_SPACE_MUT_SPINS_TAKEN.get(cpu) {
-        counter.fetch_add(spins as u64, core::sync::atomic::Ordering::Relaxed);
-    }
 }
 
 fn log_frame_wrap_failure(what: &str, pa: PhysAddr, va: VirtAddr, e: FrameError) {
