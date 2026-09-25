@@ -138,10 +138,9 @@ enum Access {
 /// second pid resolve, a slot lock and a per-page table walk before OSTD
 /// walked the same leaves again. Every failure populate can repair — absent
 /// leaf, non-user leaf, present-but-COW leaf refused to a write — arrives as
-/// [`UserPtrError::NotMapped`]. A fault taken mid-`movsb` is `CopyFailed`, and
-/// is retried too: a peer that made a page writable flushed only its own TLB,
-/// and the fault retired this CPU's stale entry. A concurrent unmap fails
-/// again.
+/// [`UserPtrError::NotMapped`]. A fault mid-`movsb`, `CopyFailed`, is retried
+/// too: a peer that made a page writable flushed only its own TLB, and the
+/// fault retired this CPU's stale entry.
 ///
 /// The `KArc<VmSpace>` is dropped before `populate` and re-taken after, and
 /// that ordering is load-bearing: the demand path refuses to install a page

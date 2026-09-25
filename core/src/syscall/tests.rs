@@ -9636,8 +9636,6 @@ fn umount_release_body(
     Ok(())
 }
 
-/// A copy that faults midway is retried: a peer that made the page writable
-/// flushed only its own TLB, and the fault retired this CPU's stale entry.
 pub fn test_user_copy_retries_a_copy_that_faulted_midway() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
