@@ -143,9 +143,8 @@ struct RecHeader {
 pub struct Journal {
     /// Home block of each log slot. `slots[0]` is the log superblock.
     slots: KVec<u32>,
-    /// The filesystem block whose newest content is in this slot, or zero.
-    /// Scanned forwards to check point, which is what makes "the last write
-    /// wins" fall out of the array order.
+    /// The filesystem block this slot holds a copy of, or zero once a revoke
+    /// or a newer home write has cleared it.
     slot_block: KVec<u32>,
     /// Chained hash index over `slot_block`, so serving a cache miss from the
     /// log costs a bucket walk instead of a scan of every slot below the head.
@@ -187,6 +186,9 @@ pub struct Journal {
     /// pass resumed after another emptied and refilled the log cannot mistake
     /// its own slot indices for the new generation's.
     generation: u32,
+    /// Bumped by every abort that put mappings back. A pass whose cursor went
+    /// by a slot before it was restored must not empty the log behind it.
+    restores: u32,
     /// `head` when the open operation began, for the abort rewind.
     op_head: u32,
     /// Running CRC over the open transaction's records.
@@ -277,6 +279,7 @@ impl Journal {
                 write_field!(slot, head, 1);
                 write_field!(slot, seq, 1);
                 write_field!(slot, generation, 0);
+                write_field!(slot, restores, 0);
                 write_field!(slot, op_head, 1);
                 write_field!(slot, crc, CRC32_INIT);
                 write_field!(slot, writes, 0);
@@ -293,6 +296,10 @@ impl Journal {
     /// Which emptying of the log the current slot indices belong to.
     pub fn generation(&self) -> u32 {
         self.generation
+    }
+
+    pub fn restores(&self) -> u32 {
+        self.restores
     }
 
     pub fn inode(&self) -> u32 {
@@ -472,6 +479,9 @@ impl Journal {
     pub fn abort_op(&mut self) {
         for slot in self.op_head..self.head {
             self.index_remove(slot);
+        }
+        if !self.revoke_undo.is_empty() {
+            self.restores = self.restores.wrapping_add(1);
         }
         // Popped, not iterated: `clear_mappings` records a block's slots
         // newest-first, so the reverse order is the one that leaves each

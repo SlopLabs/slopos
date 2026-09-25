@@ -929,9 +929,7 @@ impl Ext2Mount {
     /// Takes the FS lock, so the caller must hold none.
     ///
     /// Every caller drives a pass of its own, interleaved step by step with
-    /// any other; one opened later finds what an earlier one wrote already
-    /// clean, so a `sync(2)` storm does not multiply the device's writes. The
-    /// wait is bounded: the pass releases the mount lock every
+    /// any other. The wait is bounded: the pass releases the mount lock every
     /// [`WRITEBACK_CHUNK`] writes, and the epoch it fixed keeps the ordered
     /// phases ordered across those gaps.
     pub fn sync_fs(&self) -> VfsResult<()> {
