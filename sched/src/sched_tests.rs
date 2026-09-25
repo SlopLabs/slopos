@@ -3428,27 +3428,29 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-
-    // Push to the inbox, bypassing `schedule_task`.
-    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.push_remote_wake(&task_guard);
-    });
-
-    let has_pending_before =
-        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
-            .unwrap_or(false);
+    // IRQs off, as in the tick's own ISR: a real tick landing between the
+    // push and the first check would drain the inbox ahead of the call.
+    let (has_pending_before, has_pending_after) =
+        slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+            let cpu_id = slopos_arch::pcr::get_current_cpu();
+            // Push to the inbox, bypassing `schedule_task`.
+            super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.push_remote_wake(&task_guard);
+            });
+            let before =
+                super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
+                    .unwrap_or(false);
+            scheduler_timer_tick();
+            let after =
+                super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
+                    .unwrap_or(true);
+            (before, after)
+        });
 
     if !has_pending_before {
         klog_info!("SCHED_TEST: Task not in inbox before timer tick");
         return TestResult::Fail;
     }
-
-    scheduler_timer_tick();
-
-    let has_pending_after =
-        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
-            .unwrap_or(true);
 
     if has_pending_after {
         klog_info!("SCHED_TEST: Timer tick did not drain inbox");
