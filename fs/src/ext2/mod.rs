@@ -221,6 +221,16 @@ impl SyncPass {
     pub fn is_done(&self) -> bool {
         self.phase == SyncPhase::Done
     }
+
+    #[cfg(feature = "tests")]
+    pub fn checkpointing_for_test(&self) -> bool {
+        self.phase == SyncPhase::Logged
+    }
+
+    #[cfg(feature = "tests")]
+    pub fn cursor_for_test(&self) -> u32 {
+        self.cursor
+    }
 }
 
 /// RAII scope for one all-or-nothing ext2 operation.
@@ -992,6 +1002,11 @@ impl<'a> Ext2Fs<'a> {
     /// Where the log's append point stands. `1` is empty, and so is no log.
     pub fn journal_head(&self) -> u32 {
         self.cache.journal_head()
+    }
+
+    #[cfg(feature = "tests")]
+    pub fn journal_newest_slot_for_test(&self, block: u32) -> Option<u32> {
+        self.cache.journal_newest_slot(block)
     }
 
     /// Empty the log so the next operation has room to log itself.

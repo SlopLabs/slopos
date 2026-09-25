@@ -26,8 +26,8 @@
 # request once, and its fork past the ceiling is refused once. The pages row
 # after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
 # holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
-# the row counts twice: two captures measured 538 714 and 535 332, and the cap
-# is the larger.
+# the row counts twice: three captures measured 538 714, 535 332 and 538 832,
+# and the cap is the largest.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -55,7 +55,7 @@ post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
 post-kernel-tests	kernelmeta	6120
 post-kernel-tests	objectrow	257
-post-kernel-tests	pages	538714
+post-kernel-tests	pages	538832
 post-kernel-tests	pinnedbytes	4
 post-kernel-tests	process	14
 post-kernel-tests	residentpages	772

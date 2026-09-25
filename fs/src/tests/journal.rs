@@ -1541,3 +1541,78 @@ slopos_testing::stest!(
     name = test_ext2_orphan_drain_keeps_a_list_it_could_not_read,
     suite = fs
 );
+
+/// Two writeback passes interleave, as every writer's drain and the flusher's
+/// do: the one opened first must not check point a logged copy of a block the
+/// later one has already put home a newer copy of, then emptied the log behind.
+pub fn test_ext2_lagging_pass_never_puts_an_older_copy_home() -> TestResult {
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&image, interleave_two_passes) {
+        return fail!("{}", msg);
+    }
+    match with_log(&image, unlinked_name_stays_gone) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+const RESURRECTED: &[u8] = b"resurrected";
+
+fn interleave_two_passes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    attach(fs)?;
+    let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
+    fs.sync().map_err(|_| "sync")?;
+    fs.create_file(dir, RESURRECTED).map_err(|_| "create")?;
+    let block = fs.read_inode(dir).map_err(|_| "read dir")?.block[0].raw();
+
+    let mut early = fs.begin_sync();
+    while !early.checkpointing_for_test() {
+        fs.sync_step(&mut early, usize::MAX)
+            .map_err(|_| "early pass")?;
+    }
+    fs.unlink_entry(dir, RESURRECTED).map_err(|_| "unlink")?;
+    fs.create_file(2, b"later").map_err(|_| "create later")?;
+    let newest = fs
+        .journal_newest_slot_for_test(block)
+        .ok_or("the directory block is not in the log")?;
+
+    let mut late = fs.begin_sync();
+    while !late.checkpointing_for_test() {
+        fs.sync_step(&mut late, usize::MAX)
+            .map_err(|_| "late pass")?;
+    }
+    fs.cache_drop_clean_for_test();
+    while late.cursor_for_test() <= newest {
+        if late.is_done() {
+            return Err("the late pass finished before the early one could run");
+        }
+        fs.sync_step(&mut late, 1).map_err(|_| "late step")?;
+    }
+    while !early.is_done() {
+        fs.sync_step(&mut early, usize::MAX)
+            .map_err(|_| "early finish")?;
+    }
+    while !late.is_done() {
+        fs.sync_step(&mut late, usize::MAX)
+            .map_err(|_| "late finish")?;
+    }
+    if fs.journal_head() != 1 {
+        return Err("the late pass did not empty the log");
+    }
+    Ok(())
+}
+
+fn unlinked_name_stays_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    match fs.resolve_path(b"/d/resurrected") {
+        Err(Ext2Error::PathNotFound) => Ok(()),
+        Ok(_) => Err("an unlinked name came back on the medium"),
+        Err(_) => Err("the directory could not be read back"),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_ext2_lagging_pass_never_puts_an_older_copy_home,
+    suite = fs
+);

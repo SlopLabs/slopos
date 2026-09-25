@@ -1349,25 +1349,30 @@ impl BlockCache {
                 break;
             }
             let block = journal.slot_block_at(slot);
-            // Skipped only when the cache says the home matches, which a clean
-            // entry does by construction. A dirty entry may be newer, but
-            // nothing says the metadata phase has run for its epoch, so the
-            // committed copy goes home regardless.
-            if block == 0 || self.home_matches(block) {
+            // Only a block's newest record goes home. An older one may be
+            // older than the home already is: another pass, interleaved with
+            // this one, can have put the newer copy there and been free to
+            // empty the log once its own cursor passed it. A clean entry says
+            // the home matches; a dirty one may be newer, but nothing says
+            // the metadata phase has run for its epoch, so the committed copy
+            // goes home regardless.
+            if block == 0 || journal.resident_slot(block) != Some(slot) || self.home_matches(block)
+            {
                 slot += 1;
                 continue;
             }
             // A run is ascending slots whose *homes* are the next block, so one
-            // request replaces several without reordering what "the last write
-            // wins" reads. A slot already home ends the run rather than being
-            // skipped inside it: an older logged copy must never overwrite a
-            // newer home. No barrier moves — the caller still barriers once
-            // behind the whole check point.
+            // request replaces several. A slot the loop above would skip ends
+            // the run rather than being skipped inside it. No barrier moves —
+            // the caller still barriers once behind the whole check point.
             let room = (budget - written).min(journal.home_run_max());
             let mut len = 1u32;
             while (len as usize) < room && slot + len < end {
                 let next = journal.slot_block_at(slot + len);
-                if block.checked_add(len) != Some(next) || self.home_matches(next) {
+                if block.checked_add(len) != Some(next)
+                    || journal.resident_slot(next) != Some(slot + len)
+                    || self.home_matches(next)
+                {
                     break;
                 }
                 len += 1;
@@ -1394,6 +1399,12 @@ impl BlockCache {
         self.index
             .get(&BlockNum(block))
             .is_some_and(|&slot| self.entries[slot].valid && !self.entries[slot].frame.dirty())
+    }
+
+    /// The log slot holding `block`'s newest committed content, if any.
+    #[cfg(feature = "tests")]
+    pub fn journal_newest_slot(&self, block: u32) -> Option<u32> {
+        self.journal.as_ref()?.resident_slot(block)
     }
 
     /// Where the log's append point stands, or 1 when there is no log.
