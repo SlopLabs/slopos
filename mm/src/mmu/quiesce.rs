@@ -97,6 +97,18 @@ pub fn quarantine_required() -> bool {
             .saturating_add(2)
 }
 
+/// Whether every online CPU has flushed its whole TLB after an unmap stamped
+/// `epoch`: acks of `epoch + 1` are the first ordered after it (see the module
+/// header).
+pub fn all_acked_after(epoch: u64) -> bool {
+    if !is_active() {
+        return false;
+    }
+    (0..MAX_CPUS).all(|cpu| {
+        !slopos_arch::pcr::is_cpu_online(cpu) || CPU_ACKED[cpu].load(Ordering::Acquire) > epoch
+    })
+}
+
 /// Idempotent; the flushes happen on each CPU's own schedule.
 #[inline]
 pub fn request_advance() {

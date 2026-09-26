@@ -15,8 +15,8 @@ impl CursorUnmapHook for LufHook {
         // Unconditional, including the kernel master (`mm_ctx_handle == 0`):
         // gating on the handle would let an address space that never got one
         // skip arming the quarantine, releasing a frame that still needed it.
-        let _ = (paddr, mm_ctx_handle);
-        luf::queue_unmap(vaddr);
+        let _ = paddr;
+        luf::queue_unmap(vaddr, mm_ctx_handle);
     }
 
     fn on_activate(&self, mm_ctx_handle: u64) {

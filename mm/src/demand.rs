@@ -111,6 +111,17 @@ pub fn handle_demand_fault(
     outcome
 }
 
+/// Invalidate after mapping `va` where nothing was mapped. Only a translation
+/// an earlier lazy unmap left on some CPU can be stale, so the shootdown is
+/// owed only while one may linger; owing it also asks the epoch to close, so
+/// the next fresh mapping is free again.
+fn flush_fresh_mapping(vm_space: &VmSpace, va: VirtAddr) {
+    if crate::mmu::luf::may_hold_stale(vm_space.mm_ctx_handle()) {
+        tlb::flush_page(va);
+        crate::mmu::quiesce::request_advance();
+    }
+}
+
 fn place_fresh_page(
     vm_space: &mut KArc<VmSpace>,
     aligned_addr: u64,
@@ -151,7 +162,7 @@ fn place_fresh_page(
         return Err(MmError::MappingFailed);
     }
 
-    tlb::flush_page(VirtAddr::new(aligned_addr));
+    flush_fresh_mapping(vm_space, VirtAddr::new(aligned_addr));
 
     Ok(())
 }
@@ -241,7 +252,7 @@ pub fn install_file_page(
     if !plan.private {
         return match ostd_map_4kb_user_shared(vm_space, va, cached, pte_flags) {
             Ok(()) => {
-                tlb::flush_page(va);
+                flush_fresh_mapping(vm_space, va);
                 Ok(())
             }
             Err(MapError::WouldBlock) => Err(MmError::Retry),
@@ -268,7 +279,7 @@ pub fn install_file_page(
 
     match ostd_map_4kb_user(vm_space, va, frame, pte_flags) {
         Ok(()) => {
-            tlb::flush_page(va);
+            flush_fresh_mapping(vm_space, va);
             Ok(())
         }
         Err((_, MapError::WouldBlock)) => Err(MmError::Retry),
