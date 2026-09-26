@@ -1459,10 +1459,11 @@ fn schedule_internal() {
             let next: &Task = &next_ref;
             if next.task_id != current_ref.id() {
                 switch_to_claimed_task(cpu_id, current_ref.task(), next_ref);
-                // Reached on resume; the tail is for whatever this task
-                // displaced then. Before re-enabling interrupts, or a
-                // timer-driven dispatch parks into the still-occupied slot.
-                finish_pending_switch(cpu_id);
+                // Reached on resume, possibly on another CPU; the tail is for
+                // whatever this task displaced there. Before re-enabling
+                // interrupts, or a timer-driven dispatch parks into the
+                // still-occupied slot.
+                finish_pending_switch(slopos_arch::pcr::get_current_cpu());
                 let _ = drain_previous_task();
                 cpu::restore_flags(irq_flags);
                 return;
@@ -1478,7 +1479,7 @@ fn schedule_internal() {
         current.as_ref().map(|current| current.task()),
         idle.task(),
     );
-    finish_pending_switch(cpu_id);
+    finish_pending_switch(slopos_arch::pcr::get_current_cpu());
     let _ = drain_previous_task();
     cpu::restore_flags(irq_flags);
 }
