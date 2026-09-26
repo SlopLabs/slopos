@@ -18,8 +18,8 @@ peak for its largest single compile (`core`). The toolchain that runs it is a
 717 MB prefix — `librustc_driver` 140 MB, `libLLVM.so` and `libclang-cpp.so`
 79 MB each (X86 only), cargo 31 MB — built from a clean tree in 3 h 30 min at
 `-j4`. The same dev kernel builds on the host in 45 s at `-j4`; in the guest,
-at four vCPUs, its two passes take about 600 s under KVM and 136 + 90 min
-under TCG.
+at four vCPUs, it takes about 160 s under KVM (600 s before the work in
+"Closing the loop") and 136 + 90 min under TCG, measured before that work.
 
 **Theme.** SlopOS's limits are appliance-sized constants and policies, not
 architectural mistakes. The work is widening under proof — quantities derived
@@ -73,7 +73,7 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 | The kernel build needs no host tool | `just build`; `slopos-kallsyms` tests; two checkouts build identical ELFs | `scripts/build_kernel.sh`, `tools/kallsyms/`, `scripts/compare_kernel_elf.sh` |
 | The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway`; the guest builds both kernels | `mm/src/{commit,vma_region,page_fault,user_copy,user_mappings}.rs`, `slibc/src/process/spawn.rs` |
 | A mount has one writeback pass | `test_ext2_sync_finishes_the_open_pass_instead_of_opening_one`, `test_ext2_journal_headroom_is_restored_off_the_mount_lock` | `fs/src/ext2_vfs.rs` |
-| A kernel installs into a boot slot and rolls back | `just test-install`, `slopos-fat-core` host tests, `test_devfs_block_node_writes_through_the_claim` | `fat-core/`, `userland/src/apps/bootctl.rs`, `core/src/efivar.rs`, `fs/src/devfs/`, `scripts/build_bootdisk.sh` |
+| A kernel installs into a boot slot and rolls back | `just test-install`, `just test-install-guest`, `slopos-fat-core` host tests, `test_devfs_block_node_writes_through_the_claim` | `fat-core/`, `userland/src/apps/bootctl.rs`, `core/src/efivar.rs`, `fs/src/devfs/`, `scripts/build_bootdisk.sh` |
 | Code gets in and out | `scripts/check_offline_build.sh`, `transfer_test` | `.cargo/vendor.toml`, `scripts/{make_vendor,export_devdisk}.sh`, `tls-core/` |
 
 ### What Phase 1 builds on
@@ -139,15 +139,16 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 
 **Outcome:** one `just test-selfhost` run passes every step on one tree.
 
-**Where it stands.** Every step has passed on its own; one run passing all
-five on one tree is what is left. The guest builds both kernels under KVM at
-four vCPUs in about 160 s and 170 s, against 714 s and 756 s when this section
-was first written; the host's reference build of the dev kernel at `-j4` is
-about 44 s. The dev disk passes `e2fsck -fn`, the guest's kernels pass the ELF
-gates, and the guest's dev kernel matches the host's build in its loadable
-image and its symbol table.
+**Where it stands: closed.** One `just test-selfhost` run on `49db3f5e`
+passed all five steps: the guest built the dev kernel in 158 s and the tests
+kernel in 161 s under KVM at four vCPUs (714 s and 756 s when this section was
+first written; the host's reference dev build at `-j4` is about 44 s), the dev
+disk passed `e2fsck -fn`, both guest kernels passed the ELF gates, the suite
+passed 3455/3455 on the guest's tests kernel, and the guest's dev kernel
+matched the host's build in its loadable image (20 020 648 bytes) and its
+symbol table (46 070 symbols).
 
-1. `just test-selfhost` green end to end:
+1. `just test-selfhost` green end to end — done:
    - the guest builds both kernels
    - the dev disk passes `e2fsck -fn`
    - `check_kernel_elf_gates.sh` passes on both kernels
@@ -219,15 +220,29 @@ OVMF whose varstore survives a reset (the nightly the ISO boots keeps
 variables in RAM). The execution boundary holds: all of it is a disk image
 under `builddir/` inside QEMU.
 
-**Still to do:**
-- The exit criterion's own sequence in one run: `just boot-dev` from a boot
-  disk, build a kernel in the guest, `bootctl install b` it, boot it once, and
-  see the guest's build in the boot log.
-- A raw partition write re-reads the partition table to find its window every
-  call; `bootctl install` of a 90 MB kernel pays for it on every cluster.
+**Exit criterion met.** `just test-install-guest` boots slot a (the optimized
+tests kernel) with the dev disk attached; `install_test` builds the tests
+kernel on the dev disk under a fresh `SLOPOS_BUILD_TAG` (209 s), installs it
+into slot b, and the one-shot boot of slot b logs
+`BOOT: kernel /boot/b/kernel.elf (96330728 bytes), build tag guest-480898329`
+and reports the tag in `uname -v`. The run commits b, boots a slot that panics,
+and the reset lands on b; the host then holds slot b's file to the dev disk's
+build byte for byte, and both disks pass `e2fsck -fn`.
 
-**Phase 1 exit criteria:** `just boot-dev`, build a kernel in-guest, install
-it, reboot, and the boot log shows the new build — with rollback if it panics.
+What the run found on the way:
+- A kernel that panicked right after mounting left every writable ext2
+  volume unclean, and the next boot came up with `/` and `/devel` read-only
+  until a host `e2fsck`. The log superblock now carries the mount stamp
+  (`[s_mnt_count, s_mtime]`) of the mount that claimed it, and an unclean
+  volume whose empty log carries its current stamp mounts read-write
+  (`test_ext2_journal_empty_log_of_the_last_mount_recovers`).
+- `fat-core` moved a file one 4 KiB cluster per device request, each
+  re-probing the partition table; runs of consecutive clusters now go as one
+  request of up to 1 MiB.
+
+**Phase 1 exit criteria (met):** `just boot-dev`, build a kernel in-guest,
+install it, reboot, and the boot log shows the new build — with rollback if it
+panics.
 
 ---
 
