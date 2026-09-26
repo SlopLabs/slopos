@@ -4,7 +4,7 @@ use slopos_ostd::{KArc, KVec, klog_info, lock_class};
 use crate::blockdev::BlockDevice;
 use crate::ext2::ondisk::{SUPERBLOCK_LABEL_SPAN, volume_label_of};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_kernel_services::driver_runtime::current_task_is_privileged;
+use slopos_kernel_services::driver_runtime::{current_task_flags, current_task_is_privileged};
 
 const ROOT_INODE: InodeId = 1;
 const NULL_INODE: InodeId = 2;
@@ -204,15 +204,78 @@ fn block_device_of(inode: InodeId) -> Option<(KArc<dyn BlockDevice + Send + Sync
         .map(|n| (KArc::clone(&n.device), n.capacity))
 }
 
+/// Whether the running task may touch a device beneath every filesystem: a
+/// kernel thread, `TASK_FLAG_SYSTEM`, or the holder of `TASK_FLAG_MOUNT`, who
+/// may already graft any device onto the namespace.
+fn raw_block_entitled() -> bool {
+    current_task_is_privileged() || current_task_flags() & slopos_abi::task::TASK_FLAG_MOUNT != 0
+}
+
 /// Serve bytes from a registered block device. A short read is EOF to the
 /// VFS, so this shortens only at the end of the device.
 ///
-/// Requires the entitlement the ext2 block reserve asks for (a kernel thread
-/// or `TASK_FLAG_SYSTEM`): a raw read bypasses every filesystem permission
-/// check above it, and ext2 does not zero a block it frees, so an
+/// Requires [`raw_block_entitled`]: a raw read bypasses every filesystem
+/// permission check above it, and ext2 does not zero a block it frees, so an
 /// unprivileged reader could recover any unlinked file's contents.
 fn block_read(inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-    block_read_entitled(inode, offset, buf, current_task_is_privileged())
+    block_read_entitled(inode, offset, buf, raw_block_entitled())
+}
+
+/// The registered name of the block node at `inode`.
+fn block_name_of(inode: InodeId) -> Option<([u8; DEV_NAME_MAX], usize, u64)> {
+    let table = BLOCK_NODES.read();
+    table
+        .iter()
+        .find(|n| n.inode == inode)
+        .map(|n| (n.name, n.name_len, n.capacity))
+}
+
+/// Write bytes to a registered block device through its exclusive write
+/// claim, taken for this one call. A device something holds — a mount above
+/// all — refuses with `Busy`: a write behind a filesystem's cache would race
+/// its writeback. A write reaching past the end is shortened there, and one
+/// starting at the end has no room.
+fn block_write(inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+    block_write_entitled(inode, offset, buf, raw_block_entitled())
+}
+
+/// [`block_write`] with the entitlement a parameter, as for reads.
+pub(crate) fn block_write_entitled(
+    inode: InodeId,
+    offset: u64,
+    buf: &[u8],
+    entitled: bool,
+) -> VfsResult<usize> {
+    let Some((name, name_len, capacity)) = block_name_of(inode) else {
+        return Err(VfsError::NotFound);
+    };
+    if !entitled {
+        return Err(VfsError::PermissionDenied);
+    }
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    if offset >= capacity {
+        return Err(VfsError::NoSpace);
+    }
+    let want = (capacity - offset).min(buf.len() as u64) as usize;
+    let device = crate::vfs::init::vfs_claim_block_device(&name[..name_len])?;
+    device
+        .write_at(offset, &buf[..want])
+        .map_err(|_| VfsError::IoError)?;
+    Ok(want)
+}
+
+/// Push a block node's writes to the medium.
+fn block_flush(inode: InodeId) -> VfsResult<()> {
+    let Some((name, name_len, _)) = block_name_of(inode) else {
+        return Err(VfsError::NotFound);
+    };
+    if !raw_block_entitled() {
+        return Err(VfsError::PermissionDenied);
+    }
+    let device = crate::vfs::init::vfs_claim_block_device(&name[..name_len])?;
+    device.flush().map_err(|_| VfsError::IoError)
 }
 
 /// `entitled` is [`current_task_is_privileged`] on every production path; it
@@ -339,7 +402,7 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn write(&self, inode: InodeId, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
+    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
         match inode {
             // kmsg is read-only; writes are discarded so a stray redirect does
             // not error.
@@ -352,10 +415,7 @@ impl FileSystem for DevFs {
 
             ROOT_INODE => Err(VfsError::IsDirectory),
 
-            // The mount holds the device's exclusive write capability for the
-            // kernel's lifetime, and a device-level write behind the ext2
-            // block cache would race its own writeback.
-            _ if block_capacity_of(inode).is_some() => Err(VfsError::ReadOnly),
+            _ if block_capacity_of(inode).is_some() => block_write(inode, offset, buf),
 
             _ => Err(VfsError::NotFound),
         }
@@ -429,6 +489,13 @@ impl FileSystem for DevFs {
     }
 
     fn sync(&self) -> VfsResult<()> {
+        Ok(())
+    }
+
+    fn sync_inode(&self, inode: InodeId, _data_only: bool) -> VfsResult<()> {
+        if block_capacity_of(inode).is_some() {
+            return block_flush(inode);
+        }
         Ok(())
     }
 }

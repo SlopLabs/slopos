@@ -6,7 +6,7 @@ use slopos_testing::{TestResult, fail};
 
 use super::{Ext2ImageSpec, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
-use crate::devfs::{DevFs, block_read_entitled, devfs_register_block_device};
+use crate::devfs::{DevFs, block_read_entitled, block_write_entitled, devfs_register_block_device};
 use crate::partition::{
     LOGICAL_SECTOR, PartitionDevice, PartitionError, PartitionKind, PartitionScheme, probe,
 };
@@ -570,9 +570,17 @@ pub fn test_devfs_block_node_serves_the_device() -> TestResult {
         other => return fail!("read past the end gave {:?}", other),
     }
 
-    match fs.write(inode, 0, b"nope") {
-        Err(VfsError::ReadOnly) => {}
-        other => return fail!("a block node must refuse writes, got {:?}", other),
+    // Writes go through a driver's exclusive claim, and nothing can claim a
+    // device no driver registered: refused, and the medium is untouched.
+    let mut before = [0u8; 4];
+    let _ = fs.read(inode, 0, &mut before);
+    if fs.write(inode, 0, b"nope").is_ok() {
+        return fail!("a node no driver can claim accepted a write");
+    }
+    let mut after = [0u8; 4];
+    let _ = fs.read(inode, 0, &mut after);
+    if after != before {
+        return fail!("a refused write changed the device");
     }
 
     let mut seen = false;
@@ -724,6 +732,72 @@ pub fn test_devfs_block_node_read_requires_entitlement() -> TestResult {
     }
 }
 
+/// A block node writes through the device's exclusive claim, one call at a
+/// time: refused without the entitlement, refused while anything else holds
+/// the claim, shortened at the end of the device, and read back as written.
+pub fn test_devfs_block_node_writes_through_the_claim() -> TestResult {
+    const SCRATCH: &[u8] = b"vdb";
+    let fs = DevFs::new();
+    let Ok(inode) = fs.lookup(fs.root_inode(), SCRATCH) else {
+        klog_info!("PART_TEST: no scratch disk attached; nothing to write");
+        return TestResult::Pass;
+    };
+    let capacity = match fs.stat(inode) {
+        Ok(stat) => stat.size,
+        Err(e) => return fail!("stat of the scratch node failed: {:?}", e),
+    };
+    let at = capacity - 4096;
+    let Ok(mut saved) = slopos_ostd::KVec::<u8>::zeroed(4096) else {
+        return TestResult::Pass;
+    };
+    if fs.read(inode, at, &mut saved) != Ok(4096) {
+        return fail!("could not read the window back");
+    }
+    let verdict = block_write_body(&fs, inode, at, capacity);
+    let _ = fs.write(inode, at, &saved);
+    verdict
+}
+
+#[inline(never)]
+fn block_write_body(fs: &DevFs, inode: u64, at: u64, capacity: u64) -> TestResult {
+    let pattern = [0xC3u8; 700];
+    match block_write_entitled(inode, at + 11, &pattern, false) {
+        Err(VfsError::PermissionDenied) => {}
+        other => return fail!("an unentitled raw write was not refused: {:?}", other),
+    }
+    match fs.write(inode, at + 11, &pattern) {
+        Ok(700) => {}
+        other => return fail!("the entitled write was not served: {:?}", other),
+    }
+    if fs.sync_inode(inode, false).is_err() {
+        return fail!("fsync of the node failed");
+    }
+    let mut back = [0u8; 700];
+    if fs.read(inode, at + 11, &mut back) != Ok(700) || back != pattern {
+        return fail!("the write did not read back");
+    }
+
+    match crate::vfs::vfs_claim_block_device(b"vdb") {
+        Ok(held) => {
+            let busy = fs.write(inode, at, &pattern);
+            drop(held);
+            if busy != Err(VfsError::Busy) {
+                return fail!("a write past a held claim gave {:?}", busy);
+            }
+        }
+        Err(e) => return fail!("could not take the claim to hold: {:?}", e),
+    }
+
+    match fs.write(inode, capacity - 100, &pattern) {
+        Ok(100) => {}
+        other => return fail!("a write across the end was not shortened: {:?}", other),
+    }
+    match fs.write(inode, capacity, &pattern) {
+        Err(VfsError::NoSpace) => TestResult::Pass,
+        other => fail!("a write at the end gave {:?}", other),
+    }
+}
+
 slopos_testing::stest!(name = test_partition_gpt_happy_path, suite = fs);
 slopos_testing::stest!(name = test_partition_gpt_backup_header_fallback, suite = fs);
 slopos_testing::stest!(
@@ -748,5 +822,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_devfs_block_node_read_requires_entitlement,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_devfs_block_node_writes_through_the_claim,
     suite = fs
 );

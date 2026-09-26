@@ -1994,6 +1994,11 @@ pub fn current_task_is_privileged() -> bool {
     })
 }
 
+/// The running task's flag word; 0 on a CPU with no current task.
+pub fn current_task_flags() -> u16 {
+    Current::get().map_or(0, |c| c.task().flags)
+}
+
 /// The account the running task's allocations are charged to, or
 /// [`AccountId::NONE`] for a task that belongs to no process — which names no
 /// row, so a kernel thread's writeback is accounted to nobody rather than to
