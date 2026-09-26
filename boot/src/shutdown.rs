@@ -242,6 +242,20 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
     klog_info!("Firmware reset ignored; forcing triple fault");
     slopos_ostd::cpu::x86_64::core::trigger_triple_fault();
 }
+/// Reset from a panic: none of [`kernel_reboot`]'s filesystem flush, whose
+/// locks a panicking CPU may hold, and not the firmware's `ResetSystem`,
+/// which is mapped only into the kernel master address space and a panic can
+/// be running on a user task's.
+pub fn reset_after_panic() -> ! {
+    cpu::disable_interrupts();
+    kernel_drain_serial_output();
+    for &(_, reset) in REBOOT_METHODS.iter().skip(1) {
+        reset();
+        hpet::delay_ms(50);
+    }
+    slopos_ostd::cpu::x86_64::core::trigger_triple_fault();
+}
+
 pub fn execute_kernel() {
     klog_info!("=== EXECUTING KERNEL PURIFICATION RITUAL ===");
     klog_info!("Painting memory with the essence of slop (0x69)...");

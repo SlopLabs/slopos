@@ -376,6 +376,11 @@ extern "sysv64" fn emergency_report() -> ! {
     panic_serial_write("===================");
     panic_serial_write("Kernel panic: unrecoverable error");
 
+    if REBOOT_ON_PANIC.load(core::sync::atomic::Ordering::Relaxed) {
+        panic_serial_write("panic=reboot: resetting");
+        crate::shutdown::reset_after_panic();
+    }
+
     #[cfg(feature = "tests")]
     {
         panic_serial_write("TEST MODE: Exiting QEMU with failure code");
@@ -479,4 +484,11 @@ impl HexBuffer {
 
         core::str::from_utf8(&self.buf[..pos]).unwrap_or("")
     }
+}
+
+static REBOOT_ON_PANIC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `panic=reboot`.
+pub fn set_reboot_on_panic() {
+    REBOOT_ON_PANIC.store(true, core::sync::atomic::Ordering::Relaxed);
 }

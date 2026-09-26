@@ -550,6 +550,30 @@ fn apply_root_option(cmdline: &str) {
     }
 }
 
+/// `panic=reboot`: a panic resets the machine instead of halting it, which is
+/// what hands a boot slot that panics back to the loader's default.
+/// `panic.boot=on` panics once boot initialisation is done: the broken kernel
+/// a slot rollback is tested with.
+#[inline(never)]
+fn apply_panic_options(cmdline: &str) {
+    for token in cmdline.split_whitespace() {
+        match token {
+            "panic=reboot" => {
+                crate::panic::set_reboot_on_panic();
+                boot_info(b"Boot option: panic=reboot\0");
+            }
+            "panic.boot=on" => {
+                PANIC_AFTER_BOOT.store(true, core::sync::atomic::Ordering::Relaxed);
+                boot_info(b"Boot option: panic.boot=on\0");
+            }
+            _ => {}
+        }
+    }
+}
+
+static PANIC_AFTER_BOOT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// `prof=on`: sample where the machine's time goes, reported at the end of
 /// a test run.
 #[inline(never)]
@@ -757,6 +781,8 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 
     apply_prof_option(cmdline);
 
+    apply_panic_options(cmdline);
+
     if cmdline.split_whitespace().any(|t| t == "verity=require") {
         crate::boot_services::set_verity_required(true);
         boot_info(b"Boot option: verity=require\0");
@@ -918,6 +944,9 @@ pub fn kernel_main_impl() {
         }
         slopos_hermetic::return_after_boot(boot_ctx);
         serial::write_line("BOOT: boot init complete");
+        if PANIC_AFTER_BOOT.load(core::sync::atomic::Ordering::Relaxed) {
+            panic!("panic.boot=on");
+        }
 
         // Must happen while the EFI memory map is still live, so firmware
         // `ResetSystem` stays callable at shutdown. No-op on a BIOS boot.
