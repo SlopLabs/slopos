@@ -1,8 +1,8 @@
 //! Sleeping mutex built on top of [`SpinLock`] + [`WaitQueue`].
 //!
-//! Contended lockers block on the wait queue rather than spinning, so the lock
-//! may be held across long-running operations — and must never be taken from an
-//! interrupt handler, which would block the CPU.
+//! A contended locker spins for a bounded [`SPIN_CYCLES`] and then blocks on
+//! the wait queue, so the lock may be held across long-running operations — and
+//! must never be taken from an interrupt handler, which would block the CPU.
 //!
 //! Until a [`WaitQueueBackend`](super::wait_queue::WaitQueueBackend) is
 //! registered, `lock()` falls back to spin-acquiring the inner spinlock.
@@ -11,11 +11,17 @@ use crate::sync::lock_tracking::LockClassKey;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use crate::mm::AllocError;
 use crate::mm::init::{Init, init_from_closure, init_from_owned};
 use crate::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};
+
+/// How long a contended `lock` spins before it sleeps: about 20 µs at the clock
+/// rates this runs at. Most holds are shorter than a block, a context switch and
+/// a wake, which is what sleeping at once pays for each of them; a longer hold
+/// costs the spinner no more than this before it sleeps as it always did.
+const SPIN_CYCLES: u64 = 60_000;
 
 pub struct Mutex<T> {
     locked: AtomicBool,
@@ -94,6 +100,12 @@ impl<T> Mutex<T> {
     /// paths) the acquire degrades to busy-waiting on the flag.
     #[must_use = "an unacquired lock guards nothing"]
     pub fn lock(&self) -> WaitResult<MutexGuard<'_, T>> {
+        if let Some(guard) = self.try_lock() {
+            return Ok(guard);
+        }
+        if let Some(guard) = self.spin_for_unlock() {
+            return Ok(guard);
+        }
         loop {
             if let Some(guard) = self.try_lock() {
                 return Ok(guard);
@@ -109,6 +121,21 @@ impl<T> Mutex<T> {
                 // than panicking keeps this path panic-free.
                 Err(_) => core::hint::spin_loop(),
             }
+        }
+    }
+
+    fn spin_for_unlock(&self) -> Option<MutexGuard<'_, T>> {
+        let start = crate::arch::x86_64::tsc::rdtsc();
+        loop {
+            if !self.locked.load(Ordering::Relaxed)
+                && let Some(guard) = self.try_lock()
+            {
+                return Some(guard);
+            }
+            if crate::arch::x86_64::tsc::rdtsc().wrapping_sub(start) > SPIN_CYCLES {
+                return None;
+            }
+            core::hint::spin_loop();
         }
     }
 
@@ -142,6 +169,12 @@ impl<T> Drop for MutexGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.mutex.locked.store(false, Ordering::Release);
-        self.mutex.waiters.wake_one();
+        // Pairs with the fence `wait_core` takes between queueing a waiter and
+        // re-reading `locked`: either this sees the waiter, or it sees the lock
+        // free and never sleeps.
+        fence(Ordering::SeqCst);
+        if self.mutex.waiters.has_waiters() {
+            self.mutex.waiters.wake_one();
+        }
     }
 }

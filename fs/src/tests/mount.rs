@@ -848,8 +848,9 @@ impl BlockDevice for CountingDevice {
 
 const HEADROOM_MP: &[u8] = b"/tmp/ext2_headroom";
 /// Operations one burst may take to drive the log past its low-water mark: two
-/// or three suffice against the fixture's 47-slot log, the rest is margin for
-/// the writeback kthread draining one from under us.
+/// or three suffice against the fixture's 47-slot log. The flusher is kept off
+/// the instance, since a drain from under the burst would hold the log short of
+/// the mark until the fixture ran out of inodes.
 const HEADROOM_ROUNDS: usize = 64;
 
 /// An operation that finds the log short of headroom completes, and the pass
@@ -870,9 +871,12 @@ pub fn test_ext2_journal_headroom_is_restored_off_the_mount_lock() -> TestResult
         return slopos_testing::fail!("the ext2 pool handed out no instance");
     };
 
+    // A flusher pass left open, or a drain, would be the state under test.
+    fs.exclude_flusher_for_test(true);
     let outcome = headroom_body(fs, device);
 
     let _ = unmount(HEADROOM_MP);
+    fs.exclude_flusher_for_test(false);
     vfs_ext2_pool_release(fs, false);
     let _ = vfs_rmdir(HEADROOM_MP);
     match outcome {
@@ -969,9 +973,12 @@ pub fn test_ext2_sync_finishes_the_open_pass_instead_of_opening_one() -> TestRes
         return slopos_testing::fail!("the ext2 pool handed out no instance");
     };
 
+    // A flusher pass left open, or a drain, would be the state under test.
+    fs.exclude_flusher_for_test(true);
     let outcome = shared_pass_body(fs, device);
 
     let _ = unmount(SHARED_PASS_MP);
+    fs.exclude_flusher_for_test(false);
     vfs_ext2_pool_release(fs, false);
     let _ = vfs_rmdir(SHARED_PASS_MP);
     match outcome {

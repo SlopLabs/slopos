@@ -739,6 +739,10 @@ impl WaitQueue {
                 bk.mark_current_blocked()
             };
 
+            // A waker that stores its condition and then skips an empty queue
+            // (`has_waiters`) fences between the two; with this one, either it
+            // sees this node or the recheck below sees its store.
+            core::sync::atomic::fence(Ordering::SeqCst);
             let condition_ready = condition();
             let abort = aborts.probe(bk);
             let woke = node.as_ref().has_woken_load();
@@ -936,9 +940,11 @@ impl WaitQueue {
     /// around the data store), so the decision is left at the call site.
     ///
     /// The `Acquire` head read pairs with the `Release` store in `push_node`'s
-    /// critical section: `true` means that locked push happened-before. `false`
-    /// may race with a just-committed push and is therefore advisory — the miss
-    /// costs one extra spin-loop iteration on the consumer side.
+    /// critical section: `true` means that locked push happened-before. A bare
+    /// `false` may race with a just-committed push. It is definitive for a
+    /// producer that stored its condition and then took `fence(SeqCst)` before
+    /// this read, because `wait_core` fences between queueing and its recheck:
+    /// either the producer sees the node or the waiter sees the store.
     pub fn has_waiters(&self) -> bool {
         // SAFETY: `as_ptr` skips the lock, but the only field read through it
         // is the `AtomicPtr` list head, and the `WaitQueue` outlives all its

@@ -324,9 +324,11 @@ released and the same disk can be mounted again — a leaked claim answers
 catch.
 
 **A rude exit is survivable.** The flusher marks the image clean *on the
-medium* whenever a pass leaves nothing dirty, nothing unbarriered, no
-superblock drift and an empty log — the state ext4 reaches for `fsfreeze`,
-here reached automatically at idle — and `Ext2Fs::transaction` re-stamps it
+medium* once a pass leaves nothing dirty, nothing unbarriered, no
+superblock drift and an empty log, and the mount has had nothing to write
+for a second — the state ext4 reaches for `fsfreeze`, here reached
+automatically at idle; a busy mount would pay a superblock read, write and
+barrier each way on every pass — and `Ext2Fs::transaction` re-stamps it
 dirty before the next mutation reaches the device. Closing the QEMU window
 therefore costs at most the last idle window's writes, instead of leaving an
 image that mounts read-only forever after and that `root=auto` then demotes to

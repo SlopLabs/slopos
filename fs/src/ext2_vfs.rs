@@ -296,6 +296,15 @@ pub struct Ext2Mount {
     needs_pass: AtomicBool,
     /// When the last whole writeback pass finished, in monotonic ms.
     last_full_ms: AtomicU64,
+    /// When an operation last left something to write, in monotonic ms.
+    last_busy_ms: AtomicU64,
+    /// A pass finished with the image left dirty on the medium because the
+    /// mount was not idle yet; a later visit stamps it clean.
+    clean_owed: AtomicBool,
+    /// The pool flusher passes this instance by, so a test can hold the log
+    /// and the open pass in the state it built.
+    #[cfg(feature = "tests")]
+    flusher_excluded: AtomicBool,
 }
 
 const WANT_COMMIT: u8 = 1;
@@ -314,6 +323,8 @@ const FLUSH_INTERVAL_MS: u64 = 5_000;
 /// defaults to five seconds; a build machine that may be closed rudely at any
 /// moment is better served by one.
 const COMMIT_INTERVAL_MS: u64 = 1_000;
+/// How long a mount must have had nothing to write before it is stamped clean.
+const CLEAN_IDLE_MS: u64 = COMMIT_INTERVAL_MS;
 /// Dirty blocks past which a mount with a log wakes the flusher early, as a
 /// share of its cache — analog of `dirty_background_ratio` — floored so a
 /// small cache still batches.
@@ -338,6 +349,10 @@ impl Ext2Mount {
             wants: AtomicU8::new(0),
             needs_pass: AtomicBool::new(false),
             last_full_ms: AtomicU64::new(0),
+            last_busy_ms: AtomicU64::new(0),
+            clean_owed: AtomicBool::new(false),
+            #[cfg(feature = "tests")]
+            flusher_excluded: AtomicBool::new(false),
         }
     }
 
@@ -487,10 +502,14 @@ impl Ext2Mount {
         self.dirty_pending.store(dirty, Ordering::Relaxed);
         self.log_pending
             .store(cache.journal_pending() as usize, Ordering::Relaxed);
-        self.needs_pass.store(
-            dirty > 0 || cache.unbarriered_writes() > 0 || !cache.journal_is_empty(),
-            Ordering::Relaxed,
-        );
+        let needs_pass = dirty > 0 || cache.unbarriered_writes() > 0 || !cache.journal_is_empty();
+        self.needs_pass.store(needs_pass, Ordering::Relaxed);
+        if needs_pass {
+            self.last_busy_ms.store(
+                slopos_kernel_services::clock::uptime_ms(),
+                Ordering::Relaxed,
+            );
+        }
         // Past the background threshold writeback starts early. With a log,
         // dirty blocks are already safe in it, so the threshold scales with
         // the cache; without one it stays small, writeback being all that
@@ -1348,6 +1367,13 @@ impl Ext2Mount {
         result.map(|()| Progress::Stepped)
     }
 
+    /// Keep the pool flusher off this instance. Set before `attach`, so no
+    /// pass of its own is open when the test starts.
+    #[cfg(feature = "tests")]
+    pub(crate) fn exclude_flusher_for_test(&self, excluded: bool) {
+        self.flusher_excluded.store(excluded, Ordering::Release);
+    }
+
     /// Open the mount's pass if none is, and advance it by one step.
     #[cfg(feature = "tests")]
     pub(crate) fn writeback_step_for_test(&self) -> VfsResult<()> {
@@ -1508,20 +1534,41 @@ impl Ext2Mount {
     /// One flusher visit: a whole pass when one is asked for or due, else a
     /// log commit when records are waiting.
     fn flush_once(&self, stopping: bool) -> VfsResult<()> {
+        #[cfg(feature = "tests")]
+        if self.flusher_excluded.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let wants = self.wants.swap(0, Ordering::Relaxed);
         let now = slopos_kernel_services::clock::uptime_ms();
         let due =
             now.saturating_sub(self.last_full_ms.load(Ordering::Relaxed)) >= FLUSH_INTERVAL_MS;
         if stopping || wants & WANT_FULL != 0 || (due && self.needs_pass.load(Ordering::Relaxed)) {
             self.sync_fs()?;
-            self.mark_filesystem_clean();
+            self.stamp_clean_if_idle(stopping);
             self.last_full_ms.store(now, Ordering::Relaxed);
             return Ok(());
         }
         if wants & WANT_COMMIT != 0 || self.log_pending.load(Ordering::Relaxed) > 0 {
             return self.commit_log();
         }
+        if self.clean_owed.load(Ordering::Relaxed) {
+            self.stamp_clean_if_idle(false);
+        }
         Ok(())
+    }
+
+    /// The clean stamp is for an idle mount: a busy one would pay a
+    /// superblock read, write and barrier to stamp it and the same again on
+    /// its next operation to take the stamp back, every pass.
+    fn stamp_clean_if_idle(&self, stopping: bool) {
+        let now = slopos_kernel_services::clock::uptime_ms();
+        let idle = now.saturating_sub(self.last_busy_ms.load(Ordering::Relaxed)) >= CLEAN_IDLE_MS;
+        if stopping || idle {
+            self.clean_owed.store(false, Ordering::Relaxed);
+            self.mark_filesystem_clean();
+        } else {
+            self.clean_owed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
