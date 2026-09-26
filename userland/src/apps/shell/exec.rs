@@ -19,7 +19,7 @@ use core::ptr;
 use crate::program_registry;
 use crate::syscall::{UserFsStat, core as sys_core, fs, process};
 use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
-use slopos_abi::signal::{WNOHANG, WUNTRACED};
+use slopos_abi::signal::WUNTRACED;
 use slopos_shell_core::ast::{
     AndOr, AndOrOp, Command, CommandKind, List, Pipeline, RedirKind, RedirTarget, Redirect, Word,
 };
@@ -1164,13 +1164,19 @@ fn build_c_envp() -> (Vec<Vec<u8>>, Vec<*const u8>) {
 // ---------------------------------------------------------------------------
 
 /// `WUNTRACED` is what makes Ctrl-Z observable: without it a suspended child
-/// never reports and the shell waits forever.
+/// never reports and the shell waits forever. A blocking wait, not a poll:
+/// a script's every command would otherwise pay half a poll interval.
 fn wait_foreground(pid: u32) -> process::WaitStatus {
     loop {
-        if let Some((_, status)) = process::wait_with(pid as i32, WNOHANG | WUNTRACED) {
+        let mut status = 0i32;
+        let rc = process::waitpid_raw(pid as i32, &mut status, WUNTRACED);
+        if rc > 0 {
             return process::wait_status(status);
         }
-        sys_core::sleep_ms(5);
+        if rc != slopos_abi::Errno::EINTR.raw() as i64 {
+            // No such child any more: nothing will ever report.
+            return process::WaitStatus::Exited(127);
+        }
     }
 }
 

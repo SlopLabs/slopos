@@ -828,7 +828,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return 0;
     }
 
-    klog_info!(
+    klog_debug!(
         "Terminating task '{}' (ID {})",
         bytes_as_str(&task.name),
         resolved_id
@@ -1916,7 +1916,7 @@ pub fn task_clone(
         }
     }
 
-    klog_info!(
+    klog_debug!(
         "task_clone: created child task {} (process {}, tgid {}) flags=0x{:x} from parent {} (process {})",
         child_task_id,
         child_process_id,
