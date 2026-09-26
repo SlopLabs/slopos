@@ -1,0 +1,30 @@
+--- a/llvm/lib/MC/MCSubtargetInfo.cpp
++++ b/llvm/lib/MC/MCSubtargetInfo.cpp
+@@ -58,12 +58,23 @@
+ static
+ void ClearImpliedBits(FeatureBitset &Bits, unsigned Value,
+                       ArrayRef<SubtargetFeatureKV> FeatureTable) {
+-  for (const SubtargetFeatureKV &FE : FeatureTable) {
+-    if (FE.Implies.getAsBitset().test(Value)) {
+-      Bits.reset(FE.Value);
+-      ClearImpliedBits(Bits, FE.Value, FeatureTable);
++  // Transitively clear every feature that implies Value, one level of the
++  // implication graph per pass. Recursing per implying feature walks every
++  // path to Value instead, and through x86's SSE/AVX hierarchy that made this
++  // the hottest function of a build for a target with SSE disabled.
++  FeatureBitset Cleared;
++  FeatureBitset Frontier;
++  Frontier.set(Value);
++  while (Frontier.any()) {
++    FeatureBitset Implying;
++    for (const SubtargetFeatureKV &FE : FeatureTable) {
++      if ((FE.Implies.getAsBitset() & Frontier).any())
++        Implying.set(FE.Value);
+     }
++    Frontier = Implying & ~Cleared;
++    Cleared |= Frontier;
+   }
++  Bits &= ~Cleared;
+ }
+ 
+ static void ApplyFeatureFlag(FeatureBitset &Bits, StringRef Feature,
