@@ -922,6 +922,7 @@ pub fn kernel_main_impl() {
         // Must happen while the EFI memory map is still live, so firmware
         // `ResetSystem` stays callable at shutdown. No-op on a BIOS boot.
         crate::uefi_runtime::map_runtime_regions(boot_get_hhdm_offset());
+        slopos_core::efivar::efivar_init(crate::limine_protocol::efi_system_table_addr());
     });
 
     if klog::is_enabled_level(KlogLevel::Info) {

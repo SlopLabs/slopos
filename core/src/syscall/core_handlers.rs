@@ -138,6 +138,44 @@ define_syscall!(syscall_uname
     Ok(())
 });
 
+/// A variable name the caller's buffer holds, bounded before it is copied.
+fn efivar_name(name: &UserBytes) -> Result<slopos_ostd::KVec<u8>, Errno> {
+    if name.is_empty() || name.len() > crate::efivar::EFIVAR_NAME_MAX * 3 {
+        return Err(Errno::EINVAL);
+    }
+    let mut out = slopos_ostd::KVec::zeroed(name.len()).map_err(|_| Errno::ENOMEM)?;
+    slopos_mm::user_copy::copy_bytes_from_user(*name.inner(), &mut out)
+        .map_err(|_| Errno::EFAULT)?;
+    Ok(out)
+}
+
+define_syscall!(syscall_efivar_get
+    (ctx, name: UserBytes, guid: UserPtr<[u8; 16]>, buf: UserBytes) cap(Power)
+    -> Result<u64, Errno> {
+    let _ = ctx;
+    let name = efivar_name(&name)?;
+    let guid = copy_from_user(guid.inner()).map_err(|_| Errno::EFAULT)?;
+    let value = crate::efivar::efivar_get(&name, guid, buf.len())?;
+    slopos_mm::user_copy::copy_bytes_to_user(*buf.inner(), &value).map_err(|_| Errno::EFAULT)?;
+    Ok(value.len() as u64)
+});
+
+define_syscall!(syscall_efivar_set
+    (ctx, name: UserBytes, guid: UserPtr<[u8; 16]>, attributes: u32, data: UserBytes) cap(Power)
+    -> Result<u64, Errno> {
+    let _ = ctx;
+    let name = efivar_name(&name)?;
+    let guid = copy_from_user(guid.inner()).map_err(|_| Errno::EFAULT)?;
+    if data.len() > crate::efivar::EFIVAR_DATA_MAX {
+        return Err(Errno::E2BIG);
+    }
+    let mut value = slopos_ostd::KVec::zeroed(data.len()).map_err(|_| Errno::ENOMEM)?;
+    slopos_mm::user_copy::copy_bytes_from_user(*data.inner(), &mut value)
+        .map_err(|_| Errno::EFAULT)?;
+    crate::efivar::efivar_set(&name, guid, attributes, &value)?;
+    Ok(0)
+});
+
 // Linux's `reboot(2)`: the magics are what separate a deliberate call from a
 // stray one, and `cmd` picks the action. `POWER_OFF` and `HALT` both stop the
 // machine — the platform layer draws no further distinction.

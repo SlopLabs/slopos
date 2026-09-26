@@ -4,6 +4,7 @@
 #![feature(try_trait_v2_residual)]
 
 pub mod driver_hooks;
+pub mod efivar;
 pub mod exec;
 pub mod irq;
 pub mod kconsole;

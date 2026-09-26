@@ -7,8 +7,9 @@ use slopos_ostd::authority::Capability;
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
     syscall_clock_gettime, syscall_clock_settime, syscall_cpu_info, syscall_ctty_read,
-    syscall_exit, syscall_exit_group, syscall_klog_write, syscall_nanosleep, syscall_percpu_stats,
-    syscall_process_list, syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_uname,
+    syscall_efivar_get, syscall_efivar_set, syscall_exit, syscall_exit_group, syscall_klog_write,
+    syscall_nanosleep, syscall_percpu_stats, syscall_process_list, syscall_reboot,
+    syscall_sched_yield, syscall_sys_info, syscall_uname,
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
@@ -257,6 +258,8 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_TEST_REPORT]        => syscall_test_report,        "test_report";
     [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
     [SYSCALL_TEST_PANIC]         => syscall_test_panic,         "test_panic";
+    [SYSCALL_EFIVAR_GET]         => syscall_efivar_get,         "efivar_get";
+    [SYSCALL_EFIVAR_SET]         => syscall_efivar_set,         "efivar_set";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -310,7 +313,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 152;
+pub const SYSCALL_ENTRY_COUNT: usize = 154;
 
 /// The recorded shape of the classification.
 ///
@@ -323,7 +326,7 @@ const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::NoneSelf, 46),
     (Capability::NoneFd, 71),
     (Capability::NoneRelation, 14),
-    (Capability::Power, 1),
+    (Capability::Power, 3),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
     (Capability::SysInspect, 6),
