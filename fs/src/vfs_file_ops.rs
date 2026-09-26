@@ -314,9 +314,13 @@ pub(crate) fn write_chunk(
     match crate::filemap::coverage_at(fs, inode, offset) {
         crate::filemap::Coverage::Above(boundary) => {
             let want = clip(buf.len(), boundary - offset);
-            return fs.write(inode, offset, &buf[..want]);
+            return crate::filemap::around_uncovered_write(inode, || {
+                fs.write(inode, offset, &buf[..want])
+            });
         }
-        crate::filemap::Coverage::Absent => return fs.write(inode, offset, buf),
+        crate::filemap::Coverage::Absent => {
+            return crate::filemap::around_uncovered_write(inode, || fs.write(inode, offset, buf));
+        }
         crate::filemap::Coverage::Here => {}
     }
     let size = fs.stat(inode)?.size;

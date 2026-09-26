@@ -18,7 +18,9 @@ use crate::page_alloc::alloc_kernel_page;
 use crate::process_vm::{process_vm_get_region, process_vm_mmap_file, process_vm_munmap};
 use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::vma_region::FileMapRef;
-use slopos_abi::addr::PhysAddr;
+use slopos_abi::addr::{PhysAddr, VirtAddr};
+
+use crate::paging_defs::PageFlags;
 
 const PAGES: u32 = 2;
 const LENGTH: u64 = PAGES as u64 * 4096;
@@ -67,6 +69,14 @@ impl FileMapOps for CountingOps {
             0 => Ok(PhysAddr::new(FAULT_PAGES[0].load(Ordering::Relaxed))),
             1 => Ok(PhysAddr::new(FAULT_PAGES[1].load(Ordering::Relaxed))),
             _ => Err(slopos_abi::Errno::EINVAL.raw()),
+        }
+    }
+
+    fn resident(&self, _map: FileMapRef, first_page: u64, out: &mut [PhysAddr]) {
+        for (page, slot) in (first_page..).zip(out.iter_mut()) {
+            *slot = FAULT_PAGES.get(page as usize).map_or(PhysAddr::NULL, |pa| {
+                PhysAddr::new(pa.load(Ordering::Relaxed))
+            });
         }
     }
 }
@@ -305,9 +315,22 @@ pub fn test_file_vma_readonly_is_not_armed_and_munmap_drains() -> TestResult {
     pass!()
 }
 
-/// A `MAP_PRIVATE` fault copies the set's page rather than aliasing it, so a
-/// store cannot reach the file.
-pub fn test_private_file_vma_faults_into_its_own_page() -> TestResult {
+fn packed_handle(vm: &ProcessVmGuard) -> Option<u64> {
+    let handle = crate::process_vm::process_vm_handle(vm.process)?;
+    Some(crate::process_vm::pack_process_vm_handle(handle))
+}
+
+fn leaf_flags(vm: &ProcessVmGuard, va: u64) -> Option<PageFlags> {
+    crate::process_vm::process_vm_with_vm_space(vm.process, |vs| {
+        crate::user_mappings::ostd_get_pte_flags_4kb(vs, VirtAddr::new(va))
+    })
+    .flatten()
+}
+
+/// A `MAP_PRIVATE` read maps the set's page copy-on-write, and the first store
+/// — to that page or to one never read — lands in a page of the mapping's own,
+/// so a store cannot reach the file.
+pub fn test_private_file_vma_reads_share_and_stores_copy() -> TestResult {
     let Some(pages) = claim_pages() else {
         return fail!("claim the backing pages");
     };
@@ -331,28 +354,78 @@ pub fn test_private_file_vma_faults_into_its_own_page() -> TestResult {
         drop_pages(pages);
         return fail!("the private file mapping was refused");
     }
+    let Some(packed) = packed_handle(&vm) else {
+        drop_pages(pages);
+        return fail!("no VM handle");
+    };
 
-    let faulted = vm.handle_file_fault(va, 0);
-    let mapped = vm.virt_to_phys(va);
-    let set_refs = reference_count_at(pages.0);
+    // 0x04: a user read of an absent page.
+    let read = vm.handle_file_fault(va, 0x04);
+    let read_mapped = vm.virt_to_phys(va);
+    let read_flags = leaf_flags(&vm, va);
+    let read_refs = reference_count_at(pages.0);
+
+    // 0x07: the store that follows, against the present read-only page.
+    let stored = crate::page_fault::try_resolve_user_fault(va, 0x07, packed, 1);
+    let stored_mapped = vm.virt_to_phys(va);
+    let stored_refs = reference_count_at(pages.0);
+
+    // 0x06: a store to a page nothing has read.
+    let second = va + 4096;
+    let written = vm.handle_file_fault(second, 0x06);
+    let written_mapped = vm.virt_to_phys(second);
+    let written_refs = reference_count_at(pages.1);
+
     let armed = RETAINED_WRITABLE.load(Ordering::Relaxed);
     let rc = process_vm_munmap(vm.process, va, LENGTH);
     drop_pages(pages);
 
+    assert_test!(read.is_ok(), "the private read fault failed: {:?}", read);
     assert_test!(
-        faulted.is_ok(),
-        "the private file fault failed: {:?}",
-        faulted
+        read_mapped.as_u64() == pages.0.as_u64(),
+        "a private read mapped {:#x}, not the set's frame {:#x}",
+        read_mapped.as_u64(),
+        pages.0.as_u64()
     );
     assert_test!(
-        !mapped.is_null() && mapped.as_u64() != pages.0.as_u64(),
-        "a private mapping aliased the page set's frame {:#x}",
-        mapped.as_u64()
+        read_flags.is_some_and(|f| !f.contains(PageFlags::WRITABLE) && f.contains(PageFlags::COW)),
+        "the set's frame is mapped {:?} into a private mapping",
+        read_flags
     );
     assert_test!(
-        set_refs == 1,
-        "the set's page holds {} refs after a private fault, expected 1",
-        set_refs
+        read_refs == 2,
+        "a shared read holds {} refs, expected 2",
+        read_refs
+    );
+    assert_test!(
+        stored == crate::page_fault::FaultOutcome::Resolved,
+        "the store to the shared page was not resolved: {:?}",
+        stored
+    );
+    assert_test!(
+        !stored_mapped.is_null() && stored_mapped.as_u64() != pages.0.as_u64(),
+        "the store landed in the set's frame {:#x}",
+        stored_mapped.as_u64()
+    );
+    assert_test!(
+        stored_refs == 1,
+        "the set's page holds {} refs after the copy, expected 1",
+        stored_refs
+    );
+    assert_test!(
+        written.is_ok(),
+        "the private write fault failed: {:?}",
+        written
+    );
+    assert_test!(
+        !written_mapped.is_null() && written_mapped.as_u64() != pages.1.as_u64(),
+        "a private store mapped the set's frame {:#x}",
+        written_mapped.as_u64()
+    );
+    assert_test!(
+        written_refs == 1,
+        "the set's second page holds {} refs after a private store, expected 1",
+        written_refs
     );
     assert_test!(
         armed == 0,
@@ -360,6 +433,75 @@ pub fn test_private_file_vma_faults_into_its_own_page() -> TestResult {
         armed
     );
     assert_test!(rc == 0, "munmap of the private file mapping failed: {}", rc);
+    pass!()
+}
+
+/// A file fault also maps the neighbouring pages the set already holds, and
+/// holds nothing of the set's once it returns.
+pub fn test_file_fault_maps_the_resident_pages_around_it() -> TestResult {
+    let Some(pages) = claim_pages() else {
+        return fail!("claim the backing pages");
+    };
+    let _swap = OpsSwap::install(pages);
+    let Some(vm) = ProcessVmGuard::new() else {
+        drop_pages(pages);
+        return fail!("create VM");
+    };
+
+    let va = process_vm_mmap_file(vm.process, 0, LENGTH, PROT_READ, MAP_PRIVATE, MAP, 0, true);
+    if va == 0 {
+        drop_pages(pages);
+        return fail!("the file mapping was refused");
+    }
+    let Some(packed) = packed_handle(&vm) else {
+        drop_pages(pages);
+        return fail!("no VM handle");
+    };
+
+    let planned = crate::page_fault::try_resolve_user_fault(va, 0x04, packed, 1);
+    let outcome = match planned {
+        crate::page_fault::FaultOutcome::NeedsIo(plan) => {
+            crate::page_fault::complete_file_fault(packed, &plan, va, 1)
+        }
+        other => other,
+    };
+    let neighbour = vm.virt_to_phys(va + 4096);
+    let neighbour_flags = leaf_flags(&vm, va + 4096);
+    let neighbour_refs = reference_count_at(pages.1);
+    let released = RELEASED.load(Ordering::Relaxed);
+    let faulted = FAULTED.load(Ordering::Relaxed);
+    let rc = process_vm_munmap(vm.process, va, LENGTH);
+    drop_pages(pages);
+
+    assert_test!(
+        outcome == crate::page_fault::FaultOutcome::Resolved,
+        "the file fault was not resolved: {:?}",
+        outcome
+    );
+    assert_test!(faulted == 1, "{} pages were read for one fault", faulted);
+    assert_test!(
+        neighbour.as_u64() == pages.1.as_u64(),
+        "the resident neighbour maps {:#x}, expected {:#x}",
+        neighbour.as_u64(),
+        pages.1.as_u64()
+    );
+    assert_test!(
+        neighbour_flags
+            .is_some_and(|f| !f.contains(PageFlags::WRITABLE) && f.contains(PageFlags::NO_EXECUTE)),
+        "the neighbour of a read-only mapping is mapped {:?}",
+        neighbour_flags
+    );
+    assert_test!(
+        neighbour_refs == 2,
+        "the neighbour holds {} refs, expected the set's and the PTE's",
+        neighbour_refs
+    );
+    assert_test!(
+        released == 1,
+        "the fault released {} set references, expected the read's 1",
+        released
+    );
+    assert_test!(rc == 0, "munmap of the file mapping failed: {}", rc);
     pass!()
 }
 
@@ -373,6 +515,10 @@ slopos_testing::stest!(
     suite = filemap_vma
 );
 slopos_testing::stest!(
-    name = test_private_file_vma_faults_into_its_own_page,
+    name = test_private_file_vma_reads_share_and_stores_copy,
+    suite = filemap_vma
+);
+slopos_testing::stest!(
+    name = test_file_fault_maps_the_resident_pages_around_it,
     suite = filemap_vma
 );

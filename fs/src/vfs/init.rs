@@ -135,6 +135,7 @@ pub fn vfs_ramfs_pool_release(fs: &'static dyn FileSystem, retire: bool) -> bool
     let Some(idx) = ramfs_pool_slot_of(fs) else {
         return false;
     };
+    crate::filemap::forget_filesystem(fs);
     if retire {
         RAMFS_POOL_STATE[idx].store(POOL_RETIRED, Ordering::Release);
     } else {
@@ -223,6 +224,9 @@ pub fn vfs_ext2_pool_release(fs: &'static dyn FileSystem, retire: bool) -> bool 
     let Some(idx) = ext2_pool_slot_of(fs) else {
         return false;
     };
+    // The instance's address is what the page sets key on, and the next
+    // mount of the slot reuses it for another volume.
+    crate::filemap::forget_filesystem(fs);
     let torn_down = !retire && EXT2_POOL[idx].detach();
     if torn_down {
         EXT2_POOL_STATE[idx].store(POOL_FREE, Ordering::Release);

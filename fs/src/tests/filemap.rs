@@ -227,7 +227,7 @@ fn pattern(len: usize, seed: u8) -> Option<KVec<u8>> {
 #[inline(never)]
 fn seed_file(name: &[u8], len: usize, seed: u8) -> Result<InodeId, &'static str> {
     let fs = test_fs();
-    let _ = fs.unlink(2, name);
+    drop_file(name);
     let inode = fs
         .create(2, name, FileType::Regular)
         .map_err(|_| "create refused")?;
@@ -245,7 +245,12 @@ fn seed_file(name: &[u8], len: usize, seed: u8) -> Result<InodeId, &'static str>
 
 /// Give the fixture's inode and blocks back: the image holds exactly 22
 /// allocatable inodes, so a leftover file makes a later test's seeding fail.
+/// The set is unkeyed first, as the VFS's unlink does: the inode number is
+/// about to be reused by the next test's file.
 fn drop_file(name: &[u8]) {
+    if let Ok(inode) = test_fs().lookup(2, name) {
+        filemap::forget_inode(test_fs(), inode);
+    }
     let _ = test_fs().unlink(2, name);
 }
 
@@ -1467,5 +1472,125 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_filemap_orphaned_set_is_adopted_by_its_holder,
+    suite = fs
+);
+
+/// The last mapping going keeps the pages as a cache of the file: the next
+/// mapping of the inode starts with them, and a `write(2)` to a cached page
+/// retires the cache rather than being lost under it.
+pub fn test_filemap_idle_set_serves_the_next_mapping() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    let inode = match seed_file(b"cached", 3 * PAGE, 41) {
+        Ok(i) => i,
+        Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
+    };
+    let verdict = idle_set_body(inode);
+    filemap::drain_pending();
+    drop_file(b"cached");
+    verdict
+}
+
+#[inline(never)]
+fn idle_set_body(inode: InodeId) -> TestResult {
+    let map = match filemap::reserve_range(test_fs(), inode, 0, 3, false, AccountId::NONE) {
+        Ok(m) => m,
+        Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
+    };
+    // One fault reads the rest of the extent ahead.
+    let faulted = filemap::fault_page_in_set(map, 0);
+    let idle_before = filemap::idle_page_count();
+    filemap::release(map, 4);
+    filemap::drain_pending();
+    if let Err(e) = faulted {
+        return slopos_testing::fail!("faulting page 0 failed: {:?}", e);
+    }
+    if filemap::idle_page_count() < idle_before + 3 {
+        return slopos_testing::fail!("the unmapped set kept no pages");
+    }
+
+    let before = filemap::populated_page_count();
+    let again = match filemap::reserve_range(test_fs(), inode, 0, 3, false, AccountId::NONE) {
+        Ok(m) => m,
+        Err(e) => return slopos_testing::fail!("the second reservation refused: {:?}", e),
+    };
+    let revived = filemap::populated_page_count().saturating_sub(before);
+    filemap::release(again, 3);
+    filemap::drain_pending();
+    if revived < 3 {
+        return slopos_testing::fail!("the next mapping started without the cached pages");
+    }
+
+    const NEW: &[u8] = b"written-under-the-cache";
+    if crate::vfs_file_ops::write_chunk(test_fs(), inode, 0, NEW) != Ok(NEW.len()) {
+        return slopos_testing::fail!("the write was refused");
+    }
+    match (read_path(inode, 0, NEW.len()), fs_read(inode, 0, NEW.len())) {
+        (Some(read), Some(stored)) if read.as_slice() == NEW && stored.as_slice() == NEW => {
+            TestResult::Pass
+        }
+        _ => slopos_testing::fail!("a write under an idle cache is not what reads return"),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_filemap_idle_set_serves_the_next_mapping,
+    suite = fs
+);
+
+/// A fault whose mapping was unmapped while it was in flight still finds the
+/// set, now parked. The reference it takes must unpark it: eviction frees an
+/// idle set's frames, and the fault is about to map one.
+pub fn test_filemap_fault_on_a_parked_set_holds_its_frames() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    let inode = match seed_file(b"parked", 2 * PAGE, 43) {
+        Ok(i) => i,
+        Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
+    };
+    let verdict = parked_fault_body(inode);
+    filemap::drain_pending();
+    drop_file(b"parked");
+    verdict
+}
+
+#[inline(never)]
+fn parked_fault_body(inode: InodeId) -> TestResult {
+    let map = match filemap::reserve_range(test_fs(), inode, 0, 2, false, AccountId::NONE) {
+        Ok(m) => m,
+        Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
+    };
+    let first = filemap::fault_page_in_set(map, 0);
+    // The mapping goes: its two references and the fault's.
+    filemap::release(map, 3);
+    filemap::drain_pending();
+    if let Err(e) = first {
+        return slopos_testing::fail!("faulting page 0 failed: {:?}", e);
+    }
+
+    // The in-flight fault reaches the parked set.
+    let late = match filemap::fault_page_in_set(map, 0) {
+        Ok(pa) => pa,
+        Err(e) => return slopos_testing::fail!("the late fault was refused: {:?}", e),
+    };
+    filemap::drop_idle_sets();
+    let mut held = [slopos_abi::addr::PhysAddr::NULL; 1];
+    filemap::resident_in_set(map, 0, &mut held);
+    filemap::release(map, 1);
+    filemap::drain_pending();
+    if held[0] != late {
+        return slopos_testing::fail!(
+            "eviction took the page a fault held: set has {:#x}, fault mapped {:#x}",
+            held[0].as_u64(),
+            late.as_u64()
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_filemap_fault_on_a_parked_set_holds_its_frames,
     suite = fs
 );

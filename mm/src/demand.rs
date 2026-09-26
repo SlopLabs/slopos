@@ -11,7 +11,7 @@ use slopos_ostd::mm::uframe::UFrame;
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
-use crate::paging_defs::PAGE_SIZE_4KB;
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm;
 use crate::tlb;
 use crate::user_mappings::{
@@ -216,12 +216,39 @@ pub fn plan_file_fault(
     }))
 }
 
+/// Pages a file fault considers mapping: the aligned window around the one
+/// that faulted, of which it maps what the page set already holds. Loaded
+/// code is touched a page here and a page there, and each touch that finds
+/// its page already mapped is a fault not taken.
+pub const FAULT_AROUND_PAGES: usize = 16;
+
+/// The first file page of the fault-around window holding `page_index`.
+pub fn fault_around_first(page_index: u64) -> u64 {
+    page_index & !(FAULT_AROUND_PAGES as u64 - 1)
+}
+
+/// How a page set's frame is published into `region`. A private mapping takes
+/// it read-only and COW-marked: its first store copies it, which is the only
+/// point at which a private mapping needs a page of its own.
+fn set_frame_flags(region: &VmaRegion, private: bool) -> u64 {
+    let flags = region.to_page_flags();
+    if private {
+        flags
+            .difference(PageFlags::WRITABLE)
+            .union(PageFlags::COW)
+            .bits()
+    } else {
+        flags.bits()
+    }
+}
+
 /// Install a page the filesystem just read, revalidated against the region
 /// still covering the address: the mapping can have been unmapped or replaced
 /// while the read was in flight.
 ///
 /// `cached` is the set's frame, held alive by the caller's extra page
-/// reference; a private mapping copies it into a page of its own.
+/// reference. A private mapping copies it into a page of its own only for a
+/// write; a read maps the set's frame copy-on-write.
 pub fn install_file_page(
     vm_space: &mut KArc<VmSpace>,
     vma_start: u64,
@@ -249,7 +276,9 @@ pub fn install_file_page(
         return Err(MmError::Retry);
     }
 
-    if !plan.private {
+    let is_write = plan.error_code & 0x02 != 0;
+    if !plan.private || !is_write {
+        let pte_flags = set_frame_flags(region, plan.private);
         return match ostd_map_4kb_user_shared(vm_space, va, cached, pte_flags) {
             Ok(()) => {
                 flush_fresh_mapping(vm_space, va);
@@ -287,5 +316,55 @@ pub fn install_file_page(
             slopos_ostd::klog_info!("demand::install_file_page: private map failed: {:?}", err);
             Err(MmError::MappingFailed)
         }
+    }
+}
+
+/// Map the pages of the fault-around window that the set already holds and
+/// nothing maps yet. `frames[i]` is file page `first_page + i`, each held
+/// alive by the caller's reference on the set. Best effort: a page outside
+/// `[vma_start, vma_end)`, one the region no longer maps from this set, or a
+/// refusal from the page tables simply stays absent for its own fault.
+pub fn map_resident_around(
+    vm_space: &mut KArc<VmSpace>,
+    vma_start: u64,
+    vma_end: u64,
+    plan: &FileFaultPlan,
+    first_page: u64,
+    frames: &[PhysAddr],
+    region: &VmaRegion,
+) {
+    let pte_flags = set_frame_flags(region, plan.private);
+    for (page, &frame) in (first_page..).zip(frames) {
+        if frame.is_null() || page == plan.page_index {
+            continue;
+        }
+        let va = if page >= plan.page_index {
+            (page - plan.page_index)
+                .checked_mul(PAGE_SIZE_4KB)
+                .and_then(|delta| plan.aligned_addr.checked_add(delta))
+        } else {
+            (plan.page_index - page)
+                .checked_mul(PAGE_SIZE_4KB)
+                .and_then(|delta| plan.aligned_addr.checked_sub(delta))
+        };
+        let Some(va) = va else {
+            continue;
+        };
+        if va < vma_start || va >= vma_end {
+            continue;
+        }
+        match region.file_page_at((va - vma_start) / PAGE_SIZE_4KB) {
+            Some((map, index, private))
+                if map == plan.map && index == page && private == plan.private => {}
+            _ => continue,
+        }
+        let va = VirtAddr::new(va);
+        if !ostd_virt_to_phys_4kb(vm_space, va).is_null() {
+            continue;
+        }
+        if ostd_map_4kb_user_shared(vm_space, va, frame, pte_flags).is_err() {
+            return;
+        }
+        flush_fresh_mapping(vm_space, va);
     }
 }

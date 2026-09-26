@@ -1,4 +1,4 @@
-use slopos_abi::addr::VirtAddr;
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::task::TaskFaultReason;
 use slopos_ostd::handle::HandleError;
 use slopos_ostd::mm::KArc;
@@ -305,13 +305,23 @@ pub fn complete_file_fault(
         }
     };
 
+    // Covered by the reference the read took: the set keeps its frames while
+    // anyone holds one.
+    let mut around = [PhysAddr::NULL; demand::FAULT_AROUND_PAGES];
+    let first = demand::fault_around_first(plan.page_index);
+    filemap_hook::filemap_resident(plan.map, first, &mut around);
+
     let installed = process_vm::process_vm_with_vm_space_and_area_by_handle(
         handle,
         fault_addr,
-        |vs, start, _end, region| demand::install_file_page(vs, start, plan, cached, region),
+        |vs, start, end, region| {
+            demand::install_file_page(vs, start, plan, cached, region)?;
+            demand::map_resident_around(vs, start, end, plan, first, &around, region);
+            Ok(())
+        },
     );
 
-    // Balances the reference the read took to hold the page across the install.
+    // Balances the reference the read took to hold the pages across the install.
     filemap_hook::filemap_release(plan.map, 1);
 
     match installed {

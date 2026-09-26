@@ -127,6 +127,7 @@ fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
     let token = ctx.bsp_token();
     slopos_mm::page_alloc::register_reclaim(&token);
     slopos_fs::ext2_vfs::register_reclaim(&token);
+    slopos_fs::filemap::register_reclaim(&token);
     klog_info!(
         "OSTD: reclaim tier armed ({} pages currently reclaimable)",
         slopos_ostd::mm::reclaim::reclaimable_pages()

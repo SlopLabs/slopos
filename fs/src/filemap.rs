@@ -8,11 +8,22 @@
 //! [`write_through`]), and writeback goes out through [`FileSystem::write`].
 //!
 //! A mapping reserves an *extent* ([`reserve_range`]) and populates nothing;
-//! frames arrive one page at a time from [`fault_page_in_set`], which runs on
-//! the faulting task's kernel stack and may block on the filesystem. A slot
-//! holding [`PhysAddr::NULL`] is a page nobody has faulted yet, for which the
+//! frames arrive from [`fault_page_in_set`], which runs on the faulting task's
+//! kernel stack and may block on the filesystem. A slot holding
+//! [`PhysAddr::NULL`] is a page nobody has faulted yet, for which the
 //! filesystem is still the authority. Mapping a file therefore costs frames
-//! only for the pages a process touches.
+//! only for the pages a process touches — and, for a set no mapping can
+//! write, the [`READAHEAD_PAGES`] after each one it reads, in the same request.
+//! The fault maps whatever of its aligned window the set already holds
+//! ([`resident_in_set`]), and a `MAP_PRIVATE` mapping maps the set's frame
+//! copy-on-write rather than copying it, so the only private pages are the
+//! ones a process stored to.
+//!
+//! A set whose last mapping goes is *parked* rather than freed: a program
+//! started again maps the same shared objects, and reading them back is most
+//! of what starting it costs. A parked set is charged to nobody and gives its
+//! frames back oldest first when the page ceiling or the reclaimer asks
+//! ([`evict_idle`]).
 //!
 //! EOF is discovered per page, at fault time: a page starting at or past the
 //! end is refused with [`FileMapError::PastEof`], and one straddling it is read
@@ -71,7 +82,7 @@ pub(crate) const MAX_MAPPED_INODES: usize = 4096;
 
 /// The registry is `MAX_MAPPED_INODES` of these, so each byte of one is 4 KiB
 /// of BSS.
-const _: () = assert!(core::mem::size_of::<PageSet>() <= 96);
+const _: () = assert!(core::mem::size_of::<PageSet>() <= 104);
 
 /// Populated pages across every set, kept beside the sets so a fault's
 /// admission check is one load rather than a walk of the registry.
@@ -216,6 +227,12 @@ struct PageSet {
     /// under a user PTE is pinned against reclaim, which is what the
     /// `PinnedBytes` axis counts.
     charge: ChargeSlot<PinnedBytesAxis>,
+    /// Non-zero once nothing maps the set any more and its pages are clean:
+    /// they are then a cache of the file, charged to nobody, served to
+    /// `read(2)` and to the next mapping of the inode, and the first thing
+    /// dropped when a slot, the page ceiling or the machine runs short. The
+    /// value orders idle sets: the lowest went idle first and goes first.
+    idle_since: u32,
 }
 
 impl PageSet {
@@ -233,6 +250,7 @@ impl PageSet {
         forgotten: false,
         owner: AccountId::NONE,
         charge: ChargeSlot::empty(),
+        idle_since: 0,
     };
 
     /// Deliberately `false` once forgotten: the inode number may already have
@@ -258,6 +276,10 @@ impl PageSet {
         (!pa.is_null()).then_some(pa)
     }
 
+    fn is_idle(&self) -> bool {
+        self.idle_since != 0
+    }
+
     fn extent_end(&self) -> u64 {
         self.first_page + self.pages.len() as u64
     }
@@ -276,6 +298,16 @@ static FILEMAP: SpinLock<[PageSet; MAX_MAPPED_INODES]> = SpinLock::new(
 
 /// Sets owing writeback, so a flusher's wait predicate takes no lock.
 static PENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// Populated pages held by idle sets: what the reclaimer can give back.
+static IDLE_PAGES: AtomicU32 = AtomicU32::new(0);
+static IDLE_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Pages a fault reads ahead of the one it needs, in one filesystem read,
+/// when they sit in the same read-only set and nobody has populated them: a
+/// shared library's text faults in page order, and each page read alone is a
+/// device round trip.
+const READAHEAD_PAGES: u64 = 16;
 
 fn io_lock() -> Result<slopos_ostd::sync::MutexGuard<'static, ()>, FileMapError> {
     FILEMAP_IO.lock().map_err(|_| FileMapError::Interrupted)
@@ -367,7 +399,18 @@ fn reserve_slot(
 
     let (slot, fresh) = match existing {
         Some(idx) => (idx, false),
-        None => (free.ok_or(FileMapError::TooManyInodes)?, true),
+        None => match free {
+            Some(idx) => (idx, true),
+            // Every slot is in use: an idle set's cache is worth less than a
+            // mapping.
+            None => match oldest_idle(sets.as_slice(), None) {
+                Some(idx) => {
+                    drop_set(&mut sets[idx]);
+                    (idx, true)
+                }
+                None => return Err(FileMapError::TooManyInodes),
+            },
+        },
     };
 
     let (union_first, union_count) = if fresh {
@@ -390,8 +433,20 @@ fn reserve_slot(
     if !owner.is_none() && rehome && owned_sets >= MAX_INODES_PER_ACCOUNT {
         return Err(FileMapError::TooManyInodes);
     }
-    let taking = if rehome { sets[slot].populated } else { 0 };
-    if !owner.is_none() && owned_pages.saturating_add(taking) > max_pages_per_account() {
+    let over_share = |taking: u32| {
+        !owner.is_none() && owned_pages.saturating_add(taking) > max_pages_per_account()
+    };
+    let mut taking = if rehome { sets[slot].populated } else { 0 };
+    // An idle set's pages are a cache: when the caller cannot take them on, the
+    // mapping starts empty rather than failing. Decided here, done below the
+    // last refusable step.
+    let mut shed = false;
+    let sheddable = sets[slot].is_idle() && sets[slot].refs == 0;
+    if sheddable && over_share(taking) {
+        shed = true;
+        taking = 0;
+    }
+    if over_share(taking) {
         return Err(FileMapError::TooManyPages);
     }
 
@@ -404,12 +459,26 @@ fn reserve_slot(
 
     // Last refusable step: everything after this mutates the slot.
     let reservation = if taking > 0 {
-        Some(try_charge::<PinnedBytesAxis>(owner, taking).map_err(|_| FileMapError::TooManyPages)?)
+        match try_charge::<PinnedBytesAxis>(owner, taking) {
+            Ok(reservation) => Some(reservation),
+            Err(_) if sheddable => {
+                shed = true;
+                None
+            }
+            Err(_) => return Err(FileMapError::TooManyPages),
+        }
     } else {
         None
     };
 
     let entry = &mut sets[slot];
+    if let Some(pages) = widened {
+        entry.pages = pages;
+        entry.first_page = union_first;
+    }
+    if shed {
+        shed_pages(entry);
+    }
     if rehome {
         match reservation {
             Some(reservation) => entry.charge.put(reservation),
@@ -417,20 +486,90 @@ fn reserve_slot(
         }
         entry.owner = owner;
     }
-    if let Some(pages) = widened {
-        entry.pages = pages;
-        entry.first_page = union_first;
-    }
     if fresh {
         entry.fs = Some(fs);
         entry.inode = inode;
         entry.generation = entry.generation.wrapping_add(1);
         entry.dirtyable = false;
     }
-    entry.refs = entry.refs.saturating_add(page_count);
+    take_refs(entry, page_count);
     revive(entry);
 
     Ok(ref_for(slot, entry.generation))
+}
+
+/// The idle set that went idle first, other than `except`.
+fn oldest_idle(sets: &[PageSet], except: Option<u32>) -> Option<usize> {
+    sets.iter()
+        .enumerate()
+        .filter(|(idx, e)| {
+            e.fs.is_some() && e.is_idle() && e.refs == 0 && Some(*idx as u32) != except
+        })
+        .min_by_key(|(_, e)| e.idle_since)
+        .map(|(idx, _)| idx)
+}
+
+/// Drop the oldest idle sets until `want` pages have gone back, answering how
+/// many did.
+fn evict_idle(sets: &mut [PageSet], want: u32) -> u32 {
+    evict_idle_except(sets, want, None)
+}
+
+/// [`evict_idle`], sparing the set in slot `except`.
+fn evict_idle_except(sets: &mut [PageSet], want: u32, except: Option<u32>) -> u32 {
+    let mut freed = 0u32;
+    while freed < want {
+        let Some(idx) = oldest_idle(sets, except) else {
+            break;
+        };
+        freed = freed.saturating_add(sets[idx].populated);
+        drop_set(&mut sets[idx]);
+    }
+    freed
+}
+
+/// Keep an idle set's frames as a cache of the file rather than freeing them.
+/// Its charge goes: nothing maps the frames, so nothing pins them.
+fn park_set(entry: &mut PageSet) {
+    entry.charge.take();
+    entry.owner = AccountId::NONE;
+    entry.dirtyable = false;
+    // Zero means live, so the counter skips it when it wraps.
+    entry.idle_since = IDLE_SEQ
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
+        .max(1);
+    IDLE_PAGES.fetch_add(entry.populated, Ordering::Relaxed);
+}
+
+fn unpark(entry: &mut PageSet) {
+    if entry.is_idle() {
+        entry.idle_since = 0;
+        IDLE_PAGES.fetch_sub(entry.populated, Ordering::Relaxed);
+    }
+}
+
+/// Take `n` references on a set. A parked set is unparked first: eviction and
+/// shedding free an idle set's frames, so a set anyone holds must never read
+/// as idle — a fault that found it parked is about to map those frames.
+fn take_refs(entry: &mut PageSet, n: u32) {
+    unpark(entry);
+    entry.refs = entry.refs.saturating_add(n);
+}
+
+/// Free every frame a set holds while keeping its extent and identity, for an
+/// idle set whose cache nobody can take on.
+fn shed_pages(entry: &mut PageSet) {
+    unpark(entry);
+    for pa in entry.pages.iter_mut() {
+        if !pa.is_null() {
+            release_owned_anon_page(*pa);
+            *pa = PhysAddr::NULL;
+        }
+    }
+    POPULATED_PAGES.fetch_sub(entry.populated, Ordering::Relaxed);
+    entry.populated = 0;
+    entry.charge.take();
 }
 
 /// Rebuild the index over `[union_first, union_first + union_count)`, every
@@ -481,30 +620,72 @@ pub fn fault_page_in_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, F
         return Ok(pa);
     }
     let _io = io_lock()?;
-    let (fs, inode) = match probe_fault(map, page_index)? {
+    let (fs, inode, window) = match probe_fault(map, page_index)? {
         FaultProbe::Present(pa) => return Ok(pa),
-        FaultProbe::Missing(fs, inode) => (fs, inode),
+        FaultProbe::Missing(fs, inode, window) => (fs, inode, window),
     };
 
     let size = fs.stat(inode).map_err(|_| FileMapError::Io)?.size;
     if page_index.saturating_mul(PAGE_SIZE) >= size {
         return Err(FileMapError::PastEof);
     }
+    let wide = window.min(size.div_ceil(PAGE_SIZE) - page_index).max(1);
 
-    let mut staging = KVec::<u8>::zeroed(PAGE_SIZE_USIZE).map_err(|_| FileMapError::NoMemory)?;
+    // Readahead is best effort: a wide buffer the heap cannot find, or a
+    // write to the file racing the read, costs it and nothing else.
+    let (mut pages, mut staging) = match KVec::<u8>::zeroed(wide as usize * PAGE_SIZE_USIZE) {
+        Ok(buf) => (wide, buf),
+        Err(_) => (
+            1,
+            KVec::<u8>::zeroed(PAGE_SIZE_USIZE).map_err(|_| FileMapError::NoMemory)?,
+        ),
+    };
+    let writes = write_seq(inode).load(Ordering::Acquire);
+    read_range_into(fs, inode, page_index, size, staging.as_mut_slice())?;
+    if writes & 1 != 0 || write_seq(inode).load(Ordering::Acquire) != writes {
+        pages = 1;
+    }
     let pa = claim_page()?;
-    if let Err(e) = read_page_into(fs, inode, page_index, size, pa, staging.as_mut_slice()) {
+    if let Err(e) = fill_frame(pa, &staging.as_slice()[..PAGE_SIZE_USIZE]) {
         release_owned_anon_page(pa);
         return Err(e);
     }
-    install_page(map, page_index, pa)
+    let answer = install_page(map, page_index, pa)?;
+    // Best effort: a readahead page that finds no frame or no room is simply
+    // left for its own fault.
+    for k in 1..pages {
+        let bytes = &staging.as_slice()[k as usize * PAGE_SIZE_USIZE..][..PAGE_SIZE_USIZE];
+        let Ok(extra) = claim_page() else {
+            break;
+        };
+        if fill_frame(extra, bytes).is_err() || !install_readahead(map, page_index + k, extra) {
+            break;
+        }
+    }
+    Ok(answer)
+}
+
+/// The frames the set holds for `out.len()` pages from `first_page`, null
+/// where it holds none. Reads nothing: the caller holds a reference on the
+/// set from [`fault_page_in_set`], which keeps every frame answered alive
+/// until it releases.
+pub fn resident_in_set(map: FileMapRef, first_page: u64, out: &mut [PhysAddr]) {
+    let mut sets = FILEMAP.lock();
+    let entry = resolve(sets.as_mut_slice(), map);
+    for (page, slot) in (first_page..).zip(out.iter_mut()) {
+        *slot = entry
+            .as_ref()
+            .and_then(|e| e.frame_at(page))
+            .unwrap_or(PhysAddr::NULL);
+    }
 }
 
 /// What the set already holds for the faulting page.
 enum FaultProbe {
     /// Populated; the reference is already taken.
     Present(PhysAddr),
-    Missing(&'static dyn FileSystem, InodeId),
+    /// Not populated, and neither are the pages after it up to the window.
+    Missing(&'static dyn FileSystem, InodeId, u64),
 }
 
 fn probe_fault(map: FileMapRef, page_index: u64) -> Result<FaultProbe, FileMapError> {
@@ -515,14 +696,24 @@ fn probe_fault(map: FileMapRef, page_index: u64) -> Result<FaultProbe, FileMapEr
         return Err(FileMapError::Stale);
     }
     if let Some(pa) = entry.frame_at(page_index) {
-        entry.refs = entry.refs.saturating_add(1);
+        take_refs(entry, 1);
         revive(entry);
         return Ok(FaultProbe::Present(pa));
     }
     if entry.forgotten {
         return Err(FileMapError::Stale);
     }
-    Ok(FaultProbe::Missing(fs, entry.inode))
+    // A writable set is written back whole, so a page it reads ahead is a
+    // page it later writes.
+    let mut window = 1u64;
+    while !entry.dirtyable
+        && window < READAHEAD_PAGES
+        && entry.index_of(page_index + window).is_some()
+        && entry.frame_at(page_index + window).is_none()
+    {
+        window += 1;
+    }
+    Ok(FaultProbe::Missing(fs, entry.inode, window))
 }
 
 /// What [`install_page`] decided about the frame it was handed.
@@ -545,11 +736,21 @@ fn install_page(map: FileMapRef, page_index: u64, pa: PhysAddr) -> Result<PhysAd
         match resolved {
             None => Install::Refused(FileMapError::Stale),
             Some((owner, idx)) => {
-                let held = POPULATED_PAGES.load(Ordering::Relaxed);
+                let mut held = POPULATED_PAGES.load(Ordering::Relaxed);
+                if held >= ceiling && sets[map.slot as usize].pages[idx].is_null() {
+                    // Never this set: a fault that found it parked is about to
+                    // reference it.
+                    evict_idle_except(
+                        sets.as_mut_slice(),
+                        held - ceiling + 1,
+                        Some(u32::from(map.slot)),
+                    );
+                    held = POPULATED_PAGES.load(Ordering::Relaxed);
+                }
                 let entry = &mut sets[map.slot as usize];
                 let taken = entry.pages[idx];
                 if !taken.is_null() {
-                    entry.refs = entry.refs.saturating_add(1);
+                    take_refs(entry, 1);
                     Install::Lost(taken)
                 } else if held >= ceiling {
                     Install::Refused(FileMapError::TooManyPages)
@@ -561,7 +762,7 @@ fn install_page(map: FileMapRef, page_index: u64, pa: PhysAddr) -> Result<PhysAd
                             entry.pages[idx] = pa;
                             entry.populated = entry.populated.saturating_add(1);
                             POPULATED_PAGES.fetch_add(1, Ordering::Relaxed);
-                            entry.refs = entry.refs.saturating_add(1);
+                            take_refs(entry, 1);
                             Install::Took(pa)
                         }
                     }
@@ -582,6 +783,41 @@ fn install_page(map: FileMapRef, page_index: u64, pa: PhysAddr) -> Result<PhysAd
     }
 }
 
+/// Publish a page read ahead of any fault: no reference is taken, and a page
+/// that lost a race or finds no room gives its frame back. Answers whether
+/// the page went in.
+fn install_readahead(map: FileMapRef, page_index: u64, pa: PhysAddr) -> bool {
+    let ceiling = max_mapped_pages();
+    let took = {
+        let mut sets = FILEMAP.lock();
+        match resolve(sets.as_mut_slice(), map) {
+            Some(entry) => match entry.index_of(page_index) {
+                Some(idx)
+                    if entry.pages[idx].is_null()
+                        && POPULATED_PAGES.load(Ordering::Relaxed) < ceiling =>
+                {
+                    match try_charge::<PinnedBytesAxis>(entry.owner, 1) {
+                        Ok(reservation) => {
+                            entry.charge.grow(reservation);
+                            entry.pages[idx] = pa;
+                            entry.populated = entry.populated.saturating_add(1);
+                            POPULATED_PAGES.fetch_add(1, Ordering::Relaxed);
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                }
+                _ => false,
+            },
+            None => false,
+        }
+    };
+    if !took {
+        release_owned_anon_page(pa);
+    }
+    took
+}
+
 /// One owned frame, claimed the way a memfd claims its pages, so it outlives
 /// every mapping of it and aliasing it into a user PTE is legal.
 fn claim_page() -> Result<PhysAddr, FileMapError> {
@@ -596,19 +832,41 @@ fn claim_page() -> Result<PhysAddr, FileMapError> {
     Ok(pa)
 }
 
-/// Read one file page into `pa`, zero-filling past EOF.
+/// Bumped around every `write(2)` to a regular file that goes to the
+/// filesystem rather than into a page set, odd while one is in flight, one
+/// counter per inode hash. A fault that reads pages ahead installs them only
+/// if the counter did not move across its read: such a write is ordered
+/// against nothing else a fault holds, and a page read ahead of it would hide
+/// it.
+static WRITE_SEQ: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+
+fn write_seq(inode: InodeId) -> &'static AtomicU32 {
+    &WRITE_SEQ[((inode as u32).wrapping_mul(0x9E37_79B9) >> 26) as usize]
+}
+
+/// Bracket a filesystem write the page sets do not see: see [`WRITE_SEQ`].
+pub fn around_uncovered_write<R>(inode: InodeId, write: impl FnOnce() -> R) -> R {
+    let seq = write_seq(inode);
+    seq.fetch_add(1, Ordering::AcqRel);
+    let result = write();
+    seq.fetch_add(1, Ordering::AcqRel);
+    result
+}
+
+/// Read the file from page `page` into `staging`, whole pages, zero-filling
+/// past EOF.
 #[inline(never)]
-fn read_page_into(
+fn read_range_into(
     fs: &'static dyn FileSystem,
     inode: InodeId,
     page: u64,
     size: u64,
-    pa: PhysAddr,
     staging: &mut [u8],
 ) -> Result<(), FileMapError> {
     let offset = page * PAGE_SIZE;
-    let want = usize::try_from((size - offset).min(PAGE_SIZE)).unwrap_or(PAGE_SIZE_USIZE);
-    staging.fill(0);
+    let want = usize::try_from(size - offset)
+        .unwrap_or(usize::MAX)
+        .min(staging.len());
     let mut done = 0usize;
     while done < want {
         match fs.read(inode, offset + done as u64, &mut staging[done..want]) {
@@ -617,8 +875,12 @@ fn read_page_into(
             Err(_) => return Err(FileMapError::Io),
         }
     }
+    Ok(())
+}
+
+fn fill_frame(pa: PhysAddr, bytes: &[u8]) -> Result<(), FileMapError> {
     let virt = pa.try_to_virt().ok_or(FileMapError::Io)?;
-    if !slopos_ostd::mm::hhdm_bytes::write_bytes(virt, 0, staging) {
+    if !slopos_ostd::mm::hhdm_bytes::write_bytes(virt, 0, bytes) {
         return Err(FileMapError::Io);
     }
     Ok(())
@@ -646,7 +908,7 @@ pub fn retain(map: FileMapRef, pages: u32, writable: bool, holder: AccountId) ->
     let Some(entry) = resolve(sets.as_mut_slice(), map) else {
         return false;
     };
-    entry.refs = entry.refs.saturating_add(pages);
+    take_refs(entry, pages);
     if writable {
         entry.dirtyable = true;
     }
@@ -749,9 +1011,35 @@ pub fn forget_inode(fs: &'static dyn FileSystem, inode: InodeId) {
     }
 }
 
+/// Take every set of `fs` out of lookup, for a filesystem instance about to
+/// be handed to another mount: an idle set is dropped, a live one is
+/// forgotten as an unlinked inode's is.
+pub fn forget_filesystem(fs: &'static dyn FileSystem) {
+    let mut sets = FILEMAP.lock();
+    for entry in sets.iter_mut() {
+        let Some(mine) = entry.fs else {
+            continue;
+        };
+        if !same_filesystem(mine, fs) {
+            continue;
+        }
+        if entry.pending_release || entry.pending_flush {
+            entry.pending_release = false;
+            entry.pending_flush = false;
+            PENDING.fetch_sub(1, Ordering::Relaxed);
+        }
+        entry.forgotten = true;
+        entry.dirtyable = false;
+        if entry.refs == 0 {
+            drop_set(entry);
+        }
+    }
+}
+
 /// Free a set's frames and retire its slot. The generation bump is what makes
 /// every outstanding [`FileMapRef`] for it resolve to a miss.
 fn drop_set(entry: &mut PageSet) {
+    unpark(entry);
     // `PENDING` counts the sets carrying a flag, so clearing one here without
     // the matching decrement leaves the flusher's park predicate true forever.
     if entry.pending_release || entry.pending_flush {
@@ -930,7 +1218,7 @@ fn write_back(job: &WriteJob) -> Result<(), FileMapError> {
         Ok(())
     };
     if job.release {
-        finish_release(job);
+        finish_release(job, result.is_ok());
     }
     result
 }
@@ -973,14 +1261,25 @@ fn write_pages(job: &WriteJob) -> Result<(), FileMapError> {
     Ok(())
 }
 
-/// Free the frames and the slot, once the writeback has gone out.
-fn finish_release(job: &WriteJob) {
+/// The last mapping is gone and the writeback is out: keep the pages as an
+/// idle cache of the file, or free the slot if there is nothing to keep — or
+/// if the writeback failed, since the pages then hold bytes the filesystem
+/// never took and a cache of them would answer reads with what it lost.
+fn finish_release(job: &WriteJob, written: bool) {
     let mut sets = FILEMAP.lock();
     let entry = &mut sets[job.slot];
-    if entry.generation != job.generation || entry.refs != 0 || entry.fs.is_none() {
+    if entry.generation != job.generation
+        || entry.refs != 0
+        || entry.fs.is_none()
+        || entry.is_idle()
+    {
         return;
     }
-    drop_set(entry);
+    if entry.populated == 0 || entry.forgotten || !written {
+        drop_set(entry);
+    } else {
+        park_set(entry);
+    }
 }
 
 /// Complete every queued writeback and frame free.
@@ -1140,6 +1439,12 @@ pub fn write_through(
     let Some(entry) = sets.iter_mut().find(|e| e.holds(fs, inode)) else {
         return WriteThrough::NotCovered;
     };
+    // An idle set is a read cache: nothing would write it back, so a write
+    // retires it and goes to the filesystem.
+    if entry.is_idle() {
+        drop_set(entry);
+        return WriteThrough::NotCovered;
+    }
     let Some((mut idx, mut page_off)) = page_cursor(entry, offset) else {
         return WriteThrough::NotCovered;
     };
@@ -1197,6 +1502,10 @@ impl FileMapOps for FileMapHook {
     fn fault_page(&self, map: FileMapRef, page_index: u64) -> Result<PhysAddr, i32> {
         fault_page_in_set(map, page_index).map_err(|e| e.to_errno().raw())
     }
+
+    fn resident(&self, map: FileMapRef, first_page: u64, out: &mut [PhysAddr]) {
+        resident_in_set(map, first_page, out);
+    }
 }
 
 /// The registry, for `mm` to call on unmap, fork, fault and teardown.
@@ -1204,15 +1513,59 @@ pub fn filemap_ops() -> &'static dyn FileMapOps {
     &FILEMAP_HOOK
 }
 
-/// Page sets currently held, for tests and diagnostics.
+/// Page sets a mapping holds or a writeback owes, for tests and diagnostics.
+/// Idle sets are a cache and not counted.
 pub fn mapped_inode_count() -> usize {
-    FILEMAP.lock().iter().filter(|e| e.fs.is_some()).count()
+    FILEMAP
+        .lock()
+        .iter()
+        .filter(|e| e.fs.is_some() && !e.is_idle())
+        .count()
 }
 
-/// Frames the registry holds; reserved-but-unfaulted pages are not among them.
+/// Frames live sets hold; reserved-but-unfaulted pages and idle caches are not
+/// among them.
 pub fn populated_page_count() -> u32 {
     FILEMAP
         .lock()
         .iter()
+        .filter(|e| !e.is_idle())
         .fold(0u32, |acc, e| acc.saturating_add(e.populated))
+}
+
+/// Pages idle sets hold as a cache of their files.
+pub fn idle_page_count() -> u32 {
+    IDLE_PAGES.load(Ordering::Relaxed)
+}
+
+/// Drop every idle set's pages. A test that measures frames or slots from a
+/// known state starts here.
+pub fn drop_idle_sets() -> u32 {
+    let mut sets = FILEMAP.lock();
+    evict_idle(sets.as_mut_slice(), u32::MAX)
+}
+
+struct FileMapReclaim;
+
+impl slopos_ostd::mm::reclaim::Reclaimable for FileMapReclaim {
+    fn name(&self) -> &'static str {
+        "filemap-idle"
+    }
+
+    fn reclaimable_pages(&self) -> u32 {
+        IDLE_PAGES.load(Ordering::Relaxed)
+    }
+
+    fn reclaim(&self, want: u32) -> u32 {
+        match FILEMAP.try_lock() {
+            Some(mut sets) => evict_idle(sets.as_mut_slice(), want),
+            None => 0,
+        }
+    }
+}
+
+static FILEMAP_RECLAIM: FileMapReclaim = FileMapReclaim;
+
+pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {
+    slopos_ostd::mm::reclaim::register(token, &FILEMAP_RECLAIM);
 }

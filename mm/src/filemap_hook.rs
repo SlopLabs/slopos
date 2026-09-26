@@ -46,6 +46,12 @@ pub trait FileMapOps: Sync {
         map: FileMapRef,
         page_index: u64,
     ) -> Result<slopos_abi::addr::PhysAddr, i32>;
+
+    /// The frames the set holds for `out.len()` pages from `first_page`, null
+    /// where it holds none. Reads nothing and takes no reference: the caller
+    /// holds one from [`fault_page`](Self::fault_page) on the same set, and
+    /// that is what keeps every frame answered alive until it releases.
+    fn resident(&self, map: FileMapRef, first_page: u64, out: &mut [slopos_abi::addr::PhysAddr]);
 }
 
 static FILEMAP_OPS: SpinLock<Option<&'static dyn FileMapOps>> =
@@ -84,6 +90,14 @@ pub fn filemap_release(map: FileMapRef, pages: u32) {
 pub fn filemap_drain() {
     if let Some(o) = ops() {
         o.drain();
+    }
+}
+
+/// [`FileMapOps::resident`]; every slot null when no registry is published.
+pub fn filemap_resident(map: FileMapRef, first_page: u64, out: &mut [slopos_abi::addr::PhysAddr]) {
+    match ops() {
+        Some(o) => o.resident(map, first_page, out),
+        None => out.fill(slopos_abi::addr::PhysAddr::NULL),
     }
 }
 
