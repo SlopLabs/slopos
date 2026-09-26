@@ -51,6 +51,8 @@ struct CpuTime {
     halted_cycles: AtomicU64,
     /// TSC at the open halt, zero when none is open.
     halt_began: AtomicU64,
+    /// TSC at which the last `schedule` on this CPU masked interrupts.
+    switch_began: AtomicU64,
 }
 
 static CPUS: [CpuTime; MAX_CPUS] = [const {
@@ -60,6 +62,7 @@ static CPUS: [CpuTime; MAX_CPUS] = [const {
         idle: AtomicU64::new(0),
         halted_cycles: AtomicU64::new(0),
         halt_began: AtomicU64::new(0),
+        switch_began: AtomicU64::new(0),
     }
 }; MAX_CPUS];
 
@@ -139,6 +142,9 @@ impl<const N: usize> Histogram<N> {
 static KERNEL_RIPS: Histogram<4096> = Histogram::new();
 /// User ticks by the first eight bytes of the running task's name.
 static USER_TASKS: Histogram<256> = Histogram::new();
+/// User RIPs by 64-byte line: a hot loop in a shared library shows up as the
+/// same addresses in every process that maps it where the loader put it.
+static USER_RIPS: Histogram<4096> = Histogram::new();
 
 /// Frames recorded per park site: deep enough to get past the blocking
 /// primitive and the syscall it serves to the operation that waited.
@@ -152,8 +158,10 @@ static CHAIN_FRAMES: [[AtomicU64; CHAIN_DEPTH]; CHAINS] =
 
 /// One park-site sampler at a time; the chain frames have a single writer.
 static SAMPLING: AtomicBool = AtomicBool::new(false);
-static LAST_SAMPLE_MS: AtomicU64 = AtomicU64::new(0);
-const SAMPLE_SPACING_MS: u64 = 10;
+static LAST_SAMPLE_TSC: AtomicU64 = AtomicU64::new(0);
+/// About 10 ms at the clock rates this runs on. Cycles rather than the
+/// monotonic clock: every idle iteration asks, and the clock is an HPET read.
+const SAMPLE_SPACING_CYCLES: u64 = 30_000_000;
 
 static SAMPLES: AtomicU64 = AtomicU64::new(0);
 /// User tasks seen Ready but not on a CPU, summed over samples: a queue that
@@ -183,6 +191,19 @@ static FAULT_CYCLES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 #[inline]
 pub fn stamp() -> u64 {
     if enabled() { rdtsc() } else { 0 }
+}
+
+/// `futex(2)` calls by operation word and user address: one address taking
+/// most of them names a contended lock, and its offset inside its object says
+/// whose.
+static FUTEX_ADDRS: Histogram<1024> = Histogram::new();
+
+/// Count one `futex(2)` call on `uaddr`.
+#[inline]
+pub fn note_futex(uaddr: u64, op: u64) {
+    if enabled() {
+        FUTEX_ADDRS.bump(uaddr & 0x0000_FFFF_FFFF_FFFF | (op & 0x7F) << 56 | 1 << 63);
+    }
 }
 
 /// One syscall, blocking included, from its [`stamp`].
@@ -233,6 +254,7 @@ pub fn note_tick(rip: u64, cs: u64) {
         if let Some(current) = Current::get() {
             USER_TASKS.bump(name_key(&current.task().name));
         }
+        USER_RIPS.bump(rip >> 6 | 1 << 63);
         return;
     }
     let idle = match (Current::get(), Idle::current()) {
@@ -245,6 +267,48 @@ pub fn note_tick(rip: u64, cs: u64) {
     }
     time.kernel.fetch_add(1, Ordering::Relaxed);
     KERNEL_RIPS.bump(rip);
+}
+
+/// Interrupt-masked time of a `schedule` hand-off, bucketed by log2 of
+/// kilocycles: every tick that lands in one is deferred to the `sti` after
+/// it, so the tick sampler sees the cost only as a hot `sti`.
+static SWITCH_CALLS: AtomicU64 = AtomicU64::new(0);
+static SWITCH_CYCLES: AtomicU64 = AtomicU64::new(0);
+static SWITCH_MAX: AtomicU64 = AtomicU64::new(0);
+const SWITCH_BUCKET_COUNT: usize = 24;
+static SWITCH_BUCKETS: [AtomicU64; SWITCH_BUCKET_COUNT] =
+    [const { AtomicU64::new(0) }; SWITCH_BUCKET_COUNT];
+
+/// `schedule` masked interrupts on `cpu`.
+#[inline]
+pub fn switch_begin(cpu: usize) {
+    if !enabled() {
+        return;
+    }
+    if let Some(time) = CPUS.get(cpu) {
+        time.switch_began.store(rdtsc(), Ordering::Relaxed);
+    }
+}
+
+/// `schedule` is about to unmask on `cpu`, in whichever task it resumed.
+#[inline]
+pub fn switch_end(cpu: usize) {
+    if !enabled() {
+        return;
+    }
+    let Some(time) = CPUS.get(cpu) else {
+        return;
+    };
+    let began = time.switch_began.swap(0, Ordering::Relaxed);
+    if began == 0 {
+        return;
+    }
+    let cycles = rdtsc().saturating_sub(began);
+    SWITCH_CALLS.fetch_add(1, Ordering::Relaxed);
+    SWITCH_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    SWITCH_MAX.fetch_max(cycles, Ordering::Relaxed);
+    let bucket = (u64::BITS - (cycles >> 10).leading_zeros()) as usize;
+    SWITCH_BUCKETS[bucket.min(SWITCH_BUCKET_COUNT - 1)].fetch_add(1, Ordering::Relaxed);
 }
 
 /// This CPU is about to halt.
@@ -282,10 +346,12 @@ pub fn sample_park_sites() {
     if !enabled() {
         return;
     }
-    let now_ms = crate::sleep::sleep_queue_now_ms();
-    anchor_clock(now_ms);
-    let last = LAST_SAMPLE_MS.load(Ordering::Relaxed);
-    if now_ms < last.saturating_add(SAMPLE_SPACING_MS) {
+    let now = rdtsc();
+    if now
+        < LAST_SAMPLE_TSC
+            .load(Ordering::Relaxed)
+            .saturating_add(SAMPLE_SPACING_CYCLES)
+    {
         return;
     }
     if SAMPLING
@@ -294,7 +360,8 @@ pub fn sample_park_sites() {
     {
         return;
     }
-    LAST_SAMPLE_MS.store(now_ms, Ordering::Relaxed);
+    LAST_SAMPLE_TSC.store(now, Ordering::Relaxed);
+    anchor_clock(crate::sleep::sleep_queue_now_ms());
     SAMPLES.fetch_add(1, Ordering::Relaxed);
     task_for_each_active(|task| {
         if task.flags & TASK_FLAG_USER_MODE == 0 {
@@ -395,7 +462,7 @@ pub fn report(phase: &str) {
         "PROF[{}]: dropped kernel={} user={} park={}",
         phase,
         KERNEL_RIPS.dropped.load(Ordering::Relaxed),
-        USER_TASKS.dropped.load(Ordering::Relaxed),
+        USER_RIPS.dropped.load(Ordering::Relaxed),
         CHAIN_HITS.dropped.load(Ordering::Relaxed),
     );
 }
@@ -451,6 +518,27 @@ fn report_calls(phase: &str) {
             cycles * 1000 / per_ms / calls.max(1),
         );
     }
+    let switches = SWITCH_CALLS.load(Ordering::Relaxed);
+    klog_info!(
+        "PROF[{}]: switch masked calls={} total_ms={} avg_us={} max_us={}",
+        phase,
+        switches,
+        SWITCH_CYCLES.load(Ordering::Relaxed) / per_ms,
+        SWITCH_CYCLES.load(Ordering::Relaxed) * 1000 / per_ms / switches.max(1),
+        SWITCH_MAX.load(Ordering::Relaxed) * 1000 / per_ms,
+    );
+    for (bucket, count) in SWITCH_BUCKETS.iter().enumerate() {
+        let count = count.load(Ordering::Relaxed);
+        if count != 0 {
+            let floor = if bucket == 0 { 0 } else { 1u64 << (bucket + 9) };
+            klog_info!(
+                "PROF[{}]: switch masked >= {} us: {}",
+                phase,
+                floor * 1000 / per_ms,
+                count
+            );
+        }
+    }
     let mut bound = u64::MAX;
     for _ in 0..32 {
         let mut best = (0u64, 0usize);
@@ -489,6 +577,23 @@ fn report_ticks(phase: &str) {
     });
     KERNEL_RIPS.for_each_top(40, |rip, count| {
         symbolized(phase, format_args!("kernel tick {:>7}", count), rip);
+    });
+    USER_RIPS.for_each_top(30, |key, count| {
+        klog_info!(
+            "PROF[{}]: user tick {:>7} 0x{:x}",
+            phase,
+            count,
+            (key & !(1 << 63)) << 6
+        );
+    });
+    FUTEX_ADDRS.for_each_top(12, |key, count| {
+        klog_info!(
+            "PROF[{}]: futex {:>8} op={} uaddr=0x{:x}",
+            phase,
+            count,
+            key >> 56 & 0x7F,
+            key & 0x0000_FFFF_FFFF_FFFF
+        );
     });
 }
 

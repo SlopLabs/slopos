@@ -1416,6 +1416,7 @@ fn schedule_internal() {
     // resumed on another CPU between the two reads otherwise.
     let irq_flags = cpu::save_flags_cli();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
+    crate::profile::switch_begin(cpu_id);
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
         cpu::restore_flags(irq_flags);
@@ -1447,6 +1448,7 @@ fn schedule_internal() {
         // Before re-enabling interrupts: otherwise a timer-driven re-entrant
         // dispatch parks a second reference into the still-occupied slot.
         let _ = drain_previous_task();
+        crate::profile::switch_end(slopos_arch::pcr::get_current_cpu());
         cpu::restore_flags(irq_flags);
         return;
     }
@@ -1463,8 +1465,10 @@ fn schedule_internal() {
                 // whatever this task displaced there. Before re-enabling
                 // interrupts, or a timer-driven dispatch parks into the
                 // still-occupied slot.
-                finish_pending_switch(slopos_arch::pcr::get_current_cpu());
+                let resumed_on = slopos_arch::pcr::get_current_cpu();
+                finish_pending_switch(resumed_on);
                 let _ = drain_previous_task();
+                crate::profile::switch_end(resumed_on);
                 cpu::restore_flags(irq_flags);
                 return;
             }
@@ -1479,8 +1483,10 @@ fn schedule_internal() {
         current.as_ref().map(|current| current.task()),
         idle.task(),
     );
-    finish_pending_switch(slopos_arch::pcr::get_current_cpu());
+    let resumed_on = slopos_arch::pcr::get_current_cpu();
+    finish_pending_switch(resumed_on);
     let _ = drain_previous_task();
+    crate::profile::switch_end(resumed_on);
     cpu::restore_flags(irq_flags);
 }
 

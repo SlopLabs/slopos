@@ -462,11 +462,13 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             slopos_ostd::sync::rcu_note_cpu_idle_exit();
             continue;
         };
+        crate::profile::switch_begin(cpu_id);
         let dispatched = run_ready_task_from_idle(cpu_id, idle.task());
         // Drain before re-enabling interrupts: clearing the CPU-local
         // previous-task slot with interrupts off closes the window in which a
         // re-entrant dispatch would park a second reference into it.
         let _ = crate::scheduler::drain_previous_task();
+        crate::profile::switch_end(cpu_id);
         slopos_arch::cpu::restore_flags(irq_flags);
         crate::scheduler::drain_deferred_task_reclaim();
         if dispatched {

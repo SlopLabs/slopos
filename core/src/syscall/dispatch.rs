@@ -89,6 +89,9 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             }
             let ctx = SyscallContext::from_current(&current, user_ctx);
             let began = slopos_sched::profile::stamp();
+            if began != 0 && sysno == slopos_abi::syscall::SYSCALL_FUTEX {
+                slopos_sched::profile::note_futex(user_ctx.rdi(), user_ctx.rsi());
+            }
             let result = func(&ctx);
             slopos_sched::profile::note_syscall(sysno, began);
             ctx.write_result(result);
