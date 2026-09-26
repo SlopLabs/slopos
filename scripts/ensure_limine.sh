@@ -19,19 +19,32 @@ LIMINE_URL="${LIMINE_URL:-https://github.com/limine-bootloader/limine/releases/d
 # are immutable). Set to empty to skip integrity verification.
 LIMINE_TARBALL_SHA256="${LIMINE_TARBALL_SHA256:-52e84e1d371cdbbeb7bdf01139f33a4bae30a8a6f3d67fccb2ee07d21f8b886b}"
 
-# Already populated (downloaded earlier or pre-staged for offline builds).
+# Already populated with the pinned release (downloaded earlier or pre-staged
+# for offline builds). The version is read out of the EFI binary itself: a
+# directory left by an earlier pin passes a presence check and boots the old
+# loader, which is how a v11 Limine survived the move to v12.
+# Only the default location is replaced; a directory the caller named is
+# theirs, so a wrong version there is an error rather than a deletion.
+STALE=0
 if [ -f "$LIMINE_DIR/limine-bios.sys" ] && [ -f "$LIMINE_DIR/BOOTX64.EFI" ]; then
-    exit 0
+    if grep -aq "Limine ${LIMINE_VERSION} " "$LIMINE_DIR/BOOTX64.EFI"; then
+        exit 0
+    fi
+    if [ "$LIMINE_DIR" != "${REPO_ROOT}/third_party/limine" ]; then
+        echo "Limine in $LIMINE_DIR is not v${LIMINE_VERSION}" >&2
+        exit 1
+    fi
+    echo "Limine in $LIMINE_DIR is not v${LIMINE_VERSION}; replacing it" >&2
+    STALE=1
 fi
 
-if [ -d "$LIMINE_DIR" ] && [ -n "$(ls -A "$LIMINE_DIR" 2>/dev/null)" ]; then
+if [ "$STALE" = 0 ] && [ -d "$LIMINE_DIR" ] && [ -n "$(ls -A "$LIMINE_DIR" 2>/dev/null)" ]; then
     echo "Limine directory exists but lacks Limine binaries: $LIMINE_DIR" >&2
     echo "Remove it or point LIMINE_DIR to a valid Limine binary release." >&2
     exit 1
 fi
 
 echo "Fetching Limine v${LIMINE_VERSION} binaries..." >&2
-mkdir -p "$LIMINE_DIR"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -65,6 +78,9 @@ if [ -z "$SRC" ] || [ ! -f "$SRC/limine-bios.sys" ]; then
     exit 1
 fi
 
+# Swapped in only once the replacement is downloaded and verified.
+rm -rf "$LIMINE_DIR"
+mkdir -p "$LIMINE_DIR"
 cp -a "$SRC"/. "$LIMINE_DIR"/
 
 echo "Limine v${LIMINE_VERSION} ready in $LIMINE_DIR" >&2
