@@ -177,27 +177,30 @@ impl DlMalloc {
     }
 
     pub fn alloc(&mut self, size: usize) -> *mut c_void {
+        self.alloc_reporting_zero(size).0
+    }
+
+    /// [`alloc`](Self::alloc), also answering whether the memory is already
+    /// zero: a direct allocation is a fresh anonymous mapping, so `calloc`
+    /// need not write — and fault in — every page of it.
+    pub fn alloc_reporting_zero(&mut self, size: usize) -> (*mut c_void, bool) {
         if size == 0 {
-            return ptr::null_mut();
+            return (ptr::null_mut(), false);
         }
 
         let Some(request_size) = Self::request_size(size) else {
-            return ptr::null_mut();
+            return (ptr::null_mut(), false);
         };
 
-        if request_size >= self.mmap_threshold {
-            return self
-                .alloc_direct(request_size, chunk::ALIGNMENT)
-                .cast::<c_void>();
+        if request_size < self.mmap_threshold {
+            let from_arena = self.arena_alloc(request_size);
+            if !from_arena.is_null() {
+                return (from_arena, false);
+            }
         }
 
-        let from_arena = self.arena_alloc(request_size);
-        if !from_arena.is_null() {
-            return from_arena;
-        }
-
-        self.alloc_direct(request_size, chunk::ALIGNMENT)
-            .cast::<c_void>()
+        let direct = self.alloc_direct(request_size, chunk::ALIGNMENT);
+        (direct.cast::<c_void>(), !direct.is_null())
     }
 
     pub fn dealloc(&mut self, ptr: *mut c_void) {

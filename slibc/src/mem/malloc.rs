@@ -42,8 +42,11 @@ pub fn calloc(nmemb: usize, size: usize) -> *mut c_void {
         None => return ptr::null_mut(),
     };
 
-    let ptr = alloc(total);
-    if !ptr.is_null() {
+    let (ptr, zeroed) = match tcache::take(total) {
+        Some(cached) => (cached, false),
+        None => ALLOCATOR.lock().alloc_reporting_zero(total),
+    };
+    if !ptr.is_null() && !zeroed {
         unsafe {
             ptr::write_bytes(ptr as *mut u8, 0, total);
         }
