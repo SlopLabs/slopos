@@ -108,6 +108,10 @@ test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.deb
 # `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
 # into the ISO at build time.
 test_cmdline_effective := env("TEST_CMDLINE", test_cmdline)
+# The dev-disk and self-hosting boots run a compiler: debug klog there is a
+# line per thread created and exited, over a serial port that costs a VM exit
+# a byte.
+dev_test_cmdline   := replace(test_cmdline, "boot.debug=on", "boot.debug=off")
 # Appended to the dev-disk and self-hosting boots, e.g. `prof=on`.
 test_cmdline_extra := env("TEST_CMDLINE_EXTRA", "")
 
@@ -561,7 +565,7 @@ test-devdisk: _build-run-tests
     fresh=0
     [ -e "{{fs_image_devdisk}}" ] || fresh=1
     just _fs-image-devdisk
-    TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
+    TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*devdisk*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
@@ -595,7 +599,7 @@ test-selfhost: _build-run-tests
         { echo "FAIL: the guest's tree carries edits HEAD lacks — see {{build_dir}}/selfhost-edits.patch" >&2; exit 1; }
     # The machine running the build boots the optimized tests kernel: a
     # dev-profile one spends ten times as long in every syscall and fault.
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
     rc=0
     DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
         {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
@@ -618,7 +622,9 @@ test-selfhost: _build-run-tests
     # A config file, as the guest's is: a `--config` ahead of the subcommand is
     # dropped once build_kernel.sh passes its own after it.
     sed "s|^directory = \"|directory = \"$PWD/|" .cargo/vendor.toml >"$reference/cargo-home/config.toml"
-    env -u KERNEL_RELEASE -u KERNEL_SAFESTACK -u KERNEL_RUSTFLAGS \
+    # CARGO_INCREMENTAL pinned as the guest pins it: cargo defaults it off
+    # under CI=true, and the profile it lands in is hashed into -C metadata.
+    env -u KERNEL_RELEASE -u KERNEL_SAFESTACK -u KERNEL_RUSTFLAGS CARGO_INCREMENTAL=1 \
         CARGO="$PWD/{{build_dir}}/host-cargo/cargo" CARGO_HOME="$reference/cargo-home" \
         RUSTC="$(rustup which --toolchain slopos rustc)" RUST_TARGET={{rust_target}} \
         scripts/build_kernel.sh "$reference" "$reference/target"

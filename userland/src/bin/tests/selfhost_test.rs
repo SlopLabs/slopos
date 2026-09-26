@@ -47,6 +47,10 @@ fn guest_builds(variant: &str, features: &[&str]) -> bool {
         .env("PATH", format!("{prefix}/bin:/bin"))
         .env("CARGO_HOME", format!("{DEVEL}/cargo-home"))
         .env("KERNEL_CARGO_TIMINGS", "1")
+        // Pinned, as the host's reference build pins it: cargo's default
+        // depends on `CI`, and the profile is hashed into every crate's
+        // metadata.
+        .env("CARGO_INCREMENTAL", "1")
         .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
         .status();
