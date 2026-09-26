@@ -25,6 +25,7 @@ pub mod syscall_services_init;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 pub mod touchpad;
+pub mod tsc_clock;
 pub mod tty;
 pub mod tty_file_ops;
 #[cfg(feature = "test-hooks")]

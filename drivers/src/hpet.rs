@@ -1,8 +1,9 @@
 //! HPET (High Precision Event Timer) driver.
 //!
-//! Primary monotonic time source and LAPIC-timer calibration reference. HPET is
-//! mandatory: the kernel panics at boot if the ACPI HPET table is missing or the
-//! hardware is unavailable.
+//! The reference the TSC and the LAPIC timer are calibrated against, and the
+//! monotonic clock itself wherever the TSC does not run at a constant rate
+//! (see [`crate::tsc_clock`]). HPET is mandatory: the kernel panics at boot if
+//! the ACPI HPET table is missing or the hardware is unavailable.
 //!
 //! Init runs after IOAPIC setup. The main counter is safe to read from any CPU
 //! without synchronization.

@@ -68,7 +68,7 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     irq_send_eoi: || apic::send_eoi(),
     irq_mask_gsi: |gsi| ioapic::mask_gsi(gsi),
     irq_unmask_gsi: |gsi| ioapic::unmask_gsi(gsi),
-    clock_monotonic_ns: || hpet::nanoseconds(hpet::read_counter()),
+    clock_monotonic_ns: slopos_drivers::tsc_clock::monotonic_ns,
 };
 
 pub fn register_boot_services() {

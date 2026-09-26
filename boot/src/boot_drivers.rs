@@ -183,6 +183,7 @@ fn boot_step_hpet_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         panic!("SlopOS requires HPET — ACPI HPET table not found or hardware unavailable");
     }
     klog_debug!("HPET: Initialization complete, main counter running.");
+    slopos_drivers::tsc_clock::calibrate();
 }
 
 /// Anchor `CLOCK_REALTIME` to the wall clock, preferring the CMOS RTC over the
