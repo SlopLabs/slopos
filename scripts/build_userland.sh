@@ -29,7 +29,7 @@ USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-unknown-slopos.j
 # Cargo names the output directory after the target JSON's stem.
 USERLAND_TRIPLE="$(basename "$USERLAND_TARGET" .json)"
 
-BINS="init shell coreutils terminal compositor roulette halt editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping widget_gallery oops_smoke"
+BINS="init shell coreutils terminal compositor roulette halt bootctl editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping widget_gallery oops_smoke"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Install the pinned channel and materialise the owned `slopos` sysroot.
@@ -191,6 +191,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin seat_test \
         --bin mount_test \
         --bin devdisk_test \
+        --bin install_test \
         --bin selfhost_test \
         --bin shell_script_test \
         --bin stdio_stream_test \
@@ -317,6 +318,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/devdisk_test" ]; then
         cp "$RELEASE_DIR/devdisk_test" "$BUILD_DIR/devdisk_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/install_test" ]; then
+        cp "$RELEASE_DIR/install_test" "$BUILD_DIR/install_test.elf"
     fi
     if [ -f "$RELEASE_DIR/selfhost_test" ]; then
         cp "$RELEASE_DIR/selfhost_test" "$BUILD_DIR/selfhost_test.elf"

@@ -14,7 +14,8 @@
 # residentpages, diskblocks, pinnedbytes, task -- keep the previously tracked
 # value where it still holds, since one capture is a point and not a spread;
 # the deterministic rows and every new row carry this capture's exact peak.
-# The process row fell from 256 to 20 because an exited process is now torn
+# The task row after userland rose from 10 to 11 with `install_test`, which
+# runs `/bin/bootctl` as a child. The process row fell from 256 to 20 because an exited process is now torn
 # down and retired instead of leaking until shutdown. The commitpages row
 # after userland is the build-loop tests reserving six tenths of the
 # headroom, which moves with usable memory and with what else holds a
@@ -70,7 +71,7 @@ post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
 post-userland-tests	process	20
 post-userland-tests	residentpages	160371
-post-userland-tests	task	10
+post-userland-tests	task	11
 
 # The charge path's cost, as ratios rather than cycle counts. A cycle
 # count here measures the accelerator: the same tree reports ~1500

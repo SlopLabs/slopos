@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Run SlopOS in QEMU with mode-specific configuration.
 #
-# Usage: qemu_run.sh <mode> <iso> <fs_image>
+# Usage: qemu_run.sh <mode> <iso> <fs_image>   (<iso> is ignored with BOOT_DISK_IMG)
 #
 #   mode: interactive - Full interactive boot (Ctrl+C to exit)
 #         logged      - Headless boot with timeout, logs to file
@@ -17,7 +17,7 @@ set -euo pipefail
 #   QEMU_GTK_ZOOM_TO_FIT,
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR,
-#   DEV_DISK_IMG,
+#   DEV_DISK_IMG, BOOT_DISK_IMG, QEMU_ALLOW_REBOOT,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
@@ -169,12 +169,31 @@ if [ $(( QEMU_SMP & (QEMU_SMP - 1) )) -ne 0 ]; then
 fi
 
 # ── Ensure OVMF firmware ─────────────────────────────────────────────────────
-"$SCRIPT_DIR/setup_ovmf.sh"
+if [ -n "${BOOT_DISK_IMG:-}" ]; then
+    "$SCRIPT_DIR/setup_ovmf.sh" nv
+else
+    "$SCRIPT_DIR/setup_ovmf.sh"
+fi
 
-# ── Check ISO exists ─────────────────────────────────────────────────────────
-if [ ! -f "$ISO" ]; then
+# ── Check boot medium exists ─────────────────────────────────────────────────
+if [ -n "${BOOT_DISK_IMG:-}" ]; then
+    if [ ! -f "$BOOT_DISK_IMG" ]; then
+        echo "Boot disk not found at $BOOT_DISK_IMG" >&2
+        exit 1
+    fi
+elif [ ! -f "$ISO" ]; then
     echo "ISO not found at $ISO" >&2
     exit 1
+fi
+
+# A boot disk selects its next boot through UEFI variables, which only the
+# varstore-writing firmware keeps across a reset (see setup_ovmf.sh).
+SECURE_PFLASH=1
+if [ -n "${BOOT_DISK_IMG:-}" ]; then
+    OVMF_DIR="${OVMF_NV_DIR:-${REPO_ROOT}/third_party/ovmf-nv}"
+    OVMF_CODE="${OVMF_DIR}/OVMF_CODE.fd"
+    OVMF_VARS="${OVMF_DIR}/OVMF_VARS.fd"
+    SECURE_PFLASH=0
 fi
 
 # ── Create runtime OVMF_VARS copy ────────────────────────────────────────────
@@ -240,6 +259,14 @@ ADD_DEV_DISK=0
 if [ -n "${DEV_DISK_IMG:-}" ] && [ -f "$DEV_DISK_IMG" ]; then
     ADD_DEV_DISK=1
 fi
+# The UEFI boot disk (virtio-disk5) replaces the ISO as the boot medium. It is
+# the last disk so that it renames none of the others in the guest.
+ADD_BOOT_DISK=0
+BOOT_ORDER=d
+if [ -n "${BOOT_DISK_IMG:-}" ]; then
+    ADD_BOOT_DISK=1
+    BOOT_ORDER=c
+fi
 
 case "$MODE" in
     test)
@@ -295,6 +322,12 @@ case "$MODE" in
         exit 1
         ;;
 esac
+
+# A guest reboot then resets the machine inside this QEMU process, so the
+# OVMF vars copy — and a `LoaderEntryOneShot` the guest set — survives it.
+if [[ "${QEMU_ALLOW_REBOOT:-0}" =~ ^(1|true|on|yes)$ ]]; then
+    ADD_NO_REBOOT=0
+fi
 
 # ── Display device selection ─────────────────────────────────────────────────
 # GPU selects the emulated display adapter SlopOS drives:
@@ -458,15 +491,21 @@ QEMU_ARGS=(
     -cpu "$QEMU_CPU"
     -smp "$QEMU_SMP"
     -m "$QEMU_MEM"
-    # OVMF since 2026-07-23 faults before any console unless the varstore pflash
-    # is secure: no serial, no display, indistinguishable from a dead kernel.
-    -global "driver=cfi.pflash01,property=secure,value=on"
     -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
     -drive "if=pflash,format=raw,unit=1,file=$OVMF_VARS_RUNTIME"
     -device "ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3"
-    -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
-    -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
 )
+# The pinned nightly faults before any console unless the varstore pflash is
+# secure: no serial, no display, indistinguishable from a dead kernel.
+if [ "$SECURE_PFLASH" = "1" ]; then
+    QEMU_ARGS+=(-global "driver=cfi.pflash01,property=secure,value=on")
+fi
+if [ "$ADD_BOOT_DISK" = "0" ]; then
+    QEMU_ARGS+=(
+        -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
+        -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
+    )
+fi
 if [ "$ADD_ROOT_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
@@ -500,13 +539,19 @@ if [ "$ADD_DEV_DISK" = "1" ]; then
         -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on"
     )
 fi
+if [ "$ADD_BOOT_DISK" = "1" ]; then
+    QEMU_ARGS+=(
+        -drive "file=$BOOT_DISK_IMG,if=none,id=virtio-disk5,format=raw"
+        -device "virtio-blk-pci,drive=virtio-disk5,disable-legacy=on,bootindex=0"
+    )
+fi
 QEMU_ARGS+=(
     # No `dns=`: it sets the guest-visible address of SLIRP's own stub, not an
     # upstream to forward to, so naming a public resolver moves the stub
     # somewhere nothing replies from and every lookup times out.
     -netdev "user,id=slopnet0${NET_HOSTFWD}${NET_GUESTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
-    -boot "order=d,menu=off"
+    -boot "order=${BOOT_ORDER},menu=off"
     "${SERIAL_ARGS[@]}"
     "${DEBUG_ARGS[@]}"
     "${DISPLAY_ARGS[@]}"

@@ -25,7 +25,7 @@ gate_parse_args check_alloc_dep "$@"
 # stacks; slopos-ostd is the sanctioned allocation surface. The `*-core`
 # crates are userland-only host-testable cores the kernel does not link, so
 # the framekernel allocation discipline does not reach them.
-USERLAND_RE='^(userland|terminal-core|shell-core|editor-core|http-core|tls-core|slibc|slop-protocol|image|slopos-ostd)$'
+USERLAND_RE='^(userland|terminal-core|shell-core|editor-core|http-core|tls-core|fat-core|slibc|slop-protocol|image|slopos-ostd)$'
 
 # Findings carry a `<tag>\t` prefix so the self-test can count each pass
 # independently; the reports strip it back off.
@@ -112,7 +112,7 @@ SOURCE_WHITELIST="kernel/src/main.rs"
 # Only the named TCB annexes are skipped; any other vendored Rust source
 # that directly names alloc is a gate failure.
 filter_files() {
-    grep -Ev '^(userland|terminal-core|shell-core|editor-core|http-core|tls-core|slibc|slop-protocol|image|slopos-ostd)/' \
+    grep -Ev '^(userland|terminal-core|shell-core|editor-core|http-core|tls-core|fat-core|slibc|slop-protocol|image|slopos-ostd)/' \
       | grep -Ev '^vendor/(unwinding|gimli)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       || true

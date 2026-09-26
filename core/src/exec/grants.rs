@@ -94,6 +94,14 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_POWER,
         priority: None,
     },
+    // Writes the boot disk's EFI system partition beneath every filesystem
+    // (`Mount`, the raw-device right) and sets the loader's next-boot
+    // variable and reboots (`Power`).
+    ProgramGrant {
+        path: b"/bin/bootctl",
+        flags: TASK_FLAG_MOUNT | TASK_FLAG_POWER,
+        priority: None,
+    },
     // Granted to the seat test rather than widening the seat capability, so
     // the shipped answer to "who may take the screen" stays one program. The
     // path ships only in a tests image, and an absent path grants nothing.
@@ -114,6 +122,12 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     ProgramGrant {
         path: b"/bin/devdisk_test",
         flags: TASK_FLAG_MOUNT,
+        priority: None,
+    },
+    // Keeps its stage across the reboots it drives in a UEFI variable.
+    ProgramGrant {
+        path: b"/bin/install_test",
+        flags: TASK_FLAG_POWER,
         priority: None,
     },
     // Points the resolver at a nameserver it runs on loopback.

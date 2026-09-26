@@ -183,6 +183,10 @@ name = "slopos-editor-core"
 version = "0.1.0"
 
 [[package]]
+name = "slopos-fat-core"
+version = "0.1.0"
+
+[[package]]
 name = "slopos-font"
 version = "0.1.0"
 dependencies = [
@@ -446,6 +450,7 @@ dependencies = [
  "slopos-appkit",
  "slopos-chrome-core",
  "slopos-editor-core",
+ "slopos-fat-core",
  "slopos-font",
  "slopos-gfx",
  "slopos-http-core",

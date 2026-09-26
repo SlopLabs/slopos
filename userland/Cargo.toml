@@ -22,6 +22,10 @@ name = "halt"
 path = "src/bin/halt.rs"
 
 [[bin]]
+name = "bootctl"
+path = "src/bin/bootctl.rs"
+
+[[bin]]
 name = "compositor"
 path = "src/bin/compositor.rs"
 
@@ -225,6 +229,10 @@ name = "devdisk_test"
 path = "src/bin/tests/devdisk_test.rs"
 
 [[bin]]
+name = "install_test"
+path = "src/bin/tests/install_test.rs"
+
+[[bin]]
 name = "selfhost_test"
 path = "src/bin/tests/selfhost_test.rs"
 
@@ -300,6 +308,7 @@ slopos-editor-core = { workspace = true }
 slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-http-core = { workspace = true }
+slopos-fat-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }

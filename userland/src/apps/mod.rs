@@ -1,3 +1,4 @@
+pub mod bootctl;
 pub mod compositor;
 pub mod coreutils;
 pub mod curl;

@@ -73,6 +73,7 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 | The kernel build needs no host tool | `just build`; `slopos-kallsyms` tests; two checkouts build identical ELFs | `scripts/build_kernel.sh`, `tools/kallsyms/`, `scripts/compare_kernel_elf.sh` |
 | The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway`; the guest builds both kernels | `mm/src/{commit,vma_region,page_fault,user_copy,user_mappings}.rs`, `slibc/src/process/spawn.rs` |
 | A mount has one writeback pass | `test_ext2_sync_finishes_the_open_pass_instead_of_opening_one`, `test_ext2_journal_headroom_is_restored_off_the_mount_lock` | `fs/src/ext2_vfs.rs` |
+| A kernel installs into a boot slot and rolls back | `just test-install`, `slopos-fat-core` host tests, `test_devfs_block_node_writes_through_the_claim` | `fat-core/`, `userland/src/apps/bootctl.rs`, `core/src/efivar.rs`, `fs/src/devfs/`, `scripts/build_bootdisk.sh` |
 | Code gets in and out | `scripts/check_offline_build.sh`, `transfer_test` | `.cargo/vendor.toml`, `scripts/{make_vendor,export_devdisk}.sh`, `tls-core/` |
 
 ### What Phase 1 builds on
@@ -138,11 +139,13 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 
 **Outcome:** one `just test-selfhost` run passes every step on one tree.
 
-**Where it stands.** The guest builds both kernels under KVM at four vCPUs:
-the dev kernel in 714 s (cargo passes 6 min 47 s and 4 min 34 s) and the tests
-kernel in 756 s. The dev disk then fails `e2fsck -fn`, which is where the run
-stops. An earlier run matched the host's dev kernel in both its loadable image
-and its symbol table; no run has yet passed all five steps.
+**Where it stands.** Every step has passed on its own; one run passing all
+five on one tree is what is left. The guest builds both kernels under KVM at
+four vCPUs in about 160 s and 170 s, against 714 s and 756 s when this section
+was first written; the host's reference build of the dev kernel at `-j4` is
+about 44 s. The dev disk passes `e2fsck -fn`, the guest's kernels pass the ELF
+gates, and the guest's dev kernel matches the host's build in its loadable
+image and its symbol table.
 
 1. `just test-selfhost` green end to end:
    - the guest builds both kernels
@@ -151,36 +154,51 @@ and its symbol table; no run has yet passed all five steps.
    - the kernel suite passes on the guest's tests kernel
    - the dev kernel is identical to the host's build
 
-   The blocker is 16 inodes with three names and a link count of two. Each
-   extra name is an `out/*.rcgu.o` that rustc's first pass unlinked after
-   archiving: the object's two incremental-session names are right, and the
-   `out/` entry is back. Its neighbours in the same directory block stayed
-   deleted, and the second pass's later changes to that block persisted. So
-   one unlink's entry removal was lost while its link-count decrement was not;
-   the whole block was not reverted. Copying only a block's newest record at
-   the check point did not fix it. Next: reproduce it without the guest — an
-   `Ext2Fs`-level loop of create, link into a session directory, unlink in
-   random order, with passes interleaved and clean entries dropped, checked
-   against the medium after each full sync.
-2. The C allocator's lock: measure what the futex lock bought. Time the dev
-   kernel's first pass in the guest with a `libc.so` built on the old spinning
-   lock, installed as `/lib/libc.so` on the tests image, against the futex
-   lock, from one fresh dev disk each, on one tree. Not yet taken: the only
-   spinning-lock timing (5 min 55 s first pass) is from an older tree and an
-   older kernel.
-3. The slowdown. The guest build is about 22× the host's at the same `-j`,
-   and the guest is mostly waiting, not computing: over the last full run the
-   four CPUs were idle 27, 54, 73 and 83% of their ticks. Two causes are fixed:
-   a page fault used to bounce back to user mode whenever a sibling thread was
-   mid-copy, so multi-threaded rustc re-faulted in a loop and a copy's
-   populate eventually answered `EFAULT`; and `schedule_internal` read the CPU
-   id before masking interrupts, so a task preempted in between could dispatch
-   off another CPU's run queue. What is left: compare `cargo --timings`
-   per unit, guest against host, to find whether the rest is uniform or
-   concentrated, and account for the idle time — the remaining candidates are
-   the one global C allocator lock every LLVM thread shares, the per-mount lock
-   serialising every filesystem operation, and wakeups stranded until the
-   100 ms rescue sweep.
+   What stood in the way, and is fixed:
+   - **The e2fsck blocker** — inodes with an extra name — was
+     `remove_dir_entry` merging a removed record into the last *live* record
+     by summing lengths, which could fold a reused free record back over a
+     live name. It now merges into the record immediately before it
+     (`test_ext2_removal_after_a_reused_free_record_takes_the_name`,
+     `test_ext2_namespace_churn_matches_the_medium`).
+   - **Identity.** Under `CI=true` cargo defaults `incremental` off, and the
+     profile is hashed into `-C metadata`: the host's reference and the guest
+     built different symbol names. Both now pin `CARGO_INCREMENTAL=1`.
+   - **A hang** with every CPU idle, once: `schedule_internal` finished a
+     switch against the CPU the task had *left* when it resumed on another,
+     requeueing the displaced task where no IPI would find it. Fixed; not seen
+     since.
+   - **Heap corruption in rustc**, twice in a row, from the page-set cache: a
+     fault that took a reference on a parked set did not unpark it, so
+     eviction freed frames it was about to map
+     (`test_filemap_fault_on_a_parked_set_holds_its_frames`).
+2. The slowdown, measured with `prof=on` (`sched/src/profile.rs`). From about
+   22× the host to about 4×:
+   - an optimized kernel for the machine doing the build (the dev profile
+     spent ten times as long in every syscall and fault);
+   - `boot.debug=off` on the dev-disk boots (a klog line per thread over a
+     serial port that exits to the host per byte);
+   - no TLB shootdown for a mapping where nothing was mapped unless a lazy
+     unmap may have left a stale entry;
+   - the monotonic clock off the TSC rather than the HPET;
+   - unmapped page sets kept as a cache, read ahead 16 pages at a time, mapped
+     copy-on-write into `MAP_PRIVATE` mappings and around each fault — file
+     faults fell from 2.6 M to 0.45 M per build;
+   - the C allocator: size-class bins instead of eight sorted lists (a quarter
+     of user time), a per-thread cache, a lock that spins while held, glibc's
+     dynamic mmap threshold — futex waits on its lock fell from 1.68 M to
+     0.13 M;
+   - the shell blocking in `wait4` instead of polling;
+   - CRC-32 eight bytes at a time for the journal (17 s of kernel time);
+   - LLVM's `ClearImpliedBits`, exponential over x86's feature graph and 7% of
+     user time with SSE disabled, rewritten level by level
+     (`toolchain/llvm-rustc/0002`).
+
+   What is left, per `prof=on`: user time is still about three times the
+   host's for the same work (4 KiB pages only, one allocator lock), and every
+   filesystem operation serialises on its mount's one lock — `PROF` prints its
+   wait and hold time as `ext2 lock`. The four CPUs spend 30–80% of the build
+   halted.
 
 ---
 
@@ -188,16 +206,25 @@ and its symbol table; no run has yet passed all five steps.
 
 **Outcome:** the guest writes a bootable medium and reboots into its own kernel.
 
-- **Current state.** `write` on a `/dev` block node returns `ReadOnly`
-  (`fs/src/devfs/mod.rs`), and reading one needs `TASK_FLAG_SYSTEM`. There is no
-  FAT support, so an ESP cannot be written; partition tables are parse-only.
-  Limine is installed by host scripts, and QEMU boots `order=d` with throwaway
-  OVMF vars.
-- **Needed:** a writable block path, FAT32 write, a bootloader installer or an
-  EFI stub, a `limine.conf` editor, `SYSCALL_REBOOT` landing on the new image,
-  and A/B slots with rollback.
-- **Policy change needed:** `AGENTS.md`'s QEMU-only execution boundary forbids
-  exactly this and needs a scoped exception for the guest's own ESP.
+**Landed.** `just test-install` boots from a GPT boot disk whose EFI system
+partition holds Limine, `/limine.conf` and a kernel per slot, and across the
+resets of one QEMU: `bootctl clone a b`, a one-shot boot of `slopos-b` through
+the Boot Loader Interface's `LoaderEntryOneShot`, `bootctl commit`, and a
+one-shot boot of a slot whose kernel panics under `panic=reboot` — whose reset
+lands on the committed default. The pieces: `/dev/vd*` writes for a `Mount`
+holder through the device's exclusive claim; `fat-core`, FAT32 with
+copy-on-write file replacement; UEFI variables on a kernel thread, limited to
+the loader's and SlopOS's vendor GUIDs; `panic=reboot`; and a second, pinned
+OVMF whose varstore survives a reset (the nightly the ISO boots keeps
+variables in RAM). The execution boundary holds: all of it is a disk image
+under `builddir/` inside QEMU.
+
+**Still to do:**
+- The exit criterion's own sequence in one run: `just boot-dev` from a boot
+  disk, build a kernel in the guest, `bootctl install b` it, boot it once, and
+  see the guest's build in the boot log.
+- A raw partition write re-reads the partition table to find its window every
+  call; `bootctl install` of a 90 MB kernel pays for it on every cluster.
 
 **Phase 1 exit criteria:** `just boot-dev`, build a kernel in-guest, install
 it, reboot, and the boot log shows the new build — with rollback if it panics.

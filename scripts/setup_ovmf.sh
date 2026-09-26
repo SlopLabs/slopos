@@ -86,3 +86,35 @@ fi
 
 download_firmware "${OVMF_BASE_URL}/RELEASEX64_OVMF_CODE.fd" "${OVMF_CODE}" "${OVMF_CODE_SHA256}"
 download_firmware "${OVMF_BASE_URL}/RELEASEX64_OVMF_VARS.fd" "${OVMF_VARS}" "${OVMF_VARS_SHA256}"
+
+# A second firmware for booting from a writable boot disk. The nightly above
+# needs a secure varstore pflash to boot at all, and with it keeps UEFI
+# variables in RAM: a `LoaderEntryOneShot` set by the guest is gone after the
+# reset that should consume it. Arch's edk2-ovmf build writes its varstore, so
+# A/B slot selection survives a reboot. Pinned by package checksum.
+OVMF_NV_DIR="${OVMF_NV_DIR:-${REPO_ROOT}/third_party/ovmf-nv}"
+OVMF_NV_PKG_URL="${OVMF_NV_PKG_URL:-https://archive.archlinux.org/packages/e/edk2-ovmf/edk2-ovmf-202608-1-any.pkg.tar.zst}"
+OVMF_NV_PKG_SHA256="bee34c6036ebd0e96562b7330d2d3ddf75e240cfc44a6d506a5ccb6390eafb91"
+OVMF_NV_STAMP="${OVMF_NV_DIR}/.package-sha256"
+
+# Only a caller booting a boot disk asks for it (`setup_ovmf.sh nv`), so an
+# ISO boot never needs the network or zstd for it.
+if [ "${1:-}" = "nv" ] && [ "$(cat "${OVMF_NV_STAMP}" 2>/dev/null)" != "${OVMF_NV_PKG_SHA256}" ]; then
+  nv_tmp="$(mktemp -d)"
+  trap 'rm -rf "${nv_tmp}"' EXIT
+  echo "Downloading the varstore-writing OVMF from ${OVMF_NV_PKG_URL}" >&2
+  curl -L --fail --progress-bar "${OVMF_NV_PKG_URL}" -o "${nv_tmp}/ovmf.pkg.tar.zst"
+  nv_got="$(sha256_of "${nv_tmp}/ovmf.pkg.tar.zst")"
+  if [ "${nv_got}" != "${OVMF_NV_PKG_SHA256}" ]; then
+    rm -rf "${nv_tmp}"
+    echo "OVMF package checksum mismatch: expected ${OVMF_NV_PKG_SHA256}, got ${nv_got}" >&2
+    exit 1
+  fi
+  tar --zstd -xf "${nv_tmp}/ovmf.pkg.tar.zst" -C "${nv_tmp}" \
+    usr/share/edk2/x64/OVMF_CODE.4m.fd usr/share/edk2/x64/OVMF_VARS.4m.fd
+  mkdir -p "${OVMF_NV_DIR}"
+  cp "${nv_tmp}/usr/share/edk2/x64/OVMF_CODE.4m.fd" "${OVMF_NV_DIR}/OVMF_CODE.fd"
+  cp "${nv_tmp}/usr/share/edk2/x64/OVMF_VARS.4m.fd" "${OVMF_NV_DIR}/OVMF_VARS.fd"
+  printf '%s\n' "${OVMF_NV_PKG_SHA256}" >"${OVMF_NV_STAMP}"
+  rm -rf "${nv_tmp}"
+fi

@@ -67,6 +67,14 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Halt or reboot the machine",
     },
+    // Granted `Mount` and `Power` by path, like `halt`.
+    ProgramSpec {
+        name: "bootctl",
+        path: "/bin/bootctl",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Install a kernel into a boot slot and choose what boots",
+    },
     ProgramSpec {
         name: "editor",
         path: "/bin/editor",

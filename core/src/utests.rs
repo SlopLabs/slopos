@@ -73,6 +73,7 @@ crate::utest!(
 crate::utest!(name = utest_seat, bin = "/bin/seat_test");
 crate::utest!(name = utest_mount, bin = "/bin/mount_test");
 crate::utest!(name = utest_devdisk, bin = "/bin/devdisk_test");
+crate::utest!(name = utest_install, bin = "/bin/install_test");
 crate::utest!(
     name = utest_selfhost,
     bin = "/bin/selfhost_test",

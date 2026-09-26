@@ -82,6 +82,9 @@ iso_elf       := build_dir / "slop-elf.iso"
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
+# The UEFI boot disk: GPT, one FAT32 ESP, Limine with A/B kernel slots.
+boot_disk    := build_dir / "boot-disk.img"
+
 ports        := ""
 
 qemu_bin     := env("QEMU_BIN", "qemu-system-x86_64")
@@ -119,7 +122,7 @@ debug         := env("DEBUG", "0")
 debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
 boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 
-userland_bins      := "init shell coreutils terminal compositor roulette halt editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
+userland_bins      := "init shell coreutils terminal compositor roulette halt bootctl editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
 
 # The multicall utility binary's installed names. `/bin/<name>` is a symlink to
 # `/bin/coreutils`, which dispatches on `argv[0]` — one binary rather than
@@ -130,7 +133,7 @@ coreutils_tools    := "ls cat cp mv rm mkdir rmdir ln touch stat install mktemp 
 # they are libraries, not programs, and out of the shipped image entirely.
 test_shared_objects := "libdltest.so libc++.so libcxxtest.so libdlsearch-fixture.so libdlrunpath.so libdlplain.so"
 
-test_userland_bins := userland_bins + " dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test selfhost_test buildloop_test exit_stress_test"
+test_userland_bins := userland_bins + " dl_probe dl_test dl_search_origin dl_search_rpath dl_search_runpath dl_secure_probe cxx_probe cxx_static_probe cxx_test libc_probe fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test buildctl_test coreutils_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test bigprog_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test editor_test spawn_privilege_test seat_test mount_test install_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test dns_concurrent_test transfer_test persist_test libc_abi_test devdisk_test selfhost_test buildloop_test exit_stress_test"
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
 setup:
@@ -308,6 +311,14 @@ _iso-tests-userland-only: _fs-image-tests _initramfs-tests (_kernel kernel_varia
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" \
             "{{test_cmdline_effective}} tests.run=__userland_only__"
 
+# Rebuilt from scratch every run: both slots hold this build and slot a is the default.
+_boot-disk: _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+    LIMINE_DIR={{limine_dir}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+        scripts/build_bootdisk.sh "{{boot_disk}}" "{{kernel_elf_tests}}" "{{initramfs_tests}}" "{{test_cmdline_effective}}"
+
 _qemu-boot mode video iso fs_image *extra_env:
     QEMU_BIN={{qemu_bin}} QEMU_SMP={{qemu_smp}} QEMU_MEM={{qemu_mem}} \
     QEMU_ACCEL={{qemu_accel}} QEMU_CPU={{qemu_cpu}} QEMU_DISPLAY={{qemu_display}} \
@@ -383,6 +394,34 @@ boot-elf ELF: _fs-image _initramfs
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_elf}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
     just _qemu-boot "interactive" "1" {{iso_elf}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
+# The tests image as disk0, as `just test` attaches it, and the memory the
+# suite's harness boots with.
+[doc("Boot the tests kernel from a fresh UEFI A/B boot disk (builddir/boot-disk.img); guest reboots stay in this QEMU")]
+boot-disk: _boot-disk
+    #!/usr/bin/env bash
+    set -euo pipefail
+    QEMU_MEM="${QEMU_MEM:-1G}" \
+        just _qemu-boot "interactive" "1" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
+[doc("Phase 1: install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU")]
+test-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*" BOOTDISK_PANIC_ENTRY=1 just _boot-disk
+    log="{{build_dir}}/install.log"
+    rc=0
+    timeout "${INSTALL_TIMEOUT_SECS:-900}" \
+        just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} \
+        >"$log" 2>&1 || rc=$?
+    missing=0
+    for marker in "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-STAGE 2: rebooting into slopos-bad" \
+        "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
+        grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
+    done
+    grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
+    [ "$missing" = 0 ] || exit 1
+    echo "test-install: installed, tried, committed and rolled back (qemu rc=$rc); log in $log"
 
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
@@ -633,7 +672,7 @@ test-selfhost: _build-run-tests
 
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

@@ -3,6 +3,7 @@
 //! returns `SyscallResult`, `tty` raw `i64`), and `wrappers` for RAII types.
 
 pub mod core;
+pub mod efi;
 pub mod error;
 pub mod fs;
 pub mod input;
