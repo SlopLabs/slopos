@@ -78,6 +78,9 @@ impl From<BlockDeviceError> for Ext2Error {
     fn from(err: BlockDeviceError) -> Self {
         match err {
             BlockDeviceError::Interrupted => Self::Interrupted,
+            // Short of memory for a request is not damage to the image, and
+            // must not remount it read-only.
+            BlockDeviceError::OutOfMemory => Self::OutOfMemory,
             _ => Self::DeviceError,
         }
     }

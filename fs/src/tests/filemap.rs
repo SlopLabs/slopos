@@ -870,8 +870,16 @@ pub fn test_filemap_inode_cap_refuses() -> TestResult {
     filemap::drain_pending();
     match verdict {
         Ok(()) => {
-            if filemap::mapped_inode_count() != before {
-                return slopos_testing::fail!("the cap fixtures outlived their release");
+            // Asked of the fixtures themselves rather than of the global count,
+            // which an earlier test's process still tearing down also moves.
+            let survivor = (0..=MAX_MAPPED_INODES)
+                .map(|i| SYNTHETIC_INODE + i as InodeId)
+                .find(|&inode| filemap::covers_offset(test_fs(), inode, 0));
+            if let Some(inode) = survivor {
+                return slopos_testing::fail!(
+                    "the cap fixture for inode {} outlived its release",
+                    inode
+                );
             }
             TestResult::Pass
         }

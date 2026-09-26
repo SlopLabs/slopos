@@ -1841,6 +1841,18 @@ impl BlockCache {
         max: usize,
         batch: &mut DataBatch,
     ) -> Result<FlushProgress, Ext2Error> {
+        self.stage_batch(start, max, batch, &|e: &CacheEntry| {
+            e.kind == BlockKind::Data && e.dirtied_epoch <= epoch
+        })
+    }
+
+    fn stage_batch(
+        &mut self,
+        start: u32,
+        max: usize,
+        batch: &mut DataBatch,
+        select: &dyn Fn(&CacheEntry) -> bool,
+    ) -> Result<FlushProgress, Ext2Error> {
         batch.clear();
         let bs = self.block_size as usize;
         // Reserved up front, so staging never stops half way through with
@@ -1854,15 +1866,21 @@ impl BlockCache {
         };
         let mut seen = 0usize;
         let mut more = false;
-        let wanted = |e: &CacheEntry| {
-            e.valid
-                && e.frame.dirty()
-                && !e.inflight
-                && e.kind == BlockKind::Data
-                && e.dirtied_epoch <= epoch
-        };
-        while seen < slots && self.dirty > 0 {
-            if wanted(&self.entries[slot]) {
+        let wanted = |e: &CacheEntry| e.valid && e.frame.dirty() && !e.inflight && select(e);
+        // Exact, because the data phase must not stop with a block its commit
+        // names still unwritten: every entry dirty at the start is counted
+        // once, when the scan reaches it or when a run stages it ahead of the
+        // scan (marked clean then, so not counted again).
+        let dirty_at_start = self.dirty;
+        let mut dirty_seen = 0usize;
+        while seen < slots && dirty_seen < dirty_at_start {
+            let entry = &self.entries[slot];
+            dirty_seen += usize::from(entry.valid && entry.frame.dirty());
+            // A metadata block whose newest record is not durable yet waits
+            // for a pass that finds it so; `plan_run` stops a run at one.
+            if wanted(entry)
+                && (entry.kind == BlockKind::Data || self.home_write_allowed(entry.block))
+            {
                 if batch.blocks.len() >= max {
                     more = true;
                     break;
@@ -1885,6 +1903,7 @@ impl BlockCache {
                     .to_disk_offset(self.block_size)
                     .raw();
                 let _ = batch.runs.push((offset, first, len as u32));
+                dirty_seen += len - 1;
                 // Owed now, not when the batch finishes: a commit that takes
                 // the lock meanwhile must barrier behind these writes.
                 self.unbarriered += len;
