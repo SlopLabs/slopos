@@ -462,11 +462,11 @@ impl Loader {
 
     /// Relocate `group` deepest dependency first, against the global scope
     /// widened by the group itself, then give each object its final page
-    /// protections. Answers how many relocations were applied.
+    /// protections. Answers what the binding cost.
     ///
     /// # Safety
     /// Caller holds [`lock`]; every object in `group` is mapped and parsed.
-    pub unsafe fn relocate_group(&mut self, group: &[u16]) -> Result<usize, DlError> {
+    pub unsafe fn relocate_group(&mut self, group: &[u16]) -> Result<reloc::BindStats, DlError> {
         let mut scope = [0u16; DL_MAX_OBJECTS];
         let mut scope_len = 0usize;
         for slot in self.global[..self.global_count].iter() {
@@ -480,13 +480,13 @@ impl Loader {
             }
         }
 
-        let mut applied = 0usize;
+        let mut stats = reloc::BindStats::default();
         for slot in group.iter().rev() {
             let index = *slot as usize;
             if self.objects[index].flags & DSO_RELOCATED != 0 {
                 continue;
             }
-            applied += reloc::relocate(&self.objects, index, &scope[..scope_len])
+            stats += reloc::relocate(&self.objects, index, &scope[..scope_len])
                 .map_err(|_| DlError::Relocation)?;
             self.objects[index].flags |= DSO_RELOCATED;
             if self.objects[index].map_len != 0 {
@@ -494,7 +494,7 @@ impl Loader {
             }
             load::protect_relro(&self.objects[index]).map_err(|_| DlError::NoMemory)?;
         }
-        Ok(applied)
+        Ok(stats)
     }
 
     /// Give every TLS-carrying object in `group` a module id.

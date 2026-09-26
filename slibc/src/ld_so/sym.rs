@@ -1,6 +1,7 @@
 //! Symbol lookup: the two hash tables, and the rule for what counts as a
 //! definition.
 
+use core::cell::Cell;
 use core::ptr;
 
 use super::dso::Dso;
@@ -13,50 +14,62 @@ pub struct Def {
     pub dso: usize,
 }
 
-fn streq(a: *const u8, b: *const u8) -> bool {
-    unsafe {
-        let mut i = 0usize;
-        loop {
-            let ca = *a.add(i);
-            if ca != *b.add(i) {
-                return false;
-            }
-            if ca == 0 {
-                return true;
-            }
-            i += 1;
-        }
-    }
+/// A name being looked up, hashed once for the whole search rather than once
+/// per object visited.
+pub struct Name {
+    ptr: *const u8,
+    gnu: u32,
+    /// Only an object without `DT_GNU_HASH` needs it, and almost none lack
+    /// one. Never a valid hash: those are 28 bits.
+    sysv: Cell<u32>,
 }
 
-fn gnu_hash(name: *const u8) -> u32 {
-    unsafe {
+const SYSV_UNHASHED: u32 = u32::MAX;
+
+impl Name {
+    /// # Safety
+    /// `ptr` is a NUL-terminated string that outlives the value.
+    pub unsafe fn new(ptr: *const u8) -> Self {
         let mut h: u32 = 5381;
         let mut i = 0usize;
         loop {
-            let c = *name.add(i);
+            let c = *ptr.add(i);
             if c == 0 {
-                return h;
+                break;
             }
             h = h.wrapping_mul(33).wrapping_add(c as u32);
             i += 1;
         }
-    }
-}
-
-fn sysv_hash(name: *const u8) -> u32 {
-    unsafe {
-        let mut h: u32 = 0;
-        let mut i = 0usize;
-        loop {
-            let c = *name.add(i);
-            if c == 0 {
-                return h & 0x0fff_ffff;
-            }
-            h = h.wrapping_mul(16).wrapping_add(c as u32);
-            h ^= (h >> 24) & 0xf0;
-            i += 1;
+        Self {
+            ptr,
+            gnu: h,
+            sysv: Cell::new(SYSV_UNHASHED),
         }
+    }
+
+    fn sysv(&self) -> u32 {
+        if self.sysv.get() == SYSV_UNHASHED {
+            let mut h: u32 = 0;
+            let mut i = 0usize;
+            loop {
+                // SAFETY: `new`'s contract.
+                let c = unsafe { *self.ptr.add(i) };
+                if c == 0 {
+                    break;
+                }
+                h = h.wrapping_mul(16).wrapping_add(c as u32);
+                h ^= (h >> 24) & 0xf0;
+                i += 1;
+            }
+            self.sysv.set(h & 0x0fff_ffff);
+        }
+        self.sysv.get()
+    }
+
+    /// # Safety
+    /// `other` is a NUL-terminated string.
+    unsafe fn is(&self, other: *const u8) -> bool {
+        crate::string::vector::c_compare(self.ptr, other, usize::MAX) == 0
     }
 }
 
@@ -85,7 +98,7 @@ fn usable(sym: &Sym, need_def: bool) -> bool {
 ///
 /// # Safety
 /// `dso` must be fully parsed.
-pub unsafe fn lookup_in(dso: &Dso, name: *const u8, need_def: bool) -> Option<Sym> {
+pub unsafe fn lookup_in(dso: &Dso, name: &Name, need_def: bool) -> Option<Sym> {
     if dso.symtab.is_null() || dso.strtab.is_null() {
         return None;
     }
@@ -105,7 +118,7 @@ pub unsafe fn lookup_in(dso: &Dso, name: *const u8, need_def: bool) -> Option<Sy
     }
 }
 
-unsafe fn gnu_index(dso: &Dso, name: *const u8) -> Option<usize> {
+unsafe fn gnu_index(dso: &Dso, name: &Name) -> Option<usize> {
     const BITS: u32 = usize::BITS;
     let h = dso.gnu_hash;
     let nbuckets = ptr::read_unaligned(h) as usize;
@@ -122,7 +135,7 @@ unsafe fn gnu_index(dso: &Dso, name: *const u8) -> Option<usize> {
     let buckets = bloom.add(bloom_size).cast::<u32>();
     let chain = buckets.add(nbuckets);
 
-    let h1 = gnu_hash(name);
+    let h1 = name.gnu;
     let word = ptr::read_unaligned(bloom.add(((h1 / BITS) as usize) & (bloom_size - 1)));
     if word & (1u64 << (h1 % BITS)) == 0 {
         return None;
@@ -145,7 +158,7 @@ unsafe fn gnu_index(dso: &Dso, name: *const u8) -> Option<usize> {
         let h2 = ptr::read_unaligned(chain.add(i - symoffset));
         if want == (h2 | 1) {
             let sym = ptr::read_unaligned(dso.symtab.add(i));
-            if streq(name, dso.str_at(sym.st_name)) {
+            if name.is(dso.str_at(sym.st_name)) {
                 return Some(i);
             }
         }
@@ -156,7 +169,7 @@ unsafe fn gnu_index(dso: &Dso, name: *const u8) -> Option<usize> {
     }
 }
 
-unsafe fn sysv_index(dso: &Dso, name: *const u8) -> Option<usize> {
+unsafe fn sysv_index(dso: &Dso, name: &Name) -> Option<usize> {
     let h = dso.sysv_hash;
     let nbucket = ptr::read_unaligned(h) as usize;
     if nbucket == 0 {
@@ -166,10 +179,10 @@ unsafe fn sysv_index(dso: &Dso, name: *const u8) -> Option<usize> {
     let bucket = h.add(2);
     let chain = bucket.add(nbucket);
 
-    let mut i = ptr::read_unaligned(bucket.add((sysv_hash(name) as usize) % nbucket)) as usize;
+    let mut i = ptr::read_unaligned(bucket.add((name.sysv() as usize) % nbucket)) as usize;
     while i != 0 && i < nchain {
         let sym = ptr::read_unaligned(dso.symtab.add(i));
-        if streq(name, dso.str_at(sym.st_name)) {
+        if name.is(dso.str_at(sym.st_name)) {
             return Some(i);
         }
         i = ptr::read_unaligned(chain.add(i)) as usize;
@@ -177,8 +190,10 @@ unsafe fn sysv_index(dso: &Dso, name: *const u8) -> Option<usize> {
     None
 }
 
-/// Search `order` and answer the first strong definition, falling back to the
-/// first weak one.
+/// Search `order` and answer the first definition, weak or not.
+///
+/// A weak definition ends the search as a strong one does. That is glibc's
+/// rule absent `LD_DYNAMIC_WEAK`, and what interposition on ELF systems means.
 ///
 /// `skip` leaves one object out, which is what a `COPY` relocation needs: the
 /// image carrying the relocation holds the destination, never the definition.
@@ -188,27 +203,18 @@ unsafe fn sysv_index(dso: &Dso, name: *const u8) -> Option<usize> {
 pub unsafe fn resolve(
     table: &[Dso],
     order: &[u16],
-    name: *const u8,
+    name: &Name,
     need_def: bool,
     skip: Option<usize>,
 ) -> Option<Def> {
-    let mut weak: Option<Def> = None;
     for slot in order.iter() {
         let index = *slot as usize;
         if Some(index) == skip {
             continue;
         }
-        let Some(sym) = lookup_in(&table[index], name, need_def) else {
-            continue;
-        };
-        let def = Def { sym, dso: index };
-        if sym.bind() == STB_WEAK {
-            if weak.is_none() {
-                weak = Some(def);
-            }
-            continue;
+        if let Some(sym) = lookup_in(&table[index], name, need_def) {
+            return Some(Def { sym, dso: index });
         }
-        return Some(def);
     }
-    weak
+    None
 }

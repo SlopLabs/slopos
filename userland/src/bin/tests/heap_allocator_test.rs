@@ -137,8 +137,8 @@ fn test_small_recycling() -> bool {
 }
 
 fn test_mass_free_then_realloc() -> bool {
-    // Catches bookkeeping that survives a mass free: the batch coalesces back
-    // into segment-spanning chunks before the fresh allocations below.
+    // Catches bookkeeping that survives a mass free: the batch's spans go
+    // back to their segments before the fresh allocations below.
     let mut batch = Vec::new();
     for round in 0..16usize {
         let Some(mut buf) = RawBuffer::new(32 * 1024) else {
@@ -172,12 +172,12 @@ fn test_mass_free_then_realloc() -> bool {
 fn test_segment_release() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
-    // A batch larger than one segment forces the arena to grow; freeing it all
-    // must munmap the extra segments, one default-sized one staying resident.
+    // Megabyte blocks are spans of their own, three to a segment; freeing
+    // them all empties the segments they forced the arena to add.
     let before = heap_stats();
     let mut batch = Vec::new();
-    for round in 0..64usize {
-        let Some(mut buf) = RawBuffer::new(32 * 1024) else {
+    for round in 0..24usize {
+        let Some(mut buf) = RawBuffer::new(1024 * 1024) else {
             return false;
         };
         let tag = round as u8;
@@ -194,61 +194,29 @@ fn test_segment_release() -> bool {
     after.arena_size < peak.arena_size
 }
 
-fn test_free_chunks_are_reused_before_the_arena_grows() -> bool {
+fn test_released_segments_are_reused_before_mapping_more() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
-    const BIG: usize = 48 * 1024;
-    const REQUEST: usize = 40 * 1024;
-
-    // Keepers between the chunks stop any two frees from coalescing.
-    let mut keepers = Vec::new();
-    let mut bigs = Vec::new();
-    for _ in 0..4 {
-        let (Some(big), Some(keeper)) = (RawBuffer::new(BIG), RawBuffer::new(64)) else {
-            return false;
+    let round = || {
+        let batch: Option<Vec<_>> = (0..12).map(|_| RawBuffer::new(1024 * 1024)).collect();
+        let Some(batch) = batch else {
+            return None;
         };
-        bigs.push(big);
-        keepers.push(keeper);
-    }
-    let mut smalls = Vec::new();
-    for _ in 0..64 {
-        let (Some(small), Some(keeper)) = (RawBuffer::new(512), RawBuffer::new(64)) else {
-            return false;
-        };
-        smalls.push(small);
-        keepers.push(keeper);
-    }
-    // Nothing free may fit the request but the big chunks about to be freed.
-    let mut plugs = Vec::new();
-    while heap_stats().largest_free >= REQUEST {
-        let Some(plug) = RawBuffer::new(REQUEST - 4 * 1024) else {
-            return false;
-        };
-        plugs.push(plug);
-    }
-
-    // Freed last, the small chunks are what a bounded sort of the unsorted
-    // list reaches first; the big ones sit past it.
-    drop(bigs);
-    drop(smalls);
-    let before = heap_stats().arena_size;
-    let Some(served) = RawBuffer::new(REQUEST) else {
+        let stats = heap_stats();
+        drop(batch);
+        Some(stats.arena_size + stats.cached_size)
+    };
+    let (Some(first), Some(second)) = (round(), round()) else {
         return false;
     };
-    let grew = heap_stats().arena_size != before;
-    drop(served);
-    drop(plugs);
-    drop(keepers);
-    !grew
+    second <= first
 }
 
 fn test_direct_registry() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
-    // Allocations past the threshold get a dedicated mapping tracked in the
-    // direct registry; the count must follow create and free. Past the most a
-    // freed mapping can raise the threshold to, so no earlier test's frees
-    // move it into the arena.
+    // Allocations past the largest span get a mapping of their own, counted
+    // while live; the count must follow create and free.
     let base = heap_stats().direct_count;
     let size = 40 * 1024 * 1024;
     let Some(mut buf) = RawBuffer::new(size) else {
@@ -264,6 +232,35 @@ fn test_direct_registry() -> bool {
     }
     drop(buf);
     heap_stats().direct_count == base
+}
+
+/// Blocks a finished thread allocated and another thread frees go back into
+/// use: round after round of it must not grow the heap.
+fn test_blocks_outliving_their_thread_are_reclaimed() -> bool {
+    use slopos_slibc::mem::malloc::heap_stats;
+
+    let mut totals = Vec::new();
+    for round in 0..16usize {
+        let Ok(blocks) = std::thread::spawn(move || {
+            (0..4000usize)
+                .map(|i| vec![(round + i) as u8; 64 + i % 961])
+                .collect::<Vec<_>>()
+        })
+        .join() else {
+            return false;
+        };
+        if blocks
+            .iter()
+            .enumerate()
+            .any(|(i, b)| b.iter().any(|&x| x != (round + i) as u8))
+        {
+            return false;
+        }
+        drop(blocks);
+        let stats = heap_stats();
+        totals.push(stats.arena_size + stats.cached_size);
+    }
+    totals[15] <= totals[3] + 16 * 1024 * 1024
 }
 
 /// A child forked while another thread is inside the allocator can allocate.
@@ -426,10 +423,14 @@ fn main() {
         ("mass_free_then_realloc", test_mass_free_then_realloc),
         ("segment_release", test_segment_release),
         (
-            "free_chunks_are_reused_before_the_arena_grows",
-            test_free_chunks_are_reused_before_the_arena_grows,
+            "released_segments_are_reused_before_mapping_more",
+            test_released_segments_are_reused_before_mapping_more,
         ),
         ("direct_registry", test_direct_registry),
+        (
+            "blocks_outliving_their_thread_are_reclaimed",
+            test_blocks_outliving_their_thread_are_reclaimed,
+        ),
         (
             "simd_fill_survives_demand_fault",
             test_simd_fill_survives_demand_fault,

@@ -25,7 +25,7 @@ selection, coordination, and arrangement of the work as a whole.
 
 No code was copied from any other kernel or operating system. Where in-tree
 comments name other systems — Linux, Asterinas, Redox, CortenMM, Fuchsia,
-FreeBSD, illumos, seL4, Rust for Linux, musl, dlmalloc, smoltcp and others —
+FreeBSD, illumos, seL4, Rust for Linux, musl, mimalloc, smoltcp and others —
 they identify **conceptual influence, published specifications, or ABI
 compatibility targets**, not copied source. Interface constants (syscall
 numbers, `errno` values, ioctl codes, struct layouts, hardware register

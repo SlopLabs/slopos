@@ -183,10 +183,10 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
     }
     let _guard = lock();
     let dl = loader();
-    let name = name.cast::<u8>();
+    let name = super::sym::Name::new(name.cast());
 
     let found = if handle as usize == RTLD_DEFAULT {
-        super::sym::resolve(dl.objects_slice(), dl.global_scope(), name, false, None)
+        super::sym::resolve(dl.objects_slice(), dl.global_scope(), &name, false, None)
     } else {
         let Some(index) = handle_index(handle) else {
             record(DlError::InvalidHandle);
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
         };
         let mut group = [0u16; DL_MAX_OBJECTS];
         let count = dl.dependency_group(index as u16, &mut group);
-        super::sym::resolve(dl.objects_slice(), &group[..count], name, false, None)
+        super::sym::resolve(dl.objects_slice(), &group[..count], &name, false, None)
     };
 
     let Some(def) = found else {

@@ -1,76 +1,67 @@
 use core::ffi::c_void;
-use core::ptr;
 
-use super::chunk;
-use super::dlmalloc::ALLOCATOR;
-use super::tcache;
+use super::heap;
 
-pub const ALIGNMENT: usize = chunk::ALIGNMENT;
+pub use heap::HeapStats;
 
-#[derive(Clone, Copy, Debug)]
-pub struct HeapStats {
-    pub arena_size: usize,   // total address space in arena segments
-    pub largest_free: usize, // largest binned free chunk
-    pub direct_count: usize, // live direct (whole-mapping) allocations
+/// Null with `ENOMEM`, as C's allocation failure reads.
+#[cold]
+fn exhausted<T>() -> *mut T {
+    crate::errno::errno_set(crate::errno::ENOMEM.raw());
+    core::ptr::null_mut()
 }
 
+#[inline]
 pub fn alloc(size: usize) -> *mut c_void {
-    if let Some(cached) = tcache::take(size) {
-        return cached;
+    let p = heap::alloc(size);
+    if p.is_null() {
+        return exhausted();
     }
-    ALLOCATOR.lock().alloc(size)
+    p.cast()
 }
 
+#[inline]
 pub fn dealloc(ptr: *mut c_void) {
-    if ptr.is_null() {
-        return;
-    }
-    // SAFETY: `free`'s contract: `ptr` is a live allocation of this heap.
-    if unsafe { tcache::put(ptr) } {
-        return;
-    }
-    ALLOCATOR.lock().dealloc(ptr)
+    // SAFETY: `free`'s contract: `ptr` is null or a live allocation.
+    unsafe { heap::free(ptr.cast()) }
 }
 
 pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    ALLOCATOR.lock().realloc(ptr, size)
+    // SAFETY: `realloc`'s contract: `ptr` is null or a live allocation.
+    let p = unsafe { heap::realloc(ptr.cast(), size) };
+    if p.is_null() && size != 0 {
+        return exhausted();
+    }
+    p.cast()
 }
 
 pub fn calloc(nmemb: usize, size: usize) -> *mut c_void {
-    let total = match nmemb.checked_mul(size) {
-        Some(t) => t,
-        None => return ptr::null_mut(),
+    let Some(total) = nmemb.checked_mul(size) else {
+        return exhausted();
     };
-
-    let (ptr, zeroed) = match tcache::take(total) {
-        Some(cached) => (cached, false),
-        None => ALLOCATOR.lock().alloc_reporting_zero(total),
-    };
-    if !ptr.is_null() && !zeroed {
-        unsafe {
-            ptr::write_bytes(ptr as *mut u8, 0, total);
-        }
+    let p = heap::alloc_zeroed(total);
+    if p.is_null() {
+        return exhausted();
     }
-    ptr
+    p.cast()
 }
 
 /// The C `memalign`/`posix_memalign`/`malloc_usable_size` entry points live in
 /// [`crate::ffi`] beside `malloc`; these are the Rust-side helpers they and
-/// the TLS allocator call.
+/// the TLS allocator call. `alignment` must be a power of two.
 pub fn memalign(alignment: usize, size: usize) -> *mut u8 {
-    ALLOCATOR.lock().memalign(alignment, size)
+    let p = heap::alloc_aligned(alignment, size);
+    if p.is_null() {
+        return exhausted();
+    }
+    p
 }
 
 pub fn malloc_usable_size(ptr: *mut u8) -> usize {
-    ALLOCATOR.lock().malloc_usable_size(ptr)
+    // SAFETY: `malloc_usable_size`'s contract: `ptr` is null or live.
+    unsafe { heap::usable_size(ptr) }
 }
 
 pub fn heap_stats() -> HeapStats {
-    let guard = ALLOCATOR.lock();
-
-    HeapStats {
-        arena_size: guard.arena_size(),
-        largest_free: guard.largest_free_chunk(),
-        direct_count: guard.direct_region_count(),
-    }
+    heap::heap_stats()
 }

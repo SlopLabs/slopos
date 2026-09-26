@@ -509,9 +509,10 @@ impl Pal for Sys {
         let tls = crate::thread::tls::lock_layout();
         let atexit = crate::cxa::Guard::take();
         let streams = crate::stdio::registry::ListGuard::take();
-        let allocator = crate::mem::dlmalloc::ALLOCATOR.lock();
+        let allocator = crate::mem::fork_prepare();
         let ret = unsafe { syscall0(SYSCALL_FORK) };
-        drop((allocator, streams, atexit, tls, loader));
+        allocator.finish(ret == 0);
+        drop((streams, atexit, tls, loader));
         Ok(to_result(ret)? as i32)
     }
 

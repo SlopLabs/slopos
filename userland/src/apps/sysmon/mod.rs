@@ -535,6 +535,10 @@ impl SysmonApp {
             &format_bytes_mib(stats.arena_size as u64),
         ));
         children.push(kv_row(
+            "Cached",
+            &format_bytes_mib(stats.cached_size as u64),
+        ));
+        children.push(kv_row(
             "Largest free",
             &format_bytes_mib(stats.largest_free as u64),
         ));

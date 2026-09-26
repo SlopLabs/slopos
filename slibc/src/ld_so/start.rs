@@ -276,9 +276,9 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
     // below the thread pointer, and that distance is what registration
     // assigns.
     dl.assign_tls(&group[..count], true)?;
-    let applied = dl.relocate_group(&group[..count])?;
+    let bound = dl.relocate_group(&group[..count])?;
     if aux.statistics && !aux.secure {
-        report_statistics(applied, count);
+        report_statistics(bound, count);
     }
     if aux.libs && !aux.secure {
         REPORT_LIBS.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -319,15 +319,19 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
 
 /// `LD_DEBUG=statistics`, in glibc's spirit: what binding the startup set
 /// cost, since every relocation is bound eagerly before `main`.
-fn report_statistics(relocations: usize, objects: usize) {
-    let mut line = [0u8; 96];
+fn report_statistics(bound: super::reloc::BindStats, objects: usize) {
+    let mut line = [0u8; 192];
     let mut at = 0usize;
     for part in [
         Stat::Text(b"ld.so: "),
-        Stat::Number(relocations),
+        Stat::Number(bound.relocations),
         Stat::Text(b" relocations bound in "),
         Stat::Number(objects),
-        Stat::Text(b" objects\n"),
+        Stat::Text(b" objects\nld.so: "),
+        Stat::Number(bound.lookups),
+        Stat::Text(b" symbol lookups, "),
+        Stat::Number(bound.reused),
+        Stat::Text(b" served by the previous relocation's\n"),
     ] {
         match part {
             Stat::Text(text) => {

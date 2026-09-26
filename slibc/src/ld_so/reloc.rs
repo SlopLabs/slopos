@@ -22,39 +22,71 @@ pub enum RelocError {
     CopySizeMismatch,
 }
 
-/// Apply `DT_RELR`, `.rela.dyn` and `.rela.plt` for `table[index]`, and
-/// answer how many relocations that was.
+/// What binding cost, for `LD_DEBUG=statistics`.
+#[derive(Clone, Copy, Default)]
+pub struct BindStats {
+    pub relocations: usize,
+    /// Scope searches run.
+    pub lookups: usize,
+    /// Symbol relocations answered by the previous relocation's search.
+    pub reused: usize,
+}
+
+impl core::ops::AddAssign for BindStats {
+    fn add_assign(&mut self, other: Self) {
+        self.relocations += other.relocations;
+        self.lookups += other.lookups;
+        self.reused += other.reused;
+    }
+}
+
+/// One object's relocation pass.
+struct Pass<'a> {
+    table: &'a [Dso],
+    index: usize,
+    dso: &'a Dso,
+    scope: &'a [u16],
+    /// The last search: symbol index, `need_def`, answer. Linkers sort
+    /// `.rela.dyn` by symbol (`-z combreloc`), so runs against one symbol are
+    /// common and each run needs one search.
+    last: Option<(u32, bool, Option<Def>)>,
+    stats: BindStats,
+}
+
+/// Apply `DT_RELR`, `.rela.dyn` and `.rela.plt` for `table[index]`.
 ///
 /// `scope` is the search order for undefined symbols, nearest first.
 ///
 /// # Safety
 /// Every object in `scope` must be parsed, and `table[index]`'s writable
 /// segments must still be writable — RELRO is applied after this.
-pub unsafe fn relocate(table: &[Dso], index: usize, scope: &[u16]) -> Result<usize, RelocError> {
+pub unsafe fn relocate(
+    table: &[Dso],
+    index: usize,
+    scope: &[u16],
+) -> Result<BindStats, RelocError> {
     let dso = table[index];
-    let mut applied = dso.rela_count + dso.jmprel_count;
+    let mut pass = Pass {
+        table,
+        index,
+        dso: &dso,
+        scope,
+        last: None,
+        stats: BindStats {
+            relocations: dso.rela_count + dso.jmprel_count,
+            ..BindStats::default()
+        },
+    };
     if dso.flags & DSO_BOOTSTRAPPED == 0 {
-        applied += apply_relr(&dso);
+        pass.stats.relocations += apply_relr(&dso);
     }
     for i in 0..dso.rela_count {
-        apply_one(
-            table,
-            index,
-            &dso,
-            scope,
-            ptr::read_unaligned(dso.rela.add(i)),
-        )?;
+        pass.apply(ptr::read_unaligned(dso.rela.add(i)))?;
     }
     for i in 0..dso.jmprel_count {
-        apply_one(
-            table,
-            index,
-            &dso,
-            scope,
-            ptr::read_unaligned(dso.jmprel.add(i)),
-        )?;
+        pass.apply(ptr::read_unaligned(dso.jmprel.add(i)))?;
     }
-    Ok(applied)
+    Ok(pass.stats)
 }
 
 /// `DT_RELR`: relative relocations packed as an address word followed by
@@ -86,87 +118,113 @@ unsafe fn apply_relr(dso: &Dso) -> usize {
     applied
 }
 
-unsafe fn apply_one(
-    table: &[Dso],
-    index: usize,
-    dso: &Dso,
-    scope: &[u16],
-    rela: Rela,
-) -> Result<(), RelocError> {
-    let kind = rela.reloc_type();
-    if kind == R_X86_64_NONE {
-        return Ok(());
-    }
-    let place = dso.base.wrapping_add(rela.r_offset as usize);
-    let addend = rela.r_addend as usize;
-
-    if kind == R_X86_64_RELATIVE {
-        *(place as *mut usize) = dso.base.wrapping_add(addend);
-        return Ok(());
-    }
-    if kind == R_X86_64_IRELATIVE {
-        let resolver: extern "C" fn() -> usize =
-            core::mem::transmute(dso.base.wrapping_add(addend));
-        *(place as *mut usize) = resolver();
-        return Ok(());
-    }
-
-    let sym_index = rela.sym();
-    let need_def = kind == R_X86_64_JUMP_SLOT;
-    let def = if sym_index == 0 {
-        None
-    } else {
-        resolve_for(table, index, dso, scope, sym_index, need_def, kind)?
-    };
-
-    match kind {
-        R_X86_64_64 => *(place as *mut usize) = value_of(table, &def).wrapping_add(addend),
-        R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => *(place as *mut usize) = value_of(table, &def),
-        R_X86_64_32 => *(place as *mut u32) = value_of(table, &def).wrapping_add(addend) as u32,
-        R_X86_64_32S => *(place as *mut i32) = value_of(table, &def).wrapping_add(addend) as i32,
-        R_X86_64_PC32 => {
-            *(place as *mut i32) = value_of(table, &def)
-                .wrapping_add(addend)
-                .wrapping_sub(place) as i32
+impl Pass<'_> {
+    unsafe fn apply(&mut self, rela: Rela) -> Result<(), RelocError> {
+        let (table, dso) = (self.table, self.dso);
+        let kind = rela.reloc_type();
+        if kind == R_X86_64_NONE {
+            return Ok(());
         }
-        R_X86_64_COPY => {
-            let Some(def) = def else {
-                return Err(RelocError::UndefinedSymbol);
-            };
-            let src = table[def.dso].base.wrapping_add(def.sym.st_value as usize);
-            let own = own_symbol(dso, sym_index);
-            if def.sym.st_size < own.st_size {
-                return Err(RelocError::CopySizeMismatch);
+        let place = dso.base.wrapping_add(rela.r_offset as usize);
+        let addend = rela.r_addend as usize;
+
+        if kind == R_X86_64_RELATIVE {
+            *(place as *mut usize) = dso.base.wrapping_add(addend);
+            return Ok(());
+        }
+        if kind == R_X86_64_IRELATIVE {
+            let resolver: extern "C" fn() -> usize =
+                core::mem::transmute(dso.base.wrapping_add(addend));
+            *(place as *mut usize) = resolver();
+            return Ok(());
+        }
+
+        let sym_index = rela.sym();
+        let need_def = kind == R_X86_64_JUMP_SLOT;
+        let def = if sym_index == 0 {
+            None
+        } else {
+            self.resolve(sym_index, need_def, kind)?
+        };
+
+        match kind {
+            R_X86_64_64 => *(place as *mut usize) = value_of(table, &def).wrapping_add(addend),
+            R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
+                *(place as *mut usize) = value_of(table, &def)
             }
-            ptr::copy_nonoverlapping(src as *const u8, place as *mut u8, own.st_size as usize);
-        }
-        R_X86_64_DTPMOD64 => {
-            // gABI: an undefined index means this module.
-            *(place as *mut usize) = match def {
-                Some(def) => table[def.dso].tls_modid,
-                None => dso.tls_modid,
-            };
-        }
-        R_X86_64_DTPOFF64 => {
-            *(place as *mut usize) = match def {
-                Some(def) => (def.sym.st_value as usize).wrapping_add(addend),
-                None => addend,
-            };
-        }
-        R_X86_64_TPOFF64 => {
-            let (modid, value) = match def {
-                Some(def) => (table[def.dso].tls_modid, def.sym.st_value as usize),
-                None => (dso.tls_modid, 0),
-            };
-            let offset = crate::thread::tls::static_offset(modid);
-            if offset == 0 {
-                return Err(RelocError::DynamicStaticTls);
+            R_X86_64_32 => *(place as *mut u32) = value_of(table, &def).wrapping_add(addend) as u32,
+            R_X86_64_32S => {
+                *(place as *mut i32) = value_of(table, &def).wrapping_add(addend) as i32
             }
-            *(place as *mut usize) = value.wrapping_add(addend).wrapping_sub(offset);
+            R_X86_64_PC32 => {
+                *(place as *mut i32) = value_of(table, &def)
+                    .wrapping_add(addend)
+                    .wrapping_sub(place) as i32
+            }
+            R_X86_64_COPY => {
+                let Some(def) = def else {
+                    return Err(RelocError::UndefinedSymbol);
+                };
+                let src = table[def.dso].base.wrapping_add(def.sym.st_value as usize);
+                let own = own_symbol(dso, sym_index);
+                if def.sym.st_size < own.st_size {
+                    return Err(RelocError::CopySizeMismatch);
+                }
+                ptr::copy_nonoverlapping(src as *const u8, place as *mut u8, own.st_size as usize);
+            }
+            R_X86_64_DTPMOD64 => {
+                // gABI: an undefined index means this module.
+                *(place as *mut usize) = match def {
+                    Some(def) => table[def.dso].tls_modid,
+                    None => dso.tls_modid,
+                };
+            }
+            R_X86_64_DTPOFF64 => {
+                *(place as *mut usize) = match def {
+                    Some(def) => (def.sym.st_value as usize).wrapping_add(addend),
+                    None => addend,
+                };
+            }
+            R_X86_64_TPOFF64 => {
+                let (modid, value) = match def {
+                    Some(def) => (table[def.dso].tls_modid, def.sym.st_value as usize),
+                    None => (dso.tls_modid, 0),
+                };
+                let offset = crate::thread::tls::static_offset(modid);
+                if offset == 0 {
+                    return Err(RelocError::DynamicStaticTls);
+                }
+                *(place as *mut usize) = value.wrapping_add(addend).wrapping_sub(offset);
+            }
+            _ => return Err(RelocError::UnsupportedType),
         }
-        _ => return Err(RelocError::UnsupportedType),
+        Ok(())
     }
-    Ok(())
+
+    unsafe fn resolve(
+        &mut self,
+        sym_index: u32,
+        need_def: bool,
+        kind: u32,
+    ) -> Result<Option<Def>, RelocError> {
+        let copy = kind == R_X86_64_COPY;
+        if let Some((index, last_need_def, def)) = self.last
+            && !copy
+            && index == sym_index
+            && last_need_def == need_def
+        {
+            self.stats.reused += 1;
+            return Ok(def);
+        }
+        self.stats.lookups += 1;
+        let def = resolve_for(
+            self.table, self.index, self.dso, self.scope, sym_index, need_def, copy,
+        )?;
+        if !copy {
+            self.last = Some((sym_index, need_def, def));
+        }
+        Ok(def)
+    }
 }
 
 /// A definition's absolute address: the defining object's base plus the
@@ -192,20 +250,20 @@ unsafe fn resolve_for(
     scope: &[u16],
     sym_index: u32,
     need_def: bool,
-    kind: u32,
+    copy: bool,
 ) -> Result<Option<Def>, RelocError> {
     let own = own_symbol(dso, sym_index);
-    let name = dso.str_at(own.st_name);
-    let found = if kind == R_X86_64_COPY {
+    let name = sym::Name::new(dso.str_at(own.st_name));
+    let found = if copy {
         // This image holds the copy's destination, so the definition has to
         // come from somewhere else.
-        sym::resolve(table, scope, name, need_def, Some(index))
+        sym::resolve(table, scope, &name, need_def, Some(index))
     } else if dso.flags & DSO_SYMBOLIC != 0 {
-        sym::lookup_in(dso, name, need_def)
+        sym::lookup_in(dso, &name, need_def)
             .map(|sym| Def { sym, dso: index })
-            .or_else(|| sym::resolve(table, scope, name, need_def, None))
+            .or_else(|| sym::resolve(table, scope, &name, need_def, None))
     } else {
-        sym::resolve(table, scope, name, need_def, None)
+        sym::resolve(table, scope, &name, need_def, None)
     };
     if found.is_none() && own.bind() != STB_WEAK {
         return Err(RelocError::UndefinedSymbol);

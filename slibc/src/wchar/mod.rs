@@ -71,11 +71,7 @@ pub unsafe extern "C" fn wcslen(s: *const wchar_t) -> size_t {
     if s.is_null() {
         return 0;
     }
-    let mut n = 0usize;
-    while *s.add(n) != 0 {
-        n += 1;
-    }
-    n
+    crate::string::vector::wide_len(s.cast())
 }
 
 #[unsafe(no_mangle)]
@@ -121,9 +117,7 @@ pub unsafe extern "C" fn wmemset(dst: *mut wchar_t, c: wchar_t, n: size_t) -> *m
     if dst.is_null() {
         return dst;
     }
-    for i in 0..n {
-        *dst.add(i) = c;
-    }
+    crate::string::vector::fill_u32(dst.cast(), c as u32, n);
     dst
 }
 
@@ -870,8 +864,8 @@ fn wide_space(wc: wchar_t) -> bool {
 /// set to `s` — C's "no conversion". Every character a C numeric subject
 /// sequence can contain is ASCII, so a wide character outside it ends the run.
 ///
-/// A run longer than `buf` takes the allocator lock, which no `strto*` does,
-/// so these are not async-signal-safe; POSIX requires that of neither family.
+/// A run longer than `buf` allocates, which no `strto*` does, so these are
+/// not async-signal-safe; POSIX requires that of neither family.
 unsafe fn numeric_subject(
     s: *const wchar_t,
     endptr: *mut *const wchar_t,
