@@ -2252,7 +2252,7 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
         .as_mut()
         .expect("process_vm_map_ring: vm_space present for live pid");
 
-    let pte_flags = PageFlags::USER_RW.bits();
+    let pte_flags = region.to_page_flags().bits();
 
     for (i, pa) in paddrs.iter().enumerate() {
         let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
@@ -2461,8 +2461,6 @@ fn process_vm_mmap_inner(
     let end_addr = start_addr + size;
 
     if let Some((phys, _pages)) = shared_info {
-        use slopos_abi::syscall::PROT_WRITE;
-
         // `shared_info` is Some only on the MAP_SHARED path, whose validation
         // above proved a memfd handle is present.
         let memfd_handle = memfd_handle.expect("shared mapping requires a memfd handle");
@@ -2490,11 +2488,7 @@ fn process_vm_mmap_inner(
             .expect("process_vm_mmap shared: vm_space present for live pid");
         let page_count = (size / PAGE_SIZE_4KB) as u32;
 
-        let pte_flags = if prot & PROT_WRITE != 0 {
-            PageFlags::USER_RW.bits()
-        } else {
-            PageFlags::USER_RO.bits()
-        };
+        let pte_flags = shared_region.to_page_flags().bits();
 
         for i in 0..page_count {
             let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
@@ -2893,7 +2887,7 @@ fn push_clone_snapshot(chunks: &mut ClonePageChunks, entry: ClonePageSnapshot) -
 }
 
 /// Under the parent's per-process lock: snapshot its scalars and VMAs, and
-/// COW-mark every writable+user page of its anonymous VMAs. `None` if the
+/// COW-mark every user page of its private VMAs. `None` if the
 /// parent slot has no address space, or if the snapshot cannot be held.
 ///
 /// One hold for the whole walk: a parent whose other threads could write
@@ -2949,7 +2943,9 @@ fn clone_cow_snapshot_parent(
                 }
             };
             push_clone_snapshot(&mut snapshot, (vaddr.as_u64(), frame, flags.bits())).ok()?;
-            if !is_shared && flags.contains(PageFlags::WRITABLE) {
+            // Read-only pages too: an `mprotect` that later widens the range
+            // must not make a frame the child also maps writable here.
+            if !is_shared && !flags.contains(PageFlags::COW) {
                 if let Err(err) = ostd_mark_cow_4kb(parent_vm_space_ref, vaddr) {
                     klog_info!("process_vm_clone_cow: parent COW mark failed: {:?}", err);
                     return None;

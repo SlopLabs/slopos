@@ -359,7 +359,9 @@ pub fn ostd_protect_range_4kb(
         if cur.paddr.is_some() {
             if cur.level == slopos_ostd::mm::page_table::PageTableLevel::One {
                 let mut prop = cur.property;
-                prop.write = new_flags.contains(PageFlags::WRITABLE);
+                // A COW leaf's frame is shared: it becomes writable only by
+                // the fault that copies it, never by a protection change.
+                prop.write = new_flags.contains(PageFlags::WRITABLE) && prop.software & 0b001 == 0;
                 prop.execute = !new_flags.contains(PageFlags::NO_EXECUTE);
                 cursor.protect::<Size4Kb>(prop)?;
             }

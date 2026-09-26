@@ -21,7 +21,13 @@ fn copy_full_page(src: VirtAddr, dst: VirtAddr) {
     let _ = slopos_ostd::mm::hhdm_bytes::copy_page(src, dst);
 }
 
-pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result<(), MmError> {
+/// Break COW at `fault_addr`. `flags` is what the covering region publishes a
+/// writable leaf with, so a copy keeps the region's `NO_EXECUTE`.
+pub fn handle_cow_fault(
+    vm_space: &mut KArc<VmSpace>,
+    fault_addr: u64,
+    flags: PageFlags,
+) -> Result<(), MmError> {
     let vaddr = VirtAddr::new(fault_addr);
     let aligned_vaddr = VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1));
 
@@ -45,7 +51,8 @@ pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result
         return resolve_single_ref(vm_space, aligned_vaddr);
     }
 
-    resolve_multi_ref(vm_space, aligned_vaddr, old_phys)
+    let writable = flags.difference(PageFlags::COW).union(PageFlags::WRITABLE);
+    resolve_multi_ref(vm_space, aligned_vaddr, old_phys, writable)
 }
 
 fn resolve_single_ref(
@@ -64,6 +71,7 @@ fn resolve_multi_ref(
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
+    flags: PageFlags,
 ) -> Result<(), MmError> {
     let new_phys = alloc_kernel_page();
     if new_phys.is_null() {
@@ -91,17 +99,16 @@ fn resolve_multi_ref(
 
     // A refusal returns the copy, whose drop frees it, and leaves the original
     // leaf in place, so the fault retries against an unmodified address space.
-    let displaced =
-        match ostd_replace_4kb_user(vm_space, aligned_vaddr, frame, PageFlags::USER_RW.bits()) {
-            Ok(displaced) => displaced,
-            Err((_, err)) => {
-                if err == MapError::WouldBlock {
-                    return Err(MmError::Retry);
-                }
-                slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD replace failed: {:?}", err);
-                return Err(MmError::MappingFailed);
+    let displaced = match ostd_replace_4kb_user(vm_space, aligned_vaddr, frame, flags.bits()) {
+        Ok(displaced) => displaced,
+        Err((_, err)) => {
+            if err == MapError::WouldBlock {
+                return Err(MmError::Retry);
             }
-        };
+            slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD replace failed: {:?}", err);
+            return Err(MmError::MappingFailed);
+        }
+    };
 
     tlb::flush_page(aligned_vaddr);
     // Possibly the old page's last reference; peers cached it until the flush above.

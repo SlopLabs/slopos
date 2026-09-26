@@ -1,6 +1,6 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**One finding is open.**
+**No finding is open.**
 
 Swept 2026-09-16: the editor — `editor-core`'s buffer, lexer, search and tree
 model, the new `appkit` surfaces, the fd-based clipboard transfer in
@@ -164,36 +164,29 @@ above the bar; the snapshot now holds a reference on every frame it records
 (`test_cow_clone_survives_a_sibling_unmap`), so it is fixed here and not an
 entry.
 
+Swept 2026-09-26: copy-on-write and the file-backed fault path, which the
+guest's kernel build changed to map a page set's frame into a `MAP_PRIVATE`
+mapping until the first store. The change leans on the COW marker, and reading
+what the marker was trusted with found two **pre-existing** defects, fixed here
+with a test each rather than entered. `mprotect` wrote `WRITABLE` onto every
+present leaf, COW-marked or not, so a process that forked and then re-applied
+`PROT_READ | PROT_WRITE` to its own range stored straight into frames its child
+still mapped — one process writing another's memory, confidence 90, which
+would have scored above the bar
+(`test_mprotect_keeps_a_forked_page_copy_on_write`); the fork also left the
+parent's read-only private pages unmarked, which the same `mprotect` reached.
+And a write fault on a COW leaf was resolved without asking the region, so a
+forked child stored to its `PROT_READ` pages
+(`test_cow_write_to_a_read_only_region_is_fatal`). SLOPOS-2026-0057 is fixed
+with them: the COW copy, the ring and the shared `memfd` mapping now take their
+leaf flags from the region they map (`test_cow_copy_keeps_the_region_no_execute`).
+
 The highest ID issued so far is **SLOPOS-2026-0057**. The next finding is
 `SLOPOS-2026-0058`.
 
 ## Open findings
 
-### SLOPOS-2026-0057 — three user mapping paths drop `NO_EXECUTE`
-
-- **Status:** `open`
-- **Confidence:** 80 (evidence 40 — each path read directly against the
-  VMA-driven flags; exploitability 10 — it removes a mitigation rather than
-  crossing a boundary, so it needs a second, memory-corruption defect in the
-  victim process to matter; reproducibility 30 — a write fault after `fork`
-  deterministically leaves an executable page)
-- **CVSS:** `CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N` — **3.6 LOW**
-- **Impact:** a page the process mapped without `PROT_EXEC` executes. A
-  memory-corruption bug in a SlopOS program — `curl` parsing a server's reply,
-  say — can then run injected bytes where W^X would have stopped it.
-- **Evidence:** `mm/src/cow.rs:96` (COW resolution installs the copy with
-  `PageFlags::USER_RW`, whatever the VMA's protection), `mm/src/process_vm.rs:2277`
-  (the ring mapping, `USER_RW`), `:2514-2519` (a shared `memfd` mapping,
-  `USER_RW` or `USER_RO`), against `mm/src/vma_region.rs:316-330`
-  (`to_page_flags`, which every demand path uses and which sets `NO_EXECUTE`
-  for a region without `exec`).
-- **Repro:** `mmap(PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS)`, write
-  a `ret` into it, `fork`, write to the page again in the child so COW copies
-  it, then call it: the child returns where it should take `SIGSEGV`.
-- **Remediation:** derive each of the three from the covering VMA's
-  `to_page_flags()` — the COW path from the region the fault resolved against,
-  the other two from the region they just inserted — so no user leaf is written
-  with raw flags.
+None.
 
 ## Cadence
 

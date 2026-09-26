@@ -472,7 +472,12 @@ pub fn test_cow_write_fault_on_an_already_resolved_page_is_not_fatal() -> TestRe
         return fail!("create VM");
     };
 
-    let addr: u64 = 0x9000;
+    let addr = crate::process_vm::process_vm_alloc(
+        vm.process,
+        PAGE_SIZE_4KB,
+        PageFlags::WRITABLE.bits() as u32,
+    );
+    assert_test!(addr != 0, "process_vm_alloc failed");
     let Some(phys) = vm.map_test_page(addr, PageFlags::USER_RO.bits()) else {
         return fail!("map test page");
     };
@@ -530,6 +535,151 @@ pub fn test_write_fault_on_a_read_only_page_stays_fatal() -> TestResult {
     pass!()
 }
 
+fn packed_handle(vm: &ProcessVmGuard) -> Option<u64> {
+    let handle = crate::process_vm::process_vm_handle(vm.process)?;
+    Some(crate::process_vm::pack_process_vm_handle(handle))
+}
+
+fn leaf_flags(vm: &ProcessVmGuard, addr: u64) -> Option<PageFlags> {
+    process_vm_with_vm_space(vm.process, |vs| {
+        crate::user_mappings::ostd_get_pte_flags_4kb(vs, VirtAddr::new(addr))
+    })
+    .flatten()
+}
+
+/// A forked child's page of a read-only region carries the COW marker because
+/// its frame is shared, and a write to it is still a protection violation:
+/// the marker must not stand in for the region's permission.
+pub fn test_cow_write_to_a_read_only_region_is_fatal() -> TestResult {
+    use crate::process_vm::process_vm_alloc;
+
+    let Some(parent) = ProcessVmGuard::new() else {
+        return fail!("create parent VM");
+    };
+    let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, 0);
+    assert_test!(addr != 0, "process_vm_alloc failed");
+    let Some(phys) = parent.map_test_page(addr, PageFlags::USER_RO.bits()) else {
+        return fail!("map test page");
+    };
+    let Some(child) = parent.clone_cow() else {
+        return fail!("COW clone failed");
+    };
+    assert_test!(
+        child.is_cow(addr),
+        "the child's shared page is not COW-marked"
+    );
+    let Some(packed) = packed_handle(&child) else {
+        return fail!("no VM handle");
+    };
+
+    let outcome = crate::page_fault::try_resolve_user_fault(addr, 0x07, packed, 1);
+    assert_test!(
+        outcome
+            == crate::page_fault::FaultOutcome::Fatal(slopos_abi::task::TaskFaultReason::UserPage),
+        "a write to a read-only region was resolved by breaking COW"
+    );
+    assert_test!(
+        child.virt_to_phys(addr) == phys,
+        "the refused write still replaced the shared frame"
+    );
+    pass!()
+}
+
+/// `mprotect` widening a range must not make a frame the other side of a fork
+/// still maps writable: the parent's store would land in the child.
+pub fn test_mprotect_keeps_a_forked_page_copy_on_write() -> TestResult {
+    use crate::process_vm::{process_vm_alloc, process_vm_mprotect};
+    use slopos_abi::syscall::{PROT_READ, PROT_WRITE};
+
+    for writable in [true, false] {
+        let Some(parent) = ProcessVmGuard::new() else {
+            return fail!("create parent VM");
+        };
+        let region_flags = if writable {
+            PageFlags::WRITABLE.bits() as u32
+        } else {
+            0
+        };
+        let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, region_flags);
+        assert_test!(addr != 0, "process_vm_alloc failed");
+        let leaf = if writable {
+            PageFlags::USER_RW
+        } else {
+            PageFlags::USER_RO
+        };
+        if parent.map_test_page(addr, leaf.bits()).is_none() {
+            return fail!("map test page");
+        }
+        let Some(child) = parent.clone_cow() else {
+            return fail!("COW clone failed");
+        };
+
+        for side in [&parent, &child] {
+            let rc = process_vm_mprotect(
+                side.process,
+                addr,
+                PAGE_SIZE_4KB,
+                (PROT_READ | PROT_WRITE) as u64,
+            );
+            assert_test!(rc == 0, "mprotect failed");
+            let Some(flags) = leaf_flags(side, addr) else {
+                return fail!("the page vanished");
+            };
+            assert_test!(
+                !flags.contains(PageFlags::WRITABLE) && flags.contains(PageFlags::COW),
+                "mprotect made a page shared across fork writable (was writable: {})",
+                writable
+            );
+        }
+    }
+    pass!()
+}
+
+/// The copy a COW fault installs is published with the region's protection,
+/// so a page mapped without `PROT_EXEC` stays non-executable.
+pub fn test_cow_copy_keeps_the_region_no_execute() -> TestResult {
+    use crate::process_vm::process_vm_alloc;
+
+    let Some(parent) = ProcessVmGuard::new() else {
+        return fail!("create parent VM");
+    };
+    let addr = process_vm_alloc(
+        parent.process,
+        PAGE_SIZE_4KB,
+        PageFlags::WRITABLE.bits() as u32,
+    );
+    assert_test!(addr != 0, "process_vm_alloc failed");
+    let leaf = PageFlags::USER_RW.union(PageFlags::NO_EXECUTE);
+    let Some(phys) = parent.map_test_page(addr, leaf.bits()) else {
+        return fail!("map test page");
+    };
+    let Some(child) = parent.clone_cow() else {
+        return fail!("COW clone failed");
+    };
+    let Some(packed) = packed_handle(&child) else {
+        return fail!("no VM handle");
+    };
+
+    let outcome = crate::page_fault::try_resolve_user_fault(addr, 0x07, packed, 1);
+    assert_test!(
+        outcome == crate::page_fault::FaultOutcome::Resolved,
+        "the child's COW write fault was not resolved"
+    );
+    assert_test!(
+        child.virt_to_phys(addr) != phys,
+        "the child wrote to the parent's frame"
+    );
+    let Some(flags) = leaf_flags(&child, addr) else {
+        return fail!("the copied page vanished");
+    };
+    assert_test!(
+        flags.contains(PageFlags::WRITABLE) && flags.contains(PageFlags::NO_EXECUTE),
+        "the COW copy lost the region's protection: {:?}",
+        flags
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_cow_read_not_cow_fault, suite = cow_edge);
 slopos_testing::stest!(
     name = test_cow_clone_survives_a_sibling_unmap,
@@ -558,5 +708,17 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_write_fault_on_a_read_only_page_stays_fatal,
+    suite = cow_edge
+);
+slopos_testing::stest!(
+    name = test_cow_write_to_a_read_only_region_is_fatal,
+    suite = cow_edge
+);
+slopos_testing::stest!(
+    name = test_mprotect_keeps_a_forked_page_copy_on_write,
+    suite = cow_edge
+);
+slopos_testing::stest!(
+    name = test_cow_copy_keeps_the_region_no_execute,
     suite = cow_edge
 );

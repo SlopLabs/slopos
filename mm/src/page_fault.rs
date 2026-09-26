@@ -106,6 +106,9 @@ fn retry(task_id: u32, fault_addr: u64) -> FaultOutcome {
 enum Prefault {
     Spurious,
     Cow(Result<(), MmError>),
+    /// A write to a COW-marked page of a region that does not permit it: the
+    /// marker says the frame is shared, not that the process may store to it.
+    Denied,
     /// Neither; the region walk decides.
     Unclaimed,
 }
@@ -150,15 +153,26 @@ pub fn try_resolve_user_fault(
     };
 
     // One hold of the per-process lock, not two: a sibling can resolve the page between.
-    let prefault = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
-        if cow::is_cow_fault(error_code, vs, fault_addr) {
-            return Prefault::Cow(cow::handle_cow_fault(vs, fault_addr));
-        }
-        if fault_is_spurious(error_code, vs, fault_addr) {
-            return Prefault::Spurious;
-        }
-        Prefault::Unclaimed
-    });
+    let prefault = process_vm::process_vm_with_vm_space_and_area_by_handle(
+        handle,
+        fault_addr,
+        |vs, _start, _end, region| {
+            if cow::is_cow_fault(error_code, vs, fault_addr) {
+                if !demand::can_satisfy_fault(error_code, region) {
+                    return Prefault::Denied;
+                }
+                return Prefault::Cow(cow::handle_cow_fault(
+                    vs,
+                    fault_addr,
+                    region.to_page_flags(),
+                ));
+            }
+            if fault_is_spurious(error_code, vs, fault_addr) {
+                return Prefault::Spurious;
+            }
+            Prefault::Unclaimed
+        },
+    );
 
     match prefault {
         // Nothing to publish: only this CPU's cached translation is stale.
@@ -183,6 +197,7 @@ pub fn try_resolve_user_fault(
                 fault_addr
             );
         }
+        Ok(Prefault::Denied) => return FaultOutcome::Fatal(TaskFaultReason::UserPage),
         Ok(Prefault::Unclaimed) => {}
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);

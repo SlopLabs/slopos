@@ -46,8 +46,10 @@ impl ProcessVmGuard {
     }
 
     pub fn handle_cow_fault(&self, fault_addr: u64) -> Result<(), MmError> {
-        process_vm_with_vm_space(self.process, |vs| handle_cow_fault(vs, fault_addr))
-            .unwrap_or(Err(MmError::NoAddressSpace))
+        process_vm_with_vm_space(self.process, |vs| {
+            handle_cow_fault(vs, fault_addr, PageFlags::USER_RW)
+        })
+        .unwrap_or(Err(MmError::NoAddressSpace))
     }
 
     pub fn handle_demand_fault(&self, fault_addr: u64, error_code: u64) -> Result<(), MmError> {
