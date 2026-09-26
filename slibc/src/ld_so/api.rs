@@ -144,6 +144,12 @@ unsafe extern "C" fn dlopen_from(path: *const c_char, flags: c_int, caller: usiz
             record(err);
             return ptr::null_mut();
         }
+        if super::start::REPORT_LIBS.load(Ordering::Relaxed) {
+            for slot in group[..count].iter() {
+                let dso = dl.get(*slot as usize);
+                super::start::report_object(dso.base, dso.name);
+            }
+        }
         if flags & RTLD_GLOBAL != 0 {
             // From the root's whole dependency group, not from `group`: a
             // root that was already loaded reports a group of one.

@@ -134,6 +134,8 @@ struct EntryStack {
     library_path: *const u8,
     /// `LD_DEBUG` names `statistics`.
     statistics: bool,
+    /// `LD_DEBUG` names `libs`.
+    libs: bool,
 }
 
 unsafe fn read_auxv(stack: *const usize) -> EntryStack {
@@ -160,6 +162,7 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
         envp: envp as *const *const core::ffi::c_char,
         library_path: ptr::null(),
         statistics: false,
+        libs: false,
     };
     let mut e = envp;
     while *e != 0 {
@@ -167,9 +170,10 @@ unsafe fn read_auxv(stack: *const usize) -> EntryStack {
         if let Some(value) = env_value(var, b"LD_LIBRARY_PATH=") {
             out.library_path = value;
         } else if let Some(value) = env_value(var, b"LD_DEBUG=") {
-            out.statistics = super::cstr_bytes(value)
-                .split(|c| matches!(c, b',' | b':' | b' '))
-                .any(|opt| opt == b"statistics");
+            for opt in super::cstr_bytes(value).split(|c| matches!(c, b',' | b':' | b' ')) {
+                out.statistics |= opt == b"statistics";
+                out.libs |= opt == b"libs";
+            }
         }
         e = e.add(1);
     }
@@ -276,6 +280,18 @@ unsafe fn link_program(stack: *const usize, base: usize) -> Result<usize, DlErro
     if aux.statistics && !aux.secure {
         report_statistics(applied, count);
     }
+    if aux.libs && !aux.secure {
+        REPORT_LIBS.store(true, core::sync::atomic::Ordering::Relaxed);
+        for slot in group[..count].iter() {
+            let dso = dl.get(*slot as usize);
+            let name = if dso.name.is_null() {
+                aux.execfn
+            } else {
+                dso.name
+            };
+            report_object(dso.base, name);
+        }
+    }
 
     let (tls_base, tcb) = crate::thread::tls::alloc_thread_tls();
     if tcb.is_null() {
@@ -337,6 +353,28 @@ fn report_statistics(relocations: usize, objects: usize) {
         }
     }
     let _ = Sys::write(2, line.as_ptr(), at);
+}
+
+/// `LD_DEBUG=libs` named at startup, so `dlopen` reports what it maps too.
+pub(super) static REPORT_LIBS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// `LD_DEBUG=libs`: where each object was mapped, which is what a profile's
+/// instruction addresses need to be read against.
+pub(super) fn report_object(base: usize, name: *const u8) {
+    let name: &[u8] = if name.is_null() {
+        b"?"
+    } else {
+        super::cstr_bytes(name)
+    };
+    let mut head = *b"ld.so: 0x0000000000000000 ";
+    for (i, digit) in head[9..25].iter_mut().enumerate() {
+        let nibble = (base >> ((15 - i) * 4)) & 0xf;
+        *digit = b"0123456789abcdef"[nibble];
+    }
+    let _ = Sys::write(2, head.as_ptr(), head.len());
+    let _ = Sys::write(2, name.as_ptr(), name.len());
+    let _ = Sys::write(2, b"\n".as_ptr(), 1);
 }
 
 enum Stat {
