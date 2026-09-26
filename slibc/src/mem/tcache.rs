@@ -5,7 +5,7 @@
 //! is a potential futex sleep. A chunk freed here goes onto the freeing
 //! thread's own list and the next allocation of its size class on that thread
 //! takes it back, so the common case takes no lock at all — the design of
-//! glibc's tcache, with its bin sizes and fill count.
+//! glibc's tcache.
 //!
 //! A cached chunk stays *allocated* as far as the arena can tell: its
 //! neighbours cannot coalesce into it and its segment cannot be released, so
@@ -22,10 +22,13 @@ use super::dlmalloc::{ALLOCATOR, DlMalloc};
 use crate::thread::tcb::Tcb;
 use crate::thread::tls::tls_is_initialized;
 
-/// Size classes, one per 16-byte step from the smallest chunk.
-pub const BINS: usize = 64;
-/// Chunks one class holds before a free goes to the arena instead.
-const FILL: u8 = 7;
+/// Size classes, one per 16-byte step from the smallest chunk: chunks to
+/// 2 KiB.
+pub const BINS: usize = 128;
+/// Chunks one class holds before a free goes to the arena instead. More than
+/// glibc's seven: glibc gives each thread its own arena behind its cache, and
+/// here every miss is the one shared lock.
+const FILL: u8 = 16;
 const LARGEST: usize = chunk::MIN_CHUNK_SIZE + (BINS - 1) * chunk::ALIGNMENT;
 
 /// Stamped into a cached chunk's second data word. The address of a static

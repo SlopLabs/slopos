@@ -245,10 +245,12 @@ fn test_free_chunks_are_reused_before_the_arena_grows() -> bool {
 fn test_direct_registry() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
-    // Threshold-sized allocations get a dedicated mapping tracked in the direct
-    // registry; the count must follow create and free.
+    // Allocations past the threshold get a dedicated mapping tracked in the
+    // direct registry; the count must follow create and free. Past the most a
+    // freed mapping can raise the threshold to, so no earlier test's frees
+    // move it into the arena.
     let base = heap_stats().direct_count;
-    let size = 256 * 1024;
+    let size = 40 * 1024 * 1024;
     let Some(mut buf) = RawBuffer::new(size) else {
         return false;
     };

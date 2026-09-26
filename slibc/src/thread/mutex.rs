@@ -127,13 +127,20 @@ fn lock_state_contended(state: &AtomicI32) {
     crate::errno::errno_set(saved);
 }
 
-/// Spin a bounded while the lock is held and nobody is parked: a short critical
-/// section is over sooner than a futex round trip.
+/// Spin a bounded while the lock is held: a short critical section is over
+/// sooner than a futex round trip, which under a hypervisor is tens of
+/// microseconds and leaves the CPU idle for all of them.
+///
+/// Parked waiters are no reason to stop. A lock that once had waiters stays
+/// marked contended while a woken waiter holds it, and a spin that gave up on
+/// that mark turned every later contender into a sleeper too: a malloc-heavy
+/// compiler measured 1.7 million futex waits on its allocator lock in one
+/// kernel build. The budget is about ten microseconds of `pause`.
 fn spin_while_held(state: &AtomicI32) -> i32 {
-    let mut budget = 100;
+    let mut budget = 1000;
     loop {
         let seen = state.load(Ordering::Relaxed);
-        if seen != 1 || budget == 0 {
+        if seen == 0 || budget == 0 {
             return seen;
         }
         core::hint::spin_loop();

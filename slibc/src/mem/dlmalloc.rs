@@ -9,9 +9,9 @@
 //! and frees can never walk across a segment boundary — even when the
 //! kernel's first-fit gap finder places two segments back to back.
 //!
-//! Allocations at or above `mmap_threshold` (and all over-aligned
-//! `memalign` requests) get a dedicated mapping, tracked in the
-//! `DirectRegion` registry.
+//! Allocations at or above `mmap_threshold` — which freeing such a mapping
+//! raises, up to 32 MiB, as glibc's does — and all over-aligned `memalign`
+//! requests get a dedicated mapping, tracked in the `DirectRegion` registry.
 
 use core::cell::SyncUnsafeCell;
 use core::cmp;
@@ -48,6 +48,10 @@ const SEGMENT_FENCE_LEN: usize = chunk::HEADER_SIZE;
 const SEGMENT_OVERHEAD: usize = SEGMENT_LEAD_PAD + SEGMENT_FENCE_LEN;
 
 const MMAP_SUFFIX_PAD: usize = chunk::HEADER_SIZE;
+
+/// Where the threshold starts, and the most a freed mapping may raise it to.
+const MMAP_THRESHOLD_MIN: usize = 128 * 1024;
+const MMAP_THRESHOLD_MAX: usize = 32 * 1024 * 1024;
 
 #[repr(transparent)]
 struct SyncDlMalloc(DlMalloc);
@@ -168,7 +172,7 @@ impl DlMalloc {
             segments: [Segment::EMPTY; MAX_SEGMENTS],
             segment_count: 0,
             direct_head: ptr::null_mut(),
-            mmap_threshold: 128 * 1024,
+            mmap_threshold: MMAP_THRESHOLD_MIN,
         }
     }
 
@@ -527,11 +531,18 @@ impl DlMalloc {
                 let DirectRegion {
                     base, len, next, ..
                 } = unsafe { cur.read() };
+                let size = unsafe { chunk::size(chunk_ptr) };
                 unsafe {
                     *link = next;
                     self.release_chunk(chunk::from_data_ptr(cur.cast::<u8>()));
                 }
                 Self::munmap(base, len);
+                // glibc's dynamic threshold: a program that frees a mapping
+                // this size will allocate one again, and from the arena that
+                // costs neither an mmap and a munmap nor a fault per page.
+                if size > self.mmap_threshold && size <= MMAP_THRESHOLD_MAX {
+                    self.mmap_threshold = size;
+                }
                 return true;
             }
             link = unsafe { &mut (*cur).next };
