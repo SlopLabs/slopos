@@ -43,7 +43,9 @@ use crate::verity::{CRC32_INIT, crc32_feed, crc32_finish};
 const SB_MAGIC: u32 = 0x534A_4C53;
 /// "SLJR", every record header.
 const REC_MAGIC: u32 = 0x524A_4C53;
-const FORMAT_VERSION: u32 = 1;
+/// Version 2 adds the mount stamp; a version-1 superblock still replays.
+const FORMAT_VERSION: u32 = 2;
+const FORMAT_V1: u32 = 1;
 
 const REC_DATA: u32 = 1;
 const REC_REVOKE: u32 = 2;
@@ -53,8 +55,14 @@ const REC_COMMIT: u32 = 3;
 const REC_ENTRIES_OFF: usize = 24;
 /// Where the log superblock records what volume and file it belongs to.
 const SB_IDENTITY_OFF: usize = 20;
+/// The `[s_mnt_count, s_mtime]` of the mount that last wrote the log
+/// superblock.
+const SB_STAMP_OFF: usize = 24;
 /// Bytes of the log superblock the CRC covers; the CRC itself follows them.
-const SB_CRC_SPAN: usize = 24;
+const SB_CRC_SPAN: usize = 32;
+const SB_CRC_SPAN_V1: usize = 24;
+/// A stamp no volume carries: `s_mnt_count` is 16 bits.
+const NO_STAMP: [u32; 2] = [u32::MAX, u32::MAX];
 
 /// Smallest log worth attaching. An operation whose metadata does not fit
 /// refuses, and refusing a routine `create` would be worse than having no
@@ -108,16 +116,27 @@ pub struct JournalRecovery {
     pub transactions: u32,
     /// Blocks written back to their home locations by the replay.
     pub blocks: u32,
+    /// The log carries the stamp of the volume's last mount, so that mount
+    /// logged every metadata write it made and nothing else mounted since.
+    pub continuous: bool,
 }
 
 impl JournalRecovery {
     pub const NONE: Self = Self {
         transactions: 0,
         blocks: 0,
+        continuous: false,
     };
 
     pub fn replayed(self) -> bool {
         self.transactions > 0
+    }
+
+    /// Whether the home locations are consistent after the attach, whatever
+    /// `s_state` says: a replay made them so, or a continuous log with
+    /// nothing to replay says there was nothing half done.
+    pub fn recovered(self) -> bool {
+        self.replayed() || self.continuous
     }
 }
 
@@ -196,6 +215,9 @@ pub struct Journal {
     /// Device writes issued since the caller last took the count. The cache
     /// owns the barrier accounting, so the log only reports.
     writes: usize,
+    /// `[s_mnt_count, s_mtime]` of this mount, written into every log
+    /// superblock.
+    stamp: [u32; 2],
 }
 
 impl Journal {
@@ -206,12 +228,17 @@ impl Journal {
     /// `#[inline(never)]`, built field by field into the heap slot: a whole
     /// `Journal` rvalue plus the nine fallible allocations behind it does not
     /// fit the 2 KiB stack gate.
+    ///
+    /// `stamp` is the volume's `[s_mnt_count, s_mtime]` as it stands on the
+    /// medium now. The log is reset under the stamp it already carried: only
+    /// a mount that goes on to write may claim it, through [`Self::restamp`].
     #[inline(never)]
     pub fn attach(
         mut slots: KVec<u32>,
         block_size: u32,
         inode: u32,
         extent: LogExtent,
+        stamp: [u32; 2],
         device: &dyn BlockDevice,
     ) -> Result<(KBox<Self>, JournalRecovery), Ext2Error> {
         if slots.len() < MIN_LOG_SLOTS as usize + 1 {
@@ -234,9 +261,13 @@ impl Journal {
         // A superblock that does not describe this file on this volume is one
         // this boot must not read; the reset below overwrites it.
         let recovery = match journal.read_superblock(device)? {
-            Some(seq) => {
+            Some((seq, written_by)) => {
                 journal.seq = seq;
-                journal.replay(device)?
+                journal.stamp = written_by.unwrap_or(NO_STAMP);
+                let mut recovery = journal.replay(device)?;
+                // A count pinned at its ceiling stops telling mounts apart.
+                recovery.continuous = written_by == Some(stamp) && stamp[0] < u32::from(u16::MAX);
+                recovery
             }
             None => JournalRecovery::NONE,
         };
@@ -283,6 +314,7 @@ impl Journal {
                 write_field!(slot, op_head, 1);
                 write_field!(slot, crc, CRC32_INIT);
                 write_field!(slot, writes, 0);
+                write_field!(slot, stamp, NO_STAMP);
                 Ok(slot.finish())
             },
         )
@@ -799,6 +831,32 @@ impl Journal {
     /// Declare every logged block checked pointed: the log is empty again.
     /// The caller must have barriered the home-location writes first.
     pub fn reset(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        self.write_superblock(device)?;
+        self.head = 1;
+        self.op_head = 1;
+        self.generation = self.generation.wrapping_add(1);
+        self.index_clear();
+        self.revokes.clear();
+        self.revoke_undo.clear();
+        self.crc = CRC32_INIT;
+        Ok(())
+    }
+
+    /// Record a new mount of the volume. Written through at once when the log
+    /// is empty; otherwise the next [`Self::reset`] carries it, and a crash
+    /// before then leaves a stamp that no longer matches, which only costs the
+    /// next mount its write access.
+    pub fn restamp(&mut self, stamp: [u32; 2], device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        self.stamp = stamp;
+        if self.head != 1 {
+            return Ok(());
+        }
+        self.write_superblock(device)
+    }
+
+    /// The log superblock, naming `seq` as the first record's sequence: only
+    /// correct while the log is empty or being emptied.
+    fn write_superblock(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         self.header.as_mut_slice().fill(0);
         put_le32(self.header.as_mut_slice(), 0, SB_MAGIC);
         put_le32(self.header.as_mut_slice(), 4, FORMAT_VERSION);
@@ -808,6 +866,9 @@ impl Journal {
         put_le32(self.header.as_mut_slice(), 16, self.seq);
         let identity = self.identity();
         put_le32(self.header.as_mut_slice(), SB_IDENTITY_OFF, identity);
+        let [mnt_count, mtime] = self.stamp;
+        put_le32(self.header.as_mut_slice(), SB_STAMP_OFF, mnt_count);
+        put_le32(self.header.as_mut_slice(), SB_STAMP_OFF + 4, mtime);
         let crc = crate::verity::crc32(&self.header.as_slice()[..SB_CRC_SPAN]);
         put_le32(self.header.as_mut_slice(), SB_CRC_SPAN, crc);
         let offset = self.slot_offset(0)?;
@@ -815,13 +876,6 @@ impl Journal {
             .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
             .map_err(Ext2Error::from)?;
         self.writes += 1;
-        self.head = 1;
-        self.op_head = 1;
-        self.generation = self.generation.wrapping_add(1);
-        self.index_clear();
-        self.revokes.clear();
-        self.revoke_undo.clear();
-        self.crc = CRC32_INIT;
         Ok(())
     }
 
@@ -866,7 +920,12 @@ impl Journal {
     /// Geometry alone is satisfied by a log built for a *different*
     /// filesystem of the same shape, and replaying that one writes its
     /// metadata into this volume — hence the identity field.
-    fn read_superblock(&mut self, device: &dyn BlockDevice) -> Result<Option<u32>, Ext2Error> {
+    /// The first record's sequence and, from a version-2 superblock, the
+    /// stamp of the mount that wrote it.
+    fn read_superblock(
+        &mut self,
+        device: &dyn BlockDevice,
+    ) -> Result<Option<(u32, Option<[u32; 2]>)>, Ext2Error> {
         let bs = self.block_size as usize;
         let offset = self.slot_offset(0)?;
         device
@@ -874,7 +933,12 @@ impl Journal {
             .map_err(Ext2Error::from)?;
         let identity = self.identity();
         let data = self.header.as_slice();
-        if le32(data, 0) != SB_MAGIC || le32(data, 4) != FORMAT_VERSION {
+        let crc_span = match le32(data, 4) {
+            FORMAT_VERSION => SB_CRC_SPAN,
+            FORMAT_V1 => SB_CRC_SPAN_V1,
+            _ => return Ok(None),
+        };
+        if le32(data, 0) != SB_MAGIC {
             return Ok(None);
         }
         if le32(data, 8) != self.block_size || le32(data, 12) != self.capacity() {
@@ -883,10 +947,12 @@ impl Journal {
         if le32(data, SB_IDENTITY_OFF) != identity {
             return Ok(None);
         }
-        if crate::verity::crc32(&data[..SB_CRC_SPAN]) != le32(data, SB_CRC_SPAN) {
+        if crate::verity::crc32(&data[..crc_span]) != le32(data, crc_span) {
             return Ok(None);
         }
-        Ok(Some(le32(data, 16)))
+        let stamp = (crc_span == SB_CRC_SPAN)
+            .then(|| [le32(data, SB_STAMP_OFF), le32(data, SB_STAMP_OFF + 4)]);
+        Ok(Some((le32(data, 16), stamp)))
     }
 
     /// What ties this log to this file on this volume. Not a hash: a mismatch
@@ -951,6 +1017,7 @@ impl Journal {
         Ok(JournalRecovery {
             transactions,
             blocks,
+            continuous: false,
         })
     }
 

@@ -352,7 +352,12 @@ CRC-covered commit record before any of it reaches a home location. That is
 what makes an operation retractable (a rollback rewinds the log; nothing was
 published) and a crash recoverable: a mount that finds `s_state` unclean and
 replays a committed transaction comes up **read-write**, which is the one case
-in which this kernel repairs an image instead of deferring to `e2fsck`. The log
+in which this kernel repairs an image instead of deferring to `e2fsck`. So does
+one whose log is empty *and* carries the volume's current `[s_mnt_count,
+s_mtime]`: every mount writes that stamp into the log superblock, so a match
+says the last mount logged every metadata write it made and nothing mounted
+the volume since — a boot that panicked with the log checkpointed left nothing
+half done, and a Linux mount in between moves the count and keeps the refusal. The log
 is an *image* property, not a kernel one — an image without one gets the
 previous undo-scoped behaviour and still refuses an unclean mount — and the
 boot log says which of the two a mount got. `/.journal` is refused to readers

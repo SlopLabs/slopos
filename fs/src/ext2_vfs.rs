@@ -760,8 +760,8 @@ impl Ext2Mount {
 
     /// Attach the metadata log and answer the read-only reason that survives
     /// it. An unclean image refuses writes because nothing could say what the
-    /// last boot left half-done; a replayed log is that evidence, so the
-    /// refusal is lifted.
+    /// last boot left half-done; a replayed log is that evidence, and so is a
+    /// log the last mount stamped and left empty, so the refusal is lifted.
     #[inline(never)]
     fn attach_journal(&self, reason: Option<ReadOnlyReason>) -> Option<ReadOnlyReason> {
         let Ok(mut guard) = self.lock_cached() else {
@@ -810,8 +810,15 @@ impl Ext2Mount {
             ),
         }
         cached.journal_inode = journal_inode;
-        let keep = if recoverable && outcome.replayed() {
-            klog_info!("ext2: the replay is what makes this mount writable again");
+        let keep = if recoverable && outcome.recovered() {
+            if outcome.replayed() {
+                klog_info!("ext2: the replay is what makes this mount writable again");
+            } else {
+                klog_info!(
+                    "ext2: the log covered every write of the last mount and holds none to \
+                     replay, so this mount is writable again"
+                );
+            }
             None
         } else {
             reason
@@ -822,8 +829,10 @@ impl Ext2Mount {
         if recoverable && keep.is_none() && !cached.read_only {
             // The mount skipped its own not-clean stamp while it was refusing
             // writes; the log is what makes writing safe again, so it owes it
-            // now.
+            // now. The stamp claims the log too.
             stamp_not_clean(cached);
+        } else if !cached.read_only {
+            claim_log(cached);
         }
         if cached.read_only {
             keep.or(Some(ReadOnlyReason::ErrorsRemountRo))
@@ -980,6 +989,19 @@ fn stamp_not_clean(cached: &mut CachedExt2) {
     };
     if fs.mark_dirty_on_disk().is_ok() {
         cached.superblock = fs.superblock();
+    }
+}
+
+/// See [`Ext2Fs::claim_log`]. A failure leaves the log under the previous
+/// mount's stamp, which only costs a crashed boot the next mount's writes.
+#[inline(never)]
+fn claim_log(cached: &mut CachedExt2) {
+    let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
+    let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+        return;
+    };
+    if let Err(e) = fs.claim_log() {
+        klog_info!("ext2: could not stamp the metadata log: {:?}", e);
     }
 }
 

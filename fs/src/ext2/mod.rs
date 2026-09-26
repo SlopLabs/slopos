@@ -565,7 +565,30 @@ impl<'a> Ext2Fs<'a> {
     /// Mark the image as not cleanly unmounted, so a later fsck knows it must
     /// run, and record the mount in the fields `e2fsck` reports.
     pub fn mark_dirty_on_disk(&mut self) -> Result<(), Ext2Error> {
-        self.stamp_dirty(true)
+        self.stamp_dirty(true)?;
+        self.claim_log()
+    }
+
+    /// Stamp the attached log with this mount, which says every metadata
+    /// write from here on goes through it. Only a mount that will write may
+    /// claim it: a later unclean mount trusts an empty log carrying the
+    /// volume's current stamp.
+    pub fn claim_log(&mut self) -> Result<(), Ext2Error> {
+        if self.read_only || self.cache.journal().is_none() {
+            return Ok(());
+        }
+        let stamp = self.mount_stamp()?;
+        match self.cache.journal_mut() {
+            Some(journal) => journal.restamp(stamp, self.device),
+            None => Ok(()),
+        }
+    }
+
+    /// `[s_mnt_count, s_mtime]` on the medium: what tells one mount of the
+    /// volume from the next, whoever made it.
+    fn mount_stamp(&self) -> Result<[u32; 2], Ext2Error> {
+        let bookkeeping = self.read_bookkeeping()?;
+        Ok([u32::from(bookkeeping.mnt_count), bookkeeping.mtime])
     }
 
     /// [`Self::mark_dirty_on_disk`] for a mount that already counted itself.
@@ -942,8 +965,9 @@ impl<'a> Ext2Fs<'a> {
             first_data_block: self.geom.first_data_block().raw(),
             blocks_count: self.geom.blocks_count(),
         };
+        let stamp = self.mount_stamp()?;
         let (log, recovery) =
-            journal::Journal::attach(slots, self.block_size, ino, extent, self.device)?;
+            journal::Journal::attach(slots, self.block_size, ino, extent, stamp, self.device)?;
         if recovery.replayed() {
             // The replay wrote home locations under the reads this function
             // just did, so anything cached before it is stale.

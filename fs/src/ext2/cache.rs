@@ -346,6 +346,10 @@ impl BlockCache {
         self.journal.as_deref()
     }
 
+    pub fn journal_mut(&mut self) -> Option<&mut Journal> {
+        self.journal.as_deref_mut()
+    }
+
     /// Whether the log has room for another operation without a check point
     /// first. `true` with no log at all: there is nothing to run out of.
     pub fn journal_has_headroom(&self) -> bool {

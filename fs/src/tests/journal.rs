@@ -603,8 +603,94 @@ fn expect_survivor(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A boot that dies with its log empty — everything checkpointed, nothing
+/// half done — leaves an image the next mount may write, because the log's
+/// stamp says it saw every write of that mount. A mount of the volume that
+/// did not stamp the log (a count that moved) takes that back, and a mount
+/// that refused to write does not give it back.
+pub fn test_ext2_journal_empty_log_of_the_last_mount_recovers() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, crash_with_an_empty_log) {
+        return fail!("staging the crash: {}", msg);
+    }
+    let Ok((sb, ..)) = Ext2Fs::mount_params(&device) else {
+        return fail!("the staged image no longer parses");
+    };
+    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NotCleanlyUnmounted) {
+        return fail!("the image should read as never cleanly unmounted");
+    }
+    match with_log(&device, expect_continuous) {
+        Ok(()) => {}
+        Err(msg) => return fail!("{}", msg),
+    }
+
+    // A foreign mount since: the medium's count moves and the log's does not.
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, crash_with_an_empty_log) {
+        return fail!("staging the second crash: {}", msg);
+    }
+    device.with_buffer_mut(|buf| {
+        let count = u16::from_le_bytes([buf[1024 + 52], buf[1024 + 53]]).wrapping_add(1);
+        buf[1024 + 52..1024 + 54].copy_from_slice(&count.to_le_bytes());
+    });
+    // Twice: a mount that refused must not leave the log claimed for the next.
+    for _ in 0..2 {
+        if let Err(msg) = with_log(&device, expect_discontinuous) {
+            return fail!("{}", msg);
+        }
+    }
+    TestResult::Pass
+}
+
+fn crash_with_an_empty_log(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
+    attach(fs)?;
+    fs.claim_log().map_err(|_| "claim")?;
+    let ino = fs.create_file(2, b"synced.txt").map_err(|_| "create")?;
+    fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
+    fs.sync().map_err(|_| "sync")?;
+    // No mark_clean: the boot dies here, with s_state still not clean.
+    Ok(())
+}
+
+fn recovery_of(fs: &mut Ext2Fs<'_>) -> Result<JournalRecovery, &'static str> {
+    match fs.attach_journal() {
+        Ok(Some(recovery)) => Ok(recovery),
+        Ok(None) => Err("no log on the remount"),
+        Err(_) => Err("attach failed on the remount"),
+    }
+}
+
+fn expect_continuous(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let recovery = recovery_of(fs)?;
+    if recovery.replayed() {
+        return Err("a synced log replayed a transaction");
+    }
+    if !recovery.recovered() {
+        return Err("the last mount's own empty log did not count as recovery");
+    }
+    fs.resolve_path(b"/synced.txt")
+        .map(|_| ())
+        .map_err(|_| "the synced file is gone")
+}
+
+fn expect_discontinuous(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    if recovery_of(fs)?.recovered() {
+        return Err("a log another mount never stamped was trusted");
+    }
+    Ok(())
+}
+
 slopos_testing::stest!(
     name = test_ext2_journal_replays_an_unsynced_operation,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_journal_empty_log_of_the_last_mount_recovers,
     suite = fs
 );
 slopos_testing::stest!(
@@ -821,7 +907,7 @@ fn synthetic_log(
         first_data_block: 1,
         blocks_count: IMAGE_BLOCKS,
     };
-    Journal::attach(slots, bs, SYNTH_INO, extent, device).map_err(|_| "attach")
+    Journal::attach(slots, bs, SYNTH_INO, extent, [0, 0], device).map_err(|_| "attach")
 }
 
 /// Its own frame: `mount_params` hands back a whole superblock.
