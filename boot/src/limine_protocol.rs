@@ -246,6 +246,12 @@ fn build_system_info() -> SystemInfo {
 
     if let Some(kf_resp) = KERNEL_FILE_REQUEST.response() {
         let kernel_file = kf_resp.executable_file();
+        klog_info!(
+            "BOOT: kernel {} ({} bytes), build tag {}",
+            kernel_file.path(),
+            kernel_file.data().len(),
+            slopos_core::syscall::core_handlers::BUILD_TAG.unwrap_or("-")
+        );
         let cmdline_str = kernel_file.cmdline();
         if !cmdline_str.is_empty() {
             info.cmdline_ptr = KernelSync::new(cmdline_str.as_ptr() as *const c_char);

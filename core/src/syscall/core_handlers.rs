@@ -116,6 +116,11 @@ const KERNEL_VERSION: &str = concat!("SlopOS ", env!("CARGO_PKG_VERSION"), " deb
 #[cfg(not(debug_assertions))]
 const KERNEL_VERSION: &str = concat!("SlopOS ", env!("CARGO_PKG_VERSION"), " release");
 
+/// Set by whoever builds the kernel to tell one build of a tree from another;
+/// part of `uname -v` and the boot log. Unset on every build that is compared
+/// with another for identity.
+pub const BUILD_TAG: Option<&str> = option_env!("SLOPOS_BUILD_TAG");
+
 fn set_uts_field(field: &mut [u8; 65], value: &str) {
     let bytes = value.as_bytes();
     let len = bytes.len().min(field.len() - 1);
@@ -132,6 +137,14 @@ define_syscall!(syscall_uname
     set_uts_field(&mut uts.nodename, "slopos");
     set_uts_field(&mut uts.release, env!("CARGO_PKG_VERSION"));
     set_uts_field(&mut uts.version, KERNEL_VERSION);
+    if let Some(tag) = BUILD_TAG {
+        let at = KERNEL_VERSION.len();
+        uts.version[at] = b' ';
+        let rest: &mut [u8] = &mut uts.version[at + 1..];
+        let len = tag.len().min(rest.len() - 1);
+        rest[..len].copy_from_slice(&tag.as_bytes()[..len]);
+        rest[len] = 0;
+    }
     set_uts_field(&mut uts.machine, "x86_64");
     set_uts_field(&mut uts.domainname, "(none)");
     copy_to_user(out.inner(), &uts).map_err(|_| Errno::EFAULT)?;
