@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod devdisk;
 pub mod gfx;
 pub mod keymap;
 pub mod net;

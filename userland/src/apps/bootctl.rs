@@ -205,8 +205,16 @@ fn install(esp: &str, slot: &str, kernel_path: &str) -> Result<(), String> {
     volume
         .write_file(&target, &kernel)
         .map_err(|e| format!("{target}: {e:?}"))?;
+    // Read back past the flush: a slot is only worth booting once what is on
+    // the medium is known to be the kernel.
+    let back = volume
+        .read_file(&target)
+        .map_err(|e| format!("{target}: reading back: {e:?}"))?;
+    if back != kernel {
+        return Err(format!("{target}: read back different bytes"));
+    }
     println!(
-        "installed {} bytes as {target} (entry {entry})",
+        "installed {} bytes as {target} (entry {entry}), read back",
         kernel.len()
     );
     Ok(())

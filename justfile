@@ -423,6 +423,49 @@ test-install:
     [ "$missing" = 0 ] || exit 1
     echo "test-install: installed, tried, committed and rolled back (qemu rc=$rc); log in $log"
 
+[doc("Phase 1's exit criterion: the guest builds a kernel on the dev disk, installs it into slot b, boots it, commits it, and rolls back a slot that panics")]
+test-install-guest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    git diff --quiet HEAD || { echo "FAIL: slot a is built from the working tree and the guest builds HEAD; commit or stash first" >&2; exit 1; }
+    just _fs-image-devdisk
+    base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null)"
+    [ "$base" = "$(git rev-parse HEAD)" ] ||
+        { echo "FAIL: the dev disk was seeded from ${base:-nothing}, not HEAD; export its edits, then discard it" >&2; exit 1; }
+    # Slot a is the optimized tests kernel, as for test-selfhost: it is the
+    # machine that runs the build.
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} tests.run=*ext2_aaa*,*install*" \
+        BOOTDISK_PANIC_ENTRY=1 just _boot-disk
+    log="{{build_dir}}/install-guest.log"
+    rc=0
+    # The self-hosting budget: under TCG the guest's build alone takes hours.
+    timeout "${INSTALL_TIMEOUT_SECS:-28800}" \
+        just _qemu-boot "test" "0" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} \
+        DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+        >"$log" 2>&1 || rc=$?
+    missing=0
+    for marker in "INSTALL-BUILT guest-" "INSTALL-STAGE 1: rebooting into slopos-b" "INSTALL-BOOTED " \
+        "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" "ok 1 - boot_slot_install_commit_rollback"; do
+        grep -aqF "$marker" "$log" || { echo "FAIL: '$marker' not in $log" >&2; missing=1; }
+    done
+    grep -aq "not ok" "$log" && { echo "FAIL: a test failed; see $log" >&2; missing=1; }
+    [ "$rc" != 124 ] || { echo "FAIL: timed out after ${INSTALL_TIMEOUT_SECS:-28800} s (INSTALL_TIMEOUT_SECS)" >&2; exit 1; }
+    [ "$missing" = 0 ] || exit 1
+    tag="$(grep -aoE 'INSTALL-BUILT guest-[0-9]+' "$log" | head -n1 | cut -d' ' -f2)"
+    booted="$(grep -aE "BOOT: kernel .*/boot/b/kernel.elf \([0-9]+ bytes\), build tag $tag\b" "$log" | head -n1 || true)"
+    [ -n "$booted" ] || { echo "FAIL: no boot of /boot/b/kernel.elf reports build tag $tag" >&2; exit 1; }
+    guest="{{build_dir}}/guest"
+    mkdir -p "$guest"
+    scripts/export_devdisk.sh --file src/slopos/builddir/kernel-tests.elf "{{fs_image_devdisk}}" "$guest/installed.elf"
+    mcopy -o -i "{{boot_disk}}@@1M" ::/boot/b/kernel.elf "$guest/slot-b.elf"
+    cmp "$guest/installed.elf" "$guest/slot-b.elf" ||
+        { echo "FAIL: slot b does not hold the kernel the guest built" >&2; exit 1; }
+    size="$(stat -c %s "$guest/installed.elf")"
+    grep -qF "($size bytes)" <<<"$booted" ||
+        { echo "FAIL: the booted kernel's size is not the guest build's $size bytes: $booted" >&2; exit 1; }
+    echo "test-install-guest: the guest built $tag ($size bytes), booted it from slot b, committed it and rolled back a panicking slot (qemu rc=$rc); log in $log"
+
 [doc("Boot with timeout, serial log saved to test_output.log")]
 boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
 
