@@ -41,7 +41,8 @@
 //! mapping keeps the frames it has, its stores stop being written back, and a
 //! fault on a page it never populated is refused.
 //!
-//! Lock order: [`FILEMAP_IO`] (sleeping, held across the filesystem calls) →
+//! Lock order: a [`FILEMAP_IO`] stripe (sleeping, held across the filesystem
+//! calls for one inode; never two at once) →
 //! [`FILEMAP`] (spinning; a bounded scan, one index rebuild or one page copy) →
 //! `CACHED_EXT2`. Exactly one page is populated per [`FILEMAP`] acquisition and
 //! the read that fills it runs with [`FILEMAP`] dropped. [`release`] is reached
@@ -66,7 +67,7 @@ use slopos_mm::vma_region::FileMapRef;
 use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{ChargeSlot, try_charge};
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitAbort, WaitQueue};
 use slopos_ostd::{KVec, klog_info, lock_class};
 
 use crate::vfs::traits::same_filesystem;
@@ -409,9 +410,16 @@ fn find_set(sets: &[PageSet], fs: &'static dyn FileSystem, inode: InodeId) -> Op
     sets[slot].holds(fs, inode).then_some(slot)
 }
 
-/// Sleeping, because population and writeback reach the filesystem. Holding it
-/// orders a fault's read against a `write(2)` and against an extent rebuild.
-static FILEMAP_IO: Mutex<()> = Mutex::new((), lock_class!("FILEMAP_IO", LOCK_LEVEL_RESOURCE));
+/// Sleeping, because population and writeback reach the filesystem. Holding
+/// an inode's stripe orders a fault's read of it against a `write(2)` to it and
+/// against a rebuild of its extent; faults and writebacks of other files run
+/// alongside. A holder never takes a second stripe.
+static FILEMAP_IO: [Mutex<()>; IO_STRIPES] = {
+    const INIT: Mutex<()> = Mutex::new((), lock_class!("FILEMAP_IO", LOCK_LEVEL_RESOURCE));
+    [INIT; IO_STRIPES]
+};
+
+const IO_STRIPES: usize = 64;
 
 /// Spinning, and must stay so: [`release`] runs from a `Drop` the task-exit
 /// path reaches under a preempt guard. No filesystem call is made under it.
@@ -423,6 +431,12 @@ static FILEMAP: SpinLock<[PageSet; MAX_MAPPED_INODES]> = SpinLock::new(
 /// Sets owing writeback, so a flusher's wait predicate takes no lock.
 static PENDING: AtomicUsize = AtomicUsize::new(0);
 
+/// Jobs taken off the registry and not yet finished, whoever took them: what
+/// [`drain_pending`] waits out, since a job another task holds is writeback
+/// the drain's caller is owed as much as a queued one.
+static JOBS_TAKEN: AtomicUsize = AtomicUsize::new(0);
+static JOBS_DONE: WaitQueue = WaitQueue::new(lock_class!("FILEMAP_JOBS_DONE", LOCK_LEVEL_RESOURCE));
+
 /// Populated pages held by idle sets: what the reclaimer can give back.
 static IDLE_PAGES: AtomicU32 = AtomicU32::new(0);
 static IDLE_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -433,8 +447,11 @@ static IDLE_SEQ: AtomicU32 = AtomicU32::new(0);
 /// device round trip.
 const READAHEAD_PAGES: u64 = 32;
 
-fn io_lock() -> Result<slopos_ostd::sync::MutexGuard<'static, ()>, FileMapError> {
-    FILEMAP_IO.lock().map_err(|_| FileMapError::Interrupted)
+fn io_lock(inode: InodeId) -> Result<slopos_ostd::sync::MutexGuard<'static, ()>, FileMapError> {
+    let stripe = ((inode as u32).wrapping_mul(0x9E37_79B9) >> 26) as usize % IO_STRIPES;
+    FILEMAP_IO[stripe]
+        .lock()
+        .map_err(|_| FileMapError::Interrupted)
 }
 
 fn ref_for(slot: usize, generation: u32) -> FileMapRef {
@@ -489,7 +506,7 @@ pub fn reserve_range(
     if writable && fs.stat(inode).map_err(|_| FileMapError::Io)?.sealed {
         return Err(FileMapError::WriteRefused);
     }
-    let _io = io_lock()?;
+    let _io = io_lock(inode)?;
     reserve_slot(fs, inode, first_page, page_count, owner)
 }
 
@@ -738,14 +755,28 @@ fn revive(entry: &mut PageSet) {
 /// [`FileMapError::Stale`] means the handle no longer names a live set, whose
 /// blocks may already belong to another file.
 pub fn fault_page_in_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, FileMapError> {
+    match read_into_set(map, page_index) {
+        // A released set keeps its frames and its charge until its writeback
+        // runs, and until then no eviction can take them; run it rather than
+        // refuse a fault the queue is standing in the way of.
+        Err(FileMapError::TooManyPages) if PENDING.load(Ordering::Relaxed) != 0 => {
+            drain_pending();
+            read_into_set(map, page_index)
+        }
+        other => other,
+    }
+}
+
+fn read_into_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, FileMapError> {
     // A populated page needs no read, so it is answered without queueing
-    // behind whichever fault or writeback holds the I/O mutex. Queued
+    // behind whichever fault or writeback holds the file's I/O stripe. Queued
     // writeback is the flusher's: a fault that drained it would wait there
     // for another process's teardown.
-    if let FaultProbe::Present(pa) = probe_fault(map, page_index)? {
-        return Ok(pa);
-    }
-    let _io = io_lock()?;
+    let inode = match probe_fault(map, page_index)? {
+        FaultProbe::Present(pa) => return Ok(pa),
+        FaultProbe::Missing(_, inode, _) => inode,
+    };
+    let _io = io_lock(inode)?;
     let (fs, inode, window) = match probe_fault(map, page_index)? {
         FaultProbe::Present(pa) => return Ok(pa),
         FaultProbe::Missing(fs, inode, window) => (fs, inode, window),
@@ -783,16 +814,7 @@ fn publish_read(
     pages: u64,
     staging: &[u8],
 ) -> Result<PhysAddr, FileMapError> {
-    let answer = match install_filled(map, page_index, &staging[..PAGE_SIZE_USIZE]) {
-        // A released set keeps its frames and its charge until its writeback
-        // runs, and until then no eviction can take them; run it rather than
-        // refuse a fault the queue is standing in the way of.
-        Err(FileMapError::TooManyPages) if PENDING.load(Ordering::Relaxed) != 0 => {
-            run_queued_jobs();
-            install_filled(map, page_index, &staging[..PAGE_SIZE_USIZE])?
-        }
-        other => other?,
-    };
+    let answer = install_filled(map, page_index, &staging[..PAGE_SIZE_USIZE])?;
     // Best effort: a readahead page that finds no frame or no room is simply
     // left for its own fault.
     for k in 1..pages {
@@ -805,14 +827,6 @@ fn publish_read(
         }
     }
     Ok(answer)
-}
-
-/// Every queued writeback and frame free; the caller holds the I/O mutex.
-#[inline(never)]
-fn run_queued_jobs() {
-    while let Some(job) = take_queued_job() {
-        run_job(&job);
-    }
 }
 
 #[inline(never)]
@@ -1240,7 +1254,8 @@ fn drop_set(entry: &mut PageSet) {
 /// deliberately not written back — answers `Ok`; only a handle naming no set
 /// at all is [`FileMapError::Stale`].
 pub fn flush(map: FileMapRef) -> Result<(), FileMapError> {
-    let _io = io_lock()?;
+    let inode = live_inode(map).ok_or(FileMapError::Stale)?;
+    let _io = io_lock(inode)?;
     if !handle_is_live(map) {
         return Err(FileMapError::Stale);
     }
@@ -1248,6 +1263,14 @@ pub fn flush(map: FileMapRef) -> Result<(), FileMapError> {
         return Ok(());
     };
     write_back(&job)
+}
+
+/// The inode `map` names, while it names a set.
+fn live_inode(map: FileMapRef) -> Option<InodeId> {
+    let sets = FILEMAP.lock();
+    sets.get(map.slot as usize)
+        .filter(|e| e.fs.is_some() && e.generation == map.generation)
+        .map(|e| e.inode)
 }
 
 /// Does `map` still name a set, forgotten or not?
@@ -1259,7 +1282,7 @@ fn handle_is_live(map: FileMapRef) -> bool {
 
 /// [`flush`] for every set naming `inode`, for `fsync`/`sync`.
 pub fn flush_inode(fs: &'static dyn FileSystem, inode: InodeId) -> Result<(), FileMapError> {
-    let _io = io_lock()?;
+    let _io = io_lock(inode)?;
     let Some(job) = take_job_by_inode(fs, inode) else {
         return Ok(());
     };
@@ -1303,6 +1326,8 @@ struct WriteJob {
     pages: KVec<PhysAddr>,
     dirtyable: bool,
     release: bool,
+    /// The queue entries the job cleared, for [`requeue_job`].
+    queued: (bool, bool),
 }
 
 /// Snapshot the set in `slot` for writeback, clearing whatever queue entry it
@@ -1332,7 +1357,9 @@ fn take_job_slot(slot: usize) -> Option<WriteJob> {
     if entry.pending_release || entry.pending_flush {
         PENDING.fetch_sub(1, Ordering::Relaxed);
     }
+    let queued = (entry.pending_release, entry.pending_flush);
     let release = entry.pending_release && entry.refs == 0;
+    JOBS_TAKEN.fetch_add(1, Ordering::AcqRel);
     entry.pending_flush = false;
     entry.pending_release = false;
     Some(WriteJob {
@@ -1344,7 +1371,38 @@ fn take_job_slot(slot: usize) -> Option<WriteJob> {
         pages,
         dirtyable: entry.dirtyable && entry.populated > 0,
         release,
+        queued,
     })
+}
+
+impl Drop for WriteJob {
+    fn drop(&mut self) {
+        if JOBS_TAKEN.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = JOBS_DONE.wake_all();
+        }
+    }
+}
+
+/// Put back the queue entries a job that never ran took, so the next drain
+/// runs it.
+fn requeue_job(job: &WriteJob) {
+    let mut sets = FILEMAP.lock();
+    let entry = &mut sets[job.slot];
+    if entry.generation != job.generation || entry.fs.is_none() || entry.forgotten {
+        return;
+    }
+    let was_queued = entry.pending_release || entry.pending_flush;
+    // One flag at a time, as `release` keeps them: a release supersedes a
+    // flush.
+    if job.queued.0 {
+        entry.pending_release = true;
+        entry.pending_flush = false;
+    } else if job.queued.1 && !entry.pending_release {
+        entry.pending_flush = true;
+    }
+    if !was_queued && (entry.pending_release || entry.pending_flush) {
+        PENDING.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The set `map` names, if it is still live.
@@ -1485,27 +1543,48 @@ fn finish_release(job: &WriteJob, written: bool) {
 /// Blocks and reaches the filesystem, so the caller must be able to sleep and
 /// hold no filesystem lock.
 pub fn drain_pending() {
-    if PENDING.load(Ordering::Relaxed) == 0 {
+    while PENDING.load(Ordering::Relaxed) != 0 {
+        let Some(job) = take_queued_job() else {
+            break;
+        };
+        if !run_job_locked(&job) {
+            return;
+        }
+    }
+    if JOBS_TAKEN.load(Ordering::Acquire) == 0 {
         return;
     }
-    let Ok(_io) = io_lock() else {
-        return;
-    };
-    run_queued_jobs();
+    match JOBS_DONE.wait_event(|| JOBS_TAKEN.load(Ordering::Acquire) == 0) {
+        Ok(()) => {}
+        // A dying caller is owed nothing more; the jobs finish without it.
+        Err(WaitAbort::Killed) => {}
+        // No task to park means no other task holds a job either.
+        Err(WaitAbort::NoRuntime | WaitAbort::Interrupted | WaitAbort::Timeout) => {}
+    }
 }
 
 /// Write back every set, queued or live, and complete the queued frees — the
 /// scope `sync(2)` and shutdown need, where a mapped page that never reached
 /// the filesystem would be lost while the image was marked clean.
 pub fn flush_all() {
-    let Ok(_io) = io_lock() else {
-        return;
-    };
     for slot in 0..MAX_MAPPED_INODES {
-        if let Some(job) = take_job_slot(slot) {
-            run_job(&job);
+        if let Some(job) = take_job_slot(slot)
+            && !run_job_locked(&job)
+        {
+            return;
         }
     }
+}
+
+/// [`run_job`] under its file's I/O stripe; `false`, with the job queued
+/// again, if the wait for the stripe was interrupted.
+fn run_job_locked(job: &WriteJob) -> bool {
+    let Ok(_io) = io_lock(job.inode) else {
+        requeue_job(job);
+        return false;
+    };
+    run_job(job);
+    true
 }
 
 /// The bytes are lost either way on a failure; re-queueing would spin against
@@ -1629,7 +1708,7 @@ pub fn write_through(
     }
     // Ordered against an in-flight fault, whose read would otherwise land over
     // a write that arrived mid-read.
-    let Ok(_io) = io_lock() else {
+    let Ok(_io) = io_lock(inode) else {
         return WriteThrough::Interrupted;
     };
     let mut sets = FILEMAP.lock();

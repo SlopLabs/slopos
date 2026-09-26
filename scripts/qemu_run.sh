@@ -536,7 +536,8 @@ fi
 if [ "$ADD_DEV_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$DEV_DISK_IMG,if=none,id=virtio-disk4,format=raw,cache=writeback"
-        -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on"
+        -object "iothread,id=iot4"
+        -device "virtio-blk-pci,drive=virtio-disk4,disable-legacy=on,iothread=iot4"
     )
 fi
 if [ "$ADD_BOOT_DISK" = "1" ]; then

@@ -378,7 +378,12 @@ its newest record is durable, and a block an operation frees is not handed out
 again until that free is durable, or a crash that loses the free leaves another
 file's bytes in its old owner's block. Freeing a block whose data is still the
 cache's only copy writes it home first: an earlier operation's commit may reach
-the medium without the later one's. The block cache is sized from memory
+the medium without the later one's. The flusher's commit copies dirty data
+out (512 KiB a trip, the blocks marked clean and in flight) and writes it with
+the mount lock released, behind a per-mount gate every other request of the
+mount's device waits on — reads included, so nothing finds a home the cache
+already counts as written — and a barrier after a failed trip answers an error
+until the flusher has made those blocks dirty again. The block cache is sized from memory
 (`cache_entries_for`: an eighth of usable frames, capped by the volume and at
 `CACHE_ENTRIES_MAX`) and grows in chunks as it fills.
 

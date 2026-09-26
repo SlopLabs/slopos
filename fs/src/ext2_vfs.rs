@@ -2,14 +2,16 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering}
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::{LOCK_LEVEL_RESOURCE, LockClassKey};
 
-use crate::blockdev::BlockDevice;
-use crate::ext2::cache::{BlockCache, cache_entries_for};
+use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
+use crate::ext2::cache::{BlockCache, DataBatch, cache_entries_for};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason, SyncPass};
 use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult, orphan};
 use slopos_kernel_services::driver_runtime::{current_task_account, current_task_is_privileged};
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
+use slopos_ostd::mm::KArc;
+use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 use slopos_ostd::sync::{InitFlag, Mutex, MutexGuard, WaitResult};
 
@@ -94,10 +96,113 @@ impl Drop for CachedGuard<'_> {
 
 const EXT2_ROOT_INODE: u32 = 2;
 
+/// A data writeback the flusher runs without the mount lock
+/// ([`Ext2Mount::commit_log`]). While one is in flight every request the mount
+/// makes of its device waits for it: a write must not overtake it, a barrier
+/// must cover it, and a read must not find a block's home before the write
+/// the cache already counts as done.
+struct IoGate {
+    busy: AtomicBool,
+    /// The last batch left a run unwritten and its blocks are not dirty again
+    /// yet: a barrier then answers an error, so no commit is made durable
+    /// behind data that never reached its home.
+    failed: AtomicBool,
+    waiters: WaitQueue,
+}
+
+impl IoGate {
+    fn new() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            waiters: WaitQueue::new(lock_class!("EXT2_IO_GATE.waiters", LOCK_LEVEL_RESOURCE)),
+        }
+    }
+
+    fn begin(&self) {
+        self.busy.store(true, Ordering::Release);
+    }
+
+    fn end(&self, failed: bool) {
+        self.failed.store(failed, Ordering::Release);
+        self.busy.store(false, Ordering::Release);
+        let _ = self.waiters.wake_all();
+    }
+
+    fn wait_idle(&self) -> Result<(), BlockDeviceError> {
+        if !self.busy.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.waiters
+            .wait_event(|| !self.busy.load(Ordering::Acquire))
+            .map_err(|_| BlockDeviceError::Interrupted)
+    }
+}
+
+type SharedDevice = KArc<KBox<dyn BlockDevice + Send + Sync>>;
+
+/// The mount's view of its device: every request first waits out a batch the
+/// flusher is writing behind the gate, which writes through `inner` itself.
+struct GatedDevice {
+    inner: SharedDevice,
+    gate: KArc<IoGate>,
+}
+
+impl BlockDevice for GatedDevice {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        self.gate.wait_idle()?;
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        self.gate.wait_idle()?;
+        self.inner.write_at(offset, buffer)
+    }
+
+    fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
+        self.gate.wait_idle()?;
+        self.inner.write_vectored(offset, segs)
+    }
+
+    fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
+        self.gate.wait_idle()?;
+        self.inner.submit_write(offset, segs)
+    }
+
+    fn complete_write(&self, ticket: WriteTicket) -> Result<(), BlockDeviceError> {
+        self.inner.complete_write(ticket)
+    }
+
+    fn write_depth(&self) -> usize {
+        self.inner.write_depth()
+    }
+
+    fn capacity(&self) -> u64 {
+        self.inner.capacity()
+    }
+
+    fn write_protected(&self) -> bool {
+        self.inner.write_protected()
+    }
+
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        self.gate.wait_idle()?;
+        if self.gate.failed.load(Ordering::Acquire) {
+            return Err(BlockDeviceError::DeviceFault);
+        }
+        self.inner.flush()
+    }
+
+    fn checkpoint(&self) -> Result<(), BlockDeviceError> {
+        self.gate.wait_idle()?;
+        self.inner.checkpoint()
+    }
+}
+
 struct CachedExt2 {
     /// Sole writable handle to the backing device, held for the kernel's
     /// lifetime so no second writer can be acquired.
-    device: KBox<dyn BlockDevice + Send + Sync>,
+    device: GatedDevice,
     superblock: Ext2Superblock,
     block_size: u32,
     inode_size: u16,
@@ -313,7 +418,7 @@ impl Ext2Mount {
         let (superblock, block_size, inode_size) =
             (cached.superblock, cached.block_size, cached.inode_size);
         let mut fs = Ext2Fs::new(
-            &*cached.device,
+            &cached.device,
             &mut cached.cache,
             superblock,
             block_size,
@@ -765,6 +870,11 @@ impl Ext2Mount {
         };
         let stale = guard.take();
         drop(guard);
+        // A batch the flusher still has in flight writes through this device;
+        // the claim goes with the last reference, once it lands.
+        if let Some(stale) = stale.as_ref() {
+            let _ = stale.device.gate.wait_idle();
+        }
         drop(stale);
         true
     }
@@ -1007,6 +1117,11 @@ impl Ext2Mount {
         // Zero on a device that cannot answer: a reserve of zero refuses
         // nothing, rather than failing a mount that would otherwise succeed.
         let reserved_blocks = Ext2Fs::read_block_reserve(&*device).unwrap_or(0);
+        let device = GatedDevice {
+            inner: KArc::try_new(device).map_err(|_| ext2_error_to_vfs(Ext2Error::OutOfMemory))?,
+            gate: KArc::try_new(IoGate::new())
+                .map_err(|_| ext2_error_to_vfs(Ext2Error::OutOfMemory))?,
+        };
         let target_entries =
             mount_cache_entries(superblock.blocks_count as u64, superblock.blocks_per_group);
         let cache = BlockCache::new_boxed(block_size, target_entries).map_err(ext2_error_to_vfs)?;
@@ -1056,7 +1171,7 @@ fn stamp_not_clean(cached: &mut CachedExt2) {
         return;
     }
     let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-    let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+    let Ok(mut fs) = Ext2Fs::new(&cached.device, &mut cached.cache, sb, bs, is) else {
         return;
     };
     if fs.mark_dirty_on_disk().is_ok() {
@@ -1069,7 +1184,7 @@ fn stamp_not_clean(cached: &mut CachedExt2) {
 #[inline(never)]
 fn claim_log(cached: &mut CachedExt2) {
     let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-    let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+    let Ok(mut fs) = Ext2Fs::new(&cached.device, &mut cached.cache, sb, bs, is) else {
         return;
     };
     if let Err(e) = fs.claim_log() {
@@ -1118,6 +1233,10 @@ fn verity_error_to_vfs(e: VerityError) -> VfsError {
 /// path walk behind a pass waits for a bounded number of round trips and the
 /// extra acquisitions are noise.
 pub(crate) const WRITEBACK_CHUNK: usize = 128;
+
+/// Blocks the flusher's commit copies out and writes per trip without the
+/// mount lock: 512 KiB at 4 KiB blocks, inside one heap allocation's limit.
+const WRITEBACK_BATCH: usize = 128;
 
 /// Steps one caller may take before it gives up. A pass advances a phase or
 /// writes a block on every step, so this bounds a livelock rather than the
@@ -1311,7 +1430,7 @@ impl Ext2Mount {
             return;
         }
         let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-        let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+        let Ok(mut fs) = Ext2Fs::new(&cached.device, &mut cached.cache, sb, bs, is) else {
             return;
         };
         if fs.mark_clean().is_ok() {
@@ -1330,21 +1449,45 @@ impl Ext2Mount {
         }
         let mut epoch = None;
         let mut scan = 0u32;
+        let mut batch = DataBatch::default();
         for _ in 0..WRITEBACK_MAX_STEPS {
-            let mut guard = self
-                .lock_cached_for_writeback()
-                .map_err(|_| VfsError::Interrupted)?;
-            let Some(cached) = guard.as_mut() else {
-                return Ok(());
+            let (device, gate, block_size, more) = {
+                let mut guard = self
+                    .lock_cached_for_writeback()
+                    .map_err(|_| VfsError::Interrupted)?;
+                let Some(cached) = guard.as_mut() else {
+                    return Ok(());
+                };
+                let epoch = *epoch.get_or_insert(cached.cache.writeback_epoch());
+                let progress = cached
+                    .cache
+                    .stage_data_batch(epoch, scan, WRITEBACK_BATCH, &mut batch)
+                    .map_err(ext2_error_to_vfs)?;
+                scan = progress.next;
+                if batch.is_empty() {
+                    break;
+                }
+                cached.device.gate.begin();
+                (
+                    cached.device.inner.clone(),
+                    cached.device.gate.clone(),
+                    cached.block_size,
+                    progress.more,
+                )
             };
-            let epoch = *epoch.get_or_insert(cached.cache.writeback_epoch());
-            let progress = cached
-                .cache
-                .flush_data_dirty_since(&*cached.device, epoch, WRITEBACK_CHUNK, scan)
-                .map_err(ext2_error_to_vfs)?;
-            scan = progress.next;
-            self.note_state(&cached.cache);
-            if !progress.more {
+            batch.write(&**device, block_size);
+            // Before the gate opens: a teardown waiting on it expects its own
+            // reference to be the device's last.
+            drop(device);
+            gate.end(batch.failed());
+            if let Ok(mut guard) = self.lock_cached_for_writeback()
+                && let Some(cached) = guard.as_mut()
+            {
+                cached.cache.finish_data_batch(&batch);
+                cached.device.gate.failed.store(false, Ordering::Release);
+                self.note_state(&cached.cache);
+            }
+            if !more {
                 break;
             }
         }
@@ -1356,7 +1499,7 @@ impl Ext2Mount {
         };
         let result = cached
             .cache
-            .sync_log(&*cached.device)
+            .sync_log(&cached.device)
             .map_err(ext2_error_to_vfs);
         self.note_state(&cached.cache);
         result

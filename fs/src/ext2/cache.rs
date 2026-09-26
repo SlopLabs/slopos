@@ -71,6 +71,97 @@ const FLUSH_RUN: usize = 32;
 /// would take.
 const WRITE_DEPTH_MAX: usize = 4;
 
+/// Dirty data copied out of the cache for a writer that does not hold the
+/// mount lock: see [`BlockCache::stage_data_batch`].
+#[derive(Default)]
+pub struct DataBatch {
+    /// The staged blocks' bytes, run after run.
+    bytes: KVec<u8>,
+    /// Block numbers, in `bytes` order.
+    blocks: KVec<u32>,
+    /// `(device offset, first index into blocks, length)`, one per request.
+    runs: KVec<(u64, u32, u32)>,
+    /// Which runs reached the device, filled by [`Self::write`].
+    ok: KVec<bool>,
+}
+
+impl DataBatch {
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.blocks.clear();
+        self.runs.clear();
+        self.ok.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    /// Room for `blocks` blocks; the batch is empty when this is called.
+    fn reserve(&mut self, blocks: usize, block_size: usize) -> Result<(), AllocError> {
+        self.bytes.try_reserve_exact(blocks * block_size)?;
+        self.blocks.try_reserve_exact(blocks)?;
+        self.runs.try_reserve_exact(blocks)?;
+        self.ok.try_reserve_exact(blocks)?;
+        Ok(())
+    }
+
+    /// Whether any run failed to reach the device.
+    pub fn failed(&self) -> bool {
+        self.ok.iter().any(|ok| !ok)
+    }
+
+    /// Write every run, keeping the device's write depth in flight, and
+    /// record which reached it. A run that failed is tried once more through
+    /// the device's retrying road.
+    pub fn write(&mut self, device: &dyn BlockDevice, block_size: u32) {
+        let bs = block_size as usize;
+        let depth = device.write_depth().clamp(1, WRITE_DEPTH_MAX);
+        let runs = self.runs.len();
+        self.ok.clear();
+        if self.ok.try_reserve_exact(runs).is_err() {
+            return;
+        }
+        let mut pending: [Option<(usize, WriteTicket)>; WRITE_DEPTH_MAX] =
+            [const { None }; WRITE_DEPTH_MAX];
+        let (mut head, mut count) = (0usize, 0usize);
+        for _ in 0..runs {
+            let _ = self.ok.push(false);
+        }
+        let mut next = 0usize;
+        while next < runs || count > 0 {
+            if next < runs && count < depth {
+                let (offset, first, len) = self.runs.as_slice()[next];
+                let span = &self.bytes.as_slice()[first as usize * bs..(first + len) as usize * bs];
+                match device.submit_write(offset, &[span]) {
+                    Ok(ticket) => {
+                        pending[(head + count) % WRITE_DEPTH_MAX] = Some((next, ticket));
+                        count += 1;
+                    }
+                    Err(_) => self.retry(device, next, bs),
+                }
+                next += 1;
+                continue;
+            }
+            if let Some((k, ticket)) = pending[head].take() {
+                if device.complete_write(ticket).is_ok() {
+                    self.ok.as_mut_slice()[k] = true;
+                } else {
+                    self.retry(device, k, bs);
+                }
+            }
+            head = (head + 1) % WRITE_DEPTH_MAX;
+            count -= 1;
+        }
+    }
+
+    fn retry(&mut self, device: &dyn BlockDevice, k: usize, bs: usize) {
+        let (offset, first, len) = self.runs.as_slice()[k];
+        let span = &self.bytes.as_slice()[first as usize * bs..(first + len) as usize * bs];
+        self.ok.as_mut_slice()[k] = device.write_at(offset, span).is_ok();
+    }
+}
+
 /// The runs one flush has submitted and not yet completed, oldest first. A
 /// field rather than a local, and its run table on the heap: no frame can
 /// carry it on top of the flush.
@@ -214,6 +305,10 @@ struct CacheEntry {
     /// later operation rewrote is still data an earlier record names, so the
     /// pass's data phase selects on this rather than on `dirty_epoch`.
     dirtied_epoch: u64,
+    /// Staged into a [`DataBatch`] the flusher is writing without the mount
+    /// lock: marked clean already, so it must stay cached until the batch
+    /// finishes and puts it back dirty if the write failed.
+    inflight: bool,
 }
 
 impl CacheEntry {
@@ -236,6 +331,7 @@ impl CacheEntry {
             op_was_dirty: false,
             dirty_epoch: 0,
             dirtied_epoch: 0,
+            inflight: false,
         })
     }
 }
@@ -747,8 +843,10 @@ impl BlockCache {
                 if !entry.op_touched {
                     continue;
                 }
+                // In flight counts as dirty: until its batch finishes, the
+                // device may not hold what the cache marked clean.
                 let sole_copy = entry.kind == BlockKind::Data
-                    && entry.op_was_dirty
+                    && (entry.op_was_dirty || entry.inflight)
                     && journal.resident_slot(entry.block.raw()).is_none();
                 if !sole_copy {
                     self.drop_entry(i);
@@ -1317,6 +1415,7 @@ impl BlockCache {
         let entry = &mut self.entries[slot];
         entry.valid = false;
         entry.pinned = 0;
+        entry.inflight = false;
         entry.frame.set_owner_key(0);
         self.index.remove(&block);
         self.lru_retire(slot);
@@ -1730,6 +1829,100 @@ impl BlockCache {
         })
     }
 
+    /// Copy dirty data blocks dirtied by `epoch` into `batch`, from slot
+    /// `start`, until it holds `max` blocks or a whole circle found nothing
+    /// more: what [`Self::flush_data_dirty_since`] would write, for a caller
+    /// that writes it after giving the mount lock back. The blocks are marked
+    /// clean and in flight; [`Self::finish_data_batch`] settles them.
+    pub fn stage_data_batch(
+        &mut self,
+        epoch: u64,
+        start: u32,
+        max: usize,
+        batch: &mut DataBatch,
+    ) -> Result<FlushProgress, Ext2Error> {
+        batch.clear();
+        let bs = self.block_size as usize;
+        // Reserved up front, so staging never stops half way through with
+        // blocks marked clean that no batch carries.
+        batch.reserve(max, bs).map_err(|_| Ext2Error::OutOfMemory)?;
+        let slots = self.entries.len();
+        let mut slot = if (start as usize) < slots {
+            start as usize
+        } else {
+            0
+        };
+        let mut seen = 0usize;
+        let mut more = false;
+        let wanted = |e: &CacheEntry| {
+            e.valid
+                && e.frame.dirty()
+                && !e.inflight
+                && e.kind == BlockKind::Data
+                && e.dirtied_epoch <= epoch
+        };
+        while seen < slots && self.dirty > 0 {
+            if wanted(&self.entries[slot]) {
+                if batch.blocks.len() >= max {
+                    more = true;
+                    break;
+                }
+                let mut run = [0u32; FLUSH_RUN];
+                let len =
+                    self.plan_run(slot, max - batch.blocks.len(), &mut |e| wanted(e), &mut run);
+                let first = batch.blocks.len() as u32;
+                for &peer in &run[..len] {
+                    let peer = peer as usize;
+                    let _ = batch
+                        .bytes
+                        .extend_from_slice(&self.entries[peer].frame.as_bytes()[..bs]);
+                    let _ = batch.blocks.push(self.entries[peer].block.raw());
+                    self.set_dirty(peer, false);
+                    self.entries[peer].inflight = true;
+                }
+                let offset = self.entries[run[0] as usize]
+                    .block
+                    .to_disk_offset(self.block_size)
+                    .raw();
+                let _ = batch.runs.push((offset, first, len as u32));
+                // Owed now, not when the batch finishes: a commit that takes
+                // the lock meanwhile must barrier behind these writes.
+                self.unbarriered += len;
+            }
+            slot = if slot + 1 == slots { 0 } else { slot + 1 };
+            seen += 1;
+        }
+        Ok(FlushProgress {
+            written: batch.blocks.len(),
+            more,
+            next: slot as u32,
+        })
+    }
+
+    /// Settle a batch [`Self::stage_data_batch`] staged: every block leaves
+    /// flight, and those in a run that failed are dirty again unless an
+    /// operation already made them so. A block dropped meanwhile — freed, or
+    /// its operation rolled back — is no longer the cache's to settle.
+    pub fn finish_data_batch(&mut self, batch: &DataBatch) {
+        for (k, &(_, first, len)) in batch.runs.as_slice().iter().enumerate() {
+            let ok = batch.ok.get(k).copied().unwrap_or(false);
+            for &block in &batch.blocks.as_slice()[first as usize..(first + len) as usize] {
+                let Some(&slot) = self.index.get(&BlockNum(block)) else {
+                    continue;
+                };
+                let entry = &mut self.entries[slot];
+                if !entry.valid || !entry.inflight {
+                    continue;
+                }
+                entry.inflight = false;
+                if !ok && !entry.frame.dirty() {
+                    entry.frame.set_dirty(true);
+                    self.dirty += 1;
+                }
+            }
+        }
+    }
+
     /// One circle over the slots from `start`, writing what `wanted` accepts
     /// until `budget` runs out. `more` is only false once a whole circle found
     /// nothing left, so a resumed scan cannot miss a slot behind its start.
@@ -1976,7 +2169,8 @@ impl BlockCache {
     /// operation can have dirtied one.
     pub fn invalidate_all_clean(&mut self) {
         for i in 0..self.entries.len() {
-            if self.entries[i].valid && !self.entries[i].frame.dirty() {
+            if self.entries[i].valid && !self.entries[i].frame.dirty() && !self.entries[i].inflight
+            {
                 self.drop_entry(i);
             }
         }
@@ -2057,7 +2251,10 @@ impl BlockCache {
         let mut i = self.entries.len();
         while i > 0 && released < want {
             i -= 1;
-            if self.entries[i].pinned != 0 || self.entries[i].frame.dirty() {
+            if self.entries[i].pinned != 0
+                || self.entries[i].frame.dirty()
+                || self.entries[i].inflight
+            {
                 continue;
             }
             // Repaired in place: rebuilding the index needs
@@ -2217,7 +2414,7 @@ impl BlockCache {
             if !entry.valid {
                 return Some(cursor as usize);
             }
-            if entry.pinned == 0 {
+            if entry.pinned == 0 && !entry.inflight {
                 let class = usize::from(entry.op_touched) * 4
                     + usize::from(entry.frame.dirty()) * 2
                     + usize::from(matches!(entry.owner, BlockOwner::Alloc));
@@ -2321,6 +2518,7 @@ impl BlockCache {
         self.set_dirty(slot, false);
         let entry = &mut self.entries[slot];
         entry.valid = false;
+        entry.inflight = false;
         entry.frame.set_owner_key(0);
         entry.op_touched = false;
         entry.op_invalidated = false;

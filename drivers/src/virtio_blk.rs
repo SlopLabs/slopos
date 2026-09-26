@@ -50,6 +50,8 @@ const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 const SECTOR_SIZE: u64 = 512;
 const PAGE_SIZE: usize = 4096;
 const REQUEST_TIMEOUT_MS: u32 = 5000;
+/// How long a requester watches the used ring before it sleeps on its slot.
+const COMPLETION_POLL_NS: u64 = 50_000;
 const SLOT_WAIT_MS: u64 = 250;
 /// Attempts per logical request, including the first.
 const REQUEST_ATTEMPTS: u32 = 3;
@@ -811,6 +813,23 @@ impl VirtioBlkInner {
             self.publish_harvest(harvest, slot_idx);
             pages
         };
+
+        // Spin first: a device that answers in tens of microseconds costs less
+        // to watch than a sleep and a wake, and the requester often holds a
+        // filesystem lock others are queued on.
+        let deadline =
+            slopos_kernel_services::clock::monotonic_ns().saturating_add(COMPLETION_POLL_NS);
+        loop {
+            if let Some(pages) = collect() {
+                return Ok(pages);
+            }
+            if slopos_kernel_services::clock::monotonic_ns() >= deadline {
+                break;
+            }
+            for _ in 0..64 {
+                core::hint::spin_loop();
+            }
+        }
 
         // Uninterruptible: a write abandoned to a kill may land after a later
         // write to the same sectors, and any abandoned chain holds one of the
