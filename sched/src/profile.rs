@@ -29,6 +29,7 @@ static CLOCK_MS: AtomicU64 = AtomicU64::new(0);
 pub fn enable() {
     STARTED_TSC.store(rdtsc(), Ordering::Relaxed);
     ENABLED.store(true, Ordering::Release);
+    slopos_fs::ext2_vfs::lock_profile::enable();
 }
 
 /// Take the clock anchor on the first reading past zero.
@@ -504,6 +505,20 @@ fn cycles_per_ms() -> u64 {
 }
 
 #[inline(never)]
+fn report_ext2_lock(phase: &str, per_ms: u64) {
+    let (acquires, wait, hold, max_wait, max_hold) = slopos_fs::ext2_vfs::lock_profile::totals();
+    klog_info!(
+        "PROF[{}]: ext2 lock acquires={} wait_ms={} hold_ms={} max_wait_us={} max_hold_us={}",
+        phase,
+        acquires,
+        wait / per_ms,
+        hold / per_ms,
+        max_wait * 1000 / per_ms,
+        max_hold * 1000 / per_ms,
+    );
+}
+
+#[inline(never)]
 fn report_calls(phase: &str) {
     let per_ms = cycles_per_ms().max(1);
     for (kind, name) in [(FaultKind::Inline, "inline"), (FaultKind::File, "file")] {
@@ -518,6 +533,7 @@ fn report_calls(phase: &str) {
             cycles * 1000 / per_ms / calls.max(1),
         );
     }
+    report_ext2_lock(phase, per_ms);
     let switches = SWITCH_CALLS.load(Ordering::Relaxed);
     klog_info!(
         "PROF[{}]: switch masked calls={} total_ms={} avg_us={} max_us={}",

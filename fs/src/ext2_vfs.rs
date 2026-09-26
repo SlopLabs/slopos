@@ -11,7 +11,74 @@ use slopos_kernel_services::driver_runtime::{current_task_account, current_task_
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
-use slopos_ostd::sync::{InitFlag, Mutex};
+use slopos_ostd::sync::{InitFlag, Mutex, MutexGuard, WaitResult};
+
+/// `prof=on`: how long operations wait for a mount's lock and how long its
+/// holders keep it, summed over every mount. Every operation on a mount
+/// serialises on that one lock, so the wait is what a busy mount costs.
+pub mod lock_profile {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    pub(super) static ACQUIRES: AtomicU64 = AtomicU64::new(0);
+    pub(super) static WAIT_CYCLES: AtomicU64 = AtomicU64::new(0);
+    pub(super) static HOLD_CYCLES: AtomicU64 = AtomicU64::new(0);
+    pub(super) static MAX_WAIT: AtomicU64 = AtomicU64::new(0);
+    pub(super) static MAX_HOLD: AtomicU64 = AtomicU64::new(0);
+
+    pub fn enable() {
+        ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(super) fn stamp() -> u64 {
+        if ENABLED.load(Ordering::Relaxed) {
+            slopos_arch::tsc::rdtsc()
+        } else {
+            0
+        }
+    }
+
+    /// `(acquires, wait cycles, hold cycles, longest wait, longest hold)`.
+    pub fn totals() -> (u64, u64, u64, u64, u64) {
+        (
+            ACQUIRES.load(Ordering::Relaxed),
+            WAIT_CYCLES.load(Ordering::Relaxed),
+            HOLD_CYCLES.load(Ordering::Relaxed),
+            MAX_WAIT.load(Ordering::Relaxed),
+            MAX_HOLD.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// The mount lock's guard, timing its hold when `prof=on`.
+struct CachedGuard<'a> {
+    guard: MutexGuard<'a, Option<CachedExt2>>,
+    acquired: u64,
+}
+
+impl core::ops::Deref for CachedGuard<'_> {
+    type Target = Option<CachedExt2>;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for CachedGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for CachedGuard<'_> {
+    fn drop(&mut self) {
+        if self.acquired != 0 {
+            let held = slopos_arch::tsc::rdtsc().saturating_sub(self.acquired);
+            lock_profile::HOLD_CYCLES.fetch_add(held, Ordering::Relaxed);
+            lock_profile::MAX_HOLD.fetch_max(held, Ordering::Relaxed);
+        }
+    }
+}
 
 const EXT2_ROOT_INODE: u32 = 2;
 
@@ -141,11 +208,24 @@ impl Ext2Mount {
         self.init.is_set() && self.read_only.load(Ordering::Acquire)
     }
 
+    fn lock_cached(&self) -> WaitResult<CachedGuard<'_>> {
+        let began = lock_profile::stamp();
+        let guard = self.cached.lock()?;
+        let acquired = lock_profile::stamp();
+        if began != 0 {
+            let waited = acquired.saturating_sub(began);
+            lock_profile::ACQUIRES.fetch_add(1, Ordering::Relaxed);
+            lock_profile::WAIT_CYCLES.fetch_add(waited, Ordering::Relaxed);
+            lock_profile::MAX_WAIT.fetch_max(waited, Ordering::Relaxed);
+        }
+        Ok(CachedGuard { guard, acquired })
+    }
+
     fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
         if !self.init.is_set() {
             return Err(VfsError::IoError);
         }
-        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         // The check point is the lock owner's, not the operation's:
         // `Ext2Fs::transaction` would sync the whole filesystem inside this
         // one hold, while the chunked drain here gives the lock back every
@@ -159,7 +239,7 @@ impl Ext2Mount {
             // Best-effort: a failure here leaves `transaction`'s own fallback
             // to try again and report it.
             let _ = self.writeback(Want::LogRoom);
-            guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+            guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         }
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
         let result = self.with_cached_fs(cached, f);
@@ -284,7 +364,7 @@ impl Ext2Mount {
             return Ok(());
         }
         let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
-        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         let Some(cached) = guard.as_mut() else {
             return Ok(());
         };
@@ -608,7 +688,7 @@ impl Ext2Mount {
     /// when the lock could not be taken at all — `Mutex::lock` aborts for a
     /// task marked for death — leaving the instance still owning its device.
     fn clear_cached(&self) -> bool {
-        let Ok(mut guard) = self.cached.lock() else {
+        let Ok(mut guard) = self.lock_cached() else {
             return false;
         };
         let stale = guard.take();
@@ -684,7 +764,7 @@ impl Ext2Mount {
     /// refusal is lifted.
     #[inline(never)]
     fn attach_journal(&self, reason: Option<ReadOnlyReason>) -> Option<ReadOnlyReason> {
-        let Ok(mut guard) = self.cached.lock() else {
+        let Ok(mut guard) = self.lock_cached() else {
             return reason;
         };
         let Some(cached) = guard.as_mut() else {
@@ -757,7 +837,7 @@ impl Ext2Mount {
     /// happen inside [`Ext2Mount::install_cached`].
     #[inline(never)]
     fn post_mount_recovery(&self) -> (u32, bool) {
-        let Ok(mut guard) = self.cached.lock() else {
+        let Ok(mut guard) = self.lock_cached() else {
             return (0, false);
         };
         let Some(cached) = guard.as_mut() else {
@@ -849,7 +929,7 @@ impl Ext2Mount {
         let target_entries =
             cache_entries_for(superblock.blocks_count as u64, superblock.blocks_per_group);
         let cache = BlockCache::new_boxed(block_size, target_entries).map_err(ext2_error_to_vfs)?;
-        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         *guard = Some(CachedExt2 {
             device,
             superblock,
@@ -875,7 +955,7 @@ impl Ext2Mount {
         if !self.init.is_set() {
             return Err(VfsError::IoError);
         }
-        let guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         let cached = guard.as_ref().ok_or(VfsError::IoError)?;
         Ok(ext2_stats_of(
             &cached.superblock,
@@ -997,7 +1077,7 @@ impl Ext2Mount {
     /// first pass a [`Want::Durable`] caller can count, fixed on its first
     /// call.
     fn writeback_step(&self, want: Want, target: &mut Option<u64>) -> VfsResult<Progress> {
-        let mut guard = self.cached.lock().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         let Some(cached) = guard.as_mut() else {
             return Ok(Progress::Met);
         };
@@ -1054,7 +1134,7 @@ impl Ext2Mount {
     /// Passes opened on this mount and the latest that finished.
     #[cfg(feature = "tests")]
     pub(crate) fn writeback_passes_for_test(&self) -> (u64, u64) {
-        let Ok(guard) = self.cached.lock() else {
+        let Ok(guard) = self.lock_cached() else {
             return (0, 0);
         };
         guard.as_ref().map_or((0, 0), |cached| {
@@ -1066,7 +1146,7 @@ impl Ext2Mount {
     /// point first. `true` with no log: there is nothing to run out of.
     #[cfg(feature = "tests")]
     pub(crate) fn journal_has_headroom(&self) -> bool {
-        let Ok(guard) = self.cached.lock() else {
+        let Ok(guard) = self.lock_cached() else {
             return true;
         };
         guard
@@ -1077,7 +1157,7 @@ impl Ext2Mount {
     /// Whether the log holds transactions a mount would have to replay.
     #[cfg(feature = "tests")]
     pub(crate) fn journal_is_empty(&self) -> bool {
-        let Ok(guard) = self.cached.lock() else {
+        let Ok(guard) = self.lock_cached() else {
             return true;
         };
         guard
@@ -1095,7 +1175,7 @@ impl Ext2Mount {
         if !self.init.is_set() {
             return;
         }
-        let Ok(mut guard) = self.cached.lock() else {
+        let Ok(mut guard) = self.lock_cached() else {
             return;
         };
         let Some(cached) = guard.as_mut() else {
