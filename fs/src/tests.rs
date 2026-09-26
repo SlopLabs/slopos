@@ -1840,8 +1840,18 @@ fn build_verity_device(
 /// CRC-32 must match the standard (zlib) algorithm `gen_verity.py` uses,
 /// otherwise every verified read would fail.
 fn test_verity_crc32_known_vectors() -> TestResult {
-    use crate::verity::crc32;
-    if crc32(&[]) == 0 && crc32(b"123456789") == 0xCBF4_3926 {
+    use crate::verity::{CRC32_INIT, crc32, crc32_feed, crc32_finish};
+    let mut long = [0u8; 1027];
+    for (i, b) in long.iter_mut().enumerate() {
+        *b = (i * 7 + 3) as u8;
+    }
+    let (head, tail) = long.split_at(13);
+    let split = crc32_finish(crc32_feed(crc32_feed(CRC32_INIT, head), tail));
+    if crc32(&[]) == 0
+        && crc32(b"123456789") == 0xCBF4_3926
+        && crc32(&long) == 0x02AD_D968
+        && split == crc32(&long)
+    {
         TestResult::Pass
     } else {
         TestResult::Fail

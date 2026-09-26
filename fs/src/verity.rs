@@ -78,8 +78,8 @@ const RESIDENT_FLOOR_BYTES: u64 = 256 * 1024 * 4 + 256 * 1024 / 8;
 
 // CRC-32 (IEEE 802.3 / zlib, reflected, poly 0xEDB88320) — matches Python's
 // `zlib.crc32`, which `scripts/gen_verity.py` uses to build the trailer.
-const fn build_crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
+const fn build_crc32_tables() -> [[u32; 256]; 8] {
+    let mut tables = [[0u32; 256]; 8];
     let mut i = 0usize;
     while i < 256 {
         let mut c = i as u32;
@@ -92,22 +92,47 @@ const fn build_crc32_table() -> [u32; 256] {
             };
             k += 1;
         }
-        table[i] = c;
+        tables[0][i] = c;
         i += 1;
     }
-    table
+    let mut t = 1usize;
+    while t < 8 {
+        let mut i = 0usize;
+        while i < 256 {
+            let prev = tables[t - 1][i];
+            tables[t][i] = (prev >> 8) ^ tables[0][(prev & 0xFF) as usize];
+            i += 1;
+        }
+        t += 1;
+    }
+    tables
 }
 
-static CRC32_TABLE: [u32; 256] = build_crc32_table();
+/// Slicing-by-8: `CRC32_TABLES[k][b]` is byte `b`'s contribution followed by
+/// `k` zero bytes, so eight bytes fold in with eight independent lookups.
+static CRC32_TABLES: [[u32; 256]; 8] = build_crc32_tables();
 
 /// Starting state of a running CRC-32, before any byte is fed.
 pub(crate) const CRC32_INIT: u32 = 0xFFFF_FFFF;
 
 /// Feed `data` into a running (pre-final-inversion) CRC-32 state.
 pub(crate) fn crc32_feed(mut state: u32, data: &[u8]) -> u32 {
-    for &b in data {
-        let idx = ((state ^ b as u32) & 0xFF) as usize;
-        state = (state >> 8) ^ CRC32_TABLE[idx];
+    let t = &CRC32_TABLES;
+    let mut words = data.chunks_exact(8);
+    for w in &mut words {
+        let lo = u32::from_le_bytes([w[0], w[1], w[2], w[3]]) ^ state;
+        let hi = u32::from_le_bytes([w[4], w[5], w[6], w[7]]);
+        state = t[7][(lo & 0xFF) as usize]
+            ^ t[6][((lo >> 8) & 0xFF) as usize]
+            ^ t[5][((lo >> 16) & 0xFF) as usize]
+            ^ t[4][(lo >> 24) as usize]
+            ^ t[3][(hi & 0xFF) as usize]
+            ^ t[2][((hi >> 8) & 0xFF) as usize]
+            ^ t[1][((hi >> 16) & 0xFF) as usize]
+            ^ t[0][(hi >> 24) as usize];
+    }
+    for &b in words.remainder() {
+        state = (state >> 8) ^ t[0][((state ^ b as u32) & 0xFF) as usize];
     }
     state
 }
