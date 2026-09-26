@@ -124,6 +124,26 @@ fn replacing_a_file_frees_its_old_chain() {
 }
 
 #[test]
+fn a_file_in_holes_between_live_ones_reads_back() {
+    let mut v = fresh(64 * MIB);
+    let cb = v.cluster_bytes();
+    for (i, name) in ["/h0", "/k0", "/h1", "/k1"].iter().enumerate() {
+        v.write_file(name, &pattern(3 * cb, i as u8)).unwrap();
+    }
+    v.remove("/h0").unwrap();
+    v.remove("/h1").unwrap();
+    // Two three-cluster holes, then the free tail: at least three runs, the
+    // tail one past MAX_EXTENT.
+    let big = pattern(2 * MIB + 5 * cb + 3, 9);
+    v.write_file("/big", &big).unwrap();
+    assert_eq!(v.read_file("/big").unwrap(), big);
+    assert_eq!(v.read_file("/k0").unwrap(), pattern(3 * cb, 1));
+    assert_eq!(v.read_file("/k1").unwrap(), pattern(3 * cb, 3));
+    let mut again = Volume::open(v.into_device()).unwrap();
+    assert_eq!(again.read_file("/big").unwrap(), big);
+}
+
+#[test]
 fn a_full_volume_refuses_and_leaks_nothing() {
     let mut v = fresh(40 * MIB);
     let free = v.free_clusters();

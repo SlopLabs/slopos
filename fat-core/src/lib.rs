@@ -530,9 +530,11 @@ impl<D: Device> Volume<D> {
             return Err(Error::Corrupt);
         }
         let mut out = vec![0u8; size];
-        for (i, piece) in out.chunks_mut(cb).enumerate() {
-            let at = self.g.cluster_offset(chain[i]);
-            self.dev.read_at(at, piece)?;
+        let mut done = 0;
+        for (first, bytes) in extents(&chain, cb, size) {
+            self.dev
+                .read_at(self.g.cluster_offset(first), &mut out[done..done + bytes])?;
+            done += bytes;
         }
         Ok(out)
     }
@@ -541,12 +543,14 @@ impl<D: Device> Volume<D> {
     fn store(&mut self, data: &[u8]) -> Result<Vec<u32>, Error> {
         let cb = self.g.cluster_bytes();
         let chain = self.allocate(data.len().div_ceil(cb))?;
-        for (i, piece) in data.chunks(cb).enumerate() {
-            let at = self.g.cluster_offset(chain[i]);
-            if let Err(e) = self.dev.write_at(at, piece) {
+        let mut done = 0;
+        for (first, bytes) in extents(&chain, cb, data.len()) {
+            let at = self.g.cluster_offset(first);
+            if let Err(e) = self.dev.write_at(at, &data[done..done + bytes]) {
                 self.release(&chain);
                 return Err(e);
             }
+            done += bytes;
         }
         Ok(chain)
     }
@@ -970,6 +974,35 @@ pub fn format<D: Device>(dev: &mut D, bytes: u64, label: &[u8; 11]) -> Result<()
     write_short(&mut cluster[..ENTRY], label, 0, ATTR_VOLUME_ID, 0, 0);
     dev.write_at(root, &cluster)?;
     dev.flush()
+}
+
+/// Largest single transfer `extents` yields: a caller's I/O is one request
+/// per extent, and an unbounded one would be a bounce buffer as large as the
+/// file.
+const MAX_EXTENT: usize = 1 << 20;
+
+/// The first `len` bytes of `chain` as `(first cluster, bytes)` runs of
+/// consecutive clusters, each at most [`MAX_EXTENT`]: a file written to a
+/// fresh volume is one run, which is one device request per MiB rather than
+/// one per cluster.
+fn extents(chain: &[u32], cb: usize, len: usize) -> impl Iterator<Item = (u32, usize)> + '_ {
+    let per_extent = (MAX_EXTENT / cb).max(1);
+    let mut i = 0;
+    let mut left = len;
+    core::iter::from_fn(move || {
+        if left == 0 || i >= chain.len() {
+            return None;
+        }
+        let first = chain[i];
+        let mut n = 1;
+        while n < per_extent && i + n < chain.len() && chain[i + n] == first + n as u32 {
+            n += 1;
+        }
+        i += n;
+        let bytes = (n * cb).min(left);
+        left -= bytes;
+        Some((first, bytes))
+    })
 }
 
 #[cfg(test)]
