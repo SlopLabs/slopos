@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_ostd::lock_class;
 
-use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex, stats};
+use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex, WriteTicket, stats};
 use slopos_fs::partition::{PartitionDevice, SharedBlockDevice, probe};
 use slopos_ostd::KArc;
 use slopos_ostd::KBox;
@@ -25,7 +25,7 @@ use crate::virtio::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
         set_driver_ok, setup_interrupts,
     },
-    queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
+    queue::{self, VirtqDesc, Virtqueue},
 };
 
 use slopos_mm::page_alloc::OwnedPageFrame;
@@ -54,25 +54,26 @@ const SLOT_WAIT_MS: u64 = 250;
 /// Attempts per logical request, including the first.
 const REQUEST_ATTEMPTS: u32 = 3;
 
-/// Bounce pages per chain: 8 × 4 KiB = 32 KiB of payload behind one
-/// submission and one completion.
-const MAX_DATA_PAGES: usize = 8;
+/// Bounce pages per chain: 32 × 4 KiB = 128 KiB of payload behind one
+/// submission and one completion — a whole writeback run of 4 KiB blocks,
+/// since each chain is a round trip through the host.
+const MAX_DATA_PAGES: usize = 32;
 const MAX_XFER: usize = MAX_DATA_PAGES * PAGE_SIZE;
 /// header + payload + status.
 const MAX_CHAIN_DESCS: usize = 2 + MAX_DATA_PAGES;
 const STATUS_OFFSET: usize = size_of::<VirtioBlkReqHeader>();
 
-/// Ring budget: `DEFAULT_QUEUE_SIZE` is 64 and shared with virtio-net and
-/// virtio-gpu, so it is not raised here. A maximal chain is
-/// `1 + MAX_DATA_PAGES + 1` = 10 descriptors, and `NUM_REQUEST_SLOTS * 10 = 40`
-/// of 64 leaves 24 — two more full chains — for chains a timeout quarantined
-/// and the device has not yet returned.
+/// Ring budget: a maximal chain is `1 + MAX_DATA_PAGES + 1` = 34
+/// descriptors, and `NUM_REQUEST_SLOTS * 34 = 136` of [`BLK_QUEUE_SIZE`]
+/// leaves room for the two chains a timeout may quarantine and the device
+/// has not yet returned.
 const NUM_REQUEST_SLOTS: usize = 4;
 const QUARANTINE_SLOTS: usize = 2;
+const BLK_QUEUE_SIZE: u16 = queue::MAX_QUEUE_SIZE;
 
 const _: () = assert!(
     NUM_REQUEST_SLOTS * MAX_CHAIN_DESCS + QUARANTINE_SLOTS * MAX_CHAIN_DESCS
-        <= DEFAULT_QUEUE_SIZE as usize
+        <= BLK_QUEUE_SIZE as usize
 );
 
 #[repr(C)]
@@ -979,9 +980,16 @@ impl VirtioBlkInner {
         drain: &mut dyn FnMut(&RequestPages) -> bool,
     ) -> Result<(), BlkError> {
         let mut last = BlkError::Busy;
+        let began = slopos_arch::tsc::rdtsc();
         for _ in 0..REQUEST_ATTEMPTS {
             match self.attempt(sector, type_, len, fill, drain) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    stats::note_request_cycles(
+                        type_ == VIRTIO_BLK_T_OUT,
+                        slopos_arch::tsc::rdtsc().saturating_sub(began),
+                    );
+                    return Ok(());
+                }
                 Err(err) if err.retryable() => last = err,
                 Err(err) => return Err(err),
             }
@@ -1042,6 +1050,31 @@ impl VirtioBlkInner {
         while buffer.len() - pos >= SECTOR_SIZE as usize {
             let whole = (buffer.len() - pos) / SECTOR_SIZE as usize * SECTOR_SIZE as usize;
             let n = whole.min(MAX_XFER);
+            // Two chains in flight: the second's round trip overlaps the
+            // first's. Anything the pipelined road cannot finish goes through
+            // the retrying one.
+            let second = (whole - n).min(MAX_XFER);
+            let began = slopos_arch::tsc::rdtsc();
+            if second >= SECTOR_SIZE as usize
+                && let Ok(first_idx) = self.submit_read(at / SECTOR_SIZE, n)
+            {
+                let next = at + n as u64;
+                let second_idx = self.submit_read(next / SECTOR_SIZE, second).ok();
+                let (head, tail) = buffer[pos..].split_at_mut(n);
+                let tail = &mut tail[..second];
+                let first = self.finish_pipelined_read(first_idx, head, at, began);
+                // Completed whatever the first chain's fate: an abandoned
+                // chain would hold its request slot for the device's life.
+                let second_done = second_idx
+                    .is_some_and(|idx| self.finish_pipelined_read(idx, tail, next, began).is_ok());
+                first?;
+                if !second_done {
+                    self.request_read(next / SECTOR_SIZE, tail)?;
+                }
+                pos += n + second;
+                at += (n + second) as u64;
+                continue;
+            }
             self.request_read(at / SECTOR_SIZE, &mut buffer[pos..pos + n])?;
             pos += n;
             at += n as u64;
@@ -1133,6 +1166,73 @@ impl VirtioBlkInner {
     /// Block until the device acknowledges a `VIRTIO_BLK_T_FLUSH`. Without
     /// `VIRTIO_BLK_F_FLUSH` there is no volatile cache, so this is a
     /// successful no-op.
+    /// Stage and submit one write chain without waiting for it: `Some(slot)`
+    /// for [`Self::complete_write_chain`], or `None` when the span is not one
+    /// whole-sector chain and went through [`Self::write_span`] instead.
+    fn submit_write_chain(&self, offset: u64, segs: &[&[u8]]) -> Result<Option<usize>, BlkError> {
+        let total = total_seg_len(segs)?;
+        if total == 0
+            || total > MAX_XFER
+            || !offset.is_multiple_of(SECTOR_SIZE)
+            || !total.is_multiple_of(SECTOR_SIZE as usize)
+        {
+            return self.write_span(offset, segs).map(|()| None);
+        }
+        if !self.is_ready() {
+            return Err(BlkError::NotReady);
+        }
+        self.check_span(offset, total)?;
+        let mut last = BlkError::Busy;
+        for _ in 0..REQUEST_ATTEMPTS {
+            match self.try_submit_write_chain(offset, segs, total) {
+                Ok(idx) => {
+                    stats::note_write(total);
+                    return Ok(Some(idx));
+                }
+                Err(err) if err.retryable() => last = err,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last)
+    }
+
+    fn try_submit_write_chain(
+        &self,
+        offset: u64,
+        segs: &[&[u8]],
+        total: usize,
+    ) -> Result<usize, BlkError> {
+        self.reap_quarantine();
+        self.await_abandoned_writes()?;
+        let (idx, pages) = self.acquire_slot()?;
+        if current_task_is_killed() {
+            self.release_slot(idx, pages);
+            return Err(BlkError::Interrupted);
+        }
+        let mut cur = SegCursor::new(segs);
+        if !pages.write_header(VIRTIO_BLK_T_OUT, offset / SECTOR_SIZE)
+            || !stage_write(&pages, &mut cur, total)
+        {
+            self.release_slot(idx, pages);
+            return Err(BlkError::BadRequest);
+        }
+        if let Err((err, pages)) = self.submit_chain(idx, pages, VIRTIO_BLK_T_OUT, total) {
+            self.release_slot(idx, pages);
+            return Err(err);
+        }
+        Ok(idx)
+    }
+
+    fn complete_write_chain(&self, idx: usize) -> Result<(), BlkError> {
+        let pages = self.wait_for_completion(idx)?;
+        let status = pages.status();
+        self.release_slot(idx, pages);
+        if status != VIRTIO_BLK_S_OK {
+            return Err(status_error(status));
+        }
+        Ok(())
+    }
+
     fn do_flush(&self) -> Result<(), BlkError> {
         if !self.is_ready() {
             return Err(BlkError::NotReady);
@@ -1146,10 +1246,25 @@ impl VirtioBlkInner {
         self.run_request(0, VIRTIO_BLK_T_FLUSH, 0, &mut fill, &mut drain)
     }
 
+    /// Complete a read [`Self::submit_read`] started, falling back to the
+    /// retrying road if the chain failed.
+    fn finish_pipelined_read(
+        &self,
+        idx: usize,
+        dst: &mut [u8],
+        offset: u64,
+        began: u64,
+    ) -> Result<(), BlkError> {
+        if self.complete_read(idx, dst).is_ok() {
+            stats::note_request_cycles(false, slopos_arch::tsc::rdtsc().saturating_sub(began));
+            return Ok(());
+        }
+        self.request_read(offset / SECTOR_SIZE, dst)
+    }
+
     /// Submit a read and return its slot without parking, so one task can
     /// hold several chains in flight. Paired with
     /// [`complete_read`](Self::complete_read).
-    #[cfg(feature = "test-hooks")]
     fn submit_read(&self, sector: u64, len: usize) -> Result<usize, BlkError> {
         if !self.is_ready() {
             return Err(BlkError::NotReady);
@@ -1158,8 +1273,13 @@ impl VirtioBlkInner {
             return Err(BlkError::BadRequest);
         }
         self.check_span(sector * SECTOR_SIZE, len)?;
+        self.reap_quarantine();
 
         let (idx, pages) = self.acquire_slot()?;
+        if current_task_is_killed() {
+            self.release_slot(idx, pages);
+            return Err(BlkError::Interrupted);
+        }
         if !pages.write_header(VIRTIO_BLK_T_IN, sector) {
             self.release_slot(idx, pages);
             return Err(BlkError::BadRequest);
@@ -1168,10 +1288,10 @@ impl VirtioBlkInner {
             self.release_slot(idx, pages);
             return Err(err);
         }
+        stats::note_read(len);
         Ok(idx)
     }
 
-    #[cfg(feature = "test-hooks")]
     fn complete_read(&self, idx: usize, dst: &mut [u8]) -> Result<(), BlkError> {
         let pages = self.wait_for_completion(idx)?;
         let status = pages.status();
@@ -1587,9 +1707,36 @@ impl BlockDevice for BlockWriteToken {
     }
 
     /// Gathered into one chain, so a run of contiguous kernel buffers costs
-    /// one device request per 32 KiB rather than one per buffer.
+    /// one device request per 128 KiB rather than one per buffer.
     fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
         self.inner.write_span(offset, segs).map_err(Into::into)
+    }
+
+    fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
+        let began = slopos_arch::tsc::rdtsc();
+        match self.inner.submit_write_chain(offset, segs)? {
+            Some(idx) => Ok(WriteTicket::new(idx as u64, began)),
+            None => Ok(WriteTicket::new(WriteTicket::DONE, began)),
+        }
+    }
+
+    fn complete_write(&self, ticket: WriteTicket) -> Result<(), BlockDeviceError> {
+        if ticket.tag() == WriteTicket::DONE {
+            return Ok(());
+        }
+        self.inner.complete_write_chain(ticket.tag() as usize)?;
+        stats::note_request_cycles(
+            true,
+            slopos_arch::tsc::rdtsc().saturating_sub(ticket.began()),
+        );
+        Ok(())
+    }
+
+    /// Two of the four request slots: the rest stay free for whoever else
+    /// shares the device, so a caller's own submissions never wait on
+    /// themselves.
+    fn write_depth(&self) -> usize {
+        NUM_REQUEST_SLOTS / 2
     }
 
     fn capacity(&self) -> u64 {
@@ -1833,7 +1980,7 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         if !queue::setup_queue_into(
             &caps.common_cfg,
             0,
-            DEFAULT_QUEUE_SIZE,
+            BLK_QUEUE_SIZE,
             q0_msix_entry,
             &mut state.queue,
         ) {
@@ -1849,7 +1996,7 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         state.msix_state = msix_state;
     }
 
-    // The const assert covers `DEFAULT_QUEUE_SIZE`, but the device may
+    // The const assert covers `BLK_QUEUE_SIZE`, but the device may
     // negotiate down; say so once here rather than per exhausted request.
     if (ring_size as usize) < NUM_REQUEST_SLOTS * MAX_CHAIN_DESCS {
         klog_info!(

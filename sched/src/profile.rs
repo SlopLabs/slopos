@@ -30,6 +30,7 @@ pub fn enable() {
     STARTED_TSC.store(rdtsc(), Ordering::Relaxed);
     ENABLED.store(true, Ordering::Release);
     slopos_fs::ext2_vfs::lock_profile::enable();
+    slopos_mm::process_vm::lock_profile::enable();
 }
 
 /// Take the clock anchor on the first reading past zero.
@@ -145,7 +146,33 @@ static KERNEL_RIPS: Histogram<4096> = Histogram::new();
 static USER_TASKS: Histogram<256> = Histogram::new();
 /// User RIPs by 64-byte line: a hot loop in a shared library shows up as the
 /// same addresses in every process that maps it where the loader put it.
-static USER_RIPS: Histogram<4096> = Histogram::new();
+static USER_RIPS: Histogram<16384> = Histogram::new();
+
+/// Executable file mappings, first seen per `(base, file)`: the loader places
+/// a library at one address in every process, so this one table is what turns
+/// the user RIPs above into `(file, offset)` for an offline symbolizer.
+const EXEC_MAPS: usize = 128;
+static EXEC_MAP_KEYS: Histogram<EXEC_MAPS> = Histogram::new();
+static EXEC_MAP_INFO: [[AtomicU64; 5]; EXEC_MAPS] =
+    [const { [const { AtomicU64::new(0) }; 5] }; EXEC_MAPS];
+
+/// Record an executable mapping of `len` bytes of inode `ino` (a file of
+/// `file_size` bytes) at `base`, from file offset `offset`.
+pub fn note_exec_mapping(base: u64, len: u64, offset: u64, ino: u64, file_size: u64) {
+    if !enabled() {
+        return;
+    }
+    let key = (base ^ file_size.rotate_left(29) ^ offset.rotate_left(47)) | 1 << 63;
+    let Some(slot) = EXEC_MAP_KEYS.slot(key) else {
+        return;
+    };
+    if EXEC_MAP_KEYS.counts[slot].fetch_add(1, Ordering::Relaxed) == 0 {
+        let info = &EXEC_MAP_INFO[slot];
+        for (field, value) in info.iter().zip([base, len, offset, ino, file_size]) {
+            field.store(value, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Frames recorded per park site: deep enough to get past the blocking
 /// primitive and the syscall it serves to the operation that waited.
@@ -507,15 +534,53 @@ fn cycles_per_ms() -> u64 {
 #[inline(never)]
 fn report_ext2_lock(phase: &str, per_ms: u64) {
     let (acquires, wait, hold, max_wait, max_hold) = slopos_fs::ext2_vfs::lock_profile::totals();
+    let writeback = slopos_fs::ext2_vfs::lock_profile::writeback_hold();
     klog_info!(
-        "PROF[{}]: ext2 lock acquires={} wait_ms={} hold_ms={} max_wait_us={} max_hold_us={}",
+        "PROF[{}]: ext2 lock acquires={} wait_ms={} hold_ms={} writeback_hold_ms={} max_wait_us={} max_hold_us={}",
         phase,
         acquires,
         wait / per_ms,
         hold / per_ms,
+        writeback / per_ms,
         max_wait * 1000 / per_ms,
         max_hold * 1000 / per_ms,
     );
+}
+
+#[inline(never)]
+fn report_block_io(phase: &str, per_ms: u64) {
+    let io = slopos_fs::blockdev::stats::snapshot();
+    let (read_cycles, write_cycles) = slopos_fs::blockdev::stats::request_cycles();
+    let sectors_per_mib = (1 << 20) / slopos_fs::blockdev::stats::SECTOR_BYTES as u64;
+    klog_info!(
+        "PROF[{}]: blk reads={} read_mib={} read_ms={} writes={} write_mib={} write_ms={} flushes={}",
+        phase,
+        io.read_requests,
+        io.blocks_read / sectors_per_mib,
+        read_cycles / per_ms,
+        io.write_requests,
+        io.blocks_written / sectors_per_mib,
+        write_cycles / per_ms,
+        io.flushes,
+    );
+}
+
+#[inline(never)]
+fn report_vm_lock(phase: &str, per_ms: u64) {
+    slopos_mm::process_vm::lock_profile::for_each_site(|location, acquires, wait, hold| {
+        if (wait + hold) / per_ms == 0 {
+            return;
+        }
+        klog_info!(
+            "PROF[{}]: vm lock site={}:{} acquires={} wait_ms={} hold_ms={}",
+            phase,
+            location.file(),
+            location.line(),
+            acquires,
+            wait / per_ms,
+            hold / per_ms,
+        );
+    });
 }
 
 #[inline(never)]
@@ -534,6 +599,8 @@ fn report_calls(phase: &str) {
         );
     }
     report_ext2_lock(phase, per_ms);
+    report_vm_lock(phase, per_ms);
+    report_block_io(phase, per_ms);
     let switches = SWITCH_CALLS.load(Ordering::Relaxed);
     klog_info!(
         "PROF[{}]: switch masked calls={} total_ms={} avg_us={} max_us={}",
@@ -591,15 +658,32 @@ fn report_ticks(phase: &str) {
             bytes_as_str(&bytes)
         );
     });
-    KERNEL_RIPS.for_each_top(40, |rip, count| {
+    KERNEL_RIPS.for_each_top(120, |rip, count| {
         symbolized(phase, format_args!("kernel tick {:>7}", count), rip);
     });
-    USER_RIPS.for_each_top(30, |key, count| {
+    USER_RIPS.for_each_top(600, |key, count| {
         klog_info!(
             "PROF[{}]: user tick {:>7} 0x{:x}",
             phase,
             count,
             (key & !(1 << 63)) << 6
+        );
+    });
+    EXEC_MAP_KEYS.for_each_top(EXEC_MAPS, |key, _| {
+        let Some(slot) = EXEC_MAP_KEYS.slot(key) else {
+            return;
+        };
+        let [base, len, offset, ino, size] = EXEC_MAP_INFO[slot]
+            .each_ref()
+            .map(|f| f.load(Ordering::Relaxed));
+        klog_info!(
+            "PROF[{}]: map base=0x{:x} len=0x{:x} off=0x{:x} ino={} size={}",
+            phase,
+            base,
+            len,
+            offset,
+            ino,
+            size
         );
     });
     FUTEX_ADDRS.for_each_top(12, |key, count| {

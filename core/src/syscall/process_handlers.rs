@@ -699,7 +699,7 @@ define_syscall!(syscall_execve
                 let after =
                     slopos_ostd::task::ops::task_restrict_caps(ctx.task(), granted);
                 if after != before {
-                    slopos_ostd::klog_info!(
+                    slopos_ostd::klog_debug!(
                         "exec: task {} authority {:#x} -> {:#x}",
                         task_id,
                         before,

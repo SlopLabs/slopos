@@ -28,7 +28,14 @@ pub fn allocate_block_near(
     // Charged before the search so a caller over it costs no bitmap work, and
     // given back below if the search finds nothing.
     cache.charge_blocks(geom.account(), owner.charged_inode(), 1)?;
-    let allocated = allocate_searching(goal, geom, superblock, cache, device);
+    let mut allocated = allocate_searching(goal, geom, superblock, cache, device);
+    // Space freed by operations whose records are not durable yet is held
+    // back from reuse; one log sync hands it to this search.
+    if matches!(allocated, Err(Ext2Error::NoSpace)) && cache.has_blocked_frees() {
+        allocated = cache
+            .sync_log(device)
+            .and_then(|()| allocate_searching(goal, geom, superblock, cache, device));
+    }
     if allocated.is_err() {
         cache.cancel_block_charge(geom.account(), owner.charged_inode(), 1);
     }
@@ -131,6 +138,7 @@ pub fn free_block(
     // Before the bitmap moves: no earlier log record may be replayed into
     // this block, because the next allocation may hand it out as file data.
     cache.note_revoke(block, device)?;
+    cache.note_block_freed(block);
     // Deferred to the commit: a rollback restores the bitmap, so an operation
     // that frees and then fails still owes the block. Credited to the
     // principal charged for it, not to this caller.
@@ -198,14 +206,29 @@ fn try_alloc_block_in_group(
     // the hint it skipped them on is stale.
     let (bit, rescanned) = {
         let bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
-        match bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, hint) {
-            Some(bit) => (Some(bit), false),
-            None if hint > 0 => (
-                bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, 0),
-                true,
-            ),
-            None => (None, false),
-        }
+        let data = bmap.data();
+        let bits = bits_in_group as usize;
+        let mut from = hint;
+        let mut rescanned = false;
+        let found = loop {
+            match bitmap_slice::find_first_zero(data, bits, from) {
+                Some(bit) => {
+                    let blocked = geom
+                        .block_of(group, bit as u32)
+                        .is_some_and(|b| bmap.reuse_blocked(b));
+                    if !blocked {
+                        break Some(bit);
+                    }
+                    from = bit + 1;
+                }
+                None if !rescanned && hint > 0 => {
+                    rescanned = true;
+                    from = 0;
+                }
+                None => break None,
+            }
+        };
+        (found, rescanned)
     };
     if rescanned {
         cache.set_group_hint(group.raw(), 0);

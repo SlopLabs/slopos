@@ -467,7 +467,7 @@ fn cap_geometry() -> Option<(u64, u32, u32, usize)> {
         geometry.blocks_count() as u64,
         geometry.block_size(),
         geometry.groups_count(),
-        crate::ext2::cache::cache_entries_for(
+        crate::ext2_vfs::mount_cache_entries(
             geometry.blocks_count() as u64,
             geometry.blocks_per_group(),
         ),

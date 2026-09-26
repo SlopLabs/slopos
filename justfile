@@ -713,6 +713,26 @@ test-selfhost: _build-run-tests
     scripts/compare_kernel_elf.sh "$reference/kernel-dev.elf" "$guest/kernel-dev.elf"
     just test-elf "ELF=$guest/kernel-tests.elf"
 
+# The self-hosting build as a benchmark: the guest half of test-selfhost on
+# whatever the tree holds now, from an empty target directory, with prof=on.
+# No identity check, so it runs on an uncommitted kernel against the source
+# the dev disk already carries. The libc.so the boot ran is kept beside the
+# log: user ticks symbolize against the objects that took them.
+[doc("Benchmark the guest's kernel build: boot the optimized tests kernel with the dev disk and prof=on, build the dev and tests kernels from clean, and summarize where the time went (builddir/bench-selfhost.log)")]
+bench-selfhost: _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    just _fs-image-devdisk
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_disk_mount}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    cp {{build_dir}}/libc.so {{build_dir}}/bench-libc.so
+    rc=0
+    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
+        {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
+        --timeout-secs "${SELFHOST_TIMEOUT_SECS:-28800}" --silence-secs 0 --raw --no-color > {{build_dir}}/bench-selfhost.log 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || { tail -n 30 {{build_dir}}/bench-selfhost.log; echo "FAIL: the benchmark boot exited $rc — full log in {{build_dir}}/bench-selfhost.log" >&2; exit 1; }
+    python3 scripts/prof_report.py {{build_dir}}/bench-selfhost.log --libc {{build_dir}}/bench-libc.so --lib-dir {{toolchain_install}}/lib
+
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, http-core, tls-core, chrome-core, slibc-core, kallsyms, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
     {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-http-core -p slopos-fat-core -p slopos-tls-core -p slopos-chrome-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms

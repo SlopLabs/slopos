@@ -21,17 +21,27 @@
 //! block wins and a `REVOKE` cancels every earlier write of the blocks it
 //! lists — which is what makes a block freed and reused as file data safe.
 //!
-//! A payload is usually metadata, but a small write's file data is logged the
-//! same way instead of being written home and barriered behind: replay then
-//! restores both or neither, for a block write rather than a device flush.
+//! A payload is metadata only. File data goes home ahead of the commit record
+//! that names it (`data=ordered`), so logging it too would only write it twice.
 //!
 //! The commit record's CRC covers every byte of the transaction's other
 //! records, so a torn or lost log write makes the transaction fail its own
 //! check. That is what removes the barrier before the commit record — the
 //! trade ext4 makes with `async_commit`.
+//!
+//! # Deferred writes
+//!
+//! Records are appended to an in-memory ring rather than written at once, so
+//! an operation commits without waiting for the device, and the operations of
+//! a whole commit interval reach the medium as one sequential write behind one
+//! barrier — jbd2's group commit. [`Self::write_pending`] is that write; the
+//! cache owns the ordering around it (`data=ordered` data first, a barrier
+//! after), and no home location is written from a record until the barrier
+//! behind it has been issued.
 
 use slopos_mm::slab::MAX_ALLOC_SIZE;
 use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::frame::{Frame, PageCacheMeta};
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::{KBox, KVec, write_field};
 
@@ -100,6 +110,10 @@ const RECORD_RUN: usize = 32;
 /// staging buffer, which is preallocated at `RECORD_RUN`-independent size:
 /// eight 4 KiB blocks is the 32 KiB a virtio-blk chain takes whole.
 const CHECKPOINT_RUN: usize = 8;
+
+/// Slots whose images the log may hold in memory: 8 MiB at 4 KiB blocks.
+/// Past it an operation's records force the ring out first.
+const PENDING_SLOTS_MAX: usize = 2048;
 
 /// The volume the log belongs to, so a target block read off the medium can be
 /// refused before it becomes a write offset.
@@ -218,6 +232,17 @@ pub struct Journal {
     /// `[s_mnt_count, s_mtime]` of this mount, written into every log
     /// superblock.
     stamp: [u32; 2],
+    /// Images of the slots `written..head`, slot `s` in
+    /// `pending[s % pending.len()]`. Empty is a write-through log.
+    pending: KVec<Frame<PageCacheMeta>>,
+    /// Slots below this have been handed to the device.
+    written: u32,
+    /// Slots below this were handed to the device before the last barrier:
+    /// the durable prefix.
+    barriered: u32,
+    /// The open operation outgrew the ring, so its records go straight to
+    /// the device.
+    write_through: bool,
 }
 
 impl Journal {
@@ -272,6 +297,7 @@ impl Journal {
             None => JournalRecovery::NONE,
         };
         journal.reset(device)?;
+        journal.alloc_pending();
         Ok((journal, recovery))
     }
 
@@ -315,9 +341,153 @@ impl Journal {
                 write_field!(slot, crc, CRC32_INIT);
                 write_field!(slot, writes, 0);
                 write_field!(slot, stamp, NO_STAMP);
+                write_field!(slot, pending, KVec::new());
+                write_field!(slot, written, 1);
+                write_field!(slot, barriered, 1);
+                write_field!(slot, write_through, false);
                 Ok(slot.finish())
             },
         )
+    }
+
+    /// The in-memory ring, as large as the log and [`PENDING_SLOTS_MAX`]
+    /// allow. Best effort: whatever could not be allocated only shortens
+    /// the ring, and none at all leaves the log writing through, as it did
+    /// before deferral.
+    fn alloc_pending(&mut self) {
+        let want = (self.capacity() as usize).min(PENDING_SLOTS_MAX);
+        if self.pending.try_reserve(want).is_err() {
+            return;
+        }
+        while self.pending.len() < want {
+            let Some(frame) = Frame::<PageCacheMeta>::alloc() else {
+                break;
+            };
+            if self.pending.push(frame).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Shorten the ring to `slots` images, so a test reaches the full-ring
+    /// path on a log small enough to build in memory.
+    #[cfg(feature = "tests")]
+    pub fn shrink_ring_for_test(&mut self, slots: usize) {
+        debug_assert!(
+            self.written == self.head,
+            "shrinking a ring that holds records"
+        );
+        self.pending.truncate(slots);
+    }
+
+    /// Records go to the ring, not the device.
+    pub fn defers(&self) -> bool {
+        !self.pending.is_empty() && !self.write_through
+    }
+
+    /// Slots appended since the last [`Self::write_pending`].
+    pub fn pending_slots(&self) -> u32 {
+        self.head.saturating_sub(self.written)
+    }
+
+    /// Slots the ring can still take before it must be written out.
+    pub fn pending_room(&self) -> u32 {
+        (self.pending.len() as u32).saturating_sub(self.pending_slots())
+    }
+
+    /// Slots the ring holds at most.
+    pub fn pending_capacity(&self) -> u32 {
+        self.pending.len() as u32
+    }
+
+    /// Send the rest of the open operation's records straight to the
+    /// device: it needs more slots than the ring has. The caller has made
+    /// every earlier record durable, so none is overtaken on the medium.
+    pub fn set_write_through(&mut self) {
+        self.write_through = true;
+    }
+
+    pub fn writes_through(&self) -> bool {
+        self.pending.is_empty() || self.write_through
+    }
+
+    /// Whether `slot` was handed to the device before the last barrier.
+    pub fn slot_durable(&self, slot: u32) -> bool {
+        slot < self.barriered
+    }
+
+    /// Every appended record is on the medium behind a barrier.
+    pub fn is_durable(&self) -> bool {
+        self.barriered >= self.head
+    }
+
+    /// The device has flushed everything handed to it so far.
+    pub fn note_barrier(&mut self) {
+        self.barriered = self.written;
+    }
+
+    /// Hand the ring's slots to the device, in runs of consecutive log
+    /// blocks. Issues no barrier and orders nothing: the caller has put the
+    /// data these records name home already, and barriers behind this.
+    pub fn write_pending(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        self.write_pending_until(self.head, usize::MAX, device)
+            .map(|_| ())
+    }
+
+    /// [`Self::write_pending`] for the slots below `limit`, at most `budget`
+    /// of them. Answers whether any below `limit` are still in the ring.
+    pub fn write_pending_until(
+        &mut self,
+        limit: u32,
+        budget: usize,
+        device: &dyn BlockDevice,
+    ) -> Result<bool, Ext2Error> {
+        let end = limit.min(self.head);
+        let mut left = budget;
+        while self.written < end && left > 0 {
+            let want = ((end - self.written) as usize).min(RECORD_RUN).min(left);
+            let run = self.contiguous_slots(self.written, want);
+            if run == 0 {
+                return Err(Ext2Error::InvalidBlock);
+            }
+            self.write_pending_run(self.written, run, device)?;
+            self.written += run as u32;
+            self.writes += run;
+            left -= run;
+        }
+        Ok(self.written < end)
+    }
+
+    /// `#[inline(never)]`: the segment array is 512 bytes of frame.
+    #[inline(never)]
+    fn write_pending_run(
+        &self,
+        slot: u32,
+        run: usize,
+        device: &dyn BlockDevice,
+    ) -> Result<(), Ext2Error> {
+        let bs = self.block_size as usize;
+        let mut segs: [&[u8]; RECORD_RUN] = [&[]; RECORD_RUN];
+        for (k, seg) in segs.iter_mut().enumerate().take(run) {
+            *seg = &self.ring_frame(slot + k as u32).as_bytes()[..bs];
+        }
+        device
+            .write_vectored(self.slot_offset(slot)?, &segs[..run])
+            .map_err(Ext2Error::from)
+    }
+
+    fn ring_frame(&self, slot: u32) -> &Frame<PageCacheMeta> {
+        &self.pending[slot as usize % self.pending.len()]
+    }
+
+    /// Put `bytes` into `slot`'s ring image, zero-padded to a block.
+    fn stage(&mut self, slot: u32, bytes: &[u8]) {
+        let bs = self.block_size as usize;
+        let n = self.pending.len();
+        let image = &mut self.pending[slot as usize % n].as_bytes_mut()[..bs];
+        let len = bytes.len().min(bs);
+        image[..len].copy_from_slice(&bytes[..len]);
+        image[len..].fill(0);
     }
 
     /// Whether `block` is a block of this volume, and so a legal write target.
@@ -485,13 +655,20 @@ impl Journal {
         None
     }
 
-    /// Copy a slot's payload into `out`, which must be one block long.
+    /// Copy a slot's payload into `out`, which must be one block long. A slot
+    /// still in the ring is served from it.
     pub fn read_slot(
         &self,
         slot: u32,
         device: &dyn BlockDevice,
         out: &mut [u8],
     ) -> Result<(), Ext2Error> {
+        if slot >= self.written && !self.pending.is_empty() {
+            let bs = self.block_size as usize;
+            let n = out.len().min(bs);
+            out[..n].copy_from_slice(&self.ring_frame(slot).as_bytes()[..n]);
+            return Ok(());
+        }
         let offset = self.slot_offset(slot)?;
         device.read_at(offset, out).map_err(Ext2Error::from)
     }
@@ -501,6 +678,7 @@ impl Journal {
         self.revokes.clear();
         self.revoke_undo.clear();
         self.crc = CRC32_INIT;
+        self.write_through = false;
     }
 
     /// Discard everything the open operation appended.
@@ -522,8 +700,13 @@ impl Journal {
             self.index_insert(slot, block);
         }
         self.head = self.op_head;
+        // The rewound slots are rewritten by whatever appends next; a copy
+        // already on the medium is a record no commit covers.
+        self.written = self.written.min(self.head);
+        self.barriered = self.barriered.min(self.head);
         self.revokes.clear();
         self.crc = CRC32_INIT;
+        self.write_through = false;
     }
 
     /// The open operation appended nothing, so there is no transaction to
@@ -626,6 +809,15 @@ impl Journal {
             self.index_insert(first + i as u32, *block);
         }
 
+        if self.defers() {
+            self.stage_from_header(header_slot);
+            for i in 0..targets.len() {
+                let seg = payload(i).ok_or(Ext2Error::DeviceError)?;
+                self.stage_fed(first + i as u32, seg);
+            }
+            return Ok(first);
+        }
+
         let total = 1 + targets.len();
         let mut done = 0usize;
         while done < total {
@@ -695,7 +887,34 @@ impl Journal {
         };
         self.crc = crc;
         self.writes += took;
+        self.note_written_through(slot, took);
         Ok(took)
+    }
+
+    /// A direct write of `count` slots from `slot` landed. Direct writes only
+    /// happen with the ring empty, so they extend the written prefix.
+    fn note_written_through(&mut self, slot: u32, count: usize) {
+        if slot <= self.written {
+            self.written = self.written.max(slot + count as u32);
+        }
+    }
+
+    /// Stage the header buffer into `slot` and feed it to the record CRC.
+    fn stage_from_header(&mut self, slot: u32) {
+        let bs = self.block_size as usize;
+        let n = self.pending.len();
+        let image = &mut self.pending[slot as usize % n].as_bytes_mut()[..bs];
+        image.copy_from_slice(&self.header.as_slice()[..bs]);
+        self.crc = crc32_feed(self.crc, image);
+    }
+
+    /// Stage a payload into `slot` and feed its block image to the record CRC,
+    /// which is what a replay reads back.
+    fn stage_fed(&mut self, slot: u32, bytes: &[u8]) {
+        self.stage(slot, bytes);
+        let bs = self.block_size as usize;
+        let crc = crc32_feed(self.crc, &self.ring_frame(slot).as_bytes()[..bs]);
+        self.crc = crc;
     }
 
     /// Slots from `slot` whose blocks are one consecutive run on the device,
@@ -742,12 +961,21 @@ impl Journal {
         put_le32(self.header.as_mut_slice(), 4, self.seq);
         put_le32(self.header.as_mut_slice(), 8, REC_COMMIT);
         put_le32(self.header.as_mut_slice(), 16, crc);
-        // Outside the CRC it carries, so this write is not fed back in.
-        let offset = self.slot_offset(slot)?;
-        device
-            .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
-            .map_err(Ext2Error::from)?;
-        self.writes += 1;
+        if self.defers() {
+            // Outside the CRC it carries.
+            let n = self.pending.len();
+            let bs = self.block_size as usize;
+            self.pending[slot as usize % n].as_bytes_mut()[..bs]
+                .copy_from_slice(&self.header.as_slice()[..bs]);
+        } else {
+            // Outside the CRC it carries, so this write is not fed back in.
+            let offset = self.slot_offset(slot)?;
+            device
+                .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
+                .map_err(Ext2Error::from)?;
+            self.writes += 1;
+            self.note_written_through(slot, 1);
+        }
         stats::note_commit();
         self.seq = self.seq.wrapping_add(1);
         self.revoke_undo.clear();
@@ -779,6 +1007,11 @@ impl Journal {
             .ok_or(Ext2Error::InvalidBlock)?;
         if !self.in_volume(block) || !self.in_volume(last) {
             return Err(Ext2Error::InvalidBlock);
+        }
+        // A home write from a record the medium may not hold yet would
+        // publish a transaction a crash could still lose.
+        if !self.slot_durable(slot + n as u32 - 1) {
+            return Err(Ext2Error::DeviceError);
         }
         let bs = self.block_size as usize;
         let mut got = 0usize;
@@ -831,9 +1064,15 @@ impl Journal {
     /// Declare every logged block checked pointed: the log is empty again.
     /// The caller must have barriered the home-location writes first.
     pub fn reset(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        if self.written < self.head {
+            return Err(Ext2Error::DeviceError);
+        }
         self.write_superblock(device)?;
         self.head = 1;
         self.op_head = 1;
+        self.written = 1;
+        self.barriered = 1;
+        self.write_through = false;
         self.generation = self.generation.wrapping_add(1);
         self.index_clear();
         self.revokes.clear();
@@ -895,6 +1134,12 @@ impl Journal {
         if end as usize > self.slots.len() {
             return Err(Ext2Error::NoSpace);
         }
+        // The cache makes room before every append; running out here would
+        // overwrite an image the device has not taken yet.
+        if self.defers() && end - self.written > self.pending.len() as u32 {
+            debug_assert!(false, "log ring overrun");
+            return Err(Ext2Error::NoSpace);
+        }
         self.head = end;
         Ok(slot)
     }
@@ -904,6 +1149,10 @@ impl Journal {
         slot: u32,
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
+        if self.defers() {
+            self.stage_from_header(slot);
+            return Ok(());
+        }
         let bs = self.block_size as usize;
         let offset = self.slot_offset(slot)?;
         device
@@ -911,6 +1160,7 @@ impl Journal {
             .map_err(Ext2Error::from)?;
         self.crc = crc32_feed(self.crc, &self.header.as_slice()[..bs]);
         self.writes += 1;
+        self.note_written_through(slot, 1);
         Ok(())
     }
 
@@ -1010,6 +1260,9 @@ impl Journal {
             return Ok(JournalRecovery::NONE);
         }
         self.build_disposition(end, first_seq, device)?;
+        // Every scanned record came off the medium.
+        self.written = end;
+        self.barriered = end;
         let blocks = self.write_home(end, device)?;
         device.flush().map_err(Ext2Error::from)?;
         self.seq = expect;

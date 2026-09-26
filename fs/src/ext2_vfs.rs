@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::{LOCK_LEVEL_RESOURCE, LockClassKey};
 
@@ -25,6 +25,9 @@ pub mod lock_profile {
     pub(super) static HOLD_CYCLES: AtomicU64 = AtomicU64::new(0);
     pub(super) static MAX_WAIT: AtomicU64 = AtomicU64::new(0);
     pub(super) static MAX_HOLD: AtomicU64 = AtomicU64::new(0);
+    /// The part of the hold spent by writeback — the flusher's passes and
+    /// commits, and `sync(2)` — rather than by the operations it serves.
+    pub(super) static WRITEBACK_HOLD_CYCLES: AtomicU64 = AtomicU64::new(0);
 
     pub fn enable() {
         ENABLED.store(true, Ordering::Relaxed);
@@ -49,12 +52,18 @@ pub mod lock_profile {
             MAX_HOLD.load(Ordering::Relaxed),
         )
     }
+
+    /// Hold cycles spent by writeback.
+    pub fn writeback_hold() -> u64 {
+        WRITEBACK_HOLD_CYCLES.load(Ordering::Relaxed)
+    }
 }
 
 /// The mount lock's guard, timing its hold when `prof=on`.
 struct CachedGuard<'a> {
     guard: MutexGuard<'a, Option<CachedExt2>>,
     acquired: u64,
+    writeback: bool,
 }
 
 impl core::ops::Deref for CachedGuard<'_> {
@@ -76,6 +85,9 @@ impl Drop for CachedGuard<'_> {
             let held = slopos_arch::tsc::rdtsc().saturating_sub(self.acquired);
             lock_profile::HOLD_CYCLES.fetch_add(held, Ordering::Relaxed);
             lock_profile::MAX_HOLD.fetch_max(held, Ordering::Relaxed);
+            if self.writeback {
+                lock_profile::WRITEBACK_HOLD_CYCLES.fetch_add(held, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -167,7 +179,22 @@ pub struct Ext2Mount {
     /// Best-effort dirty-block count: the flusher's wait predicate reads only
     /// this and the stop flag, so it takes no lock.
     dirty_pending: AtomicUsize,
+    /// Log records appended but not yet written, for the commit timer.
+    log_pending: AtomicUsize,
+    /// Work that should not wait for the timer: [`WANT_COMMIT`] for a ring
+    /// half full, [`WANT_FULL`] for dirty blocks past the background
+    /// threshold or a log that needs a drain. The flusher takes them.
+    wants: AtomicU8,
+    /// A whole pass would write something: dirty blocks, unbarriered writes
+    /// or a log to check point. What the periodic pass and the clean stamp
+    /// wait on.
+    needs_pass: AtomicBool,
+    /// When the last whole writeback pass finished, in monotonic ms.
+    last_full_ms: AtomicU64,
 }
+
+const WANT_COMMIT: u8 = 1;
+const WANT_FULL: u8 = 2;
 
 static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
     "ext2-flush",
@@ -175,11 +202,18 @@ static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
 );
 static FLUSH_THREAD_STARTED: InitFlag = InitFlag::new();
 
-/// Periodic writeback cadence — analog of Linux `dirty_writeback_centisecs`.
+/// Whole-pass writeback cadence — analog of Linux `dirty_writeback_centisecs`
+/// — and so also how long an idle mount waits to be marked clean.
 const FLUSH_INTERVAL_MS: u64 = 5_000;
-/// Eager-wake threshold — analog of `dirty_background_ratio`. Past this many
-/// dirty blocks a mutating op kicks the flusher instead of awaiting the tick.
+/// Log commit cadence: how long an appended record may wait in the ring. jbd2
+/// defaults to five seconds; a build machine that may be closed rudely at any
+/// moment is better served by one.
+const COMMIT_INTERVAL_MS: u64 = 1_000;
+/// Dirty blocks past which a mount with a log wakes the flusher early, as a
+/// share of its cache — analog of `dirty_background_ratio` — floored so a
+/// small cache still batches.
 const FLUSH_EAGER_THRESHOLD: usize = 48;
+const FLUSH_EAGER_SHARE: usize = 8;
 /// First retry delay after a failed sync (exponential backoff floor).
 const FLUSH_BACKOFF_MIN_MS: u64 = 50;
 /// Backoff ceiling — a persistently failing device is retried no more often
@@ -195,6 +229,10 @@ impl Ext2Mount {
             remount_ro_pending: AtomicBool::new(false),
             remount_ro_reported: InitFlag::new(),
             dirty_pending: AtomicUsize::new(0),
+            log_pending: AtomicUsize::new(0),
+            wants: AtomicU8::new(0),
+            needs_pass: AtomicBool::new(false),
+            last_full_ms: AtomicU64::new(0),
         }
     }
 
@@ -218,7 +256,18 @@ impl Ext2Mount {
             lock_profile::WAIT_CYCLES.fetch_add(waited, Ordering::Relaxed);
             lock_profile::MAX_WAIT.fetch_max(waited, Ordering::Relaxed);
         }
-        Ok(CachedGuard { guard, acquired })
+        Ok(CachedGuard {
+            guard,
+            acquired,
+            writeback: false,
+        })
+    }
+
+    /// [`Self::lock_cached`] for writeback, whose hold `prof=on` reports apart.
+    fn lock_cached_for_writeback(&self) -> WaitResult<CachedGuard<'_>> {
+        let mut guard = self.lock_cached()?;
+        guard.writeback = true;
+        Ok(guard)
     }
 
     fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
@@ -243,14 +292,7 @@ impl Ext2Mount {
         }
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
         let result = self.with_cached_fs(cached, f);
-        // The log filling is its own reason to wake the flusher: draining it
-        // there is a bounded pass, whereas at its low-water mark the next
-        // operation pays an unbounded one under the lock.
-        let drain = cached.cache.journal_needs_drain();
-        self.note_dirty(cached.cache.dirty_count());
-        if drain {
-            FLUSH_STOP.wake_one_for_work();
-        }
+        self.note_state(&cached.cache);
         drop(guard);
         // Off-lock: the log line must not be emitted while every path walk on
         // this mount is queued behind the lock it would hold.
@@ -332,17 +374,47 @@ impl Ext2Mount {
         );
     }
 
-    /// Never holds the FS lock.
-    fn note_dirty(&self, dirty: usize) {
+    /// Publish what the flusher's predicate and timer read, waking it when
+    /// this mount should not wait for the timer. Called under the FS lock;
+    /// touches only atomics.
+    fn note_state(&self, cache: &BlockCache) {
+        let dirty = cache.dirty_count();
         self.dirty_pending.store(dirty, Ordering::Relaxed);
-        if dirty >= FLUSH_EAGER_THRESHOLD {
+        self.log_pending
+            .store(cache.journal_pending() as usize, Ordering::Relaxed);
+        self.needs_pass.store(
+            dirty > 0 || cache.unbarriered_writes() > 0 || !cache.journal_is_empty(),
+            Ordering::Relaxed,
+        );
+        // Past the background threshold writeback starts early. With a log,
+        // dirty blocks are already safe in it, so the threshold scales with
+        // the cache; without one it stays small, writeback being all that
+        // makes them durable.
+        let threshold = if cache.journal().is_some() {
+            (cache.capacity() / FLUSH_EAGER_SHARE).max(FLUSH_EAGER_THRESHOLD)
+        } else {
+            FLUSH_EAGER_THRESHOLD
+        };
+        let mut wants = 0u8;
+        // The log filling is its own reason: draining it there is a bounded
+        // pass, whereas at its low-water mark the next operation pays an
+        // unbounded one under the lock.
+        if dirty >= threshold || cache.journal_needs_drain() {
+            wants |= WANT_FULL;
+        }
+        // Written before an operation finds the ring full and writes it
+        // inline.
+        if cache.journal_ring_filling() {
+            wants |= WANT_COMMIT;
+        }
+        if wants != 0 && self.wants.fetch_or(wants, Ordering::Relaxed) & wants != wants {
             FLUSH_STOP.wake_one_for_work();
         }
     }
 
     /// What the flusher's park predicate reads for this slot.
-    pub(crate) fn dirty_pending(&self) -> usize {
-        self.dirty_pending.load(Ordering::Relaxed)
+    pub(crate) fn needs_flusher_now(&self) -> bool {
+        self.wants.load(Ordering::Relaxed) != 0
     }
 
     /// Wake the flusher to complete a deferred inode free.
@@ -369,10 +441,7 @@ impl Ext2Mount {
             return Ok(());
         };
         let result = self.with_cached_fs(cached, |fs| fs.sync_inode(ino, data_only));
-        // Not a `CLEAN_THROUGH` publication: this committed one inode, so a
-        // later whole-filesystem `sync` still owes the device everything else.
-        self.dirty_pending
-            .store(cached.cache.dirty_count(), Ordering::Relaxed);
+        self.note_state(&cached.cache);
         drop(guard);
         self.report_remount_ro_if_pending();
         result
@@ -680,6 +749,9 @@ impl Ext2Mount {
         self.remount_ro_pending.store(false, Ordering::Release);
         self.remount_ro_reported.reset();
         self.dirty_pending.store(0, Ordering::Relaxed);
+        self.log_pending.store(0, Ordering::Relaxed);
+        self.wants.store(0, Ordering::Relaxed);
+        self.needs_pass.store(false, Ordering::Relaxed);
         true
     }
 
@@ -936,7 +1008,7 @@ impl Ext2Mount {
         // nothing, rather than failing a mount that would otherwise succeed.
         let reserved_blocks = Ext2Fs::read_block_reserve(&*device).unwrap_or(0);
         let target_entries =
-            cache_entries_for(superblock.blocks_count as u64, superblock.blocks_per_group);
+            mount_cache_entries(superblock.blocks_count as u64, superblock.blocks_per_group);
         let cache = BlockCache::new_boxed(block_size, target_entries).map_err(ext2_error_to_vfs)?;
         let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
         *guard = Some(CachedExt2 {
@@ -1041,15 +1113,24 @@ fn verity_error_to_vfs(e: VerityError) -> VfsError {
     }
 }
 
-/// Device writes one holder of the mount lock may issue before giving it back.
-/// Small enough that a path walk behind a pass waits for a bounded number of
-/// round trips, large enough that the extra acquisitions are noise.
-pub(crate) const WRITEBACK_CHUNK: usize = 32;
+/// Blocks one holder of the mount lock may write back before giving it back:
+/// four `FLUSH_RUN`-sized requests, which the device takes two at a time, so a
+/// path walk behind a pass waits for a bounded number of round trips and the
+/// extra acquisitions are noise.
+pub(crate) const WRITEBACK_CHUNK: usize = 128;
 
 /// Steps one caller may take before it gives up. A pass advances a phase or
 /// writes a block on every step, so this bounds a livelock rather than the
-/// work: reaching it means the device is failing every write.
-const WRITEBACK_MAX_STEPS: usize = 4096;
+/// work: reaching it means the device is failing every write. Enough steps
+/// for a whole cache of dirty blocks, several times over.
+const WRITEBACK_MAX_STEPS: usize = 4 * crate::ext2::cache::CACHE_ENTRIES_MAX / WRITEBACK_CHUNK;
+
+/// The cache a mount of this geometry gets on this machine.
+pub(crate) fn mount_cache_entries(volume_blocks: u64, blocks_per_group: u32) -> usize {
+    let pages = slopos_mm::page_alloc::get_page_allocator_stats();
+    let usable = u64::from(pages.free) + u64::from(pages.allocated);
+    cache_entries_for(volume_blocks, blocks_per_group, usable)
+}
 
 /// What one call of [`Ext2Mount::writeback_step`] did.
 enum Progress {
@@ -1099,7 +1180,9 @@ impl Ext2Mount {
     /// first pass a [`Want::Durable`] caller can count, fixed on its first
     /// call.
     fn writeback_step(&self, want: Want, target: &mut Option<u64>) -> VfsResult<Progress> {
-        let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self
+            .lock_cached_for_writeback()
+            .map_err(|_| VfsError::Interrupted)?;
         let Some(cached) = guard.as_mut() else {
             return Ok(Progress::Met);
         };
@@ -1125,7 +1208,7 @@ impl Ext2Mount {
                         pass
                     }
                     None => {
-                        self.dirty_pending.store(0, Ordering::Relaxed);
+                        self.note_state(&cached.cache);
                         return Ok(Progress::Met);
                     }
                 }
@@ -1140,8 +1223,7 @@ impl Ext2Mount {
             Ok(()) => Some(pass),
             Err(_) => None,
         };
-        self.dirty_pending
-            .store(cached.cache.dirty_count(), Ordering::Relaxed);
+        self.note_state(&cached.cache);
         drop(guard);
         self.report_remount_ro_if_pending();
         result.map(|()| Progress::Stepped)
@@ -1237,6 +1319,67 @@ impl Ext2Mount {
             cached.superblock_dirty = fs.superblock_dirty();
         }
     }
+
+    /// Make the log durable without a whole pass: the dirty data its records
+    /// may name goes home a chunk per lock hold, then one hold writes what
+    /// the chunks left, the ring and the barriers. Metadata stays dirty for
+    /// the next check point — the log already holds it.
+    fn commit_log(&self) -> VfsResult<()> {
+        if !self.init.is_set() {
+            return Ok(());
+        }
+        let mut epoch = None;
+        let mut scan = 0u32;
+        for _ in 0..WRITEBACK_MAX_STEPS {
+            let mut guard = self
+                .lock_cached_for_writeback()
+                .map_err(|_| VfsError::Interrupted)?;
+            let Some(cached) = guard.as_mut() else {
+                return Ok(());
+            };
+            let epoch = *epoch.get_or_insert(cached.cache.writeback_epoch());
+            let progress = cached
+                .cache
+                .flush_data_dirty_since(&*cached.device, epoch, WRITEBACK_CHUNK, scan)
+                .map_err(ext2_error_to_vfs)?;
+            scan = progress.next;
+            self.note_state(&cached.cache);
+            if !progress.more {
+                break;
+            }
+        }
+        let mut guard = self
+            .lock_cached_for_writeback()
+            .map_err(|_| VfsError::Interrupted)?;
+        let Some(cached) = guard.as_mut() else {
+            return Ok(());
+        };
+        let result = cached
+            .cache
+            .sync_log(&*cached.device)
+            .map_err(ext2_error_to_vfs);
+        self.note_state(&cached.cache);
+        result
+    }
+
+    /// One flusher visit: a whole pass when one is asked for or due, else a
+    /// log commit when records are waiting.
+    fn flush_once(&self, stopping: bool) -> VfsResult<()> {
+        let wants = self.wants.swap(0, Ordering::Relaxed);
+        let now = slopos_kernel_services::clock::uptime_ms();
+        let due =
+            now.saturating_sub(self.last_full_ms.load(Ordering::Relaxed)) >= FLUSH_INTERVAL_MS;
+        if stopping || wants & WANT_FULL != 0 || (due && self.needs_pass.load(Ordering::Relaxed)) {
+            self.sync_fs()?;
+            self.mark_filesystem_clean();
+            self.last_full_ms.store(now, Ordering::Relaxed);
+            return Ok(());
+        }
+        if wants & WANT_COMMIT != 0 || self.log_pending.load(Ordering::Relaxed) > 0 {
+            return self.commit_log();
+        }
+        Ok(())
+    }
 }
 
 /// Must be called with interrupts still enabled — the virtio-blk completion
@@ -1283,11 +1426,11 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
             token.park_timeout(
                 &FLUSH_STOP,
                 || {
-                    crate::vfs::init::ext2_pool_has_dirty()
+                    crate::vfs::init::ext2_pool_needs_flusher()
                         || orphan::releasable_count() > 0
                         || crate::filemap::pending_count() > 0
                 },
-                FLUSH_INTERVAL_MS,
+                COMMIT_INTERVAL_MS,
             )
         };
 
@@ -1295,18 +1438,17 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         // run from the `release` that queued it.
         crate::filemap::drain_pending();
 
-        // Sync on the stop path too: dirty blocks that never reach the device
-        // are lost.
+        // A whole pass on the stop path too: dirty blocks that never reach the
+        // device are lost.
+        let stopping = waited == KthreadWait::Stop;
         let mut failed = false;
         crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
             // Before the sync, so the frees it performs go out in the same
             // pass rather than waiting a further tick. Takes the mount lock
             // itself, so it must not run under one.
             orphan::drain_releasable(mount);
-            if mount.sync_fs().is_err() {
+            if mount.flush_once(stopping).is_err() {
                 failed = true;
-            } else {
-                mount.mark_filesystem_clean();
             }
         });
         backoff_ms = if failed {
@@ -1314,7 +1456,7 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         } else {
             0
         };
-        if waited == KthreadWait::Stop {
+        if stopping {
             break;
         }
     }

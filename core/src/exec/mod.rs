@@ -42,7 +42,6 @@ use slopos_mm::process_vm::{
     process_vm_prepay_commit, process_vm_reset_for_exec, process_vm_reset_stack,
     process_vm_write_user_bytes,
 };
-use slopos_ostd::klog_info;
 
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_ostd::task::new_group_in_session;
@@ -580,7 +579,7 @@ fn exec_image(
     // POSIX: close all FDs with FD_CLOEXEC set after point of no return.
     slopos_fs::fileio_close_on_exec(table);
 
-    klog_info!(
+    slopos_ostd::klog_debug!(
         "exec: loaded ELF for process {}, entry={:#x}, stack={:#x}, tls_tp={:#x}",
         table.id(),
         *entry_out,

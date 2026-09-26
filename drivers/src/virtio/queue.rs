@@ -14,6 +14,9 @@ use super::{
 };
 
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
+/// The largest ring a driver may ask for: 256 descriptors are one 4 KiB page,
+/// which is all `setup_queue_into` allocates for the descriptor table.
+pub const MAX_QUEUE_SIZE: u16 = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod)]
@@ -57,7 +60,7 @@ pub struct Virtqueue {
     /// Free chain over descriptor indices, held in kernel memory rather than
     /// threaded through the device-visible `next` fields, so a misbehaving
     /// device cannot corrupt the allocator's bookkeeping.
-    free_links: [u16; DEFAULT_QUEUE_SIZE as usize],
+    free_links: [u16; MAX_QUEUE_SIZE as usize],
     free_head: u16,
     num_free: u16,
 }
@@ -81,7 +84,7 @@ impl Virtqueue {
             notify_off: 0,
             last_used_idx: 0,
             ready: false,
-            free_links: [DESC_NONE; DEFAULT_QUEUE_SIZE as usize],
+            free_links: [DESC_NONE; MAX_QUEUE_SIZE as usize],
             free_head: DESC_NONE,
             num_free: 0,
         }
@@ -206,7 +209,7 @@ pub fn setup_queue_into(
         return false;
     }
 
-    let size = device_max_size.min(max_size);
+    let size = device_max_size.min(max_size).min(MAX_QUEUE_SIZE);
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_SIZE, size);
 
     // Raw-physical frames, deliberately not `DmaCoherent`: under the boot

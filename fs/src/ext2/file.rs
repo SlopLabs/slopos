@@ -7,11 +7,12 @@ use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
 use core::cmp;
 
-/// Blocks a read may take off the device in one request, bypassing the cache.
+/// Blocks a read may take off the device in one request, rather than a block
+/// per cache miss; what it read is kept in the cache afterwards.
 const DIRECT_RUN_MAX: u32 = 64;
 
-/// The shortest run worth a direct read. Below it the blocks go through the
-/// cache, so a small file read again and again stays resident.
+/// The shortest run worth one request. Below it the blocks go through the
+/// cache's own misses.
 const DIRECT_RUN_MIN: u32 = 4;
 
 pub fn read_file(
@@ -46,12 +47,11 @@ pub fn read_file(
             let run = direct_run(inode, fb, phys, whole, cache, device, geom, owner)?;
             if run > 0 {
                 let len = run as usize * block_size as usize;
+                let span = &mut buffer[read_total..read_total + len];
                 device
-                    .read_at(
-                        phys.to_disk_offset(block_size).raw(),
-                        &mut buffer[read_total..read_total + len],
-                    )
+                    .read_at(phys.to_disk_offset(block_size).raw(), span)
                     .map_err(Ext2Error::from)?;
+                cache.install_clean_run(phys, span, owner);
                 read_total += len;
                 file_offset += len as u64;
                 continue;

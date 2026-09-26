@@ -883,7 +883,7 @@ pub fn test_virtio_blk_counters_are_per_device_request() -> TestResult {
     };
 
     // Sector-aligned, so the chain split is the only thing the counter sees.
-    const WIDE: usize = 64 * 1024;
+    const WIDE: usize = 256 * 1024;
     const SECTOR: u64 = 6144;
     let wide = assert_ok!(KVec::<u8>::zeroed(WIDE), "wide payload");
 
@@ -898,7 +898,7 @@ pub fn test_virtio_blk_counters_are_per_device_request() -> TestResult {
     let after = stats::snapshot();
     assert_test!(
         after.write_requests - before.write_requests >= 2,
-        "a {}-byte span is more than one 32 KiB chain, so it must count more \
+        "a {}-byte span is more than one 128 KiB chain, so it must count more \
          than one device write",
         WIDE
     );

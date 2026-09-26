@@ -424,6 +424,8 @@ impl PriorityRunQueue {
         let result = self.enqueue_local_preclaimed(task);
         if result < 0 {
             let _ = body.sched_placement_compare_exchange(SchedPlacement::ReadyQueue, from);
+        } else if self.effective_load() >= 2 {
+            kick_idle_peer(self.cpu_id());
         }
         result
     }
@@ -1013,6 +1015,37 @@ pub fn get_total_schedule_calls() -> u32 {
 }
 
 /// Genuinely idle: no queued tasks and no real (non-idle) task running.
+/// Set while a kick is on its way to a CPU, so a burst of enqueues sends it
+/// one IPI rather than one each; its scheduler loop clears it.
+static KICK_PENDING: [AtomicBool; slopos_arch::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; slopos_arch::MAX_CPUS];
+
+/// A task now waits behind a running one on `busy`: wake an idle CPU so its
+/// scheduler loop steals it. An idle CPU halts — tickless, it may not wake
+/// again on its own for a long time — and stealing is only ever done by the
+/// thief, so without this the task waits out the running one's slice while a
+/// peer sleeps. Linux kicks an idle CPU into balancing the same way.
+fn kick_idle_peer(busy: usize) {
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    for i in 1..cpu_count {
+        let cpu = (busy + i) % cpu_count;
+        if !is_schedulable_cpu(cpu, 0) || !cpu_is_idle(cpu) {
+            continue;
+        }
+        if !KICK_PENDING[cpu].swap(true, Ordering::AcqRel) {
+            crate::lifecycle::send_reschedule_ipi(cpu);
+        }
+        return;
+    }
+}
+
+/// The kick has landed: this CPU's scheduler loop is looking for work.
+pub fn clear_idle_kick(cpu_id: usize) {
+    if cpu_id < slopos_arch::MAX_CPUS {
+        KICK_PENDING[cpu_id].store(false, Ordering::Release);
+    }
+}
+
 fn cpu_is_idle(cpu_id: usize) -> bool {
     with_cpu_scheduler(cpu_id, |sched| sched.effective_load() == 0).unwrap_or(false)
 }

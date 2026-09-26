@@ -38,7 +38,7 @@ use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec, klog_info, lock_class};
 
-use crate::blockdev::{BlockDevice, BlockDeviceError};
+use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 
 // On-disk trailer (little-endian, appended at the end of the image):
 //   v1: [ ext2 region ][ pad to sector ][ hash array: N×u32 ][ 32-byte header ]
@@ -492,6 +492,26 @@ impl BlockDevice for VerifiedBlockDevice {
         }
         map.un_attest(offset, len, self.block_size as u64);
         self.inner.write_vectored(offset, segs)
+    }
+
+    fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
+        let Some(map) = self.attested.as_ref() else {
+            return Err(BlockDeviceError::WriteProtected);
+        };
+        let mut len = 0u64;
+        for seg in segs {
+            len += seg.len() as u64;
+        }
+        map.un_attest(offset, len, self.block_size as u64);
+        self.inner.submit_write(offset, segs)
+    }
+
+    fn complete_write(&self, ticket: WriteTicket) -> Result<(), BlockDeviceError> {
+        self.inner.complete_write(ticket)
+    }
+
+    fn write_depth(&self) -> usize {
+        self.inner.write_depth()
     }
 
     fn write_protected(&self) -> bool {

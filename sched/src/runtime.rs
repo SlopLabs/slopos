@@ -475,6 +475,7 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             continue;
         }
 
+        per_cpu::clear_idle_kick(cpu_id);
         if !per_cpu::are_aps_paused() && try_work_steal() {
             continue;
         }

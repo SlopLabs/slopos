@@ -160,10 +160,10 @@ pub(crate) fn ext2_pool_for_each_bound(f: &mut dyn FnMut(&'static Ext2Mount)) {
     }
 }
 
-/// Whether any attached instance has dirty blocks. The flusher's park
-/// predicate, so it reads atomics and takes no lock.
-pub(crate) fn ext2_pool_has_dirty() -> bool {
-    EXT2_POOL.iter().any(|mount| mount.dirty_pending() > 0)
+/// Whether any attached instance wants the flusher before its timer. The
+/// flusher's park predicate, so it reads atomics and takes no lock.
+pub(crate) fn ext2_pool_needs_flusher() -> bool {
+    EXT2_POOL.iter().any(|mount| mount.needs_flusher_now())
 }
 
 /// Detach every retired ext2 instance whose last reference has gone. The

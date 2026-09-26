@@ -490,6 +490,15 @@ pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
     new.priority.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
 }
 
+/// Whether a task that blocked and is now woken should preempt `cpu`'s
+/// current task: at equal priority as well, as a remote wake's IPI already
+/// does. A task that blocked is typically short of work — one that slept on
+/// a device may hold the lock everyone else is queued on — and left behind a
+/// CPU-bound peer it waits out that peer's whole slice.
+fn wakee_preempts_current(cpu: usize, new: &Task) -> bool {
+    new.priority.as_u8() <= slopos_arch::pcr::current_task_priority_for(cpu)
+}
+
 fn publish_ready_fallback(task: &TaskRef) -> c_int {
     let body: &Task = task;
     if !body.is_ready() {
@@ -702,7 +711,13 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
         }
         // Local path: the preempt-pending flag makes the trap-exit handoff
         // dispatch the newcomer before HLT re-engages; the remote path IPIs.
-        if newcomer_outranks_current(current_cpu, body) {
+        // A wake an interrupt delivers — a device completing, a sleep expiring
+        // — preempts at equal priority too; a task-to-task wake does not, so a
+        // futex handoff does not bounce between two threads on one CPU.
+        let interrupt_wake = from == SchedPlacement::Waking
+            && slopos_ostd::cpu::x86_64::pcr::in_interrupt_context()
+            && wakee_preempts_current(current_cpu, body);
+        if interrupt_wake || newcomer_outranks_current(current_cpu, body) {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
         0

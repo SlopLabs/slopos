@@ -193,6 +193,10 @@ fn dir_file_type(inode: &Inode) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SyncPhase {
     Data,
+    /// The log's in-memory records below the pass's limit go to the medium
+    /// behind the data barrier, so the metadata home writes after them only
+    /// ever publish durable transactions.
+    Commit,
     Metadata,
     Logged,
     Superblock,
@@ -211,6 +215,9 @@ pub struct SyncPass {
     phase: SyncPhase,
     cursor: u32,
     limit: u32,
+    /// Where the data or metadata phase's next step resumes its scan of the
+    /// cache, so a pass costs one walk of the slots rather than one per step.
+    scan: u32,
     /// Which emptying of the log `cursor` and `limit` index. Another pass can
     /// reset and refill it between two steps, after which those indices name
     /// someone else's records.
@@ -277,10 +284,17 @@ impl<'t, 'a> Ext2Txn<'t, 'a> {
         self.committed = true;
         if self.outermost && self.fs.take_pending_orphan_head().is_some() {
             // After the commit, never before: the head may only name a
-            // member whose record is already recoverable. Best-effort, as the
-            // rollback's compensation is — failing leaves a list shorter than
-            // the truth, which `e2fsck` reclaims, not a chain that lies.
-            if self.fs.write_orphan_head_now().is_err() {
+            // member whose record is already recoverable, which under a
+            // deferred log means durable, not merely appended. Best-effort,
+            // as the rollback's compensation is — failing leaves a list
+            // shorter than the truth, which `e2fsck` reclaims, not a chain
+            // that lies.
+            let published = self
+                .fs
+                .cache
+                .sync_log(device)
+                .and_then(|()| self.fs.write_orphan_head_now());
+            if published.is_err() {
                 self.fs.corruption_seen = true;
             }
         }
@@ -727,8 +741,18 @@ impl<'a> Ext2Fs<'a> {
         // is written on its behalf.
         let (table_block, _) = self.inode_disk_offset(ino_num)?;
 
-        let (first, last) = self.inode_table_span(ino_num, table_block)?;
+        // Under a log the inode's record is in a transaction, so what makes it
+        // durable is making the log durable: its data home, a barrier, the
+        // ring, a barrier — jbd2's commit on `fsync`. The inode's own data
+        // goes first so a log with nothing pending still barriers behind it.
+        if self.cache.journal().is_some() {
+            self.cache.flush_where(self.device, |kind, owner| {
+                kind == cache::BlockKind::Data && owner == BlockOwner::File(ino)
+            })?;
+            return self.cache.sync_log(self.device);
+        }
 
+        let (first, last) = self.inode_table_span(ino_num, table_block)?;
         // The record shares its block with its neighbours, so writing it
         // publishes their cached state too. Their data goes out in the same
         // phase as this inode's, or the barrier below would order a metadata
@@ -823,6 +847,7 @@ impl<'a> Ext2Fs<'a> {
             epoch: self.cache.writeback_epoch(),
             phase: SyncPhase::Data,
             cursor: 1,
+            scan: 0,
             limit: self.cache.journal_head(),
             generation: self.cache.journal_generation(),
             restores: self.cache.journal_restores(),
@@ -832,29 +857,52 @@ impl<'a> Ext2Fs<'a> {
     /// Advance `pass` by at most `budget` device writes.
     ///
     /// Ordered durability, following ext2's `data=ordered` discipline: data
-    /// blocks, barrier, metadata blocks, the log's own leftovers, barrier,
-    /// superblock free counts, barrier. A crash between phases can leave
-    /// recoverable free-count drift but never a directory entry or inode
-    /// pointing at uninitialised on-disk data.
+    /// blocks, barrier, the log's in-memory records, barrier, metadata
+    /// blocks, the log's own leftovers, barrier, superblock free counts,
+    /// barrier. A crash between phases can leave recoverable free-count drift
+    /// but never a directory entry or inode pointing at uninitialised on-disk
+    /// data.
     pub fn sync_step(&mut self, pass: &mut SyncPass, budget: usize) -> Result<(), Ext2Error> {
         match pass.phase {
             SyncPhase::Data => {
-                let progress =
-                    self.cache
-                        .flush_bounded(self.device, pass.epoch, budget, |kind, _| {
-                            kind == cache::BlockKind::Data
-                        })?;
+                let progress = self.cache.flush_data_dirty_since(
+                    self.device,
+                    pass.epoch,
+                    budget,
+                    pass.scan,
+                )?;
+                pass.scan = progress.next;
                 if !progress.more {
                     self.device_barrier()?;
+                    pass.phase = SyncPhase::Commit;
+                    pass.scan = 0;
+                }
+            }
+            SyncPhase::Commit => {
+                // A log emptied behind the pass took these records with it.
+                if self.cache.journal_generation() != pass.generation {
+                    pass.phase = SyncPhase::Metadata;
+                    return Ok(());
+                }
+                let more = self
+                    .cache
+                    .write_log_until(self.device, pass.limit, budget)?;
+                if !more {
+                    if !self.cache.log_durable_below(pass.limit) {
+                        self.device_barrier()?;
+                    }
                     pass.phase = SyncPhase::Metadata;
                 }
             }
             SyncPhase::Metadata => {
-                let progress =
-                    self.cache
-                        .flush_bounded(self.device, pass.epoch, budget, |kind, _| {
-                            kind == cache::BlockKind::Metadata
-                        })?;
+                let progress = self.cache.flush_bounded_at(
+                    self.device,
+                    pass.epoch,
+                    budget,
+                    pass.scan,
+                    |kind, _| kind == cache::BlockKind::Metadata,
+                )?;
+                pass.scan = progress.next;
                 if !progress.more {
                     pass.phase = SyncPhase::Logged;
                 }
@@ -1026,6 +1074,37 @@ impl<'a> Ext2Fs<'a> {
     /// before an operation is forced to check point under the mount lock.
     pub fn journal_needs_drain(&self) -> bool {
         self.cache.journal_needs_drain()
+    }
+
+    /// Make every committed operation durable in the log without a check
+    /// point: what the flusher's commit timer and `fsync` do.
+    pub fn commit_log(&mut self) -> Result<(), Ext2Error> {
+        self.cache.sync_log(self.device)
+    }
+
+    /// Slots the log's in-memory ring can still take.
+    #[cfg(feature = "tests")]
+    pub fn journal_ring_room_for_test(&self) -> u32 {
+        self.cache.journal().map_or(0, |j| j.pending_room())
+    }
+
+    #[cfg(feature = "tests")]
+    pub fn shrink_journal_ring_for_test(&mut self, slots: usize) {
+        if let Some(journal) = self.cache.journal_mut() {
+            journal.shrink_ring_for_test(slots);
+        }
+    }
+
+    /// `sync_log` cut short after the records below `limit`: the data flush,
+    /// its barrier, then only part of the ring and a barrier — what a crash
+    /// part-way through writing the ring leaves.
+    #[cfg(feature = "tests")]
+    pub fn sync_log_below_for_test(&mut self, limit: u32) -> Result<(), Ext2Error> {
+        self.cache
+            .flush_where(self.device, |kind, _| kind == cache::BlockKind::Data)?;
+        self.device_barrier()?;
+        while self.cache.write_log_until(self.device, limit, usize::MAX)? {}
+        self.device_barrier()
     }
 
     /// Where the log's append point stands. `1` is empty, and so is no log.

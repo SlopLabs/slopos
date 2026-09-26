@@ -43,9 +43,6 @@ static PROBE_REFUSES: AtomicBool = AtomicBool::new(false);
 static PROBE_INTERRUPTS: AtomicBool = AtomicBool::new(false);
 /// A read covering this offset is refused once, then the probe disarms.
 static PROBE_REFUSE_READ_AT: AtomicU64 = AtomicU64::new(u64::MAX);
-/// Writes allowed before every later one is refused, as a killed requester's
-/// are; `usize::MAX` disarms it.
-static PROBE_WRITES_LEFT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Counts writes, and can be made to refuse writes or reads part-way through a
 /// test.
@@ -63,7 +60,6 @@ impl ProbeDevice {
         PROBE_REFUSES.store(false, Ordering::Relaxed);
         PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
         PROBE_REFUSE_READ_AT.store(u64::MAX, Ordering::Relaxed);
-        PROBE_WRITES_LEFT.store(usize::MAX, Ordering::Relaxed);
         Self { inner }
     }
 }
@@ -87,16 +83,6 @@ impl BlockDevice for ProbeDevice {
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         if PROBE_REFUSES.load(Ordering::Relaxed) {
             return Err(BlockDeviceError::InvalidBuffer);
-        }
-        if PROBE_WRITES_LEFT
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| match n {
-                usize::MAX => Some(n),
-                0 => None,
-                n => Some(n - 1),
-            })
-            .is_err()
-        {
-            return Err(BlockDeviceError::Interrupted);
         }
         PROBE_WRITES.fetch_add(1, Ordering::Relaxed);
         let _ =
@@ -169,8 +155,8 @@ fn attach(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     }
 }
 
-/// An operation the log recorded and nothing else did survives a mount that
-/// never saw a clean unmount — the whole point of having a log.
+/// An operation the log committed and nothing else wrote home survives a mount
+/// that never saw a clean unmount — the whole point of having a log.
 pub fn test_ext2_journal_replays_an_unsynced_operation() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
@@ -196,10 +182,129 @@ fn log_one_operation(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"logged.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
-    // Deliberately no sync. The commit record is on the medium and the home
-    // locations are not, which is exactly what a power cut here leaves.
+    // The commit timer's work and no more: the records are on the medium and
+    // the home locations are not, which is exactly what a power cut here
+    // leaves.
+    fs.commit_log().map_err(|_| "commit")
+}
+
+/// An operation whose records never left the in-memory ring is not
+/// replayed, and neither is anything after it: the mount comes back at the
+/// last durable commit, not at a mix of old homes and half a transaction.
+pub fn test_ext2_journal_drops_an_uncommitted_ring_whole() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, commit_one_then_stage_one) {
+        return fail!("staging: {}", msg);
+    }
+    match with_log(&device, replay_keeps_only_the_commit) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn commit_one_then_stage_one(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
+    attach(fs)?;
+    let ino = fs.create_file(2, b"logged.txt").map_err(|_| "create")?;
+    fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
+    fs.commit_log().map_err(|_| "commit")?;
+    // One more operation, which the fixture's small log still has headroom
+    // for — a second would check point everything.
+    fs.create_file(2, b"lost.txt")
+        .map_err(|_| "second create")?;
     Ok(())
 }
+
+fn replay_keeps_only_the_commit(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    replay_and_check(fs)?;
+    if fs.resolve_path(b"/lost.txt").is_ok() {
+        return Err("a create that never left the ring was replayed");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_drops_an_uncommitted_ring_whole,
+    suite = fs
+);
+
+/// Blocks a large write puts in a file: more than the log takes data for, so
+/// they wait in the cache with no record.
+const UNLOGGED_BLOCKS: usize = 24;
+
+fn unlogged_byte(i: usize) -> u8 {
+    (i % 251) as u8 | 1
+}
+
+/// A large write's data has no record, so it must reach its home before that
+/// write's commit does — even when a later operation frees the blocks before
+/// either commit leaves the ring, and the crash keeps the first commit and
+/// loses the second.
+pub fn test_ext2_journal_orders_data_a_later_truncate_frees() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, write_then_truncate_then_crash) {
+        return fail!("staging: {}", msg);
+    }
+    match with_log(&device, expect_the_write) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn write_then_truncate_then_crash(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
+    attach(fs)?;
+    let bs = fs.block_size() as usize;
+    let mut payload = KVec::<u8>::zeroed(UNLOGGED_BLOCKS * bs).map_err(|_| "payload")?;
+    for (i, byte) in payload.as_mut_slice().iter_mut().enumerate() {
+        *byte = unlogged_byte(i);
+    }
+    let ino = fs.create_file(2, b"large.bin").map_err(|_| "create")?;
+    fs.write_file(ino, 0, payload.as_slice())
+        .map_err(|_| "write")?;
+    let written = fs.journal_head();
+    fs.truncate_file(ino, 0).map_err(|_| "truncate")?;
+    fs.sync_log_below_for_test(written)
+        .map_err(|_| "partial log sync")
+}
+
+fn expect_the_write(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    match fs.attach_journal() {
+        Ok(Some(recovery)) if recovery.replayed() => {}
+        Ok(Some(_)) => return Err("the log held the write's commit and replayed nothing"),
+        Ok(None) => return Err("no log on the remount"),
+        Err(_) => return Err("attach failed on the remount"),
+    }
+    let ino = fs
+        .resolve_path(b"/large.bin")
+        .map_err(|_| "the replay did not restore the file")?;
+    let bs = fs.block_size() as usize;
+    let mut buf = KVec::<u8>::zeroed(UNLOGGED_BLOCKS * bs).map_err(|_| "buffer")?;
+    let read = fs
+        .read_file(ino, 0, buf.as_mut_slice())
+        .map_err(|_| "read back")?;
+    if read != buf.len() {
+        return Err("the replay kept the truncate the crash lost");
+    }
+    if buf
+        .as_slice()
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b != unlogged_byte(i))
+    {
+        return Err("the replayed file points at blocks its data never reached");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_orders_data_a_later_truncate_frees,
+    suite = fs
+);
 
 fn replay_and_check(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let recovery = match fs.attach_journal() {
@@ -222,7 +327,8 @@ fn replay_and_check(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 /// A commit that cannot reach the medium leaves neither the log nor the
-/// filesystem carrying half an operation.
+/// filesystem carrying half an operation. With the ring deferring records,
+/// the commit that meets the device is the one that finds the ring full.
 pub fn test_ext2_journal_retracts_a_failed_commit() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
@@ -236,22 +342,50 @@ pub fn test_ext2_journal_retracts_a_failed_commit() -> TestResult {
 
 fn retract_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
+    // A ring shorter than the log's headroom, so it fills before the log
+    // forces a check point, and the next create cannot fit without writing
+    // it out.
+    fs.shrink_journal_ring_for_test(12);
+    let mut name = *b"fill00.txt";
+    let mut n = 0u8;
+    while fs.journal_ring_room_for_test() >= 8 {
+        name[4] = b'0' + n / 10;
+        name[5] = b'0' + n % 10;
+        fs.create_file(2, &name).map_err(|_| "filling create")?;
+        n += 1;
+        if n >= 100 {
+            return Err("the ring never filled");
+        }
+    }
     let head = fs.journal_head();
     PROBE_REFUSES.store(true, Ordering::Relaxed);
-    let created = fs.create_file(2, b"doomed.txt").is_ok();
+    let mut path = *b"/doomed0.txt";
+    let mut refused = false;
+    for k in 0..8u8 {
+        path[7] = b'0' + k;
+        if fs.create_file(2, &path[1..]).is_err() {
+            refused = true;
+            break;
+        }
+    }
     PROBE_REFUSES.store(false, Ordering::Relaxed);
-    if created {
-        return Err("a create whose commit could not be written reported success");
+    if !refused {
+        return Err("creates whose commit could not be written all reported success");
     }
-    if fs.journal_head() != head {
-        return Err("the log kept the records of a retracted operation");
-    }
-    if fs.dirty_count() != 0 {
-        return Err("the cache kept blocks a retracted operation dirtied");
-    }
-    if fs.resolve_path(b"/doomed.txt").is_ok() {
+    if fs.resolve_path(&path).is_ok() {
         return Err("the retracted name is still resolvable");
     }
+    // A rollback drops the entries it touched and re-reads them from the
+    // ring, so what must hold is the names, not the dirty count.
+    if fs.journal_head() < head {
+        return Err("the retraction rewound past committed operations");
+    }
+    fs.resolve_path(b"/fill00.txt")
+        .map_err(|_| "a committed create was lost with the retraction")?;
+    // Still whole once the device takes writes again.
+    fs.commit_log().map_err(|_| "commit after recovery")?;
+    fs.resolve_path(b"/fill00.txt")
+        .map_err(|_| "a committed create was lost")?;
     Ok(())
 }
 
@@ -759,9 +893,12 @@ fn orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     if detached != ino {
         return Err("a different inode was orphaned");
     }
+    // One barrier for the log commit that makes the member's record durable,
+    // one behind the head that names it; a home write mid-operation would
+    // add a third.
     let barriers = PROBE_FLUSHES.load(Ordering::Relaxed);
-    if barriers != 1 {
-        return Err("the orphan path barriered more than once, so it published home early");
+    if barriers != 2 {
+        return Err("the orphan path barriered other than twice, so it published home early");
     }
     // And the list is still usable: the deferred head write landed.
     fs.release_orphan(detached).map_err(|_| "release")?;
@@ -1036,6 +1173,8 @@ fn oversized_log_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
     log.write_record(&[target], device, &mut |_| Some(payload.as_slice()))
         .map_err(|_| "write_record")?;
     log.write_commit(device).map_err(|_| "write_commit")?;
+    log.write_pending(device)
+        .map_err(|_| "write the ring out")?;
     // Dropped without a check point, so the next attach has to find the
     // transaction and apply it — and dropped first, because two capped logs'
     // slot arrays at once are not what this measures.
@@ -1094,6 +1233,8 @@ fn large_transaction_body(device: &dyn BlockDevice) -> Result<(), &'static str> 
             .map_err(|_| "spill")?;
     }
 
+    log.write_pending(device)
+        .map_err(|_| "write the ring out")?;
     log.reset(device).map_err(|_| "reset")?;
     let mut targets = KVec::<u32>::with_capacity(per_record as usize).map_err(|_| "targets")?;
     let mut done = 0u32;
@@ -1129,9 +1270,8 @@ slopos_testing::stest!(
     suite = fs
 );
 
-/// Blocks the extent test writes in one call: past `DATA_LOG_LIMIT`, so the
-/// data is written home and barriered rather than logged, and past the cache's
-/// flush-run bound, so a coalesced phase is still several requests.
+/// Blocks the extent test writes in one call: past the cache's flush-run
+/// bound, so a coalesced phase is still several requests.
 const EXTENT_BLOCKS: u32 = 64;
 
 /// Byte *i* of the extent, so a misplaced segment mismatches rather than
@@ -1265,20 +1405,21 @@ fn extent_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
         *byte = extent_byte(i);
     }
     // The create is what stamps the image dirty and spends the log's first
-    // slots, so counting after it leaves only the write's own two phases.
+    // slots. The write itself defers its data to the next log sync, so the
+    // sync is where the ordered phases are counted.
     let ino = fs.create_file(2, b"extent.bin").map_err(|_| "create")?;
-    ExtentDevice::rearm();
     let written = fs
         .write_file(ino, 0, buffer.as_slice())
         .map_err(|_| "write")?;
+    if written != len {
+        return Err("the extent write was short");
+    }
+    ExtentDevice::rearm();
+    fs.sync().map_err(|_| "sync")?;
     EXT_SEEN_WRITES.store(EXT_PRE_WRITES.load(Ordering::Relaxed), Ordering::Relaxed);
     EXT_SEEN_BYTES.store(EXT_PRE_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
     EXT_SEEN_BARRIERS.store(EXT_BARRIERS.load(Ordering::Relaxed), Ordering::Relaxed);
     EXT_SEEN_BLOCK_SIZE.store(bs, Ordering::Relaxed);
-    if written != len {
-        return Err("the extent write was short");
-    }
-    fs.sync().map_err(|_| "sync")?;
     fs.mark_clean().map_err(|_| "clean")
 }
 
@@ -1307,12 +1448,13 @@ slopos_testing::stest!(
     suite = fs
 );
 
-/// Logged by a small write, then written home by one too large to log: the home
-/// copy is newer, and a cache miss and a check point must both answer it.
+/// A small write overwritten by a large one: a cache miss and a check point
+/// must both answer the newer bytes.
 ///
-/// The path that broke: the log kept its mapping, so a miss read the logged
-/// copy back and the check point wrote it home. In the guest build every rlib
-/// member began with the zeros its archive header's small write had logged.
+/// The path that once broke: while small writes were logged, the log kept its
+/// mapping of the older copy, so a miss read it back and the check point
+/// wrote it home. In the guest build every rlib member began with the zeros
+/// its archive header's small write had logged.
 pub fn test_ext2_journal_home_write_outranks_an_older_logged_copy() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
@@ -1341,7 +1483,7 @@ pub fn test_ext2_journal_replay_keeps_a_home_write_over_an_older_logged_copy() -
     }
 }
 
-const RELOG_SMALL: &[u8] = b"a small write the log takes whole";
+const RELOG_SMALL: &[u8] = b"a small write the large one overwrites";
 
 fn relog_writes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.create_file(2, b"relog.bin").map_err(|_| "create")?;
@@ -1398,7 +1540,9 @@ fn relog_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 fn relog_unsynced(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
     attach(fs)?;
-    relog_writes(fs)
+    relog_writes(fs)?;
+    // Committed to the medium, never check pointed.
+    fs.commit_log().map_err(|_| "commit")
 }
 
 fn relog_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
@@ -1588,6 +1732,8 @@ fn clamp_fill(device: &TamperDevice, payload: &[u8]) -> Result<u32, &'static str
     log.write_record(&[CLAMP_TAIL_HOME], device, &mut |_| Some(payload))
         .map_err(|_| "write_record")?;
     log.write_commit(device).map_err(|_| "write_commit")?;
+    log.write_pending(device)
+        .map_err(|_| "write the ring out")?;
     // Dropped without a check point: the next attach is what has to find both
     // transactions and apply them.
     drop(log);
@@ -1723,84 +1869,5 @@ fn unlinked_name_stays_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 slopos_testing::stest!(
     name = test_ext2_lagging_pass_never_puts_an_older_copy_home,
-    suite = fs
-);
-
-/// A large write whose commit fails has already put its data home, and its
-/// abort gives the block back its logged copy. A pass whose cursor passed that
-/// copy before the abort must not empty the log, or the failed write's data
-/// replaces the committed contents once the copy is gone.
-pub fn test_ext2_aborted_home_write_does_not_outlive_the_log() -> TestResult {
-    let Some(image) = journal_image() else {
-        return TestResult::Skipped;
-    };
-    let device = ProbeDevice::new(image);
-    if let Err(msg) = with_log(&device, abort_behind_a_pass) {
-        return fail!("{}", msg);
-    }
-    match with_log(&device, committed_block_survives) {
-        Ok(()) => TestResult::Pass,
-        Err(msg) => fail!("{}", msg),
-    }
-}
-
-const WIDE_BLOCKS: usize = 20;
-const COMMITTED: u8 = 0x22;
-
-fn abort_behind_a_pass(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    attach(fs)?;
-    let bs = fs.block_size() as usize;
-    let mut wide = KVec::<u8>::zeroed(bs * WIDE_BLOCKS).map_err(|_| "buffer")?;
-    wide.as_mut_slice().fill(0x11);
-    let file = fs.create_file(2, b"x").map_err(|_| "create")?;
-    fs.write_file(file, 0, wide.as_slice())
-        .map_err(|_| "wide write")?;
-    fs.sync().map_err(|_| "sync")?;
-    wide.as_mut_slice()[..bs].fill(COMMITTED);
-    fs.write_file(file, 0, &wide.as_slice()[..bs])
-        .map_err(|_| "narrow write")?;
-    fs.create_file(2, b"after").map_err(|_| "create after")?;
-    let block = fs.read_inode(file).map_err(|_| "read")?.block[0].raw();
-    let logged = fs
-        .journal_newest_slot_for_test(block)
-        .ok_or("the narrow write was not logged")?;
-
-    let mut pass = fs.begin_sync();
-    while !pass.checkpointing_for_test() {
-        fs.sync_step(&mut pass, usize::MAX).map_err(|_| "pass")?;
-    }
-    fs.cache_drop_clean_for_test();
-    while pass.cursor_for_test() <= logged {
-        if pass.is_done() {
-            return Err("the pass finished before the write could fail");
-        }
-        fs.sync_step(&mut pass, 1).map_err(|_| "step")?;
-    }
-
-    wide.as_mut_slice().fill(0x33);
-    PROBE_WRITES_LEFT.store(WIDE_BLOCKS, Ordering::Release);
-    let failed = fs.write_file(file, 0, wide.as_slice());
-    let left = PROBE_WRITES_LEFT.swap(usize::MAX, Ordering::AcqRel);
-    if failed.is_ok() || left != 0 {
-        return Err("the wide write did not fail at its log record");
-    }
-    while !pass.is_done() {
-        fs.sync_step(&mut pass, usize::MAX).map_err(|_| "finish")?;
-    }
-    fs.sync().map_err(|_| "sync")
-}
-
-fn committed_block_survives(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
-    let file = fs.resolve_path(b"/x").map_err(|_| "resolve")?;
-    let mut first = [0u8; 16];
-    fs.read_file(file, 0, &mut first).map_err(|_| "read")?;
-    if first != [COMMITTED; 16] {
-        return Err("a failed write's data replaced the committed contents");
-    }
-    Ok(())
-}
-
-slopos_testing::stest!(
-    name = test_ext2_aborted_home_write_does_not_outlive_the_log,
     suite = fs
 );

@@ -42,6 +42,33 @@ pub(crate) fn total_seg_len(segs: &[&[u8]]) -> Result<usize, BlockDeviceError> {
     Ok(total)
 }
 
+/// A write [`BlockDevice::submit_write`] started; hand it to
+/// [`BlockDevice::complete_write`] exactly once.
+#[must_use = "an uncompleted write holds a device request slot"]
+#[derive(Debug)]
+pub struct WriteTicket {
+    tag: u64,
+    began: u64,
+}
+
+impl WriteTicket {
+    /// A write the device already finished before `submit_write` returned.
+    pub const DONE: u64 = u64::MAX;
+
+    pub fn new(tag: u64, began: u64) -> Self {
+        Self { tag, began }
+    }
+
+    pub fn tag(&self) -> u64 {
+        self.tag
+    }
+
+    /// When the device was handed the write, in TSC cycles.
+    pub fn began(&self) -> u64 {
+        self.began
+    }
+}
+
 pub trait BlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
@@ -57,6 +84,27 @@ pub trait BlockDevice {
                 .ok_or(BlockDeviceError::OutOfBounds)?;
         }
         Ok(())
+    }
+
+    /// Start writing `segs` at `offset` and return before the device has
+    /// finished, so a caller can keep [`Self::write_depth`] writes in flight.
+    /// The bytes are copied before this returns. The default writes
+    /// synchronously.
+    fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
+        self.write_vectored(offset, segs)?;
+        Ok(WriteTicket::new(WriteTicket::DONE, 0))
+    }
+
+    /// Wait for a submitted write. A failure leaves nothing to retry here: the
+    /// caller still holds the bytes and writes them again.
+    fn complete_write(&self, ticket: WriteTicket) -> Result<(), BlockDeviceError> {
+        let _ = ticket;
+        Ok(())
+    }
+
+    /// How many submitted writes one caller may hold uncompleted at once.
+    fn write_depth(&self) -> usize {
+        1
     }
 
     /// `true` when every `write_at` will fail with
@@ -206,6 +254,8 @@ pub mod stats {
     static FLUSHES: AtomicU64 = AtomicU64::new(0);
     static TRANSACTIONS: AtomicU64 = AtomicU64::new(0);
     static COMMITS: AtomicU64 = AtomicU64::new(0);
+    static READ_CYCLES: AtomicU64 = AtomicU64::new(0);
+    static WRITE_CYCLES: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
     pub struct Counters {
@@ -229,6 +279,22 @@ pub mod stats {
     pub fn note_write(bytes: usize) {
         WRITE_REQUESTS.fetch_add(1, Ordering::Relaxed);
         BLOCKS_WRITTEN.fetch_add(bytes.div_ceil(SECTOR_BYTES) as u64, Ordering::Relaxed);
+    }
+
+    /// Time from a request's submission to its completion, in TSC cycles:
+    /// what `prof=on` divides by the request count for a device's latency.
+    #[inline]
+    pub fn note_request_cycles(write: bool, cycles: u64) {
+        let total = if write { &WRITE_CYCLES } else { &READ_CYCLES };
+        total.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    /// `(read cycles, write cycles)` summed over every request.
+    pub fn request_cycles() -> (u64, u64) {
+        (
+            READ_CYCLES.load(Ordering::Relaxed),
+            WRITE_CYCLES.load(Ordering::Relaxed),
+        )
     }
 
     #[inline]
@@ -266,5 +332,7 @@ pub mod stats {
         FLUSHES.store(0, Ordering::Relaxed);
         TRANSACTIONS.store(0, Ordering::Relaxed);
         COMMITS.store(0, Ordering::Relaxed);
+        READ_CYCLES.store(0, Ordering::Relaxed);
+        WRITE_CYCLES.store(0, Ordering::Relaxed);
     }
 }

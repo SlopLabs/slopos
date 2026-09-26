@@ -18,8 +18,9 @@ peak for its largest single compile (`core`). The toolchain that runs it is a
 717 MB prefix — `librustc_driver` 140 MB, `libLLVM.so` and `libclang-cpp.so`
 79 MB each (X86 only), cargo 31 MB — built from a clean tree in 3 h 30 min at
 `-j4`. The same dev kernel builds on the host in 45 s at `-j4`; in the guest,
-at four vCPUs, it takes about 160 s under KVM (600 s before the work in
-"Closing the loop") and 136 + 90 min under TCG, measured before that work.
+at four vCPUs, it takes about 88 s under KVM (160 s and 600 s before the two
+rounds of work in "Closing the loop") and 136 + 90 min under TCG, measured
+before that work.
 
 **Theme.** SlopOS's limits are appliance-sized constants and policies, not
 architectural mistakes. The work is widening under proof — quantities derived
@@ -92,7 +93,9 @@ The mechanisms and their invariants live in the code and in `AGENTS.md`.
 - **The loader.** `LD_LIBRARY_PATH`, `DT_RPATH`, `DT_RUNPATH` and `$ORIGIN`, all
   refused under `AT_SECURE`; `AT_EXECFN` is the canonical executable path, so
   `dladdr` on the executable names it (clang's `getMainExecutable`).
-  `LD_DEBUG=statistics` prints the relocations bound. Binding is eager.
+  `LD_DEBUG=statistics` prints the relocations bound and the symbol searches
+  they cost. Binding is eager; a name binds to its first definition in scope,
+  weak or not, as under glibc.
 - **The dev disk.** 4 GiB, labelled `slopos-dev`, mounted at `/devel` by
   `mount=LABEL=slopos-dev:/devel`. A new volume carries the toolchain at
   `src/slopos/third_party/rust-slopos` — where the host keeps its owned
@@ -195,11 +198,33 @@ symbol table (46 070 symbols).
      user time with SSE disabled, rewritten level by level
      (`toolchain/llvm-rustc/0002`).
 
-   What is left, per `prof=on`: user time is still about three times the
-   host's for the same work (4 KiB pages only, one allocator lock), and every
-   filesystem operation serialises on its mount's one lock — `PROF` prints its
-   wait and hold time as `ext2 lock`. The four CPUs spend 30–80% of the build
-   halted.
+   Then from 161 s to 88 s (`just bench-selfhost`, which boots the optimized
+   tests kernel with `prof=on` and symbolizes the profile with
+   `scripts/prof_report.py`), against 48 s for the host's `-j4` build pinned
+   to the same four cores:
+   - the journal commits in groups, jbd2-style: records wait in an in-memory
+     ring and reach the log every second, when the ring fills, or at `fsync`,
+     behind the data they name; file data is never logged. ext2 lock waits
+     fell from 176 s to 48 s per two builds;
+   - the block cache sized from memory (an eighth of it, grown on demand),
+     writeback that keeps two 128 KiB requests in flight, virtio-blk chains of
+     128 KiB rather than 32, and large reads kept in the cache;
+   - page sets found through a hash index rather than a scan, written back 64
+     pages per write;
+   - anonymous faults fill their 128 KiB window, file faults map and read
+     ahead 32 pages, and a fault-around pays one TLB shootdown for its window
+     rather than one per page — 1.03 M shootdowns, 16 s, before;
+   - slibc: a mimalloc-style allocator (per-thread heaps, no global lock),
+     SSE2 string routines, and a loader that hashes a name once per lookup;
+   - an interrupt-delivered wake preempts an equal-priority task, and an
+     enqueue behind a running task kicks an idle CPU to steal it.
+
+   What is left, per `prof=on`: the large crates compile 1.5–1.7× slower
+   than on the host (4 KiB pages only; kernel time is a fifth of the busy
+   time, half of it faults), the incremental second pass that embeds the
+   symbol table takes 16 s against 5 (process startup and metadata
+   operations, each of which still takes its mount's one lock), and `rustc
+   --version` takes 168 ms against 31, binding 206 k relocations.
 
 ---
 

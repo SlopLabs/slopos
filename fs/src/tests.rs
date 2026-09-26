@@ -3117,14 +3117,15 @@ slopos_testing::stest!(
 );
 
 /// The cache is sized from the volume: a cache that cannot hold every group's
-/// two bitmaps evicts, on every allocation, a bitmap the next one needs.
+/// two bitmaps evicts, on every allocation, a bitmap the next one needs. Past
+/// that it is sized from memory, but never past the volume itself.
 pub fn test_block_cache_capacity_covers_every_group_bitmap() -> TestResult {
     use crate::ext2::cache::{CACHE_ENTRIES_MAX, cache_entries_for};
 
     // 16 GiB of 4 KiB blocks at `mke2fs`'s 32768 blocks per group.
     const BLOCKS_16G: u64 = 16 * 1024 * 1024 * 1024 / 4096;
     let groups = BLOCKS_16G.div_ceil(32768);
-    let entries = cache_entries_for(BLOCKS_16G, 32768);
+    let entries = cache_entries_for(BLOCKS_16G, 32768, 0);
     slopos_testing::assert_test!(
         entries as u64 >= groups * 2 + 1,
         "a 16 GiB volume asked for {} frames, short of {} group bitmaps plus a descriptor table",
@@ -3133,7 +3134,7 @@ pub fn test_block_cache_capacity_covers_every_group_bitmap() -> TestResult {
     );
 
     // 2048 groups: a real request that must still fit under the ceiling.
-    let dense = cache_entries_for(16 * 1024 * 1024, 8192);
+    let dense = cache_entries_for(16 * 1024 * 1024, 8192, 0);
     slopos_testing::assert_test!(
         dense as u64 >= 2048 * 2 && dense <= CACHE_ENTRIES_MAX,
         "2048 groups asked for {} frames, outside [4096, {}]",
@@ -3141,11 +3142,26 @@ pub fn test_block_cache_capacity_covers_every_group_bitmap() -> TestResult {
         CACHE_ENTRIES_MAX
     );
 
-    // A small volume keeps the floor; the spare frames are what file data gets.
+    // A small volume keeps the floor however much memory there is: frames
+    // past the volume's own blocks would never be filled.
     slopos_testing::assert_test!(
-        cache_entries_for(128, 1024) == CACHE_ENTRIES_MIN,
+        cache_entries_for(128, 1024, 1 << 20) == CACHE_ENTRIES_MIN,
         "a 128-block image asked for {} frames instead of the floor",
-        cache_entries_for(128, 1024)
+        cache_entries_for(128, 1024, 1 << 20)
+    );
+
+    // A large volume on a large machine takes its memory share, to the cap.
+    let blocks_4g: u64 = 4 * 1024 * 1024 * 1024 / 4096;
+    let usable_1g: u64 = 1024 * 1024 * 1024 / 4096;
+    let share = cache_entries_for(blocks_4g, 32768, usable_1g);
+    slopos_testing::assert_test!(
+        share as u64 == usable_1g / 8,
+        "a 4 GiB volume with 1 GiB usable asked for {} frames, not an eighth of memory",
+        share
+    );
+    slopos_testing::assert_test!(
+        cache_entries_for(blocks_4g, 32768, u64::MAX / 2) == CACHE_ENTRIES_MAX,
+        "the memory share is not capped at CACHE_ENTRIES_MAX"
     );
     TestResult::Pass
 }
@@ -3304,12 +3320,11 @@ pub fn test_rollback_forgets_a_directory_its_own_eviction_displaced() -> TestRes
     cache.put_dir_index(index);
 
     cache.begin_op();
-    // Dirtied, so its eviction is a device write this test can count.
-    match cache.get_data(BlockNum(1), &device, BlockOwner::File(DIR)) {
-        Ok(mut block) => {
-            block.data_mut()[0] = 0xA5;
-        }
-        Err(_) => return slopos_testing::fail!("the directory's block would not cache"),
+    if cache
+        .get_data(BlockNum(1), &device, BlockOwner::File(DIR))
+        .is_err()
+    {
+        return slopos_testing::fail!("the directory's block would not cache");
     }
     cache.note_dir_remove(DIR, HASH, 0);
     cache.note_dir_remove(OTHER, HASH, 0);
@@ -3317,7 +3332,6 @@ pub fn test_rollback_forgets_a_directory_its_own_eviction_displaced() -> TestRes
         return slopos_testing::fail!("the fixture index does not claim the removed name is gone");
     }
 
-    device.reset();
     // Four past the cache, with every resident entry owned by this operation,
     // so the victim search falls through to the oldest op-touched block.
     for b in 2..=cap + 4 {
@@ -3328,7 +3342,7 @@ pub fn test_rollback_forgets_a_directory_its_own_eviction_displaced() -> TestRes
             return slopos_testing::fail!("block {} would not cache", b);
         }
     }
-    if device.writes() == 0 {
+    if cache.kind_of(BlockNum(1)).is_some() {
         return slopos_testing::fail!(
             "the fill evicted nothing -- the operation's own blocks were never victims"
         );

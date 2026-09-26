@@ -208,13 +208,16 @@ pub fn try_resolve_user_fault(
     let demanded = process_vm::process_vm_with_fault_context_by_handle(
         handle,
         fault_addr,
-        |vs, map, region| {
+        |vs, map, (vma_start, vma_end), region| {
             if !demand::is_demand_fault_in_region(error_code, &region) || !region.is_anonymous() {
                 return None;
             }
-            Some(demand::handle_demand_fault(
-                vs, map, fault_addr, error_code, &region,
-            ))
+            let placed = demand::handle_demand_fault(vs, map, fault_addr, error_code, &region);
+            if placed.is_ok() {
+                let page = fault_addr & !(PAGE_SIZE_4KB - 1);
+                demand::fault_around_anon(vs, vma_start, vma_end, page, &region);
+            }
+            Some(placed)
         },
     );
 

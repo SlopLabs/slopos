@@ -311,6 +311,59 @@ pub fn test_commit_teardown_returns_everything() -> TestResult {
     pass!()
 }
 
+/// An anonymous fault fills its aligned window on both sides of the page it
+/// needs, but never beyond the region it faulted in: the pages around a heap
+/// may be `PROT_NONE` guards, and a prefault there would hand them readable,
+/// writable frames.
+pub fn test_anon_fault_around_stays_inside_its_region() -> TestResult {
+    use crate::demand::ANON_FAULT_AROUND_PAGES;
+    use crate::process_vm::{
+        pack_process_vm_handle, process_vm_handle, process_vm_user_va_to_paddr,
+    };
+
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    let process = resolve_pid(scratch.pid);
+    let page = PAGE_SIZE_4KB;
+    let window = ANON_FAULT_AROUND_PAGES * page;
+    let base = scratch.mmap(3 * ANON_FAULT_AROUND_PAGES, PROT_RW, MAP_FLAGS);
+    assert_test!(base != 0, "mmap refused");
+    // A whole window inside the mapping, so the fault's window is known:
+    // guards at pages 0-1 and 5.., the faulting region at pages 2-4.
+    let first = (base + window - 1) & !(window - 1);
+    assert_test!(
+        process_vm_mprotect(process, first, 2 * page, PROT_NONE) == 0
+            && process_vm_mprotect(process, first + 5 * page, window - 5 * page, PROT_NONE) == 0,
+        "mprotect refused"
+    );
+    let Some(handle) = process_vm_handle(process) else {
+        return fail!("no VM handle");
+    };
+    // 0x06: a user write to an absent page.
+    let outcome = crate::page_fault::try_resolve_user_fault(
+        first + 3 * page,
+        0x06,
+        pack_process_vm_handle(handle),
+        1,
+    );
+    assert_test!(
+        outcome == crate::page_fault::FaultOutcome::Resolved,
+        "the demand fault was not resolved"
+    );
+    for (index, want) in [(1, false), (2, true), (4, true), (5, false)] {
+        let mapped = process_vm_user_va_to_paddr(process, first + index * page) != 0;
+        assert_test!(
+            mapped == want,
+            "page {} of the window: mapped={}, want {}",
+            index,
+            mapped,
+            want
+        );
+    }
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_commit_limit_is_a_share_of_usable_frames,
     suite = quota_commit
@@ -345,5 +398,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_commit_teardown_returns_everything,
+    suite = quota_commit
+);
+slopos_testing::stest!(
+    name = test_anon_fault_around_stays_inside_its_region,
     suite = quota_commit
 );

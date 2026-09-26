@@ -16,6 +16,8 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
 
+pub mod lock_profile;
+
 use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, PF_R, PF_W, PF_X, SegmentBudget, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
@@ -31,6 +33,7 @@ use crate::user_mappings::{
 use crate::vma_region::{
     Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion,
 };
+use lock_profile::VmLock;
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// Per-process VM slot, protected by the per-slot lock in `PROCESS_VMS`.
@@ -146,7 +149,7 @@ impl VmReservation {
 
 fn count_bound_slots() -> u32 {
     (0..MAX_PROCESSES)
-        .filter(|&i| slot_pid_lock_free(&PROCESS_VMS[i]) != INVALID_PROCESS_ID)
+        .filter(|&i| slot_pid_lock_free(PROCESS_VMS[i].raw()) != INVALID_PROCESS_ID)
         .count() as u32
 }
 
@@ -159,11 +162,11 @@ pub struct ProcessVmRef {
 }
 
 /// Independently lockable, so unrelated processes never contend.
-static PROCESS_VMS: [SpinLock<ProcessVm>; MAX_PROCESSES] = {
-    const INIT: SpinLock<ProcessVm> = SpinLock::new(
+static PROCESS_VMS: [VmLock; MAX_PROCESSES] = {
+    const INIT: VmLock = VmLock::new(SpinLock::new(
         ProcessVm::new(),
         lock_class!("PROCESS_VMS", LOCK_LEVEL_RESOURCE),
-    );
+    ));
     [INIT; MAX_PROCESSES]
 };
 
@@ -288,6 +291,7 @@ pub fn process_vm_handle(process: ProcessId) -> Option<Handle<ProcessVm>> {
 /// A rebound slot resolves to [`HandleError::Stale`]; an unbound slot to
 /// [`HandleError::NoEntry`]; an out-of-range slot to
 /// [`HandleError::OutOfBounds`].
+#[track_caller]
 pub fn process_vm_with_handle<R>(
     handle: Handle<ProcessVm>,
     f: impl FnOnce(&mut ProcessVm) -> R,
@@ -310,6 +314,7 @@ pub fn process_vm_with_handle<R>(
 
 /// The shape every caller should reach for: a process whose slot has been
 /// rebound answers `Stale` instead of handing back a stranger's page tables.
+#[track_caller]
 pub fn process_vm_with_process<R>(
     process: Handle<Process>,
     f: impl FnOnce(&mut ProcessVm) -> R,
@@ -381,6 +386,7 @@ pub fn process_vm_get_cr3_phys_by_handle(handle: Handle<ProcessVm>) -> Result<u6
 
 /// Runs `f` under the per-process lock; a rebound slot resolves to
 /// [`HandleError::Stale`] rather than to its current occupant.
+#[track_caller]
 pub fn process_vm_with_vm_space_by_handle<R>(
     handle: Handle<ProcessVm>,
     f: impl FnOnce(&mut KArc<VmSpace>) -> R,
@@ -392,6 +398,7 @@ pub fn process_vm_with_vm_space_by_handle<R>(
 /// Like [`process_vm_with_vm_space_by_handle`] but also resolves the
 /// covering [`VmaRegion`] for `fault_addr` under the same lock, so the
 /// demand-fault path decides and acts in one acquisition.
+#[track_caller]
 pub fn process_vm_with_vm_space_and_region_by_handle<R>(
     handle: Handle<ProcessVm>,
     fault_addr: u64,
@@ -410,21 +417,24 @@ pub fn process_vm_with_vm_space_and_region_by_handle<R>(
 
 /// The demand-fault hold: the address space, the covering [`VmaRegion`] and
 /// the map it is charged through, under one acquisition.
+#[track_caller]
 pub fn process_vm_with_fault_context_by_handle<R>(
     handle: Handle<ProcessVm>,
     fault_addr: u64,
-    f: impl FnOnce(&mut KArc<VmSpace>, &mut VmaMap, VmaRegion) -> R,
+    f: impl FnOnce(&mut KArc<VmSpace>, &mut VmaMap, (u64, u64), VmaRegion) -> R,
 ) -> Result<R, HandleError> {
     process_vm_with_handle(handle, |proc| {
-        let region = proc.vma_map.find_containing(fault_addr)?.2.clone();
+        let (start, end, region) = proc.vma_map.find_containing(fault_addr)?;
+        let (bounds, region) = ((start, end), region.clone());
         let vm_space = proc.vm_space.as_mut()?;
-        Some(f(vm_space, &mut proc.vma_map, region))
+        Some(f(vm_space, &mut proc.vma_map, bounds, region))
     })?
     .ok_or(HandleError::NoEntry)
 }
 
 /// [`process_vm_with_vm_space_and_region_by_handle`] with the covering VMA's
 /// extent too, which is what turns `fault_addr` into a file page index.
+#[track_caller]
 pub fn process_vm_with_vm_space_and_area_by_handle<R>(
     handle: Handle<ProcessVm>,
     fault_addr: u64,
@@ -542,6 +552,7 @@ pub fn process_vm_activate(process: ProcessId) -> bool {
 /// Run `f` under the per-process lock with mutable access to `process`'s
 /// `KArc<VmSpace>`. `None` if the slot is unbound or has no `vm_space`.
 /// The closure runs with the lock held — keep the body fast.
+#[track_caller]
 pub fn process_vm_with_vm_space<R>(
     process: ProcessId,
     f: impl FnOnce(&mut KArc<VmSpace>) -> R,
@@ -560,6 +571,7 @@ pub fn process_vm_with_vm_space<R>(
 /// Like [`process_vm_with_vm_space`] but also hands out the map and the
 /// [`VmaRegion`] covering `fault_addr`, under the same lock: dropping and
 /// re-acquiring it would deadlock the recursive demand-fault path.
+#[track_caller]
 pub fn process_vm_with_fault_context<R>(
     process: ProcessId,
     fault_addr: u64,
@@ -582,6 +594,7 @@ pub fn process_vm_with_fault_context<R>(
 /// Test-only: the fault path resolves by handle, so the by-handle twin is the
 /// production one.
 #[cfg(feature = "test-hooks")]
+#[track_caller]
 pub fn process_vm_with_vm_space_and_area<R>(
     process: ProcessId,
     fault_addr: u64,
@@ -653,7 +666,7 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
     }
 
     for i in 0..MAX_PROCESSES {
-        let pid = slot_pid_lock_free(&PROCESS_VMS[i]);
+        let pid = slot_pid_lock_free(PROCESS_VMS[i].raw());
         if pid == INVALID_PROCESS_ID {
             continue;
         }
@@ -1757,7 +1770,7 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             return None;
         }
 
-        klog_info!("Created process VM space for PID {}", process_id);
+        klog_debug!("Created process VM space for PID {}", process_id);
     }
     tlb::register_process_tlb(slot_tlb_key(slot));
     Some(ProcessVmRef {
@@ -1778,7 +1791,7 @@ pub fn destroy_process_vm(process: ProcessId) -> c_int {
             return 0;
         }
     }
-    klog_info!("Destroying process VM space for PID {}", process.id());
+    klog_debug!("Destroying process VM space for PID {}", process.id());
     let released: Option<KArc<Process>>;
     let space: Option<KArc<VmSpace>>;
 
@@ -1935,7 +1948,7 @@ pub fn init_process_vm() -> c_int {
 /// behind every address-space operation.
 fn reconcile_page_charges(report: &mut dyn FnMut(slopos_ostd::process::AccountId, u32, u32)) {
     for slot in PROCESS_VMS.iter() {
-        let Some(guard) = slot.try_lock() else {
+        let Some(guard) = slot.raw().try_lock() else {
             continue;
         };
         if guard.process.is_none() {
@@ -2026,7 +2039,7 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
 
     // Read the extent before taking the slot lock: allocating under that
     // IRQs-off lock can itself trigger a cross-CPU drain, and deadlock.
-    let (stack_start, stack_end) = slot_read_lock_free(&PROCESS_VMS[slot], |inner| {
+    let (stack_start, stack_end) = slot_read_lock_free(PROCESS_VMS[slot].raw(), |inner| {
         (inner.stack_start, inner.stack_end)
     });
     if stack_end <= stack_start {
@@ -3273,7 +3286,7 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         return None;
     }
 
-    klog_info!(
+    klog_debug!(
         "process_vm_clone_cow: Cloned PID {} -> PID {} ({} COW pages)",
         parent.id(),
         child_id,

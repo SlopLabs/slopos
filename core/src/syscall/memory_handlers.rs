@@ -1,7 +1,7 @@
 use slopos_abi::Errno;
 use slopos_abi::file_ops::FileKind;
 use slopos_abi::syscall::{
-    MAP_PRIVATE, MAP_SHARED, MFD_CLOEXEC, MS_ASYNC, MS_INVALIDATE, MS_SYNC, PROT_WRITE,
+    MAP_PRIVATE, MAP_SHARED, MFD_CLOEXEC, MS_ASYNC, MS_INVALIDATE, MS_SYNC, PROT_EXEC, PROT_WRITE,
 };
 use slopos_fs::fileio::OpenMode;
 use slopos_fs::filemap;
@@ -89,6 +89,9 @@ fn mmap_regular_file(
     // `process_vm_mmap_file` retained it a second time for the VMA; drop this
     // call's own hold.
     filemap::release(map, page_count);
+    if prot & PROT_EXEC != 0 {
+        slopos_sched::profile::note_exec_mapping(result, length, offset, inode, stat.size);
+    }
     Ok(result)
 }
 

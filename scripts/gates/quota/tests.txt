@@ -16,13 +16,19 @@
 # the deterministic rows and every new row carry this capture's exact peak.
 # The task row after userland rose from 10 with `install_test`, which runs
 # `/bin/bootctl` as a child; it is timing-dependent, and two captures of one
-# tree measured 11 and 12. The process row fell from 256 to 20 because an exited process is now torn
-# down and retired instead of leaking until shutdown. The commitpages row
+# tree measured 11 and 12, then 13 once an interrupt-delivered wake preempted
+# an equal-priority task and an enqueue behind a running task began kicking an
+# idle CPU: more of the userland suite's children overlap. The process row fell
+# from 256 to 20 because an exited process is now torn down and retired
+# instead of leaking until shutdown, and rose to 21 with that same scheduling
+# change, since its peak is how many exited children are still being torn
+# down while the next ones start. The commitpages row
 # after userland is the build-loop tests reserving six tenths of the
 # headroom, which moves with usable memory and with what else holds a
 # promise at that moment: three captures measured 120 266, 120 318 and
-# 120 319, then two captures of the in-guest toolchain work 120 602 each, and
-# the cap is the largest. The expected refusals are the kernel stest that lowers the
+# 120 319, then two captures of the in-guest toolchain work 120 602 each, then
+# 121 633 once slibc's allocator became a per-thread segment allocator, whose
+# 4 MiB segments are promised whole, and the cap is the largest. The expected refusals are the kernel stest that lowers the
 # root ceiling and over-asks once, then the build-loop utest: its over-ask is
 # refused twice, because the mmap handler reclaims and retries a refused
 # request once, and its fork past the ceiling is refused once. The pages row
@@ -62,7 +68,7 @@ post-kernel-tests	pinnedbytes	4
 post-kernel-tests	process	14
 post-kernel-tests	residentpages	772
 post-kernel-tests	task	8
-post-userland-tests	commitpages	120602
+post-userland-tests	commitpages	121633
 post-userland-tests	custody	8
 post-userland-tests	diskblocks	3658
 post-userland-tests	fdslot	256
@@ -70,9 +76,9 @@ post-userland-tests	kernelmeta	10035
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
-post-userland-tests	process	20
+post-userland-tests	process	21
 post-userland-tests	residentpages	160371
-post-userland-tests	task	12
+post-userland-tests	task	13
 
 # The charge path's cost, as ratios rather than cycle counts. A cycle
 # count here measures the accelerator: the same tree reports ~1500
