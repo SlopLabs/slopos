@@ -217,7 +217,10 @@ bootstrap copies the prefix into the target sysroot, so the libraries reach
 the toolchain install and the dev disk. **No patch, ever:** a recipe is the
 tarball and its template, and a build that would need an edit to upstream is
 a slibc or kernel finding, fixed there. `scripts/check_recipes.sh` holds the
-shape.
+shape, and holds every `arg` and the OpenSSL target definition to a grammar
+that can carry no code — a compiler flag, a CMake script, a launcher or a
+search root edits what is built without touching a file — and the driver
+fails any build that leaves the unpacked tree other than the tarball made it.
 
 **`just toolchain --pgo` builds the compiler as a Rust release is.** ThinLTO
 and one codegen unit for rustc's crates, ThinLTO for LLVM, and

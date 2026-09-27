@@ -10,7 +10,10 @@ set -euo pipefail
 # and one of the build templates below — and nothing else: no patch, no edit
 # to the unpacked source. A build that would need one is a finding against
 # slibc or the kernel, fixed there. `scripts/check_recipes.sh` holds every
-# recipe to that shape.
+# recipe to that shape, and this driver proves it of every build: both
+# templates build out of the unpacked tree, and a recipe whose configure,
+# build or install leaves that tree other than the tarball unpacked it — a
+# byte, a mode, a file, or a change time — fails.
 #
 # `toolchain/recipes/<name>/recipe` is `key=value`, one per line, `#`
 # comments ignored:
@@ -270,6 +273,15 @@ template_openssl() {
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
 }
 
+# The unpacked tree as the tarball made it: every entry's path, type, mode,
+# change time and link target, then every file's checksum. No write can set
+# a change time back, so an edit a build makes and then undoes is caught as
+# surely as one it leaves.
+source_manifest() {
+    (cd "$1" && find . -printf '%p %y %m %C@ %l\n' | LC_ALL=C sort &&
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum)
+}
+
 build_recipe() {
     local name="$1" want="$2" work="$OUT/$name" tarball template
     tarball="$(fetch "$name")"
@@ -283,13 +295,18 @@ build_recipe() {
     rm -rf "$work"
     mkdir -p "$work/src"
     tar -xf "$tarball" -C "$work/src" --strip-components=1 || die "$name: could not unpack $tarball"
+    source_manifest "$work/src" >"$work/source.manifest"
     "template_$template" "$name" "$work"
+    source_manifest "$work/src" | diff "$work/source.manifest" - >"$work/source.diff" || {
+        head -n 20 "$work/source.diff" >&2
+        die "$name: the build changed the upstream source tree; recipes build it unmodified — see $work/source.diff"
+    }
 
     [ -d "$work/dest$PREFIX" ] || die "$name: the install put nothing under $PREFIX"
     (cd "$work/dest$PREFIX" && find . ! -type d -print | sed 's|^\./||' | LC_ALL=C sort) >"$work/manifest"
     cp -a "$work/dest$PREFIX/." "$PREFIX/"
     installed "$name" || die "$name: installed no lib/$(recipe_values "$name" soname | tr '\n' ' ')"
-    rm -rf "$work/src" "$work/build" "$work/dest"
+    rm -rf "$work/src" "$work/build" "$work/dest" "$work/source.manifest" "$work/source.diff"
     printf '%s\n' "$want" >"$work/stamp"
 }
 
