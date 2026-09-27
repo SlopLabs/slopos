@@ -1009,11 +1009,12 @@ fn probe_fault(map: FileMapRef, page_index: u64) -> Result<FaultProbe, FileMapEr
     if entry.forgotten {
         return Err(FileMapError::Stale);
     }
-    // A writable set is written back whole, so a page it reads ahead is a
-    // page it later writes.
+    // A writable set is written back whole, so a page read ahead into one is
+    // written back too, touched or not. Read ahead anyway: a linker writes
+    // its output through a mapping, every page of it, and a window of one
+    // is a fault and a fill per page of a 100 MiB kernel image.
     let mut window = 1u64;
-    while !entry.dirtyable
-        && window < READAHEAD_PAGES
+    while window < READAHEAD_PAGES
         && entry.index_of(page_index + window).is_some()
         && entry.frame_at(page_index + window).is_none()
     {
