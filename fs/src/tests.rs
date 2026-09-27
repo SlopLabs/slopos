@@ -1,3 +1,4 @@
+pub mod dcache;
 pub mod dirchurn;
 pub mod dquota;
 pub mod filemap;

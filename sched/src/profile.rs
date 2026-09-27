@@ -545,6 +545,20 @@ fn report_ext2_lock(phase: &str, per_ms: u64) {
         max_wait * 1000 / per_ms,
         max_hold * 1000 / per_ms,
     );
+    slopos_fs::ext2_vfs::lock_profile::for_each_site(|location, acquires, wait, hold| {
+        if (wait + hold) / per_ms == 0 && acquires < 10_000 {
+            return;
+        }
+        klog_info!(
+            "PROF[{}]: ext2 lock site={}:{} acquires={} wait_ms={} hold_ms={}",
+            phase,
+            location.file(),
+            location.line(),
+            acquires,
+            wait / per_ms,
+            hold / per_ms,
+        );
+    });
 }
 
 #[inline(never)]

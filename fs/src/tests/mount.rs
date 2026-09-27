@@ -916,6 +916,13 @@ fn headroom_body(
             short = true;
             break;
         }
+        // Out of the ring: the next round's operations on the same blocks
+        // would otherwise rewrite this compound in place and never fill the
+        // log.
+        handle
+            .fs
+            .sync_inode(handle.inode, false)
+            .map_err(|_| "an fsync in the burst failed")?;
     }
     if !short {
         return Err("the burst never drove the log past its low-water mark");

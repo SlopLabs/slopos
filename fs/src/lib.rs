@@ -18,6 +18,7 @@ pub mod blockdev;
 pub mod cpio;
 pub mod devfs;
 pub mod ext2;
+pub mod ext2_dcache;
 pub mod ext2_vfs;
 pub mod fileio;
 pub mod filemap;

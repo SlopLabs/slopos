@@ -4,7 +4,8 @@ use slopos_ostd::sync::lock_tracking::{LOCK_LEVEL_RESOURCE, LockClassKey};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 use crate::ext2::cache::{BlockCache, DataBatch, cache_entries_for};
-use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason, SyncPass};
+use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock, ReadOnlyReason, SyncPass};
+use crate::ext2_dcache::{Ext2Dcache, InodeAttr, NameKey};
 use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult, orphan};
 use slopos_kernel_services::driver_runtime::{current_task_account, current_task_is_privileged};
@@ -13,7 +14,7 @@ use slopos_ostd::klog_info;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
-use slopos_ostd::sync::{InitFlag, Mutex, MutexGuard, WaitResult};
+use slopos_ostd::sync::{InitFlag, Mutex, MutexGuard, OnceLock, WaitResult};
 
 /// `prof=on`: how long operations wait for a mount's lock and how long its
 /// holders keep it, summed over every mount. Every operation on a mount
@@ -59,6 +60,17 @@ pub mod lock_profile {
     pub fn writeback_hold() -> u64 {
         WRITEBACK_HOLD_CYCLES.load(Ordering::Relaxed)
     }
+
+    pub(super) static SITES: slopos_mm::lock_sites::SiteTable =
+        slopos_mm::lock_sites::SiteTable::new(slopos_ostd::lock_class!(
+            "EXT2_LOCK_SITES",
+            slopos_ostd::sync::LOCK_LEVEL_UNORDERED
+        ));
+
+    /// Every call site seen: `(location, acquires, wait cycles, hold cycles)`.
+    pub fn for_each_site(f: impl FnMut(&'static core::panic::Location<'static>, u64, u64, u64)) {
+        SITES.for_each(f);
+    }
 }
 
 /// The mount lock's guard, timing its hold when `prof=on`.
@@ -66,6 +78,7 @@ struct CachedGuard<'a> {
     guard: MutexGuard<'a, Option<CachedExt2>>,
     acquired: u64,
     writeback: bool,
+    site: Option<&'static slopos_mm::lock_sites::Site>,
 }
 
 impl core::ops::Deref for CachedGuard<'_> {
@@ -89,6 +102,9 @@ impl Drop for CachedGuard<'_> {
             lock_profile::MAX_HOLD.fetch_max(held, Ordering::Relaxed);
             if self.writeback {
                 lock_profile::WRITEBACK_HOLD_CYCLES.fetch_add(held, Ordering::Relaxed);
+            }
+            if let Some(site) = self.site {
+                site.note_hold(held);
             }
         }
     }
@@ -301,6 +317,14 @@ pub struct Ext2Mount {
     /// A pass finished with the image left dirty on the medium because the
     /// mount was not idle yet; a later visit stamps it clean.
     clean_owed: AtomicBool,
+    /// The name and attribute caches `lookup` and `stat` answer from without
+    /// the lock. Built at the slot's first attach and never freed, because a
+    /// reader holds no lock that would keep it alive.
+    dcache: OnceLock<Ext2Dcache>,
+    /// The caches describe the attached image: set once attach has
+    /// invalidated them behind the replay and orphan drain, cleared before
+    /// detach lets the image go.
+    dcache_live: AtomicBool,
     /// The pool flusher passes this instance by, so a test can hold the log
     /// and the open pass in the state it built.
     #[cfg(feature = "tests")]
@@ -351,6 +375,8 @@ impl Ext2Mount {
             last_full_ms: AtomicU64::new(0),
             last_busy_ms: AtomicU64::new(0),
             clean_owed: AtomicBool::new(false),
+            dcache: OnceLock::new(),
+            dcache_live: AtomicBool::new(false),
             #[cfg(feature = "tests")]
             flusher_excluded: AtomicBool::new(false),
         }
@@ -366,30 +392,40 @@ impl Ext2Mount {
         self.init.is_set() && self.read_only.load(Ordering::Acquire)
     }
 
+    #[track_caller]
     fn lock_cached(&self) -> WaitResult<CachedGuard<'_>> {
+        let location = core::panic::Location::caller();
         let began = lock_profile::stamp();
         let guard = self.cached.lock()?;
         let acquired = lock_profile::stamp();
+        let mut site = None;
         if began != 0 {
             let waited = acquired.saturating_sub(began);
             lock_profile::ACQUIRES.fetch_add(1, Ordering::Relaxed);
             lock_profile::WAIT_CYCLES.fetch_add(waited, Ordering::Relaxed);
             lock_profile::MAX_WAIT.fetch_max(waited, Ordering::Relaxed);
+            site = lock_profile::SITES.site(location);
+            if let Some(site) = site {
+                site.note_acquire(waited);
+            }
         }
         Ok(CachedGuard {
             guard,
             acquired,
             writeback: false,
+            site,
         })
     }
 
     /// [`Self::lock_cached`] for writeback, whose hold `prof=on` reports apart.
+    #[track_caller]
     fn lock_cached_for_writeback(&self) -> WaitResult<CachedGuard<'_>> {
         let mut guard = self.lock_cached()?;
         guard.writeback = true;
         Ok(guard)
     }
 
+    #[track_caller]
     fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
         if !self.init.is_set() {
             return Err(VfsError::IoError);
@@ -453,6 +489,7 @@ impl Ext2Mount {
         // nothing about how much of the volume one principal may hold.
         fs.set_account(current_task_account());
         fs.set_journal_inode(cached.journal_inode);
+        fs.set_gens(self.dcache.get().map(Ext2Dcache::gens));
         // Classified on reads too, not only in the mutating entry points: a
         // read that finds a group descriptor pointing outside the volume is
         // the same evidence of damage, and a mount that keeps writing after
@@ -594,15 +631,19 @@ impl Ext2Mount {
 }
 
 trait Ext2VfsBackend {
+    #[track_caller]
     fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R>;
     /// The flusher kthread is what drains a filesystem's deferred frees.
     fn ext2_wake_for_detached(&self);
     fn ext2_sync(&self) -> VfsResult<()>;
     fn ext2_statfs(&self) -> VfsResult<FsStats>;
     fn ext2_sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()>;
+    /// `None` while nothing is attached or the caches could not be built.
+    fn ext2_dcache(&self) -> Option<&Ext2Dcache>;
 }
 
 impl Ext2VfsBackend for Ext2Mount {
+    #[track_caller]
     fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
         self.with_fs(f)
     }
@@ -622,6 +663,13 @@ impl Ext2VfsBackend for Ext2Mount {
     fn ext2_sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
         self.sync_one_inode(inode, data_only)
     }
+
+    fn ext2_dcache(&self) -> Option<&Ext2Dcache> {
+        if !self.dcache_live.load(Ordering::Acquire) {
+            return None;
+        }
+        self.dcache.get()
+    }
 }
 
 impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
@@ -634,33 +682,52 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
     }
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
-        self.with_ext2(|fs| {
-            fs.lookup_child(parent as u32, name)
-                .map(|ino| ino.raw() as InodeId)
-        })
+        let dcache = self.ext2_dcache();
+        let key = dcache.and_then(|_| NameKey::new(parent, name));
+        if let (Some(dcache), Some(key)) = (dcache, key.as_ref())
+            && let Some(found) = dcache.lookup(key)
+        {
+            return found.map(InodeId::from).ok_or(VfsError::NotFound);
+        }
+        let mut stamp = None;
+        let found = self.with_ext2(|fs| {
+            // Under the lock, before the read: a mutation after this point
+            // moves the counter past what the entry is stamped with.
+            if let (Some(dcache), Some(key)) = (dcache, key.as_ref()) {
+                stamp = Some(dcache.name_stamp(key));
+            }
+            match fs.lookup_child(parent as u32, name) {
+                Ok(ino) => Ok(Some(ino.raw())),
+                Err(Ext2Error::PathNotFound) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })?;
+        if let (Some(dcache), Some(key), Some(stamp)) = (dcache, key.as_ref(), stamp) {
+            dcache.insert_name(key, stamp, found);
+        }
+        found.map(InodeId::from).ok_or(VfsError::NotFound)
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        self.with_ext2(|fs| {
-            let ext2_inode = fs.read_inode(inode as u32)?;
-            Ok(FileStat {
-                inode,
-                file_type: inode_to_file_type(&ext2_inode),
-                size: ext2_inode.size as u64,
-                mode: ext2_inode.mode,
-                nlink: ext2_inode.links_count as u32,
-                uid: ext2_inode.uid as u32,
-                gid: ext2_inode.gid as u32,
-                atime: ext2_inode.atime as u64,
-                mtime: ext2_inode.mtime as u64,
-                ctime: ext2_inode.ctime as u64,
-                dev_major: 0,
-                dev_minor: 0,
-                // `EXT2_IMMUTABLE_FL` is the carrier, so the seal survives a
-                // reboot and reads as one to `lsattr` and `e2fsck`.
-                sealed: ext2_inode.is_immutable(),
-            })
-        })
+        let dcache = self.ext2_dcache();
+        let ino = u32::try_from(inode).ok();
+        if let (Some(dcache), Some(ino)) = (dcache, ino)
+            && let Some(attr) = dcache.attr(ino)
+        {
+            return Ok(attr.to_stat(inode));
+        }
+        let mut stamp = None;
+        let attr = self.with_ext2(|fs| {
+            if let (Some(dcache), Some(ino)) = (dcache, ino) {
+                stamp = Some(dcache.attr_stamp(ino));
+            }
+            fs.read_inode(inode as u32)
+                .map(|record| InodeAttr::of(&record))
+        })?;
+        if let (Some(dcache), Some(ino), Some(stamp)) = (dcache, ino, stamp) {
+            dcache.insert_attr(ino, stamp, attr);
+        }
+        Ok(attr.to_stat(inode))
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
@@ -839,8 +906,18 @@ impl Ext2Mount {
         if !self.init.init_once() {
             return Err(VfsError::AlreadyExists);
         }
-        match self.mount_device(device, read_only) {
-            Ok(info) => Ok(info),
+        self.dcache.call_once(Ext2Dcache::new);
+        let mounted = self.mount_device(device, read_only);
+        // After the replay and the orphan drain, which rewrite blocks without
+        // telling the caches, and whatever the last image left in them.
+        if let Some(dcache) = self.dcache.get() {
+            dcache.invalidate_all();
+        }
+        match mounted {
+            Ok(info) => {
+                self.dcache_live.store(true, Ordering::Release);
+                Ok(info)
+            }
             Err(e) => {
                 // `init` stays set when the device could not be taken back:
                 // an instance that reports uninitialised while still holding
@@ -865,8 +942,13 @@ impl Ext2Mount {
         }
         let _ = self.sync_fs();
         self.mark_filesystem_clean();
+        self.dcache_live.store(false, Ordering::Release);
         if !self.clear_cached() {
+            self.dcache_live.store(true, Ordering::Release);
             return false;
+        }
+        if let Some(dcache) = self.dcache.get() {
+            dcache.invalidate_all();
         }
         self.init.reset();
         self.read_only.store(false, Ordering::Release);
@@ -1679,20 +1761,6 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
         Ext2Error::Immutable => VfsError::PermissionDenied,
         Ext2Error::InvalidPath => VfsError::InvalidPath,
         Ext2Error::Interrupted => VfsError::Interrupted,
-    }
-}
-
-fn inode_to_file_type(inode: &Ext2Inode) -> FileType {
-    let mode = inode.mode & 0xF000;
-    match mode {
-        0x4000 => FileType::Directory,
-        0x8000 => FileType::Regular,
-        0xA000 => FileType::Symlink,
-        0x2000 => FileType::CharDevice,
-        0x6000 => FileType::BlockDevice,
-        0x1000 => FileType::Pipe,
-        0xC000 => FileType::Socket,
-        _ => FileType::Regular,
     }
 }
 

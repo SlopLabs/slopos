@@ -368,6 +368,9 @@ pub struct Ext2Fs<'a> {
     /// The log's own file, kept even when no log was attached: the reason to
     /// refuse a reader is the file's contents, not whether this boot logs.
     journal_inode: Option<u32>,
+    /// The mount's cache generations, bumped by every change a cached lookup
+    /// or `stat` could see. `None` on a handle no cache sits in front of.
+    gens: Option<&'a crate::ext2_dcache::Ext2Gens>,
 }
 
 impl<'a> Ext2Fs<'a> {
@@ -431,11 +434,34 @@ impl<'a> Ext2Fs<'a> {
             in_transaction: false,
             pending_orphan_head: None,
             journal_inode: None,
+            gens: None,
         })
     }
 
     pub fn geometry(&self) -> &Ext2Geometry {
         &self.geom
+    }
+
+    pub fn set_gens(&mut self, gens: Option<&'a crate::ext2_dcache::Ext2Gens>) {
+        self.gens = gens;
+    }
+
+    fn note_record(&self, ino: InodeNum) {
+        if let Some(gens) = self.gens {
+            gens.note_record(ino.raw());
+        }
+    }
+
+    fn note_entry(&self, dir: InodeNum, name: &[u8]) {
+        if let Some(gens) = self.gens {
+            gens.note_entry(dir.raw(), name);
+        }
+    }
+
+    fn note_life(&self, ino: InodeNum) {
+        if let Some(gens) = self.gens {
+            gens.note_life(ino.raw());
+        }
     }
 
     /// Hold back `reserved` blocks from unprivileged allocation
@@ -844,8 +870,12 @@ impl<'a> Ext2Fs<'a> {
     ///
     /// The epoch is fixed here, so a pass driven one [`Self::sync_step`] at a
     /// time with the mount lock dropped in between still writes nothing a
-    /// later operation dirtied — which is what keeps the phases ordered.
-    pub fn begin_sync(&self) -> SyncPass {
+    /// later operation dirtied — which is what keeps the phases ordered. The
+    /// log's open compound is sealed here for the same reason: a later
+    /// operation joining it would have the pass commit metadata whose data
+    /// the pass never wrote.
+    pub fn begin_sync(&mut self) -> SyncPass {
+        self.cache.seal_log();
         SyncPass {
             epoch: self.cache.writeback_epoch(),
             phase: SyncPhase::Data,
@@ -1110,6 +1140,15 @@ impl<'a> Ext2Fs<'a> {
         self.device_barrier()
     }
 
+    /// Close the log's open compound where it stands, as a writeback pass
+    /// opening does, and answer the head: a boundary a crash test may cut the
+    /// ring at without cutting a transaction.
+    #[cfg(feature = "tests")]
+    pub fn seal_journal_for_test(&mut self) -> u32 {
+        self.cache.seal_log();
+        self.cache.journal_head()
+    }
+
     /// Where the log's append point stands. `1` is empty, and so is no log.
     pub fn journal_head(&self) -> u32 {
         self.cache.journal_head()
@@ -1186,6 +1225,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     fn write_inode_num(&mut self, ino: InodeNum, inode: &Inode) -> Result<(), Ext2Error> {
+        self.note_record(ino);
         let (blk_num, within) = self.inode_disk_offset(ino)?;
         let size = self.inode_size as usize;
         let owner = self.inode_block_owner(ino, blk_num)?;
@@ -1436,6 +1476,7 @@ impl<'a> Ext2Fs<'a> {
             fs.deindex_directory(parent_num, &mut parent_inode)?;
 
             let ft = dir_file_type(&target_inode);
+            fs.note_entry(parent_num, name);
             dir::append_dir_entry(
                 &mut parent_inode,
                 target_num,
@@ -1685,6 +1726,7 @@ impl<'a> Ext2Fs<'a> {
             &mut *self.cache,
             self.device,
         )?;
+        self.note_life(new_ino);
 
         let mut new_inode = self.build_new_inode(new_ino, parent_num, kind)?;
         let now = time::now_unix();
@@ -1698,6 +1740,7 @@ impl<'a> Ext2Fs<'a> {
             NewInode::File => DIR_FT_REG_FILE,
             NewInode::Symlink(_) => DIR_FT_SYMLINK,
         };
+        self.note_entry(parent_num, name);
         dir::append_dir_entry(
             &mut parent,
             new_ino,
@@ -1933,6 +1976,7 @@ impl<'a> Ext2Fs<'a> {
             self.cache.forget_dir_index(target_num.raw());
         }
 
+        self.note_entry(parent_num, name);
         dir::remove_dir_entry(
             &parent_inode,
             name,
@@ -1994,6 +2038,7 @@ impl<'a> Ext2Fs<'a> {
         if !target.is_fast_symlink() {
             self.release_file_blocks(target, BlockOwner::File(target_num.raw()))?;
         }
+        self.note_life(target_num);
         ext2_alloc::free_inode(
             target_num,
             &self.geom,
@@ -2412,6 +2457,7 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::TooManyLinks);
         }
         self.deindex_directory(new_parent, &mut target_parent)?;
+        self.note_entry(new_parent, new_name);
         dir::append_dir_entry(
             &mut target_parent,
             plan.source,
@@ -2443,6 +2489,7 @@ impl<'a> Ext2Fs<'a> {
         // both ends name one directory.
         let mut source_parent = self.read_inode_num(old_parent)?;
         self.deindex_directory(old_parent, &mut source_parent)?;
+        self.note_entry(old_parent, old_name);
         dir::remove_dir_entry(
             &source_parent,
             old_name,

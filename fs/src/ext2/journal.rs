@@ -37,7 +37,22 @@
 //! barrier — jbd2's group commit. [`Self::write_pending`] is that write; the
 //! cache owns the ordering around it (`data=ordered` data first, a barrier
 //! after), and no home location is written from a record until the barrier
-//! behind it has been issued.
+//! behind its commit record has been issued.
+//!
+//! The operations waiting in the ring form one *compound* transaction, as a
+//! jbd2 transaction does: they share one sequence and get one commit record,
+//! put behind them when the ring is written out ([`Self::seal`]), so a crash
+//! keeps all of them or none. A block whose newest record is still an
+//! unwritten image in the compound is not logged again: the cache rewrites
+//! that image in place ([`Self::rewrite`]), which is what holds a burst of
+//! operations on the same directory to one slot per block instead of one per
+//! block per operation. An image joins the commit CRC only when the device
+//! takes it or the compound is sealed, so the CRC covers the final images.
+//!
+//! An operation that must put a record in the log before its own commit — a
+//! spilled block, a full revoke list — seals the compound first, because
+//! those records are not committed ones and a later write-out must be able to
+//! commit everything before them without them.
 
 use slopos_mm::slab::MAX_ALLOC_SIZE;
 use slopos_ostd::mm::AllocError;
@@ -114,6 +129,13 @@ const CHECKPOINT_RUN: usize = 8;
 /// Slots whose images the log may hold in memory: 8 MiB at 4 KiB blocks.
 /// Past it an operation's records force the ring out first.
 const PENDING_SLOTS_MAX: usize = 2048;
+
+/// Ring slots [`Journal::pending_room`] holds back from an operation: one for
+/// the commit record that seals the compound ahead of a mid-operation record,
+/// one for the commit that closes the operation's own transaction. Every
+/// record reservation also leaves a slot of the log itself, so sealing can
+/// never find the log or the ring full.
+const COMMIT_RESERVE: u32 = 2;
 
 /// The volume the log belongs to, so a target block read off the medium can be
 /// refused before it becomes a write offset.
@@ -222,9 +244,16 @@ pub struct Journal {
     /// Bumped by every abort that put mappings back. A pass whose cursor went
     /// by a slot before it was restored must not empty the log behind it.
     restores: u32,
-    /// `head` when the open operation began, for the abort rewind.
+    /// `head` when the open operation began, for the abort rewind; `head`
+    /// again once it ends, so between operations `sealed..op_head` is every
+    /// committed record still waiting for a commit record.
     op_head: u32,
-    /// Running CRC over the open transaction's records.
+    /// First slot of the open transaction: every record below it is covered
+    /// by a commit record.
+    sealed: u32,
+    /// Running CRC over the open transaction's slots the device has taken,
+    /// `sealed..written`. The rest are fed in when it is sealed, so an image
+    /// rewritten in place is counted as it finally stands.
     crc: u32,
     /// Device writes issued since the caller last took the count. The cache
     /// owns the barrier accounting, so the log only reports.
@@ -237,9 +266,15 @@ pub struct Journal {
     pending: KVec<Frame<PageCacheMeta>>,
     /// Slots below this have been handed to the device.
     written: u32,
-    /// Slots below this were handed to the device before the last barrier:
-    /// the durable prefix.
+    /// End of the newest commit record handed to the device before the last
+    /// barrier: the durable prefix. Never inside a transaction, so a slot
+    /// below it belongs to a commit the medium holds.
     barriered: u32,
+    /// End of the newest commit record handed to the device so far.
+    committed_written: u32,
+    /// One bit per slot, set on a commit record's. How a write-out of part of
+    /// the ring learns which transactions it completed.
+    commit_marks: KVec<u64>,
     /// The open operation outgrew the ring, so its records go straight to
     /// the device.
     write_through: bool,
@@ -338,12 +373,15 @@ impl Journal {
                 write_field!(slot, generation, 0);
                 write_field!(slot, restores, 0);
                 write_field!(slot, op_head, 1);
+                write_field!(slot, sealed, 1);
                 write_field!(slot, crc, CRC32_INIT);
                 write_field!(slot, writes, 0);
                 write_field!(slot, stamp, NO_STAMP);
                 write_field!(slot, pending, KVec::new());
                 write_field!(slot, written, 1);
                 write_field!(slot, barriered, 1);
+                write_field!(slot, committed_written, 1);
+                write_field!(slot, commit_marks, KVec::zeroed(count.div_ceil(64))?);
                 write_field!(slot, write_through, false);
                 Ok(slot.finish())
             },
@@ -390,9 +428,10 @@ impl Journal {
         self.head.saturating_sub(self.written)
     }
 
-    /// Slots the ring can still take before it must be written out.
+    /// Slots the ring can still take for the open operation's records before
+    /// it must be written out; [`COMMIT_RESERVE`] of them are held back.
     pub fn pending_room(&self) -> u32 {
-        (self.pending.len() as u32).saturating_sub(self.pending_slots())
+        (self.pending.len() as u32).saturating_sub(self.pending_slots() + COMMIT_RESERVE)
     }
 
     /// Slots the ring holds at most.
@@ -411,31 +450,49 @@ impl Journal {
         self.pending.is_empty() || self.write_through
     }
 
-    /// Whether `slot` was handed to the device before the last barrier.
+    /// Whether `slot` belongs to a transaction whose commit record was handed
+    /// to the device before the last barrier.
     pub fn slot_durable(&self, slot: u32) -> bool {
         slot < self.barriered
     }
 
-    /// Every appended record is on the medium behind a barrier.
+    /// Every committed operation is on the medium behind a barrier, commit
+    /// record included, and the ring holds nothing the device lacks. The open
+    /// operation's own records carry no commit and are not waited for.
     pub fn is_durable(&self) -> bool {
-        self.barriered >= self.head
+        !self.has_unsealed() && self.written >= self.head && self.barriered >= self.sealed
+    }
+
+    /// A write-out has something to do: slots the device lacks, or committed
+    /// operations still waiting for their commit record.
+    pub fn owes_write(&self) -> bool {
+        self.pending_slots() > 0 || self.has_unsealed()
+    }
+
+    /// Committed operations' records wait in the open transaction for a
+    /// commit record.
+    pub fn has_unsealed(&self) -> bool {
+        self.sealed < self.op_head
     }
 
     /// The device has flushed everything handed to it so far.
     pub fn note_barrier(&mut self) {
-        self.barriered = self.written;
+        self.barriered = self.committed_written;
     }
 
-    /// Hand the ring's slots to the device, in runs of consecutive log
-    /// blocks. Issues no barrier and orders nothing: the caller has put the
-    /// data these records name home already, and barriers behind this.
+    /// Seal the compound and hand the ring's slots to the device, in runs of
+    /// consecutive log blocks. Issues no barrier and orders nothing: the
+    /// caller has put the data these records name home already, and barriers
+    /// behind this.
     pub fn write_pending(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        self.seal(device)?;
         self.write_pending_until(self.head, usize::MAX, device)
             .map(|_| ())
     }
 
-    /// [`Self::write_pending`] for the slots below `limit`, at most `budget`
-    /// of them. Answers whether any below `limit` are still in the ring.
+    /// The ring's slots below `limit`, at most `budget` of them, unsealed:
+    /// the caller chose `limit` at a commit record. Answers whether any below
+    /// `limit` are still in the ring.
     pub fn write_pending_until(
         &mut self,
         limit: u32,
@@ -451,11 +508,56 @@ impl Journal {
                 return Err(Ext2Error::InvalidBlock);
             }
             self.write_pending_run(self.written, run, device)?;
-            self.written += run as u32;
+            self.note_ring_written(self.written, run as u32);
             self.writes += run;
             left -= run;
         }
         Ok(self.written < end)
+    }
+
+    /// The ring slots `slot..slot + run` reached the device. Those of the
+    /// open transaction join its CRC now, since nothing may rewrite them any
+    /// more; a commit record among them completes its transaction.
+    fn note_ring_written(&mut self, slot: u32, run: u32) {
+        let bs = self.block_size as usize;
+        let mut crc = self.crc;
+        for s in slot..slot + run {
+            if s >= self.sealed {
+                crc = crc32_feed(crc, &self.ring_frame(s).as_bytes()[..bs]);
+            } else if self.is_commit(s) {
+                self.committed_written = s + 1;
+            }
+        }
+        self.crc = crc;
+        self.written = slot + run;
+    }
+
+    fn mark_commit(&mut self, slot: u32) {
+        self.commit_marks[slot as usize / 64] |= 1 << (slot % 64);
+    }
+
+    fn is_commit(&self, slot: u32) -> bool {
+        self.commit_marks[slot as usize / 64] & (1 << (slot % 64)) != 0
+    }
+
+    /// The slot whose image may be rewritten with `block`'s newer contents:
+    /// its newest record, when that is still an unwritten image of the open
+    /// transaction. A slot the device has taken is covered by the CRC already,
+    /// and one below the open transaction by a commit record.
+    pub fn rewritable_slot(&self, block: u32) -> Option<u32> {
+        if !self.defers() {
+            return None;
+        }
+        let slot = self.resident_slot(block)?;
+        (slot >= self.sealed && slot >= self.written).then_some(slot)
+    }
+
+    /// Replace the image in `slot`, one [`Self::rewritable_slot`] answered.
+    /// Final: nothing keeps the image it overwrites, so the caller does this
+    /// only once its operation can no longer fail.
+    pub fn rewrite(&mut self, slot: u32, bytes: &[u8]) {
+        debug_assert!(slot >= self.sealed && slot >= self.written && slot < self.head);
+        self.stage(slot, bytes);
     }
 
     /// `#[inline(never)]`: the segment array is 512 bytes of frame.
@@ -673,11 +775,12 @@ impl Journal {
         device.read_at(offset, out).map_err(Ext2Error::from)
     }
 
+    /// Open an operation. Its records join the open transaction, whose CRC
+    /// carries on across it.
     pub fn begin_op(&mut self) {
         self.op_head = self.head;
         self.revokes.clear();
         self.revoke_undo.clear();
-        self.crc = CRC32_INIT;
         self.write_through = false;
     }
 
@@ -685,7 +788,9 @@ impl Journal {
     ///
     /// Sound because no home block was written on its behalf, and the caller
     /// drops the operation's cache entries, so a later read comes back from
-    /// the log or from the block's own home.
+    /// the log or from the block's own home. No image below `op_head` needs
+    /// putting back: the cache rewrites the compound's images only as the last
+    /// step of a commit that can no longer fail.
     pub fn abort_op(&mut self) {
         for slot in self.op_head..self.head {
             self.index_remove(slot);
@@ -701,18 +806,18 @@ impl Journal {
         }
         self.head = self.op_head;
         // The rewound slots are rewritten by whatever appends next; a copy
-        // already on the medium is a record no commit covers.
+        // already on the medium is a record no commit covers. No commit
+        // record is among them, so the durable prefix stands.
         self.written = self.written.min(self.head);
-        self.barriered = self.barriered.min(self.head);
         self.revokes.clear();
-        self.crc = CRC32_INIT;
+        // Only an operation that began the open transaction can have put
+        // slots of it on the device: one that joined a compound appended
+        // nothing before its commit, and a record it had to write early
+        // sealed the compound first.
+        if self.sealed == self.op_head {
+            self.crc = CRC32_INIT;
+        }
         self.write_through = false;
-    }
-
-    /// The open operation appended nothing, so there is no transaction to
-    /// commit and the sequence is not spent.
-    pub fn op_is_empty(&self) -> bool {
-        self.head == self.op_head
     }
 
     /// Note that `block` was freed, so no record before this point may be
@@ -726,6 +831,9 @@ impl Journal {
             .push(block)
             .map_err(|_| Ext2Error::OutOfMemory)?;
         if self.revokes.len() >= self.max_entries() {
+            // Written before the operation commits, so not a record the
+            // compound's commit may cover.
+            self.seal(device)?;
             self.flush_revokes(device)?;
         }
         Ok(())
@@ -784,9 +892,9 @@ impl Journal {
     /// them in, so the CRC is unchanged. Runs are bounded by [`RECORD_RUN`],
     /// by the first slot whose block is not the next one, and by the first
     /// payload shorter than a block, since nothing may follow a segment that
-    /// does not fill its slot. Issues no barrier: [`Self::write_commit`]'s
-    /// record is still a separate write after every payload of the
-    /// transaction has been handed to the device.
+    /// does not fill its slot. Issues no barrier: the commit record is still a
+    /// separate write after every payload of the transaction has been handed
+    /// to the device.
     pub fn write_record<'a>(
         &mut self,
         targets: &[u32],
@@ -809,11 +917,14 @@ impl Journal {
             self.index_insert(first + i as u32, *block);
         }
 
+        // Staged images join the CRC when the device takes them or when the
+        // transaction is sealed, whichever is first: until then the cache
+        // may rewrite them.
         if self.defers() {
             self.stage_from_header(header_slot);
             for i in 0..targets.len() {
                 let seg = payload(i).ok_or(Ext2Error::DeviceError)?;
-                self.stage_fed(first + i as u32, seg);
+                self.stage(first + i as u32, seg);
             }
             return Ok(first);
         }
@@ -899,22 +1010,12 @@ impl Journal {
         }
     }
 
-    /// Stage the header buffer into `slot` and feed it to the record CRC.
+    /// Stage the header buffer into `slot`.
     fn stage_from_header(&mut self, slot: u32) {
         let bs = self.block_size as usize;
         let n = self.pending.len();
-        let image = &mut self.pending[slot as usize % n].as_bytes_mut()[..bs];
-        image.copy_from_slice(&self.header.as_slice()[..bs]);
-        self.crc = crc32_feed(self.crc, image);
-    }
-
-    /// Stage a payload into `slot` and feed its block image to the record CRC,
-    /// which is what a replay reads back.
-    fn stage_fed(&mut self, slot: u32, bytes: &[u8]) {
-        self.stage(slot, bytes);
-        let bs = self.block_size as usize;
-        let crc = crc32_feed(self.crc, &self.ring_frame(slot).as_bytes()[..bs]);
-        self.crc = crc;
+        self.pending[slot as usize % n].as_bytes_mut()[..bs]
+            .copy_from_slice(&self.header.as_slice()[..bs]);
     }
 
     /// Slots from `slot` whose blocks are one consecutive run on the device,
@@ -946,41 +1047,117 @@ impl Journal {
         data: &[u8],
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
+        // The open operation's content, which a commit of the compound must
+        // not cover.
+        self.seal(device)?;
         self.write_record(&[block], device, &mut |_| Some(data))
             .map(|_| ())
     }
 
-    /// Close the transaction. Its records become replayable the moment this
-    /// block reaches the medium, and unreadable garbage if it does not.
-    pub fn write_commit(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+    /// End the open operation. In the ring its records stay in the open
+    /// compound for the commit record a write-out puts behind it; written
+    /// through, they are committed now.
+    pub fn commit_op(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
         self.flush_revokes(device)?;
-        let slot = self.reserve(1)?;
-        let crc = crc32_finish(self.crc);
+        // Closed before `op_head` moves, so a failed commit write still
+        // rewinds the whole operation.
+        if !self.defers() && self.head > self.sealed {
+            self.close_transaction(device)?;
+        }
+        self.op_head = self.head;
+        self.revoke_undo.clear();
+        Ok(())
+    }
+
+    /// Put the commit record behind the committed operations waiting in the
+    /// open transaction. Nothing when there are none, and refused while the
+    /// open operation has records of its own in it: those are not committed.
+    pub fn seal(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        if !self.has_unsealed() {
+            return Ok(());
+        }
+        if self.head != self.op_head {
+            debug_assert!(false, "sealing over an open operation's records");
+            return Err(Ext2Error::DeviceError);
+        }
+        self.close_transaction(device)?;
+        self.op_head = self.head;
+        Ok(())
+    }
+
+    /// [`Self::seal`] for a log that stages its records, where it is only a
+    /// ring image and cannot fail: every record reservation left the slot.
+    /// A writeback pass seals as it opens, so its records end at a commit
+    /// record and no later operation joins them.
+    pub fn seal_ring(&mut self) {
+        if self.defers() && self.has_unsealed() && self.head == self.op_head {
+            let staged = self.close_transaction_staged();
+            debug_assert!(staged.is_ok(), "no slot left to seal the ring");
+            if staged.is_ok() {
+                self.op_head = self.head;
+            }
+        }
+    }
+
+    /// Append the commit record of every slot from `sealed` up. Its records
+    /// become replayable the moment it reaches the medium, and unreadable
+    /// garbage if it does not.
+    fn close_transaction(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        if self.defers() {
+            return self.close_transaction_staged();
+        }
+        let slot = self.commit_header()?;
+        // Outside the CRC it carries, so this write is not fed back in.
+        let offset = self.slot_offset(slot)?;
+        device
+            .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
+            .map_err(Ext2Error::from)?;
+        self.writes += 1;
+        self.note_written_through(slot, 1);
+        if self.written > slot {
+            self.committed_written = slot + 1;
+        }
+        self.transaction_closed(slot);
+        Ok(())
+    }
+
+    fn close_transaction_staged(&mut self) -> Result<(), Ext2Error> {
+        let slot = self.commit_header()?;
+        let bs = self.block_size as usize;
+        let n = self.pending.len();
+        // Outside the CRC it carries.
+        self.pending[slot as usize % n].as_bytes_mut()[..bs]
+            .copy_from_slice(&self.header.as_slice()[..bs]);
+        self.transaction_closed(slot);
+        Ok(())
+    }
+
+    /// Reserve the commit slot and build its record in the header buffer,
+    /// feeding the CRC every image the device has not taken yet: the final
+    /// ones, rewrites included.
+    fn commit_header(&mut self) -> Result<u32, Ext2Error> {
+        let slot = self.reserve_slots(1, 0)?;
+        let mut crc = self.crc;
+        if !self.pending.is_empty() {
+            let bs = self.block_size as usize;
+            for s in self.written.max(self.sealed)..slot {
+                crc = crc32_feed(crc, &self.ring_frame(s).as_bytes()[..bs]);
+            }
+        }
         self.header.as_mut_slice().fill(0);
         put_le32(self.header.as_mut_slice(), 0, REC_MAGIC);
         put_le32(self.header.as_mut_slice(), 4, self.seq);
         put_le32(self.header.as_mut_slice(), 8, REC_COMMIT);
-        put_le32(self.header.as_mut_slice(), 16, crc);
-        if self.defers() {
-            // Outside the CRC it carries.
-            let n = self.pending.len();
-            let bs = self.block_size as usize;
-            self.pending[slot as usize % n].as_bytes_mut()[..bs]
-                .copy_from_slice(&self.header.as_slice()[..bs]);
-        } else {
-            // Outside the CRC it carries, so this write is not fed back in.
-            let offset = self.slot_offset(slot)?;
-            device
-                .write_at(offset, &self.header.as_slice()[..self.block_size as usize])
-                .map_err(Ext2Error::from)?;
-            self.writes += 1;
-            self.note_written_through(slot, 1);
-        }
+        put_le32(self.header.as_mut_slice(), 16, crc32_finish(crc));
+        Ok(slot)
+    }
+
+    fn transaction_closed(&mut self, slot: u32) {
+        self.mark_commit(slot);
         stats::note_commit();
         self.seq = self.seq.wrapping_add(1);
-        self.revoke_undo.clear();
         self.crc = CRC32_INIT;
-        Ok(())
+        self.sealed = slot + 1;
     }
 
     /// Copy the logged blocks in slots `slot..slot + len` to home locations
@@ -1064,14 +1241,17 @@ impl Journal {
     /// Declare every logged block checked pointed: the log is empty again.
     /// The caller must have barriered the home-location writes first.
     pub fn reset(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
-        if self.written < self.head {
+        if self.written < self.head || self.has_unsealed() {
             return Err(Ext2Error::DeviceError);
         }
         self.write_superblock(device)?;
         self.head = 1;
         self.op_head = 1;
+        self.sealed = 1;
         self.written = 1;
         self.barriered = 1;
+        self.committed_written = 1;
+        self.commit_marks.as_mut_slice().fill(0);
         self.write_through = false;
         self.generation = self.generation.wrapping_add(1);
         self.index_clear();
@@ -1128,15 +1308,25 @@ impl Journal {
         Ok(block as u64 * self.block_size as u64)
     }
 
+    /// Slots for a record, which always leaves one of the log and of the ring
+    /// for the commit record that will close its transaction.
     fn reserve(&mut self, want: u32) -> Result<u32, Ext2Error> {
+        let slot = self.reserve_slots(want, 1)?;
+        for s in slot..self.head {
+            self.commit_marks[s as usize / 64] &= !(1 << (s % 64));
+        }
+        Ok(slot)
+    }
+
+    fn reserve_slots(&mut self, want: u32, spare: u32) -> Result<u32, Ext2Error> {
         let slot = self.head;
         let end = slot.checked_add(want).ok_or(Ext2Error::NoSpace)?;
-        if end as usize > self.slots.len() {
+        if end as usize + spare as usize > self.slots.len() {
             return Err(Ext2Error::NoSpace);
         }
         // The cache makes room before every append; running out here would
         // overwrite an image the device has not taken yet.
-        if self.defers() && end - self.written > self.pending.len() as u32 {
+        if self.defers() && end - self.written + spare > self.pending.len() as u32 {
             debug_assert!(false, "log ring overrun");
             return Err(Ext2Error::NoSpace);
         }
@@ -1260,8 +1450,10 @@ impl Journal {
             return Ok(JournalRecovery::NONE);
         }
         self.build_disposition(end, first_seq, device)?;
-        // Every scanned record came off the medium.
+        // Every scanned record came off the medium, and the region ends at a
+        // commit record.
         self.written = end;
+        self.committed_written = end;
         self.barriered = end;
         let blocks = self.write_home(end, device)?;
         device.flush().map_err(Ext2Error::from)?;

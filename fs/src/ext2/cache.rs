@@ -1040,11 +1040,13 @@ impl BlockCache {
         }
         self.stage_metadata()?;
         let needed = self.log_slots_needed();
-        if self
-            .journal
-            .as_ref()
-            .is_some_and(|journal| journal.free_slots() < needed)
-        {
+        // Making room seals the open compound, whose commit record the log
+        // must also hold. The ring needs no such slot: `pending_room` holds
+        // it back already, so charging it there too would write a compound
+        // out one operation early.
+        if self.journal.as_ref().is_some_and(|journal| {
+            journal.free_slots() < needed + u32::from(journal.has_unsealed())
+        }) {
             return Err(Ext2Error::NoSpace);
         }
         self.ensure_log_room(device, needed)?;
@@ -1113,7 +1115,7 @@ impl BlockCache {
         if journal.is_durable() && self.unbarriered == 0 {
             return Ok(());
         }
-        if journal.pending_slots() > 0 {
+        if journal.owes_write() {
             self.flush_where(device, |kind, _| kind == BlockKind::Data)?;
             if self.unbarriered > 0 {
                 self.barrier(device)?;
@@ -1127,6 +1129,17 @@ impl BlockCache {
             result?;
         }
         self.barrier(device)
+    }
+
+    /// Close the log's open compound with its commit record, staged in the
+    /// ring. What a writeback pass does as it opens: the records below its
+    /// limit then end at a commit of their own, so no operation that runs
+    /// while the pass is open — whose data the pass does not write — can
+    /// join a transaction the pass commits.
+    pub fn seal_log(&mut self) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal.seal_ring();
+        }
     }
 
     /// One bounded step of writing the ring's records below `limit` out.
@@ -1379,14 +1392,12 @@ impl BlockCache {
         device: &dyn BlockDevice,
     ) -> Result<(), Ext2Error> {
         journal.flush_revokes(device)?;
-        if journal.op_is_empty() && self.scratch.is_empty() {
-            return Ok(());
-        }
         let bs = self.block_size as usize;
+        let appended = self.partition_rewrites(journal)?;
         let per_record = journal.max_entries();
         let mut done = 0usize;
-        while done < self.scratch.len() {
-            let take = (self.scratch.len() - done).min(per_record);
+        while done < appended {
+            let take = (appended - done).min(per_record);
             let targets = &self.scratch.as_slice()[done..done + take];
             let (index, entries) = (&self.index, &self.entries);
             // The log gathers these; the commit record is still a separate
@@ -1398,7 +1409,45 @@ impl BlockCache {
             })?;
             done += take;
         }
-        journal.write_commit(device)
+        // Last, once nothing can fail: a rewrite keeps no copy of the image it
+        // replaces, so an abort after one could not put the earlier
+        // operation's contents back. `commit_op` can only fail writing
+        // through, and a log writing through has nothing rewritable.
+        for k in appended..self.scratch.len() {
+            let block = self.scratch.as_slice()[k];
+            let slot = journal.rewritable_slot(block);
+            let entry = self.index.get(&BlockNum(block)).copied();
+            // Both checked by the partition, and the appends only index
+            // other blocks.
+            debug_assert!(slot.is_some() && entry.is_some());
+            if let (Some(slot), Some(entry)) = (slot, entry) {
+                journal.rewrite(slot, &self.entries[entry].frame.as_bytes()[..bs]);
+            }
+        }
+        journal.commit_op(device)
+    }
+
+    /// Order the staged blocks so those whose newest record is still an
+    /// unwritten image of the open transaction come last, and answer how many
+    /// come before them. Those are rewritten in place rather than appended:
+    /// the compound's one commit covers whatever its images finally hold.
+    ///
+    /// Decided before anything is appended, since a block appended here would
+    /// itself read as rewritable. Every block's cache entry is checked now,
+    /// which is what lets the rewrites after the appends not fail.
+    fn partition_rewrites(&mut self, journal: &Journal) -> Result<usize, Ext2Error> {
+        let mut appended = 0usize;
+        for k in 0..self.scratch.len() {
+            let block = self.scratch.as_slice()[k];
+            if !self.index.contains_key(&BlockNum(block)) {
+                return Err(Ext2Error::DeviceError);
+            }
+            if journal.rewritable_slot(block).is_none() {
+                self.scratch.as_mut_slice().swap(k, appended);
+                appended += 1;
+            }
+        }
+        Ok(appended)
     }
 
     /// Forget a slot's contents without writing them back.

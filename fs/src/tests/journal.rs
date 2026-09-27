@@ -17,6 +17,7 @@ use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::cache::{BlockCache, BlockKind, CACHE_ENTRIES_MIN};
 use crate::ext2::journal::{Journal, JournalRecovery, LogExtent, MAX_LOG_SLOTS};
+use crate::ext2::types::BlockNum;
 use crate::ext2::{Ext2Error, Ext2Fs, JOURNAL_PATH, ReadOnlyReason};
 
 /// Comfortably above `journal::MIN_LOG_SLOTS`, and small enough to leave the
@@ -43,6 +44,10 @@ static PROBE_REFUSES: AtomicBool = AtomicBool::new(false);
 static PROBE_INTERRUPTS: AtomicBool = AtomicBool::new(false);
 /// A read covering this offset is refused once, then the probe disarms.
 static PROBE_REFUSE_READ_AT: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Counts writes down to one the device acknowledges and never lands: a torn
+/// log write whose later blocks, commit record included, still reach the
+/// medium. Zero is disarmed.
+static PROBE_DROP_IN: AtomicUsize = AtomicUsize::new(0);
 
 /// Counts writes, and can be made to refuse writes or reads part-way through a
 /// test.
@@ -60,6 +65,7 @@ impl ProbeDevice {
         PROBE_REFUSES.store(false, Ordering::Relaxed);
         PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
         PROBE_REFUSE_READ_AT.store(u64::MAX, Ordering::Relaxed);
+        PROBE_DROP_IN.store(0, Ordering::Relaxed);
         Self { inner }
     }
 }
@@ -83,6 +89,13 @@ impl BlockDevice for ProbeDevice {
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         if PROBE_REFUSES.load(Ordering::Relaxed) {
             return Err(BlockDeviceError::InvalidBuffer);
+        }
+        let drop_in = PROBE_DROP_IN.load(Ordering::Relaxed);
+        if drop_in != 0 {
+            PROBE_DROP_IN.store(drop_in - 1, Ordering::Relaxed);
+            if drop_in == 1 {
+                return Ok(());
+            }
         }
         PROBE_WRITES.fetch_add(1, Ordering::Relaxed);
         let _ =
@@ -266,7 +279,9 @@ fn write_then_truncate_then_crash(fs: &mut Ext2Fs<'_>) -> Result<(), &'static st
     let ino = fs.create_file(2, b"large.bin").map_err(|_| "create")?;
     fs.write_file(ino, 0, payload.as_slice())
         .map_err(|_| "write")?;
-    let written = fs.journal_head();
+    // Sealed here, as a pass opening between the two would: otherwise the
+    // truncate joins the write's compound and the cut below takes both.
+    let written = fs.seal_journal_for_test();
     fs.truncate_file(ino, 0).map_err(|_| "truncate")?;
     fs.sync_log_below_for_test(written)
         .map_err(|_| "partial log sync")
@@ -635,7 +650,8 @@ fn epoch_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"first.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
-    drive(fs, fs.begin_sync())?;
+    let pass = fs.begin_sync();
+    drive(fs, pass)?;
     if fs.sync_pending() {
         return Err("an undisturbed pass left work behind");
     }
@@ -1120,7 +1136,8 @@ fn index_rewind_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
             .write_record(&[kept], device, &mut |_| Some(PAYLOAD))
             .map_err(|_| "write_record")?;
     }
-    log.write_commit(device).map_err(|_| "write_commit")?;
+    log.commit_op(device).map_err(|_| "commit_op")?;
+    log.seal(device).map_err(|_| "seal")?;
 
     let head = log.head();
     let aborted = [HOME_FIRST + 1, HOME_FIRST + 2, HOME_FIRST + 3];
@@ -1172,7 +1189,7 @@ fn oversized_log_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
     }
     log.write_record(&[target], device, &mut |_| Some(payload.as_slice()))
         .map_err(|_| "write_record")?;
-    log.write_commit(device).map_err(|_| "write_commit")?;
+    log.commit_op(device).map_err(|_| "commit_op")?;
     log.write_pending(device)
         .map_err(|_| "write the ring out")?;
     // Dropped without a check point, so the next attach has to find the
@@ -1248,7 +1265,9 @@ fn large_transaction_body(device: &dyn BlockDevice) -> Result<(), &'static str> 
             .map_err(|_| "a transaction the log promised room for was refused")?;
         done += take;
     }
-    log.write_commit(device)
+    log.commit_op(device)
+        .map_err(|_| "a transaction the log promised room for was refused")?;
+    log.seal(device)
         .map_err(|_| "the commit record of a transaction the log promised room for was refused")?;
     Ok(())
 }
@@ -1728,10 +1747,12 @@ fn clamp_fill(device: &TamperDevice, payload: &[u8]) -> Result<u32, &'static str
     targets.as_mut_slice().fill(CLAMP_WIDE_HOME);
     log.write_record(targets.as_slice(), device, &mut |_| Some(payload))
         .map_err(|_| "write_record")?;
-    log.write_commit(device).map_err(|_| "write_commit")?;
+    log.commit_op(device).map_err(|_| "commit_op")?;
+    log.seal(device).map_err(|_| "seal")?;
     log.write_record(&[CLAMP_TAIL_HOME], device, &mut |_| Some(payload))
         .map_err(|_| "write_record")?;
-    log.write_commit(device).map_err(|_| "write_commit")?;
+    log.commit_op(device).map_err(|_| "commit_op")?;
+    log.seal(device).map_err(|_| "seal")?;
     log.write_pending(device)
         .map_err(|_| "write the ring out")?;
     // Dropped without a check point: the next attach is what has to find both
@@ -1869,5 +1890,298 @@ fn unlinked_name_stays_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 slopos_testing::stest!(
     name = test_ext2_lagging_pass_never_puts_an_older_copy_home,
+    suite = fs
+);
+
+/// Operations on one file's inode, all inside one compound.
+const COMPOUND_OPS: u16 = 16;
+
+fn compound_mode(k: u16) -> u16 {
+    0o400 | (k & 0o77)
+}
+
+/// Slots the log has taken since `start`, refusing a log emptied in between:
+/// a check point there would measure nothing.
+fn slots_since(fs: &Ext2Fs<'_>, start: u32) -> Result<u32, &'static str> {
+    fs.journal_head()
+        .checked_sub(start)
+        .ok_or("the log was emptied under the measurement")
+}
+
+/// Operations that change the same blocks inside one compound cost the log a
+/// slot per distinct block, not one per block per operation: every one after
+/// the first rewrites the images the first appended. The compound's one
+/// commit covers the images as they finally stand, so a replay applies the
+/// last operation.
+pub fn test_ext2_journal_compound_logs_each_block_once() -> TestResult {
+    let Some(device) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_log(&device, compound_body) {
+        return fail!("staging: {}", msg);
+    }
+    match with_log(&device, compound_replay) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn compound_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    fs.mark_dirty_on_disk().map_err(|_| "not-clean stamp")?;
+    attach(fs)?;
+    let ino = fs.create_file(2, b"modes.txt").map_err(|_| "create")?;
+    // Out to the medium, so the compound below starts in an empty ring.
+    fs.commit_log().map_err(|_| "commit")?;
+    let start = fs.journal_head();
+    fs.set_mode(ino, compound_mode(0)).map_err(|_| "set_mode")?;
+    let one = slots_since(fs, start)?;
+    if one == 0 {
+        return Err("the first operation logged nothing");
+    }
+    for k in 1..COMPOUND_OPS {
+        fs.set_mode(ino, compound_mode(k)).map_err(|_| "set_mode")?;
+    }
+    if slots_since(fs, start)? != one {
+        return Err("operations on blocks already in the compound appended records");
+    }
+    fs.commit_log().map_err(|_| "commit")?;
+    if slots_since(fs, start)? != one + 1 {
+        return Err("the compound took other than one commit record");
+    }
+    Ok(())
+}
+
+fn compound_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let recovery = match fs.attach_journal() {
+        Ok(Some(recovery)) => recovery,
+        Ok(None) => return Err("no log on the remount"),
+        Err(_) => return Err("attach failed on the remount"),
+    };
+    if recovery.transactions != 2 {
+        return Err("the replay did not find the create and the compound");
+    }
+    let ino = fs
+        .resolve_path(b"/modes.txt")
+        .map_err(|_| "the replay did not restore the name")?;
+    let mode = fs.read_inode(ino).map_err(|_| "read inode")?.mode;
+    if mode & 0o7777 != compound_mode(COMPOUND_OPS - 1) {
+        return Err("the replay applied an image older than the compound's last");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_compound_logs_each_block_once,
+    suite = fs
+);
+
+/// Home blocks the cache-level compound fixtures change: past every slot the
+/// synthetic log takes.
+const COMPOUND_A: u32 = HOME_FIRST;
+const COMPOUND_B: u32 = HOME_FIRST + 1;
+const COMPOUND_C: u32 = HOME_FIRST + 2;
+const COMPOUND_LOG_SLOTS: u32 = 64;
+
+/// A cache over a synthetic log on `device`. Boxed, both of them: a cache
+/// alone is most of a 2 KiB frame.
+#[inline(never)]
+fn compound_cache(device: &dyn BlockDevice, bs: u32) -> Result<KBox<BlockCache>, &'static str> {
+    let (log, _) = synthetic_log(device, COMPOUND_LOG_SLOTS)?;
+    let mut cache = BlockCache::new_boxed(bs, CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
+    cache.install_journal(log).map_err(|_| "install")?;
+    Ok(cache)
+}
+
+/// One operation: every byte of every block in `blocks` becomes `value`,
+/// and the operation commits — or rolls back, as a failed one does.
+fn fill_op(
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    blocks: &[u32],
+    value: u8,
+) -> Result<(), &'static str> {
+    cache.begin_op();
+    for &block in blocks {
+        let filled = match cache.get(BlockNum(block), device) {
+            Ok(mut cached) => {
+                cached.data_mut().fill(value);
+                true
+            }
+            Err(_) => false,
+        };
+        if !filled {
+            cache.rollback_op();
+            return Err("get");
+        }
+    }
+    if cache.commit_op(device).is_err() {
+        cache.rollback_op();
+        return Err("commit");
+    }
+    Ok(())
+}
+
+/// The first byte of `block`'s home location.
+fn home_byte(device: &dyn BlockDevice, block: u32, bs: u32) -> Result<u8, &'static str> {
+    let mut buf = KVec::<u8>::zeroed(bs as usize).map_err(|_| "buffer")?;
+    device
+        .read_at(u64::from(block) * u64::from(bs), buf.as_mut_slice())
+        .map_err(|_| "read home")?;
+    Ok(buf.as_slice()[0])
+}
+
+/// Replay what `device`'s synthetic log holds and answer how many
+/// transactions it applied.
+fn replay_synthetic(device: &dyn BlockDevice) -> Result<u32, &'static str> {
+    let (log, recovery) = synthetic_log(device, COMPOUND_LOG_SLOTS)?;
+    drop(log);
+    Ok(recovery.transactions)
+}
+
+/// A torn write of the ring loses the whole compound and keeps the commit
+/// before it. Two tears: the write stops part-way, so the compound's commit
+/// record never lands; and a block ahead of it is acknowledged but never
+/// lands, so the commit does and the CRC over the compound's final images
+/// has to refuse it.
+pub fn test_ext2_journal_torn_compound_replays_none_of_it() -> TestResult {
+    for lost_block in [false, true] {
+        let Some(image) = plain_image() else {
+            return TestResult::Skipped;
+        };
+        let device = ProbeDevice::new(image);
+        if let Err(msg) = torn_compound(&device, lost_block) {
+            let tear = if lost_block {
+                "a lost block"
+            } else {
+                "a cut-short write"
+            };
+            return fail!("{}: {}", tear, msg);
+        }
+    }
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn torn_compound(device: &ProbeDevice, lost_block: bool) -> Result<(), &'static str> {
+    let bs = image_block_size(device)?;
+    let b_before = home_byte(device, COMPOUND_B, bs)?;
+    let mut cache = compound_cache(device, bs)?;
+    fill_op(&mut cache, device, &[COMPOUND_A], 1)?;
+    cache.sync_log(device).map_err(|_| "the durable baseline")?;
+    let start = cache.journal_head();
+    for value in 2..5u8 {
+        fill_op(&mut cache, device, &[COMPOUND_A, COMPOUND_B], value)?;
+    }
+    // A header and two payloads, whatever the number of operations.
+    if cache.journal_head() != start + 3 {
+        return Err("the compound took a slot per block per operation");
+    }
+    if lost_block {
+        // The ring's second block is A's image, which every operation after
+        // the first rewrote.
+        PROBE_DROP_IN.store(2, Ordering::Relaxed);
+        let written = cache.sync_log(device);
+        PROBE_DROP_IN.store(0, Ordering::Relaxed);
+        written.map_err(|_| "the ring write")?;
+    } else {
+        // All but B's image, and no commit record.
+        let cut = cache.journal_head() - 1;
+        cache
+            .write_log_until(device, cut, usize::MAX)
+            .map_err(|_| "the partial ring write")?;
+    }
+    // The crash: nothing else of this mount reaches the medium.
+    drop(cache);
+
+    if replay_synthetic(device)? != 1 {
+        return Err("the replay kept other than the one durable commit");
+    }
+    if home_byte(device, COMPOUND_A, bs)? != 1 || home_byte(device, COMPOUND_B, bs)? != b_before {
+        return Err("the replay applied part of a torn compound");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_torn_compound_replays_none_of_it,
+    suite = fs
+);
+
+/// Ring slots for the abort fixture: the first operation's three and the
+/// second's rewrites fit, a third that appends another block does not.
+const ABORT_RING: usize = 9;
+
+/// An operation that aborts inside a compound — its commit found the ring
+/// full and the write-out failed — leaves the images the compound's earlier
+/// operations put in the ring as they were: a re-read answers the last
+/// committed contents, and so does a replay.
+pub fn test_ext2_journal_abort_in_a_compound_keeps_earlier_images() -> TestResult {
+    let Some(image) = plain_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    match compound_abort(&device) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn compound_abort(device: &ProbeDevice) -> Result<(), &'static str> {
+    let bs = image_block_size(device)?;
+    let c_before = home_byte(device, COMPOUND_C, bs)?;
+    let mut cache = compound_cache(device, bs)?;
+    if let Some(journal) = cache.journal_mut() {
+        journal.shrink_ring_for_test(ABORT_RING);
+    }
+    fill_op(&mut cache, device, &[COMPOUND_A, COMPOUND_B], 1)?;
+    let head = cache.journal_head();
+    fill_op(&mut cache, device, &[COMPOUND_A, COMPOUND_B], 2)?;
+    if cache.journal_head() != head {
+        return Err("the second operation appended instead of rewriting");
+    }
+    PROBE_REFUSES.store(true, Ordering::Relaxed);
+    let doomed = fill_op(&mut cache, device, &[COMPOUND_A, COMPOUND_B, COMPOUND_C], 3);
+    PROBE_REFUSES.store(false, Ordering::Relaxed);
+    if doomed.is_ok() {
+        return Err("an operation whose commit could not be written succeeded");
+    }
+    // The failed write-out sealed the compound first; nothing past that
+    // commit record outlives the abort.
+    if cache.journal_head() != head + 1 {
+        return Err("the abort kept records of its own or rewound committed ones");
+    }
+    for block in [COMPOUND_A, COMPOUND_B] {
+        let cached = cache.get(BlockNum(block), device).map_err(|_| "re-read")?;
+        if cached.data().iter().any(|&b| b != 2) {
+            return Err("a re-read after the abort did not answer the compound's last image");
+        }
+    }
+    let c_now = cache
+        .get(BlockNum(COMPOUND_C), device)
+        .map_err(|_| "re-read")?
+        .data()[0];
+    if c_now != c_before {
+        return Err("the aborted operation's own block kept its change");
+    }
+    cache
+        .sync_log(device)
+        .map_err(|_| "the ring write once the device recovers")?;
+    drop(cache);
+
+    if replay_synthetic(device)? != 1 {
+        return Err("the replay did not find the compound as one transaction");
+    }
+    if home_byte(device, COMPOUND_A, bs)? != 2
+        || home_byte(device, COMPOUND_B, bs)? != 2
+        || home_byte(device, COMPOUND_C, bs)? != c_before
+    {
+        return Err("the replay did not apply exactly the committed images");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_journal_abort_in_a_compound_keeps_earlier_images,
     suite = fs
 );

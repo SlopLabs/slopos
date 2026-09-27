@@ -14,6 +14,7 @@ pub mod io_mem_mapper_shim;
 pub mod kconsole;
 pub mod kernel_mappings;
 pub mod kernel_meta;
+pub mod lock_sites;
 pub mod memfd;
 pub mod memory_init;
 pub mod memory_layout;
