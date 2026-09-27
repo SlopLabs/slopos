@@ -803,15 +803,13 @@ fn fill_window(
     inode: InodeId,
     wide: usize,
 ) -> Result<PhysAddr, FileMapError> {
-    // Readahead is best effort: frames the allocator cannot find, or a write
-    // to the file racing the read, cost it and nothing else.
+    // Readahead is best effort: frames the allocator cannot find cost it and
+    // nothing else. A write to the file cannot land between the read and the
+    // install: the caller holds the inode's I/O stripe across both, and so
+    // does every write, through `write_through` or `around_uncovered_write`.
     let mut fill = FillWindow::new();
     fill.claim(wide)?;
-    let writes = write_seq(inode).load(Ordering::Acquire);
     let filled = fill.read(fs, inode, page_index * PAGE_SIZE)?;
-    if writes & 1 != 0 || write_seq(inode).load(Ordering::Acquire) != writes {
-        fill.truncate(1);
-    }
     publish_read(map, page_index, fill.publish(filled)?)
 }
 
@@ -1140,25 +1138,18 @@ fn claim_unscrubbed_page() -> Result<PhysAddr, FileMapError> {
     Ok(pa)
 }
 
-/// Bumped around every `write(2)` to a regular file that goes to the
-/// filesystem rather than into a page set, odd while one is in flight, one
-/// counter per inode hash. A fault that reads pages ahead installs them only
-/// if the counter did not move across its read: such a write is ordered
-/// against nothing else a fault holds, and a page read ahead of it would hide
-/// it.
-static WRITE_SEQ: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
-
-fn write_seq(inode: InodeId) -> &'static AtomicU32 {
-    &WRITE_SEQ[((inode as u32).wrapping_mul(0x9E37_79B9) >> 26) as usize]
-}
-
-/// Bracket a filesystem write the page sets do not see: see [`WRITE_SEQ`].
-pub fn around_uncovered_write<R>(inode: InodeId, write: impl FnOnce() -> R) -> R {
-    let seq = write_seq(inode);
-    seq.fetch_add(1, Ordering::AcqRel);
-    let result = write();
-    seq.fetch_add(1, Ordering::AcqRel);
-    result
+/// Run a filesystem write the page sets do not see under the inode's I/O
+/// stripe: a fault reading pages ahead holds it from its read to its install,
+/// and a page read ahead of the write would hide it, then write it back over
+/// it if the set is writable.
+pub fn around_uncovered_write(
+    inode: InodeId,
+    write: impl FnOnce() -> crate::vfs::VfsResult<usize>,
+) -> crate::vfs::VfsResult<usize> {
+    let Ok(_io) = io_lock(inode) else {
+        return Err(crate::vfs::VfsError::Interrupted);
+    };
+    write()
 }
 
 /// Add `pages` mapping references; `false` if the handle is stale.

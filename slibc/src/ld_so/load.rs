@@ -169,6 +169,10 @@ fn span_of(phdrs: *const Phdr, phnum: usize) -> Result<(usize, usize), LoadError
         if ph.p_type != PT_LOAD {
             continue;
         }
+        // A segment reads `p_filesz` bytes into a mapping sized by `p_memsz`.
+        if ph.p_filesz > ph.p_memsz {
+            return Err(LoadError::Malformed);
+        }
         let start = page_down(ph.p_vaddr as usize);
         let end = page_up(ph.p_vaddr as usize + ph.p_memsz as usize);
         if start < low {
