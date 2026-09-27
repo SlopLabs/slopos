@@ -9,11 +9,16 @@
 
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <fcntl.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+struct linger {
+    int l_onoff;
+    int l_linger;
+};
 typedef unsigned int socklen_t;
 typedef unsigned short sa_family_t;
 struct sockaddr {

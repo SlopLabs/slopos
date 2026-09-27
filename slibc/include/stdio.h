@@ -72,6 +72,7 @@ int putchar_unlocked(int c);
 int puts(const char *s);
 void rewind(FILE *stream);
 int scanf(const char *fmt, ...);
+void setbuf(FILE *stream, char *buf);
 int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 int snprintf(char *buf, size_t n, const char *fmt, ...);
 int sprintf(char *buf, const char *fmt, ...);

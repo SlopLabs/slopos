@@ -12,5 +12,7 @@
 pub mod calendar;
 pub mod dtoa;
 pub mod hexfloat;
+pub mod iconv;
+pub mod inet;
 pub mod strftime;
 pub mod utf8;

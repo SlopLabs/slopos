@@ -8,6 +8,9 @@
 #define _SLIBC_NETDB_H
 
 #include <sys/socket.h>
+#include <netinet/in.h>
+
+#define h_errno (*__h_errno_location())
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,7 +26,30 @@ struct addrinfo {
     char *ai_canonname;
     struct addrinfo *ai_next;
 };
+struct hostent {
+    char *h_name;
+    char **h_aliases;
+    int h_addrtype;
+    int h_length;
+    char **h_addr_list;
+};
+struct servent {
+    char *s_name;
+    char **s_aliases;
+    int s_port;
+    char *s_proto;
+};
 
+#define NI_NUMERICHOST (0x01)
+#define NI_NUMERICSERV (0x02)
+#define NI_NOFQDN (0x04)
+#define NI_NAMEREQD (0x08)
+#define NI_DGRAM (0x10)
+#define NI_NUMERICSCOPE (0x100)
+#define HOST_NOT_FOUND (1)
+#define TRY_AGAIN (2)
+#define NO_RECOVERY (3)
+#define NO_DATA (4)
 #define AI_ADDRCONFIG (0x0020)
 #define AI_ALL (0x0010)
 #define AI_CANONNAME (0x0002)
@@ -47,6 +73,10 @@ struct addrinfo {
 int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
 void freeaddrinfo(struct addrinfo *res);
 const char *gai_strerror(int errcode);
+int getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host, socklen_t hostlen, char *serv, socklen_t servlen, int flags);
+struct hostent *gethostbyname(const char *name);
+struct servent *getservbyname(const char *name, const char *proto);
+int *__h_errno_location(void);
 
 #ifdef __cplusplus
 }

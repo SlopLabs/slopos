@@ -1250,4 +1250,23 @@ impl Pal for Sys {
         to_result(ret)?;
         Ok(())
     }
+
+    fn signalfd(mask: u64, flags: u32) -> Result<i32, Errno> {
+        let set = mask;
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_SIGNALFD4,
+                -1i64 as u64,
+                &raw const set as u64,
+                core::mem::size_of::<u64>() as u64,
+                u64::from(flags),
+            )
+        };
+        Ok(to_result(ret)? as i32)
+    }
+
+    fn klog_write(buf: &[u8]) -> Result<usize, Errno> {
+        let ret = unsafe { syscall2(SYSCALL_KLOG_WRITE, buf.as_ptr() as u64, buf.len() as u64) };
+        Ok(to_result(ret)? as usize)
+    }
 }

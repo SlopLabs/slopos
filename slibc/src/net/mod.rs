@@ -2,9 +2,11 @@
 
 pub mod addr;
 pub mod dns;
+pub mod netdb;
 #[allow(dead_code)]
 pub(crate) mod shim;
 pub mod tests;
+pub mod text;
 
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};

@@ -9,6 +9,25 @@
 
 #include <sys/socket.h>
 
+#define __SLIBC_IN6_ZERO8(a) (((a)->s6_addr[0] | (a)->s6_addr[1] | (a)->s6_addr[2] | (a)->s6_addr[3] | (a)->s6_addr[4] | (a)->s6_addr[5] | (a)->s6_addr[6] | (a)->s6_addr[7]) == 0)
+#define IN6_IS_ADDR_UNSPECIFIED(a) (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11] | (a)->s6_addr[12] | (a)->s6_addr[13] | (a)->s6_addr[14] | (a)->s6_addr[15]) == 0))
+#define IN6_IS_ADDR_LOOPBACK(a) \
+    (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11] | (a)->s6_addr[12] | (a)->s6_addr[13] | (a)->s6_addr[14]) == 0) && (a)->s6_addr[15] == 1)
+#define IN6_IS_ADDR_MULTICAST(a) ((a)->s6_addr[0] == 0xff)
+#define IN6_IS_ADDR_LINKLOCAL(a) ((a)->s6_addr[0] == 0xfe && ((a)->s6_addr[1] & 0xc0) == 0x80)
+#define IN6_IS_ADDR_SITELOCAL(a) ((a)->s6_addr[0] == 0xfe && ((a)->s6_addr[1] & 0xc0) == 0xc0)
+#define IN6_IS_ADDR_V4MAPPED(a) \
+    (__SLIBC_IN6_ZERO8(a) && (a)->s6_addr[8] == 0 && (a)->s6_addr[9] == 0 && \
+     (a)->s6_addr[10] == 0xff && (a)->s6_addr[11] == 0xff)
+#define IN6_IS_ADDR_V4COMPAT(a) \
+    (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11]) == 0) && \
+     !IN6_IS_ADDR_UNSPECIFIED(a) && !IN6_IS_ADDR_LOOPBACK(a))
+#define IN6_IS_ADDR_MC_NODELOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x1)
+#define IN6_IS_ADDR_MC_LINKLOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x2)
+#define IN6_IS_ADDR_MC_SITELOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x5)
+#define IN6_IS_ADDR_MC_ORGLOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x8)
+#define IN6_IS_ADDR_MC_GLOBAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0xe)
+
 typedef unsigned int in_addr_t;
 typedef unsigned short in_port_t;
 struct in_addr {
@@ -40,6 +59,8 @@ struct sockaddr_in6 {
     unsigned int sin6_scope_id;
 };
 
+#define INET_ADDRSTRLEN (16)
+#define INET6_ADDRSTRLEN (46)
 #define INADDR_ANY (0)
 #define INADDR_BROADCAST (0xffffffff)
 #define INADDR_LOOPBACK (0x7f000001)
@@ -64,9 +85,5 @@ struct sockaddr_in6 {
 #define IP_MULTICAST_TTL (33)
 #define IP_TOS (1)
 #define IP_TTL (2)
-#define TCP_KEEPCNT (6)
-#define TCP_KEEPIDLE (4)
-#define TCP_KEEPINTVL (5)
-#define TCP_NODELAY (1)
 
 #endif /* _SLIBC_NETINET_IN_H */

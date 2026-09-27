@@ -5,6 +5,7 @@ pub mod rlimit;
 pub mod shim;
 pub mod spawn;
 pub mod tests;
+pub mod times;
 pub mod wait;
 
 use core::ptr;
@@ -187,7 +188,7 @@ pub(crate) const SH_PATH: &[u8] = b"/bin/sh\0";
 /// Returns the child PID on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
-    match Sys::waitpid(pid, status, options) {
+    match times::reap(pid, status, options, ptr::null_mut()) {
         Ok(ret) => ret,
         Err(e) => {
             errno::errno_set(e.raw());

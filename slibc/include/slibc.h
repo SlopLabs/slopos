@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fenv.h>
+#include <iconv.h>
 #include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
@@ -26,6 +27,7 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <nl_types.h>
 #include <poll.h>
 #include <pthread.h>
@@ -38,10 +40,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/auxv.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/param.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/resource.h>
@@ -52,12 +56,14 @@
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <sysexits.h>
+#include <syslog.h>
 #include <termios.h>
 #include <time.h>
 #include <uchar.h>

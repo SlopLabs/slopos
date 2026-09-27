@@ -103,7 +103,7 @@ pub unsafe extern "C" fn wait4(
     options: c_int,
     usage: *mut rusage,
 ) -> pid_t {
-    match Sys::wait4(pid, status, options, usage.cast()) {
+    match crate::process::times::reap(pid, status, options, usage) {
         Ok(child) => child,
         Err(e) => {
             errno_set(e.raw());

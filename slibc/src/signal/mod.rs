@@ -14,6 +14,7 @@
 //! to block.
 
 pub mod tests;
+pub mod wait;
 
 use core::ffi::{c_char, c_int, c_uint};
 use core::mem;

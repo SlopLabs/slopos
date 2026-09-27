@@ -299,4 +299,10 @@ pub trait Pal {
     /// called once from `/sbin/init`. Blocks until every registered utest has
     /// completed. `Err` means the kernel was not booted with `tests=on`.
     fn run_userland_tests() -> Result<(), Errno>;
+
+    /// `signalfd4(-1, mask, 8, flags)`: a new descriptor whose `read` takes
+    /// one pending signal in `mask` off the caller's pending set.
+    fn signalfd(mask: u64, flags: u32) -> Result<i32, Errno>;
+    /// One line to the kernel log, which is where `syslog` writes.
+    fn klog_write(buf: &[u8]) -> Result<usize, Errno>;
 }

@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 
+pub mod case;
 pub mod convert;
 pub(crate) mod vector;
 

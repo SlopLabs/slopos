@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 
+typedef int sig_atomic_t;
 typedef void (*sighandler_t)(int);
 typedef struct {
     unsigned long __val[16];
@@ -158,6 +159,7 @@ int __libc_current_sigrtmax(void);
 sighandler_t signal(int signum, sighandler_t handler);
 char *strsignal(int sig);
 int sigqueue(pid_t pid, int sig, union sigval value);
+int sigwait(const sigset_t *set, int *sig);
 
 #ifdef __cplusplus
 }

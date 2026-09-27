@@ -50,12 +50,12 @@ pub struct HeaderSpec {
     pub raw_unguarded: &'static [&'static str],
 }
 
-/// The 19 items the contract reaches through `crate::`, as
-/// `name: <rust type>` for a typedef and `struct name { field: ty, ... }` for
-/// a struct.
+/// The items the contract reaches through `crate::`, and the ones only slibc's
+/// own entry points use, as `name: <rust type>` for a typedef and
+/// `struct name { field: ty, ... }` for a struct.
 ///
-/// These are upstream `libc`'s shared `src/unix/mod.rs` definitions for
-/// x86-64, unmodified: the SlopOS patch adds a per-OS module arm and a
+/// All but the last two are upstream `libc`'s shared `src/unix/mod.rs`
+/// definitions for x86-64, unmodified: the SlopOS patch adds a per-OS module arm and a
 /// `#[link]` arm and touches no type or struct definition, so there is no
 /// creation hunk to read them out of. `size_t`/`ssize_t` are the crate
 /// prelude's. `build.rs` pins the three that `slopos-abi` also defines with a
@@ -86,6 +86,17 @@ pub const SHARED_TYPES: &[&str] = &[
      ws_ypixel: c_ushort }",
     "struct sigval { sival_ptr: *mut c_void }",
     "opaque DIR",
+    "struct linger { l_onoff: c_int, l_linger: c_int }",
+    "struct tms { tms_utime: clock_t, tms_stime: clock_t, tms_cutime: clock_t, \
+     tms_cstime: clock_t }",
+    "struct hostent { h_name: *mut c_char, h_aliases: *mut *mut c_char, h_addrtype: c_int, \
+     h_length: c_int, h_addr_list: *mut *mut c_char }",
+    "struct servent { s_name: *mut c_char, s_aliases: *mut *mut c_char, s_port: c_int, \
+     s_proto: *mut c_char }",
+    // POSIX types with no `libc` crate spelling for this target: C11 7.14's
+    // `sig_atomic_t` and `<iconv.h>`'s descriptor.
+    "sig_atomic_t: c_int",
+    "iconv_t: *mut c_void",
 ];
 
 /// `va_list` is not a contract type and cannot be: the `libc` crate has no
@@ -281,6 +292,13 @@ pub const HEADERS: &[HeaderSpec] = &[
             "#    define NULL ((void *)0)",
             "#  endif",
             "#endif",
+            "",
+            "/* The BSD spellings every Unix C library still has: OpenSSH's code, and",
+            " * libssh2's copy of it, declares with nothing else. */",
+            "typedef unsigned char u_char;",
+            "typedef unsigned short u_short;",
+            "typedef unsigned int u_int;",
+            "typedef unsigned long u_long;",
         ],
         raw_unguarded: &[],
     },
@@ -892,6 +910,26 @@ pub const HEADERS: &[HeaderSpec] = &[
         raw_unguarded: &[],
     },
     HeaderSpec {
+        path: "strings.h",
+        summary: "case-insensitive string comparison",
+        includes: &["sys/types.h", "locale.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "ffs(i: c_int) -> c_int",
+            "strcasecmp(a: *const c_char, b: *const c_char) -> c_int",
+            "strncasecmp(a: *const c_char, b: *const c_char, n: size_t) -> c_int",
+            "strcasecmp_l(a: *const c_char, b: *const c_char, loc: locale_t) -> c_int",
+            "strncasecmp_l(a: *const c_char, b: *const c_char, n: size_t, loc: locale_t) -> c_int",
+        ],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
         path: "stdlib.h",
         summary: "general utilities: allocation, environment, conversion",
         // `limits.h` for `MB_LEN_MAX`, which `MB_CUR_MAX` below derives from.
@@ -1048,6 +1086,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "puts(s: *const c_char) -> c_int",
             "rewind(stream: *mut FILE)",
             "scanf(fmt: *const c_char, ...) -> c_int",
+            "setbuf(stream: *mut FILE, buf: *mut c_char)",
             "setvbuf(stream: *mut FILE, buf: *mut c_char, mode: c_int, size: size_t) -> c_int",
             "snprintf(buf: *mut c_char, n: size_t, fmt: *const c_char, ...) -> c_int",
             "sprintf(buf: *mut c_char, fmt: *const c_char, ...) -> c_int",
@@ -1299,6 +1338,7 @@ pub const HEADERS: &[HeaderSpec] = &[
         includes: &["sys/types.h"],
         // `siginfo_t` before `sigaction`: the handler slot names it.
         types: &[
+            "sig_atomic_t",
             "sighandler_t",
             "sigset_t",
             "siginfo_t",
@@ -1342,6 +1382,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "signal(signum: c_int, handler: sighandler_t) -> sighandler_t",
             "strsignal(sig: c_int) -> *mut c_char",
             "sigqueue(pid: pid_t, sig: c_int, value: sigval) -> c_int",
+            "sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int",
         ],
         variables: &[],
         raw: &[],
@@ -1400,8 +1441,13 @@ pub const HEADERS: &[HeaderSpec] = &[
         // through this header, and libc++'s `steady_clock` is one that does:
         // it tests `CLOCK_MONOTONIC` having included only this and
         // `<unistd.h>`, and takes a `#error` when neither defines it.
-        includes: &["sys/types.h", "time.h"],
-        types: &["timeval"],
+        //
+        // `<sys/select.h>` too, which POSIX lets this header make visible and
+        // every Unix C library does: programs take `select` and `fd_set` from
+        // here. `timeval` lives there, which POSIX also has define it, so the
+        // include finds it whichever of the two a program names first.
+        includes: &["sys/types.h", "time.h", "sys/select.h"],
+        types: &[],
         consts: &[],
         slibc_consts: &[],
         macros: &[],
@@ -1414,8 +1460,8 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "sys/select.h",
         summary: "synchronous descriptor multiplexing",
-        includes: &["sys/types.h", "sys/time.h"],
-        types: &["fd_set"],
+        includes: &["sys/types.h", "time.h"],
+        types: &["timeval", "fd_set"],
         consts: &["FD_SETSIZE"],
         slibc_consts: &[],
         macros: &["FD_CLR", "FD_ISSET", "FD_SET", "FD_ZERO"],
@@ -1456,7 +1502,10 @@ pub const HEADERS: &[HeaderSpec] = &[
             "shm_open",
             "shm_unlink",
         ],
-        extra: &[],
+        extra: &[
+            "mlock(addr: *const c_void, len: size_t) -> c_int",
+            "munlock(addr: *const c_void, len: size_t) -> c_int",
+        ],
         variables: &[],
         raw: &[],
         raw_unguarded: &[],
@@ -1464,8 +1513,12 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "sys/socket.h",
         summary: "sockets",
-        includes: &["sys/types.h", "sys/uio.h"],
+        // `<fcntl.h>` because `SOCK_CLOEXEC` and `SOCK_NONBLOCK` are spelled
+        // as `O_CLOEXEC` and `O_NONBLOCK`, which must be defined wherever the
+        // two are used.
+        includes: &["sys/types.h", "sys/uio.h", "fcntl.h"],
         types: &[
+            "linger",
             "socklen_t",
             "sa_family_t",
             "sockaddr",
@@ -1547,7 +1600,162 @@ pub const HEADERS: &[HeaderSpec] = &[
             "sockaddr_in",
             "sockaddr_in6",
         ],
-        consts: &["IPPROTO_*", "IP_*", "IPV6_*", "INADDR_*", "TCP_*"],
+        consts: &["IPPROTO_*", "IP_*", "IPV6_*", "INADDR_*"],
+        slibc_consts: &["INET_ADDRSTRLEN", "INET6_ADDRSTRLEN"],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        // POSIX's `IN6_IS_ADDR_*` tests, over the address's bytes (RFC 4291
+        // section 2). Macros with no contract item behind them: a
+        // `const fn` in the `libc` crate would be a different thing to call.
+        raw: &[
+            "#define __SLIBC_IN6_ZERO8(a) (((a)->s6_addr[0] | (a)->s6_addr[1] | (a)->s6_addr[2] | (a)->s6_addr[3] | (a)->s6_addr[4] | (a)->s6_addr[5] | (a)->s6_addr[6] | (a)->s6_addr[7]) == 0)",
+            "#define IN6_IS_ADDR_UNSPECIFIED(a) (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11] | (a)->s6_addr[12] | (a)->s6_addr[13] | (a)->s6_addr[14] | (a)->s6_addr[15]) == 0))",
+            "#define IN6_IS_ADDR_LOOPBACK(a) \\",
+            "    (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11] | (a)->s6_addr[12] | (a)->s6_addr[13] | (a)->s6_addr[14]) == 0) && (a)->s6_addr[15] == 1)",
+            "#define IN6_IS_ADDR_MULTICAST(a) ((a)->s6_addr[0] == 0xff)",
+            "#define IN6_IS_ADDR_LINKLOCAL(a) ((a)->s6_addr[0] == 0xfe && ((a)->s6_addr[1] & 0xc0) == 0x80)",
+            "#define IN6_IS_ADDR_SITELOCAL(a) ((a)->s6_addr[0] == 0xfe && ((a)->s6_addr[1] & 0xc0) == 0xc0)",
+            "#define IN6_IS_ADDR_V4MAPPED(a) \\",
+            "    (__SLIBC_IN6_ZERO8(a) && (a)->s6_addr[8] == 0 && (a)->s6_addr[9] == 0 && \\",
+            "     (a)->s6_addr[10] == 0xff && (a)->s6_addr[11] == 0xff)",
+            "#define IN6_IS_ADDR_V4COMPAT(a) \\",
+            "    (__SLIBC_IN6_ZERO8(a) && (((a)->s6_addr[8] | (a)->s6_addr[9] | (a)->s6_addr[10] | (a)->s6_addr[11]) == 0) && \\",
+            "     !IN6_IS_ADDR_UNSPECIFIED(a) && !IN6_IS_ADDR_LOOPBACK(a))",
+            "#define IN6_IS_ADDR_MC_NODELOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x1)",
+            "#define IN6_IS_ADDR_MC_LINKLOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x2)",
+            "#define IN6_IS_ADDR_MC_SITELOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x5)",
+            "#define IN6_IS_ADDR_MC_ORGLOCAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0x8)",
+            "#define IN6_IS_ADDR_MC_GLOBAL(a) (IN6_IS_ADDR_MULTICAST(a) && ((a)->s6_addr[1] & 0xf) == 0xe)",
+        ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "syslog.h",
+        summary: "system error logging",
+        includes: &["sys/types.h", "stdio.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[
+            "LOG_EMERG",
+            "LOG_ALERT",
+            "LOG_CRIT",
+            "LOG_ERR",
+            "LOG_WARNING",
+            "LOG_NOTICE",
+            "LOG_INFO",
+            "LOG_DEBUG",
+            "LOG_KERN",
+            "LOG_USER",
+            "LOG_MAIL",
+            "LOG_DAEMON",
+            "LOG_AUTH",
+            "LOG_SYSLOG",
+            "LOG_LPR",
+            "LOG_NEWS",
+            "LOG_UUCP",
+            "LOG_CRON",
+            "LOG_AUTHPRIV",
+            "LOG_FTP",
+            "LOG_LOCAL0",
+            "LOG_LOCAL1",
+            "LOG_LOCAL2",
+            "LOG_LOCAL3",
+            "LOG_LOCAL4",
+            "LOG_LOCAL5",
+            "LOG_LOCAL6",
+            "LOG_LOCAL7",
+            "LOG_PID",
+            "LOG_CONS",
+            "LOG_ODELAY",
+            "LOG_NDELAY",
+            "LOG_NOWAIT",
+            "LOG_PERROR",
+        ],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "openlog(ident: *const c_char, option: c_int, facility: c_int)",
+            "closelog()",
+            "setlogmask(mask: c_int) -> c_int",
+            "syslog(priority: c_int, format: *const c_char, ...)",
+            "vsyslog(priority: c_int, format: *const c_char, ap: va_list)",
+        ],
+        variables: &[],
+        raw: &[
+            "#define LOG_MASK(pri) (1 << (pri))",
+            "#define LOG_UPTO(pri) ((1 << ((pri) + 1)) - 1)",
+        ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "sys/times.h",
+        summary: "process times",
+        includes: &["sys/types.h"],
+        types: &["tms"],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &["times(buf: *mut tms) -> clock_t"],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "iconv.h",
+        summary: "codeset conversion",
+        includes: &["sys/types.h"],
+        types: &["iconv_t"],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[
+            "iconv_open(tocode: *const c_char, fromcode: *const c_char) -> iconv_t",
+            "iconv(cd: iconv_t, inbuf: *mut *mut c_char, inbytesleft: *mut size_t, outbuf: *mut *mut c_char, outbytesleft: *mut size_t) -> size_t",
+            "iconv_close(cd: iconv_t) -> c_int",
+        ],
+        variables: &[],
+        raw: &[],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "sys/param.h",
+        summary: "BSD system parameters",
+        includes: &["sys/types.h", "limits.h"],
+        types: &[],
+        consts: &[],
+        slibc_consts: &[],
+        macros: &[],
+        functions: &[],
+        extra: &[],
+        variables: &[],
+        raw: &[
+            "/* Not POSIX, but every Unix C library has it and OpenSSL includes it",
+            " * unconditionally. */",
+            "#define MAXPATHLEN PATH_MAX",
+            "#define MAXHOSTNAMELEN 64",
+            "#define NBBY 8",
+            "#ifndef MIN",
+            "#define MIN(a, b) (((a) < (b)) ? (a) : (b))",
+            "#endif",
+            "#ifndef MAX",
+            "#define MAX(a, b) (((a) > (b)) ? (a) : (b))",
+            "#endif",
+            "#define howmany(x, y) (((x) + ((y) - 1)) / (y))",
+            "#define roundup(x, y) ((((x) + ((y) - 1)) / (y)) * (y))",
+            "#define powerof2(x) ((((x) - 1) & (x)) == 0)",
+        ],
+        raw_unguarded: &[],
+    },
+    HeaderSpec {
+        path: "netinet/tcp.h",
+        summary: "TCP options",
+        includes: &[],
+        types: &[],
+        consts: &["TCP_*"],
         slibc_consts: &[],
         macros: &[],
         functions: &[],
@@ -1572,6 +1780,9 @@ pub const HEADERS: &[HeaderSpec] = &[
             "ntohs(netshort: u16) -> u16",
             "inet_addr(cp: *const c_char) -> in_addr_t",
             "inet_ntoa(addr: in_addr) -> *mut c_char",
+            "inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int",
+            "inet_ntop(af: c_int, src: *const c_void, dst: *mut c_char, size: socklen_t) \
+             -> *const c_char",
         ],
         variables: &[],
         raw: &[],
@@ -1580,15 +1791,33 @@ pub const HEADERS: &[HeaderSpec] = &[
     HeaderSpec {
         path: "netdb.h",
         summary: "name resolution",
-        includes: &["sys/socket.h"],
-        types: &["addrinfo"],
+        includes: &["sys/socket.h", "netinet/in.h"],
+        types: &["addrinfo", "hostent", "servent"],
         consts: &["AI_*", "EAI_*", "NI_*"],
-        slibc_consts: &[],
+        slibc_consts: &[
+            "NI_NUMERICHOST",
+            "NI_NUMERICSERV",
+            "NI_NOFQDN",
+            "NI_NAMEREQD",
+            "NI_DGRAM",
+            "NI_NUMERICSCOPE",
+            "HOST_NOT_FOUND",
+            "TRY_AGAIN",
+            "NO_RECOVERY",
+            "NO_DATA",
+        ],
         macros: &[],
         functions: &["getaddrinfo", "freeaddrinfo", "gai_strerror"],
-        extra: &[],
+        extra: &[
+            "getnameinfo(sa: *const sockaddr, salen: socklen_t, host: *mut c_char, \
+             hostlen: socklen_t, serv: *mut c_char, servlen: socklen_t, flags: c_int) -> c_int",
+            "gethostbyname(name: *const c_char) -> *mut hostent",
+            "getservbyname(name: *const c_char, proto: *const c_char) -> *mut servent",
+            "__h_errno_location() -> *mut c_int",
+        ],
         variables: &[],
-        raw: &[],
+        // `h_errno` is per thread, a macro over its accessor as `errno` is.
+        raw: &["#define h_errno (*__h_errno_location())"],
         raw_unguarded: &[],
     },
     HeaderSpec {
@@ -1867,7 +2096,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "pthread_once_t",
         ],
         consts: &["PTHREAD_*"],
-        slibc_consts: &[],
+        slibc_consts: &["PTHREAD_CREATE_JOINABLE", "PTHREAD_CREATE_DETACHED"],
         macros: &[],
         functions: &[
             "pthread_create",

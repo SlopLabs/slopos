@@ -584,7 +584,12 @@ pub(crate) unsafe fn vfprintf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut V
     count
 }
 
-unsafe fn vsnprintf_impl(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
+pub(crate) unsafe fn vsnprintf_impl(
+    buf: *mut u8,
+    n: usize,
+    fmt: *const u8,
+    ap: &mut VaList<'_>,
+) -> i32 {
     let mut pos: usize = 0;
     let limit = if n > 0 { n - 1 } else { 0 };
     let mut malformed = false;

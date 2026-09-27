@@ -42,6 +42,8 @@ int madvise(void *addr, size_t len, int advice);
 int msync(void *addr, size_t len, int flags);
 int shm_open(const char *name, int oflag, mode_t mode);
 int shm_unlink(const char *name);
+int mlock(const void *addr, size_t len);
+int munlock(const void *addr, size_t len);
 
 #ifdef __cplusplus
 }

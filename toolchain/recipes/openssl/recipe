@@ -1,0 +1,22 @@
+# OpenSSL 3: TLS for curl and libgit2, and the cryptography libssh2 and
+# openssl-sys build on.
+#
+# `Configure --config=slopos.conf slopos-x86_64` takes the target from the
+# out-of-tree definition beside this file, which is how Configure admits a
+# platform it does not ship.
+#
+#   no-tests    the test programs, which run on the build machine and cannot
+#               here.
+#   /etc/ssl    where the SlopOS image keeps its CA bundle
+#               (`certs/ca-certificates.crt`).
+version=3.6.4
+url=https://github.com/openssl/openssl/releases/download/openssl-3.6.4/openssl-3.6.4.tar.gz
+sha256=9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef
+license=Apache-2.0
+template=openssl
+config=slopos.conf
+target=slopos-x86_64
+soname=libcrypto.so.3
+soname=libssl.so.3
+arg=--openssldir=/etc/ssl
+arg=no-tests

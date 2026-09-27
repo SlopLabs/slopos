@@ -8,12 +8,16 @@
 #define _SLIBC_SYS_SELECT_H
 
 #include <sys/types.h>
-#include <sys/time.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+struct timeval {
+    time_t tv_sec;
+    suseconds_t tv_usec;
+};
 typedef struct {
     unsigned long fds_bits[16];
 } fd_set;

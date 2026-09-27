@@ -19,6 +19,8 @@ unsigned int ntohl(unsigned int netlong);
 unsigned short ntohs(unsigned short netshort);
 in_addr_t inet_addr(const char *cp);
 char *inet_ntoa(struct in_addr addr);
+int inet_pton(int af, const char *src, void *dst);
+const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);
 
 #ifdef __cplusplus
 }

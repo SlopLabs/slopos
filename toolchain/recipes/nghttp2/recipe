@@ -1,0 +1,13 @@
+# nghttp2: HTTP/2 framing, for curl, which cargo asks for `http2`.
+#
+# The library only: the applications (nghttp, nghttpd, nghttpx, h2load) need
+# libev, c-ares and more, and nothing here runs them.
+version=1.70.0
+url=https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz
+sha256=e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2
+license=MIT
+template=cmake
+soname=libnghttp2.so.14
+arg=-DENABLE_LIB_ONLY=ON
+arg=-DENABLE_DOC=OFF
+arg=-DBUILD_STATIC_LIBS=OFF

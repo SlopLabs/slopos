@@ -443,6 +443,15 @@ pub unsafe extern "C" fn clearerr(stream: *mut FILE) {
     }
 }
 
+/// `setbuf(3)`: `setvbuf` with full buffering for a buffer, none for null.
+/// The stream keeps its own `BUFSIZ` buffer either way, so `buf` is only a
+/// choice of mode.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setbuf(stream: *mut FILE, buf: *mut u8) {
+    let mode = if buf.is_null() { _IONBF } else { _IOFBF };
+    setvbuf(stream, buf, mode, super::BUFSIZ);
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setvbuf(stream: *mut FILE, _buf: *mut u8, mode: i32, _size: usize) -> i32 {
     if stream.is_null() {

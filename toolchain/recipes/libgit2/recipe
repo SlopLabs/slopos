@@ -1,0 +1,19 @@
+# libgit2: cargo's git sources, through git2 with `https` and `ssh`.
+#
+# 1.9.x because libgit2-sys 0.18.7 accepts a system library in 1.9.6..1.10.0
+# and builds its bundled copy otherwise. The tarball is GitHub's archive of
+# the release tag, which is the only form libgit2 publishes.
+#
+# The library only: the `git2` command line and the clar test suite are
+# programs of their own.
+version=1.9.7
+url=https://github.com/libgit2/libgit2/archive/refs/tags/v1.9.7.tar.gz
+sha256=1a4fbe7589e814777ae76b64734ad80f4ecad22cd33a22682a2aaea4ae5375e7
+license=GPL-2.0-only WITH GCC-exception-2.0
+template=cmake
+depends=libssh2 openssl zlib
+soname=libgit2.so.1.9
+arg=-DUSE_HTTPS=OpenSSL
+arg=-DUSE_SSH=libssh2
+arg=-DBUILD_TESTS=OFF
+arg=-DBUILD_CLI=OFF
