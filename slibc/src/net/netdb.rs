@@ -180,7 +180,7 @@ pub unsafe extern "C" fn getnameinfo(
     if flags & !NI_KNOWN != 0 {
         return EAI_BADFLAGS;
     }
-    if sa.is_null() {
+    if sa.is_null() || salen < 4 {
         return EAI_FAMILY;
     }
     let raw = sa.cast::<u8>();

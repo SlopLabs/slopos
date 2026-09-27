@@ -1966,6 +1966,22 @@ static int addresses(void) {
         return fail("getnameinfo did not refuse NI_NAMEREQD or a short buffer");
     }
 
+    long page = sysconf(_SC_PAGESIZE);
+    char *map = mmap(NULL, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0);
+    if (map == MAP_FAILED || munmap(map + page, (size_t)page) != 0) {
+        return fail("could not map the getnameinfo guard page");
+    }
+    sa_family_t family = AF_INET;
+    memcpy(map + page - sizeof family, &family, sizeof family);
+    if (getnameinfo((struct sockaddr *)(map + page), 0, host, sizeof host, NULL, 0, 0) !=
+            EAI_FAMILY ||
+        getnameinfo((struct sockaddr *)(map + page - sizeof family), sizeof family, host,
+                    sizeof host, NULL, 0, 0) != EAI_FAMILY) {
+        return fail("getnameinfo did not refuse a sockaddr shorter than its family and port");
+    }
+    munmap(map, (size_t)page);
+
     struct hostent *he = gethostbyname("10.0.2.2");
     if (!he || he->h_addrtype != AF_INET || he->h_length != 4 ||
         memcmp(he->h_addr_list[0], "\x0a\x00\x02\x02", 4) != 0 || he->h_addr_list[1] != NULL ||
