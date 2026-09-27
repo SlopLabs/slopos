@@ -71,10 +71,9 @@ pub struct posix_spawn_file_actions_t {
 }
 
 /// `sigset_t` is 128 bytes — glibc's `_SIGSET_NWORDS`, and what the target's
-/// `libc` declares — while the kernel's mask is a single `u64`. Only signals
-/// `1..=31` exist (`NSIG` is 32), so every bit slibc can hand the kernel lives
-/// in word 0; [`sigset_high_bits_set`] is what refuses the rest rather than
-/// silently dropping it.
+/// `libc` declares — while the kernel's mask is a single `u64`. Signals
+/// `1..=64` exist, so word 0 is the whole mask the kernel understands and
+/// signal `n` is its bit `n - 1`; the other fifteen words name nothing.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct sigset_t {
@@ -89,23 +88,19 @@ impl sigset_t {
     /// Word 0, which is the whole mask the kernel understands.
     #[inline]
     pub const fn kernel_mask(&self) -> u64 {
-        self.__val[0] & KERNEL_SIGSET_MASK
+        self.__val[0]
     }
 
-    /// True when the caller set a bit above signal 31. Such a bit names a
-    /// realtime signal, which this kernel does not have.
+    /// True when a bit past signal 64 is set: it names no signal at all.
     #[inline]
     pub fn has_unsupported_bits(&self) -> bool {
-        if self.__val[0] & !KERNEL_SIGSET_MASK != 0 {
-            return true;
-        }
         self.__val[1..].iter().any(|&w| w != 0)
     }
 
     #[inline]
     pub const fn from_kernel_mask(mask: u64) -> Self {
         let mut set = Self::empty();
-        set.__val[0] = mask & KERNEL_SIGSET_MASK;
+        set.__val[0] = mask;
         set
     }
 }
@@ -116,15 +111,17 @@ impl Default for sigset_t {
     }
 }
 
-/// Bits the kernel's `SigSet` can carry: signal N is bit N-1, for
-/// `1 <= N <= NSIG`. Everything above is a realtime signal, which this kernel
-/// has not got.
-pub const KERNEL_SIGSET_MASK: u64 = slopos_abi::signal::SIGNAL_MASK;
+/// One past the highest signal number, glibc's `_NSIG`: signals are
+/// `1..NSIG`, where the kernel's own constant names the highest (64).
+pub const NSIG: c_int = slopos_abi::signal::NSIG as c_int + 1;
 
-/// Highest signal number that exists. The kernel's `parse_signum` accepts
-/// `1..=NSIG` inclusive, which is one more than Linux's reading of the same
-/// name — a stated divergence, and the reason the range lives in one constant.
-pub const NSIG: c_int = slopos_abi::signal::NSIG as c_int;
+/// `union sigval`: what `sigqueue` sends and a handler reads as `si_value`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union sigval {
+    pub sival_int: c_int,
+    pub sival_ptr: *mut c_void,
+}
 
 /// The userspace `struct sigaction`: handler at 0, the 128-byte mask at 8,
 /// `sa_flags` at 136, `sa_restorer` at 144. The kernel's `UserSigaction` is a
@@ -310,9 +307,8 @@ const _: () = assert!(size_of::<slopos_abi::signal::UserSigaction>() == 32);
 const _: () = assert!(size_of::<sigset_t>() == 128);
 const _: () = assert!(align_of::<sigset_t>() == 8);
 const _: () = assert!(size_of::<slopos_abi::signal::SigSet>() == 8);
-const _: () = assert!(NSIG == 32);
-// Signal 31 is the last one that fits; bit 31 is the last set bit of the mask.
-const _: () = assert!(KERNEL_SIGSET_MASK == (1u64 << 32) - 1);
+const _: () = assert!(NSIG == 65);
+const _: () = assert!(size_of::<sigval>() == 8);
 
 // `stack_t`.
 const _: () = assert!(size_of::<stack_t>() == 24);

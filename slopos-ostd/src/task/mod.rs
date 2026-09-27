@@ -23,6 +23,7 @@ pub mod link_roles;
 pub mod ops;
 pub mod pcr_ty;
 pub mod placement;
+pub mod sigqueue;
 pub mod spawner;
 pub mod state;
 pub mod switch;

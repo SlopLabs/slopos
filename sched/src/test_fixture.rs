@@ -15,21 +15,15 @@
 pub extern "C" fn dummy_task_entry(_arg: *mut core::ffi::c_void) {}
 
 /// Set or clear the current task's kill flag, answering whether it took.
-/// [`SIGNAL_KILLED`](slopos_abi::signal::SIGNAL_KILLED) is outside
-/// `SIGNAL_MASK`, so the raw field is the only way back out of the state.
+/// Nothing but `task_kill_and_wake` sets the flag, and nothing clears it, so
+/// the raw field is the only way back out of the state.
 pub fn mark_current_killed(on: bool) -> bool {
     use core::sync::atomic::Ordering;
     let Some(current) = crate::task_struct::Current::get() else {
         return false;
     };
     let task = current.task();
-    if on {
-        task.signal_pending
-            .fetch_or(slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
-    } else {
-        task.signal_pending
-            .fetch_and(!slopos_abi::signal::SIGNAL_KILLED, Ordering::AcqRel);
-    }
+    task.killed.store(on, Ordering::Release);
     task.is_killed() == on
 }
 

@@ -7270,9 +7270,9 @@ slopos_testing::stest!(
     name = test_clone_shares_cwd_with_threads_and_clone_fs,
     suite = syscall_valid
 );
-/// `rt_sigaction` bounds the signal number against `NSIG`, not a literal 64:
-/// the handler indexes `[SignalActionCell; NSIG]` with `signum - 1`, and the
-/// `old_act` read happens before every other validation.
+/// `rt_sigaction` bounds the signal number at `NSIG`, the last realtime
+/// signal: the handler indexes `[SignalActionCell; NSIG]` with `signum - 1`,
+/// and the `old_act` read happens before every other validation.
 pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -7343,12 +7343,7 @@ pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
         einval,
         "signum NSIG+1 has no table slot and must be EINVAL"
     );
-    assert_eq_test!(
-        query(64),
-        einval,
-        "signum 64 was the old literal bound and must now be EINVAL"
-    );
-    assert_eq_test!(query(65), einval, "signum 65 must be EINVAL");
+    assert_eq_test!(query(32), 0, "the first realtime signal must be queryable");
     // `rt_sigaction` has no kill(2)-style existence-probe meaning for 0.
     assert_eq_test!(query(0), einval, "signum 0 must be EINVAL");
 
@@ -7373,86 +7368,42 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 
-/// A kernel-private pending bit is invisible to signal delivery, and no public
-/// writer can disturb it. An unmasked bit at or above `NSIG` has `sig_bit` 0,
-/// so the clearing `fetch_and(!0)` is a no-op and the bit re-delivers forever.
-pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
+/// The kill flag is not a signal and no signal word reaches it: every one of
+/// the 64 pending bits can be set and cleared through the public writers
+/// without marking the task, and none of them clears the mark once set.
+pub fn test_kill_flag_is_outside_every_signal_word() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let Some(pid) = task_guard
-        .process()
-        .as_deref()
-        .and_then(slopos_fs::fileio::FdTable::of)
-    else {
-        return TestResult::Fail;
-    };
 
-    // One bit above the kill flag: private and meaningless, so this exercises
-    // the masking alone rather than kill semantics.
-    let private_bit: SigSet = 1u64 << (NSIG + 1);
-    assert_test!(
-        private_bit != slopos_abi::signal::SIGNAL_KILLED,
-        "the probe bit must not be the kill flag"
-    );
-    task_guard
-        .signal_pending
-        .fetch_or(private_bit, core::sync::atomic::Ordering::AcqRel);
-
-    assert_test!(
-        !task::task_has_deliverable_signal(&*task_guard),
-        "a kernel-private bit must not read as a deliverable signal"
-    );
-
-    let original_rip = 0x5000_8765u64;
-    let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
-    user_frame.regs_mut().rip = original_rip;
-    deliver_pending_signal_as_current(task_id, pid, &user_frame);
-    assert_eq_test!(
-        user_frame.rip(),
-        original_rip,
-        "a kernel-private bit must not redirect RIP"
-    );
-    assert_eq_test!(
-        task_guard.signal_pending() & private_bit,
-        private_bit,
-        "delivery must leave a kernel-private bit set"
-    );
-    let state = task_guard.status();
-    assert_test!(
-        state != TaskStatus::Zombie && state != TaskStatus::Terminated,
-        "a kernel-private bit must not terminate the target"
-    );
-
+    task_guard.set_signal_blocked(u64::MAX);
+    task_guard.set_signal_pending(u64::MAX);
+    let _ = task_guard.raise_signal_pending(u64::MAX);
+    let marked_by_signals = task_guard.is_killed();
     task_guard.set_signal_pending(0);
-    assert_eq_test!(
-        task_guard.signal_pending(),
-        private_bit,
-        "set_signal_pending must preserve kernel-private bits"
-    );
-    task_guard.clear_signal_pending(private_bit);
-    assert_eq_test!(
-        task_guard.signal_pending(),
-        private_bit,
-        "clear_signal_pending must not reach kernel-private bits"
-    );
-    task_guard
-        .signal_pending
-        .fetch_and(!private_bit, core::sync::atomic::Ordering::AcqRel);
-    assert_test!(
-        task_guard.raise_signal_pending(private_bit) & private_bit == 0
-            && task_guard.signal_pending() & private_bit == 0,
-        "raise_signal_pending must not reach kernel-private bits"
-    );
+
+    let first = task::task_kill_and_wake(&*task_guard);
+    task_guard.set_signal_pending(0);
+    let _ = task_guard.clear_signal_pending(u64::MAX);
+    task_guard.set_signal_blocked(0);
+    let survived = task_guard.is_killed();
+    let pending_after = task_guard.signal_pending();
 
     task_terminate(task_id);
+    assert_test!(
+        !marked_by_signals,
+        "a full signal word marked the task killed"
+    );
+    assert_test!(first, "the first kill did not report the marking");
+    assert_test!(survived, "clearing every signal cleared the kill flag");
+    assert_eq_test!(pending_after, 0, "the kill flag reads as a pending signal");
     pass!()
 }
 
 slopos_testing::stest!(
-    name = test_kernel_private_pending_bit_is_not_a_signal,
+    name = test_kill_flag_is_outside_every_signal_word,
     suite = syscall_signal
 );
 

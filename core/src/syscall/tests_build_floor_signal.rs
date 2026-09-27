@@ -6,8 +6,8 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{
     MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_SIGINFO, SEGV_MAPERR, SI_ADDR_OFFSET,
-    SIG_DFL, SIGCONT, SIGNAL_KILLED, SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE,
-    SS_ONSTACK, SignalFrame, UserSigAltStack, UserSiginfo, UserUcontext, sig_bit,
+    SIG_DFL, SIGCONT, SIGSEGV, SIGSTOP, SIGTERM, SIGTSTP, SIGUSR1, SS_DISABLE, SS_ONSTACK,
+    SignalFrame, UserSigAltStack, UserSiginfo, UserUcontext, sig_bit,
 };
 use slopos_abi::syscall::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
 use slopos_abi::task::{
@@ -33,7 +33,8 @@ use slopos_sched::task_struct::{Current, SignalAction};
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test, pass};
 
 use crate::syscall::signal::{
-    deliver_pending_signal, syscall_kill, syscall_rt_sigreturn, syscall_sigaltstack,
+    deliver_pending_signal, syscall_kill, syscall_rt_sigqueueinfo, syscall_rt_sigreturn,
+    syscall_sigaltstack, syscall_tgkill,
 };
 
 type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
@@ -1557,11 +1558,10 @@ pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
 }
 
 /// `rt_sigreturn` restores the blocked mask from a sigframe the caller wrote,
-/// so a user-authored word reaches `signal_blocked` directly. The kill flag
-/// lives above `NSIG`, outside `SIGNAL_MASK`, and every reader masks before
-/// looking — which is exactly why the writer has to: an unmasked store leaves
-/// a kernel-private bit set in a field userland chose.
-pub fn test_sigreturn_cannot_set_a_kernel_private_mask_bit() -> TestResult {
+/// so a user-authored word reaches `signal_blocked` directly: all 64 bits are
+/// signals, realtime ones included, the uncatchable pair is stripped, and no
+/// value of it can mark the task killed.
+pub fn test_sigreturn_restores_a_full_mask_without_the_kill_flag() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     const INTERRUPTED_RIP: u64 = 0x5000_7777;
@@ -1616,9 +1616,13 @@ pub fn test_sigreturn_cannot_set_a_kernel_private_mask_bit() -> TestResult {
     );
 
     assert_eq_test!(
-        task.signal_blocked() & SIGNAL_KILLED,
-        0,
-        "a user-authored sigframe set the kernel-private kill flag in the blocked mask"
+        task.signal_blocked(),
+        !slopos_abi::signal::SIG_UNCATCHABLE,
+        "a full saved mask must restore every catchable signal, realtime included"
+    );
+    assert_test!(
+        !task.is_killed(),
+        "a user-authored sigframe marked the task killed"
     );
 
     drop(task);
@@ -1715,7 +1719,216 @@ slopos_testing::stest!(
     suite = syscall_signal_build_floor
 );
 slopos_testing::stest!(
-    name = test_sigreturn_cannot_set_a_kernel_private_mask_bit,
+    name = test_sigreturn_restores_a_full_mask_without_the_kill_flag,
+    suite = syscall_signal_build_floor
+);
+
+/// Run `handler` as `caller` with `args` (`rdi, rsi, rdx, r10`), returning RAX.
+fn call_as(handler: crate::syscall::common::SyscallHandler, caller: u32, args: [u64; 4]) -> u64 {
+    let (Some(task), Some(table)) = (task_find_by_id(caller), fdtable_of(caller)) else {
+        return u64::MAX;
+    };
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("frame alloc");
+    {
+        let regs = frame.regs_mut();
+        regs.rdi = args[0];
+        regs.rsi = args[1];
+        regs.rdx = args[2];
+        regs.r10 = args[3];
+    }
+    let _ = with_user_process_context(table, || {
+        crate::syscall::dispatch::dispatch_handler(handler, &task, &mut frame)
+    });
+    frame.rax()
+}
+
+/// Realtime instances queue each with its own record, FIFO per signal, and
+/// the lowest-numbered pending signal is delivered first — standard before
+/// realtime. A standard signal sent twice coalesces into the first sender's.
+pub fn test_realtime_signals_queue_and_standard_ones_coalesce() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SI_USER, SIGRTMIN, SigInfo};
+    use slopos_sched::task::{SignalPost, task_signal_post_info};
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let queued = |pid: u32, value: u64| SigInfo::sent(SI_QUEUE, pid, 0, value);
+
+    let posts = [
+        task_signal_post_info(&task, SIGRTMIN + 1, queued(7, 1)),
+        task_signal_post_info(&task, SIGRTMIN, queued(7, 2)),
+        task_signal_post_info(&task, SIGRTMIN + 1, queued(7, 3)),
+        task_signal_post_info(&task, SIGRTMIN, queued(7, 4)),
+        task_signal_post_info(&task, SIGUSR1, SigInfo::sent(SI_USER, 10, 0, 0)),
+    ];
+    let coalesced = task_signal_post_info(&task, SIGUSR1, SigInfo::sent(SI_USER, 11, 0, 0));
+    let mut order = [(0u8, 0u32, 0u64); 5];
+    for slot in order.iter_mut() {
+        if let Some((signum, info)) = task.dequeue_signal(u64::MAX) {
+            *slot = (signum, info.pid, info.value);
+        }
+    }
+    let drained = task.dequeue_signal(u64::MAX).is_none() && task.signal_pending() == 0;
+    drop(task);
+    task_terminate(task_id);
+
+    assert_test!(
+        posts.iter().all(|p| *p == SignalPost::Pending),
+        "every first instance must pend"
+    );
+    assert_eq_test!(
+        coalesced,
+        SignalPost::Dropped,
+        "a second SIGUSR1 must coalesce"
+    );
+    assert_eq_test!(
+        order[0],
+        (SIGUSR1, 10, 0),
+        "the standard signal, first sender's record"
+    );
+    assert_eq_test!(order[1], (SIGRTMIN, 7, 2), "SIGRTMIN's first instance");
+    assert_eq_test!(order[2], (SIGRTMIN, 7, 4), "SIGRTMIN's second instance");
+    assert_eq_test!(
+        order[3],
+        (SIGRTMIN + 1, 7, 1),
+        "SIGRTMIN+1's first instance"
+    );
+    assert_eq_test!(
+        order[4],
+        (SIGRTMIN + 1, 7, 3),
+        "SIGRTMIN+1's second instance"
+    );
+    assert_test!(drained, "five deliveries must drain the pending set");
+    pass!()
+}
+
+/// A task holds at most `SIGQUEUE_MAX` realtime instances; the next is
+/// refused, and a delivery makes room again.
+pub fn test_realtime_queue_limit_refuses_the_surplus() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMAX, SigInfo};
+    use slopos_sched::task::{SignalPost, task_signal_post_info};
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let info = SigInfo::sent(SI_QUEUE, 1, 0, 0);
+    let mut accepted = 0;
+    for _ in 0..SIGQUEUE_MAX {
+        if task_signal_post_info(&task, SIGRTMAX, info) == SignalPost::Pending {
+            accepted += 1;
+        }
+    }
+    let surplus = task_signal_post_info(&task, SIGRTMAX, info);
+    let delivered = task.dequeue_signal(u64::MAX).is_some();
+    let after = task_signal_post_info(&task, SIGRTMAX, info);
+    let held = task.queued_realtime_signals();
+    drop(task);
+    task_terminate(task_id);
+
+    assert_eq_test!(
+        accepted,
+        SIGQUEUE_MAX,
+        "the queue must take SIGQUEUE_MAX instances"
+    );
+    assert_eq_test!(
+        surplus,
+        SignalPost::QueueFull,
+        "the surplus instance must be refused"
+    );
+    assert_test!(delivered, "a queued instance must deliver");
+    assert_eq_test!(after, SignalPost::Pending, "a delivery must make room");
+    assert_eq_test!(held, SIGQUEUE_MAX, "the queue must be full again");
+    pass!()
+}
+
+/// `rt_sigqueueinfo` takes `si_code` and `si_value` from the caller but never
+/// `si_pid`, and refuses a kernel-owned code or `SI_TKILL` aimed at another
+/// process. `kill` and `tgkill` report their sender with `SI_USER` and
+/// `SI_TKILL`.
+pub fn test_sent_signals_carry_the_real_sender() -> TestResult {
+    use slopos_abi::signal::{SI_QUEUE, SI_TKILL, SI_USER, SIGRTMIN, SigInfo, UserSiginfo};
+    let _fixture = SyscallFixture::new();
+
+    let sender = create_test_user_task();
+    let target = create_test_user_task();
+    if sender == INVALID_TASK_ID || target == INVALID_TASK_ID {
+        return fail_and_clean(&[sender, target]);
+    }
+    let (Some(table), Some(target_task)) = (fdtable_of(sender), task_find_by_id(target)) else {
+        return fail_and_clean(&[sender, target]);
+    };
+    let Some(page) = map_user_rw_region(table, 1) else {
+        drop(target_task);
+        return fail_and_clean(&[sender, target]);
+    };
+    let write_info = |code: i32| {
+        let mut info =
+            UserSiginfo::from_info(SIGRTMIN as i32, &SigInfo::sent(code, 999, 999, 0x1234_5678));
+        info.si_errno = 0;
+        user_copy_out(table, page, &info)
+    };
+    let queue = |sig: u8| {
+        call_as(
+            syscall_rt_sigqueueinfo,
+            sender,
+            [target as u64, sig as u64, page, 0],
+        )
+    };
+    let eperm = slopos_abi::Errno::EPERM.as_u64();
+
+    let forged_user = write_info(SI_USER) && queue(SIGRTMIN) == eperm;
+    let forged_tkill = write_info(SI_TKILL) && queue(SIGRTMIN) == eperm;
+    let queued = write_info(SI_QUEUE) && queue(SIGRTMIN) == 0;
+    let got_queued = target_task.dequeue_signal(u64::MAX);
+    let killed = call_as(syscall_kill, sender, [target as u64, SIGUSR1 as u64, 0, 0]) == 0;
+    let got_kill = target_task.dequeue_signal(u64::MAX);
+    let tkilled = call_as(
+        syscall_tgkill,
+        sender,
+        [target as u64, target as u64, SIGUSR1 as u64, 0],
+    ) == 0;
+    let got_tkill = target_task.dequeue_signal(u64::MAX);
+    let own = write_info(SI_USER)
+        && call_as(
+            syscall_rt_sigqueueinfo,
+            sender,
+            [sender as u64, SIGRTMIN as u64, page, 0],
+        ) == 0;
+    drop(target_task);
+    task_terminate(sender);
+    task_terminate(target);
+
+    assert_test!(
+        forged_user,
+        "a forged SI_USER to another process must be EPERM"
+    );
+    assert_test!(
+        forged_tkill,
+        "a forged SI_TKILL to another process must be EPERM"
+    );
+    assert_test!(queued && killed && tkilled, "the legitimate sends failed");
+    assert_test!(own, "a process may queue any code to itself");
+    let q = SigInfo::sent(SI_QUEUE, sender, 0, 0x1234_5678);
+    assert_eq_test!(got_queued, Some((SIGRTMIN, q)), "sigqueue's record");
+    let k = SigInfo::sent(SI_USER, sender, 0, 0);
+    assert_eq_test!(got_kill, Some((SIGUSR1, k)), "kill's record");
+    let t = SigInfo::sent(SI_TKILL, sender, 0, 0);
+    assert_eq_test!(got_tkill, Some((SIGUSR1, t)), "tgkill's record");
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_realtime_signals_queue_and_standard_ones_coalesce,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_realtime_queue_limit_refuses_the_surplus,
+    suite = syscall_signal_build_floor
+);
+slopos_testing::stest!(
+    name = test_sent_signals_carry_the_real_sender,
     suite = syscall_signal_build_floor
 );
 

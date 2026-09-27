@@ -27,9 +27,7 @@ pub fn signalfd_create(table: FdTable, owner_task_id: u32, mask: u64) -> i32 {
     };
     let Some(raw_handle) = registry::insert(registry::SignalfdState {
         owner_task_id,
-        // Bits outside the signal range name kernel-private state, which a
-        // signalfd must never observe or drain.
-        mask: mask & slopos_abi::signal::SIGNAL_MASK,
+        mask,
     }) else {
         return Errno::ENOMEM.raw();
     };

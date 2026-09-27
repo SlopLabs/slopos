@@ -62,7 +62,8 @@ impl SignalListener {
 
     /// Await the next signal; resolves to its number (1-based), or 0 on error.
     pub async fn recv(&self) -> u32 {
-        let br = super::read(self.fd, vec![0u8; 16], 16).await;
+        const RECORD: usize = slopos_abi::signal::SignalfdSiginfo::SERIALIZED_LEN;
+        let br = super::read(self.fd, vec![0u8; RECORD], RECORD as u32).await;
         if br.res < 4 {
             return 0;
         }

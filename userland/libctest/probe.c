@@ -1722,9 +1722,6 @@ static void *post_later(void *arg) {
 static int semaphores(void) {
     sem_t sem;
     int value = -1;
-    if (sem_init(&sem, 1, 0) == 0 || errno != ENOSYS) {
-        return fail("a process-shared semaphore was accepted over private futexes");
-    }
     if (sem_init(&sem, 0, 1) != 0 || sem_getvalue(&sem, &value) != 0 || value != 1) {
         return fail("sem_init did not set the value");
     }

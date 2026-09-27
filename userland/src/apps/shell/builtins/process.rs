@@ -37,7 +37,7 @@ pub fn cmd_jobs(_argc: i32, _argv: &[&[u8]]) -> i32 {
 fn parse_signal(spec: &[u8]) -> Option<u8> {
     let text = jobs::arg_as_str(spec)?;
     if let Ok(num) = text.parse::<u8>() {
-        return if (num as usize) < NSIG {
+        return if (num as usize) <= NSIG {
             Some(num)
         } else {
             None

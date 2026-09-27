@@ -8,7 +8,7 @@ use slopos_userland as _;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_abi::signal::UserSigaction;
+use slopos_abi::signal::{UserSigaction, UserSiginfo};
 use slopos_slibc::signal::{self, SIG_DFL, SIGUSR1, SIGUSR2};
 use slopos_slibc::types::{sigaction as SigAction, sigset_t as SigSet};
 
@@ -317,8 +317,9 @@ fn test_signal_preserves_mxcsr() -> bool {
     true
 }
 
-/// `rt_sigaction` must reject a signal number past `NSIG` with `EINVAL` rather
-/// than indexing off the end of the 32-entry action table.
+/// `rt_sigaction` must take every signal up to 64, the last realtime one, and
+/// reject a number past it with `EINVAL` rather than indexing off the end of
+/// the 64-entry action table.
 ///
 /// Issued as a raw syscall because libc's `sigaction()` never produces one; the
 /// query-only form (`new == 0`, `old != 0`) reaches the table read before any
@@ -330,7 +331,7 @@ fn test_sigaction_rejects_signum_past_nsig() -> bool {
         sa_restorer: 0,
         sa_mask: 0,
     };
-    for signum in [33u64, 64, 65] {
+    for (signum, want) in [(32u64, 0i64), (64, 0), (65, -22), (128, -22)] {
         let ret = unsafe {
             slopos_slibc::pal::raw::syscall4(
                 slopos_abi::syscall::SYSCALL_RT_SIGACTION,
@@ -340,8 +341,86 @@ fn test_sigaction_rejects_signum_past_nsig() -> bool {
                 core::mem::size_of::<u64>() as u64,
             )
         } as i64;
-        if ret != -22 {
-            eprintln!("signal_handler_test: rt_sigaction({signum}) returned {ret}, want -EINVAL");
+        if ret != want {
+            eprintln!("signal_handler_test: rt_sigaction({signum}) returned {ret}, want {want}");
+            return false;
+        }
+    }
+    true
+}
+
+static QUEUED_SEEN: AtomicU32 = AtomicU32::new(0);
+/// Per delivery: signal, `si_code`, `si_pid`, `si_value`'s `sival_int`.
+static QUEUED_LOG: [[AtomicU32; 4]; 4] = [const { [const { AtomicU32::new(0) }; 4] }; 4];
+
+extern "C" fn on_queued(sig: i32, info: *mut UserSiginfo, _uc: *mut core::ffi::c_void) {
+    let at = QUEUED_SEEN.fetch_add(1, Ordering::SeqCst) as usize;
+    if at >= QUEUED_LOG.len() || info.is_null() {
+        return;
+    }
+    // SAFETY: the kernel hands an `SA_SIGINFO` handler a live siginfo.
+    let info = unsafe { &*info };
+    let row = &QUEUED_LOG[at];
+    row[0].store(sig as u32, Ordering::SeqCst);
+    row[1].store(info.si_code as u32, Ordering::SeqCst);
+    row[2].store(info.si_pid(), Ordering::SeqCst);
+    row[3].store(info.si_value() as u32, Ordering::SeqCst);
+}
+
+/// `sigqueue` round trip: three instances queued while blocked — two of
+/// `SIGRTMIN`, one of `SIGRTMIN+1`, sent in the order +1, 0, 0 — arrive on
+/// unblock lowest signal first and FIFO within one, each with its own
+/// `si_value`, `SI_QUEUE` and this process as `si_pid`.
+fn test_sigqueue_delivers_every_instance_in_order() -> bool {
+    use slopos_slibc::signal::{__libc_current_sigrtmin, SI_QUEUE};
+    use slopos_slibc::types::sigval;
+
+    QUEUED_SEEN.store(0, Ordering::SeqCst);
+    let rtmin = __libc_current_sigrtmin();
+    let act = SigAction {
+        sa_sigaction: on_queued as *const () as usize,
+        sa_mask: SigSet::empty(),
+        sa_flags: slopos_abi::signal::SA_SIGINFO as i32,
+        sa_restorer: None,
+    };
+    let mut block = SigSet::empty();
+    unsafe {
+        if signal::sigaction(rtmin, &act, core::ptr::null_mut()) != 0
+            || signal::sigaction(rtmin + 1, &act, core::ptr::null_mut()) != 0
+        {
+            eprintln!("signal_handler_test: installing the realtime handlers failed");
+            return false;
+        }
+        signal::sigaddset(&mut block, rtmin);
+        signal::sigaddset(&mut block, rtmin + 1);
+        signal::sigprocmask(signal::SIG_BLOCK, &block, core::ptr::null_mut());
+    }
+    let me = unsafe { slopos_slibc::process::getpid() };
+    let sent = [(rtmin + 1, 3), (rtmin, 1), (rtmin, 2)].iter().all(
+        |&(sig, value)| unsafe { signal::sigqueue(me, sig, sigval { sival_int: value }) } == 0,
+    );
+    let early = QUEUED_SEEN.load(Ordering::SeqCst);
+    unsafe {
+        signal::sigprocmask(signal::SIG_UNBLOCK, &block, core::ptr::null_mut());
+        let _ = signal::signal(rtmin, SIG_DFL);
+        let _ = signal::signal(rtmin + 1, SIG_DFL);
+    }
+    if !sent || early != 0 {
+        eprintln!("signal_handler_test: sigqueue failed ({sent}) or a blocked one ran ({early})");
+        return false;
+    }
+    let seen = QUEUED_SEEN.load(Ordering::SeqCst);
+    let want = [(rtmin, 1), (rtmin, 2), (rtmin + 1, 3)];
+    if seen != 3 {
+        eprintln!("signal_handler_test: {seen} queued deliveries, want 3");
+        return false;
+    }
+    for (row, (sig, value)) in QUEUED_LOG.iter().zip(want) {
+        let got = [0, 1, 2, 3].map(|i| row[i].load(Ordering::SeqCst));
+        if got != [sig as u32, SI_QUEUE as u32, me as u32, value as u32] {
+            eprintln!(
+                "signal_handler_test: delivery {got:?}, want signal {sig} code {SI_QUEUE} pid {me} value {value}"
+            );
             return false;
         }
     }
@@ -349,6 +428,10 @@ fn test_sigaction_rejects_signum_past_nsig() -> bool {
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
+    (
+        "sigqueue_delivers_every_instance_in_order",
+        test_sigqueue_delivers_every_instance_in_order,
+    ),
     (
         "signal_installs_and_delivers",
         test_signal_installs_and_delivers,

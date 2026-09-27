@@ -5,7 +5,7 @@ pub use slopos::Sys;
 
 use crate::errno::Errno;
 use slopos_abi::fs::{UserFsStat, UserIovec};
-use slopos_abi::signal::UserSigAltStack;
+use slopos_abi::signal::{UserSigAltStack, UserSiginfo};
 use slopos_abi::spawn::SpawnAttrs;
 use slopos_abi::syscall::{Timespec, UserUtsname};
 
@@ -181,6 +181,8 @@ pub trait Pal {
     fn kill(pid: i32, sig: i32) -> Result<(), Errno>;
     /// Signal thread `tid` of thread group `tgid`.
     fn tgkill(tgid: i32, tid: i32, sig: i32) -> Result<(), Errno>;
+    /// Queue `sig` on process `pid` with `info`'s code and value.
+    fn rt_sigqueueinfo(pid: i32, sig: i32, info: *const UserSiginfo) -> Result<(), Errno>;
     fn rt_sigreturn() -> !;
     fn sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack) -> Result<(), Errno>;
 

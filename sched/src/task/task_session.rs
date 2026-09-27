@@ -1,9 +1,12 @@
-use slopos_abi::signal::SIGCHLD;
+use core::sync::atomic::Ordering;
+
+use slopos_abi::signal::{CLD_EXITED, CLD_KILLED, SIGCHLD, SigInfo};
 use slopos_abi::syscall::TtyIndex;
+use slopos_abi::task::TaskExitReason;
 use slopos_ostd::task::{ProcessGroup, Session};
 use slopos_ostd::{KArc, KWeak};
 
-use super::task_ops::{task_signal_post, task_wake_all_waiters};
+use super::task_ops::{task_signal_post_info, task_wake_all_waiters};
 use super::task_table::{task_find_by_id, task_for_each_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
 
@@ -85,9 +88,27 @@ pub(super) fn notify_parent_of_child_exit(task: &Task) {
         return;
     };
 
-    let _ = task_signal_post(&parent, SIGCHLD);
+    let _ = task_signal_post_info(&parent, SIGCHLD, child_exit_info(task));
     // Published unconditionally rather than only when a waiter exists: the
     // waiter registers before it scans, so a publish that races registration
     // costs a re-scan rather than a lost wakeup.
     slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::any_child_exit_event(parent_task_id));
+}
+
+/// The `SIGCHLD` record for `task`'s exit: `CLD_KILLED` and the signal for a
+/// death by signal, else `CLD_EXITED` and the exit code, as `waitpid` reports
+/// them. There are no core dumps, so never `CLD_DUMPED`.
+fn child_exit_info(task: &Task) -> SigInfo {
+    let reason = TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire));
+    let signal = task.exit_signal();
+    let (code, status) = if matches!(
+        reason,
+        TaskExitReason::Signalled | TaskExitReason::UserFault
+    ) && signal != 0
+    {
+        (CLD_KILLED, signal as u32)
+    } else {
+        (CLD_EXITED, task.exit_code.load(Ordering::Acquire) & 0xff)
+    };
+    SigInfo::sent(code, task.task_id, 0, status as u64)
 }

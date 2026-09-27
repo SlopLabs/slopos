@@ -67,3 +67,7 @@ unsafe impl Zeroable for VirtAddr {}
 unsafe impl Zeroable for Cell {}
 unsafe impl Zeroable for ComposeEntry {}
 unsafe impl Zeroable for LayoutTable {}
+
+// SAFETY: `SigInfo` is `#[repr(C)]` over `i32 + u32 + u32 + u32 + u64`, every
+// one a primitive integer whose all-zero pattern is a valid value.
+unsafe impl Zeroable for slopos_abi::signal::SigInfo {}

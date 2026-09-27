@@ -2,7 +2,7 @@
 //! in-band `POLLIN` on the signalfd, so a single `poll(2)` — no EINTR-retry
 //! loop — observes it.
 
-use slopos_abi::signal::{SIGCHLD, sig_bit};
+use slopos_abi::signal::{CLD_EXITED, SIGCHLD, SignalfdSiginfo, sig_bit};
 use slopos_abi::syscall::POLLIN;
 use slopos_userland as _;
 use slopos_userland::syscall::{UserPollFd, core as sys_core, fs, process, signalfd};
@@ -20,7 +20,7 @@ fn test_sigchld_inband() -> bool {
 
     let pid = process::fork();
     if pid == 0 {
-        sys_core::exit_with_code(0);
+        sys_core::exit_with_code(CHILD_EXIT_CODE);
     }
     if pid < 0 {
         let _ = slopos_slibc::ffi::close(sfd);
@@ -37,10 +37,16 @@ fn test_sigchld_inband() -> bool {
     let ready =
         matches!(fs::poll(&mut pfds, 5000), Ok(n) if n >= 1) && (pfds[0].revents & POLLIN) != 0;
 
-    // `ssi_signo` is the LE u32 at offset 0 of the drained `SignalfdSiginfo`.
-    let mut buf = [0u8; 16];
-    let signo_ok = matches!(fs::read_slice(sfd, &mut buf), Ok(n) if n >= 4)
-        && u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) == SIGCHLD as u32;
+    // Linux's `signalfd_siginfo`: signo at 0, code at 8, pid at 12, status
+    // at 40, little-endian.
+    let mut buf = [0u8; SignalfdSiginfo::SERIALIZED_LEN];
+    let full = matches!(fs::read_slice(sfd, &mut buf), Ok(n) if n == buf.len());
+    let word = |at: usize| u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
+    let signo_ok = full && word(0) == SIGCHLD as u32;
+    let info_ok = full
+        && word(8) as i32 == CLD_EXITED
+        && word(12) == child
+        && word(40) as i32 == CHILD_EXIT_CODE;
 
     let _ = process::waitpid(child);
     let _ = slopos_slibc::ffi::close(sfd);
@@ -53,8 +59,19 @@ fn test_sigchld_inband() -> bool {
         eprintln!("signalfd_test: drained siginfo ssi_signo != SIGCHLD");
         return false;
     }
+    if !info_ok {
+        eprintln!(
+            "signalfd_test: SIGCHLD record code={} pid={} status={}, want {CLD_EXITED}/{child}/{CHILD_EXIT_CODE}",
+            word(8) as i32,
+            word(12),
+            word(40) as i32
+        );
+        return false;
+    }
     true
 }
+
+const CHILD_EXIT_CODE: i32 = 7;
 
 const CASES: &[(&str, fn() -> bool)] = &[("sigchld_inband", test_sigchld_inband)];
 

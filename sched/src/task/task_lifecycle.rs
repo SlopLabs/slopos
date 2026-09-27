@@ -2,6 +2,8 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
+use slopos_abi::signal::SigInfo;
+
 use slopos_arch::cpu;
 use slopos_ostd::KArc;
 use slopos_ostd::kdiag_timestamp;
@@ -11,8 +13,9 @@ use slopos_ostd::process::{
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
 use slopos_ostd::task::ops::{
-    TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES, TASK_EXIT_CLEANUP_RESOURCES,
-    TASK_EXIT_CLEANUP_VM, TASK_EXIT_CPU_BANKED, TASK_EXIT_LAST_IN_PROCESS,
+    SignalPost, TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES,
+    TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM, TASK_EXIT_CPU_BANKED,
+    TASK_EXIT_LAST_IN_PROCESS,
 };
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -2032,7 +2035,7 @@ fn has_user_handler(member: &Task, signum: u8) -> bool {
 ///
 /// The `WUNTRACED` report is published once per stop, by the last member the
 /// stop has to park.
-fn task_group_stop_members(tid: u32, stop_signal: u8, sender: u32) -> usize {
+fn task_group_stop_members(tid: u32, stop_signal: u8, info: SigInfo) -> usize {
     let bit = slopos_abi::signal::sig_bit(stop_signal);
     if bit == 0 {
         return 0;
@@ -2060,7 +2063,8 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, sender: u32) -> usize {
         let _ = member.take_continue_report();
 
         if catchable && has_user_handler(member, stop_signal) {
-            if slopos_ostd::task::ops::task_signal_post_from(member, stop_signal, sender) {
+            if slopos_ostd::task::ops::task_signal_post_info(member, stop_signal, info).is_pending()
+            {
                 let _ = scheduler::unblock_task(member);
             }
             acted += 1;
@@ -2137,7 +2141,7 @@ fn task_group_stop_members(tid: u32, stop_signal: u8, sender: u32) -> usize {
 /// Job control. Idempotent; see [`task_group_stop_members`] for the mechanics
 /// and the caller-parks-last rule.
 pub fn task_group_stop(tid: u32, stop_signal: u8) -> bool {
-    task_group_stop_members(tid, stop_signal, 0) != 0
+    task_group_stop_members(tid, stop_signal, SigInfo::KERNEL) != 0
 }
 
 /// Resume every stopped member of `tid`'s thread group, and retire any pending
@@ -2183,26 +2187,42 @@ pub fn task_group_continue(tid: u32) -> bool {
     resumed
 }
 
-/// Post `signum` to every task in the thread group containing `tid`.
+/// How a signal sent to a whole thread group landed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GroupPost {
+    /// Members that took the signal, including those whose disposition
+    /// discarded it.
+    pub reached: usize,
+    /// Some member's realtime queue was full, so its instance was lost.
+    pub queue_full: bool,
+}
+
+/// Post `signum` to every task in the thread group containing `tid`, as the
+/// kernel's own.
 ///
 /// Returns how many tasks took the signal. Job-control signals are acted on
 /// here rather than at a delivery point: a stopped task reaches no delivery
 /// point, so a `SIGCONT` that only pended could never resume it.
 pub fn task_group_signal(tid: u32, signum: u8) -> usize {
-    task_group_signal_from(tid, signum, 0)
+    task_group_signal_info(tid, signum, SigInfo::KERNEL).reached
 }
 
-/// [`task_group_signal`] for a signal a process sent; `sender` is its
-/// thread-group id, reported to a handler as `si_pid`.
-pub fn task_group_signal_from(tid: u32, signum: u8, sender: u32) -> usize {
+/// [`task_group_signal`] for an instance carrying `info`, which a sent signal
+/// fills from its sender.
+pub fn task_group_signal_info(tid: u32, signum: u8, info: SigInfo) -> GroupPost {
+    let mut post = GroupPost {
+        reached: 0,
+        queue_full: false,
+    };
     if slopos_abi::signal::sig_bit(signum) == 0 {
-        return 0;
+        return post;
     }
     let tgid = thread_group_of(tid);
 
     match slopos_abi::signal::sig_default_action(signum) {
         slopos_abi::signal::SigDefault::Stop => {
-            return task_group_stop_members(tid, signum, sender);
+            post.reached = task_group_stop_members(tid, signum, info);
+            return post;
         }
         slopos_abi::signal::SigDefault::Continue => {
             let _ = task_group_continue(tid);
@@ -2210,7 +2230,6 @@ pub fn task_group_signal_from(tid: u32, signum: u8, sender: u32) -> usize {
         _ => {}
     }
 
-    let mut signaled = 0usize;
     for_each_group_member(tgid, |member| {
         if member.is_exited() {
             return;
@@ -2218,36 +2237,43 @@ pub fn task_group_signal_from(tid: u32, signum: u8, sender: u32) -> usize {
         if signum == slopos_abi::signal::SIGKILL {
             // Always deliverable: `SIG_UNCATCHABLE` is stripped from every
             // mask and refused by `rt_sigaction`.
-            let _ = slopos_ostd::task::ops::task_signal_post_from(member, signum, sender);
+            let _ = slopos_ostd::task::ops::task_signal_post_info(member, signum, info);
             slopos_ostd::task::ops::task_kill_and_wake(member);
             // POSIX: `SIGKILL` and `SIGCONT` are the only signals that resume
             // a stopped process, and a stopped task reaches no delivery point
             // at which to act on the kill.
             task_resume_if_stopped(member);
-            signaled += 1;
+            post.reached += 1;
             return;
         }
-        if slopos_ostd::task::ops::task_signal_post_from(member, signum, sender) {
-            let _ = scheduler::unblock_task(member);
+        match slopos_ostd::task::ops::task_signal_post_info(member, signum, info) {
+            SignalPost::Pending => {
+                let _ = scheduler::unblock_task(member);
+            }
+            SignalPost::QueueFull => post.queue_full = true,
+            SignalPost::Dropped => {}
         }
         // POSIX: `kill` succeeds even when the disposition discards the signal.
-        signaled += 1;
+        post.reached += 1;
     });
-    signaled
+    post
 }
 
-/// Post `signum` to the one thread `tid` of thread group `tgid`, for `tgkill`.
-/// Stop, continue and `SIGKILL` act on the whole group, as POSIX has them.
-/// `false` when `tid` is not a live member of `tgid`.
-pub fn task_thread_signal_from(tgid: u32, tid: u32, signum: u8, sender: u32) -> bool {
+/// Post `signum` carrying `info` to the one thread `tid` of thread group
+/// `tgid`, for `tgkill`. Stop, continue and `SIGKILL` act on the whole group,
+/// as POSIX has them. `None` when `tid` is not a live member of `tgid`.
+pub fn task_thread_signal_info(
+    tgid: u32,
+    tid: u32,
+    signum: u8,
+    info: SigInfo,
+) -> Option<SignalPost> {
     if slopos_abi::signal::sig_bit(signum) == 0 {
-        return false;
+        return None;
     }
-    let Some(target) = task_find_by_id(tid) else {
-        return false;
-    };
+    let target = task_find_by_id(tid)?;
     if group_id_of(&target) != tgid || target.is_exited() {
-        return false;
+        return None;
     }
     let group_wide = signum == slopos_abi::signal::SIGKILL
         || matches!(
@@ -2255,12 +2281,14 @@ pub fn task_thread_signal_from(tgid: u32, tid: u32, signum: u8, sender: u32) -> 
             slopos_abi::signal::SigDefault::Stop | slopos_abi::signal::SigDefault::Continue
         );
     if group_wide {
-        return task_group_signal_from(tid, signum, sender) != 0;
+        return (task_group_signal_info(tid, signum, info).reached != 0)
+            .then_some(SignalPost::Pending);
     }
-    if slopos_ostd::task::ops::task_signal_post_from(&target, signum, sender) {
+    let post = slopos_ostd::task::ops::task_signal_post_info(&target, signum, info);
+    if post.is_pending() {
         let _ = scheduler::unblock_task(&target);
     }
-    true
+    Some(post)
 }
 
 /// Put a stopped task back on a runqueue so it can reach a delivery point.

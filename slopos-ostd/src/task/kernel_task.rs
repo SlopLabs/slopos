@@ -36,6 +36,7 @@ use crate::task::job_control::ProcessGroup;
 use crate::task::link_roles::{
     CleanupRole, FutexRole, ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole,
 };
+use crate::task::sigqueue::SigQueue;
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -559,8 +560,17 @@ pub struct TaskInner<K, U> {
     /// value, so no task is accidentally omnipotent and none is accidentally
     /// powerless.
     pub caps: AtomicU64,
-    /// Bitmask of pending signals, written by `kill()`.
+    /// Bitmask of pending signals: bit `n - 1` for signal `n`. What each set
+    /// bit carries lives in [`sigqueue`](Self::sigqueue), whose lock every
+    /// writer of this word holds; readers probe it lock-free.
     pub signal_pending: AtomicU64,
+    /// The `siginfo` records behind `signal_pending`, allocated on the first
+    /// signal that carries one.
+    pub(crate) sigqueue: SpinLock<Option<KBox<SigQueue>>>,
+    /// The task is marked for death: every blocking primitive but the bounded
+    /// uninterruptible tier aborts rather than parks. A word of its own, not a
+    /// bit of any signal set, so no mask userland writes can name it.
+    pub killed: AtomicBool,
     /// Bitmask of blocked signals. Atomic because `task_signal_post` reads it
     /// from whichever CPU is sending while the owner writes it in
     /// `rt_sigprocmask`, `rt_sigreturn`, and on exec.
@@ -594,11 +604,6 @@ pub struct TaskInner<K, U> {
     pub(crate) fault_signo: AtomicU8,
     pub(crate) fault_si_code: AtomicU32,
     pub(crate) fault_si_addr: AtomicU64,
-    /// Per signal, the thread-group id of the process whose `kill` made it
-    /// pending, or 0 when the kernel raised it. Written only by the post that
-    /// takes the pending bit from clear to set, taken by the claim that
-    /// clears it, so a signal's `si_pid` is its first sender's as on Linux.
-    pub(crate) signal_sender: [AtomicU32; NSIG],
     pub switch_ctx: TaskOwnCell<SwitchContext>,
     /// Set while a CPU is physically executing this task.
     pub on_cpu: AtomicBool,
@@ -718,6 +723,11 @@ pub const TTY_INDEX_NONE: u16 = u16::MAX;
 /// constructors so a task's class does not depend on which one built it.
 const TEST_REPORTS_CLASS: &crate::sync::lock_tracking::LockClassKey =
     crate::lock_class!("Task.test_reports", LOCK_LEVEL_RESOURCE);
+
+/// One class for every task's `sigqueue`. A leaf: nothing is acquired under
+/// it, and a post publishes its wake only after releasing it.
+const SIGQUEUE_CLASS: &crate::sync::lock_tracking::LockClassKey =
+    crate::lock_class!("Task.sigqueue", LOCK_LEVEL_RESOURCE);
 
 impl<K, U> TaskInner<K, U> {
     /// This task's FS segment base (TLS pointer).
@@ -1329,6 +1339,8 @@ impl<K, U> TaskInner<K, U> {
             migration_count: AtomicU32::new(0),
             caps: AtomicU64::new(CAPS_UNSET),
             signal_pending: AtomicU64::new(0),
+            sigqueue: SpinLock::new(None, SIGQUEUE_CLASS),
+            killed: AtomicBool::new(false),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
             sighand: None,
             stop_report: AtomicU8::new(0),
@@ -1340,7 +1352,6 @@ impl<K, U> TaskInner<K, U> {
             fault_signo: AtomicU8::new(0),
             fault_si_code: AtomicU32::new(0),
             fault_si_addr: AtomicU64::new(0),
-            signal_sender: [const { AtomicU32::new(0) }; NSIG],
             switch_ctx: TaskOwnCell::new(SwitchContext::zero()),
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
@@ -1415,6 +1426,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).process_group).write(RcuArcSlot::empty());
                 addr_of_mut!((*slot).caps).write(AtomicU64::new(CAPS_UNSET));
                 addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, TEST_REPORTS_CLASS));
+                addr_of_mut!((*slot).sigqueue).write(SpinLock::new(None, SIGQUEUE_CLASS));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
                 addr_of_mut!((*slot).signal_blocked).write(AtomicU64::new(SIG_EMPTY));
@@ -1675,6 +1687,7 @@ impl<K, U> TaskInner<K, U> {
         drop(self.process_group.replace_exclusive(None));
         drop(self.fs.replace_exclusive(None));
         drop(self.test_reports.get_mut().take());
+        drop(self.sigqueue.get_mut().take());
 
         // SAFETY: Both pointers are valid, non-overlapping TaskInner
         // instances. The caller guarantees exclusive write access to
@@ -1691,6 +1704,12 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::write(
                 &mut self.test_reports as *mut _,
                 SpinLock::new(None, TEST_REPORTS_CLASS),
+            );
+            // Pending signals are not inherited, and the copy duplicated the
+            // parent's heap pointer.
+            core::ptr::write(
+                &mut self.sigqueue as *mut _,
+                SpinLock::new(None, SIGQUEUE_CLASS),
             );
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
@@ -1735,6 +1754,7 @@ impl<K, U> TaskInner<K, U> {
         // and is how an entitlement leaks into a child.
         self.caps = AtomicU64::new(other.caps.load(Ordering::Acquire));
         self.signal_pending = AtomicU64::new(0);
+        self.killed = AtomicBool::new(false);
         // A child is handed its own existence reference at registration;
         // inheriting the parent's `true` would let its reap take back a
         // reference never given, dropping the count below what owners hold.
@@ -1756,7 +1776,6 @@ impl<K, U> TaskInner<K, U> {
         self.fault_signo = AtomicU8::new(0);
         self.fault_si_code = AtomicU32::new(0);
         self.fault_si_addr = AtomicU64::new(0);
-        self.signal_sender = [const { AtomicU32::new(0) }; NSIG];
         self.futex_bitset = AtomicU32::new(0);
     }
 }

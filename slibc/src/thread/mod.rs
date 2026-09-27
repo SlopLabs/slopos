@@ -289,9 +289,8 @@ pub unsafe extern "C" fn pthread_getname_np(
     0
 }
 
-/// Directed thread signals need `tgkill`, which SlopOS has not got: `kill`
-/// fans a signal out to the whole thread group, so `pthread_kill` can only
-/// answer the `sig == 0` liveness probe and must refuse the rest.
+/// A signal to one thread, through `tgkill`: the receiver's `si_code` is
+/// `SI_TKILL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
     if thread == 0 {

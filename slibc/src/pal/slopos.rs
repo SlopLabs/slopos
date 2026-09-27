@@ -2,7 +2,7 @@ use crate::errno::Errno;
 use crate::pal::raw::*;
 use crate::pal::{FutexScope, Pal};
 use slopos_abi::fs::{UserFsStat, UserIovec};
-use slopos_abi::signal::UserSigAltStack;
+use slopos_abi::signal::{UserSigAltStack, UserSiginfo};
 use slopos_abi::spawn::SpawnAttrs;
 use slopos_abi::syscall::*;
 
@@ -797,6 +797,12 @@ impl Pal for Sys {
 
     fn tgkill(tgid: i32, tid: i32, sig: i32) -> Result<(), Errno> {
         let ret = unsafe { syscall3(SYSCALL_TGKILL, tgid as u64, tid as u64, sig as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn rt_sigqueueinfo(pid: i32, sig: i32, info: *const UserSiginfo) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_RT_SIGQUEUEINFO, pid as u64, sig as u64, info as u64) };
         to_result(ret)?;
         Ok(())
     }

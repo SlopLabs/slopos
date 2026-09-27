@@ -53,8 +53,8 @@ pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
 };
 use crate::syscall::signal::{
-    syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
-    syscall_sigaltstack, syscall_tgkill,
+    syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigqueueinfo,
+    syscall_rt_sigreturn, syscall_rt_tgsigqueueinfo, syscall_sigaltstack, syscall_tgkill,
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd4;
 pub use crate::syscall::test_handlers::{
@@ -178,6 +178,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SETSID]            => syscall_setsid,            "setsid";
     [SYSCALL_GETPGID]           => syscall_getpgid,           "getpgid";
     [SYSCALL_GETSID]            => syscall_getsid,            "getsid";
+    [SYSCALL_RT_SIGQUEUEINFO]   => syscall_rt_sigqueueinfo,   "rt_sigqueueinfo";
     [SYSCALL_SIGALTSTACK]       => syscall_sigaltstack,       "sigaltstack";
     [SYSCALL_MKNOD]             => syscall_mknod,             "mknod";
     [SYSCALL_STATFS]            => syscall_statfs,            "statfs";
@@ -212,6 +213,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SIGNALFD4]         => syscall_signalfd4,         "signalfd4";
     [SYSCALL_DUP3]              => syscall_dup3,              "dup3";
     [SYSCALL_PIPE2]             => syscall_pipe2,             "pipe2";
+    [SYSCALL_RT_TGSIGQUEUEINFO] => syscall_rt_tgsigqueueinfo, "rt_tgsigqueueinfo";
     [SYSCALL_PRLIMIT64]         => syscall_prlimit64,         "prlimit64";
     [SYSCALL_GETCPU]            => syscall_getcpu,            "getcpu";
     [SYSCALL_GETRANDOM]         => syscall_getrandom,         "getrandom";
@@ -318,7 +320,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 158;
+pub const SYSCALL_ENTRY_COUNT: usize = 160;
 
 /// The recorded shape of the classification.
 ///
@@ -330,7 +332,7 @@ const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 46),
     (Capability::NoneFd, 74),
-    (Capability::NoneRelation, 15),
+    (Capability::NoneRelation, 17),
     (Capability::Power, 3),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),

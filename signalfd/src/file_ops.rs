@@ -9,7 +9,7 @@ use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::quota::ObjectRow;
-use slopos_abi::signal::{SignalfdSiginfo, sig_bit};
+use slopos_abi::signal::SignalfdSiginfo;
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
 use slopos_ostd::process::quota::{Charge, FileBacking};
 use slopos_ostd::sync::event_bus::BUS;
@@ -41,7 +41,7 @@ impl Drop for SignalfdBacking {
 
 fn pending_masked(state: &SignalfdState) -> u64 {
     task_find_by_id(state.owner_task_id)
-        .map(|task| task.signal_pending() & slopos_abi::signal::SIGNAL_MASK & state.mask)
+        .map(|task| task.signal_pending() & state.mask)
         .unwrap_or(0)
 }
 
@@ -57,22 +57,16 @@ impl FileOps for SignalfdFileOps {
         if buf.len() < SignalfdSiginfo::SERIALIZED_LEN {
             return Errno::EINVAL.as_isize();
         }
-        let pending = pending_masked(&state);
-        if pending == 0 {
-            // Never blocks: readiness comes from poll_events, so an empty read
-            // is EAGAIN rather than a sleep.
-            return Errno::EAGAIN.as_isize();
-        }
-        let signum = (pending.trailing_zeros() as u8).wrapping_add(1);
         let Some(task) = task_find_by_id(state.owner_task_id) else {
             return Errno::EBADF.as_isize();
         };
-        let _ = task.clear_signal_pending(sig_bit(signum));
-        let info = SignalfdSiginfo {
-            ssi_signo: signum as u32,
-            ..Default::default()
+        // Never blocks: readiness comes from poll_events, so an empty read is
+        // EAGAIN rather than a sleep.
+        let Some((signum, info)) = task.dequeue_signal(state.mask) else {
+            return Errno::EAGAIN.as_isize();
         };
-        match buf.copy_in(0, &info.to_bytes()) {
+        let record = SignalfdSiginfo::new(signum, &info);
+        match buf.copy_in(0, &record.to_bytes()) {
             Ok(n) => n as isize,
             Err(e) => e.as_isize(),
         }

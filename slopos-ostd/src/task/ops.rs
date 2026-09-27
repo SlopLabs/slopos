@@ -7,7 +7,7 @@
 use crate::sync::BUS;
 use core::sync::atomic::Ordering;
 use slopos_abi::event::{KernelEvent, TaskSlot};
-use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SIGNAL_KILLED, SIGNAL_MASK, SigSet, sig_bit};
+use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigInfo, SigSet, sig_bit, sig_is_realtime};
 
 use crate::task::kernel_task::TaskInner;
 
@@ -92,18 +92,16 @@ pub fn task_wake_all_waiters<K, U>(task: &TaskInner<K, U>) {
 /// subscribed to its `SignalPending` queue is still woken to drain it.
 /// Returns the previous pending bitmask.
 pub fn task_signal_raise<K, U>(task: &TaskInner<K, U>, mask: u64) -> u64 {
-    let prev = task
-        .signal_pending
-        .fetch_or(mask & SIGNAL_MASK, core::sync::atomic::Ordering::AcqRel);
+    let prev = task.raise_signal_pending(mask);
     BUS.publish(signal_pending_event(task.task_id));
     prev
 }
 
 /// Mark `task` for death and make it observe that fact.
 ///
-/// The only writer of [`SIGNAL_KILLED`]. The two halves are fused: the bit
-/// without a wake leaves a task parked in a blocking primitive that never
-/// re-runs its abort probe, and a wake without the bit is spurious.
+/// The only writer of [`TaskInner::killed`]. The two halves are fused: the
+/// flag without a wake leaves a task parked in a blocking primitive that never
+/// re-runs its abort probe, and a wake without the flag is spurious.
 ///
 /// Returns `true` if this call did the marking. The wake is issued either way
 /// — a redundant unblock is a no-op, a lost one is not.
@@ -112,58 +110,85 @@ pub fn task_signal_raise<K, U>(task: &TaskInner<K, U>, mask: u64) -> u64 {
 /// transition, so a killed task spinning in userland keeps running until its
 /// next return-to-user boundary.
 pub fn task_kill_and_wake<K, U>(task: &TaskInner<K, U>) -> bool {
-    let prev = task
-        .signal_pending
-        .fetch_or(SIGNAL_KILLED, core::sync::atomic::Ordering::AcqRel);
+    let first = !task.killed.swap(true, Ordering::AcqRel);
     BUS.publish(signal_pending_event(task.task_id));
     let _ = crate::sync::wait_queue::unblock_task_by_id(task.task_id);
-    (prev & SIGNAL_KILLED) == 0
+    first
 }
 
-/// Post `signum` to `task`, honouring its disposition at the send site.
+/// What a send did with one signal instance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignalPost {
+    /// Pending on the target now; the caller should wake it.
+    Pending,
+    /// Discarded: ignored at the send, a standard signal already pending, or
+    /// not a signal at all. Not an error: `kill` succeeds either way.
+    Dropped,
+    /// A realtime instance past the queue limit — `EAGAIN` for `sigqueue`.
+    QueueFull,
+}
+
+impl SignalPost {
+    #[inline]
+    pub fn is_pending(self) -> bool {
+        self == Self::Pending
+    }
+}
+
+/// Post `signum` to `task` as the kernel's own, honouring its disposition at
+/// the send site. `true` when the caller should wake the target.
+pub fn task_signal_post<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
+    task_signal_post_info(task, signum, SigInfo::KERNEL).is_pending()
+}
+
+/// Post one instance of `signum` carrying `info` to `task`.
 ///
 /// The disposition-aware chokepoint every signal *send* routes through. A
 /// signal that would be discarded anyway — handler is `SIG_IGN`, or `SIG_DFL`
-/// with a default of [`SigDefault::Ignore`] — and is **not blocked** is
+/// with a default of [`SigDefault::Ignore`](slopos_abi::signal::SigDefault::Ignore) — and is **not blocked** is
 /// dropped here instead of being left pending, so it never spuriously wakes a
 /// blocked task only to be consumed as a no-op at the delivery point. Blocked
 /// signals always pend regardless of disposition: a `signalfd` reader or a
 /// later-installed handler may still drain them after unblocking.
 ///
-/// Returns `true` when the signal was made pending (the caller should
-/// then wake/unblock the target); `false` when it was dropped or the
-/// arguments were invalid.
-pub fn task_signal_post<K, U>(task: &TaskInner<K, U>, signum: u8) -> bool {
-    task_signal_post_from(task, signum, 0)
-}
-
-/// [`task_signal_post`] for a signal a process sent: `sender` is its
-/// thread-group id, which delivery reports as `si_pid`. 0 means the kernel.
-pub fn task_signal_post_from<K, U>(task: &TaskInner<K, U>, signum: u8, sender: u32) -> bool {
-    let bit = slopos_abi::signal::sig_bit(signum);
+/// A record store is allocated here, before the lock, the first time an
+/// instance carries more than the kernel's own record; a sender that raises
+/// only [`SigInfo::KERNEL`] standard signals (an interrupt handler) never
+/// allocates.
+pub fn task_signal_post_info<K, U>(
+    task: &TaskInner<K, U>,
+    signum: u8,
+    info: SigInfo,
+) -> SignalPost {
+    let bit = sig_bit(signum);
     if bit == 0 {
-        return false;
+        return SignalPost::Dropped;
     }
-    if task.signal_pending() & bit != 0 {
-        return false;
+    let realtime = sig_is_realtime(signum);
+    if !realtime && task.signal_pending() & bit != 0 {
+        return SignalPost::Dropped;
     }
-    let blocked = task.signal_blocked();
-    if (blocked & bit) == 0 {
-        let handler = task.signal_handler((signum - 1) as usize);
-        let ignored = match handler {
-            Some(h) if h == slopos_abi::signal::SIG_IGN => true,
-            Some(h) if h == slopos_abi::signal::SIG_DFL => {
-                slopos_abi::signal::sig_default_ignores(signum)
-            }
+    if (task.signal_blocked() & bit) == 0 {
+        let ignored = match task.signal_handler((signum - 1) as usize) {
+            Some(SIG_IGN) => true,
+            Some(SIG_DFL) => slopos_abi::signal::sig_default_ignores(signum),
             _ => false,
         };
         if ignored {
-            return false;
+            return SignalPost::Dropped;
         }
     }
-    task.set_signal_sender(signum, sender);
-    task_signal_raise(task, bit);
-    true
+    let spare = if (realtime || info != SigInfo::KERNEL) && !task.has_sigqueue() {
+        crate::KBox::zeroed().ok()
+    } else {
+        None
+    };
+    let (outcome, unused) = task.enqueue_signal(signum, info, spare);
+    drop(unused);
+    if outcome.is_pending() {
+        BUS.publish(signal_pending_event(task.task_id));
+    }
+    outcome
 }
 
 #[inline]
@@ -257,7 +282,7 @@ pub fn task_clone_from<K, U>(dest: &mut TaskInner<K, U>, other: &TaskInner<K, U>
 
 #[inline]
 pub fn task_has_deliverable_signal<K, U>(task: &TaskInner<K, U>) -> bool {
-    (task.signal_pending() & SIGNAL_MASK & !task.signal_blocked()) != 0
+    (task.signal_pending() & !task.signal_blocked()) != 0
 }
 
 // ---------------------------------------------------------------------------

@@ -6,12 +6,12 @@
 //! the translation between them, and the kernel structs are not changed to
 //! suit libc.
 //!
-//! The kernel accepts signals `1..=NSIG` — `1..=32`, bit `N-1` of its mask —
-//! and has no realtime signals beyond that. So the whole of a `sigset_t` that
-//! can mean anything lives in word 0, and libc refuses exactly what the
-//! kernel refuses: a signal *number* outside that range is `EINVAL`, and a
-//! *mask* word above it is dropped, because a set bit for a signal that
-//! cannot be raised has nothing to block.
+//! The kernel accepts signals `1..=64`, bit `N-1` of its mask; `32..=64` are
+//! realtime. So the whole of a `sigset_t` that can mean anything lives in
+//! word 0, and libc refuses exactly what the kernel refuses: a signal
+//! *number* outside that range is `EINVAL`, and a *mask* word above it is
+//! dropped, because a set bit for a signal that cannot be raised has nothing
+//! to block.
 
 pub mod tests;
 
@@ -21,8 +21,8 @@ use core::mem;
 use crate::errno::{EINTR, EINVAL, ENOSYS, errno_set};
 use crate::pal::slopos::signal_restorer_addr;
 use crate::pal::{Pal, Sys};
-use crate::types::{KERNEL_SIGSET_MASK, sigaction as SigAction, sigset_t, stack_t};
-use slopos_abi::signal::{UserSigAltStack, UserSigaction};
+use crate::types::{sigaction as SigAction, sigset_t, sigval, stack_t};
+use slopos_abi::signal::{SigInfo, UserSigAltStack, UserSigaction, UserSiginfo};
 
 /// True when `handler` is a real function pointer (not `SIG_DFL`/`SIG_IGN`).
 /// The kernel rejects (`EINVAL`) such a handler with a zero `sa_restorer`, so
@@ -55,6 +55,17 @@ pub const SIGTTIN: i32 = slopos_abi::signal::SIGTTIN as i32;
 pub const SIGTTOU: i32 = slopos_abi::signal::SIGTTOU as i32;
 pub const SIGWINCH: i32 = slopos_abi::signal::SIGWINCH as i32;
 
+pub const SI_USER: c_int = slopos_abi::signal::SI_USER;
+pub const SI_KERNEL: c_int = slopos_abi::signal::SI_KERNEL;
+pub const SI_QUEUE: c_int = slopos_abi::signal::SI_QUEUE;
+pub const SI_TKILL: c_int = slopos_abi::signal::SI_TKILL;
+pub const CLD_EXITED: c_int = slopos_abi::signal::CLD_EXITED;
+pub const CLD_KILLED: c_int = slopos_abi::signal::CLD_KILLED;
+pub const CLD_DUMPED: c_int = slopos_abi::signal::CLD_DUMPED;
+pub const CLD_TRAPPED: c_int = slopos_abi::signal::CLD_TRAPPED;
+pub const CLD_STOPPED: c_int = slopos_abi::signal::CLD_STOPPED;
+pub const CLD_CONTINUED: c_int = slopos_abi::signal::CLD_CONTINUED;
+
 pub const SIG_DFL: usize = slopos_abi::signal::SIG_DFL as usize;
 pub const SIG_IGN: usize = slopos_abi::signal::SIG_IGN as usize;
 /// `signal()`'s failure return.
@@ -72,10 +83,8 @@ pub type SigHandler = unsafe extern "C" fn(i32);
 /// The kernel's `sigsetsize` argument: it accepts 8 and nothing else.
 const SIGSET_SIZE: usize = mem::size_of::<u64>();
 
-/// Highest signal number the kernel accepts. Its `parse_signum` admits
-/// `1..=NSIG` inclusive, so libc must too: refusing 32 here would reject a
-/// number `kill` would deliver.
-const SIGNAL_MAX: c_int = crate::types::NSIG;
+/// Highest signal number the kernel accepts; `NSIG` is one past it.
+const SIGNAL_MAX: c_int = crate::types::NSIG - 1;
 
 #[inline]
 fn signal_in_range(sig: c_int) -> bool {
@@ -115,7 +124,7 @@ pub unsafe extern "C" fn signal(signum: c_int, handler: usize) -> usize {
 /// Examine or change a signal action.
 ///
 /// The libc-declared `sa_mask` is 128 bytes and the kernel's is 8; only bits
-/// for signals `1..=31` survive the narrowing, which is every signal that
+/// for signals `1..=64` survive the narrowing, which is every signal that
 /// exists. `sa_restorer` is injected when the caller left it null and the
 /// handler is catchable — without one the kernel refuses the install.
 #[unsafe(no_mangle)]
@@ -202,15 +211,15 @@ pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
     0
 }
 
-/// Fills the bits for the signals that exist, and no others: a set bit for a
-/// realtime signal would be a claim this kernel cannot honour.
+/// Fills the bits for the signals that exist, and no others: a bit past
+/// signal 64 names nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
     if set.is_null() {
         errno_set(EINVAL.raw());
         return -1;
     }
-    *set = sigset_t::from_kernel_mask(KERNEL_SIGSET_MASK);
+    *set = sigset_t::from_kernel_mask(u64::MAX);
     0
 }
 
@@ -394,6 +403,36 @@ pub unsafe extern "C" fn killpg(pgrp: i32, sig: c_int) -> c_int {
         return -1;
     }
     kill(if pgrp == 0 { 0 } else { -pgrp }, sig)
+}
+
+/// `sigqueue(3)`: send `sig` to process `pid` carrying `value`, which the
+/// receiver reads as `si_value` beside `si_code == SI_QUEUE`. A realtime
+/// signal queues one instance per call; past the kernel's queue limit this is
+/// `EAGAIN`. The kernel fills in `si_pid` and `si_uid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigqueue(pid: i32, sig: c_int, value: sigval) -> c_int {
+    let info = UserSiginfo::from_info(sig, &SigInfo::sent(SI_QUEUE, 0, 0, value.sival_ptr as u64));
+    match Sys::rt_sigqueueinfo(pid, sig, &info) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno_set(e.raw());
+            -1
+        }
+    }
+}
+
+/// The lowest realtime signal an application may use: `SIGRTMIN` expands to
+/// this call, as in glibc. slibc takes none of the kernel's realtime signals
+/// for itself, so it is the kernel's `SIGRTMIN`, 32.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_current_sigrtmin() -> c_int {
+    slopos_abi::signal::SIGRTMIN as c_int
+}
+
+/// The highest realtime signal, `SIGRTMAX`: 64.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_current_sigrtmax() -> c_int {
+    slopos_abi::signal::SIGRTMAX as c_int
 }
 
 #[unsafe(no_mangle)]

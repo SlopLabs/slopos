@@ -320,6 +320,12 @@ pub const SYSCALL_GETPGID: u64 = 121;
 /// `getsid(pid)`.
 pub const SYSCALL_GETSID: u64 = 124;
 
+/// `rt_sigqueueinfo(tgid, sig, info: *const UserSiginfo)` — queue `sig` on
+/// process `tgid` with `info`'s `si_code` and `si_value`. The kernel fills
+/// `si_pid`/`si_uid`; an `si_code` at or above 0, or `SI_TKILL`, aimed at
+/// another process is `EPERM`. `EAGAIN` past the realtime queue limit.
+pub const SYSCALL_RT_SIGQUEUEINFO: u64 = 129;
+
 /// `sigaltstack(new: *const UserSigAltStack, old: *mut UserSigAltStack)` —
 /// nominate a stack for `SA_ONSTACK` handlers.
 pub const SYSCALL_SIGALTSTACK: u64 = 131;
@@ -464,6 +470,10 @@ pub const SYSCALL_DUP3: u64 = 292;
 
 /// `pipe2(fds: *mut [i32; 2], flags)` — `O_CLOEXEC` and `O_NONBLOCK`.
 pub const SYSCALL_PIPE2: u64 = 293;
+
+/// `rt_tgsigqueueinfo(tgid, tid, sig, info: *const UserSiginfo)` —
+/// [`SYSCALL_RT_SIGQUEUEINFO`] aimed at one thread, as `tgkill` is.
+pub const SYSCALL_RT_TGSIGQUEUEINFO: u64 = 297;
 
 /// `prlimit64(pid, resource, new: *const RLimit64, old: *mut RLimit64)` —
 /// `pid` must be 0 or the caller's own id.

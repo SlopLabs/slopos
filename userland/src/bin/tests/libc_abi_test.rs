@@ -671,22 +671,27 @@ fn sigset_narrows_signal_n_to_bit_n_minus_one() -> bool {
         return false;
     }
 
-    // Signal 0 is `kill`'s existence probe and never a set member; anything
-    // past `NSIG` names a realtime signal this kernel has not got.
+    // Signal 0 is `kill`'s existence probe and never a set member; `NSIG` is
+    // one past the last signal, glibc's convention.
     let nsig = slopos_slibc::types::NSIG;
     if unsafe { signal::sigaddset(&mut set, 0) } != -1
-        || unsafe { signal::sigaddset(&mut set, nsig + 1) } != -1
-        || unsafe { signal::sigismember(&set, nsig + 1) } != -1
+        || unsafe { signal::sigaddset(&mut set, nsig) } != -1
+        || unsafe { signal::sigismember(&set, nsig) } != -1
     {
-        eprintln!("libc_abi_test: a signal outside 1..=NSIG was accepted into a sigset");
+        eprintln!("libc_abi_test: a signal outside 1..NSIG was accepted into a sigset");
         return false;
     }
-    if unsafe { signal::sigaddset(&mut set, nsig) } != 0 {
-        eprintln!("libc_abi_test: sigaddset rejected NSIG ({nsig}), the last signal there is");
+    if unsafe { signal::sigaddset(&mut set, nsig - 1) } != 0
+        || set.kernel_mask() & (1u64 << 63) == 0
+    {
+        eprintln!(
+            "libc_abi_test: signal {} (the last realtime one) is not bit 63",
+            nsig - 1
+        );
         return false;
     }
 
-    // `sigfillset` fills only what can be raised: a bit above `NSIG` is a
+    // `sigfillset` fills only what can be raised: a bit past signal 64 is a
     // promise to block something that cannot arrive.
     if unsafe { signal::sigfillset(&mut set) } != 0
         || unsafe { signal::sigismember(&set, SIGUSR2) } != 1

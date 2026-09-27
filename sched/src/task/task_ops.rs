@@ -5,11 +5,11 @@
 //! unresolved import instead of a glob that silently keeps resolving.
 
 pub use slopos_ostd::task::ops::{
-    TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
+    SignalPost, TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
     child_exit_event, signal_pending_event, task_clone_from, task_default_signals_in_mask,
     task_has_deliverable_signal, task_install_idle_affinity, task_kernel_stack_seed_ret,
     task_kill_and_wake, task_reset_caught_handlers, task_reset_fpu_state, task_signal_force,
-    task_signal_post, task_signal_post_from, task_signal_raise, task_waiter_count,
+    task_signal_post, task_signal_post_info, task_signal_raise, task_waiter_count,
     task_wake_all_waiters,
 };
 

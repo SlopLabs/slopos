@@ -7,14 +7,17 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::{SIGNAL_KILLED, SIGNAL_MASK, SigSet};
+use slopos_abi::signal::{SigInfo, SigSet, sig_bit, sig_is_realtime};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 
+use crate::KBox;
 use crate::sync::LinkError;
 use crate::sync::intrusive::Link;
 use crate::task::exit_info::ExitInfo;
 use crate::task::kernel_task::{SchedPlacement, SigHandTable, SignalAction, TaskInner};
 use crate::task::link_roles::{CleanupRole, ReclaimRole, RemoteWakeRole};
+use crate::task::ops::SignalPost;
+use crate::task::sigqueue::SigQueue;
 
 /// `SIGKILL` for a write the OOM killer could not serve: it dies the way the
 /// killer's victims do, not with a catchable error its handler cannot fix.
@@ -204,26 +207,14 @@ impl<K, U> TaskInner<K, U> {
         self.signal_pending.load(Ordering::Acquire)
     }
 
-    /// Overwrite the signal portion of the pending bitmask.
-    ///
-    /// Bits outside [`SIGNAL_MASK`] are kernel-private and are preserved: this
-    /// is otherwise the one writer that could clear them wholesale.
-    #[inline]
+    /// Overwrite the pending set, dropping the records of every signal it
+    /// clears.
     pub fn set_signal_pending(&self, value: SigSet) {
-        let want = value & SIGNAL_MASK;
-        let mut current = self.signal_pending.load(Ordering::Relaxed);
-        loop {
-            let next = (current & !SIGNAL_MASK) | want;
-            match self.signal_pending.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
+        let mut store = self.sigqueue.lock();
+        if let Some(queue) = store.as_deref_mut() {
+            queue.forget(!value);
         }
+        self.signal_pending.store(value, Ordering::Release);
     }
 
     /// Whether this task has been marked for death.
@@ -232,23 +223,105 @@ impl<K, U> TaskInner<K, U> {
     /// and consulting the blocked set would let `sigprocmask` defeat it.
     #[inline]
     pub fn is_killed(&self) -> bool {
-        (self.signal_pending.load(Ordering::Acquire) & SIGNAL_KILLED) != 0
+        self.killed.load(Ordering::Acquire)
     }
 
-    /// Clear `bits` from the pending set, returning the previous value. Bits
-    /// outside [`SIGNAL_MASK`] are ignored.
-    #[inline]
+    /// Clear `bits` from the pending set with every record they carried,
+    /// returning the previous set.
     pub fn clear_signal_pending(&self, bits: SigSet) -> SigSet {
-        self.signal_pending
-            .fetch_and(!(bits & SIGNAL_MASK), Ordering::AcqRel)
+        let mut store = self.sigqueue.lock();
+        if let Some(queue) = store.as_deref_mut() {
+            queue.forget(bits);
+        }
+        self.signal_pending.fetch_and(!bits, Ordering::AcqRel)
     }
 
-    /// Raise `bits` in the pending set, returning the previous value. Bits
-    /// outside [`SIGNAL_MASK`] are ignored.
-    #[inline]
+    /// Raise `bits` in the pending set with no record, so each delivers as
+    /// [`SigInfo::KERNEL`]. Returns the previous set.
     pub fn raise_signal_pending(&self, bits: SigSet) -> SigSet {
+        let _store = self.sigqueue.lock();
+        self.signal_pending.fetch_or(bits, Ordering::AcqRel)
+    }
+
+    /// Whether the record store exists yet.
+    #[inline]
+    pub(crate) fn has_sigqueue(&self) -> bool {
+        self.sigqueue.lock().is_some()
+    }
+
+    /// Make one instance of `signum` pending with `info`, installing `spare` as
+    /// the record store if there is none yet. Hands back what it did and the
+    /// spare if unused, for the caller to drop outside the lock.
+    pub(crate) fn enqueue_signal(
+        &self,
+        signum: u8,
+        info: SigInfo,
+        spare: Option<KBox<SigQueue>>,
+    ) -> (SignalPost, Option<KBox<SigQueue>>) {
+        let bit = sig_bit(signum);
+        let mut store = self.sigqueue.lock();
+        let mut spare = spare;
+        if store.is_none() {
+            *store = spare.take();
+        }
+        if !sig_is_realtime(signum) {
+            // Standard signals coalesce: the first sender's record stands.
+            if self.signal_pending.load(Ordering::Acquire) & bit != 0 {
+                return (SignalPost::Dropped, spare);
+            }
+            if let Some(queue) = store.as_deref_mut() {
+                queue.record(signum, info);
+            }
+        } else {
+            let Some(queue) = store.as_deref_mut() else {
+                return (SignalPost::QueueFull, spare);
+            };
+            if !queue.push(signum, info, false) {
+                return (SignalPost::QueueFull, spare);
+            }
+        }
+        self.signal_pending.fetch_or(bit, Ordering::AcqRel);
+        (SignalPost::Pending, spare)
+    }
+
+    /// Take the lowest-numbered pending signal in `mask` with the record the
+    /// instance carries. Its bit clears unless another instance stays queued.
+    pub fn dequeue_signal(&self, mask: SigSet) -> Option<(u8, SigInfo)> {
+        let mut store = self.sigqueue.lock();
+        let pending = self.signal_pending.load(Ordering::Acquire) & mask;
+        if pending == 0 {
+            return None;
+        }
+        let signum = (pending.trailing_zeros() + 1) as u8;
+        let (info, more) = match store.as_deref_mut() {
+            Some(queue) => queue.take(signum),
+            None => (SigInfo::KERNEL, false),
+        };
+        if !more {
+            self.signal_pending
+                .fetch_and(!sig_bit(signum), Ordering::AcqRel);
+        }
+        Some((signum, info))
+    }
+
+    /// Put back an instance [`dequeue_signal`](Self::dequeue_signal) took and
+    /// delivery could not use, ahead of any later one.
+    pub fn requeue_signal(&self, signum: u8, info: SigInfo) {
+        let mut store = self.sigqueue.lock();
+        if let Some(queue) = store.as_deref_mut() {
+            if sig_is_realtime(signum) {
+                let _ = queue.push(signum, info, true);
+            } else {
+                queue.record(signum, info);
+            }
+        }
         self.signal_pending
-            .fetch_or(bits & SIGNAL_MASK, Ordering::AcqRel)
+            .fetch_or(sig_bit(signum), Ordering::AcqRel);
+    }
+
+    /// Realtime instances queued on this task, of every signal.
+    pub fn queued_realtime_signals(&self) -> usize {
+        self.sigqueue.lock().as_deref().map_or(0, SigQueue::queued)
     }
 
     /// `None` for a task built without one — a bootstrap stub, or a clone
@@ -437,24 +510,6 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn clear_fault_siginfo(&self) {
         self.fault_signo.store(0, Ordering::Release);
-    }
-
-    /// Record who made `signum` pending. Relaxed: the pending bit's release
-    /// store that follows publishes it to the claim that reads it.
-    #[inline]
-    pub fn set_signal_sender(&self, signum: u8, sender: u32) {
-        if let Some(slot) = self.signal_sender.get((signum as usize).wrapping_sub(1)) {
-            slot.store(sender, Ordering::Relaxed);
-        }
-    }
-
-    /// The sender of a pending `signum`, emptying the slot. 0 for a signal the
-    /// kernel raised.
-    #[inline]
-    pub fn take_signal_sender(&self, signum: u8) -> u32 {
-        self.signal_sender
-            .get((signum as usize).wrapping_sub(1))
-            .map_or(0, |slot| slot.swap(0, Ordering::Relaxed))
     }
 
     // Relaxed throughout: nothing is ordered against these, and `fetch_add`

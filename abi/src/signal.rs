@@ -1,7 +1,22 @@
 //! POSIX signal ABI definitions shared between kernel and userland.
 
-/// Signals are numbered 1..NSIG; signal 0 is reserved for error checking in kill().
-pub const NSIG: usize = 32;
+/// Signals are numbered `1..=NSIG`; signal 0 is reserved for error checking in
+/// `kill()`. Linux's kernel numbering: 64 signals in one 64-bit set.
+pub const NSIG: usize = 64;
+
+/// Signals `SIGRTMIN..=SIGRTMAX` are realtime: every instance queues with its
+/// own `siginfo`. The kernel's bounds; a libc may reserve some at the bottom.
+pub const SIGRTMIN: u8 = 32;
+pub const SIGRTMAX: u8 = NSIG as u8;
+
+/// Realtime instances one task may hold queued at once (POSIX
+/// `_POSIX_SIGQUEUE_MAX`). A send past it fails with `EAGAIN`.
+pub const SIGQUEUE_MAX: usize = 32;
+
+#[inline]
+pub const fn sig_is_realtime(signum: u8) -> bool {
+    signum >= SIGRTMIN && signum <= SIGRTMAX
+}
 
 // Numbering follows the POSIX / Linux-compatible subset.
 
@@ -34,34 +49,126 @@ pub type SigSet = u64;
 
 pub const SIG_EMPTY: SigSet = 0;
 
-/// One drained signal, returned by `read()` on a `FileKind::Signalfd`. SlopOS's
-/// analogue of Linux `struct signalfd_siginfo`, trimmed to 16 bytes.
+/// What one pending signal instance carries to delivery: `si_code`, the
+/// sender's `si_pid`/`si_uid`, and the union's second word — `si_value` for a
+/// queued signal, `si_status` for `SIGCHLD`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SignalfdSiginfo {
-    /// Signal number (1-based).
-    pub ssi_signo: u32,
-    /// Signal-specific code (0 — SlopOS does not track si_code yet).
-    pub ssi_code: i32,
-    /// Sending task id, when known (0 otherwise).
-    pub ssi_pid: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SigInfo {
+    pub code: i32,
+    pub pid: u32,
+    pub uid: u32,
     pub _pad: u32,
+    pub value: u64,
+}
+
+impl SigInfo {
+    /// A signal the kernel raised on its own account.
+    pub const KERNEL: Self = Self {
+        code: SI_KERNEL,
+        pid: 0,
+        uid: 0,
+        _pad: 0,
+        value: 0,
+    };
+
+    /// A signal process `pid` sent with `code`, carrying `value`.
+    #[inline]
+    pub const fn sent(code: i32, pid: u32, uid: u32, value: u64) -> Self {
+        Self {
+            code,
+            pid,
+            uid,
+            _pad: 0,
+            value,
+        }
+    }
+}
+
+/// One drained signal, returned by `read()` on a `FileKind::Signalfd`: Linux
+/// x86-64's `struct signalfd_siginfo`, 128 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalfdSiginfo {
+    pub ssi_signo: u32,
+    pub ssi_errno: i32,
+    pub ssi_code: i32,
+    pub ssi_pid: u32,
+    pub ssi_uid: u32,
+    pub ssi_fd: i32,
+    pub ssi_tid: u32,
+    pub ssi_band: u32,
+    pub ssi_overrun: u32,
+    pub ssi_trapno: u32,
+    pub ssi_status: i32,
+    pub ssi_int: i32,
+    pub ssi_ptr: u64,
+    pub ssi_utime: u64,
+    pub ssi_stime: u64,
+    pub ssi_addr: u64,
+    pub ssi_addr_lsb: u16,
+    pub _pad: [u8; 46],
 }
 
 impl SignalfdSiginfo {
-    pub const SERIALIZED_LEN: usize = 16;
+    pub const SERIALIZED_LEN: usize = 128;
+
+    /// The record for `signo` taken with `info`. The union word lands where
+    /// its `si_code` says it lives: `ssi_status` for a child's report,
+    /// `ssi_int`/`ssi_ptr` for a queued value.
+    pub const fn new(signo: u8, info: &SigInfo) -> Self {
+        let child = signo == SIGCHLD && info.code > 0;
+        let queued = info.code == SI_QUEUE;
+        Self {
+            ssi_signo: signo as u32,
+            ssi_errno: 0,
+            ssi_code: info.code,
+            ssi_pid: info.pid,
+            ssi_uid: info.uid,
+            ssi_fd: 0,
+            ssi_tid: 0,
+            ssi_band: 0,
+            ssi_overrun: 0,
+            ssi_trapno: 0,
+            ssi_status: if child { info.value as i32 } else { 0 },
+            ssi_int: if queued { info.value as i32 } else { 0 },
+            ssi_ptr: if queued { info.value } else { 0 },
+            ssi_utime: 0,
+            ssi_stime: 0,
+            ssi_addr: 0,
+            ssi_addr_lsb: 0,
+            _pad: [0; 46],
+        }
+    }
 
     /// Fixed-width little-endian byte image for the `read()` copy-out.
     pub fn to_bytes(&self) -> [u8; Self::SERIALIZED_LEN] {
         let mut b = [0u8; Self::SERIALIZED_LEN];
         b[0..4].copy_from_slice(&self.ssi_signo.to_le_bytes());
-        b[4..8].copy_from_slice(&self.ssi_code.to_le_bytes());
-        b[8..12].copy_from_slice(&self.ssi_pid.to_le_bytes());
+        b[4..8].copy_from_slice(&self.ssi_errno.to_le_bytes());
+        b[8..12].copy_from_slice(&self.ssi_code.to_le_bytes());
+        b[12..16].copy_from_slice(&self.ssi_pid.to_le_bytes());
+        b[16..20].copy_from_slice(&self.ssi_uid.to_le_bytes());
+        b[20..24].copy_from_slice(&self.ssi_fd.to_le_bytes());
+        b[24..28].copy_from_slice(&self.ssi_tid.to_le_bytes());
+        b[28..32].copy_from_slice(&self.ssi_band.to_le_bytes());
+        b[32..36].copy_from_slice(&self.ssi_overrun.to_le_bytes());
+        b[36..40].copy_from_slice(&self.ssi_trapno.to_le_bytes());
+        b[40..44].copy_from_slice(&self.ssi_status.to_le_bytes());
+        b[44..48].copy_from_slice(&self.ssi_int.to_le_bytes());
+        b[48..56].copy_from_slice(&self.ssi_ptr.to_le_bytes());
+        b[56..64].copy_from_slice(&self.ssi_utime.to_le_bytes());
+        b[64..72].copy_from_slice(&self.ssi_stime.to_le_bytes());
+        b[72..80].copy_from_slice(&self.ssi_addr.to_le_bytes());
+        b[80..82].copy_from_slice(&self.ssi_addr_lsb.to_le_bytes());
         b
     }
 }
 
 const _: () = assert!(core::mem::size_of::<SignalfdSiginfo>() == SignalfdSiginfo::SERIALIZED_LEN);
+const _: () = assert!(core::mem::offset_of!(SignalfdSiginfo, ssi_status) == 40);
+const _: () = assert!(core::mem::offset_of!(SignalfdSiginfo, ssi_ptr) == 48);
+const _: () = assert!(core::mem::offset_of!(SignalfdSiginfo, ssi_addr_lsb) == 80);
 
 /// Convert a signal number (1-based) to its bitmask.
 #[inline]
@@ -73,23 +180,9 @@ pub const fn sig_bit(signum: u8) -> SigSet {
     }
 }
 
-/// Every bit `sig_bit` can produce: signals `1..=NSIG` occupy bits `0..NSIG`.
-///
-/// Bits at and above `NSIG` are kernel-private and must be masked off before a
-/// signal number is derived from a pending set: an unmasked one yields
-/// `signum = NSIG + 1`, for which [`sig_bit`] returns 0 — so the bit never
-/// clears — and it indexes past a `[_; NSIG]` table.
-pub const SIGNAL_MASK: SigSet = (1u64 << NSIG) - 1;
-
-/// Kernel-private: the task is marked for death and every blocking primitive
-/// but the bounded uninterruptible tier aborts rather than parks. Outside
-/// [`SIGNAL_MASK`] deliberately, so it is invisible to `kill`, `sigprocmask`,
-/// `sigaction`, `signalfd` and delivery, and unreachable from userland —
-/// [`sig_bit`] cannot produce it.
-pub const SIGNAL_KILLED: SigSet = 1u64 << NSIG;
-
-const _: () = assert!(SIGNAL_KILLED & SIGNAL_MASK == 0);
-const _: () = assert!(sig_bit(NSIG as u8) & SIGNAL_MASK != 0);
+// Every bit of a `SigSet` is a signal: nothing kernel-private shares the word.
+const _: () = assert!(NSIG == SigSet::BITS as usize);
+const _: () = assert!(sig_bit(NSIG as u8) == 1 << 63);
 
 /// Signals that cannot be caught, blocked, or ignored.
 pub const SIG_UNCATCHABLE: SigSet = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
@@ -129,9 +222,19 @@ const _: () = assert!(
     "UserSigAltStack must match the Linux x86-64 stack_t"
 );
 
-/// `si_code` values this kernel produces. Linux numbering.
+/// `si_code` values. Linux numbering: a code at or above 0 is the kernel's
+/// to write, which is why `rt_sigqueueinfo` refuses one from userland.
 pub const SI_USER: i32 = 0;
 pub const SI_KERNEL: i32 = 0x80;
+pub const SI_QUEUE: i32 = -1;
+pub const SI_TKILL: i32 = -6;
+/// `SIGCHLD` codes.
+pub const CLD_EXITED: i32 = 1;
+pub const CLD_KILLED: i32 = 2;
+pub const CLD_DUMPED: i32 = 3;
+pub const CLD_TRAPPED: i32 = 4;
+pub const CLD_STOPPED: i32 = 5;
+pub const CLD_CONTINUED: i32 = 6;
 /// SIGSEGV: address not mapped to an object.
 pub const SEGV_MAPERR: i32 = 1;
 /// SIGSEGV: mapped, but the access was not permitted.
@@ -152,9 +255,10 @@ pub const SI_ADDR_OFFSET: usize = 16;
 pub const SI_PID_OFFSET: usize = 16;
 /// `si_uid` — `_sifields._kill._uid`.
 pub const SI_UID_OFFSET: usize = 20;
-/// `si_status` — `_sifields._sigchld._status`, the union's second word. This
-/// kernel delivers no `SIGCHLD` `siginfo`, so it always reads 0.
+/// `si_status` — `_sifields._sigchld._status`, the union's second word.
 pub const SI_STATUS_OFFSET: usize = 24;
+/// `si_value` — `_sifields._rt._sigval`, the same word.
+pub const SI_VALUE_OFFSET: usize = 24;
 
 /// The `siginfo_t` an `SA_SIGINFO` handler receives. Linux x86-64's layout:
 /// three `int`s, four bytes of padding, then the 112-byte `_sifields` union —
@@ -162,9 +266,9 @@ pub const SI_STATUS_OFFSET: usize = 24;
 ///
 /// The union is a word array behind an accessor rather than a Rust `union`:
 /// this crate is `#![forbid(unsafe_code)]`, and reading a union field is
-/// `unsafe`. Word 0 is the overlap that matters — `si_addr` for a fault
-/// signal, `si_pid`/`si_uid` for a `kill`-originated one. The rest of the
-/// union stays zero, as Linux's tail padding is.
+/// `unsafe`. Word 0 is `si_addr` for a fault signal and `si_pid`/`si_uid`
+/// for a sent one; word 1 is `si_value` or `si_status`. The rest of the union
+/// stays zero, as Linux's tail padding is.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserSiginfo {
@@ -192,17 +296,40 @@ impl UserSiginfo {
         }
     }
 
-    /// The `siginfo` for a signal process `si_pid` sent: `si_pid` and `si_uid`
-    /// share the union's first word, low half and high half.
+    /// The `siginfo` for an instance that carried `info`: `si_pid` and
+    /// `si_uid` share the union's first word, low half and high half, and
+    /// `si_value`/`si_status` is the second.
     #[inline]
-    pub const fn sent(si_signo: i32, si_code: i32, si_pid: u32, si_uid: u32) -> Self {
-        Self::new(si_signo, si_code, (si_pid as u64) | ((si_uid as u64) << 32))
+    pub const fn from_info(si_signo: i32, info: &SigInfo) -> Self {
+        let mut out = Self::new(
+            si_signo,
+            info.code,
+            (info.pid as u64) | ((info.uid as u64) << 32),
+        );
+        out._sifields[1] = info.value;
+        out
     }
 
-    /// The sending process of a `kill`-originated signal.
+    /// The sending process of a sent signal, or the child of a `SIGCHLD`.
     #[inline]
     pub const fn si_pid(&self) -> u32 {
         self._sifields[0] as u32
+    }
+
+    #[inline]
+    pub const fn si_uid(&self) -> u32 {
+        (self._sifields[0] >> 32) as u32
+    }
+
+    /// `si_value`, as `sival_ptr`; `sival_int` is its low half.
+    #[inline]
+    pub const fn si_value(&self) -> u64 {
+        self._sifields[1]
+    }
+
+    #[inline]
+    pub const fn si_status(&self) -> i32 {
+        self._sifields[1] as i32
     }
 
     /// The faulting address a `SIGSEGV`/`SIGBUS`/`SIGILL` handler reads.
@@ -230,6 +357,7 @@ const _: () = assert!(SI_ADDR_OFFSET == 16);
 const _: () = assert!(SI_PID_OFFSET == SI_ADDR_OFFSET);
 const _: () = assert!(SI_UID_OFFSET == SI_PID_OFFSET + 4);
 const _: () = assert!(SI_STATUS_OFFSET == SI_ADDR_OFFSET + 8);
+const _: () = assert!(SI_VALUE_OFFSET == SI_STATUS_OFFSET);
 
 /// The machine state an `SA_SIGINFO` handler receives as its third argument.
 /// Layout is the leading part of the Linux x86-64 `ucontext_t`: the
