@@ -726,6 +726,15 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
         cpu::disable_interrupts();
         irq_nest.reenter();
     }
+    // The killer waits for its victim's memory, so it runs in the same kind
+    // of window, with the address space the write faulted in already let go.
+    if let slopos_mm::page_fault::FaultOutcome::OutOfMemory(trigger) = outcome {
+        irq_nest.leave();
+        cpu::enable_interrupts();
+        outcome = slopos_mm::page_fault::out_of_memory_fault(trigger);
+        cpu::disable_interrupts();
+        irq_nest.reenter();
+    }
     slopos_sched::profile::note_fault(kind, began);
 
     match outcome {
@@ -735,9 +744,10 @@ fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut Irq
         | slopos_mm::page_fault::FaultOutcome::Interrupted => {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
-        // `complete_file_fault` never answers one, and the arm above is the
-        // only producer.
-        slopos_mm::page_fault::FaultOutcome::NeedsIo(_) => {
+        // The windows above consume both: no completion answers `NeedsIo`,
+        // and the killer answers neither.
+        slopos_mm::page_fault::FaultOutcome::NeedsIo(_)
+        | slopos_mm::page_fault::FaultOutcome::OutOfMemory(_) => {
             crate::exception::record_fault(slopos_abi::task::TaskFaultReason::UserPage, fault_addr);
             return false;
         }

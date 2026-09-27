@@ -86,7 +86,6 @@ fn deliver_user_fault_signal(
     }
 
     let si_code = match reason {
-        TaskFaultReason::UserOom => slopos_abi::signal::BUS_OBJERR,
         TaskFaultReason::UserUd => slopos_abi::signal::ILL_ILLOPC,
         // Error-code bit 0: the page was present, so the mapping exists and
         // the access itself was refused.

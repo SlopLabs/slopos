@@ -134,10 +134,12 @@ fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
     );
 }
 
+/// The ceiling, and the killer behind the pages it does not cover.
 fn boot_step_commit_ledger_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let pages = slopos_mm::page_alloc::get_page_allocator_stats();
     let usable = pages.free.saturating_add(pages.allocated);
     let limit = slopos_mm::commit::install(usable);
+    slopos_mm::oom::oom_register_ops(&slopos_core::oom::OOM_OPS);
     let pinned = slopos_fs::filemap::install_pinned_default();
     klog_info!(
         "commit: {} of {} usable pages may be promised (mem.commit={}%), {} pinned per principal",

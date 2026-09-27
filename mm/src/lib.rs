@@ -22,6 +22,7 @@ pub mod memory_layout_defs;
 pub mod memory_reservations;
 pub mod mmio;
 pub mod mmu;
+pub mod oom;
 pub mod page_alloc;
 pub mod page_fault;
 pub mod paging;

@@ -180,6 +180,7 @@ pub fn cmd_info(_argc: i32, _argv: &[&[u8]]) -> i32 {
     info_kv(b"  Allocated pages:  ", info.allocated_pages);
     info_kv(b"  Committed pages:  ", info.committed_pages);
     info_kv(b"  Commit limit:     ", info.commit_limit_pages);
+    info_kv(b"  OOM kills:        ", info.oom_kills);
 
     info_kv(b"  Total tasks:      ", info.total_tasks);
     info_kv(b"  Active tasks:     ", info.active_tasks);

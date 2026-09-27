@@ -13,6 +13,7 @@ pub mod tests_exec_boundary;
 pub mod tests_filemap_vma;
 pub mod tests_map_ownership;
 pub mod tests_oom;
+pub mod tests_oom_killer;
 pub mod tests_pcid;
 pub mod tests_quota_heap;
 pub mod tests_quota_pages;

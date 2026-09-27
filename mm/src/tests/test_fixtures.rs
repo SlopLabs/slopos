@@ -11,6 +11,7 @@ use crate::process_vm::{
 };
 use crate::user_mappings::{ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_mark_cow_4kb};
 use slopos_abi::task::INVALID_PROCESS_ID;
+use slopos_ostd::handle::HandleError;
 use slopos_ostd::process::ProcessId;
 
 /// Owns a process VM; the helpers drive the OSTD cursor under the per-process
@@ -77,14 +78,18 @@ impl ProcessVmGuard {
         };
         let cached = crate::filemap_hook::filemap_fault_page(plan.map, plan.page_index)
             .map_err(|_| MmError::MappingFailed)?;
-        let installed = crate::process_vm::process_vm_with_vm_space_and_area(
-            self.process,
-            fault_addr,
-            |vs, start, _end, region| {
-                crate::demand::install_file_page(vs, start, &plan, cached, region)
-            },
-        )
-        .unwrap_or(Err(MmError::NoAddressSpace));
+        let installed = crate::process_vm::process_vm_handle(self.process)
+            .ok_or(HandleError::NoEntry)
+            .and_then(|handle| {
+                crate::process_vm::process_vm_with_fault_context_by_handle(
+                    handle,
+                    fault_addr,
+                    |vs, map, (start, _end), region| {
+                        crate::demand::install_file_page(vs, map, start, &plan, cached, &region)
+                    },
+                )
+            })
+            .unwrap_or(Err(MmError::NoAddressSpace));
         crate::filemap_hook::filemap_release(plan.map, 1);
         installed
     }

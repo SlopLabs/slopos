@@ -32,7 +32,8 @@ use crate::user_mappings::{
     ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_unmap_present_4kb, ostd_visit_mark_cow_4kb,
 };
 use crate::vma_region::{
-    Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion,
+    Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, Unmapped, VmaMap,
+    VmaRegion,
 };
 use lock_profile::VmLock;
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -715,19 +716,35 @@ fn prot_to_region(prot: u64) -> VmaRegion {
     )
 }
 
+/// Unmap the private leaves of `[start, end)` region by region, giving back
+/// the per-page commit each region's class held on them.
 fn unmap_and_free_range_inner(
     inner: &mut ProcessVm,
     start: u64,
     end: u64,
-) -> Result<u32, MapError> {
+) -> Result<Unmapped, MapError> {
+    let mut total = Unmapped::default();
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(total);
     }
     let vm_space = inner
         .vm_space
         .as_mut()
         .expect("unmap_and_free_range_inner: vm_space present for live process");
-    unmap_present_leaves::<AnonymousMeta>(vm_space, start, end).map_err(|e| e.err)
+    let mut cursor = start;
+    while let Some((from, to, commit)) = inner.vma_map.first_overlapping_class(cursor, end) {
+        let unmapped = unmap_present_leaves::<AnonymousMeta>(vm_space, from, to);
+        let done = match &unmapped {
+            Ok(done) => *done,
+            Err(err) => err.unmapped,
+        };
+        inner.vma_map.refund_frames(done.owed_under(commit));
+        total.present += done.present;
+        total.private += done.private;
+        unmapped.map_err(|e| e.err)?;
+        cursor = to;
+    }
+    Ok(total)
 }
 
 /// Unmap each present 4 KiB leaf of `[start, end)`, stepping over empty
@@ -736,15 +753,18 @@ fn unmap_present_leaves<M: AnyUFrameMeta>(
     vm_space: &mut KArc<VmSpace>,
     start: u64,
     end: u64,
-) -> Result<u32, UnmapRegionError> {
-    let mut unmapped = 0u32;
+) -> Result<Unmapped, UnmapRegionError> {
+    let mut unmapped = Unmapped::default();
     let mut returns = FrameReturnBatch::new();
     ostd_unmap_present_4kb::<M>(
         vm_space,
         VirtAddr::new(start),
         VirtAddr::new(end),
-        |_, frame| {
-            unmapped += 1;
+        |_, flags, frame| {
+            unmapped.present += 1;
+            if !flags.contains(PageFlags::COW) {
+                unmapped.private += 1;
+            }
             returns.drop_frame(frame);
         },
     )
@@ -956,14 +976,14 @@ fn teardown_inner_mappings(inner: &mut ProcessVm, key: TlbProcessKey) {
 }
 
 /// Unmap a range; each unmapped `UFrame` returns its buddy frame on drop.
-/// Returns how many leaves were present.
+/// Returns what the range had present.
 fn unmap_and_free_range_dir(
     vm_space: &mut KArc<VmSpace>,
     start: u64,
     end: u64,
-) -> Result<u32, UnmapRegionError> {
+) -> Result<Unmapped, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(Unmapped::default());
     }
     unmap_present_leaves::<AnonymousMeta>(vm_space, start, end)
 }
@@ -976,9 +996,9 @@ fn unmap_ring_range_dir(
     key: TlbProcessKey,
     start: u64,
     end: u64,
-) -> Result<u32, UnmapRegionError> {
+) -> Result<Unmapped, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(Unmapped::default());
     }
     // The cursor-unmap issues only a local INVLPG, and a ring region is
     // routinely re-created at the same VA, so a migrated task could read the
@@ -988,11 +1008,11 @@ fn unmap_ring_range_dir(
 
 fn flushed_after(
     key: TlbProcessKey,
-    unmapped: Result<u32, UnmapRegionError>,
-) -> Result<u32, UnmapRegionError> {
+    unmapped: Result<Unmapped, UnmapRegionError>,
+) -> Result<Unmapped, UnmapRegionError> {
     let any = match &unmapped {
-        Ok(n) => *n,
-        Err(e) => e.present,
+        Ok(n) => n.present,
+        Err(e) => e.unmapped.present,
     };
     if any > 0 {
         tlb::flush_all_for_process(key);
@@ -1008,9 +1028,9 @@ fn unmap_range_nofree_dir(
     key: TlbProcessKey,
     start: u64,
     end: u64,
-) -> Result<u32, UnmapRegionError> {
+) -> Result<Unmapped, UnmapRegionError> {
     if !vma_range_valid(start, end) {
-        return Ok(0);
+        return Ok(Unmapped::default());
     }
     flushed_after(
         key,
@@ -1026,14 +1046,14 @@ struct UnmapRegionError {
     err: MapError,
     processed_end: u64,
     /// Leaves already gone when the error struck.
-    present: u32,
+    unmapped: Unmapped,
 }
 
-fn unmap_region_error(err: MapError, processed_end: u64, present: u32) -> UnmapRegionError {
+fn unmap_region_error(err: MapError, processed_end: u64, unmapped: Unmapped) -> UnmapRegionError {
     UnmapRegionError {
         err,
         processed_end,
-        present,
+        unmapped,
     }
 }
 
@@ -1072,14 +1092,14 @@ fn collect_overlapping_vmas(
     .map_err(|_| ())
 }
 
-/// Returns how many leaves the range had present.
+/// Returns what the range had present.
 fn unmap_region_range_dir(
     vm_space: &mut KArc<VmSpace>,
     key: TlbProcessKey,
     start: u64,
     end: u64,
     region: &VmaRegion,
-) -> Result<u32, UnmapRegionError> {
+) -> Result<Unmapped, UnmapRegionError> {
     if region.is_ring() {
         unmap_ring_range_dir(vm_space, key, start, end)
     } else if region.is_shared() {
@@ -1813,6 +1833,7 @@ pub fn destroy_process_vm(process: ProcessId) -> c_int {
     // frame and page table, and a compiler's are a gigabyte.
     drop(space);
     klog_debug!("destroy_process_vm({}): page table cleanup done", process);
+    crate::oom::note_released();
 
     // Retired after the unbind, so the id outlives every translation to the
     // address space it named.
@@ -1968,6 +1989,34 @@ pub fn get_process_vm_stats() -> ProcessVmStats {
         total_processes: MAX_PROCESSES as u32,
         active_processes: count_bound_slots(),
     }
+}
+
+/// Visit every bound address space with its process and the resident pages
+/// the ledger holds for it. `f` runs off the slot lock, so it may take locks
+/// the address-space operations are ordered after.
+pub(crate) fn for_each_resident(mut f: impl FnMut(Handle<ProcessVm>, &KArc<Process>, u32)) {
+    for (slot, vm) in PROCESS_VMS.iter().enumerate() {
+        let seen = {
+            let guard = vm.lock();
+            match (&guard.process, &guard.vm_space) {
+                (Some(process), Some(_)) => Some((
+                    Handle::from_parts(slot as u32, guard.generation),
+                    process.clone(),
+                    guard.vma_map.resident_pages(),
+                )),
+                _ => None,
+            }
+        };
+        if let Some((handle, process, resident)) = seen {
+            f(handle, &process, resident);
+        }
+    }
+}
+
+/// Whether the address space `handle` named has been torn down, and with it
+/// every frame and every promise it held.
+pub(crate) fn process_vm_released(handle: Handle<ProcessVm>) -> bool {
+    process_vm_with_handle(handle, |proc| proc.vm_space.is_none()).unwrap_or(true)
 }
 
 pub fn get_current_process_id() -> u32 {
@@ -2343,15 +2392,15 @@ fn resolve_mmap_base(
             *overlap_end,
             region,
         ) {
-            Ok(present) => {
-                if region.commit == Commit::Frames {
-                    inner.vma_map.refund_frames(present);
-                }
+            Ok(unmapped) => {
+                inner
+                    .vma_map
+                    .refund_frames(unmapped.owed_under(region.commit));
             }
             Err(err) => {
-                if region.commit == Commit::Frames {
-                    inner.vma_map.refund_frames(err.present);
-                }
+                inner
+                    .vma_map
+                    .refund_frames(err.unmapped.owed_under(region.commit));
                 if err.processed_end > addr_hint {
                     inner.vma_map.remove_range(
                         addr_hint,
@@ -2726,15 +2775,15 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
             *overlap_end,
             region,
         ) {
-            Ok(present) => {
-                if region.commit == Commit::Frames {
-                    inner.vma_map.refund_frames(present);
-                }
+            Ok(unmapped) => {
+                inner
+                    .vma_map
+                    .refund_frames(unmapped.owed_under(region.commit));
             }
             Err(err) => {
-                if region.commit == Commit::Frames {
-                    inner.vma_map.refund_frames(err.present);
-                }
+                inner
+                    .vma_map
+                    .refund_frames(err.unmapped.owed_under(region.commit));
                 if err.processed_end > addr {
                     inner.vma_map.remove_range(
                         addr,
@@ -2907,10 +2956,37 @@ fn clone_cow_snapshot_parent(
         return None;
     }
 
-    let vmas_iter: KVec<(u64, u64, VmaRegion)> =
-        KVec::from_iter_fallible(guard.vma_map.iter().map(|(s, e, r)| (s, e, r.clone()))).ok()?;
+    let mut cow_backed = 0u32;
+    let vmas = snapshot_parent_vmas(&mut guard, &mut cow_backed);
+    // Given back however the fork ends: the marks stay, and a page of a
+    // forked copy that is copy-on-write again is owed only by the write that
+    // breaks it.
+    guard.vma_map.refund_frames(cow_backed);
+    let vmas = vmas?;
 
-    let parent_vm_space_ref = guard.vm_space.as_mut()?;
+    Some((
+        guard.code_start,
+        guard.data_start,
+        guard.heap_start,
+        guard.heap_end,
+        guard.heap_break,
+        guard.stack_start,
+        guard.stack_end,
+        guard.flags,
+        vmas,
+    ))
+}
+
+/// The walk [`clone_cow_snapshot_parent`] makes, counting into `cow_backed`
+/// the paid pages of the parent's own [`Commit::Forked`] regions it marks.
+fn snapshot_parent_vmas(
+    inner: &mut ProcessVm,
+    cow_backed: &mut u32,
+) -> Option<KVec<CloneVmaEntry>> {
+    let vmas_iter: KVec<(u64, u64, VmaRegion)> =
+        KVec::from_iter_fallible(inner.vma_map.iter().map(|(s, e, r)| (s, e, r.clone()))).ok()?;
+
+    let parent_vm_space_ref = inner.vm_space.as_mut()?;
 
     let mut vmas: KVec<CloneVmaEntry> = KVec::new();
     for (vma_start, vma_end, region) in vmas_iter.iter() {
@@ -2926,6 +3002,7 @@ fn clone_cow_snapshot_parent(
         }
         let mut snapshot: ClonePageChunks = KVec::new();
         let is_shared = region.is_shared();
+        let forked = region.commit == Commit::Forked;
         let walked = ostd_visit_mark_cow_4kb(
             parent_vm_space_ref,
             VirtAddr::new(vma_start),
@@ -2945,7 +3022,11 @@ fn clone_cow_snapshot_parent(
                 // Read-only pages too: an `mprotect` that later widens the
                 // range must not make a frame the child also maps writable
                 // here.
-                ControlFlow::Continue(!is_shared && !flags.contains(PageFlags::COW))
+                let mark = !is_shared && !flags.contains(PageFlags::COW);
+                if mark && forked {
+                    *cow_backed += 1;
+                }
+                ControlFlow::Continue(mark)
             },
         );
         match walked {
@@ -2959,18 +3040,7 @@ fn clone_cow_snapshot_parent(
         vmas.push((vma_start, vma_end, region.clone(), snapshot))
             .ok()?;
     }
-
-    Some((
-        guard.code_start,
-        guard.data_start,
-        guard.heap_start,
-        guard.heap_end,
-        guard.heap_break,
-        guard.stack_start,
-        guard.stack_end,
-        guard.flags,
-        vmas,
-    ))
+    Some(vmas)
 }
 
 /// A reference on the frame the parent maps at `vaddr`, for the child to map.
@@ -3090,31 +3160,15 @@ fn clone_cow_populate_child(
         }
         let is_shared_vma = parent_region.is_shared();
 
-        let child_region = if is_shared_vma {
-            parent_region.clone()
-        } else {
-            let mut r = parent_region.clone();
-            r.cow = true;
-            r
-        };
-
-        let placed = child_region.commit == Commit::Frames;
+        // A forked copy owes no commit here: its pages are charged as the
+        // child comes to hold them as its own.
         if child
             .vma_map
-            .insert(vma_start, vma_end, child_region)
+            .insert(vma_start, vma_end, parent_region.forked())
             .is_err()
         {
             report_clone_page_ceiling(vma_start, vma_end);
             return Err(cow_pages);
-        }
-        if placed {
-            let pages = snapshot.iter().fold(0u32, |acc, chunk| {
-                acc.saturating_add(u32::try_from(chunk.len()).unwrap_or(u32::MAX))
-            });
-            if child.vma_map.charge_frames(pages).is_err() {
-                report_clone_page_ceiling(vma_start, vma_end);
-                return Err(cow_pages);
-            }
         }
         if let Some(memfd_handle) = parent_region.memfd_handle() {
             crate::memfd::memfd_inc_mapcount_by(memfd_handle, vma_page_count(vma_start, vma_end));

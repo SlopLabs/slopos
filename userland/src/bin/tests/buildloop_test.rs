@@ -1,7 +1,8 @@
 //! The build loop's plumbing, as cargo and rustc use it: a jobserver's
 //! tokens crossing `exec`, `std`'s file locks between processes, an rlib
-//! mapped read-only, and a memory budget that refuses at `mmap` and `fork`
-//! rather than killing a process at its first touch.
+//! mapped read-only, a memory budget that refuses at `mmap` rather than
+//! killing a process at its first touch, a fork a large process can afford,
+//! and the OOM killer behind the copy that fork did not charge.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -441,7 +442,9 @@ fn reserve_most_of_the_headroom() -> Result<Option<(u64, u64)>, String> {
     }
 }
 
-fn test_fork_past_the_ceiling_is_refused_not_killed() -> bool {
+/// A fork owes nothing for its copy, so a process holding most of the
+/// headroom forks as freely as a small one.
+fn test_a_large_process_forks_without_owing_its_copy() -> bool {
     let (addr, len) = match reserve_most_of_the_headroom() {
         Ok(Some(held)) => held,
         Ok(None) => {
@@ -453,23 +456,128 @@ fn test_fork_past_the_ceiling_is_refused_not_killed() -> bool {
             return false;
         }
     };
-    let refused = process::fork();
-    if refused == 0 {
+    let before = sys_info().committed_pages;
+    let child = process::fork();
+    if child == 0 {
         std::process::exit(0);
     }
-    if refused > 0 {
-        process::wait_exit_code(refused as u32);
-    }
+    let forked_commit = sys_info().committed_pages;
+    let child_ok = child > 0 && process::wait_exit_code(child as u32) == 0;
     memory::munmap(addr, len);
-    let granted = process::fork();
-    if granted == 0 {
+    note(format!(
+        "fork with {} pages reserved: {child}; committed {before} before, {forked_commit} after",
+        len / PAGE
+    ));
+    child_ok && forked_commit < before + (len / PAGE) as u32 / 2
+}
+
+/// Pages the hog writes before its fork: more than the headroom it leaves,
+/// so its child's copy of them reaches the ceiling.
+const HOG_TOUCHED: u64 = 4096;
+/// Headroom the hog leaves when it maps its reservation.
+const HOG_SLACK: u64 = 3072;
+/// Pages the hog places after the fork, to stay the largest process.
+const HOG_EXTRA: u64 = 1024;
+
+/// The hog: promise nearly all the headroom, write part of it, fork, grow
+/// past the child, then wait. The child writes its copy past the ceiling and
+/// reports on stdout once every page is its own.
+fn hog_mode() -> i32 {
+    let info = sys_info();
+    let headroom = info.commit_headroom_pages as u64;
+    let Some(pages) = headroom.checked_sub(HOG_SLACK) else {
+        return 2;
+    };
+    let Some(held) = map_anonymous(pages, 0) else {
+        return 3;
+    };
+    for page in 0..HOG_TOUCHED {
+        unsafe { ((held + page * PAGE) as *mut u64).write_volatile(page) };
+    }
+    let Ok((ready_rx, ready_tx)) = sys_fs::pipe2(0) else {
+        return 4;
+    };
+    let child = process::fork();
+    if child == 0 {
+        drop(ready_tx);
+        let mut byte = [0u8; 1];
+        let _ = sys_fs::read_slice(ready_rx.raw(), &mut byte);
+        for page in 0..HOG_TOUCHED {
+            unsafe { ((held + page * PAGE) as *mut u64).write_volatile(!page) };
+        }
+        let intact = (0..HOG_TOUCHED)
+            .all(|page| unsafe { ((held + page * PAGE) as *const u64).read_volatile() } == !page);
+        if intact {
+            println!("copy-written");
+        }
         std::process::exit(0);
     }
-    let child_ok = granted > 0 && process::wait_exit_code(granted as u32) == 0;
+    if child < 0 {
+        return 5;
+    }
+    let Some(extra) = map_anonymous(HOG_EXTRA, 0) else {
+        return 6;
+    };
+    for page in 0..HOG_EXTRA {
+        unsafe { ((extra + page * PAGE) as *mut u64).write_volatile(page) };
+    }
+    let _ = sys_fs::write_slice(ready_tx.raw(), b"g");
+    process::wait_exit_code(child as u32);
+    0
+}
+
+/// A forked child writing its copy past the ceiling costs the largest
+/// process — the hog that forked it — exactly one kill, and the child's
+/// write then proceeds; the runner and init live on, and so does the machine.
+fn test_the_oom_killer_takes_the_largest_and_the_writer_proceeds() -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+
+    let info = sys_info();
+    if info.commit_limit_pages == u32::MAX {
+        note("no commit ceiling is configured".to_string());
+        return true;
+    }
+    if (info.commit_headroom_pages as u64) < 4 * (HOG_TOUCHED + HOG_SLACK) {
+        note(format!(
+            "{} pages of headroom is too little for the hog",
+            info.commit_headroom_pages
+        ));
+        return false;
+    }
+    let kills_before = info.oom_kills;
+    let Ok(mut hog) = Command::new(SELF_PATH)
+        .arg("hog")
+        .stdout(Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+    let hog_pid = hog.id();
+    let mut report = String::new();
+    if let Some(mut out) = hog.stdout.take() {
+        let _ = out.read_to_string(&mut report);
+    }
+    let Ok(status) = hog.wait() else {
+        return false;
+    };
+    let after = sys_info();
+    let alive = Command::new(SELF_PATH)
+        .arg("noop")
+        .status()
+        .is_ok_and(|s| s.success());
     note(format!(
-        "fork with the reservation held: {refused}; without it: {granted}"
+        "hog {hog_pid} ended {status:?}; kills {} -> {}, last victim {}; child said {:?}",
+        kills_before,
+        after.oom_kills,
+        after.oom_last_victim,
+        report.trim()
     ));
-    refused < 0 && child_ok
+    status.signal() == Some(9)
+        && after.oom_kills == kills_before + 1
+        && after.oom_last_victim == hog_pid
+        && report.trim() == "copy-written"
+        && alive
 }
 
 fn test_posix_spawn_from_a_large_process_needs_no_second_commit() -> bool {
@@ -584,8 +692,12 @@ const CASES: &[(&str, fn() -> bool)] = &[
         test_a_reservation_past_the_ceiling_is_refused_not_killed,
     ),
     (
-        "fork_past_the_ceiling_is_refused_not_killed",
-        test_fork_past_the_ceiling_is_refused_not_killed,
+        "a_large_process_forks_without_owing_its_copy",
+        test_a_large_process_forks_without_owing_its_copy,
+    ),
+    (
+        "the_oom_killer_takes_the_largest_and_the_writer_proceeds",
+        test_the_oom_killer_takes_the_largest_and_the_writer_proceeds,
     ),
     (
         "posix_spawn_from_a_large_process_needs_no_second_commit",
@@ -614,6 +726,7 @@ fn main() {
             args.get(2).map(String::as_str).unwrap_or(""),
         ),
         Some("hold") => hold_mode(),
+        Some("hog") => hog_mode(),
         Some("noop") => 0,
         _ => slopos_slibc::test_harness::run_with_progress("buildloop", CASES),
     };

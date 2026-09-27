@@ -38,6 +38,8 @@ pub enum MmError {
     PermissionDenied,
     /// Exclusive access to the address space was unavailable; transient.
     Retry,
+    /// The commit ceiling refused the page a per-page charged region needed.
+    CommitRefused,
 }
 
 impl fmt::Display for MmError {
@@ -72,6 +74,7 @@ impl fmt::Display for MmError {
             Self::NotDemandPaged => write!(f, "page is not demand-paged"),
             Self::PermissionDenied => write!(f, "VMA permissions deny this access"),
             Self::Retry => write!(f, "address space temporarily not exclusive"),
+            Self::CommitRefused => write!(f, "the commit ceiling refused a page"),
         }
     }
 }

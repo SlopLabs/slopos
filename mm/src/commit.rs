@@ -9,7 +9,7 @@ use slopos_ostd::process::quota::{root, set_limit, stats};
 
 /// Share of usable frames the ledger may promise, in percent. The kernel's
 /// own consumers draw from the same buddy under caps of their own, so at 100
-/// a promise can still meet an empty buddy; that road stays `SIGBUS`.
+/// a promise can still meet an empty buddy; that road goes to the OOM killer.
 pub const DEFAULT_COMMIT_PERCENT: u32 = 100;
 
 static COMMIT_PERCENT: AtomicU32 = AtomicU32::new(DEFAULT_COMMIT_PERCENT);

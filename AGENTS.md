@@ -449,44 +449,58 @@ the next one, the way a jbd2 commit waiter does. Mutations remain serialised
 per mount — the plan's per-inode locking is deliberately not what landed,
 because the wait, not the lock count, is what G5 was about.
 
-**Memory is promised before it is touched.** Every private mapping is charged
-against a *commit* ceiling when it is created — `mmap`, `brk`, an `mprotect`
-that makes a `PROT_NONE` reservation accessible, `fork` for the child's copy of
-every private region — and refused there with `ENOMEM` (or `EAGAIN` from
-`fork`), so a process that could never be backed is told at the allocator, not
-killed at its first page fault. The ledger is the `CommitPages` quota kind on
+**Memory is promised before it is touched — except a fork's copy, which the
+OOM killer stands behind.** Every private mapping is charged against a
+*commit* ceiling when it is created — `mmap`, `brk`, an `mprotect` that makes a
+`PROT_NONE` reservation accessible — and refused there with `ENOMEM`, so a
+process that could never be backed is told at the allocator, not killed at its
+first page fault. The ledger is the `CommitPages` quota kind on
 the root account, its limit `mem.commit=<percent>` of usable frames (default
 100; `0` records without refusing) installed by the `commit ledger` boot step,
-and `sys_info` reports the limit, the promised total and the headroom left. The
+and `sys_info` reports the limit, the promised total and the headroom left, and
+how many processes the OOM killer has taken and the last one's pid. The
 same boot step derives the per-process `PinnedBytes` default — an eighth of
 usable memory, the share the file map hands one owner — since the `abi`
 default was sized for an appliance, a compiler's shared objects exceed it
-before `main`, and a linker maps every rlib of the kernel at once. A region is charged one of two ways, and `VmaRegion::commit` says which: an
+before `main`, and a linker maps every rlib of the kernel at once. A region is charged one of three ways, and `VmaRegion::commit` says which: an
 `Extent` region owes its whole span when it is created, so a fault in it never
 finds itself unaccounted for; a `Frames` region — the loader's eager segments,
 the mapped stack, the stack's lazy growth extent, `MAP_NORESERVE` — is charged
-one page at a time as pages are placed, and a refusal at that point is the one
-road that still ends in `SIGBUS`, exactly as stack growth does under Linux's
-`overcommit_memory=2` and as illumos treats `MAP_NORESERVE`. Shared objects, a
-file's page set and the ring share are `Unreserved`: their frames are owned
-elsewhere. A class is never given back — `commit_under` moves only an
-unreserved region, the first time a protection lets its pages be populated —
-and `MAP_NORESERVE` is an attribute of the region, honoured rather than
+one page at a time as pages are placed; a `Forked` region is a fork's copy of
+a region its parent had charged, and owes a page from the moment the child
+holds it as its own — a write that breaks copy-on-write, a fresh page — so its
+paid pages are exactly its present leaves not marked copy-on-write, and a
+second fork that marks them again, an unmap and teardown each give them back.
+`fork` therefore charges nothing and is never refused on the ledger: Unix
+software assumes a cheap one. The parent's own charge still covers its span,
+so a parent that writes a page it still shares pays nothing more, and the
+child keeps the old frame unpaid until it writes it — the overcommit. Shared
+objects, a file's page set and the ring share are `Unreserved`: their frames
+are owned elsewhere. A class is never given back — `commit_under` moves only
+an unreserved region, the first time a protection lets its pages be populated
+— and `MAP_NORESERVE` is an attribute of the region, honoured rather than
 ignored because a caller that says it will not touch the whole reservation is
 asking for the fault-time road on purpose, and a sparse gigabyte is what a
-runtime's address-space reservation looks like. An `exec` is charged beside
-the image it replaces: the segments, interpreter and stack are sized from the
-headers and charged before the old image is released, then advanced to the
-loader, so a program that cannot fit is the caller's `ENOMEM` rather than a
-fault in a process that no longer has a program. `posix_spawn` matters under
-this policy: a `fork` of a compiler holding a gigabyte owes a second gigabyte,
-so slibc implements the `posix_spawn` family over the kernel's `spawn`
-primitive — the child's descriptor table is computed in the parent and handed
-over whole — and the std fork takes that road for `Command::spawn`, falling
-back to `fork` only for `pre_exec` closures and attributes the primitive
-cannot express. The `jobserver` crate registers such a closure for every
-child cargo configures, so its port in `toolchain/crates/` keeps the pipe
-inheritable instead (see `toolchain/crates/PIN`).
+runtime's address-space reservation looks like. So only forked copies, stack
+growth and `MAP_NORESERVE` can outrun memory, and when such a write finds the
+ceiling refusing its page or the buddy empty after reclaim, `mm::oom` kills
+instead of faulting the writer, as Linux's OOM killer does: the largest
+resident user process by the ledger's `ResidentPages` row, never init, killed
+the way every kill works (the flag each thread unwinds from, I8). The writer
+drops the address space, waits — killable, bounded — for the victim's to be
+torn down, and writes again; while a victim is dying nobody picks a second,
+and one still holding its memory five seconds after the kill stops holding
+back the next choice. Only when nothing but init and the dying is left does
+the write fail, as a `SIGKILL` (`TaskFaultReason::UserOom`). An `exec` is
+charged beside the image it replaces: the segments, interpreter and stack are
+sized from the headers and charged before the old image is released, then
+advanced to the loader, so a program that cannot fit is the caller's `ENOMEM`
+rather than a fault in a process that no longer has a program. slibc
+implements the `posix_spawn` family over the kernel's `spawn` primitive — the
+child's descriptor table is computed in the parent and handed over whole, and
+no address space is copied at all — and the std fork takes that road for
+`Command::spawn` because it is the cheaper one, falling back to `fork` for
+`pre_exec` closures and attributes the primitive cannot express.
 
 ## Knowledge Index (AI)
 `knowledge/` hosts a local semantic index for querying the codebase. Build once with `python3 -m venv knowledge/.venv && . knowledge/.venv/bin/activate && pip install -r knowledge/requirements.txt && python knowledge/index.py`, then query via `python knowledge/query.py "<question>"` for signatures, drivers, or file locations. Rebuild after large refactors or merges. Never commit the venv or embedding database artifacts.

@@ -1,7 +1,7 @@
 //! The `CommitPages` axis: what the kernel has promised a frame for. An
 //! extent is charged when it is created and a placed page when it lands, so
 //! the ledger moves at `mmap`, `mprotect`, `exec` and teardown, and at a
-//! fault only for the page a `Frames` region places.
+//! fault only for the page a `Frames` region places or a forked copy writes.
 
 use slopos_abi::quota::{CommitPagesAxis, QuotaMode, ResourceKind};
 use slopos_abi::syscall::{
@@ -13,11 +13,20 @@ use slopos_testing::{assert_test, fail, pass};
 
 use super::tests::resolve_pid;
 use crate::memory_layout_defs::PROCESS_STACK_SIZE_BYTES;
+use crate::oom::OomTrigger;
+use crate::page_fault::{FaultOutcome, try_resolve_user_fault};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{
-    create_process_vm, destroy_process_vm, process_vm_end_prepay, process_vm_mmap,
-    process_vm_mprotect, process_vm_munmap, process_vm_prepay_commit, process_vm_reset_stack,
+    create_process_vm, destroy_process_vm, pack_process_vm_handle, process_vm_clone_cow,
+    process_vm_end_prepay, process_vm_handle, process_vm_mmap, process_vm_mprotect,
+    process_vm_munmap, process_vm_prepay_commit, process_vm_reset_stack,
+    process_vm_user_va_to_paddr,
 };
+use crate::user_mappings::ostd_get_pte_flags_4kb;
+
+/// 0x06 / 0x07: a user write to an absent page, and to a present one.
+const WRITE_ABSENT: u64 = 0x06;
+const WRITE_PRESENT: u64 = 0x07;
 
 const MAP_FLAGS: u64 = MAP_ANONYMOUS | MAP_PRIVATE;
 const PROT_RW: u64 = PROT_READ | PROT_WRITE;
@@ -57,6 +66,51 @@ impl Scratch {
 
     fn munmap(&self, addr: u64, pages: u64) -> i32 {
         process_vm_munmap(resolve_pid(self.pid), addr, pages * PAGE_SIZE_4KB)
+    }
+
+    /// A fork of this address space, torn down on drop like its parent.
+    fn fork(&self) -> Option<Self> {
+        let pid = process_vm_clone_cow(resolve_pid(self.pid));
+        (pid != slopos_abi::task::INVALID_PROCESS_ID).then(|| Self {
+            pid,
+            restore: quota_mode(),
+        })
+    }
+
+    /// Take the user fault `code` at `addr`, as the trap would.
+    fn fault(&self, addr: u64, code: u64) -> Option<FaultOutcome> {
+        let handle = process_vm_handle(resolve_pid(self.pid))?;
+        Some(try_resolve_user_fault(
+            addr,
+            code,
+            pack_process_vm_handle(handle),
+            1,
+        ))
+    }
+
+    /// Write every page of `[addr, addr + pages)`.
+    fn write(&self, addr: u64, pages: u64) -> bool {
+        (0..pages).all(|page| {
+            let va = addr + page * PAGE_SIZE_4KB;
+            let code = if self.phys(va) == 0 {
+                WRITE_ABSENT
+            } else {
+                WRITE_PRESENT
+            };
+            self.fault(va, code) == Some(FaultOutcome::Resolved)
+        })
+    }
+
+    fn phys(&self, addr: u64) -> u64 {
+        process_vm_user_va_to_paddr(resolve_pid(self.pid), addr)
+    }
+
+    fn is_cow(&self, addr: u64) -> bool {
+        crate::process_vm::process_vm_with_vm_space(resolve_pid(self.pid), |vs| {
+            ostd_get_pte_flags_4kb(vs, slopos_abi::addr::VirtAddr::new(addr))
+        })
+        .flatten()
+        .is_some_and(|flags| flags.contains(crate::paging_defs::PageFlags::COW))
     }
 }
 
@@ -317,9 +371,6 @@ pub fn test_commit_teardown_returns_everything() -> TestResult {
 /// writable frames.
 pub fn test_anon_fault_around_stays_inside_its_region() -> TestResult {
     use crate::demand::ANON_FAULT_AROUND_PAGES;
-    use crate::process_vm::{
-        pack_process_vm_handle, process_vm_handle, process_vm_user_va_to_paddr,
-    };
 
     let Some(scratch) = Scratch::new() else {
         return fail!("could not create an address space");
@@ -364,6 +415,177 @@ pub fn test_anon_fault_around_stays_inside_its_region() -> TestResult {
     pass!()
 }
 
+/// A fork owes nothing for its copy: granted with no headroom left at all,
+/// and the child has promised nothing until it writes.
+pub fn test_commit_fork_owes_nothing_for_its_copy() -> TestResult {
+    let Some(parent) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    const PAGES: u64 = 16;
+    let addr = parent.mmap(PAGES, PROT_RW, MAP_FLAGS);
+    assert_test!(addr != 0, "mmap refused");
+    assert_test!(parent.write(addr, PAGES), "the parent's writes faulted");
+    let parent_before = parent.committed();
+
+    let restore = root_limit();
+    set_limit(root(), ResourceKind::CommitPages, root_committed());
+    let child = parent.fork();
+    set_limit(root(), ResourceKind::CommitPages, restore);
+
+    let Some(child) = child else {
+        return fail!("a fork with no commit headroom was refused");
+    };
+    assert_test!(
+        child.committed() == 0,
+        "the child promised {} pages at the fork",
+        child.committed()
+    );
+    assert_test!(
+        parent.committed() == parent_before,
+        "the fork moved the parent's commit from {} to {}",
+        parent_before,
+        parent.committed()
+    );
+    pass!()
+}
+
+/// A forked copy is charged a page at a time as the child comes to hold it:
+/// a write that breaks copy-on-write, a write to a page nobody placed; unmap
+/// gives each back. The parent's span already covers its own copy.
+pub fn test_commit_forked_copy_is_charged_as_written() -> TestResult {
+    let Some(parent) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    const PAGES: u64 = 4;
+    let shared = parent.mmap(PAGES, PROT_RW, MAP_FLAGS);
+    // `MAP_NORESERVE`, so it neither merges with `shared` nor is prefaulted
+    // with it: the child finds its pages absent.
+    let fresh = parent.mmap(PAGES, PROT_RW, MAP_FLAGS | MAP_NORESERVE);
+    assert_test!(shared != 0 && fresh != 0, "mmap refused");
+    assert_test!(parent.write(shared, PAGES), "the parent's writes faulted");
+    let Some(child) = parent.fork() else {
+        return fail!("the fork failed");
+    };
+    let parent_before = parent.committed();
+    assert_test!(child.phys(fresh) == 0, "the fresh page is already placed");
+
+    assert_test!(child.write(shared, 1), "the child's copy-on-write fault");
+    let after_copy = child.committed();
+    assert_test!(child.write(fresh, 1), "the child's fresh-page fault");
+    let after_fresh = child.committed();
+    assert_test!(
+        parent.write(shared + PAGE_SIZE_4KB, 1),
+        "the parent's write"
+    );
+    let parent_after = parent.committed();
+    assert_test!(child.munmap(shared, PAGES) == 0, "munmap failed");
+    let after_unmap = child.committed();
+    assert_test!(child.munmap(fresh, PAGES) == 0, "munmap failed");
+    let after_both = child.committed();
+
+    assert_test!(
+        after_copy == 1,
+        "a copy-on-write break charged {}",
+        after_copy
+    );
+    assert_test!(
+        after_fresh == 2,
+        "a fresh page moved the charge from {} to {}",
+        after_copy,
+        after_fresh
+    );
+    assert_test!(
+        parent_after == parent_before,
+        "the parent's write to its own span was charged again"
+    );
+    assert_test!(
+        after_unmap == 1 && after_both == 0,
+        "unmapping the written pages left {} and then {} charged",
+        after_unmap,
+        after_both
+    );
+    pass!()
+}
+
+/// A page a forked copy wrote is its own until it forks again: that fork
+/// marks it copy-on-write once more, and it is owed afresh by the write that
+/// next breaks it.
+pub fn test_commit_a_refork_gives_back_what_a_forked_copy_wrote() -> TestResult {
+    let Some(parent) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    const PAGES: u64 = 4;
+    let addr = parent.mmap(PAGES, PROT_RW, MAP_FLAGS);
+    assert_test!(addr != 0, "mmap refused");
+    assert_test!(parent.write(addr, PAGES), "the parent's writes faulted");
+    let Some(child) = parent.fork() else {
+        return fail!("the fork failed");
+    };
+    assert_test!(child.write(addr, 2), "the child's writes faulted");
+    let written = child.committed();
+    let Some(grandchild) = child.fork() else {
+        return fail!("the second fork failed");
+    };
+    let after_refork = child.committed();
+    let marked = child.is_cow(addr);
+    assert_test!(child.write(addr, 1), "the child's write after the fork");
+    let rewritten = child.committed();
+
+    assert_test!(written == 2, "two written pages charged {}", written);
+    assert_test!(
+        marked && after_refork == 0,
+        "the refork left {} pages charged (page marked copy-on-write: {})",
+        after_refork,
+        marked
+    );
+    assert_test!(
+        grandchild.committed() == 0,
+        "the grandchild promised {} pages at the fork",
+        grandchild.committed()
+    );
+    assert_test!(
+        rewritten == 1,
+        "breaking the page again charged {}",
+        rewritten
+    );
+    pass!()
+}
+
+/// A forked copy's write past the ceiling is served by the OOM killer, not
+/// by killing the writer, and until then the page stays shared.
+pub fn test_commit_forked_write_past_the_ceiling_goes_to_the_killer() -> TestResult {
+    let Some(parent) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    let addr = parent.mmap(1, PROT_RW, MAP_FLAGS);
+    assert_test!(addr != 0, "mmap refused");
+    assert_test!(parent.write(addr, 1), "the parent's write faulted");
+    let Some(child) = parent.fork() else {
+        return fail!("the fork failed");
+    };
+
+    let restore = root_limit();
+    set_limit(root(), ResourceKind::CommitPages, root_committed());
+    let outcome = child.fault(addr, WRITE_PRESENT);
+    set_limit(root(), ResourceKind::CommitPages, restore);
+
+    assert_test!(
+        outcome == Some(FaultOutcome::OutOfMemory(OomTrigger::Commit)),
+        "a refused copy answered {:?}",
+        outcome
+    );
+    assert_test!(
+        child.is_cow(addr) && child.phys(addr) == parent.phys(addr),
+        "the refused write still replaced the shared page"
+    );
+    assert_test!(
+        child.committed() == 0,
+        "the refusal left {} pages charged",
+        child.committed()
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_commit_limit_is_a_share_of_usable_frames,
     suite = quota_commit
@@ -402,5 +624,21 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_anon_fault_around_stays_inside_its_region,
+    suite = quota_commit
+);
+slopos_testing::stest!(
+    name = test_commit_fork_owes_nothing_for_its_copy,
+    suite = quota_commit
+);
+slopos_testing::stest!(
+    name = test_commit_forked_copy_is_charged_as_written,
+    suite = quota_commit
+);
+slopos_testing::stest!(
+    name = test_commit_a_refork_gives_back_what_a_forked_copy_wrote,
+    suite = quota_commit
+);
+slopos_testing::stest!(
+    name = test_commit_forked_write_past_the_ceiling_goes_to_the_killer,
     suite = quota_commit
 );

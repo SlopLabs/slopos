@@ -527,14 +527,15 @@ pub fn ostd_next_leaf_4kb(
 }
 
 /// Unmap every present 4 KiB leaf of `[start, end)` in one pass over its leaf
-/// tables, handing each frame to `each` as [`ostd_unmap_4kb_user_take`] would.
-/// An address space with nothing mapped there is not waited on. `Err` names
-/// the address the failure struck at; every leaf below it is gone.
+/// tables, handing each frame to `each` as [`ostd_unmap_4kb_user_take`] would,
+/// with the flags its leaf carried. An address space with nothing mapped there
+/// is not waited on. `Err` names the address the failure struck at; every leaf
+/// below it is gone.
 pub fn ostd_unmap_present_4kb<M: AnyUFrameMeta>(
     vm_space: &mut KArc<VmSpace>,
     start: VirtAddr,
     end: VirtAddr,
-    each: impl FnMut(VirtAddr, UFrame<M>),
+    mut each: impl FnMut(VirtAddr, PageFlags, UFrame<M>),
 ) -> Result<(), (MapError, VirtAddr)> {
     let Some((first, _, _)) = ostd_next_leaf_4kb(vm_space, start, end).map_err(|e| (e, start))?
     else {
@@ -542,7 +543,9 @@ pub fn ostd_unmap_present_4kb<M: AnyUFrameMeta>(
     };
     let vs = vm_space_get_mut(vm_space).map_err(|e| (e, first))?;
     let mut cursor = vs.cursor_mut(first..end).map_err(|e| (e, first))?;
-    cursor.unmap_present(each).map_err(|e| (e, cursor.vaddr()))
+    cursor
+        .unmap_present(|va, property, frame| each(va, property_to_page_flags(property), frame))
+        .map_err(|e| (e, cursor.vaddr()))
 }
 
 /// Offer every present 4 KiB leaf of `[start, end)` to `visit` as

@@ -16,12 +16,12 @@ use crate::task::exit_info::ExitInfo;
 use crate::task::kernel_task::{SchedPlacement, SigHandTable, SignalAction, TaskInner};
 use crate::task::link_roles::{CleanupRole, ReclaimRole, RemoteWakeRole};
 
-/// `SIGBUS` for an out-of-memory demand fault: the mapping exists and the
-/// access is legal, but no page can be produced, which is the bus-error case.
+/// `SIGKILL` for a write the OOM killer could not serve: it dies the way the
+/// killer's victims do, not with a catchable error its handler cannot fix.
 #[inline]
 pub const fn fault_signal_for(reason: TaskFaultReason) -> u8 {
     match reason {
-        TaskFaultReason::UserOom => slopos_abi::signal::SIGBUS,
+        TaskFaultReason::UserOom => slopos_abi::signal::SIGKILL,
         TaskFaultReason::UserUd => slopos_abi::signal::SIGILL,
         _ => slopos_abi::signal::SIGSEGV,
     }
@@ -150,9 +150,8 @@ impl<K, U> TaskInner<K, U> {
     /// Release on each store, in the order a fault reader walks them.
     ///
     /// The exit code carries the signal a POSIX kernel would have killed the
-    /// task with, so `waitpid` can distinguish the causes. `SIGBUS` for an
-    /// out-of-memory demand fault: the mapping exists and the access is legal,
-    /// but no page can be produced, which is the bus-error case.
+    /// task with, so `waitpid` can distinguish the causes; see
+    /// [`fault_signal_for`].
     #[inline]
     pub fn record_user_fault_exit(&self, reason: TaskFaultReason) -> u32 {
         self.exit_reason

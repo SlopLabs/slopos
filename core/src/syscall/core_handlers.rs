@@ -394,6 +394,7 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
     let tasks = get_task_stats();
     let sched = get_scheduler_stats();
     let commit = slopos_mm::commit::commit_stats();
+    let oom = slopos_mm::oom::oom_stats();
     let commit_headroom_pages = if commit.limit == u32::MAX {
         u32::MAX
     } else {
@@ -417,6 +418,8 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
         commit_headroom_pages,
         commit_limit_pages: commit.limit,
         committed_pages: commit.committed,
+        oom_kills: oom.kills,
+        oom_last_victim: oom.last_victim,
     };
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;

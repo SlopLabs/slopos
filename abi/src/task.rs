@@ -381,10 +381,11 @@ pub enum TaskFaultReason {
     UserGp = 2,
     UserUd = 3,
     UserDeviceNa = 4,
-    /// A demand fault that could not be serviced because memory ran out after
-    /// reclaim was asked. Distinct from [`UserPage`](Self::UserPage) so
-    /// `waitpid` can tell "the machine was short of memory" from "the program
-    /// was wrong". Reported as `SIGBUS`.
+    /// A write found no page and the OOM killer had nothing it could take
+    /// instead — only init and the dying were left. Distinct from
+    /// [`UserPage`](Self::UserPage) so `waitpid` can tell "the machine was
+    /// short of memory" from "the program was wrong". Reported as `SIGKILL`,
+    /// the signal the killer's victims die of.
     UserOom = 5,
 }
 

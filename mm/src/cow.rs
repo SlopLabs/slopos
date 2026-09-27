@@ -13,6 +13,7 @@ use crate::user_mappings::{
     ostd_get_pte_flags_4kb, ostd_replace_4kb_user, ostd_resolve_cow_4kb, ostd_virt_to_phys_4kb,
     wait_vm_space_exclusive,
 };
+use crate::vma_region::{Commit, VmaMap, VmaRegion};
 
 /// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
 /// must be live HHDM-mapped virtual addresses pointing at distinct pages.
@@ -53,6 +54,26 @@ pub fn handle_cow_fault(
 
     let writable = flags.difference(PageFlags::COW).union(PageFlags::WRITABLE);
     resolve_multi_ref(vm_space, aligned_vaddr, old_phys, writable)
+}
+
+/// [`handle_cow_fault`] in `region`, charging the page through `map` when the
+/// region is a forked copy: a broken page is this address space's own from
+/// then on, whether the break copied it or found the frame no longer shared.
+pub fn break_cow_in(
+    vm_space: &mut KArc<VmSpace>,
+    map: &mut VmaMap,
+    fault_addr: u64,
+    region: &VmaRegion,
+) -> Result<(), MmError> {
+    let owed = region.commit == Commit::Forked;
+    if owed && map.charge_frames(1).is_err() {
+        return Err(MmError::CommitRefused);
+    }
+    let broken = handle_cow_fault(vm_space, fault_addr, region.to_page_flags());
+    if owed && broken.is_err() {
+        map.refund_frames(1);
+    }
+    broken
 }
 
 fn resolve_single_ref(

@@ -1392,13 +1392,13 @@ impl CursorMut<'_> {
     }
 
     /// Unmap every present 4 KiB leaf from the cursor to `range.end`,
-    /// descending once per leaf table, and hand each frame to `each` in the
-    /// state [`Self::unmap`] returns it in: gone from this CPU's TLB only.
-    /// Huge leaves stay mapped. On error the cursor rests on the leaf that
-    /// failed, and every leaf before it is gone.
+    /// descending once per leaf table, and hand each frame to `each`, with the
+    /// property its leaf carried, in the state [`Self::unmap`] returns it in:
+    /// gone from this CPU's TLB only. Huge leaves stay mapped. On error the
+    /// cursor rests on the leaf that failed, and every leaf before it is gone.
     pub fn unmap_present<M: AnyUFrameMeta>(
         &mut self,
-        mut each: impl FnMut(VirtAddr, UFrame<M>),
+        mut each: impl FnMut(VirtAddr, PageProperty, UFrame<M>),
     ) -> Result<(), MapError> {
         let mut local = RangeInvalidation::new();
         let unmapped = self.unmap_present_into(&mut local, &mut each);
@@ -1409,7 +1409,7 @@ impl CursorMut<'_> {
     fn unmap_present_into<M: AnyUFrameMeta>(
         &mut self,
         local: &mut RangeInvalidation,
-        each: &mut impl FnMut(VirtAddr, UFrame<M>),
+        each: &mut impl FnMut(VirtAddr, PageProperty, UFrame<M>),
     ) -> Result<(), MapError> {
         while let Some((table, first, last)) = self.next_leaf_table()? {
             let base = self.cur.as_u64() - first as u64 * PAGE_SIZE_4KB;
@@ -1419,8 +1419,9 @@ impl CursorMut<'_> {
                     continue;
                 }
                 self.cur = VirtAddr::new(base + index as u64 * PAGE_SIZE_4KB);
+                let property = PageProperty::from_leaf_flags(pte.flags());
                 if let Some(frame) = self.take_leaf::<Size4Kb, M>(pte, Some(local))? {
-                    each(self.cur, UFrame::from_frame(frame));
+                    each(self.cur, property, UFrame::from_frame(frame));
                 }
             }
             self.cur = VirtAddr::new(base + last as u64 * PAGE_SIZE_4KB);

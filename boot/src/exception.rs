@@ -226,7 +226,7 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
     let (reason, detail) = match take_fault_reason() {
         TaskFaultReason::UserOom => (
             TaskFaultReason::UserOom,
-            cstr_from_bytes(b"out of memory servicing a user page fault\0"),
+            cstr_from_bytes(b"out of memory, and nothing left for the OOM killer to take\0"),
         ),
         _ => (
             TaskFaultReason::UserPage,

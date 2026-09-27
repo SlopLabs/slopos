@@ -40,10 +40,14 @@ pub struct UserSysInfo {
     pub commit_headroom_pages: u32,
     pub commit_limit_pages: u32,
     pub committed_pages: u32,
+    /// Processes the OOM killer has taken since boot.
+    pub oom_kills: u32,
+    /// The pid of the last of them; `INVALID_TASK_ID` before the first.
+    pub oom_last_victim: u32,
 }
 
 const _: () = assert!(
-    core::mem::size_of::<UserSysInfo>() == 80,
+    core::mem::size_of::<UserSysInfo>() == 88,
     "UserSysInfo must carry no implicit padding"
 );
 

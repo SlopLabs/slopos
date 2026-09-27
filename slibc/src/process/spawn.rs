@@ -1,9 +1,9 @@
 //! `posix_spawn(3)` over the kernel's spawn primitive, which builds the child
 //! from an explicit descriptor list: the parent's table is walked here, the
 //! file actions applied to that copy, and what the child would hold at `exec`
-//! is what it is handed. No address space is duplicated, which is what makes
-//! this cheaper than `fork` under commit accounting; attributes the primitive
-//! cannot express fall back to fork and exec.
+//! is what it is handed. No address space is duplicated, not even
+//! copy-on-write, which is what makes this cheaper than `fork`; attributes
+//! the primitive cannot express fall back to fork and exec.
 
 use core::ffi::{c_int, c_short, c_void};
 use core::ptr;

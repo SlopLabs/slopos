@@ -106,9 +106,35 @@ pub enum Commit {
     /// can therefore always find its frame accounted for.
     Extent,
     /// Each page is charged as it is placed — by the loader, by the stack
-    /// growth fault, by fork's snapshot — and a refusal there is the one
-    /// road that still ends in `SIGBUS`. Also what `MAP_NORESERVE` asks for.
+    /// growth fault — and a refusal there goes to the OOM killer. Also what
+    /// `MAP_NORESERVE` asks for.
     Frames,
+    /// A forked copy of a region the parent had charged. A page is owed from
+    /// the moment this address space holds it as its own — a write that breaks
+    /// copy-on-write, or a fresh page placed — so exactly its present leaves
+    /// not marked copy-on-write are paid for. A fork that marks one again, an
+    /// unmap and teardown give that page's charge back; a refusal goes to the
+    /// OOM killer.
+    Forked,
+}
+
+/// What unmapping a range found there: every present leaf, and those not
+/// marked copy-on-write, which this address space held as its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unmapped {
+    pub present: u32,
+    pub private: u32,
+}
+
+impl Unmapped {
+    /// The per-page charges a region of class `commit` held on these leaves.
+    pub fn owed_under(self, commit: Commit) -> u32 {
+        match commit {
+            Commit::Frames => self.present,
+            Commit::Forked => self.private,
+            Commit::Unreserved | Commit::Extent => 0,
+        }
+    }
 }
 
 /// A virtual memory region with typed backing, protection, and purpose.
@@ -204,6 +230,24 @@ impl VmaRegion {
     /// Whether `prot` is what first makes this region owe its span.
     pub fn reserves_under(&self, prot: Protection) -> bool {
         self.commit == Commit::Unreserved && self.commit_under(prot) == Commit::Extent
+    }
+
+    /// The region a fork hands the child: copy-on-write, and owing page by
+    /// page what the parent had promised, so the fork itself owes nothing.
+    pub fn forked(&self) -> Self {
+        let mut child = self.clone();
+        if !self.is_shared() {
+            child.cow = true;
+            if child.commit != Commit::Unreserved {
+                child.commit = Commit::Forked;
+            }
+        }
+        child
+    }
+
+    /// Whether a fresh page placed here is charged as it lands.
+    pub fn charges_placement(&self) -> bool {
+        matches!(self.commit, Commit::Frames | Commit::Forked)
     }
 
     /// Mergeable ignoring file position — every attribute but `first_page`.
@@ -314,11 +358,21 @@ impl VmaRegion {
     }
 
     pub fn to_page_flags(&self) -> PageFlags {
+        self.page_flags(self.cow)
+    }
+
+    /// How a frame placed for this address space alone is published: `cow`
+    /// describes the pages a fork handed over, never one placed since.
+    pub fn private_page_flags(&self) -> PageFlags {
+        self.page_flags(false)
+    }
+
+    fn page_flags(&self, cow: bool) -> PageFlags {
         let mut pf = PageFlags::PRESENT;
         if self.user {
             pf = pf.union(PageFlags::USER);
         }
-        if self.cow {
+        if cow {
             pf = pf.union(PageFlags::COW);
         } else if self.protection.write {
             pf = pf.union(PageFlags::WRITABLE);
@@ -351,8 +405,9 @@ fn range_pages(start: u64, end: u64) -> u32 {
 /// that at runtime anyway.
 ///
 /// The commit charge is the same shape over a different sum: the
-/// [`Commit::Extent`] spans, kept by `link`/`unlink`, plus the pages the
-/// [`Commit::Frames`] regions have placed, kept by `charge_frames`/`refund_frames`.
+/// [`Commit::Extent`] spans, kept by `link`/`unlink`, plus the pages charged
+/// one at a time — placed by [`Commit::Frames`] regions, held as their own by
+/// [`Commit::Forked`] ones — kept by `charge_frames`/`refund_frames`.
 pub struct VmaMap {
     map: KBTreeMap<u64, (u64, VmaRegion)>,
     /// Pages the tree currently spans. Maintained incrementally by
@@ -469,8 +524,8 @@ impl VmaMap {
         self.commit.amount()
     }
 
-    /// Promise `n` more pages for a [`Commit::Frames`] region, before they
-    /// are placed. A refusal leaves the ledger untouched.
+    /// Promise `n` more pages for a region charged per page, before they are
+    /// placed or copied. A refusal leaves the ledger untouched.
     pub fn charge_frames(&mut self, n: u32) -> Result<(), TryChargeError> {
         let advanced = n.min(self.prepaid);
         let rest = n - advanced;
@@ -505,7 +560,7 @@ impl VmaMap {
         self.settle();
     }
 
-    /// Give back the promise for `n` placed pages that are gone.
+    /// Give back the promise for `n` per-page charged pages that are gone.
     pub fn refund_frames(&mut self, n: u32) {
         self.frame_pages = self.frame_pages.saturating_sub(n);
         self.settle();
@@ -914,6 +969,15 @@ impl VmaMap {
             .range(start..end)
             .next()
             .map(|entry| (*entry.0, entry.1.0))
+    }
+
+    /// The first entry overlapping `[start, end)`, clipped to it, with its
+    /// commit class: what an unmap walking the range region by region needs
+    /// to give each region's per-page charges back.
+    pub fn first_overlapping_class(&self, start: u64, end: u64) -> Option<(u64, u64, Commit)> {
+        let (vma_start, vma_end) = self.first_overlapping(start, end)?;
+        let commit = self.map.get(&vma_start)?.1.commit;
+        Some((vma_start.max(start), vma_end.min(end), commit))
     }
 
     /// Drain all regions, calling `on_each(start, end, &region)` before removal.

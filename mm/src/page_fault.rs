@@ -7,10 +7,11 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, WaitAbort, WaitQueue};
 use slopos_ostd::{klog_info, klog_warn, lock_class};
 
 use crate::error::MmError;
+use crate::oom::{OomTrigger, OomVerdict};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::ProcessVm;
 use crate::user_mappings::ostd_get_pte_flags_4kb;
-use crate::{cow, demand, filemap_hook, process_vm};
+use crate::{cow, demand, filemap_hook, oom, process_vm};
 use slopos_ostd::handle::Handle;
 
 /// What became of a user page fault.
@@ -27,9 +28,31 @@ pub enum FaultOutcome {
     /// the blocking window and finishes through [`complete_file_fault`], by
     /// which point the deep plan phase has unwound off the trap frame.
     NeedsIo(demand::FileFaultPlan),
+    /// The write found no page. The caller opens the blocking window and
+    /// hands it to the OOM killer through [`out_of_memory_fault`].
+    OutOfMemory(OomTrigger),
     /// Not serviceable; the task dies with this reason, which `waitpid` needs
     /// to tell an out-of-memory kill from a wild dereference.
     Fatal(TaskFaultReason),
+}
+
+/// The outcome a fault takes when servicing it found no page.
+fn no_page(err: MmError) -> Option<FaultOutcome> {
+    match err {
+        MmError::CommitRefused => Some(FaultOutcome::OutOfMemory(OomTrigger::Commit)),
+        MmError::NoMemory => Some(FaultOutcome::OutOfMemory(OomTrigger::Frames)),
+        _ => None,
+    }
+}
+
+/// Run the OOM killer for a write that found no page, then let the write
+/// retry. **Blocks**, so the caller must have opened the window, as for
+/// [`complete_file_fault`]. Fatal only when nothing is left to kill.
+pub fn out_of_memory_fault(trigger: OomTrigger) -> FaultOutcome {
+    match oom::out_of_memory(trigger) {
+        OomVerdict::Retry => FaultOutcome::Retry,
+        OomVerdict::Unresolved => FaultOutcome::Fatal(TaskFaultReason::UserOom),
+    }
 }
 
 pub(crate) const RETRY_WARN_MS: u64 = 50;
@@ -153,19 +176,15 @@ pub fn try_resolve_user_fault(
     };
 
     // One hold of the per-process lock, not two: a sibling can resolve the page between.
-    let prefault = process_vm::process_vm_with_vm_space_and_area_by_handle(
+    let prefault = process_vm::process_vm_with_fault_context_by_handle(
         handle,
         fault_addr,
-        |vs, _start, _end, region| {
+        |vs, map, _bounds, region| {
             if cow::is_cow_fault(error_code, vs, fault_addr) {
-                if !demand::can_satisfy_fault(error_code, region) {
+                if !demand::can_satisfy_fault(error_code, &region) {
                     return Prefault::Denied;
                 }
-                return Prefault::Cow(cow::handle_cow_fault(
-                    vs,
-                    fault_addr,
-                    region.to_page_flags(),
-                ));
+                return Prefault::Cow(cow::break_cow_in(vs, map, fault_addr, &region));
             }
             if fault_is_spurious(error_code, vs, fault_addr) {
                 return Prefault::Spurious;
@@ -182,15 +201,10 @@ pub fn try_resolve_user_fault(
         }
         Ok(Prefault::Cow(Ok(()))) => return FaultOutcome::Resolved,
         Ok(Prefault::Cow(Err(MmError::Retry))) => return retry(task_id, fault_addr),
-        Ok(Prefault::Cow(Err(MmError::NoMemory))) => {
-            klog_info!(
-                "PF: COW copy for task {} at cr2=0x{:x} found no memory",
-                task_id,
-                fault_addr
-            );
-            return FaultOutcome::Fatal(TaskFaultReason::UserOom);
-        }
-        Ok(Prefault::Cow(Err(_))) => {
+        Ok(Prefault::Cow(Err(err))) => {
+            if let Some(outcome) = no_page(err) {
+                return outcome;
+            }
             klog_info!(
                 "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
                 task_id,
@@ -224,15 +238,9 @@ pub fn try_resolve_user_fault(
     match demanded {
         Ok(Some(Ok(()))) => return FaultOutcome::Resolved,
         Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
-        Ok(Some(Err(MmError::NoMemory))) => {
-            klog_info!(
-                "PF: demand fault for task {} at cr2=0x{:x} found no memory after reclaim",
-                task_id,
-                fault_addr
-            );
-            return FaultOutcome::Fatal(TaskFaultReason::UserOom);
+        Ok(Some(Err(err))) => {
+            return no_page(err).unwrap_or(FaultOutcome::Fatal(TaskFaultReason::UserPage));
         }
-        Ok(Some(Err(_))) => return FaultOutcome::Fatal(TaskFaultReason::UserPage),
         Ok(None) => {}
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
@@ -314,12 +322,12 @@ pub fn complete_file_fault(
     let first = demand::fault_around_first(plan.page_index);
     filemap_hook::filemap_resident(plan.map, first, &mut around);
 
-    let installed = process_vm::process_vm_with_vm_space_and_area_by_handle(
+    let installed = process_vm::process_vm_with_fault_context_by_handle(
         handle,
         fault_addr,
-        |vs, start, end, region| {
-            demand::install_file_page(vs, start, plan, cached, region)?;
-            demand::map_resident_around(vs, start, end, plan, first, &around, region);
+        |vs, map, (start, end), region| {
+            demand::install_file_page(vs, map, start, plan, cached, &region)?;
+            demand::map_resident_around(vs, start, end, plan, first, &around, &region);
             Ok(())
         },
     );
@@ -330,15 +338,7 @@ pub fn complete_file_fault(
     match installed {
         Ok(Ok(())) => FaultOutcome::Resolved,
         Ok(Err(MmError::Retry)) => retry(task_id, fault_addr),
-        Ok(Err(MmError::NoMemory)) => {
-            klog_info!(
-                "PF: file page install for task {} at cr2=0x{:x} found no memory",
-                task_id,
-                fault_addr
-            );
-            FaultOutcome::Fatal(TaskFaultReason::UserOom)
-        }
-        Ok(Err(_)) => FaultOutcome::Fatal(TaskFaultReason::UserPage),
+        Ok(Err(err)) => no_page(err).unwrap_or(FaultOutcome::Fatal(TaskFaultReason::UserPage)),
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
             FaultOutcome::Fatal(TaskFaultReason::UserPage)
@@ -371,18 +371,24 @@ fn resolve_for_populate(
     task_id: u32,
     io: FileIo,
 ) -> PopulateStep {
-    let outcome = match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
+    let mut outcome = match try_resolve_user_fault(page, error_code, process_vm_handle, task_id) {
         FaultOutcome::NeedsIo(plan) if io == FileIo::Read => {
             complete_file_fault(process_vm_handle, &plan, page, task_id)
         }
         outcome => outcome,
     };
+    if let FaultOutcome::OutOfMemory(trigger) = outcome
+        && io == FileIo::Read
+    {
+        outcome = out_of_memory_fault(trigger);
+    }
     match outcome {
         FaultOutcome::Resolved => PopulateStep::Resolved,
         FaultOutcome::Retry => PopulateStep::Retry,
-        FaultOutcome::NeedsIo(_) | FaultOutcome::Interrupted | FaultOutcome::Fatal(_) => {
-            PopulateStep::GiveUp
-        }
+        FaultOutcome::NeedsIo(_)
+        | FaultOutcome::OutOfMemory(_)
+        | FaultOutcome::Interrupted
+        | FaultOutcome::Fatal(_) => PopulateStep::GiveUp,
     }
 }
 

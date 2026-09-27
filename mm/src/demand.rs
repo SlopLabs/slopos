@@ -101,9 +101,9 @@ pub fn handle_demand_fault(
         return Err(MmError::Retry);
     }
 
-    let placed = region.commit == Commit::Frames;
+    let placed = region.charges_placement();
     if placed && map.charge_frames(1).is_err() {
-        return Err(MmError::NoMemory);
+        return Err(MmError::CommitRefused);
     }
     let outcome = place_fresh_page(vm_space, aligned_addr, region);
     if placed && outcome.is_err() {
@@ -189,7 +189,7 @@ pub fn fault_around_anon(
 
     // A frame the claim or the map never reached is still the allocator's.
     let mut taken = 0usize;
-    let pte_flags = region.to_page_flags().bits();
+    let pte_flags = region.private_page_flags().bits();
     let pages = absent[..got]
         .iter()
         .zip(&phys[..got])
@@ -264,7 +264,7 @@ fn place_page(
         }
     };
 
-    let pte_flags = region.to_page_flags().bits();
+    let pte_flags = region.private_page_flags().bits();
     // Sole ref, so dropping the refused frame is the free.
     if let Err((_, err)) =
         ostd_map_4kb_user(vm_space, VirtAddr::new(aligned_addr), frame, pte_flags)
@@ -359,9 +359,11 @@ fn set_frame_flags(region: &VmaRegion, private: bool) -> u64 {
 ///
 /// `cached` is the set's frame, held alive by the caller's extra page
 /// reference. A private mapping copies it into a page of its own only for a
-/// write; a read maps the set's frame copy-on-write.
+/// write, charged through `map` when the region pays per page; a read maps the
+/// set's frame copy-on-write.
 pub fn install_file_page(
     vm_space: &mut KArc<VmSpace>,
+    map: &mut VmaMap,
     vma_start: u64,
     plan: &FileFaultPlan,
     cached: PhysAddr,
@@ -369,15 +371,14 @@ pub fn install_file_page(
 ) -> Result<(), MmError> {
     let offset_pages = (plan.aligned_addr.saturating_sub(vma_start)) / PAGE_SIZE_4KB;
     match region.file_page_at(offset_pages) {
-        Some((map, page_index, private))
-            if map == plan.map && page_index == plan.page_index && private == plan.private => {}
+        Some((set, page_index, private))
+            if set == plan.map && page_index == plan.page_index && private == plan.private => {}
         _ => return Err(MmError::Retry),
     }
     // The region that authorised the read is not necessarily this one.
     if !can_satisfy_fault(plan.error_code, region) {
         return Err(MmError::PermissionDenied);
     }
-    let pte_flags = region.to_page_flags().bits();
 
     let va = VirtAddr::new(plan.aligned_addr);
     if !ostd_virt_to_phys_4kb(vm_space, va).is_null() {
@@ -403,6 +404,24 @@ pub fn install_file_page(
         };
     }
 
+    let placed = region.charges_placement();
+    if placed && map.charge_frames(1).is_err() {
+        return Err(MmError::CommitRefused);
+    }
+    let installed = install_private_copy(vm_space, va, cached, region);
+    if placed && installed.is_err() {
+        map.refund_frames(1);
+    }
+    installed
+}
+
+/// Map a private copy of the set's frame `cached` at `va`.
+fn install_private_copy(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+    cached: PhysAddr,
+    region: &VmaRegion,
+) -> Result<(), MmError> {
     let phys = alloc_kernel_page();
     if phys.is_null() {
         return Err(MmError::NoMemory);
@@ -417,7 +436,7 @@ pub fn install_file_page(
     };
     let _ = slopos_ostd::mm::hhdm_bytes::copy_page(cached.to_virt(), phys.to_virt());
 
-    match ostd_map_4kb_user(vm_space, va, frame, pte_flags) {
+    match ostd_map_4kb_user(vm_space, va, frame, region.private_page_flags().bits()) {
         Ok(()) => {
             flush_fresh_mapping(vm_space, va);
             Ok(())
