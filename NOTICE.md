@@ -223,8 +223,6 @@ remains © its authors under its own licence:
 
 - zlib (`toolchain/recipes/zlib/`): © Jean-loup Gailly and Mark Adler, `Zlib`.
 - nghttp2 (`toolchain/recipes/nghttp2/`): © the nghttp2 contributors, `MIT`.
-  cargo's `libnghttp2-sys` also compiles a bundled copy of the same library
-  into cargo itself, under the same licence.
 - OpenSSL (`toolchain/recipes/openssl/`): © The OpenSSL Project Authors,
   `Apache-2.0`. `toolchain/recipes/openssl/slopos.conf`, the target
   definition passed to its `Configure`, is © 2025–2026 The SlopOS Authors,
@@ -235,11 +233,26 @@ remains © its authors under its own licence:
   `BSD-3-Clause`.
 - libgit2 (`toolchain/recipes/libgit2/`): © the libgit2 contributors,
   `GPL-2.0-only WITH GCC-exception-2.0` — the linking exception is what lets
-  cargo link it. The build also compiles code libgit2 bundles, each under its
-  own licence as listed in libgit2's `COPYING`: llhttp (`MIT`), PCRE2
-  (`BSD-3-Clause`), xdiff from LibXDiff (`LGPL-2.1-or-later`), ntlmclient
-  (`MIT`), the SHA-1 collision detection code (`MIT`) and wildmatch (BSD).
-  Its bundled zlib is not compiled; the zlib recipe is linked instead.
+  cargo link it. The build also compiles code libgit2 bundles or derives from
+  others, each under the licence libgit2's `COPYING` gives it: llhttp
+  (`MIT`); PCRE2 (`BSD-3-Clause WITH PCRE2-exception`, without its JIT, which
+  the tarball does not carry); the SHA-1 collision detection code (`MIT`);
+  ntlmclient (`MIT`); the portions `COPYING` lists as derived from Team
+  Explorer Everywhere (`MIT`), the LLVM Compiler Infrastructure (`NCSA`),
+  Unicode, Inc. (its 2001–2004 conversion-code licence, which asks that its
+  notice stay attached) and sheredom/utf8.h (`Unlicense`); wildmatch (© Rich
+  Salz, BSD-style, whose second condition asks for this acknowledgement:
+  *This product includes software developed by Rich Salz*);
+  `git_fs_path_basename_r()`, from Android (`BSD-2-Clause`); the
+  public-domain `xoroshiro256**` (`CC0-1.0`); and the portions of the OpenSSL
+  headers libgit2 declares (`OpenSSL`). xdiff, from Davide Libenzi's LibXDiff, is
+  compiled too and is `LGPL-2.1-or-later` by its own headers, which `COPYING`
+  does not list. What `COPYING` also covers and this build does not compile:
+  the bundled and Chromium zlib — the recipe passes
+  `CMAKE_REQUIRE_FIND_PACKAGE_ZLIB`, so the zlib recipe is linked or the
+  configure fails — the RFC 6234 SHA-256 and RFC 1320 MD4 code, which
+  OpenSSL replaces, the Windows-only winhttp definitions and the Clar test
+  framework.
 
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's

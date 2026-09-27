@@ -6,6 +6,11 @@
 #
 # The library only: the `git2` command line and the clar test suite are
 # programs of their own.
+#
+#   CMAKE_REQUIRE_FIND_PACKAGE_ZLIB   libgit2 compiles its bundled zlib when
+#                                     `find_package(ZLIB)` fails and says so
+#                                     only in a status line; required, a
+#                                     missing zlib recipe fails the configure.
 version=1.9.7
 url=https://github.com/libgit2/libgit2/archive/refs/tags/v1.9.7.tar.gz
 sha256=1a4fbe7589e814777ae76b64734ad80f4ecad22cd33a22682a2aaea4ae5375e7
@@ -17,3 +22,5 @@ arg=-DUSE_HTTPS=OpenSSL
 arg=-DUSE_SSH=libssh2
 arg=-DBUILD_TESTS=OFF
 arg=-DBUILD_CLI=OFF
+arg=-DUSE_BUNDLED_ZLIB=OFF
+arg=-DCMAKE_REQUIRE_FIND_PACKAGE_ZLIB=ON
