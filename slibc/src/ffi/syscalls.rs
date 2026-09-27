@@ -858,10 +858,14 @@ unsafe fn canonicalize(
     Ok(resolved_len)
 }
 
-/// SlopOS has no FIFO file kind, so there is nothing for `mkfifo` to create.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mkfifo(_path: *const c_char, _mode: mode_t) -> c_int {
-    fail(ENOSYS, -1)
+pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: mode_t) -> c_int {
+    mknodat(
+        AT_FDCWD,
+        path,
+        slopos_abi::fs::S_IFIFO | (mode & !slopos_abi::fs::S_IFMT),
+        0,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -869,32 +873,15 @@ pub unsafe extern "C" fn mknod(path: *const c_char, mode: mode_t, dev: dev_t) ->
     mknodat(AT_FDCWD, path, mode, dev)
 }
 
-/// Only the regular-file case, which POSIX defines as equivalent to `creat`,
-/// is expressible, and `dev` means nothing to it. A device node is refused as
-/// Linux refuses one to a caller without `CAP_MKNOD`, since there is no
-/// syscall that makes one; no filesystem here has a FIFO or socket kind; any
-/// other type is not a node at all.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mknodat(
     dirfd: c_int,
     path: *const c_char,
     mode: mode_t,
-    _dev: dev_t,
+    dev: dev_t,
 ) -> c_int {
-    use slopos_abi::fs::{S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSOCK};
-    match mode & S_IFMT {
-        0 | S_IFREG => {}
-        S_IFCHR | S_IFBLK => return fail(EPERM, -1),
-        S_IFIFO | S_IFSOCK => return fail(ENOSYS, -1),
-        _ => return fail(EINVAL, -1),
-    }
-    let flags =
-        (slopos_abi::fs::O_WRONLY | slopos_abi::fs::O_CREAT | slopos_abi::fs::O_EXCL) as c_int;
-    match Sys::openat(dirfd, path as *const u8, flags, mode & !S_IFMT) {
-        Ok(fd) => {
-            let _ = Sys::close(fd);
-            0
-        }
+    match Sys::mknodat(dirfd, path as *const u8, mode, dev as u64) {
+        Ok(()) => 0,
         Err(e) => fail(e, -1),
     }
 }

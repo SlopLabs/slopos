@@ -330,7 +330,8 @@ pub trait FileSystem: Send + Sync {
     /// user-space I/O, so filesystem code never touches a user address.
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize>;
 
-    /// Create an entry under `parent`. `file_type` is `Regular` or `Directory`.
+    /// Create an entry under `parent`. `file_type` is `Regular`, `Directory`
+    /// or `Pipe`.
     fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId>;
 
     /// Remove a non-directory entry. A directory is `EISDIR`; use

@@ -48,6 +48,7 @@ pub trait Pal {
 
     fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> Result<i32, Errno>;
     fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> Result<(), Errno>;
+    fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> Result<(), Errno>;
     /// `AT_REMOVEDIR` in `flags` makes this an `rmdir`.
     fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> Result<(), Errno>;
     fn renameat(olddirfd: i32, old: *const u8, newdirfd: i32, new: *const u8) -> Result<(), Errno>;

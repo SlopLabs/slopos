@@ -17,12 +17,13 @@ use crate::syscall::fs::{
     syscall_faccessat, syscall_faccessat2, syscall_fchmod, syscall_fchmodat, syscall_fchmodat2,
     syscall_fcntl, syscall_fdatasync, syscall_flock, syscall_fstat, syscall_fstatfs, syscall_fsync,
     syscall_getdents64, syscall_ioctl, syscall_link, syscall_linkat, syscall_lseek, syscall_lstat,
-    syscall_mkdir, syscall_mkdirat, syscall_mount, syscall_newfstatat, syscall_open,
-    syscall_openat, syscall_pipe, syscall_pipe2, syscall_poll, syscall_pread64, syscall_pwrite64,
-    syscall_read, syscall_readlink, syscall_readlinkat, syscall_readv, syscall_rename,
-    syscall_renameat, syscall_rmdir, syscall_select, syscall_stat, syscall_statfs, syscall_symlink,
-    syscall_symlinkat, syscall_sync, syscall_truncate, syscall_umount2, syscall_unlink,
-    syscall_unlinkat, syscall_utimensat, syscall_write, syscall_writev,
+    syscall_mkdir, syscall_mkdirat, syscall_mknod, syscall_mknodat, syscall_mount,
+    syscall_newfstatat, syscall_open, syscall_openat, syscall_pipe, syscall_pipe2, syscall_poll,
+    syscall_pread64, syscall_pwrite64, syscall_read, syscall_readlink, syscall_readlinkat,
+    syscall_readv, syscall_rename, syscall_renameat, syscall_rmdir, syscall_select, syscall_stat,
+    syscall_statfs, syscall_symlink, syscall_symlinkat, syscall_sync, syscall_truncate,
+    syscall_umount2, syscall_unlink, syscall_unlinkat, syscall_utimensat, syscall_write,
+    syscall_writev,
 };
 use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
 pub use crate::syscall::memory_handlers::{
@@ -178,6 +179,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETPGID]           => syscall_getpgid,           "getpgid";
     [SYSCALL_GETSID]            => syscall_getsid,            "getsid";
     [SYSCALL_SIGALTSTACK]       => syscall_sigaltstack,       "sigaltstack";
+    [SYSCALL_MKNOD]             => syscall_mknod,             "mknod";
     [SYSCALL_STATFS]            => syscall_statfs,            "statfs";
     [SYSCALL_FSTATFS]           => syscall_fstatfs,           "fstatfs";
     [SYSCALL_VHANGUP]           => syscall_vhangup,           "vhangup";
@@ -197,6 +199,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_TGKILL]            => syscall_tgkill,            "tgkill";
     [SYSCALL_OPENAT]            => syscall_openat,            "openat";
     [SYSCALL_MKDIRAT]           => syscall_mkdirat,           "mkdirat";
+    [SYSCALL_MKNODAT]           => syscall_mknodat,           "mknodat";
     [SYSCALL_NEWFSTATAT]        => syscall_newfstatat,        "newfstatat";
     [SYSCALL_UNLINKAT]          => syscall_unlinkat,          "unlinkat";
     [SYSCALL_RENAMEAT]          => syscall_renameat,          "renameat";
@@ -315,7 +318,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 156;
+pub const SYSCALL_ENTRY_COUNT: usize = 158;
 
 /// The recorded shape of the classification.
 ///
@@ -326,7 +329,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 156;
 const CAP_COUNTS: [(Capability, usize); 17] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 46),
-    (Capability::NoneFd, 72),
+    (Capability::NoneFd, 74),
     (Capability::NoneRelation, 15),
     (Capability::Power, 3),
     (Capability::Launch, 0),

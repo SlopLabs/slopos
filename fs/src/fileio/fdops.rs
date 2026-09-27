@@ -18,7 +18,8 @@ use slopos_mm::user_msghdr::{
 use slopos_mm::user_ptr::UserPtr;
 
 use crate::pipe;
-use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, pipe_backings};
+use crate::pipe::FifoNode;
+use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, fifo_open, pipe_backings};
 use crate::vfs::path::{RESOLVE_FOLLOW, RESOLVE_MUST_BE_DIR};
 use crate::vfs::{FileType, FsStats, InodeId, VfsError, vfs_mkdir_at, vfs_unlink_at};
 use crate::vfs_file_ops::{
@@ -219,7 +220,8 @@ pub fn file_open_at(
         None
     } else {
         match vfs_open_handle_flags_at(path, cwd, open_flags, resolve_flags) {
-            Ok(h) => Some(h),
+            Ok(opened) if opened.fifo => return open_fifo_fd(table, opened.handle, flags),
+            Ok(opened) => Some(opened.handle),
             // `open(dir, O_RDONLY)` is how a `dirfd` and `getdents64` are
             // obtained; only a writer is refused a directory.
             Err(Errno::EISDIR) if !writable && !create => None,
@@ -260,6 +262,44 @@ pub fn file_open_at(
         None,
         Some(backing),
         dir_path,
+    )
+}
+
+/// The descriptor for a FIFO whose node `vnode` has just been registered:
+/// ownership of that registration passes to the FIFO's backing here.
+#[inline(never)]
+fn open_fifo_fd(table: FdTable, vnode: usize, flags: OpenMode) -> c_int {
+    let Some(node_hold) = vnode_backing(vnode, table.account()) else {
+        return Errno::ENFILE.raw();
+    };
+    let Some((fs, inode)) = vfs_file_inode(vnode) else {
+        return Errno::EBADF.raw();
+    };
+    let nonblock = flags.bits() & O_NONBLOCK as u32 != 0;
+    let opened = fifo_open(
+        FifoNode { fs, inode },
+        node_hold,
+        table.account(),
+        flags.contains(OpenMode::READ),
+        flags.contains(OpenMode::WRITE),
+        nonblock,
+    );
+    let (ops, handle, backing) = match opened {
+        Ok(parts) => parts,
+        Err(e) => return e.raw(),
+    };
+    // Appending means nothing to a pipe, and the append path would ask it for
+    // a size it does not have.
+    let flags = OpenMode::from_bits(flags.bits() & !OpenMode::APPEND.bits());
+    install_fd_entry(
+        table,
+        ops,
+        handle.as_usize(),
+        flags,
+        FdFlags::NONE,
+        None,
+        Some(backing),
+        None,
     )
 }
 

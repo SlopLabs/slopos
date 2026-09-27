@@ -1575,10 +1575,27 @@ static int files_for_rust(void) {
         return fail("mknodat(S_IFREG) did not create a regular file");
     }
     unlink(node);
-    if (mknodat(AT_FDCWD, node, S_IFCHR | 0600, 0) != -1 || errno != EPERM ||
-        mknod(node, S_IFIFO | 0600, 0) != -1 || errno != ENOSYS) {
-        return fail("mknod made a node kind nothing here can hold");
+    if (mknodat(AT_FDCWD, node, S_IFCHR | 0600, 0) != -1 || errno != EPERM) {
+        return fail("mknod made a device node nothing here can hold");
     }
+    if (mkfifo(node, 0640) != 0 || stat(node, &st) != 0 || !S_ISFIFO(st.st_mode) ||
+        (st.st_mode & 07777) != 0640) {
+        return fail("mkfifo did not create a FIFO with its mode");
+    }
+    int ends = open(node, O_RDWR | O_NONBLOCK);
+    char got[4] = {0};
+    if (ends < 0 || write(ends, "fifo", 4) != 4 || read(ends, got, 4) != 4 ||
+        memcmp(got, "fifo", 4) != 0) {
+        if (ends >= 0) {
+            close(ends);
+        }
+        return fail("a FIFO opened O_RDWR did not read back its own write");
+    }
+    close(ends);
+    if (mkfifo(node, 0640) != -1 || errno != EEXIST) {
+        return fail("mkfifo over an existing name was not EEXIST");
+    }
+    unlink(node);
 
     const char *target = "/tmp/libc_probe_lt_target", *link = "/tmp/libc_probe_lt_link";
     unlink(link);

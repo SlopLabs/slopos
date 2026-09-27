@@ -136,6 +136,7 @@ pub type Ext2Inode = Inode;
 #[derive(Copy, Clone)]
 enum NewInode<'a> {
     File,
+    Fifo,
     Directory,
     Symlink(&'a [u8]),
 }
@@ -1676,6 +1677,15 @@ impl<'a> Ext2Fs<'a> {
             .map(|n| n.raw())
     }
 
+    /// A named pipe: an inode with no data blocks, whose contents live only in
+    /// the kernel's pipe object while it is open.
+    #[inline(never)]
+    pub fn create_fifo(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, NewInode::Fifo))
+            .map(|n| n.raw())
+    }
+
     /// Create a symlink under `parent` pointing at `target`. Targets of 60
     /// bytes or fewer are fast symlinks, stored inline in `i_block`.
     pub fn create_symlink(
@@ -1749,6 +1759,7 @@ impl<'a> Ext2Fs<'a> {
         let ft = match kind {
             NewInode::Directory => DIR_FT_DIR,
             NewInode::File => DIR_FT_REG_FILE,
+            NewInode::Fifo => ondisk::DIR_FT_FIFO,
             NewInode::Symlink(_) => DIR_FT_SYMLINK,
         };
         self.note_entry(parent_num, name);
@@ -1810,10 +1821,10 @@ impl<'a> Ext2Fs<'a> {
 
         let is_dir = matches!(kind, NewInode::Directory);
         let mut inode = Inode {
-            mode: if is_dir {
-                MODE_DIRECTORY | 0o755
-            } else {
-                MODE_FILE | 0o644
+            mode: match kind {
+                NewInode::Directory => MODE_DIRECTORY | 0o755,
+                NewInode::Fifo => ondisk::MODE_FIFO | 0o644,
+                _ => MODE_FILE | 0o644,
             },
             uid: 0,
             size: 0,

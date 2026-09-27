@@ -324,6 +324,10 @@ pub const SYSCALL_GETSID: u64 = 124;
 /// nominate a stack for `SA_ONSTACK` handlers.
 pub const SYSCALL_SIGALTSTACK: u64 = 131;
 
+/// `mknod(path: *const u8, mode, dev)` — [`SYSCALL_MKNODAT`] against the working
+/// directory.
+pub const SYSCALL_MKNOD: u64 = 133;
+
 /// `statfs(path: *const u8, out: *mut UserStatfs)` — filesystem-wide counters
 /// for the mount the path resolves through. `EOPNOTSUPP` from a filesystem
 /// that keeps none.
@@ -406,6 +410,11 @@ pub const SYSCALL_OPENAT: u64 = 257;
 
 /// `mkdirat(dirfd, path: *const u8, mode)`.
 pub const SYSCALL_MKDIRAT: u64 = 258;
+
+/// `mknodat(dirfd, path: *const u8, mode, dev)` — a FIFO or a regular file;
+/// `EPERM` for a device or socket node, which no filesystem here stores,
+/// `EINVAL` for an unknown type.
+pub const SYSCALL_MKNODAT: u64 = 259;
 
 /// `newfstatat(dirfd, path: *const u8, out: *mut UserFsStat, flags)`. The only
 /// stat entry point that can decline a final symlink, so `AT_SYMLINK_NOFOLLOW`

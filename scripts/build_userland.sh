@@ -198,6 +198,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin stdio_stream_test \
         --bin ip_e2e_test \
         --bin rlimit_test \
+        --bin fifo_test \
         --bin session_smoke_test \
         --bin spawn_output_test \
         --bin dns_resolve_test \
@@ -343,6 +344,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/rlimit_test" ]; then
         cp "$RELEASE_DIR/rlimit_test" "$BUILD_DIR/rlimit_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/fifo_test" ]; then
+        cp "$RELEASE_DIR/fifo_test" "$BUILD_DIR/fifo_test.elf"
     fi
     if [ -f "$RELEASE_DIR/session_smoke_test" ]; then
         cp "$RELEASE_DIR/session_smoke_test" "$BUILD_DIR/session_smoke_test.elf"

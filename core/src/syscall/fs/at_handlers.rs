@@ -3,8 +3,8 @@
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW, UTIME_NOW,
-    UTIME_OMIT, UserFsStat,
+    AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW, S_IFBLK,
+    S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSOCK, UTIME_NOW, UTIME_OMIT, UserFsStat,
 };
 use slopos_abi::syscall::types::Timespec;
 
@@ -62,6 +62,22 @@ pub(crate) fn open_at(
 /// chmod it can land on a replacement, or on a symlink's target.
 pub(crate) fn mkdir_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
     slopos_fs::vfs::vfs_mkdir_at(path, cwd, Some((mode & 0o7777) as u16)).map_err(|e| e.to_errno())
+}
+
+/// `mknodat(2)` for what a filesystem here can store, with Linux's errors for
+/// the rest: a type 0 is a regular file, a device node is `EPERM` as it is to
+/// a caller without `CAP_MKNOD`, a socket node is `EPERM` as it is on a
+/// filesystem that cannot hold one, and anything else is `EINVAL`. `dev` is
+/// only meaningful to a device node, so it is never read.
+pub(crate) fn mknod_at(path: &[u8], cwd: &[u8], mode: u32) -> Result<(), Errno> {
+    let file_type = match mode & S_IFMT {
+        0 | S_IFREG => slopos_fs::FileType::Regular,
+        S_IFIFO => slopos_fs::FileType::Pipe,
+        S_IFCHR | S_IFBLK | S_IFSOCK => return Err(Errno::EPERM),
+        _ => return Err(Errno::EINVAL),
+    };
+    slopos_fs::vfs::vfs_mknod_at(path, cwd, file_type, (mode & 0o7777) as u16)
+        .map_err(|e| e.to_errno())
 }
 
 /// Own frame: [`UserFsStat`] is 144 bytes.
@@ -131,6 +147,17 @@ define_syscall!(syscall_mkdirat
 {
     with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
         mkdir_at(path.as_bytes(), cwd, mode)
+    })?
+});
+
+define_syscall!(syscall_mknodat
+    (ctx, dirfd: i32, path: UserPath, mode: u32, _dev: u64)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    with_dir_base(ctx, pid, dirfd, path.as_bytes(), |cwd| {
+        mknod_at(path.as_bytes(), cwd, mode)
     })?
 });
 

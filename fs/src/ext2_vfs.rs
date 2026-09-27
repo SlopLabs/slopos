@@ -747,6 +747,7 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
             let inode = match file_type {
                 FileType::Directory => fs.create_directory(parent as u32, name)?,
                 FileType::Regular => fs.create_file(parent as u32, name)?,
+                FileType::Pipe => fs.create_fifo(parent as u32, name)?,
                 _ => return Err(Ext2Error::InvalidInode),
             };
             Ok(inode as InodeId)

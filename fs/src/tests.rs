@@ -3866,6 +3866,71 @@ fn expect_sealed(device: &MemoryBlockDevice, path: &[u8]) -> TestResult {
     }
 }
 
+/// A FIFO is the record Linux's `mkfifo` writes: an inode of type `S_IFIFO`
+/// owning no block, named by an `EXT2_FT_FIFO` entry, which a later mount reads
+/// back as such and whose removal frees no block.
+pub fn test_ext2_fifo_is_a_blockless_fifo_record() -> TestResult {
+    let Some(device) = phase3_image(b"f.txt", b"x") else {
+        return TestResult::Skipped;
+    };
+    let made = with_mounted(&device, make_fifo_record)
+        .and_then(|()| with_mounted(&device, remounted_fifo_record));
+    match made {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn make_fifo_record(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let free_blocks = fs.superblock().free_blocks_count;
+    let ino = fs
+        .create_fifo(2, b"pipe")
+        .map_err(|_| "create_fifo failed")?;
+    if fs.superblock().free_blocks_count != free_blocks {
+        return Err("a FIFO allocated a block");
+    }
+    let inode = fs.read_inode(ino).map_err(|_| "read_inode")?;
+    if inode.mode != 0x1000 | 0o644 || inode.size != 0 || inode.blocks != 0 {
+        return Err("the FIFO's record is not a blockless S_IFIFO inode");
+    }
+    if inode
+        .block
+        .iter()
+        .any(|b| *b != crate::ext2::types::BlockNum::ZERO)
+    {
+        return Err("the FIFO's record names a block");
+    }
+    fs.sync().map_err(|_| "sync")
+}
+
+#[inline(never)]
+fn remounted_fifo_record(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let ino = fs
+        .resolve_path(b"/pipe")
+        .map_err(|_| "the FIFO is gone after a remount")?;
+    let mut entry_type = None;
+    fs.for_each_dir_entry_from(2, 0, |_, entry| {
+        if entry.name == b"pipe" {
+            entry_type = Some(entry.file_type);
+        }
+        true
+    })
+    .map_err(|_| "readdir")?;
+    if entry_type != Some(crate::ext2::ondisk::DIR_FT_FIFO) {
+        return Err("the FIFO's directory entry is not EXT2_FT_FIFO");
+    }
+    if fs.read_inode(ino).map(|i| i.mode & 0xF000) != Ok(0x1000) {
+        return Err("the FIFO did not read back as S_IFIFO");
+    }
+    let free_blocks = fs.superblock().free_blocks_count;
+    fs.unlink_entry(2, b"pipe").map_err(|_| "unlink")?;
+    if fs.superblock().free_blocks_count != free_blocks {
+        return Err("removing a FIFO freed blocks it never owned");
+    }
+    Ok(())
+}
+
 /// A failed operation must leave nothing behind: no dirtied block the flusher
 /// could publish, and no free-count drift.
 ///
@@ -4187,6 +4252,7 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(name = test_ext2_seal_survives_a_remount, suite = fs);
+slopos_testing::stest!(name = test_ext2_fifo_is_a_blockless_fifo_record, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_failed_op_leaves_no_partial_state,
     suite = fs

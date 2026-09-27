@@ -13,7 +13,7 @@ use slopos_ostd::KVec;
 
 use crate::syscall::args::{Fd, UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
-use crate::syscall::fs::at_handlers::{chmod_at, mkdir_at, open_at, stat_at_into_user};
+use crate::syscall::fs::at_handlers::{chmod_at, mkdir_at, mknod_at, open_at, stat_at_into_user};
 use crate::syscall::fs::dirfd::{reject_non_directory, with_cwd_base};
 
 define_syscall!(syscall_open
@@ -66,11 +66,25 @@ define_syscall!(syscall_write
         return Err(Errno::ERESTARTSYS);
     }
     if bytes < 0 {
-        Err(Errno::from_raw(bytes as i32).unwrap_or(Errno::EINVAL))
+        let errno = Errno::from_raw(bytes as i32).unwrap_or(Errno::EINVAL);
+        raise_sigpipe_on_epipe(ctx, errno);
+        Err(errno)
     } else {
         Ok(bytes as u64)
     }
 });
+
+/// A write refused because nothing will ever read it also raises `SIGPIPE` at
+/// the writer, per POSIX `write()`; the caller sees `EPIPE` only when that
+/// signal is ignored, blocked or caught.
+pub(crate) fn raise_sigpipe_on_epipe(
+    ctx: &crate::syscall::context::SyscallContext<'_>,
+    errno: Errno,
+) {
+    if errno == Errno::EPIPE {
+        let _ = slopos_sched::task::task_signal_post(ctx.task(), slopos_abi::signal::SIGPIPE);
+    }
+}
 
 // Commits one inode, so the lock is held for that inode's blocks rather than
 // every dirty block on the mount. It is still ext2's one global sleeping
@@ -128,6 +142,13 @@ define_syscall!(syscall_mkdir
     -> Result<(), Errno>
 {
     with_cwd_base(ctx, |cwd| mkdir_at(path.as_bytes(), cwd, mode))
+});
+
+define_syscall!(syscall_mknod
+    (ctx, path: UserPath, mode: u32, _dev: u64) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    with_cwd_base(ctx, |cwd| mknod_at(path.as_bytes(), cwd, mode))
 });
 
 define_syscall!(syscall_unlink

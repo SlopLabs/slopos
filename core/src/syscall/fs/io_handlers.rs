@@ -16,6 +16,7 @@ use slopos_ostd::KVec;
 
 use crate::syscall::args::{Fd, UserBytes, UserSlice};
 use crate::syscall::common::errno_from_neg;
+use crate::syscall::fs::path_handlers::raise_sigpipe_on_epipe;
 
 /// A user buffer larger than this is served short, which `getdents64` permits.
 const GETDENTS_STAGING_MAX: usize = 64 * 1024;
@@ -91,7 +92,9 @@ define_syscall!(syscall_writev
         return Err(Errno::ERESTARTSYS);
     }
     if bytes < 0 {
-        Err(errno_from_neg(bytes as i32))
+        let errno = errno_from_neg(bytes as i32);
+        raise_sigpipe_on_epipe(ctx, errno);
+        Err(errno)
     } else {
         Ok(bytes as u64)
     }

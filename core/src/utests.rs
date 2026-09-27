@@ -83,6 +83,7 @@ crate::utest!(
 crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");
 crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
 crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");
+crate::utest!(name = utest_fifo, bin = "/bin/fifo_test");
 crate::utest!(name = utest_persist, bin = "/bin/persist_test");
 
 // Nothing below is ordered by its position in this file. The userland phase

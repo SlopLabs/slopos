@@ -9,6 +9,7 @@
 //! never let a table guard escape their closure, so a sleeper or waker
 //! never holds the table lock across a wait-queue operation.
 
+use slopos_abi::Errno;
 use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
 use slopos_ostd::KVec;
@@ -17,6 +18,9 @@ use slopos_ostd::lock_class;
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{Charge, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+
+use crate::vfs::traits::same_filesystem;
+use crate::vfs::{FileSystem, InodeId};
 
 pub(crate) use slopos_abi::event::MAX_PIPES;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
@@ -67,12 +71,34 @@ impl PipeHandle {
     }
 }
 
+/// The filesystem node a named pipe belongs to.
+///
+/// Every opener holds the node open, so the inode cannot be freed and its
+/// number handed to another file while a pipe carries this key.
+#[derive(Clone, Copy)]
+pub(crate) struct FifoNode {
+    pub(crate) fs: &'static dyn FileSystem,
+    pub(crate) inode: InodeId,
+}
+
+impl FifoNode {
+    fn names(&self, other: &FifoNode) -> bool {
+        self.inode == other.inode && same_filesystem(self.fs, other.fs)
+    }
+}
+
 pub(crate) struct Pipe {
     read_pos: usize,
     write_pos: usize,
     pub(crate) len: usize,
     pub(crate) readers: u16,
     pub(crate) writers: u16,
+    /// Opens of each end so far, so a FIFO opener blocked for a partner is
+    /// released by one that arrived and left again before it looked.
+    pub(crate) reader_opens: u32,
+    pub(crate) writer_opens: u32,
+    /// `None` for `pipe2`'s anonymous pipes.
+    pub(crate) fifo: Option<FifoNode>,
     buffer: KVec<u8>,
     /// The registry row and its buffer, charged to the `pipe2` caller.
     ///
@@ -91,8 +117,22 @@ impl Pipe {
             len: 0,
             readers: 0,
             writers: 0,
+            reader_opens: 0,
+            writer_opens: 0,
+            fifo: None,
             buffer,
             object_charge,
+        }
+    }
+
+    fn attach(&mut self, reads: bool, writes: bool) {
+        if reads {
+            self.readers = self.readers.saturating_add(1);
+            self.reader_opens = self.reader_opens.wrapping_add(1);
+        }
+        if writes {
+            self.writers = self.writers.saturating_add(1);
+            self.writer_opens = self.writer_opens.wrapping_add(1);
         }
     }
 
@@ -157,16 +197,96 @@ static PIPE_TABLE: SpinLock<HandleTable<Pipe>> = SpinLock::new(
 /// The ring buffer is allocated before the table lock is taken, so the locked
 /// region stays allocation-light. `None` if the pipe table is full.
 pub(crate) fn alloc_slot(account: AccountId) -> Option<PipeHandle> {
-    let buffer = KVec::<u8>::zeroed(PIPE_BUFFER_SIZE).ok()?;
-    // Charged before the table lock: a refusal must not unwind under it.
-    let reservation = try_charge::<ObjectRow>(account, 1).ok()?;
-    let pipe = Pipe::new(buffer, Charge::commit(reservation));
+    let pipe = new_pipe(account)?;
     let mut table = PIPE_TABLE.lock();
     if table.len() >= MAX_PIPES {
         return None;
     }
     let handle = table.insert(pipe).ok()?;
     Some(PipeHandle::pack(handle))
+}
+
+fn new_pipe(account: AccountId) -> Option<Pipe> {
+    let buffer = KVec::<u8>::zeroed(PIPE_BUFFER_SIZE).ok()?;
+    // Charged before the table lock: a refusal must not unwind under it.
+    let reservation = try_charge::<ObjectRow>(account, 1).ok()?;
+    Some(Pipe::new(buffer, Charge::commit(reservation)))
+}
+
+/// What a FIFO opener found when it joined the node's pipe.
+pub(crate) struct FifoJoined {
+    pub(crate) handle: PipeHandle,
+    /// The partner end's open count at the join, for [`fifo_partner_arrived`].
+    pub(crate) partner_opens: u32,
+    pub(crate) partner_present: bool,
+}
+
+/// Join the pipe `node`'s openers share, making it if this is the first open,
+/// and count the caller as the ends it asked for. A non-blocking writer with no
+/// reader joins nothing and is `ENXIO`, per Linux fifo(7).
+pub(crate) fn fifo_join(
+    node: FifoNode,
+    account: AccountId,
+    reads: bool,
+    writes: bool,
+    nonblock: bool,
+) -> Result<FifoJoined, Errno> {
+    let mut fresh: Option<Pipe> = None;
+    loop {
+        let mut table = PIPE_TABLE.lock();
+        let found = table
+            .iter_mut()
+            .find(|(_, p)| p.fifo.as_ref().is_some_and(|f| f.names(&node)));
+        let (handle, pipe) = match found {
+            Some(entry) => entry,
+            None => {
+                if writes && !reads && nonblock {
+                    return Err(Errno::ENXIO);
+                }
+                let Some(mut pipe) = fresh.take() else {
+                    drop(table);
+                    fresh = Some(new_pipe(account).ok_or(Errno::ENOMEM)?);
+                    continue;
+                };
+                if table.len() >= MAX_PIPES {
+                    return Err(Errno::ENFILE);
+                }
+                pipe.fifo = Some(node);
+                let handle = table.insert(pipe).map_err(|_| Errno::ENFILE)?;
+                let pipe = table.get_mut(handle).map_err(|_| Errno::ENFILE)?;
+                (handle, pipe)
+            }
+        };
+        if writes && !reads && nonblock && pipe.readers == 0 {
+            return Err(Errno::ENXIO);
+        }
+        pipe.attach(reads, writes);
+        let (partner_opens, partner_present) = if reads && !writes {
+            (pipe.writer_opens, pipe.writers > 0)
+        } else if writes && !reads {
+            (pipe.reader_opens, pipe.readers > 0)
+        } else {
+            (0, true)
+        };
+        return Ok(FifoJoined {
+            handle: PipeHandle::pack(handle),
+            partner_opens,
+            partner_present,
+        });
+    }
+}
+
+/// Whether the partner a blocked FIFO opener waits for has come, now or in
+/// between: `reader` is the waiter's own end. A pipe that is gone releases it.
+pub(crate) fn fifo_partner_arrived(handle: PipeHandle, reader: bool, opens_at_join: u32) -> bool {
+    with_pipe(handle, |p| {
+        if reader {
+            p.writers > 0 || p.writer_opens != opens_at_join
+        } else {
+            p.readers > 0 || p.reader_opens != opens_at_join
+        }
+    })
+    .unwrap_or(true)
 }
 
 /// `None` if the handle is stale, recycled, or invalid.
@@ -183,6 +303,36 @@ pub(crate) fn with_pipe_mut<R>(handle: PipeHandle, f: impl FnOnce(&mut Pipe) -> 
     let mut table = PIPE_TABLE.lock();
     let pipe = table.get_mut(internal).ok()?;
     Some(f(pipe))
+}
+
+/// Retire one end of `handle`, removing the pipe once neither end is held.
+/// Answers whether that was the last of this end.
+///
+/// One lock hold for both: a FIFO opener finds a pipe by its node, so a pipe
+/// left in the table between the last close and its removal could be joined
+/// and then pulled out from under the joiner.
+pub(crate) fn retire_end(handle: PipeHandle, reader: bool) -> bool {
+    let Some(internal) = handle.to_internal() else {
+        return false;
+    };
+    let mut table = PIPE_TABLE.lock();
+    let Ok(pipe) = table.get_mut(internal) else {
+        return false;
+    };
+    let count = if reader {
+        &mut pipe.readers
+    } else {
+        &mut pipe.writers
+    };
+    if *count == 0 {
+        return false;
+    }
+    *count -= 1;
+    let last_of_end = *count == 0;
+    if pipe.readers == 0 && pipe.writers == 0 {
+        let _ = table.remove(internal);
+    }
+    last_of_end
 }
 
 /// Bumps the slot generation, so any surviving handle to it becomes stale.

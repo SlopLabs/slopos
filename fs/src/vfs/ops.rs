@@ -10,6 +10,7 @@ use slopos_ostd::KVec;
 pub struct VfsHandle {
     pub inode: InodeId,
     pub fs: &'static dyn crate::vfs::FileSystem,
+    pub file_type: FileType,
     /// Granted at open, where the read-only mount and the seal were checked;
     /// a handle without it cannot become a writer later.
     writable: bool,
@@ -113,9 +114,13 @@ pub fn vfs_open_flags_at(
                 _ => {}
             }
             // Refused at open, not at the first write: a descriptor obtained
-            // before the check is a descriptor that outlives it.
+            // before the check is a descriptor that outlives it. A FIFO's
+            // writer stores nothing on the filesystem, so a read-only mount
+            // does not refuse it.
             if flags.writable {
-                resolved.check_writable()?;
+                if stat.file_type != FileType::Pipe {
+                    resolved.check_writable()?;
+                }
                 if stat.sealed {
                     return Err(VfsError::PermissionDenied);
                 }
@@ -130,6 +135,7 @@ pub fn vfs_open_flags_at(
             Ok(VfsHandle {
                 inode: resolved.inode,
                 fs: resolved.fs,
+                file_type: stat.file_type,
                 writable: flags.writable,
             })
         }
@@ -143,6 +149,7 @@ pub fn vfs_open_flags_at(
             Ok(VfsHandle {
                 inode: new_inode,
                 fs: parent.fs,
+                file_type: FileType::Regular,
                 writable: flags.writable,
             })
         }
@@ -167,12 +174,28 @@ pub fn vfs_mkdir(path: &[u8]) -> VfsResult<()> {
 /// path to chmod it could hand the mode to a replacement, or to a symlink's
 /// target.
 pub fn vfs_mkdir_at(path: &[u8], cwd: &[u8], mode: Option<u16>) -> VfsResult<()> {
+    create_node_at(path, cwd, FileType::Directory, mode)
+}
+
+/// `mknodat(2)` for the node kinds a filesystem here stores: a regular file or
+/// a FIFO. The mode lands on the new inode, as [`vfs_mkdir_at`]'s does.
+pub fn vfs_mknod_at(path: &[u8], cwd: &[u8], file_type: FileType, mode: u16) -> VfsResult<()> {
+    if !matches!(file_type, FileType::Regular | FileType::Pipe) {
+        return Err(VfsError::NotSupported);
+    }
+    create_node_at(path, cwd, file_type, Some(mode))
+}
+
+fn create_node_at(
+    path: &[u8],
+    cwd: &[u8],
+    file_type: FileType,
+    mode: Option<u16>,
+) -> VfsResult<()> {
     let (parent, name) = resolve_parent_at(path, cwd)?;
     check_name_len(name.as_bytes())?;
     parent.check_writable()?;
-    let inode = parent
-        .fs
-        .create(parent.inode, name.as_bytes(), FileType::Directory)?;
+    let inode = parent.fs.create(parent.inode, name.as_bytes(), file_type)?;
     if let Some(mode) = mode {
         parent.fs.set_mode(inode, mode)?;
     }

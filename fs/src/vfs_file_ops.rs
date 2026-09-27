@@ -81,6 +81,14 @@ pub fn vfs_open_handle_flags(
     flags: crate::vfs::ops::VfsOpenFlags,
 ) -> Result<usize, slopos_abi::Errno> {
     vfs_open_handle_flags_at(path, b"/", flags, crate::vfs::path::RESOLVE_FOLLOW)
+        .map(|opened| opened.handle)
+}
+
+/// A registered vnode handle, and whether the node is a FIFO — which is opened
+/// as a pipe rather than read through the filesystem.
+pub struct OpenedVnode {
+    pub handle: usize,
+    pub fifo: bool,
 }
 
 pub fn vfs_open_handle_flags_at(
@@ -88,13 +96,17 @@ pub fn vfs_open_handle_flags_at(
     cwd: &[u8],
     flags: crate::vfs::ops::VfsOpenFlags,
     resolve_flags: u32,
-) -> Result<usize, slopos_abi::Errno> {
+) -> Result<OpenedVnode, slopos_abi::Errno> {
     // A create may have *just* made this name: re-resolving it would be a
     // second lookup of something this call itself is responsible for.
     let created = flags.create;
     let opened = crate::vfs::ops::vfs_open_flags_at(path, cwd, flags, resolve_flags)
         .map_err(|e| e.to_errno())?;
-    register_vnode(path, cwd, resolve_flags, opened.fs, opened.inode, created)
+    let handle = register_vnode(path, cwd, resolve_flags, opened.fs, opened.inode, created)?;
+    Ok(OpenedVnode {
+        handle,
+        fifo: opened.file_type == crate::vfs::FileType::Pipe,
+    })
 }
 
 /// Open an existing directory as a vnode handle — what a `dirfd` and

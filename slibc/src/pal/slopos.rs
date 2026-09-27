@@ -245,6 +245,12 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> Result<(), Errno> {
+        let ret = unsafe { syscall4(SYSCALL_MKNODAT, dirfd as u64, path as u64, mode as u64, dev) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> Result<(), Errno> {
         let ret = unsafe { syscall3(SYSCALL_UNLINKAT, dirfd as u64, path as u64, flags as u64) };
         to_result(ret)?;
