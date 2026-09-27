@@ -277,7 +277,11 @@ inventory and the source tree, unmounts `/devel` and mounts it again by label
 --version` under `LD_DEBUG=statistics`, rustc linking a program through `cc`,
 cargo building a crate with a build script and a proc macro, cargo fetching a
 `git = "file:///devel/git/greeting.git"` dependency through libgit2 from the
-bare repository a new volume carries, and clang compiling C and C++.
+bare repository a new volume carries, cargo fetching a crate through libcurl
+and OpenSSL from the sparse registry a new volume carries under `registry/`,
+served over TLS on loopback by the TLS crate's test server and verified
+against a test root the host's `openssl` minted for that volume (the image's
+own CA bundle must refuse it first), and clang compiling C and C++.
 
 **The source rides the same volume.** A new dev disk is seeded with
 `src/slopos`: the committed `HEAD`, the vendored crates, a

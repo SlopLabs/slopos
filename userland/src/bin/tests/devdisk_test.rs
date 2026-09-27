@@ -2,12 +2,18 @@ use slopos_userland as _;
 
 use slopos_abi::fs::MS_RDONLY;
 use slopos_slibc::test_harness::note;
+use slopos_tls_core::server::{Server, ServerConfig};
 use slopos_userland::syscall::error::SyscallError;
 use slopos_userland::syscall::fs as fs_syscall;
+use slopos_userland::tls::{self, CipherSuite};
 use std::ffi::c_char;
 use std::fs;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Where the boot's `mount=LABEL=slopos-dev:/devel` puts the volume; every
@@ -303,11 +309,16 @@ fn grade_source(source: &str) -> bool {
     true
 }
 
+/// The value of the marker's `<tag> <value>` line.
+fn marker_entry(tag: &str) -> Option<String> {
+    let text = fs::read_to_string(marker_path()).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix(tag)?.strip_prefix(' ').map(str::to_owned))
+}
+
 /// The staged toolchain prefix, absolute, when the marker names one.
 fn toolchain() -> Option<String> {
-    let text = fs::read_to_string(marker_path()).ok()?;
-    let rel = text.lines().find_map(|l| l.strip_prefix("toolchain "))?;
-    Some(format!("{MOUNT_POINT}/{rel}"))
+    marker_entry("toolchain").map(|rel| format!("{MOUNT_POINT}/{rel}"))
 }
 
 struct Ran {
@@ -558,10 +569,7 @@ fn cargo_fetches_a_git_dependency() -> bool {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
-    let Some(repo) = fs::read_to_string(marker_path()).ok().and_then(|text| {
-        text.lines()
-            .find_map(|l| l.strip_prefix("git ").map(str::to_owned))
-    }) else {
+    let Some(repo) = marker_entry("git") else {
         note("the volume carries no git fixture");
         return true;
     };
@@ -616,7 +624,332 @@ fn cargo_fetches_a_git_dependency() -> bool {
     ran.ok("fetch") && ran.stdout == "fetched through libgit2\n"
 }
 
-/// Rung 5: clang finds its resource directory and its config through its own
+/// Every loopback read gives up after this, so a client that never hangs up
+/// fails the rung rather than hanging it.
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct Connection {
+    offered_alpn: Vec<Vec<u8>>,
+    requests: Vec<(String, u16)>,
+    error: Option<String>,
+}
+
+/// What `www` holds at `path`, refusing a path that climbs out of it.
+fn served_file(www: &str, path: &str) -> Option<Vec<u8>> {
+    if !path.starts_with('/') || path.split('/').any(|s| s == "..") {
+        return None;
+    }
+    fs::read(format!("{www}{path}")).ok()
+}
+
+/// One client: HTTP/1.1 GETs, kept alive, over the TLS crate's test server.
+fn serve_connection(mut sock: TcpStream, www: &str, chain: &[Vec<u8>], key: &[u8]) -> Connection {
+    let mut conn = Connection::default();
+    if let Err(e) = sock
+        .set_nonblocking(false)
+        .and_then(|()| sock.set_read_timeout(Some(IO_TIMEOUT)))
+    {
+        conn.error = Some(e.to_string());
+        return conn;
+    }
+    let mut entropy = [0u8; 64];
+    tls::random(&mut entropy);
+    let mut server = Server::new(ServerConfig {
+        chain,
+        key,
+        suites: &CipherSuite::ALL,
+        alpn: &[b"http/1.1"],
+        request_certificate: false,
+        entropy,
+    });
+    let mut plain = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        while let Some(end) = plain.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&plain[..end]).into_owned();
+            plain.drain(..end + 4);
+            let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+            let (status, reason, body) = match served_file(www, &path) {
+                Some(body) => (200, "OK", body),
+                None => (404, "Not Found", Vec::new()),
+            };
+            let reply = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            if let Err(e) = server
+                .write(reply.as_bytes())
+                .and_then(|()| server.write(&body))
+            {
+                conn.error = Some(e.to_string());
+                return conn;
+            }
+            conn.requests.push((path, status));
+        }
+        if let Err(e) = sock.write_all(&server.take_output()) {
+            conn.error = Some(format!("write: {e}"));
+            return conn;
+        }
+        if server.peer_closed() {
+            return conn;
+        }
+        let n = match sock.read(&mut buf) {
+            Ok(0) => return conn,
+            Ok(n) => n,
+            Err(e) => {
+                conn.error = Some(format!("read: {e}"));
+                return conn;
+            }
+        };
+        let fed = server.read_tls(&buf[..n]);
+        conn.offered_alpn = server.client_alpn().to_vec();
+        if let Err(e) = fed {
+            let _ = sock.write_all(&server.take_output());
+            conn.error = Some(e.to_string());
+            return conn;
+        }
+        loop {
+            let k = server.read(&mut buf);
+            if k == 0 {
+                break;
+            }
+            plain.extend_from_slice(&buf[..k]);
+        }
+    }
+}
+
+/// Serves every connection `listener` takes until `stop`, each on its own
+/// thread, so a connection curl keeps alive never holds up the next one.
+fn serve_registry(
+    listener: &TcpListener,
+    www: &str,
+    chain: &[Vec<u8>],
+    key: &[u8],
+    stop: &AtomicBool,
+) -> Vec<Connection> {
+    let served = Mutex::new(Vec::new());
+    let record = |conn| {
+        served
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(conn)
+    };
+    thread::scope(|s| {
+        while !stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((sock, _)) => {
+                    s.spawn(|| record(serve_connection(sock, www, chain, key)));
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    record(Connection {
+                        error: Some(format!("accept: {e}")),
+                        ..Connection::default()
+                    });
+                    break;
+                }
+            }
+        }
+    });
+    served.into_inner().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn alpn_list(offered: &[Vec<u8>]) -> String {
+    let names: Vec<_> = offered
+        .iter()
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    names.join(", ")
+}
+
+/// Rung 5: cargo fetches a crate from the sparse registry the volume carries,
+/// served over TLS on loopback by the TLS crate's test server, so the index
+/// and the download go through libcurl and OpenSSL, verified against the
+/// volume's test root. The image's own CA bundle, which lacks that root, must
+/// refuse the same server first, or the verification proves nothing.
+fn cargo_fetches_over_https() -> bool {
+    let prefix = match prefix() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(rel) = marker_entry("registry") else {
+        note("the volume carries no registry");
+        return true;
+    };
+    let root = format!("{MOUNT_POINT}/{rel}");
+    let www = format!("{root}/www");
+    let config = fs::read_to_string(format!("{www}/index/config.json")).unwrap_or_default();
+    let Some(authority) = config
+        .split("\"dl\":\"https://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .map(str::to_owned)
+    else {
+        note(&format!(
+            "{www}/index/config.json names no https download URL"
+        ));
+        return false;
+    };
+    let (Ok(cert), Ok(key)) = (
+        fs::read(format!("{root}/server.der")),
+        fs::read(format!("{root}/server.key")),
+    ) else {
+        note("the registry's server certificate or key is missing");
+        return false;
+    };
+    let chain = [cert];
+    let listener = match TcpListener::bind(authority.as_str())
+        .and_then(|l| l.set_nonblocking(true).map(|()| l))
+    {
+        Ok(l) => l,
+        Err(e) => {
+            note(&format!("bind {authority}: {e}"));
+            return false;
+        }
+    };
+    let index = format!("sparse+https://{authority}/index/");
+    let manifest = "[package]\nname = \"fetch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngreeting = { version = \"0.1.0\", registry = \"devdisk\" }\n\n[workspace]\n";
+    let Some(dir) = scratch(
+        "https",
+        &[("Cargo.toml", manifest), ("src/main.rs", FETCH_MAIN)],
+    ) else {
+        return false;
+    };
+    let cargo = format!("{prefix}/bin/cargo");
+    let untrusting_home = format!("{dir}/untrusting-home");
+    let cargo_home = format!("{dir}/cargo-home");
+    let ca = format!("{root}/ca.pem");
+    let registry = [
+        ("CARGO_REGISTRIES_DEVDISK_INDEX", index.as_str()),
+        ("CARGO_NET_OFFLINE", "false"),
+        ("CARGO_NET_RETRY", "0"),
+    ];
+    let stop = AtomicBool::new(false);
+    let (refused, built, served) = thread::scope(|s| {
+        let server = s.spawn(|| serve_registry(&listener, &www, &chain, &key, &stop));
+        let refused = run(
+            &prefix,
+            &dir,
+            &cargo,
+            &["fetch"],
+            &[&registry[..], &[("CARGO_HOME", untrusting_home.as_str())]].concat(),
+        );
+        let built = run(
+            &prefix,
+            &dir,
+            &cargo,
+            &["build"],
+            &[
+                &registry[..],
+                &[
+                    ("CARGO_HOME", cargo_home.as_str()),
+                    ("CARGO_HTTP_CAINFO", ca.as_str()),
+                ],
+            ]
+            .concat(),
+        );
+        stop.store(true, Ordering::Release);
+        (refused, built, server.join().unwrap_or_default())
+    });
+    let (Some(refused), Some(built)) = (refused, built) else {
+        return false;
+    };
+    let mut log = String::new();
+    for c in &served {
+        log += &format!(
+            "connection: ALPN offered [{}], {:?}, {}\n",
+            alpn_list(&c.offered_alpn),
+            c.requests,
+            c.error.as_deref().unwrap_or("closed cleanly")
+        );
+    }
+    log += &format!(
+        "cargo fetch without the root, exit {:?}:\n{}\ncargo build with it, exit {:?}:\n{}\n",
+        refused.code, refused.stderr, built.code, built.stderr
+    );
+    let log_path = format!("{dir}/https.log");
+    let _ = fs::write(&log_path, log);
+    let last = |text: &str| {
+        text.trim_end()
+            .lines()
+            .last()
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    // 60 is CURLE_PEER_FAILED_VERIFICATION: the handshake reached the
+    // certificate and OpenSSL rejected it, not a missing bundle or a refused
+    // connection.
+    if refused.code == Some(0) || !refused.stderr.contains("[60]") {
+        note(&format!(
+            "without the root, cargo exited {:?}: {} (see {log_path})",
+            refused.code,
+            last(&refused.stderr)
+        ));
+        return false;
+    }
+    if built.code != Some(0) {
+        note(&format!(
+            "cargo build exited {:?}: {} (see {log_path})",
+            built.code,
+            last(&built.stderr)
+        ));
+        return false;
+    }
+    let lock = fs::read_to_string(format!("{dir}/Cargo.lock")).unwrap_or_default();
+    if !lock.contains(&format!("source = \"{index}\"")) {
+        note(&format!("Cargo.lock does not pin greeting to {index}"));
+        return false;
+    }
+    let requests: Vec<&(String, u16)> = served.iter().flat_map(|c| &c.requests).collect();
+    for want in [
+        "/index/config.json",
+        "/index/gr/ee/greeting",
+        "/crates/greeting-0.1.0.crate",
+    ] {
+        if !requests
+            .iter()
+            .any(|(path, status)| path == want && *status == 200)
+        {
+            note(&format!("the registry never served {want}: {requests:?}"));
+            return false;
+        }
+    }
+    let serving: Vec<&Connection> = served.iter().filter(|c| !c.requests.is_empty()).collect();
+    if let Some(c) = serving
+        .iter()
+        .find(|c| !c.offered_alpn.iter().any(|p| p == b"h2"))
+    {
+        note(&format!(
+            "libcurl offered ALPN [{}], without h2: nghttp2 is not in it",
+            alpn_list(&c.offered_alpn)
+        ));
+        return false;
+    }
+    let Some(ran) = run(
+        &prefix,
+        &dir,
+        &format!("{dir}/target/debug/fetch"),
+        &[],
+        &[],
+    ) else {
+        return false;
+    };
+    note(&format!(
+        "built in {} ms, {} GETs/{} conn, ALPN [{}] -> http/1.1; test root refused in {} ms",
+        built.took.as_millis(),
+        requests.len(),
+        serving.len(),
+        alpn_list(&serving[0].offered_alpn),
+        refused.took.as_millis(),
+    ));
+    ran.ok("fetch") && ran.stdout == "fetched over https\n"
+}
+
+/// Rung 6: clang finds its resource directory and its config through its own
 /// path, compiles C and C++, and links both against the prefix's sysroot.
 fn clang_links_c_and_cxx() -> bool {
     let prefix = match prefix() {
@@ -675,6 +1008,7 @@ fn main() {
             "cargo_fetches_a_git_dependency",
             cargo_fetches_a_git_dependency,
         ),
+        ("cargo_fetches_over_https", cargo_fetches_over_https),
         ("clang_links_c_and_cxx", clang_links_c_and_cxx),
     ]);
 }

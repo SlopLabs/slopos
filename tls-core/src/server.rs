@@ -43,6 +43,7 @@ pub struct Server<'a> {
     client_hs: Option<Digest>,
     client_app: Option<Digest>,
     failure: Option<Error>,
+    client_alpn: Vec<Vec<u8>>,
 }
 
 impl<'a> Server<'a> {
@@ -56,6 +57,7 @@ impl<'a> Server<'a> {
             client_hs: None,
             client_app: None,
             failure: None,
+            client_alpn: Vec::new(),
         }
     }
 
@@ -65,6 +67,11 @@ impl<'a> Server<'a> {
 
     pub fn suite(&self) -> Option<CipherSuite> {
         self.suite
+    }
+
+    /// The protocols the client's hello offered, in its order.
+    pub fn client_alpn(&self) -> &[Vec<u8>] {
+        &self.client_alpn
     }
 
     pub fn take_output(&mut self) -> Vec<u8> {
@@ -191,6 +198,7 @@ impl<'a> Server<'a> {
                 _ => {}
             }
         }
+        self.client_alpn = client_alpn.iter().map(|p| p.to_vec()).collect();
         if !tls13 {
             return Err(Error::Protocol(
                 Alert::ProtocolVersion,

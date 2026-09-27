@@ -47,6 +47,14 @@ set -euo pipefail
 # so cargo fetches it through libgit2 with no network. Made with the host's
 # `git` at a fixed date, so it is the same repository every time.
 #
+# And `registry/`, a sparse registry holding one crate, which `devdisk_test`
+# serves over TLS on the guest's loopback so cargo fetches it through libcurl
+# and OpenSSL. `registry/www` is what is served; `ca.pem` is the root cargo is
+# told to trust, and `server.der` and `server.key` (the raw P-256 scalar the
+# TLS crate's test server takes) are the certificate it serves. The keys are
+# made fresh with the host's `openssl` each time a volume is created and the
+# root's key is thrown away, so nothing here is a secret worth keeping.
+#
 # The volume is labelled `slopos-dev`: the guest's disk letters are probe
 # order, so the boot finds it with `mount=LABEL=slopos-dev:/devel`.
 
@@ -170,6 +178,68 @@ stage_git_fixture() {
 }
 [ -f "$IMAGE_PATH" ] || stage_git_fixture
 
+REGISTRY_REL="registry"
+REGISTRY_ORIGIN="https://127.0.0.1:4433"
+stage_registry() {
+    local work="$BUILD_DIR/devdisk-registry" reg="$STAGE/$REGISTRY_REL" www cksum cnf sec1
+    command -v openssl >/dev/null 2>&1 || die "openssl is required to stage $REGISTRY_REL"
+    www="$reg/www"
+    rm -rf "$work"
+    mkdir -p "$work/greeting-0.1.0/src" "$www/index/gr/ee" "$www/crates"
+    printf '%s\n' '[package]' 'name = "greeting"' 'version = "0.1.0"' 'edition = "2021"' \
+        >"$work/greeting-0.1.0/Cargo.toml"
+    printf '%s\n' 'pub fn greeting() -> &'"'"'static str {' '    "fetched over https"' '}' \
+        >"$work/greeting-0.1.0/src/lib.rs"
+    tar --sort=name --mtime=@1767225600 --owner=0 --group=0 --numeric-owner \
+        --mode=u=rwX,go=rX --format=ustar -C "$work" -cf - greeting-0.1.0 |
+        gzip -9n >"$www/crates/greeting-0.1.0.crate" ||
+        die "could not pack the registry's crate"
+    cksum="$(sha256sum "$www/crates/greeting-0.1.0.crate" | cut -d' ' -f1)"
+    printf '{"dl":"%s/crates/{crate}-{version}.crate"}\n' "$REGISTRY_ORIGIN" \
+        >"$www/index/config.json"
+    printf '{"name":"greeting","vers":"0.1.0","deps":[],"cksum":"%s","features":{},"yanked":false}\n' \
+        "$cksum" >"$www/index/gr/ee/greeting"
+
+    cnf="$work/openssl.cnf"
+    cat >"$cnf" <<'EOF'
+[req]
+distinguished_name = dn
+prompt = no
+[dn]
+[root]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+[leaf]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = IP:127.0.0.1, DNS:localhost
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+EOF
+    {
+        openssl ecparam -name prime256v1 -genkey -noout -out "$work/root.key" &&
+            openssl ecparam -name prime256v1 -genkey -noout -out "$work/server.key" &&
+            openssl req -x509 -new -config "$cnf" -extensions root -key "$work/root.key" \
+                -subj "/CN=SlopOS Dev Disk Test Root" -days 3650 -sha256 -out "$reg/ca.pem" &&
+            openssl req -new -config "$cnf" -key "$work/server.key" -subj "/CN=127.0.0.1" \
+                -out "$work/server.csr" &&
+            openssl x509 -req -in "$work/server.csr" -CA "$reg/ca.pem" -CAkey "$work/root.key" \
+                -set_serial 2 -days 3650 -sha256 -extfile "$cnf" -extensions leaf \
+                -outform DER -out "$reg/server.der" &&
+            openssl ec -in "$work/server.key" -no_public -outform DER -out "$work/server.sec1"
+    } >/dev/null 2>&1 || die "openssl could not make the registry's certificates in $work"
+    # RFC 5915's ECPrivateKey: SEQUENCE, version 1, then the scalar as a
+    # 32-byte OCTET STRING at offset 7.
+    sec1="$work/server.sec1"
+    [ "$(od -An -tx1 -j2 -N5 "$sec1" | tr -d ' \n')" = "0201010420" ] ||
+        die "$sec1 is not a SEC1 P-256 private key"
+    head -c 39 "$sec1" | tail -c 32 >"$reg/server.key"
+    rm -rf "$work"
+}
+[ -f "$IMAGE_PATH" ] || stage_registry
+
 # Where the host keeps its owned sysroot, so the tree's scripts find the
 # guest's toolchain where they find the host's.
 TOOLCHAIN_REL="src/slopos/third_party/rust-slopos"
@@ -258,6 +328,9 @@ MARKER_FILE="${BUILD_DIR}/devdisk-marker.txt"
     fi
     if image_holds_dir "$GIT_FIXTURE_REL"; then
         echo "git $GIT_FIXTURE_REL"
+    fi
+    if image_holds_dir "$REGISTRY_REL"; then
+        echo "registry $REGISTRY_REL"
     fi
     inventory lib "$STAGE/lib" 0
     if [ -n "${TOOLCHAIN_STAGE:-}" ]; then

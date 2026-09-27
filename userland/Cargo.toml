@@ -231,6 +231,7 @@ path = "src/bin/tests/mount_test.rs"
 [[bin]]
 name = "devdisk_test"
 path = "src/bin/tests/devdisk_test.rs"
+required-features = ["testbins"]
 
 [[bin]]
 name = "install_test"
