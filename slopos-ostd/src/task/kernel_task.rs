@@ -639,8 +639,21 @@ pub struct TaskInner<K, U> {
     /// woken by a signal, a kill or a timeout unlinks itself in O(1) without
     /// naming which bucket holds it.
     pub futex_link: DLink<TaskInner<K, U>, FutexRole>,
-    /// The futex word this task is parked on while `futex_link` is linked.
+    /// The futex word this task is parked on while `futex_link` is linked: a
+    /// virtual address for a private key, a byte offset into the backing
+    /// object for a shared one.
     pub futex_addr: AtomicU64,
+    /// The other half of the parked key: the address space for a private key,
+    /// the backing object's identity for a shared one. Written with
+    /// [`futex_addr`](Self::futex_addr) under the bucket lock.
+    pub futex_space: AtomicU64,
+    /// Whether the parked key is a shared one. Same discipline as
+    /// [`futex_space`](Self::futex_space).
+    pub futex_shared: AtomicBool,
+    /// Index of the bucket holding this task while `futex_link` is linked.
+    /// One word, so a waiter unlinking itself cannot read a key half-way
+    /// through a requeue restamping it.
+    pub futex_bucket: AtomicU8,
     /// Bitset a `FUTEX_WAIT_BITSET` waiter registered. Meaningful only while
     /// `futex_link` is linked, and read under the futex bucket lock, hence
     /// Relaxed.
@@ -1336,6 +1349,9 @@ impl<K, U> TaskInner<K, U> {
             sibling_link: DLink::new(),
             futex_link: DLink::new(),
             futex_addr: AtomicU64::new(0),
+            futex_space: AtomicU64::new(0),
+            futex_shared: AtomicBool::new(false),
+            futex_bucket: AtomicU8::new(0),
             futex_bitset: AtomicU32::new(0),
             reclaim_link: Link::new(),
             cleanup_link: Link::new(),

@@ -65,12 +65,12 @@ pub fn take_orphan() -> *mut Heap {
 
 #[inline]
 pub fn lock(state: &AtomicI32) {
-    crate::thread::mutex::lock_state(state);
+    crate::thread::mutex::lock_state(state, crate::pal::FutexScope::Private);
 }
 
 #[inline]
 pub fn unlock(state: &AtomicI32) {
-    crate::thread::mutex::unlock_state(state);
+    crate::thread::mutex::unlock_state(state, crate::pal::FutexScope::Private);
 }
 
 #[cold]

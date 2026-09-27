@@ -256,6 +256,16 @@ pub fn memfd_get_phys(handle: usize) -> (PhysAddr, usize) {
     (PhysAddr::new(phys), size)
 }
 
+/// `handle`'s memfd as a futex identity and the physical base its offsets
+/// count from. The packed handle carries the slot's generation, so a later
+/// memfd in the same slot is a different identity. The caller holds a mapping
+/// of the memfd, which keeps the slot and its base from changing underneath.
+pub(crate) fn memfd_futex_object(handle: MemfdHandle) -> (u64, PhysAddr, usize) {
+    let raw = handle.pack(SLOT_BITS);
+    let (base, size) = memfd_get_phys(raw);
+    (raw as u64, base, size)
+}
+
 /// Physical address, size and page count for mmap; takes the registry lock.
 pub(crate) fn memfd_get_info(handle: MemfdHandle) -> Option<(PhysAddr, usize, u32)> {
     with_registry(|t| match t.get(handle) {

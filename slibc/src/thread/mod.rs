@@ -51,6 +51,27 @@ pub const PTHREAD_STACK_MIN: usize = 16384;
 /// `pthread_setname_np` truncates at this, as Linux's `PR_SET_NAME` does.
 pub const PTHREAD_NAME_MAX: usize = 16;
 
+pub const PTHREAD_PROCESS_PRIVATE: i32 = 0;
+pub const PTHREAD_PROCESS_SHARED: i32 = 1;
+
+/// A `*_setpshared` argument as a flag, or `None` for anything but the two
+/// values POSIX names.
+pub(crate) fn pshared_flag(pshared: i32) -> Option<bool> {
+    match pshared {
+        PTHREAD_PROCESS_PRIVATE => Some(false),
+        PTHREAD_PROCESS_SHARED => Some(true),
+        _ => None,
+    }
+}
+
+pub(crate) fn pshared_value(shared: bool) -> i32 {
+    if shared {
+        PTHREAD_PROCESS_SHARED
+    } else {
+        PTHREAD_PROCESS_PRIVATE
+    }
+}
+
 pub use condvar::{PTHREAD_COND_INITIALIZER, pthread_cond_t};
 pub use create::pthread_create;
 pub use join::{pthread_detach, pthread_equal, pthread_exit, pthread_join, pthread_self};

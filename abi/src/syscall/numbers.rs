@@ -371,8 +371,9 @@ pub const SYSCALL_GETTID: u64 = 186;
 /// `futex(uaddr: *mut u32, op, val, timeout: *const Timespec, uaddr2, val3)`.
 ///
 /// `op & FUTEX_CMD_MASK` selects `WAIT`, `WAKE`, `REQUEUE`, `CMP_REQUEUE`,
-/// `WAIT_BITSET` or `WAKE_BITSET`; `FUTEX_PRIVATE_FLAG` is accepted. A null
-/// `timeout` blocks forever; the wait's internal resolution is a millisecond.
+/// `WAIT_BITSET` or `WAKE_BITSET`; without `FUTEX_PRIVATE_FLAG` a word in a
+/// shared mapping is keyed on its backing object. A null `timeout` blocks
+/// forever; the wait's internal resolution is a millisecond.
 /// For the requeue forms `timeout` is reinterpreted as `val2`.
 pub const SYSCALL_FUTEX: u64 = 202;
 

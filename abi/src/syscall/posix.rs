@@ -328,9 +328,9 @@ pub const FUTEX_CMP_REQUEUE: u64 = 4;
 pub const FUTEX_WAIT_BITSET: u64 = 9;
 pub const FUTEX_WAKE_BITSET: u64 = 10;
 
-/// Accepted and ignored: every futex here is keyed on a virtual address, so
-/// all of them are already private. What it must not do is make the call
-/// `ENOSYS` — glibc- and std-shaped callers always set it.
+/// Keys the futex on the caller's address space. Without it a word in a
+/// `MAP_SHARED` mapping of a shared object is keyed on that object, so other
+/// processes mapping it meet the same futex.
 pub const FUTEX_PRIVATE_FLAG: u64 = 128;
 /// Measure an absolute timeout against `CLOCK_REALTIME` instead of
 /// `CLOCK_MONOTONIC`. Only legal with [`FUTEX_WAIT_BITSET`].

@@ -8,7 +8,7 @@
 use core::ffi::{c_char, c_int, c_uint, c_void};
 
 use crate::errno::{EINVAL, ENOSYS, EPERM, errno_set};
-use crate::pal::{Pal, Sys};
+use crate::pal::{FutexScope, Pal, Sys};
 use crate::string::u_strlen;
 use crate::types::{
     MAP_FAILED, dev_t, gid_t, iovec as Iovec, mode_t, off_t, pid_t, stat as Stat, statfs as Statfs,
@@ -1042,7 +1042,7 @@ pub unsafe extern "C" fn slopos_futex_wait(
         ts = crate::time::timespec_from_nanos(timeout_ns);
         &raw const ts
     };
-    match Sys::futex_wait(addr, expected, timeout) {
+    match Sys::futex_wait(addr, expected, timeout, FutexScope::Private) {
         Ok(()) => 0,
         Err(e) => fail(e, -1),
     }
@@ -1050,7 +1050,7 @@ pub unsafe extern "C" fn slopos_futex_wait(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_futex_wake(addr: *const u32, count: u32) -> i32 {
-    match Sys::futex_wake(addr, count) {
+    match Sys::futex_wake(addr, count, FutexScope::Private) {
         Ok(n) => n,
         Err(e) => fail(e, -1),
     }

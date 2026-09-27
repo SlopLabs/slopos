@@ -2037,6 +2037,69 @@ pub fn process_vm_get_region(process: ProcessId, addr: u64) -> Option<VmaRegion>
     Some(region.clone())
 }
 
+/// Where a futex word in a shared mapping lives: the backing object's
+/// identity and the word's byte offset into it. Every address space mapping
+/// the object derives the same pair, whatever address it mapped it at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SharedFutexWord {
+    pub object: u64,
+    pub offset: u64,
+}
+
+/// Tags keeping a memfd identity and a file page-set identity apart.
+const FUTEX_OBJECT_MEMFD: u64 = 1 << 63;
+const FUTEX_OBJECT_FILE: u64 = 1 << 62;
+
+/// The shared object a non-private futex word at `va` lives in.
+///
+/// `Ok(None)` when `va` is mapped but not over a shared object — private
+/// anonymous memory, a private file mapping — so the word is the address
+/// space's own. `Err` when nothing maps `va`.
+pub fn process_vm_shared_futex_word(
+    process: ProcessId,
+    va: u64,
+) -> Result<Option<SharedFutexWord>, ()> {
+    let slot = find_slot_for_pid(process).ok_or(())?;
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process.id() {
+        return Err(());
+    }
+    let page = va & !(PAGE_SIZE_4KB - 1);
+    let (start, _end, region) = guard.vma_map.find_containing(page).ok_or(())?;
+    match &region.backing {
+        RegionBacking::SharedMemfd { handle } => {
+            // Through the page table rather than the region's start: a split
+            // region keeps the handle but not where in the object it begins.
+            let vm_space = guard.vm_space.as_ref().ok_or(())?;
+            let pa =
+                crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(va)).as_u64();
+            let (identity, base, size) = crate::memfd::memfd_futex_object(*handle);
+            let offset = pa.checked_sub(base.as_u64()).ok_or(())?;
+            if pa == 0 || base.is_null() || offset >= size as u64 {
+                return Err(());
+            }
+            Ok(Some(SharedFutexWord {
+                object: FUTEX_OBJECT_MEMFD | (identity & (FUTEX_OBJECT_FILE - 1)),
+                offset,
+            }))
+        }
+        RegionBacking::File {
+            map,
+            first_page,
+            private: false,
+        } => {
+            let page_index = first_page.saturating_add((page - start) / PAGE_SIZE_4KB);
+            Ok(Some(SharedFutexWord {
+                object: FUTEX_OBJECT_FILE | ((map.slot as u64) << 32) | map.generation as u64,
+                offset: page_index
+                    .saturating_mul(PAGE_SIZE_4KB)
+                    .saturating_add(va & (PAGE_SIZE_4KB - 1)),
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub fn process_vm_get_stack_top(process: ProcessId) -> u64 {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,

@@ -4,7 +4,7 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::errno::EINVAL;
-use crate::pal::{Pal, Sys};
+use crate::pal::{FutexScope, Pal, Sys};
 
 use super::futex::futex_wait_or_abort;
 
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn pthread_once(
                 }
                 routine();
                 if state.swap(DONE, Ordering::Release) == RUNNING_WITH_WAITERS {
-                    let _ = Sys::futex_wake(state.as_ptr(), u32::MAX);
+                    let _ = Sys::futex_wake(state.as_ptr(), u32::MAX, FutexScope::Private);
                 }
                 return 0;
             }
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn pthread_once(
                 {
                     continue;
                 }
-                futex_wait_or_abort(state.as_ptr(), RUNNING_WITH_WAITERS);
+                futex_wait_or_abort(state.as_ptr(), RUNNING_WITH_WAITERS, FutexScope::Private);
             }
         }
     }

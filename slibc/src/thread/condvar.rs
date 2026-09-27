@@ -5,9 +5,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::errno::{EINVAL, ETIMEDOUT};
-use crate::pal::{Pal, Sys};
+use crate::pal::{FutexScope, Pal, Sys};
 
 use super::mutex::{pthread_mutex_lock, pthread_mutex_t, pthread_mutex_unlock};
+use super::{pshared_flag, pshared_value};
 
 /// 48 bytes, matching the target's `libc`. Valid all-zero: sequence 0, no
 /// associated mutex, and `clock` 0 — which is `CLOCK_REALTIME`, the POSIX
@@ -19,22 +20,36 @@ pub struct pthread_cond_t {
     /// set by `pthread_condattr_setclock`.
     pub clock: c_int,
     pub mutex: *mut pthread_mutex_t,
-    pub _reserved: [u64; 4],
+    /// Nonzero for `PTHREAD_PROCESS_SHARED`, as `pthread_mutex_t`'s.
+    pub pshared: c_int,
+    pub _pad: c_int,
+    pub _reserved: [u64; 3],
 }
 
 unsafe impl Send for pthread_cond_t {}
 unsafe impl Sync for pthread_cond_t {}
 
+/// The clock, with [`CONDATTR_PSHARED`] folded in: the target's `libc` gives
+/// the attribute four bytes.
 #[repr(C)]
 pub struct pthread_condattr_t {
     pub clock: c_int,
+}
+
+const CONDATTR_PSHARED: c_int = 1 << 30;
+
+#[inline]
+unsafe fn scope_of(cond: *const pthread_cond_t) -> FutexScope {
+    FutexScope::of_pshared((*cond).pshared != 0)
 }
 
 pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t {
     seq: AtomicU32::new(0),
     clock: crate::time::CLOCK_REALTIME,
     mutex: ptr::null_mut(),
-    _reserved: [0; 4],
+    pshared: 0,
+    _pad: 0,
+    _reserved: [0; 3],
 };
 
 #[unsafe(no_mangle)]
@@ -47,12 +62,15 @@ pub unsafe extern "C" fn pthread_cond_init(
     }
     (*cond).seq = AtomicU32::new(0);
     (*cond).mutex = ptr::null_mut();
-    (*cond)._reserved = [0; 4];
-    (*cond).clock = if attr.is_null() {
+    (*cond)._pad = 0;
+    (*cond)._reserved = [0; 3];
+    let attr_clock = if attr.is_null() {
         crate::time::CLOCK_REALTIME
     } else {
         (*attr).clock
     };
+    (*cond).clock = attr_clock & !CONDATTR_PSHARED;
+    (*cond).pshared = c_int::from(attr_clock & CONDATTR_PSHARED != 0);
     0
 }
 
@@ -69,7 +87,11 @@ pub unsafe extern "C" fn pthread_cond_wait(
     (*cond).mutex = mutex;
 
     pthread_mutex_unlock(mutex);
-    super::futex::futex_wait_or_abort((*cond).seq.as_ptr() as *const u32, saved_seq);
+    super::futex::futex_wait_or_abort(
+        (*cond).seq.as_ptr() as *const u32,
+        saved_seq,
+        scope_of(cond),
+    );
     pthread_mutex_lock(mutex);
 
     0
@@ -126,6 +148,7 @@ pub unsafe extern "C" fn pthread_cond_timedwait(
         (*cond).seq.as_ptr() as *const u32,
         saved_seq,
         &raw const relative,
+        scope_of(cond),
     );
     pthread_mutex_lock(mutex);
 
@@ -144,7 +167,7 @@ pub unsafe extern "C" fn pthread_cond_signal(cond: *mut pthread_cond_t) -> c_int
         return EINVAL.raw();
     }
     (*cond).seq.fetch_add(1, Ordering::Release);
-    let _ = Sys::futex_wake((*cond).seq.as_ptr() as *const u32, 1);
+    let _ = Sys::futex_wake((*cond).seq.as_ptr() as *const u32, 1, scope_of(cond));
     0
 }
 
@@ -154,7 +177,11 @@ pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut pthread_cond_t) -> c_
         return EINVAL.raw();
     }
     (*cond).seq.fetch_add(1, Ordering::Release);
-    let _ = Sys::futex_wake((*cond).seq.as_ptr() as *const u32, i32::MAX as u32);
+    let _ = Sys::futex_wake(
+        (*cond).seq.as_ptr() as *const u32,
+        i32::MAX as u32,
+        scope_of(cond),
+    );
     0
 }
 
@@ -165,6 +192,7 @@ pub unsafe extern "C" fn pthread_cond_destroy(cond: *mut pthread_cond_t) -> c_in
     }
     (*cond).seq = AtomicU32::new(0);
     (*cond).mutex = ptr::null_mut();
+    (*cond).pshared = 0;
     0
 }
 
@@ -200,6 +228,38 @@ pub unsafe extern "C" fn pthread_condattr_setclock(
     if clock_id != crate::time::CLOCK_REALTIME && clock_id != crate::time::CLOCK_MONOTONIC {
         return EINVAL.raw();
     }
-    (*attr).clock = clock_id;
+    (*attr).clock = clock_id | ((*attr).clock & CONDATTR_PSHARED);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_setpshared(
+    attr: *mut pthread_condattr_t,
+    pshared: c_int,
+) -> c_int {
+    if attr.is_null() {
+        return EINVAL.raw();
+    }
+    let Some(shared) = pshared_flag(pshared) else {
+        return EINVAL.raw();
+    };
+    let clock = (*attr).clock & !CONDATTR_PSHARED;
+    (*attr).clock = if shared {
+        clock | CONDATTR_PSHARED
+    } else {
+        clock
+    };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_getpshared(
+    attr: *const pthread_condattr_t,
+    pshared: *mut c_int,
+) -> c_int {
+    if attr.is_null() || pshared.is_null() {
+        return EINVAL.raw();
+    }
+    *pshared = pshared_value((*attr).clock & CONDATTR_PSHARED != 0);
     0
 }

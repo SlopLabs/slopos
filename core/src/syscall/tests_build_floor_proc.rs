@@ -1033,7 +1033,9 @@ pub fn test_futex_wait_bitset_past_absolute_deadline_times_out() -> TestResult {
     );
     // Read the bucket while the fixture task is still current: the hooks key
     // on the running task's address space.
-    let leaked = slopos_sched::futex::futex_waiters_for_test(fx.page);
+    let leaked = slopos_sched::futex::futex_waiters_for_test(
+        slopos_sched::futex::FutexKey::private(fx.page),
+    );
     park_bootstrap_on_current_cpu();
     fx.teardown();
 
@@ -1060,17 +1062,34 @@ pub fn test_futex_wake_bitset_wakes_only_the_intersecting_waiter() -> TestResult
 
     let mut parked = 0usize;
     for (id, mask) in [(first, 0b01u32), (second, 0b10u32)] {
-        if make_task_current(id) && slopos_sched::futex::futex_park_bitset_for_test(addr, mask) {
+        if make_task_current(id)
+            && slopos_sched::futex::futex_park_bitset_for_test(
+                slopos_sched::futex::FutexKey::private(addr),
+                mask,
+            )
+        {
             parked += 1;
         }
     }
     park_bootstrap_on_current_cpu();
 
-    let queued = slopos_sched::futex::futex_waiters_for_test(addr);
-    let woken = slopos_sched::futex::futex_wake_bitset(addr, u32::MAX, 0b10);
-    let remaining = slopos_sched::futex::futex_waiters_for_test(addr);
-    let remaining_mask = slopos_sched::futex::futex_waiter_bitset_for_test(addr);
-    let drained = slopos_sched::futex::futex_wake(addr, u32::MAX);
+    let queued =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
+    let woken = slopos_sched::futex::futex_wake(
+        slopos_sched::futex::FutexKey::private(addr),
+        u32::MAX,
+        0b10,
+    );
+    let remaining =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
+    let remaining_mask = slopos_sched::futex::futex_waiter_bitset_for_test(
+        slopos_sched::futex::FutexKey::private(addr),
+    );
+    let drained = slopos_sched::futex::futex_wake(
+        slopos_sched::futex::FutexKey::private(addr),
+        u32::MAX,
+        slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY,
+    );
 
     task_terminate(first);
     task_terminate(second);
@@ -1100,16 +1119,31 @@ pub fn test_futex_requeue_moves_the_surplus_to_the_second_word() -> TestResult {
             break;
         }
         *slot = id;
-        if make_task_current(id) && slopos_sched::futex::futex_park_for_test(src) {
+        if make_task_current(id)
+            && slopos_sched::futex::futex_park_for_test(slopos_sched::futex::FutexKey::private(src))
+        {
             parked += 1;
         }
     }
     park_bootstrap_on_current_cpu();
 
-    let moved = slopos_sched::futex::futex_requeue(src, dst, 1, 2, None);
-    let left_on_src = slopos_sched::futex::futex_waiters_for_test(src);
-    let on_dst = slopos_sched::futex::futex_waiters_for_test(dst);
-    let drained = slopos_sched::futex::futex_wake(dst, u32::MAX);
+    let moved = slopos_sched::futex::futex_requeue(
+        slopos_sched::futex::FutexKey::private(src),
+        src,
+        slopos_sched::futex::FutexKey::private(dst),
+        1,
+        2,
+        None,
+    );
+    let left_on_src =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(src));
+    let on_dst =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(dst));
+    let drained = slopos_sched::futex::futex_wake(
+        slopos_sched::futex::FutexKey::private(dst),
+        u32::MAX,
+        slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY,
+    );
 
     for &id in ids.iter() {
         if id != INVALID_TASK_ID {
@@ -1146,24 +1180,44 @@ pub fn test_futex_key_carries_the_address_space() -> TestResult {
         return fail!("could not create two user tasks");
     }
 
-    let victim_parked =
-        make_task_current(victim_id) && slopos_sched::futex::futex_park_for_test(addr);
-    let victim_queued = slopos_sched::futex::futex_waiters_for_test(addr);
+    let victim_parked = make_task_current(victim_id)
+        && slopos_sched::futex::futex_park_for_test(slopos_sched::futex::FutexKey::private(addr));
+    let victim_queued =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
 
-    let attacker_parked =
-        make_task_current(attacker_id) && slopos_sched::futex::futex_park_for_test(addr);
+    let attacker_parked = make_task_current(attacker_id)
+        && slopos_sched::futex::futex_park_for_test(slopos_sched::futex::FutexKey::private(addr));
     // Still the attacker: every call below is one address space's view.
-    let attacker_queued = slopos_sched::futex::futex_waiters_for_test(addr);
-    let requeued = slopos_sched::futex::futex_requeue(addr, dst, 0, u32::MAX, None);
-    let attacker_left = slopos_sched::futex::futex_waiters_for_test(addr);
-    let attacker_drained = slopos_sched::futex::futex_wake(dst, u32::MAX);
+    let attacker_queued =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
+    let requeued = slopos_sched::futex::futex_requeue(
+        slopos_sched::futex::FutexKey::private(addr),
+        addr,
+        slopos_sched::futex::FutexKey::private(dst),
+        0,
+        u32::MAX,
+        None,
+    );
+    let attacker_left =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
+    let attacker_drained = slopos_sched::futex::futex_wake(
+        slopos_sched::futex::FutexKey::private(dst),
+        u32::MAX,
+        slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY,
+    );
 
     // Not `make_task_current`: its nascent CAS only fires on a task's first
     // dispatch, and the victim has already had one.
     let switched = dispatch_task_for_test(slopos_arch::pcr::get_current_cpu(), victim_id);
-    let victim_left = slopos_sched::futex::futex_waiters_for_test(addr);
-    let victim_moved = slopos_sched::futex::futex_waiters_for_test(dst);
-    let victim_woken = slopos_sched::futex::futex_wake(addr, u32::MAX);
+    let victim_left =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
+    let victim_moved =
+        slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(dst));
+    let victim_woken = slopos_sched::futex::futex_wake(
+        slopos_sched::futex::FutexKey::private(addr),
+        u32::MAX,
+        slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY,
+    );
 
     park_bootstrap_on_current_cpu();
     task_terminate(attacker_id);
@@ -1197,6 +1251,151 @@ pub fn test_futex_key_carries_the_address_space() -> TestResult {
         1,
         "the victim can no longer wake its own waiter"
     );
+    pass!()
+}
+
+type SharedWord = Result<Option<slopos_mm::process_vm::SharedFutexWord>, ()>;
+
+/// What each address space derives for the memfd word, its neighbour, its own
+/// anonymous page and an unmapped address.
+struct SharedWords {
+    a: SharedWord,
+    b: SharedWord,
+    neighbour: SharedWord,
+    anonymous: SharedWord,
+    unmapped: SharedWord,
+}
+
+const SHARED_BASE_A: u64 = slopos_mm::memory_layout_defs::PROCESS_MMAP_START_VA + 0x100_0000;
+const SHARED_BASE_B: u64 = slopos_mm::memory_layout_defs::PROCESS_MMAP_START_VA + 0x140_0000;
+const SHARED_WORD: u64 = 4096 + 8;
+
+/// Map one memfd into both fixtures at different addresses and derive keys.
+#[inline(never)]
+fn map_one_memfd_twice(a: &PageFixture, b: &PageFixture, memfd: usize) -> Option<SharedWords> {
+    use slopos_abi::syscall::{MAP_FIXED, MAP_SHARED, PROT_READ, PROT_WRITE};
+    use slopos_mm::process_vm::{process_vm_mmap_shared, process_vm_shared_futex_word};
+
+    let (proc_a, proc_b) = (a.table.process()?, b.table.process()?);
+    let flags = MAP_SHARED | MAP_FIXED;
+    let prot = PROT_READ | PROT_WRITE;
+    if process_vm_mmap_shared(proc_a, SHARED_BASE_A, 8192, prot, flags, 0, memfd) != SHARED_BASE_A
+        || process_vm_mmap_shared(proc_b, SHARED_BASE_B, 8192, prot, flags, 0, memfd)
+            != SHARED_BASE_B
+    {
+        return None;
+    }
+    Some(SharedWords {
+        a: process_vm_shared_futex_word(proc_a, SHARED_BASE_A + SHARED_WORD),
+        b: process_vm_shared_futex_word(proc_b, SHARED_BASE_B + SHARED_WORD),
+        neighbour: process_vm_shared_futex_word(proc_b, SHARED_BASE_B + SHARED_WORD + 4),
+        anonymous: process_vm_shared_futex_word(proc_a, a.page),
+        unmapped: process_vm_shared_futex_word(proc_a, SHARED_BASE_A + 0x10_0000),
+    })
+}
+
+/// Park `a` on `key`, then wake the word from `b`'s side through the syscall,
+/// privately and then shared. Returns (parked, private woken, shared woken,
+/// left queued).
+#[inline(never)]
+fn wake_across_spaces(
+    a: &PageFixture,
+    b: &PageFixture,
+    key: slopos_sched::futex::FutexKey,
+) -> (bool, u64, u64, usize) {
+    let parked = user_copy_out(b.table, SHARED_BASE_B + SHARED_WORD, &0u32)
+        && make_task_current(a.task_id)
+        && slopos_sched::futex::futex_park_for_test(key);
+    let private_wake = b.call(
+        syscall_futex,
+        [
+            SHARED_BASE_B + SHARED_WORD,
+            FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+            1,
+            0,
+            0,
+            0,
+        ],
+    );
+    let shared_wake = b.call(
+        syscall_futex,
+        [SHARED_BASE_B + SHARED_WORD, FUTEX_WAKE, 1, 0, 0, 0],
+    );
+    let left = slopos_sched::futex::futex_waiters_for_test(key);
+    park_bootstrap_on_current_cpu();
+    (parked, private_wake, shared_wake, left)
+}
+
+/// Without `FUTEX_PRIVATE_FLAG`, a word in a `MAP_SHARED` memfd mapping is
+/// keyed on the memfd and the byte offset: two address spaces mapping it at
+/// different addresses derive one key, and a wake from one reaches a waiter
+/// parked by the other. Private anonymous memory keeps its per-space key.
+pub fn test_shared_futex_keys_on_the_backing_object() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let (Some(a), Some(b)) = (build_page_fixture(), build_page_fixture()) else {
+        return fail!("could not build two page fixtures");
+    };
+    let Some((memfd, _ops, backing)) =
+        slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root())
+    else {
+        a.teardown();
+        b.teardown();
+        return fail!("memfd_create failed");
+    };
+    let sized =
+        slopos_mm::memfd::memfd_ftruncate(memfd, 8192, slopos_ostd::process::AccountId::NONE);
+    let words = map_one_memfd_twice(&a, &b, memfd);
+    let woken = match words.as_ref().map(|w| w.a) {
+        Some(Ok(Some(word))) => Some(wake_across_spaces(
+            &a,
+            &b,
+            slopos_sched::futex::FutexKey::shared(word.object, word.offset),
+        )),
+        _ => None,
+    };
+    a.teardown();
+    b.teardown();
+    drop(backing);
+
+    assert_eq_test!(sized, 0, "memfd_ftruncate failed");
+    let words = assert_some!(words, "the memfd did not map at both addresses");
+    let word_a = assert_some!(
+        words.a.ok().flatten(),
+        "the first mapping has no shared key"
+    );
+    let word_b = assert_some!(
+        words.b.ok().flatten(),
+        "the second mapping has no shared key"
+    );
+    assert_eq_test!(word_a, word_b, "one memfd word derived two keys");
+    assert_eq_test!(
+        word_a.offset,
+        SHARED_WORD,
+        "the key is not the offset into the memfd"
+    );
+    let neighbour = assert_some!(words.neighbour.ok().flatten(), "the next word has no key");
+    assert_test!(neighbour != word_b, "two words of one memfd share a key");
+    assert_test!(
+        matches!(words.anonymous, Ok(None)),
+        "private anonymous memory must keep the address-space key"
+    );
+    assert_test!(
+        words.unmapped.is_err(),
+        "an unmapped word must not derive a key"
+    );
+    let (parked, private_wake, shared_wake, left) = assert_some!(woken, "no key to park on");
+    assert_test!(parked, "could not park the first space's waiter");
+    assert_eq_test!(
+        private_wake,
+        0,
+        "a private wake reached another space's waiter"
+    );
+    assert_eq_test!(
+        shared_wake,
+        1,
+        "a shared wake missed the other space's waiter"
+    );
+    assert_eq_test!(left, 0, "the woken waiter is still queued");
     pass!()
 }
 
@@ -1627,6 +1826,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_futex_key_carries_the_address_space,
+    suite = syscall_proc_build_floor
+);
+slopos_testing::stest!(
+    name = test_shared_futex_keys_on_the_backing_object,
     suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(

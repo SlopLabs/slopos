@@ -31,6 +31,7 @@ pub unsafe extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut u8) -
         super::futex::futex_wait_or_abort(
             &raw const (*tcb).child_tid as *const u32,
             tid_val as u32,
+            crate::pal::FutexScope::Private,
         );
     }
 

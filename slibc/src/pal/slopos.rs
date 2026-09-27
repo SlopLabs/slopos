@@ -1,12 +1,19 @@
 use crate::errno::Errno;
-use crate::pal::Pal;
 use crate::pal::raw::*;
+use crate::pal::{FutexScope, Pal};
 use slopos_abi::fs::{UserFsStat, UserIovec};
 use slopos_abi::signal::UserSigAltStack;
 use slopos_abi::spawn::SpawnAttrs;
 use slopos_abi::syscall::*;
 
 pub struct Sys;
+
+fn futex_scope_flag(scope: FutexScope) -> u64 {
+    match scope {
+        FutexScope::Private => FUTEX_PRIVATE_FLAG,
+        FutexScope::Shared => 0,
+    }
+}
 
 /// Signal restorer trampoline — the address userland installs as
 /// `sa_restorer`. The kernel refuses to deliver a handler whose
@@ -642,12 +649,17 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
-    fn futex_wait(addr: *const u32, val: u32, timeout: *const Timespec) -> Result<(), Errno> {
+    fn futex_wait(
+        addr: *const u32,
+        val: u32,
+        timeout: *const Timespec,
+        scope: FutexScope,
+    ) -> Result<(), Errno> {
         let ret = unsafe {
             syscall4(
                 SYSCALL_FUTEX,
                 addr as u64,
-                FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+                FUTEX_WAIT | futex_scope_flag(scope),
                 val as u64,
                 timeout as u64,
             )
@@ -656,12 +668,12 @@ impl Pal for Sys {
         Ok(())
     }
 
-    fn futex_wake(addr: *const u32, count: u32) -> Result<i32, Errno> {
+    fn futex_wake(addr: *const u32, count: u32, scope: FutexScope) -> Result<i32, Errno> {
         let ret = unsafe {
             syscall3(
                 SYSCALL_FUTEX,
                 addr as u64,
-                FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+                FUTEX_WAKE | futex_scope_flag(scope),
                 count as u64,
             )
         };

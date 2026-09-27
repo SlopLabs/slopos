@@ -9,6 +9,22 @@ use slopos_abi::signal::UserSigAltStack;
 use slopos_abi::spawn::SpawnAttrs;
 use slopos_abi::syscall::{Timespec, UserUtsname};
 
+/// Which futex a wait or wake names: this address space's word
+/// (`FUTEX_PRIVATE_FLAG`), or, for an object made `PTHREAD_PROCESS_SHARED`,
+/// the word of the shared object it lives in, which every process mapping
+/// that object meets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FutexScope {
+    Private,
+    Shared,
+}
+
+impl FutexScope {
+    pub fn of_pshared(pshared: bool) -> Self {
+        if pshared { Self::Shared } else { Self::Private }
+    }
+}
+
 pub trait Pal {
     fn open(path: *const u8, flags: i32, mode: u32) -> Result<i32, Errno>;
     fn close(fd: i32) -> Result<(), Errno>;
@@ -133,9 +149,14 @@ pub trait Pal {
         child_tid: *mut i32,
         tls: u64,
     ) -> Result<i32, Errno>;
-    /// A null `timeout` blocks indefinitely. Sends `FUTEX_PRIVATE_FLAG`.
-    fn futex_wait(addr: *const u32, val: u32, timeout: *const Timespec) -> Result<(), Errno>;
-    fn futex_wake(addr: *const u32, count: u32) -> Result<i32, Errno>;
+    /// A null `timeout` blocks indefinitely.
+    fn futex_wait(
+        addr: *const u32,
+        val: u32,
+        timeout: *const Timespec,
+        scope: FutexScope,
+    ) -> Result<(), Errno>;
+    fn futex_wake(addr: *const u32, count: u32, scope: FutexScope) -> Result<i32, Errno>;
     fn get_cpu_count() -> Result<u32, Errno>;
     fn get_current_cpu() -> Result<u32, Errno>;
     fn set_cpu_affinity(target: u32, affinity: u32) -> Result<(), Errno>;

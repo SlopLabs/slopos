@@ -4,7 +4,9 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::errno::{EAGAIN, EBUSY, EINVAL};
-use crate::pal::{Pal, Sys};
+use crate::pal::{FutexScope, Pal, Sys};
+
+use super::{pshared_flag, pshared_value};
 
 /// Readers occupy the low 15 bits, waiting writers the next 15, and a writer
 /// holding the lock sets bit 30. Every reachable value is positive, so the
@@ -32,32 +34,39 @@ pub struct pthread_rwlock_t {
     /// one word, the same sequence changes the word, so the compare fails and
     /// the reader retries instead of sleeping.
     pub state: AtomicI32,
-    pub _pad: u32,
+    /// Nonzero for `PTHREAD_PROCESS_SHARED`, as `pthread_mutex_t`'s.
+    pub pshared: u32,
     pub _reserved: [u64; 6],
 }
 
 /// 8 bytes, matching the target's `libc`'s `[u64; 1]`.
 #[repr(C)]
 pub struct pthread_rwlockattr_t {
-    pub _opaque: u64,
+    pub pshared: u32,
+    pub _pad: u32,
 }
 
 pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t {
     state: AtomicI32::new(0),
-    _pad: 0,
+    pshared: 0,
     _reserved: [0; 6],
 };
+
+#[inline]
+unsafe fn scope_of(rwlock: *const pthread_rwlock_t) -> FutexScope {
+    FutexScope::of_pshared((*rwlock).pshared != 0)
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_init(
     rwlock: *mut pthread_rwlock_t,
-    _attr: *const pthread_rwlockattr_t,
+    attr: *const pthread_rwlockattr_t,
 ) -> c_int {
     if rwlock.is_null() {
         return EINVAL.raw();
     }
     (*rwlock).state = AtomicI32::new(0);
-    (*rwlock)._pad = 0;
+    (*rwlock).pshared = if attr.is_null() { 0 } else { (*attr).pshared };
     (*rwlock)._reserved = [0; 6];
     0
 }
@@ -74,7 +83,11 @@ pub unsafe extern "C" fn pthread_rwlock_rdlock(rwlock: *mut pthread_rwlock_t) ->
     loop {
         let s = state.load(Ordering::Acquire);
         if s & (WRITER_LOCKED | WRITERS_WAITING_MASK) != 0 {
-            super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, s as u32);
+            super::futex::futex_wait_or_abort(
+                state.as_ptr() as *const u32,
+                s as u32,
+                scope_of(rwlock),
+            );
             continue;
         }
         if s & READERS_MASK == READERS_MASK {
@@ -143,7 +156,11 @@ pub unsafe extern "C" fn pthread_rwlock_wrlock(rwlock: *mut pthread_rwlock_t) ->
     loop {
         let s = state.load(Ordering::Acquire);
         if s & (WRITER_LOCKED | READERS_MASK) != 0 {
-            super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, s as u32);
+            super::futex::futex_wait_or_abort(
+                state.as_ptr() as *const u32,
+                s as u32,
+                scope_of(rwlock),
+            );
             continue;
         }
         // Withdraws this thread's own waiting count and takes the lock in one
@@ -219,7 +236,11 @@ pub unsafe extern "C" fn pthread_rwlock_unlock(rwlock: *mut pthread_rwlock_t) ->
         // Everyone, not one: readers and writers park on the same word, and
         // waking a single sleeper can wake a reader that has to park straight
         // back, leaving the writer the wake was meant for asleep.
-        let _ = Sys::futex_wake(state.as_ptr() as *const u32, i32::MAX as u32);
+        let _ = Sys::futex_wake(
+            state.as_ptr() as *const u32,
+            i32::MAX as u32,
+            scope_of(rwlock),
+        );
         return 0;
     }
 }
@@ -241,7 +262,8 @@ pub unsafe extern "C" fn pthread_rwlockattr_init(attr: *mut pthread_rwlockattr_t
     if attr.is_null() {
         return EINVAL.raw();
     }
-    (*attr)._opaque = 0;
+    (*attr).pshared = 0;
+    (*attr)._pad = 0;
     0
 }
 
@@ -250,6 +272,33 @@ pub unsafe extern "C" fn pthread_rwlockattr_destroy(attr: *mut pthread_rwlockatt
     if attr.is_null() {
         return EINVAL.raw();
     }
-    (*attr)._opaque = 0;
+    (*attr).pshared = 0;
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlockattr_setpshared(
+    attr: *mut pthread_rwlockattr_t,
+    pshared: c_int,
+) -> c_int {
+    if attr.is_null() {
+        return EINVAL.raw();
+    }
+    let Some(shared) = pshared_flag(pshared) else {
+        return EINVAL.raw();
+    };
+    (*attr).pshared = u32::from(shared);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlockattr_getpshared(
+    attr: *const pthread_rwlockattr_t,
+    pshared: *mut c_int,
+) -> c_int {
+    if attr.is_null() || pshared.is_null() {
+        return EINVAL.raw();
+    }
+    *pshared = pshared_value((*attr).pshared != 0);
     0
 }

@@ -5,9 +5,9 @@ use slopos_abi::signal::{
 };
 use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::syscall::{
-    ARCH_GET_FS, ARCH_SET_FS, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE,
-    FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, Rusage, Timespec,
-    Timeval,
+    ARCH_GET_FS, ARCH_SET_FS, FUTEX_BITSET_MATCH_ANY, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK,
+    FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET,
+    FUTEX_WAKE, FUTEX_WAKE_BITSET, Rusage, Timespec, Timeval,
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, SPAWN_PRIVILEGED, SPAWN_RESERVED, SPAWN_USER_SETTABLE, TASK_FLAG_KERNEL_MODE,
@@ -20,6 +20,7 @@ use slopos_fs::vfs::path::RESOLVE_MUST_BE_DIR;
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
 use slopos_ostd::task::{ExitInfo, new_group_in_session, new_session_group};
+use slopos_sched::futex::{self, FutexKey};
 use slopos_sched::scheduler::task_apply_affinity;
 use slopos_sched::task::{
     task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
@@ -1174,6 +1175,26 @@ fn futex_timeout_ms(addr: u64, absolute: bool, realtime: bool) -> Result<Option<
     Ok(Some(remaining_ns.div_ceil(1_000_000)))
 }
 
+/// The key a futex op on `uaddr` names. Without `FUTEX_PRIVATE_FLAG` a word
+/// in a `MAP_SHARED` mapping of a shared object is keyed on the object, so
+/// another process mapping it elsewhere meets it; everything else keys on this
+/// address space, as the flag would.
+fn futex_key(
+    ctx: &crate::syscall::context::SyscallContext,
+    uaddr: u64,
+    private: bool,
+) -> Result<FutexKey, Errno> {
+    if private {
+        return Ok(FutexKey::private(uaddr));
+    }
+    let process = ctx.require_process()?.process().ok_or(Errno::ESRCH)?;
+    match slopos_mm::process_vm::process_vm_shared_futex_word(process, uaddr) {
+        Ok(Some(word)) => Ok(FutexKey::shared(word.object, word.offset)),
+        Ok(None) => Ok(FutexKey::private(uaddr)),
+        Err(()) => Err(Errno::EFAULT),
+    }
+}
+
 define_syscall!(syscall_futex
     (ctx, uaddr: u64, op: u64, val: u32, timeout: u64, uaddr2: u64, val3: u32) cap(NoneSelf)
     -> Result<u64, Errno>
@@ -1189,6 +1210,7 @@ define_syscall!(syscall_futex
 
     let cmd = op & FUTEX_CMD_MASK;
     let realtime = op & FUTEX_CLOCK_REALTIME != 0;
+    let private = op & FUTEX_PRIVATE_FLAG != 0;
     // Linux accepts the clock flag only where the timeout is absolute.
     if realtime && cmd != FUTEX_WAIT_BITSET {
         return Err(Errno::ENOSYS);
@@ -1197,21 +1219,23 @@ define_syscall!(syscall_futex
     let rc = match cmd {
         FUTEX_WAIT => {
             let relative = futex_timeout_ms(timeout, false, false)?;
-            slopos_sched::futex::futex_wait(uaddr, val, relative)
+            let key = futex_key(ctx, uaddr, private)?;
+            futex::futex_wait(key, uaddr, val, relative, FUTEX_BITSET_MATCH_ANY)
         }
         FUTEX_WAIT_BITSET => {
             if val3 == 0 {
                 return Err(Errno::EINVAL);
             }
             let relative = futex_timeout_ms(timeout, true, realtime)?;
-            slopos_sched::futex::futex_wait_bitset(uaddr, val, relative, val3)
+            let key = futex_key(ctx, uaddr, private)?;
+            futex::futex_wait(key, uaddr, val, relative, val3)
         }
-        FUTEX_WAKE => slopos_sched::futex::futex_wake(uaddr, val),
+        FUTEX_WAKE => futex::futex_wake(futex_key(ctx, uaddr, private)?, val, FUTEX_BITSET_MATCH_ANY),
         FUTEX_WAKE_BITSET => {
             if val3 == 0 {
                 return Err(Errno::EINVAL);
             }
-            slopos_sched::futex::futex_wake_bitset(uaddr, val, val3)
+            futex::futex_wake(futex_key(ctx, uaddr, private)?, val, val3)
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             if (uaddr2 & 0x3) != 0 || uaddr2 == uaddr {
@@ -1221,10 +1245,16 @@ define_syscall!(syscall_futex
             if copy_from_user(second).is_err() {
                 return Err(Errno::EFAULT);
             }
+            let src = futex_key(ctx, uaddr, private)?;
+            let dst = futex_key(ctx, uaddr2, private)?;
+            // Two addresses mapping one word of a shared object are one futex.
+            if src == dst {
+                return Err(Errno::EINVAL);
+            }
             // Arg 4 is `val2`, the requeue count, not a timeout.
             let max_requeue = timeout as u32;
             let expected = (cmd == FUTEX_CMP_REQUEUE).then_some(val3);
-            slopos_sched::futex::futex_requeue(uaddr, uaddr2, val, max_requeue, expected)
+            futex::futex_requeue(src, uaddr, dst, val, max_requeue, expected)
         }
         _ => return Err(Errno::ENOSYS),
     };

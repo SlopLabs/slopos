@@ -3,17 +3,25 @@
 use core::ffi::{c_int, c_uint};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::errno::{EAGAIN, EINTR, EINVAL, ENOSYS, EOVERFLOW, ETIMEDOUT, Errno, errno_set};
-use crate::pal::{Pal, Sys};
+use crate::errno::{EAGAIN, EINTR, EINVAL, EOVERFLOW, ETIMEDOUT, Errno, errno_set};
+use crate::pal::{FutexScope, Pal, Sys};
 use crate::time::Timespec;
 
-/// The value, then how many threads sleep on it, as in musl; the rest pads to
-/// the 32 bytes the target's `libc` declares.
+/// The value, then how many threads sleep on it, as in musl, then whether it
+/// is process-shared; the rest pads to the 32 bytes the target's `libc`
+/// declares.
 #[repr(C)]
 pub struct sem_t {
     value: AtomicU32,
     waiters: AtomicU32,
-    _reserved: [u32; 6],
+    pshared: u32,
+    _reserved: [u32; 5],
+}
+
+impl sem_t {
+    fn scope(&self) -> FutexScope {
+        FutexScope::of_pshared(self.pshared != 0)
+    }
 }
 
 const SEM_VALUE_MAX: u32 = i32::MAX as u32;
@@ -39,20 +47,18 @@ fn try_take(sem: &sem_t) -> bool {
     false
 }
 
-/// Private futexes only, so a semaphore another process maps would never be
-/// woken; one that asks to be shared is refused rather than half-working.
+/// A nonzero `pshared` makes every wait and post name the shared object the
+/// semaphore lives in, so processes mapping that object share it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int {
     if sem.is_null() || value > SEM_VALUE_MAX {
         return fail(EINVAL);
     }
-    if pshared != 0 {
-        return fail(ENOSYS);
-    }
     sem.write(sem_t {
         value: AtomicU32::new(value),
         waiters: AtomicU32::new(0),
-        _reserved: [0; 6],
+        pshared: u32::from(pshared != 0),
+        _reserved: [0; 5],
     });
     0
 }
@@ -87,7 +93,7 @@ pub unsafe extern "C" fn sem_post(sem: *mut sem_t) -> c_int {
         }
     }
     if sem.waiters.load(Ordering::SeqCst) > 0 {
-        let _ = Sys::futex_wake(sem.value.as_ptr(), 1);
+        let _ = Sys::futex_wake(sem.value.as_ptr(), 1, sem.scope());
     }
     0
 }
@@ -125,6 +131,7 @@ unsafe fn wait(sem: *mut sem_t, deadline: Option<Timespec>) -> c_int {
             timeout
                 .as_ref()
                 .map_or(core::ptr::null(), |t| t as *const _),
+            sem.scope(),
         );
         sem.waiters.fetch_sub(1, Ordering::SeqCst);
         match slept {

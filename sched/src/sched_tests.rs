@@ -7322,7 +7322,7 @@ pub fn test_futex_bucket_exceeds_old_fixed_cap() -> TestResult {
         if !scheduler::clear_nascent_for_test(id) || !dispatch_as_current(id) {
             break;
         }
-        if !crate::futex::futex_park_for_test(uaddr) {
+        if !crate::futex::futex_park_for_test(crate::futex::FutexKey::private(uaddr)) {
             klog_info!("SCHED_TEST: bucket refused waiter {}", parked + 1);
             outcome = TestResult::Fail;
             break;
@@ -7335,17 +7335,21 @@ pub fn test_futex_bucket_exceeds_old_fixed_cap() -> TestResult {
         klog_info!("SCHED_TEST: only {} waiters parked; cap not lifted", parked);
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_waiters_for_test(uaddr) != parked {
+    if crate::futex::futex_waiters_for_test(crate::futex::FutexKey::private(uaddr)) != parked {
         klog_info!("SCHED_TEST: bucket does not hold every parked waiter");
         outcome = TestResult::Fail;
     }
 
-    let woken = crate::futex::futex_wake(uaddr, parked as u32);
+    let woken = crate::futex::futex_wake(
+        crate::futex::FutexKey::private(uaddr),
+        parked as u32,
+        slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY,
+    );
     if woken != parked as i64 {
         klog_info!("SCHED_TEST: woke {} of {} waiters", woken, parked);
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_waiters_for_test(uaddr) != 0 {
+    if crate::futex::futex_waiters_for_test(crate::futex::FutexKey::private(uaddr)) != 0 {
         klog_info!("SCHED_TEST: bucket not drained after wake");
         outcome = TestResult::Fail;
     }
@@ -7388,43 +7392,48 @@ pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
     let other = 0x1234_6000u64;
     let mut outcome = TestResult::Pass;
 
-    if !crate::futex::futex_park_for_test(uaddr) {
+    if !crate::futex::futex_park_for_test(crate::futex::FutexKey::private(uaddr)) {
         klog_info!("SCHED_TEST: could not park a futex waiter");
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_waiters_for_test(uaddr) != 1 {
+    if crate::futex::futex_waiters_for_test(crate::futex::FutexKey::private(uaddr)) != 1 {
         klog_info!("SCHED_TEST: parked waiter is not in its bucket");
         outcome = TestResult::Fail;
     }
 
-    if crate::futex::futex_remove_self_for_test(other, task_id) {
+    if crate::futex::futex_remove_self_for_test(crate::futex::FutexKey::private(other)) {
         klog_info!("SCHED_TEST: dequeue matched an unrelated futex address");
         outcome = TestResult::Fail;
     }
 
-    if !crate::futex::futex_remove_self_for_test(uaddr, task_id) {
+    if !crate::futex::futex_remove_self_for_test(crate::futex::FutexKey::private(uaddr)) {
         klog_info!("SCHED_TEST: self-dequeue did not find its own entry");
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_waiters_for_test(uaddr) != 0 {
+    if crate::futex::futex_waiters_for_test(crate::futex::FutexKey::private(uaddr)) != 0 {
         klog_info!("SCHED_TEST: bucket still holds the entry after dequeue");
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_remove_self_for_test(uaddr, task_id) {
+    if crate::futex::futex_remove_self_for_test(crate::futex::FutexKey::private(uaddr)) {
         klog_info!("SCHED_TEST: a second dequeue claimed to find an entry");
         outcome = TestResult::Fail;
     }
 
     // A real wake takes the slot, so the self-dequeue reports "not mine".
-    if !crate::futex::futex_park_for_test(uaddr) {
+    if !crate::futex::futex_park_for_test(crate::futex::FutexKey::private(uaddr)) {
         klog_info!("SCHED_TEST: could not re-park the futex waiter");
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_wake(uaddr, 1) != 1 {
+    if crate::futex::futex_wake(
+        crate::futex::FutexKey::private(uaddr),
+        1,
+        slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY,
+    ) != 1
+    {
         klog_info!("SCHED_TEST: futex_wake did not report one waiter");
         outcome = TestResult::Fail;
     }
-    if crate::futex::futex_remove_self_for_test(uaddr, task_id) {
+    if crate::futex::futex_remove_self_for_test(crate::futex::FutexKey::private(uaddr)) {
         klog_info!("SCHED_TEST: self-dequeue claimed an entry futex_wake had taken");
         outcome = TestResult::Fail;
     }

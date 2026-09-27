@@ -4,7 +4,9 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::errno::{EAGAIN, EBUSY, EDEADLK, EINVAL, EPERM};
-use crate::pal::{Pal, Sys};
+use crate::pal::{FutexScope, Pal, Sys};
+
+use super::{pshared_flag, pshared_value};
 
 pub const PTHREAD_MUTEX_NORMAL: c_int = 0;
 pub const PTHREAD_MUTEX_RECURSIVE: c_int = 1;
@@ -33,21 +35,36 @@ pub struct pthread_mutex_t {
     /// and write happens with the lock held.
     pub count: i32,
     pub kind: c_int,
-    pub _reserved: [u64; 3],
+    /// Nonzero for `PTHREAD_PROCESS_SHARED`: the futex calls name the shared
+    /// object the word lives in rather than this address space.
+    pub pshared: c_int,
+    pub _pad: c_int,
+    pub _reserved: [u64; 2],
 }
 
+/// The mutex kind, with [`MUTEXATTR_PSHARED`] folded in: the target's `libc`
+/// gives the attribute four bytes.
 #[repr(C)]
 pub struct pthread_mutexattr_t {
     pub kind: c_int,
 }
+
+const MUTEXATTR_PSHARED: c_int = 1 << 30;
 
 pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t {
     state: AtomicI32::new(0),
     owner_tid: AtomicI32::new(0),
     count: 0,
     kind: PTHREAD_MUTEX_NORMAL,
-    _reserved: [0; 3],
+    pshared: 0,
+    _pad: 0,
+    _reserved: [0; 2],
 };
+
+#[inline]
+unsafe fn scope_of(mutex: *const pthread_mutex_t) -> FutexScope {
+    FutexScope::of_pshared((*mutex).pshared != 0)
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_init(
@@ -60,12 +77,15 @@ pub unsafe extern "C" fn pthread_mutex_init(
     (*mutex).state = AtomicI32::new(0);
     (*mutex).owner_tid = AtomicI32::new(0);
     (*mutex).count = 0;
-    (*mutex)._reserved = [0; 3];
-    (*mutex).kind = if attr.is_null() {
+    (*mutex)._pad = 0;
+    (*mutex)._reserved = [0; 2];
+    let attr_kind = if attr.is_null() {
         PTHREAD_MUTEX_NORMAL
     } else {
         (*attr).kind
     };
+    (*mutex).kind = attr_kind & !MUTEXATTR_PSHARED;
+    (*mutex).pshared = c_int::from(attr_kind & MUTEXATTR_PSHARED != 0);
     0
 }
 
@@ -97,18 +117,18 @@ unsafe fn held_by_caller(mutex: *const pthread_mutex_t, tid: i32) -> bool {
 
 /// Futex-based lock: 0=unlocked, 1=locked, 2=locked+waiters.
 #[inline]
-pub(crate) fn lock_state(state: &AtomicI32) {
+pub(crate) fn lock_state(state: &AtomicI32, scope: FutexScope) {
     if state
         .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
     {
         return;
     }
-    lock_state_contended(state);
+    lock_state_contended(state, scope);
 }
 
 #[cold]
-fn lock_state_contended(state: &AtomicI32) {
+fn lock_state_contended(state: &AtomicI32, scope: FutexScope) {
     let mut seen = spin_while_held(state);
     if seen == 0 {
         match state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) {
@@ -121,7 +141,7 @@ fn lock_state_contended(state: &AtomicI32) {
     // A waiter that takes the lock takes it as contended: it cannot know
     // whether it was the last one parked.
     while seen == 2 || state.swap(2, Ordering::Acquire) != 0 {
-        super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, 2);
+        super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, 2, scope);
         seen = spin_while_held(state);
     }
     crate::errno::errno_set(saved);
@@ -149,10 +169,10 @@ fn spin_while_held(state: &AtomicI32) -> i32 {
 }
 
 #[inline]
-pub(crate) fn unlock_state(state: &AtomicI32) {
+pub(crate) fn unlock_state(state: &AtomicI32, scope: FutexScope) {
     if state.swap(0, Ordering::Release) == 2 {
         let saved = crate::errno::errno_get();
-        let _ = Sys::futex_wake(state.as_ptr() as *const u32, 1);
+        let _ = Sys::futex_wake(state.as_ptr() as *const u32, 1, scope);
         crate::errno::errno_set(saved);
     }
 }
@@ -166,7 +186,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> c_in
     // `PTHREAD_MUTEX_NORMAL` is the only kind Rust's `std` ever creates, and
     // it needs no owner: the futex word alone is the lock.
     if (*mutex).kind == PTHREAD_MUTEX_NORMAL {
-        lock_state(&(*mutex).state);
+        lock_state(&(*mutex).state, scope_of(mutex));
         return 0;
     }
 
@@ -182,7 +202,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> c_in
         return 0;
     }
 
-    lock_state(&(*mutex).state);
+    lock_state(&(*mutex).state, scope_of(mutex));
     (*mutex).owner_tid.store(tid, Ordering::Relaxed);
     (*mutex).count = 1;
     0
@@ -245,7 +265,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> c_
         (*mutex).owner_tid.store(0, Ordering::Relaxed);
     }
 
-    unlock_state(&(*mutex).state);
+    unlock_state(&(*mutex).state, scope_of(mutex));
     0
 }
 
@@ -261,6 +281,7 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut pthread_mutex_t) -> c
     (*mutex).owner_tid = AtomicI32::new(0);
     (*mutex).kind = 0;
     (*mutex).count = 0;
+    (*mutex).pshared = 0;
     0
 }
 
@@ -289,7 +310,7 @@ pub unsafe extern "C" fn pthread_mutexattr_settype(
     {
         return EINVAL.raw();
     }
-    (*attr).kind = kind;
+    (*attr).kind = kind | ((*attr).kind & MUTEXATTR_PSHARED);
     0
 }
 
@@ -299,5 +320,37 @@ pub unsafe extern "C" fn pthread_mutexattr_destroy(attr: *mut pthread_mutexattr_
         return EINVAL.raw();
     }
     (*attr).kind = 0;
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_setpshared(
+    attr: *mut pthread_mutexattr_t,
+    pshared: c_int,
+) -> c_int {
+    if attr.is_null() {
+        return EINVAL.raw();
+    }
+    let Some(shared) = pshared_flag(pshared) else {
+        return EINVAL.raw();
+    };
+    let kind = (*attr).kind & !MUTEXATTR_PSHARED;
+    (*attr).kind = if shared {
+        kind | MUTEXATTR_PSHARED
+    } else {
+        kind
+    };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_getpshared(
+    attr: *const pthread_mutexattr_t,
+    pshared: *mut c_int,
+) -> c_int {
+    if attr.is_null() || pshared.is_null() {
+        return EINVAL.raw();
+    }
+    *pshared = pshared_value((*attr).kind & MUTEXATTR_PSHARED != 0);
     0
 }

@@ -6,7 +6,7 @@
 //! reports why.
 
 use crate::errno::{EAGAIN, EINTR, ETIMEDOUT};
-use crate::pal::{Pal, Sys};
+use crate::pal::{FutexScope, Pal, Sys};
 
 /// Block on `addr` until woken.
 ///
@@ -16,8 +16,8 @@ use crate::pal::{Pal, Sys};
 /// performed at all, and spinning on it would hide a kernel-side failure
 /// behind a pegged CPU.
 #[inline]
-pub(crate) fn futex_wait_or_abort(addr: *const u32, val: u32) {
-    match Sys::futex_wait(addr, val, core::ptr::null()) {
+pub(crate) fn futex_wait_or_abort(addr: *const u32, val: u32, scope: FutexScope) {
+    match Sys::futex_wait(addr, val, core::ptr::null(), scope) {
         Ok(()) => {}
         Err(e) if e == EAGAIN || e == EINTR || e == ETIMEDOUT => {}
         Err(_) => abort_unexpected(),
