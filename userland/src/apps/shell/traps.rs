@@ -8,9 +8,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-use slopos_abi::signal::{
-    SIGINT, SIGKILL, SIGNAL_MASK, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SigSet, sig_bit,
-};
+use slopos_abi::signal::{SIGINT, SIGKILL, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SigSet, sig_bit};
 use slopos_shell_core::trap::{self, Action, Condition, MAX_SIGNAL};
 
 use crate::syscall::process;
@@ -170,7 +168,7 @@ pub fn any_pending() -> bool {
 
 /// The lowest trapped signal received but not yet acted on.
 pub fn pending_signal() -> Option<u8> {
-    let pending = PENDING.load(Ordering::Acquire) & SIGNAL_MASK;
+    let pending = PENDING.load(Ordering::Acquire);
     (pending != 0).then(|| pending.trailing_zeros() as u8 + 1)
 }
 
@@ -213,7 +211,7 @@ pub fn run_pending() {
         return;
     }
     'drain: loop {
-        let pending = PENDING.swap(0, Ordering::AcqRel) & SIGNAL_MASK;
+        let pending = PENDING.swap(0, Ordering::AcqRel);
         if pending == 0 {
             break;
         }
