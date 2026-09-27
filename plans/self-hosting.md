@@ -62,11 +62,13 @@ The patches today, by what they do:
    tarball, check it, and build it with the SlopOS clang against slibc into a
    prefix the dev disk carries. A recipe that needs a source patch is a
    finding against slibc or the kernel, not a patch to carry.
-2. **Cargo's network, unpatched.** zlib, nghttp2, libcurl with a TLS library,
-   libssh2 and libgit2 as recipes; cargo built with its default features;
-   `cargo/0001` and `compiler/0002` deleted. Decide the TLS library when
-   libcurl is ported: OpenSSL is the stock choice and a second TLS stack beside
-   `tls-core`; libcurl over rustls keeps TLS in Rust.
+2. **Cargo's network, unpatched.** zlib, nghttp2, OpenSSL, libcurl, libssh2
+   and libgit2 as recipes; cargo built with its default features;
+   `cargo/0001` and `compiler/0002` deleted. OpenSSL is not a choice: on a
+   Unix target `git2` (cargo enables `https` and `ssh`), `libgit2-sys` and
+   `libssh2-sys` depend on it, and curl takes it by default, so rustls would
+   cost a patch to cargo's manifest and still ship OpenSSL. OpenSSL 3 is
+   Apache-2.0, which GPL-3.0 takes; SlopOS's own programs keep `tls-core`.
 3. **POSIX where SlopOS approximates it.** Each deviation is either fixed or a
    port breaks on it:
    - the working directory is per-thread, not per-process;
@@ -79,13 +81,14 @@ The patches today, by what they do:
    - no `mkfifo`, and the shell has no `trap`.
 
    One user, uid 0, stays until a port needs more.
-4. **A fork a large process can afford.** A `fork` charges the child's copy
-   of every private region to the commit ledger up front, so a gigabyte
-   compiler forking owes a second gigabyte, and the jobserver port exists so
-   cargo's children never fork. Charge a forked copy as it is written, as
-   Linux's default overcommit does, and delete the port. The price is that a
-   refusal lands as `SIGBUS` at the write that needed the page, not as
-   `ENOMEM` from `fork`.
+4. **A fork a large process can afford.** A forked copy is charged to the
+   commit ledger as its pages are written, as Linux's default overcommit does;
+   `mmap` and `brk` stay charged when they are made. Unix software assumes a
+   fork is cheap (make, shells, git, cargo's `pre_exec` children), and charging
+   a gigabyte compiler's copy up front is why the jobserver port exists, which
+   goes. With no OOM killer, a refusal lands as `SIGBUS` at the write that
+   needed the page, as a refused stack growth does today; a fork that execs
+   right away writes almost nothing.
 5. **No speed patches of our own.** Upstream `llvm-rustc/0002,0003` or drop
    them and take the cost in build time.
 
@@ -188,7 +191,7 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - **ABI.** Linux x86-64 syscall numbers, no Linux binary compatibility. Unlike
   Asterinas, which runs stock NixOS gcc and git, every tool here is compiled
   for SlopOS; unlike a fork, it is compiled unchanged.
-- **Memory.** A commit ledger, not swap.
+- **Memory.** A commit ledger, not swap; a forked copy is charged as written.
 - **The dev loop.** One development machine (`just boot`, and `just
   boot-fast` to skip the wheel) and one live artifact (`just iso`); knobs
   (`KERNEL_RELEASE`, `VIDEO`, `ports`, `DEBUG`, `ROULETTE`) rather than more
