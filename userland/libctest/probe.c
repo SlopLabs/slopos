@@ -6,16 +6,19 @@
 // `libc_abi_test` grades the exit status: 0, or the number of the check
 // that failed.
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fenv.h>
+#include <iconv.h>
 #include <inttypes.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
+#include <netdb.h>
 #include <nl_types.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -27,12 +30,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/auxv.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/wait.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -1752,6 +1758,228 @@ static int semaphores(void) {
     return sem_destroy(&sem) == 0 ? 1 : fail("sem_destroy failed");
 }
 
+// What curl, OpenSSL and libgit2 need from the C library beyond what rustc's
+// own dependencies did.
+static int case_and_bits(void) {
+    if (strcasecmp("HeLLo", "hello") != 0 || strcasecmp("apple", "BANANA") >= 0 ||
+        strcasecmp("Zed", "abc") <= 0 || strncasecmp("CONTENT-type", "content-TYPO", 10) != 0 ||
+        strncasecmp("abc", "ABD", 3) >= 0 || strncasecmp("x", "y", 0) != 0) {
+        return fail("strcasecmp compared case-sensitively or past n");
+    }
+    if (ffs(0) != 0 || ffs(1) != 1 || ffs(0x80) != 8 || ffs(INT_MIN) != 32) {
+        return fail("ffs did not number the lowest set bit from one");
+    }
+    return 1;
+}
+
+static int unbuffered(void) {
+    const char *path = "/tmp/libc_probe_setbuf";
+    FILE *out = fopen(path, "w");
+    if (!out) {
+        return fail("could not create the setbuf file");
+    }
+    setbuf(out, NULL);
+    fputs("now", out);
+    char seen[8] = {0};
+    int fd = open(path, O_RDONLY);
+    ssize_t got = fd < 0 ? -1 : read(fd, seen, sizeof seen);
+    close(fd);
+    fclose(out);
+    unlink(path);
+    return got == 3 && memcmp(seen, "now", 3) == 0 ? 1
+                                                   : fail("setbuf(NULL) left the stream buffered");
+}
+
+static int locked_pages(void) {
+    long page = sysconf(_SC_PAGESIZE);
+    char *map = mmap(NULL, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0);
+    if (map == MAP_FAILED || munmap(map + page, (size_t)page) != 0) {
+        return fail("could not map the mlock pages");
+    }
+    if (mlock(map, (size_t)page) != 0 || munlock(map, (size_t)page) != 0) {
+        return fail("mlock of a mapped page failed");
+    }
+    if (mlock(map, (size_t)page * 2) == 0 || errno != ENOMEM) {
+        return fail("mlock over an unmapped page did not fail with ENOMEM");
+    }
+    munmap(map, (size_t)page);
+    return 1;
+}
+
+static int waited_signal(void) {
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &set, &old) != 0 || raise(SIGUSR2) != 0) {
+        return fail("could not leave SIGUSR2 pending");
+    }
+    int sig = 0;
+    if (sigwait(&set, &sig) != 0 || sig != SIGUSR2) {
+        return fail("sigwait did not take the pending signal");
+    }
+    sigset_t pending;
+    sigpending(&pending);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    return sigismember(&pending, SIGUSR2) ? fail("sigwait left its signal pending") : 1;
+}
+
+// The parent's child totals grow only by what a reaped child burned.
+static int child_times(void) {
+    struct tms before, after;
+    if (times(&before) == (clock_t)-1) {
+        return fail("times failed");
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        struct tms own;
+        volatile uint64_t spin = 0;
+        do {
+            for (int i = 0; i < 1000000; i++) {
+                spin += (uint64_t)i;
+            }
+            times(&own);
+        } while (own.tms_utime + own.tms_stime == 0);
+        _exit(0);
+    }
+    int status = -1;
+    if (child < 0 || waitpid(child, &status, 0) != child || status != 0) {
+        return fail("the times child did not exit cleanly");
+    }
+    clock_t now = times(&after);
+    if (now == (clock_t)-1 || after.tms_cutime + after.tms_cstime <= 0 ||
+        after.tms_cutime < before.tms_cutime || after.tms_utime < before.tms_utime) {
+        return fail("times did not charge a reaped child's CPU to the parent");
+    }
+    return 1;
+}
+
+// LOG_PERROR copies the message, without its priority, to stderr.
+static int logging(void) {
+    int pipefd[2], saved = dup(2);
+    if (saved < 0 || pipe(pipefd) != 0 || dup2(pipefd[1], 2) != 2) {
+        return fail("could not capture stderr for syslog");
+    }
+    openlog("probe", LOG_PERROR, LOG_DAEMON);
+    int first = setlogmask(LOG_UPTO(LOG_WARNING));
+    errno = ENOENT;
+    syslog(LOG_ERR, "gone: %m %d", 7);
+    int kept = errno;
+    syslog(LOG_DEBUG, "masked");
+    int mask = setlogmask(0);
+    setlogmask(first);
+    closelog();
+    dup2(saved, 2);
+    close(saved);
+    close(pipefd[1]);
+    char line[128] = {0};
+    ssize_t got = read(pipefd[0], line, sizeof line - 1);
+    close(pipefd[0]);
+    if (kept != ENOENT || mask != LOG_UPTO(LOG_WARNING)) {
+        return fail("syslog clobbered errno or setlogmask lost the mask");
+    }
+    const char *want = "probe: gone: ";
+    if (got <= 0 || strncmp(line, want, strlen(want)) != 0 || !strstr(line, " 7\n") ||
+        strstr(line, "masked")) {
+        return fail("syslog LOG_PERROR wrote the wrong line");
+    }
+    return 1;
+}
+
+static int addresses(void) {
+    struct in_addr v4;
+    unsigned char v6[16];
+    char text[INET6_ADDRSTRLEN];
+    if (inet_pton(AF_INET, "192.168.1.20", &v4) != 1 || ntohl(v4.s_addr) != 0xC0A80114u ||
+        inet_pton(AF_INET, "1.2.3", &v4) != 0 || inet_pton(AF_INET, "256.2.3.4", &v4) != 0) {
+        return fail("inet_pton accepted or misread an IPv4 address");
+    }
+    if (inet_pton(AF_INET6, "2001:DB8:0:0:1:0:0:1", v6) != 1 ||
+        !inet_ntop(AF_INET6, v6, text, sizeof text) || strcmp(text, "2001:db8::1:0:0:1") != 0) {
+        return fail("inet_ntop did not write RFC 5952 form");
+    }
+    if (inet_pton(AF_INET6, "::ffff:10.0.0.1", v6) != 1 || v6[10] != 0xff || v6[12] != 10 ||
+        inet_pton(AF_INET6, "1::2::3", v6) != 0) {
+        return fail("inet_pton misread an IPv6 address");
+    }
+    if (inet_ntop(AF_INET, &v4, text, 4) != NULL || errno != ENOSPC ||
+        inet_pton(12345, "1.2.3.4", &v4) != -1 || errno != EAFNOSUPPORT) {
+        return fail("inet_ntop/inet_pton did not report ENOSPC/EAFNOSUPPORT");
+    }
+
+    struct sockaddr_in6 sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin6_family = AF_INET6;
+    sa.sin6_port = htons(443);
+    sa.sin6_addr.s6_addr[15] = 1;
+    char host[NI_MAXHOST], serv[NI_MAXSERV];
+    if (getnameinfo((struct sockaddr *)&sa, sizeof sa, host, sizeof host, serv, sizeof serv,
+                    NI_NUMERICHOST | NI_NUMERICSERV) != 0 ||
+        strcmp(host, "::1") != 0 || strcmp(serv, "443") != 0) {
+        return fail("getnameinfo did not render [::1]:443");
+    }
+    if (getnameinfo((struct sockaddr *)&sa, sizeof sa, host, sizeof host, NULL, 0, NI_NAMEREQD) !=
+            EAI_NONAME ||
+        getnameinfo((struct sockaddr *)&sa, sizeof sa, host, 3, NULL, 0, 0) != EAI_OVERFLOW) {
+        return fail("getnameinfo did not refuse NI_NAMEREQD or a short buffer");
+    }
+
+    struct hostent *he = gethostbyname("10.0.2.2");
+    if (!he || he->h_addrtype != AF_INET || he->h_length != 4 ||
+        memcmp(he->h_addr_list[0], "\x0a\x00\x02\x02", 4) != 0 || he->h_addr_list[1] != NULL ||
+        strcmp(he->h_name, "10.0.2.2") != 0) {
+        return fail("gethostbyname did not resolve a numeric address");
+    }
+    return getservbyname("https", "tcp") == NULL ? 1 : fail("getservbyname invented a service");
+}
+
+static size_t convert(const char *to, const char *from, const char *in, size_t inlen, char *out,
+                      size_t outlen, size_t *wrote, int *err) {
+    iconv_t cd = iconv_open(to, from);
+    if (cd == (iconv_t)-1) {
+        *err = errno;
+        return (size_t)-1;
+    }
+    char *src = (char *)in, *dst = out;
+    size_t left = inlen, room = outlen;
+    errno = 0;
+    size_t r = iconv(cd, &src, &left, &dst, &room);
+    *err = errno;
+    *wrote = outlen - room;
+    iconv_close(cd);
+    return r;
+}
+
+static int conversion(void) {
+    char out[16];
+    size_t wrote = 0;
+    int err = 0;
+    if (convert("ISO-8859-1", "UTF-8", "caf\xc3\xa9", 5, out, sizeof out, &wrote, &err) != 0 ||
+        wrote != 4 || memcmp(out, "caf\xe9", 4) != 0 ||
+        convert("ASCII", "UTF-8", "\xe2\x82\xac!", 4, out, sizeof out, &wrote, &err) != 1 ||
+        wrote != 2 || memcmp(out, "?!", 2) != 0) {
+        return fail("iconv UTF-8 to Latin-1 failed");
+    }
+    if (convert("UTF-16LE", "UTF-8", "\xe2\x82\xac", 3, out, sizeof out, &wrote, &err) != 0 ||
+        wrote != 2 || memcmp(out, "\xac\x20", 2) != 0) {
+        return fail("iconv UTF-8 to UTF-16LE failed");
+    }
+    if (convert("UTF-8", "UTF-8", "a\xff", 2, out, sizeof out, &wrote, &err) != (size_t)-1 ||
+        err != EILSEQ || wrote != 1) {
+        return fail("iconv did not stop at an invalid sequence with EILSEQ");
+    }
+    if (convert("UTF-32BE", "UTF-8", "ab", 2, out, 6, &wrote, &err) != (size_t)-1 || err != E2BIG ||
+        wrote != 4) {
+        return fail("iconv did not stop with E2BIG when the output filled");
+    }
+    if (convert("EBCDIC-NOPE", "UTF-8", "", 0, out, sizeof out, &wrote, &err) != (size_t)-1 ||
+        err != EINVAL) {
+        return fail("iconv_open accepted an unknown codeset");
+    }
+    return 1;
+}
+
 static int run(void) {
     static int (*const checks[])(void) = {
         jumps,           mask_jumps,          calendar,
@@ -1763,7 +1991,9 @@ static int run(void) {
         wide_stdio,      widest_integers,     scan_conversions,
         absent_posix,    entry_points,        floating_env,
         llvm_surface,    files_for_rust,      signal_sender,
-        semaphores,
+        semaphores,      case_and_bits,       unbuffered,
+        locked_pages,    waited_signal,       child_times,
+        logging,         addresses,           conversion,
     };
     for (size_t i = 0; i < sizeof checks / sizeof checks[0]; i++) {
         check = (int)i + 1;

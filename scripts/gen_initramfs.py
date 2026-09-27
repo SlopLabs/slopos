@@ -163,6 +163,7 @@ def main() -> None:
     bundle = os.path.join(certs_dir, "ca-certificates.crt")
     if os.path.isfile(bundle):
         entries.append((b"/etc/ssl/certs/ca-certificates.crt", MODE_DATA, read_file(bundle)))
+        entries.append((b"/etc/ssl/cert.pem", MODE_LINK, b"certs/ca-certificates.crt"))
         entries.append((
             b"/usr/share/licenses/ca-certificates/MPL-2.0.txt",
             MODE_DATA,

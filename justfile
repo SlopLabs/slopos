@@ -794,6 +794,10 @@ toolchain *ARGS:
 toolchain-profile *ARGS:
     scripts/make_toolchain_profile.sh {{ARGS}}
 
+[doc("Build the C libraries under toolchain/recipes/ (zlib, nghttp2, OpenSSL, curl, libssh2, libgit2) for SlopOS from their pinned tarballs into builddir/slopos-recipes/prefix; names build only those and what they depend on")]
+recipes *NAMES: _build-userland-tests
+    BUILD_DIR={{build_dir}} scripts/build_recipes.sh {{NAMES}}
+
 [doc("Hold the cross-build plan and the compiler wrapper to the toolchain they claim to produce. Needs `just rustc-src` and a tests userland build first.")]
 check-bootstrap-config:
     scripts/check_bootstrap_config.sh --require

@@ -502,6 +502,9 @@ if [ -f "$CERTS_DIR/ca-certificates.crt" ]; then
     mkdir_p /etc/ssl
     mkdir_p /etc/ssl/certs
     install_file "$CERTS_DIR/ca-certificates.crt" /etc/ssl/certs/ca-certificates.crt
+    # OpenSSL's default CA file.
+    debugfs -w -R "rm /etc/ssl/cert.pem" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    debugfs -w -R "symlink /etc/ssl/cert.pem certs/ca-certificates.crt" "$IMAGE_PATH" >/dev/null
     mkdir_p /usr/share/licenses
     mkdir_p /usr/share/licenses/ca-certificates
     install_file "$CERTS_DIR/MPL-2.0.txt" /usr/share/licenses/ca-certificates/MPL-2.0.txt
