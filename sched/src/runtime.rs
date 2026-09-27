@@ -498,6 +498,10 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             continue;
         }
 
+        if prezero_while_idle(cpu_id) {
+            continue;
+        }
+
         crate::scheduler::arm_tickless_idle_if_due();
 
         slopos_ostd::sync::rcu_note_cpu_idle_enter();
@@ -506,4 +510,19 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         crate::profile::halt_end(cpu_id);
         slopos_ostd::sync::rcu_note_cpu_idle_exit();
     }
+}
+
+/// Pages an idle CPU scrubs between looks for work: about 20 µs, the
+/// longest a task woken onto it waits for the scrubbing to notice.
+const IDLE_PREZERO_BATCH: usize = 16;
+
+/// Scrub frames for the fault paths while nothing is runnable here; `true`
+/// when work arrived and the loop should dispatch it rather than halt.
+fn prezero_while_idle(cpu_id: usize) -> bool {
+    while slopos_mm::page_alloc::prezero_idle(IDLE_PREZERO_BATCH) > 0 {
+        if per_cpu::has_local_work(cpu_id) {
+            return true;
+        }
+    }
+    false
 }

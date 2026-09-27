@@ -921,6 +921,13 @@ impl BuddyAllocator {
         pcp::for_each_at_shutdown(|_cpu, cache| {
             let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
             loop {
+                // Scrubbed frames are free frames like any other.
+                while cache.zeroed_count > 0 && (cache.count as usize) < pcp::PCP_CAPACITY {
+                    cache.zeroed_count -= 1;
+                    cache.stack[cache.count as usize] = cache.zeroed[cache.zeroed_count as usize];
+                    cache.zeroed[cache.zeroed_count as usize] = INVALID_PAGE_FRAME;
+                    cache.count += 1;
+                }
                 if cache.count == 0 {
                     break;
                 }
@@ -975,6 +982,14 @@ impl BuddyAllocator {
             && (flags & ALLOC_FLAG_ORDER_MASK) == 0
             && (flags & ALLOC_FLAG_NO_PCP) == 0
             && pcp::is_live();
+
+        if use_pcp && scrub {
+            let _no_migrate = PreemptGuard::new();
+            let frame = self.pcp_try_alloc_zeroed(slopos_arch::pcr::get_current_cpu());
+            if frame != INVALID_PAGE_FRAME {
+                return PhysAddr::new((frame as u64) << 12);
+            }
+        }
 
         let mut attempts = 0u32;
         let mut quiesce_recovered = false;
@@ -1155,10 +1170,21 @@ impl BuddyAllocator {
 
         let mut frames = [INVALID_PAGE_FRAME; pcp::PCP_CAPACITY];
         let mut filled = 0usize;
+        // The first `zeroed` come from the scrubbed stack and skip the scrub.
+        let mut zeroed = 0usize;
 
         if pcp::is_live() {
             let _no_migrate = PreemptGuard::new();
             let cpu = slopos_arch::pcr::get_current_cpu();
+            while filled < out.len() {
+                let frame = self.pcp_try_alloc_zeroed(cpu);
+                if frame == INVALID_PAGE_FRAME {
+                    break;
+                }
+                frames[filled] = frame;
+                filled += 1;
+            }
+            zeroed = filled;
             while filled < out.len() {
                 let mut frame = self.pcp_try_alloc(cpu);
                 if frame == INVALID_PAGE_FRAME {
@@ -1188,7 +1214,7 @@ impl BuddyAllocator {
                     out[i] = inner.frame_to_phys(frames[i]);
                 }
             });
-            for i in 0..filled {
+            for i in zeroed..filled {
                 if zero_physical_page(out[i]) != 0 {
                     klog_info!(
                         "alloc_pcp_batch: zero_physical_page failed at 0x{:x}",
@@ -1222,6 +1248,71 @@ impl BuddyAllocator {
             desc.next_free = INVALID_PAGE_FRAME;
         });
         frame_num
+    }
+
+    fn pcp_try_alloc_zeroed(&self, cpu: usize) -> u32 {
+        debug_assert!(PreemptGuard::is_active());
+        let Some(cache) = pcp::cache_mut(cpu) else {
+            return INVALID_PAGE_FRAME;
+        };
+        if !pcp::is_live() || cache.zeroed_count == 0 {
+            return INVALID_PAGE_FRAME;
+        }
+        cache.zeroed_count -= 1;
+        let frame_num = cache.zeroed[cache.zeroed_count as usize];
+        cache.zeroed[cache.zeroed_count as usize] = INVALID_PAGE_FRAME;
+        cache
+            .alloc_count
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.frame_desc_lockfree(frame_num, |desc| {
+            desc.state = PAGE_FRAME_ALLOCATED;
+            desc.next_free = INVALID_PAGE_FRAME;
+        });
+        frame_num
+    }
+
+    /// Scrub up to `budget` of this CPU's cached frames onto its zeroed
+    /// stack, for an idle CPU: the order-0 allocations a fault makes then
+    /// take a scrubbed frame instead of clearing one under the address-space
+    /// lock. Answers how many it scrubbed.
+    pub fn prezero_idle(&self, budget: usize) -> usize {
+        if !pcp::is_live() {
+            return 0;
+        }
+        let _no_migrate = PreemptGuard::new();
+        let cpu = slopos_arch::pcr::get_current_cpu();
+        let mut done = 0usize;
+        while done < budget {
+            let Some(cache) = pcp::cache_mut(cpu) else {
+                break;
+            };
+            if cache.zeroed_count as usize >= pcp::ZEROED_CAPACITY {
+                break;
+            }
+            if cache.count == 0 {
+                self.pcp_refill(cpu, 0);
+            }
+            let Some(cache) = pcp::cache_mut(cpu) else {
+                break;
+            };
+            if cache.count == 0 {
+                break;
+            }
+            // Still a cached free frame while it is scrubbed: its descriptor
+            // stays `PAGE_FRAME_PCP`, and nothing else can reach it.
+            cache.count -= 1;
+            let frame_num = cache.stack[cache.count as usize];
+            cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
+            if zero_physical_page(PhysAddr::new((frame_num as u64) << 12)) != 0 {
+                cache.stack[cache.count as usize] = frame_num;
+                cache.count += 1;
+                break;
+            }
+            cache.zeroed[cache.zeroed_count as usize] = frame_num;
+            cache.zeroed_count += 1;
+            done += 1;
+        }
+        done
     }
 
     fn pcp_refill(&self, cpu: usize, flags: u32) {

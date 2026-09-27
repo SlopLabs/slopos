@@ -53,6 +53,12 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
     BUDDY_ALLOCATOR.alloc_raw(count, flags)
 }
 
+/// Scrub up to `budget` cached frames ahead of the fault paths that would
+/// scrub them; for an idle CPU. See [`BuddyAllocator::prezero_idle`].
+pub fn prezero_idle(budget: usize) -> usize {
+    BUDDY_ALLOCATOR.prezero_idle(budget)
+}
+
 /// Raw single-page buddy entry point. See [`__alloc_page_frames_raw`]
 /// for the audit-point rationale.
 #[doc(hidden)]

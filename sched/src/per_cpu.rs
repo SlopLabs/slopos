@@ -1039,6 +1039,15 @@ fn kick_idle_peer(busy: usize) {
     }
 }
 
+/// Work this CPU's idle loop would dispatch or steal if it looked now.
+pub fn has_local_work(cpu_id: usize) -> bool {
+    (cpu_id < slopos_arch::MAX_CPUS && KICK_PENDING[cpu_id].load(Ordering::Acquire))
+        || with_cpu_scheduler(cpu_id, |sched| {
+            sched.total_ready_count() > 0 || sched.has_pending_inbox()
+        })
+        .unwrap_or(false)
+}
+
 /// The kick has landed: this CPU's scheduler loop is looking for work.
 pub fn clear_idle_kick(cpu_id: usize) {
     if cpu_id < slopos_arch::MAX_CPUS {

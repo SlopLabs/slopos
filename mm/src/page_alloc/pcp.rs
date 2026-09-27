@@ -17,6 +17,9 @@ pub(super) const PCP_CAPACITY: usize = 64;
 pub(super) const PCP_LOW_WATERMARK: u32 = 8;
 pub(super) const PCP_HIGH_WATERMARK: u32 = PCP_CAPACITY as u32;
 pub(super) const PCP_BATCH_SIZE: u32 = 16;
+/// Frames an idle CPU has scrubbed ahead of the order-0 allocations that
+/// would scrub them on a fault path: 1 MiB per CPU.
+pub(super) const ZEROED_CAPACITY: usize = 256;
 
 /// `count`/`stack` are non-atomic: only the owning CPU touches them, under a
 /// [`PreemptGuard`]. The counters are atomic for cross-CPU stat reads.
@@ -24,6 +27,8 @@ pub(super) const PCP_BATCH_SIZE: u32 = 16;
 pub(super) struct PerCpuPageCache {
     pub(super) stack: [u32; PCP_CAPACITY],
     pub(super) count: u32,
+    pub(super) zeroed: [u32; ZEROED_CAPACITY],
+    pub(super) zeroed_count: u32,
     pub(super) alloc_count: AtomicU32,
     pub(super) free_count: AtomicU32,
 }
@@ -33,6 +38,8 @@ impl PerCpuPageCache {
         Self {
             stack: [INVALID_PAGE_FRAME; PCP_CAPACITY],
             count: 0,
+            zeroed: [INVALID_PAGE_FRAME; ZEROED_CAPACITY],
+            zeroed_count: 0,
             alloc_count: AtomicU32::new(0),
             free_count: AtomicU32::new(0),
         }
@@ -94,7 +101,9 @@ pub(super) fn total_cached() -> u32 {
     let mut total = 0u32;
     for cpu in 0..get_cpu_count().min(MAX_CPUS) {
         if let Some(cache) = PER_CPU_CACHES.snapshot_for_cpu(cpu) {
-            total = total.saturating_add(cache.count);
+            total = total
+                .saturating_add(cache.count)
+                .saturating_add(cache.zeroed_count);
         }
     }
     total
