@@ -920,6 +920,9 @@ impl Ext2Mount {
         match mounted {
             Ok(info) => {
                 self.dcache_live.store(true, Ordering::Release);
+                // Attaching stamped the image dirty, and a mount nothing
+                // writes to runs no pass that would stamp it clean again.
+                self.clean_owed.store(true, Ordering::Relaxed);
                 Ok(info)
             }
             Err(e) => {
@@ -962,6 +965,8 @@ impl Ext2Mount {
         self.log_pending.store(0, Ordering::Relaxed);
         self.wants.store(0, Ordering::Relaxed);
         self.needs_pass.store(false, Ordering::Relaxed);
+        self.last_busy_ms.store(0, Ordering::Relaxed);
+        self.clean_owed.store(false, Ordering::Relaxed);
         true
     }
 
@@ -1477,6 +1482,17 @@ impl Ext2Mount {
         })
     }
 
+    #[cfg(feature = "tests")]
+    pub(crate) fn flusher_visit_for_test(&self) -> VfsResult<()> {
+        self.flush_once(false)
+    }
+
+    #[cfg(feature = "tests")]
+    pub(crate) fn superblock_state_for_test(&self) -> Option<u16> {
+        let guard = self.lock_cached().ok()?;
+        guard.as_ref().map(|cached| cached.superblock.state)
+    }
+
     /// Whether the log has room for an ordinary operation without a check
     /// point first. `true` with no log: there is nothing to run out of.
     #[cfg(feature = "tests")]
@@ -1620,10 +1636,6 @@ impl Ext2Mount {
     /// One flusher visit: a whole pass when one is asked for or due, else a
     /// log commit when records are waiting.
     fn flush_once(&self, stopping: bool) -> VfsResult<()> {
-        #[cfg(feature = "tests")]
-        if self.flusher_excluded.load(Ordering::Acquire) {
-            return Ok(());
-        }
         let wants = self.wants.swap(0, Ordering::Relaxed);
         let now = slopos_kernel_services::clock::uptime_ms();
         let due =
@@ -1648,7 +1660,9 @@ impl Ext2Mount {
     /// its next operation to take the stamp back, every pass.
     fn stamp_clean_if_idle(&self, stopping: bool) {
         let now = slopos_kernel_services::clock::uptime_ms();
-        let idle = now.saturating_sub(self.last_busy_ms.load(Ordering::Relaxed)) >= CLEAN_IDLE_MS;
+        let last_busy = self.last_busy_ms.load(Ordering::Relaxed);
+        // Zero: nothing has been written since the attach.
+        let idle = last_busy == 0 || now.saturating_sub(last_busy) >= CLEAN_IDLE_MS;
         if stopping || idle {
             self.clean_owed.store(false, Ordering::Relaxed);
             self.mark_filesystem_clean();
@@ -1719,6 +1733,10 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         let stopping = waited == KthreadWait::Stop;
         let mut failed = false;
         crate::vfs::init::ext2_pool_for_each_bound(&mut |mount| {
+            #[cfg(feature = "tests")]
+            if mount.flusher_excluded.load(Ordering::Acquire) {
+                return;
+            }
             // Before the sync, so the frees it performs go out in the same
             // pass rather than waiting a further tick. Takes the mount lock
             // itself, so it must not run under one.

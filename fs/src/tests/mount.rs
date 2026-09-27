@@ -1026,6 +1026,52 @@ fn shared_pass_body(
     Ok(())
 }
 
+/// A mount nothing writes to is still stamped clean once idle.
+pub fn test_ext2_untouched_mount_is_stamped_clean_at_idle() -> TestResult {
+    let Some(image) = super::journal::journal_image() else {
+        return TestResult::Skipped;
+    };
+    let Some(device) = boxed_device_counting(image) else {
+        return TestResult::Skipped;
+    };
+    let Some(fs) = vfs_ext2_pool_claim() else {
+        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    };
+
+    fs.exclude_flusher_for_test(true);
+    let outcome = untouched_body(fs, device);
+
+    fs.exclude_flusher_for_test(false);
+    vfs_ext2_pool_release(fs, false);
+    match outcome {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!(msg),
+    }
+}
+
+#[inline(never)]
+fn untouched_body(
+    fs: &'static Ext2Mount,
+    device: KBox<dyn BlockDevice + Send + Sync>,
+) -> Result<(), &'static str> {
+    use crate::ext2::ondisk::{EXT2_ERROR_FS, EXT2_VALID_FS};
+
+    fs.attach(device, false)
+        .map_err(|_| "the log-carrying fixture would not attach")?;
+    if fs.is_read_only() {
+        return Err("the fixture mounted read-only, so the mount stamped nothing");
+    }
+    if fs.superblock_state_for_test() != Some(EXT2_ERROR_FS) {
+        return Err("attaching did not stamp the image dirty");
+    }
+    fs.flusher_visit_for_test()
+        .map_err(|_| "the flusher's visit failed")?;
+    if fs.superblock_state_for_test() != Some(EXT2_VALID_FS) {
+        return Err("an idle mount nothing wrote to was never stamped clean");
+    }
+    Ok(())
+}
+
 const RDONLY_MP: &[u8] = b"/tmp/ext2_rdonly";
 const RDONLY_FILE: &[u8] = b"/tmp/ext2_rdonly/denied";
 /// A device of this test's own, published through a handle that takes writes —
@@ -1163,6 +1209,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_ext2_sync_finishes_the_open_pass_instead_of_opening_one,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_untouched_mount_is_stamped_clean_at_idle,
     suite = fs
 );
 slopos_testing::stest!(name = test_mount_shadowed_name_lists_once, suite = fs);
