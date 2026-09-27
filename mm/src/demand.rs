@@ -10,12 +10,13 @@ use slopos_ostd::mm::uframe::UFrame;
 
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
-use crate::page_alloc::{alloc_kernel_page, free_page_frame};
+use crate::page_alloc::{alloc_kernel_page, alloc_page_frames_pcp_batch, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm;
 use crate::tlb;
 use crate::user_mappings::{
-    ostd_map_4kb_user, ostd_map_4kb_user_shared, ostd_virt_to_phys_4kb, wait_vm_space_exclusive,
+    ostd_map_4kb_user, ostd_map_4kb_user_shared, ostd_map_each_4kb_user, ostd_present_mask_4kb,
+    ostd_virt_to_phys_4kb, wait_vm_space_exclusive,
 };
 use crate::vma_region::{Commit, FileMapRef, RegionPurpose, VmaMap, VmaRegion};
 
@@ -168,19 +169,57 @@ pub fn fault_around_anon(
     let window = ANON_FAULT_AROUND_PAGES * PAGE_SIZE_4KB;
     let start = (aligned_addr & !(window - 1)).max(vma_start);
     let end = ((aligned_addr & !(window - 1)) + window).min(vma_end);
-    let mut placed = (u64::MAX, 0u64);
-    let mut va = start;
-    while va < end {
-        if va != aligned_addr && ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(va)).is_null() {
-            if place_page(vm_space, va, region, false).is_err() {
-                break;
-            }
-            placed = (placed.0.min(va), va + PAGE_SIZE_4KB);
+    let (first, last) = (VirtAddr::new(start), VirtAddr::new(end));
+    let Ok(present) = ostd_present_mask_4kb(vm_space, first, last) else {
+        return;
+    };
+    let mut absent = [0u64; ANON_FAULT_AROUND_PAGES as usize];
+    let mut wanted = 0usize;
+    for (i, va) in (start..end).step_by(PAGE_SIZE_4KB as usize).enumerate() {
+        if va != aligned_addr && present & (1 << i) == 0 {
+            absent[wanted] = va;
+            wanted += 1;
         }
-        va += PAGE_SIZE_4KB;
     }
-    if placed.0 < placed.1 {
-        flush_fresh_range(vm_space, VirtAddr::new(placed.0), VirtAddr::new(placed.1));
+    if wanted == 0 {
+        return;
+    }
+    let mut phys = [PhysAddr::NULL; ANON_FAULT_AROUND_PAGES as usize];
+    let got = alloc_page_frames_pcp_batch(&mut phys[..wanted]);
+
+    // A frame the claim or the map never reached is still the allocator's.
+    let mut taken = 0usize;
+    let pte_flags = region.to_page_flags().bits();
+    let pages = absent[..got]
+        .iter()
+        .zip(&phys[..got])
+        .map_while(|(&va, &pa)| {
+            taken += 1;
+            match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
+                Ok(frame) => Some((VirtAddr::new(va), frame, pte_flags)),
+                Err(e) => {
+                    free_page_frame(pa);
+                    slopos_ostd::klog_info!("demand::fault_around_anon: claim failed: {:?}", e);
+                    None
+                }
+            }
+        });
+    let mapped = match ostd_map_each_4kb_user(vm_space, first, last, pages) {
+        Ok(n) => n,
+        Err((_, refused)) => absent[..got]
+            .iter()
+            .position(|&va| va == refused.as_u64())
+            .unwrap_or(0),
+    };
+    for &pa in &phys[taken..got] {
+        free_page_frame(pa);
+    }
+    if mapped > 0 {
+        flush_fresh_range(
+            vm_space,
+            VirtAddr::new(absent[0]),
+            VirtAddr::new(absent[mapped - 1] + PAGE_SIZE_4KB),
+        );
     }
 }
 
@@ -406,8 +445,9 @@ pub fn map_resident_around(
     region: &VmaRegion,
 ) {
     let pte_flags = set_frame_flags(region, plan.private);
-    let mut mapped = (u64::MAX, 0u64);
-    for (page, &frame) in (first_page..).zip(frames) {
+    let mut candidates = [(0u64, PhysAddr::NULL); FAULT_AROUND_PAGES];
+    let mut count = 0usize;
+    for (page, &frame) in (first_page..).zip(frames).take(FAULT_AROUND_PAGES) {
         if frame.is_null() || page == plan.page_index {
             continue;
         }
@@ -431,14 +471,28 @@ pub fn map_resident_around(
                 if map == plan.map && index == page && private == plan.private => {}
             _ => continue,
         }
-        let va = VirtAddr::new(va);
-        if !ostd_virt_to_phys_4kb(vm_space, va).is_null() {
-            continue;
-        }
-        if ostd_map_4kb_user_shared(vm_space, va, frame, pte_flags).is_err() {
-            break;
-        }
-        mapped = (mapped.0.min(va.as_u64()), va.as_u64() + PAGE_SIZE_4KB);
+        candidates[count] = (va, frame);
+        count += 1;
+    }
+    let candidates = &candidates[..count];
+    let (Some(&(low, _)), Some(&(high, _))) = (candidates.first(), candidates.last()) else {
+        return;
+    };
+    let (first, last) = (VirtAddr::new(low), VirtAddr::new(high + PAGE_SIZE_4KB));
+    let Ok(present) = ostd_present_mask_4kb(vm_space, first, last) else {
+        return;
+    };
+    let absent = candidates
+        .iter()
+        .filter(|&&(va, _)| present & (1 << ((va - low) / PAGE_SIZE_4KB)) == 0);
+    let mut mapped = (u64::MAX, 0u64);
+    let pages = absent.map_while(|&(va, pa)| {
+        let frame = UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(pa.as_u64())).ok()?;
+        mapped = (mapped.0.min(va), va + PAGE_SIZE_4KB);
+        Some((VirtAddr::new(va), frame, pte_flags))
+    });
+    if let Err((_, refused)) = ostd_map_each_4kb_user(vm_space, first, last, pages) {
+        mapped.1 = refused.as_u64();
     }
     if mapped.0 < mapped.1 {
         flush_fresh_range(vm_space, VirtAddr::new(mapped.0), VirtAddr::new(mapped.1));

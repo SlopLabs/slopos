@@ -574,6 +574,26 @@ pub fn ostd_visit_mark_cow_4kb(
     })
 }
 
+/// Which 4 KiB pages of `[start, end)` hold a present leaf, as bit `i` for
+/// the page `i` pages past `start`, from one pass over the range's leaf
+/// tables. A huge leaf reads as absent, as [`ostd_virt_to_phys_4kb`] has it.
+/// The range spans at most 64 pages.
+pub fn ostd_present_mask_4kb(
+    vm_space: &mut KArc<VmSpace>,
+    start: VirtAddr,
+    end: VirtAddr,
+) -> Result<u64, MapError> {
+    debug_assert!(end.as_u64() - start.as_u64() <= 64 * PAGE_SIZE_4KB);
+    let vs = vm_space_get_mut(vm_space)?;
+    let mut cursor = vs.cursor_mut(start..end)?;
+    let mut mask = 0u64;
+    cursor.update_present(|entry| {
+        mask |= 1 << ((entry.vaddr.as_u64() - start.as_u64()) / PAGE_SIZE_4KB);
+        ControlFlow::Continue(None)
+    })?;
+    Ok(mask)
+}
+
 /// Map each `(vaddr, frame, flags)` into `[start, end)` as
 /// [`ostd_map_4kb_user`] would, descending once per leaf table the vaddrs
 /// share. Returns how many were mapped; `Err` names the vaddr refused, whose
