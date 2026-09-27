@@ -36,7 +36,9 @@ set -euo pipefail
 # with nothing but its own search path — as `libz-sys` probes `-lz` — and
 # they reach the install beside cargo. Each `-sys` crate is pointed at them
 # for the SlopOS target alone; `libnghttp2-sys` has no such option and
-# compiles its bundled copy into cargo regardless.
+# compiles its bundled copy, which `curl-sys` links only when it builds its
+# own libcurl. `scripts/check_bootstrap_config.sh` holds the installed cargo
+# to the recipes.
 #
 # `--dry-run` runs bootstrap's own dry run: it validates the config, resolves
 # `--host` through the compiler's built-in target list, and walks the step
@@ -242,6 +244,8 @@ CXX_ABI_FLAGS="$("$SCRIPT_DIR/make_slopos_cxx.sh" --print-abi-flags)"
 RECIPES_DIR="${SLOPOS_RECIPES_DIR:-$BUILD_DIR/slopos-recipes}"
 RECIPES_PREFIX="$RECIPES_DIR/prefix"
 if [ "$DRY_RUN" -eq 0 ]; then
+    command -v pkg-config >/dev/null 2>&1 ||
+        die "pkg-config is required: the -sys crates find the recipes through it, and build their bundled copies without it"
     BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" "$SCRIPT_DIR/build_recipes.sh" ||
         die "the recipes did not build"
     cp -a "$RECIPES_PREFIX"/lib/lib*.so* "$SYSROOT/lib/"
@@ -380,6 +384,21 @@ if [ "$PGO" -eq 1 ]; then
 else
     rbs_invalidate_rust "$RUSTC_BUILD" "$HOST_TRIPLE" ""
     rbs_forget_llvm "$RUSTC_BUILD" "$TARGET"
+fi
+
+# Nor does cargo see the recipes change: a `-sys` build script keeps the
+# answer pkg-config gave it, and pkg-config names no file for cargo to watch,
+# so a rebuilt prefix would ship beside a cargo linked against the last one.
+# The SlopOS tools are cleared whenever the recipes' stamps are not the ones
+# they were built against.
+RECIPES_STAMP="$(BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" \
+    "$SCRIPT_DIR/build_recipes.sh" --print-stamp | sha256sum)"
+if [ "$(cat "$RUSTC_BUILD/.slopos-recipes" 2>/dev/null)" != "$RECIPES_STAMP" ]; then
+    if compgen -G "$RUSTC_BUILD/*/stage[1-9]-tools/$TARGET" >/dev/null; then
+        echo "$SELF: the recipes changed since cargo was built; clearing the $TARGET tools" >&2
+    fi
+    rm -rf "$RUSTC_BUILD"/*/stage[1-9]-tools/"$TARGET"
+    printf '%s\n' "$RECIPES_STAMP" >"$RUSTC_BUILD/.slopos-recipes"
 fi
 
 # Completed under another name and renamed last: a build that stops part way

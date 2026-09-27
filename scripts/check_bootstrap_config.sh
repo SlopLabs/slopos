@@ -29,9 +29,17 @@ set -euo pipefail
 #
 # An installed toolchain is graded too: every object may need only libraries
 # the toolchain ships — its own, slibc, the C++ runtime and the sonames the
-# recipes under `toolchain/recipes/` declare — and `bin/cargo` must need
-# libcurl and libgit2, because `curl-sys` that cannot find the recipe builds
-# its own copy into cargo and says nothing.
+# recipes under `toolchain/recipes/` declare — and `bin/cargo` must run the
+# recipes rather than a copy a `-sys` crate bundled, which none of them says
+# it did: `curl-sys`, `libgit2-sys`, `libssh2-sys` and `libz-sys` each build
+# their own when pkg-config does not answer. Cargo is linked `--as-needed`,
+# and a bundled copy linked into it is exported to the recipe libraries that
+# need the same names, so needing a soname proves nothing on its own. What
+# does: cargo needs each recipe library it calls, its closure through its
+# run path reaches every recipe library, no object in that closure but a
+# library itself defines the library's symbols — in `.dynsym` or `.symtab`,
+# cargo included — and each recipe library needs a library of every recipe
+# it depends on.
 #
 # `skipped` without a materialised source tree or a staged target sysroot;
 # the CI step that has both passes `--require`. A first run downloads
@@ -77,8 +85,31 @@ RECIPE_SONAMES="$(sed -n 's/^soname=//p' "$REPO_ROOT"/toolchain/recipes/*/recipe
 ALLOWED_NEEDED="^(libc\\.so|libc\\+\\+\\.so|libLLVM[-.].*|libclang-cpp\\.so.*|librustc_driver-[0-9a-f]+\\.so|libstd-[0-9a-f]+\\.so$(
     printf '|%s' $(printf '%s\n' "$RECIPE_SONAMES" | sed 's/[.+]/\\&/g')
 ))\$"
-# What cargo links from the recipes rather than from a bundled copy.
-CARGO_NEEDS="libcurl.so.4 libgit2.so.1.9"
+# Symbols only the recipe library named first defines.
+RECIPE_SYMBOLS="
+libz.so.1 inflate deflate zlibVersion
+libssl.so.3 SSL_new OPENSSL_init_ssl
+libcrypto.so.3 OPENSSL_init_crypto EVP_DigestInit_ex
+libnghttp2.so.14 nghttp2_session_client_new
+libssh2.so.1 libssh2_init libssh2_exit
+libcurl.so.4 curl_easy_init
+libgit2.so.1.9 git_libgit2_init
+"
+# The recipe libraries cargo calls itself: `curl` and `git2`, and libssh2 and
+# OpenSSL for the `libssh2_exit` and `OPENSSL_init_ssl` libgit2-sys's `init`
+# reaches. zlib, nghttp2 and libcrypto it reaches through them.
+CARGO_NEEDS="libcurl.so.4 libgit2.so.1.9 libssh2.so.1 libssl.so.3"
+# `<soname> <sonames of one recipe it depends on>`, a line per dependency.
+RECIPE_DEPENDS="$(
+    for recipe in "$REPO_ROOT"/toolchain/recipes/*/recipe; do
+        for soname in $(sed -n 's/^soname=//p' "$recipe"); do
+            for dep in $(sed -n 's/^depends=//p' "$recipe"); do
+                printf '%s %s\n' "$soname" \
+                    "$(sed -n 's/^soname=//p' "$REPO_ROOT/toolchain/recipes/$dep/recipe" | tr '\n' ' ')"
+            done
+        done
+    done
+)"
 
 # Each step the cross-build exists to produce, as bootstrap spells it. The
 # triple is on the right of the arrow because these are the steps built *for*
@@ -243,11 +274,11 @@ resolve_needed() {
     return 1
 }
 
-# The names an object may bind to: its own and those of everything in its
-# DT_NEEDED closure. A name the object's search path cannot find is written
-# to `$cache/unfound`.
-closure_defined() {
-    local cache="$1" queue="$2" seen path name found key
+# Every object in the DT_NEEDED closure of `$2`, once each, as the loader
+# finds them. A name the object's search path cannot find is written to
+# `$1/unfound`.
+closure_objects() {
+    local cache="$1" queue="$2" seen path name found
     seen=" "
     while :; do
         # shellcheck disable=SC2086
@@ -258,9 +289,7 @@ closure_defined() {
         queue="$*"
         case "$seen" in *" $path "*) continue ;; esac
         seen="$seen$path "
-        key="$cache/$(printf '%s' "$path" | tr '/' '_').def"
-        [ -f "$key" ] || dynsyms "$path" defined >"$key"
-        cat "$key"
+        printf '%s\n' "$path"
         for name in $(needed_of "$path"); do
             if found="$(resolve_needed "$path" "$name")"; then
                 queue="$queue $found"
@@ -268,7 +297,79 @@ closure_defined() {
                 printf '%s needs %s\n' "${path#"$INSTALL_ROOT"/}" "$name" >>"$cache/unfound"
             fi
         done
+    done
+}
+
+# The names an object may bind to: its own and those of everything in its
+# DT_NEEDED closure.
+closure_defined() {
+    local cache="$1" path key
+    for path in $(closure_objects "$cache" "$2"); do
+        key="$cache/$(printf '%s' "$path" | tr '/' '_').def"
+        [ -f "$key" ] || dynsyms "$path" defined >"$key"
+        cat "$key"
     done | sort -u
+}
+
+# Every name an object defines, exported or not: a copy linked in with
+# hidden visibility is in `.symtab` alone.
+all_defined() {
+    readelf -sW "$1" | awk '
+        NF >= 8 && $1 ~ /:$/ && $7 != "UND" {
+            name = $8; sub(/@.*/, "", name)
+            if (name != "") print name
+        }' | sort -u
+}
+
+soname_of() {
+    readelf -d "$1" | sed -n 's/.*Library soname: \[\(.*\)\]/\1/p'
+}
+
+recipe_symbols_of() {
+    printf '%s\n' "$RECIPE_SYMBOLS" | awk -v s="$1" '$1 == s { for (i = 2; i <= NF; i++) print $i }'
+}
+
+# `bin/cargo` at `$1`, needing `$2`, against the recipes; see the header.
+grade_cargo() {
+    local file="$1" needed="$2" cache="$3" bad=0 lib soname object key owner sym closure reached
+    for lib in $CARGO_NEEDS; do
+        printf '%s\n' "$needed" | grep -qxF "$lib" || {
+            echo "  bin/cargo does not need $lib: it was built with a bundled copy, not the recipe" >&2
+            bad=1
+        }
+    done
+    closure="$(closure_objects "$cache" "$file")"
+    reached="$(for object in $closure; do basename "$object"; done)"
+    for soname in $RECIPE_SONAMES; do
+        [ -n "$(recipe_symbols_of "$soname")" ] || {
+            echo "  $SELF knows no symbol of the recipe library $soname: add it to RECIPE_SYMBOLS" >&2
+            bad=1
+        }
+        printf '%s\n' "$reached" | grep -qxF "$soname" || {
+            echo "  bin/cargo does not reach $soname through its run path" >&2
+            bad=1
+        }
+    done
+    for object in $closure; do
+        key="$cache/$(printf '%s' "$object" | tr '/' '_').all"
+        [ -f "$key" ] || all_defined "$object" >"$key"
+        for soname in $RECIPE_SONAMES; do
+            owner=0
+            [ "$(basename "$object")" != "$soname" ] || owner=1
+            for sym in $(recipe_symbols_of "$soname"); do
+                if grep -qxF "$sym" "$key"; then
+                    [ "$owner" -eq 1 ] || {
+                        echo "  ${object#"$INSTALL_ROOT"/} defines $sym, which is $soname's: a bundled copy, not the recipe" >&2
+                        bad=1
+                    }
+                elif [ "$owner" -eq 1 ]; then
+                    echo "  ${object#"$INSTALL_ROOT"/} does not define $sym: it is not $soname as its recipe builds it" >&2
+                    bad=1
+                fi
+            done
+        done
+    done
+    return "$bad"
 }
 
 # The loader binds `DTPMOD64`/`DTPOFF64` and startup `TPOFF64` and nothing
@@ -277,7 +378,7 @@ closure_defined() {
 # `-z defs`, so a library the search path misses, or a name nothing in the
 # closure defines, is a program that does not start.
 grade_install() {
-    local dir="$1" bad=0 file needed lib cache unbound
+    local dir="$1" bad=0 file needed lib cache unbound soname deps dep found
     INSTALL_ROOT="$dir"
     cache="$(mktemp -d)"
     while IFS= read -r file; do
@@ -294,13 +395,20 @@ grade_install() {
             echo "  ${file#"$dir"/} carries R_X86_64_TLSDESC, which the loader does not bind" >&2
             bad=1
         fi
-        if [ "${file#"$dir"/}" = bin/cargo ]; then
-            for lib in $CARGO_NEEDS; do
-                printf '%s\n' "$needed" | grep -qxF "$lib" || {
-                    echo "  bin/cargo does not need $lib: it was built with a bundled copy, not the recipe" >&2
-                    bad=1
-                }
+        soname="$(soname_of "$file")"
+        while read -r lib deps; do
+            [ -n "$soname" ] && [ "$lib" = "$soname" ] || continue
+            found=0
+            for dep in $deps; do
+                case " $(printf '%s ' $needed)" in *" $dep "*) found=1 ;; esac
             done
+            [ "$found" -eq 1 ] || {
+                echo "  ${file#"$dir"/} ($soname) needs none of $deps: it carries its own copy of a recipe it depends on" >&2
+                bad=1
+            }
+        done <<<"$RECIPE_DEPENDS"
+        if [ "${file#"$dir"/}" = bin/cargo ]; then
+            grade_cargo "$file" "$needed" "$cache" || bad=1
         fi
         [ -n "$needed" ] || continue
         rm -f "$cache/unfound"
@@ -490,28 +598,124 @@ self_test() {
         "$scratch/calls-h.c" -L"$lib" -l:libc.so
     install_case tlsdesc 'R_X86_64_TLSDESC' tls.so "$scratch/tls.s"
 
-    # A recipe's soname is one the toolchain ships; a cargo that does not
-    # need both recipe libraries linked a bundled copy of one.
-    if $so -Wl,-soname,libcurl.so.4 "$scratch/f.c" -o "$lib/libcurl.so.4" &&
-        $so "$scratch/calls-f.c" -Wl,-rpath,'$ORIGIN' -L"$lib" -l:libcurl.so.4 -o "$lib/curl-user.so" &&
-        grade_install "$scratch/install" 2>/dev/null; then
-        echo "  case recipe-library: accepted an object needing a recipe's soname"
-    else
-        echo "$SELF --self-test: an object needing a recipe's soname was not built or was rejected" >&2
-        failed=1
-    fi
-    mkdir -p "$scratch/install/bin"
-    if $so "$scratch/calls-f.c" -Wl,-rpath,'$ORIGIN/../lib' -L"$lib" -l:libcurl.so.4 \
-        -o "$scratch/install/bin/cargo"; then
-        why="$(grade_install "$scratch/install" 2>&1 || true)"
-        if printf '%s\n' "$why" | grep -q 'bin/cargo does not need libgit2'; then
-            echo "  case bundled-libgit2: rejected a cargo that does not need libgit2"
+    # The recipe libraries and a cargo linked against them, from the recipes'
+    # own data: each library defines its RECIPE_SYMBOLS and needs every
+    # library of the recipes it depends on. Each case then swaps one object
+    # for the shape a bundled copy leaves.
+    recipe_stub() {
+        local dir="$1" soname="$2" src="$scratch/stub-$2.c" sym owner deps dep link=()
+        shift 2
+        : >"$src"
+        for sym in $(recipe_symbols_of "$soname"); do
+            printf 'int %s(void) { return 0; }\n' "$sym" >>"$src"
+        done
+        for sym in "$@"; do
+            printf '__attribute__((visibility("hidden"))) int %s(void) { return 0; }\n' "$sym" >>"$src"
+        done
+        while read -r owner deps; do
+            [ "$owner" = "$soname" ] || continue
+            for dep in $deps; do
+                [ "$dep" = "${SKIP_DEP:-}" ] || link+=("-l:$dep")
+            done
+        done <<<"$RECIPE_DEPENDS"
+        $so -Wl,-soname,"$soname" -Wl,-rpath,'$ORIGIN' "$src" -L"$dir" "${link[@]}" -o "$dir/$soname"
+    }
+    # `$1` the libraries cargo links, `$2` the recipe symbols it defines.
+    cargo_stub() {
+        local src="$scratch/cargo.c" soname sym link=()
+        : >"$src"
+        for sym in $2; do
+            printf 'int %s(void) { return 0; }\n' "$sym" >>"$src"
+        done
+        for soname in $CARGO_NEEDS; do
+            sym="$(recipe_symbols_of "$soname" | tail -n 1)"
+            printf 'extern int %s(void);\nint call_%s(void) { return %s(); }\n' "$sym" "$sym" "$sym" >>"$src"
+        done
+        for soname in $1; do
+            link+=("-l:$soname")
+        done
+        $so "$src" -Wl,-rpath,'$ORIGIN/../lib' -L"$scratch/case/lib" "${link[@]}" -o "$scratch/case/bin/cargo"
+    }
+    recipe_install() {
+        local pending="$RECIPE_SONAMES" rest s ready owner deps dep progress
+        mkdir -p "$scratch/case/lib" "$scratch/case/bin"
+        cp "$lib/libc.so" "$scratch/case/lib/"
+        while [ -n "$pending" ]; do
+            rest=""
+            progress=0
+            for s in $pending; do
+                ready=1
+                while read -r owner deps; do
+                    [ "$owner" = "$s" ] || continue
+                    for dep in $deps; do
+                        [ -f "$scratch/case/lib/$dep" ] || ready=0
+                    done
+                done <<<"$RECIPE_DEPENDS"
+                if [ "$ready" -eq 1 ]; then
+                    recipe_stub "$scratch/case/lib" "$s" || return 1
+                    progress=1
+                else
+                    rest="$rest $s"
+                fi
+            done
+            [ "$progress" -eq 1 ] || return 1
+            pending="${rest# }"
+        done
+        cargo_stub "$CARGO_NEEDS" ""
+    }
+    libgit2_with_zlib() {
+        SKIP_DEP=libz.so.1 recipe_stub "$scratch/case/lib" libgit2.so.1.9 $(recipe_symbols_of libz.so.1)
+    }
+    libcurl_without_nghttp2() {
+        SKIP_DEP=libnghttp2.so.14 recipe_stub "$scratch/case/lib" libcurl.so.4
+    }
+    libssh2_impostor() {
+        $so -Wl,-soname,libssh2.so.1 "$scratch/f.c" -o "$scratch/case/lib/libssh2.so.1"
+    }
+    cargo_case() {
+        local name="$1" want="$2" why
+        shift 2
+        rm -rf "$scratch/case"
+        cp -a "$scratch/recipes-good" "$scratch/case"
+        if ! "$@"; then
+            echo "$SELF --self-test: case $name: the fixture did not build" >&2
+            failed=1
+            return
+        fi
+        why="$(grade_install "$scratch/case" 2>&1 || true)"
+        if [ -z "$want" ]; then
+            if [ -z "$why" ]; then
+                echo "  case $name: accepted a cargo on the recipes"
+            else
+                echo "$SELF --self-test: case $name was rejected:" >&2
+                printf '%s\n' "$why" | sed 's/^/      /' >&2
+                failed=1
+            fi
+        elif printf '%s\n' "$why" | grep -qF "$want"; then
+            echo "  case $name: rejected for '$want'"
         else
-            echo "$SELF --self-test: case bundled-libgit2 was not rejected" >&2
+            echo "$SELF --self-test: case $name was not rejected for '$want'" >&2
+            printf '%s\n' "$why" | sed 's/^/      /' >&2
             failed=1
         fi
+    }
+    rm -rf "$scratch/case"
+    if recipe_install; then
+        mv "$scratch/case" "$scratch/recipes-good"
+        cargo_case recipe-cargo "" true
+        cargo_case bundled-libgit2 'bin/cargo does not need libgit2.so.1.9' \
+            cargo_stub "libcurl.so.4 libssh2.so.1 libssl.so.3" "git_libgit2_init"
+        cargo_case bundled-libssh2 "bin/cargo defines libssh2_exit, which is libssh2.so.1's" \
+            cargo_stub "libcurl.so.4 libgit2.so.1.9 libssl.so.3" "libssh2_init libssh2_exit"
+        cargo_case interposed-zlib "bin/cargo defines inflate, which is libz.so.1's" \
+            cargo_stub "$CARGO_NEEDS" "$(recipe_symbols_of libz.so.1 | tr '\n' ' ')"
+        cargo_case libgit2-bundled-zlib "lib/libgit2.so.1.9 defines inflate, which is libz.so.1's" \
+            libgit2_with_zlib
+        cargo_case libgit2-no-zlib 'needs none of libz.so.1' libgit2_with_zlib
+        cargo_case nghttp2-unreached 'bin/cargo does not reach libnghttp2.so.14' libcurl_without_nghttp2
+        cargo_case impostor-libssh2 'does not define libssh2_init' libssh2_impostor
     else
-        echo "$SELF --self-test: case bundled-libgit2: the fixture did not build" >&2
+        echo "$SELF --self-test: the recipe fixtures did not build" >&2
         failed=1
     fi
 
