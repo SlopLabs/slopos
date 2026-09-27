@@ -26,8 +26,7 @@ fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "80M")
 # `test_userland_bins` feeds `initramfs-tests.cpio` too, so `bigprog_test`
 # costs ~25 MB of guest RAM on every test boot as well (~39 MB of cpio against
-# `qemu_mem`'s 512M). `boot-ramonly` is unaffected: it builds `_iso-notests`,
-# whose initramfs carries `userland_bins` only.
+# `qemu_mem`'s 512M).
 # Sized on its own: this disk holds work, not the shipped appliance root. No
 # longer capped at 1 GiB — the verity hash array is chunked, so what bounds it
 # is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
@@ -61,7 +60,6 @@ dev_disk_mount        := "mount=LABEL=slopos-dev:/devel"
 dev_watchdog          := "watchdog.miss_threshold=300"
 dev_disk_inode_ratio  := env("DEV_DISK_INODE_RATIO", "16384")
 toolchain_install     := build_dir / "slopos-toolchain/install"
-persist_qemu_mem   := env("PERSIST_QEMU_MEM", "2G")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
@@ -75,10 +73,8 @@ kernel_elf_tests := build_dir / ("kernel-" + kernel_variant_tests + ".elf")
 kernel_features_tests := "slopos-testing/qemu-exit kernel/tests"
 
 iso          := build_dir / "slop.iso"
-iso_notests  := build_dir / "slop-notests.iso"
 iso_tests    := build_dir / "slop-tests.iso"
-# `boot-elf`/`test-elf`: a kernel built elsewhere, never the build's own ISOs.
-iso_elf       := build_dir / "slop-elf.iso"
+# `test-elf`: a kernel built elsewhere, never the build's own ISO.
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
@@ -86,6 +82,7 @@ log_file     := env("LOG_FILE", "test_output.log")
 boot_disk    := build_dir / "boot-disk.img"
 
 ports        := ""
+net_env      := if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" }
 
 qemu_bin     := env("QEMU_BIN", "qemu-system-x86_64")
 qemu_smp     := env("QEMU_SMP", "4")
@@ -104,8 +101,6 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 gpu                 := env("GPU", "virtio-vga")
 
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
-# `verity=require`: the shipped image carries a trailer, so a `just boot` that
-# came up without verification is a broken artifact and must say so.
 boot_cmdline     := env("BOOT_CMDLINE", "tests=off verity=require")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=auto"
 # `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
@@ -120,7 +115,10 @@ test_cmdline_extra := env("TEST_CMDLINE_EXTRA", "")
 
 debug         := env("DEBUG", "0")
 debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
-boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
+roulette      := env("ROULETTE", "1")
+roulette_flag := if roulette =~ '^(0|false|off|no|skip)$' { "roulette=skip" } else { "" }
+boot_cmdline_effective := trim(replace(boot_cmdline + " " + debug_flag + " " + roulette_flag, "  ", " "))
+dev_boot_cmdline := trim(replace("tests=off " + dev_disk_mount + " " + debug_flag + " " + roulette_flag, "  ", " "))
 
 userland_bins      := "init shell coreutils terminal compositor roulette halt bootctl editor file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
 
@@ -167,12 +165,7 @@ _fs-image-tests: _build-userland-tests
         EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
-# The developer's persistent disk: `VERITY=rw` (a v2 trailer) so the kernel
-# mounts it as a writable `/` that is still attested for every block no boot
-# rewrote, preserved across builds so what the guest wrote survives, and
-# separate from the shipped image so `just boot`'s `verity=require` keeps
-# meaning what it says. Refreshes only the binaries that changed, never deletes
-# the image, and grows it in place when `PERSIST_IMAGE_SIZE` rises.
+# `VERITY=rw`: writable, and attested wherever no boot rewrote a block.
 _fs-image-persist: _build-userland
     FS_IMAGE_SIZE={{persist_image_size}} VERITY=rw PRESERVE_FS_IMAGE=1 COREUTILS_LINKS="{{coreutils_tools}}" \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}" {{userland_bins}}
@@ -229,6 +222,26 @@ _fs-image-devdisk: _build-userland-tests
     DEV_DISK_SIZE={{dev_disk_size}} DEV_DISK_INODE_RATIO={{dev_disk_inode_ratio}} \
         scripts/build_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}"
 
+[doc("Discard a persistent disk so the next just boot builds it fresh: root (/) or devdisk (/devel, reseeded from HEAD with the installed toolchain; the guest's edits are kept in builddir/devdisk-<base>.patch)")]
+reset DISK:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{DISK}}" in
+        root) img="{{fs_image_persist}}" ;;
+        devdisk)
+            img="{{fs_image_devdisk}}"
+            base="$(debugfs -R 'cat /src/slopos/.slopos-base' "$img" 2>/dev/null || true)"
+            if [ -n "$base" ]; then
+                patch="{{build_dir}}/devdisk-$base.patch"
+                scripts/export_devdisk.sh "$img" "$patch"
+                [ -s "$patch" ] || rm -f "$patch"
+            fi
+            ;;
+        *) echo "usage: just reset root|devdisk" >&2; exit 2 ;;
+    esac
+    rm -f "$img" "$img.stamp"
+    echo "reset: discarded $img; the next just boot builds a fresh one"
+
 [doc("Write the guest's edits to the dev disk's src/slopos as a patch against the commit it was seeded from")]
 devdisk-export:
     scripts/export_devdisk.sh "{{fs_image_devdisk}}" "{{build_dir}}/devdisk.patch"
@@ -278,20 +291,13 @@ build: _fs-image (_kernel kernel_variant)
 [doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
 
-[doc("Build default ISO (honors BOOT_CMDLINE, e.g. BOOT_CMDLINE='tests=off tp.debug=on')")]
-iso: build _initramfs
+[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk. Honors BOOT_CMDLINE")]
+iso: _initramfs (_kernel kernel_variant)
     KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
-
-_iso-notests: build _initramfs
-    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
-    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
-    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
-    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
-        scripts/build_iso.sh "{{iso_notests}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
 # `_fs-image`: the harness attaches the shipped image as a snapshot disk.
 _iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
@@ -319,6 +325,13 @@ _boot-disk: _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kerne
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_bootdisk.sh "{{boot_disk}}" "{{kernel_elf_tests}}" "{{initramfs_tests}}" "{{test_cmdline_effective}}"
 
+_boot-disk-dev: _initramfs (_kernel kernel_variant)
+    LIMINE_DIR={{limine_dir}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+        scripts/build_bootdisk.sh "{{boot_disk}}" "{{kernel_elf}}" "{{initramfs}}" "{{dev_boot_cmdline}}"
+
 _qemu-boot mode video iso fs_image *extra_env:
     QEMU_BIN={{qemu_bin}} QEMU_SMP={{qemu_smp}} QEMU_MEM={{qemu_mem}} \
     QEMU_ACCEL={{qemu_accel}} QEMU_CPU={{qemu_cpu}} QEMU_DISPLAY={{qemu_display}} \
@@ -332,77 +345,45 @@ _qemu-boot mode video iso fs_image *extra_env:
     {{extra_env}} \
         scripts/qemu_run.sh "{{mode}}" "{{iso}}" "{{fs_image}}"
 
-[doc("Boot SlopOS (ports=7777,8080 to enable host↔guest forwarding)")]
+# Optimized by default: a dev-profile kernel spends ten times as long in every
+# syscall and page fault a compiler makes. A disk closed mid-write boots
+# unrefreshed, because the host cannot write into an image whose log the kernel
+# has yet to replay.
+[doc("Boot the development machine and spin the Wheel of Fate: persistent /, the dev disk at /devel, an A/B boot disk the guest installs into. KERNEL_RELEASE=0 for a dev kernel, VIDEO=0 for serial only, ports=7777,8080 to forward")]
 boot:
-    just _iso-notests
-    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KERNEL_RELEASE="${KERNEL_RELEASE:-1}"
+    refresh=""
+    for disk in "_fs-image-persist {{fs_image_persist}}" "_fs-image-devdisk {{fs_image_devdisk}}"; do
+        set -- $disk
+        state="$(dumpe2fs -h "$2" 2>/dev/null | sed -n 's/^Filesystem state:[[:space:]]*//p' || true)"
+        if [ -f "$2" ] && [ "$state" != clean ]; then
+            echo "boot: $2 was closed mid-write; booting it unrefreshed so its log replays" >&2
+        else
+            refresh="$refresh $1"
+        fi
+    done
+    just _boot-disk-dev $refresh
+    base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null || true)"
+    head="$(git rev-parse HEAD 2>/dev/null || true)"
+    [ "$base" = "$head" ] ||
+        echo "boot: /devel/src/slopos is ${base:-not seeded}, HEAD is ${head:-unknown}; just reset devdisk reseeds it" >&2
+    echo "boot: in the guest, cd /devel/src/slopos && shell scripts/selfhost.sh install; then bootctl reboot"
+    QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" \
+        just _qemu-boot "interactive" "${VIDEO:-1}" {{boot_disk}} {{fs_image_persist}} BOOT_DISK_IMG={{boot_disk}} {{net_env}}
 
-[doc("Boot SlopOS skipping the Wheel of Fate (fast dev iteration)")]
+[doc("just boot without the Wheel of Fate")]
 boot-fast:
-    BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" just _iso-notests
-    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+    ROULETTE=0 just boot
 
-# `shutdown` is the exit that flushes on demand; closing the window loses at
-# most what the 5-second flusher had not yet written.
-[doc("Boot from a persistent, writable disk root that survives rebuilds (fs/assets/ext2-persist.img)")]
-boot-persist:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # No `verity=require`: this disk's v2 trailer keeps it writable, and the
-    # knob is `just boot`'s assertion about the shipped image, not this one.
-    # `roulette=skip` as `boot-fast` does.
-    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests _fs-image-persist
-    QEMU_MEM="${QEMU_MEM:-{{persist_qemu_mem}}}" \
-        just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+[doc("just boot-fast on the dev kernel with QEMU's GDB stub on :1234 and a monitor socket; attach with debug-gdb, debug-bt or debug-monitor")]
+boot-debug:
+    QEMU_DEBUG=1 KERNEL_RELEASE=0 ROULETTE=0 just boot
 
-[doc("Discard the persistent disk and everything on it, then boot a fresh one")]
-boot-persist-reset:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rm -f "{{fs_image_persist}}" "{{fs_image_persist}}.stamp"
-    echo "boot-persist-reset: discarded {{fs_image_persist}}"
-    just boot-persist
-
-[doc("Boot the persistent root with the dev disk mounted at /devel from the cmdline, and 4G of RAM")]
-boot-dev:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Optimized: this machine's job is to run a compiler, and a dev-profile
-    # kernel spends ten times as long in every syscall and page fault.
-    KERNEL_RELEASE=1 BOOT_CMDLINE="tests=off roulette=skip {{dev_disk_mount}}" just _iso-notests _fs-image-persist _fs-image-devdisk
-    DEV_DISK_IMG="$PWD/{{fs_image_devdisk}}" QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" \
-        just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
-
-[doc("Boot SlopOS with release-optimized kernel (production build)")]
-boot-prod:
-    BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" KERNEL_RELEASE=1 just _iso-notests
-    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
-
-[doc("Boot SlopOS headless (serial only, ports= for forwarding)")]
-boot-headless:
-    just _iso-notests
-    just _qemu-boot "interactive" "0" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
-
-# `ELF=` is optional sugar, stripped: after the recipe name just passes
-# `NAME=value` through literally. No dependency builds a kernel — `build`
-# deletes the variant's ELF first — so the ELF staged is exactly the one named.
-[doc("Boot a kernel ELF built elsewhere, e.g. by the guest, without building one: just boot-elf ELF=builddir/guest-dev.elf")]
-boot-elf ELF: _fs-image _initramfs
-    KERNEL_ELF="{{ trim_start_match(ELF, 'ELF=') }}" LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
-    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
-    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
-    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
-        scripts/build_iso.sh "{{iso_elf}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
-    just _qemu-boot "interactive" "1" {{iso_elf}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
-
-# The tests image as disk0, as `just test` attaches it, and the memory the
-# suite's harness boots with.
-[doc("Boot the tests kernel from a fresh UEFI A/B boot disk (builddir/boot-disk.img); guest reboots stay in this QEMU")]
-boot-disk: _boot-disk
-    #!/usr/bin/env bash
-    set -euo pipefail
-    QEMU_MEM="${QEMU_MEM:-1G}" \
-        just _qemu-boot "interactive" "1" {{boot_disk}} {{fs_image_tests}} QEMU_ALLOW_REBOOT=1 BOOT_DISK_IMG={{boot_disk}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+[doc("Boot the live ISO from RAM with no disk attached, as bare metal runs it; spins the Wheel of Fate unless ROULETTE=0")]
+boot-live: iso
+    just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
 [doc("Phase 1: install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics, across the reboots of one QEMU")]
 test-install:
@@ -466,35 +447,20 @@ test-install-guest:
         { echo "FAIL: the booted kernel's size is not the guest build's $size bytes: $booted" >&2; exit 1; }
     echo "test-install-guest: the guest built $tag ($size bytes), booted it from slot b, committed it and rolled back a panicking slot (qemu rc=$rc); log in $log"
 
-[doc("Boot with timeout, serial log saved to test_output.log")]
-boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_TIMEOUT=" + boot_log_timeout + " LOG_FILE=" + log_file)
-
-[doc("Prove RAM-only boot: boot the ISO with NO disk attached; assert /sbin/init comes up from the initramfs (the real-hardware path)")]
-boot-ramonly:
+[doc("Boot the live ISO headless for BOOT_LOG_TIMEOUT seconds, serial log in test_output.log; fails unless /sbin/init launched")]
+boot-log: iso
     #!/usr/bin/env bash
     set -euo pipefail
-    BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" just _iso-notests
-    just _qemu-boot "logged" "0" {{iso_notests}} {{fs_image}} "BOOT_LOG_TIMEOUT=25 LOG_FILE={{log_file}} QEMU_NO_ROOT_DISK=1"
-    echo "──────── RAM-only boot: key serial lines ────────"
-    grep -E "ROOTFS:|USERLAND: launched|VFS:|ext2" "{{log_file}}" || true
-    echo "─────────────────────────────────────────────────"
-    if grep -q "USERLAND: launched /sbin/init" "{{log_file}}"; then
-        echo "PASS: /sbin/init launched from initramfs with no disk attached"
-    else
-        echo "FAIL: /sbin/init did not launch — full log in {{log_file}}" >&2
-        exit 1
-    fi
+    just _qemu-boot "logged" "0" {{iso}} {{fs_image}} "BOOT_LOG_TIMEOUT={{boot_log_timeout}} LOG_FILE={{log_file}} QEMU_NO_ROOT_DISK=1"
+    grep -q "USERLAND: launched /sbin/init" "{{log_file}}" ||
+        { echo "boot-log: /sbin/init did not launch; the log is {{log_file}}" >&2; exit 1; }
 
 # The `debug-*` recipes attach to a QEMU already running under `boot-debug`;
 # they never rebuild.
 
-[doc("Boot with QEMU GDB stub (:1234) + monitor socket (/tmp/slopos-monitor.sock)")]
-boot-debug:
-    QEMU_DEBUG=1 just boot-fast
-
 [doc("Capture all-CPU backtraces from the running kernel (writes builddir/freeze-gdb.log)")]
 debug-bt:
-    @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just iso' first" >&2; exit 1; }
+    @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just boot-debug' first" >&2; exit 1; }
     @echo "Attaching to QEMU GDB stub on :1234 — kernel must be running with 'just boot-debug'…"
     gdb -q {{kernel_elf}} \
         -ex 'set pagination off' \
@@ -507,7 +473,7 @@ debug-bt:
 
 [doc("Interactive GDB attached to the running kernel (Ctrl-D to exit)")]
 debug-gdb:
-    @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just iso' first" >&2; exit 1; }
+    @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just boot-debug' first" >&2; exit 1; }
     gdb -q {{kernel_elf}} \
         -ex 'set pagination off' \
         -ex 'target remote :1234'
@@ -1035,6 +1001,6 @@ clean:
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean
-    rm -rf {{build_dir}} {{iso}} {{iso_notests}} {{iso_tests}} {{log_file}}
+    rm -rf {{build_dir}} {{iso}} {{iso_tests}} {{log_file}}
     rm -f {{fs_image}} {{fs_image_tests}} {{initramfs}} {{initramfs_tests}}
     rm -rf third_party/llvm-project-*.src third_party/slopos-rustc-src third_party/vendor

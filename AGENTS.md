@@ -7,8 +7,8 @@ Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `vi
 [`just`](https://github.com/casey/just) is the command runner; the `justfile` drives cargo + `rust-lld` via `scripts/`. Run `just --list` for all recipes. No git submodules — `scripts/ensure_limine.sh` fetches pinned Limine v12.3.1 into `third_party/limine` on first ISO build.
 
 - `just setup` — install pinned nightly from `rust-toolchain.toml`; materialize the owned `slopos` sysroot (`scripts/make_slopos_sysroot.sh`, see below); verifies Go >= 1.22 on PATH (for `tools/run_tests/`)
-- `just build` — emits `builddir/kernel-dev.elf`; `just iso` regenerates `builddir/slop.iso`
-- `just boot` (interactive) / `just boot-fast` (skips roulette) / `just boot-log` (non-interactive, 15 s timeout)
+- `just build` — emits `builddir/kernel-dev.elf`; `just iso` regenerates `builddir/slop.iso`, the live ISO bare metal boots from RAM
+- `just boot` (the development machine: persistent `/`, the dev disk at `/devel`, an A/B boot disk; spins the Wheel of Fate) / `just boot-fast` (the same without the wheel, `ROULETTE=0`) / `just boot-live` (the live ISO from RAM, no disk; `ROULETTE=0` skips the wheel) / `just boot-log` (the live ISO headless, 15 s timeout, fails unless `/sbin/init` launched)
 - `just test` — the CI/agent entry point (see Testing Guidelines)
 
 **Both targets build on an owned toolchain.** The kernel
@@ -272,9 +272,9 @@ one place in both trees. A preserved volume whose toolchain
 differs from the installed one fails the build and names the fix. It is
 attached by `DEV_DISK_IMG` as **virtio-disk4** and mounted by the kernel from
 its command line: `mount=LABEL=slopos-dev:/devel`, since the guest's disk
-letters are positional (`just boot-dev` boots the persistent root that way,
-with 4G of RAM and the optimized kernel, because a dev-profile kernel spends
-ten times as long in every syscall and page fault a compiler makes). The marker file at the volume root records every staged
+letters are positional (`just boot` boots it that way, with 4G of RAM and the
+optimized kernel, because a dev-profile kernel spends ten times as long in
+every syscall and page fault a compiler makes). The marker file at the volume root records every staged
 path's size read back *out of the image*, and `devdisk_test` grades the
 inventory and the source tree, unmounts `/devel` and mounts it again by label
 — the second mount is the point, because a leaked write claim answers
@@ -311,8 +311,7 @@ the kernel suite on the tests kernel (`just test-elf`) and compares the dev
 kernel with its own build of the same commit (`scripts/compare_kernel_elf.sh`:
 the loadable image and the symbol table). That reference is built the way the
 guest builds: by the cargo fork (`scripts/make_host_cargo.sh` builds it for the
-host), from the vendored sources, into an empty target directory. `just
-boot-elf` boots a kernel built elsewhere.
+host), from the vendored sources, into an empty target directory.
 
 **The guest installs what it builds.** `/bin/bootctl` (granted `Mount` for the
 raw partition and `Power` for the loader's variables) writes a kernel into a
@@ -328,7 +327,11 @@ holder, each one through the device's exclusive claim, so a mounted device
 answers `EBUSY`. UEFI variables are read and written on a kernel thread — the
 firmware is mapped only into the kernel master address space and may use the
 vector registers — and only under the Boot Loader Interface's and SlopOS's own
-vendor GUIDs.
+vendor GUIDs. In the guest, `shell scripts/selfhost.sh install` is the one
+command for the whole of it: it builds with the dev disk's toolchain, installs
+into the slot that is not the default and arms the one-shot boot.
+`selfhost_test` and `install_test` run that script as a person at the shell
+does, so the loop a developer types is the loop the tests grade.
 
 **The guest speaks TLS 1.3.** `tls-core` is a sans-I/O client with every
 primitive under it written here, `no_std` and `forbid(unsafe_code)`;
@@ -351,9 +354,9 @@ unconditionally. The 60 static Rust binaries are unaffected: they take slibc as
 an rlib with the feature off, and `userland/userland.ld` discards `.eh_frame`
 outright.
 
-Boot targets rebuild a secondary `builddir/slop-notests.iso` with `tests=off`; override via `BOOT_CMDLINE=... just boot`, add `VIDEO=1` for a graphical window.
+`just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line, plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
 
-**The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the shipped verified `ext2.img`, so `just boot` still runs `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot-persist` is the developer's persistent machine: it boots `fs/assets/ext2-persist.img`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`, binaries only) so what the guest wrote survives. `VERITY=on` builds the shipped v1 trailer, which write-protects the device and is what `just boot`'s `verity=require` asserts; `VERITY=off` builds no trailer. The shipped and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
+**The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`, binaries only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **The root is not the only filesystem.** `mount(2)` with `fstype=ext2` takes a
 `source` naming a block device — `mount("/dev/vdb1", "/home", "ext2", …)` —
@@ -386,13 +389,17 @@ superblock drift and an empty log, and the mount has had nothing to write
 for a second — the state ext4 reaches for `fsfreeze`, here reached
 automatically at idle; a busy mount would pay a superblock read, write and
 barrier each way on every pass — and `Ext2Fs::transaction` re-stamps it
-dirty before the next mutation reaches the device. Closing the QEMU window
+dirty before the next mutation reaches the device. A mount owes the stamp
+from the moment it attaches, since attaching stamped it dirty and a mount
+nothing writes to runs no pass. Closing the QEMU window
 therefore costs at most the last idle window's writes, instead of leaving an
 image that mounts read-only forever after and that `root=auto` then demotes to
 `/mnt` while booting the initramfs. The host half is the same promise:
 `build_fs_image.sh` never deletes a `PRESERVE_FS_IMAGE=1` image. One that is
 damaged, left dirty, or built under a different `VERITY` stops the build
-naming the command that repairs it; `just boot-persist-reset` is the only
+naming the command that repairs it, except that `just boot` boots a disk
+closed mid-write without refreshing it, so the kernel replays its log;
+`just reset root` (or `devdisk`) is the only
 thing that discards one; a larger `PERSIST_IMAGE_SIZE` grows the image with
 `resize2fs` rather than rebuilding it; and `gen_verity.py` AND-s the old
 attested bitmap into the new one, so a block the guest rewrote stays
@@ -675,8 +682,8 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext2 volume, attach it as `virtio-disk3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-devdisk` — the dev-disk check: build (once, then preserve) the 4 GiB volume a cross-built toolchain lands on, attach it as `virtio-disk4`, boot with it mounted at `/devel` by `mount=LABEL=slopos-dev:/devel` and 4G of RAM, and let `devdisk_test` read the staged inventory back, grade the source tree against its own vendor directory, mount the volume a second time, and — when the volume carries a toolchain — climb the toolchain ladder; on a volume this run created, `devdisk-export` must then find nothing to export, since nobody has edited that tree. Separate from `just test` for the reason `test-capacity` is: the volume is opt-in, and the same utest under `just test` passes by reporting that no dev disk is attached. `DEV_DISK_SIZE` overrides the size.
 - `just test-install` — the Phase 1 check: boot from `builddir/boot-disk.img` (GPT, one FAT32 ESP holding Limine, `/limine.conf` and one kernel per slot under `/boot/<slot>/`), and across the resets of one QEMU let `install_test` clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot`, commit it as `default_entry`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
-- `just test-install-guest` — Phase 1's exit criterion, the two loops in one QEMU: a clean tree, `just toolchain` and a dev disk seeded from `HEAD`; slot a is the optimized tests kernel, and `install_test`, finding a dev disk at `/devel`, builds the tests kernel there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is unset on every build compared for identity — installs it into slot b and boots it once; that boot must report the tag. The run then commits and rolls back as `test-install` does, and the host holds slot b's file to the dev disk's `kernel-tests.elf` byte for byte. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
-- `just test-selfhost` — the self-hosting check: needs `just toolchain`, a clean working tree and a dev disk seeded from `HEAD`. The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), builds the dev and tests kernels with `scripts/build_kernel.sh` (`selfhost_test`), leaving cargo's `--timings` report under the volume's `builddir/target/cargo-timings`; the host holds the volume to `e2fsck -fn` and a clean superblock, exports both kernels, runs the ELF gates on them, runs the kernel suite on the tests kernel, and compares the dev kernel's loadable image and symbol table with a build of its own made by the cargo fork from the vendored sources. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
+- `just test-install-guest` — Phase 1's exit criterion, the two loops in one QEMU: a clean tree, `just toolchain` and a dev disk seeded from `HEAD`; slot a is the optimized tests kernel, and `install_test`, finding a dev disk at `/devel`, runs `scripts/selfhost.sh install tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is unset on every build compared for identity — which builds the tests kernel and installs it into slot b; the run boots it once, and that boot must report the tag. The run then commits and rolls back as `test-install` does, and the host holds slot b's file to the dev disk's `kernel-tests.elf` byte for byte. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
+- `just test-selfhost` — the self-hosting check: needs `just toolchain`, a clean working tree and a dev disk seeded from `HEAD`. The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), builds the dev and tests kernels with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the volume's `builddir/target/cargo-timings`; the host holds the volume to `e2fsck -fn` and a clean superblock, exports both kernels, runs the ELF gates on them, runs the kernel suite on the tests kernel, and compares the dev kernel's loadable image and symbol table with a build of its own made by the cargo fork from the vendored sources. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
 - `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel with the dev disk and `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
 - `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
@@ -704,7 +711,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `root` | `auto` / `initramfs` / `virtio` / `/dev/vdX[N]` / `vdX[N]` | which filesystem `/` is. `auto` prefers a writable `disk0` and falls back to the initramfs; a device name selects a probe-order device and, with a number, a GPT/MBR partition of it; an absent device or partition degrades to the initramfs with a klog line |
 | `mount` | `<device>:/<path>` / `LABEL=<label>:/<path>`, repeatable | mount an ext2 volume read-write after the root is up, in cmdline order; the source takes every spelling `mount(2)` accepts. A failure is one klog line and the boot goes on |
 | `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
-| `verity` | `require` | an attached disk must mount with a verity trailer or the `fs init` boot step fails; no disk at all still passes. `just boot` sets it — the shipped image is verified, so an unverified interactive boot is a broken artifact |
+| `verity` | `require` | an attached disk must mount with a verity trailer or the `fs init` boot step fails; no disk at all still passes. `just iso` sets it: the live ISO trusts no disk it finds without a trailer |
 | `sched.ap_pause_ms` | integer | wall-clock budget for the AP pause; `0` disables the deadline and falls back to the iteration bound. Default measured — see `AP_PAUSE_BUDGET_NS_DEFAULT` |
 | `kconsole` | `off` / `on` / `<hex mask>` | diagnostic-console permission mask; default `on` (informational only) |
 | `kconsole.serial` | `on` / `off` | serial BREAK trigger; default `on` |

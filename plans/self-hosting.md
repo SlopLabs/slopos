@@ -1,387 +1,167 @@
-# SlopOS As A Development Machine — Task Plan
+# SlopOS As A Development Machine
 
 ## Goal
 
-Turn SlopOS from an appliance that demonstrates subsystems into a machine you
-can *develop SlopOS on*: boot it (QEMU first, bare metal later), edit its
-sources, build the kernel and userland with a native Rust toolchain, install the
-result, and reboot into it. The loop closes when a commit to this repository is
-authored, compiled and booted without a Linux host in the path.
+Develop SlopOS on SlopOS: edit its sources, build them with the native
+toolchain, install the result and reboot into it. QEMU first, bare metal after.
+The loop closes when a commit to this repository is authored, compiled and
+booted with no Linux host in the path.
 
-One word decides the scope: the compiler must *run* here, not be *built* here.
-A C++ runtime on SlopOS lets a cross-built LLVM run; a C++ compiler rebuilding
-LLVM here is Phase 3, an order of magnitude further out and not committed.
+The compiler must *run* here. Rebuilding LLVM here is Phase 3 and not
+committed.
 
-**Scale, measured.** The dev kernel is 49 rustc invocations and 6 build
-scripts, a 410 MB target directory, 42 s at `-j20` on the host, and a 1.2 GiB
-peak for its largest single compile (`core`). The toolchain that runs it is a
-717 MB prefix — `librustc_driver` 140 MB, `libLLVM.so` and `libclang-cpp.so`
-79 MB each (X86 only), cargo 31 MB — built from a clean tree in 3 h 30 min at
-`-j4`. The same dev kernel builds on the host in 49 s at `-j4` on four
-pinned cores; in the guest, at four vCPUs, it takes about 75 s under KVM (88,
-160 and 600 s before the rounds of work in "Closing the loop") and 136 + 90
-min under TCG, measured before that work.
+## The loop today
 
-**Theme.** SlopOS's limits are appliance-sized constants and policies, not
-architectural mistakes. The work is widening under proof — quantities derived
-from the medium and from RAM instead of frozen at test-fixture values — not
-redesign.
+```sh
+just boot                                   # host: the development machine
+cd /devel/src/slopos                        # guest
+shell scripts/selfhost.sh install           # build the kernel, put it in the spare slot
+bootctl reboot                              # try it once
+bootctl commit                              # keep it; a reboot without this, or a panic, falls back
+```
 
-## Architectural constraints (do not violate)
+`just boot` boots this build's kernel from an A/B boot disk, with `/` on a
+persistent disk and the dev disk (toolchain and a source tree cut from `HEAD`)
+at `/devel`. The host owns the boot disk and the binaries it installs on `/`;
+the guest owns everything else on both disks. `just reset root|devdisk`
+discards one. `just boot-live` boots the live ISO the way bare metal runs it:
+from RAM, with no disk.
 
-- **Unsafe surface.** Only `slopos-ostd` may use `unsafe`; every other kernel
-  crate stays `#![forbid(unsafe_code)]`, and `check_unsafe_expansion.sh` sees
-  through macros. Nothing in this plan earns an exemption.
-- **Allocation discipline.** `KBox`/`KVec`/`KArc`/`KBTreeMap` only. A
-  toolchain-sized buffer becomes a chunked or page-list design, never a bigger
-  single allocation: `MAX_ALLOC_SIZE` stays 1 MiB (`mm/src/slab/mod.rs:61`).
-- **Stack frames ≤ 2 KiB** against a 4 KiB guard page, which is why paths are
-  heap-backed (`CanonPath`, `UserPath`) and large structs are built with
-  `KBox::try_init`.
-- **Task ownership I1–I8, and no `async fn` in a kernel crate.**
-- **Licensing.** GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source;
-  concepts, ABI numbers and layouts are free to take. Anything linked into a
-  shipped binary needs a `NOTICE.md` entry; fonts stay runtime-loaded.
-- **Ratchets are measurements, not numbers.** Re-measure with the gate's
-  `--emit-allowlist` in the same commit and name the change that moved it.
-- **`just boot`'s `verity=require` keeps meaning what it says.** Everything this
-  plan makes writable is a different medium.
+`selfhost_test` and `install_test` run `scripts/selfhost.sh` the way you type
+it, so `just test-selfhost` and `just test-install-guest` grade the command
+above: the guest's dev kernel matches the host's build byte for byte, and a
+kernel the guest built boots from slot b, commits and rolls back.
 
----
+**Broken at the default 4G.** Linking the *tests* kernel in the guest hits the
+file map's per-process cap, an eighth of usable memory (125306 pages at 4G):
+`pinnedbytes` peaks at exactly the cap, `rust-lld` takes a refused file-page
+fault and dies of SIGSEGV, and the dev disk remounts read-only with bitmap
+blocks leaked. `test-install-guest` fails that way at 4G and passes at
+`DEV_QEMU_MEM=8G`; `test-selfhost` builds the same kernel. The release kernel,
+which `selfhost.sh install` builds by default, links at 4G. Fix it before
+anything below: find which change grew the link's resident file pages or size
+the cap for a linker, then make a refused fault in one process stop failing a
+whole mount.
 
-## What has landed
+The guest builds the dev kernel in about 75 s at four vCPUs under KVM, against
+49 s for rustup's dist compiler on the host's same four cores. The gap is the
+compiler's build settings (PGO, BOLT, ThinLTO, one codegen unit, jemalloc), not
+the kernel: bootstrap's plain stage1 takes 65 s on the host. `just toolchain
+--pgo` builds the compiler with release settings and stays opt-in until it
+passes `just test-devdisk` and someone times it in the guest. Performance is
+off the critical path.
 
-Each row is a piece of the foundation and the test or gate that keeps it true.
-The mechanisms and their invariants live in the code and in `AGENTS.md`.
+## Phase 1: move development into the guest
 
-| Piece | Standing proof | Where |
-|---|---|---|
-| A persistent, writable root | `just boot-persist`, `test_ext2_clean_stamp_thaws_before_the_next_write` | `fs/src/ext2/`, `scripts/build_fs_image.sh` |
-| A large program runs | `bigprog_test` | `mm/src/{elf,demand,process_vm}.rs`, `core/src/exec/` |
-| A build system's floor | `buildctl_test`, `scripts/check_syscall_abi.sh` | `abi/src/syscall/`, `core/src/syscall/`, `fs/src/fileio/flock.rs` |
-| Storage holds a tree | `just test-capacity`, `scripts/check_fs_throughput.sh` | `fs/src/ext2/{dirindex,journal}.rs`, `drivers/src/virtio_blk.rs` |
-| Interleaved writeback never reverts a block | `test_ext2_lagging_pass_never_puts_an_older_copy_home`, `test_ext2_aborted_home_write_does_not_outlive_the_log`, `just check-fs-image` after every capture | `fs/src/ext2/{cache,journal}.rs`, `Ext2Fs::sync_step` |
-| A kill never reorders the disk | `test_virtio_blk_killed_write_is_waited_out`, `test_virtio_blk_waits_out_an_abandoned_write`, `test_uninterruptible_wait_outlasts_a_kill` | `drivers/src/virtio_blk.rs`, `slopos-ostd/src/sync/wait_queue.rs` |
-| An error is never an absent name | `test_ext2_create_and_link_fail_when_the_lookup_does`, `test_rename_fails_when_a_lookup_does`, `test_removal_fails_when_a_lookup_does`, `test_create_open_keeps_the_mode_of_a_file_it_found`, `test_ext2_directory_hole_is_damage_not_absence`, `test_ext2_orphan_drain_keeps_a_list_it_could_not_read` | `fs/src/{ext2,vfs,fileio}/` |
-| Utilities, a POSIX shell, a terminal and an editor | `coreutils_test`, `shell_script_test`, `terminal_grid_test`, `editor_test` | `userland/src/apps/`, `shell-core/`, `terminal-core/`, `editor-core/` |
-| The target is a hosted, built-in target | `scripts/check_rustc_target.sh`, `libc_abi_test` | `targets/x86_64-unknown-slopos.json`, `toolchain/{compiler,rust,libc}/` |
-| The libc surface LLVM 23.1 and rustc's crates need | `libc_probe`, `heap_allocator_test`, `slibc-core` host tests | `slibc/`, `userland/libctest/` |
-| A forked child inherits no libc lock held by a thread it lacks | `heap_allocator_test`'s `fork_while_another_thread_{allocates,holds_the_loader,starts_threads,flushes_streams}` | `slibc/src/pal/slopos.rs` |
-| C++ runtime and LLVM ports | `cxx_test`, `scripts/check_{cxx_pin,llvm_port,clang_driver}.sh` | `toolchain/{cxx,llvm,llvm-rustc}/`, `scripts/make_slopos_cxx.sh` |
-| The loader searches like glibc and musl | `dl_test` | `slibc/src/ld_so/`, `core/src/exec/` |
-| The toolchain is cross-built into one prefix | `scripts/check_bootstrap_config.sh`, `scripts/check_cargo_fork.sh`, `scripts/check_toolchain_pin.sh` | `scripts/bootstrap_slopos_toolchain.sh`, `toolchain/crates/` |
-| The dev disk carries it, mounts at boot, and runs it | `just test-devdisk` (inventory, source, remount, the toolchain ladder), `mount_test` | `scripts/build_devdisk.sh`, `boot/src/early_init.rs`, `fs/src/vfs/init.rs` |
-| The kernel build needs no host tool | `just build`; `slopos-kallsyms` tests; two checkouts build identical ELFs | `scripts/build_kernel.sh`, `tools/kallsyms/`, `scripts/compare_kernel_elf.sh` |
-| The build loop holds | `buildloop_test`, `exit_stress_test`, `test_blocking_populate_outlasts_a_long_reader`, `test_user_copy_retries_a_copy_that_faulted_midway`, `test_corpse_is_queued_inside_a_running_cleanup`; the guest builds both kernels | `mm/src/{commit,vma_region,page_fault,user_copy,user_mappings}.rs`, `slibc/src/process/spawn.rs`, `sched/src/scheduler.rs` |
-| A mount has one writeback pass | `test_ext2_sync_finishes_the_open_pass_instead_of_opening_one`, `test_ext2_journal_headroom_is_restored_off_the_mount_lock` | `fs/src/ext2_vfs.rs` |
-| A kernel installs into a boot slot and rolls back | `just test-install`, `just test-install-guest`, `slopos-fat-core` host tests, `test_devfs_block_node_writes_through_the_claim` | `fat-core/`, `userland/src/apps/bootctl.rs`, `core/src/efivar.rs`, `fs/src/devfs/`, `scripts/build_bootdisk.sh` |
-| Code gets in and out | `scripts/check_offline_build.sh`, `transfer_test` | `.cargo/vendor.toml`, `scripts/{make_vendor,export_devdisk}.sh`, `tls-core/` |
+In QEMU, you can build and install a kernel in the guest today, but you cannot
+work there. Linux became self-hosting at 0.11 when Linus moved his *work* onto
+it, and what held that back was tooling around the compiler. Here the tooling
+gaps are, in order:
 
-### What Phase 1 builds on
+1. **Source control.** The guest has no git. Sources reach it only by
+   reseeding the whole volume from `HEAD` (`just reset devdisk`, then a cold
+   build), and leave it only through `just devdisk-export`, which reads the
+   image with `debugfs` after the guest shuts down. Redox, Asterinas (PR
+   #3749) and SerenityOS (#12303) all bridge with git over the network, and so
+   should SlopOS. Done when the guest fetches from the host, commits, and the
+   host fetches the commit back; that retires reseeding and
+   `export_devdisk.sh`. Decide which git first:
+   - **C git**, cross-built with the SlopOS clang, with zlib. Complete: `just
+     boot` serves the checkout with `git daemon` on the SLIRP host address,
+     and `git://` needs neither TLS nor libcurl, which the guest lacks. But
+     git is GPL-2.0-only, and a patch series to it in this tree is the
+     verbatim GPL-2.0-only code `AGENTS.md` forbids. It needs an explicit
+     exemption for a separate program's port, kept apart from SlopOS code.
+   - **gitoxide**, MIT OR Apache-2.0, built by the guest's own cargo. It
+     fetches and commits, but has no push and no upload-pack server, so the
+     host takes commits back over dumb HTTP from a static server in the
+     guest.
+2. **Scripts run as `shell script.sh`.** Exec has no `#!` dispatch and there is
+   no `/bin/sh`. C git runs hooks, aliases and `sh -c`; build scripts and
+   ports assume both. Add `#!` handling to exec and install `/bin/sh`.
+3. **The userland builds only on the host.** `build_userland.sh` is bash and
+   the C++ runtime build is CMake and Ninja, so the guest can rebuild the
+   kernel but not `init`, the shell, the coreutils or `libc.so`. Port the
+   userland build to POSIX sh, as `build_kernel.sh` was, and give
+   `selfhost.sh` a verb that installs into `/`. That forces a decision the
+   loop dodges today: the host refreshes every binary it built on each `just
+   boot`, so a guest-installed `/bin` must either win or be declared the
+   guest's.
+4. **POSIX gaps a port hits.** The cwd is per-thread; futexes are private
+   only; there is no `mkfifo`, `vfork`, shell `trap`, `tgkill`, `sigqueue`,
+   procfs or `current_exe`; directories have no htree; one mount serialises
+   its mutations; there is one user, uid 0. Fix each when a port needs it,
+   not ahead.
 
-- **The toolchain.** `just toolchain` builds rustc, cargo, LLVM, clang and lld
-  for `x86_64-unknown-slopos` into `builddir/slopos-toolchain/install`, which is
-  also the C sysroot: clang's config names `<CFGDIR>/..`, and `cc`, `c++` and
-  `ld.lld` are links in `bin/`. Every binary carries `RUNPATH $ORIGIN/../lib`,
-  links `libc++` rather than the host's `libstdc++`, and passes the install
-  grader: no host library, no `TLSDESC`, every name bound. The prefix's
-  `libc.so` is a link input only: `libc.so` is the interpreter, so a program
-  runs on the `/lib` copy whatever its search path finds.
-- **The target.** Links through `cc`, whose `toolchains::SlopOS` supplies
-  `crt0.o`, the interpreter, `-lc` and compiler-rt, and unwinds. The system's own
-  binaries pin `rust-lld` and `panic=abort`.
-- **The loader.** `LD_LIBRARY_PATH`, `DT_RPATH`, `DT_RUNPATH` and `$ORIGIN`, all
-  refused under `AT_SECURE`; `AT_EXECFN` is the canonical executable path, so
-  `dladdr` on the executable names it (clang's `getMainExecutable`).
-  `LD_DEBUG=statistics` prints the relocations bound and the symbol searches
-  they cost. Binding is eager; a name binds to its first definition in scope,
-  weak or not, as under glibc.
-- **The dev disk.** 4 GiB, labelled `slopos-dev`, mounted at `/devel` by
-  `mount=LABEL=slopos-dev:/devel`. A new volume carries the toolchain at
-  `src/slopos/third_party/rust-slopos` — where the host keeps its owned
-  sysroot, so std's crates hash alike on both machines — and the source cut from
-  `HEAD`. `just boot-dev` boots it with 4G of RAM.
-- **The kernel build.** `scripts/build_kernel.sh` is POSIX sh for `/bin/shell`
-  and the coreutils; the ELF gates run from the justfile. Host builds use
-  `cargo +slopos` with `trim-paths`. The cross-built rustc reports the host's
-  version string, `1.100.0-nightly (2e2b193f8 2026-09-02)`, which is hashed into
-  every `StableCrateId`; `devdisk_test` holds the two to one string.
-- **The guest's build.** `selfhost_test` runs `scripts/build_kernel.sh` under
-  `/bin/shell` over `/devel/src/slopos`, with nothing on `PATH` but the staged
-  toolchain and the coreutils, and streams cargo's output to the console.
-  `just test-selfhost` then holds the volume to `e2fsck -fn`, grades both
-  kernels, runs the kernel suite on the guest's tests kernel and compares the
-  guest's dev kernel with the host's build of the same commit. Under TCG the
-  run takes about eight hours, so `SELFHOST_TIMEOUT_SECS` raises its budget.
+## Phase 2: bare metal
 
-### Deliberate gaps carried forward
+`just iso` builds the bare-metal artifact: kernel and initramfs, running from
+RAM, keeping nothing. That lets you *try* SlopOS on hardware. You can only
+*develop* there once it keeps what you write:
 
-- **Memory.** No swap and no OOM victim; user pages are 4 KiB only. A shared
-  file's page set is charged to whichever process reserved or mapped it last,
-  so one process's fault can be refused for another's share.
-- **ABI.** Linux's at the numbers and most layouts, except `getdents64`'s
-  `d_name` at 24, a truncated `ucontext_t`, `NSIG` 32, a `termios2`-shaped
-  `struct termios` and a 16-byte `signalfd_siginfo`.
-- **Processes.** The cwd is per-thread. Futexes are private-only, so a
-  process-shared semaphore is refused. `si_pid` comes from `kill` only — there
-  is no `tgkill` or `sigqueue`. `fork` holds libc's process-wide locks, so a
-  `fork` from a signal handler that interrupted a holder deadlocks, as under
-  glibc; a stdio stream another thread holds at the `fork` stays held in the
-  child.
-- **Files.** `posix_fallocate` and `posix_fadvise` are libc-side; no htree;
-  mutations serialise per mount; single user, uid 0.
-- **Entropy.** The kernel's CSPRNG is seeded from RDRAND and RDSEED; a CPU
-  without RDRAND seeds it from four TSC reads, which an observer of a TLS
-  ClientHello's random can search.
-- **Missing.** `mkfifo`, `vfork`, `trap`, `git` in the guest, network for cargo,
-  9p or virtio-fs, `current_exe` (no procfs).
+1. **Storage.** NVMe first, then AHCI. QEMU emulates both (Redox's `make qemu`
+   defaults to NVMe), so write and test the driver in QEMU, then let `just
+   boot` attach its disks through it and exercise it every session.
+2. **An installer.** From the live ISO: partition a disk GPT (ESP, `/`,
+   `/devel`), copy the running root, write the ESP with `fat-core` as `bootctl`
+   does. That is Linux 0.12's route (boot a RAM root, `mkfs`, copy, set the
+   root device) and Redox's installer's.
+3. **The rest of a real machine.** PCI without MCFG, x2APIC, a real NIC (git
+   needs one), USB HID input (`plans/usb-xhci.md`), ACPI SCI/GPE, and a log
+   sink other than COM1, which carries KTAP in QEMU and is absent on most
+   hardware.
 
----
+The verified image (`fs/assets/ext2.img`, `verity=require`) no longer backs any
+boot; the suite mounts it to exercise verity. Decide whether it becomes the
+bare-metal read-only root or goes.
 
-## Closing the loop
+## Phase 3: the toolchain rebuilds itself (not committed)
 
-**Outcome:** one `just test-selfhost` run passes every step on one tree.
-
-**Where it stands: closed.** One `just test-selfhost` run on `49db3f5e`
-passed all five steps: the guest built the dev kernel in 158 s and the tests
-kernel in 161 s under KVM at four vCPUs (714 s and 756 s when this section was
-first written; the host's reference dev build at `-j4` is about 44 s), the dev
-disk passed `e2fsck -fn`, both guest kernels passed the ELF gates, the suite
-passed 3455/3455 on the guest's tests kernel, and the guest's dev kernel
-matched the host's build in its loadable image (20 020 648 bytes) and its
-symbol table (46 070 symbols).
-
-1. `just test-selfhost` green end to end — done:
-   - the guest builds both kernels
-   - the dev disk passes `e2fsck -fn`
-   - `check_kernel_elf_gates.sh` passes on both kernels
-   - the kernel suite passes on the guest's tests kernel
-   - the dev kernel is identical to the host's build
-
-   What stood in the way, and is fixed:
-   - **The e2fsck blocker** — inodes with an extra name — was
-     `remove_dir_entry` merging a removed record into the last *live* record
-     by summing lengths, which could fold a reused free record back over a
-     live name. It now merges into the record immediately before it
-     (`test_ext2_removal_after_a_reused_free_record_takes_the_name`,
-     `test_ext2_namespace_churn_matches_the_medium`).
-   - **Identity.** Under `CI=true` cargo defaults `incremental` off, and the
-     profile is hashed into `-C metadata`: the host's reference and the guest
-     built different symbol names. Both now pin `CARGO_INCREMENTAL=1`.
-   - **A hang** with every CPU idle, once: `schedule_internal` finished a
-     switch against the CPU the task had *left* when it resumed on another,
-     requeueing the displaced task where no IPI would find it. Fixed; not seen
-     since.
-   - **Heap corruption in rustc**, twice in a row, from the page-set cache: a
-     fault that took a reference on a parked set did not unpark it, so
-     eviction freed frames it was about to map
-     (`test_filemap_fault_on_a_parked_set_holds_its_frames`).
-2. The slowdown, measured with `prof=on` (`sched/src/profile.rs`). From about
-   22× the host to about 4×:
-   - an optimized kernel for the machine doing the build (the dev profile
-     spent ten times as long in every syscall and fault);
-   - `boot.debug=off` on the dev-disk boots (a klog line per thread over a
-     serial port that exits to the host per byte);
-   - no TLB shootdown for a mapping where nothing was mapped unless a lazy
-     unmap may have left a stale entry;
-   - the monotonic clock off the TSC rather than the HPET;
-   - unmapped page sets kept as a cache, read ahead 16 pages at a time, mapped
-     copy-on-write into `MAP_PRIVATE` mappings and around each fault — file
-     faults fell from 2.6 M to 0.45 M per build;
-   - the C allocator: size-class bins instead of eight sorted lists (a quarter
-     of user time), a per-thread cache, a lock that spins while held, glibc's
-     dynamic mmap threshold — futex waits on its lock fell from 1.68 M to
-     0.13 M;
-   - the shell blocking in `wait4` instead of polling;
-   - CRC-32 eight bytes at a time for the journal (17 s of kernel time);
-   - LLVM's `ClearImpliedBits`, exponential over x86's feature graph and 7% of
-     user time with SSE disabled, rewritten level by level — still first at
-     5.8% — and then as each feature table's implication closures, computed
-     once per process (`toolchain/llvm-rustc/0002`).
-
-   Then from 161 s to 88 s (`just bench-selfhost`, which boots the optimized
-   tests kernel with `prof=on` and symbolizes the profile with
-   `scripts/prof_report.py`), against 48 s for the host's `-j4` build pinned
-   to the same four cores:
-   - the journal commits in groups, jbd2-style: records wait in an in-memory
-     ring and reach the log every second, when the ring fills, or at `fsync`,
-     behind the data they name; file data is never logged. ext2 lock waits
-     fell from 176 s to 48 s per two builds;
-   - the block cache sized from memory (an eighth of it, grown on demand),
-     writeback that keeps two 128 KiB requests in flight, virtio-blk chains of
-     128 KiB rather than 32, and large reads kept in the cache;
-   - page sets found through a hash index rather than a scan, written back 64
-     pages per write;
-   - anonymous faults fill their 128 KiB window, file faults map and read
-     ahead 32 pages, and a fault-around pays one TLB shootdown for its window
-     rather than one per page — 1.03 M shootdowns, 16 s, before;
-   - slibc: a mimalloc-style allocator (per-thread heaps, no global lock),
-     SSE2 string routines, and a loader that hashes a name once per lookup;
-   - an interrupt-delivered wake preempts an equal-priority task, and an
-     enqueue behind a running task kicks an idle CPU to steal it.
-
-   Then from 88 s to 75 s:
-   - LLVM linked with a static libc++, `-Bsymbolic` and `DT_RELR`: `rustc
-     --version` 135 ms → 73 ms, symbol lookups at startup 22 k → 3 k;
-   - the ext2 log gathers the operations still in its ring into one
-     transaction and rewrites a block already logged there in place:
-     15 k small metadata operations wrote 340 MiB with 819 barriers, now
-     2.5 MiB with 4; create 263 µs → 13 µs;
-   - per-mount name and attribute caches answer a warm path walk without
-     the mount lock: 5.5 M acquisitions per bench → 0.5 M;
-   - a file fault fills its pages from the block cache in one pass, and the
-     loader reads a writable segment instead of mapping it (840 COW faults
-     per rustc, gone);
-   - unmap, exec reset and fork walk each leaf page table once, fault-around
-     maps its window in one walk from one frame batch; the jobserver port
-     lets cargo spawn rustc with `posix_spawn` instead of fork + exec;
-   - an idle-gated clean stamp, and a mutex that spins before it sleeps.
-
-   What is left is mostly the compiler, not the kernel. The host's 49 s is
-   rustup's dist build, with PGO, BOLT, ThinLTO, `codegen-units=1` and
-   jemalloc; the SlopOS-hosted compiler has none of them. The same host
-   build with bootstrap's plain Linux stage1 compiler, the same source and
-   configuration, takes 64.8 s and 133 s of user time: against that the
-   guest's 75 s is 15% slower, and its user time 5%.
-
-   The release settings recover the host side: `just toolchain-profile`
-   gathers LLVM and rustc profiles from a Linux-hosted build of the same
-   compiler running this kernel build (opt-dist's flow), and the
-   Linux-hosted twin built with them and with ThinLTO and one codegen unit
-   (`--optimized-host`) builds the dev kernel in 49.8 s / 102 s user, against
-   50.4 s / 117 s for rustup's dist compiler and 65.6 s / 137 s for the
-   plain stage1 in the same session. The rustc profile matches the SlopOS
-   build by name only because both compile every crate through
-   `scripts/rustc_neutral_metadata.sh`; LLVM's, compiled against libstdc++
-   on Linux and libc++ on SlopOS, matched 75% of the functions the PGO pass
-   saw in a 60-file sample of the SlopOS LLVM (5% hash mismatch, 20% absent,
-   mostly C++-library instantiations). Next: `just toolchain --pgo`, which
-   is opt-in until the compiler it builds has passed `just test-devdisk` and
-   been timed in the guest.
-
----
-
-## Phase 1 — Install what you built
-
-**Outcome:** the guest writes a bootable medium and reboots into its own kernel.
-
-**Landed.** `just test-install` boots from a GPT boot disk whose EFI system
-partition holds Limine, `/limine.conf` and a kernel per slot, and across the
-resets of one QEMU: `bootctl clone a b`, a one-shot boot of `slopos-b` through
-the Boot Loader Interface's `LoaderEntryOneShot`, `bootctl commit`, and a
-one-shot boot of a slot whose kernel panics under `panic=reboot` — whose reset
-lands on the committed default. The pieces: `/dev/vd*` writes for a `Mount`
-holder through the device's exclusive claim; `fat-core`, FAT32 with
-copy-on-write file replacement; UEFI variables on a kernel thread, limited to
-the loader's and SlopOS's vendor GUIDs; `panic=reboot`; and a second, pinned
-OVMF whose varstore survives a reset (the nightly the ISO boots keeps
-variables in RAM). The execution boundary holds: all of it is a disk image
-under `builddir/` inside QEMU.
-
-**Exit criterion met.** `just test-install-guest` boots slot a (the optimized
-tests kernel) with the dev disk attached; `install_test` builds the tests
-kernel on the dev disk under a fresh `SLOPOS_BUILD_TAG` (209 s), installs it
-into slot b, and the one-shot boot of slot b logs
-`BOOT: kernel /boot/b/kernel.elf (96330728 bytes), build tag guest-480898329`
-and reports the tag in `uname -v`. The run commits b, boots a slot that panics,
-and the reset lands on b; the host then holds slot b's file to the dev disk's
-build byte for byte, and both disks pass `e2fsck -fn`.
-
-What the run found on the way:
-- A kernel that panicked right after mounting left every writable ext2
-  volume unclean, and the next boot came up with `/` and `/devel` read-only
-  until a host `e2fsck`. The log superblock now carries the mount stamp
-  (`[s_mnt_count, s_mtime]`) of the mount that claimed it, and an unclean
-  volume whose empty log carries its current stamp mounts read-write
-  (`test_ext2_journal_empty_log_of_the_last_mount_recovers`).
-- `fat-core` moved a file one 4 KiB cluster per device request, each
-  re-probing the partition table; runs of consecutive clusters now go as one
-  request of up to 1 MiB.
-
-**Phase 1 exit criteria (met):** `just boot-dev`, build a kernel in-guest,
-install it, reboot, and the boot log shows the new build — with rollback if it
-panics.
-
----
-
-## Phase 2 — Bare metal (not committed)
-
-Recorded so the cost is known: no NVMe, AHCI or USB; PCI panics without MCFG;
-x2APIC is disabled; no real NIC; no ACPI SCI/GPE runtime or frequency
-management; COM1 is the only serial, so the KTAP transport vanishes on real
-hardware.
-
----
-
-## Phase 3 — The toolchain rebuilds itself (not committed)
-
-The goal asks that a commit be *compiled* here, not the compiler. Rebuilding
-LLVM in-guest needs CMake, Ninja and Python ported, tens of gigabytes and hours
-of CPU on real I/O, and `-Zbuild-std` on every build until the target is tier 2.
+Rebuilding LLVM in the guest needs CMake, Ninja and Python ported, tens of
+gigabytes and hours of CPU, and `-Zbuild-std` until the target is tier 2.
 Neither Redox nor Asterinas rebuilds its own compiler.
 
----
+## Constraints
+
+- Only `slopos-ostd` uses `unsafe`; `check_unsafe_expansion.sh` sees through
+  macros. Nothing here earns an exemption.
+- `KBox`/`KVec`/`KArc`/`KBTreeMap` only. A toolchain-sized buffer becomes a
+  chunked or page-list design; `MAX_ALLOC_SIZE` stays 1 MiB.
+- Stack frames stay under 2 KiB, against a 4 KiB guard page.
+- Task ownership I1 to I8; no `async fn` in a kernel crate.
+- GPL-3.0-or-later. No verbatim GPL-2.0-only or CDDL source. A third-party
+  program shipped on an image needs a `NOTICE.md` entry.
+- Ratchets are measurements: re-measure with the gate's `--emit-allowlist` and
+  name the change that moved it.
+- The verified image stays read-only and attested. Anything writable is a
+  different medium.
 
 ## Decided
 
-- **Toolchain.** LLVM cross-built from Linux, one shared `libLLVM.so`; cargo a
-  pinned fork with `network` off; the compiler's crates ported by PR-shaped
-  patches pinned by checksum. A Rust-hosted toolchain — cranelift and wild —
-  was decided first, then measured against this kernel and found not to reach
-  it; `scripts/gates/{codegen,linker}/` hold that answer, and CI re-asks it
-  whenever the candidates install.
-- **Linking and panics.** Hosted programs link through `cc` and unwind, as on
-  Redox; the system's own binaries pin `rust-lld` and abort. `rustc_llvm` picks
-  `libc++` for `slopos`, as it does for FreeBSD, rather than `llvm.use-libcxx`,
-  which would force it on the Linux stage1 compiler too — and links it
-  statically, as libLLVM does, under `llvm.static-libstdcpp`.
-- **C++ runtime.** LLVM's libc++ and libc++abi in one `libc++.so`, settled by
-  cross-building it: `libstdc++` comes out of a GCC cross-compiler's
-  bootstrap, a second toolchain to pin and keep, where libc++ is built by the
-  clang that has to be here anyway. Localization, wide characters,
-  `<filesystem>` and the random device are on because LLVM reaches all four;
-  with them on, porting LLVM 18.1.8 cost the C library POSIX-2008's locale
-  objects and 53 `_l` functions, wide stdio, and four headers.
-- **Library search** follows glibc and musl, all of it ignored under
-  `AT_SECURE`.
-- **Syscall ABI.** Linux x86-64 numbering, private range at 1024. Linux binary
-  compatibility is out of scope.
-- **Std platform layer.** Unix family over a real libc.
+- **Toolchain.** LLVM cross-built from Linux into one prefix; cargo a pinned
+  fork with `network` off; the compiler's crates ported by PR-shaped patches
+  pinned by checksum. Cranelift and wild were measured against this kernel and
+  do not reach it; `scripts/gates/{codegen,linker}/` re-ask whenever they
+  install.
+- **Linking and panics.** Hosted programs link through `cc` and unwind; the
+  system's own binaries pin `rust-lld` and abort. The C++ runtime is libc++.
+- **ABI.** Linux x86-64 syscall numbers, no Linux binary compatibility. Unlike
+  Asterinas, which runs stock NixOS gcc and git, every tool here is a port.
 - **Memory.** A commit ledger, not swap.
-- **Block requests.** A request the device holds is waited out, not
-  abandoned, because nothing orders two requests in flight to one sector:
-  Linux never abandons a submitted bio, whose pages stay with it until it
-  completes, and Asterinas and Redox wait on the completion too. The wait is
-  bounded, and a write given up on a timeout fences every later write, and a
-  read-modify-write's read, until the device returns it.
-- **The C allocator's lock** is the futex mutex `pthread_mutex_t` uses: a
-  contended `malloc` sleeps, as under glibc and musl, after a short spin, as
-  under musl.
-- **`fork` and libc's locks.** Held across the `fork`, outermost first — loader,
-  TLS layout, `atexit` list, stream list, allocator — as musl does, so both
-  sides release them. glibc re-initialises its loader locks in the child
-  instead, which leaves the table a concurrent `dlopen` was editing half-done.
-- **Writeback.** One pass per mount, driven by every caller that needs one. A
-  `sync` that finds a pass open drives it to the end and then the next, as a
-  jbd2 commit waiter does, because the open pass's epoch predates the caller's
-  writes.
-- **Page faults against user copies.** A fault waits, holding the per-process
-  lock, for the copies in flight to drop their reference to the address space;
-  copies run with preemption off and none can start while that lock is held.
-  Linux faults under a shared `mmap_lock` with page-table locks, and Asterinas
-  locks page-table nodes; this is the coarse form of the same exclusion.
-- **Post-switch cleanup** of a dead task runs in its successor, preemptible,
-  and never nests: a task resumed inside one queues its new corpse for the
-  cleanup already running. Nested, each resume stacked another teardown, and
-  an idle CPU under `exit_stress` overflowed its 32 KiB stack.
-- **Account release against quota walks.** Charges and refunds stay lock-free
-  and never wait on each other; a release waits out the walks in flight and
-  holds new ones off, the per-CPU-reader shape of Linux's `percpu_rw_semaphore`.
-  A release that re-pointed a child's parent edge under a refund walk credited
-  the child's pages to the root twice.
-- **Dev disk.** Mounted from the command line, trailer-less, seeded from `HEAD`
-  and carried back out as a patch; no host share on the build path.
-- **Kernel build.** One POSIX `sh` driver and one Rust symbol-table tool, on
-  both machines; identity means the same loadable image with std at one
-  workspace-relative path on both sides.
-- **Scope.** The full in-guest loop, through Phase 1, in QEMU.
+- **The dev loop.** One development machine (`just boot`, and `just
+  boot-fast` to skip the wheel) and one live artifact (`just iso`); knobs
+  (`KERNEL_RELEASE`, `VIDEO`, `ports`, `DEBUG`, `ROULETTE`) rather than more
+  recipe variants, as Asterinas, Redox and SerenityOS all do.
+  Persistent disks refresh in place and only `just reset` deletes one; Redox
+  rebuilds its image and loses what the guest wrote.
+- **Install.** A/B slots, a one-shot try and a commit are the one install
+  path: the shape of `grub-reboot` and systemd-boot's boot assessment, which
+  Redox, Asterinas and SerenityOS do not have. The host rebuilds the boot disk
+  on every `just boot`.
+- **Tests drive the human entry point.** The guest-side tests call
+  `scripts/selfhost.sh`, so the loop you run is the loop `just test-selfhost`
+  and `just test-install-guest` grade.
+- **Source bridge.** The network, not a shared filesystem: no 9p or virtio-fs
+  on the build path.
+- **Kernel build.** One POSIX sh driver and one Rust symbol-table tool on both
+  machines; identity means the same loadable image.

@@ -1,11 +1,11 @@
 //! The shipped verified image, mounted from the device the test harness
 //! attaches it on.
 //!
-//! `fs/assets/ext2.img` is what `just boot` runs from, and it is the only
-//! image that carries a verity trailer: the tests image on disk0 is built
-//! `VERITY=off` so the suite can write to it. Without this test no `just
-//! test` run would exercise `fs/src/verity.rs` against a trailer a real block
-//! device reports — which is exactly how SLOPOS-2026-0053 stayed invisible.
+//! `fs/assets/ext2.img` is the only image that carries a write-protecting
+//! verity trailer: the tests image on disk0 is built `VERITY=off` so the suite
+//! can write to it. Without this test no `just test` run would exercise
+//! `fs/src/verity.rs` against a trailer a real block device reports — which is
+//! exactly how SLOPOS-2026-0053 stayed invisible.
 
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
 use slopos_fs::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};

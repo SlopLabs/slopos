@@ -520,8 +520,8 @@ if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     )
 fi
 if [ "$ADD_VERIFIED_DISK" = "1" ]; then
-    # snapshot=on: the file is what the next `just boot` runs from, and a bug
-    # is exactly when "the guest never writes it" is not to be trusted.
+    # snapshot=on: a bug is exactly when "the guest never writes it" is not to
+    # be trusted.
     QEMU_ARGS+=(
         -drive "file=$VERIFIED_IMG,if=none,id=virtio-disk2,format=raw,snapshot=on"
         -device "virtio-blk-pci,drive=virtio-disk2,disable-legacy=on"

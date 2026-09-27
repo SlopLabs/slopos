@@ -162,7 +162,7 @@ refuse() {
     echo "preserve: $1" >&2
     echo "  $IMAGE_PATH holds whatever the guest wrote, so this build stops here." >&2
     echo "  Fix it:     $2" >&2
-    echo "  Discard it: rm -f '$IMAGE_PATH' '$STAMP_PATH'   (just boot-persist-reset)" >&2
+    echo "  Discard it: rm -f '$IMAGE_PATH' '$STAMP_PATH'" >&2
     exit 1
 }
 

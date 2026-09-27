@@ -143,9 +143,8 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         ROOT_VIRTIO => false,
         // A read-only disk falls back to the initramfs as a no-disk boot does:
         // nothing written to such a root survives, so preferring it buys no
-        // persistence and costs a writable `/`. That is what keeps `just boot`
-        // working, whose shipped image is verified and therefore read-only.
-        // With no initramfs to fall back to, a read-only disk is still a root.
+        // persistence and costs a writable `/`. With no initramfs to fall back
+        // to, a read-only disk is still a root.
         _ => !writable_disk && archive.is_some(),
     };
     if !use_initramfs {

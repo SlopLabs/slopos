@@ -1,7 +1,7 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::devdisk::{TESTS_FEATURES, kernel_build, workspace};
+use slopos_userland::devdisk::{selfhost, workspace};
 use std::fs;
 use std::time::Instant;
 
@@ -9,9 +9,9 @@ use std::time::Instant;
 /// build and the test passes by saying so. `clean` starts from an empty target
 /// directory and no symbol table, as the host's reference build does, so the
 /// time measures a whole build rather than whatever the last boot left behind.
-fn guest_builds(variant: &str, features: &[&str], clean: bool) -> bool {
-    let (root, prefix) = match workspace() {
-        Ok(w) => w,
+fn guest_builds(variant: &str, clean: bool) -> bool {
+    let root = match workspace() {
+        Ok(root) => root,
         Err(why) => {
             note(why);
             return true;
@@ -26,7 +26,7 @@ fn guest_builds(variant: &str, features: &[&str], clean: bool) -> bool {
         }
     }
     let started = Instant::now();
-    let status = kernel_build(&root, &prefix, features).status();
+    let status = selfhost(&root, &["build", variant]).status();
     let status = match status {
         Ok(status) => status,
         Err(e) => {
@@ -35,7 +35,10 @@ fn guest_builds(variant: &str, features: &[&str], clean: bool) -> bool {
         }
     };
     if !status.success() {
-        note(&format!("build_kernel.sh exited {:?}", status.code()));
+        note(&format!(
+            "selfhost.sh build {variant} exited {:?}",
+            status.code()
+        ));
         return false;
     }
     match fs::metadata(&elf) {
@@ -55,11 +58,11 @@ fn guest_builds(variant: &str, features: &[&str], clean: bool) -> bool {
 }
 
 fn guest_builds_the_dev_kernel() -> bool {
-    guest_builds("dev", &[], true)
+    guest_builds("dev", true)
 }
 
 fn guest_builds_the_tests_kernel() -> bool {
-    guest_builds("tests", TESTS_FEATURES, false)
+    guest_builds("tests", false)
 }
 
 fn main() {

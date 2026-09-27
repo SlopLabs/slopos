@@ -17,7 +17,7 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::devdisk::{TESTS_FEATURES, kernel_build, workspace};
+use slopos_userland::devdisk::{selfhost, workspace};
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
@@ -107,26 +107,25 @@ fn running_version() -> String {
 /// Build the tests kernel on the dev disk under a fresh tag and install it
 /// into slot b; `None` when no dev disk is attached.
 fn install_guest_build() -> Option<bool> {
-    let (root, prefix) = match workspace() {
-        Ok(w) => w,
+    let root = match workspace() {
+        Ok(root) => root,
         Err(why) => {
             note(&format!("{why}; cloning slot a instead of building"));
             return None;
         }
     };
     let tag = format!("guest-{}", clock_gettime_ns());
-    let elf = format!("{root}/builddir/kernel-tests.elf");
-    let _ = std::fs::remove_file(&elf);
+    let _ = std::fs::remove_file(format!("{root}/builddir/kernel-tests.elf"));
     let started = Instant::now();
-    let status = kernel_build(&root, &prefix, TESTS_FEATURES)
+    let status = selfhost(&root, &["install", "tests"])
         .env("SLOPOS_BUILD_TAG", &tag)
         .status();
     if !matches!(status, Ok(s) if s.success()) {
-        note(&format!("the guest's kernel build: {status:?}"));
+        note(&format!("selfhost.sh install tests: {status:?}"));
         return Some(false);
     }
     println!("INSTALL-BUILT {tag} in {} s", started.elapsed().as_secs());
-    Some(set_var(TAG, tag.as_bytes()) && bootctl(&["install", "b", &elf]).is_some())
+    Some(set_var(TAG, tag.as_bytes()))
 }
 
 fn reboot_into(entry: &str, next: u8) -> bool {

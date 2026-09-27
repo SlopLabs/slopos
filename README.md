@@ -63,16 +63,24 @@ sudo pacman -S qemu-full xorriso e2fsprogs just go
 
 # Then:
 just setup          # installs the pinned rust nightly + the forked `slopos` sysroot
-just boot           # spins the wheel
+just boot-live      # spins the wheel, from RAM
 ```
 
 | Command | What it does |
 |---------|--------------|
-| `just boot` | Boot with a display window |
-| `just boot-fast` | Skip the Wheel of Fate (coward) |
-| `just boot-headless` | Serial only, no window |
+| `just boot` | Boot the development machine, wheel first: a persistent `/` and the dev disk at `/devel`. Also needs clang, lld, cmake, ninja, dosfstools and mtools |
+| `just boot-fast` | `just boot` without the Wheel of Fate (coward) |
+| `just boot-live` | Boot the live ISO from RAM in a window, as bare metal runs it; nothing persists. `ROULETTE=0` skips the wheel |
 | `just test` | Run the 2,500+ test suite under QEMU |
 | `just --list` | Everything else (there's a lot) |
+
+To build SlopOS inside SlopOS, cross-build the toolchain once (`just toolchain`,
+hours), `just boot`, and in the guest:
+
+```sh
+cd /devel/src/slopos && shell scripts/selfhost.sh install
+bootctl reboot      # boots the new kernel once; `bootctl commit` keeps it
+```
 
 When it wedges, ask it why: press **SysRq** (Alt+PrintScreen) — or send a
 **BREAK** on the serial line — then a command key. `h` lists them; `t` dumps
@@ -85,6 +93,8 @@ it, and `kconsole=off` on the kernel cmdline turns it off entirely.
 ```bash
 QEMU_DISPLAY=cocoa just boot                       # force a display backend (macOS auto-detects Cocoa)
 QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 just boot   # manual framebuffer override
+VIDEO=0 just boot                                  # serial only, no window
+ROULETTE=0 just boot-live                          # the live ISO without the Wheel of Fate
 just ports=7777,8080 boot                          # expose guest ports on the host
 just test 'mm::*'                                  # run a subset of the tests
 just boot-debug                                    # QEMU GDB stub on :1234
