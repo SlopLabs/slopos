@@ -302,7 +302,8 @@ the host has — `ensure_toolchain.sh` before, the ELF gates after
 (`scripts/check_kernel_elf_gates.sh`) — lives in the justfile's `_kernel`
 recipe. The embedded symbol table comes from `tools/kallsyms`, an ELF reader
 built for whichever machine runs the build, byte-identical to what `llvm-nm`
-gave; the driver writes the empty safestack runtime archive itself; and
+gave less LLVM's `.llvm.<hash>` promotion suffix, which would keep a release
+table from ever reaching a fixed point; the driver writes the empty safestack runtime archive itself; and
 `trim-paths` keeps every absolute path out of the image. `just test-selfhost`
 is the whole loop: the guest builds the dev and tests kernels
 (`selfhost_test`), the host holds the volume to `e2fsck`, exports both kernels,

@@ -3,7 +3,8 @@
 //! Usage: `kallsyms <kernel.elf> <out.rs>`
 //!
 //! The table is what `llvm-nm -n --defined-only --demangle` lists with type
-//! `t`, `T`, `w` or `W` at a kernel address, in llvm-nm's order, deduplicated
+//! `t`, `T`, `w` or `W` at a kernel address, in llvm-nm's order, without
+//! LLVM's `.llvm.<hash>` promotion suffix, deduplicated
 //! by address and name. `<out.rs>` is rewritten only when the table changed,
 //! so the second kernel build is a cache hit whenever the symbols are stable.
 //! Dependency-free, so it builds for the Linux host and the SlopOS guest alike.
@@ -42,12 +43,14 @@ fn run(elf: &Path, out: &Path) -> Result<(), String> {
     let mut table: Vec<(u64, Vec<u8>)> = Vec::with_capacity(symbols.len());
     let mut group_start = 0;
     for sym in &symbols {
-        let name = demangle::demangle(&sym.name).map_err(|demangle::Unsupported(scheme)| {
-            format!(
-                "{} is a {scheme} name, which llvm-nm would demangle and this tool cannot",
-                String::from_utf8_lossy(&sym.name)
-            )
-        })?;
+        let name = demangle::demangle(without_promotion_suffix(&sym.name)).map_err(
+            |demangle::Unsupported(scheme)| {
+                format!(
+                    "{} is a {scheme} name, which llvm-nm would demangle and this tool cannot",
+                    String::from_utf8_lossy(&sym.name)
+                )
+            },
+        )?;
         if table
             .get(group_start)
             .is_some_and(|&(addr, _)| addr != sym.addr)
@@ -75,6 +78,43 @@ fn run(elf: &Path, out: &Path) -> Result<(), String> {
         out.display()
     );
     Ok(())
+}
+
+/// LLVM names a local it promotes across codegen units `<name>.llvm.<hash>`,
+/// hashing the module; the table sits in one of those modules, so kept, the
+/// suffix changes the table on every build and it never reaches a fixed point.
+fn without_promotion_suffix(name: &[u8]) -> &[u8] {
+    const SUFFIX: &[u8] = b".llvm.";
+    match name.windows(SUFFIX.len()).rposition(|w| w == SUFFIX) {
+        Some(at)
+            if name.len() > at + SUFFIX.len()
+                && name[at + SUFFIX.len()..].iter().all(u8::is_ascii_digit) =>
+        {
+            &name[..at]
+        }
+        _ => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_promotion_suffix;
+
+    #[test]
+    fn drops_only_a_numeric_promotion_suffix() {
+        assert_eq!(
+            without_promotion_suffix(b"_RNvC1a4main.llvm.12345"),
+            b"_RNvC1a4main"
+        );
+        for kept in [
+            &b"_RNvC1a4main"[..],
+            b"a.llvm.",
+            b"a.llvm.12x",
+            b"a.llvm.1.cold",
+        ] {
+            assert_eq!(without_promotion_suffix(kept), kept);
+        }
+    }
 }
 
 fn render(table: &[(u64, Vec<u8>)]) -> String {
