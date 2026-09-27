@@ -843,9 +843,13 @@ rustc-src:
 check-cargo-fork:
     scripts/check_cargo_fork.sh --require
 
-[doc("Cross-build the Rust toolchain that runs on SlopOS. Hours of CPU; `just check-bootstrap-config` is the affordable half.")]
+[doc("Cross-build the Rust toolchain that runs on SlopOS. Hours of CPU; `just check-bootstrap-config` is the affordable half. `--pgo` builds it as a Rust release is (ThinLTO, one codegen unit, PGO with the profiles `just toolchain-profile` gathers, made first when missing or stale).")]
 toolchain *ARGS:
     scripts/bootstrap_slopos_toolchain.sh {{ARGS}}
+
+[doc("Gather the PGO profiles for `just toolchain` from an instrumented Linux-hosted build of the same compiler running the kernel build (builddir/slopos-pgo). `--optimized-host` also builds that compiler with them, for timing a host kernel build; `--force` regenerates.")]
+toolchain-profile *ARGS:
+    scripts/make_toolchain_profile.sh {{ARGS}}
 
 [doc("Hold the cross-build plan and the compiler wrapper to the toolchain they claim to produce. Needs `just rustc-src` and a tests userland build first.")]
 check-bootstrap-config:

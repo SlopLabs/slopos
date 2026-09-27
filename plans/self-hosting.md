@@ -244,6 +244,21 @@ symbol table (46 070 symbols).
    configuration, takes 64.8 s and 133 s of user time: against that the
    guest's 75 s is 15% slower, and its user time 5%.
 
+   The release settings recover the host side: `just toolchain-profile`
+   gathers LLVM and rustc profiles from a Linux-hosted build of the same
+   compiler running this kernel build (opt-dist's flow), and the
+   Linux-hosted twin built with them and with ThinLTO and one codegen unit
+   (`--optimized-host`) builds the dev kernel in 49.8 s / 102 s user, against
+   50.4 s / 117 s for rustup's dist compiler and 65.6 s / 137 s for the
+   plain stage1 in the same session. The rustc profile matches the SlopOS
+   build by name only because both compile every crate through
+   `scripts/rustc_neutral_metadata.sh`; LLVM's, compiled against libstdc++
+   on Linux and libc++ on SlopOS, matched 75% of the functions the PGO pass
+   saw in a 60-file sample of the SlopOS LLVM (5% hash mismatch, 20% absent,
+   mostly C++-library instantiations). Next: `just toolchain --pgo`, which
+   is opt-in until the compiler it builds has passed `just test-devdisk` and
+   been timed in the guest.
+
 ---
 
 ## Phase 1 — Install what you built

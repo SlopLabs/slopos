@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Cross-build the Rust toolchain that runs on SlopOS.
 #
-# Usage: bootstrap_slopos_toolchain.sh [--dry-run] [--stage <dir>] [-- <x.py args>]
+# Usage: bootstrap_slopos_toolchain.sh [--dry-run] [--no-pgo | --pgo] [--sources-only]
+#                                      [--stage <dir>] [-- <x.py args>]
 #
 # One bootstrap invocation, `--build=x86_64-unknown-linux-gnu
 # --host=x86_64-unknown-slopos`, producing rustc, cargo, rust-lld, clang and
@@ -37,12 +38,30 @@ set -euo pipefail
 # graph without compiling anything. That is the half of this a gate can
 # afford, and it is what `scripts/check_bootstrap_config.sh` runs.
 #
+# `--pgo` builds the compiler as a Rust release is: ThinLTO and one codegen
+# unit for rustc's crates, ThinLTO for LLVM
+# (`scripts/lib/rustc_build_settings.sh`), and profile-guided optimisation of
+# both, with the profiles `scripts/make_toolchain_profile.sh` gathers from a
+# Linux-hosted build of the same sources compiling this repository's kernel;
+# every crate is then compiled through `scripts/rustc_neutral_metadata.sh`,
+# so the SlopOS build names its symbols as the profiled Linux one does. The
+# profiles are cached under `<build dir>/slopos-pgo` and regenerated only when
+# an input to them changes, which the first time and after a compiler patch
+# costs a Linux LLVM built twice, a stage1 and a stage2 compiler, and two
+# kernel builds on instrumented compilers. It is opt-in until a SlopOS-hosted
+# compiler built that way has been through `just test-devdisk`; without it
+# (`--no-pgo`, the default) the configuration is the plain one.
+#
+# `--sources-only` stages the source subtrees below and exits: what the
+# profile build needs from this script.
+#
 # Environment:
 #   SLOPOS_SYSROOT   - the target sysroot (default: builddir/slopos-sysroot,
 #                      assembled here from the staged libraries and headers)
 #   BUILD_DIR        - where artifacts go (default: builddir)
 #   SLOPOS_TOOLCHAIN_OUT - the wrapper and config directory
 #                      (default: <build dir>/slopos-toolchain)
+#   SLOPOS_TOOLCHAIN_PGO - 1 is `--pgo` (default: 0)
 #   BOOTSTRAP_JOBS   - -j for x.py (default: nproc)
 
 SELF="bootstrap_slopos_toolchain"
@@ -51,6 +70,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"
 . "$SCRIPT_DIR/lib/tree_sync.sh"
+. "$SCRIPT_DIR/lib/rustc_build_settings.sh"
 
 die() {
     echo "$SELF: $1" >&2
@@ -58,12 +78,26 @@ die() {
 }
 
 DRY_RUN=0
+SOURCES_ONLY=0
+PGO="${SLOPOS_TOOLCHAIN_PGO:-0}"
 STAGE=""
 XPY_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)
             DRY_RUN=1
+            shift
+            ;;
+        --sources-only)
+            SOURCES_ONLY=1
+            shift
+            ;;
+        --pgo)
+            PGO=1
+            shift
+            ;;
+        --no-pgo)
+            PGO=0
             shift
             ;;
         --stage)
@@ -78,6 +112,10 @@ while [ $# -gt 0 ]; do
         *) die "unknown argument: $1" ;;
     esac
 done
+case "$PGO" in
+    0 | 1) ;;
+    *) die "SLOPOS_TOOLCHAIN_PGO must be 0 or 1, not $PGO" ;;
+esac
 
 TARGET="x86_64-unknown-slopos"
 HOST_TRIPLE="x86_64-unknown-linux-gnu"
@@ -168,6 +206,10 @@ if [ "$DRY_RUN" -eq 0 ]; then
         printf '%s\n' "$STD_STAMP_WANT" >"$LIBRARY_STAMP"
         ts_carry_over "$SRC/library" || die "could not carry library/ over the previous tree"
     fi
+fi
+if [ "$SOURCES_ONLY" -eq 1 ]; then
+    [ "$DRY_RUN" -eq 0 ] || die "--sources-only stages sources, which a dry run never does"
+    exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -413,6 +455,43 @@ write_wrapper "$WRAPPER_DIR/$TARGET-clang++" "$CLANGXX" \
     "-nostdinc++ -isystem $SYSROOT/include/c++/v1 $CXX_ABI_FLAGS" "-lc++"
 
 # ---------------------------------------------------------------------------
+# With `--pgo`: the PGO profiles, gathered by
+# `scripts/make_toolchain_profile.sh`, which returns at once while their
+# stamp describes the tree (a dry run names them without making them:
+# bootstrap only reads them once it compiles), the release settings, and the
+# build triple compiled by the host's clang and archived by LLVM's tools,
+# because LLVM's ThinLTO needs both. Without it the configuration is the plain
+# one this script always wrote.
+# ---------------------------------------------------------------------------
+PGO_DIR="$BUILD_DIR/slopos-pgo"
+RUSTC_PROFILE="$PGO_DIR/rustc.profdata"
+LLVM_PROFILE="$PGO_DIR/llvm.profdata"
+PLAIN=plain
+PGO_CONFIG=""
+TARGET_AR="$LLVM_AR"
+TARGET_RANLIB="$LLVM_AR"
+if [ "$PGO" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 0 ]; then
+        BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_toolchain_profile.sh" ||
+            die "no PGO profiles — see above, or build without --pgo"
+    fi
+    eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
+    PLAIN=""
+    TARGET_AR="$RBS_AR"
+    TARGET_RANLIB="$RBS_RANLIB"
+    PGO_CONFIG="[pgo.rustc]
+use = \"$RUSTC_PROFILE\"
+[pgo.llvm]
+use = \"$LLVM_PROFILE\"
+
+[target.$HOST_TRIPLE]
+cc = \"$CLANG\"
+cxx = \"$CLANGXX\"
+ar = \"$RBS_AR\"
+ranlib = \"$RBS_RANLIB\""
+fi
+
+# ---------------------------------------------------------------------------
 # bootstrap.toml. `target` carries the build triple as well as the host one:
 # `--host` alone would default `target` to SlopOS and drop the Linux std the
 # stage-1 compiler is built against.
@@ -430,69 +509,24 @@ host = ["$TARGET"]
 target = ["$HOST_TRIPLE", "$TARGET"]
 extended = true
 tools = ["cargo", "src"]
-docs = false
-submodules = false
-# Empty rather than bootstrap's "built from a source tarball": the version
-# string is hashed into every crate's StableCrateId, so a kernel this compiler
-# builds matches the host's only if both name themselves alike.
-description = ""
-vendor = false
-# jemalloc is a C library nobody has ported here, and it is the default
-# allocator for a unix host.
-allocator = "system"
+$(rbs_build_settings)
 [build.tool.cargo]
 default-features = false
 
 [llvm]
-download-ci-llvm = false
 clang = true
-link-shared = true
-targets = "X86"
-ninja = true
-# libc++ is linked statically, with \`-Bsymbolic\`: upstream's release
-# configuration (\`-Wl,-Bsymbolic -static-libstdc++\`), and 0004 in
-# toolchain/compiler/ makes \`rustc_llvm\` take \`libc++.a\` the same way. The
-# loader binds eagerly, so every interposable name libLLVM used of its own —
-# 5,381 symbolic relocations — was looked up anew at every start, and a
-# shared libc++ was one more object to map and bind. libLLVM exports the
-# runtime it links, and libclang-cpp, clang and lld, which list libLLVM before
-# \`libc++.a\`, bind to that one copy: libc++'s error categories are
-# singletons compared by address, and with a copy each, clang took LLVM's
-# ENOENT for an error that is not ENOENT and failed on the first header its
-# resource directory does not carry. librustc_driver does keep its own copy
-# (\`rustc_llvm\`'s archive is read before libLLVM), which is sound because
-# the wrapper only tests the error codes LLVM hands it for zero and no
-# exception crosses the two: LLVM builds with \`LLVM_ENABLE_EH\` off, and
-# neither it nor the wrapper references a personality routine. On the build
-# triple this links the stage1 LLVM against the host's \`libstdc++.a\`, as a
-# Rust release does.
-static-libstdcpp = true
-# A cross find_package searches the *host*: without an empty find root,
-# FindZLIB and friends take /usr/include, and a wchar.h that reaches glibc's
-# mbstate_t collides with slibc's. Measured: it is what stopped the cross
-# LLVM.
-#
-# \`LLVM_LINKER_SUPPORTS_B_SYMBOLIC_FUNCTIONS\` off: libLLVM's and
-# libclang-cpp's own link options add \`-Bsymbolic-functions\` after the
-# \`-Bsymbolic\` above, and the linker keeps the last of the two, so the
-# objects came out with every data reference to themselves still
-# interposable — 3,857 \`GLOB_DAT\`s in libLLVM, measured.
-build-config = { CMAKE_FIND_ROOT_PATH = "$OUT/find-root", CMAKE_FIND_ROOT_PATH_MODE_INCLUDE = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_LIBRARY = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_PROGRAM = "NEVER", LLVM_ENABLE_ZLIB = "OFF", LLVM_ENABLE_ZSTD = "OFF", LLVM_ENABLE_TERMINFO = "OFF", LLVM_ENABLE_LIBXML2 = "OFF", LLVM_ENABLE_LIBEDIT = "OFF", LLVM_ENABLE_LIBPFM = "OFF", LLVM_ENABLE_BACKTRACES = "OFF", LLVM_ENABLE_CRASH_OVERRIDES = "OFF", LLVM_LINKER_SUPPORTS_B_SYMBOLIC_FUNCTIONS = "OFF" }
+$(rbs_llvm_settings "$OUT/find-root" $PLAIN)
 
 [rust]
-channel = "nightly"
-lld = true
-rpath = true
-# The pinned libc fork is upstream's release plus one module, and a newer
-# rustc lints it; denying would make that fork's warnings this build's
-# problem.
-deny-warnings = false
+$(rbs_rust_settings $PLAIN)
+
+$PGO_CONFIG
 
 [target.$TARGET]
 cc = "$WRAPPER_DIR/$TARGET-clang"
 cxx = "$WRAPPER_DIR/$TARGET-clang++"
-ar = "$LLVM_AR"
-ranlib = "$LLVM_AR"
+ar = "$TARGET_AR"
+ranlib = "$TARGET_RANLIB"
 linker = "$WRAPPER_DIR/$TARGET-clang"
 crt-static = false
 # Link-time only, so what the compiler generates is untouched.
@@ -512,10 +546,33 @@ prefix = "$OUT/install.partial"
 sysconfdir = "etc"
 CONFIG_END
 
+# With `--pgo`, every rustc bootstrap runs names its crate without the target
+# triple (see the script), so a symbol here is spelled as in the profiled
+# Linux build.
+if [ "$PGO" -eq 1 ]; then
+    export RUSTC_WRAPPER="$SCRIPT_DIR/rustc_neutral_metadata.sh"
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "$SELF: dry run — $CONFIG"
     (cd "$SRC" && python3 x.py install --config "$CONFIG" --dry-run "${XPY_ARGS[@]}")
     exit 0
+fi
+
+# What bootstrap does not see change. Cargo does not fingerprint the
+# wrapper, so a build directory whose crates were named otherwise is cleared
+# of every Rust stage; bootstrap keys LLVM's stamp on a commit a tarball does
+# not carry, so the SlopOS LLVM and lld are rebuilt when a setting, the
+# profile or the host clang they were built with changes. The build triple's
+# LLVM is a build tool whose code reaches nothing shipped, and is left alone.
+# A plain build of a directory no `--pgo` build touched does nothing here.
+if [ "$PGO" -eq 1 ]; then
+    rbs_invalidate_rust "$RUSTC_BUILD" "$HOST_TRIPLE" "$RUSTC_WRAPPER"
+    rbs_invalidate_llvm "$RUSTC_BUILD" "$TARGET" "$CLANG" "$(rbs_llvm_settings "$OUT/find-root")" \
+        "$(sha256sum <"$LLVM_PROFILE")"
+else
+    rbs_invalidate_rust "$RUSTC_BUILD" "$HOST_TRIPLE" ""
+    rbs_forget_llvm "$RUSTC_BUILD" "$TARGET"
 fi
 
 # Completed under another name and renamed last: a build that stops part way

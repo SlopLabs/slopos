@@ -223,6 +223,44 @@ find `libc++.a`), with `-Bsymbolic` for LLVM's shared objects and
 toolchain is linked with `-z pack-relative-relocs` (`DT_RELR`, which slibc's
 loader applies).
 
+**`just toolchain --pgo` builds the compiler as a Rust release is.** ThinLTO
+and one codegen unit for rustc's crates, ThinLTO for LLVM, and
+profile-guided optimisation of both, the settings the two configurations
+below share living in `scripts/lib/rustc_build_settings.sh`. It is opt-in
+(`--pgo` or `SLOPOS_TOOLCHAIN_PGO=1`): without it the configuration is the
+plain one, and no SlopOS-hosted compiler has yet been built with it. The profiles
+come from `scripts/make_toolchain_profile.sh` (`just toolchain-profile`),
+rust-lang's opt-dist with this repository's kernel build as the workload: in
+`builddir/slopos-pgo-build`, a Linux-hosted build of the same sources with
+the same settings builds an instrumented LLVM under a stage1 compiler and runs
+`scripts/build_kernel.sh` for the dev and tests kernels on it (the guest's
+`selfhost_test` build, with the cargo fork and the vendored sources), then an
+instrumented stage2 compiler over the optimised LLVM and runs it again. The
+merged profiles land in `builddir/slopos-pgo`: LLVM's merged by the host's
+`llvm-profdata`, because the host clang compiled the instrumented objects and
+compiles the SlopOS LLVM with the result, rustc's by the build's own. `just
+toolchain --pgo` makes them first when they are missing or stale — a stamp
+over the compiler tree's source stamps, the host clang, the shared settings,
+the wrapper and the script's `PROFILE_FLOW`, not over the kernel — and `just
+toolchain-profile --optimized-host` builds the Linux-hosted twin with them.
+Timed as the host reference is (dev kernel, empty target directory, four
+P-cores): rustup's dist rustc 50.4 s wall / 117 s user, the plain stage1
+65.6 s / 137 s, the PGO twin 49.8 s / 102 s. A profile is keyed by symbol,
+and cargo hashes the target triple into `-C metadata`, rustc hashes that into
+every crate's `StableCrateId`, and every v0 symbol carries it: out of one tree
+and one compiler, the Linux std's `core` is `CsgRlzlzJNmri_4core` and the
+SlopOS one's `Cs61faTTiSLg5_4core`. Both builds therefore compile every crate
+through `scripts/rustc_neutral_metadata.sh`, a `RUSTC_WRAPPER` that replaces
+cargo's value with a hash of package, version, crate name, crate types,
+host-or-target and bootstrap's per-mode `__CARGO_DEFAULT_LIB_METADATA`.
+Cargo does not fingerprint a wrapper and bootstrap keys LLVM on a commit a
+tarball lacks, so both scripts clear a build directory's Rust stages when the
+wrapper changes and a triple's LLVM and lld when its settings, profile or
+host clang do; a plain build clears only what a `--pgo` build left. cc-rs
+forwards `-Cprofile-generate`/`-Cprofile-use` to a clang, so the profile
+build's C compiler drops the rustc profile flags: the host clang's LLVM is not
+rustc's, and mixed records crashed the instrumented compiler at exit.
+
 **The result lands on a dev disk.** `scripts/build_devdisk.sh` (`just
 _fs-image-devdisk`) builds `fs/assets/ext2-devdisk.img`, a preserved,
 trailer-less 4 GiB volume labelled `slopos-dev`, carrying the target sysroot
