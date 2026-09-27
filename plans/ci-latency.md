@@ -12,7 +12,7 @@ inputs, sized to finish near the boot lane:
 |-----|--------------|-----------|
 | `ci` | tests build → boot → graders of that capture → persistence and dev-disk boots | ~2:50, most of it the 65 s boot and the two short ones after it |
 | `gates` | host tests → dev kernel → framekernel gates → offline build → release kernel → candidate backends | ~3:50, half of it `check-framekernel-gates` |
-| `toolchain` | llvm-project, tests userland, rustc source → clang driver, C++ pin, LLVM port, cross-build plan, built-in target, cargo fork | ~3:10; ~9 min when the clang build's compiler cache is cold |
+| `toolchain` | llvm-project, tests userland, rustc source → clang driver, C++ pin, LLVM port, cross-build plan, built-in target | ~3:10; ~9 min when the clang build's compiler cache is cold |
 | `ostd-verify` | KernMiri → Verus | ~2:20, most of it Miri |
 
 The rules that keep it there:

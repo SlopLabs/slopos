@@ -387,9 +387,7 @@ fn prefix() -> Result<String, bool> {
 
 /// Rung 1. Every startup binds every relocation of rustc, `librustc_driver`,
 /// `libLLVM` and `libstd` before `main`, so this is where eager binding's cost
-/// at compiler scale shows. The version must be the host's: it is hashed into
-/// every crate's `StableCrateId`, so a differing one renames every symbol of a
-/// guest-built kernel.
+/// at compiler scale shows.
 fn toolchain_starts() -> bool {
     let prefix = match prefix() {
         Ok(p) => p,

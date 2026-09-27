@@ -633,6 +633,7 @@ test-selfhost: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    git diff --quiet HEAD || { echo "FAIL: the guest builds HEAD and the host grades it with the working tree's gates and tests; commit or stash first" >&2; exit 1; }
     just _fs-image-devdisk
     base="$(debugfs -R 'cat /src/slopos/.slopos-base' "{{fs_image_devdisk}}" 2>/dev/null)"
     [ "$base" = "$(git rev-parse HEAD)" ] ||

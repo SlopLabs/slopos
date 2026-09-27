@@ -7,8 +7,8 @@ use std::time::Instant;
 
 /// The dev disk's kernel build, timed; with no dev disk there is nothing to
 /// build and the test passes by saying so. `clean` starts from an empty target
-/// directory and no symbol table, as the host's reference build does, so the
-/// time measures a whole build rather than whatever the last boot left behind.
+/// directory and no symbol table, so the time measures a whole build rather
+/// than whatever the last boot left behind.
 fn guest_builds(variant: &str, clean: bool) -> bool {
     let root = match workspace() {
         Ok(root) => root,

@@ -222,7 +222,7 @@ workload() {
     for features in "" "slopos-testing/qemu-exit kernel/tests"; do
         (cd "$REPO_ROOT" && env -u KERNEL_RELEASE -u KERNEL_SAFESTACK -u KERNEL_RUSTFLAGS \
             -u RUSTC_WRAPPER -u RUSTFLAGS -u LLVM_PROFILE_FILE \
-            CARGO="$STAGE/stage0/bin/cargo" CARGO_HOME="$work/cargo-home" RUSTC="$sysroot/bin/rustc" \
+            CARGO="$STAGE/stage0/bin/cargo" RUSTC_BOOTSTRAP=1 CARGO_HOME="$work/cargo-home" RUSTC="$sysroot/bin/rustc" \
             RUST_TARGET=targets/x86_64-slos.json \
             scripts/build_kernel.sh "$work" "$work/target" "$features") >>"$work.log" 2>&1 || {
             tail -n 30 "$work.log" >&2
