@@ -1,0 +1,44 @@
+diff --git a/src/unix.rs b/src/unix.rs
+index 2758e31..246a294 100644
+--- a/src/unix.rs
++++ b/src/unix.rs
+@@ -77,7 +77,14 @@ impl Client {
+             return Err(io::Error::last_os_error());
+         }
+ 
+-        #[cfg(not(target_os = "linux"))]
++        // SlopOS: inheritable from birth, so `configure` needs no `pre_exec`
++        // hook and std can still spawn children with `posix_spawn`.
++        #[cfg(target_os = "slopos")]
++        {
++            cvt(libc::pipe(pipes.as_mut_ptr()))?;
++        }
++
++        #[cfg(not(any(target_os = "linux", target_os = "slopos")))]
+         {
+             cvt(libc::pipe(pipes.as_mut_ptr()))?;
+             drop(set_cloexec(pipes[0], true));
+@@ -345,6 +352,15 @@ impl Client {
+         Ok(unsafe { len.assume_init() } as usize)
+     }
+ 
++    // SlopOS: every descriptor `string_arg` can name is already inheritable —
++    // the pipe `mk` created without `O_CLOEXEC`, or the descriptors this
++    // process inherited, which `from_pipe` leaves as they came (it keeps only
++    // cloexec dups of them) — and a fifo is reopened by path. A `pre_exec`
++    // hook would only push std off `posix_spawn` onto fork+exec.
++    #[cfg(target_os = "slopos")]
++    pub fn configure(&self, _cmd: &mut Command) {}
++
++    #[cfg(not(target_os = "slopos"))]
+     pub fn configure(&self, cmd: &mut Command) {
+         if matches!(self.creation_arg, ClientCreationArg::Fifo { .. }) {
+             // We `File::open`ed it when inheriting from environment,
+@@ -510,6 +526,7 @@ fn clone_fd_and_set_cloexec(fd: c_int) -> Result<File, FromEnvErrorInner> {
+         .map_err(|err| FromEnvErrorInner::CannotOpenFd(fd, err))
+ }
+ 
++#[cfg(not(target_os = "slopos"))]
+ fn set_cloexec(fd: c_int, set: bool) -> io::Result<()> {
+     unsafe {
+         let previous = cvt(libc::fcntl(fd, libc::F_GETFD))?;

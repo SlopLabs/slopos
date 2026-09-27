@@ -461,7 +461,9 @@ so slibc implements the `posix_spawn` family over the kernel's `spawn`
 primitive — the child's descriptor table is computed in the parent and handed
 over whole — and the std fork takes that road for `Command::spawn`, falling
 back to `fork` only for `pre_exec` closures and attributes the primitive
-cannot express.
+cannot express. The `jobserver` crate registers such a closure for every
+child cargo configures, so its port in `toolchain/crates/` keeps the pipe
+inheritable instead (see `toolchain/crates/PIN`).
 
 ## Knowledge Index (AI)
 `knowledge/` hosts a local semantic index for querying the codebase. Build once with `python3 -m venv knowledge/.venv && . knowledge/.venv/bin/activate && pip install -r knowledge/requirements.txt && python knowledge/index.py`, then query via `python knowledge/query.py "<question>"` for signatures, drivers, or file locations. Rebuild after large refactors or merges. Never commit the venv or embedding database artifacts.
