@@ -130,7 +130,11 @@ BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/builddir}"
 SRC="$REPO_ROOT/$TP_RUSTC_SRC_REL"
 OUT="${SLOPOS_TOOLCHAIN_OUT:-$BUILD_DIR/slopos-toolchain}"
 SYSROOT="${SLOPOS_SYSROOT:-$BUILD_DIR/slopos-sysroot}"
-RUSTC_BUILD="$BUILD_DIR/slopos-rustc-build"
+# Physical: bootstrap installs the SlopOS libLLVM by mapping the host
+# `llvm-config --libfiles` paths, which are physical, out of this directory,
+# and through a symlinked build directory the mapping misses and ships the
+# Linux one.
+RUSTC_BUILD="$(mkdir -p "$BUILD_DIR/slopos-rustc-build" && cd -P "$BUILD_DIR/slopos-rustc-build" && pwd)"
 JOBS="${BOOTSTRAP_JOBS:-$(nproc)}"
 
 [ -f "$SRC/x.py" ] || die "no rustc sources at $TP_RUSTC_SRC_REL — run scripts/make_rustc_src.sh"
