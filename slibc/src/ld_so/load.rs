@@ -217,6 +217,24 @@ unsafe fn map_segment(fd: i32, base: usize, ph: &Phdr) -> Result<(), LoadError> 
     let mem_end = vaddr + ph.p_memsz as usize;
     let prot = prot_of(ph.p_flags) | PROT_READ | PROT_WRITE;
 
+    // A writable segment is read in rather than mapped: relocation rewrites
+    // nearly every page of it (`.data.rel.ro`, the GOT), so a file mapping
+    // only defers one copy-on-write fault per page to the relocation pass —
+    // over 800 of them for librustc_driver and libLLVM together.
+    if ph.p_flags & PF_W != 0 && ph.p_filesz > 0 {
+        Sys::mmap(
+            start as *mut u8,
+            page_up(mem_end) - start,
+            prot,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+            -1,
+            0,
+        )
+        .map_err(|_| LoadError::NoMemory)?;
+        let bytes = core::slice::from_raw_parts_mut(vaddr as *mut u8, ph.p_filesz as usize);
+        return read_exact_at(fd, ph.p_offset as usize, bytes);
+    }
+
     if ph.p_filesz > 0 {
         let len = page_up(page_off + ph.p_filesz as usize);
         Sys::mmap(
