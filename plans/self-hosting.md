@@ -27,8 +27,8 @@ run, with `/` on a persistent disk and the dev disk (toolchain and a source
 tree cut from `HEAD`) at `/devel`. The host owns the boot disk and the
 binaries it installs on `/`; the guest owns everything else on both disks.
 `just test-selfhost` and `just test-install-guest` run the command above in the
-guest and grade it: the guest's dev kernel matches the host's build byte for
-byte, and a kernel the guest built boots, commits and rolls back.
+guest and grade it: the guest's kernels pass the ELF gates and the kernel
+suite, and a kernel the guest built boots, commits and rolls back.
 
 The guest builds the dev kernel in about 75 s at four vCPUs under KVM against
 49 s for rustup's dist compiler on the same four cores; the gap is the
@@ -55,8 +55,8 @@ The patches today, by what they do:
 | Teach the target | `compiler/0001,0003,0004`, `rust/0001`, `libc/0001`, `llvm/*`, `llvm-rustc/0001`, `crates/*` but jobserver, `crates/wiring` | stay until upstream takes them |
 | Stand in for missing libraries | `cargo/0001` (the `network` cut), `compiler/0002` (exists only to drop that default feature) | remove |
 | Work around SlopOS's memory policy | `crates/jobserver` (no `pre_exec`, so a large process never forks) | remove |
-| Speed LLVM up | `llvm-rustc/0002,0003` | upstream to LLVM or drop |
-| Make the host's and the guest's builds identical | `cargo/0002` (no host triple in `-C metadata`) | upstream to cargo, or decide identity differently |
+| Speed LLVM up | `llvm-rustc/0002,0003` | drop |
+| Make the host's and the guest's builds identical | `cargo/0002` (no host triple in `-C metadata`) | drop, with the identity check |
 
 1. **Recipes.** One place and one driver that fetch a pinned upstream
    tarball, check it, and build it with the SlopOS clang against slibc into a
@@ -94,12 +94,18 @@ The patches today, by what they do:
    (a flag the victim unwinds from, I8); the faulting write waits for the
    frames and retries. Refused stack growth goes through it too, not
    `SIGBUS`.
-5. **No speed patches of our own.** Upstream `llvm-rustc/0002,0003` or drop
-   them and take the cost in build time.
+5. **Drop the speed patches.** `llvm-rustc/0002,0003` go, and the guest's
+   build pays for the feature-string work they cut.
+6. **Drop build identity.** The guest's kernel no longer has to match the
+   host's byte for byte; the ELF gates and the kernel suite on the guest's
+   tests kernel grade it. `cargo/0002` goes, and with it `test-selfhost`'s host
+   reference build, `compare_kernel_elf.sh`, the `CARGO_INCREMENTAL` pins, and
+   `devdisk_test` holding the guest rustc's version string to the host's.
+   `make_host_cargo.sh` stays only while the PGO profile flow needs a cargo
+   built from the fork.
 
-**Exit:** `toolchain/` holds only target patches, cargo builds with default
-features from recipes that carry no patch, and the kernel build still matches
-the host's byte for byte.
+**Exit:** `toolchain/` holds only target patches, and cargo builds with
+default features from recipes that carry no patch.
 
 ## Phase 2: git in the guest
 
@@ -213,5 +219,9 @@ tier 2. Neither Redox nor Asterinas rebuilds its own compiler.
 - **Source bridge.** Git over the network, not a shared filesystem: no 9p or
   virtio-fs on the build path.
 - **Kernel build.** One POSIX sh driver and one Rust symbol-table tool on both
-  machines, rebuilt until the embedded table is the kernel's own; identity
-  means the same loadable image.
+  machines, rebuilt until the embedded table is the kernel's own. The guest's
+  kernel is graded by the gates and the suite, not by identity with the
+  host's.
+- **No patches of our own for speed or identity.** A toolchain patch that only
+  makes something faster, or makes two machines build the same bytes, is not
+  carried.
