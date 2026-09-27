@@ -8,8 +8,9 @@
 
 use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write, shell_write_idx};
 use super::super::exec::{self, Flow};
-use super::super::{env, funcs, script};
+use super::super::{env, funcs, script, traps};
 use crate::syscall::fs;
+use slopos_shell_core::trap::{self, Action};
 
 fn parse_count(arg: Option<&&[u8]>, default: u32) -> Option<u32> {
     let Some(arg) = arg else { return Some(default) };
@@ -101,6 +102,41 @@ pub fn cmd_eval(argc: i32, argv: &[&[u8]]) -> i32 {
         text.extend_from_slice(arg);
     }
     run_nested(&text)
+}
+
+/// `trap [action condition...]` — POSIX XCU 2.14 `trap`. With no operands,
+/// list the traps set; a leading unsigned integer, or a lone operand, resets
+/// every operand named.
+pub fn cmd_trap(argc: i32, argv: &[&[u8]]) -> i32 {
+    let argc = (argc.max(1) as usize).min(argv.len());
+    let mut operands = &argv[1..argc];
+    if operands.first() == Some(&b"--".as_slice()) {
+        operands = &operands[1..];
+    }
+    let Some((&first, rest)) = operands.split_first() else {
+        shell_write(&traps::listing());
+        return 0;
+    };
+    let (action, conditions) = if rest.is_empty() || trap::is_unsigned_integer(first) {
+        (Action::Default, operands)
+    } else {
+        (trap::classify_action(first), rest)
+    };
+    let mut status = 0;
+    for &operand in conditions {
+        let problem: &[u8] = match trap::parse_condition(operand) {
+            None => b": bad trap",
+            Some(condition) => match traps::set(condition, action) {
+                Ok(()) => continue,
+                Err(()) => b": cannot be trapped",
+            },
+        };
+        let mut msg = operand.to_vec();
+        msg.extend_from_slice(problem);
+        shell_error_named(b"trap", &msg);
+        status = 1;
+    }
+    status
 }
 
 /// `. file` / `source file` — run a file's commands in this shell.

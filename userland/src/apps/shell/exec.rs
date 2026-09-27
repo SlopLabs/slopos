@@ -33,7 +33,7 @@ use super::buffers::ParsedTokens;
 use super::builtins;
 use super::display::{shell_error, shell_error_named, shell_write};
 use super::parser::normalize_path;
-use super::{env, expand, funcs, jobs};
+use super::{env, expand, funcs, jobs, traps};
 
 /// POSIX reserves 2 for the shell's own usage errors, distinct from any status
 /// a command could return.
@@ -320,8 +320,9 @@ pub fn capture(text: &[u8]) -> Result<Vec<u8>, ()> {
         }
         let _ = fs::close_fd_raw(write_fd);
         super::interrupt::mark_forked_child();
+        traps::enter_subshell(0);
         let outcome = run_list(&list);
-        sys_core::exit_with_code(outcome.status);
+        sys_core::exit_with_code(traps::run_exit_trap(outcome.status));
     }
 
     let _ = fs::close_fd_raw(write_fd);
@@ -336,7 +337,7 @@ pub fn capture(text: &[u8]) -> Result<Vec<u8>, ()> {
         }
     }
     let _ = fs::close_fd_raw(read_fd);
-    let status = process::wait_exit_code(pid as u32);
+    let status = reap(pid as u32);
     super::set_last_exit_code(status);
     Ok(out)
 }
@@ -411,11 +412,29 @@ fn run_and_or(and_or: &AndOr) -> (Outcome, bool) {
 /// A pipeline whose status another operator is about to judge is a condition,
 /// so `set -e` must not fire on it.
 fn run_pipeline_cond(pipeline: &Pipeline, is_condition: bool) -> Outcome {
-    if is_condition || pipeline.negate {
+    let outcome = if is_condition || pipeline.negate {
         let _depth = Depth::enter(&COND_DEPTH);
         run_pipeline(pipeline, false)
     } else {
         run_pipeline(pipeline, false)
+    };
+    take_traps(outcome)
+}
+
+/// POSIX: a trapped signal's action runs once the command in progress has
+/// completed, with that command's status in `$?`.
+fn take_traps(outcome: Outcome) -> Outcome {
+    if !traps::any_pending() {
+        return outcome;
+    }
+    super::set_last_exit_code(outcome.status);
+    traps::run_pending();
+    match super::exit_requested() {
+        Some(status) => Outcome {
+            status,
+            flow: Flow::Exit,
+        },
+        None => outcome,
     }
 }
 
@@ -864,7 +883,7 @@ impl Applied {
             let _ = fs::close_fd_raw(slot.backup);
         }
         for pid in self.writers {
-            let _ = process::wait_exit_code(pid);
+            let _ = reap(pid);
         }
     }
 }
@@ -1180,6 +1199,21 @@ fn wait_foreground(pid: u32) -> process::WaitStatus {
     }
 }
 
+/// Wait for `pid` to terminate, riding out the `EINTR` a trap's handler
+/// causes; `-1` when it cannot be reaped at all.
+fn reap(pid: u32) -> i32 {
+    loop {
+        let mut status = 0i32;
+        let rc = process::waitpid_raw(pid as i32, &mut status, 0);
+        if rc > 0 {
+            return process::wait_status(status).exit_code().unwrap_or(-1);
+        }
+        if rc != slopos_abi::Errno::EINTR.raw() as i64 {
+            return -1;
+        }
+    }
+}
+
 /// A stop is not a termination: it becomes a job the user can `fg`.
 fn finish_foreground(pid: u32, pgid: u32, command: &[u8]) -> i32 {
     let report = wait_foreground(pid);
@@ -1260,7 +1294,7 @@ fn child_setup(pgid: u32, foreground: bool) {
 
     // The reset must be explicit: execve preserves ignored dispositions, and an
     // in-child builtin never execs at all.
-    let _ = process::sigdefault(JOB_CONTROL_DEFAULT_SIGNALS);
+    traps::enter_subshell(JOB_CONTROL_DEFAULT_SIGNALS);
     super::interrupt::mark_forked_child();
 }
 
@@ -1290,12 +1324,12 @@ fn become_command(cmd: &Command) -> ! {
         if let Some(body) = funcs::lookup(&argv[0]) {
             let _args = super::args::shadow_args(argv[1..].to_vec());
             let outcome = run_command(&body);
-            sys_core::exit_with_code(outcome.status);
+            sys_core::exit_with_code(traps::run_exit_trap(outcome.status));
         }
         if let Some(entry) = builtins::find_builtin(&argv[0]) {
             let slices: Vec<&[u8]> = argv.iter().map(|a| a.as_slice()).collect();
             let status = (entry.func)(argv.len() as i32, &slices);
-            sys_core::exit_with_code(status);
+            sys_core::exit_with_code(traps::run_exit_trap(status));
         }
 
         let mut path_buf = buffers::path_scratch();
@@ -1319,7 +1353,7 @@ fn become_command(cmd: &Command) -> ! {
         CommandKind::Subshell(list) => run_list(list),
         other => run_compound(other),
     };
-    sys_core::exit_with_code(outcome.status);
+    sys_core::exit_with_code(traps::run_exit_trap(outcome.status));
 }
 
 /// Run one command in a fork of this shell — a subshell, a pipeline stage that
@@ -1496,7 +1530,7 @@ fn run_staged_pipeline(pipeline: &Pipeline, background: bool) -> Outcome {
             // The pipes are closed, so every forked stage exits; reaping here
             // is what keeps a failing `fork` from leaving a zombie behind.
             for pid in &pids {
-                let _ = process::wait_exit_code(*pid);
+                let _ = reap(*pid);
             }
             return Outcome::normal(1);
         }

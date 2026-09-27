@@ -19,6 +19,7 @@ pub mod interrupt;
 pub mod jobs;
 pub mod parser;
 pub mod script;
+pub mod traps;
 
 pub(crate) static NL: &str = "\n";
 pub(crate) static PATH_TOO_LONG: &str = "path too long\n";
@@ -55,6 +56,12 @@ static EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
 pub fn request_exit(status: i32) {
     EXIT_STATUS.store(status, Ordering::Relaxed);
     EXIT_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// The `EXIT` trap runs after the shell decided to exit, and its own commands
+/// must not stop at the first one.
+pub fn clear_exit_request() {
+    EXIT_REQUESTED.store(false, Ordering::Relaxed);
 }
 
 pub fn exit_requested() -> Option<i32> {
@@ -290,19 +297,20 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     exec::initialize_job_control();
 
-    if interactive {
+    let status = if interactive {
         // Only interactive: a non-interactive shell leaves SIGINT at SIG_DFL,
         // since nothing in the script loop ever polls the recorded flag.
         interrupt::install();
-        return shell_interactive_main();
-    }
-
-    display::set_plain_output(true);
-    match invocation.source {
-        args::Source::CommandString(text) => script::run_command_string(&text),
-        args::Source::File(path) => script::run_script_file(&path),
-        args::Source::Stdin => script::run_script(&mut script::FdSource::new(0)),
-    }
+        shell_interactive_main()
+    } else {
+        display::set_plain_output(true);
+        match invocation.source {
+            args::Source::CommandString(text) => script::run_command_string(&text),
+            args::Source::File(path) => script::run_script_file(&path),
+            args::Source::Stdin => script::run_script(&mut script::FdSource::new(0)),
+        }
+    };
+    traps::run_exit_trap(status)
 }
 
 fn shell_interactive_main() -> i32 {
@@ -320,6 +328,10 @@ fn shell_interactive_main() -> i32 {
 
     loop {
         if pending.is_empty() {
+            traps::run_pending();
+            if let Some(status) = exit_requested() {
+                return status;
+            }
             jobs::notify_completed_jobs();
             state.prompt_len = build_prompt(&mut state.prompt_buf, &mut state.prompt_colors);
         } else {

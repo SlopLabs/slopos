@@ -24,5 +24,6 @@ pub mod pattern;
 pub mod qbuf;
 pub mod script;
 pub mod syntax;
+pub mod trap;
 
 pub use script::{ByteSource, Line, ScriptReader, SourceError};

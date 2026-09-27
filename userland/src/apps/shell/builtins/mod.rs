@@ -372,6 +372,14 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         func: control::cmd_eval,
     },
     BuiltinEntry {
+        name: "trap",
+        desc: "Run a command on a signal or exit",
+        usage: "trap [action condition...]",
+        detail: "Run action when a condition occurs: EXIT (or 0) as\nthe shell exits, or a signal by name or number.\nAction - restores the default, '' ignores the\nsignal. Without operands, list the traps set.",
+        category: Process,
+        func: control::cmd_trap,
+    },
+    BuiltinEntry {
         name: ".",
         desc: "Run a file in this shell",
         usage: ". file",

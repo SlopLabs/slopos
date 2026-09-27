@@ -383,6 +383,27 @@ pub fn default_signal(signum: u8) -> i32 {
     }
 }
 
+/// Whether `signum` is currently ignored — a query-only `rt_sigaction`.
+#[inline(always)]
+pub fn signal_ignored(signum: u8) -> bool {
+    let mut old = UserSigaction {
+        sa_handler: SIG_DFL,
+        sa_flags: 0,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    let rc = unsafe {
+        syscall4(
+            SYSCALL_RT_SIGACTION,
+            signum as u64,
+            0,
+            (&mut old as *mut UserSigaction) as u64,
+            core::mem::size_of::<SigSet>() as u64,
+        ) as i64
+    };
+    rc == 0 && old.sa_handler == SIG_IGN
+}
+
 /// `SA_RESTART` is deliberately omitted, so blocking syscalls (e.g. `poll`)
 /// return early once the handler has run.
 #[inline(always)]

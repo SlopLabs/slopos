@@ -377,6 +377,9 @@ dependencies = [
 [[package]]
 name = "slopos-shell-core"
 version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+]
 
 [[package]]
 name = "slopos-signalfd"

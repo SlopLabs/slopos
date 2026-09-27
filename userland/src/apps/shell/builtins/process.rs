@@ -1,14 +1,11 @@
-use slopos_abi::signal::{
-    NSIG, SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL,
-    SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1,
-    SIGUSR2, SIGWINCH,
-};
+use slopos_abi::signal::{NSIG, SIGCONT, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU};
+use slopos_shell_core::trap::signal_by_name;
 
 use crate::syscall::process;
 
 use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write_idx};
 use super::super::exec;
-use super::super::jobs;
+use super::super::{interrupt, jobs, traps};
 
 fn parse_job_id(arg: &[u8]) -> Option<u16> {
     if arg.len() < 2 {
@@ -37,31 +34,6 @@ pub fn cmd_jobs(_argc: i32, _argv: &[&[u8]]) -> i32 {
     0
 }
 
-const SIGNAL_NAMES: &[(&str, u8)] = &[
-    ("HUP", SIGHUP),
-    ("INT", SIGINT),
-    ("QUIT", SIGQUIT),
-    ("ILL", SIGILL),
-    ("TRAP", SIGTRAP),
-    ("ABRT", SIGABRT),
-    ("BUS", SIGBUS),
-    ("FPE", SIGFPE),
-    ("KILL", SIGKILL),
-    ("USR1", SIGUSR1),
-    ("SEGV", SIGSEGV),
-    ("USR2", SIGUSR2),
-    ("PIPE", SIGPIPE),
-    ("ALRM", SIGALRM),
-    ("TERM", SIGTERM),
-    ("CHLD", SIGCHLD),
-    ("CONT", SIGCONT),
-    ("STOP", SIGSTOP),
-    ("TSTP", SIGTSTP),
-    ("TTIN", SIGTTIN),
-    ("TTOU", SIGTTOU),
-    ("WINCH", SIGWINCH),
-];
-
 fn parse_signal(spec: &[u8]) -> Option<u8> {
     let text = jobs::arg_as_str(spec)?;
     if let Ok(num) = text.parse::<u8>() {
@@ -71,14 +43,7 @@ fn parse_signal(spec: &[u8]) -> Option<u8> {
             None
         };
     }
-    let name = match text.split_at_checked(3) {
-        Some((head, tail)) if head.eq_ignore_ascii_case("SIG") => tail,
-        _ => text,
-    };
-    SIGNAL_NAMES
-        .iter()
-        .find(|(known, _)| known.eq_ignore_ascii_case(name))
-        .map(|&(_, num)| num)
+    signal_by_name(&spec.to_ascii_uppercase())
 }
 
 /// A `%job` operand addresses the whole process group, which is what makes
@@ -250,7 +215,24 @@ pub fn cmd_wait(argc: i32, argv: &[&[u8]]) -> i32 {
         shell_write_idx(b"wait: invalid pid\n", COLOR_ERROR_RED);
         return 1;
     };
-    process::wait_exit_code(pid)
+    loop {
+        let mut status = 0i32;
+        let rc = process::waitpid_raw(pid as i32, &mut status, 0);
+        if rc > 0 {
+            return process::wait_status(status).exit_code().unwrap_or(-1);
+        }
+        if rc != slopos_abi::Errno::EINTR.raw() as i64 {
+            return -1;
+        }
+        // POSIX: a trapped signal ends the wait at once, with a status above
+        // 128; its action runs as soon as `wait` returns.
+        if let Some(signum) = traps::pending_signal() {
+            return 128 + signum as i32;
+        }
+        if interrupt::take_pending() {
+            return interrupt::EXIT_INTERRUPTED;
+        }
+    }
 }
 
 /// `exit [n]` — end the shell with status `n`, or with the status of the last
@@ -270,10 +252,12 @@ pub fn cmd_exit(argc: i32, argv: &[&[u8]]) -> i32 {
             }
         }
     } else {
-        super::super::last_exit_code()
+        // POSIX: inside a trap action, the last command is the one that ran
+        // before the action.
+        traps::status_before_action().unwrap_or_else(super::super::last_exit_code)
     };
 
-    if !super::super::interrupt::in_forked_child() {
+    if !interrupt::in_forked_child() {
         super::super::request_exit(status);
     }
     status

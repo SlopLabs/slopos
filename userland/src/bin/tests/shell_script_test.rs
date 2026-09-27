@@ -152,6 +152,22 @@ fn expect_status(name: &str, script: &[u8], want: i32) -> bool {
     true
 }
 
+/// Output and status from one run, for cases whose point is the pair.
+fn expect_output_and_status(name: &str, script: &[u8], want: &[u8], want_status: i32) -> bool {
+    let Some((got, status)) = run_script(script) else {
+        return false;
+    };
+    if got != want || status != want_status {
+        eprintln!(
+            "shell_script_test: {name}: want {:?} status {want_status}\n  got {:?} status {status}",
+            String::from_utf8_lossy(want),
+            String::from_utf8_lossy(&got)
+        );
+        return false;
+    }
+    true
+}
+
 fn script_output_is_exact() -> bool {
     expect_output(
         "script_output_is_exact",
@@ -589,6 +605,95 @@ fn a_syntax_error_does_not_run_anything() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// trap
+// ---------------------------------------------------------------------------
+
+/// The `EXIT` trap runs once as the shell ends, with the exit status in `$?`;
+/// only an `exit n` inside it changes that status, and an `exit` inside it
+/// does not run it again.
+fn trap_exit_runs_once_with_the_exit_status() -> bool {
+    expect_output_and_status(
+        "trap_exit_at_end",
+        b"trap 'echo \"exit:$?\"' EXIT\nfalse\n",
+        b"exit:1\n",
+        1,
+    ) && expect_output_and_status(
+        "trap_exit_on_exit_builtin",
+        b"trap 'echo bye $?' EXIT\nexit 3\necho no\n",
+        b"bye 3\n",
+        3,
+    ) && expect_output_and_status(
+        "trap_exit_inside_exit_trap",
+        b"trap 'echo once; false; exit' 0\nexit 4\n",
+        b"once\n",
+        4,
+    ) && expect_status(
+        "trap_exit_n_inside_exit_trap",
+        b"trap 'exit 5' EXIT\nexit 4\n",
+        5,
+    )
+}
+
+/// A caught signal's action runs once the command that was running completes,
+/// before the next one, and leaves `$?` as it found it. `''` ignores the
+/// signal; `-` gives it back its default action, which ends the shell.
+fn trap_signal_actions() -> bool {
+    expect_output_and_status(
+        "trap_signal_actions",
+        b"trap 'echo got; false' USR1\n\
+          kill -USR1 $$\necho after $?\n\
+          kill -s USR1 $$; echo same-line\n\
+          trap '' USR1\nkill -10 $$\necho ignored\n\
+          trap - USR1\nkill -USR1 $$\necho unreachable\n",
+        b"got\nafter 0\ngot\nsame-line\nignored\n",
+        128 + slopos_abi::signal::SIGUSR1 as i32,
+    )
+}
+
+/// `wait` returns as soon as a trapped signal arrives, with a status above
+/// 128, and the action runs right after it.
+fn trap_interrupts_wait() -> bool {
+    expect_output(
+        "trap_interrupts_wait",
+        b"trap 'echo trapped' USR1\n\
+          sleep 5 >/dev/null &\nsp=$!\n\
+          (sleep 1; kill -USR1 $$) &\n\
+          wait $sp\necho wait=$?\nkill $sp\n",
+        b"trapped\nwait=138\n",
+    )
+}
+
+/// An action that exits is how a script handles a fatal signal, and the
+/// `EXIT` trap still runs.
+fn trap_exit_from_a_signal_action() -> bool {
+    expect_output_and_status(
+        "trap_exit_from_a_signal_action",
+        b"trap 'echo bye $?' EXIT\ntrap 'exit 7' TERM\nkill $$\necho no\n",
+        b"bye 7\n",
+        7,
+    )
+}
+
+/// The listing reads back as commands; a leading number makes every operand a
+/// condition to reset; a bad condition fails the builtin without stopping the
+/// others; and a subshell keeps only the ignored traps.
+fn trap_listing_and_operands() -> bool {
+    expect_output(
+        "trap_listing_and_operands",
+        b"trap 'echo it'\\''s' EXIT\ntrap '' INT\ntrap -- 'x' 10 SIGUSR2\ntrap\n\
+          trap 0 12\ntrap x NOPE TERM 2>/dev/null\necho status=$?\n\
+          trap y KILL 2>/dev/null\necho kill=$?\n\
+          trap\n(trap)\n\
+          trap - EXIT TERM INT USR1\ntrap\necho end\n",
+        b"trap -- 'echo it'\\''s' EXIT\ntrap -- '' INT\ntrap -- 'x' USR1\ntrap -- 'x' USR2\n\
+          status=1\nkill=1\n\
+          trap -- '' INT\ntrap -- 'x' USR1\ntrap -- 'x' TERM\n\
+          trap -- '' INT\n\
+          end\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
 // The interactive path
 // ---------------------------------------------------------------------------
 
@@ -793,6 +898,17 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "a_syntax_error_does_not_run_anything",
         a_syntax_error_does_not_run_anything,
     ),
+    (
+        "trap_exit_runs_once_with_the_exit_status",
+        trap_exit_runs_once_with_the_exit_status,
+    ),
+    ("trap_signal_actions", trap_signal_actions),
+    ("trap_interrupts_wait", trap_interrupts_wait),
+    (
+        "trap_exit_from_a_signal_action",
+        trap_exit_from_a_signal_action,
+    ),
+    ("trap_listing_and_operands", trap_listing_and_operands),
     (
         "the_interactive_prompt_continues_an_unfinished_command",
         the_interactive_prompt_continues_an_unfinished_command,
