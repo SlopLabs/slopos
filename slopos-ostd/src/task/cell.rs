@@ -478,8 +478,8 @@ mod tests {
         let task = fresh();
         let w = window(&task);
         assert_eq!(
-            task.cwd.as_ptr_racy().cast::<u8>(),
-            task.cwd.get_ptr(&w).cast::<u8>().cast_const()
+            task.switch_ctx.as_ptr_racy().cast::<u8>(),
+            task.switch_ctx.get_ptr(&w).cast::<u8>().cast_const()
         );
     }
 }
